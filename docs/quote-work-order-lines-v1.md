@@ -44,15 +44,28 @@ job's live `pricing_json`. The rule is the one the expected-costs freeze uses
 - the revision recorded at acceptance (`jobs.expected_costs.scope_revision_id`), read whether
   it is still `frozen` or was `superseded` by a later revision (a re-quote after acceptance);
 - without one, the latest revision, `frozen` or `superseded`, frozen at or before
-  `jobs.accepted_at`.
+  `jobs.accepted_at`;
+- with neither a recorded revision nor an acceptance time, and only then (captain, 16 Oct
+  2026): a job that has moved past quoted (it is in an open status,
+  `JOB_WORK_ORDER_OPEN_STATUSES`) counts as accepted at its latest revision, `frozen` or
+  `superseded`, frozen at or before the job first left quoted. Jobs moved on by a status
+  change on the Ops screen never get an acceptance time, so this is how their fence-tool or
+  patio-tool quote counts. "First left quoted" is the earliest recorded status change into an
+  open status (`job_events` `status_changed` `new_status`, or the older `status_change`
+  `to`). An unreadable status history is a 500 `status_history_unreadable`, never "no quote".
 
 Its pricing is read from `scope_revisions.pricing_canonical_text`. With no accepted revision
-(no recorded revision, no acceptance time, or only revisions frozen after acceptance) the
-result is flagged `no_accepted_quote` and the draft is not filled (`quote_fill.reason`
+(no recorded revision, no acceptance time and no recorded move past quoted, or only revisions
+frozen after acceptance or after the move) the result is flagged `no_accepted_quote` and the draft is not filled (`quote_fill.reason`
 `no_accepted_quote`); it stays empty for the approver to fill. An accepted revision whose
 pricing cannot be read adds `frozen_quote_unreadable` and is never replaced by another
-revision. Measured on 13 Oct 2026: 26 of the 81 open fencing and patio jobs have an accepted
-revision by this rule (17 recorded, 9 by acceptance time).
+revision. Measured on 16 Oct 2026: 54 of the 81 open fencing and patio jobs have an accepted
+revision by this rule (18 recorded, 8 by acceptance time, 28 by the move past quoted: 4
+fencing, 24 patio). The other 27 stay with the office to fill by hand, as the captain
+accepted: older quotes from before the tools froze quotes, jobs with no quote in the system,
+and the one job whose move past quoted is not recorded (moved by the quote page with no
+acceptance time). A quote saved with no labour figure is filled but held for the office too
+(`agreed_labour_missing`, docs/job-work-orders-v1.md).
 
 ## The lines
 
@@ -231,8 +244,8 @@ and returns:
 
 `{job:{id, job_number, type, status}, quote:{source, scope_revision_id, frozen_at, flags}, result}`
 
-`quote.source` is `accepted_revision`, `revision_at_acceptance`, or null when the job has no
-accepted revision (`flags` then holds `no_accepted_quote`).
+`quote.source` is `accepted_revision`, `revision_at_acceptance`,
+`revision_before_leaving_quoted`, or null when the job has no accepted revision (`flags` then holds `no_accepted_quote`).
 
 - 400 `job_id_required`, before any query, when `job_id` is missing or is not a job id
   (uuid). A job number is not accepted.

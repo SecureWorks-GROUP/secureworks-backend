@@ -67,6 +67,7 @@
 
 import {
   fillJobWorkOrderDraftFromQuote,
+  JOB_WORK_ORDER_OPEN_STATUSES,
   jobWorkOrderDraftIsUntouched,
   QuoteFillError,
   type QuoteFillOutcome,
@@ -141,22 +142,10 @@ export const JOB_WORK_ORDER_AUTO_ISSUE_FLAG = "job_work_order_auto_issue_v1";
 
 /** Open, approved job statuses. Mirrors the database's
  *  job_work_order_open_statuses() (20261012130000): the jobs a draft is opened
- *  for, and the only jobs whose work order is issued automatically. */
-export const JOB_WORK_ORDER_OPEN_STATUSES: ReadonlySet<string> = new Set([
-  "accepted",
-  "partially_accepted",
-  "approvals",
-  "deposit",
-  "awaiting_deposit",
-  "processing",
-  "order_materials",
-  "awaiting_supplier",
-  "order_confirmed",
-  "schedule_install",
-  "scheduled",
-  "in_progress",
-  "rectification",
-]);
+ *  for, and the only jobs whose work order is issued automatically. Declared
+ *  in job_work_order_quote_fill.ts, which also reads it (a job moved past
+ *  quoted), so the two modules import no cycle. */
+export { JOB_WORK_ORDER_OPEN_STATUSES };
 
 const MAX_SCOPE_ITEMS = 200;
 const MAX_TEXT = 4000;

@@ -49,7 +49,35 @@ export class QuoteFillError extends Error {
 
 export type QuoteSource =
   | "accepted_revision"
-  | "revision_at_acceptance";
+  | "revision_at_acceptance"
+  | "revision_before_leaving_quoted";
+
+/** Open, approved job statuses. Mirrors the database's
+ *  job_work_order_open_statuses() (20261012130000): the jobs a draft is opened
+ *  for, and the only jobs whose work order is issued automatically
+ *  (job_work_orders.ts re-exports it). A job in one of them has moved past
+ *  quoted. */
+export const JOB_WORK_ORDER_OPEN_STATUSES: ReadonlySet<string> = new Set([
+  "accepted",
+  "partially_accepted",
+  "approvals",
+  "deposit",
+  "awaiting_deposit",
+  "processing",
+  "order_materials",
+  "awaiting_supplier",
+  "order_confirmed",
+  "schedule_install",
+  "scheduled",
+  "in_progress",
+  "rectification",
+]);
+
+// The job_events a status change writes: ops-api's status writers record
+// 'status_changed' with detail_json.new_status, the older job creation path
+// 'status_change' with detail_json.to.
+const STATUS_EVENT_TYPES = ["status_changed", "status_change"];
+const MAX_STATUS_EVENTS = 500;
 
 export type JobQuoteWorkOrderLines = {
   job: {
@@ -163,8 +191,15 @@ async function readRevisions(
 // the revision recorded at acceptance (jobs.expected_costs.scope_revision_id),
 // read whether it is still frozen or was superseded since; without one, the
 // latest revision frozen at or before jobs.accepted_at, frozen or superseded.
-// With neither there is no accepted quote, flagged no_accepted_quote, and the
-// draft is not filled.
+// With neither, and only then: a job that has moved past quoted (it is in an
+// open status, JOB_WORK_ORDER_OPEN_STATUSES) counts as accepted at its newest
+// revision frozen at or before the job first left quoted, frozen or superseded
+// (captain, 16 Oct 2026). Jobs moved on by a status change on the Ops screen
+// never get an acceptance time, so this is how their tool quote counts. "First
+// left quoted" is the earliest recorded status change into an open status
+// (job_events, STATUS_EVENT_TYPES). With no such change recorded, or no
+// revision frozen by then, there is no accepted quote, flagged
+// no_accepted_quote, and the draft is not filled: the office fills it by hand.
 async function readAcceptedQuote(client: any, job: any): Promise<{
   pricing: Record<string, any> | null;
   quote: JobQuoteWorkOrderLines["quote"];
@@ -220,8 +255,63 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
           .limit(1),
     );
     if (atAcceptance) return use(atAcceptance, "revision_at_acceptance");
+    return none();
+  }
+  if (acceptedId) return none();
+  if (!JOB_WORK_ORDER_OPEN_STATUSES.has(String(job?.status || ""))) {
+    return none();
+  }
+  const leftQuotedAt = await readFirstLeftQuotedAt(client, job.id);
+  if (leftQuotedAt) {
+    const [beforeLeaving] = await readRevisions(
+      client,
+      (q) =>
+        q.eq("job_id", job.id)
+          .in("status", ["frozen", "superseded"])
+          .lte("frozen_at", leftQuotedAt)
+          .order("frozen_at", { ascending: false })
+          .limit(1),
+    );
+    if (beforeLeaving) {
+      return use(beforeLeaving, "revision_before_leaving_quoted");
+    }
   }
   return none();
+}
+
+/** When the job first moved into an open status, from its recorded status
+ *  changes; null when none is recorded. A read fault throws: an unreadable
+ *  history must never read as "no quote" or pick a revision. */
+async function readFirstLeftQuotedAt(
+  client: any,
+  jobId: string,
+): Promise<string | null> {
+  const { data, error } = await client.from("job_events")
+    .select("event_type, detail_json, created_at")
+    .eq("job_id", jobId)
+    .in("event_type", STATUS_EVENT_TYPES)
+    .order("created_at", { ascending: true })
+    .limit(MAX_STATUS_EVENTS);
+  if (error) {
+    throw new QuoteFillError(
+      500,
+      "status_history_unreadable",
+      "The job's status history could not be read",
+    );
+  }
+  for (const event of Array.isArray(data) ? data : []) {
+    const detail = event?.detail_json;
+    const to = detail && typeof detail === "object"
+      ? detail.new_status ?? detail.to
+      : null;
+    if (
+      typeof to === "string" && JOB_WORK_ORDER_OPEN_STATUSES.has(to) &&
+      typeof event.created_at === "string" && event.created_at
+    ) {
+      return event.created_at;
+    }
+  }
+  return null;
 }
 
 /** The fencing labour rates from the scoping tool's cost table, and the keys
