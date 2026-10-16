@@ -1418,7 +1418,6 @@ Deno.test("reconcile: an approver who found no draft in Xero releases an unknown
       variation_id: VAR,
       expected_updated_at: STAMP,
       outcome: "no_draft",
-      note: "Checked Xero at 2pm: no draft for this variation",
     },
     SHAUN_SESSION,
     { now: STALE_NOW },
@@ -1428,15 +1427,6 @@ Deno.test("reconcile: an approver who found no draft in Xero releases an unknown
   const row = invoiceRow(d);
   assertEquals(row.status, "prepared");
   assertEquals(row.xero_invoice_id, null);
-  assertEquals(
-    [row.reconciled_outcome, row.reconciled_by, row.reconciled_via],
-    ["no_draft", SHAUN, "session"],
-  );
-  assertEquals(row.reconciled_at, new Date(STALE_NOW()).toISOString());
-  assertEquals(
-    row.reconcile_note,
-    "Checked Xero at 2pm: no draft for this variation",
-  );
   assertEquals(row.failure, "socket closed");
   const event = d.tables.job_events.find((e: any) =>
     e.event_type === "customer_variation_xero_draft_reconciled"
@@ -1499,8 +1489,17 @@ Deno.test("reconcile: an approver records the draft found in Xero; nothing is se
   );
   assertEquals(row.xero_created_at, new Date(STALE_NOW()).toISOString());
   assertEquals(
-    [row.reconciled_outcome, row.reconciled_by, row.reconciled_via],
-    ["draft_exists", SHAUN, "terminal"],
+    d.tables.job_events.find((e: any) =>
+      e.event_type === "customer_variation_xero_draft_reconciled"
+    )?.detail_json,
+    {
+      customer_variation_id: VAR,
+      outcome: "draft_exists",
+      from_status: "unknown",
+      xero_invoice_id: XERO_INVOICE,
+      reconciled_by: SHAUN,
+      via: "terminal",
+    },
   );
 
   // The same answer again is a duplicate; a different invoice is refused.
@@ -1562,7 +1561,7 @@ Deno.test("reconcile: a creating claim is answered for only once it is too old t
     "xero_draft_in_progress",
   );
   assertEquals(invoiceRow(fresh).status, "creating");
-  assertEquals(invoiceRow(fresh).reconciled_outcome, undefined);
+  assertEquals(fresh.tables.job_events, []);
 
   const stale = stuckDb("creating");
   const r = await reconcileCustomerVariationXeroDraft(
@@ -1676,7 +1675,6 @@ Deno.test("reconcile: only a work order approver answers, and nothing changes wh
       code,
     );
     assertEquals(invoiceRow(d).status, "unknown", name);
-    assertEquals(invoiceRow(d).reconciled_outcome, undefined, name);
     assertEquals(d.tables.job_events, [], name);
   }
   const unnamed = stuckDb("unknown");
@@ -1727,25 +1725,25 @@ Deno.test("reconcile: the answer and the record are checked before anything is w
     400,
     "invalid_request",
   );
-  await refused(
+  const missing = await assertRejects(
     run(d, { variation_id: VAR, outcome: "no_draft" }),
-    400,
-    "expected_updated_at_required",
+    JobWorkOrderError,
   );
-  await refused(
-    run(d, { ...base, outcome: "no_draft", note: 7 }),
-    400,
-    "invalid_note",
+  assertEquals(
+    [missing.status, missing.code],
+    [400, "expected_updated_at_required"],
   );
-  await refused(
+  assert(missing.message.includes("invoice.updated_at"), missing.message);
+  const stale = await assertRejects(
     run(d, {
       ...base,
       expected_updated_at: "2026-10-13T01:00:00+00:00",
       outcome: "no_draft",
     }),
-    409,
-    "stale_review",
+    JobWorkOrderError,
   );
+  assertEquals([stale.status, stale.code], [409, "stale_review"]);
+  assert(stale.message.includes("invoice.updated_at"), stale.message);
   assertEquals(invoiceRow(d).status, "unknown");
 
   const prepared = stuckDb("unknown", { status: "prepared" });

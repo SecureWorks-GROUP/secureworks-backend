@@ -238,7 +238,7 @@ export function buildCustomerVariationInvoiceLine(
 
 const JOB_COLUMNS = "id, org_id, job_number, type, status, client_name";
 const INVOICE_COLUMNS =
-  "id, variation_id, job_id, line, status, prepared_by, prepared_at, xero_contact_id, job_contact_id, xero_requested_by, xero_requested_at, xero_invoice_id, invoice_number, xero_created_at, failure, reconciled_outcome, reconciled_by, reconciled_via, reconciled_at, reconcile_note, updated_at";
+  "id, variation_id, job_id, line, status, prepared_by, prepared_at, xero_contact_id, job_contact_id, xero_requested_by, xero_requested_at, xero_invoice_id, invoice_number, xero_created_at, failure, updated_at";
 
 async function readJob(client: any, jobId: string) {
   const { data, error } = await client.from("jobs").select(JOB_COLUMNS)
@@ -287,14 +287,14 @@ function requireActor(actor: { actor: string; missing: boolean }): string {
   return actor.actor;
 }
 
-function requireExpected(body: any): string {
+function requireExpected(
+  body: any,
+  message =
+    "Read the variation again and send its updated_at as expected_updated_at.",
+): string {
   const expected = body?.expected_updated_at;
   if (typeof expected !== "string" || !Number.isFinite(Date.parse(expected))) {
-    fail(
-      400,
-      "expected_updated_at_required",
-      "Read the variation again and send its updated_at as expected_updated_at.",
-    );
+    fail(400, "expected_updated_at_required", message);
   }
   return expected;
 }
@@ -567,11 +567,6 @@ function shapeInvoiceRow(row: any) {
     invoice_number: row.invoice_number ?? null,
     xero_created_at: row.xero_created_at ?? null,
     failure: row.failure ?? null,
-    reconciled_outcome: row.reconciled_outcome ?? null,
-    reconciled_by: row.reconciled_by ?? null,
-    reconciled_via: row.reconciled_via ?? null,
-    reconciled_at: row.reconciled_at ?? null,
-    reconcile_note: row.reconcile_note ?? null,
     updated_at: row.updated_at ?? null,
   };
 }
@@ -941,7 +936,6 @@ export const CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS = 15 * 60 * 1000;
 
 const XERO_DRAFT_OUTCOMES = new Set(["draft_exists", "no_draft"]);
 const MAX_INVOICE_NUMBER = 50;
-const MAX_RECONCILE_NOTE = 2000;
 
 function parseReconcileBody(body: any) {
   const outcome = body?.outcome;
@@ -951,19 +945,6 @@ function parseReconcileBody(body: any) {
       "invalid_outcome",
       'outcome is "draft_exists" (you found the draft in Xero) or "no_draft" (you checked Xero and none was made)',
     );
-  }
-  let note: string | null = null;
-  if (body?.note !== undefined && body.note !== null) {
-    if (
-      typeof body.note !== "string" || body.note.length > MAX_RECONCILE_NOTE
-    ) {
-      fail(
-        400,
-        "invalid_note",
-        `note must be text of at most ${MAX_RECONCILE_NOTE} characters`,
-      );
-    }
-    note = body.note.trim() || null;
   }
   if (outcome === "no_draft") {
     if (
@@ -976,7 +957,7 @@ function parseReconcileBody(body: any) {
         "no_draft releases the line: it takes no Xero invoice id or number",
       );
     }
-    return { outcome, note, xeroInvoiceId: null, invoiceNumber: null };
+    return { outcome, xeroInvoiceId: null, invoiceNumber: null };
   }
   const xeroInvoiceId = requireUuid(body?.xero_invoice_id, "xero_invoice_id")
     .toLowerCase();
@@ -994,7 +975,7 @@ function parseReconcileBody(body: any) {
     }
     invoiceNumber = n;
   }
-  return { outcome, note, xeroInvoiceId, invoiceNumber };
+  return { outcome, xeroInvoiceId, invoiceNumber };
 }
 
 function creatingIsStale(row: any, nowMs: number): boolean {
@@ -1051,7 +1032,7 @@ function refuseUnreconcilable(row: any, nowMs: number): void {
  * The caller names the record's updated_at as read (expected_updated_at); the
  * write is one compare-and-set on that, on the status read and, for
  * `creating`, on the claim still being older than the threshold. Who answered,
- * how, when and what is kept on the record and in a job_events row.
+ * how, when and what is recorded in a job_events row.
  */
 export async function reconcileCustomerVariationXeroDraft(
   client: any,
@@ -1068,7 +1049,10 @@ export async function reconcileCustomerVariationXeroDraft(
     notApprover:
       "Only the work order approver answers for a variation's Xero draft",
   });
-  const expected = requireExpected(body);
+  const expected = requireExpected(
+    body,
+    "Read the variation again and send its Xero draft record's updated_at (invoice.updated_at) as expected_updated_at.",
+  );
   const answer = parseReconcileBody(body);
   const nowMs = (opts.now ?? Date.now)();
 
@@ -1108,27 +1092,18 @@ export async function reconcileCustomerVariationXeroDraft(
   }
 
   const nowIso = new Date(nowMs).toISOString();
-  const answeredBy = {
-    reconciled_outcome: answer.outcome,
-    reconciled_by: approver.userId,
-    reconciled_via: approver.via,
-    reconciled_at: nowIso,
-    reconcile_note: answer.note,
-  };
   const patch = answer.outcome === "draft_exists"
     ? {
       status: "xero_draft_created",
       xero_invoice_id: answer.xeroInvoiceId,
       invoice_number: answer.invoiceNumber,
       xero_created_at: nowIso,
-      ...answeredBy,
     }
     : {
       status: "prepared",
       xero_invoice_id: null,
       invoice_number: null,
       xero_created_at: null,
-      ...answeredBy,
     };
   let write = client.from("work_order_customer_variation_invoices")
     .update(patch)
@@ -1152,7 +1127,7 @@ export async function reconcileCustomerVariationXeroDraft(
     fail(
       409,
       "stale_review",
-      "The variation's Xero draft record changed after it was read. Read it again.",
+      "The variation's Xero draft record changed after it was read. Read the variation again and send its Xero draft record's updated_at (invoice.updated_at) as expected_updated_at.",
     );
   }
   await logJobEvent(
