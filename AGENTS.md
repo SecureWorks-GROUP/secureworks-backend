@@ -526,6 +526,12 @@ only on a real move into Accepted: a re-save (accepted -> accepted) pushes
 nothing, a move from another status (scheduled -> accepted) still pushes
 non-Dispatch draft orders. Contract:
 `docs/dispatch-slice-5-contract.md`.
+Slice 6's Deliveries rules (rows, counted, the three cells, `step`, the rail
+line) live only in `dispatch_deliveries.ts`; a hand-set confirmed date
+(`confirmed_delivery_set_*`) and a sighting (`delivery_sighted_*`) are six
+`purchase_orders` columns written only by the three `dispatch_delivery_*`
+actions, never `delivery_confirmed_at`. Contract:
+`docs/dispatch-slice-6-contract.md`.
 Slice 7's install step and its To do rule at Trade scheduled live only in
 `dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
