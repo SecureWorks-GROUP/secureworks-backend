@@ -29,7 +29,7 @@ const CYCLE = "cycle-current";
 
 /**
  * A card that IS rules-clean: MLB physical make-safe, 2 trades x 5 hours at the
- * sealed $85, no materials, no override, no live money, independently proven
+ * sealed $90, no materials, no override, no live money, independently proven
  * pack. Modelled on the live shape of the board's only family-A-and-B-clean
  * card at the 2026-08-06 shadow run.
  */
@@ -56,11 +56,11 @@ function baseline(): SesRulesCleanEvidence {
         billable_hours_per_trade: 5,
         reported_hours_per_trade: 5,
         billable_hours_floor: 3,
-        subtotal_ex_gst: 850,
+        subtotal_ex_gst: 900,
         line_items: [{
           description: "MLB-25147 - make-safe attendance - 2 trades x 5 hours",
           quantity: 10,
-          unit_price_ex_gst: 85,
+          unit_price_ex_gst: 90,
         }],
       },
     },
@@ -214,7 +214,7 @@ Deno.test("A5: an excluded invoice that is not this card's own current DRAFT par
         xero_invoice_id: "x-9",
         status: "AUTHORISED",
         invoice_obligation_revision_id: "ob-1",
-        sub_total: 850,
+        sub_total: 900,
         totals_source: "xero_api",
       };
     }),
@@ -231,7 +231,7 @@ Deno.test("A5: an excluded invoice that is not this card's own current DRAFT par
         xero_invoice_id: "x-9",
         status: "DRAFT",
         invoice_obligation_revision_id: "ob-other",
-        sub_total: 850,
+        sub_total: 900,
         totals_source: "xero_api",
       };
     }),
@@ -248,11 +248,11 @@ Deno.test("A5: this card's own current DRAFT is the subject, not a duplicate", (
       xero_invoice_id: "x-9",
       status: "DRAFT",
       invoice_obligation_revision_id: "ob-1",
-      // 2 trades x 5 hours at the sealed $85 is $850 ex, and the DRAFT in Xero
+      // 2 trades x 5 hours at the sealed $90 is $900 ex, and the DRAFT in Xero
       // carries exactly that. This is the case that must stay clean, or the
       // A6 cases below prove nothing.
-      sub_total: 850,
-      total: 935,
+      sub_total: 900,
+      total: 990,
       totals_source: "xero_api",
     };
   }));
@@ -340,7 +340,7 @@ Deno.test("A6: a Xero DRAFT whose own total is not the sealed total parks the ca
 });
 
 Deno.test("A6: an inc-GST total that disagrees parks even when the ex-GST total matches", () => {
-  // 2 trades x 5 hours at $85 is $850 ex / $935 inc. A tax-treatment edit moves
+  // 2 trades x 5 hours at $90 is $900 ex / $990 inc. A tax-treatment edit moves
   // only the inc figure, and the inc figure is what the builder pays.
   assertParksOn(
     mutate((evidence) => {
@@ -350,7 +350,7 @@ Deno.test("A6: an inc-GST total that disagrees parks even when the ex-GST total 
         xero_invoice_id: "x-9",
         status: "DRAFT",
         invoice_obligation_revision_id: "ob-1",
-        sub_total: 850,
+        sub_total: 900,
         total: 1000,
         totals_source: "xero_api",
       };
@@ -379,20 +379,20 @@ Deno.test("A6: an absent, non-numeric, mirrored or unreadable Xero total parks r
       // No total at all.
       draft({ totals_source: "xero_api" }),
       // A total that is not a number.
-      draft({ sub_total: "850.00", total: 935, totals_source: "xero_api" }),
+      draft({ sub_total: "900.00", total: 990, totals_source: "xero_api" }),
       // An ex-GST total with no inc-GST total beside it: a tax-treatment edit
       // moves what the builder is billed without touching the ex figure.
-      draft({ sub_total: 850, totals_source: "xero_api" }),
+      draft({ sub_total: 900, totals_source: "xero_api" }),
       // Read from the LOCAL MIRROR, which is written at the mint and cannot
       // witness an edit made in Xero afterwards. Comparing against it compares
       // the sealed total with itself.
-      draft({ sub_total: 850, total: 935, totals_source: "local_mirror" }),
+      draft({ sub_total: 900, total: 990, totals_source: "local_mirror" }),
       // A total with no stated origin: it cannot be trusted as the money.
-      draft({ sub_total: 850, total: 935 }),
+      draft({ sub_total: 900, total: 990 }),
       // The read itself failed.
       draft({
-        sub_total: 850,
-        total: 935,
+        sub_total: 900,
+        total: 990,
         totals_source: "xero_api",
         totals_read_error: "Xero 503",
       }),
@@ -473,7 +473,7 @@ Deno.test("B2: any line the sealed law would not have produced parks the card", 
         {
           description: "MLB-25147 - make-safe attendance - 2 trades x 5 hours",
           quantity: 10,
-          unit_price_ex_gst: 85,
+          unit_price_ex_gst: 90,
         },
         {
           description: "MLB-25147 - site allowance",
@@ -491,7 +491,7 @@ Deno.test("B2: any line the sealed law would not have produced parks the card", 
       evidence.docket!.local_invoice_proposal!.line_items = [{
         description: "MLB-25147 - emergency callout (2 trades, 5 hours)",
         quantity: 10,
-        unit_price_ex_gst: 85,
+        unit_price_ex_gst: 90,
       }];
     }),
     "B2_sealed_line_derivation",
@@ -524,7 +524,7 @@ Deno.test("B4: billing under the sealed attendance floor parks the card", () => 
       proposal.line_items = [{
         description: "MLB-25147 - make-safe attendance - 1 trade x 1 hours",
         quantity: 1,
-        unit_price_ex_gst: 85,
+        unit_price_ex_gst: 90,
       }];
     }),
     "B4_attendance_hours_floor",
@@ -538,7 +538,7 @@ Deno.test("B4: billing under the sealed attendance floor parks the card", () => 
     proposal.line_items = [{
       description: "MLB-25147 - make-safe attendance - 2 trades x 8 hours",
       quantity: 16,
-      unit_price_ex_gst: 85,
+      unit_price_ex_gst: 90,
     }];
   }));
   assert(verdict.park_reason);
@@ -621,7 +621,7 @@ Deno.test("B7: hand-priced money parks, including a rate override with a full au
       evidence.docket!.local_invoice_proposal!.line_items = [{
         description: "MLB-25147 - make-safe attendance - 2 trades x 5 hours",
         quantity: 10,
-        unit_price_ex_gst: 85,
+        unit_price_ex_gst: 90,
         rate_override_approved: true,
       }];
     }),
@@ -634,7 +634,7 @@ Deno.test("B7: hand-priced money parks, including a rate override with a full au
       evidence.docket!.local_invoice_proposal!.line_items = [{
         description: "MLB-25147 - make-safe attendance - 2 trades x 5 hours",
         quantity: 10,
-        unit_price_ex_gst: 85,
+        unit_price_ex_gst: 90,
         rate_override_approved: true,
         rate_override_by: "Captain Marnin Stobbe",
         rate_override_at: "2026-08-06T01:00:00.000Z",
@@ -670,7 +670,7 @@ Deno.test("B8: a materials-bearing invoice parks until item 08 seals a rate card
         {
           description: "MLB-25147 - make-safe attendance - 2 trades x 5 hours",
           quantity: 10,
-          unit_price_ex_gst: 85,
+          unit_price_ex_gst: 90,
         },
         {
           description: "MLB-25147 - Materials used: Timber x 1m; Fixings",
@@ -691,7 +691,7 @@ Deno.test("B8: a materials-bearing invoice parks until item 08 seals a rate card
         {
           description: "MLB-25147 - make-safe attendance - 2 trades x 5 hours",
           quantity: 10,
-          unit_price_ex_gst: 85,
+          unit_price_ex_gst: 90,
         },
         {
           description:
@@ -1124,8 +1124,8 @@ Deno.test("an authorise-point clean determination is what permits the advance", 
       xero_invoice_id: "x-9",
       status: "DRAFT",
       invoice_obligation_revision_id: "ob-1",
-      sub_total: 850,
-      total: 935,
+      sub_total: 900,
+      total: 990,
       totals_source: "xero_api",
     };
   }));

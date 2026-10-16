@@ -118,19 +118,25 @@ Deno.test("unquantified materials become a review caveat, never a hard refusal",
   assertStringIncludes(decision.review_recovery_action, "Do not release");
 });
 
-Deno.test("quantified non-settled materials propose from the rate card instead of refusing", () => {
+Deno.test("quantified settled materials bill the card and do not propose a review line", () => {
   const decision = decideStandardLabourMaterialsCharge({
     materials_used: ["Nails x 5", "Timber x 0.2m"],
     standing_decision: null,
     priced_materials_line_count: 0,
   });
-  assertEquals(decision.action, "rate_card_proposal");
-  if (decision.action !== "rate_card_proposal") return;
-  assertEquals(decision.amount_ex_gst, 71);
-  assertEquals(decision.provenance.captain_review_required, true);
-  assertStringIncludes(decision.description, "Nails x 5");
-  assertStringIncludes(decision.description, "Timber x 0.2m");
-  assertStringIncludes(decision.review_recovery_action, "do not send");
+  assertEquals(decision.action, "settled_charge_lines");
+  if (decision.action !== "settled_charge_lines") return;
+  assertEquals(
+    decision.lines.map((line) => line.unit_price_ex_gst),
+    [25, 17],
+  );
+  assertEquals(decision.omitted, []);
+  assertEquals(
+    decision.lines.some((line) =>
+      line.description.includes("Proposed materials for Captain review")
+    ),
+    false,
+  );
 });
 
 Deno.test("an authorised operator figure produces one builder-readable charge line", () => {
