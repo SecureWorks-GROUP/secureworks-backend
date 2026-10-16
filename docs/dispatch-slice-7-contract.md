@@ -152,6 +152,9 @@ nullable, and two checks: `job_dispatch_state_install_confirmed_named`
 table, trigger, function or publication. Rollback:
 `supabase/rollbacks/20261014190000_job_dispatch_install_confirmed_down.sql`.
 Contract case: `supabase/tests/migration-contracts/20261014190000_job_dispatch_install_confirmed/`.
+`20261016160000_job_dispatch_install_for_day_comment.sql` restates the
+`install_confirmed_for_day` column comment to the section 2 rule; it changes
+nothing else.
 
 ## 6. List read time on production
 
