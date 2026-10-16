@@ -2618,50 +2618,78 @@ Deno.test("manual text: every send gate still applies (sending, owner, text, liv
   assertEquals(rec.sms.length, 0);
 });
 
-Deno.test("manual text: refused while chasing is paused, and the job view says why", async () => {
+Deno.test("manual text: allowed while chasing is paused (Shaun, 16 Oct 2026); the planned step stays paused", async () => {
   const store = new FakeStore();
   const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
   const view = async (id: string) =>
     ((await call(deps, "debt_ws_job", SHAUN, { xero_invoice_id: id }))
       .body as any).manual_text;
-  assertEquals(await view(IDS.final), {
-    allowed: true,
-    code: null,
-    reason: null,
-  });
-  // A company invoice.
-  assertEquals((await view(IDS.account)).code, "not_chased_by_text");
-  // Day 21: Jan's visit list.
-  assertEquals(await view(IDS.janFinal), {
+  const allowed = { allowed: true, code: null, reason: null };
+  assertEquals(await view(IDS.final), allowed);
+  // Still blocked: a company invoice (the Monday statement) and a contact we never chase.
+  assertEquals(await view(IDS.account), {
     allowed: false,
-    code: "chasing_paused",
-    reason: "Day 21 is Jan's visit list. No more texts",
+    code: "not_chased_by_text",
+    reason: "Company invoices go on the Monday statement, not a text",
   });
-  // A promise to pay pauses it.
+  assertEquals((await view(IDS.notChased)).code, "not_chased_by_text");
+  // Day 21, Jan's visit list: Shaun may still reply in his own words.
+  assertEquals(await view(IDS.janFinal), allowed);
+  // A promise to pay pauses the steps, not a manual text.
   await call(deps, "debt_ws_note", SHAUN, {
     xero_invoice_id: IDS.final,
     promise_date: "2026-10-12",
   });
-  assertEquals((await view(IDS.final)).code, "chasing_paused");
+  assertEquals(await view(IDS.final), allowed);
+  // The planned day 7 step is not due while paused, and is refused as before.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, D7_SEND)).body.code,
+    "step_not_due",
+  );
   const promised = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
-  assertEquals(promised.body.code, "chasing_paused");
-  assert(String(promised.body.error).includes("a promise to pay"));
-  // Says paid pauses it too.
+  assertEquals(promised.status, 200);
+  assertEquals(promised.body.manual, true);
+  assertEquals(rec.sms.length, 1);
+  // Says paid: a manual text still goes (its own reference), logged as manual.
   store.stateRows.find((s) => s.share_key === IDS.final)!.paused_until = null;
   await call(deps, "debt_ws_set_category", SHAUN, {
     xero_invoice_id: IDS.final,
     category: "says_paid",
   });
+  assertEquals(await view(IDS.final), allowed);
+  const saysPaid = await call(deps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    client_ref: "70000000-0000-4000-8000-000000000003",
+  });
+  assertEquals(saysPaid.status, 200);
+  assertEquals(rec.sms.length, 2);
+  // Rectification too.
+  await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "rectification",
+  });
+  const rect = await call(deps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    client_ref: "70000000-0000-4000-8000-000000000004",
+  });
+  assertEquals(rect.status, 200);
+  assertEquals(rec.sms.length, 3);
+  // None of them moved the ladder: every claim is a manual one, every log is step manual.
+  assert(store.sendRows.every((r) => r.step.startsWith("manual:")));
   assertEquals(
-    (await view(IDS.final)).reason,
-    "They say they have paid. Follow-ups are paused while Xero catches up",
+    store.logRows.filter((l) => l.kind === "text_sent").map((l) => l.step),
+    ["manual", "manual", "manual"],
   );
+  // A company invoice is still refused at the send.
   assertEquals(
-    (await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
-    "chasing_paused",
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      xero_invoice_id: IDS.account,
+      client_ref: "70000000-0000-4000-8000-000000000005",
+    })).body.code,
+    "not_chased_by_text",
   );
-  assertEquals(rec.sms.length, 0);
-  assertEquals(store.sendRows.length, 0);
+  assertEquals(rec.sms.length, 3);
 });
 
 Deno.test("manual text: refuses bad shapes before anything is read", async () => {

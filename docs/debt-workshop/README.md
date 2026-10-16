@@ -64,8 +64,7 @@ A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The cod
 - `already_sent`, `step_not_due`, `payer_not_linked`, `no_email`, `nothing_due`;
 - `text_not_allowed`, `xero_unavailable`, `bank_check_unavailable`;
 - the debt report: `no_recipients`, `recipient_not_internal`, `recently_sent`, `report_pdf_failed`, `email_failed`;
-- `send_refused_by_guard`, `send_not_confirmed`;
-- `chasing_paused` (a manual text while chasing is paused).
+- `send_refused_by_guard`, `send_not_confirmed`.
 
 ### The guarded send (`debt_ws_decide` send, and stage 5 auto-send)
 
@@ -99,7 +98,8 @@ The Debt tab's job screen is a chat window: the proposed step's text sits in the
 
 - **Shape:** `debt_ws_decide {xero_invoice_id, step: "manual", action: "send", text, channel: "sms", amount, client_ref}`. `amount` is the amount owing the screen showed (required, `amount_required`); `client_ref` is a UUID the screen makes once per message. No `suggestion_id`, and it cannot be skipped. `client_ref` on any other step is refused.
 - **Same guarded send:** every check above runs (sending on, owner, the text guard, homeowner and open and chased, the payer's contact, live Xero with the amount as the bar, the bank feed with Send anyway, 771 through `sendChaseSms`). Step 4 does not apply.
-- **Paused chasing refuses it** with `chasing_paused`: says paid, rectification, a promise to pay still ahead, or day 21 (Jan's visit list, or the hold for a progress payment). `debt_ws_job.manual_text` gives the same answer, so the screen says why in place of its reply box.
+- **Allowed while chasing is paused** (Shaun decided 16 Oct 2026): says paid, rectification, a promise to pay still ahead, and day 21 (Jan's visit list, or the hold for a progress payment) pause the planned steps only, so Shaun can still reply in his own words ("thanks, we'll keep an eye out for it"). The planned step stays refused (`step_not_due`) while paused.
+- **Still blocked** (`not_chased_by_text`): a company invoice (the Monday statement), a contact we never chase, and an invoice that is no longer open (paid, nothing owing); the live Xero check refuses one paid since. `debt_ws_job.manual_text` (`manualTextBlock`) gives the same answer, so the screen says why in place of its reply box.
 - **Never a step:** the claim row's step is `manual:<client_ref>`, which no ladder step matches, so the ladder never counts it as done and the due step stays due. The same `client_ref` is never texted twice (a double tap, or a retry after a send that is not confirmed, is `already_sent`); a new message gets a new reference.
 - **Logged as manual:** `debt_ws_log` kind `text_sent`, step `manual`, the text as `body`, and `meta.manual: true` with `meta.client_ref`. A refusal is logged as `send_refused` with step `manual`. No migration: both columns are free text.
 

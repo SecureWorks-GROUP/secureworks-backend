@@ -25,9 +25,10 @@
 //     === true. Off by default.
 //   - A manual text (Shaun's own words from the job screen's reply box, step "manual") goes
 //     through the same guarded send and every check above. It is logged as a manual text,
-//     never as a step, so it never moves the day ladder. It is refused while chasing is
-//     paused (says paid, rectification, a promise to pay, day 21). Its claim is keyed on a
-//     client_ref the screen makes once per message, so a double tap never texts twice.
+//     never as a step, so it never moves the day ladder. It may go while chasing is paused
+//     (says paid, rectification, a promise to pay, day 21: Shaun decided 16 Oct 2026), so he
+//     can reply; the planned steps stay paused. Its claim is keyed on a client_ref the
+//     screen makes once per message, so a double tap never texts twice.
 
 import {
   addDays,
@@ -565,19 +566,18 @@ export function payerSendBlock(
 
 /**
  * Why a manual text (Shaun's own words, not a planned step) cannot go to this invoice's
- * payer now, or null when it can. The job screen shows the reason in place of its reply
- * box, and the send refuses with the same words:
- *   not_chased_by_text: a company invoice, a contact we never chase, or a closed invoice;
- *   chasing_paused:     says paid, rectification, a promise to pay still ahead, or day 21
- *                       (Jan's visit list for a final, a hold for a progress payment).
- * The rest of the checks (sending on, the payer's contact, live Xero, the bank feed) run
- * at the send itself, exactly as for a planned step.
+ * payer, or null when it can. The job screen shows the reason in place of its reply box;
+ * the guarded send refuses the same cases with the same code (not_chased_by_text):
+ *   a company invoice (the Monday statement), a contact we never chase, or an invoice that
+ *   is no longer open (paid, nothing owing).
+ * Paused chasing does NOT block a manual text (Shaun decided 16 Oct 2026): says paid,
+ * rectification, a promise to pay still ahead and day 21 (Jan's visit list) pause the
+ * planned steps only, so Shaun can still reply in his own words. The rest of the checks
+ * (sending on, the payer's contact, live Xero, the bank feed) run at the send itself,
+ * exactly as for a planned step.
  */
 export function manualTextBlock(
-  entry: Pick<
-    BookEntry,
-    "kind" | "notChased" | "open" | "category" | "ladder" | "state"
-  >,
+  entry: Pick<BookEntry, "kind" | "notChased" | "open">,
 ): { code: string; message: string } | null {
   if (entry.kind === "account") {
     return {
@@ -595,36 +595,6 @@ export function manualTextBlock(
     return {
       code: "not_chased_by_text",
       message: "This invoice is no longer open in our Xero copy",
-    };
-  }
-  if (entry.category === "says_paid") {
-    return {
-      code: "chasing_paused",
-      message:
-        "They say they have paid. Follow-ups are paused while Xero catches up",
-    };
-  }
-  if (entry.category === "rectification") {
-    return {
-      code: "chasing_paused",
-      message: "In Rectification. Chasing stops until the fix is done",
-    };
-  }
-  if (entry.ladder.paused) {
-    const until = entry.state?.paused_until;
-    return {
-      code: "chasing_paused",
-      message: `Follow-ups are paused${
-        until ? ` until ${longDate(until)}` : ""
-      }, a promise to pay`,
-    };
-  }
-  if (entry.ladder.reached === "d21") {
-    return {
-      code: "chasing_paused",
-      message: entry.kind === "progress"
-        ? "Day 21 is a hold for a progress payment. No more texts"
-        : "Day 21 is Jan's visit list. No more texts",
     };
   }
   return null;
@@ -1363,12 +1333,8 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         : "Company invoices go on the Monday statement, not a text",
     );
   }
-  // A manual text waits while chasing is paused (says paid, rectification, a promise,
-  // day 21), as the screen says in place of its reply box.
-  if (input.manual) {
-    const paused = manualTextBlock(entry);
-    if (paused) await refuse(deps, input, paused.code, paused.message);
-  }
+  // (A manual text is blocked by exactly the cases above, as manualTextBlock tells the
+  // screen; paused chasing does not stop it: Shaun decided 16 Oct 2026.)
   // The text goes to the PAYER's own contact, never the job's: on a shared fence the
   // job's contact is the primary client, who may not owe this invoice.
   const block = payerSendBlock(entry);
