@@ -27,7 +27,9 @@
 --      ops-api checks the flag again before writing anything.
 --   5. Drafts the quote fill wrote before this migration (it shipped on
 --      13 Oct 2026) get their quote_filled_at when no write landed after the
---      fill's own event; anything else is left for the approver.
+--      fill's own event; anything else is left for the approver. Drafts that
+--      carry instructions, a date or an address the open path never wrote are
+--      stamped hand_edited_at first (section 1).
 --
 -- Nothing here sends, writes Xero, or issues a work order: while the flag is
 -- off every path stays exactly as it was.
@@ -42,6 +44,23 @@ COMMENT ON COLUMN public.work_orders.quote_filled_at IS
   'Job work orders: when the quote fill wrote this draft from the accepted quote. Stamped only by that fill of an untouched draft; the trigger refuses any other write.';
 COMMENT ON COLUMN public.work_orders.hand_edited_at IS
   'Job work orders: the last time anything other than the quote fill changed this draft''s content. Set by the trigger only. A draft with a value here is never issued automatically.';
+
+-- Drafts written into by hand before this migration: the open path
+-- (ensure_job_work_order_draft) writes no special instructions, no date and
+-- the job's address at the time, so a draft carrying any other of the three
+-- was edited by hand. Stamped once, here, while the 20261012130000 trigger
+-- (which does not touch the new columns) is still in place, so it is never
+-- filled with the stamp or issued automatically; it waits for the approver.
+UPDATE public.work_orders wo
+  SET hand_edited_at = wo.updated_at
+  FROM public.jobs j
+  WHERE j.id = wo.job_id
+    AND wo.kind = 'job' AND wo.status = 'draft'
+    AND wo.quote_filled_at IS NULL AND wo.hand_edited_at IS NULL
+    AND (COALESCE(btrim(wo.special_instructions), '') <> ''
+         OR wo.scheduled_date IS NOT NULL
+         OR wo.site_address IS DISTINCT FROM
+              NULLIF(concat_ws(', ', NULLIF(j.site_address, ''), NULLIF(j.site_suburb, '')), ''));
 
 -- ── 2. approved_via auto ─────────────────────────────────────────────────────
 

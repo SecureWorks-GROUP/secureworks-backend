@@ -93,7 +93,13 @@ What is issued, and what waits for the approver:
   instructions, agreed labour, date, address) stamps `hand_edited_at`. Both are
   set by the database trigger only: a caller can neither write nor clear them.
   A draft edited by hand is never issued automatically; it waits for Shaun's
-  approval as before.
+  approval as before. Drafts written into before the migration are stamped
+  once by it: a draft with no fill stamp that carries special instructions, a
+  date, or an address other than the job's (the open path,
+  `ensure_job_work_order_draft`, writes none of those but the job's address)
+  gets `hand_edited_at`, so the fill leaves it unstamped and it waits for the
+  approver. An untouched opened draft and a draft only the earlier fill wrote
+  are not stamped.
 - Only an open fencing or patio job (`job_work_order_open_statuses()`, mirrored
   as `JOB_WORK_ORDER_OPEN_STATUSES`). An approved work order is never touched.
 - Lines the fill flags for review (`needs_review`, for example an old extra

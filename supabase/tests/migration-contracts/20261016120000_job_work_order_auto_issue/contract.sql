@@ -50,6 +50,35 @@ BEGIN
   END IF;
 END $$;
 
+-- 2b. Drafts written into by hand before this migration, with no lines, are
+-- stamped as hand edits: the fill may not stamp them. The untouched opened
+-- draft and the prior fill are not.
+DO $$
+DECLARE
+  v_wo uuid;
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.work_orders wo
+             WHERE wo.job_id IN ('a0a0a0a0-0000-4000-8000-000000000003',
+                                 'a0a0a0a0-0000-4000-8000-000000000004',
+                                 'a0a0a0a0-0000-4000-8000-000000000005')
+               AND wo.kind = 'job' AND wo.hand_edited_at IS NULL) THEN
+    RAISE EXCEPTION 'contract: a draft written into by hand before this migration must be stamped as a hand edit';
+  END IF;
+  IF (SELECT wo.hand_edited_at FROM public.work_orders wo
+      WHERE wo.job_id = 'a0a0a0a0-0000-4000-8000-000000000006' AND wo.kind = 'job') IS NOT NULL THEN
+    RAISE EXCEPTION 'contract: an untouched opened draft must not read as a hand edit';
+  END IF;
+  SELECT id INTO v_wo FROM public.work_orders
+    WHERE job_id = 'a0a0a0a0-0000-4000-8000-000000000003' AND kind = 'job';
+  BEGIN
+    UPDATE public.work_orders
+      SET scope_items = '[{"description":"Install","source":"quote"}]', agreed_labour_ex = 600, quote_filled_at = now()
+      WHERE id = v_wo;
+    RAISE EXCEPTION 'contract: a draft edited by hand before this migration must not take the fill stamp';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
 -- 3. The stamps are the database's: the quote fill stamps an untouched draft
 -- once; any other content change is a hand edit; a caller can set neither.
 DO $$
@@ -209,6 +238,8 @@ DECLARE
   v_plain uuid := gen_random_uuid();
   v_wo uuid;
   v_plain_wo uuid;
+  v_pre_wo uuid;
+  v_opened_wo uuid;
 BEGIN
   INSERT INTO public.jobs (id, org_id, type, status, job_number) VALUES
     (v_job, '00000000-0000-0000-0000-000000000001', 'patio', 'scheduled', 'WOA-HAND-1'),
@@ -248,6 +279,28 @@ BEGIN
     RAISE EXCEPTION 'contract: an automatic issue must never name an approver';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
+
+  -- A draft edited by hand before this migration, filled afterwards: never
+  -- issued automatically. The untouched opened draft, filled, is.
+  SELECT id INTO v_pre_wo FROM public.work_orders
+    WHERE job_id = 'a0a0a0a0-0000-4000-8000-000000000004' AND kind = 'job';
+  UPDATE public.work_orders
+    SET scope_items = '[{"description":"Roof","source":"quote"}]', agreed_labour_ex = 700
+    WHERE id = v_pre_wo;
+  BEGIN
+    PERFORM public.auto_issue_job_work_order(v_pre_wo, (SELECT updated_at FROM public.work_orders WHERE id = v_pre_wo));
+    RAISE EXCEPTION 'contract: a draft edited by hand before this migration must not be issued automatically';
+  EXCEPTION WHEN SQLSTATE 'WO423' THEN NULL;
+  END;
+  SELECT id INTO v_opened_wo FROM public.work_orders
+    WHERE job_id = 'a0a0a0a0-0000-4000-8000-000000000006' AND kind = 'job';
+  UPDATE public.work_orders
+    SET scope_items = '[{"description":"Roof","source":"quote"}]', agreed_labour_ex = 700, quote_filled_at = now()
+    WHERE id = v_opened_wo;
+  PERFORM public.auto_issue_job_work_order(v_opened_wo, (SELECT updated_at FROM public.work_orders WHERE id = v_opened_wo));
+  IF (SELECT approved_via FROM public.work_orders WHERE id = v_opened_wo) IS DISTINCT FROM 'auto' THEN
+    RAISE EXCEPTION 'contract: an untouched draft opened before this migration, filled from the quote, must be issued automatically';
+  END IF;
 
   -- Both drafts still wait for the approver, whose approval works as before.
   IF (SELECT count(*) FROM public.work_orders WHERE id IN (v_wo, v_plain_wo) AND status = 'draft') <> 2 THEN
