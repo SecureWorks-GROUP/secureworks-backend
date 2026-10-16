@@ -213,7 +213,8 @@ export async function readDispatchJobCounts(
   const { data: orders, error: ordersError } = await client
     .from("purchase_orders")
     .select("id, delivery_sighted_at")
-    .in("id", orderIds);
+    .in("id", orderIds)
+    .neq("status", "deleted");
   if (ordersError) {
     console.error(`[${label}] counts orders read failed:`, ordersError);
     return null;
