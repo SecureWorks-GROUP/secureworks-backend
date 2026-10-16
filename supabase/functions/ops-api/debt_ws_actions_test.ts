@@ -2438,3 +2438,280 @@ Deno.test("set_category: manual says paid, rectification and clear work with no 
   assertEquals(rec.statusMoves.length, 1);
   assertEquals(move.status, "pending");
 });
+
+// ── Manual texts (Shaun's own words from the chat window, approved 16 Oct 2026) ──
+
+const MANUAL_REF = "70000000-0000-4000-8000-000000000001";
+const MANUAL_SEND = {
+  xero_invoice_id: IDS.final,
+  step: "manual",
+  action: "send",
+  text: "Thanks Alex, Friday is fine.\n\nCheers,\nShaun",
+  channel: "sms",
+  // The amount owing the text was written against (the live check's bar).
+  amount: 1000,
+  client_ref: MANUAL_REF,
+};
+
+Deno.test("manual text: sends through the guarded path, is logged as manual, and never moves the ladder", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const res = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(res.status, 200);
+  assertEquals(res.body.sent, true);
+  assertEquals(res.body.manual, true);
+  assertEquals(res.body.step, "manual");
+  // One text, through sendChaseSms, after the live Xero read and the bank check.
+  assertEquals(rec.sms.length, 1);
+  assertEquals(rec.sms[0].message, MANUAL_SEND.text);
+  assertEquals(rec.sms[0].ghl_contact_id, "ghlcontact0000000001");
+  assertEquals(rec.liveReads, [IDS.final]);
+  // The claim is keyed on the message's client_ref, never a ladder step.
+  assertEquals(store.sendRows.length, 1);
+  assertEquals(store.sendRows[0].step, "manual:" + MANUAL_REF);
+  assertEquals(store.sendRows[0].status, "sent");
+  // Logged as a manual text, not a step.
+  const log = store.logRows.find((l) => l.kind === "text_sent")!;
+  assertEquals(log.step, "manual");
+  assertEquals(log.body, MANUAL_SEND.text);
+  assertEquals(log.meta.manual, true);
+  assertEquals(log.meta.client_ref, MANUAL_REF);
+  // The day 7 step is still due, and still sends as itself.
+  const row = ((await call(deps, "debt_ws_overview", SHAUN)).body as any).rows
+    .find((r: any) => r.xero_invoice_id === IDS.final);
+  assertEquals(row.step_due.step, "d7");
+  const job = (await call(deps, "debt_ws_job", SHAUN, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(job.ladder.find((s: any) => s.step === "d7").status, "due");
+  assertEquals(job.suggestion.step, "d7");
+  assertEquals((await call(deps, "debt_ws_decide", SHAUN, D7_SEND)).status, 200);
+  assertEquals(rec.sms.length, 2);
+});
+
+Deno.test("manual text: the same client_ref never texts twice; a new message has its own", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND)).status,
+    200,
+  );
+  const twice = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(twice.body.code, "already_sent");
+  assertEquals(rec.sms.length, 1);
+  const next = await call(deps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    client_ref: "70000000-0000-4000-8000-000000000002",
+  });
+  assertEquals(next.status, 200);
+  assertEquals(rec.sms.length, 2);
+  // An unconfirmed send keeps its claim, so a retry of that message is refused.
+  const store2 = new FakeStore();
+  const { deps: deps2, rec: rec2 } = fakeDeps(store2, {
+    env: sendingOn(store2),
+    smsError: new Error("timeout"),
+  });
+  assertEquals(
+    (await call(deps2, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "send_not_confirmed",
+  );
+  assertEquals(store2.sendRows[0].status, "sending");
+  assertEquals(
+    (await call(deps2, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "already_sent",
+  );
+  assertEquals(rec2.sms.length, 1);
+});
+
+Deno.test("manual text: every send gate still applies (sending, owner, text, live Xero, bank feed, contact)", async () => {
+  // Sending off.
+  const off = new FakeStore();
+  const { deps: offDeps, rec: offRec } = fakeDeps(off);
+  const refused = await call(offDeps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(refused.body.code, "sending_off");
+  assertEquals(off.logRows.at(-1)!.kind, "send_refused");
+  assertEquals(off.logRows.at(-1)!.step, "manual");
+  assertEquals(offRec.sms.length, 0);
+  // Not the owner.
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  assertEquals(
+    (await call(deps, "debt_ws_decide", STAFF, MANUAL_SEND)).body.code,
+    "not_owner",
+  );
+  // The words the guard forbids, and an empty text.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      text: "Hi — pay now",
+    })).body.code,
+    "text_not_allowed",
+  );
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, { ...MANUAL_SEND, text: " " }))
+      .body.code,
+    "text_not_allowed",
+  );
+  // A company invoice goes on the statement, never a text.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      xero_invoice_id: IDS.account,
+    })).body.code,
+    "not_chased_by_text",
+  );
+  assertEquals(rec.sms.length, 0);
+  // Part paid since the screen was read: the live check refuses.
+  const part = new FakeStore();
+  const { deps: partDeps, rec: partRec } = fakeDeps(part, {
+    env: sendingOn(part),
+    live: {
+      [IDS.final]: {
+        InvoiceID: IDS.final,
+        Status: "AUTHORISED",
+        AmountDue: 400,
+      },
+    },
+  });
+  assertEquals(
+    (await call(partDeps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "part_paid",
+  );
+  assertEquals(partRec.sms.length, 0);
+  // A possible payment in the bank feed refuses; Send anyway overrides, logged.
+  const bankStore = new FakeStore();
+  const bank = [{
+    bank_transaction_id: "b0000000-0000-4000-8000-000000000001",
+    type: "RECEIVE",
+    date: "2026-10-06T00:00:00",
+    total: 1000,
+    reference: "Transfer",
+    contact_name: null,
+    line_item_descriptions: [],
+  }];
+  const { deps: bankDeps, rec: bankRec } = fakeDeps(bankStore, {
+    env: sendingOn(bankStore),
+    bank,
+  });
+  assertEquals(
+    (await call(bankDeps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "possible_payment",
+  );
+  assertEquals(bankRec.sms.length, 0);
+  const anyway = await call(bankDeps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    override_possible_payment: true,
+  });
+  assertEquals(anyway.status, 200);
+  assertEquals(anyway.body.override_possible_payment, true);
+  const log = bankStore.logRows.find((l) => l.kind === "text_sent")!;
+  assertEquals([log.meta.manual, log.meta.override_possible_payment], [
+    true,
+    true,
+  ]);
+  // No contact to text.
+  store.jobRows.find((j) => j.id === JOBS.fence)!.ghl_contact_id = null;
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "payer_not_linked",
+  );
+  assertEquals(rec.sms.length, 0);
+});
+
+Deno.test("manual text: refused while chasing is paused, and the job view says why", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const view = async (id: string) =>
+    ((await call(deps, "debt_ws_job", SHAUN, { xero_invoice_id: id }))
+      .body as any).manual_text;
+  assertEquals(await view(IDS.final), {
+    allowed: true,
+    code: null,
+    reason: null,
+  });
+  // A company invoice.
+  assertEquals((await view(IDS.account)).code, "not_chased_by_text");
+  // Day 21: Jan's visit list.
+  assertEquals(await view(IDS.janFinal), {
+    allowed: false,
+    code: "chasing_paused",
+    reason: "Day 21 is Jan's visit list. No more texts",
+  });
+  // A promise to pay pauses it.
+  await call(deps, "debt_ws_note", SHAUN, {
+    xero_invoice_id: IDS.final,
+    promise_date: "2026-10-12",
+  });
+  assertEquals((await view(IDS.final)).code, "chasing_paused");
+  const promised = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(promised.body.code, "chasing_paused");
+  assert(String(promised.body.error).includes("a promise to pay"));
+  // Says paid pauses it too.
+  store.stateRows.find((s) => s.share_key === IDS.final)!.paused_until = null;
+  await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "says_paid",
+  });
+  assertEquals(
+    (await view(IDS.final)).reason,
+    "They say they have paid. Follow-ups are paused while Xero catches up",
+  );
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "chasing_paused",
+  );
+  assertEquals(rec.sms.length, 0);
+  assertEquals(store.sendRows.length, 0);
+});
+
+Deno.test("manual text: refuses bad shapes before anything is read", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const { client_ref: _ref, ...noRef } = MANUAL_SEND;
+  const { amount: _amount, ...noAmount } = MANUAL_SEND;
+  for (
+    const body of [
+      noRef,
+      { ...MANUAL_SEND, client_ref: "not-a-uuid" },
+      { ...MANUAL_SEND, action: "skip" },
+      { ...MANUAL_SEND, amount: 0 },
+      // A planned step never carries a client_ref.
+      { ...D7_SEND, client_ref: MANUAL_REF },
+    ]
+  ) {
+    assertEquals(
+      (await call(deps, "debt_ws_decide", SHAUN, body)).status,
+      400,
+      JSON.stringify(body),
+    );
+  }
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, noAmount)).body.code,
+    "amount_required",
+  );
+  // A manual text has no suggestion.
+  const draft = await store.insertSuggestion({
+    share_key: IDS.final,
+    xero_invoice_ids: [IDS.final],
+    job_id: JOBS.fence,
+    cycle_start: "2026-10-01",
+    step: "d7",
+    kind: "draft",
+    channel: "sms",
+    text: "draft",
+    why: "Day 7",
+    proposed_category: null,
+    amount: 1000,
+    source: "agent",
+    agent_version: "debt-ws-playbook/v1",
+  });
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      suggestion_id: draft.id,
+    })).status,
+    400,
+  );
+  assertEquals(draft.status, "pending");
+  assertEquals(rec.sms.length + rec.liveReads.length, 0);
+});

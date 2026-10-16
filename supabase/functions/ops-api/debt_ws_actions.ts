@@ -23,6 +23,11 @@
 //   - Automatic sending (stage 5) stays two-key: on top of sending being on, it also needs
 //     env DEBT_WS_AUTO_SEND_ENABLED === "true" and debt_ws_settings.auto_send_steps[step]
 //     === true. Off by default.
+//   - A manual text (Shaun's own words from the job screen's reply box, step "manual") goes
+//     through the same guarded send and every check above. It is logged as a manual text,
+//     never as a step, so it never moves the day ladder. It is refused while chasing is
+//     paused (says paid, rectification, a promise to pay, day 21). Its claim is keyed on a
+//     client_ref the screen makes once per message, so a double tap never texts twice.
 
 import {
   addDays,
@@ -100,6 +105,12 @@ export { DebtWsError } from "./debt_ws_store.ts";
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
+/**
+ * The step a manual text is sent and logged under (Shaun's own words, not a planned step).
+ * Its claim row's step is "manual:<client_ref>", which is never a ladder step, so the
+ * ladder never counts it as done.
+ */
+export const DEBT_WS_MANUAL_STEP = "manual";
 /** Bank feed: one read, re-read at most every 15 minutes within a Perth day (spec section 6). */
 export const DEBT_WS_BANK_CACHE_MS = 15 * 60_000;
 /** Pages of 100 per bank-feed read at most: 10 Xero calls, well inside 60 a minute. */
@@ -547,6 +558,73 @@ export function payerSendBlock(
       code: "payer_not_linked",
       message:
         `Link ${who}'s GoHighLevel contact first: there is no contact to text`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Why a manual text (Shaun's own words, not a planned step) cannot go to this invoice's
+ * payer now, or null when it can. The job screen shows the reason in place of its reply
+ * box, and the send refuses with the same words:
+ *   not_chased_by_text: a company invoice, a contact we never chase, or a closed invoice;
+ *   chasing_paused:     says paid, rectification, a promise to pay still ahead, or day 21
+ *                       (Jan's visit list for a final, a hold for a progress payment).
+ * The rest of the checks (sending on, the payer's contact, live Xero, the bank feed) run
+ * at the send itself, exactly as for a planned step.
+ */
+export function manualTextBlock(
+  entry: Pick<
+    BookEntry,
+    "kind" | "notChased" | "open" | "category" | "ladder" | "state"
+  >,
+): { code: string; message: string } | null {
+  if (entry.kind === "account") {
+    return {
+      code: "not_chased_by_text",
+      message: "Company invoices go on the Monday statement, not a text",
+    };
+  }
+  if (entry.notChased) {
+    return {
+      code: "not_chased_by_text",
+      message: "This contact is never chased",
+    };
+  }
+  if (!entry.open) {
+    return {
+      code: "not_chased_by_text",
+      message: "This invoice is no longer open in our Xero copy",
+    };
+  }
+  if (entry.category === "says_paid") {
+    return {
+      code: "chasing_paused",
+      message:
+        "They say they have paid. Follow-ups are paused while Xero catches up",
+    };
+  }
+  if (entry.category === "rectification") {
+    return {
+      code: "chasing_paused",
+      message: "In Rectification. Chasing stops until the fix is done",
+    };
+  }
+  if (entry.ladder.paused) {
+    const until = entry.state?.paused_until;
+    return {
+      code: "chasing_paused",
+      message: `Follow-ups are paused${
+        until ? ` until ${longDate(until)}` : ""
+      }, a promise to pay`,
+    };
+  }
+  if (entry.ladder.reached === "d21") {
+    return {
+      code: "chasing_paused",
+      message: entry.kind === "progress"
+        ? "Day 21 is a hold for a progress payment. No more texts"
+        : "Day 21 is Jan's visit list. No more texts",
     };
   }
   return null;
@@ -1047,6 +1125,13 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
     },
     // Why Send is off for this payer (null: it can be texted once sending is on).
     send_block: entry.kind === "account" ? null : payerSendBlock(entry),
+    // Whether Shaun may type his own text here (step "manual"), and why not in words.
+    manual_text: (() => {
+      const block = manualTextBlock(entry);
+      return block
+        ? { allowed: false, code: block.code, reason: block.message }
+        : { allowed: true, code: null, reason: null };
+    })(),
     pay_link: payLink,
   };
 }
@@ -1188,6 +1273,11 @@ interface SendInput {
   override: boolean;
   /** The amount the draft was written against. */
   draftAmount: number;
+  /**
+   * Set for a manual text (step DEBT_WS_MANUAL_STEP): the screen's one-off reference for
+   * this message, which keys the claim so the same message is never texted twice.
+   */
+  manual?: { client_ref: string };
 }
 
 function liveCheck(
@@ -1273,11 +1363,22 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         : "Company invoices go on the Monday statement, not a text",
     );
   }
+  // A manual text waits while chasing is paused (says paid, rectification, a promise,
+  // day 21), as the screen says in place of its reply box.
+  if (input.manual) {
+    const paused = manualTextBlock(entry);
+    if (paused) await refuse(deps, input, paused.code, paused.message);
+  }
   // The text goes to the PAYER's own contact, never the job's: on a shared fence the
   // job's contact is the primary client, who may not owe this invoice.
   const block = payerSendBlock(entry);
   if (block) await refuse(deps, input, block.code, block.message);
   const contact = entry.payer.ghl_contact_id as string;
+  // The claim's step: the step itself, or "manual:<client_ref>" for a manual text, which
+  // is unique to that one message and is never a ladder step.
+  const claimStep = input.manual
+    ? `${DEBT_WS_MANUAL_STEP}:${input.manual.client_ref}`
+    : step;
   if (isLadderStep(step) && entry.row.step_due?.step !== step) {
     await refuse(
       deps,
@@ -1291,7 +1392,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     );
   }
   const already = entry.sends.find((s) =>
-    s.cycle_start === entry.dayZero && s.step === step &&
+    s.cycle_start === entry.dayZero && s.step === claimStep &&
     (s.status === "sending" || s.status === "sent")
   );
   if (already) {
@@ -1299,7 +1400,9 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
       deps,
       input,
       "already_sent",
-      "That step was already sent (or a send of it is not confirmed), so it is not sent twice",
+      input.manual
+        ? "That text was already sent (or a send of it is not confirmed), so it is not sent twice"
+        : "That step was already sent (or a send of it is not confirmed), so it is not sent twice",
     );
   }
 
@@ -1357,7 +1460,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
   const claim = await deps.store.claimSend({
     share_key: entry.row.share_key,
     cycle_start: entry.dayZero,
-    step,
+    step: claimStep,
     suggestion_id: input.suggestion?.id ?? null,
     actor: actor.label,
   });
@@ -1439,6 +1542,10 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         ...(input.override && payments.length
           ? { possible_payments: payments }
           : {}),
+        // A manual text is marked as one, so it never reads as a planned step.
+        ...(input.manual
+          ? { manual: true, client_ref: input.manual.client_ref }
+          : {}),
       },
     });
   } catch (error) {
@@ -1454,6 +1561,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     version: DEBT_WS_VERSION,
     sent: true,
     step,
+    manual: !!input.manual,
     send_id: claim!.id,
     provider_message_id: messageId,
     override_possible_payment: input.override && payments.length > 0,
@@ -1478,6 +1586,7 @@ export async function debtWsDecide(
     "override_possible_payment",
     "amount",
     "channel",
+    "client_ref",
   ]);
   // Texts only in v1: the screen may name the channel, and it must be sms.
   if (
@@ -1540,8 +1649,50 @@ export async function debtWsDecide(
 
   const id = uuidOf(body.xero_invoice_id, "xero_invoice_id");
   const step = body.step;
+
+  // A manual text: Shaun's own words, not a planned step. Sent only (never skipped), with
+  // no suggestion, the amount owing it was written against, and the screen's client_ref.
+  if (step === DEBT_WS_MANUAL_STEP) {
+    if (action !== "send") bad("A manual text can only be sent");
+    if (suggestion) bad("A manual text has no suggestion_id");
+    const clientRef = uuidOf(body.client_ref, "client_ref");
+    if (typeof body.text !== "string") bad("text is required to send");
+    if (
+      body.override_possible_payment !== undefined &&
+      typeof body.override_possible_payment !== "boolean"
+    ) bad("override_possible_payment must be true or false");
+    const owed = body.amount === undefined || body.amount === null
+      ? null
+      : Number(body.amount);
+    if (owed === null) {
+      bad(
+        "amount is required: send the amount owing the text was written for",
+        "amount_required",
+      );
+    }
+    if (!Number.isFinite(owed) || owed <= 0) {
+      bad("amount must be the positive amount the text was written for");
+    }
+    const { book, entry } = await oneEntry(deps, id);
+    return await guardedSend(deps, {
+      book,
+      entry,
+      step: DEBT_WS_MANUAL_STEP,
+      text: (body.text as string).trim(),
+      suggestion: null,
+      actor,
+      operatorEmail: caller.email ?? null,
+      override: body.override_possible_payment === true,
+      draftAmount: owed,
+      manual: { client_ref: clientRef },
+    });
+  }
+  if (body.client_ref !== undefined) {
+    bad("client_ref is only for a manual text");
+  }
+
   if (!isLadderStep(step) && !isReplyStep(step)) {
-    bad("step must be d1, d3, d7, d12, d17, d21 or a reply step");
+    bad("step must be d1, d3, d7, d12, d17, d21, a reply step or manual");
   }
   if (suggestion && suggestion.share_key !== id) {
     throw new DebtWsError(
