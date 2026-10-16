@@ -38,10 +38,10 @@ Who may call each action:
 | Action | Method | Who | What it does |
 |---|---|---|---|
 | `debt_ws_overview` | GET | staff | Everything W1 needs: categories, rows, companies, not due, not chased, needs a look, paid this week, Jan's list. |
-| `debt_ws_job` | GET `xero_invoice_id` (optional `conversation=all`) | staff | Everything W2 needs: row, job (with `shares[]`), `payer_contact`, story, invoices, documents, conversation (the payer's own messages; `conversation=all` gives the whole job's thread with each message marked `party_name` / `is_payer`), notes, ladder, suggestion (a pending agent draft or move, else the template draft), flags, possible payments, the payer's contact candidates, `send_block` and the pay link. |
+| `debt_ws_job` | GET `xero_invoice_id` (optional `conversation=all`) | staff | Everything W2 needs: row, job (with `shares[]`), `payer_contact`, story, invoices, documents, conversation (the payer's own messages; `conversation=all` gives the whole job's thread with each message marked `party_name` / `is_payer`), notes, ladder, suggestion (a pending agent draft or move, else the template draft), flags, possible payments, the payer's contact candidates, `send_block`, `manual_text` (`{allowed, code, reason}`: whether Shaun may type his own text here, and why not in words) and the pay link. |
 | `debt_ws_document` | GET `job_id, document_id` (or `xero_invoice_id`) | staff | One job document as base64, or the invoice PDF. |
 | `debt_ws_note` | POST | staff | Add a note (`body`, `note` or `text`). An optional `promise_date` pauses the steps until that date and logs a promise. |
-| `debt_ws_decide` | POST | owner | `action: send` runs the guarded send. A template send (no `suggestion_id`) must carry `amount`, the amount its draft was written for, or it is refused with `amount_required`. `skip` marks the due step done for this cycle. `dismiss` closes a pending suggestion, such as an agent flag. |
+| `debt_ws_decide` | POST | owner | `action: send` runs the guarded send. A template send (no `suggestion_id`) must carry `amount`, the amount its draft was written for, or it is refused with `amount_required`. `skip` marks the due step done for this cycle. `dismiss` closes a pending suggestion, such as an agent flag. `step: "manual"` sends a manual text (see "Manual texts" below). |
 | `debt_ws_set_category` | POST | owner | `says_paid`, `rectification` (through `updateJobStatus`, source `debt_workshop`, only when the card is not already in Rectification) or `clear` (removes says paid). Works with no `suggestion_id` (the manual buttons). With `suggestion_id`, a move is marked accepted; `clear` marks it dismissed ("Keep chasing"). |
 | `debt_ws_link_contact` | POST `{xero_invoice_id, ghl_contact_id}` (`job_id` still accepted) | owner | Links the invoice's PAYER. A neighbour's contact goes on their own `job_contacts` row and never touches `jobs.ghl_contact_id`; the primary client (or a `job_id`-only call) sets `jobs.ghl_contact_id` as before. Replacing a different contact needs `replace: true`. Refuses `contact_belongs_to_other_payer` (another payer's contact on this job), `payer_not_on_job` (a neighbour with no `job_contacts` row) and `job_mismatch`. |
 | `debt_ws_statement_preview` | GET `company_key` | staff | The statement HTML, its invoices, total and To address. An alias contact id reads as its canonical company. |
@@ -91,6 +91,17 @@ The checks run in this order. A refusal is logged to `debt_ws_log` as `send_refu
 9. The text goes through `sendChaseSms`. That path sends from 771, keeps the SES fence and the contact/job match guard, and also logs to `payment_chase_logs`.
    - A guard refusal releases the claim, because nothing was sent.
    - A send that is not confirmed keeps the claim, so the step can never be texted twice.
+
+### Manual texts (approved 16 Oct 2026)
+
+The Debt tab's job screen is a chat window: the proposed step's text sits in the reply box, and Shaun may instead type his own text (a reply to "I'll pay Friday", say). That text is a **manual text**, not a step.
+
+- **Shape:** `debt_ws_decide {xero_invoice_id, step: "manual", action: "send", text, channel: "sms", amount, client_ref}`. `amount` is the amount owing the screen showed (required, `amount_required`); `client_ref` is a UUID the screen makes once per message. No `suggestion_id`, and it cannot be skipped. `client_ref` on any other step is refused.
+- **Same guarded send:** every check above runs (sending on, owner, the text guard, homeowner and open and chased, the payer's contact, live Xero with the amount as the bar, the bank feed with Send anyway, 771 through `sendChaseSms`). Step 4 does not apply.
+- **Allowed while chasing is paused** (Shaun decided 16 Oct 2026): says paid, rectification, a promise to pay still ahead, and day 21 (Jan's visit list, or the hold for a progress payment) pause the planned steps only, so Shaun can still reply in his own words ("thanks, we'll keep an eye out for it"). The planned step stays refused (`step_not_due`) while paused.
+- **Still blocked** (`not_chased_by_text`): a company invoice (the Monday statement), a contact we never chase, and an invoice that is no longer open (paid, nothing owing); the live Xero check refuses one paid since. `debt_ws_job.manual_text` (`manualTextBlock`) gives the same answer, so the screen says why in place of its reply box.
+- **Never a step:** the claim row's step is `manual:<client_ref>`, which no ladder step matches, so the ladder never counts it as done and the due step stays due. The same `client_ref` is never texted twice (a double tap, or a retry after a send that is not confirmed, is `already_sent`); a new message gets a new reference.
+- **Logged as manual:** `debt_ws_log` kind `text_sent`, step `manual`, the text as `body`, and `meta.manual: true` with `meta.client_ref`. A refusal is logged as `send_refused` with step `manual`. No migration: both columns are free text.
 
 ### The payer (shared fences)
 
