@@ -669,7 +669,10 @@ import {
 } from './trade_invoice_time_entry.ts'
 import {
   approveJobWorkOrder,
+  autoIssueJobWorkOrderForJob,
+  autoIssueJobWorkOrders,
   backfillJobWorkOrders,
+  JOB_WORK_ORDER_OPEN_STATUSES,
   correctWorkOrderVariation,
   createJobWorkOrder,
   JobWorkOrderError,
@@ -8917,6 +8920,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
+      // The automatic issue sweep (pg_cron job-work-order-auto-issue, every 2
+      // minutes): fills and issues job work orders with no human approval.
+      // Writes nothing while feature flag job_work_order_auto_issue_v1 is off.
+      case 'auto_issue_job_work_orders': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: auto_issue_job_work_orders requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+      }
       // Re-sends variation emails left failed or stuck in sending. Sends
       // nothing while feature flag work_order_variation_emails_v1 is off.
       case 'resend_work_order_variation_emails':
@@ -17076,6 +17091,9 @@ async function jobDetail(
         variation_count: jwo.variations.length,
         customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
         quote_fill: jwo.quote_fill,
+        // Office only: lines the quote fill flagged (they never stop the work
+        // order going out) and why a draft has not gone to the trades.
+        needs_checking: jwo.needs_checking,
       }
     } catch (e) {
       console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
@@ -35622,6 +35640,23 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
+  // ── The job work order (job_work_orders.ts): a fencing or patio job moving
+  // into an open approved status had its draft opened by the database trigger
+  // in this same update; fill it from the accepted quote and issue it to the
+  // trades now, rather than on the next 2-minute sweep. A no-op while
+  // job_work_order_auto_issue_v1 is off, and it never throws: the status
+  // change stands whatever happens here.
+  if (
+    (data?.type === 'fencing' || data?.type === 'patio') &&
+    JOB_WORK_ORDER_OPEN_STATUSES.has(String(status)) &&
+    oldStatus !== status
+  ) {
+    const issue = await autoIssueJobWorkOrderForJob(client, jId)
+    if (!issue.issued && issue.reason !== 'switched_off') {
+      console.log('[ops-api] job work order not issued on status change:', jId, issue.reason, issue.code || '')
+    }
+  }
+
   // ── Acceptance trigger: auto-approve draft WOs + push labour POs to Xero (non-blocking) ──
   if (status === 'accepted') {
     (async () => {
@@ -35631,8 +35666,9 @@ async function updateJobStatus(client: any, body: any) {
         // not mention quote_builder_version_id (the column may not exist yet).
         const ordersOn = await quoteBuilderOrdersEnabled(client)
         // 1. Approve draft work orders for this job
-        // Crew work orders only: a job work order is approved by Shaun alone
-        // (job_work_orders.ts), never by job acceptance.
+        // Crew work orders only: a job work order is issued by its own rule
+        // (job_work_orders.ts: automatically while job_work_order_auto_issue_v1
+        // is on, else by Shaun), never by this acceptance step.
         let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)

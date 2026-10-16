@@ -916,6 +916,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Debt report: the report settings, debt_ws_reports and
                       # the payments read (debt_ws_report_* actions).
                       ("20261015170000", "debt_ws_report"),
+                      # Automatic issue of job work orders: the fill and edit
+                      # stamps every job work order read selects
+                      # (job_work_orders.ts).
+                      ("20261016120000", "job_work_order_auto_issue"),
                       # Dispatch slice 6: the delivery columns dispatch_materials
                       # and pipeline dispatch=1 read and dispatch_delivery_* write.
                       ("20261016150000", "dispatch_deliveries"),

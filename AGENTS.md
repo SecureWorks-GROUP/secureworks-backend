@@ -4612,7 +4612,9 @@ by trigger: any update or delete raises, so a crew-path writer that touches it
 fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
 `kind = 'crew'`; a new one must too. Only the users in
-`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role (the one
+other seal is the system's own `approved_via 'auto'` issue of an unedited
+quote-filled draft, behind `job_work_order_auto_issue_v1`), and an
 approval seals only the draft that was read: `approve_work_order` requires
 `expected_updated_at`, compared under the row lock in `approve_job_work_order`.
 A recorded variation changes only through the staff door
@@ -4633,7 +4635,7 @@ seeded off. Contract and API: `docs/job-work-orders-v1.md`.
 An untouched job draft is filled from the accepted quote revision only (never
 one frozen after acceptance, never live pricing; no accepted revision, no fill) by
 `job_work_order_quote_fill.ts` (pure rules in `quote_work_order_lines.ts`), on
-the staff open and read and in the backfill: never a sealed work order, never a
+the staff open and read, in the backfill and in the automatic issue: never a sealed work order, never a
 draft someone wrote into, and the rates come only from the quote itself and
 the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
 carry a rate, amount, percent or money word. Rules:
