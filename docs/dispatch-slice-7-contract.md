@@ -73,8 +73,9 @@ does not lapse when `day` moves on to the next install day); with `for_day`
 null, while no install is booked ahead.
 
 **`dispatch_install_open`**, set only on a stop 6 job in To do: `not_confirmed`
-(no mark), `moved` (no install booking remains on the mark's `for_day`), `booked_after`
-(marked with nothing booked, a booking made since). Null otherwise.
+(no mark), `moved` (no install booking remains on the mark's `for_day`),
+`booked_after` (marked with nothing booked, a booking made since). Null
+otherwise.
 
 ## 3. To do (one condition changed in slice 3's `dispatchTodo`)
 
