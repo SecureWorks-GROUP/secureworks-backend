@@ -23,11 +23,12 @@ the only file in either path's load-set that carries a materials rate. **One sou
 | Section | State |
 |---|---|
 | Star pickets | **SETTLED** — sealed precedent, unchanged by this card |
-| Cable ties and small consumables | **SETTLED** — sealed two-step tier, unchanged by this card |
-| Flashing tape | **SETTLED** — Captain ruling 2026-08-07 (D2) |
-| Sikaflex / silicone | **SETTLED** — Captain ruling 2026-08-07 (D2) |
-| Combined tape + Sikaflex line | **SETTLED** — Captain ruling 2026-08-07 (D2) |
-| Make-safe tarpaulin (standard HD 160gsm) | **SETTLED** — Captain ruling 2026-08-07 (D3) |
+| Cable ties and small consumables (zip ties) | **SETTLED** — sealed two-step tier, unchanged 2026-08-28 |
+| Flashing tape | **SETTLED** — Shaun ruling 2026-08-28 (supersedes D2 `$25`) |
+| Sikaflex (never billed as “Silicone”) | **SETTLED** — Shaun ruling 2026-08-28 (supersedes D2 `$25`) |
+| Combined tape + Sikaflex line | **SETTLED** — Shaun ruling 2026-08-28 (sum of the two `$35` units) |
+| Make-safe tarpaulin (standard HD 160gsm) | **SETTLED** — Shaun ruling 2026-08-28 (supersedes D3 bands) |
+| Timber 2.4 m (incl. 2 bugle screws) | **SETTLED** — Shaun ruling 2026-08-28 |
 | Make-safe tarpaulin (heavy / Xtreme grade) | **HOLD** — deliberately not banded, see its row |
 | Make-safe tarpaulin above 55.5 m², standard grade | **HOLD** — no band, see its row |
 | Polyweave / builders film | **HOLD** — evidence recorded, no rate ruled |
@@ -39,10 +40,11 @@ before this card existed. Do not bill a `HOLD` and do not invent a figure to fil
 
 ## The evidence beside the rulings
 
-The Captain's figures are in force. The evidence they were ruled against is recorded **beside**
-them, not deleted because it was superseded. **A ruling that overrides evidence sits next to the
-evidence it overrode** — otherwise the next reader sees a number with no basis, which is the exact
-defect this card exists to remove.
+Shaun's 2026-08-28 figures are in force for **every pack, every builder**. The 2026-08-07 D2/D3
+figures they overrode, and the cost evidence those earlier figures were ruled against, stay
+**beside** the new rates rather than being deleted. **A ruling that overrides evidence sits next to
+the evidence it overrode** — otherwise the next reader sees a number with no basis, which is the
+exact defect this card exists to remove.
 
 ### What the record showed before the ruling: we have been billing materials below retail cost
 
@@ -58,26 +60,27 @@ Sikaflex lines clear it by 45 cents; the `$25` tape lines recover just over half
 
 ### The flashing tape flag — live, and deliberately not resolved by the ruling
 
-**The Captain's ruling is `$25 ex` per roll on a TRADE-price basis.** The only acquisition price this
-card has on file for a 100mm x 10m flashing tape roll is **`$45.00 ex` retail** (Bunnings, checked
-2026-08-06).
+**D2 (2026-08-07) was `$25 ex` per roll on a TRADE-price basis. Shaun 2026-08-28 raised the billed
+roll to `$35 ex`.** The only acquisition price this card has on file for a 100mm x 10m flashing tape
+roll is **`$45.00 ex` retail** (Bunnings, checked 2026-08-06).
 
 **Trade price and retail price are not the same thing, so both figures may be right.** But we hold
-no invoice, supplier price list or receipt evidencing a `$25` trade acquisition for this roll. Until
-one is on file:
+no invoice, supplier price list or receipt evidencing a `$25` or `$35` trade acquisition for this
+roll. Until one is on file:
 
-> **Every flashing tape line billed at `$25 ex` is potentially `$20` below what we pay to acquire the
-> material.** If tape is in fact bought at or near retail, the ruling bills it at roughly 56% of cost.
+> **Every flashing tape line billed at `$35 ex` is potentially `$10` below what we pay to acquire the
+> material** (the D2 `$25` line was `$20` below). If tape is in fact bought at or near retail, the
+> ruling still bills it below the only acquisition price on file.
 
 **What closes this flag:** a supplier invoice, trade account price list or receipt showing the
 acquisition price actually paid for a 100mm x 10m flashing tape roll, filed against this row with its
-date. If it confirms `$25` or lower, the flag is struck and the ruling stands unqualified. If it
-confirms a higher figure, the gap is real and the Captain is deciding a below-cost line knowingly.
-This is recorded so the fact is visible the next time he reads the card, not living in a status
+date. If it confirms `$35` or lower, the flag is struck and the ruling stands unqualified. If it
+confirms a higher figure, the gap is real and the line is billed below cost knowingly.
+This is recorded so the fact is visible the next time the card is read, not living in a status
 message.
 
-Sikaflex carries no such flag: `$25` against `$24.55` retail clears cost by 45 cents even before any
-trade discount.
+Sikaflex carries no such flag: Shaun's `$35` against `$24.55` retail clears cost by `$10.45` even
+before any trade discount. D2's `$25` had cleared it by 45 cents.
 
 ### Superseded, written out rather than quietly overwritten
 
@@ -87,6 +90,14 @@ trade discount.
 | Sikaflex floor | `$30 ex` | **`$25 ex` per cartridge** | `$30` was the Captain's own earlier figure and clears retail cost by 22%. |
 | Combined tape + Sikaflex line | `$80 ex` | **`$50 ex`** | The proposal was the sum of the `$50`/`$30` floors. The ruled line is the sum of the two `$25` units. |
 | Tarpaulin smallest band | `$45 ex` | **retired — `$80 ex` hard minimum** | The `$45` band is invalid under the ruling. No tarp line bills below `$80 ex`. |
+
+| Figure | Was in force (D2/D3) | **Ruled 2026-08-28 (Shaun, all packs)** | Why it moved |
+|---|---|---|---|
+| Flashing tape floor | `$25 ex` per roll | **`$35 ex` per roll** | Ops standard: tape bills `$35`; part use still the whole roll. |
+| Sikaflex floor | `$25 ex` per cartridge | **`$35 ex` per cartridge**; always named Sikaflex, never Silicone | Ops standard. Silicon on a trade report is this line. |
+| Combined tape + Sikaflex line | `$50 ex` | **`$70 ex`** | Sum of the two `$35` units. |
+| Tarpaulin bands | `$80` / `$110` / `$145` / `$190` | **`$150` / `$185` / `$230` / `$275`** | Small starts at `$150`; then `$185` / `$230` / `$275`. Hard minimum is now `$150`. |
+| Timber 2.4 m | unpriced (basket only) | **`$17 ex` per 2.4 m length** | `$15` timber + two bugle screws at `$1` each. Ceiling of (metres ÷ 2.4). |
 
 **No existing invoice is repriced by any of this.** Re-pricing shipped work is a separate Captain
 decision and is out of scope here. This card is a price list, not a repricing.
@@ -153,22 +164,22 @@ system, and its boundary is job size.
 
 ## Flashing tape
 
-**Key:** `flashing_tape` · **Status:** SETTLED (D2) · **Tiered:** yes
+**Key:** `flashing_tape` · **Status:** SETTLED · **Tiered:** yes
 
-**Ruled basis:** `$25 ex` per 100mm x 10m roll at **trade** price. **Part use still bills the whole
+**Ruled basis:** `$35 ex` per 100mm x 10m roll (Shaun 2026-08-28). **Part use still bills the whole
 unit** — a job that consumes 0.4 m of a roll bills one roll, because the roll is opened and
-committed to that job.
+committed to that job. Two evidenced rolls bill `$70`.
 
 **Retail cost basis, recorded beside the ruling:** CAgroup 100mm x 10m Byute Flash weatherproof
 flashing tape, `$49.50` inc = **`$45.00 ex`** per roll (bunnings.com.au, checked 2026-08-06; the
 product page figure is recorded, not the `$45.95` search summary). **See *The flashing tape flag*
-above — the ruled `$25` is `$20` below the only acquisition price on file, and that gap is open until
-a trade-price source is filed.**
+above — the ruled `$35` is `$10` below the only acquisition price on file, and that gap is open until
+a trade-price source is filed.** D2's `$25` is superseded and written out above.
 
 | Tier | Boundary | Price ex | Status | Provenance |
 |---|---|---|---|---|
-| 1 (floor) | one roll, part or whole | $25 | SETTLED | Captain ruling 2026-08-07, trade-price basis; Bunnings retail $45.00 ex checked 2026-08-06 recorded beside it |
-| 2 | each additional roll, quantity evidenced | $25 per roll | SETTLED | Captain ruling 2026-08-07, same per-roll trade basis; Bunnings retail $45.00 ex checked 2026-08-06 |
+| 1 (floor) | one roll, part or whole | $35 | SETTLED | Shaun ruling 2026-08-28; D2 $25 superseded and written out; Bunnings retail $45.00 ex checked 2026-08-06 recorded beside it |
+| 2 | each additional roll, quantity evidenced | $35 per roll | SETTLED | Shaun ruling 2026-08-28, same per-roll basis; Bunnings retail $45.00 ex checked 2026-08-06 |
 
 Accepted-record distribution for tape / silicone / tape+silicone material lines, for context on where
 practice already sits: `$20` x1, `$25` x6, `$35` x6, `$45` x6, `$60` x3 (AUTHORISED ACCREC line
@@ -177,35 +188,38 @@ items, 2026-06 to 2026-08; read 2026-08-06). The record has been trending up on 
 
 ## Sikaflex / silicone
 
-**Key:** `sikaflex_silicone` · **Status:** SETTLED (D2) · **Tiered:** yes
+**Key:** `sikaflex_silicone` · **Status:** SETTLED · **Tiered:** yes
 
-**Ruled basis:** `$25 ex` per 300ml cartridge at trade price. **Part use still bills the whole
-unit** — an opened cartridge is committed to that job.
+**Ruled basis:** `$35 ex` per 300ml cartridge (Shaun 2026-08-28). **Always named Sikaflex on the
+invoice — never “Silicone”.** Silicon / silicone on a trade report is this line. **Part use still
+bills the whole unit** — an opened cartridge is committed to that job. Two evidenced cartridges
+bill `$70`.
 
 **Retail cost basis, recorded beside the ruling:** Sika 300ml White Sikaflex 11FC Purform, `$27.00`
 inc = **`$24.55 ex`** per cartridge (bunnings.com.au, checked 2026-08-06). Unlike flashing tape this
-carries **no open flag**: the ruled `$25` clears even the retail cartridge cost, by 45 cents, before
-any trade discount.
+carries **no open flag**: the ruled `$35` clears the retail cartridge cost by `$10.45` before any
+trade discount. D2's `$25` is superseded and written out above.
 
 | Tier | Boundary | Price ex | Status | Provenance |
 |---|---|---|---|---|
-| 1 (floor) | one cartridge, part or whole | $25 | SETTLED | Captain ruling 2026-08-07, trade-price basis; Bunnings retail $24.55 ex checked 2026-08-06, cleared by 45c |
-| 2 | each additional cartridge, quantity evidenced | $25 each | SETTLED | Captain ruling 2026-08-07, same per-cartridge basis; Bunnings retail $24.55 ex checked 2026-08-06 |
+| 1 (floor) | one cartridge, part or whole | $35 | SETTLED | Shaun ruling 2026-08-28; D2 $25 superseded and written out; Bunnings retail $24.55 ex checked 2026-08-06, cleared by $10.45 |
+| 2 | each additional cartridge, quantity evidenced | $35 each | SETTLED | Shaun ruling 2026-08-28, same per-cartridge basis; Bunnings retail $24.55 ex checked 2026-08-06 |
 
 ## Combined flashing tape + Sikaflex line
 
-**Key:** `tape_and_sikaflex_combined` · **Status:** SETTLED (D2) · **Tiered:** yes (sum of units)
+**Key:** `tape_and_sikaflex_combined` · **Status:** SETTLED · **Tiered:** yes (sum of units)
 
-D2 is ruled: the floors are **per material**, and a combined line is the **sum of the units it
-carries**. There is no separate combined-line rate below that sum.
+The floors are **per material**, and a combined line is the **sum of the units it carries**. There
+is no separate combined-line rate below that sum.
 
 | Tier | Boundary | Price ex | Status | Provenance |
 |---|---|---|---|---|
-| 1 (floor) | one roll + one cartridge | $50 | SETTLED | Derived: sum of the two ruled $25 units, Captain ruling 2026-08-07 |
-| 2 | additional rolls / cartridges, quantity evidenced | $25 per roll + $25 per cartridge | SETTLED | Derived: the same two ruled per-unit bases, Captain ruling 2026-08-07 |
+| 1 (floor) | one roll + one cartridge | $70 | SETTLED | Derived: sum of the two ruled $35 units, Shaun ruling 2026-08-28 |
+| 2 | additional rolls / cartridges, quantity evidenced | $35 per roll + $35 per cartridge | SETTLED | Derived: the same two ruled per-unit bases, Shaun ruling 2026-08-28 |
 
-**Worked example arithmetic:** `$25 + $25 = $50` — one roll of flashing tape plus one Sikaflex
-cartridge on the same job, whether billed as two lines or one combined line.
+**Worked example arithmetic:** `$35 + $35 = $70` — one roll of flashing tape plus one Sikaflex
+cartridge on the same job, whether billed as two lines or one combined line. Styling then bumps the
+composed line to `$71`.
 
 **The historical `$45` pair is superseded** and is recorded above as accepted history, not as a tier.
 Two findings from the accepted record (read 2026-08-06) support pricing per material rather than as a
@@ -217,16 +231,19 @@ pair, and both survive the ruling:
    `$45` was never reliably "the price of tape and silicone together"; it was a round number applied
    to one material and to two.
 
-**The retail-cost flag carries into the combined line too:** `$50` for a roll plus a cartridge sits
-below the `$69.55 ex` combined **retail** cost. On the ruled **trade** basis it is the sum of two
-whole units. See *The flashing tape flag* above — the tape half of that gap is the open one.
+**The retail-cost flag carries into the combined line too:** `$70` for a roll plus a cartridge now
+clears the `$69.55 ex` combined **retail** cost by 45 cents. The tape half of the old D2 `$50` gap
+is narrowed, not closed — see *The flashing tape flag* above. The combined line is still the sum of
+two whole units.
 
 ## Make-safe tarpaulin
 
-**Key:** `tarpaulin` · **Status:** SETTLED (D3) · **Tiered:** yes (size bands)
+**Key:** `tarpaulin` · **Status:** SETTLED · **Tiered:** yes (size bands)
 
-**The ruling:** a **hard `$80 ex` minimum** on every tarp line, an average job around **`$145 ex`**,
-larger above. No tarp line bills below `$80 ex` whatever the size — the retired `$45` band is invalid.
+**The ruling (Shaun 2026-08-28):** a **hard `$150 ex` minimum** on every tarp line (Small), then
+**`$185` / `$230` / `$275`**. No tarp line bills below `$150 ex` whatever the size. D3's `$80` /
+`$110` / `$145` / `$190` bands are superseded and written out above. The retired `$45` band stays
+invalid.
 
 **Why this is banded and not a single price.** The Captain refused to guess this one, and the record
 proves he was right to:
@@ -252,19 +269,17 @@ band's 29.9 m² and prices at Extra large.
 
 | Band | Up to | Cost ex | Price ex | Status | Provenance |
 |---|---|---|---|---|---|
-| Small (hard minimum) | 10.8 m² (3.0 x 3.6) | $35.54 | $80 | SETTLED | Captain ruling 2026-08-07, hard $80 minimum on every tarp line; Bunnings Polytuf HD 160gsm checked 2026-08-06; 2.25x retail cost |
-| Medium | 19.8 m² (3.6 x 5.5) | $62.54 | $110 | SETTLED | Captain ruling 2026-08-07; Bunnings Polytuf HD 160gsm checked 2026-08-06; 1.76x |
-| Large (average job) | 29.9 m² (4.9 x 6.1) | $85.75 | $145 | SETTLED | Captain ruling 2026-08-07, "average job around $145"; Bunnings Polytuf HD 160gsm checked 2026-08-06; 1.69x |
-| Extra large | 55.5 m² (6.1 x 9.1) | $151.57 | $190 | SETTLED | Captain ruling 2026-08-07, "larger above"; Bunnings Polytuf HD 160gsm checked 2026-08-06; 1.25x |
+| Small (hard minimum) | 10.8 m² (3.0 x 3.6) | $35.54 | $150 | SETTLED | Shaun ruling 2026-08-28, hard $150 minimum on every tarp line; D3 $80 superseded and written out; Bunnings Polytuf HD 160gsm checked 2026-08-06 |
+| Medium | 19.8 m² (3.6 x 5.5) | $62.54 | $185 | SETTLED | Shaun ruling 2026-08-28; D3 $110 superseded; Bunnings Polytuf HD 160gsm checked 2026-08-06 |
+| Large | 29.9 m² (4.9 x 6.1) | $85.75 | $230 | SETTLED | Shaun ruling 2026-08-28; D3 $145 superseded; Bunnings Polytuf HD 160gsm checked 2026-08-06 |
+| Extra large | 55.5 m² (6.1 x 9.1) | $151.57 | $275 | SETTLED | Shaun ruling 2026-08-28; D3 $190 superseded; Bunnings Polytuf HD 160gsm checked 2026-08-06 |
 | Heavy / Xtreme grade | 37 m² (6.1 x 6.1) | $223.92 | hold | HOLD | Bunnings Polytuf Xtreme checked 2026-08-06; $6.02/m² ex, ~2x the HD basis |
 | Above 55.5 m², standard grade | no band | — | hold | HOLD | Derived: no HD 160gsm size above 55.5 m² on the Bunnings cost curve checked 2026-08-06 |
 
-**One tension recorded beside the ruling, not smoothed over.** The `$145` band is anchored to the
-"average job", but the only two size-stated tarp lines in the whole accepted record are **both ~36
-m²** (INV-1084 and INV-0695), which lands in **Extra large at `$190`**, one band above the average
-anchor. On the evidence we hold, the typical sized tarp job is bigger than the `$145` band. That does
-not override the ruling — it is recorded so the next reader can see the anchor and the record are not
-the same thing.
+**One tension recorded beside the earlier D3 ruling, not smoothed over.** D3's `$145` band was
+anchored to the "average job", but the only two size-stated tarp lines in the whole accepted record
+are **both ~36 m²** (INV-1084 and INV-0695), which lands in **Extra large**. That record is kept;
+the in-force Extra large band is now `$275`.
 
 **Above `55.5 m²` in standard HD 160gsm there is no band and the line HOLDS**, with the area
 evidenced, exactly as the heavy grade holds. It must not fall into Extra large: no single tarp on the
@@ -277,14 +292,43 @@ invent a fifth number, it holds and asks the Captain, with the grade evidenced. 
 on record from the research is `$280 ex` (1.25x `$223.92`); it is **not** ruled and is not in force.
 
 **Quantified effect of the ruled bands:** INV-1084's tarpaulin is **36 m²**, which exceeds the Large
-band's *up to 29.9 m²*, so it falls in **Extra large at `$190 ex`**, plus one roll of flashing tape
-and one Sikaflex cartridge at the ruled `$25` each.
+band's *up to 29.9 m²*, so it falls in **Extra large at `$275 ex`**, plus one roll of flashing tape
+and one Sikaflex cartridge at the ruled `$35` each.
 
-**Worked example arithmetic:** `$190 + $25 + $25 = $240` — against the `$110` actually invoiced on
-INV-1084, an under-recovery of `$130` on a tarp-plus-seal job.
+**Worked example arithmetic:** `$275 + $35 + $35 = $345` — against the `$110` actually invoiced on
+INV-1084, an under-recovery of `$235` on a tarp-plus-seal job. Styling then bumps the composed line
+to `$346`.
 
-Bands price the tarp **only**. Screws, tape, silicone, staples, bags and timber on the same job are
+Bands price the tarp **only**. Screws, tape, Sikaflex, staples, bags and timber on the same job are
 their own evidenced lines.
+
+---
+
+## Timber 2.4 m (includes two bugle screws)
+
+**Key:** `timber_2_4m` · **Status:** SETTLED · **Tiered:** no (per 2.4 m length)
+
+**Ruled basis (Shaun 2026-08-28):** **`$17 ex` per 2.4 m length** = `$15` timber + two bugle screws
+at `$1` each. The two screws are **inside** this rate. Do not add a separate bugle-screw line unless
+the report proves extra screws beyond two per length.
+
+**Quantity rule:** count whole 2.4 m lengths. Always round **up**. Never round down. Unevidenced
+length holds rather than invent.
+
+- 2.4 m or less, if timber is evidenced → 1 length × `$17`
+- 5 m → ceiling of 5 ÷ 2.4 = 3 lengths
+- 20 m → ceiling of 20 ÷ 2.4 = 9 lengths
+
+| Item | Unit | Price ex | Status | Provenance |
+|---|---|---|---|---|
+| Timber 2.4 m incl. 2 bugle screws | per 2.4 m length | $17 | SETTLED | Shaun ruling 2026-08-28; $15 timber + 2 bugle screws at $1 each |
+
+**Worked example arithmetic:** `$17 + $17 + $17 = $51` — three 2.4 m lengths (a 5 m evidenced run).
+`$17` is not a round multiple of `$5`, so a single-length line stays `$17`; a composed total that
+lands on a round multiple still bumps.
+
+Invoice wording names the length count, not the raw metres, so accounts can see the unit: 
+`Timber 2.4m (incl. 2 bugle screws) - <N> lengths`.
 
 ---
 
@@ -300,13 +344,15 @@ do not eyeball a number into shape.
 | Question | Answer |
 |---|---|
 | What counts as round? | A whole-dollar amount that is a multiple of 5. `$80`, `$145`, `$25`, `$50` are round; `$81`, `$146`, `$26` are not. |
-| Which direction does it move? | **Always up**, to the next qualifying amount. Never down, so a ruled floor or the hard `$80` tarp minimum can never be breached by styling. |
-| How far can it move? | Always under `$2`, and on a whole-dollar ruled figure such as `$80` or `$145` exactly `$1`. |
+| Which direction does it move? | **Always up**, to the next qualifying amount. Never down, so a ruled floor or the hard `$150` tarp minimum can never be breached by styling. |
+| How far can it move? | Always under `$2`, and on a whole-dollar ruled figure such as `$150` or `$35` exactly `$1`. |
 | What is it applied to? | The **composed line amount**, after the card's rates and quantities are applied. It is presentation, not a rate: the rate rows above stay exactly as ruled. |
 | What is it never applied to? | **Guard-sealed rates** — star pickets `$13.50` per unit, cable ties / consumables `$25` / `$35`, and every MLB hire-card line. The money gate hard-refuses those at exact values, so styling them would refuse the invoice. The composer knows this and returns them untouched. |
 | What happens on an unknown line key? | The composer **refuses**. It composes only the `**Key:**` values declared on this card plus its registered composed-line keys; anything else raises. A near miss on a sealed material (`star_pickets` for `star_picket`) would otherwise style a guard-pinned rate and the money gate would refuse the invoice, so it fails closed rather than guessing. |
 
-**Worked example arithmetic:** `$190 + $25 + $25 = $240` composes to a styled line amount of `$241`.
+**Worked example arithmetic:** `$275 + $35 + $35 = $345` composes to a styled line amount of `$346`.
+A `$35` Sikaflex or tape line composes to `$36`. A `$150` small tarp composes to `$151`. Zip ties
+at `$25` / `$35` are guard-sealed and do **not** bump.
 
 ## Unpriced in v1 — deliberately, with the reason
 
@@ -333,23 +379,27 @@ Restating these here would create exactly the drift this card exists to prevent.
 
 ## What this card does not change
 
-- **The AJS/AJBR temporary-fencing material exception is untouched.** AJS/AJBR supplies its own
-  temp-fence materials, so no panel, block/base, tie/clip, hire or retrieval-material line, and no
-  picket line for temporary-fence scope or kits. On an explicit temporary-fence scope **every** ruled
-  material line is still refused, with this card present.
+- **The AJS/AJBR temporary-fencing skip is hire / kit only (Captain 2026-08-21).** AJS/AJBR
+  supplies its own fence kit, so no panel, block/base, hire, fence-kit or retrieval-material
+  line, and no picket line for temporary-fence scope or kits. **All other SETTLED card items
+  bill on the same SETTLED rate card as MLB** — silicone, tape, tarp, cable ties,
+  timber and the rest. Do not drop them because the builder is AJS. The 2026-07-20 / 2026-08-03 wording
+  that AJS temp-fence was labour-only for every ruled material line, including ties, is
+  reversed.
 - **The star-picket carve-out keeps its full condition** (existing fence, explicit narrative, no
   temp-fence signal anywhere).
-- **No labour rate moves in this card.** It is materials only. The sealed `$80` AJS / `$85` MLB
-  schedule, the solo temp-fence 4-hour floor and the MLB `$180` retrieval line shape are all
-  untouched. The Captain's 2026-08-07 **travel ruling is labour**, by his own words ("travel is
+- **No labour rate moves in this card.** It is materials only. The sealed `$80` AJS / `$90` MLB
+  weekday schedule (Shaun 2026-09-22; `$85` before that date), the solo temp-fence 4-hour floor and the MLB `$180` retrieval line shape are
+  owned by the labour rules, not by this card. The Captain's 2026-08-07 **travel ruling is labour**, by his own words ("travel is
   incorporated into labour"), so it lives in `pricing-and-invoice-rules.md` →
   *Travel bands incorporated into labour*, not here.
 - **No live invoice is reminted or repriced** as part of this card.
 
 ## Change control
 
-- A price moves by a **Captain ruling**, recorded here with its date, with the superseded figure
-  written out rather than quietly overwritten, and with the evidence it overrode kept beside it.
+- A price moves by a **Captain or Shaun ops ruling**, recorded here with its date, with the
+  superseded figure written out rather than quietly overwritten, and with the evidence it overrode
+  kept beside it. Shaun 2026-08-28 is in force for **all packs, all builders**.
 - Every new price arrives with its provenance and date, or it does not go in the card.
 - Machine-checked by `scripts/test_materials_rate_card.py`: every rate row carries a status,
   provenance and date; tape, Sikaflex and the combined line each declare a floor and at least one
@@ -367,3 +417,5 @@ Restating these here would create exactly the drift this card exists to prevent.
 | 2026-08-07 | **D3 ruled** — tarp bands with a **hard `$80 ex` minimum**, average job around `$145 ex`, larger above. The `$45` band is retired as invalid. | Bands move to SETTLED at `$80` / `$110` / `$145` / `$190`. Heavy grade and above-55.5 m² stay on HOLD. |
 | 2026-08-07 | **Line-amount styling ruled** — composed materials amounts must end in a non-round number, encoded in the composer rather than applied by hand. | New `scripts/materials_line_composer.py` plus its tests. Guard-sealed rates are exempt by construction. |
 | 2026-08-07 | **Travel ruled** — incorporated into labour for far jobs, with bands. | Recorded in `pricing-and-invoice-rules.md` → *Travel bands incorporated into labour*. Labour, not materials, so it is not a row on this card. |
+| 2026-08-21 | **AJS/AJBR materials same SETTLED card as MLB.** The only AJS skip is temp-fence hire / panel / block / kit / retrieval. Silicone, tape, tarp, cable ties still SETTLED. | Reverses labour-only-for-all-AJS-materials. No price invented. Labour rates unchanged. |
+| 2026-08-28 | **Shaun ops standard, all packs.** Sikaflex `$35` (never billed as Silicone); flashing tape `$35`; part use still the whole unit. Tarp bands `$150` / `$185` / `$230` / `$275` (hard `$150` minimum). Timber `$17` per 2.4 m length (`$15` + two `$1` bugles; ceiling of metres ÷ 2.4). Zip ties keep the existing `$25` / `$35` cable-ties tiers. Non-round styling still bumps. No live invoice reminted. | Supersedes D2 `$25`/`$25`/`$50` and D3 `$80`/`$110`/`$145`/`$190`. Adds timber as SETTLED. Cable ties unchanged. |

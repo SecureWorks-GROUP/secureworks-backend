@@ -917,10 +917,11 @@ Deno.test("read: the job's orders, oldest first, deleted left out, lines flatten
     assert(!text.includes(money), `${money} leaked into the orders`);
   }
   const ordersRead = db.requests.find((r) => r.table === "purchase_orders")!;
-  // Slice 5 adds the Dispatch order columns; still no price, total or tax.
+  // Slice 5 adds the Dispatch order columns, slice 6 the delivery columns;
+  // still no price, total or tax.
   assertEquals(
     ordersRead.select,
-    "id, po_number, supplier_name, status, created_at, updated_at, line_items, supplier_id, source, pdf_version, last_sent_pdf_version, last_sent_at, xero_po_id",
+    "id, po_number, supplier_name, status, created_at, updated_at, line_items, supplier_id, source, pdf_version, last_sent_pdf_version, last_sent_at, xero_po_id, po_type, delivery_date, confirmed_delivery_date, confirmed_delivery_set_at, confirmed_delivery_set_by, confirmed_delivery_set_by_email, delivery_sighted_at, delivery_sighted_by, delivery_sighted_by_email",
   );
   assertEquals(db.writes(), []);
 });

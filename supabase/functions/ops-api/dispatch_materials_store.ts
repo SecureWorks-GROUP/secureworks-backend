@@ -42,6 +42,15 @@ import {
   dispatchWorkType,
 } from "./dispatch_job_list.ts";
 import { dispatchSupplierOrder } from "./dispatch_orders.ts";
+import {
+  DISPATCH_DELIVERY_ORDER_COLUMNS,
+  dispatchDelivery,
+  dispatchDeliveryPersonIds,
+  dispatchDeliveryRows,
+  dispatchDeliverySummary,
+  type DispatchPersonNames,
+  dispatchSightedOrderIds,
+} from "./dispatch_deliveries.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 
 export class DispatchMaterialsError extends Error {
@@ -177,18 +186,47 @@ function bodyJobId(body: any): unknown {
 // After a write: the job's counts by the one rule. A failed read here does
 // not undo a write that landed, so the answer carries `counts: null` rather
 // than a made-up zero; the screen keeps the figure it had.
-async function readJobCounts(
+// Slice 6: a line on a sighted order is Delivered and counts as ready, so the
+// orders the lines are on are read too (only when a line is on one). Shared by
+// slice 5's and slice 6's writes.
+export async function readDispatchJobCounts(
   client: any,
   jobId: string,
+  label = "dispatch_materials",
 ): Promise<DispatchMaterialCounts | null> {
   const { data, error } = await client.from("job_material_lines")
     .select(DISPATCH_MATERIALS_LIST_SELECT)
     .eq("job_id", jobId);
   if (error) {
-    console.error("[dispatch_materials] counts read failed:", error);
+    console.error(`[${label}] counts read failed:`, error);
     return null;
   }
-  return dispatchMaterialCounts(data || []);
+  const lines: any[] = data || [];
+  const orderIds = [
+    ...new Set(
+      lines.map((line) => line?.purchase_order_id).filter((
+        id,
+      ): id is string => typeof id === "string" && !!id),
+    ),
+  ];
+  if (orderIds.length === 0) return dispatchMaterialCounts(lines);
+  const { data: orders, error: ordersError } = await client
+    .from("purchase_orders")
+    .select("id, delivery_sighted_at")
+    .in("id", orderIds)
+    .neq("status", "deleted");
+  if (ordersError) {
+    console.error(`[${label}] counts orders read failed:`, ordersError);
+    return null;
+  }
+  return dispatchMaterialCounts(lines, dispatchSightedOrderIds(orders || []));
+}
+
+function readJobCounts(
+  client: any,
+  jobId: string,
+): Promise<DispatchMaterialCounts | null> {
+  return readDispatchJobCounts(client, jobId);
 }
 
 async function readLineById(client: any, id: string) {
@@ -303,6 +341,45 @@ async function readDispatchOrderState(
   };
 }
 
+// Slice 6: an orders[] entry with its delivery block (po_type and updated_at
+// beside slice 5's fields). Shared by the read and the three delivery writes.
+export function projectDispatchDeliveryOrder(
+  order: any,
+  names: DispatchPersonNames,
+) {
+  return {
+    ...projectDispatchOrder(order),
+    po_type: order?.po_type ?? null,
+    updated_at: order?.updated_at ?? null,
+    delivery: dispatchDelivery(order, names),
+  };
+}
+
+// users.name for the people who set a confirmed date or sighted a delivery.
+// A failed read is not a failure of the page: names fall back to the stored
+// emails.
+export async function readDispatchPersonNames(
+  client: any,
+  orders: any[],
+): Promise<DispatchPersonNames> {
+  const ids = dispatchDeliveryPersonIds(orders);
+  const names: DispatchPersonNames = new Map();
+  if (ids.length === 0) return names;
+  const { data, error } = await client.from("users")
+    .select("id, name")
+    .in("id", ids);
+  if (error) {
+    console.error("[dispatch_materials] person names read failed:", error);
+    return names;
+  }
+  for (const user of data || []) {
+    if (user?.id && typeof user.name === "string" && user.name.trim()) {
+      names.set(String(user.id), user.name.trim());
+    }
+  }
+  return names;
+}
+
 // ── The read ────────────────────────────────────────────────────────────────
 
 export async function readDispatchMaterials(
@@ -342,7 +419,7 @@ export async function readDispatchMaterials(
       .maybeSingle(),
     // purchase_orders.status is NOT NULL live, so neq drops no row it should keep.
     client.from("purchase_orders")
-      .select(DISPATCH_ORDER_SELECT)
+      .select(`${DISPATCH_ORDER_SELECT}, ${DISPATCH_DELIVERY_ORDER_COLUMNS}`)
       .eq("job_id", job.id)
       .eq("org_id", ctx.orgId)
       .neq("status", "deleted")
@@ -384,6 +461,14 @@ export async function readDispatchMaterials(
       ) => [String(o.id), o.po_number ?? null]),
     )
     : undefined;
+  // Slice 6: lines on a sighted order read Delivered. With the orders read
+  // failed nothing is sighted, as before slice 6 (the screen shows the failure).
+  const sightedOrderIds = ordersRes.error
+    ? undefined
+    : dispatchSightedOrderIds(ordersRes.data || []);
+  const names = orderState
+    ? await readDispatchPersonNames(client, ordersRes.data || [])
+    : new Map<string, string>();
   const nowMs = Date.parse(nowIso(ctx));
   const answer: Record<string, unknown> = {
     job_id: job.id,
@@ -408,10 +493,10 @@ export async function readDispatchMaterials(
     })),
     lines: lines.map((line) =>
       poNumbers
-        ? projectDispatchMaterialLineOnOrder(line, poNumbers)
-        : projectDispatchMaterialLine(line)
+        ? projectDispatchMaterialLineOnOrder(line, poNumbers, sightedOrderIds)
+        : projectDispatchMaterialLine(line, sightedOrderIds)
     ),
-    counts: dispatchMaterialCounts(lines),
+    counts: dispatchMaterialCounts(lines, sightedOrderIds),
     can_suggest: dispatchCanSuggest(job.work_type, lines.length),
     workings: projectDispatchWorkings(workingsRes.data),
   };
@@ -423,8 +508,26 @@ export async function readDispatchMaterials(
     );
     answer.orders_status = "failed";
   } else {
-    answer.orders = (ordersRes.data || []).map(projectDispatchOrder);
+    const orders: any[] = ordersRes.data || [];
+    answer.orders = orders.map((order) =>
+      projectDispatchDeliveryOrder(order, names)
+    );
     answer.orders_status = "ok";
+    // Slice 6: the Deliveries table. Left out with the orders read failed.
+    answer.deliveries = {
+      rows: dispatchDeliveryRows(
+        chosen.map((row) => ({
+          supplier_id: row.supplier_id,
+          name: projectDispatchMaterialSupplier(
+            row,
+            contactsById.get(String(row.supplier_id)),
+          ).name,
+        })),
+        orders,
+        names,
+      ),
+      ...dispatchDeliverySummary(orders),
+    };
   }
   return answer;
 }
@@ -912,7 +1015,7 @@ export async function suggestDispatchMaterialLines(
   return {
     success: true,
     added: insertedRows.length,
-    lines: insertedRows.map(projectDispatchMaterialLine),
+    lines: insertedRows.map((row: any) => projectDispatchMaterialLine(row)),
     counts: await readJobCounts(client, job.id),
   };
 }

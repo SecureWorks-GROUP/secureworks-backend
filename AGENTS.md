@@ -526,6 +526,12 @@ only on a real move into Accepted: a re-save (accepted -> accepted) pushes
 nothing, a move from another status (scheduled -> accepted) still pushes
 non-Dispatch draft orders. Contract:
 `docs/dispatch-slice-5-contract.md`.
+Slice 6's Deliveries rules (rows, counted, the three cells, `step`, the rail
+line) live only in `dispatch_deliveries.ts`; a hand-set confirmed date
+(`confirmed_delivery_set_*`) and a sighting (`delivery_sighted_*`) are six
+`purchase_orders` columns written only by the three `dispatch_delivery_*`
+actions, never `delivery_confirmed_at`. Contract:
+`docs/dispatch-slice-6-contract.md`.
 Slice 7's install step and its To do rule at Trade scheduled live only in
 `dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
@@ -4124,7 +4130,7 @@ Default path: `prepare_ses_invoice_obligation` copies lines VERBATIM from
 `hoursPerTrade = Math.max(reportedHoursPerTrade, minimum)`
 (`ses_prepare_docket_revision.ts`) raises short attendances to the sealed
 builder floor and **never lowers a longer one**. AJS/AJBR floor is **2h** at
-$80; MLB is **3h** at $85. Do **not** change those floors for a one-off card.
+$80; MLB is **3h** at $90. Do **not** change those floors for a one-off card.
 
 `hours_per_trade` resolves from four aliases nested inside the one
 `job_service_reports.checklist_json` row (`ses_assembler_input_adapter.ts`).
@@ -4152,7 +4158,7 @@ shared sealed schedule matrix is never changed; a sealed stamp that does not
 match the U4 sealed rate refuses. Without `labour_rate_override`, a non-sealed
 labour unit price still refuses (no quiet rate fakery to force a total).
 MLB after-hours labour bills **$110/h** (Captain standing rule 2026-08-06),
-applied through this per-card instrument — the sealed $85 schedule matrix stays
+applied through this per-card instrument — the sealed $90 schedule matrix stays
 unchanged. Worked example: Mosman Park SWMS-261147 / INV-1152 DRAFT
 `data/mosman-doc-integrity-f01-f02-v1/report.md` (supersedes the $100 remint in
 `data/mosman-park-remint-v1/report.md`).

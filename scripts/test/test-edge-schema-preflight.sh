@@ -919,7 +919,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Automatic issue of job work orders: the fill and edit
                       # stamps every job work order read selects
                       # (job_work_orders.ts).
-                      ("20261016120000", "job_work_order_auto_issue")]:
+                      ("20261016120000", "job_work_order_auto_issue"),
+                      # Dispatch slice 6: the delivery columns dispatch_materials
+                      # and pipeline dispatch=1 read and dispatch_delivery_* write.
+                      ("20261016150000", "dispatch_deliveries")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
