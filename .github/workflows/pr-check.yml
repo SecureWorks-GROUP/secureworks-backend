@@ -658,7 +658,7 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    # 40, not 20: each registered contract case can replay the whole stack
+    # 40, not 20: each registered contract case could replay the whole stack
     # (fail-closed, rollback and break proofs). Passing suites were cancelled at
     # the limit of 5, then of 10, then of 20: on 5 Oct 2026 main ran 12 to 19
     # minutes, and job story v1 (four cases) was cancelled at 20 with every
