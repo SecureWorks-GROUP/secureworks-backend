@@ -685,6 +685,7 @@ import {
   createCustomerVariationXeroDraft,
   listCustomerVariations,
   prepareCustomerVariationInvoiceLine,
+  reconcileCustomerVariationXeroDraft,
   updateCustomerVariation,
 } from './work_order_customer_variations.ts'
 
@@ -8923,6 +8924,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           accountCodeForJob: (jobType) => accountCodeForJob(jobType),
           createDraft: (payload) => createInvoiceDraftAction(client, payload, authMode, authUser, serverSecretPresented),
         })))
+      // A work order approver, after checking Xero by hand, answers for a
+      // variation's Xero draft record left `unknown` or stuck `creating`:
+      // records the draft that exists, or releases the line to `prepared`.
+      // Never calls Xero.
+      case 'reconcile_customer_variation_xero_draft':
+        return json(await runJobWorkOrder(() => reconcileCustomerVariationXeroDraft(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write

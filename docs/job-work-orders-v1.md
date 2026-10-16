@@ -326,14 +326,45 @@ gives before Xero is called releases it back to `prepared` (422
 synthetic live-fire refusal, the preflight refusal and a Xero token it could not
 get (`customerVariationDraftRefusedBeforeXero`). Any other outcome Xero did not
 confirm is kept as `unknown` (502 `xero_outcome_unknown`) and every later call is
-refused 409 `xero_outcome_unknown`, because the draft may exist: check Xero by
-hand. There is no action yet that releases an `unknown` line; one is needed
-before the flag is turned on. When Xero confirms the draft but its outcome
-cannot be saved, the call fails 502 `xero_draft_outcome_not_saved` naming the
-Xero invoice id and number, and the line stays `creating` (later calls 409
-`xero_draft_in_progress`). A
+refused 409 `xero_outcome_unknown`, because the draft may exist. When Xero
+confirms the draft but its outcome cannot be saved, the call fails 502
+`xero_draft_outcome_not_saved` naming the Xero invoice id and number, and the
+line stays `creating` (later calls 409 `xero_draft_in_progress`). A
 variation split across several payers (one owner each, as on SWF-26904) is out
 of this slice: one line, one contact.
+
+### A stuck Xero draft record
+
+Nothing retries an `unknown` record or a stuck `creating` one by itself. A work
+order approver (the same people, and the same session or terminal rule, as
+`approve_customer_variation`) checks Xero by hand and then answers with
+`reconcile_customer_variation_xero_draft`, which never calls Xero:
+
+- `outcome: "draft_exists"` with the `xero_invoice_id` they found (and its
+  `invoice_number` when they have it): the record becomes `xero_draft_created`
+  holding that invoice and is sealed like any other created draft. Its
+  `xero_created_at` is when it was recorded here, not when Xero made it. A Xero
+  invoice already recorded for another variation is refused 409
+  `xero_invoice_already_recorded`.
+- `outcome: "no_draft"`: they found none, and the record goes back to
+  `prepared` so `create_customer_variation_xero_draft` can send the line again.
+  The earlier `failure` text is kept.
+
+A `creating` record is answered for only once its claim (`xero_requested_at`)
+is 15 minutes old (`CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS`); before that a
+request may still be making the draft, and the answer is refused 409
+`xero_draft_in_progress`. An ops-api request cannot run that long, so an older
+claim has nothing left that could finish it. The answer names the record's
+`updated_at` as read (`expected_updated_at`, `invoice.updated_at` on the reads)
+and is written in one compare-and-set on that, the status read and, for
+`creating`, the same claim instant: a record that changed or was claimed again
+since the read is refused 409 `stale_review`.
+
+The record of an answer is its `customer_variation_xero_draft_reconciled` job
+event, which carries ids only: the variation, the `outcome`, the status it came
+from, the Xero invoice id recorded (null for `no_draft`), who answered
+(`reconciled_by`, a user id) and how (`via`, `session` or `terminal`); when is
+the event's own time. The invoice record keeps no copy of the answer.
 
 ## Backfill (OFF)
 
@@ -375,13 +406,14 @@ Errors are `{error, code}`.
 | `send_work_order` | POST | staff | job work order id | 409 `job_work_order_not_sendable` |
 | `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, addenda, invoice_count, variation_count, customer_variations_open_count, quote_fill}` on fencing and patio jobs (null on other types); `customer_variations_open_count` counts drafts and approved ones, not cancelled (`figures.customer_variation_count` counts only the approved addenda on the work order); `{unreadable: true}` when that read fails, which never fails the job detail |
 | `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions, addenda[]} or null, reason, can_report_variation, my_variations[]}`. Each scope item is `{description, qty, unit, hours}` (plus `is_variation`, `variation_number` on an addendum line); each addendum `{variation_number, label, approved_at, description, scope_items}`. No price, allowance, agreed amount or figure, ever, for any trade, the lead trade included. |
-| `customer_variations` | GET | staff | `job_id` (a job id) | `{schema:"customer-variations.v1", job:{id, job_number, type}, customer_variations[]}`; each is the customer variation row below plus `invoice` (the invoice record, or null) |
+| `customer_variations` | GET | staff | `job_id` (a job id) | `{schema:"customer-variations.v1", job:{id, job_number, type}, customer_variations[]}`; each is the customer variation row below plus `invoice` (the invoice record, or null: `status, line, prepared_by, prepared_at, xero_contact_id, job_contact_id, xero_requested_by, xero_requested_at, xero_invoice_id, invoice_number, xero_created_at, failure, updated_at`) |
 | `create_customer_variation` | POST | staff, a named caller | `{job_id, description, tasks?, trade_allocation_ex?, customer_price_ex?}` | `{customer_variation}` (a draft); 422 `job_type_not_eligible`, 400 `invalid_tasks` / `money_in_text` / `invalid_description`, 403 `actor_identity_missing` |
 | `update_customer_variation` | POST | staff, a named caller | `{variation_id, expected_updated_at, description?, tasks?, trade_allocation_ex?, customer_price_ex?}` (amounts may be null to clear) | `{customer_variation}`; 409 `stale_review` (read it again), 409 `variation_sealed`, 400 `nothing_to_update` / `expected_updated_at_required` |
 | `approve_customer_variation` | POST | work order approver (session; terminal only while its flag is on) | `{variation_id, expected_updated_at}` | `{customer_variation}` now `approved`, with `work_order_id`, `variation_number` and `label`; 409 `work_order_not_approved`, 409 `stale_review`, 409 `not_a_draft`, 422 `variation_not_ready` (a task without hours, or no allocation or price), 403 `approver_required` / `approver_identity_missing` / `approver_not_set` / `terminal_approval_switched_off` |
 | `cancel_customer_variation` | POST | staff, a named caller | `{variation_id, expected_updated_at, reason?}` | `{customer_variation}` now `cancelled`; 409 `variation_sealed` for an approved one, 409 `stale_review` |
 | `prepare_customer_variation_invoice_line` | POST | staff, a named caller | `{variation_id}` | `{customer_variation_id, line, invoice, create_invoice_draft:{job_id, line_items, reference}, xero_draft_switched_on}`; 409 `variation_not_approved`, 422 `no_customer_charge`. No Xero write |
 | `create_customer_variation_xero_draft` | POST | staff, a named caller | `{variation_id, xero_contact_id, job_contact_id?}` | the prepare response plus `duplicate`, with `invoice.status` `xero_draft_created` and `invoice.xero_invoice_id` / `invoice_number`; 403 `xero_draft_switched_off` while the flag is off; 422 `xero_draft_refused`; 502 then 409 `xero_outcome_unknown`; 502 `xero_draft_outcome_not_saved`; 409 `xero_draft_in_progress` |
+| `reconcile_customer_variation_xero_draft` | POST | work order approver (session; terminal only while its flag is on) | `{variation_id, expected_updated_at, outcome: "draft_exists" \| "no_draft", xero_invoice_id?, invoice_number?}`: `xero_invoice_id` (the Xero InvoiceID) is required for `draft_exists` and refused for `no_draft` | `{customer_variation_id, invoice, duplicate}`; `duplicate` is true when the same draft was already recorded. 409 `nothing_to_reconcile` (`prepared`), 409 `xero_draft_already_recorded`, 409 `xero_draft_in_progress` (a `creating` claim under 15 minutes old), 409 `xero_invoice_already_recorded`, 409 `stale_review`, 404 `invoice_line_not_found`, 400 `invalid_outcome` / `invalid_request` / `invalid_invoice_number` / `expected_updated_at_required` (send the record's `invoice.updated_at`), 403 `approver_required` / `approver_identity_missing` / `approver_not_set` / `terminal_approval_switched_off`. Never calls Xero |
 | `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the labour the invoice bills on the job |
 
 Each `variations[]` row on the staff read: `id, work_order_id,
