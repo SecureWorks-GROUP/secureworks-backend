@@ -259,11 +259,16 @@ export interface DebtWsStore {
   // ── The debt report (20261015170000_debt_ws_report.sql) ──
   // Kept apart from settings() on purpose: the Debt tab itself never reads these columns,
   // so the tab keeps working even before the report migration is applied.
-  /** Who the report goes to, who is copied, and the Monday auto-send switch. */
+  /** Who the report goes to, who is copied, and the Wednesday 12pm auto-send switch. */
   reportSettings(): Promise<DebtWsReportSettings>;
   /** Customer payments applied in Xero between two dates (inclusive), one per payment. */
   paymentsBetween(from: string, to: string): Promise<WsPayment[]>;
-  /** When our Xero copy of invoices was last synced (the newest synced_at), or null. */
+  /**
+   * When our Xero copy of invoices was last brought up to date, or null when unknown: the
+   * start of the last invoice sync that read every page (xero_sync_state 'sync_invoices'
+   * cursor_at), so every change made in Xero before that moment is in the copy. Falls back
+   * to the newest xero_invoices.synced_at when the cursor row is missing.
+   */
   lastInvoiceSync(): Promise<string | null>;
   /** The newest report sends, newest first (without the HTML and PDF copies). */
   reportSends(limit: number): Promise<WsReportRow[]>;
@@ -882,6 +887,15 @@ export function createSupabaseDebtWsStore(
       }));
     },
     async lastInvoiceSync() {
+      // xero-sync advances this cursor only after a run fetched every type and page
+      // (20260910100000_xero_sync_state_and_pdf_attempts.sql), so it is the honest
+      // "complete as of" time. A row written only now and then (synced_at) is not.
+      const cursor = await client.from("xero_sync_state").select("cursor_at").eq(
+        "key",
+        "sync_invoices",
+      ).maybeSingle();
+      if (cursor.error) readFailed("the invoice sync time", cursor.error);
+      if (cursor.data?.cursor_at) return String(cursor.data.cursor_at);
       const { data, error } = await client.from("xero_invoices").select(
         "synced_at",
       ).eq("org_id", orgId).not("synced_at", "is", null).order("synced_at", {

@@ -26,14 +26,15 @@ Nothing is sent when this merges. Every switch below starts off.
 | `debt_ws_deps.ts` | Builds the dependencies from what `index.ts` owns. |
 | `index.ts` | Wiring only: one `case` block that injects `sendChaseSms`, `getJobConversation`, `getToken`, `xeroReadGet`, `updateJobStatus`, the Outlook send, `getInvoicePdf`, `searchGHLContacts`, the staff SMS path and the job document reads. |
 | `supabase/migrations/20261008170000_debt_workshop.sql` | The seven tables, row-level security, and the two cron jobs. Rollback: `supabase/rollbacks/20261008170000_debt_workshop_down.sql`. |
-| `supabase/migrations/20261015170000_debt_ws_report.sql` | The debt report: three settings, `debt_ws_reports`, `debt_ws_payments_between` and the Monday cron. Rollback: `supabase/rollbacks/20261015170000_debt_ws_report_down.sql`. |
+| `supabase/migrations/20261015170000_debt_ws_report.sql` | The debt report: three settings, `debt_ws_reports`, `debt_ws_payments_between` and the auto-send cron (first on Monday). Rollback: `supabase/rollbacks/20261015170000_debt_ws_report_down.sql`. |
+| `supabase/migrations/20261016180000_debt_ws_report_wednesday.sql` | Moves the auto-send to Wednesday 12:00 Perth and adds the 11:55 Xero refresh (`trigger_debt_ws_report_refresh()`, cron `debt-ws-report-refresh`). Rollback: `supabase/rollbacks/20261016180000_debt_ws_report_wednesday_down.sql` (back to Monday 08:00). |
 
 ## The actions
 
 Who may call each action:
 - **staff:** a signed-in staff user (admin, owner or ops_manager). The server key is refused.
 - **owner:** the workshop owner, signed in.
-- **server key:** only the two Jan list crons, the Monday report cron, and the agent queue and submit (which the owner may also call).
+- **server key:** only the two Jan list crons, the Wednesday 12:00 report cron, and the agent queue and submit (which the owner may also call).
 
 | Action | Method | Who | What it does |
 |---|---|---|---|
@@ -54,7 +55,7 @@ Who may call each action:
 | `debt_ws_report` | GET | staff | The live debt report, built fresh on every read: `report` (every figure as data), `html` (the page the Debt tab shows), `delivery` (from, to, cc, `auto_send`, `sending_on`, `viewer_is_owner`, `can_send`, `why_not`), `last_sent` and `last_attempt`. See "The debt report". |
 | `debt_ws_report_pdf` | GET | staff | The same report as a PDF: `filename`, `content_type`, `pdf_base64`, `page_count`. |
 | `debt_ws_report_send` | POST (no fields) | owner | Emails the report PDF to the report recipients. Refused unless sending is on (`sending_off`), the recipients are set and all ours (`no_recipients`, `recipient_not_internal`), and no manual report went in the last two minutes (`recently_sent`). Built fresh at the moment of sending. |
-| `debt_ws_report_auto` | POST | server key | The Monday 08:00 cron. Does nothing unless `report_auto_send` and sending are both on (`sent: false` with `reason`). One auto report per week. |
+| `debt_ws_report_auto` | POST | server key | The Wednesday 12:00 Perth cron. Does nothing unless `report_auto_send` and sending are both on (`sent: false` with `reason`). One auto report per week. Refuses (`xero_copy_stale`, 409) when our Xero copy is more than 20 minutes old. |
 | `debt_ws_agent_submit` | POST | server key or owner | Stores a `draft`, `move` or `flag`, or records `no_action`. Every submit stamps `agent_reviewed_at`. A `move` whose payer's newest inbound message is held on no job with more than one candidate job is stored as a `flag` to Shaun instead (`move_refused` in the result); a move is refused with `conversation_unreadable` (503) when those messages cannot be read, including when the read of the held messages fails (the conversation reader's `held_read_failed`). Nothing is stored or stamped then. Drafts, flags and `no_action` are not checked against the messages. |
 
 A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The codes include:
@@ -135,7 +136,7 @@ Every switch starts off. Turn one on only when Shaun says so.
 | Not chased | `debt_ws_settings.not_chased_contacts` | Contacts that stay in the totals but are never texted or sent a statement. Each entry is a contact name (whole words) or a Xero contact id (matching the invoice's contact or its canonical company). Seeded with Emergency Trade Services and Builderwest, by name and by id. |
 | Statement addresses | `debt_ws_settings.statement_emails` | A JSON map from the canonical Xero contact id to an accounts email; a contact-name key is a fallback only. Seeded with Major Loss Builders (`96abb9b3...`) and AJ Building & Restoration (`71a5e645...`). |
 | Report recipients | `debt_ws_settings.report_recipients` (To) and `report_cc` (Cc) | Who the debt report is emailed to. Defaults: `marnin@secureworkswa.com.au`, cc `shaun@secureworkswa.com.au`. Our own domain only: the database refuses any other address (`debt_ws_settings_report_addresses_internal`), and ops-api and send-outlook-email check again. |
-| Report auto-send | `debt_ws_settings.report_auto_send` AND sending on | The Monday 08:00 Perth email of the debt report. Default OFF. |
+| Report auto-send | `debt_ws_settings.report_auto_send` AND sending on | The Wednesday 12:00 Perth email of the debt report, after the 11:55 Xero refresh. Default OFF. |
 | Company aliases | `debt_ws_settings.company_aliases` | A JSON map from an extra Xero contact id to the canonical one, because one builder can sit on several Xero contacts. Seeded: MLB `4d7121e3...` to `96abb9b3...`, Western Building `2a34b09f...` to `29d70cdc...`, Builderwest `aff63429...` to `c3a479ce...`. |
 
 To turn sending on (Shaun decided 14 Oct 2026 that the database switch alone decides it):
@@ -151,7 +152,8 @@ pg_cron runs in UTC; Perth is UTC+8 with no daylight saving.
 |---|---|---|---|
 | `debt-ws-jan-list-lock` | `0 1 * * 5` | Friday 09:00 | `public.trigger_debt_ws_jan_list('debt_ws_jan_list_lock')` |
 | `debt-ws-jan-list-send` | `0 11 * * 0` | Sunday 19:00 | `public.trigger_debt_ws_jan_list('debt_ws_jan_list_send')` |
-| `debt-ws-report-auto` | `0 0 * * 1` | Monday 08:00 | `public.trigger_debt_ws_report_auto()`, a no-op unless `report_auto_send` is on |
+| `debt-ws-report-refresh` | `55 3 * * 3` | Wednesday 11:55 | `public.trigger_debt_ws_report_refresh()`: one extra xero-sync `sync_invoices`, a no-op unless `report_auto_send` is on |
+| `debt-ws-report-auto` | `0 4 * * 3` | Wednesday 12:00 | `public.trigger_debt_ws_report_auto()`, a no-op unless `report_auto_send` is on |
 
 - **How it calls ops-api:** the trigger posts to ops-api with `Bearer sw_service_key()`, like `20260911060000_ses_report_trigger_runs.sql`.
 - **When it calls:** only while `jan_list_auto_send` is on. ops-api checks the switches again before it does anything.
@@ -168,7 +170,7 @@ pg_cron runs in UTC; Perth is UTC+8 with no daylight saving.
 - **Pay links** (Xero online-invoice URLs) are cached on `debt_ws_states.pay_link`. A request fetches at most 20 new ones.
 - **Invoice kinds:** final endings are FIN, FINBAL or BAL with up to three digits (FIN25, FINBAL50), FINAL and PRIVATE, with a description starting Balance, Remaining or Remainder. Not final: DEP, MAT and PROG with up to three digits, PLAN and VAR. An ending and description that disagree (FIN25 with "Deposit") still fall to "needs a look".
 - **Tests:** `deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_deps_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts supabase/functions/ops-api/debt_ws_payer_test.ts supabase/functions/ops-api/debt_ws_report_test.ts supabase/functions/ops-api/debt_ws_report_pdf_test.ts` (CI runs the same), plus `job_conversation_payer_threads_test.ts` for the conversation reader.
-- **Migration contracts:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/` and `20261015170000_debt_ws_report/`.
+- **Migration contracts:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/`, `20261015170000_debt_ws_report/` and `20261016180000_debt_ws_report_wednesday/`.
 
 ## The debt report
 
@@ -191,5 +193,7 @@ Shaun approved it on 15 Oct 2026 (plan: the local Lavish page `debt-collection-f
 - **The internal allow-list.** send-outlook-email's PDF fence refuses any PDF without an invoice or job document behind it. The debt report is the one exception, fenced to this route: the body must say `internal_report: "debt_report"`, be a plain send with no job, invoice or document, come from and go only to `@secureworkswa.com.au` (To, Cc and Bcc), and carry its PDF inline. A body that says `internal_report` but breaks any rule is refused (`internal_report_not_allowed`). Every other email is unchanged. Tests: `send-outlook-email/ses_delivery_fence_test.ts`.
 - **Who:** anyone who can see the Debt tab (staff) reads it and downloads the PDF; only the workshop owner sends it, and only while `sending_enabled` is on.
 - **The record:** each send is claimed first in `debt_ws_reports` (`sending`), then settled `sent` or `failed`, with a copy of the HTML and the attached PDF (base64 and its SHA-256), the subject, the summary and the headline totals. An email that may have gone stays `sending` and is never retried by itself. Each send also writes an `email_sent` line on `debt_ws_log` under share_key `debt-report`; a refusal writes `send_refused`.
-- **The Monday auto-send** (`report_auto_send`, default off) runs `debt_ws_report_auto` from the `debt-ws-report-auto` cron at 08:00 Perth. It also needs sending on, and sends at most once a week (a unique index on `debt_ws_reports`).
-- **Deploy order:** the migration applies before the matching ops-api (the normal merge lane does that). Until it is applied, the report still reads (payments show as not read) but cannot be sent.
+- **The Wednesday 12pm auto-send** (`report_auto_send`, default off) runs `debt_ws_report_auto` from the `debt-ws-report-auto` cron at 12:00 Perth on a Wednesday (Shaun, 16 Oct 2026; it was Monday 08:00 until `20261016180000`). It also needs sending on, and sends at most once a week (a unique index on `debt_ws_reports`). The week is still Monday to Sunday, Perth: `week_start` is that week's Monday, so a Wednesday send files under the Monday two days before.
+- **Consolidate first.** Every report (the view, the PDF and each send) is built fresh at that moment from the Debt tab's own book, with the bank balances read live from Xero. The invoices come from our Xero copy, which xero-sync brings up to date every 15 minutes (cron `xero-invoice-sync`, at 4, 19, 34 and 49 past the hour). On a Wednesday the cron `debt-ws-report-refresh` asks xero-sync for one extra invoice sync at 11:55, clear of the 11:49 and 12:04 runs (a run takes under a minute), so the copy is about five minutes old at 12:00. The sync can take close to a minute, too long to wait for inside the report call, so the refresh is scheduled ahead instead.
+- **The freshness check.** The copy's age is the start of the last invoice sync that read every page (`xero_sync_state` key `sync_invoices`, `cursor_at`; the newest `xero_invoices.synced_at` only when that row is missing). A send, automatic or by hand, refuses with `xero_copy_stale` (409) when that is more than 20 minutes old (`DEBT_WS_REPORT_MAX_COPY_AGE_MS`) or unknown: nothing is sent, no PDF is drawn, the claim settles as `refused` with the reason (so it never holds the week's auto slot) and a `send_refused` line goes on the log. The view says the same in `delivery.why_not`, so **Send to Marnin** stays off until the next sync. A missed 11:55 refresh still leaves the 11:49 run inside the limit; if both are missed the Wednesday report does not go, and Shaun can send it by hand once the copy is fresh again.
+- **Deploy order:** the migration applies before the matching ops-api (the normal merge lane does that). Until it is applied, the report still reads (payments show as not read) but cannot be sent. The Wednesday change (`20261016180000`) has no order to keep: ops-api's freshness check reads `xero_sync_state`, live since September, and the migration only moves cron jobs.

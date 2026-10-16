@@ -10,7 +10,9 @@ import {
 import {
   _resetDebtWsBankCacheForTest,
   DEBT_WS_ACTIONS,
+  DEBT_WS_REPORT_MAX_COPY_AGE_MS,
   reportAddressesInternal,
+  reportCopyProblem,
   runDebtWsAction,
 } from "./debt_ws_actions.ts";
 import {
@@ -426,7 +428,52 @@ Deno.test("send: a PDF that cannot be drawn sends nothing and releases the claim
   assertEquals(store.reportRows[0].status, "failed");
 });
 
-// ── The Monday auto-send ──
+// ── Consolidate first: the copy of the debt must be fresh ──
+
+Deno.test("fresh copy: a sync up to 20 minutes old is fresh; older, or unknown, is refused", () => {
+  const now = new Date("2026-10-14T04:00:00Z"); // Wednesday 14 Oct, 12:00 Perth
+  assertEquals(reportCopyProblem("2026-10-14T03:55:00Z", now), null);
+  assertEquals(reportCopyProblem("2026-10-14T03:40:00Z", now), null);
+  assertEquals(DEBT_WS_REPORT_MAX_COPY_AGE_MS, 20 * 60_000);
+  const stale = reportCopyProblem("2026-10-14T03:39:00Z", now);
+  assertStringIncludes(String(stale), "last synced at 11:39am Perth time, more than 20 minutes ago");
+  const yesterday = reportCopyProblem("2026-10-13T03:39:00Z", now);
+  assertStringIncludes(String(yesterday), "11:39am Perth time on Tuesday the 13th of October");
+  assertStringIncludes(String(reportCopyProblem(null, now)), "is unknown");
+  assertStringIncludes(String(reportCopyProblem("not a date", now)), "is unknown");
+  for (const text of [stale, yesterday]) assert(!LONG_DASH_OR_EMOJI.test(String(text)));
+});
+
+Deno.test("fresh copy: a stale copy refuses a manual send, draws no PDF, and says why on the view", async () => {
+  const store = new FakeStore();
+  store.settingsRow.sending_enabled = true;
+  store.syncedAt = "2026-10-08T01:30:00Z"; // 30 minutes before NOW
+  const { deps, rec } = fakeDeps(store);
+  const view = (await call(deps, "debt_ws_report", SHAUN)).body as any;
+  assertEquals(view.delivery.can_send, false);
+  assertStringIncludes(view.delivery.why_not, "more than 20 minutes ago");
+  const res = await call(deps, "debt_ws_report_send", SHAUN);
+  assertEquals(res.status, 409);
+  assertEquals((res.body as any).code, "xero_copy_stale");
+  assertEquals(rec.emails.length, 0);
+  assertEquals(rec.pdfs, 0);
+  assertEquals(store.reportRows.length, 1);
+  assertEquals(store.reportRows[0].status, "refused");
+  assertStringIncludes(String(store.reportRows[0].error), "xero copy not fresh");
+  assert(store.logRows.some((l) =>
+    l.kind === "send_refused" && l.share_key === "debt-report" &&
+    (l.meta as any)?.code === "xero_copy_stale"
+  ));
+  // An unknown sync time is refused the same way.
+  const s2 = new FakeStore();
+  s2.settingsRow.sending_enabled = true;
+  s2.syncedAt = null;
+  const { deps: d2, rec: r2 } = fakeDeps(s2);
+  assertEquals(((await call(d2, "debt_ws_report_send", SHAUN)).body as any).code, "xero_copy_stale");
+  assertEquals(r2.emails.length, 0);
+});
+
+// ── The Wednesday 12pm auto-send ──
 
 Deno.test("auto: does nothing while report_auto_send is off (the default), or while sending is off", async () => {
   const store = new FakeStore();
@@ -446,7 +493,7 @@ Deno.test("auto: does nothing while report_auto_send is off (the default), or wh
   assertEquals((await call(deps, "debt_ws_report_auto", SHAUN)).status, 403);
 });
 
-Deno.test("auto: when switched on it sends once a week, as the Monday auto-send", async () => {
+Deno.test("auto: when switched on it sends once a week, as the Wednesday 12pm auto-send", async () => {
   const store = new FakeStore();
   store.settingsRow.sending_enabled = true;
   store.reportSettingsRow.auto_send = true;
@@ -454,11 +501,53 @@ Deno.test("auto: when switched on it sends once a week, as the Monday auto-send"
   const first = await call(deps, "debt_ws_report_auto", SERVER);
   assertEquals((first.body as any).sent, true);
   assertEquals(rec.emails.length, 1);
-  assertStringIncludes(rec.emails[0].htmlBody, "the Monday auto-send");
+  assertStringIncludes(rec.emails[0].htmlBody, "the Wednesday 12pm auto-send");
   assertEquals(store.reportRows[0].kind, "auto");
   assertEquals(store.reportRows[0].week_start, "2026-10-05");
   const second = await call(deps, "debt_ws_report_auto", SERVER);
   assertEquals((second.body as any).sent, false);
   assertEquals((second.body as any).reason, "already_sent");
   assertEquals(rec.emails.length, 1);
+});
+
+Deno.test("auto: at Wednesday 12:00 Perth it reads the copy synced at 11:55 and files the week from Monday", async () => {
+  const store = new FakeStore();
+  store.settingsRow.sending_enabled = true;
+  store.reportSettingsRow.auto_send = true;
+  store.syncedAt = "2026-10-07T03:55:01Z"; // the 11:55 refresh
+  const wednesdayNoon = new Date("2026-10-07T04:00:00Z");
+  store.clock = () => wednesdayNoon;
+  const { deps, rec } = fakeDeps(store, { now: wednesdayNoon });
+  const res = await call(deps, "debt_ws_report_auto", SERVER);
+  assertEquals((res.body as any).sent, true, JSON.stringify(res.body));
+  assertEquals(rec.emails.length, 1);
+  assertEquals(store.reportRows[0].week_start, "2026-10-05");
+  assertEquals(store.reportRows[0].sent_by_name, "the Wednesday 12pm auto-send");
+  assertEquals(store.reportRows[0].status, "sent");
+});
+
+Deno.test("auto: a stale copy at 12:00 sends nothing and is recorded as refused, without taking the week", async () => {
+  const store = new FakeStore();
+  store.settingsRow.sending_enabled = true;
+  store.reportSettingsRow.auto_send = true;
+  store.syncedAt = "2026-10-07T03:19:00Z"; // the 11:55 refresh and the 11:49 sync both missed
+  const wednesdayNoon = new Date("2026-10-07T04:00:00Z");
+  store.clock = () => wednesdayNoon;
+  const { deps, rec } = fakeDeps(store, { now: wednesdayNoon });
+  const res = await call(deps, "debt_ws_report_auto", SERVER);
+  assertEquals(res.status, 409);
+  assertEquals((res.body as any).code, "xero_copy_stale");
+  assertEquals(rec.emails.length, 0);
+  assertEquals(rec.pdfs, 0);
+  assertEquals(store.reportRows.length, 1);
+  assertEquals(store.reportRows[0].kind, "auto");
+  assertEquals(store.reportRows[0].status, "refused");
+  // The refused row does not hold the week: once the copy is fresh the auto send can go.
+  store.syncedAt = "2026-10-07T04:04:00Z";
+  const later = new Date("2026-10-07T04:10:00Z");
+  store.clock = () => later;
+  const { deps: d2, rec: r2 } = fakeDeps(store, { now: later });
+  const again = await call(d2, "debt_ws_report_auto", SERVER);
+  assertEquals((again.body as any).sent, true, JSON.stringify(again.body));
+  assertEquals(r2.emails.length, 1);
 });

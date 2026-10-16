@@ -4592,7 +4592,7 @@ by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
   Never add a second text path.
 - An unconfirmed send keeps its claim. Only a guard refusal releases it.
 - Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons,
-  the Monday report cron and the agent queue and submit.
+  the Wednesday 12:00 report cron and the agent queue and submit.
 - The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
 - The debt report (`debt_ws_report*`, `debt_ws_report.ts`, `debt_ws_report_pdf.ts`) reads the
   tab's own book, so it always matches the tab; its buckets must tie to Xero's open total to the

@@ -86,7 +86,7 @@ export interface DebtReportInput {
   feed: ReportBankFeed | null;
   /** When our Xero copy of invoices was last synced. */
   syncedAt: string | null;
-  /** Who the report was prepared for or by: "Shaun", or "the Monday auto-send". */
+  /** Who the report was prepared for or by: "Shaun", or "the Wednesday 12pm auto-send". */
   preparedBy: string;
 }
 

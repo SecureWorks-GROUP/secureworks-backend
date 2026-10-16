@@ -656,6 +656,7 @@ ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|column|debt_ws_set
 ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|table|debt_ws_reports
 ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|policy|debt_ws_reports.debt_ws_reports_service_role_all
 ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|function|debt_ws_payments_between
+ops-api|supabase/migrations/20260910100000_xero_sync_state_and_pdf_attempts.sql|column|xero_sync_state.cursor_at
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|table|quote_builder_versions
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.chain_id
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.cost_lines
