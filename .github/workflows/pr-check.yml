@@ -667,6 +667,10 @@ jobs:
     # 90, not 40: the replays grow with every registered case. On 7 Oct 2026 a
     # PR adding one case to main took 37 min 51 s here (PR 986), and the
     # scorecard v2 PR carries eight more (the seven 7 Oct data sources and v2).
+    # On 16 Oct 2026 (144 cases, about 320 replays) runs took 35 to 80 min and
+    # slower runners were cancelled here. Proofs now start from a copy of a
+    # database built once (run.sh), not a replay, so the job no longer grows
+    # with the square of the case count.
     timeout-minutes: 90
 
     services:
