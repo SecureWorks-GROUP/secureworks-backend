@@ -815,3 +815,8 @@ ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|co
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# 20261016140000 restates the install_confirmed_for_day column comment for the
+# rule ops-api's dispatch_install.ts follows (a mark stands while a booking is
+# on its day, past or ahead). Comment only; the marker is the same column.
+ops-api|supabase/migrations/20261016140000_job_dispatch_install_for_day_comment.sql|column|job_dispatch_state.install_confirmed_for_day

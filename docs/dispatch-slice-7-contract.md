@@ -67,12 +67,13 @@ today counts as ahead. Bookings are read for the listed non-draft jobs (the
 existing read's scope), so a draft shown through a `status=draft` filter reads
 `none`.
 
-**`confirmed_current`:** with `for_day`, only while `for_day` is the install
-`day` the row shows (a new or earlier trip needs its own mark); with `for_day`
+**`confirmed_current`:** with `for_day`, while the job still has an install
+booking on `for_day`, past or ahead (one confirmation is for the install, so it
+does not lapse when `day` moves on to the next install day); with `for_day`
 null, while no install is booked ahead.
 
 **`dispatch_install_open`**, set only on a stop 6 job in To do: `not_confirmed`
-(no mark), `moved` (the mark's `for_day` is not the day shown), `booked_after`
+(no mark), `moved` (no install booking remains on the mark's `for_day`), `booked_after`
 (marked with nothing booked, a booking made since). Null otherwise.
 
 ## 3. To do (one condition changed in slice 3's `dispatchTodo`)
