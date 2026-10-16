@@ -82,8 +82,8 @@ trade variations already on the job linked). Allocated trades then read it
 through `my_job_work_order` with no human step. Code:
 `autoIssueJobWorkOrderForJob` and `autoIssueJobWorkOrders` in
 `job_work_orders.ts`; schema, door and sweep:
-`supabase/migrations/20261014120000_job_work_order_auto_issue.sql` (contract
-`supabase/tests/migration-contracts/20261014120000_job_work_order_auto_issue/`).
+`supabase/migrations/20261016120000_job_work_order_auto_issue.sql` (contract
+`supabase/tests/migration-contracts/20261016120000_job_work_order_auto_issue/`).
 
 What is issued, and what waits for the approver:
 
@@ -101,20 +101,20 @@ What is issued, and what waits for the approver:
   order: it goes out as it is, and the flags stay on the sealed lines for the
   office as the "needs checking" note below. Trades never see a flag.
 - A job moved past quoted with no recorded acceptance but with a frozen
-  fence-tool or patio-tool quote counts as accepted at its latest revision
-  frozen before it first left quoted (captain, 16 Oct 2026;
-  `revision_before_leaving_quoted`, docs/quote-work-order-lines-v1.md "Which
-  quote"), so its work order fills and goes out like any other: 28 of the 81
-  open jobs on 16 Oct 2026 (4 fencing, 24 patio), most of them patio jobs moved
-  on by an Ops status change.
+  fence-tool or patio-tool quote counts as accepted at its latest frozen quote,
+  the newest revision still in status `frozen`, whenever it was frozen; a
+  superseded revision never counts (captain, 16 Oct 2026;
+  `latest_frozen_revision`, docs/quote-work-order-lines-v1.md "Which quote"),
+  so its work order fills and goes out like any other: 29 of the 81 open jobs
+  on 16 Oct 2026 (5 fencing, 24 patio), most of them patio jobs moved straight
+  to an open status other than accepted by an Ops status change.
 - Held for the office to fill by hand, with the reason on the note, as the
   captain accepted on 16 Oct 2026: a quote with no labour figure
   (`agreed_labour_missing`: lines are filled, the agreed labour is the
   approver's to set), a job with nothing to fill from (`not_filled`: older
-  quotes from before the tools froze quotes, no quote in the system, or a move
-  past quoted that was never recorded; 27 of the 81 open jobs on 16 Oct 2026),
-  and a draft filled before this switch that cannot be shown untouched since
-  (`filled_before_auto_issue`).
+  quotes from before the tools froze quotes, or no quote in the system; 26 of
+  the 81 open jobs on 16 Oct 2026), and a draft filled before this switch that
+  cannot be shown untouched since (`filled_before_auto_issue`).
 - Customer variations still need the work order approver, exactly as before
   ("Customer variations" below). They join an automatically issued work order
   the same way.

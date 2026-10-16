@@ -43,7 +43,7 @@
 //
 // While JOB_WORK_ORDER_AUTO_ISSUE_FLAG is on, a draft the quote fill wrote
 // that nobody has edited since is issued by the system (approved_via 'auto',
-// no approver; 20261014120000_job_work_order_auto_issue.sql): by the sweep,
+// no approver; 20261016120000_job_work_order_auto_issue.sql): by the sweep,
 // on an ops status change, and by the backfill. A draft edited by hand waits
 // for the approver; customer variations always do.
 //

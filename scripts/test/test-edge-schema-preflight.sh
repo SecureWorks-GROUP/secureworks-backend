@@ -901,10 +901,6 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch slice 3: the stage record pipeline dispatch=1
                       # reads and set_dispatch_stage / _next_step write.
                       ("20261014113000", "job_dispatch_state"),
-                      # Automatic issue of job work orders: the fill and edit
-                      # stamps every job work order read selects
-                      # (job_work_orders.ts).
-                      ("20261014120000", "job_work_order_auto_issue"),
                       # Dispatch slice 4: the materials store pipeline
                       # dispatch=1 reads and dispatch_materials_* write.
                       ("20261014130000", "job_materials_by_supplier"),
@@ -919,7 +915,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261014190000", "job_dispatch_install_confirmed"),
                       # Debt report: the report settings, debt_ws_reports and
                       # the payments read (debt_ws_report_* actions).
-                      ("20261015170000", "debt_ws_report")]:
+                      ("20261015170000", "debt_ws_report"),
+                      # Automatic issue of job work orders: the fill and edit
+                      # stamps every job work order read selects
+                      # (job_work_orders.ts).
+                      ("20261016120000", "job_work_order_auto_issue")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

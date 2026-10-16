@@ -1,4 +1,4 @@
--- Contract for 20261014120000_job_work_order_auto_issue.sql: a job work order
+-- Contract for 20261016120000_job_work_order_auto_issue.sql: a job work order
 -- filled from the accepted quote goes to the trades with no human approval
 -- (approved_via auto, no approver), only while job_work_order_auto_issue_v1 is
 -- on, only for the draft the quote fill wrote that nobody has edited since,

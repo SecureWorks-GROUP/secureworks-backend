@@ -1,4 +1,4 @@
--- Rollback for 20261014120000_job_work_order_auto_issue.sql.
+-- Rollback for 20261016120000_job_work_order_auto_issue.sql.
 --
 -- Refuses while any job work order was issued automatically: such a row names
 -- no approver, which the restored seal check forbids, and it is sealed, so it
@@ -7,7 +7,7 @@
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM public.work_orders WHERE approved_via = 'auto') THEN
-    RAISE EXCEPTION 'automatically issued job work orders exist: resolve them before rolling back 20261014120000_job_work_order_auto_issue';
+    RAISE EXCEPTION 'automatically issued job work orders exist: resolve them before rolling back 20261016120000_job_work_order_auto_issue';
   END IF;
 END $$;
 

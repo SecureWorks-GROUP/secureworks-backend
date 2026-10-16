@@ -459,8 +459,9 @@ Deno.test("no accepted revision: the draft is not filled, from a later revision 
     ["only a revision frozen after acceptance", (db) => {
       db.tables.jobs[0].accepted_at = "2026-10-01T00:00:00Z";
     }],
-    ["no acceptance time to compare with", (db) => {
+    ["no acceptance time and no current frozen quote", (db) => {
       db.tables.jobs[0].accepted_at = null;
+      db.tables.scope_revisions[0].status = "superseded";
     }],
     ["no revision at all", (db) => {
       db.tables.scope_revisions = [];
@@ -822,7 +823,7 @@ function autoIssueOn(db: FakeDb) {
 }
 
 /** auto_issue_job_work_order as the database answers it
- *  (20261014120000_job_work_order_auto_issue.sql). */
+ *  (20261016120000_job_work_order_auto_issue.sql). */
 function autoIssueDoor(db: FakeDb) {
   const calls: any[] = [];
   db.rpcImpl = (fn, args) => {
@@ -1197,12 +1198,9 @@ Deno.test("backfill: while automatic issue is on, every draft it fills goes to t
 
 // ── A job moved past quoted with no recorded acceptance (captain, 16 Oct) ────
 
-// When the job first moved into an open status: after the quote was frozen
-// (5 Oct) and before the re-quote (10 Oct).
-const LEFT_QUOTED_AT = "2026-10-09T04:05:03Z";
-
-/** The SWP-261550 shape: moved on by an Ops status change, so no acceptance
- *  time and no revision recorded at acceptance, and re-quoted after the move. */
+/** The SWP-261550 shape: moved straight to an open status by an Ops status
+ *  change, so no acceptance time and no revision recorded at acceptance. Its
+ *  one tool quote (5 Oct) is still frozen. */
 function movedPastQuotedDb() {
   const db = baseDb();
   Object.assign(db.tables.jobs[0], {
@@ -1211,47 +1209,22 @@ function movedPastQuotedDb() {
     expected_costs: null,
     pricing_json: { line_items: [], labourCostEstimate: 999 },
   });
-  db.tables.scope_revisions[0].status = "superseded";
-  db.tables.scope_revisions.push(laterRevision());
-  db.tables.job_events = [
-    {
-      id: "ev-quoted",
-      job_id: JOB,
-      event_type: "status_changed",
-      detail_json: { new_status: "quoted", source: "ops_dashboard" },
-      created_at: "2026-10-05T09:00:00Z",
-    },
-    {
-      id: "ev-scheduled",
-      job_id: JOB,
-      event_type: "status_changed",
-      detail_json: { new_status: "scheduled", source: "ops_dashboard" },
-      created_at: "2026-10-12T00:00:00Z",
-    },
-    {
-      id: "ev-left",
-      job_id: JOB,
-      event_type: "status_changed",
-      detail_json: { new_status: "awaiting_deposit", source: "ops_dashboard" },
-      created_at: LEFT_QUOTED_AT,
-    },
-    // Another job's move never counts.
-    {
-      id: "ev-other",
-      job_id: "11111111-1111-4111-8111-999999999999",
-      event_type: "status_changed",
-      detail_json: { new_status: "awaiting_deposit" },
-      created_at: "2026-10-04T00:00:00Z",
-    },
-  ];
   return db;
 }
 
-Deno.test("moved past quoted: the job counts as accepted at its newest revision frozen before it first left quoted, never a later one or live pricing", async () => {
+/** Moved on, then re-quoted: the first quote superseded, the re-quote frozen. */
+function requotedDb() {
+  const db = movedPastQuotedDb();
+  db.tables.scope_revisions[0].status = "superseded";
+  db.tables.scope_revisions.push(laterRevision());
+  return db;
+}
+
+Deno.test("moved past quoted: the job counts as accepted at its latest frozen quote, never live pricing", async () => {
   const db = movedPastQuotedDb();
   const p = await previewQuoteWorkOrderLines(db, JOB);
   assertEquals([p.quote.source, p.quote.scope_revision_id, p.quote.flags], [
-    "revision_before_leaving_quoted",
+    "latest_frozen_revision",
     REV_ACCEPTED,
     [],
   ]);
@@ -1267,61 +1240,79 @@ Deno.test("moved past quoted: the job counts as accepted at its newest revision 
   const event = db.tables.job_events.find((e) =>
     e.event_type === "job_work_order_draft_filled_from_quote"
   );
-  assertEquals(
-    event.detail_json.quote_source,
-    "revision_before_leaving_quoted",
-  );
+  assertEquals(event.detail_json.quote_source, "latest_frozen_revision");
   // Nothing is written to the job: no acceptance time is invented.
   assertEquals(db.tables.jobs[0].accepted_at, null);
   assert(!db.writes().includes("update:jobs"));
 });
 
-Deno.test("moved past quoted: the older job creation event (status_change, to) counts too", async () => {
-  const db = movedPastQuotedDb();
-  db.tables.job_events = [{
-    id: "ev-created",
-    job_id: JOB,
-    event_type: "status_change",
-    detail_json: { from: null, to: "accepted" },
-    created_at: LEFT_QUOTED_AT,
-  }];
+Deno.test("moved past quoted: a re-quote fills from the current frozen revision, never the superseded one", async () => {
+  const db = requotedDb();
   const p = await previewQuoteWorkOrderLines(db, JOB);
   assertEquals([p.quote.source, p.quote.scope_revision_id], [
-    "revision_before_leaving_quoted",
+    "latest_frozen_revision",
+    REV_NEWER,
+  ]);
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.scope_revision_id], [true, REV_NEWER]);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 175);
+  assert(
+    !JSON.stringify(wo.scope_items).includes("18.5"),
+    "a superseded quote's lines reached the draft",
+  );
+});
+
+Deno.test("moved past quoted: a quote frozen after the job first left quoted still fills", async () => {
+  const db = movedPastQuotedDb();
+  db.tables.job_events = [{
+    id: "ev-left",
+    job_id: JOB,
+    event_type: "status_changed",
+    detail_json: { new_status: "scheduled", source: "ops_dashboard" },
+    created_at: "2026-10-01T00:00:00Z",
+  }];
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.scope_revision_id], [
+    true,
+    REV_ACCEPTED,
+  ]);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
+});
+
+Deno.test("moved past quoted: a recorded revision or acceptance time is never overridden by the latest frozen quote", async () => {
+  const recorded = requotedDb();
+  recorded.tables.jobs[0].expected_costs = { scope_revision_id: REV_ACCEPTED };
+  const byRevision = await previewQuoteWorkOrderLines(recorded, JOB);
+  assertEquals([byRevision.quote.source, byRevision.quote.scope_revision_id], [
+    "accepted_revision",
+    REV_ACCEPTED,
+  ]);
+  const timed = requotedDb();
+  timed.tables.jobs[0].accepted_at = ACCEPTED_AT;
+  const byTime = await previewQuoteWorkOrderLines(timed, JOB);
+  assertEquals([byTime.quote.source, byTime.quote.scope_revision_id], [
+    "revision_at_acceptance",
     REV_ACCEPTED,
   ]);
 });
 
 Deno.test("moved past quoted: with nothing to fill from the draft stays with the office", async () => {
   const cases: Array<[string, (db: FakeDb) => void]> = [
-    ["no recorded move past quoted", (db) => {
-      db.tables.job_events = db.tables.job_events.filter((e) =>
-        e.detail_json.new_status === "quoted"
-      );
-    }],
-    ["only a revision frozen after the move", (db) => {
-      db.tables.scope_revisions = [laterRevision()];
+    ["only superseded revisions", (db) => {
+      db.tables.scope_revisions[0].status = "superseded";
     }],
     ["no frozen quote at all", (db) => {
       db.tables.scope_revisions = [];
     }],
     ["a draft revision is not a frozen quote", (db) => {
-      db.tables.scope_revisions = [{
-        ...db.tables.scope_revisions[0],
-        status: "draft",
-      }];
-    }],
-    ["a move into a closed or dead status is not a move past quoted", (db) => {
-      db.tables.job_events = [{
-        id: "ev-lost",
-        job_id: JOB,
-        event_type: "status_changed",
-        detail_json: { new_status: "lost" },
-        created_at: LEFT_QUOTED_AT,
-      }];
+      db.tables.scope_revisions[0].status = "draft";
     }],
     ["the job is not in an open status now", (db) => {
       db.tables.jobs[0].status = "quoted";
+    }],
+    ["the job is lost", (db) => {
+      db.tables.jobs[0].status = "lost";
     }],
     ["an acceptance time with no revision by then is not overridden", (db) => {
       db.tables.jobs[0].accepted_at = "2026-10-01T00:00:00Z";
@@ -1346,17 +1337,6 @@ Deno.test("moved past quoted: with nothing to fill from the draft stays with the
     assertEquals(db.tables.work_orders[0].scope_items, [], label);
     assertEquals(db.writes(), [], label);
   }
-});
-
-Deno.test("moved past quoted: an unreadable status history never picks a revision or reads as no quote", async () => {
-  const db = movedPastQuotedDb();
-  db.failOn.add("select:job_events");
-  const err = await assertRejects(
-    () => fillJobWorkOrderDraftFromQuote(db, JOB),
-    QuoteFillError,
-  );
-  assertEquals(err.code, "status_history_unreadable");
-  assertEquals(db.writes(), []);
 });
 
 Deno.test("auto issue: a job moved past quoted with a frozen tool quote goes to the trades like any other, with no amount, rate or allocation", async () => {
@@ -1394,7 +1374,7 @@ Deno.test("auto issue: a job moved past quoted with a frozen tool quote goes to 
       "agreed",
       "allocation",
       "approved_via",
-      "revision_before_leaving_quoted",
+      "latest_frozen_revision",
       "$",
       String(ACCEPTED_AGREED),
       "175",
