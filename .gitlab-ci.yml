@@ -1,5 +1,5 @@
 # Replaces .github/workflows/{pr-check,deploy-edge-functions,makesafe-intake-watchdog}.yml on GitLab.
-# Variables (masked, protected): SUPABASE_ACCESS_TOKEN, SW_API_KEY; optional OPS_API_BASE_URL.
+# Variables (masked, protected): SUPABASE_ACCESS_TOKEN (deploy and make-safe intake watchdog), SW_API_KEY (deploy smoke checks).
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -33,7 +33,7 @@ deno-check:
   image: denoland/deno:debian
   rules: *mr_changes
   before_script:
-    - apt-get update -qq && apt-get install -y -qq git curl jq nodejs python3 >/dev/null
+    - apt-get update -qq && apt-get install -y -qq git curl jq nodejs python3 python3-yaml >/dev/null
   script:
     - |
       BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"; HEAD_SHA="$CI_COMMIT_SHA"
@@ -43,10 +43,11 @@ deno-check:
         while IFS= read -r f; do deno check "$f" || echo "advisory: $f failed deno check"; done < /tmp/changed_function_files.txt
         while IFS= read -r f; do deno cache --no-check "$f"; done < /tmp/changed_function_files.txt
       fi
-    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh scripts/install-supabase-cli.sh scripts/check-supabase-cli.sh scripts/edge-catchup-deploy-set.sh; do [ ! -f "$s" ] || bash -n "$s"; done
+    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh scripts/install-supabase-cli.sh scripts/check-supabase-cli.sh scripts/edge-catchup-deploy-set.sh scripts/check-makesafe-intake-health.sh; do [ ! -f "$s" ] || bash -n "$s"; done
     - bash scripts/test/test-smoke-ops-api-action-surface.sh
     - bash scripts/test/test-stamp-ops-api-build-metadata.sh
     - bash scripts/test/test-edge-schema-preflight.sh
+    - bash scripts/test/test-check-makesafe-intake-health.sh
     - bash scripts/test/test-apply-pending-migrations.sh
     - deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
     # Ported from GitHub pr-check: Debt Workshop (8 Oct; replaced the 30 Sep debt
@@ -240,17 +241,8 @@ makesafe-intake-watchdog:
   variables:
     STALE_MINUTES: "30"
   before_script:
-    - apk add --no-cache curl jq coreutils >/dev/null
+    - apk add --no-cache bash curl python3 >/dev/null
   script:
-    - |
-      test -n "$SW_API_KEY" || { echo "FAIL: SW_API_KEY not set"; exit 1; }
-    - URL="${OPS_API_BASE_URL:-https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api}?action=intake_health"
-    - |
-      HTTP_CODE=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 -H "x-api-key: $SW_API_KEY" "$URL" || echo 000)
-    - |
-      test "$HTTP_CODE" = 200 || { echo "FAIL: intake_health HTTP $HTTP_CODE"; head -c 2000 /tmp/health.json; exit 1; }
-    - |
-      LAST_SCAN=$(jq -r '.extraction.last_scan_at // empty' /tmp/health.json); test -n "$LAST_SCAN" || { echo "FAIL: no last_scan_at"; exit 1; }
-    - AGE_MIN=$(( ( $(date -u +%s) - $(date -u -d "$LAST_SCAN" +%s) ) / 60 )); echo "last scan ${AGE_MIN} min ago"
-    - |
-      test "$AGE_MIN" -le "$STALE_MINUTES" || { echo "FAIL: make-safe intake scan STALE (${AGE_MIN} min)"; exit 1; }
+    # Reads makesafe_intake_health through the Supabase Management API with
+    # read_only true; ops-api intake_health refuses SW_API_KEY since #667.
+    - bash scripts/check-makesafe-intake-health.sh
