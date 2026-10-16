@@ -99,6 +99,7 @@ import {
   debtReportFileName,
   debtReportHtml,
   debtReportTotals,
+  perthClock,
 } from "./debt_ws_report.ts";
 
 export { DebtWsError } from "./debt_ws_store.ts";
@@ -3277,8 +3278,17 @@ export async function debtWsAgentSubmit(
 // debt_ws_report_pdf  GET, staff:  the same report as a PDF (Download PDF).
 // debt_ws_report_send POST, owner: emails the PDF to the report recipients (Marnin, cc
 //                                  Shaun), built fresh at the moment of sending.
-// debt_ws_report_auto POST, server key: the Monday 08:00 Perth cron. Does nothing unless
-//                                  report_auto_send is on; one auto report per week.
+// debt_ws_report_auto POST, server key: the Wednesday 12:00 Perth cron. Does nothing
+//                                  unless report_auto_send is on; one auto report per week.
+//
+// Consolidate first (Shaun, 16 Oct 2026: "it goes Wednesday at 12pm after consolidating the
+// debt for that day"). Every report is built fresh from the tab's own book at the moment it
+// is made, with the bank balances read live from Xero. The invoices come from our Xero copy,
+// which xero-sync brings up to date every 15 minutes, and on a Wednesday the cron
+// debt-ws-report-refresh runs one extra sync at 11:55 Perth so the copy is about five minutes
+// old at 12:00 (20261016180000_debt_ws_report_wednesday.sql). A send, automatic or by hand,
+// refuses when the copy is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS or its age is unknown,
+// so Marnin never gets a report built on stale debt.
 //
 // The report is internal: it holds every client's name and balance, so it only ever goes to
 // our own domain. The recipients are checked here before every send (and the database
@@ -3290,6 +3300,37 @@ export const DEBT_WS_REPORT_DOMAIN = "secureworkswa.com.au";
 export const DEBT_WS_REPORT_RESEND_MS = 2 * 60_000;
 /** The share_key the report's debt_ws_log rows sit on. */
 export const DEBT_WS_REPORT_LOG_KEY = "debt-report";
+/**
+ * The oldest our Xero copy of invoices may be when a report is sent. The sync runs every
+ * 15 minutes, so 20 minutes allows one run in flight; past that a run was missed.
+ */
+export const DEBT_WS_REPORT_MAX_COPY_AGE_MS = 20 * 60_000;
+/** Who the automatic report says it came from (the email and the record). */
+export const DEBT_WS_REPORT_AUTO_LABEL = "the Wednesday 12pm auto-send";
+
+/**
+ * Why a report must not be sent on this copy of the debt, or null when the copy is fresh:
+ * its sync time is unknown, or it is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS.
+ */
+export function reportCopyProblem(
+  syncedAt: string | null,
+  now: Date,
+): string | null {
+  const ms = syncedAt ? Date.parse(syncedAt) : NaN;
+  if (!syncedAt || !Number.isFinite(ms)) {
+    return "When our Xero copy of invoices was last synced is unknown, so the report cannot be sent";
+  }
+  if (now.getTime() - ms > DEBT_WS_REPORT_MAX_COPY_AGE_MS) {
+    const syncedDay = perthDate(new Date(ms));
+    const day = syncedDay === perthDate(now) ? "" : ` on ${longDate(syncedDay)}`;
+    return `Our Xero copy of invoices was last synced at ${
+      perthClock(syncedAt)
+    } Perth time${day}, more than ${
+      DEBT_WS_REPORT_MAX_COPY_AGE_MS / 60_000
+    } minutes ago, so the report would not show today's debt. Wait for the next sync (every 15 minutes) and try again`;
+  }
+  return null;
+}
 
 const OWN_ADDRESS = /^[a-z0-9._%+-]+@secureworkswa\.com\.au$/;
 
@@ -3452,7 +3493,8 @@ export async function debtWsReport(deps: DebtWsDeps, caller: DebtWsCaller) {
     ? "Only the workshop owner (Shaun) can send the report"
     : !sendingOn
     ? "Sending is off until you switch it on"
-    : addresses.problem?.message ?? null;
+    : addresses.problem?.message ??
+      reportCopyProblem(report.synced_at, deps.now());
   return {
     ok: true,
     version: DEBT_WS_VERSION,
@@ -3498,9 +3540,11 @@ export async function debtWsReportPdf(deps: DebtWsDeps, caller: DebtWsCaller) {
 }
 
 /**
- * One report email: claim the send, build the report fresh, draw the PDF, email it, then
- * keep the copy and log it. The claim is written first, so an auto report can never go
- * twice in a week, and an email that may have gone is never retried by itself.
+ * One report email: claim the send, build the report fresh, check our Xero copy is fresh,
+ * draw the PDF, email it, then keep the copy and log it. The claim is written first, so an
+ * auto report can never go twice in a week, and an email that may have gone is never
+ * retried by itself. A stale copy settles the claim as 'refused' (it does not hold the
+ * week's auto slot) and sends nothing.
  */
 async function sendDebtReport(
   deps: DebtWsDeps,
@@ -3509,7 +3553,7 @@ async function sendDebtReport(
   addresses: { to: string[]; cc: string[] },
   weekStart: string,
 ) {
-  const sentBy = kind === "auto" ? "the Monday auto-send" : actor.label;
+  const sentBy = kind === "auto" ? DEBT_WS_REPORT_AUTO_LABEL : actor.label;
   const claim = await deps.store.claimReport({
     kind,
     week_start: weekStart,
@@ -3520,10 +3564,13 @@ async function sendDebtReport(
   });
   if (!claim) return null;
   let report: DebtReport;
-  let pdf: { bytes: Uint8Array; pageCount: number };
+  let pdf: { bytes: Uint8Array; pageCount: number } | null = null;
+  let stale: string | null = null;
   try {
     report = await loadDebtReport(deps, sentBy);
-    pdf = await deps.renderReportPdf(report);
+    // Consolidate first: no PDF is drawn on a stale copy of the debt.
+    stale = reportCopyProblem(report.synced_at, deps.now());
+    if (!stale) pdf = await deps.renderReportPdf(report);
   } catch (error) {
     // Nothing was sent: release the claim with the reason.
     await deps.store.settleReport(claim.id, {
@@ -3536,6 +3583,35 @@ async function sendDebtReport(
       502,
       "report_pdf_failed",
     );
+  }
+  if (stale !== null || pdf === null) {
+    // Our Xero copy is too old (or its age is unknown): nothing is sent. The claim settles
+    // as 'refused' with the reason, which frees this week's auto slot, and the refusal is
+    // logged where the Debt tab shows the report's history.
+    const reason = stale ?? "The report could not be built just now";
+    await deps.store.settleReport(claim.id, {
+      status: "refused",
+      error: `xero copy not fresh: ${reason}`.slice(0, 500),
+    }).catch(() => {});
+    await log(
+      deps,
+      { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+      actor,
+      "send_refused",
+      {
+        body: reason,
+        meta: {
+          code: "xero_copy_stale",
+          report: true,
+          report_id: claim.id,
+          kind,
+          synced_at: report.synced_at,
+        },
+      },
+    ).catch(() => {});
+    throw new DebtWsError(reason, 409, "xero_copy_stale", {
+      synced_at: report.synced_at,
+    });
   }
   const email = debtReportEmail(report, {
     greeting: reportGreeting(addresses.to),
@@ -3694,7 +3770,11 @@ export async function debtWsReportSend(
   return sent;
 }
 
-/** The Monday cron. Off unless report_auto_send and sending are both on; once a week. */
+/**
+ * The Wednesday 12:00 Perth cron. Off unless report_auto_send and sending are both on; once
+ * a week (the week is Monday to Sunday, Perth, so week_start is still that Monday). Refuses
+ * (xero_copy_stale) when our Xero copy is not fresh, like a manual send.
+ */
 export async function debtWsReportAuto(deps: DebtWsDeps) {
   const settings = await deps.store.settings();
   const rs = await deps.store.reportSettings();
@@ -3719,7 +3799,7 @@ export async function debtWsReportAuto(deps: DebtWsDeps) {
   }
   const sent = await sendDebtReport(
     deps,
-    { user_id: null, label: "Monday auto-send" },
+    { user_id: null, label: "Wednesday 12pm auto-send" },
     "auto",
     addresses,
     weekStart,

@@ -8307,7 +8307,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'debt_ws_agent_queue':
       case 'debt_ws_agent_submit':
       // The debt report (docs/debt-workshop/README.md "The debt report"): the live view and
-      // its PDF for staff, the owner's send to Marnin, and the Monday cron (off by default).
+      // its PDF for staff, the owner's send to Marnin, and the Wednesday 12:00 cron (off by default).
       case 'debt_ws_report':
       case 'debt_ws_report_pdf':
       case 'debt_ws_report_send':

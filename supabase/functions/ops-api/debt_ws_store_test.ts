@@ -229,3 +229,35 @@ Deno.test("batch Xero read: 40 ids a call, receivables only, nothing unasked", a
     [],
   );
 });
+
+Deno.test("store: the invoice sync time is the sync cursor (a complete run), else the newest synced_at", async () => {
+  // The cursor row: xero-sync advances it only after reading every page.
+  const withCursor = fakeClient((table) =>
+    table === "xero_sync_state"
+      ? { data: { cursor_at: "2026-10-14T03:55:00.5+00:00" }, error: null }
+      : { data: [{ synced_at: "2026-10-14T03:59:00+00:00" }], error: null }
+  );
+  assertEquals(
+    await createSupabaseDebtWsStore(withCursor.client).lastInvoiceSync(),
+    "2026-10-14T03:55:00.5+00:00",
+  );
+  assertEquals(withCursor.log.map((l) => l.table), ["xero_sync_state"]);
+  assert(withCursor.log[0].calls.some((c) => c === 'eq(["key","sync_invoices"])'));
+  // No cursor row yet: the newest synced_at on our copy.
+  const noCursor = fakeClient((table) =>
+    table === "xero_sync_state"
+      ? { data: null, error: null }
+      : { data: [{ synced_at: "2026-10-14T03:49:00+00:00" }], error: null }
+  );
+  assertEquals(
+    await createSupabaseDebtWsStore(noCursor.client).lastInvoiceSync(),
+    "2026-10-14T03:49:00+00:00",
+  );
+  // A read error is a read error, never "fresh".
+  const broken = fakeClient(() => ({ data: null, error: { code: "42P01", message: "x" } }));
+  const error = await assertRejects(
+    () => createSupabaseDebtWsStore(broken.client).lastInvoiceSync(),
+    DebtWsError,
+  );
+  assertEquals(error.code, "debt_ws_read_failed");
+});

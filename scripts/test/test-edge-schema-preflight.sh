@@ -916,6 +916,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Debt report: the report settings, debt_ws_reports and
                       # the payments read (debt_ws_report_* actions).
                       ("20261015170000", "debt_ws_report"),
+                      # Debt report freshness: the invoice sync cursor the
+                      # report's "last synced" time and its send check read.
+                      ("20260910100000", "xero_sync_state_and_pdf_attempts"),
                       # Automatic issue of job work orders: the fill and edit
                       # stamps every job work order read selects
                       # (job_work_orders.ts).
