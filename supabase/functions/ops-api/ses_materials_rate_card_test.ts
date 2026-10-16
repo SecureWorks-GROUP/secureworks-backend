@@ -8,15 +8,17 @@ import {
 
 Deno.test("the executable rate card parses the canonical markdown, not a numeric twin", () => {
   const card = readSesMaterialsRateCard();
-  assertEquals(card.flashingTape, 25);
-  assertEquals(card.silicone, 25);
+  assertEquals(card.flashingTape, 35);
+  assertEquals(card.silicone, 35);
+  assertEquals(card.timberLength, 17);
+  assertEquals(card.bugleEach, 1);
   assertEquals(card.starPicket, 13.5);
   assertEquals(card.consumablesStandard, 25);
   assertEquals(card.tarpBands, [
-    { upToSquareMetres: 10.8, amount: 80 },
-    { upToSquareMetres: 19.8, amount: 110 },
-    { upToSquareMetres: 29.9, amount: 145 },
-    { upToSquareMetres: 55.5, amount: 190 },
+    { upToSquareMetres: 10.8, amount: 150 },
+    { upToSquareMetres: 19.8, amount: 185 },
+    { upToSquareMetres: 29.9, amount: 230 },
+    { upToSquareMetres: 55.5, amount: 275 },
   ]);
   assertEquals(card.proposalBasketFloor, 45);
   assertEquals(card.roundMultiple, 5);
@@ -26,10 +28,39 @@ Deno.test("the executable rate card parses the canonical markdown, not a numeric
   );
 });
 
-Deno.test("settled silicone and tape retain whole-unit lines from the markdown", () => {
+Deno.test("settled Sikaflex and tape bill the styled whole-unit lines", () => {
   const result = priceRecordedMaterialsFromRateCard([
     "Silicone x 1",
     "Flashing tape x 0.4m",
+  ]);
+  assertEquals(result.kind, "settled");
+  if (result.kind !== "settled") return;
+  assertEquals(
+    result.lines.map((line) => ({
+      description: line.description,
+      quantity: line.quantity,
+      unit_price_ex_gst: line.unit_price_ex_gst,
+    })),
+    [
+      {
+        description: "Materials used: Sikaflex x 1 (whole cartridge)",
+        quantity: 1,
+        unit_price_ex_gst: 36,
+      },
+      {
+        description: "Materials used: Flashing tape x 1 (whole roll)",
+        quantity: 1,
+        unit_price_ex_gst: 36,
+      },
+    ],
+  );
+  assertEquals(result.omitted, []);
+});
+
+Deno.test("nails and a short timber length settle from the card", () => {
+  const result = priceRecordedMaterialsFromRateCard([
+    "Nails x 5",
+    "Timber x 0.2m",
   ]);
   assertEquals(result.kind, "settled");
   if (result.kind !== "settled") return;
@@ -40,54 +71,60 @@ Deno.test("settled silicone and tape retain whole-unit lines from the markdown",
     })),
     [
       { quantity: 1, unit_price_ex_gst: 25 },
-      { quantity: 1, unit_price_ex_gst: 25 },
+      { quantity: 1, unit_price_ex_gst: 17 },
     ],
   );
+  assertEquals(result.omitted, []);
 });
 
-Deno.test("nails and timber propose from card evidence and style upward", () => {
-  const result = priceRecordedMaterialsFromRateCard([
-    "Nails x 5",
-    "Timber x 0.2m",
+Deno.test("bugle screws inside the timber rate are not billed again", () => {
+  const included = priceRecordedMaterialsFromRateCard([
+    "Timber x 2.4m",
+    "Bugle screws x 2",
   ]);
-  assertEquals(result.kind, "proposal");
-  if (result.kind !== "proposal") return;
-  assertEquals(result.raw_amount_ex_gst, 70);
-  assertEquals(result.amount_ex_gst, 71);
-  assertEquals(result.rate_card_keys, [
-    "cable_ties_consumables",
-    "accepted_materials_basket_floor",
+  assertEquals(included.kind, "settled");
+  if (included.kind !== "settled") return;
+  assertEquals(included.lines.length, 1);
+  assertEquals(included.lines[0].unit_price_ex_gst, 17);
+  assertEquals(
+    included.lines.some((line) => /^Materials used: Bugle/.test(line.description)),
+    false,
+  );
+
+  const extras = priceRecordedMaterialsFromRateCard([
+    "Timber x 4.8m",
+    "Bugle screws x 6",
   ]);
-  assertEquals(result.materials.map((fact) => fact.quantity), [5, 0.2]);
-  assertEquals(result.provenance.captain_review_required, true);
+  assertEquals(extras.kind, "settled");
+  if (extras.kind !== "settled") return;
+  const bugles = extras.lines.find((line) =>
+    line.description.startsWith("Materials used: Bugle")
+  );
+  assertEquals(bugles?.quantity, 2);
+  assertEquals(bugles?.unit_price_ex_gst, 1);
 });
 
-Deno.test("36 square metres of tarp plus quantified clips selects the tarp band and non-round styling", () => {
+Deno.test("36 square metres of tarp plus clips bills the extra-large band and the ties rate", () => {
   const result = priceRecordedMaterialsFromRateCard([
     "Make-safe tarp x 36m2",
     "Clips x 30",
   ]);
-  assertEquals(result.kind, "proposal");
-  if (result.kind !== "proposal") return;
-  assertEquals(result.raw_amount_ex_gst, 215);
-  assertEquals(result.amount_ex_gst, 216);
-  assertEquals(result.rate_card_keys, [
-    "tarpaulin",
-    "cable_ties_consumables",
-  ]);
-  assertEquals(result.materials.map((fact) => fact.quantity), [36, 30]);
+  assertEquals(result.kind, "settled");
+  if (result.kind !== "settled") return;
+  assertEquals(
+    result.lines.map((line) => line.unit_price_ex_gst),
+    [276, 25],
+  );
+  assertEquals(result.omitted, []);
 });
 
-Deno.test("object-form report quantities survive into a review proposal", () => {
+Deno.test("object-form quantities are kept and unmatched ticks are not billed", () => {
   const result = priceRecordedMaterialsFromRateCard([
     { label: "Dehumidifier", quantity: 1, unit: "each" },
     { label: "Fans", quantity: 3, unit: "each" },
     { label: "Green tape", quantity: 15, unit: "m" },
   ]);
-  assertEquals(result.kind, "proposal");
-  if (result.kind !== "proposal") return;
-  assertEquals(result.raw_amount_ex_gst, 45);
-  assertEquals(result.amount_ex_gst, 46);
+  assertEquals(result.kind, "unquantified");
   assertEquals(result.materials.map((fact) => fact.quantity), [1, 3, 15]);
 });
 
