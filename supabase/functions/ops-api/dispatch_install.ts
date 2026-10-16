@@ -205,12 +205,14 @@ export function dispatchInstall(
   );
   const onDay = dispatchInstallBookingsOnDay(installs, day);
   const confirmed = dispatchInstallMark(state);
-  // A mark for a day stands only while that day is the install day shown; a
-  // mark made with nothing booked stands while nothing is booked ahead.
+  // A mark for a day stands while the job still has an install booking on that
+  // day, past or ahead: one confirmation is for the install, so it does not
+  // lapse when the day shown moves on to the next install day. A mark made with
+  // nothing booked stands while nothing is booked ahead.
   const confirmedCurrent = confirmed === null
     ? false
     : confirmed.for_day
-    ? confirmed.for_day === day
+    ? installDays(installs).includes(confirmed.for_day)
     : installState !== "ahead";
   return {
     state: installState,
@@ -234,7 +236,8 @@ export function dispatchInstallHoldsTodo(install: DispatchInstall): boolean {
 }
 
 // Why a Trade scheduled job is in To do. Null unless the job is in To do at
-// stop 6 because of the install condition.
+// stop 6 because of the install condition. `moved` means no install booking
+// remains on the mark's day.
 export function dispatchInstallOpen(
   install: DispatchInstall | null,
   stageIndex: number | null,

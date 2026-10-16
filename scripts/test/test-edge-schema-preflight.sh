@@ -918,7 +918,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261015170000", "debt_ws_report"),
                       # Dispatch slice 6: the delivery columns dispatch_materials
                       # and pipeline dispatch=1 read and dispatch_delivery_* write.
-                      ("20261016150000", "dispatch_deliveries")]:
+                      ("20261016150000", "dispatch_deliveries"),
+                      # Dispatch slice 7, F2: the install_confirmed_for_day
+                      # column comment states the mark rule.
+                      ("20261016160000", "job_dispatch_install_for_day_comment")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
