@@ -916,6 +916,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Debt report: the report settings, debt_ws_reports and
                       # the payments read (debt_ws_report_* actions).
                       ("20261015170000", "debt_ws_report"),
+                      # Dispatch slice 6: the delivery columns dispatch_materials
+                      # and pipeline dispatch=1 read and dispatch_delivery_* write.
+                      ("20261016150000", "dispatch_deliveries"),
                       # Dispatch slice 7, F2: the install_confirmed_for_day
                       # column comment states the mark rule.
                       ("20261016140000", "job_dispatch_install_for_day_comment")]:
