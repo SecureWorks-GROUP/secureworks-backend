@@ -152,13 +152,51 @@ expect "a bad STALE_MINUTES fails" 1 "STALE_MINUTES must be a positive whole num
 
 # The workflow must run this check with the production environment token and
 # must not send the shared SW_API_KEY anywhere (ops-api refuses it since #667).
-if grep -q "bash scripts/check-makesafe-intake-health.sh" "$WORKFLOW" &&
-   grep -q "environment: production" "$WORKFLOW" &&
-   grep -q 'SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}' "$WORKFLOW" &&
-   ! grep -q "secrets.SW_API_KEY" "$WORKFLOW"; then
+# The workflow is parsed, so comments and other jobs cannot satisfy the check.
+if WORKFLOW_RESULT="$(python3 - "$WORKFLOW" 2>&1 <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("PyYAML is not installed, so the workflow cannot be parsed")
+
+workflow = yaml.safe_load(open(sys.argv[1]))
+job = workflow["jobs"]["intake-health"]
+environment = job.get("environment")
+if isinstance(environment, dict):
+    environment = environment.get("name")
+assert environment == "production", f"intake-health environment is {environment!r}"
+
+check_steps = [
+    step for step in job.get("steps", [])
+    if any(
+        line.strip() == "bash scripts/check-makesafe-intake-health.sh"
+        for line in str(step.get("run", "")).splitlines()
+    )
+]
+assert len(check_steps) == 1, f"{len(check_steps)} steps run the check script"
+token = (check_steps[0].get("env") or {}).get("SUPABASE_ACCESS_TOKEN")
+assert token == "${{ secrets.SUPABASE_ACCESS_TOKEN }}", f"check step token is {token!r}"
+
+def values(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield str(key)
+            yield from values(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from values(value)
+    else:
+        yield str(node)
+
+leaks = [v for v in values(workflow) if "secrets.SW_API_KEY" in v.replace(" ", "")]
+assert not leaks, f"SW_API_KEY is used: {leaks}"
+PY
+)"; then
   pass "the watchdog workflow runs this check with the production token and no SW_API_KEY"
 else
-  fail "the watchdog workflow runs this check with the production token and no SW_API_KEY" "$WORKFLOW"
+  fail "the watchdog workflow runs this check with the production token and no SW_API_KEY" "$WORKFLOW_RESULT"
 fi
 
 echo ""
