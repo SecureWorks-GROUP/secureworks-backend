@@ -30,7 +30,8 @@ Code:
 
 - `supabase/functions/ops-api/quote_work_order_lines.ts`: the pure builder.
 - `supabase/functions/ops-api/job_work_order_quote_fill.ts`: the reads and the one write.
-- `job_work_orders.ts` calls the fill when staff open or read a draft, and in the backfill.
+- `job_work_orders.ts` calls the fill when staff open or read a draft, in the backfill, and
+  in the automatic issue while it is switched on.
 
 Tests: `quote_work_order_lines_test.ts`, `job_work_order_quote_fill_test.ts` and
 `job_work_order_quote_fill_handler_test.ts`.
@@ -213,7 +214,7 @@ not be checked against it, `labour_unverified`) adds nothing to
 - **The event:** `job_work_order_draft_filled_from_quote` carries ids and counts only, never
   an amount.
 
-It runs at three points:
+It runs at four points:
 
 - `job_work_order` (and `job_detail`'s `job_work_order` block) fills an untouched draft on
   the staff read: a signed-in admin, owner or ops manager, or the ops server key. A read
@@ -232,8 +233,11 @@ It runs at three points:
   A draft is left untouched, and tried again on the next run, only when its quote gives no
   work order lines or the job has no accepted quote. A quote with lines but no labour figure
   is filled with lines only. A dry run fills nothing and counts `untouched_drafts`.
+- The automatic issue (`auto_issue_job_work_orders` and the `update_job_status` hook), only
+  while `job_work_order_auto_issue_v1` is on, fills an untouched draft nobody has edited by
+  hand before issuing it (`docs/job-work-orders-v1.md`, "Automatic issue").
 
-A fill failure never fails the open, the read or the backfill; the reason is reported
+A fill failure never fails the open, the read, the backfill or the automatic issue; the reason is reported
 instead. An unreadable cost table or quote is a failure (`fill_failed` with
 `code: cost_table_unreadable` / `quote_unreadable`), never a fill on missing rates.
 

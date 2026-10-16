@@ -4629,7 +4629,7 @@ seeded off. Contract and API: `docs/job-work-orders-v1.md`.
 An untouched job draft is filled from the accepted quote revision only (never
 one frozen after acceptance, never live pricing; no accepted revision, no fill) by
 `job_work_order_quote_fill.ts` (pure rules in `quote_work_order_lines.ts`), on
-the staff open and read and in the backfill: never a sealed work order, never a
+the staff open and read, in the backfill and in the automatic issue: never a sealed work order, never a
 draft someone wrote into, and the rates come only from the quote itself and
 the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
 carry a rate, amount, percent or money word. Rules:
