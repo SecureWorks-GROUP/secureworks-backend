@@ -1,4 +1,4 @@
--- Prerequisites for 20261015120000_dispatch_deliveries. Earlier registered cases create
+-- Prerequisites for 20261016150000_dispatch_deliveries. Earlier registered cases create
 -- public.users (id primary key) and public.purchase_orders with the live columns slice 6 reads
 -- (delivery dates added here, nullable, as live has them) and the live trg_po_updated trigger.
 DO $$

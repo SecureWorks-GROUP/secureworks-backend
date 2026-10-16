@@ -1,4 +1,4 @@
--- Rollback contract: 20261015120000_dispatch_deliveries. The down drops the check and the six
+-- Rollback contract: 20261016150000_dispatch_deliveries. The down drops the check and the six
 -- columns and leaves purchase_orders, its dates and delivery_confirmed_at in place.
 \set ON_ERROR_STOP on
 DO $$
