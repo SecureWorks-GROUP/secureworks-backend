@@ -7,9 +7,13 @@
 --
 -- What it does. context_job_record_timeline only. A sent or accepted line gains "; for: <section words>"
 -- before "; scope: ". The words, in order, and only the first source that has any:
---   1. the newest quote_revisions row for that document: pricing_snapshot_json.raw.runs, run_name else
---      run_label;
---   2. else job_documents.data_snapshot_json.run, the same two keys, when that value is an object;
+--   1. this document's own run, job_documents.data_snapshot_json.run when that value is an object:
+--      run_name, else run_label, else name (send-runs stores each run document's run there);
+--   2. else the newest quote_revisions row for that document: pricing_snapshot_json.raw.runs, the same
+--      three keys. That snapshot is the whole job's pricing_json, not this quote's, so a document with a
+--      run_label keeps only the runs whose run_label, run_name or name is that label (spacing and case
+--      ignored), and names nothing when none is; a document with no run_label is a whole-job quote and
+--      names every run;
 --   3. else that revision's raw.job_description;
 --   4. else up to three of that revision's raw.line_items descriptions, with no price attached;
 --   5. else jobs.pricing_json.runs (name, else run_name, else run_label) only when this document is
@@ -18,8 +22,8 @@
 -- A blank name, and a name that is only "run" or "runs", is skipped. Repeated names keep the earliest.
 -- The phrase is cut at 80 characters. Its length is taken off the scope's room, the same way the extras
 -- are, so the line stays within 360 characters and a long scope is still cut before the extras. Viewed,
--- declined, generated and superseded-event lines gain nothing. Neighbour names and addresses, the job's
--- line items, and jobs.scope_json are not read. amount, kind, state, every other line and the row order
+-- declined, generated and superseded-event lines gain nothing. The run_label alone is never the phrase.
+-- Neighbour names and addresses, the job's line items, and jobs.scope_json are not read. amount, kind, state, every other line and the row order
 -- are unchanged. The story's card hash leaves out every what.
 --
 -- No table or column is added. Production already has quote_revisions.pricing_snapshot_json and
@@ -28,7 +32,7 @@
 -- after this lands.
 --
 -- Replaced body (guarded on its live md5, the 20261011130000 body fca5eda750a40bbf1f2d8f0e7cf33055,
--- and this body on re-apply, 97d773b91b6789b0e54f8cc2c809cd48): context_job_record_timeline. The vision policy is not
+-- and this body on re-apply, 0bee62495835e22f6ac80393e3a58fbb): context_job_record_timeline. The vision policy is not
 -- replaced. Signature, volatility, owner and grants stay. The comment keeps its slice names first.
 -- Rollback: supabase/rollbacks/20261018140000_context_quote_ask_link_down.sql (the record-scope
 -- timeline body and its comment, word for word; the vision policy stays; no row touched).
@@ -40,7 +44,7 @@ DO $guard$
 DECLARE problems text[] := '{}'; live text; x record; f text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['fca5eda750a40bbf1f2d8f0e7cf33055', '97d773b91b6789b0e54f8cc2c809cd48'])
+  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['fca5eda750a40bbf1f2d8f0e7cf33055', '0bee62495835e22f6ac80393e3a58fbb'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
@@ -260,12 +264,14 @@ AS $fn$
   CROSS JOIN LATERAL (VALUES ('generated', d.created_at), ('sent', d.sent_at), ('viewed', d.viewed_at),
        ('accepted', d.accepted_at), ('declined', d.declined_at), ('superseded', d.superseded_at)) q(ev, at)
   -- (quote ask link, 20261018140000) before that scope, a sent or accepted line adds "; for: " and what
-  -- the quote is for. The words come from the quote's own data, in order: the newest quote_revisions
-  -- pricing snapshot's run names (run_name, else run_label; a blank name and a bare run or runs are
-  -- skipped), else data_snapshot_json.run the same way, else that snapshot's job_description, else up
-  -- to three of its line descriptions with no price, else jobs.pricing_json.runs (name, else run_name,
-  -- else run_label) only when this document is the one current client quote. Never a neighbour name or
-  -- address, and never the job's line items. The phrase is cut at 80 characters. Its length comes off
+  -- the quote is for. The words come from the quote's own data, in order: the document's own run
+  -- (data_snapshot_json.run when an object: run_name, else run_label, else name; a blank name and a bare
+  -- run or runs are skipped), else the newest quote_revisions pricing snapshot's run names the same way
+  -- (that snapshot is the whole job's price record, so a document with a run_label keeps only the runs
+  -- that label names, and none when none match), else that snapshot's job_description, else up to three
+  -- of its line descriptions with no price, else jobs.pricing_json.runs (name, else run_name, else
+  -- run_label) only when this document is the one current client quote. Never a neighbour name or
+  -- address, never the run_label alone, and never the job's line items. The phrase is cut at 80 characters. Its length comes off
   -- the scope's room, the same way the extras do, so a long scope is still cut before the extras.
   -- (record scope, 20261011130000) qb.base is the line's earlier words; a sent or accepted line adds what
   -- the quote sold: its own price-free scope summary (trade_pack_json.summary) and the custom extra
@@ -332,8 +338,14 @@ AS $fn$
                                                                AND NOT coalesce(o.superseded_at <= p_as_of, false)) END) e) AS extras,
                       CASE WHEN q.ev IN ('sent', 'accepted') THEN (
                        SELECT CASE WHEN length(picked.phrase) > 80 THEN left(picked.phrase, 79) || '…' ELSE picked.phrase END
-                       FROM (SELECT coalesce(rev_runs.names, snap_run.name, job_desc.descr, item_names.names, job_runs.names) AS phrase
+                       FROM (SELECT coalesce(snap_run.name, rev_runs.names, job_desc.descr, item_names.names, job_runs.names) AS phrase
                              FROM (SELECT 1) seed
+                             LEFT JOIN LATERAL (
+                               SELECT coalesce(CASE WHEN jsonb_typeof(snap.r -> 'run_name') = 'string' AND btrim(regexp_replace(snap.r ->> 'run_name', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(snap.r ->> 'run_name', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(snap.r ->> 'run_name', '\s+', ' ', 'g')) END,
+                         CASE WHEN jsonb_typeof(snap.r -> 'run_label') = 'string' AND btrim(regexp_replace(snap.r ->> 'run_label', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(snap.r ->> 'run_label', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(snap.r ->> 'run_label', '\s+', ' ', 'g')) END,
+                         CASE WHEN jsonb_typeof(snap.r -> 'name') = 'string' AND btrim(regexp_replace(snap.r ->> 'name', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(snap.r ->> 'name', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(snap.r ->> 'name', '\s+', ' ', 'g')) END) AS name
+                               FROM (SELECT CASE WHEN jsonb_typeof(d.data_snapshot_json -> 'run') = 'object'
+                                                 THEN d.data_snapshot_json -> 'run' END AS r) snap) snap_run ON true
                              LEFT JOIN LATERAL (
                                SELECT r.pricing_snapshot_json AS snap
                                FROM public.quote_revisions r
@@ -346,14 +358,15 @@ AS $fn$
                                                              THEN rev.snap #> '{raw,runs}' ELSE '[]'::jsonb END)
                                    WITH ORDINALITY it(v, ord)
                               CROSS JOIN LATERAL (SELECT coalesce(CASE WHEN jsonb_typeof(it.v -> 'run_name') = 'string' AND btrim(regexp_replace(it.v ->> 'run_name', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(it.v ->> 'run_name', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(it.v ->> 'run_name', '\s+', ' ', 'g')) END,
-                         CASE WHEN jsonb_typeof(it.v -> 'run_label') = 'string' AND btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g')) END) AS name) nm
+                         CASE WHEN jsonb_typeof(it.v -> 'run_label') = 'string' AND btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g')) END,
+                         CASE WHEN jsonb_typeof(it.v -> 'name') = 'string' AND btrim(regexp_replace(it.v ->> 'name', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(it.v ->> 'name', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(it.v ->> 'name', '\s+', ' ', 'g')) END) AS name) nm
                               WHERE jsonb_typeof(it.v) = 'object' AND nm.name IS NOT NULL
+                                AND (d.run_label IS NULL
+                                     OR lower(btrim(regexp_replace(d.run_label, '\s+', ' ', 'g'))) IN (
+                                          CASE WHEN jsonb_typeof(it.v -> 'run_label') = 'string' THEN lower(btrim(regexp_replace(it.v ->> 'run_label', '\s+', ' ', 'g'))) END,
+                                          CASE WHEN jsonb_typeof(it.v -> 'run_name') = 'string' THEN lower(btrim(regexp_replace(it.v ->> 'run_name', '\s+', ' ', 'g'))) END,
+                                          CASE WHEN jsonb_typeof(it.v -> 'name') = 'string' THEN lower(btrim(regexp_replace(it.v ->> 'name', '\s+', ' ', 'g'))) END))
                               GROUP BY nm.name) g) AS names) rev_runs ON true
-                             LEFT JOIN LATERAL (
-                               SELECT coalesce(CASE WHEN jsonb_typeof(snap.r -> 'run_name') = 'string' AND btrim(regexp_replace(snap.r ->> 'run_name', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(snap.r ->> 'run_name', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(snap.r ->> 'run_name', '\s+', ' ', 'g')) END,
-                         CASE WHEN jsonb_typeof(snap.r -> 'run_label') = 'string' AND btrim(regexp_replace(snap.r ->> 'run_label', '\s+', ' ', 'g')) <> '' AND lower(btrim(regexp_replace(snap.r ->> 'run_label', '\s+', ' ', 'g'))) NOT IN ('run', 'runs') THEN btrim(regexp_replace(snap.r ->> 'run_label', '\s+', ' ', 'g')) END) AS name
-                               FROM (SELECT CASE WHEN jsonb_typeof(d.data_snapshot_json -> 'run') = 'object'
-                                                 THEN d.data_snapshot_json -> 'run' END AS r) snap) snap_run ON true
                              LEFT JOIN LATERAL (
                                SELECT nullif(btrim(regexp_replace(
                                         CASE WHEN jsonb_typeof(rev.snap #> '{raw,job_description}') = 'string'
@@ -787,4 +800,4 @@ AS $fn$
  ORDER BY m.job_id, m.at, m.kind COLLATE "C", m.source_id COLLATE "C", m.what COLLATE "C"
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
- 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (record scope, 20261011130000) (quote ask link, 20261018140000) a sent or accepted quote line also says what the quote is for, before the scope, in "; for: ". The words are the quote''s own section names: its newest revision''s run names, else the document snapshot''s run, else that revision''s job description, else up to three of its line descriptions without their prices, else the job''s run names only when this document is the one current client quote. They are price-free and carry no neighbour name or address. a sent or accepted quote line''s what adds what the quote sold: "; scope: " and the document''s own price-free scope summary (trade_pack_json.summary), then "; extras: " and up to 3 custom extra lines of the job''s price record (pricing_json.line_items, category custom; ", and N more" beyond) each with its sell price ex GST (total_sell, else sell_price times quantity). An extra is the document''s when its words are one of its own quote lines (trade_pack_json.quote_lines, case and spacing ignored); a document with no quote lines takes the job''s extras only when it is the job''s one current client quote (no party, no run, no other client quote sent and not superseded as of p_as_of); a document superseded as of p_as_of shows its scope and no price. what stays within 360 characters (the scope is cut first, with an ellipsis). amount is unchanged (the quote''s value inc GST). Prices stay on this service-role read and the staff surfaces built on it, never a trade one. Earlier, story safety: a booking change on a ghost or observer row (is_ghost, or role observer), or one its writer tags as a ghost copy, is booking_mirror (an observer copy, never "Booking made"); a supplier bill whose lines name other jobs says it is shared and gives this job''s lines; first contact never comes from a text dated before the job''s lead window (context_job_record_messages). Earlier, story fixes: app events the ledger store lets close a matter (quote_sent, invoice.emailed, acceptance_invoice_sent, payment_link_sent, payment_received, payment_recorded, clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted) are lines citing job_events, one per event type, matter and Perth day (the newest cited, the count named; a folded clock-off gives the day''s net hours, every stint added, or none), each with state = its event_type, or not_delivered when it names a document whose every email bounced or failed and the customer never viewed or answered it; rows sort by time, then kind, source and words in C (byte) order. Earlier: one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
+ 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (record scope, 20261011130000) (quote ask link, 20261018140000) a sent or accepted quote line also says what the quote is for, before the scope, in "; for: ". The words are this quote''s own: the document snapshot''s run (run_name, else run_label, else name), else its newest revision''s run names (that snapshot is the whole job''s price record, so a document with a run_label names only the runs that label names), else that revision''s job description, else up to three of its line descriptions without their prices, else the job''s run names only when this document is the one current client quote. They are price-free and carry no neighbour name or address. a sent or accepted quote line''s what adds what the quote sold: "; scope: " and the document''s own price-free scope summary (trade_pack_json.summary), then "; extras: " and up to 3 custom extra lines of the job''s price record (pricing_json.line_items, category custom; ", and N more" beyond) each with its sell price ex GST (total_sell, else sell_price times quantity). An extra is the document''s when its words are one of its own quote lines (trade_pack_json.quote_lines, case and spacing ignored); a document with no quote lines takes the job''s extras only when it is the job''s one current client quote (no party, no run, no other client quote sent and not superseded as of p_as_of); a document superseded as of p_as_of shows its scope and no price. what stays within 360 characters (the scope is cut first, with an ellipsis). amount is unchanged (the quote''s value inc GST). Prices stay on this service-role read and the staff surfaces built on it, never a trade one. Earlier, story safety: a booking change on a ghost or observer row (is_ghost, or role observer), or one its writer tags as a ghost copy, is booking_mirror (an observer copy, never "Booking made"); a supplier bill whose lines name other jobs says it is shared and gives this job''s lines; first contact never comes from a text dated before the job''s lead window (context_job_record_messages). Earlier, story fixes: app events the ledger store lets close a matter (quote_sent, invoice.emailed, acceptance_invoice_sent, payment_link_sent, payment_received, payment_recorded, clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted) are lines citing job_events, one per event type, matter and Perth day (the newest cited, the count named; a folded clock-off gives the day''s net hours, every stint added, or none), each with state = its event_type, or not_delivered when it names a document whose every email bounced or failed and the customer never viewed or answered it; rows sort by time, then kind, source and words in C (byte) order. Earlier: one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';

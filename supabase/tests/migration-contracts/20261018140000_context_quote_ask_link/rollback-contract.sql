@@ -60,7 +60,7 @@ DO $re$
 DECLARE w text;
 BEGIN
  PERFORM pg_temp.qal_rb_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_job_record_timeline(uuid[],timestamptz)'::regprocedure)
-   = '97d773b91b6789b0e54f8cc2c809cd48', 'the migration did not re-apply its timeline');
+   = '0bee62495835e22f6ac80393e3a58fbb', 'the migration did not re-apply its timeline');
  PERFORM pg_temp.qal_rb_assert(obj_description('public.context_job_record_timeline(uuid[],timestamptz)'::regprocedure, 'pg_proc')
    LIKE '%(quote ask link, 20261018140000)%', 'the migration did not re-apply its comment');
  PERFORM pg_temp.qal_rb_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_document_vision_policy()'::regprocedure)

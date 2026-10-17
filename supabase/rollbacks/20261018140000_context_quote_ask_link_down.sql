@@ -10,7 +10,7 @@ DECLARE problems text[] := '{}'; live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p
  WHERE p.oid = to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)');
- IF live IS NULL OR NOT live = ANY (ARRAY['97d773b91b6789b0e54f8cc2c809cd48', 'fca5eda750a40bbf1f2d8f0e7cf33055']) THEN
+ IF live IS NULL OR NOT live = ANY (ARRAY['0bee62495835e22f6ac80393e3a58fbb', 'fca5eda750a40bbf1f2d8f0e7cf33055']) THEN
   RAISE EXCEPTION 'context_quote_ask_link_down_refused: context_job_record_timeline md5 %; a later change replaced this body, roll it back first',
    coalesce(live, '<missing>');
  END IF;

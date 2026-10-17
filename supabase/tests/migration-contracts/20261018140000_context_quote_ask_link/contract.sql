@@ -2,9 +2,10 @@
 -- Names and quote numbers are synthetic. The fixed instant is 2026-10-18 05:00Z.
 --
 -- A sent or accepted quote line gains "; for: <what this quote is for>" before "; scope:".
--- The words come from that quote's own data, first source that has any: the newest
--- revision's run names, else the document snapshot's run, else that revision's job
--- description, else up to three of its line descriptions with no price, else the job's
+-- The words come from that quote's own data, first source that has any: the document
+-- snapshot's own run, else the newest revision's run names (that snapshot is the whole
+-- job's price record, so a document with a run_label keeps only the runs that label
+-- names), else that revision's job description, else up to three of its line descriptions with no price, else the job's
 -- run names only when this document is the one current client quote. A blank name and
 -- a name that is only "run" or "runs" is skipped. Viewed, declined, generated and the
 -- superseded event gain nothing. A neighbour name or address is never copied.
@@ -60,7 +61,7 @@ DECLARE p record;
 BEGIN
  SELECT pr.prosecdef, pr.provolatile, pr.proconfig, md5(pr.prosrc) AS m INTO p
  FROM pg_proc pr WHERE pr.oid = to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)');
- PERFORM pg_temp.qal_assert(p.m = '97d773b91b6789b0e54f8cc2c809cd48', 'timeline md5 ' || coalesce(p.m, '<missing>'));
+ PERFORM pg_temp.qal_assert(p.m = '0bee62495835e22f6ac80393e3a58fbb', 'timeline md5 ' || coalesce(p.m, '<missing>'));
  PERFORM pg_temp.qal_assert(p.prosecdef AND p.provolatile = 's' AND p.proconfig = ARRAY['search_path=public, pg_temp'],
   'timeline flags changed');
  PERFORM pg_temp.qal_assert(has_function_privilege('service_role', 'public.context_job_record_timeline(uuid[],timestamptz)', 'EXECUTE')
@@ -199,6 +200,30 @@ SELECT pg_temp.qal_rev('8ae00000-0000-4000-8000-0000000000d1', '8a000000-0000-40
  '8ad00000-0000-4000-8000-0000000000d1', 1,
  jsonb_build_object('raw', jsonb_build_object('runs', jsonb_build_array(jsonb_build_object('run_name', repeat('Rear ', 30))))));
 
+-- Send-runs shape: one revision, on the first run document only, lists every run on the job.
+-- Each run document carries its own run, and each line names only that run.
+SELECT pg_temp.qal_job('8a000000-0000-4000-8000-00000000000f', 'SWF-QAL-15', '{"runs":[{"name":"Rear"},{"name":"Front"}]}');
+SELECT pg_temp.qal_doc('8ad00000-0000-4000-8000-0000000000f1', '8a000000-0000-4000-8000-00000000000f', 'Q-2401',
+ '2026-10-01 01:00Z', NULL, NULL, NULL, NULL, 'Rear', NULL, '{"run":{"run_name":"Rear"}}');
+SELECT pg_temp.qal_doc('8ad00000-0000-4000-8000-0000000000f2', '8a000000-0000-4000-8000-00000000000f', 'Q-2402',
+ '2026-10-01 01:00Z', NULL, NULL, NULL, NULL, 'Front', NULL, '{"run":{"run_name":"Front"}}');
+SELECT pg_temp.qal_rev('8ae00000-0000-4000-8000-0000000000f1', '8a000000-0000-4000-8000-00000000000f',
+ '8ad00000-0000-4000-8000-0000000000f1', 1, '{"raw":{"runs":[{"run_name":"Rear","run_label":"Rear"},{"run_name":"Front","run_label":"Front"}]}}');
+
+-- A run document with no snapshot run keeps only the revision run its run_label names.
+SELECT pg_temp.qal_job('8a000000-0000-4000-8000-000000000010', 'SWF-QAL-16', NULL);
+SELECT pg_temp.qal_doc('8ad00000-0000-4000-8000-000000000101', '8a000000-0000-4000-8000-000000000010', 'Q-2501',
+ '2026-10-01 01:00Z', NULL, NULL, NULL, NULL, 'Front');
+SELECT pg_temp.qal_rev('8ae00000-0000-4000-8000-000000000101', '8a000000-0000-4000-8000-000000000010',
+ '8ad00000-0000-4000-8000-000000000101', 1, '{"raw":{"runs":[{"run_name":"Rear","run_label":"Rear"},{"run_name":"Front","run_label":"Front"}]}}');
+
+-- A document's own run named only by name wins over its revision's job-wide runs.
+SELECT pg_temp.qal_job('8a000000-0000-4000-8000-000000000011', 'SWF-QAL-17', NULL);
+SELECT pg_temp.qal_doc('8ad00000-0000-4000-8000-000000000111', '8a000000-0000-4000-8000-000000000011', 'Q-2601',
+ '2026-10-01 01:00Z', NULL, NULL, NULL, NULL, NULL, NULL, '{"run":{"name":"Side Return"}}');
+SELECT pg_temp.qal_rev('8ae00000-0000-4000-8000-000000000111', '8a000000-0000-4000-8000-000000000011',
+ '8ad00000-0000-4000-8000-000000000111', 1, '{"raw":{"runs":[{"run_name":"Rear"},{"run_name":"Front"}]}}');
+
 -- Odd records do not raise and add no words. A declined line gains nothing.
 SELECT pg_temp.qal_job('8a000000-0000-4000-8000-00000000000e', 'SWF-QAL-14', '{"runs":{"name":"Rear"},"line_items":{"custom":1}}');
 SELECT pg_temp.qal_doc('8ad00000-0000-4000-8000-0000000000e1', '8a000000-0000-4000-8000-00000000000e', 'Q-2101',
@@ -211,7 +236,7 @@ DO $cases$
 DECLARE
  rear text; blade text; accepted text; highest text; ignored text; ordered text; side text; descr text; items text;
  sole text; one text; two text; old_sent text; old_event text; viewed text; generated text; rhs text; cut text;
- odd text; declined text; phrase text; n int; amt numeric;
+ odd text; declined text; phrase text; n int; amt numeric; run_rear text; run_front text; labelled text; own_name text;
 BEGIN
  rear := pg_temp.qal_what('8a000000-0000-4000-8000-000000000001', '8ad00000-0000-4000-8000-000000000011', 'sent');
  blade := pg_temp.qal_what('8a000000-0000-4000-8000-000000000001', '8ad00000-0000-4000-8000-000000000012', 'sent');
@@ -290,6 +315,19 @@ BEGIN
   AND cut LIKE '%…; extras: Short extra $10.00 ex GST'
   AND position('Today only' IN cut) = 0, 'cut order: ' || coalesce(cut, '<none>'));
 
+ run_rear := pg_temp.qal_what('8a000000-0000-4000-8000-00000000000f', '8ad00000-0000-4000-8000-0000000000f1', 'sent');
+ run_front := pg_temp.qal_what('8a000000-0000-4000-8000-00000000000f', '8ad00000-0000-4000-8000-0000000000f2', 'sent');
+ PERFORM pg_temp.qal_assert(run_rear LIKE 'Quote Q-2401 v1 (Rear) sent, %' AND pg_temp.qal_for(run_rear) = 'Rear'
+  AND position('Front' IN run_rear) = 0, 'send-runs rear line: ' || coalesce(run_rear, '<none>'));
+ PERFORM pg_temp.qal_assert(run_front LIKE 'Quote Q-2402 v1 (Front) sent, %' AND pg_temp.qal_for(run_front) = 'Front'
+  AND position('Rear' IN run_front) = 0, 'send-runs front line: ' || coalesce(run_front, '<none>'));
+ labelled := pg_temp.qal_what('8a000000-0000-4000-8000-000000000010', '8ad00000-0000-4000-8000-000000000101', 'sent');
+ PERFORM pg_temp.qal_assert(pg_temp.qal_for(labelled) = 'Front' AND position('Rear' IN labelled) = 0,
+  'run label filter: ' || coalesce(labelled, '<none>'));
+ own_name := pg_temp.qal_what('8a000000-0000-4000-8000-000000000011', '8ad00000-0000-4000-8000-000000000111', 'sent');
+ PERFORM pg_temp.qal_assert(pg_temp.qal_for(own_name) = 'Side Return' AND position('Rear' IN own_name) = 0
+  AND position('Front' IN own_name) = 0, 'own run name: ' || coalesce(own_name, '<none>'));
+
  odd := pg_temp.qal_what('8a000000-0000-4000-8000-00000000000e', '8ad00000-0000-4000-8000-0000000000e1', 'sent');
  declined := pg_temp.qal_what('8a000000-0000-4000-8000-00000000000e', '8ad00000-0000-4000-8000-0000000000e1', 'declined');
  PERFORM pg_temp.qal_assert(odd = 'Quote Q-2101 v1 sent, value not recorded (not recorded on the sent quote)' AND position('Rear' IN odd) = 0,
@@ -301,7 +339,8 @@ BEGIN
    '8a000000-0000-4000-8000-000000000004', '8a000000-0000-4000-8000-000000000005', '8a000000-0000-4000-8000-000000000006',
    '8a000000-0000-4000-8000-000000000007', '8a000000-0000-4000-8000-000000000008', '8a000000-0000-4000-8000-000000000009',
    '8a000000-0000-4000-8000-00000000000a', '8a000000-0000-4000-8000-00000000000b', '8a000000-0000-4000-8000-00000000000c',
-   '8a000000-0000-4000-8000-00000000000d', '8a000000-0000-4000-8000-00000000000e']::uuid[], '2026-10-18 05:00Z') t
+   '8a000000-0000-4000-8000-00000000000d', '8a000000-0000-4000-8000-00000000000e', '8a000000-0000-4000-8000-00000000000f',
+   '8a000000-0000-4000-8000-000000000010', '8a000000-0000-4000-8000-000000000011']::uuid[], '2026-10-18 05:00Z') t
  WHERE t.kind = 'quote' AND t.what ~ '[—–]';
  PERFORM pg_temp.qal_assert(n = 0, 'a quote line contains an em dash');
  SELECT t.amount INTO amt FROM public.context_job_record_timeline(ARRAY['8a000000-0000-4000-8000-000000000001'::uuid], '2026-10-18 05:00Z') t
