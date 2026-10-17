@@ -452,9 +452,16 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unrea
        LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
 -- (and first the record scope, 20261011130000, which replaced story safety's record timeline since:
 -- story safety's down refuses while it is live)
+-- (and before that the quote ask link, 20261018140000, which replaced the record-scope timeline
+-- since: the record scope's down refuses while this later body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(quote ask link, 20261018140000)%' AS quote_ask_link_live \gset
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
 BEGIN;
+\if :quote_ask_link_live
+\ir ../../../rollbacks/20261018140000_context_quote_ask_link_down.sql
+\endif
 \if :record_scope_live
 \ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
 \endif

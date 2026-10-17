@@ -1876,6 +1876,13 @@ SELECT (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.contex
 \endif
 \ir ../../../rollbacks/20261013100000_context_call_cap_setting_down.sql
 \endif
+-- (before the record scope, the quote ask link, 20261018140000, which replaced that timeline
+-- since: the record scope's down refuses while this later body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(quote ask link, 20261018140000)%' AS quote_ask_link_live \gset
+\if :quote_ask_link_live
+\ir ../../../rollbacks/20261018140000_context_quote_ask_link_down.sql
+\endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
 \if :record_scope_live

@@ -203,7 +203,14 @@ BEGIN
 END $c6$;
 
 -- 7. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- The quote ask link (20261018140000) replaced this timeline since. Its down goes
+-- first, inside this transaction, so the snapshot is this migration's own body.
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(quote ask link, 20261018140000)%' AS quote_ask_link_live \gset
 BEGIN;
+\if :quote_ask_link_live
+\ir ../../../rollbacks/20261018140000_context_quote_ask_link_down.sql
+\endif
 CREATE TEMP TABLE record_scope_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_job_record_timeline', 'context_document_vision_policy');
