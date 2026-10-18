@@ -271,6 +271,12 @@ ROLLBACK;
 
 -- 4. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (ledger packet records, 20261018120000) replaced the packet since: its down goes first,
+-- inside this transaction only, so the body snapshotted below is this migration's own.
+SELECT to_regprocedure('public.context_ledger_evidence_record_links(uuid,timestamptz,jsonb)') IS NOT NULL AS ledger_packet_records_live \gset
+\if :ledger_packet_records_live
+\ir ../../../rollbacks/20261018120000_context_ledger_packet_records_down.sql
+\endif
 CREATE TEMP TABLE hn_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_held_notes_on', 'context_ledger_held_placed_copy',
