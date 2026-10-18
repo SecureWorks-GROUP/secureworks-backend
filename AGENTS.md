@@ -1,5 +1,10 @@
 # SecureWorks Agent Instructions
 
+## Project folder (six parts, R51)
+Project documents for this repo live on Marnin's Mac, outside the repo: `~/Projects/dispatch/`, `~/Projects/context-system/`, `~/Projects/job-profit/`, `~/Projects/quote-tool/`, `~/Projects/bookkeeping/`.
+Before project work read that folder's `PROJECT.md` and `5-context.md`; log each run in its `6-progress.md`.
+Rules: `~/CLAUDE.md` > Project work. v1, 18 Oct 2026; Rayleigh owns it and may refine it.
+
 ## Builder Portal Links Are Share Paths, Not Host Names
 
 `urlIsBuilderPortalLink` in `supabase/functions/ops-api/makesafe_email_links.ts`
