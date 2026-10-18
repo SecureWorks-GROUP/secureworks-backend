@@ -4,8 +4,7 @@
 // JWT verification stays on (the default deploy): only the service role is
 // accepted, checked again in handler.ts. The run is read.ts; the PDF text
 // layer extractor is make-safe intake's bounded one (no model is called).
-// deno-lint-ignore no-import-prefix
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
+import { createServiceRoleClient } from "../_shared/service_role_client.ts";
 import { extractPdfText } from "../ops-api/makesafe_pdf_text.ts";
 import { handleDocumentText } from "./handler.ts";
 
@@ -13,10 +12,9 @@ Deno.serve((req) =>
   handleDocumentText(req, {
     env: (name) => Deno.env.get(name),
     createSupabase: () =>
-      createClient(
+      createServiceRoleClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-        { auth: { persistSession: false } },
       ),
     extract: extractPdfText,
     // EdgeRuntime is a Supabase-injected global. waitUntil(promise) keeps the

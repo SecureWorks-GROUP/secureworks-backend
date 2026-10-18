@@ -4,18 +4,16 @@
 // on (the default deploy); handler.ts checks the caller again. The run is
 // capture.ts. Reads mail only: it never sends, replies, moves, deletes or
 // marks mail read.
-// deno-lint-ignore no-import-prefix
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
+import { createServiceRoleClient } from "../_shared/service_role_client.ts";
 import { handleCapture } from "./handler.ts";
 
 Deno.serve((req) =>
   handleCapture(req, {
     env: (name) => Deno.env.get(name),
     createSupabase: () =>
-      createClient(
+      createServiceRoleClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-        { auth: { persistSession: false } },
       ),
     // EdgeRuntime is a Supabase-injected global. waitUntil(promise) keeps the
     // worker alive until the run settles after the 202 is returned.

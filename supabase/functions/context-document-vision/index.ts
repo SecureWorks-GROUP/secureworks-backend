@@ -6,9 +6,8 @@
 // context reader already uses; this function calls no model. Off until
 // feature flag context_document_vision_v1. JWT verification stays on.
 // deno-lint-ignore no-import-prefix
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
-// deno-lint-ignore no-import-prefix
 import { getDocumentProxy } from "npm:unpdf@1.6.2";
+import { createServiceRoleClient } from "../_shared/service_role_client.ts";
 import { handleDocumentVision } from "./handler.ts";
 
 async function pageCount(bytes: Uint8Array): Promise<number | null> {
@@ -33,10 +32,9 @@ Deno.serve((req) =>
   handleDocumentVision(req, {
     env: (name) => Deno.env.get(name),
     createSupabase: () =>
-      createClient(
+      createServiceRoleClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-        { auth: { persistSession: false } },
       ),
     pageCount,
   })
