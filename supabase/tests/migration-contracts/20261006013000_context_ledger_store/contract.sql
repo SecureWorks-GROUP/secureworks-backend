@@ -164,13 +164,15 @@ BEGIN
  -- rule for a row a reading has not read, context_ledger_row_unread, is plain SQL with no SET
  -- read inside the definer judge, due list, sweep and story ledger read; and by ledger packet
  -- records, 20261018120000: context_ledger_record_invoice_about, context_ledger_record_link_about
- -- and context_ledger_record_uuid are plain SQL with no SET, read inside the definer packet)
+ -- and context_ledger_record_uuid, context_ledger_record_trim and context_ledger_record_money
+ -- are plain SQL with no SET, read inside the definer packet)
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
     'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes',
     'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_ledger_row_unread',
-    'context_ledger_record_invoice_about', 'context_ledger_record_link_about', 'context_ledger_record_uuid') THEN
+    'context_ledger_record_invoice_about', 'context_ledger_record_link_about', 'context_ledger_record_uuid',
+    'context_ledger_record_trim', 'context_ledger_record_money') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');

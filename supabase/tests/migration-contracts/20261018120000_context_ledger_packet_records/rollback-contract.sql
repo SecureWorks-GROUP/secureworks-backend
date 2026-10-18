@@ -16,8 +16,14 @@ BEGIN
   OR to_regprocedure('public.context_ledger_comm_log_links(uuid,timestamptz,jsonb)') IS NOT NULL
   OR to_regprocedure('public.context_ledger_record_link_about(text)') IS NOT NULL
   OR to_regprocedure('public.context_ledger_record_invoice_about(text)') IS NOT NULL
-  OR to_regprocedure('public.context_ledger_record_uuid(text)') IS NOT NULL THEN
+  OR to_regprocedure('public.context_ledger_record_uuid(text)') IS NOT NULL
+  OR to_regprocedure('public.context_ledger_record_trim(text)') IS NOT NULL
+  OR to_regprocedure('public.context_ledger_record_money(numeric)') IS NOT NULL THEN
   RAISE EXCEPTION 'ledger packet records rollback: a helper is still there';
+ END IF;
+ IF to_regclass('public.communications_log_ledger_business_event_idx') IS NOT NULL
+  OR to_regclass('public.communications_log_ledger_inbox_event_idx') IS NOT NULL THEN
+  RAISE EXCEPTION 'ledger packet records rollback: a communications_log index is still there';
  END IF;
 END $shape$;
 

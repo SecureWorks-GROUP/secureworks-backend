@@ -169,3 +169,7 @@ DROP FUNCTION IF EXISTS public.context_ledger_comm_log_links(uuid, timestamptz, 
 DROP FUNCTION IF EXISTS public.context_ledger_record_link_about(text);
 DROP FUNCTION IF EXISTS public.context_ledger_record_invoice_about(text);
 DROP FUNCTION IF EXISTS public.context_ledger_record_uuid(text);
+DROP FUNCTION IF EXISTS public.context_ledger_record_money(numeric);
+DROP FUNCTION IF EXISTS public.context_ledger_record_trim(text);
+DROP INDEX IF EXISTS public.communications_log_ledger_business_event_idx;
+DROP INDEX IF EXISTS public.communications_log_ledger_inbox_event_idx;

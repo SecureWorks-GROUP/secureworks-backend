@@ -14,6 +14,8 @@ DECLARE
   'public.context_ledger_record_invoice_about(text)',
   'public.context_ledger_record_link_about(text)',
   'public.context_ledger_record_uuid(text)',
+  'public.context_ledger_record_trim(text)',
+  'public.context_ledger_record_money(numeric)',
   'public.context_ledger_comm_log_links(uuid,timestamptz,jsonb)',
   'public.context_ledger_evidence_record_links(uuid,timestamptz,jsonb)'];
 BEGIN
@@ -68,7 +70,21 @@ BEGIN
     IS DISTINCT FROM '18f00000-0000-4000-8000-000000000101'::uuid THEN
   RAISE EXCEPTION 'ledger packet records shape: uuid parse';
  END IF;
- n := n + 7;
+ IF public.context_ledger_record_trim(U&'\00A0') IS NOT NULL
+  OR public.context_ledger_record_trim(E'\tAcme\n') IS DISTINCT FROM 'Acme'
+  OR public.context_ledger_record_trim(U&'Acme\00A0Metals') IS DISTINCT FROM U&'Acme\00A0Metals'
+  OR public.context_ledger_record_trim(U&'\200B') IS DISTINCT FROM U&'\200B' THEN
+  RAISE EXCEPTION 'ledger packet records shape: javascript trim';
+ END IF;
+ IF public.context_ledger_record_money(90) IS DISTINCT FROM '90.00'
+  OR public.context_ledger_record_money(10.10) IS DISTINCT FROM '10.10'
+  OR public.context_ledger_record_money(0.10) IS DISTINCT FROM '0.10'
+  OR public.context_ledger_record_money(1000000000.50) IS DISTINCT FROM '1000000000.50'
+  OR public.context_ledger_record_money(0) IS NOT NULL
+  OR public.context_ledger_record_money(-1) IS NOT NULL THEN
+  RAISE EXCEPTION 'ledger packet records shape: money text %', public.context_ledger_record_money(1000000000.50);
+ END IF;
+ n := n + 9;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p
   WHERE p.oid = to_regprocedure('public.context_ledger_packet(uuid,timestamptz,timestamptz)');
  IF live IS DISTINCT FROM '4d99c79138a3b9de41b2957145addeb2' THEN
@@ -398,6 +414,8 @@ BEGIN
  RAISE NOTICE 'ledger packet records behaviour checks: %', current_setting('lpr.n', true);
 END $proof$;
 
+\ir review_scenarios.sql
+
 ROLLBACK;
 
 \ir ../../../migrations/20261018120000_context_ledger_packet_records.sql
@@ -411,3 +429,92 @@ BEGIN
   RAISE EXCEPTION 'ledger packet records shape: reapply md5 %', live;
  END IF;
 END $re$;
+
+-- Same seed the review measured: 100,000 communications_log rows, 20,000 of
+-- them attached, 80 source ids, zero of those ids in the bulk business_event_id
+-- column. One planted row matches. The table is created here, after the
+-- migration, so the partial indexes are absent and the bound is the unindexed
+-- plan. Rolled back so later contracts do not inherit the seed.
+BEGIN;
+SET LOCAL session_replication_role = replica;
+SET LOCAL statement_timeout = '120s';
+SET LOCAL jit = off;
+
+INSERT INTO public.jobs (id, org_id, status, type, job_number, client_name, client_email, ghl_contact_id, site_suburb, metadata, created_at)
+VALUES ('18f60000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000aa', 'scheduled', 'fencing', 'SWF-LPRPERF1',
+ 'Perf Client', 'perf@example.test', 'lpr-perf', 'Testville', '{}', '2026-09-01 00:00Z');
+
+INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at)
+VALUES ('18f60000-0000-4000-8000-000000000301', '18f60000-0000-4000-8000-000000000001', 'quote', 'Q-77', 1, '2026-10-01 00:00Z', NULL);
+
+CREATE TABLE IF NOT EXISTS public.communications_log (
+ id uuid PRIMARY KEY,
+ has_attachments boolean,
+ document_id uuid,
+ business_event_id uuid,
+ created_at timestamptz
+);
+
+INSERT INTO public.communications_log (id, has_attachments, document_id, business_event_id, created_at)
+SELECT ('18f63000-0000-4000-8000-' || lpad(g::text, 12, '0'))::uuid,
+ g <= 20000,
+ CASE WHEN g <= 20000 THEN '18f60000-0000-4000-8000-000000000301'::uuid ELSE NULL END,
+ ('18f61000-0000-4000-8000-' || lpad(g::text, 12, '0'))::uuid,
+ '2026-10-01 00:00Z'
+FROM generate_series(1, 100000) g;
+
+UPDATE public.communications_log
+SET business_event_id = '18f62000-0000-4000-8000-000000000001',
+    has_attachments = true,
+    document_id = '18f60000-0000-4000-8000-000000000301',
+    created_at = '2026-10-01 00:00Z'
+WHERE id = '18f63000-0000-4000-8000-000000000001';
+
+ANALYZE public.communications_log;
+
+DO $perf$
+DECLARE
+ sources jsonb;
+ plan text;
+ ms numeric;
+ hits int;
+ about text;
+ doc text;
+BEGIN
+ IF to_regclass('public.communications_log_ledger_business_event_idx') IS NOT NULL
+  OR to_regclass('public.communications_log_ledger_inbox_event_idx') IS NOT NULL THEN
+  RAISE EXCEPTION 'ledger packet records contract: performance seed is indexed';
+ END IF;
+ SELECT jsonb_agg(jsonb_build_object(
+   'table', 'business_events',
+   'id', '18f62000-0000-4000-8000-' || lpad(g::text, 12, '0')) ORDER BY g)
+  INTO sources
+ FROM generate_series(1, 80) g;
+ EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM public.context_ledger_comm_log_links($1, $2, $3)'
+  INTO plan
+  USING '18f60000-0000-4000-8000-000000000001'::uuid, '2026-10-18 00:00+00'::timestamptz, sources;
+ ms := (plan::jsonb->0->>'Execution Time')::numeric;
+ RAISE NOTICE 'ledger packet records comm log links ms: %', ms;
+ IF ms >= 500 THEN
+  RAISE EXCEPTION 'ledger packet records contract: comm log links % ms', ms;
+ END IF;
+ SELECT count(*)::int, min(c.rec->>'about'), min(c.rec->>'document_id')
+  INTO hits, about, doc
+ FROM public.context_ledger_comm_log_links(
+  '18f60000-0000-4000-8000-000000000001', '2026-10-18 00:00+00', sources) c;
+ IF hits IS DISTINCT FROM 1
+  OR about IS DISTINCT FROM 'quote:q-77'
+  OR doc IS DISTINCT FROM '18f60000-0000-4000-8000-000000000301' THEN
+  RAISE EXCEPTION 'ledger packet records contract: planted attachment % % %', hits, about, doc;
+ END IF;
+ EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM public.context_ledger_evidence_record_links($1, $2, $3)'
+  INTO plan
+  USING '18f60000-0000-4000-8000-000000000001'::uuid, '2026-10-18 00:00+00'::timestamptz, sources;
+ ms := (plan::jsonb->0->>'Execution Time')::numeric;
+ RAISE NOTICE 'ledger packet records evidence record links ms: %', ms;
+ IF ms >= 500 THEN
+  RAISE EXCEPTION 'ledger packet records contract: evidence record links % ms', ms;
+ END IF;
+END $perf$;
+
+ROLLBACK;

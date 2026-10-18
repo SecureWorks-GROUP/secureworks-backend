@@ -3,6 +3,9 @@
 -- context_ledger_packet stays ledger-packet-v1. Evidence rows gain an optional
 -- records array; every earlier key is unchanged and the key is left off when
 -- there is nothing to cite. Held rows are not evidence and carry none.
+-- A supplier or event_type is emitted only after the same trim JavaScript
+-- uses, and a communications_log link is found from the source ids, not by
+-- scanning every attached row first.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -50,7 +53,8 @@ BEGIN
  FOR x IN SELECT p.oid::regprocedure::text AS sig, coalesce(obj_description(p.oid, 'pg_proc'), '') AS c
   FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace
    AND p.proname IN ('context_ledger_record_invoice_about', 'context_ledger_record_link_about',
-    'context_ledger_record_uuid', 'context_ledger_comm_log_links', 'context_ledger_evidence_record_links') LOOP
+    'context_ledger_record_uuid', 'context_ledger_record_trim', 'context_ledger_record_money',
+    'context_ledger_comm_log_links', 'context_ledger_evidence_record_links') LOOP
   IF x.c NOT LIKE 'Ledger packet records (20261018120000)%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -109,17 +113,56 @@ $fn$;
 COMMENT ON FUNCTION public.context_ledger_record_uuid(text) IS
  'Ledger packet records (20261018120000): a stored uuid, or null when the text is not one. Never casts a token.';
 
+-- JavaScript String.prototype.trim, not btrim. btrim strips only U+0020, and a
+-- supplier or event_type made of a tab, newline or NBSP was emitted and then
+-- rejected the whole packet. The class is the ECMA-262 WhiteSpace and
+-- LineTerminator set: HT LF VT FF CR SP, NBSP, Ogham, U+2000-U+200A, line and
+-- paragraph separators, narrow NBSP, medium mathematical space, ideographic
+-- space, and BOM. U+200B is not in that set and is left in place.
+CREATE OR REPLACE FUNCTION public.context_ledger_record_trim(p_raw text)
+RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $fn$
+ SELECT nullif(regexp_replace(
+  p_raw,
+  U&'^[\0009\000A\000B\000C\000D\0020\00A0\1680\2000-\200A\2028\2029\202F\205F\3000\FEFF]+|[\0009\000A\000B\000C\000D\0020\00A0\1680\2000-\200A\2028\2029\202F\205F\3000\FEFF]+$',
+  '',
+  'g'), '')
+$fn$;
+COMMENT ON FUNCTION public.context_ledger_record_trim(text) IS
+ 'Ledger packet records (20261018120000): JavaScript trim. Empty after that trim is null, and the trimmed text is what a link emits.';
+
+-- numeric(12,2) is ten digits before the point. to_char with nine digit
+-- positions overflows those to hashes and the link disappears. round keeps
+-- two decimal places and cannot overflow the text.
+CREATE OR REPLACE FUNCTION public.context_ledger_record_money(p_total numeric)
+RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $fn$
+ SELECT CASE
+  WHEN p_total IS NULL OR p_total <= 0 THEN NULL
+  ELSE round(p_total, 2)::text
+ END
+$fn$;
+COMMENT ON FUNCTION public.context_ledger_record_money(numeric) IS
+ 'Ledger packet records (20261018120000): a positive amount with two decimal places, or null. Ten-digit totals stay digits.';
+
 -- 2. communications_log is not in this repository. When a deployment has the
 -- table, an attachment link needs its own row id, has_attachments true, a uuid
 -- document column, and that document on this job with an about key. No table,
 -- no boolean, or no document id: no link, and no id is invented.
+-- The lookup starts from the packet's source ids. A named communications_log
+-- id is a primary-key read. A reverse pointer is that source id on
+-- business_event_id or inbox_event_id. The job filter is the document join.
+-- Joining every attached row first, then filtering, walked the whole table
+-- once per source.
 CREATE OR REPLACE FUNCTION public.context_ledger_comm_log_links(p_job_id uuid, p_as_of timestamptz, p_sources jsonb)
 RETURNS TABLE(src_table text, src_id uuid, rec jsonb)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
 DECLARE
- doc_col text; be_col text; inbox_col text; has_time boolean;
- rev text; q text;
+ doc_col text; has_be boolean; has_inbox boolean; has_time boolean;
+ time_sql text := ''; rev_sql text := ''; q text;
 BEGIN
  IF to_regclass('public.communications_log') IS NULL THEN RETURN; END IF;
  IF NOT EXISTS (
@@ -140,53 +183,101 @@ BEGIN
  ORDER BY CASE c.column_name WHEN 'document_id' THEN 1 WHEN 'job_document_id' THEN 2 ELSE 3 END
  LIMIT 1;
  IF doc_col IS NULL THEN RETURN; END IF;
- SELECT c.column_name INTO be_col FROM information_schema.columns c
-  WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
-    AND c.column_name = 'business_event_id' AND c.udt_name = 'uuid';
- SELECT c.column_name INTO inbox_col FROM information_schema.columns c
-  WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
-    AND c.column_name = 'inbox_event_id' AND c.udt_name = 'uuid';
+ SELECT EXISTS (
+   SELECT 1 FROM information_schema.columns c
+   WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
+     AND c.column_name = 'business_event_id' AND c.udt_name = 'uuid')
+ INTO has_be;
+ SELECT EXISTS (
+   SELECT 1 FROM information_schema.columns c
+   WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
+     AND c.column_name = 'inbox_event_id' AND c.udt_name = 'uuid')
+ INTO has_inbox;
  SELECT EXISTS (
    SELECT 1 FROM information_schema.columns c
    WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
      AND c.column_name = 'created_at' AND c.udt_name = 'timestamptz')
  INTO has_time;
- rev := 'false';
- IF be_col IS NOT NULL THEN
-  rev := rev || format(' OR (s.st = ''business_events'' AND c.%I = s.sid)', be_col);
+ IF has_time THEN
+  time_sql := ' AND c.created_at IS NOT NULL AND c.created_at <= $2';
  END IF;
- IF inbox_col IS NOT NULL THEN
-  rev := rev || format(' OR (s.st = ''inbox_events'' AND c.%I = s.sid)', inbox_col);
+ IF has_be THEN
+  rev_sql := rev_sql || format($rev$
+   UNION ALL
+   SELECT s.st, s.sid, c.id, c.%1$I AS doc
+   FROM src s
+   JOIN public.communications_log c ON c.business_event_id = s.sid
+   WHERE s.st = 'business_events' AND c.has_attachments IS TRUE AND c.%1$I IS NOT NULL%2$s$rev$,
+   doc_col, time_sql);
  END IF;
- q := 'SELECT s.st, s.sid, jsonb_build_object('
-   || '''kind'', ''attachment'', ''table'', ''job_documents'', '
-   || '''id'', c.id::text, ''job_id'', $1::text, '
-   || format('''document_id'', c.%I::text, ', doc_col)
-   || '''about'', public.context_ledger_record_link_about(d.quote_number)) '
-   || 'FROM (SELECT el->>''table'' AS st, public.context_ledger_record_uuid(el->>''id'') AS sid '
-   || 'FROM jsonb_array_elements(coalesce($3, ''[]''::jsonb)) el '
-   || 'WHERE el->>''table'' IN (''business_events'', ''inbox_events'') '
-   || 'AND public.context_ledger_record_uuid(el->>''id'') IS NOT NULL) s '
-   || 'JOIN public.communications_log c ON c.has_attachments IS TRUE '
-   || format('AND c.%I IS NOT NULL ', doc_col)
-   || CASE WHEN has_time THEN 'AND c.created_at IS NOT NULL AND c.created_at <= $2 ' ELSE '' END
-   || format('JOIN public.job_documents d ON d.id = c.%I AND d.job_id = $1 ', doc_col)
-   || 'AND public.context_ledger_record_link_about(d.quote_number) IS NOT NULL '
-   || 'LEFT JOIN public.business_events b ON s.st = ''business_events'' AND b.id = s.sid '
-   || 'WHERE (' || rev || ') OR (b.id IS NOT NULL AND ('
-   || 'c.id = public.context_ledger_record_uuid(b.payload->>''communications_log_id'') '
-   || 'OR c.id = public.context_ledger_record_uuid(b.metadata->>''communications_log_id'') '
-   || 'OR (lower(btrim(b.source_table)) = ''communications_log'' AND c.id = public.context_ledger_record_uuid(b.source_id)) '
-   || 'OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(b.payload->''related_entities'') = ''array'' THEN b.payload->''related_entities'' ELSE ''[]''::jsonb END) e '
-   || 'WHERE lower(btrim(e->>''type'')) IN (''communications_log'') AND c.id = public.context_ledger_record_uuid(e->>''id'')) '
-   || 'OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(b.metadata->''related_entities'') = ''array'' THEN b.metadata->''related_entities'' ELSE ''[]''::jsonb END) e '
-   || 'WHERE lower(btrim(e->>''type'')) IN (''communications_log'') AND c.id = public.context_ledger_record_uuid(e->>''id''))'
-   || '))';
+ IF has_inbox THEN
+  rev_sql := rev_sql || format($rev$
+   UNION ALL
+   SELECT s.st, s.sid, c.id, c.%1$I AS doc
+   FROM src s
+   JOIN public.communications_log c ON c.inbox_event_id = s.sid
+   WHERE s.st = 'inbox_events' AND c.has_attachments IS TRUE AND c.%1$I IS NOT NULL%2$s$rev$,
+   doc_col, time_sql);
+ END IF;
+ q := format($q$
+WITH src AS (
+ SELECT el->>'table' AS st, public.context_ledger_record_uuid(el->>'id') AS sid
+ FROM jsonb_array_elements(coalesce($3, '[]'::jsonb)) el
+ WHERE el->>'table' IN ('business_events', 'inbox_events')
+   AND public.context_ledger_record_uuid(el->>'id') IS NOT NULL
+), named AS (
+ SELECT s.st, s.sid, public.context_ledger_record_uuid(b.payload->>'communications_log_id') AS cid
+ FROM src s
+ JOIN public.business_events b ON s.st = 'business_events' AND b.id = s.sid
+ WHERE public.context_ledger_record_uuid(b.payload->>'communications_log_id') IS NOT NULL
+ UNION ALL
+ SELECT s.st, s.sid, public.context_ledger_record_uuid(b.metadata->>'communications_log_id')
+ FROM src s
+ JOIN public.business_events b ON s.st = 'business_events' AND b.id = s.sid
+ WHERE public.context_ledger_record_uuid(b.metadata->>'communications_log_id') IS NOT NULL
+ UNION ALL
+ SELECT s.st, s.sid, public.context_ledger_record_uuid(b.source_id)
+ FROM src s
+ JOIN public.business_events b ON s.st = 'business_events' AND b.id = s.sid
+ WHERE lower(btrim(b.source_table)) = 'communications_log'
+   AND public.context_ledger_record_uuid(b.source_id) IS NOT NULL
+ UNION ALL
+ SELECT s.st, s.sid, public.context_ledger_record_uuid(e->>'id')
+ FROM src s
+ JOIN public.business_events b ON s.st = 'business_events' AND b.id = s.sid
+ CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(b.payload->'related_entities') = 'array' THEN b.payload->'related_entities' ELSE '[]'::jsonb END) e
+ WHERE lower(btrim(e->>'type')) = 'communications_log'
+   AND public.context_ledger_record_uuid(e->>'id') IS NOT NULL
+ UNION ALL
+ SELECT s.st, s.sid, public.context_ledger_record_uuid(e->>'id')
+ FROM src s
+ JOIN public.business_events b ON s.st = 'business_events' AND b.id = s.sid
+ CROSS JOIN LATERAL jsonb_array_elements(
+  CASE WHEN jsonb_typeof(b.metadata->'related_entities') = 'array' THEN b.metadata->'related_entities' ELSE '[]'::jsonb END) e
+ WHERE lower(btrim(e->>'type')) = 'communications_log'
+   AND public.context_ledger_record_uuid(e->>'id') IS NOT NULL
+), hit AS (
+ SELECT n.st, n.sid, c.id AS cid, c.%1$I AS doc
+ FROM named n
+ JOIN public.communications_log c ON c.id = n.cid
+ WHERE c.has_attachments IS TRUE AND c.%1$I IS NOT NULL%2$s
+ %3$s
+)
+SELECT h.st, h.sid, jsonb_build_object(
+ 'kind', 'attachment', 'table', 'job_documents',
+ 'id', h.cid::text, 'job_id', $1::text,
+ 'document_id', h.doc::text,
+ 'about', public.context_ledger_record_link_about(d.quote_number))
+FROM hit h
+JOIN public.job_documents d ON d.id = h.doc AND d.job_id = $1
+ AND public.context_ledger_record_link_about(d.quote_number) IS NOT NULL
+$q$, doc_col, time_sql, rev_sql);
  RETURN QUERY EXECUTE q USING p_job_id, p_as_of, p_sources;
 END
 $fn$;
 COMMENT ON FUNCTION public.context_ledger_comm_log_links(uuid, timestamptz, jsonb) IS
- 'Ledger packet records (20261018120000): attachment links from communications_log when that table exists and a row with has_attachments true names a document on this job. Absent table: no rows.';
+ 'Ledger packet records (20261018120000): attachment links from communications_log when that table exists. The packet''s source ids drive the read (primary key, or business_event_id / inbox_event_id). Absent table: no rows.';
 
 -- 3. One call per packet. A link is emitted only from a stored pointer on the
 -- worded row, or from a stored pointer on the record back to that row.
@@ -272,13 +363,23 @@ WITH src AS (
   WHEN 'quote' THEN 'quote' WHEN 'quote_sent' THEN 'quote' WHEN 'quote_email' THEN 'quote'
   WHEN 'invoice' THEN 'invoice' WHEN 'invoice_sent' THEN 'invoice' WHEN 'invoice_email' THEN 'invoice'
   WHEN 'client_email' THEN 'client_email' ELSE NULL END) et(t)
- CROSS JOIN LATERAL (SELECT coalesce(
-  public.context_ledger_record_link_about(e.metadata->>'about'),
-  public.context_ledger_record_link_about(e.metadata->>'quote_number'),
-  public.context_ledger_record_link_about(e.metadata->>'invoice_number'),
+ CROSS JOIN LATERAL (SELECT
+  public.context_ledger_record_link_about(e.metadata->>'about') AS about_key,
+  public.context_ledger_record_link_about(e.metadata->>'quote_number') AS quote_key,
+  public.context_ledger_record_link_about(e.metadata->>'invoice_number') AS invoice_key,
   (SELECT public.context_ledger_record_link_about(d.quote_number) FROM public.job_documents d
-   WHERE d.id = public.context_ledger_record_uuid(e.metadata->>'document_id') AND d.job_id = p_job_id)
- ) AS a) ab
+   WHERE d.id = public.context_ledger_record_uuid(e.metadata->>'document_id') AND d.job_id = p_job_id) AS doc_key
+ ) keys
+ -- A quote email does not carry an invoice about-key. invoice_number is not
+ -- consulted for quote, and a quote key that normalises to invoice: is skipped
+ -- so a later quote key can still be the about.
+ CROSS JOIN LATERAL (SELECT CASE
+  WHEN et.t = 'quote' THEN coalesce(
+    CASE WHEN keys.about_key NOT LIKE 'invoice:%' THEN keys.about_key END,
+    CASE WHEN keys.quote_key NOT LIKE 'invoice:%' THEN keys.quote_key END,
+    CASE WHEN keys.doc_key NOT LIKE 'invoice:%' THEN keys.doc_key END)
+  ELSE coalesce(keys.about_key, keys.quote_key, keys.invoice_key, keys.doc_key)
+ END AS a) ab
  WHERE e.sent_at IS NOT NULL AND e.sent_at <= p_as_of
    AND lower(btrim(e.status)) IN ('sent', 'delivered', 'accepted')
    AND et.t IS NOT NULL AND ab.a IS NOT NULL
@@ -295,7 +396,7 @@ WITH src AS (
 ), jev AS (
  SELECT i.st, i.sid,
   jsonb_build_object('kind','job_event','table','job_events','id', je.id::text, 'job_id', p_job_id::text,
-   'event_type', btrim(je.event_type), 'about', ab.a) AS rec,
+   'event_type', public.context_ledger_record_trim(je.event_type), 'about', ab.a) AS rec,
   'job_event'::text AS kind, je.id::text AS ident, ''::text AS doc_id
  FROM je_id i
  JOIN public.job_events je ON je.id = i.event_id AND je.job_id = p_job_id
@@ -310,7 +411,7 @@ WITH src AS (
    WHERE d.id = public.context_ledger_record_uuid(je.detail_json->>'document_id') AND d.job_id = p_job_id)
  ) AS a) ab
  WHERE je.created_at IS NOT NULL AND je.created_at <= p_as_of
-   AND nullif(btrim(je.event_type), '') IS NOT NULL AND ab.a IS NOT NULL
+   AND public.context_ledger_record_trim(je.event_type) IS NOT NULL AND ab.a IS NOT NULL
 ), docs AS (
  SELECT p.st, p.sid, public.context_ledger_record_uuid(p.raw) AS document_id
  FROM ptr p
@@ -325,20 +426,24 @@ WITH src AS (
  WHERE d.sent_at IS NOT NULL AND d.sent_at <= p_as_of
    AND public.context_ledger_record_link_about(d.quote_number) IS NOT NULL
 ), xi_raw AS (
+ -- A voided or deleted twin is not a second live invoice. Counting it made a
+ -- real PAID row ambiguous and dropped the link. A draft twin still counts:
+ -- two live rows for one pointer stay silent. Null status still counts.
  SELECT p.st, p.sid, btrim(p.raw) AS raw, xi.id
  FROM ptr p
  JOIN public.xero_invoices xi ON xi.job_id = p_job_id
   AND (xi.xero_invoice_id = btrim(p.raw) OR xi.id = public.context_ledger_record_uuid(p.raw))
  WHERE p.kind = 'xero_invoice'
+   AND upper(coalesce(public.context_ledger_record_trim(xi.status), '')) NOT IN ('VOIDED', 'DELETED')
 ), xi_one AS (
  SELECT r.st, r.sid, r.raw FROM xi_raw r GROUP BY r.st, r.sid, r.raw HAVING count(DISTINCT r.id) = 1
 ), xi AS (
- SELECT o.st, o.sid, o.raw, inv.id, nullif(btrim(inv.contact_name), '') AS supplier,
+ SELECT o.st, o.sid, o.raw, inv.id, public.context_ledger_record_trim(inv.contact_name) AS supplier,
   public.context_ledger_record_invoice_about(inv.invoice_number) AS number, inv.invoice_type, inv.total
  FROM xi_one o
  JOIN xi_raw r ON r.st = o.st AND r.sid = o.sid AND r.raw = o.raw
  JOIN public.xero_invoices inv ON inv.id = r.id
- WHERE inv.status = 'PAID'
+ WHERE upper(public.context_ledger_record_trim(inv.status)) = 'PAID'
    AND (inv.fully_paid_on IS NULL OR inv.fully_paid_on <= (p_as_of AT TIME ZONE 'Australia/Perth')::date)
    AND coalesce(inv.created_at, inv.synced_at, '-infinity'::timestamptz) <= p_as_of
 ), bill AS (
@@ -347,7 +452,7 @@ WITH src AS (
    'supplier', m.supplier, 'amount', a.amt) AS rec,
   'paid_bill'::text AS kind, m.id::text AS ident, ''::text AS doc_id
  FROM xi m
- CROSS JOIN LATERAL (SELECT to_char(m.total, 'FM999999990.00') AS amt) a
+ CROSS JOIN LATERAL (SELECT public.context_ledger_record_money(m.total) AS amt) a
  WHERE m.invoice_type = 'ACCPAY' AND m.supplier IS NOT NULL
    AND a.amt ~ '^[0-9]+\.[0-9]{2}$' AND a.amt <> '0.00'
 ), paid AS (
@@ -552,14 +657,58 @@ COMMENT ON FUNCTION public.context_ledger_packet(uuid,timestamptz,timestamptz) I
 REVOKE ALL ON FUNCTION public.context_ledger_record_invoice_about(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_ledger_record_link_about(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_ledger_record_uuid(text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.context_ledger_record_trim(text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.context_ledger_record_money(numeric) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_ledger_comm_log_links(uuid, timestamptz, jsonb) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_ledger_evidence_record_links(uuid, timestamptz, jsonb) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_ledger_packet(uuid, timestamptz, timestamptz) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_ledger_record_invoice_about(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_ledger_record_link_about(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_ledger_record_uuid(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_ledger_record_trim(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_ledger_record_money(numeric) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_ledger_comm_log_links(uuid, timestamptz, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_ledger_evidence_record_links(uuid, timestamptz, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_ledger_packet(uuid, timestamptz, timestamptz) TO service_role;
+
+-- The 100k-row proof is under 500 ms without an index. These partial indexes
+-- are for a deployment that already has communications_log; this repository
+-- does not create that table, so the block does nothing here. Not CONCURRENTLY:
+-- this migration runs inside a transaction.
+DO $idx$
+DECLARE doc_col text;
+BEGIN
+ IF to_regclass('public.communications_log') IS NULL THEN RETURN; END IF;
+ IF NOT EXISTS (
+   SELECT 1 FROM information_schema.columns c
+   WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
+     AND c.column_name = 'has_attachments' AND c.udt_name = 'bool') THEN
+  RETURN;
+ END IF;
+ SELECT c.column_name INTO doc_col
+ FROM information_schema.columns c
+ WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
+   AND c.udt_name = 'uuid'
+   AND c.column_name IN ('document_id', 'job_document_id', 'attachment_document_id')
+ ORDER BY CASE c.column_name WHEN 'document_id' THEN 1 WHEN 'job_document_id' THEN 2 ELSE 3 END
+ LIMIT 1;
+ IF doc_col IS NULL THEN RETURN; END IF;
+ IF EXISTS (
+   SELECT 1 FROM information_schema.columns c
+   WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
+     AND c.column_name = 'business_event_id' AND c.udt_name = 'uuid') THEN
+  EXECUTE format(
+   'CREATE INDEX IF NOT EXISTS communications_log_ledger_business_event_idx ON public.communications_log (business_event_id) WHERE has_attachments IS TRUE AND %I IS NOT NULL',
+   doc_col);
+ END IF;
+ IF EXISTS (
+   SELECT 1 FROM information_schema.columns c
+   WHERE c.table_schema = 'public' AND c.table_name = 'communications_log'
+     AND c.column_name = 'inbox_event_id' AND c.udt_name = 'uuid') THEN
+  EXECUTE format(
+   'CREATE INDEX IF NOT EXISTS communications_log_ledger_inbox_event_idx ON public.communications_log (inbox_event_id) WHERE has_attachments IS TRUE AND %I IS NOT NULL',
+   doc_col);
+ END IF;
+END $idx$;
 
 COMMIT;
