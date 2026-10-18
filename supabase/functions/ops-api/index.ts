@@ -2234,11 +2234,8 @@ async function reconciliationStateTokens(
   return tokens
 }
 
-// One service-role client. Deno exposes `window`, so supabase-js treats the
-// isolate as a browser and GoTrueClient.startAutoRefresh starts a setInterval
-// unless auto-refresh is off. A service-role client has no user session to
-// refresh or persist; leaving the defaults on leaks that interval out of any
-// test that drives this handler (Deno's sanitizer, not a swallowed timer).
+// supabase-js 2.99.3 defaults autoRefreshToken to true on every runtime. On Deno 2.5.6
+// window and document are undefined, so the non-browser branch of _handleVisibilityChange starts the interval.
 function sb(options?: { global?: { headers?: Record<string, string> } }) {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
     ...options,
