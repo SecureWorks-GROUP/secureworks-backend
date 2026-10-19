@@ -500,13 +500,17 @@ BEGIN
       --   * the switch quote_option_strict_record_v1, for every writer. An
       --     owning-review decision, seeded off. Missing or unreadable is off.
       -- This raise is outside every swallowing block, so it propagates.
-      BEGIN
-        v_strict := coalesce(current_setting('sw.quote_accept_atomic', true), '') = 'on'
-          OR coalesce((SELECT enabled FROM public.feature_flags
-                        WHERE flag_name = 'quote_option_strict_record_v1'), false) IS TRUE;
-      EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
-        v_strict := false;
-      END;
+      -- The marker is read on its own, first, so an unreadable strict
+      -- switch can never cancel the atomic path's raise.
+      v_strict := coalesce(current_setting('sw.quote_accept_atomic', true), '') = 'on';
+      IF NOT v_strict THEN
+        BEGIN
+          v_strict := coalesce((SELECT enabled FROM public.feature_flags
+                                 WHERE flag_name = 'quote_option_strict_record_v1'), false) IS TRUE;
+        EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
+          v_strict := false;
+        END;
+      END IF;
       IF v_strict THEN
         RAISE EXCEPTION 'quote_option_unrecorded'
           USING DETAIL = format('work %s, review event %s, no run record', v_err_state, v_review_state),

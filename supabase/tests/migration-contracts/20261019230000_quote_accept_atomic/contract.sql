@@ -21,10 +21,13 @@ EXCEPTION WHEN OTHERS THEN
  RETURN 'err:' || SQLERRM;
 END $$;
 CREATE FUNCTION pg_temp.qa_accept(p_doc uuid, p_status text, p_run text DEFAULT NULL,
-  p_event jsonb DEFAULT NULL, p_fp text DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $$
- SELECT public.accept_quote_document_atomic(p_doc, '2026-10-19 12:00:00+00', p_status,
+  p_event jsonb DEFAULT NULL, p_fp text DEFAULT NULL, p_token text DEFAULT NULL,
+  p_request uuid DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $$
+ SELECT public.accept_quote_document_atomic(p_doc,
+   coalesce(p_token, (SELECT share_token FROM public.job_documents WHERE id = p_doc), 'no-token'),
+   coalesce(p_request, gen_random_uuid()), '2026-10-19 12:00:00+00', p_status,
    coalesce(p_fp, public.quote_acceptance_fingerprint((SELECT job_id FROM public.job_documents WHERE id = p_doc))),
-   p_run, p_event)
+   p_run, CASE WHEN p_event IS NULL AND p_run IS NULL THEN '{"contract":true}'::jsonb ELSE p_event END)
 $$;
 
 -- Switches seeded off.
@@ -35,38 +38,53 @@ SELECT pg_temp.qa_assert((SELECT enabled = false FROM public.feature_flags WHERE
 -- Service role only; owner rights with a fixed search_path.
 SELECT pg_temp.qa_assert(NOT EXISTS (
   SELECT 1 FROM unnest(ARRAY['public', 'anon', 'authenticated']) r(role),
-       unnest(ARRAY['public.accept_quote_document_atomic(uuid, timestamptz, text, text, text, jsonb)',
+       unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)',
                     'public.quote_acceptance_fingerprint(uuid)',
-                    'public.quote_acceptance_finish_downstream(uuid, text)',
+                    'public.quote_acceptance_handler_finished(uuid, uuid)',
+                    'public.quote_acceptance_snapshot(uuid)',
                     'public.quote_acceptance_gaps(interval)']) f(fn)
    WHERE has_function_privilege(r.role, f.fn, 'EXECUTE'))
  AND (SELECT bool_and(has_function_privilege('service_role', f.fn, 'EXECUTE'))
-   FROM unnest(ARRAY['public.accept_quote_document_atomic(uuid, timestamptz, text, text, text, jsonb)',
+   FROM unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)',
                      'public.quote_acceptance_fingerprint(uuid)',
-                      'public.quote_acceptance_finish_downstream(uuid, text)',
+                      'public.quote_acceptance_handler_finished(uuid, uuid)',
+                    'public.quote_acceptance_snapshot(uuid)',
                      'public.quote_acceptance_gaps(interval)']) f(fn)),
  'the new functions must be the service role''s only');
-SELECT pg_temp.qa_assert((SELECT count(*) = 4
+SELECT pg_temp.qa_assert((SELECT count(*) = 5
    AND bool_and(coalesce(p.prosecdef, false))
    AND bool_and(coalesce(p.proconfig @> ARRAY['search_path=public, pg_temp'], false))
   FROM pg_proc p
-  WHERE p.oid IN ('public.accept_quote_document_atomic(uuid, timestamptz, text, text, text, jsonb)'::regprocedure,
+  WHERE p.oid IN ('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)'::regprocedure,
     'public.quote_acceptance_fingerprint(uuid)'::regprocedure,
-    'public.quote_acceptance_finish_downstream(uuid, text)'::regprocedure,
+    'public.quote_acceptance_handler_finished(uuid, uuid)'::regprocedure,
+    'public.quote_acceptance_snapshot(uuid)'::regprocedure,
     'public.quote_acceptance_gaps(interval)'::regprocedure)),
  'the new functions must run as their owner with a fixed search_path');
 SELECT pg_temp.qa_assert(has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'SELECT')
  AND NOT has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'INSERT')
  AND NOT has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'DELETE')
  AND NOT has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'TRUNCATE')
- AND NOT has_column_privilege('service_role', 'public.quote_acceptance_attempts', 'downstream_started_at', 'UPDATE')
+ AND NOT has_column_privilege('service_role', 'public.quote_acceptance_attempts', 'handler_finished_at', 'UPDATE')
+ AND NOT has_column_privilege('service_role', 'public.quote_acceptance_attempts', 'request_id', 'UPDATE')
  AND has_column_privilege('service_role', 'public.quote_acceptance_attempts', 'resolved_at', 'UPDATE')
  AND NOT has_table_privilege('authenticated', 'public.quote_acceptance_attempts', 'SELECT')
  AND NOT has_table_privilege('anon', 'public.quote_acceptance_attempts', 'SELECT'),
  'the attempt table must be read and resolved by the service role only');
+SELECT pg_temp.qa_assert(has_table_privilege('service_role', 'public.quote_acceptance_gap_resolutions', 'INSERT')
+ AND has_table_privilege('service_role', 'public.quote_acceptance_gap_resolutions', 'SELECT')
+ AND NOT has_table_privilege('service_role', 'public.quote_acceptance_gap_resolutions', 'UPDATE')
+ AND NOT has_table_privilege('service_role', 'public.quote_acceptance_gap_resolutions', 'DELETE')
+ AND NOT has_table_privilege('authenticated', 'public.quote_acceptance_gap_resolutions', 'SELECT')
+ AND NOT has_table_privilege('anon', 'public.quote_acceptance_gap_resolutions', 'SELECT'),
+ 'gap resolutions must be added and read by the service role only, never changed or removed');
 
 BEGIN;
--- Fixed ids: jobs 9a..., documents 9d..., contacts 9c....
+-- Fixed ids: jobs 9a..., documents 9d..., contacts 9c.... Every fixture document gets a share
+-- token tok-<id> unless one is given.
+CREATE FUNCTION public.qa_token() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.share_token := coalesce(NEW.share_token, 'tok-' || NEW.id::text); RETURN NEW; END $$;
+CREATE TRIGGER qa_token BEFORE INSERT ON public.job_documents FOR EACH ROW EXECUTE FUNCTION public.qa_token();
 -- R4 first (the break contract removes it). Group A: customer c-a, fence options A1 and A2;
 -- A1's quote document DA1. The supersede switch is on; the run insert, the marking of A2 and
 -- every review event are forced to fail.
@@ -153,6 +171,20 @@ BEGIN
   PERFORM pg_temp.qa_today('unreadable ' || v_code);
  END LOOP;
 END $$;
+-- The atomic marker is read before, and apart from, the strict switch: with the strict
+-- switch unreadable the atomic acceptance must still be refused and roll back.
+DO $$
+DECLARE v_code text;
+BEGIN
+ FOREACH v_code IN ARRAY ARRAY['57014', 'P0001'] LOOP
+  PERFORM set_config('qa.flag_error', v_code, true);
+  IF pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000a1', 'accepted')$q$)
+     NOT LIKE 'err:quote_option_unrecorded%'
+     OR (SELECT accepted_at IS NOT NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000a1') THEN
+   RAISE EXCEPTION 'quote accept atomic contract: strict unreadable %: the atomic acceptance must still roll back', v_code;
+  END IF;
+ END LOOP;
+END $$;
 DROP VIEW public.feature_flags;
 ALTER TABLE public.qa_contract_feature_flags RENAME TO feature_flags;
 DROP FUNCTION public.qa_contract_raise();
@@ -206,28 +238,84 @@ SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b
  AND (SELECT accepted_at IS NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b1')
  AND (SELECT status = 'quoted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000b1'),
  'a changed snapshot must be stale and write nothing');
--- Each input the snapshot covers changes the fingerprint.
+-- The snapshot and its fingerprint come from one statement and agree.
+SELECT pg_temp.qa_assert((SELECT (x->>'fingerprint') = public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1')
+   AND jsonb_array_length(x->'documents') = 4
+   AND (x->'documents'->0) ? 'share_token' AND (x->'documents'->0) ? 'data_snapshot_json'
+  FROM (SELECT public.quote_acceptance_snapshot('9a000000-0000-4000-8000-0000000000b1') AS x) s),
+ 'the snapshot must return its documents and the matching fingerprint');
+-- Each input the guards and party rules read changes the fingerprint, and putting it back
+-- restores it. A NULL-to-value move between columns is not lost.
+CREATE FUNCTION pg_temp.qa_fp_moves(p_sql text, p_undo text, p_what text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE v_before text := public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1');
+BEGIN
+ EXECUTE p_sql;
+ IF public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1') = v_before THEN
+  RAISE EXCEPTION 'quote accept atomic contract: % must change the fingerprint', p_what;
+ END IF;
+ EXECUTE p_undo;
+ IF public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1') <> v_before THEN
+  RAISE EXCEPTION 'quote accept atomic contract: undoing % must restore the fingerprint', p_what;
+ END IF;
+END $$;
+INSERT INTO public.job_contacts (id, job_id) VALUES
+ ('9c000000-0000-4000-8000-0000000000b9', '9a000000-0000-4000-8000-0000000000b1');
+DO $$
+DECLARE d text := '''9d000000-0000-4000-8000-0000000000b3''';
+BEGIN
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET declined_at = now() WHERE id = ' || d,
+   'UPDATE public.job_documents SET declined_at = NULL WHERE id = ' || d, 'a decline');
+ UPDATE public.job_documents SET accepted_at = '2026-10-01 00:00:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000b3';
+ PERFORM pg_temp.qa_fp_moves(
+   'UPDATE public.job_documents SET accepted_at = NULL, declined_at = ''2026-10-01 00:00:00+00'' WHERE id = ' || d,
+   'UPDATE public.job_documents SET accepted_at = ''2026-10-01 00:00:00+00'', declined_at = NULL WHERE id = ' || d,
+   'moving one instant from accepted_at to declined_at');
+ UPDATE public.job_documents SET accepted_at = NULL WHERE id = '9d000000-0000-4000-8000-0000000000b3';
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET run_label = ''Z'' WHERE id = ' || d,
+   'UPDATE public.job_documents SET run_label = NULL WHERE id = ' || d, 'a raw run label');
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET data_snapshot_json = ''{"run":{"run_label":"X"}}'' WHERE id = ' || d,
+   'UPDATE public.job_documents SET data_snapshot_json = NULL WHERE id = ' || d, 'a snapshot run label');
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET version = version + 1 WHERE id = ' || d,
+   'UPDATE public.job_documents SET version = version - 1 WHERE id = ' || d, 'a version');
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET sent_to_client = false WHERE id = ' || d,
+   'UPDATE public.job_documents SET sent_to_client = true WHERE id = ' || d, 'sent_to_client');
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET share_token = ''rotated'' WHERE id = ' || d,
+   'UPDATE public.job_documents SET share_token = ''tok-9d000000-0000-4000-8000-0000000000b3'' WHERE id = ' || d, 'a token rotation');
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET send_claimed_at = now() WHERE id = ' || d,
+   'UPDATE public.job_documents SET send_claimed_at = NULL WHERE id = ' || d, 'a send claim');
+ PERFORM pg_temp.qa_fp_moves('UPDATE public.job_documents SET superseded_at = now() WHERE id = ' || d,
+   'UPDATE public.job_documents SET superseded_at = NULL WHERE id = ' || d, 'a supersession');
+ PERFORM pg_temp.qa_fp_moves($q$INSERT INTO public.run_acceptances (id, job_id, job_contact_id, run_label, status)
+   VALUES ('9e000000-0000-4000-8000-0000000000b9', '9a000000-0000-4000-8000-0000000000b1', '9c000000-0000-4000-8000-0000000000b9', 'R', 'pending')$q$,
+   $q$DELETE FROM public.run_acceptances WHERE id = '9e000000-0000-4000-8000-0000000000b9'$q$, 'a run acceptance');
+ INSERT INTO public.run_acceptances (id, job_id, job_contact_id, run_label, status)
+ VALUES ('9e000000-0000-4000-8000-0000000000b9', '9a000000-0000-4000-8000-0000000000b1', '9c000000-0000-4000-8000-0000000000b9', 'R', 'pending');
+ PERFORM pg_temp.qa_fp_moves($q$UPDATE public.run_acceptances SET status = 'declined' WHERE id = '9e000000-0000-4000-8000-0000000000b9'$q$,
+   $q$UPDATE public.run_acceptances SET status = 'pending' WHERE id = '9e000000-0000-4000-8000-0000000000b9'$q$, 'a run acceptance status');
+ DELETE FROM public.run_acceptances WHERE id = '9e000000-0000-4000-8000-0000000000b9';
+ PERFORM pg_temp.qa_fp_moves($q$INSERT INTO public.run_line_items (id, job_id, run_label, job_contact_id, description)
+   VALUES ('9f000000-0000-4000-8000-0000000000b9', '9a000000-0000-4000-8000-0000000000b1', 'R', '9c000000-0000-4000-8000-0000000000b9', 'x')$q$,
+   $q$DELETE FROM public.run_line_items WHERE id = '9f000000-0000-4000-8000-0000000000b9'$q$, 'a run line item');
+END $$;
 DO $$
 DECLARE v_before text := public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1');
 BEGIN
- UPDATE public.job_documents SET declined_at = now() WHERE id = '9d000000-0000-4000-8000-0000000000b3';
- IF public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1') = v_before THEN
-  RAISE EXCEPTION 'quote accept atomic contract: a decline must change the fingerprint';
- END IF;
- UPDATE public.job_documents SET declined_at = NULL WHERE id = '9d000000-0000-4000-8000-0000000000b3';
- UPDATE public.job_documents SET data_snapshot_json = '{"run":{"run_label":"X"}}' WHERE id = '9d000000-0000-4000-8000-0000000000b4';
- IF public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1') = v_before THEN
-  RAISE EXCEPTION 'quote accept atomic contract: a snapshot run label must change the fingerprint';
- END IF;
- UPDATE public.job_documents SET data_snapshot_json = NULL WHERE id = '9d000000-0000-4000-8000-0000000000b4';
- IF public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1') <> v_before THEN
-  RAISE EXCEPTION 'quote accept atomic contract: the fingerprint must be a function of the rows only';
- END IF;
  PERFORM set_config('TimeZone', 'Australia/Perth', true);
  IF public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1') <> v_before THEN
   RAISE EXCEPTION 'quote accept atomic contract: the fingerprint must not depend on TimeZone';
  END IF;
 END $$;
+-- A rotated or wrong token is refused before anything is written.
+SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b1', 'partially_accepted', NULL, NULL, NULL, 'wrong-token'))
+  ->> 'reason' = 'not_a_sent_quote'
+ AND (SELECT accepted_at IS NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b1'),
+ 'a token that is not the document''s current one must be refused');
+-- A whole quote without its acceptance event raises and writes nothing.
+SELECT pg_temp.qa_assert(pg_temp.qa_try($q$SELECT public.accept_quote_document_atomic('9d000000-0000-4000-8000-0000000000b1',
+   'tok-9d000000-0000-4000-8000-0000000000b1', gen_random_uuid(), now(), 'partially_accepted',
+   public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1'), NULL, NULL)$q$) LIKE 'err:quote_accept_event_missing%'
+ AND (SELECT accepted_at IS NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b1'),
+ 'a whole-quote acceptance must carry its acceptance event');
 -- Bad inputs raise and write nothing.
 SELECT pg_temp.qa_assert(pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b1', 'scheduled')$q$)
   LIKE 'err:quote_accept_bad_status%'
@@ -240,7 +328,8 @@ SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b
 -- Accept DB1: DB1 accepted, DB2 superseded, DB3 (another party) untouched, status as given,
 -- the acceptance event and the attempt row, in one transaction.
 SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b1', 'partially_accepted', NULL,
-   '{"document_id":"9d000000-0000-4000-8000-0000000000b1","new_status":"partially_accepted"}'::jsonb))->>'outcome' = 'accepted',
+   '{"document_id":"9d000000-0000-4000-8000-0000000000b1","new_status":"partially_accepted"}'::jsonb, NULL, NULL,
+   '9b000000-0000-4000-8000-0000000000b1'))->>'outcome' = 'accepted',
  'a whole-quote acceptance must commit');
 SELECT pg_temp.qa_assert((SELECT accepted_at = '2026-10-19 12:00:00+00' FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b1')
  AND (SELECT superseded_at IS NOT NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b2')
@@ -253,10 +342,10 @@ SELECT pg_temp.qa_assert((SELECT accepted_at = '2026-10-19 12:00:00+00' FROM pub
 -- Replay: the same document returns the stored result and writes nothing, even with a stale
 -- fingerprint and a different status asked for.
 SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b1', 'accepted', NULL, NULL, 'stale'))
-  ->> 'outcome' = 'replay'
+  ->> 'request_id' = '9b000000-0000-4000-8000-0000000000b1'
  AND (SELECT status = 'partially_accepted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000b1')
  AND (SELECT count(*) = 1 FROM public.job_events WHERE job_id = '9a000000-0000-4000-8000-0000000000b1' AND event_type = 'quote_accepted'),
- 'a repeat call must replay the committed result and write nothing');
+ 'a repeat call must replay the committed result (with the committing request) and write nothing');
 -- The superseded sibling is refused.
 SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b2', 'accepted'))->>'reason' = 'superseded',
  'a superseded option must be refused');
@@ -297,21 +386,30 @@ SELECT pg_temp.qa_assert((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000e
  AND (SELECT status = 'accepted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000e1'),
  'a run document with no contact must accept as today: no run acceptance row, the status written');
 
--- Follow-up work: started at commit (the committing request owns it), finished once.
-SELECT pg_temp.qa_assert((SELECT bool_and(downstream_started_at IS NOT NULL AND downstream_completed_at IS NULL)
-  FROM public.quote_acceptance_attempts)
- AND public.quote_acceptance_finish_downstream('9d000000-0000-4000-8000-0000000000b1', 'done')
- AND NOT public.quote_acceptance_finish_downstream('9d000000-0000-4000-8000-0000000000b1', 'done')
- AND NOT public.quote_acceptance_finish_downstream('9d000000-0000-4000-8000-00000000ffff', 'done'),
- 'follow-up work must be started at commit and finish exactly once');
+-- The handler-finished mark: only the committing request, only once.
+SELECT pg_temp.qa_assert(NOT public.quote_acceptance_handler_finished('9d000000-0000-4000-8000-0000000000b1', gen_random_uuid())
+ AND public.quote_acceptance_handler_finished('9d000000-0000-4000-8000-0000000000b1', '9b000000-0000-4000-8000-0000000000b1')
+ AND NOT public.quote_acceptance_handler_finished('9d000000-0000-4000-8000-0000000000b1', '9b000000-0000-4000-8000-0000000000b1'),
+ 'only the committing request may mark the handler finished, once');
 SELECT pg_temp.qa_assert(
  (SELECT count(*) = 1 FROM public.quote_acceptance_gaps(interval '-1 second')
-   WHERE kind = 'acceptance_downstream_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000b3')
+   WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000b3')
  AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '-1 second')
-   WHERE ref = '9d000000-0000-4000-8000-0000000000b1')
+   WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000b1')
  AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '1 hour')
-   WHERE ref = '9d000000-0000-4000-8000-0000000000b3'),
- 'the gap read must list unfinished follow-up work after the grace period, and not finished work');
+   WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000b3'),
+ 'the gap read must list an unfinished handler after the grace period, and not a finished one');
+-- Review events are listed one by one, and a resolution suppresses only its own row.
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'review_needed' AND job_id = '9a000000-0000-4000-8000-0000000000c1'),
+ 'the staff-advanced acceptance review event must be listed');
+INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
+SELECT 'acceptance_handler_unfinished', '9d000000-0000-4000-8000-0000000000b3', '00000000-0000-0000-0000-000000000001';
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '-1 second')
+   WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000b3')
+ AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps(interval '-1 second')
+   WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000c1'),
+ 'a resolution must suppress exactly its own obligation');
 
 -- R3 bypass: a grouped option set won with its trigger skipped (session_replication_role
 -- replica, which only a superuser can set) shows in the gap read.
@@ -326,6 +424,37 @@ SET LOCAL session_replication_role = origin;
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000f1'),
  'R3: a won option whose status was written without its trigger must be listed');
+UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_supersede_v1';
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'won_with_open_sibling'),
+ 'R3: with marking off, an open sibling beside a won option is by design and must not be listed');
+SET LOCAL session_replication_role = replica;
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000f2';
+SET LOCAL session_replication_role = origin;
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'more_than_one_won' AND ref LIKE '9a000000-0000-4000-8000-0000000000f1@%'),
+ 'R3: two won options in one group must be listed');
+-- A review-only failure (run insert and work failing, the review event written) has no
+-- unsettled run, and is listed by its review event.
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'quote_option_supersede_v1';
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9a000000-0000-4000-8000-0000000000f5', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-g'),
+ ('9a000000-0000-4000-8000-0000000000f6', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-g');
+SELECT public.link_fence_quote_option('9a000000-0000-4000-8000-0000000000f6', '9a000000-0000-4000-8000-0000000000f5', NULL, NULL);
+CREATE FUNCTION public.qa_fail_any() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'contract forced failure' USING ERRCODE = '55P03'; END $$;
+CREATE TRIGGER qa_fail_run BEFORE INSERT ON public.quote_option_settle_runs FOR EACH ROW EXECUTE FUNCTION public.qa_fail_any();
+CREATE TRIGGER qa_fail_mark BEFORE UPDATE OF superseded_at ON public.jobs FOR EACH ROW
+ WHEN (NEW.id = '9a000000-0000-4000-8000-0000000000f6' AND NEW.superseded_at IS NOT NULL) EXECUTE FUNCTION public.qa_fail_any();
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000f5';
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_option_settle_runs WHERE job_id = '9a000000-0000-4000-8000-0000000000f5')
+ AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps() WHERE kind = 'review_needed'
+   AND job_id = '9a000000-0000-4000-8000-0000000000f5')
+ AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps() WHERE kind = 'won_with_open_sibling'
+   AND job_id = '9a000000-0000-4000-8000-0000000000f5'),
+ 'R3: a review-only failure must be listed by its review event, and its open sibling must still be listed');
+DROP TRIGGER qa_fail_mark ON public.jobs;
+DROP TRIGGER qa_fail_run ON public.quote_option_settle_runs;
+DROP FUNCTION public.qa_fail_any();
 
 -- Switch combinations. In the database, quote_accept_atomic_v1 on means send-quote calls the
 -- RPC (path 'rpc'); off, missing or unreadable means today's separate writes (path 'plain',
@@ -349,8 +478,14 @@ INSERT INTO public.job_documents (id, job_id, type, sent_to_client) VALUES
  ('9d000000-0000-4000-8000-0000000000d1', '9a000000-0000-4000-8000-0000000000d1', 'quote', true);
 CREATE FUNCTION public.qa_combo_fail() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- IF TG_TABLE_NAME = 'job_events' AND NEW.event_type IS DISTINCT FROM 'quote_option_review_needed' THEN RETURN NEW; END IF;
  RAISE EXCEPTION 'contract forced combination failure' USING ERRCODE = '55P03';
+END $$;
+CREATE FUNCTION public.qa_combo_fail_review() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.event_type = 'quote_option_review_needed' THEN
+  RAISE EXCEPTION 'contract forced combination failure' USING ERRCODE = '55P03';
+ END IF;
+ RETURN NEW;
 END $$;
 CREATE FUNCTION public.qa_combo_raise() RETURNS boolean LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'contract forced switch read failure' USING ERRCODE = '57014'; END $$;
@@ -381,7 +516,7 @@ BEGIN
    WHEN (NEW.id = '9a000000-0000-4000-8000-0000000000d2' AND NEW.superseded_at IS NOT NULL)
    EXECUTE FUNCTION public.qa_combo_fail();
   CREATE TRIGGER qa_combo_fail_review BEFORE INSERT ON public.job_events FOR EACH ROW
-   EXECUTE FUNCTION public.qa_combo_fail();
+   EXECUTE FUNCTION public.qa_combo_fail_review();
  END IF;
  IF p_path = 'rpc' THEN
   v_res := pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000d1', 'accepted')$q$);
@@ -425,5 +560,6 @@ BEGIN
  END LOOP;
 END $$;
 DROP FUNCTION public.qa_combo_fail();
+DROP FUNCTION public.qa_combo_fail_review();
 DROP FUNCTION public.qa_combo_raise();
 ROLLBACK;

@@ -54,7 +54,11 @@ import {
   acceptQuoteDocumentAtomically,
   finishAtomicAcceptance,
   quoteAcceptAtomicOn,
-  readQuoteAcceptanceFingerprint,
+  quoteDocumentMatchesSnapshot,
+  quoteGuardsPassOnSnapshot,
+  type QuoteAcceptanceSnapshotRead,
+  readQuoteAcceptanceSnapshot,
+  snapshotRunNeighbourId,
 } from './quote_accept_atomic.ts'
 import {
   persistTradePackOnDocuments,
@@ -1610,24 +1614,15 @@ serve(async (req: Request) => {
 
       // SQ-23 remedy: with quote_accept_atomic_v1 readable and true, the
       // acceptance's writes go through one database transaction below. The
-      // fingerprint of everything the party rules read is taken FIRST, so the
-      // database can refuse ('stale') if anything changed after this point.
+      // decision inputs and their fingerprint are read FIRST, in one database
+      // statement; the document must match its snapshot row exactly, and every
+      // guard and party rule below is (re)evaluated on that snapshot. The
+      // database refuses ('stale') if the locked state differs from it.
       // Off, missing or unreadable: today's path, unchanged.
-      let atomicFingerprint: string | null = null
+      let atomicSnap: QuoteAcceptanceSnapshotRead | null = null
       if (doc.job_id && await quoteAcceptAtomicOn(sb)) {
-        atomicFingerprint = await readQuoteAcceptanceFingerprint(sb, doc.job_id)
-        const { data: docAgain, error: docAgainError } = await sb
-          .from('job_documents')
-          .select('id, job_id, job_contact_id, run_label, data_snapshot_json, accepted_at, declined_at, superseded_at')
-          .eq('id', doc.id)
-          .single()
-        if (atomicFingerprint === null || docAgainError || !docAgain
-          || docAgain.job_id !== doc.job_id
-          || docAgain.job_contact_id !== doc.job_contact_id
-          || quoteDocumentRunLabel(docAgain) !== quoteDocumentRunLabel(doc)
-          || docAgain.accepted_at !== doc.accepted_at
-          || docAgain.declined_at !== doc.declined_at
-          || docAgain.superseded_at !== doc.superseded_at) {
+        atomicSnap = await readQuoteAcceptanceSnapshot(sb, doc.job_id)
+        if (!atomicSnap || !quoteDocumentMatchesSnapshot(doc, atomicSnap, token)) {
           return new Response(quoteViewRetryPage(), {
             status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
           })
@@ -1635,6 +1630,7 @@ serve(async (req: Request) => {
       }
       // Set once the atomic transaction has committed for this request.
       let atomicDocId: string | null = null
+      const atomicRequestId = crypto.randomUUID()
 
       const sourceRunLabel = quoteDocumentRunLabel(doc)
 
@@ -1719,7 +1715,23 @@ serve(async (req: Request) => {
       // the acceptance (quoteAcceptanceReadFailed). A failed read writes
       // nothing, so the customer's retry can still complete the acceptance.
       let acceptanceSnapshot: QuoteAcceptanceSnapshot | null = null
-      if (doc.job_id) {
+      if (doc.job_id && atomicSnap !== null) {
+        // Atomic path: the guards again, and the party rules, on the snapshot.
+        const guard = quoteGuardsPassOnSnapshot(doc, atomicSnap, sourceRunLabel)
+        if (guard !== 'ok') {
+          return new Response(
+            errorPage(guard === 'not_current'
+              ? 'This quote link is no longer current. Please open the latest quote we sent you.'
+              : 'This option is no longer available — another option was already accepted.'),
+            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
+        acceptanceSnapshot = withPendingAcceptance({
+          documents: atomicSnap.documents,
+          acceptances: atomicSnap.acceptances,
+          runNeighbourId: snapshotRunNeighbourId(atomicSnap, sourceRunLabel),
+        }, doc, sourceRunLabel, acceptedAt)
+      } else if (doc.job_id) {
         const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
           sb.from('run_acceptances')
             .select('job_document_id, job_contact_id, run_label, status, accepted_at')
@@ -1749,7 +1761,7 @@ serve(async (req: Request) => {
         }, doc, sourceRunLabel, acceptedAt)
       }
 
-      if (atomicFingerprint !== null) {
+      if (atomicSnap !== null) {
         // One transaction: accepted_at, the sibling supersession or the run
         // acceptance, the job status, the acceptance event and the attempt
         // row. The status comes from today's party rules on the same snapshot.
@@ -1791,9 +1803,11 @@ serve(async (req: Request) => {
         }
         const atomic = await acceptQuoteDocumentAtomically(sb, {
           documentId: doc.id,
+          shareToken: token,
+          requestId: atomicRequestId,
           acceptedAt,
           jobStatus,
-          fingerprint: atomicFingerprint,
+          fingerprint: atomicSnap.fingerprint,
           runLabel: sourceRunLabel,
           acceptEvent,
         })
@@ -1808,8 +1822,11 @@ serve(async (req: Request) => {
           )
         }
         if (atomic.kind !== 'accepted') {
-          // stale or failed: nothing was written; the customer can try again.
-          console.error('[accept] atomic acceptance not committed:', atomic.kind)
+          // stale or failed: nothing was written. unknown: the commit could
+          // not be confirmed either way; if it committed, its attempt row is
+          // listed for a person (acceptance_handler_unfinished) and a retry
+          // gets today's "Already accepted". Either way the retry page.
+          console.error('[accept] atomic acceptance not confirmed:', atomic.kind)
           return new Response(quoteViewRetryPage(), {
             status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
           })
@@ -2062,11 +2079,11 @@ serve(async (req: Request) => {
           }
 
           // Return "Next Steps" page for fully accepted run
-          await finishAtomicAcceptance(sb, atomicDocId)
+          await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId)
           return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || ''))
         } else {
           // ── WAITING FOR OTHER PARTY ──
-          await finishAtomicAcceptance(sb, atomicDocId)
+          await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId)
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
         }
       }
@@ -2381,7 +2398,7 @@ serve(async (req: Request) => {
           isPatio,
           jobId: job?.id || '',
         })
-        await finishAtomicAcceptance(sb, atomicDocId)
+        await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId)
         return new Response(nextStepsHtml, {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'text/html' },

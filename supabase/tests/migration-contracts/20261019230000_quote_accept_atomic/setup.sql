@@ -17,6 +17,7 @@ END $$;
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS accepted_at timestamptz;
 ALTER TABLE public.job_documents
   ADD COLUMN IF NOT EXISTS sent_to_client boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS share_token text,
   ADD COLUMN IF NOT EXISTS send_claimed_at timestamptz,
   ADD COLUMN IF NOT EXISTS version int DEFAULT 1,
   ADD COLUMN IF NOT EXISTS run_label text,
@@ -28,7 +29,8 @@ ALTER TABLE public.job_documents
   ADD COLUMN IF NOT EXISTS superseded_at timestamptz,
   ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
 ALTER TABLE public.run_acceptances
-  ADD COLUMN IF NOT EXISTS job_document_id uuid;
+  ADD COLUMN IF NOT EXISTS job_document_id uuid,
+  ADD COLUMN IF NOT EXISTS declined_at timestamptz;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_accept_unique
   ON public.run_acceptances (job_id, job_contact_id, run_label);
 ALTER TABLE public.job_events ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
