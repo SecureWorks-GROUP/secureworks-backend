@@ -198,3 +198,25 @@ The other steps from revision 4 are single-effect already. `deposit_invoice` sta
 A 2xx with an error or unknown body is `unknown` for send and money steps, and `failed` for the rest. A non-2xx follows the same classifier as the containment work: an explicit unknown, 408, 429, 5xx, an unreadable body or a transport error is `unknown`. Only a reply that says it is retry-safe makes the step retryable.
 
 **GHL stage reconciliation.** "The opportunity is already at accepted" counts as done only if the step had recorded no dispatch, or if the opportunity's stage history shows the move at or after `dispatch_started_at`. Otherwise the step is `unknown`, for a person to check. The move is idempotent by target, so the risk is only that nothing gets recorded, never a duplicate.
+
+## Revision 6, after the Codex re-review at `31b2603`
+
+**Claim versus fencing.** These are two separate statements.
+- **The claim** is the only write without a token condition: `UPDATE ... SET state='running', claim_token=:fresh, lease_until=now()+:lease WHERE id=:step AND (state IN ('pending','failed_retry_safe') OR (state='running' AND lease_until <= now() AND dispatch_started_at IS NULL)) RETURNING claim_token`. Exactly one claimer can win it.
+- **Every write after the claim** is fenced by both conditions: `claim_token=:mine AND lease_until > now()`.
+- A `running` step with an expired lease **and** `dispatch_started_at` set can never be claimed again. The expiry sweep moves it to `unknown`.
+
+**Neighbour note waits for the link.** `neighbour_note:<contact>` depends on `neighbour_contact_link:<contact>`, not only on `neighbour_contact`. The note goes out only after the link to `job_contacts` is recorded.
+
+**Contact and opportunity creation stays one external call, treated as one effect.** ghl-proxy `create_contact_and_opportunity` creates both inside one server call, and send-quote cannot split it. Rules for the step:
+- It is at-most-once.
+- Its stored result is `{contactId, opportunityId}`.
+- If its outcome is uncertain, the step is `unknown`. A person checks GHL by the neighbour's phone or email. ghl-proxy's own contact de-duplication by phone or email limits the harm to a possible extra opportunity, never an extra contact.
+
+This is listed as a known limit, not claimed as atomic.
+
+**GHL stage: the timing heuristic is withdrawn.** The stage history cannot attribute a move to this attempt. So the `ghl_stage` step is:
+- at-most-once: claim, record dispatch, call, record the outcome;
+- on any doubt after dispatch, `unknown`. A person checks the opportunity and marks the step done or failed.
+
+A move to the same target stage is harmless if repeated, but no automatic resolution is claimed.
