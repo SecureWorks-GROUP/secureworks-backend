@@ -406,6 +406,7 @@ export async function fillJobWorkOrderDraftFromQuote(
     };
   }
   if (result.lines.length === 0) {
+    await recordQuoteHasNoLines(client, job.id, draft, quote.scope_revision_id);
     return {
       filled: false,
       reason: "no_quote_lines",
@@ -471,4 +472,62 @@ export async function fillJobWorkOrderDraftFromQuote(
     scope_revision_id: quote.scope_revision_id,
     needs_review: result.needs_review,
   };
+}
+
+export const QUOTE_HAS_NO_LINES_EVENT = "job_work_order_quote_has_no_lines";
+
+/** Records, once per draft and quote revision, that the accepted quote gave
+ *  the draft nothing to copy, so the office has a stored signal that the
+ *  labour must be entered by hand. The sweep retries an untouched draft every
+ *  two minutes, so an earlier event for the same pair is read first, and an
+ *  unreadable read writes nothing rather than risk a flood. Ids only:
+ *  job_events is readable by every signed-in user of the org, trades
+ *  included. Never throws. */
+async function recordQuoteHasNoLines(
+  client: any,
+  jobId: string,
+  draft: any,
+  scopeRevisionId: string | null,
+): Promise<void> {
+  try {
+    const { data: earlier, error: readError } = await client.from("job_events")
+      .select("id, detail_json")
+      .eq("job_id", jobId)
+      .eq("event_type", QUOTE_HAS_NO_LINES_EVENT);
+    if (readError) {
+      console.error(
+        "[ops-api] job work order: no-lines event not checked:",
+        jobId,
+        readError.message,
+      );
+      return;
+    }
+    const seen = (Array.isArray(earlier) ? earlier : []).some((e: any) =>
+      e?.detail_json?.work_order_id === draft.id &&
+      (e?.detail_json?.scope_revision_id ?? null) === (scopeRevisionId ?? null)
+    );
+    if (seen) return;
+    const { error } = await client.from("job_events").insert({
+      job_id: jobId,
+      event_type: QUOTE_HAS_NO_LINES_EVENT,
+      detail_json: {
+        work_order_id: draft.id,
+        wo_number: draft.wo_number ?? null,
+        scope_revision_id: scopeRevisionId ?? null,
+      },
+    });
+    if (error) {
+      console.error(
+        "[ops-api] job work order: no-lines event not written:",
+        jobId,
+        error.message,
+      );
+    }
+  } catch (e) {
+    console.error(
+      "[ops-api] job work order: no-lines event failed:",
+      jobId,
+      (e as Error)?.message,
+    );
+  }
 }

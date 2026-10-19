@@ -129,6 +129,13 @@ What is issued, and what waits for the approver:
   saved as materials. Smaller flagged lines still never hold the work order.
   Known residual: a held draft stays among the sweep's oldest candidates until
   the approver acts on it.
+- A frozen quote with nothing to copy (no labour and no work lines, so the
+  fill answers `no_quote_lines`) shows as `quote_has_no_lines` on the staff
+  read instead of `not_filled`, and the fill writes one ids-only job event
+  `job_work_order_quote_has_no_lines` per draft and quote revision (PROPOSAL
+  from 19 Oct 2026; SWP-900101, SWP-900102 and SWP-900103 had such quotes and
+  the office got no signal). An unreadable check of earlier events writes
+  nothing, so the 2-minute sweep cannot flood the job's events.
 - Customer variations still need the work order approver, exactly as before
   ("Customer variations" below). They join an automatically issued work order
   the same way.
@@ -174,9 +181,10 @@ counts only, no user).
 
 `lines` are the work order's lines the fill flagged (`needs_review`).
 `held` is set only on a draft: `hand_edited`, `not_filled`,
-`agreed_labour_missing`, `filled_before_auto_issue`, `labour_outside_agreed` (each needs the office:
+`agreed_labour_missing`, `filled_before_auto_issue`, `labour_outside_agreed`, `quote_has_no_lines` (each needs the office:
 `needs_checking` true), or `auto_issue_switched_off` / `awaiting_auto_issue`
-(nothing to do). Computed at read time from the work order, stored nowhere.
+(nothing to do). Computed at read time from the work order and the fill that
+read made (`quote_has_no_lines` comes from the fill's answer), stored nowhere.
 The trade read is an allowlist and never carries it.
 
 ### Turning it on (the captain's "make it live")
