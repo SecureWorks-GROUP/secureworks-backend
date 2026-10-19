@@ -1,14 +1,20 @@
 // Dispatch scope order lines, stage 1. IO only.
 // Contract: docs/dispatch-scope-order-lines-v1.md.
 //
-// Reads jobs (id, org, number, type) and upserts dispatch_scope_order_lines.
-// It does not read scope_json, does not write job_material_lines, purchase
-// orders, prices or events, and it never sends.
+// Reads jobs (id, org, number, type) and replaces one scope's rows in
+// dispatch_scope_order_lines, in the one function
+// dispatch_replace_scope_order_lines. It does not read scope_json, does not
+// write job_material_lines, purchase orders, prices or events, and it never
+// sends.
 
 import { isDispatchUuid } from "./dispatch_materials.ts";
 import {
   DispatchScopeOrderError,
   parseScopeOrder,
+  requireOrderVersion,
+  requireScopeId,
+  SCOPE_ORDER_BYTES_MAX,
+  scopeOrderUtf8Bytes,
   type ScopeOrderCut,
   type ScopeOrderLine,
 } from "./dispatch_scope_order.ts";
@@ -23,7 +29,7 @@ export const DISPATCH_SCOPE_ORDER_WRITE_ACTIONS = [
 ] as const;
 
 const LINE_SELECT =
-  "id, job_id, demand_id, product, product_unknown, description, quantity, unit, length_mm, cut_size, cuts, supplier_name, position, created_at, created_by, created_by_email";
+  "id, job_id, scope_id, order_version, demand_id, product, product_unknown, description, quantity, unit, length_mm, stock_length_mm, stock_qty, cut_size, cuts, element_refs, supplier_name, position, created_at, created_by, created_by_email";
 
 export type DispatchScopeOrderActor = {
   userId: string | null;
@@ -39,6 +45,8 @@ export type DispatchScopeOrderContext = {
 
 export type DispatchScopeOrderLineRow = {
   id: string;
+  scope_id: string;
+  order_version: string;
   demand_id: string;
   product: string | null;
   product_unknown: boolean;
@@ -46,8 +54,11 @@ export type DispatchScopeOrderLineRow = {
   quantity: number | null;
   unit: string | null;
   length_mm: number | null;
+  stock_length_mm: number | null;
+  stock_qty: number | null;
   cut_size: string | null;
   cuts: ScopeOrderCut[];
+  element_refs: string[];
   supplier_name: string | null;
   position: number;
 };
@@ -99,9 +110,25 @@ function cutsOf(value: unknown): ScopeOrderCut[] {
   return cuts;
 }
 
+function refsOf(value: unknown): string[] {
+  const raw = typeof value === "string"
+    ? (() => {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return [];
+      }
+    })()
+    : value;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item) => typeof item === "string");
+}
+
 function project(row: Record<string, unknown>): DispatchScopeOrderLineRow {
   return {
     id: String(row.id),
+    scope_id: String(row.scope_id ?? ""),
+    order_version: String(row.order_version ?? ""),
     demand_id: String(row.demand_id),
     product: row.product == null || row.product === "" ? null : String(row.product),
     product_unknown: row.product_unknown === true,
@@ -109,8 +136,11 @@ function project(row: Record<string, unknown>): DispatchScopeOrderLineRow {
     quantity: numberOrNull(row.quantity),
     unit: row.unit == null || row.unit === "" ? null : String(row.unit),
     length_mm: numberOrNull(row.length_mm),
+    stock_length_mm: numberOrNull(row.stock_length_mm),
+    stock_qty: numberOrNull(row.stock_qty),
     cut_size: row.cut_size == null || row.cut_size === "" ? null : String(row.cut_size),
     cuts: cutsOf(row.cuts),
+    element_refs: refsOf(row.element_refs),
     supplier_name: row.supplier_name == null || row.supplier_name === ""
       ? null
       : String(row.supplier_name),
@@ -118,11 +148,15 @@ function project(row: Record<string, unknown>): DispatchScopeOrderLineRow {
   };
 }
 
-export async function scopeOrderLineId(jobId: string, demandId: string): Promise<string> {
+export async function scopeOrderLineId(
+  jobId: string,
+  scopeId: string,
+  demandId: string,
+): Promise<string> {
   const digest = new Uint8Array(
     await crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(`dispatch-scope-order:${jobId}:${demandId}`),
+      new TextEncoder().encode(`dispatch-scope-order:${jobId}:${scopeId}:${demandId}`),
     ),
   ).slice(0, 16);
   digest[6] = (digest[6] & 0x0f) | 0x50;
@@ -172,6 +206,7 @@ async function storedLines(client: any, jobId: string): Promise<Record<string, u
   const { data, error } = await client.from("dispatch_scope_order_lines")
     .select(LINE_SELECT)
     .eq("job_id", jobId)
+    .order("scope_id")
     .order("position")
     .order("demand_id");
   if (error) readFailed("scope order read", error);
@@ -182,35 +217,28 @@ function nowIso(ctx: DispatchScopeOrderContext): string {
   return ctx.now ? ctx.now() : new Date().toISOString();
 }
 
-async function rowFor(
-  job: { id: string; org_id: string },
-  line: ScopeOrderLine,
+async function linePayload(
+  jobId: string,
+  scopeId: string,
+  row: ScopeOrderLine,
   position: number,
-  prior: Record<string, unknown> | undefined,
-  ctx: DispatchScopeOrderContext,
-  now: string,
 ): Promise<Record<string, unknown>> {
   return {
-    id: await scopeOrderLineId(job.id, line.demand_id),
-    org_id: job.org_id,
-    job_id: job.id,
-    demand_id: line.demand_id,
-    product: line.product,
-    product_unknown: line.product_unknown,
-    description: line.description,
-    quantity: line.quantity,
-    unit: line.unit,
-    length_mm: line.length_mm,
-    cut_size: line.cut_size,
-    cuts: line.cuts,
-    supplier_name: line.supplier_name,
+    id: await scopeOrderLineId(jobId, scopeId, row.demand_id),
+    demand_id: row.demand_id,
+    product: row.product,
+    product_unknown: row.product_unknown,
+    description: row.description,
+    quantity: row.quantity,
+    unit: row.unit,
+    length_mm: row.length_mm,
+    stock_length_mm: row.stock_length_mm,
+    stock_qty: row.stock_qty,
+    cut_size: row.cut_size,
+    cuts: row.cuts,
+    element_refs: row.element_refs,
+    supplier_name: row.supplier_name,
     position,
-    created_at: prior?.created_at ?? now,
-    created_by: prior?.created_by ?? ctx.actor.userId,
-    created_by_email: prior?.created_by_email ?? ctx.actor.email,
-    updated_at: now,
-    updated_by: ctx.actor.userId,
-    updated_by_email: ctx.actor.email,
   };
 }
 
@@ -221,47 +249,55 @@ export async function runDispatchScopeOrderAction(
   body: Record<string, unknown> | null,
   ctx: DispatchScopeOrderContext,
 ): Promise<Record<string, unknown>> {
-  const job = await loadJob(client, jobIdOf(params, body), ctx);
   if (action === "dispatch_scope_order_lines") {
+    const job = await loadJob(client, jobIdOf(params, body), ctx);
     const lines = (await storedLines(client, job.id)).map(project);
     return { job_id: job.id, lines, sends: false };
   }
   if (action !== "dispatch_scope_order_import") {
     fail(400, "invalid_request", "unknown scope order action");
   }
+  const scopeId = requireScopeId(body?.scope_id);
+  const orderVersion = requireOrderVersion(body?.order_version);
   if (!body || !Object.prototype.hasOwnProperty.call(body, "order")) {
     fail(400, "invalid_request", "order required");
+  }
+  if (scopeOrderUtf8Bytes(body.order) > SCOPE_ORDER_BYTES_MAX) {
+    fail(400, "order_too_large", `an order must be at most ${SCOPE_ORDER_BYTES_MAX} bytes`);
   }
   const parsed = parseScopeOrder(body.order);
   if (parsed.lines.length === 0) {
     fail(400, "no_lines", "an order must name at least one line");
   }
-  const existing = await storedLines(client, job.id);
-  const byDemand = new Map(existing.map((row) => [String(row.demand_id), row]));
+  const job = await loadJob(client, jobIdOf(params, body), ctx);
   const now = nowIso(ctx);
-  const rows = [];
-  for (const [position, line] of parsed.lines.entries()) {
-    rows.push(await rowFor(job, line, position, byDemand.get(line.demand_id), ctx, now));
+  const lines = [];
+  for (const [position, row] of parsed.lines.entries()) {
+    lines.push(await linePayload(job.id, scopeId, row, position));
   }
-  const { error: upsertError } = await client.from("dispatch_scope_order_lines")
-    .upsert(rows, { onConflict: "job_id,demand_id" });
-  if (upsertError) writeFailed("scope order save", upsertError);
-  const keep = new Set(parsed.lines.map((line) => line.demand_id));
-  const dropIds = existing
-    .filter((row) => !keep.has(String(row.demand_id)))
-    .map((row) => String(row.id));
-  if (dropIds.length > 0) {
-    const { error: deleteError } = await client.from("dispatch_scope_order_lines")
-      .delete()
-      .in("id", dropIds);
-    if (deleteError) writeFailed("scope order replace", deleteError);
-  }
-  const lines = (await storedLines(client, job.id)).map(project);
+  const { data, error } = await client.rpc("dispatch_replace_scope_order_lines", {
+    p: {
+      job_id: job.id,
+      org_id: job.org_id,
+      scope_id: scopeId,
+      order_version: orderVersion,
+      now,
+      actor: { user_id: ctx.actor.userId, email: ctx.actor.email },
+      lines,
+    },
+  });
+  if (error) writeFailed("scope order replace", error);
+  const removed = numberOrNull(data && typeof data === "object" ? (data as RowRemoved).removed : null) ?? 0;
+  const stored = (await storedLines(client, job.id)).map(project);
   return {
     job_id: job.id,
-    lines,
+    scope_id: scopeId,
+    order_version: orderVersion,
+    lines: stored,
     withheld_demand_ids: parsed.withheld_demand_ids,
-    removed: dropIds.length,
+    removed,
     sends: false,
   };
 }
+
+type RowRemoved = { removed?: unknown };

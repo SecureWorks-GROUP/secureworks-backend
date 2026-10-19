@@ -1,0 +1,1121 @@
+{
+  "schemaVersion": "supplier-order/v1",
+  "revisions": {
+    "catalogue": "patio-bought-items-2026-10-17",
+    "mapping": "patio-bought-items-2026-10-17",
+    "prices": "patio-bought-items-2026-10-17"
+  },
+  "suppliers": [
+    {
+      "supplier": "Buildex",
+      "lines": [
+        {
+          "demandIds": [
+            "material-15",
+            "material-16"
+          ],
+          "productId": "p-buildex-1-310-9070-1tpcs-12-14x20-hex-teks-sl-c3-",
+          "description": "12-14X20 HEX TEKS SL C3 BX100",
+          "quantity": 3,
+          "unit": "box",
+          "lengthMm": null,
+          "lengthBasis": "not-applicable",
+          "cuts": [],
+          "requirements": [
+            {
+              "id": "material-15",
+              "references": [
+                "sheets",
+                "back-beam",
+                "purlins",
+                "front-beam",
+                "end-beam-east"
+              ]
+            },
+            {
+              "id": "material-16",
+              "references": [
+                "end-beam-west",
+                "back-beam",
+                "front-beam",
+                "end-beam-east",
+                "post-bw",
+                "post-bm",
+                "post-be",
+                "post-fw",
+                "post-fm",
+                "post-fe",
+                "rafters",
+                "purlins"
+              ]
+            }
+          ],
+          "supplier": "Buildex",
+          "toConfirm": [
+            "to confirm"
+          ]
+        }
+      ]
+    },
+    {
+      "supplier": "CMI",
+      "lines": [
+        {
+          "demandIds": [
+            "material-12"
+          ],
+          "productId": "practice-cmi-patioline",
+          "description": "Patioline gutter, minimum purchase roll",
+          "quantity": 1,
+          "unit": "length",
+          "lengthMm": 7000,
+          "lengthBasis": "cut-to-length",
+          "cuts": [
+            {
+              "lengthMm": 6000,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-12",
+              "references": [
+                "gutter"
+              ]
+            }
+          ],
+          "supplier": "CMI",
+          "toConfirm": [
+            "to confirm"
+          ]
+        }
+      ]
+    },
+    {
+      "supplier": "Metroll",
+      "lines": [
+        {
+          "demandIds": [
+            "material-18",
+            "material-21"
+          ],
+          "productId": "p-metroll-corodek-3-2mm-sealed-blind-aluminium-rivet",
+          "description": "3.2mm Sealed Blind Aluminium Rivet",
+          "quantity": 112,
+          "unit": "each",
+          "lengthMm": null,
+          "lengthBasis": "not-applicable",
+          "cuts": [],
+          "requirements": [
+            {
+              "id": "material-18",
+              "references": [
+                "gutter",
+                "barge-west",
+                "sheets",
+                "barge-east",
+                "high-flashing",
+                "auto-roof-0-sheet-gutter-flashing"
+              ]
+            },
+            {
+              "id": "material-21",
+              "references": [
+                "high-flashing",
+                "sheets",
+                "auto-roof-0-sheet-gutter-flashing"
+              ]
+            }
+          ],
+          "supplier": "Metroll",
+          "toConfirm": [
+            "to confirm"
+          ]
+        }
+      ]
+    },
+    {
+      "supplier": "Metroll Perth",
+      "lines": [
+        {
+          "demandIds": [
+            "material-4"
+          ],
+          "productId": "metroll-spanplus-330-042",
+          "description": "Spanplus 330 patio roofing; family-level match in two Metroll bill lines.",
+          "quantity": 19,
+          "unit": "length",
+          "lengthMm": 6058,
+          "lengthBasis": "cut-to-length",
+          "cuts": [
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6058,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-4",
+              "references": [
+                "sheets"
+              ]
+            }
+          ],
+          "supplier": "Metroll Perth",
+          "toConfirm": [
+            "to confirm"
+          ]
+        }
+      ]
+    },
+    {
+      "supplier": "Stramit",
+      "lines": [
+        {
+          "demandIds": [
+            "material-8"
+          ],
+          "productId": "p-stramit-ast19545u-ultra",
+          "description": "Strap Astragal 95x45 (ULTRA)",
+          "quantity": 4,
+          "unit": "each",
+          "lengthMm": null,
+          "lengthBasis": "not-applicable",
+          "cuts": [],
+          "requirements": [
+            {
+              "id": "material-8",
+              "references": [
+                "gutter",
+                "post-fw",
+                "post-fe"
+              ]
+            }
+          ],
+          "supplier": "Stramit",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-13"
+          ],
+          "productId": "p-stramit-noz9545za-za",
+          "description": "Nozzle 95x45",
+          "quantity": 2,
+          "unit": "each",
+          "lengthMm": null,
+          "lengthBasis": "not-applicable",
+          "cuts": [],
+          "requirements": [
+            {
+              "id": "material-13",
+              "references": [
+                "gutter"
+              ]
+            }
+          ],
+          "supplier": "Stramit",
+          "toConfirm": [
+            "to confirm"
+          ]
+        }
+      ]
+    },
+    {
+      "supplier": "Stratco",
+      "lines": [
+        {
+          "demandIds": [
+            "material-1"
+          ],
+          "productId": "p-stratco-fla-b400-flashing-girth-400-mm",
+          "description": "Flashing girth 400 mm",
+          "quantity": 4,
+          "unit": "length",
+          "lengthMm": 3082,
+          "lengthBasis": "cut-to-length",
+          "cuts": [
+            {
+              "lengthMm": 3082,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3082,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3082,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3082,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-1",
+              "references": [
+                "barge-west",
+                "barge-east"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-2"
+          ],
+          "productId": "p-stratco-ert2-010050po80-colour",
+          "description": "8.0 m (Colour)",
+          "quantity": 3,
+          "unit": "length",
+          "lengthMm": 8000,
+          "lengthBasis": "stock",
+          "cuts": [
+            {
+              "lengthMm": 6000,
+              "qty": 1
+            },
+            {
+              "lengthMm": 1950,
+              "qty": 1
+            },
+            {
+              "lengthMm": 6000,
+              "qty": 1
+            },
+            {
+              "lengthMm": 1925,
+              "qty": 1
+            },
+            {
+              "lengthMm": 5913,
+              "qty": 1
+            },
+            {
+              "lengthMm": 1925,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-2",
+              "references": [
+                "back-beam",
+                "front-beam",
+                "end-beam-west",
+                "end-beam-east",
+                "rafters",
+                "purlins"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-2"
+          ],
+          "productId": "p-stratco-ert2-010050po65-colour",
+          "description": "6.5 m (Colour)",
+          "quantity": 3,
+          "unit": "length",
+          "lengthMm": 6500,
+          "lengthBasis": "stock",
+          "cuts": [
+            {
+              "lengthMm": 5913,
+              "qty": 1
+            },
+            {
+              "lengthMm": 5913,
+              "qty": 1
+            },
+            {
+              "lengthMm": 5913,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-2",
+              "references": [
+                "back-beam",
+                "front-beam",
+                "end-beam-west",
+                "end-beam-east",
+                "rafters",
+                "purlins"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-3"
+          ],
+          "productId": "p-stratco-est2-09090po40-colour",
+          "description": "4.0 m (Colour)",
+          "quantity": 6,
+          "unit": "length",
+          "lengthMm": 4000,
+          "lengthBasis": "stock",
+          "cuts": [
+            {
+              "lengthMm": 3550,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3550,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3550,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3243,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3243,
+              "qty": 1
+            },
+            {
+              "lengthMm": 3243,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-3",
+              "references": [
+                "post-bw",
+                "post-bm",
+                "post-be",
+                "post-fw",
+                "post-fm",
+                "post-fe"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-7"
+          ],
+          "productId": "p-stratco-square-downpipes-square-and-rectangular-downpipe-4",
+          "description": "Square and Rectangular Downpipe",
+          "quantity": 4,
+          "unit": "length",
+          "lengthMm": 1800,
+          "lengthBasis": "stock",
+          "cuts": [
+            {
+              "lengthMm": 1800,
+              "qty": 1
+            },
+            {
+              "lengthMm": 1800,
+              "qty": 1
+            },
+            {
+              "lengthMm": 1800,
+              "qty": 1
+            },
+            {
+              "lengthMm": 1800,
+              "qty": 1
+            }
+          ],
+          "requirements": [
+            {
+              "id": "material-7",
+              "references": [
+                "gutter"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-17"
+          ],
+          "productId": "p-stratco-teknnw1422-plain",
+          "description": "14 x 22 mm Self drilling (Plain)",
+          "quantity": 56,
+          "unit": "each",
+          "lengthMm": null,
+          "lengthBasis": "not-applicable",
+          "cuts": [],
+          "requirements": [
+            {
+              "id": "material-17",
+              "references": [
+                "end-beam-west",
+                "back-beam",
+                "front-beam",
+                "end-beam-east",
+                "rafters",
+                "purlins"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        },
+        {
+          "demandIds": [
+            "material-22"
+          ],
+          "productId": "p-stratco-pab10050-plain",
+          "description": "100 mm x 50 mm (Plain)",
+          "quantity": 14,
+          "unit": "each",
+          "lengthMm": null,
+          "lengthBasis": "not-applicable",
+          "cuts": [],
+          "requirements": [
+            {
+              "id": "material-22",
+              "references": [
+                "end-beam-west",
+                "back-beam",
+                "front-beam",
+                "end-beam-east",
+                "rafters",
+                "purlins"
+              ]
+            }
+          ],
+          "supplier": "Stratco",
+          "toConfirm": [
+            "to confirm"
+          ]
+        }
+      ]
+    }
+  ],
+  "unresolved": [
+    {
+      "demand": {
+        "id": "material-5",
+        "engineKey": "flashing-profile:sheet-back-flashing",
+        "description": "Back flashing at the high edge, profiled sheet roof",
+        "unit": "m",
+        "quantity": 6,
+        "cuts": [
+          {
+            "lengthMm": 6000,
+            "qty": 1
+          }
+        ],
+        "references": [
+          "high-flashing"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-6",
+        "engineKey": "flashing-profile:sheet-gutter-flashing",
+        "description": "Pressed metal flashing into a gutter, profiled sheet roof",
+        "unit": "m",
+        "quantity": 6,
+        "cuts": [
+          {
+            "lengthMm": 6000,
+            "qty": 1
+          }
+        ],
+        "references": [
+          "auto-roof-0-sheet-gutter-flashing"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-9",
+        "engineKey": "rainwater-accessory:gutter-stop-end-left-hand:metroll-patioline",
+        "description": "Metroll Patioline stop end, left hand (also fits Quickfix)",
+        "unit": "each",
+        "quantity": 1,
+        "cuts": [],
+        "references": [
+          "gutter",
+          "sheets"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-10",
+        "engineKey": "rainwater-accessory:gutter-stop-end-right-hand:metroll-patioline",
+        "description": "Metroll Patioline stop end, right hand (also fits Quickfix)",
+        "unit": "each",
+        "quantity": 1,
+        "cuts": [],
+        "references": [
+          "gutter",
+          "sheets"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-11",
+        "engineKey": "rainwater-accessory:gutter-clip:metroll-universal",
+        "description": "Metroll universal gutter clip, for Patioline and Quickfix",
+        "unit": "each",
+        "quantity": 6,
+        "cuts": [],
+        "references": [
+          "gutter",
+          "sheets"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-14",
+        "engineKey": "footing:pad:600x600x600",
+        "description": "Mass concrete pad footing, 600 x 600 on plan and 600 deep",
+        "unit": "m3",
+        "quantity": 1.296,
+        "cuts": [],
+        "references": [
+          "post-bw",
+          "post-bm",
+          "post-be",
+          "post-fw",
+          "post-fm",
+          "post-fe"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-19",
+        "engineKey": "fabricated:cap:3pl",
+        "description": "3PL cap (past engineering set)",
+        "unit": "each",
+        "quantity": 4,
+        "cuts": [],
+        "references": [
+          "back-beam",
+          "front-beam"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-20",
+        "engineKey": "fabricated:column-key:400x50x50",
+        "description": "Column key, 400 x 50 x 50 equal angle, screwed to the post and cast into the footing",
+        "unit": "each",
+        "quantity": 6,
+        "cuts": [],
+        "references": [
+          "post-bw",
+          "post-bm",
+          "post-be",
+          "post-fw",
+          "post-fm",
+          "post-fe"
+        ],
+        "toConfirm": []
+      }
+    },
+    {
+      "demand": {
+        "id": "material-23",
+        "engineKey": null,
+        "description": "Fixing of the Patioline back return to the roof sheets",
+        "unit": "each",
+        "quantity": null,
+        "cuts": [],
+        "references": [
+          "gutter",
+          "sheets"
+        ],
+        "toConfirm": [
+          "to confirm"
+        ]
+      }
+    }
+  ],
+  "cutList": [
+    {
+      "id": "material-1",
+      "engineKey": "flashing-profile:secureworks-barge-capping",
+      "description": "Barge capping, folded from 0.55 COLORBOND, girth 356",
+      "unit": "m2",
+      "quantity": 4.391,
+      "cuts": [
+        {
+          "lengthMm": 3082,
+          "qty": 4
+        }
+      ],
+      "references": [
+        "barge-west",
+        "barge-east"
+      ]
+    },
+    {
+      "id": "material-2",
+      "engineKey": "rhs:100x50x2.0:c450l0",
+      "description": "100 × 50 × 2.0 RHS, AS/NZS 1163 C450L0 (DuraGal® DualGrade®, also meets C350L0)",
+      "unit": "m",
+      "quantity": 41.452,
+      "cuts": [
+        {
+          "lengthMm": 6000,
+          "qty": 2
+        },
+        {
+          "lengthMm": 5913,
+          "qty": 4
+        },
+        {
+          "lengthMm": 1950,
+          "qty": 1
+        },
+        {
+          "lengthMm": 1925,
+          "qty": 2
+        }
+      ],
+      "references": [
+        "back-beam",
+        "front-beam",
+        "end-beam-west",
+        "end-beam-east",
+        "rafters",
+        "purlins"
+      ]
+    },
+    {
+      "id": "material-3",
+      "engineKey": "shs:90x90x2.0:c450l0",
+      "description": "90 × 90 × 2.0 SHS, AS/NZS 1163 C450L0 (DuraGal® DualGrade®, also meets C350L0)",
+      "unit": "m",
+      "quantity": 20.379,
+      "cuts": [
+        {
+          "lengthMm": 3550,
+          "qty": 3
+        },
+        {
+          "lengthMm": 3243,
+          "qty": 3
+        }
+      ],
+      "references": [
+        "post-bw",
+        "post-bm",
+        "post-be",
+        "post-fw",
+        "post-fm",
+        "post-fe"
+      ]
+    },
+    {
+      "id": "material-4",
+      "engineKey": "sheet:spanplus-330:0.42",
+      "description": "Metroll Spanplus® 330 patio roofing, 330 mm cover, 350 mm sheet width, 44 mm rib, 0.42 mm BMT G550s COLORBOND, Metroll WA branches only",
+      "unit": "m",
+      "quantity": 115.102,
+      "cuts": [
+        {
+          "lengthMm": 6058,
+          "qty": 19
+        }
+      ],
+      "references": [
+        "sheets"
+      ]
+    },
+    {
+      "id": "material-5",
+      "engineKey": "flashing-profile:sheet-back-flashing",
+      "description": "Back flashing at the high edge, profiled sheet roof",
+      "unit": "m",
+      "quantity": 6,
+      "cuts": [
+        {
+          "lengthMm": 6000,
+          "qty": 1
+        }
+      ],
+      "references": [
+        "high-flashing"
+      ]
+    },
+    {
+      "id": "material-6",
+      "engineKey": "flashing-profile:sheet-gutter-flashing",
+      "description": "Pressed metal flashing into a gutter, profiled sheet roof",
+      "unit": "m",
+      "quantity": 6,
+      "cuts": [
+        {
+          "lengthMm": 6000,
+          "qty": 1
+        }
+      ],
+      "references": [
+        "auto-roof-0-sheet-gutter-flashing"
+      ]
+    },
+    {
+      "id": "material-7",
+      "engineKey": "downpipe:rect:95x45",
+      "description": "95 × 45 mm rectangular steel downpipe: a size, not a brand; any merchant that rolls it can fill the order",
+      "unit": "m",
+      "quantity": 7.2,
+      "cuts": [
+        {
+          "lengthMm": 1800,
+          "qty": 4
+        }
+      ],
+      "references": [
+        "gutter"
+      ]
+    },
+    {
+      "id": "material-8",
+      "engineKey": "rainwater-accessory:downpipe-strap:95x45",
+      "description": "Downpipe strap to suit a 95 × 45 mm downpipe: holds the pipe to the wall or post. NOT a gutter bracket.",
+      "unit": "each",
+      "quantity": 4,
+      "cuts": [],
+      "references": [
+        "gutter",
+        "post-fw",
+        "post-fe"
+      ]
+    },
+    {
+      "id": "material-9",
+      "engineKey": "rainwater-accessory:gutter-stop-end-left-hand:metroll-patioline",
+      "description": "Metroll Patioline stop end, left hand (also fits Quickfix)",
+      "unit": "each",
+      "quantity": 1,
+      "cuts": [],
+      "references": [
+        "gutter",
+        "sheets"
+      ]
+    },
+    {
+      "id": "material-10",
+      "engineKey": "rainwater-accessory:gutter-stop-end-right-hand:metroll-patioline",
+      "description": "Metroll Patioline stop end, right hand (also fits Quickfix)",
+      "unit": "each",
+      "quantity": 1,
+      "cuts": [],
+      "references": [
+        "gutter",
+        "sheets"
+      ]
+    },
+    {
+      "id": "material-11",
+      "engineKey": "rainwater-accessory:gutter-clip:metroll-universal",
+      "description": "Metroll universal gutter clip, for Patioline and Quickfix",
+      "unit": "each",
+      "quantity": 6,
+      "cuts": [],
+      "references": [
+        "gutter",
+        "sheets"
+      ]
+    },
+    {
+      "id": "material-12",
+      "engineKey": "gutter:metroll-patioline",
+      "description": "Patioline eaves gutter, 125 × 120 × 61 mm",
+      "unit": "m",
+      "quantity": 6,
+      "cuts": [
+        {
+          "lengthMm": 6000,
+          "qty": 1
+        }
+      ],
+      "references": [
+        "gutter"
+      ]
+    },
+    {
+      "id": "material-13",
+      "engineKey": "rainwater-accessory:gutter-outlet:95x45",
+      "description": "Square gutter outlet (pop) for a 95 × 45 mm downpipe, ZINCALUME",
+      "unit": "each",
+      "quantity": 2,
+      "cuts": [],
+      "references": [
+        "gutter"
+      ]
+    },
+    {
+      "id": "material-14",
+      "engineKey": "footing:pad:600x600x600",
+      "description": "Mass concrete pad footing, 600 x 600 on plan and 600 deep",
+      "unit": "m3",
+      "quantity": 1.296,
+      "cuts": [],
+      "references": [
+        "post-bw",
+        "post-bm",
+        "post-be",
+        "post-fw",
+        "post-fm",
+        "post-fe"
+      ]
+    },
+    {
+      "id": "material-15",
+      "engineKey": "screw:tek:12-14x20:seal",
+      "description": "12-14 × 20 mm hex head roofing tek with seal: roof sheet to steel",
+      "unit": "each",
+      "quantity": 171,
+      "cuts": [],
+      "references": [
+        "sheets",
+        "back-beam",
+        "purlins",
+        "front-beam",
+        "end-beam-east"
+      ]
+    },
+    {
+      "id": "material-16",
+      "engineKey": "screw:hex:12x20",
+      "description": "12-14 × 20 mm hex head tek screw (No. 12 tek), steel to steel",
+      "unit": "each",
+      "quantity": 104,
+      "cuts": [],
+      "references": [
+        "end-beam-west",
+        "back-beam",
+        "front-beam",
+        "end-beam-east",
+        "post-bw",
+        "post-bm",
+        "post-be",
+        "post-fw",
+        "post-fm",
+        "post-fe",
+        "rafters",
+        "purlins"
+      ]
+    },
+    {
+      "id": "material-17",
+      "engineKey": "screw:tek:14-20x22",
+      "description": "14-20 × 22 mm hex head metal tek (No. 14 tek into steel)",
+      "unit": "each",
+      "quantity": 56,
+      "cuts": [],
+      "references": [
+        "end-beam-west",
+        "back-beam",
+        "front-beam",
+        "end-beam-east",
+        "rafters",
+        "purlins"
+      ]
+    },
+    {
+      "id": "material-18",
+      "engineKey": "rivet:3.2mm",
+      "description": "3.2 mm aluminium blind rivet (pop rivet) for flashings and rainwater fittings",
+      "unit": "each",
+      "quantity": 74,
+      "cuts": [],
+      "references": [
+        "gutter",
+        "barge-west",
+        "sheets",
+        "barge-east",
+        "high-flashing",
+        "auto-roof-0-sheet-gutter-flashing"
+      ]
+    },
+    {
+      "id": "material-19",
+      "engineKey": "fabricated:cap:3pl",
+      "description": "3PL cap (past engineering set)",
+      "unit": "each",
+      "quantity": 4,
+      "cuts": [],
+      "references": [
+        "back-beam",
+        "front-beam"
+      ]
+    },
+    {
+      "id": "material-20",
+      "engineKey": "fabricated:column-key:400x50x50",
+      "description": "Column key, 400 x 50 x 50 equal angle, screwed to the post and cast into the footing",
+      "unit": "each",
+      "quantity": 6,
+      "cuts": [],
+      "references": [
+        "post-bw",
+        "post-bm",
+        "post-be",
+        "post-fw",
+        "post-fm",
+        "post-fe"
+      ]
+    },
+    {
+      "id": "material-21",
+      "engineKey": "rivet:3.2mm:epdm-washer",
+      "description": "EPDM washer under a 3.2 mm rivet, for Spanplus receivers and flashings",
+      "unit": "each",
+      "quantity": 38,
+      "cuts": [],
+      "references": [
+        "high-flashing",
+        "sheets",
+        "auto-roof-0-sheet-gutter-flashing"
+      ]
+    },
+    {
+      "id": "material-22",
+      "engineKey": "fabricated:internal-bracket:s2003:100x50",
+      "description": "Internal bracket to P3700 S2003 for a 100 × 50 member, 1.6 mm galvanised",
+      "unit": "each",
+      "quantity": 14,
+      "cuts": [],
+      "references": [
+        "end-beam-west",
+        "back-beam",
+        "front-beam",
+        "end-beam-east",
+        "rafters",
+        "purlins"
+      ]
+    },
+    {
+      "id": "material-23",
+      "engineKey": null,
+      "description": "Fixing of the Patioline back return to the roof sheets",
+      "unit": "each",
+      "quantity": null,
+      "cuts": [],
+      "references": [
+        "gutter",
+        "sheets"
+      ]
+    }
+  ]
+}
