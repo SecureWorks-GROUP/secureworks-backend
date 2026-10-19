@@ -526,7 +526,9 @@ BEGIN
         -- handler takes the current quote per party: the newest live sent
         -- revision, by version, then sent_at, then created_at, then id
         -- (checker 2887117 N5, N6). Still not reproduced: the handler's
-        -- skipping of qb: labels and its normalising of blank run labels.
+        -- skipping of qb: labels and its normalising of blank run labels, and
+        -- its wider idea of sent (quoteDocumentHasClientSend) and of required
+        -- parties (checker 81719e5 N8, N9); design section 3.
         -- A contactless whole-job document beside party documents is not a
         -- party (the handler ignores it) and is left out (checker 70fd7db L1);
         -- an older live revision is left out (L2).

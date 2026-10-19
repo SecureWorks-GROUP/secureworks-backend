@@ -1028,7 +1028,8 @@ DROP FUNCTION public.qa_combo_raise();
 -- are assigned on insert, and work_order_id is set by the status write itself (the
 -- 20261012130000 trigger opens a draft job work order when a job enters an open status), with
 -- a new work order per job. So the compare checks instead that each twin's work_order_id is
--- present or absent alike, and that each points at a job work order. The same for a partial write (no accepted_at), a missing job (no row,
+-- present or absent alike, and that each points at an existing work order (its kind is not
+-- checked). The same for a partial write (no accepted_at), a missing job (no row,
 -- no error either way) and a refused value (an error either way).
 UPDATE public.feature_flags SET enabled = false
  WHERE flag_name IN ('quote_option_supersede_v1', 'quote_accept_atomic_v1', 'quote_option_strict_record_v1');
