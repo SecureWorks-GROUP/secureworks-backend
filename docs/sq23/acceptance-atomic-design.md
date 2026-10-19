@@ -101,3 +101,31 @@ Verdict: **sound with changes, not ready to enable.** The design changes as foll
 7. **Switch off.** Today's code path, plus one switch read. A missing or unreadable switch selects the legacy path. Jobless documents and per-run routing are unchanged.
 
 Tests: Codex's list in the review replaces the six above. Build follows only after this revision is re-reviewed.
+
+## Revision 3, after the Codex re-review at `7f41354`
+
+The re-review marked items 1, 3 and 4 resolved. Items 2 and 5 were partly resolved. This revision closes both.
+
+**Item 5 (staff-advanced jobs): today's semantics are kept, so no owner decision is needed.** Revision 2's point 5 is withdrawn.
+- On the atomic path the job status is written exactly as today, overwriting whatever status it holds.
+- "Exactly one row" therefore holds whenever the job exists. A missing job raises and rolls back.
+- When the overwrite replaces a status other than `draft`, `quoted` or `partially_accepted`, the same transaction also writes a `quote_option_review_needed` event (reason `accepted_after_status_moved`) recording the old status. This adds information and changes no behaviour.
+
+**Item 2 (acceptance identity, replay and downstream recovery):**
+- **Identity is the document.** A document can be accepted at most once, so the identity is `job_documents.id`. This survives reloads, retries and new tabs, and needs no client-generated id. A new table `quote_acceptance_attempts` has one row per document (unique `document_id`), inserted **in the same transaction** as `accepted_at` and the job status. It holds the derived status, the previous job status and `committed_at`.
+- **Replay before rejection.** send-quote, on the atomic path only, checks for an attempt row before the "Already accepted" check. If it finds one, it returns today's success page and resumes the steps below. "Already accepted" without an attempt row keeps today's response (legacy acceptances).
+- **Downstream steps ledger.** A table `quote_acceptance_steps` has one row per attempt and step, unique on (attempt, step). The steps are the sibling-option supersession (now inside the transaction, so not a step), evidence, the invoice, the GHL push and the notifications. Each step runs as follows:
+  1. claim the row (`pending` to `running`, with a lease);
+  2. do the work;
+  3. mark the outcome `done` or `failed`, or `unknown` when a send may have happened.
+
+  A replay re-runs only `pending` steps, `failed` steps whose own result says retry-safe, and `running` steps with an expired lease that never started their external call. A step marked `unknown` is never re-run automatically; it waits for a person to reconcile it, using the same Sent Items rule as the containment work. External calls carry an idempotency key, `<attempt id>:<step>`, where the provider supports one. Where it does not, the step is listed as at-most-once with the `unknown` hold.
+- **Lost response.** If the RPC response is lost, the customer's retry or reload finds the attempt row and resumes. If the transaction did not commit, there is no attempt row, the document is not accepted, and the retry runs the full acceptance again.
+
+**The guarantee, stated once.** On the whole-quote atomic path, every committed acceptance has its accepted document, its job status and its attempt row in one transaction. Every downstream step has a ledger row whose state is `done`, `failed`, `unknown` or resumable. Per-run (neighbour) acceptances, legacy acceptances and every other status writer are outside this guarantee and behave as today.
+
+**Tests:** Codex's list in the review, plus:
+- a replay after a committed attempt with each step in each state;
+- an expired lease, both before and after the external call;
+- the `unknown` hold, which must never auto-resend;
+- a staff-advanced overwrite writing its review event.
