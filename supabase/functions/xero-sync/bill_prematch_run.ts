@@ -34,6 +34,7 @@ import {
   type PrematchPO,
 } from "./bill_prematch.ts";
 import { AGENT_PREMATCH_SOURCE, assignReconRow } from "../ops-api/materials_recon.ts";
+import { HELD_QUEUE_REASONS } from "./materials_ingest.ts";
 
 const PAGE = 1000;
 const CHUNK = 100;
@@ -210,7 +211,7 @@ export async function runBillPrematch(
   // Open rows and their bills.
   const queue = await readAll<any>(() =>
     sb.from("materials_reconciliation_queue")
-      .select("id, org_id, xero_invoice_id, invoice_number, xero_contact_id, contact_name, sub_total, invoice_date, status, assigned_by")
+      .select("id, org_id, xero_invoice_id, invoice_number, xero_contact_id, contact_name, sub_total, invoice_date, status, assigned_by, suggestion_reason")
       .eq("org_id", opts.orgId).eq("status", "open").order("id")
   );
   if (!queue) return { ...result, reason: "queue_unreadable" };
@@ -359,7 +360,10 @@ export async function runBillPrematch(
     }
     const hash = await sha256Hex(decisionFingerprint(d));
     const undone = placedBefore.has(bill.xero_invoice_id); // a person undid an agent placement
-    const canPlace = d.kind === "job" && d.confidence === "high" && !hasFact.has(bill.xero_invoice_id) && !undone;
+    // A row held for a person (the sync removed a contradicted fact, or Xero
+    // links another job) is proposed but never placed by the agent.
+    const held = HELD_QUEUE_REASONS.has(String(q.suggestion_reason || ""));
+    const canPlace = d.kind === "job" && d.confidence === "high" && !hasFact.has(bill.xero_invoice_id) && !undone && !held;
     if (current && current.input_hash === hash && current.outcome === "queued_for_review") {
       // Unchanged, and either not for the agent to place or already refused once: leave it.
       const refused = String(current.outcome_reason || "").startsWith("agent placement refused");

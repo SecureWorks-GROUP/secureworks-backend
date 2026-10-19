@@ -45,13 +45,16 @@ import {
   DEFAULT_MATCH_CONFIG,
   extractJobNumber,
   existingFactVerdict,
+  HELD_QUEUE_REASONS,
   JOB_NUMBER_RE,
   jobNumbersInText,
   newPlacementAllowed,
   matchBill,
+  OWN_FACT_SOURCES,
   type BillInput,
   type MatchConfig,
   type POCandidate,
+  type SuggestionReason,
 } from './materials_ingest.ts'
 import {
   sealedSesMoneyRefusal,
@@ -1398,7 +1401,7 @@ async function ingestMaterialsActuals(
     const { data: bills } = await sb
       .from('xero_invoices')
       .select(
-        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type, line_items',
+        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type, line_items, job_id',
       )
       .eq('org_id', DEFAULT_ORG_ID)
       .eq('invoice_type', 'ACCPAY')
@@ -1411,6 +1414,7 @@ async function ingestMaterialsActuals(
     const factSourceById = new Map<string, string>() // xero_invoice_id -> automation_source
     const queueStatusById = new Map<string, string>() // xero_invoice_id -> status
     const queueAssignedById = new Map<string, string>() // xero_invoice_id -> assigned_by
+    const queueReasonById = new Map<string, string>() // xero_invoice_id -> suggestion_reason
     const factJobById = new Map<string, string>() // xero_invoice_id -> job_id
     {
       const facts = await readAll<any>(() =>
@@ -1422,12 +1426,13 @@ async function ingestMaterialsActuals(
         factJobById.set(f.xero_invoice_id, f.job_id)
       }
       const qrows = await readAll<any>(() =>
-        sb.from('materials_reconciliation_queue').select('id, xero_invoice_id, status, assigned_by').order('id')
+        sb.from('materials_reconciliation_queue').select('id, xero_invoice_id, status, assigned_by, suggestion_reason').order('id')
       )
       if (!qrows) throw new Error('materials queue unreadable')
       for (const q of qrows) {
         queueStatusById.set(q.xero_invoice_id, q.status)
         if (q.assigned_by) queueAssignedById.set(q.xero_invoice_id, q.assigned_by)
+        if (q.suggestion_reason) queueReasonById.set(q.xero_invoice_id, q.suggestion_reason)
       }
     }
 
@@ -1446,15 +1451,19 @@ async function ingestMaterialsActuals(
         invoice_type: b.invoice_type,
       }
 
-      // Mirror — exclude, and defensively remove any stale derived rows.
+      // Mirror — exclude, and defensively remove this path's own stale facts.
+      // A person's or the agent's placement is never deleted here (and the
+      // delete is filtered by source, so a placement written since the read
+      // survives): it is left for review.
+      const ownSources = [...OWN_FACT_SOURCES]
       if (mirrorSet.has(bill.xero_invoice_id)) {
         result.mirrors_excluded++
-        if (factSourceById.get(bill.xero_invoice_id) === 'manual_queue') {
-          // A human somehow assigned a mirror — leave it, but flag in logs.
-          console.warn(`[materials] mirror ${bill.xero_invoice_id} has a manual fact — left untouched for review`)
-        } else if (factSourceById.has(bill.xero_invoice_id)) {
+        const src = factSourceById.get(bill.xero_invoice_id)
+        if (src && !OWN_FACT_SOURCES.has(src)) {
+          console.warn(`[materials] mirror ${bill.xero_invoice_id} has a ${src} fact — left untouched for review`)
+        } else if (src) {
           await sb.from('job_materials_facts').delete()
-            .eq('xero_invoice_id', bill.xero_invoice_id).neq('automation_source', 'manual_queue')
+            .eq('xero_invoice_id', bill.xero_invoice_id).in('automation_source', ownSources)
           result.cleaned++
         }
         continue
@@ -1472,21 +1481,16 @@ async function ingestMaterialsActuals(
       if (billStatus !== 'AUTHORISED' && billStatus !== 'PAID') {
         const counts = result as Record<string, unknown>
         counts.skipped_unissued = Number(counts.skipped_unissued || 0) + 1
-        // An automatic fact written earlier for a bill that is not issued is
-        // removed (a human placement is left for review), as for mirrors.
+        // This path's own fact on a bill that is not issued is removed. The
+        // agent's placement went through a person-equivalent assign and is left
+        // for review, like a person's.
         const src = factSourceById.get(bill.xero_invoice_id)
-        if (src && src !== 'manual_queue') {
+        if (src && OWN_FACT_SOURCES.has(src)) {
           await sb.from('job_materials_facts').delete()
-            .eq('xero_invoice_id', bill.xero_invoice_id).eq('automation_source', src)
+            .eq('xero_invoice_id', bill.xero_invoice_id).in('automation_source', ownSources)
           result.cleaned++
-          // The agent's own placement is undone with it, so the bill is back on
-          // the list for when Xero issues it. A person's decision is left alone.
-          if (queueStatusById.get(bill.xero_invoice_id) === 'assigned' &&
-            queueAssignedById.get(bill.xero_invoice_id) === 'agent_prematch') {
-            await sb.from('materials_reconciliation_queue')
-              .update({ status: 'open', updated_at: new Date().toISOString() })
-              .eq('xero_invoice_id', bill.xero_invoice_id).eq('status', 'assigned').eq('assigned_by', 'agent_prematch')
-          }
+        } else if (src) {
+          console.warn(`[materials] unissued bill ${bill.xero_invoice_id} has a ${src} fact — left untouched for review`)
         }
         continue
       }
@@ -1541,6 +1545,7 @@ async function ingestMaterialsActuals(
         refTokens,
         lineTokens,
         jobFromRefId: jobFromRef?.id ?? null,
+        xeroJobId: b.job_id ?? null,
       })
       if (verdict === 'not_ours' || verdict === 'keep') continue
       if (verdict === 'remove') {
@@ -1552,9 +1557,25 @@ async function ingestMaterialsActuals(
       // A new placement only on one consistent job number (the reference), or on
       // the PO fallback when the bill names no job at all; after a removal, never
       // in the same pass. Anything else is a queue row for a person.
+      // A bill held for a person (an earlier removal, or a Xero link conflict)
+      // stays held until a person resolves its queue row.
+      const heldReason = existingQueueStatus === 'open' ? queueReasonById.get(bill.xero_invoice_id) : undefined
+      const held = !!heldReason && HELD_QUEUE_REASONS.has(heldReason)
+      // Xero links the bill to a job, and the bill names job numbers, none of
+      // them that job: a contradiction for a person, not for any automatic path.
+      const xeroJobNumber = b.job_id ? jobNumberById.get(b.job_id) ?? null : null
+      const named = new Set([...refTokens, ...lineTokens])
+      const xeroLinkConflict = !!b.job_id && named.size > 0 &&
+        !(xeroJobNumber && named.has(String(xeroJobNumber).toUpperCase()))
       const allowed = verdict === 'remove'
         ? { reference: false, poFallback: false }
-        : newPlacementAllowed({ refTokens, lineTokens, jobFromRefId: jobFromRef?.id ?? null })
+        : newPlacementAllowed({
+          refTokens,
+          lineTokens,
+          jobFromRefId: jobFromRef?.id ?? null,
+          xeroJobId: b.job_id ?? null,
+          held,
+        })
       const pos = allowed.poFallback && bill.xero_contact_id
         ? posByContact.get(bill.xero_contact_id) || []
         : []
@@ -1583,7 +1604,16 @@ async function ingestMaterialsActuals(
         }
         result.facts++
       } else if (m.outcome === 'queue') {
-        const row = buildQueueRow(bill, m, DEFAULT_ORG_ID)
+        // Why a person must decide: a removed fact, or a Xero link the bill's
+        // job number does not back. Kept on the row so no automatic path places it.
+        const holdReason: SuggestionReason | null = verdict === 'remove'
+          ? 'fact_contradicted'
+          : held
+          ? heldReason as SuggestionReason
+          : xeroLinkConflict
+          ? 'xero_link_conflict'
+          : null
+        const row = buildQueueRow(bill, holdReason ? { ...m, suggestionReason: holdReason } : m, DEFAULT_ORG_ID)
         const { error: qErr } = await sb
           .from('materials_reconciliation_queue')
           .upsert(row, { onConflict: 'xero_invoice_id' })

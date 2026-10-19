@@ -131,7 +131,15 @@ export type SuggestionReason =
   | "no_ref_no_po"
   | "ref_no_job"
   | "no_po_match"
-  | "ambiguous_po_competitor";
+  | "ambiguous_po_competitor"
+  // An automatic fact was removed because the bill now contradicts it: held for
+  // a person. Neither the reference path nor the agent places this bill again.
+  | "fact_contradicted"
+  // Xero links the bill to a job that the bill's own job number does not name.
+  | "xero_link_conflict";
+
+/** Queue reasons that hold a bill for a person: no automatic placement while open. */
+export const HELD_QUEUE_REASONS = new Set<string>(["fact_contradicted", "xero_link_conflict"]);
 
 export interface MatchResult {
   outcome: MatchOutcome;
@@ -365,10 +373,18 @@ export function buildQueueRow(
 // ─────────────────────────────────────────────────────────────
 export const OWN_FACT_SOURCES = new Set(["xero_ref_link", "po_deterministic"]);
 
-/** Every distinct job number in a text, whole tokens only, upper case. */
+// Detection grammar, the same as the pre-match (bill_prematch.ts
+// JOB_NUMBER_RE_GLOBAL): hyphen optional, so "SWF26999" in a line is seen as a
+// job number. Placement still needs the hyphenated reference (JOB_NUMBER_RE);
+// this wider grammar only stops a bill that names a second job being placed.
+const JOB_NUMBER_ANY_RE = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t]?-?[ \t]?(\d{5,6}))(?![A-Z0-9])/gi;
+
+/** Every distinct job number in a text, whole tokens only, normalised to SWX-12345. */
 export function jobNumbersInText(text: string | null | undefined): Set<string> {
-  const re = new RegExp(JOB_NUMBER_RE.source, "gi");
-  return new Set([...String(text || "").matchAll(re)].map((m) => m[0].toUpperCase()));
+  const re = new RegExp(JOB_NUMBER_ANY_RE.source, "gi");
+  return new Set(
+    [...String(text || "").matchAll(re)].map((m) => `SW${m[1].toUpperCase()}-${m[2] ?? m[3]}`),
+  );
 }
 
 export function existingFactVerdict(input: {
@@ -379,11 +395,13 @@ export function existingFactVerdict(input: {
   refTokens: Set<string>; // job numbers in the bill's reference
   lineTokens: Set<string>; // job numbers in the bill's line descriptions
   jobFromRefId: string | null; // the reference's job when it resolved and passed every guard
+  xeroJobId?: string | null; // xero_invoices.job_id: the job Xero links the bill to
 }): "none" | "not_ours" | "keep" | "remove" {
   if (!input.source) return "none";
   if (!OWN_FACT_SOURCES.has(input.source)) return "not_ours";
   const all = new Set([...input.refTokens, ...input.lineTokens]);
   if (input.factJobBlocked) return "remove";
+  if (input.xeroJobId && input.xeroJobId !== input.factJobId) return "remove"; // Xero links another job
   if (all.size > 1) return "remove"; // the bill names several jobs: a split for a person
   if (input.source === "xero_ref_link") {
     if (input.refTokens.size === 0) return "remove"; // the reference that placed it is gone
@@ -403,9 +421,17 @@ export function newPlacementAllowed(input: {
   refTokens: Set<string>;
   lineTokens: Set<string>;
   jobFromRefId: string | null;
+  xeroJobId?: string | null; // xero_invoices.job_id: the job Xero links the bill to
+  held?: boolean; // the open queue row holds the bill for a person
 }): { reference: boolean; poFallback: boolean } {
+  if (input.held) return { reference: false, poFallback: false };
   const all = new Set([...input.refTokens, ...input.lineTokens]);
   if (all.size > 1) return { reference: false, poFallback: false };
+  // A Xero job link this path cannot confirm is left to the pre-match, which
+  // weighs it; the reference may place only on the very job Xero names.
+  if (input.xeroJobId) {
+    return { reference: !!input.jobFromRefId && input.jobFromRefId === input.xeroJobId && input.refTokens.size === 1, poFallback: false };
+  }
   if (all.size === 1) {
     // One number: only the reference path, and only when it resolved and the
     // lines (if they name a job) name the same one. Never the PO fallback.

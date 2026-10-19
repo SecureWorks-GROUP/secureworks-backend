@@ -23,6 +23,7 @@ import {
   dateWithinWindow,
   DEFAULT_MATCH_CONFIG,
   existingFactVerdict,
+  HELD_QUEUE_REASONS,
   extractJobNumber,
   jobNumbersInText,
   newPlacementAllowed,
@@ -498,4 +499,60 @@ Deno.test("new placement: only one consistent job number, and never the PO fallb
 Deno.test("existing fact: a PO fact whose lines name a different job is removed for a person", () => {
   assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, refTokens: T(), lineTokens: T("SWF-26999"), jobFromRefId: null }), "remove");
   assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, refTokens: T(), lineTokens: T("SWF-26535"), jobFromRefId: null }), "keep");
+});
+
+// ── Review 6 (PR 1063): one grammar, Xero link conflicts, holds ──
+Deno.test("jobNumbersInText sees a hyphenless job number in a line (same grammar as the pre-match)", () => {
+  const lines = jobNumbersInText("Posts for SWF26999 site");
+  assertEquals([...lines], ["SWF-26999"]);
+  // Reference SWF-26535 + line SWF26999: two jobs, never placed whole.
+  assertEquals(
+    newPlacementAllowed({ refTokens: jobNumbersInText("SWF-26535"), lineTokens: lines, jobFromRefId: "a" }),
+    { reference: false, poFallback: false },
+  );
+  // Still a whole token only.
+  assertEquals(jobNumbersInText("SWF-261009XL").size, 0);
+});
+
+Deno.test("a Xero job link the reference does not back blocks every automatic placement", () => {
+  const refTokens = jobNumbersInText("SWF-26535");
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "b", xeroJobId: "a" }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", xeroJobId: "a" }),
+    { reference: true, poFallback: false },
+  );
+  // No job number on the bill: the PO fallback leaves a linked bill to the pre-match.
+  assertEquals(
+    newPlacementAllowed({ refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, xeroJobId: "a" }),
+    { reference: false, poFallback: false },
+  );
+});
+
+Deno.test("an existing automatic fact on another job than Xero's link is removed", () => {
+  assertEquals(
+    existingFactVerdict({
+      source: "po_deterministic",
+      factJobId: "a",
+      factJobNumber: "SWF-26535",
+      factJobBlocked: false,
+      refTokens: new Set(),
+      lineTokens: new Set(),
+      jobFromRefId: null,
+      xeroJobId: "b",
+    }),
+    "remove",
+  );
+});
+
+Deno.test("a held queue row is never placed automatically", () => {
+  assertEquals(
+    newPlacementAllowed({ refTokens: jobNumbersInText("SWF-26535"), lineTokens: new Set(), jobFromRefId: "a", held: true }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(HELD_QUEUE_REASONS.has("fact_contradicted"), true);
+  assertEquals(HELD_QUEUE_REASONS.has("xero_link_conflict"), true);
+  assertEquals(HELD_QUEUE_REASONS.has("no_ref_no_po"), false);
 });
