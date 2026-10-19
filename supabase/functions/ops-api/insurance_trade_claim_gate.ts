@@ -81,8 +81,11 @@ export function insuranceClaimFamily(
     ...input.job,
     makesafe_details: input.makesafe_details ?? null,
   };
-  // Repair wins over the stored type, as on the Repairs board and Dispatch: a
-  // make-safe card tagged repair keeps type=makesafe and its SWMS- number.
+  // Repair wins over the stored type, by the Repairs board's rule
+  // (isInsuranceRepairFamily): a make-safe card tagged repair keeps
+  // type=makesafe and its SWMS- number. Dispatch is narrower: its work type
+  // ignores makesafe_details.report_type = 'repair', so such a card is a repair
+  // here and on the Repairs board but refused by Dispatch Materials.
   if (isInsuranceRepairFamily(row)) return "repair";
   if (type === "makesafe") return "makesafe";
   if (type === "insurance") return "restoration";
@@ -144,7 +147,7 @@ export function insuranceTradeClaimGate(
 // ruling picks a name instead of a new build. Not wired: a caller would read
 // the rule from a flag seeded off (rule `C_unchanged`), and wiring it into
 // either trade-pay lane is a money change that needs second-model review.
-//   A_completion_report (recommended): insuranceTradeClaimGate above.
+//   A_completion_report: insuranceTradeClaimGate above.
 //   B_builder_invoice: released once the job's own sales invoice to the
 //     builder is raised (AUTHORISED, SUBMITTED or PAID; a DRAFT is unpayable
 //     and never counts, the same raised set as _makesafeInvoiceIsRaised).
