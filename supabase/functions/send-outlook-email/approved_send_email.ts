@@ -26,6 +26,7 @@ import {
   prepareApprovedSend,
   type SendDeps,
 } from '../_shared/approved_send.ts'
+import { assertGraphSendAccepted } from './graph_send_accept.ts'
 
 export type GraphCall = (
   path: string,
@@ -170,10 +171,13 @@ export async function sendApprovedEmail(
       }, { mutating: true })
     }
     stage = 'send'
-    await deps.graph(`${base}/${seg(draftId)}/send`, {
+    const sent = await deps.graph(`${base}/${seg(draftId)}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }, { mutating: true })
+    // A 2xx that carries an error, or whose body cannot be read, is not a
+    // confirmed send: it throws an outcome-unknown error, recorded below.
+    await assertGraphSendAccepted(sent)
   } catch (error) {
     // Before the final send nothing can have been delivered.
     const unknown = stage === 'send' && outcomeUnknown(error)

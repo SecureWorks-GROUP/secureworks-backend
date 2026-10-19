@@ -17,6 +17,7 @@ import {
   type StoredFile,
 } from "./approved_send.ts";
 import { resolveSmsFromNumber } from "./sms_from_number.ts";
+import { makeFakeClaimStore } from "./outbound_send_claim_fake.ts";
 
 export const TEST_SEAL_SECRET = "test-service-role-key-for-seal";
 export const RECORDER: RecorderIdentity = {
@@ -29,12 +30,18 @@ export class MemoryApprovedSendStore implements ApprovedSendStore {
   rows = new Map<string, ApprovalRow>();
   auditRows: (AuditEntry & { seq: number })[] = [];
   failAuditFor: Set<string> = new Set();
+  /** Outbound send claims; tests may fail or advance it. */
+  claims = makeFakeClaimStore();
+  /** When set, finish() reports the outcome write as lost (row stays sending). */
+  loseOutcomeWrites = false;
   private seq = 0;
 
+  /** The store's clock for created_at; makeDeps points it at the test clock. */
+  now: () => Date = () => new Date();
   insertApproval(row: ApprovalRow): Promise<void> {
     if (this.rows.has(row.id)) throw new Error("duplicate id");
     if (row.status !== "approved") throw new Error("a new approval must start unclaimed");
-    this.rows.set(row.id, structuredClone(row));
+    this.rows.set(row.id, { ...structuredClone(row), created_at: row.created_at ?? this.now().toISOString() });
     return Promise.resolve();
   }
   loadApproval(id: string): Promise<ApprovalRow | null> {
@@ -62,6 +69,7 @@ export class MemoryApprovedSendStore implements ApprovedSendStore {
     outcome: Parameters<ApprovedSendStore["finish"]>[2],
   ): Promise<boolean> {
     const row = this.rows.get(id);
+    if (this.loseOutcomeWrites) return Promise.resolve(false);
     if (!row || row.status !== "sending" || row.claim_token !== claimToken) {
       return Promise.resolve(false);
     }
@@ -87,8 +95,18 @@ export class MemoryApprovedSendStore implements ApprovedSendStore {
   findOutcomeUnknown(payloadHash: string): Promise<{ id: string; outcome_at: string | null }[]> {
     return Promise.resolve(
       [...this.rows.values()]
-        .filter((row) => row.payload_hash === payloadHash && row.status === "outcome_unknown")
+        .filter((row) => row.payload_hash === payloadHash &&
+          (row.status === "outcome_unknown" || row.status === "sending"))
         .map((row) => ({ id: row.id, outcome_at: row.outcome_at ?? null })),
+    );
+  }
+  findClaimedSince(payloadHash: string, exceptId: string, sinceIso: string): Promise<{ id: string; status: string }[]> {
+    return Promise.resolve(
+      [...this.rows.values()]
+        .filter((row) => row.payload_hash === payloadHash && row.id !== exceptId &&
+          ["sending", "sent", "outcome_unknown"].includes(row.status) &&
+          !!row.claimed_at && Date.parse(row.claimed_at) > Date.parse(sinceIso))
+        .map((row) => ({ id: row.id, status: row.status })),
     );
   }
   events(id: string | null = null): string[] {
@@ -145,6 +163,7 @@ export function makeDeps(
   files = new MemoryFiles(),
   clock = new Clock(Date.parse("2026-09-29T02:00:00Z")),
 ): RecordDeps & SendDeps & { store: MemoryApprovedSendStore; files: MemoryFiles; clock: Clock } {
+  store.now = clock.now;
   return {
     store,
     files,

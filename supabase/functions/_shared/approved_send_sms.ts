@@ -8,6 +8,12 @@
 // equal the approved mobile exactly before anything is claimed or sent.
 //
 // Approval checks, the claim and the audit are owned by approved_send.ts.
+//
+// Scope, by design: an SMS takes the same per-content send hold as an approved
+// email (approved_send:<payload hash>, claimed in claimApprovedSend before any
+// GHL send). So an SMS whose outcome is unknown, or still sending, holds every
+// other approval of the same text until someone checks the conversation and
+// records again with sent_items_checked, exactly as an email does.
 
 import {
   ApprovedSendRefusal,
