@@ -565,3 +565,24 @@ Deno.test("an unknown bill amount blocks every automatic placement", () => {
   );
   assertEquals([amountIsKnown(null), amountIsKnown(""), amountIsKnown(0), amountIsKnown("12.5")], [false, false, true, true]);
 });
+
+Deno.test("a bill naming a PO on another job is never placed by its reference", () => {
+  const refTokens = jobNumbersInText("SWF-26535");
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", namedPoJobIds: ["b"] }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", namedPoJobIds: [null] }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", namedPoJobIds: ["a"] }),
+    { reference: true, poFallback: false },
+  );
+  // No job number, but a PO named: the supplier+amount fallback leaves it to the pre-match.
+  assertEquals(
+    newPlacementAllowed({ refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, namedPoJobIds: ["a"] }),
+    { reference: false, poFallback: false },
+  );
+});

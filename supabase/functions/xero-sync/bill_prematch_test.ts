@@ -295,3 +295,13 @@ Deno.test("a bill linked in Xero to a holding job is never placed on another job
   const d = decideBillPrematch(bill([["Your order PO-302382", "305", 410]], { xero_contact_id: "c-9", xero_job_id: "j4" }), ctx({ pos: [po] }));
   assertEquals(d.kind === "job", false);
 });
+
+Deno.test("a bill naming a PO on a holding job, or a PO with no job, is never placed on another job's PO", () => {
+  const live: PrematchPO = { id: "p1", po_number: "PO-302382", job_id: "j2", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null };
+  const hold: PrematchPO = { id: "p2", po_number: "PO-302399", job_id: "j4", xero_contact_id: "c-9", supplier_name: null, subtotal: 100, status: "sent", xero_bill_id: null };
+  const nojob: PrematchPO = { id: "p3", po_number: "PO-302400", job_id: null as unknown as string, xero_contact_id: "c-9", supplier_name: null, subtotal: 100, status: "sent", xero_bill_id: null };
+  const b1 = bill([["Your order PO-302382", "305", 410], ["and PO-302399", "305", 90]], { xero_contact_id: "c-9" });
+  assertEquals(decideBillPrematch(b1, ctx({ pos: [live, hold] })).kind === "job", false);
+  const b2 = bill([["Your order PO-302382", "305", 410], ["and PO-302400", "305", 90]], { xero_contact_id: "c-9" });
+  assertEquals(decideBillPrematch(b2, ctx({ pos: [live, nojob] })).kind === "job", false);
+});

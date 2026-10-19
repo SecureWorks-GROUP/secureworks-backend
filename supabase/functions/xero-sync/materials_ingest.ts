@@ -429,7 +429,15 @@ export function newPlacementAllowed(input: {
   xeroJobId?: string | null; // xero_invoices.job_id: the job Xero links the bill to
   held?: boolean; // the open queue row holds the bill for a person
   amountKnown?: boolean; // false when the bill's ex-GST subtotal is missing
+  namedPoJobIds?: Array<string | null>; // the job of each PO the bill names
 }): { reference: boolean; poFallback: boolean } {
+  // A bill that names a PO is left to the pre-match, which weighs the PO, unless
+  // every PO it names is on the very job its reference resolves to.
+  const poJobs = input.namedPoJobIds ?? [];
+  if (poJobs.length > 0) {
+    const agrees = !!input.jobFromRefId && poJobs.every((j) => j === input.jobFromRefId);
+    if (!agrees) return { reference: false, poFallback: false };
+  }
   if (input.held) return { reference: false, poFallback: false };
   // Unknown cost is never placed as $0: wait until the amount is known.
   if (input.amountKnown === false) return { reference: false, poFallback: false };

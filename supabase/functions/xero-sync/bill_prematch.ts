@@ -277,11 +277,11 @@ export function invoiceKeyForms(key: string): string[] {
   return [...new Set(forms)];
 }
 
-function poIsDead(po: PrematchPO): boolean {
+export function poIsDead(po: { status?: string | null }): boolean {
   return ["cancelled", "canceled", "voided", "deleted"].includes(String(po.status || "").toLowerCase());
 }
 
-function poNamedIn(po: PrematchPO, text: string): boolean {
+export function poNamedIn(po: { po_number: string | null }, text: string): boolean {
   const n = String(po.po_number || "").trim();
   if (n.length < 5 || !/\d/.test(n)) return false;
   return normWords(text).includes(normWords(n));
@@ -340,7 +340,12 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
   const poByJob = new Map<string, PrematchPO[]>();
   let poTaken = false;
   for (const po of ctx.pos) {
-    if (!po.job_id || poIsDead(po)) continue;
+    if (poIsDead(po)) continue;
+    if (!po.job_id) {
+      const t = texts.find((x) => poNamedIn(po, x.text));
+      if (t) problems.push(`${po.po_number} (${t.where}) has no job`);
+      continue;
+    }
     let where: string | null = null;
     if (po.xero_bill_id && po.xero_bill_id === bill.xero_invoice_id) where = `linked ${po.po_number || "PO"}`;
     else {
@@ -373,7 +378,9 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
         poTaken = true;
         problems.push(`${po.po_number || "the purchase order"} is already matched to another bill`);
       }
-    } else if (job && !job.holding) problems.push(`${po.po_number} is on ${job.job_number}, which is ${String(job.status).toLowerCase()}`);
+    } else if (job && job.holding) problems.push(`${po.po_number} is on the holding job ${job.job_number}`);
+    else if (job) problems.push(`${po.po_number} is on ${job.job_number}, which is ${String(job.status).toLowerCase()}`);
+    else problems.push(`${po.po_number} is on a job not on record`);
   }
 
   // 2. Context signals.

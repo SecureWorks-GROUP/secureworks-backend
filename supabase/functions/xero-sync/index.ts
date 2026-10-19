@@ -35,7 +35,7 @@ import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { readAll, runBillPrematch } from './bill_prematch_run.ts'
-import { DEAD_JOB_STATUSES } from './bill_prematch.ts'
+import { DEAD_JOB_STATUSES, poIsDead, poNamedIn } from './bill_prematch.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -1353,6 +1353,9 @@ async function ingestMaterialsActuals(
     // 2. Open PO candidates (all suppliers) — grouped by xero_contact_id. The PO
     //    anchor date is delivery_date if set, else created_at.
     const posByContact = new Map<string, POCandidate[]>()
+    // Every issued PO, whoever it is for: a PO the bill names must agree with
+    // the job this path would place it on.
+    let namedPoPool: Array<{ po_number: string | null; job_id: string | null }> = []
     let blockedJobIds = new Set<string>() // jobs not won, or holding: never a cost by rule
     const jobNumberById = new Map<string, string>()
     {
@@ -1364,6 +1367,12 @@ async function ingestMaterialsActuals(
           .order('id')
       )
       if (!pos) throw new Error('purchase orders unreadable')
+      const allPos = await readAll<any>(() =>
+        sb.from('purchase_orders').select('id, po_number, job_id, status').order('id')
+      )
+      if (!allPos) throw new Error('purchase orders unreadable')
+      // Drafts count here: a draft PO for another job still contradicts the reference.
+      namedPoPool = allPos.filter((p: any) => !poIsDead(p))
       // A PO can only carry a cost to a job that was won and is not a holding
       // job, and only once it has been issued (never a draft).
       const notLiveJobs = await readAll<any>(() =>
@@ -1559,6 +1568,9 @@ async function ingestMaterialsActuals(
       // stays held until a person resolves its queue row.
       const heldReason = existingQueueStatus === 'open' ? queueReasonById.get(bill.xero_invoice_id) : undefined
       const held = !!heldReason && HELD_QUEUE_REASONS.has(heldReason)
+      // The job of every PO the bill names (null for a PO with no job).
+      const billText = `${bill.reference || ''} \n ${(Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n ')}`
+      const namedPoJobs = namedPoPool.filter((p) => poNamedIn(p, billText)).map((p) => p.job_id ?? null)
       // Xero links the bill to a job, and the bill names job numbers, none of
       // them that job: a contradiction for a person, not for any automatic path.
       const xeroJobNumber = b.job_id ? jobNumberById.get(b.job_id) ?? null : null
@@ -1574,6 +1586,7 @@ async function ingestMaterialsActuals(
           xeroJobId: b.job_id ?? null,
           held,
           amountKnown: amountIsKnown(bill.sub_total),
+          namedPoJobIds: namedPoJobs,
         })
       const pos = allowed.poFallback && bill.xero_contact_id
         ? posByContact.get(bill.xero_contact_id) || []
