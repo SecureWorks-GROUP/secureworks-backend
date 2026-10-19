@@ -35,7 +35,12 @@
 --      quote_option_review_needed event records the failure; the status
 --      change stands. Every run first writes a row to
 --      quote_option_settle_runs and marks it settled only when its work
---      commits, so a failed run is recorded before anything can fail.
+--      commits, so a failed run is recorded before its work starts. The
+--      residual: if that first insert, the work and the review event all
+--      fail, the status change commits with only warnings (see section
+--      "Residual" in DESIGN.md). Closing it means failing the status change,
+--      which send-quote's split write would turn into an accepted quote with
+--      an unaccepted job: an owner decision, not made here.
 --   4. Switch fence_same_site_guard_v1, seeded OFF: ghl-proxy's route A
 --      refusal (choose_existing_or_option) stays off until every fencing
 --      caller shows the chooser.
@@ -127,7 +132,8 @@ $$;
 -- One row per trigger run with the switch on, written before any of the
 -- trigger's work and marked settled_at at the end of that work, in the same
 -- subtransaction. If the work fails, settled_at stays NULL: the record of the
--- failure exists before anything that can fail. No triggers and no RLS on
+-- failure exists before the work starts (the insert itself can still fail;
+-- see the header). No triggers and no RLS on
 -- this table; only the trigger (as owner) inserts. The service role reads
 -- it and fills resolved_at and resolved_by; nothing is deleted.
 CREATE TABLE public.quote_option_settle_runs (
@@ -361,7 +367,9 @@ BEGIN
   IF NOT v_flag_on THEN
     RETURN NULL;
   END IF;
-  -- The run's record comes first, before anything that can fail.
+  -- The run's record comes first, before any of the work. This insert can
+  -- itself fail (a lock timeout or a cancel on this table); the work still
+  -- runs, and the review event below is then the only failure record.
   BEGIN
     INSERT INTO public.quote_option_settle_runs (job_id, quote_option_group_id, status)
     VALUES (NEW.id, v_group, NEW.status) RETURNING id INTO v_run;
@@ -370,9 +378,6 @@ BEGIN
     RAISE WARNING 'jobs_quote_option_supersede: run record not written (%)', SQLSTATE;
   END;
   BEGIN
-    IF NOT v_flag_on THEN
-      RETURN NULL;
-    END IF;
     -- One group at a time. Bounded: about 2 seconds, then review.
     WHILE NOT pg_try_advisory_xact_lock(public.fence_quote_option_lock_key(v_group)) LOOP
       v_tries := v_tries + 1;

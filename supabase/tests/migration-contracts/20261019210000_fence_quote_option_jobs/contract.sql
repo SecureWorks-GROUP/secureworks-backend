@@ -315,6 +315,64 @@ DROP FUNCTION public.qo_contract_fail_event();
 DROP TRIGGER qo_contract_fail ON public.jobs;
 DROP FUNCTION public.qo_contract_fail();
 
+-- The run record's insert fails (a trigger forced on the run table for this transaction only;
+-- the no-trigger check above ran first). Group 7: customer c-8, H1 and H2.
+--   a. Work succeeds: the marks and events are written, with no run row.
+--   b. Work fails, review event succeeds: the review event is the record.
+--   c. Work fails and the review event fails too: the status change stands with nothing
+--      recorded. This is the stated residual, pinned so it cannot change unnoticed.
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9c000000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-8'),
+ ('9c000000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-8');
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000000a2', '9c000000-0000-4000-8000-0000000000a1', NULL, NULL);
+CREATE FUNCTION public.qo_contract_fail_run() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'contract forced run insert failure' USING ERRCODE = '55P03'; END $$;
+CREATE TRIGGER qo_contract_fail_run BEFORE INSERT ON public.quote_option_settle_runs FOR EACH ROW
+ EXECUTE FUNCTION public.qo_contract_fail_run();
+-- a.
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000a1';
+SELECT pg_temp.qo_assert((SELECT superseded_by_job_id = '9c000000-0000-4000-8000-0000000000a1'
+  FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a2')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_option_settle_runs
+  WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000a1'),
+ 'a failed run insert must not stop work that succeeds');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000a1';
+SELECT pg_temp.qo_assert((SELECT superseded_at IS NULL FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a2'),
+ 'the reversal must clear H2 even with the run insert failing');
+-- b.
+CREATE FUNCTION public.qo_contract_fail_h2() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'contract forced mark failure'; END $$;
+CREATE TRIGGER qo_contract_fail_h2 BEFORE UPDATE OF superseded_at ON public.jobs FOR EACH ROW
+ WHEN (NEW.id = '9c000000-0000-4000-8000-0000000000a2' AND NEW.superseded_at IS NOT NULL)
+ EXECUTE FUNCTION public.qo_contract_fail_h2();
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000a1';
+SELECT pg_temp.qo_assert((SELECT status = 'accepted' FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a1')
+ AND (SELECT superseded_at IS NULL FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a2')
+ AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000000a1', 'quote_option_review_needed', 'supersede_failed') = 1,
+ 'with no run row, a failed run must leave its review event');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000a1';
+-- c.
+CREATE FUNCTION public.qo_contract_fail_review() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.event_type = 'quote_option_review_needed' THEN RAISE EXCEPTION 'contract forced review failure'; END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER qo_contract_fail_review BEFORE INSERT ON public.job_events FOR EACH ROW
+ EXECUTE FUNCTION public.qo_contract_fail_review();
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000a1';
+SELECT pg_temp.qo_assert((SELECT status = 'accepted' FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a1')
+ AND (SELECT superseded_at IS NULL FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a2')
+ AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000000a1', 'quote_option_review_needed', 'supersede_failed') = 1
+ AND NOT EXISTS (SELECT 1 FROM public.quote_option_settle_runs
+  WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000a1'),
+ 'residual: run insert, work and review all failing must keep the status change and record nothing new');
+DROP TRIGGER qo_contract_fail_review ON public.job_events;
+DROP FUNCTION public.qo_contract_fail_review();
+DROP TRIGGER qo_contract_fail_h2 ON public.jobs;
+DROP FUNCTION public.qo_contract_fail_h2();
+DROP TRIGGER qo_contract_fail_run ON public.quote_option_settle_runs;
+DROP FUNCTION public.qo_contract_fail_run();
+
 -- The switch fails closed. With the switch false, NULL (where the column allows it) or missing,
 -- or set true but with its read raising (a cancel or statement timeout 57014, a permission error
 -- 42501, a lock timeout 55P03, a missing table 42P01, an ordinary error P0001, an assert failure
