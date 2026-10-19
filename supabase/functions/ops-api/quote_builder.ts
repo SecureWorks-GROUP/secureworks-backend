@@ -2412,16 +2412,26 @@ async function claimOrderMark(
 type MakeState = { maybeWritten: boolean };
 
 /**
- * PostgreSQL errors that mean the statement was refused and rolled back. An
- * allow-list, not the code's shape: a proxy can answer a committed write with
- * its own five-character code, and 08007 / 40003 mean the outcome is unknown.
- * Classes 22 (data), 23 (integrity) and 42 (a missing column or table: the
- * statement never ran), serialization failure, deadlock and statement timeout.
+ * Errors this press treats as "refused, nothing written": a short allow-list of
+ * exact PostgreSQL codes, not the code's shape. A proxy can answer a committed
+ * write with a code of its own, 08007 / 40003 mean the outcome is unknown, and
+ * a timeout or cancel (57014) does not prove the insert rolled back, so all of
+ * those keep the marker. Even these are trusted from the code alone; a wrong
+ * code from a gateway would release a marker, which the unique keys still back
+ * while the first set's rows exist.
  */
+const REFUSED_CODES = new Set([
+  "23502", // not null
+  "23503", // foreign key
+  "23505", // unique (a number clash, or another press's set)
+  "23514", // check
+  "42703", // undefined column
+  "42P01", // undefined table
+  "40001", // serialization failure
+  "40P01", // deadlock
+]);
 function refusedAndRolledBack(error: any): boolean {
-  const code = String(error?.code || "");
-  return /^(22|23|42)[0-9A-Z]{3}$/.test(code) ||
-    code === "40001" || code === "40P01" || code === "57014";
+  return REFUSED_CODES.has(String(error?.code || ""));
 }
 
 /**
@@ -2449,6 +2459,10 @@ async function releaseIfNothingWritten(
  * returned rows, or failed with an error not on the allow-list), the press
  * keeps its marker whatever later writes do.
  */
+export async function _trackedInsertForTest(state: { maybeWritten: boolean }, send: () => Promise<any>) {
+  return await trackedInsert(state, send);
+}
+
 async function trackedInsert(state: MakeState, send: () => Promise<any>) {
   const before = state.maybeWritten;
   state.maybeWritten = true;

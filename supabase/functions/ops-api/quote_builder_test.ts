@@ -13,6 +13,7 @@ import {
   listQuoteBuilderJobs,
   loadQuoteBuilderCardValues,
   loadQuoteBuilderSettings,
+  _trackedInsertForTest,
   makeQuoteBuilderPurchaseOrders,
   makeQuoteBuilderWorkOrder,
   normaliseChargeLines,
@@ -2984,7 +2985,8 @@ Deno.test("quote builder: only a known rolled-back database error releases the m
     [{ code: "PGRST116", message: "postgrest" }, false],
     [{ code: "42703", message: "column does not exist" }, true],
     [{ code: "23502", message: "not null" }, true],
-    [{ code: "57014", message: "statement timeout" }, true],
+    [{ code: "57014", message: "statement timeout" }, false],
+    [{ code: "42501", message: "permission denied" }, false],
     [{ code: "40001", message: "serialization failure" }, true],
   ];
   for (const kind of ["purchase_orders", "work_orders"] as const) {
@@ -3000,18 +3002,31 @@ Deno.test("quote builder: only a known rolled-back database error releases the m
   }
 });
 
-Deno.test("quote builder: once a write may have landed, a later refused write does not release the marker", async () => {
-  for (const kind of ["purchase_orders", "work_orders"] as const) {
-    const { store, issued } = await issuedForOrders();
-    // First a number clash with no winner (refused, retried), then an unknown outcome.
-    const answers = [{ code: "23505", message: "number clash" }, { code: "08007", message: "unknown" }];
-    const failing = makeFakeClient(store, {
-      insertError: (table) => table === kind ? answers.shift() ?? { code: "23505", message: "x" } : null,
-    }).client;
-    const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
-    await assertRejects(() => make(failing, { version_id: issued.id }, ACTOR));
-    assertEquals(store.quote_builder_order_marks.length, 1, kind);
-  }
+Deno.test("quote builder: once a write may have landed, a later refused write does not clear it", async () => {
+  const refused = () => Promise.resolve({ data: null, error: { code: "23505", message: "clash" } });
+  const unknown = () => Promise.resolve({ data: null, error: { code: "08007", message: "unknown" } });
+  const wrote = () => Promise.resolve({ data: [{ id: "x" }], error: null });
+  const lost = () => Promise.reject(new Error("connection reset"));
+  // Unknown, then refused: stays maybe-written.
+  const a = { maybeWritten: false };
+  await _trackedInsertForTest(a, unknown);
+  await _trackedInsertForTest(a, refused);
+  assertEquals(a.maybeWritten, true);
+  // Wrote, then refused: stays.
+  const b = { maybeWritten: false };
+  await _trackedInsertForTest(b, wrote);
+  await _trackedInsertForTest(b, refused);
+  assertEquals(b.maybeWritten, true);
+  // Threw, then refused: stays.
+  const c = { maybeWritten: false };
+  await assertRejects(() => _trackedInsertForTest(c, lost));
+  await _trackedInsertForTest(c, refused);
+  assertEquals(c.maybeWritten, true);
+  // Only refusals: nothing written.
+  const d = { maybeWritten: false };
+  await _trackedInsertForTest(d, refused);
+  await _trackedInsertForTest(d, refused);
+  assertEquals(d.maybeWritten, false);
 });
 
 Deno.test("quote builder: a failure after the orders were written keeps the marker", async () => {

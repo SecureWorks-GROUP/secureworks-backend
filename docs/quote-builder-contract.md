@@ -710,12 +710,14 @@ From an issued version:
   making any by hand. A set missing a row comes back with
   `purchase_orders_incomplete: { expected, present, missing_seq }` and is
   never re-made. A make that fails releases its marker only when every
-  order write it sent came back with an error on a short allow-list that
-  means the statement was refused and rolled back (classes 22, 23 and 42,
-  `40001`, `40P01`, `57014`): then a later press can make them. If any write
-  threw, never answered, returned rows, or failed with any other code
-  (including `08007` and `40003`, outcome unknown, or a proxy's own code),
-  the marker stays for good and later presses get `409 *_unsettled` (staff reconcile). No
+  order write it sent came back with one of a short allow-list of
+  PostgreSQL codes it treats as refused (`23502`, `23503`, `23505`, `23514`,
+  `42703`, `42P01`, `40001`, `40P01`): then a later press can make them. The
+  code is trusted as given; a wrong code from a gateway could release a
+  marker, and the unique keys still refuse a second set while the first
+  set's rows exist. If any write threw, never answered, returned rows, or
+  failed with any other code (including `57014`, `08007` and `40003`, or a
+  proxy's own code), the marker stays for good and later presses get `409 *_unsettled` (staff reconcile). No
   re-read decides this, since an empty read proves nothing about a write in
   flight. The unique keys refuse a second set only while the first set's rows
   exist; the kept marker is what protects a set that was removed.
