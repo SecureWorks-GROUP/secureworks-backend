@@ -304,18 +304,21 @@ async function run(): Promise<void> {
       })`,
     ),
   ]);
-  const { matches: unlinkedMatches, exclusions: unlinkedExclusions } =
-    deriveSesUnlinkedInvoiceMatches(
-      (refUniverse as any[]).map((row) => ({
-        id: String(row.job_id),
-        external_ref: row.external_ref ?? null,
-        builder_po_number: row.builder_po_number ?? null,
-      })),
-      unlinkedInvoices as any[],
-    );
+  const {
+    matches: unlinkedMatches,
+    exclusions: unlinkedExclusions,
+    manual_review: unlinkedManualReview,
+  } = deriveSesUnlinkedInvoiceMatches(
+    (refUniverse as any[]).map((row) => ({
+      id: String(row.job_id),
+      external_ref: row.external_ref ?? null,
+      builder_po_number: row.builder_po_number ?? null,
+    })),
+    unlinkedInvoices as any[],
+  );
   const unlinkedMatchByJob = indexSesInvoiceMatches(unlinkedMatches);
   console.error(
-    `unlinked invoice matches: ${unlinkedMatches.length} matched, ${unlinkedExclusions.length} excluded as ambiguous`,
+    `unlinked invoice matches: ${unlinkedMatches.length} matched, ${unlinkedExclusions.length} excluded as ambiguous, ${unlinkedManualReview.length} held for manual review (one-sided PO)`,
   );
 
   const detailByJob: Record<string, any> = {};

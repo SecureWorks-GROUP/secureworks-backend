@@ -91,6 +91,22 @@ export interface SesInvoiceMatch {
   invoice: SesMatchInvoice;
 }
 
+/**
+ * A card-unique candidate the matcher will NOT call a match because the
+ * purchase-order evidence is one-sided: the card names a PO and the invoice
+ * does not, or the reverse (`sesMatchPoRelation` -> `po_indeterminate`). One
+ * claim routinely hosts several POs, so the claim digits alone cannot prove the
+ * money is this card's, and keeping the candidate visible is not proof that it
+ * is (DSP-T3-GAP-1, Codex 19 Oct 2026). It is reported on its own list so no
+ * consumer reading `matches` can treat it as an accepted match; a person
+ * decides.
+ */
+export interface SesInvoiceManualReview extends SesInvoiceMatch {
+  review_status: "manual_review";
+  reason: "po_indeterminate";
+  detail: string;
+}
+
 export interface SesInvoiceMatchExclusion {
   job_id: string;
   job_number: string | null;
@@ -211,7 +227,7 @@ export function sesMatchPoRelation(
 /**
  * Map SES board cards to their card-unique unlinked issued ACCREC invoice.
  *
- * Three guards, all of which must hold:
+ * Five guards, all of which must hold:
  *
  * 1. Exactly one eligible invoice names the card's identity digits (claim
  *    reference and/or the card's own purchase order - see
@@ -226,6 +242,9 @@ export function sesMatchPoRelation(
  *    (`sesMatchPoRelation` -> `distinct_po`). One claim routinely hosts several
  *    POs, so the shared claim digits alone do not prove the money is this
  *    card's (DSP-T3-GAP-1, 19 Oct 2026).
+ * 5. Both sides agree on the purchase order, or neither names one. A pair where
+ *    only one side names a PO (`po_indeterminate`) is reported in
+ *    `manual_review`, never in `matches`.
  *
  * `jobs` must be the FULL job population, not just board cards, or guard 2
  * silently weakens. Only jobs with `on_board !== false` can receive a match.
@@ -236,6 +255,7 @@ export function deriveSesUnlinkedInvoiceMatches(
 ): {
   matches: SesInvoiceMatch[];
   exclusions: SesInvoiceMatchExclusion[];
+  manual_review: SesInvoiceManualReview[];
 } {
   const eligible = invoices.filter(isUnlinkedIssuedAccrec);
 
@@ -335,7 +355,7 @@ export function deriveSesUnlinkedInvoiceMatches(
   for (const match of provisional) {
     claims.set(match.invoice.id, (claims.get(match.invoice.id) ?? 0) + 1);
   }
-  const matches = provisional.filter((match) => {
+  const survivors = provisional.filter((match) => {
     if ((claims.get(match.invoice.id) ?? 0) <= 1) return true;
     exclusions.push({
       job_id: match.job_id,
@@ -349,7 +369,34 @@ export function deriveSesUnlinkedInvoiceMatches(
     return false;
   });
 
-  return { matches, exclusions };
+  // Guard 5: one-sided purchase-order evidence is never an accepted match. It
+  // runs after guard 3 so a contested invoice is still excluded outright.
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
+  const matches: SesInvoiceMatch[] = [];
+  const manual_review: SesInvoiceManualReview[] = [];
+  for (const match of survivors) {
+    const job = jobsById.get(match.job_id);
+    if (!job || sesMatchPoRelation(job, match.invoice) !== "po_indeterminate") {
+      matches.push(match);
+      continue;
+    }
+    const cardPos = sesMatchJobPurchaseOrders(job);
+    const invoicePo = splitRefPo(match.invoice.reference).po;
+    manual_review.push({
+      ...match,
+      review_status: "manual_review",
+      reason: "po_indeterminate",
+      detail: invoicePo
+        ? `${
+          match.invoice.invoice_number ?? match.invoice.id
+        } names PO ${invoicePo}; card declares no PO`
+        : `${
+          match.invoice.invoice_number ?? match.invoice.id
+        } names no PO; card declares ${cardPos.join(",")}`,
+    });
+  }
+
+  return { matches, exclusions, manual_review };
 }
 
 /** Index matches by job id for O(1) lookup by a per-card reader. */

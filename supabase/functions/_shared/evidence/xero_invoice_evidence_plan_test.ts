@@ -149,3 +149,33 @@ Deno.test("the board rule: make-safe, restoration, or a details row", () => {
   );
   assertEquals(xeroEvidenceMatchJob({ id: J1, type: "fencing" }).on_board, false);
 });
+
+Deno.test("PO guards: a same-claim different-PO or one-sided-PO invoice is a candidate, never placed", () => {
+  // DSP-T3-GAP-1: guard 4 refuses a different PO and guard 5 sends one-sided
+  // PO evidence to manual review. Neither may reach `plan.matches`; each stays
+  // a review candidate naming its card.
+  const { plan, summary } = buildXeroInvoiceEvidencePlan(
+    [
+      card(J1, "MLB-27037PO-2222"),
+      card(J2, "MLB-24664"),
+      card(J3, "MLB-26344PO-56387"),
+    ],
+    [
+      invoice(I1, "MLB-27037PO-1111"),
+      invoice(I2, "MLB-24664PO-55370"),
+      invoice(I3, "MLB-26344PO-56387"),
+    ],
+    [I1, I2, I3],
+  );
+  assertEquals(plan.matches, [{
+    invoice_id: I3,
+    job_id: J3,
+    digits: ["26344", "56387"],
+  }]);
+  assertEquals(plan.candidates, [
+    { invoice_id: I1, job_ids: [J1] },
+    { invoice_id: I2, job_ids: [J2] },
+  ]);
+  assertEquals(summary.matched, 1);
+  assertEquals(summary.with_candidates, 2);
+});
