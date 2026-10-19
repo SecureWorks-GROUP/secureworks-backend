@@ -523,7 +523,10 @@ BEGIN
       FROM public.jobs j
       JOIN LATERAL (
         -- One current document per party (contact and run label), as the
-        -- handler takes the current quote per party: the newest live revision.
+        -- handler takes the current quote per party: the newest live sent
+        -- revision, by version, then sent_at, then created_at, then id
+        -- (checker 2887117 N5, N6). Still not reproduced: the handler's
+        -- skipping of qb: labels and its normalising of blank run labels.
         -- A contactless whole-job document beside party documents is not a
         -- party (the handler ignores it) and is left out (checker 70fd7db L1);
         -- an older live revision is left out (L2).
@@ -532,13 +535,14 @@ BEGIN
                d.version, d.created_at, d.id, d.accepted_at
           FROM public.job_documents d
          WHERE d.job_id = j.id AND d.type = 'quote' AND d.superseded_at IS NULL AND d.declined_at IS NULL
+           AND d.sent_to_client IS TRUE
            AND NOT (d.job_contact_id IS NULL
                     AND coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label) IS NULL
                     AND EXISTS (SELECT 1 FROM public.job_documents pd
                                  WHERE pd.job_id = j.id AND pd.type = 'quote' AND pd.job_contact_id IS NOT NULL
                                    AND pd.superseded_at IS NULL AND pd.declined_at IS NULL))
          ORDER BY d.job_contact_id, coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label),
-                  d.version DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id
+                  d.version DESC NULLS LAST, d.sent_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
       ) p ON true
      WHERE j.status = 'partially_accepted'
        AND NOT EXISTS (SELECT 1 FROM public.job_documents x
@@ -559,13 +563,19 @@ BEGIN
     -- 'accepted', not in any won status), whatever the documents look like:
     -- this covers the shapes the document heuristic cannot (checker 70fd7db
     -- L1 to L3). ref: the event id, a durable occurrence, so a person can
-    -- resolve it. Not listed if the event write itself failed.
+    -- resolve it. Not listed if the event write itself failed. Can stay
+    -- listed after a legitimate move to a non-won status other than the
+    -- intended one (for example lost): a person resolves it.
     SELECT 'acceptance_status_not_written', e.job_id, e.id::text, e.created_at
       FROM public.job_events e
       JOIN public.jobs j ON j.id = e.job_id
      WHERE e.event_type = 'quote_acceptance_status_not_written'
        AND j.status IS DISTINCT FROM (e.detail_json->>'intended_status')
-       AND NOT ((e.detail_json->>'intended_status') = 'accepted' AND public.fence_quote_option_status_won(j.status))
+       -- Any won status clears it, for either intended value: a later party's
+       -- acceptance or a staff move on has superseded the missed write
+       -- (checker 2887117 N1, N3). Not bounded by p_since: a resolvable kind,
+       -- cleared by its condition or by a person (N4).
+       AND NOT public.fence_quote_option_status_won(j.status)
     UNION ALL
     -- An accepted run document with a contact but no accepted run acceptance
     -- pointing at it: the legacy run upsert failed after the document

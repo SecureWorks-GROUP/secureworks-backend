@@ -1024,9 +1024,11 @@ DROP FUNCTION public.qa_combo_raise();
 -- C4 parity: with every switch off, the legacy status write has exactly the database effect
 -- of the PATCH it replaces. Twin ungrouped jobs (their own ids, 9a00c4c4-..., used nowhere
 -- else in this transaction) are written one each way and compared column by column, except
--- id, job_number and work_order_id: each new job gets its own from insert triggers (the job
--- number sequence and the job work-orders trigger, 20261012130000), and no status write
--- touches them, so they differ between twins whatever the write does. The same for a partial write (no accepted_at), a missing job (no row,
+-- id, job_number and work_order_id, whose values differ per row by design: id and job_number
+-- are assigned on insert, and work_order_id is set by the status write itself (the
+-- 20261012130000 trigger opens a draft job work order when a job enters an open status), with
+-- a new work order per job. So the compare checks instead that each twin's work_order_id is
+-- present or absent alike, and that each points at a job work order. The same for a partial write (no accepted_at), a missing job (no row,
 -- no error either way) and a refused value (an error either way).
 UPDATE public.feature_flags SET enabled = false
  WHERE flag_name IN ('quote_option_supersede_v1', 'quote_accept_atomic_v1', 'quote_option_strict_record_v1');
@@ -1046,7 +1048,15 @@ SELECT pg_temp.qa_assert(
  AND (SELECT to_jsonb(j) - ARRAY['id', 'job_number', 'work_order_id'] FROM public.jobs j WHERE id = '9a00c4c4-0000-4000-8000-0000000000d3')
    = (SELECT to_jsonb(j) - ARRAY['id', 'job_number', 'work_order_id'] FROM public.jobs j WHERE id = '9a00c4c4-0000-4000-8000-0000000000d4')
  AND (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a00c4c4-0000-4000-8000-0000000000d1', '9a00c4c4-0000-4000-8000-0000000000d3'))
-   = (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a00c4c4-0000-4000-8000-0000000000d2', '9a00c4c4-0000-4000-8000-0000000000d4')),
+   = (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a00c4c4-0000-4000-8000-0000000000d2', '9a00c4c4-0000-4000-8000-0000000000d4'))
+ AND (SELECT array_agg(j.work_order_id IS NULL ORDER BY j.id) FROM public.jobs j
+       WHERE j.id IN ('9a00c4c4-0000-4000-8000-0000000000d1', '9a00c4c4-0000-4000-8000-0000000000d3'))
+   = (SELECT array_agg(j.work_order_id IS NULL ORDER BY j.id) FROM public.jobs j
+       WHERE j.id IN ('9a00c4c4-0000-4000-8000-0000000000d2', '9a00c4c4-0000-4000-8000-0000000000d4'))
+ AND (SELECT count(*) FROM public.jobs j JOIN public.work_orders w ON w.id = j.work_order_id
+       WHERE j.id IN ('9a00c4c4-0000-4000-8000-0000000000d1', '9a00c4c4-0000-4000-8000-0000000000d3'))
+   = (SELECT count(*) FROM public.jobs j JOIN public.work_orders w ON w.id = j.work_order_id
+       WHERE j.id IN ('9a00c4c4-0000-4000-8000-0000000000d2', '9a00c4c4-0000-4000-8000-0000000000d4')),
  'C4 parity: the legacy status write must leave exactly the row the PATCH leaves');
 SELECT pg_temp.qa_assert(pg_temp.qa_try($q$SELECT public.quote_accept_legacy_set_status('9a00c4c4-0000-4000-8000-00000000ffff', 'accepted', now())$q$) = 'ok',
  'C4 parity: a missing job is no row and no error, like the PATCH');
@@ -1170,6 +1180,29 @@ INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by) VAL
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'acceptance_status_not_written' AND ref = '9e000000-0000-4000-8000-0000000000ef'),
  'gap: a person can resolve a recorded status write by its event');
+-- N5 (checker 2887117): two live revisions of the same version for party E2; the later-sent
+-- one is current, as in the handler, and unaccepted, so the job is pending: not listed.
+UPDATE public.job_documents SET superseded_at = '2026-10-20 04:00:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000ee';
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_id, version, sent_at) VALUES
+ ('9d000000-0000-4000-8000-0000000000f0', '9a000000-0000-4000-8000-0000000000e9', 'quote', true,
+  '9c00c4c4-0000-4000-8000-0000000000e2', 1, '2026-10-21 00:00:00+00');
+UPDATE public.job_documents SET sent_at = '2026-10-19 00:00:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000ea';
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
+ 'gap (N5): the later-sent revision of the same version is current, so the job is pending');
+-- N1 (checker 2887117): an intended partially_accepted write missed, then the next party's
+-- acceptance landed accepted: cleared.
+INSERT INTO public.job_events (id, job_id, event_type, detail_json) VALUES
+ ('9e000000-0000-4000-8000-0000000000f0', '9a000000-0000-4000-8000-0000000000ef', 'quote_acceptance_status_not_written',
+  '{"document_id":"9d000000-0000-4000-8000-0000000000ef","intended_status":"partially_accepted","reason":"call:57014"}');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000ef';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'acceptance_status_not_written' AND ref = '9e000000-0000-4000-8000-0000000000f0'),
+ 'gap: a missed partially_accepted write is listed while the job is still quoted');
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000ef';
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'acceptance_status_not_written' AND ref = '9e000000-0000-4000-8000-0000000000f0'),
+ 'gap (N1): a later acceptance into a won status clears a missed partially_accepted write');
 -- A run row with no document pointer is listed as not live.
 INSERT INTO public.run_acceptances (job_id, job_contact_id, job_document_id, run_label, status, accepted_at) VALUES
  ('9a000000-0000-4000-8000-0000000000e5', '9c000000-0000-4000-8000-0000000000e5', NULL, 'B', 'accepted', '2026-10-20 05:00:00+00');
