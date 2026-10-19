@@ -141,6 +141,13 @@ Deno.test('the RPC outcomes map one to one, with the inputs passed through', asy
   }
 })
 
+Deno.test('a run acceptance passes its run label and neighbour through', async () => {
+  const sb = fakeClient({}, { accept_quote_document_atomic: { data: { outcome: 'accepted', request_id: 'r-1', job_status: 'quoted' } } })
+  await acceptQuoteDocumentAtomically(sb, { ...input, runLabel: 'A', runNeighbour: 'n1', jobStatus: 'quoted', acceptEvent: null }, 0)
+  const args = sb.calls[0].args as Record<string, unknown>
+  assertEquals([args.p_run_label, args.p_run_neighbour, args.p_job_status, args.p_accept_event], ['A', 'n1', 'quoted', null])
+})
+
 Deno.test('a database error (SQLSTATE) is a confirmed rollback: failed, never accepted', async () => {
   const sb = fakeClient({ quote_acceptance_attempts: { data: [{ request_id: 'r-1', job_status: 'accepted' }] } },
     { accept_quote_document_atomic: { error: { code: 'P0001', message: 'quote_option_unrecorded' } } })

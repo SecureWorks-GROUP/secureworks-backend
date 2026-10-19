@@ -418,7 +418,8 @@ INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_
  ('9d000000-0000-4000-8000-0000000000c5', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'M'),
  ('9d000000-0000-4000-8000-0000000000c6', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'L'),
  ('9d000000-0000-4000-8000-0000000000c7', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'E'),
- ('9d000000-0000-4000-8000-0000000000c8', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'X');
+ ('9d000000-0000-4000-8000-0000000000c8', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'X'),
+ ('9d000000-0000-4000-8000-0000000000c9', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c6', 'M');
 INSERT INTO public.run_line_items (job_id, run_label, job_contact_id, description) VALUES
  ('9a000000-0000-4000-8000-0000000000c5', 'M', NULL, 'mixed: no contact'),
  ('9a000000-0000-4000-8000-0000000000c5', 'M', '9c000000-0000-4000-8000-0000000000c6', 'mixed: neighbour'),
@@ -432,6 +433,9 @@ $$;
 SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c5', 'M', NULL)::text, true);
 SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted',
  'run neighbour: NULL must be accepted when the run has a NULL-contact item');
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c9', 'M', '9c000000-0000-4000-8000-0000000000c6')::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted',
+ 'run neighbour: the mixed run''s contact must also be accepted');
 -- All-NULL run: NULL accepted; a contact not on the run refused.
 SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c6', 'L', '9c000000-0000-4000-8000-0000000000c6')::text, true);
 SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'reason' = 'run_neighbour_unbound',
