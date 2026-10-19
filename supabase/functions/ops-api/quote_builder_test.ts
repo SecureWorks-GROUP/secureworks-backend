@@ -145,6 +145,17 @@ function makeFakeClient(
           ...r,
         }));
         for (const r of rows) {
+          // purchase_orders_quote_builder_seq_with_version (20261019183000).
+          if (
+            table === "purchase_orders" &&
+            (r.quote_builder_version_id != null) !==
+              (r.quote_builder_po_seq != null)
+          ) {
+            return {
+              data: null,
+              error: { code: "23514", message: "seq must come with version" },
+            };
+          }
           const clash = table === "quote_builder_versions"
             ? store[table].some((o) =>
               o.job_id === r.job_id && o.chain_id === r.chain_id &&
@@ -2770,4 +2781,61 @@ Deno.test("quote builder: a refused order insert that leaves no order for the ve
   );
   assertEquals(store.work_orders.length, 0);
   assertEquals(store.purchase_orders.length, 0);
+});
+
+Deno.test("quote builder: a set with a removed purchase order comes back named incomplete, and is not re-made", async () => {
+  const { store, client, issued } = await issuedForOrders();
+  await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR);
+  store.purchase_orders = store.purchase_orders.filter((r) => r.quote_builder_po_seq !== 2);
+  const reply: any = await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR);
+  assertEquals(store.purchase_orders.length, 2);
+  assertEquals(reply.purchase_orders.length, 2);
+  assertEquals(reply.purchase_orders_incomplete, { expected: 3, present: 2, missing_seq: [2] });
+  // A whole set reads with no such key.
+  const whole = await issuedForOrders();
+  const ok: any = await makeQuoteBuilderPurchaseOrders(whole.client, { version_id: whole.issued.id }, ACTOR);
+  assertEquals("purchase_orders_incomplete" in ok, false);
+});
+
+Deno.test("quote builder: a set removed entirely is refused, never made a second time", async () => {
+  const { store, client, issued } = await issuedForOrders();
+  await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR);
+  store.purchase_orders = [];
+  let status = 0, c = "";
+  try {
+    await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR);
+  } catch (e) {
+    status = (e as any).status;
+    c = (e as any).code;
+  }
+  assertEquals([status, c], [409, "purchase_orders_removed"]);
+  assertEquals(store.purchase_orders.length, 0);
+});
+
+Deno.test("quote builder: an order number clash is tried again with a new number; one set lands", async () => {
+  const { store, client, issued } = await issuedForOrders();
+  let refusals = 1;
+  const clashing = makeFakeClient(store, {
+    insertError: (table) =>
+      (table === "purchase_orders" || table === "work_orders") && refusals-- > 0
+        ? { code: "23505", message: "purchase_orders_org_po_number_key" }
+        : null,
+  }).client;
+  const reply: any = await makeQuoteBuilderPurchaseOrders(clashing, { version_id: issued.id }, ACTOR);
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(reply.purchase_orders.length, 3);
+  refusals = 1;
+  const wo: any = await makeQuoteBuilderWorkOrder(clashing, { version_id: issued.id }, ACTOR);
+  assertEquals(store.work_orders.length, 1);
+  assertEquals(wo.work_order?.id, store.work_orders[0].id);
+});
+
+Deno.test("quote builder: the database refuses a version-linked purchase order without its seq", async () => {
+  const { client, issued } = await issuedForOrders();
+  const { error } = await client.from("purchase_orders").insert({
+    po_number: "PO-OLD-1",
+    supplier_name: "Bunnings",
+    quote_builder_version_id: issued.id,
+  });
+  assertEquals(error?.code, "23514");
 });

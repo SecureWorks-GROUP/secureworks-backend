@@ -2167,7 +2167,9 @@ async function ordersForVersion(client: any, versionId: string) {
   if (woError) readError("work orders read failed", woError);
   const { data: purchaseOrders, error: poError } = await client
     .from("purchase_orders")
-    .select("id, po_number, supplier_name, status, quote_builder_version_id")
+    .select(
+      "id, po_number, supplier_name, status, quote_builder_version_id, quote_builder_po_seq",
+    )
     .eq("quote_builder_version_id", versionId);
   if (poError) readError("purchase orders read failed", poError);
   const workOrder = (workOrders || [])[0] ?? null;
@@ -2177,6 +2179,8 @@ async function ordersForVersion(client: any, versionId: string) {
   return {
     work_order: workOrderView(workOrder),
     purchase_orders: pos.map(purchaseOrderView),
+    // Not in any reply: the set check's input.
+    seqs: pos.map((po: any) => po.quote_builder_po_seq ?? null),
   };
 }
 
@@ -2233,7 +2237,8 @@ function ordersReply(version: any, orders: {
   purchase_orders: ReturnType<typeof purchaseOrderView>[];
 }) {
   return {
-    ...orders,
+    work_order: orders.work_order,
+    purchase_orders: orders.purchase_orders,
     hidden_lines: quoteBuilderCrewScope(version).hidden_lines,
   };
 }
@@ -2248,27 +2253,35 @@ export async function makeQuoteBuilderWorkOrder(
   if (existing.work_order) return ordersReply(version, existing);
 
   const scope = quoteBuilderCrewScope(version);
-  const woNumber = `WO-${orderStamp()}`;
-  const { data, error } = await client.from("work_orders").insert({
-    org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
-    job_id: version.job_id,
-    wo_number: woNumber,
-    kind: "crew",
-    status: "draft",
-    scope_items: scope.scope_items,
-    site_address: siteLine(job),
-    created_by: uuidOrNull(actor.id),
-    quote_builder_version_id: version.id,
-  }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
-  if (error?.code === "23505") {
-    // Another press made this version's work order first
-    // (uq_work_orders_one_quote_builder_version). A clash on anything else,
-    // such as the number, leaves no order for the version and is an error.
-    const winner = await ordersForVersion(client, version.id);
-    if (!winner.work_order) readError("work order create failed", error);
-    return ordersReply(version, winner);
+  let data: any = null;
+  for (let attempt = 0; attempt < 3 && !data; attempt++) {
+    const woNumber = `WO-${orderStamp()}`;
+    const res = await client.from("work_orders").insert({
+      org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
+      job_id: version.job_id,
+      wo_number: woNumber,
+      kind: "crew",
+      status: "draft",
+      scope_items: scope.scope_items,
+      site_address: siteLine(job),
+      created_by: uuidOrNull(actor.id),
+      quote_builder_version_id: version.id,
+    }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
+    if (res.error?.code === "23505") {
+      // Another press made this version's work order first
+      // (uq_work_orders_one_quote_builder_version): return it. No order for
+      // the version means the number clashed: try a new one.
+      const winner = await ordersForVersion(client, version.id);
+      if (winner.work_order) return ordersReply(version, winner);
+      await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+      continue;
+    }
+    if (res.error || !res.data) {
+      readError("work order create failed", res.error || "no row");
+    }
+    data = res.data;
   }
-  if (error || !data) readError("work order create failed", error || "no row");
+  if (!data) readError("work order create failed", "order number clashed three times");
   await recordOrderEvent(
     client,
     actor,
@@ -2293,14 +2306,79 @@ export async function makeQuoteBuilderPurchaseOrders(
   actor: QuoteBuilderActor,
 ) {
   const { version } = await loadIssuedQuoteVersion(client, body, actor);
+  const groups = materialGroups(version);
   const existing = await ordersForVersion(client, version.id);
   // Any row for this version, including a renamed, cancelled or deleted one,
-  // is the order. A second press inserts nothing.
-  if (existing.purchase_orders.length) return ordersReply(version, existing);
-
-  const groups = materialGroups(version);
+  // is the order. A second press inserts nothing. A set missing a row (one
+  // removed from the table) is returned as it is and named incomplete: the
+  // missing order may already be with the supplier, so it is never re-made.
+  if (existing.purchase_orders.length) {
+    return withSetCheck(ordersReply(version, existing), existing, groups.length);
+  }
   if (!groups.length) return ordersReply(version, existing);
+  // No rows, but this version's set was made once: they were removed by hand.
+  // Making them again could order twice, so staff must decide.
+  if (await purchaseOrdersWereMade(client, version.job_id, version.id)) {
+    fail(
+      "purchase_orders_removed",
+      "This quote's purchase orders were made and then removed. Make any still needed by hand.",
+      409,
+    );
+  }
 
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const made = await insertPurchaseOrderSet(client, actor, version, groups);
+    if (made) return made;
+    // The insert clashed on something other than this version's set (the
+    // order number): try again with a new number.
+    await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+  }
+  readError("purchase order create failed", "order number clashed three times");
+}
+
+/** The made event is the lasting record that a version's set once existed. */
+async function purchaseOrdersWereMade(
+  client: any,
+  jobId: string,
+  versionId: string,
+): Promise<boolean> {
+  const { data, error } = await client.from("job_events")
+    .select("id")
+    .eq("job_id", jobId)
+    .eq("event_type", "quote_builder_purchase_orders_made")
+    .eq("detail_json->>quote_builder_version_id", versionId)
+    .limit(1);
+  if (error) readError("job events read failed", error);
+  return (data || []).length > 0;
+}
+
+function withSetCheck(
+  reply: ReturnType<typeof ordersReply>,
+  orders: { seqs: Array<number | null> },
+  expected: number,
+) {
+  // Every version-linked row carries its seq (CHECK of 20261019183000).
+  const present = new Set(orders.seqs.filter((n) => n != null));
+  const missing: number[] = [];
+  for (let n = 1; n <= expected; n++) if (!present.has(n)) missing.push(n);
+  if (!missing.length) return reply;
+  return {
+    ...reply,
+    purchase_orders_incomplete: {
+      expected,
+      present: orders.seqs.length,
+      missing_seq: missing,
+    },
+  };
+}
+
+/** One set in one insert; null when the clash was not this version's set. */
+async function insertPurchaseOrderSet(
+  client: any,
+  actor: QuoteBuilderActor,
+  version: any,
+  groups: Array<{ supplier_name: string; lines: any[] }>,
+) {
   const stamp = orderStamp();
   const rows = groups.map((group, i) => {
     const lineItems = group.lines.map((line) => ({
@@ -2337,12 +2415,11 @@ export async function makeQuoteBuilderPurchaseOrders(
     .select("id, po_number, supplier_name, status, quote_builder_version_id");
   if (error?.code === "23505") {
     // Another press made this version's set first; the whole insert was
-    // refused, so nothing of ours landed. Return the winner's set.
+    // refused, so nothing of ours landed. Return the winner's set. No winner:
+    // the clash was the order number, and the caller tries a new one.
     const winner = await ordersForVersion(client, version.id);
-    if (!winner.purchase_orders.length) {
-      readError("purchase order create failed", error);
-    }
-    return ordersReply(version, winner);
+    if (!winner.purchase_orders.length) return null;
+    return withSetCheck(ordersReply(version, winner), winner, groups.length);
   }
   if (error) readError("purchase order create failed", error);
   const inserted = Array.isArray(data) ? data : data ? [data] : [];

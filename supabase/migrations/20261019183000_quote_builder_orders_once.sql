@@ -22,6 +22,17 @@
 -- row already present is numbered first, in PO number order (none on 19 Oct
 -- 2026: 0 rows, read by SELECT in the SQ-14 run), so the index always builds.
 --
+-- A version-linked row without a seq is refused (IS NOT NULL is spelt out:
+-- a bare ">= 1" on NULL is UNKNOWN and would pass), so an older writer that
+-- does not set the seq cannot slip past the key. Rollout: the older writer
+-- only runs while quote_builder_orders_v1 is on (off live, 19 Oct 2026); ship
+-- the ops-api that sets the seq with or before this migration, and keep the
+-- switch off until both are live.
+--
+-- Locks: one ALTER, one UPDATE over the version-linked rows and one index
+-- build on purchase_orders, under a 5s lock timeout. If the lock cannot be
+-- had, the migration fails and nothing changes.
+--
 -- Rollback: supabase/rollbacks/20261019183000_quote_builder_orders_once_down.sql.
 
 SET LOCAL lock_timeout = '5s';
@@ -40,14 +51,21 @@ UPDATE public.purchase_orders po
     WHERE quote_builder_version_id IS NOT NULL
   ) numbered
  WHERE po.id = numbered.id
-   AND po.quote_builder_po_seq IS NULL;
+   AND po.quote_builder_po_seq IS NULL
+   -- A version already numbered is left alone, so a re-run cannot collide.
+   AND NOT EXISTS (
+     SELECT 1 FROM public.purchase_orders x
+      WHERE x.quote_builder_version_id = po.quote_builder_version_id
+        AND x.quote_builder_po_seq IS NOT NULL
+   );
 
 ALTER TABLE public.purchase_orders
   DROP CONSTRAINT IF EXISTS purchase_orders_quote_builder_seq_with_version;
 ALTER TABLE public.purchase_orders
   ADD CONSTRAINT purchase_orders_quote_builder_seq_with_version CHECK (
     (quote_builder_version_id IS NULL AND quote_builder_po_seq IS NULL)
-    OR (quote_builder_version_id IS NOT NULL AND quote_builder_po_seq >= 1)
+    OR (quote_builder_version_id IS NOT NULL AND quote_builder_po_seq IS NOT NULL
+        AND quote_builder_po_seq >= 1)
   );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_quote_builder_version_seq
