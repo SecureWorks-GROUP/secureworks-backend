@@ -33,8 +33,9 @@
 --          one another transaction holds is skipped with one too.
 --      If the trigger's own work fails, it alone is rolled back and a
 --      quote_option_review_needed event records the failure; the status
---      change stands. If even that event cannot be written, the status
---      change fails rather than commit with no record.
+--      change stands. If even that event cannot be written, the group is
+--      left with no marks and fence_quote_option_unsettled_groups reports
+--      it from the data alone.
 --   4. Switch fence_same_site_guard_v1, seeded OFF: ghl-proxy's route A
 --      refusal (choose_existing_or_option) stays off until every fencing
 --      caller shows the chooser.
@@ -290,10 +291,10 @@ REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uu
 -- header). The trigger's own work runs in its own block. If it fails, that
 -- work is rolled back and a quote_option_review_needed event (reason
 -- supersede_failed) is written in its place, and the status change stands.
--- A timeout or cancel during that work is caught the same way. Only if that
--- review event cannot be written either does the status change fail, so an
--- unrecorded half state can never commit. A timeout elsewhere in the status
--- change's statement still fails it, as before this migration.
+-- A timeout or cancel during that work is caught the same way. If even that
+-- event cannot be written, the status change still stands with no marks,
+-- and fence_quote_option_unsettled_groups reports the group. A timeout
+-- elsewhere in the status change's statement still fails it, as before.
 CREATE OR REPLACE FUNCTION public.jobs_quote_option_supersede()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -412,14 +413,49 @@ BEGIN
                                  'error', left(coalesce(v_err_msg, ''), 200),
                                  'status', NEW.status, 'quote_option_group_id', v_group));
     EXCEPTION WHEN query_canceled OR OTHERS THEN
-      -- No durable record is possible, so the status change does not stand
-      -- either: nothing half-done is left, and the caller sees the error.
-      RAISE EXCEPTION 'quote_option_review_unrecorded: % (%)', v_err_msg, v_err_state
-        USING ERRCODE = 'P0001';
+      -- The status change still stands: callers such as send-quote's
+      -- acceptance have already committed the customer's acceptance, so
+      -- failing here would split it from the job status. The trigger's own
+      -- work was rolled back, so the group is left with no marks (every
+      -- option live, as before SQ-23), and fence_quote_option_unsettled_groups
+      -- finds it from the data alone.
+      RAISE WARNING 'jobs_quote_option_supersede: % (%), review event also failed; status change kept, group unsettled',
+        v_err_msg, v_err_state;
     END;
   END IF;
   RETURN NULL;
 END $$;
+
+-- Groups the trigger has not settled, found from the data alone (no event
+-- needed): a group with a won option, an open (draft or quoted) unmarked
+-- sibling, and no quote_option_review_needed event on any of its jobs. With
+-- the switch on, a settled group has none: open siblings are marked, and
+-- every exception writes a review event. This is the durable record when
+-- the trigger could not write one. Service role only; read only.
+CREATE OR REPLACE FUNCTION public.fence_quote_option_unsettled_groups()
+RETURNS TABLE (quote_option_group_id uuid, won_job_ids uuid[], open_job_ids uuid[])
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT g.quote_option_group_id,
+         array_agg(g.id ORDER BY g.id) FILTER (WHERE public.fence_quote_option_status_won(g.status)),
+         array_agg(g.id ORDER BY g.id) FILTER (WHERE coalesce(g.status, 'draft') IN ('draft', 'quoted')
+                                                AND g.superseded_at IS NULL)
+    FROM public.jobs g
+   WHERE g.quote_option_group_id IS NOT NULL
+   GROUP BY g.quote_option_group_id
+  HAVING bool_or(public.fence_quote_option_status_won(g.status))
+     AND bool_or(coalesce(g.status, 'draft') IN ('draft', 'quoted') AND g.superseded_at IS NULL)
+     AND NOT EXISTS (SELECT 1 FROM public.job_events e
+                      JOIN public.jobs m ON m.id = e.job_id
+                     WHERE m.quote_option_group_id = g.quote_option_group_id
+                       AND e.event_type = 'quote_option_review_needed')
+   ORDER BY g.quote_option_group_id
+$$;
+
+REVOKE ALL ON FUNCTION public.fence_quote_option_unsettled_groups() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.fence_quote_option_unsettled_groups() TO service_role;
 
 DROP TRIGGER IF EXISTS trg_jobs_quote_option_supersede ON public.jobs;
 CREATE TRIGGER trg_jobs_quote_option_supersede
