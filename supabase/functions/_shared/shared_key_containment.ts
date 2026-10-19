@@ -26,9 +26,25 @@ type EnvGet = (name: string) => string | undefined;
 const defaultEnv: EnvGet = (name) => Deno.env.get(name);
 
 /** True when the operator has switched shared-key containment on. */
+const SWITCH_ON = new Set(["1", "true", "on", "yes"]);
+const SWITCH_OFF = new Set(["", "0", "false", "off", "no"]);
+
+/**
+ * True when the operator has switched shared-key containment on. Unset or an
+ * explicit off value means off. Any other value is a typo: it is logged as a
+ * configuration error and fails CLOSED (on), so a mistyped "on" can never
+ * quietly reopen shared-key access.
+ */
 export function sharedKeyContainmentOn(env: EnvGet = defaultEnv): boolean {
   const raw = (env(SHARED_KEY_CONTAINMENT_ENV) || "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+  if (SWITCH_ON.has(raw)) return true;
+  if (SWITCH_OFF.has(raw)) return false;
+  console.error(JSON.stringify({
+    event: "shared_key_containment_bad_value",
+    containment_env: SHARED_KEY_CONTAINMENT_ENV,
+    treated_as: "on",
+  }));
+  return true;
 }
 
 /** Does `presented` equal the shared key? Always false while containment is on. */
@@ -79,26 +95,49 @@ export function sharedKeyGate(input: {
   return "accepted";
 }
 
+// Origins the census may name. Anything else is logged as "other": header
+// text is never copied into a log line, because it can carry email addresses,
+// key fragments or the shared key itself.
+const CENSUS_ORIGINS = new Set([
+  "https://marninms98-dotcom.github.io",
+  "https://secureworks-group.github.io",
+  "https://kevgrhcjxspbxgovpmfl.supabase.co",
+]);
+
+export type CallerClient = "browser" | "deno" | "node" | "curl" | "python" | "pg_net" | "other" | "none";
+
 /**
- * Non-secret hints that help name the caller: origin, referer path, user agent
- * and the self-declared actor header. Never a credential or a query string.
+ * Allowlisted, enumerated caller hints for the census: a known origin or
+ * "other"/"none", a client family, and whether an actor header was present.
+ * No free text from any header is returned.
  */
-export function callerHints(headers?: Headers | null): Record<string, string | null> {
-  const clip = (v: string | null | undefined, n = 120) => v ? v.slice(0, n) : null;
-  let refererPath: string | null = null;
-  try {
-    const r = headers?.get("referer");
-    if (r) {
-      const u = new URL(r);
-      refererPath = clip(u.origin + u.pathname);
+export function callerHints(headers?: Headers | null): {
+  origin: string;
+  client: CallerClient;
+  actor_header: boolean;
+} {
+  const rawOrigin = headers?.get("origin");
+  let origin = "none";
+  if (rawOrigin) {
+    try {
+      const o = new URL(rawOrigin).origin;
+      origin = CENSUS_ORIGINS.has(o) ? o : "other";
+    } catch {
+      origin = "other";
     }
-  } catch { /* not a URL */ }
-  return {
-    origin: clip(headers?.get("origin")),
-    referer: refererPath,
-    user_agent: clip(headers?.get("user-agent")),
-    actor: clip(headers?.get("x-sw-actor"), 80),
-  };
+  }
+  const ua = (headers?.get("user-agent") || "").toLowerCase();
+  let client: CallerClient = "none";
+  if (ua) {
+    if (ua.includes("mozilla/")) client = "browser";
+    else if (ua.startsWith("deno/") || ua.includes("supabase-edge-runtime")) client = "deno";
+    else if (ua.startsWith("node") || ua.includes("undici") || ua.includes("node-fetch")) client = "node";
+    else if (ua.startsWith("curl/")) client = "curl";
+    else if (ua.startsWith("python")) client = "python";
+    else if (ua.startsWith("pg_net")) client = "pg_net";
+    else client = "other";
+  }
+  return { origin, client, actor_header: !!headers?.get("x-sw-actor") };
 }
 
 /** One log line per refused shared-key call, so callers still using it can be found. */
@@ -133,13 +172,15 @@ export function serverCallHeaders(
   serviceKey: string | null | undefined,
   sharedKey: string | null | undefined,
   extra: Record<string, string> = {},
+  // Fixed operation name for the fallback warning (never request data).
+  operation?: string,
 ): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (serviceKey) {
     h["Authorization"] = `Bearer ${serviceKey}`;
     h["apikey"] = serviceKey;
   } else if (sharedKey) {
-    console.warn(JSON.stringify({ event: "server_call_shared_key_fallback" }));
+    console.warn(JSON.stringify({ event: "server_call_shared_key_fallback", operation: operation ?? null }));
     h["x-api-key"] = sharedKey;
   }
   return { ...h, ...extra };

@@ -630,3 +630,46 @@ Deno.test("C4 — containment off: shared key still sends invoices (unchanged un
     assertEquals(d.mode, "api_key");
   }
 });
+
+Deno.test("C5 — containment on: legacy x-api-key plus an office JWT on /send-invoice is decided by the JWT", async () => {
+  const d = await decideSendQuoteAuth({
+    req: req({ "x-api-key": ENV.SW_API_KEY, authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+    sb: makeAuthSb({ role: "admin" }),
+    path: "send-invoice",
+    corsHeaders,
+    swApiKey: ENV.SW_API_KEY,
+    serviceRoleKey: ENV.SUPABASE_SERVICE_ROLE_KEY,
+    env: (name) => name === "SW_SHARED_KEY_CONTAINMENT" ? "on" : undefined,
+  });
+  assert(d.kind === "allow");
+  assertEquals(d.mode, "jwt");
+  assertEquals(d.user?.role, "admin");
+});
+
+Deno.test("C6 — containment on: legacy x-api-key plus a non-office JWT on /send-invoice is 403, not api_key", async () => {
+  const d = await decideSendQuoteAuth({
+    req: req({ "x-api-key": ENV.SW_API_KEY, authorization: `Bearer ${VALID_JWT}` }, "send-invoice"),
+    sb: makeAuthSb({ role: "estimator" }),
+    path: "send-invoice",
+    corsHeaders,
+    swApiKey: ENV.SW_API_KEY,
+    serviceRoleKey: ENV.SUPABASE_SERVICE_ROLE_KEY,
+    env: (name) => name === "SW_SHARED_KEY_CONTAINMENT" ? "on" : undefined,
+  });
+  assert(d.kind === "reject");
+  assertEquals(d.response.status, 403);
+});
+
+Deno.test("C7 — containment on: legacy x-api-key plus an expired JWT on /send-invoice is 401", async () => {
+  const d = await decideSendQuoteAuth({
+    req: req({ "x-api-key": ENV.SW_API_KEY, authorization: `Bearer ${EXPIRED_JWT}` }, "send-invoice"),
+    sb: makeAuthSb({ role: "admin" }),
+    path: "send-invoice",
+    corsHeaders,
+    swApiKey: ENV.SW_API_KEY,
+    serviceRoleKey: ENV.SUPABASE_SERVICE_ROLE_KEY,
+    env: (name) => name === "SW_SHARED_KEY_CONTAINMENT" ? "on" : undefined,
+  });
+  assert(d.kind === "reject");
+  assertEquals(d.response.status, 401);
+});

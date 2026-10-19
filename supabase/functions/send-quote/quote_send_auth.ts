@@ -274,6 +274,11 @@ export async function decideSendQuoteAuth(input: {
   // client email and payment details (resolveSendInvoiceDelivery). With
   // SW_SHARED_KEY_CONTAINMENT on, /send-invoice needs the service credential
   // (ops-api already sends it) or an office JWT.
+  // A Bearer that is not the shared key is a user JWT candidate. With the
+  // invoice send contained, a request carrying both the legacy x-api-key and a
+  // JWT is decided by the JWT below (role and delivery limits apply), never
+  // refused for the legacy header alone.
+  const jwtCandidate = !!bearerToken && !isSharedKey(bearerToken, swApiKey)
   if (isSharedKey(xApiKey, swApiKey) || isSharedKey(bearerToken, swApiKey)) {
     const gated = path === 'send-invoice'
       ? sharedKeyGate({
@@ -286,13 +291,17 @@ export async function decideSendQuoteAuth(input: {
       })
       : 'accepted'
     if (gated === 'refused') {
-      return rejectJson(corsHeaders, 401, {
-        error: 'Invoice send needs an office session or a server credential',
-        code: 'shared_key_contained',
-      })
+      if (!jwtCandidate) {
+        return rejectJson(corsHeaders, 401, {
+          error: 'Invoice send needs an office session or a server credential',
+          code: 'shared_key_contained',
+        })
+      }
+      // fall through: the JWT decides
+    } else {
+      logSendAuth({ path, authMode: 'api_key', user: null })
+      return { kind: 'allow', mode: 'api_key', user: null }
     }
-    logSendAuth({ path, authMode: 'api_key', user: null })
-    return { kind: 'allow', mode: 'api_key', user: null }
   }
   if (!bearerToken) {
     return rejectJson(corsHeaders, 401, { error: 'Unauthorized' })
