@@ -1420,6 +1420,7 @@ import {
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
+import { ClientInputError } from './client_input_error.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -2469,7 +2470,7 @@ function makeSesInvoiceVoidGateway(client: any): SesInvoiceVoidGateway {
       )
       const result = toSesXeroInvoiceResult(response?.Invoices?.[0])
       if (result.xero_invoice_id !== invoiceId || result.status !== targetStatus) {
-        throw new Error('Xero did not confirm the exact approved invoice void')
+        throw new ClientInputError('Xero did not confirm the exact approved invoice void')
       }
       return {
         xero_invoice_id: result.xero_invoice_id,
@@ -3733,7 +3734,7 @@ async function getToken(client: any): Promise<{ accessToken: string; tenantId: s
     .eq('org_id', DEFAULT_ORG_ID)
     .single()
 
-  if (error || !token) throw new Error('No Xero token available. Ensure token_refresh is running.')
+  if (error || !token) throw new ClientInputError('No Xero token available. Ensure token_refresh is running.')
 
   // Check if expired (with 2-min buffer)
   if (new Date(token.expires_at) < new Date(Date.now() + 120000)) {
@@ -10127,7 +10128,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const invMoney = persistedTradeInvoiceMoney(inv)
         const expectedSubtotal = invMoney.gross_earned
         if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
-          throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+          throw new ClientInputError('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
         }
         const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
 
@@ -10235,7 +10236,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           tenantId,
         })
 
-        if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
+        if (!xeroContactId) throw new ClientInputError('Failed to resolve Xero contact for ' + tradeName)
 
         const xeroPayload = {
           Invoices: [{
@@ -12469,7 +12470,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (!attachRes.ok) {
                 const errText = await attachRes.text()
                 console.log('[ops-api] Xero PDF attach failed:', attachRes.status, errText)
-                throw new Error('Xero attachment failed: ' + attachRes.status)
+                throw new ClientInputError('Xero attachment failed: ' + attachRes.status)
               }
               return json({ success: true })
             } catch (e) {
@@ -14505,8 +14506,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     if (err instanceof ApiError) {
       return json(err.body || { error: err.message }, err.status)
     }
-    // Anything that is not an ApiError is unexpected: its message and stack can
-    // carry store or provider text, so neither is logged nor returned.
+    // A caller-input or business-rule message carries no store or provider
+    // text, so it is answered exactly as main answers it.
+    if (err instanceof ClientInputError) {
+      return json({ error: err.message || 'Internal error' }, 500)
+    }
+    // Anything else is unexpected: its message and stack can carry store or
+    // provider text, so neither is logged nor returned.
     console.error(JSON.stringify({ event: 'ops_api_unhandled_error', action: safeIdentifier(auditAction), ...safeErrorFacts(err) }))
     return json({ error: 'Internal error', ...safeErrorFacts(err) }, 500)
   }
@@ -14526,7 +14532,7 @@ export async function prepareClockEventAssignment(
     .maybeSingle()
 
   if (assignmentError || !assignment) throw new ApiError('Assignment not found', 404)
-  if (assignment.user_id !== tradeUserId) throw new Error('Not your assignment')
+  if (assignment.user_id !== tradeUserId) throw new ClientInputError('Not your assignment')
 
   if (idempotencyKey) {
     const { data: existing } = await client.from('job_events')
@@ -16595,7 +16601,7 @@ export const PIPELINE_PRICING_PROJECTION = [
 function pipelinePricingProjectionParts(projection: string) {
   const separator = projection.indexOf(':')
   if (separator <= 0 || separator === projection.length - 1) {
-    throw new Error(`Invalid pipeline pricing projection: ${projection}`)
+    throw new ClientInputError(`Invalid pipeline pricing projection: ${projection}`)
   }
   return [projection.slice(0, separator), projection.slice(separator + 1)] as const
 }
@@ -17390,7 +17396,7 @@ async function jobDetail(
   jobId: string,
   opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean; includeCloseout?: boolean } = {},
 ) {
-  if (!jobId) throw new Error('jobId required')
+  if (!jobId) throw new ClientInputError('jobId required')
 
   // If job_number passed instead of UUID, resolve it
   // 2026-04-24 fix: widen from [PFDRI] to [A-Z]+ so all prefixes work (SWM, SWG, etc.)
@@ -17927,7 +17933,7 @@ async function listSuppliers(client: any) {
 
 async function updateSupplierEmail(client: any, body: any) {
   const { supplier_name, email } = body
-  if (!supplier_name || !email) throw new Error('supplier_name and email required')
+  if (!supplier_name || !email) throw new ClientInputError('supplier_name and email required')
 
   // Try to update existing supplier by name
   const { data, error } = await client.from('suppliers')
@@ -17989,7 +17995,7 @@ async function getOpsTargets(client: any) {
 // ── get_email_events: email log for a job ──
 async function getEmailEvents(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id') || params.get('jobId')
-  if (!jobId) throw new Error('job_id required')
+  if (!jobId) throw new ClientInputError('job_id required')
 
   const { data, error } = await client
     .from('email_events')
@@ -18454,7 +18460,7 @@ async function assembleJobDossier(client: any, body: any) {
   const inputJobId: string | null = typeof body?.job_id === 'string' && body.job_id ? body.job_id : null
   const inputJobNumber: string | null = typeof body?.job_number === 'string' && body.job_number ? body.job_number : null
   if (!inputJobId && !inputJobNumber) {
-    throw new Error('assemble_job_dossier requires job_id or job_number')
+    throw new ClientInputError('assemble_job_dossier requires job_id or job_number')
   }
 
   // Production jobs schema (verified via information_schema 2026-05-01) does
@@ -18970,7 +18976,7 @@ async function myActions(client: any) {
 
 async function listJobActions(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id')
-  if (!jobId) throw new Error('job_id required')
+  if (!jobId) throw new ClientInputError('job_id required')
 
   const statusFilter = params.get('status')
   let query = client.from('job_actions')
@@ -18993,8 +18999,8 @@ async function listJobActions(client: any, params: URLSearchParams) {
 
 async function createOrgEvent(client: any, body: any) {
   const { title, event_date, event_end, event_type, description, visible_to_trades } = body
-  if (!title || !event_date || !event_type) throw new Error('title, event_date, and event_type required')
-  if (!['public_holiday', 'company_day'].includes(event_type)) throw new Error('event_type must be public_holiday or company_day')
+  if (!title || !event_date || !event_type) throw new ClientInputError('title, event_date, and event_type required')
+  if (!['public_holiday', 'company_day'].includes(event_type)) throw new ClientInputError('event_type must be public_holiday or company_day')
 
   // "Repeat" in the Add Event modal: one org_events row per occurrence, all
   // sharing a recurrence_group_id so the series can be edited/deleted as one.
@@ -19036,7 +19042,7 @@ async function createOrgEvent(client: any, body: any) {
 
 async function deleteOrgEvent(client: any, body: any) {
   const id = body.id || body.event_id
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   const { error } = await client.from('org_events').delete().eq('id', id).eq('org_id', DEFAULT_ORG_ID)
   if (error) throw error
@@ -19045,7 +19051,7 @@ async function deleteOrgEvent(client: any, body: any) {
 
 async function createJobAction(client: any, body: any) {
   const { title, description, job_number, job_id, due_date, due_time, priority, source, category, sub_category } = body
-  if (!title) throw new Error('title required')
+  if (!title) throw new ClientInputError('title required')
 
   // If job_number provided but no job_id, look up the job
   let resolvedJobId = job_id || null
@@ -19112,7 +19118,7 @@ async function createJobAction(client: any, body: any) {
 
 async function updateJobAction(client: any, body: any) {
   const actionId = body.action_id || body.id
-  if (!actionId) throw new Error('action_id required')
+  if (!actionId) throw new ClientInputError('action_id required')
 
   const updates: any = { updated_at: new Date().toISOString() }
   if (body.status === 'done') {
@@ -19394,7 +19400,7 @@ async function generateWorkOrderDoc(client: any, body: any) {
 
 async function deleteMedia(client: any, body: any) {
   const mediaId = body.mediaId || body.media_id
-  if (!mediaId) throw new Error('mediaId required')
+  if (!mediaId) throw new ClientInputError('mediaId required')
 
   const { data: media, error: fetchErr } = await client
     .from('job_media')
@@ -19403,7 +19409,7 @@ async function deleteMedia(client: any, body: any) {
     .single()
 
   if (fetchErr) throw fetchErr
-  if (!media) throw new Error('Media not found')
+  if (!media) throw new ClientInputError('Media not found')
 
   // Delete from storage
   if (media.storage_url) {
@@ -19441,17 +19447,17 @@ async function deleteMedia(client: any, body: any) {
 
 async function jumpCouncilStep(client: any, body: any) {
   const { submission_id, target_step_index } = body
-  if (!submission_id || target_step_index == null) throw new Error('submission_id and target_step_index required')
+  if (!submission_id || target_step_index == null) throw new ClientInputError('submission_id and target_step_index required')
 
   const { data: sub } = await client.from('council_submissions')
     .select('id, job_id, steps, current_step_index')
     .eq('id', submission_id)
     .single()
-  if (!sub) throw new Error('Submission not found')
+  if (!sub) throw new ClientInputError('Submission not found')
 
   const steps = sub.steps || []
   const target = Number(target_step_index)
-  if (target < 0 || target >= steps.length) throw new Error('target_step_index out of range')
+  if (target < 0 || target >= steps.length) throw new ClientInputError('target_step_index out of range')
 
   const now = new Date().toISOString()
 
@@ -19538,9 +19544,9 @@ async function geocodeAndUpdateJob(client: any, jobId: string, address: string, 
 
 async function geocodeJob(client: any, body: any) {
   const jId = body.jobId || body.job_id
-  if (!jId) throw new Error('jobId required')
+  if (!jId) throw new ClientInputError('jobId required')
   const { data: job } = await client.from('jobs').select('id, site_address, site_suburb, site_lat, site_lng').eq('id', jId).single()
-  if (!job) throw new Error('Job not found')
+  if (!job) throw new ClientInputError('Job not found')
   const coords = await geocodeAddress(job.site_address, job.site_suburb)
   if (!coords) return { ok: false, message: 'Could not geocode address: ' + (job.site_address || '') }
   await client.from('jobs').update({ site_lat: coords.lat, site_lng: coords.lng }).eq('id', jId)
@@ -19586,7 +19592,7 @@ async function createMakesafeDraftFromProposal(client: any, body: any) {
     safety_requirements, special_instructions, attachments_json,
   } = body
 
-  if (!client_name || !site_address) throw new Error('client_name and site_address required')
+  if (!client_name || !site_address) throw new ClientInputError('client_name and site_address required')
 
   const attachments = parseJsonArray(attachments_json)
   // Same required-field set the approve gate enforces (P0-C parity): a draft missing any
@@ -19792,7 +19798,7 @@ async function createMakesafeJob(
     builder_work_order_value_ex_gst,
   } = body
 
-  if (!client_name || !site_address) throw new Error('client_name and site_address required')
+  if (!client_name || !site_address) throw new ClientInputError('client_name and site_address required')
   const reviewedSyntheticLivefireMarker = cleanReviewedString(synthetic_livefire_marker)
   const usesSyntheticLivefireProfile = requesting_company_slug === 'synthetic-livefire'
   const validSyntheticLivefireMarker = !!reviewedSyntheticLivefireMarker &&
@@ -20294,7 +20300,7 @@ async function listMakesafeCompanies(client: any) {
 async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: string } = {}) {
   const { job_id, jobId } = body
   const jId = job_id || jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   // `report_sent_at` is NOT on this list and must never be re-added. It is the
   // one field here that asserts something happened OUTSIDE this system — that a
@@ -20792,9 +20798,9 @@ function normalizeMakesafeSubstatus(substatus: string | null | undefined): strin
 
 function requireValidMakesafeSubstatus(substatus: string | null | undefined): string {
   const normalized = normalizeMakesafeSubstatus(substatus)
-  if (!normalized) throw new Error('substatus required')
+  if (!normalized) throw new ClientInputError('substatus required')
   if (!MAKESAFE_VALID_SUBSTATUSES.includes(normalized)) {
-    throw new Error('Invalid substatus: ' + substatus + '. Allowed: ' + MAKESAFE_VALID_SUBSTATUSES.join(', '))
+    throw new ClientInputError('Invalid substatus: ' + substatus + '. Allowed: ' + MAKESAFE_VALID_SUBSTATUSES.join(', '))
   }
   return normalized
 }
@@ -22205,7 +22211,7 @@ async function updateMakesafeSubstatus(
 ) {
   const { job_id, jobId, substatus } = body
   const jId = job_id || jobId
-  if (!jId || !substatus) throw new Error('job_id and substatus required')
+  if (!jId || !substatus) throw new ClientInputError('job_id and substatus required')
   const nextSubstatus = requireValidMakesafeSubstatus(substatus)
   const origin = opts.origin || unidentifiedOrigin('external')
   const external = opts.external ?? !opts.origin
@@ -26570,7 +26576,7 @@ async function submitMakesafeReport(
   } = body
   const jId = job_id || jobId
   const uId = userId || user_id || null
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   const normalizedReportStatus = normalizeMakesafeReportStatus(reportStatus)
   const submittingFinal = normalizedReportStatus !== 'draft'
   // Captain D1: a final report is always attributable. Trade JWT dispatch
@@ -26698,13 +26704,13 @@ async function submitMakesafeReport(
     }
   }
 
-  if (existing?.status === 'approved') throw new Error('Report already approved')
+  if (existing?.status === 'approved') throw new ClientInputError('Report already approved')
   if (!submittingFinal && existing?.status === 'submitted') {
     throw new ApiError('A submitted MakeSafe report cannot be downgraded to draft', 409)
   }
   if (resumingSubmitted) assertResumableSubmissionAuthority(existing)
   if (submittingFinal) {
-    if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
+    if (existing?.status === 'submitted' && boardSyncComplete) throw new ClientInputError('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
       .select('id, type, phase, attendance_cycle_id, cycle_attribution')
       .eq('job_id', jId)
@@ -26767,9 +26773,9 @@ async function submitMakesafeReport(
       existing = concurrentExisting
       resumingSubmitted = submittingFinal &&
         existing.status === 'submitted' && !boardSyncComplete
-      if (existing.status === 'approved') throw new Error('Report already approved')
+      if (existing.status === 'approved') throw new ClientInputError('Report already approved')
       if (existing.status === 'submitted' && boardSyncComplete) {
-        throw new Error('Report already submitted')
+        throw new ClientInputError('Report already submitted')
       }
       if (resumingSubmitted) assertResumableSubmissionAuthority(existing)
     } else {
@@ -26809,7 +26815,7 @@ async function submitMakesafeReport(
         .maybeSingle()
       if (concurrentReadErr || !concurrentExisting) throw error
       existing = concurrentExisting
-      if (existing.status === 'approved') throw new Error('Report already approved')
+      if (existing.status === 'approved') throw new ClientInputError('Report already approved')
       if (existing.status === 'submitted') {
         throw new ApiError('A submitted MakeSafe report cannot be downgraded to draft', 409)
       }
@@ -26821,7 +26827,7 @@ async function submitMakesafeReport(
     }
   }
   if (existing) {
-    if (existing.status === 'approved') throw new Error('Report already approved')
+    if (existing.status === 'approved') throw new ClientInputError('Report already approved')
     if (resumingSubmitted) {
       assertResumableSubmissionAuthority(existing)
       const { data, error } = await client.from('job_service_reports')
@@ -28465,7 +28471,7 @@ async function intakeMintAuthority(
     sourcePostIds,
   })
   if (!authority) {
-    throw new Error('new intake job mint requires canonical case and source authority')
+    throw new ClientInputError('new intake job mint requires canonical case and source authority')
   }
   return authority
 }
@@ -28705,7 +28711,7 @@ const REPAIR_AUTO_INTAKE_APPROVAL_MARKER = {
 
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
-  if (!draft_id) throw new Error('draft_id required')
+  if (!draft_id) throw new ClientInputError('draft_id required')
   const unattendedApproval =
     body?.[UNATTENDED_INTAKE_APPROVAL] === UNATTENDED_INTAKE_APPROVAL
   const notificationSuppressionReason =
@@ -28717,7 +28723,7 @@ async function approveIntakeDraft(client: any, body: any) {
   // Load the draft for its field data (extraction/reviewed values below need draft.*).
   const { data: loadedDraft, error: dErr } = await client.from('makesafe_intake_drafts')
     .select('*').eq('id', draft_id).single()
-  if (dErr || !loadedDraft) throw new Error('Draft not found')
+  if (dErr || !loadedDraft) throw new ClientInputError('Draft not found')
   const draft = loadedDraft
 
   let extraction = parseJsonObject(draft.extraction_json)
@@ -28792,7 +28798,7 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!approvedFields.client_name) missing.push('client_name')
   if (!approvedFields.site_address) missing.push('site_address')
   if (availableAttachments.length === 0) missing.push('work_order_pdf')
-  if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
+  if (missing.length > 0) throw new ClientInputError('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
   const recoveredMints = await recoverDraftMintLinks(client, draft)
   const recoveredPrimaryMint = recoveredMints.find(
@@ -29088,7 +29094,7 @@ async function approveIntakeDraft(client: any, body: any) {
       .select()
     if (claimErr) throw claimErr
     if (!claimed || claimed.length === 0) {
-      throw new Error('Draft is not in a reviewable state (needs_review/draft) - already approved, rejected, or superseded; concurrent approval blocked')
+      throw new ClientInputError('Draft is not in a reviewable state (needs_review/draft) - already approved, rejected, or superseded; concurrent approval blocked')
     }
 
     const { error: linkError } = await client.from('makesafe_intake_drafts').update({
@@ -29262,7 +29268,7 @@ async function approveIntakeDraft(client: any, body: any) {
       })
       if (dup?.job_id) {
         const existingJob = Array.isArray(dup.jobs) ? dup.jobs[0] : dup.jobs
-        throw new Error('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same builder instruction')
+        throw new ClientInputError('Possible duplicate: ref ' + approvedFields.external_ref + ' already exists on ' + (existingJob?.job_number || dup.job_id) + ' for the same builder instruction')
       }
     }
   }
@@ -29292,7 +29298,7 @@ async function approveIntakeDraft(client: any, body: any) {
     .select()
   if (claimErr) throw claimErr
   if (!claimed || claimed.length === 0) {
-    throw new Error('Draft is not in a reviewable state (needs_review/draft) - already approved, rejected, or superseded; concurrent approval blocked')
+    throw new ClientInputError('Draft is not in a reviewable state (needs_review/draft) - already approved, rejected, or superseded; concurrent approval blocked')
   }
 
   // Failure-safety (Wave 0 C3 + auditor concern 2): everything from job creation
@@ -29420,7 +29426,7 @@ async function approveIntakeDraft(client: any, body: any) {
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
     if (createdJobId) createdJobIds.push(createdJobId)
-    if (!createdJobId) throw new Error('guarded approval returned no primary job id')
+    if (!createdJobId) throw new ClientInputError('guarded approval returned no primary job id')
     if (primaryMint) await completeIntakeMint(client, primaryMint.id, createdJobId)
 
     // For report-only jobs: set report_type on makesafe_job_details and park the
@@ -29674,7 +29680,7 @@ export const _repairAutoIntakeApprovalMarkerForTest =
 // ── Slice 7: reject intake draft ──
 async function rejectIntakeDraft(client: any, body: any) {
   const { draft_id, rejected_by, review_notes } = body
-  if (!draft_id) throw new Error('draft_id required')
+  if (!draft_id) throw new ClientInputError('draft_id required')
 
   const { data, error } = await client.from('makesafe_intake_drafts')
     .update({
@@ -29702,7 +29708,7 @@ async function createIntakeDraft(client: any, body: any) {
     confidence, missing_fields, extraction_json, attachments_json,
   } = body
 
-  if (!graph_message_id) throw new Error('graph_message_id required')
+  if (!graph_message_id) throw new ClientInputError('graph_message_id required')
 
   const { data, error } = await client.from('makesafe_intake_drafts').insert({
     org_id: DEFAULT_ORG_ID,
@@ -29749,7 +29755,7 @@ async function createIntakeDraft(client: any, body: any) {
 // Privilege gate is identical to approve_intake_draft: api_key OR admin/owner JWT.
 async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?: any) {
   const { draft_id } = body
-  if (!draft_id) throw new Error('draft_id required')
+  if (!draft_id) throw new ClientInputError('draft_id required')
 
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (SUPABASE_URL/SERVICE_KEY are module consts, so a test
@@ -29760,7 +29766,7 @@ async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?
   // 1. Load the existing draft.
   const { data: draft, error: draftErr } = await client.from('makesafe_intake_drafts')
     .select('*').eq('id', draft_id).single()
-  if (draftErr || !draft) throw new Error('Draft not found')
+  if (draftErr || !draft) throw new ClientInputError('Draft not found')
 
   // 2. Resolve the group email row.
   // If the draft was already created by the group-sync path (mailbox == ses@),
@@ -31970,7 +31976,7 @@ async function createHistoricalBackfillJob(
       },
     })
     const projected = historicalJobProjection(created.job)
-    if (!projected) throw new Error('historical backfill job creation returned no job')
+    if (!projected) throw new ClientInputError('historical backfill job creation returned no job')
     return projected
   } catch (error: any) {
     const recovered = await loadHistoricalBackfillJob(client, args.recoveryKey)
@@ -33072,7 +33078,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
           extractionSuccesses++
           emailModelValidResult = true
         } else {
-          throw new Error('response parse failed: Anthropic returned no JSON object')
+          throw new ClientInputError('response parse failed: Anthropic returned no JSON object')
         }
       } catch (e) {
         const em = (e as Error).message || String(e)
@@ -34444,7 +34450,7 @@ async function intakeHealth(client: any) {
   // synchronous server-visibility stop until the append-only clock spine lands.
   let logicalSla24h: any = null
   try {
-    if (!invariant) throw new Error('source reconciliation unavailable')
+    if (!invariant) throw new ClientInputError('source reconciliation unavailable')
     const [caseResult, notificationResult] = await Promise.all([
       client.from('makesafe_intake_cases')
         .select('id, state, job_id, received_at, last_decision_at, raw_identity_json, makesafe_intake_case_sources(post_id, internet_message_id, received_at, raw_identity_json), jobs:job_id(id, created_at)')
@@ -34905,7 +34911,7 @@ export async function createAssignment(client: any, body: any) {
   if (!jId || wantsRecurrence(body.recurrence_rule ?? body.recurrenceRule)) {
     return await createPlanningEntries(client, body)
   }
-  if (!sDate) throw new Error('jobId and scheduledDate required')
+  if (!sDate) throw new ClientInputError('jobId and scheduledDate required')
 
   // CP1 fold-forward (calendar-overhaul Feature 2): a NEW assignment must carry
   // a REAL crew member. Trade myJobs filters .eq('user_id', userId), so a
@@ -35198,7 +35204,7 @@ export async function createAssignment(client: any, body: any) {
 
 export async function updateAssignment(client: any, body: any) {
   const id = body.assignmentId || body.assignment_id || body.id
-  if (!id) throw new Error('assignmentId required')
+  if (!id) throw new ClientInputError('assignmentId required')
 
   // Capture old state for dual-write
   const { data: oldAssignment } = await client
@@ -35429,7 +35435,7 @@ export async function updateAssignment(client: any, body: any) {
 
 export async function deleteAssignment(client: any, body: any) {
   const id = body.assignmentId || body.assignment_id || body.id
-  if (!id) throw new Error('assignmentId required')
+  if (!id) throw new ClientInputError('assignmentId required')
 
   // Get assignment for event log + dual-write
   const { data: existing } = await client
@@ -35805,12 +35811,12 @@ async function setJobLead(client: any, body: any) {
 async function updateJobStatus(client: any, body: any) {
   const jId = body.jobId || body.job_id
   const status = body.status
-  if (!jId || !status) throw new Error('jobId and status required')
+  if (!jId || !status) throw new ClientInputError('jobId and status required')
 
   // Live trusted baseline 2026-05-18 accepted new stages without an edge
   // redeploy. Preserve that behaviour here and let database constraints /
   // stage-gate shadow observations catch invalid transitions downstream.
-  if (!status || typeof status !== 'string' || status.length > 50) throw new Error('Invalid status')
+  if (!status || typeof status !== 'string' || status.length > 50) throw new ClientInputError('Invalid status')
 
   // Capture old status + job data for business_events dual-write
   const { data: jobBefore } = await client.from('jobs')
@@ -36194,7 +36200,7 @@ async function createPO(client: any, body: any, sessionUserId: string | null = n
           line_items, lineItems, delivery_date, deliveryDate, delivery_address, reference, notes } = body
 
   const supplier = supplier_name || supplierName
-  if (!supplier && body.status !== 'draft') throw new Error('supplier_name required')
+  if (!supplier && body.status !== 'draft') throw new ClientInputError('supplier_name required')
 
   // Generate PO number from timestamp (sequence requires raw SQL RPC)
   const poNum = `PO-${String(Date.now()).slice(-6)}`
@@ -36334,7 +36340,7 @@ async function createPO(client: any, body: any, sessionUserId: string | null = n
 
 async function updatePO(client: any, body: any) {
   const { id, ...updates } = body
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   const allowed = ['supplier_name', 'xero_contact_id', 'line_items', 'delivery_date',
                     'reference', 'notes', 'status',
@@ -36364,7 +36370,7 @@ async function updatePO(client: any, body: any) {
 
 async function pushPOToXero(client: any, body: any) {
   const { id, status: requestedStatus } = body
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   const { data: po, error } = await client
     .from('purchase_orders')
@@ -36372,8 +36378,8 @@ async function pushPOToXero(client: any, body: any) {
     .eq('id', id)
     .single()
 
-  if (error || !po) throw new Error('PO not found')
-  if (po.xero_po_id) throw new Error('PO already synced to Xero')
+  if (error || !po) throw new ClientInputError('PO not found')
+  if (po.xero_po_id) throw new ClientInputError('PO already synced to Xero')
   // A blank or placeholder supplier must not become a Xero contact, and only
   // while quote_builder_orders_v1 is on. Missing or unreadable is off. While
   // off this is the same push as before that refusal existed: no 409 here.
@@ -36505,7 +36511,7 @@ async function pushPOToXero(client: any, body: any) {
 
 async function emailPO(client: any, body: any) {
   const id = body.id || body.po_id
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   const { data: po, error } = await client
     .from('purchase_orders')
@@ -36513,8 +36519,8 @@ async function emailPO(client: any, body: any) {
     .eq('id', id)
     .single()
 
-  if (error || !po) throw new Error('PO not found')
-  if (!po.xero_po_id) throw new Error('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
+  if (error || !po) throw new ClientInputError('PO not found')
+  if (!po.xero_po_id) throw new ClientInputError('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
 
   const { accessToken, tenantId } = await getToken(client)
   await xeroPost(`/PurchaseOrders/${po.xero_po_id}/Email`, accessToken, tenantId, {}, 'POST')
@@ -36543,7 +36549,7 @@ async function emailPO(client: any, body: any) {
 async function reconcilePayment(client: any, body: any) {
   const { invoice_id, amount, payment_date, reference, account_code } = body
 
-  if (!invoice_id || !amount) throw new Error('invoice_id and amount required')
+  if (!invoice_id || !amount) throw new ClientInputError('invoice_id and amount required')
   await assertLegacySesInvoiceActionAllowed(
     client,
     invoice_id,
@@ -36569,7 +36575,7 @@ async function reconcilePayment(client: any, body: any) {
   }
 
   if (!bankAccountCode && !bankAccountId) {
-    throw new Error('No bank account found in Xero. Please provide an account_code or set up a bank account in Xero.')
+    throw new ClientInputError('No bank account found in Xero. Please provide an account_code or set up a bank account in Xero.')
   }
 
   const paymentPayload = {
@@ -36588,7 +36594,7 @@ async function reconcilePayment(client: any, body: any) {
   const payment = result?.Payments?.[0]
 
   if (!payment) {
-    throw new Error('Xero returned no payment data')
+    throw new ClientInputError('Xero returned no payment data')
   }
 
   // Update cached invoice in xero_invoices table if it exists
@@ -36642,7 +36648,7 @@ async function reconcilePayment(client: any, body: any) {
 
 async function createWorkOrder(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   const woNum = `WO-${String(Date.now()).slice(-6)}`
 
@@ -36711,7 +36717,7 @@ async function createWorkOrder(client: any, body: any) {
 
 async function updateWorkOrder(client: any, body: any) {
   const { id, ...updates } = body
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   const allowed = ['trade_name', 'trade_phone', 'trade_email', 'assigned_user_id',
                     'scope_items', 'special_instructions', 'scheduled_date',
@@ -36738,7 +36744,7 @@ async function updateWorkOrder(client: any, body: any) {
 
 async function sendWorkOrder(client: any, body: any) {
   const id = body.id || body.work_order_id
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   const { data: wo, error } = await client
     .from('work_orders')
@@ -36746,7 +36752,7 @@ async function sendWorkOrder(client: any, body: any) {
     .eq('id', id)
     .single()
 
-  if (error || !wo) throw new Error('Work order not found')
+  if (error || !wo) throw new ClientInputError('Work order not found')
   if (!wo.job_id) throw new ApiError('Work order has no authoritative job link', 409)
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -37823,9 +37829,9 @@ async function createInvoice(
   const sesContext = internal.ses
 
   const items = line_items || lineItems
-  if (!items || items.length === 0) throw new Error('line_items required')
+  if (!items || items.length === 0) throw new ClientInputError('line_items required')
   const contact = contact_name || contactName
-  if (!contact && !xero_contact_id) throw new Error('contact_name or xero_contact_id required')
+  if (!contact && !xero_contact_id) throw new ClientInputError('contact_name or xero_contact_id required')
 
   // ── REPORT JOB $0 GATE (generic createInvoice path) ──
   // A report-type makesafe job has no scope_json pricing — a $0 or empty invoice
@@ -37864,7 +37870,7 @@ async function createInvoice(
         0,
       )
       if (gateTotal <= 0) {
-        throw new Error('report job needs a charge amount before invoicing: supply line_items with the trade/WO charge')
+        throw new ClientInputError('report job needs a charge amount before invoicing: supply line_items with the trade/WO charge')
       }
     }
   }
@@ -38324,7 +38330,7 @@ export const _makesafeTrustedInvoiceRefTokenForTest = _makesafeTrustedInvoiceRef
 
 async function syncJobInvoices(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     jId,
@@ -38336,7 +38342,7 @@ async function syncJobInvoices(client: any, body: any) {
     .select('id, job_number, client_name, xero_contact_id, metadata')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   const { data: msDetail } = await client.from('makesafe_job_details')
     .select('external_ref')
@@ -38546,7 +38552,7 @@ async function updateInvoiceUnderClaim(
   // Xero uses POST for updates
   const result = await xeroPost(`/Invoices/${xero_invoice_id}`, accessToken, tenantId, { Invoices: [payload] }, 'POST')
   const xeroInvoice = result?.Invoices?.[0]
-  if (!xeroInvoice) throw new Error('Xero did not return an updated invoice')
+  if (!xeroInvoice) throw new ClientInputError('Xero did not return an updated invoice')
 
   const lineSubtotal = (line_items as Array<{ quantity?: number; unit_price?: number }>).reduce((sum, li) => {
     const qty = Number(li.quantity ?? 1)
@@ -38757,7 +38763,7 @@ async function completeAndInvoice(
   opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
 ) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   // Fetch the job
   const { data: job, error: jobErr } = await client
@@ -38765,7 +38771,7 @@ async function completeAndInvoice(
     .select('id, status, client_name, client_email, job_number, xero_contact_id, pricing_json, scope_json, type, site_address, site_suburb')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
   const origin = opts.origin || internalEvidenceOrigin('invoice_advance')
   if (opts.external && String(job.type || '').toLowerCase() === 'makesafe') {
     assertMakesafeMoneyStageFence('complete', origin, opts.authMode)
@@ -38777,7 +38783,7 @@ async function completeAndInvoice(
   )
 
   if (!['in_progress', 'complete', 'scheduled', 'processing'].includes(job.status)) {
-    throw new Error(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, processing, scheduled, or complete.`)
+    throw new ClientInputError(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, processing, scheduled, or complete.`)
   }
 
   // Use line_items_override if provided (from invoice creation modal),
@@ -38792,7 +38798,7 @@ async function completeAndInvoice(
       }
       if (!li.quantity) li.quantity = 1
       if (!li.unit_price || isNaN(li.unit_price)) {
-        throw new Error(`line_items_override[${i}] missing unit_price or amount_inc_gst`)
+        throw new ClientInputError(`line_items_override[${i}] missing unit_price or amount_inc_gst`)
       }
       if (!li.account_code) li.account_code = accountCodeForJob(job.type)
       return li
@@ -38860,7 +38866,7 @@ async function completeAndInvoice(
 
   const total = lineItems.reduce((s: number, li: any) => s + ((li.quantity || 0) * (li.unit_price || 0)), 0)
   if (!total || isNaN(total) || total <= 0) {
-    throw new Error(`Calculated total is $${total} — line items have invalid or zero pricing. Check unit_price values.`)
+    throw new ClientInputError(`Calculated total is $${total} — line items have invalid or zero pricing. Check unit_price values.`)
   }
 
   // ── Deposit awareness: check for existing invoices on this job ──
@@ -38884,7 +38890,7 @@ async function completeAndInvoice(
   }
 
   if (balance <= 0) {
-    throw new Error(
+    throw new ClientInputError(
       `Job already fully invoiced. Total: $${totalIncGst.toFixed(2)}, ` +
       `Already invoiced: $${alreadyInvoiced.toFixed(2)}. ` +
       `No balance remaining. Check existing invoices: ${(existingInvoices || []).map((i: any) => i.invoice_number).join(', ')}`
@@ -38901,7 +38907,7 @@ async function completeAndInvoice(
       .select('report_type').eq('job_id', jId).maybeSingle()
     if (msDetail?.report_type) {
       if (lineItems.length === 0) {
-        throw new Error('report job needs a charge amount before invoicing: supply line_items_override with the trade/WO charge')
+        throw new ClientInputError('report job needs a charge amount before invoicing: supply line_items_override with the trade/WO charge')
       }
       const totalExGst = lineItems.reduce((sum: number, li: any) => sum + (li.unit_price ?? 0) * (li.quantity ?? 1), 0)
       if (totalExGst <= 0) {
@@ -39029,16 +39035,16 @@ async function searchXeroContacts(client: any, params: URLSearchParams) {
 // ── Create General Invoice (rich descriptions for bookkeeper) ──
 async function createGeneralInvoice(client: any, body: any) {
   const { job_id, account_code } = body
-  if (!job_id) throw new Error('job_id required')
+  if (!job_id) throw new ClientInputError('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
     .select('id, job_number, client_name, client_email, site_address, site_suburb, pricing_json, xero_contact_id, ghl_contact_id')
     .eq('id', job_id).single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   const pricing = job.pricing_json || {}
   const lineItems = pricing.line_items || []
-  if (lineItems.length === 0) throw new Error('No line items on this job')
+  if (lineItems.length === 0) throw new ClientInputError('No line items on this job')
 
   const address = [job.site_address, job.site_suburb].filter(Boolean).join(', ')
   const scopeDesc = pricing.job_description || pricing.description || lineItems.map((li: any) => li.description).join('; ')
@@ -39080,8 +39086,8 @@ async function createGeneralInvoice(client: any, body: any) {
 // ── Create GHL Contact (with dedup) ──
 async function createGHLContact(client: any, body: any) {
   const { firstName, lastName, email, phone, address, suburb, job_id } = body
-  if (!firstName && !lastName) throw new Error('firstName or lastName required')
-  if (!GHL_API_TOKEN) throw new Error('GHL API token not configured')
+  if (!firstName && !lastName) throw new ClientInputError('firstName or lastName required')
+  if (!GHL_API_TOKEN) throw new ClientInputError('GHL API token not configured')
 
   const name = [firstName, lastName].filter(Boolean).join(' ')
   const headers = { 'Authorization': `Bearer ${GHL_API_TOKEN}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' }
@@ -39136,7 +39142,7 @@ async function createGHLContact(client: any, body: any) {
     }
     const createData = await createRes.json()
     contactId = createData.contact?.id
-    if (!contactId) throw new Error('GHL returned no contact ID')
+    if (!contactId) throw new ClientInputError('GHL returned no contact ID')
   }
 
   // Link to job if provided
@@ -39151,7 +39157,7 @@ async function searchGHLContacts(client: any, params: URLSearchParams) {
   const q = (params.get('q') || '').trim()
   if (!q || q.length < 2) return { contacts: [] }
 
-  if (!GHL_API_TOKEN) throw new Error('GHL API token not configured')
+  if (!GHL_API_TOKEN) throw new ClientInputError('GHL API token not configured')
 
   // Search GHL contacts by name/email/phone using GET /contacts/ endpoint
   const searchParams = new URLSearchParams({
@@ -39220,8 +39226,8 @@ async function createMiscJob(client: any, body: any) {
   } = body
 
   const name = client_name || [client_first_name, client_last_name].filter(Boolean).join(' ')
-  if (!name) throw new Error('Client name required')
-  if (!line_items || line_items.length === 0) throw new Error('At least one line item required')
+  if (!name) throw new ClientInputError('Client name required')
+  if (!line_items || line_items.length === 0) throw new ClientInputError('At least one line item required')
 
   // Cap 0 release-truth: a Quick Quote is created at status='draft' regardless of what the
   // caller asked for. Promotion to 'quoted' only happens when sendQuickQuoteEmail successfully
@@ -39324,22 +39330,22 @@ async function createMiscJob(client: any, body: any) {
 // ── Send Quick Quote Email to Client ──
 async function sendQuickQuoteEmail(client: any, body: any) {
   const { job_id, pdf_url } = body
-  if (!job_id) throw new Error('job_id required')
+  if (!job_id) throw new ClientInputError('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
     .select('id, job_number, type, client_name, client_email, client_phone, site_address, site_suburb, pricing_json')
     .eq('id', job_id)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     job_id,
     'send_quick_quote_email',
   )
-  if (!job.client_email) throw new Error('No client email on this job')
+  if (!job.client_email) throw new ClientInputError('No client email on this job')
 
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
-  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
+  if (!RESEND_API_KEY) throw new ClientInputError('RESEND_API_KEY not configured')
 
   const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
 
@@ -39348,7 +39354,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   // with no/zero price. Strict === false so quotes that never set the flag
   // (fence/legacy) are not blocked — only an explicit validation failure blocks.
   if (pricing.pricing_validation_passed === false) {
-    throw new Error('Quote failed pricing validation in the scoping tool and cannot be sent. Fix the flagged pricing issues, re-save, and try again.')
+    throw new ClientInputError('Quote failed pricing validation in the scoping tool and cannot be sent. Fix the flagged pricing issues, re-save, and try again.')
   }
   // Same total fallback chain as send-quote so legacy quotes carrying only
   // `total`/`grandTotal` (not `totalIncGST`) are not falsely blocked.
@@ -39630,17 +39636,17 @@ async function sendQuickQuoteEmail(client: any, body: any) {
 // ── Delete PO ──
 async function deletePO(client: any, body: any) {
   const { id } = body
-  if (!id) throw new Error('id required')
+  if (!id) throw new ClientInputError('id required')
 
   // Only allow deletion of draft/quote_requested POs
   const { data: po, error: fetchErr } = await client.from('purchase_orders')
     .select('id, status, po_number, supplier_name')
     .eq('id', id).single()
-  if (fetchErr) throw new Error('PO not found')
+  if (fetchErr) throw new ClientInputError('PO not found')
 
   const deletable = ['draft', 'quote_requested']
   if (!deletable.includes(po.status)) {
-    throw new Error('Cannot delete — PO status is "' + po.status + '". Cancel it instead.')
+    throw new ClientInputError('Cannot delete — PO status is "' + po.status + '". Cancel it instead.')
   }
 
   const { error } = await client.from('purchase_orders').delete().eq('id', id)
@@ -39652,8 +39658,8 @@ async function deletePO(client: any, body: any) {
 // ── PO Email Log ──
 async function addPOEvent(client: any, body: any) {
   const { po_id, event_type, supplier, summary, direction, job_id } = body
-  if (!po_id) throw new Error('po_id required')
-  if (!event_type) throw new Error('event_type required')
+  if (!po_id) throw new ClientInputError('po_id required')
+  if (!event_type) throw new ClientInputError('event_type required')
 
   const eventData: any = {
     event_type: event_type,
@@ -39863,7 +39869,7 @@ function buildScopeSummaryLine(job: any): string {
 // client-facing payment links. See "Acceptance Deposit Invoice Invariant" in AGENTS.md.
 async function createDepositInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   const depositPercent = body.deposit_percent ?? 50
 
@@ -39873,7 +39879,7 @@ async function createDepositInvoice(client: any, body: any) {
     .select('id, status, client_name, client_email, job_number, xero_contact_id, pricing_json, scope_json, type, site_address, site_suburb')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   // Resolve neighbour contact details if job_contact_id provided
   const job_contact_id = body.job_contact_id || null
@@ -39911,7 +39917,7 @@ async function createDepositInvoice(client: any, body: any) {
   if (runLabel) existingDepQuery.eq('run_label', runLabel)
   const { data: existingDep } = await existingDepQuery
   if (existingDep && existingDep.length > 0) {
-    throw new Error(`Deposit invoice already exists: ${existingDep[0].invoice_number} ($${existingDep[0].total}). Void it in Xero before creating a new one.`)
+    throw new ClientInputError(`Deposit invoice already exists: ${existingDep[0].invoice_number} ($${existingDep[0].total}). Void it in Xero before creating a new one.`)
   }
 
   // Extract total from pricing_json (with fallback to scope_json._pricing_json for fencing jobs)
@@ -39938,7 +39944,7 @@ async function createDepositInvoice(client: any, body: any) {
   const depositAmountIncGst = depositAmountOverride || Math.round(quotedTotal * (depositPercent / 100) * 100) / 100
 
   if (depositAmountIncGst <= 0) {
-    throw new Error('Cannot create a $0 deposit invoice. Set pricing_json on the job first.')
+    throw new ClientInputError('Cannot create a $0 deposit invoice. Set pricing_json on the job first.')
   }
 
   // Build rich description with all job metadata baked in
@@ -40052,10 +40058,10 @@ async function createDepositInvoice(client: any, body: any) {
 // ── Unified Invoice — single flow for deposits, progress claims, finals, extras ──
 async function createUnifiedInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   const items = body.line_items || body.lineItems
-  if (!items || items.length === 0) throw new Error('line_items required')
+  if (!items || items.length === 0) throw new ClientInputError('line_items required')
 
   // Fetch job
   const { data: job, error: jobErr } = await client
@@ -40063,7 +40069,7 @@ async function createUnifiedInvoice(client: any, body: any) {
     .select('id, status, client_name, client_email, job_number, xero_contact_id, pricing_json, type, site_address, site_suburb')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   // Calculate quoted total
   const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
@@ -40111,7 +40117,7 @@ async function createUnifiedInvoice(client: any, body: any) {
       .not('status', 'in', '("VOIDED","DELETED")')
       .limit(1)
     if (dupeCheck && dupeCheck.length > 0) {
-      throw new Error(`Invoice with reference ${reference} already exists (${dupeCheck[0].invoice_number}). Void it first if you need to recreate.`)
+      throw new ClientInputError(`Invoice with reference ${reference} already exists (${dupeCheck[0].invoice_number}). Void it first if you need to recreate.`)
     }
   }
 
@@ -40486,14 +40492,14 @@ function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
 // Exposed as API action for PO auto-population
 async function scopeToPO(client: any, params: URLSearchParams) {
   const jobId = params.get('jobId') || params.get('job_id')
-  if (!jobId) throw new Error('jobId required')
+  if (!jobId) throw new ClientInputError('jobId required')
 
   const { data: job, error } = await client
     .from('jobs')
     .select('id, scope_json, pricing_json, client_name, site_suburb, type')
     .eq('id', jobId)
     .single()
-  if (error || !job) throw new Error('Job not found')
+  if (error || !job) throw new ClientInputError('Job not found')
 
   const materials = extractMaterialsFromScope(job.scope_json, job.pricing_json)
   return { job_id: jobId, client: job.client_name, type: job.type, materials }
@@ -41057,7 +41063,7 @@ async function assertMakesafeJob(
   if (!job || (access?.orgId && String(job.org_id || '') !== access.orgId)) {
     throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
   }
-  if (!(await isMakesafeAccessJobForClient(client, job))) throw new Error('MakeSafe job required')
+  if (!(await isMakesafeAccessJobForClient(client, job))) throw new ClientInputError('MakeSafe job required')
   return job
 }
 
@@ -42158,7 +42164,7 @@ export async function myJobs(
   // changes, replace() silently no-ops and the manager query would stop
   // constraining by vertical. Fail loudly instead.
   if (ASSIGNMENT_SELECT_ADMIN_INNER === ASSIGNMENT_SELECT_ADMIN) {
-    throw new Error('ASSIGNMENT_SELECT_ADMIN_INNER inner-join derivation failed — embed spelling changed')
+    throw new ClientInputError('ASSIGNMENT_SELECT_ADMIN_INNER inner-join derivation failed — embed spelling changed')
   }
 
   let assignments: any[]
@@ -44091,7 +44097,7 @@ async function tradeJobDetail(
   isAdmin = false,
 ) {
   const jobId = params.get('jobId')
-  if (!jobId) throw new Error('jobId required')
+  if (!jobId) throw new ClientInputError('jobId required')
 
   // Verify the job belongs to the viewer's tenant, then resolve the ONE access
   // tier (office / division_manager / allocated / makesafe_open) or refuse.
@@ -44641,7 +44647,7 @@ async function addNote(client: any, body: any, isAdmin = false, access?: TradeJo
   const { jobId, job_id, userId, user_id, text, sync_to_ghl, visibility, from_ops } = body
   const jId = jobId || job_id
   const uId = userId || user_id
-  if (!jId || !text) throw new Error('jobId and text required')
+  if (!jId || !text) throw new ClientInputError('jobId and text required')
 
   // Verify user is assigned to this job (admins bypass), or manages the job's
   // vertical (same access context trade_job_detail honours). Open MakeSafe
@@ -44906,7 +44912,7 @@ async function uploadPhoto(client: any, body: any, access?: TradeJobAccessContex
   const { jobId, job_id, dataUrl, label, phase, userId, user_id, po_id } = body
   const jId = jobId || job_id
   const uId = userId || user_id
-  if (!jId || !dataUrl) throw new Error('jobId and dataUrl required')
+  if (!jId || !dataUrl) throw new ClientInputError('jobId and dataUrl required')
 
   // Verify user is assigned, manages the job's vertical, or this is a MakeSafe
   // field-report job.
@@ -45076,7 +45082,7 @@ async function submitServiceReport(
 ) {
   const { jobId, job_id, userId, user_id, checklist, notes, signatureData, signatureName, status, weather, start_time, end_time, variations } = body
   const jId = jobId || job_id
-  if (!jId) throw new Error('jobId required')
+  if (!jId) throw new ClientInputError('jobId required')
 
   const reportStatus = status || 'submitted'
   const uId = userId || user_id || null
@@ -45116,7 +45122,7 @@ async function submitServiceReport(
     .maybeSingle()
 
   if (existing?.status === 'approved' && reportStatus !== 'approved') {
-    throw new Error('This report has been approved and cannot be modified')
+    throw new ClientInputError('This report has been approved and cannot be modified')
   }
 
   let report
@@ -45196,7 +45202,7 @@ async function getServiceReport(
   isOffice = false,
 ) {
   const jobId = params.get('jobId')
-  if (!jobId) throw new Error('jobId required')
+  if (!jobId) throw new ClientInputError('jobId required')
 
   // Verify user is assigned, manages the job's vertical, or this is a
   // MakeSafe/SWMS field-report job.
@@ -45364,7 +45370,7 @@ async function uploadDocument(client: any, body: any) {
   const { jobId, job_id, fileName, file_name, contentType, content_type, type, visible_to_trades } = body
   const jId = jobId || job_id
   const fName = fileName || file_name
-  if (!jId || !fName) throw new Error('jobId and fileName required')
+  if (!jId || !fName) throw new ClientInputError('jobId and fileName required')
 
   const allowedTypes = ['work_order', 'supplier_work_order', 'quote', 'approval', 'site_photo', 'general', 'supplier_quote', 'council_plans', 'engineering', 'client_reference', 'asbestos', 'makesafe_report', 'invoice', 'swms', 'other']
   const docType = allowedTypes.includes(type) ? type : 'general'
@@ -45393,7 +45399,7 @@ async function uploadDocument(client: any, body: any) {
 async function confirmDocumentUpload(client: any, body: any) {
   const { jobId, job_id, publicUrl, path, fileName, type, visible_to_trades, uploaded_by } = body
   const jId = jobId || job_id
-  if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
+  if (!jId || !publicUrl) throw new ClientInputError('jobId and publicUrl required')
 
   // Default visibility: on for field/useful trade docs. Off for quote/client-only docs.
   // makesafe_report + swms are operational docs trades/ops view on site (close-out
@@ -45596,7 +45602,7 @@ async function attachEmailAttachmentToJob(
   } = {},
 ) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   const type = body.type || 'work_order'
 
   // ── PRIMARY: resolve a synced email_attachments row. A miss no longer throws —
@@ -45759,7 +45765,7 @@ async function persistMakesafeDocumentPdfBytes(args: {
   )
   const publicUrl = String(urlData?.publicUrl || '')
   if (!publicUrl.startsWith('https://')) {
-    throw new Error('Storage public URL was not issued')
+    throw new ClientInputError('Storage public URL was not issued')
   }
   return { publicUrl, storagePath }
 }
@@ -45781,9 +45787,9 @@ async function attachMakesafeDocument(
   // report is the whole point of the roof-report flow -- so it is not subject to
   // the report-type gate.
   const allowedTypes = ['work_order', 'makesafe_report', 'roof_report', 'invoice', 'swms']
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   if (!allowedTypes.includes(type)) {
-    throw new Error('type must be one of ' + allowedTypes.join(', '))
+    throw new ClientInputError('type must be one of ' + allowedTypes.join(', '))
   }
 
   // ── REPORT-JOB REPORT-DOC GATE ──
@@ -45806,7 +45812,7 @@ async function attachMakesafeDocument(
 
   const url: string | undefined = body.url || body.public_url || body.publicUrl || body.storage_url
   const pdfBase64: string | undefined = body.pdf_base64 || body.pdfBase64
-  if (!url && !pdfBase64) throw new Error('url or pdf_base64 required')
+  if (!url && !pdfBase64) throw new ClientInputError('url or pdf_base64 required')
 
   // Resolve a stable file name. Caller may pass one; otherwise derive from the
   // type so idempotency stays deterministic per job+type.
@@ -53143,7 +53149,7 @@ export const _reattendMakesafeForTest = reattendMakesafe
 async function toggleDocumentVisibility(client: any, body: any) {
   const { documentId, document_id, visible_to_trades } = body
   const dId = documentId || document_id
-  if (!dId || visible_to_trades == null) throw new Error('documentId and visible_to_trades required')
+  if (!dId || visible_to_trades == null) throw new ClientInputError('documentId and visible_to_trades required')
 
   const { error } = await client.from('job_documents')
     .update({ visible_to_trades: visible_to_trades })
@@ -53155,7 +53161,7 @@ async function toggleDocumentVisibility(client: any, body: any) {
 
 async function deleteDocument(client: any, body: any) {
   const dId = body.documentId || body.document_id
-  if (!dId) throw new Error('documentId required')
+  if (!dId) throw new ClientInputError('documentId required')
 
   // Get document for storage cleanup + event log
   const { data: doc, error: fetchErr } = await client
@@ -53165,7 +53171,7 @@ async function deleteDocument(client: any, body: any) {
     .single()
 
   if (fetchErr) throw fetchErr
-  if (!doc) throw new Error('Document not found')
+  if (!doc) throw new ClientInputError('Document not found')
 
   // Delete from storage if we have a storage path
   if (doc.storage_url) {
@@ -53323,7 +53329,7 @@ async function sendOpsNoteToTrade(client: any, body: any) {
 // ── Comms attachment upload URL (ops dashboard → Storage) ──
 async function getCommsUploadUrl(client: any, body: any) {
   const { fileName, jobId } = body
-  if (!fileName || !jobId) throw new Error('fileName and jobId required')
+  if (!fileName || !jobId) throw new ClientInputError('fileName and jobId required')
 
   const bucket = 'comms-attachments'
   const fileId = crypto.randomUUID()
@@ -53381,16 +53387,16 @@ async function sendCommsMessageAction(client: any, body: any) {
   }
 
   if (type === 'SMS') {
-    if (!message) throw new Error('message required for SMS')
+    if (!message) throw new ClientInputError('message required for SMS')
     payload.message = message
     if (attachmentUrls.length > 0) payload.attachments = attachmentUrls
   } else if (type === 'Email') {
-    if (!subject || !htmlBody) throw new Error('subject and htmlBody required for Email')
+    if (!subject || !htmlBody) throw new ClientInputError('subject and htmlBody required for Email')
     payload.subject = subject
     payload.html = htmlBody
     if (attachmentUrls.length > 0) payload.attachments = attachmentUrls
   } else {
-    throw new Error('type must be SMS or Email')
+    throw new ClientInputError('type must be SMS or Email')
   }
 
   const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
@@ -53418,8 +53424,8 @@ async function getUploadUrl(client: any, body: any, userId: string, isAdmin = fa
   // expense). All other purposes still require a job_id and assignment check.
   const isExpenseReceipt = purpose === 'expense_receipt'
 
-  if (!fileName) throw new Error('fileName required')
-  if (!isExpenseReceipt && !jId) throw new Error('jobId required')
+  if (!fileName) throw new ClientInputError('fileName required')
+  if (!isExpenseReceipt && !jId) throw new ClientInputError('jobId required')
 
   if (jId && !isExpenseReceipt) {
     await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin, access)
@@ -53541,7 +53547,7 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
   }
 
   // ── Standard photo path (unchanged behaviour) ──
-  if (!jId || !publicUrl) throw new Error('jobId and publicUrl required')
+  if (!jId || !publicUrl) throw new ClientInputError('jobId and publicUrl required')
 
   // Verify user is assigned, manages the job's vertical, or this is a MakeSafe
   // field-report job.
@@ -53950,8 +53956,8 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
     const { data: asgn, error: aErr } = await client.from('job_assignments')
       .select('id, job_id, user_id, acknowledged_at').eq('id', id).maybeSingle()
     if (aErr) throw aErr
-    if (!asgn) throw new Error('Assignment not found')
-    if (asgn.user_id !== userId) throw new Error('Not your assignment')
+    if (!asgn) throw new ClientInputError('Assignment not found')
+    if (asgn.user_id !== userId) throw new ClientInputError('Not your assignment')
     if (asgn.acknowledged_at) return { assignment: asgn } // already done
 
     const { data: acked, error: ackErr } = await client.from('job_assignments')
@@ -53967,10 +53973,10 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
   }
 
   const newStatus = body.status
-  if (!id || !newStatus) throw new Error('assignmentId and status required')
+  if (!id || !newStatus) throw new ClientInputError('assignmentId and status required')
 
   const allowed = ['confirmed', 'in_progress', 'complete', 'submitted']
-  if (!allowed.includes(newStatus)) throw new Error('Invalid status. Use: ' + allowed.join(', '))
+  if (!allowed.includes(newStatus)) throw new ClientInputError('Invalid status. Use: ' + allowed.join(', '))
 
   // Verify this assignment belongs to the authenticated user
   const { data: assignment, error: findErr } = await client
@@ -53980,8 +53986,8 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
     .maybeSingle()
 
   if (findErr) throw findErr
-  if (!assignment) throw new Error('Assignment not found')
-  if (assignment.user_id !== userId) throw new Error('Not your assignment')
+  if (!assignment) throw new ClientInputError('Assignment not found')
+  if (assignment.user_id !== userId) throw new ClientInputError('Not your assignment')
 
   // Record timestamps for time tracking
   const updateFields: any = { status: newStatus }
@@ -54032,8 +54038,8 @@ const VALID_PHASES = ['assigned','acknowledged','travelling','arrived','material
 async function updateJobPhase(client: any, body: any, userId: string) {
   const assignmentId = body.assignmentId || body.id
   const newPhase = body.phase
-  if (!assignmentId || !newPhase) throw new Error('assignmentId and phase required')
-  if (!VALID_PHASES.includes(newPhase)) throw new Error('Invalid phase: ' + newPhase)
+  if (!assignmentId || !newPhase) throw new ClientInputError('assignmentId and phase required')
+  if (!VALID_PHASES.includes(newPhase)) throw new ClientInputError('Invalid phase: ' + newPhase)
 
   // Verify ownership
   const { data: asgn, error: findErr } = await client
@@ -54042,8 +54048,8 @@ async function updateJobPhase(client: any, body: any, userId: string) {
     .eq('id', assignmentId)
     .maybeSingle()
   if (findErr) throw findErr
-  if (!asgn) throw new Error('Assignment not found')
-  if (asgn.user_id !== userId) throw new Error('Not your assignment')
+  if (!asgn) throw new ClientInputError('Assignment not found')
+  if (asgn.user_id !== userId) throw new ClientInputError('Not your assignment')
 
   const oldPhase = asgn.job_phase || 'assigned'
   // Skip if already at this phase
@@ -54337,7 +54343,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 // ── submit_trade_invoice: build + push ACCPAY bill to Xero ──
 export async function submitTradeInvoice(client: any, userId: string, body: any) {
   const { week_ending, notes, items } = body
-  if (!week_ending) throw new Error('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
+  if (!week_ending) throw new ClientInputError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
 
   const weekStart = weekStartFromEnd(week_ending)
 
@@ -54366,7 +54372,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     .eq('user_id', userId)
     .eq('week_end', week_ending)
     .maybeSingle()
-  if (existing) throw new Error(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
+  if (existing) throw new ClientInputError(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
 
   // Re-query assignments server-side (prevents tampering). Every assignment the
   // trade holds for the week is fetched: hourly billing uses the completed
@@ -54412,9 +54418,9 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   const billableAssignments = (weekAssignments || []).filter((a: any) => a.status !== 'cancelled')
 
   if (isPerMetre) {
-    if (billableAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
+    if (billableAssignments.length === 0) throw new ClientInputError('No jobs assigned to you for this week')
   } else if (assignments.length === 0) {
-    throw new Error(stHeldCount > 0
+    throw new ClientInputError(stHeldCount > 0
       ? 'Every completed job card for this week is already on a live invoice. Contact the office if this looks wrong.'
       : 'No completed hours found for this week')
   }
@@ -54493,7 +54499,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 
   if (isPerMetre) {
     // ── Per-metre invoice: use client-sent items with per-metre rate ──
-    if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
+    if (!items || !Array.isArray(items) || items.length === 0) throw new ClientInputError('Enter the metres installed on at least one job before submitting.')
     const pmRate = _resolvePerMetreRate(tradeUser?.trade_details)
 
     const jobMap: Record<string, any> = {}
@@ -54517,7 +54523,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       const metres = Number(item.metres) || 0
       if (metres <= 0) continue
       const job = jobMap[item.job_id]
-      if (!job) throw new Error(`Job ${item.job_number || item.job_id} is not assigned to you for the week ending ${week_ending}, so it cannot be invoiced. Ask the office to add the assignment, then remove that job and submit the rest.`)
+      if (!job) throw new ClientInputError(`Job ${item.job_number || item.job_id} is not assigned to you for the week ending ${week_ending}, so it cannot be invoiced. Ask the office to add the assignment, then remove that job and submit the rest.`)
 
       const amount = Math.round(metres * pmRate * 100) / 100
       subtotal += amount
@@ -54544,7 +54550,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       addJobLine(item.job_id, job, 0, 0, amount, undefined, undefined, metres, pmRate)
     }
 
-    if (lineItems.length === 0) throw new Error('All metre amounts are zero. Enter the metres you installed on each job.')
+    if (lineItems.length === 0) throw new ClientInputError('All metre amounts are zero. Enter the metres you installed on each job.')
 
   } else {
     // ── Hourly invoice: existing path ──
@@ -54558,7 +54564,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       .limit(1)
       .maybeSingle()
 
-    if (!rateRow) throw new Error('No hourly rate set — update your rate in Profile before submitting')
+    if (!rateRow) throw new ClientInputError('No hourly rate set — update your rate in Profile before submitting')
     const rate = Number(rateRow.hourly_rate)
 
     for (const a of assignments) {
@@ -54595,10 +54601,10 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 
   // ── M0 LEGACY GUARD (2026-06-12) ──
   if (lineItems.length === 0) {
-    throw new Error('Invoice rejected: no valid line items to submit.')
+    throw new ClientInputError('Invoice rejected: no valid line items to submit.')
   }
   if (subtotal <= 0) {
-    throw new Error('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
+    throw new ClientInputError('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
   }
   // ── END M0 LEGACY GUARD ──
   // Recurring deduction (for example Ute hire): taken off the amount payable
@@ -54624,7 +54630,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     0,
   )
   if (Object.keys(jobLines).length === 0 || Math.abs(persistedLineSubtotal - stMoney.gross_earned) > 0.01) {
-    throw new Error(
+    throw new ClientInputError(
       'Invoice rejected: persisted job lines do not match gross earned. Reload and ask the office to check the affected job assignment.',
     )
   }
@@ -54759,7 +54765,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     accessToken: stAt,
     tenantId: stTi,
   })
-  if (!stXeroContactId) throw new Error('Could not create Xero supplier contact')
+  if (!stXeroContactId) throw new ClientInputError('Could not create Xero supplier contact')
 
   // Build Xero payload
   const dueDate = new Date(new Date(week_ending + 'T00:00:00Z').getTime() + 14 * 86400000)
@@ -54923,8 +54929,8 @@ export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 async function setTradeRate(client: any, authUserId: string | null, body: any) {
   const { user_id, hourly_rate } = body
   const targetUserId = user_id || authUserId
-  if (!targetUserId) throw new Error('user_id required')
-  if (!hourly_rate || hourly_rate <= 0) throw new Error('Valid hourly_rate required')
+  if (!targetUserId) throw new ClientInputError('user_id required')
+  if (!hourly_rate || hourly_rate <= 0) throw new ClientInputError('Valid hourly_rate required')
 
   const today = getAWSTDate()
 
@@ -54988,7 +54994,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
 // ── labour_reconciliation: labour PO budget vs trade hours per job ──
 async function labourReconciliation(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id')
-  if (!jobId) throw new Error('job_id required')
+  if (!jobId) throw new ClientInputError('job_id required')
 
   // Get labour POs for this job (type contains 'labour' in notes or supplier is a trade)
   const { data: pos } = await client.from('purchase_orders')
@@ -55115,7 +55121,7 @@ async function tradeLabourBudget(
   access?: TradeJobAccessContext,
 ) {
   const jobId = params.get('jobId') || params.get('job_id')
-  if (!jobId) throw new Error('jobId required')
+  if (!jobId) throw new ClientInputError('jobId required')
   // Same tier decision as every other per-job trade door: office and a manager
   // of the job's vertical pass, an allocated trade passes, nobody else does.
   const accessDecision = await assertAssignedOrMakesafeAccess(client, jobId, userId, isOffice, access)
@@ -55206,17 +55212,17 @@ export const _tradeLabourBudgetForTest = tradeLabourBudget
 // ── complete_job: mark job complete + GHL stage sync ──
 async function completeJob(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   const { data: job, error: jobErr } = await client
     .from('jobs')
     .select('id, status, client_name, job_number, type, site_address, site_suburb, ghl_opportunity_id, ghl_contact_id')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   if (!['in_progress', 'scheduled', 'processing', 'accepted'].includes(job.status)) {
-    throw new Error(`Cannot complete a job with status "${job.status}". Must be in_progress, processing, scheduled, or accepted.`)
+    throw new ClientInputError(`Cannot complete a job with status "${job.status}". Must be in_progress, processing, scheduled, or accepted.`)
   }
 
   // Update status + completed_at
@@ -55318,7 +55324,7 @@ async function completeJob(client: any, body: any) {
 // non-success response as "reminder NOT sent".
 async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     jId,
@@ -55346,8 +55352,8 @@ async function sendPaymentLink(client: any, body: any) {
     .select('id, client_name, client_phone, job_number, ghl_contact_id')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
-  if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
+  if (!job.ghl_contact_id) throw new ClientInputError('No GHL contact ID on this job — cannot send SMS')
 
   // Find the Xero invoice for this job
   const { data: invoices } = await client
@@ -55359,7 +55365,7 @@ async function sendPaymentLink(client: any, body: any) {
     .order('created_at', { ascending: false })
     .limit(1)
 
-  if (!invoices || invoices.length === 0) throw new Error('No invoice found for this job')
+  if (!invoices || invoices.length === 0) throw new ClientInputError('No invoice found for this job')
   const invoice = invoices[0]
 
   if (invoice.status !== 'AUTHORISED') {
@@ -55373,7 +55379,7 @@ async function sendPaymentLink(client: any, body: any) {
     accessToken, tenantId
   )
   const onlineUrl = onlineResult?.OnlineInvoices?.[0]?.OnlineInvoiceUrl
-  if (!onlineUrl) throw new Error('Could not get Xero online invoice URL')
+  if (!onlineUrl) throw new ClientInputError('Could not get Xero online invoice URL')
 
   // Send SMS via GHL
   const smsMessage = `Hi ${job.client_name?.split(' ')[0] || 'there'}, your invoice for ${job.job_number} is ready. You can view and pay online here: ${onlineUrl}\n\nThanks,\nSecureWorks Group`
@@ -55439,7 +55445,7 @@ export function _acceptanceInvoiceChargeable(xeroStatus: unknown, paymentUrl: un
 // Used by: send-quote /accept (auto), sale.html button, ops dashboard
 async function sendAcceptanceInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     jId,
@@ -55452,7 +55458,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     .select('id, type, client_name, client_phone, job_number, ghl_contact_id, xero_contact_id, pricing_json, site_address, site_suburb')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   const livePricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
 
@@ -55811,7 +55817,7 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
 
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
   await assertNoSyntheticLivefireJobs(client, [jId], 'send_review_request')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -55895,8 +55901,8 @@ async function getCrewAvailability(client: any, params: URLSearchParams) {
 async function setAvailability(client: any, body: any) {
   const { userId, user_id, dates } = body
   const uid = userId || user_id
-  if (!uid) throw new Error('userId required')
-  if (!dates || !Array.isArray(dates) || dates.length === 0) throw new Error('dates array required')
+  if (!uid) throw new ClientInputError('userId required')
+  if (!dates || !Array.isArray(dates) || dates.length === 0) throw new ClientInputError('dates array required')
 
   const rows = dates.map((d: any) => ({
     user_id: uid,
@@ -55918,7 +55924,7 @@ async function setAvailability(client: any, body: any) {
 async function confirmAssignment(client: any, body: any) {
   const { assignmentId, assignment_id, notifyClient, notify_client, customMessage, custom_message, confirmedBy, confirmed_by } = body
   const aId = assignmentId || assignment_id
-  if (!aId) throw new Error('assignmentId required')
+  if (!aId) throw new ClientInputError('assignmentId required')
 
   const shouldNotify = notifyClient ?? notify_client ?? false
   const message = customMessage || custom_message || null
@@ -56010,7 +56016,7 @@ async function confirmAssignment(client: any, body: any) {
 async function bulkConfirm(client: any, body: any) {
   const { assignmentIds, assignment_ids, notifyClient, notify_client, confirmedBy, confirmed_by } = body
   const ids = assignmentIds || assignment_ids
-  if (!ids || !Array.isArray(ids) || ids.length === 0) throw new Error('assignmentIds array required')
+  if (!ids || !Array.isArray(ids) || ids.length === 0) throw new ClientInputError('assignmentIds array required')
 
   let successCount = 0
   let failCount = 0
@@ -56042,7 +56048,7 @@ async function bulkConfirm(client: any, body: any) {
 async function dismissAlert(client: any, body: any) {
   const { alert_id, alertId, userId, user_id } = body
   const aId = alert_id || alertId
-  if (!aId) throw new Error('alert_id required')
+  if (!aId) throw new ClientInputError('alert_id required')
 
   const { error } = await client.from('ai_alerts')
     .update({
@@ -56063,7 +56069,7 @@ async function dismissAlert(client: any, body: any) {
 async function extractPOPricing(client: any, body: any) {
   const { po_id, poId } = body
   const pId = po_id || poId
-  if (!pId) throw new Error('po_id required')
+  if (!pId) throw new ClientInputError('po_id required')
 
   // Get the PO with line items
   const { data: po, error: poErr } = await client.from('purchase_orders')
@@ -56189,7 +56195,7 @@ async function extractPOPricing(client: any, body: any) {
 
 async function confirmPrice(client: any, body: any) {
   const { ledger_id, user_id } = body
-  if (!ledger_id) throw new Error('ledger_id required')
+  if (!ledger_id) throw new ClientInputError('ledger_id required')
 
   // Get the ledger entry details before confirming
   const { data: entry } = await client.from('material_price_ledger')
@@ -56252,7 +56258,7 @@ async function confirmPrice(client: any, body: any) {
 
 async function dismissPrice(client: any, body: any) {
   const { ledger_id, reason } = body
-  if (!ledger_id) throw new Error('ledger_id required')
+  if (!ledger_id) throw new ClientInputError('ledger_id required')
 
   const { error } = await client.from('material_price_ledger')
     .update({
@@ -56286,7 +56292,7 @@ async function createTradeAlert(client: any, userId: string, body: any) {
   const { jobId, job_id, issueType, issue_type, detail } = body
   const jId = jobId || job_id
   const iType = issueType || issue_type
-  if (!jId || !iType) throw new Error('jobId and issueType required')
+  if (!jId || !iType) throw new ClientInputError('jobId and issueType required')
 
   // Look up job for context
   const { data: job } = await client.from('jobs')
@@ -56445,7 +56451,7 @@ async function createVariation(
   const { job_id, jobId, description, estimated_cost, amount, photo_url, user_id, userId, reason, cost_estimate, invoice_method } = body
   const jId = job_id || jobId
   const uid = user_id || userId
-  if (!jId || !description) throw new Error('job_id and description required')
+  if (!jId || !description) throw new ClientInputError('job_id and description required')
 
   const cost = Number(estimated_cost || amount || 0)
   const officeApprovalRequired = options.requireOfficeApproval === true
@@ -56545,7 +56551,7 @@ async function approveVariation(client: any, body: any) {
   const { variation_id, event_id, eventId, approved, user_id, userId, notes } = body
   // Accept both variation_id (new) and event_id (backward compat)
   const vId = variation_id || event_id || eventId
-  if (!vId) throw new Error('variation_id required')
+  if (!vId) throw new ClientInputError('variation_id required')
 
   // Try job_variations first (v2), fall back to job_events (legacy)
   const { data: variation } = await client.from('job_variations')
@@ -56568,7 +56574,7 @@ async function approveVariation(client: any, body: any) {
       .select('id, job_id, detail_json')
       .eq('id', vId)
       .single()
-    if (!event) throw new Error('Variation not found')
+    if (!event) throw new ClientInputError('Variation not found')
 
     const detail = event.detail_json || {}
     detail.status = approved ? 'approved' : 'rejected'
@@ -56663,11 +56669,11 @@ async function listVariations(client: any, params: URLSearchParams) {
 async function analyseSupplierQuote(client: any, body: any) {
   const { po_id, poId, image_url, image_base64, quote_text } = body
   const pId = po_id || poId
-  if (!pId) throw new Error('po_id required')
-  if (!image_url && !image_base64 && !quote_text) throw new Error('image_url, image_base64, or quote_text required')
+  if (!pId) throw new ClientInputError('po_id required')
+  if (!image_url && !image_base64 && !quote_text) throw new ClientInputError('image_url, image_base64, or quote_text required')
 
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
-  if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not configured')
+  if (!ANTHROPIC_API_KEY) throw new ClientInputError('ANTHROPIC_API_KEY not configured')
 
   // Get the PO with its line items (what we ordered)
   const { data: po, error: poErr } = await client.from('purchase_orders')
@@ -56675,7 +56681,7 @@ async function analyseSupplierQuote(client: any, body: any) {
     .eq('id', pId)
     .single()
 
-  if (poErr || !po) throw new Error('PO not found')
+  if (poErr || !po) throw new ClientInputError('PO not found')
   // Dispatch slice 6 (docs/dispatch-slice-6-contract.md): a confirmed date a
   // person set by hand is never replaced by this reader's reading of an email.
   const replyMayWriteConfirmedDate = !po.confirmed_delivery_set_at
@@ -57331,7 +57337,7 @@ export async function sendProposedSms(client: any, body: any) {
 // ════════════════════════════════════════════════════════════
 async function sendQuoteFollowupSms(client: any, body: any) {
   const { action_id, user_id } = body
-  if (!action_id) throw new Error('action_id required')
+  if (!action_id) throw new ClientInputError('action_id required')
 
   // Read-only preflight before the atomic claim. The claim is constrained to
   // this same job id so a concurrent rewrite cannot move the send across jobs.
@@ -57407,7 +57413,7 @@ async function sendQuoteFollowupSms(client: any, body: any) {
       .update({ status: 'pending', approved_at: null, approved_by: null })
       .eq('proposal_id', action_id)
       .eq('status', 'approved')
-    throw new Error('contact_id and drafted_message required to send')
+    throw new ClientInputError('contact_id and drafted_message required to send')
   }
   const ghlUrl = Deno.env.get('SUPABASE_URL')?.replace('/rest/v1', '') + '/functions/v1/ghl-proxy'
   const ghlKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -57432,7 +57438,7 @@ async function sendQuoteFollowupSms(client: any, body: any) {
     sendResult = await resp.json().catch(() => ({}))
   } catch (e: any) {
     console.error('[ops-api/send_quote_followup_sms] SMS send failed:', e.message)
-    throw new Error('SMS sending failed — check ghl-proxy logs (proposal stays at status=approved for audit)')
+    throw new ClientInputError('SMS sending failed — check ghl-proxy logs (proposal stays at status=approved for audit)')
   }
 
   // Step 3: finalize — UPDATE approved → sent with returning. If zero rows,
@@ -57537,7 +57543,7 @@ async function pushGhlContactNoteBestEffort(client: any, opts: {
 
 async function approveScoperCallTask(client: any, body: any) {
   const { action_id, user_id, outcome, note } = body
-  if (!action_id) throw new Error('action_id required')
+  if (!action_id) throw new ClientInputError('action_id required')
   const callOutcome = ['called', 'voicemail', 'no_answer'].includes(String(outcome || ''))
     ? String(outcome)
     : 'called'
@@ -57716,14 +57722,14 @@ async function approveScoperCallTask(client: any, body: any) {
 
 async function approveQuoteReviewTask(client: any, body: any) {
   const { action_id, user_id, sub_action, lost_reason } = body
-  if (!action_id) throw new Error('action_id required')
+  if (!action_id) throw new ClientInputError('action_id required')
 
   const VALID_SUB_ACTIONS = ['refresh_price', 'archive_lost', 'reactivate']
   if (!sub_action || !VALID_SUB_ACTIONS.includes(sub_action)) {
-    throw new Error(`sub_action required (one of ${VALID_SUB_ACTIONS.join(', ')})`)
+    throw new ClientInputError(`sub_action required (one of ${VALID_SUB_ACTIONS.join(', ')})`)
   }
   if (sub_action === 'archive_lost' && (!lost_reason || !String(lost_reason).trim())) {
-    throw new Error('lost_reason required when sub_action=archive_lost')
+    throw new ClientInputError('lost_reason required when sub_action=archive_lost')
   }
 
   // Step 1: atomic validate-and-claim.
@@ -58187,7 +58193,7 @@ async function listStaleQuoteReviewTasks(client: any, _params: URLSearchParams) 
 
 async function dismissProposedAction(client: any, body: any) {
   const { action_id, user_id, reason } = body
-  if (!action_id) throw new Error('action_id required')
+  if (!action_id) throw new ClientInputError('action_id required')
 
   // Load proposal for the audit event payload
   const { data: action } = await client.from('ai_proposed_actions')
@@ -58237,17 +58243,17 @@ async function dismissProposedAction(client: any, body: any) {
 // through the same audit chain as Approve & Send.
 async function editAndSend(client: any, body: any): Promise<any> {
   const { action_id, edited_message, user_id } = body
-  if (!action_id) throw new Error('action_id required')
+  if (!action_id) throw new ClientInputError('action_id required')
   const trimmed = String(edited_message || '').trim()
-  if (!trimmed) throw new Error('edited_message required (non-empty)')
-  if (trimmed.length > 1600) throw new Error('edited_message too long (max 1600c)')
+  if (!trimmed) throw new ClientInputError('edited_message required (non-empty)')
+  if (trimmed.length > 1600) throw new ClientInputError('edited_message too long (max 1600c)')
 
   const { data: action, error: loadErr } = await client.from('ai_proposed_actions')
     .select('proposal_id, action_type, drafted_message, status, job_id, contact_id')
     .eq('proposal_id', action_id).maybeSingle()
   if (loadErr) throw loadErr
-  if (!action) throw new Error('proposal not found')
-  if (action.status !== 'pending') throw new Error(`cannot edit: status='${action.status}' (must be pending)`)
+  if (!action) throw new ClientInputError('proposal not found')
+  if (action.status !== 'pending') throw new ClientInputError(`cannot edit: status='${action.status}' (must be pending)`)
   if (!action.job_id) throw new ApiError('Proposed action has no authoritative job link', 409)
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -58300,17 +58306,17 @@ async function editAndSend(client: any, body: any): Promise<any> {
 // metadata.snoozed_until check.
 async function snoozeProposedAction(client: any, body: any): Promise<any> {
   const { action_id, snooze_until, user_id } = body
-  if (!action_id) throw new Error('action_id required')
-  if (!snooze_until) throw new Error('snooze_until required (ISO datetime)')
+  if (!action_id) throw new ClientInputError('action_id required')
+  if (!snooze_until) throw new ClientInputError('snooze_until required (ISO datetime)')
   const until = new Date(String(snooze_until))
-  if (Number.isNaN(until.getTime())) throw new Error('snooze_until invalid date')
-  if (until.getTime() <= Date.now()) throw new Error('snooze_until must be in the future')
+  if (Number.isNaN(until.getTime())) throw new ClientInputError('snooze_until invalid date')
+  if (until.getTime() <= Date.now()) throw new ClientInputError('snooze_until must be in the future')
 
   const { data: action } = await client.from('ai_proposed_actions')
     .select('proposal_id, action_type, metadata, job_id, contact_id, status')
     .eq('proposal_id', action_id).maybeSingle()
-  if (!action) throw new Error('proposal not found')
-  if (action.status !== 'pending') throw new Error(`cannot snooze: status='${action.status}'`)
+  if (!action) throw new ClientInputError('proposal not found')
+  if (action.status !== 'pending') throw new ClientInputError(`cannot snooze: status='${action.status}'`)
 
   const newMeta = Object.assign({}, action.metadata || {}, {
     snoozed_until: until.toISOString(),
@@ -58364,13 +58370,13 @@ async function createJobForOpportunity(client: any, body: any): Promise<any> {
     site_suburb,
     monetary_value,
   } = body
-  if (!ghl_opportunity_id) throw new Error('ghl_opportunity_id required')
+  if (!ghl_opportunity_id) throw new ClientInputError('ghl_opportunity_id required')
 
   // Infer type from pipeline_lane. Scoping tool will reject unspecified.
   const type = pipeline_lane === 'fencing' ? 'fencing'
              : pipeline_lane === 'patio'   ? 'patio'
              : null
-  if (!type) throw new Error("pipeline_lane required ('patio' or 'fencing')")
+  if (!type) throw new ClientInputError("pipeline_lane required ('patio' or 'fencing')")
 
   // First check: does a job already exist for this opp+type? (avoid dup)
   const { data: existing } = await client.from('jobs')
@@ -58464,10 +58470,10 @@ async function manualDispatchMarninPoc(client: any, body: any): Promise<any> {
     .or('email.ilike.marnin%,client_name.ilike.%Marnin%')
     .limit(2)
   if (cErr) throw cErr
-  if (!contacts || contacts.length === 0) throw new Error('Marnin contact not found in contact_matches')
-  if (contacts.length > 1) throw new Error('multiple Marnin matches — refine the lookup')
+  if (!contacts || contacts.length === 0) throw new ClientInputError('Marnin contact not found in contact_matches')
+  if (contacts.length > 1) throw new ClientInputError('multiple Marnin matches — refine the lookup')
   const contact = contacts[0]
-  if (!contact.phone) throw new Error('Marnin contact has no phone')
+  if (!contact.phone) throw new ClientInputError('Marnin contact has no phone')
 
   // Create a trace row first (ai_proposed_actions.trace_id NOT NULL FK)
   const { data: trace, error: tErr } = await client.from('ai_reasoning_traces')
@@ -59550,8 +59556,8 @@ async function listNudges(client: any, params: URLSearchParams) {
 
 async function actNudge(client: any, body: any) {
   const { nudge_id, action } = body
-  if (!nudge_id) throw new Error('nudge_id required')
-  if (!action || !['act', 'dismiss'].includes(action)) throw new Error('action must be "act" or "dismiss"')
+  if (!nudge_id) throw new ClientInputError('nudge_id required')
+  if (!action || !['act', 'dismiss'].includes(action)) throw new ClientInputError('action must be "act" or "dismiss"')
 
   const now = new Date().toISOString()
   const update: any = { status: action === 'act' ? 'acted' : 'dismissed' }
@@ -59641,7 +59647,7 @@ async function getAnnotations(client: any, params: URLSearchParams) {
 // POST: Resolve an annotation with response
 async function resolveAnnotation(client: any, body: any) {
   const { annotation_id, response_value, response_text, operator_email } = body
-  if (!annotation_id) throw new Error('annotation_id required')
+  if (!annotation_id) throw new ClientInputError('annotation_id required')
 
   // Fetch annotation
   const { data: ann, error: fetchErr } = await client.from('ai_annotations')
@@ -59649,7 +59655,7 @@ async function resolveAnnotation(client: any, body: any) {
     .eq('id', annotation_id)
     .eq('status', 'active')
     .single()
-  if (fetchErr || !ann) throw new Error('Annotation not found or already resolved')
+  if (fetchErr || !ann) throw new ClientInputError('Annotation not found or already resolved')
 
   // F8 sibling preflight: an annotation must remain active when a forbidden
   // sealed-SES link is refused, and neither the invoice nor annotation may be
@@ -60825,7 +60831,7 @@ async function listUnreconciledTransactions(client: any, params: URLSearchParams
 
 async function createCouncilSubmission(client: any, body: any) {
   const { job_id, template_type } = body
-  if (!job_id) throw new Error('job_id required')
+  if (!job_id) throw new ClientInputError('job_id required')
 
   // Seed steps: prefer client-provided steps array, fall back to template
   let steps: any[] = []
@@ -60890,18 +60896,18 @@ async function createCouncilSubmission(client: any, body: any) {
 
 async function updateCouncilStatus(client: any, body: any) {
   const { submission_id, step_index, step_id, status, vendor, vendor_email, notes, documents_received } = body
-  if (!submission_id) throw new Error('submission_id required')
+  if (!submission_id) throw new ClientInputError('submission_id required')
 
   const { data: sub } = await client.from('council_submissions')
     .select('id, job_id, steps, current_step_index')
     .eq('id', submission_id)
     .single()
-  if (!sub) throw new Error('Submission not found')
+  if (!sub) throw new ClientInputError('Submission not found')
 
   const steps = sub.steps || []
   // Find step by index or step_id
   const idx = step_index != null ? step_index : steps.findIndex((s: any) => s.step_id === step_id)
-  if (idx < 0 || idx >= steps.length) throw new Error('Step not found')
+  if (idx < 0 || idx >= steps.length) throw new ClientInputError('Step not found')
 
   // Update the step
   if (status) steps[idx].status = status
@@ -60943,13 +60949,13 @@ async function updateCouncilStatus(client: any, body: any) {
 
 async function sendCouncilEmail(client: any, body: any) {
   const { submission_id, step_index, to_email, cc, subject, body_html, body_text, attachments } = body
-  if (!submission_id || !to_email) throw new Error('submission_id and to_email required')
+  if (!submission_id || !to_email) throw new ClientInputError('submission_id and to_email required')
 
   const { data: sub } = await client.from('council_submissions')
     .select('id, job_id, steps')
     .eq('id', submission_id)
     .single()
-  if (!sub) throw new Error('Submission not found')
+  if (!sub) throw new ClientInputError('Submission not found')
   if (!sub.job_id) throw new ApiError('Council submission has no authoritative job link', 409)
   await assertNoSyntheticLivefireJobs(client, [sub.job_id], 'send_council_email')
   await assertLegacySesMoneyActionAllowedForJob(
@@ -60965,7 +60971,7 @@ async function sendCouncilEmail(client: any, body: any) {
   // We create a dummy po_id reference — send-po-email will handle sending
   // Actually, call Resend directly since we don't have a PO
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
-  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
+  if (!RESEND_API_KEY) throw new ClientInputError('RESEND_API_KEY not configured')
 
   const emailPayload: any = {
     from: `SecureWorks Group <orders@secureworksgroup.app>`,
@@ -61036,7 +61042,7 @@ async function sendCouncilEmail(client: any, body: any) {
 
 async function listRunAcceptances(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id')
-  if (!jobId) throw new Error('job_id required')
+  if (!jobId) throw new ClientInputError('job_id required')
 
   const { data: acceptances, error } = await client.from('run_acceptances')
     .select('*, job_contacts(client_name, contact_label, is_primary)')
@@ -61075,7 +61081,7 @@ async function listRunAcceptances(client: any, params: URLSearchParams) {
 // ── Send Council SMS via GHL ──
 async function sendCouncilSMS(client: any, body: any) {
   const { job_id, message } = body
-  if (!job_id || !message) throw new Error('job_id and message required')
+  if (!job_id || !message) throw new ClientInputError('job_id and message required')
   await assertNoSyntheticLivefireJobs(client, [job_id], 'send_council_sms')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -61087,8 +61093,8 @@ async function sendCouncilSMS(client: any, body: any) {
     .select('id, job_number, client_name, client_phone, ghl_contact_id')
     .eq('id', job_id)
     .single()
-  if (!job) throw new Error('Job not found')
-  if (!job.ghl_contact_id) throw new Error('No GHL contact linked to this job — cannot send SMS')
+  if (!job) throw new ClientInputError('Job not found')
+  if (!job.ghl_contact_id) throw new ClientInputError('No GHL contact linked to this job — cannot send SMS')
 
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
   const smsResp = await fetch(ghlUrl, {
@@ -61149,13 +61155,13 @@ async function listCouncilSubmissions(client: any, params: URLSearchParams) {
 
 async function sendVariation(client: any, body: any) {
   const { variation_id } = body
-  if (!variation_id) throw new Error('variation_id required')
+  if (!variation_id) throw new ClientInputError('variation_id required')
 
   const { data: variation } = await client.from('job_variations')
     .select('*, jobs:job_id(client_name, client_email, job_number, type, site_address, ghl_contact_id)')
     .eq('id', variation_id)
     .single()
-  if (!variation) throw new Error('Variation not found')
+  if (!variation) throw new ClientInputError('Variation not found')
   await assertNoSyntheticLivefireJobs(client, [variation.job_id], 'send_variation')
   if (!variation.job_id) throw new ApiError('Variation has no authoritative job link', 409)
   await assertLegacySesMoneyActionAllowedForJob(
@@ -61165,10 +61171,10 @@ async function sendVariation(client: any, body: any) {
   )
 
   const job = variation.jobs
-  if (!job?.client_email) throw new Error('No client email on job')
+  if (!job?.client_email) throw new ClientInputError('No client email on job')
 
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
-  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
+  if (!RESEND_API_KEY) throw new ClientInputError('RESEND_API_KEY not configured')
 
   // Build variation email
   const viewUrl = `https://secureworks-group.github.io/secureworks-ux/quote-viewer.html?token=${variation.share_token}&type=variation`
@@ -61263,7 +61269,7 @@ async function sendVariation(client: any, body: any) {
 
 async function createCallback(client: any, body: any) {
   const { job_id, issue_description, reported_by } = body
-  if (!job_id || !issue_description) throw new Error('job_id and issue_description required')
+  if (!job_id || !issue_description) throw new ClientInputError('job_id and issue_description required')
 
   const { data: job } = await client.from('jobs')
     .select('id, job_number, client_name, type, status')
@@ -61311,7 +61317,7 @@ async function createCallback(client: any, body: any) {
 
 async function resolveCallback(client: any, body: any) {
   const { job_id, resolution_notes, resolved_by } = body
-  if (!job_id) throw new Error('job_id required')
+  if (!job_id) throw new ClientInputError('job_id required')
 
   await client.from('jobs').update({
     status: 'complete',
@@ -61410,7 +61416,7 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
 
 export async function sendClientUpdate(client: any, body: any) {
   const { job_id, comms_trigger, channel: overrideChannel, custom_message, template_vars, job_contact_id } = body
-  if (!job_id || !comms_trigger) throw new Error('job_id and comms_trigger required')
+  if (!job_id || !comms_trigger) throw new ClientInputError('job_id and comms_trigger required')
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     job_id,
@@ -61817,7 +61823,7 @@ type FencingNeighbourSyncResult = {
 
 async function syncFencingNeighbours(client: any, body: any): Promise<FencingNeighbourSyncResult> {
   const jId = body.job_id || body.jobId
-  if (!jId) throw new Error('job_id required')
+  if (!jId) throw new ClientInputError('job_id required')
 
   // Fetch job with pricing and scope data
   const { data: job, error: jobErr } = await client
@@ -61825,7 +61831,7 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
     .select('id, job_number, type, client_name, client_phone, client_email, site_address, site_suburb, ghl_contact_id, xero_contact_id, pricing_json, scope_json')
     .eq('id', jId)
     .single()
-  if (jobErr || !job) throw new Error('Job not found')
+  if (jobErr || !job) throw new ClientInputError('Job not found')
 
   // Parse pricing_json for pre-calculated neighbour splits
   const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
@@ -62078,7 +62084,7 @@ async function listPoCommunications(client: any, params: URLSearchParams) {
 
 async function markEmailRead(client: any, body: any) {
   const emailId = body.email_id || body.id
-  if (!emailId) throw new Error('email_id required')
+  if (!emailId) throw new ClientInputError('email_id required')
 
   const { error } = await client.from('po_communications')
     .update({ read_at: new Date().toISOString() })
@@ -62091,7 +62097,7 @@ async function markEmailRead(client: any, body: any) {
 
 async function listJobCommunications(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id')
-  if (!jobId) throw new Error('job_id required')
+  if (!jobId) throw new ClientInputError('job_id required')
 
   const { data, error } = await client.from('po_communications')
     .select('*')

@@ -110,3 +110,56 @@ Deno.test("raw provider text: a failed draft pack stores the error's class only"
     assertNoSentinel(patches, "draft pack row");
   }
 });
+
+// Caller-input and business-rule messages reach the client exactly as main
+// (efb28a57) answers them: status 500 and `{ error: <message> }`, nothing else.
+// Each case fails before any database or provider call.
+const MAIN_CLIENT_MESSAGES: Array<{ action: string; method: "GET" | "POST"; body?: Record<string, unknown>; error: string }> = [
+  { action: "update_job_action", method: "POST", body: {}, error: "action_id required" },
+  { action: "dismiss_proposed_action", method: "POST", body: {}, error: "action_id required" },
+  { action: "snooze_proposed_action", method: "POST", body: {}, error: "action_id required" },
+  { action: "create_job_action", method: "POST", body: {}, error: "title required" },
+  { action: "delete_org_event", method: "POST", body: {}, error: "id required" },
+  { action: "update_po", method: "POST", body: {}, error: "id required" },
+  { action: "add_po_event", method: "POST", body: {}, error: "po_id required" },
+  { action: "reject_intake_draft", method: "POST", body: {}, error: "draft_id required" },
+  { action: "dismiss_alert", method: "POST", body: {}, error: "alert_id required" },
+  { action: "approve_variation", method: "POST", body: {}, error: "variation_id required" },
+  { action: "confirm_price", method: "POST", body: {}, error: "ledger_id required" },
+  { action: "act_nudge", method: "POST", body: {}, error: "nudge_id required" },
+  { action: "list_job_actions", method: "GET", error: "job_id required" },
+  { action: "get_email_events", method: "GET", error: "job_id required" },
+];
+
+Deno.test("client messages: caller-input refusals answer exactly as main does", async () => {
+  const { _opsApiRequestHandlerForTest: handle } = await opsApi();
+  const saved = { log: console.log, error: console.error, warn: console.warn, fetch: globalThis.fetch };
+  console.log = console.error = console.warn = () => {};
+  // Any network call would mean the case reached past validation.
+  globalThis.fetch = (() => Promise.reject(new Error(SENTINEL))) as typeof fetch;
+  try {
+    for (const c of MAIN_CLIENT_MESSAGES) {
+      const res = await withEnv(BASE_ENV, () =>
+        handle(new Request(`https://example.invalid/ops-api?action=${c.action}`, {
+          method: c.method,
+          headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_KEY}` },
+          body: c.method === "POST" ? JSON.stringify(c.body ?? {}) : undefined,
+        }))
+      );
+      assertEquals(res.status, 500, c.action);
+      assertEquals(await res.json(), { error: c.error }, c.action);
+    }
+  } finally {
+    Object.assign(console, { log: saved.log, error: saved.error, warn: saved.warn });
+    globalThis.fetch = saved.fetch;
+  }
+});
+
+Deno.test("client messages: no literal plain Error is thrown in ops-api index.ts", async () => {
+  // A literal message is caller-facing: it must be a ClientInputError so the
+  // general catch keeps main's wording rather than answering "Internal error".
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const literal = /throw new Error\(('[^'`$\\]*'|"[^"$\\]*")\)/g;
+  const hits = [...source.matchAll(literal)].map((m) => m[0]);
+  assertEquals(hits, []);
+});
