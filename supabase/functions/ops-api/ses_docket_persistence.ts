@@ -4,6 +4,7 @@ import type {
   SesPersistPayload,
   SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const SES_DOCKET_BUCKET = "makesafe-docket-artifacts";
 
@@ -161,7 +162,7 @@ async function resolveLegacyDocketRevision(
   }
   const committedAt = String(row.committed_at || "");
   if (!committedAt) {
-    throw new Error(
+    throw new ClientInputError(
       "docket revision legacy identity read omitted committed_at",
     );
   }
@@ -271,7 +272,7 @@ export function createSesDocketPersistenceAdapter(
     }
     const committedAt = String(committed.data.committed_at || "");
     if (!committedAt) {
-      throw new Error("docket revision commit omitted committed_at");
+      throw new ClientInputError("docket revision commit omitted committed_at");
     }
     const docsReady = evaluateSesDocsReadyGate(revision);
     if (docsReady.state === "needs_review") {

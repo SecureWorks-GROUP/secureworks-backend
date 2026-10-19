@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 
+import { ClientInputError } from "./client_input_error.ts"
 export interface ReportingIntakeAccountingProof {
   checked: number;
   final: number;
@@ -15,7 +16,7 @@ export function assertReportingIntakeAccounting(
   intake: any,
 ): ReportingIntakeAccountingProof {
   if (intake?.mode !== "deterministic") {
-    throw new Error(
+    throw new ClientInputError(
       "SES reporting intake did not return deterministic evidence",
     );
   }
@@ -29,7 +30,7 @@ export function assertReportingIntakeAccounting(
     !Number.isInteger(transient) || transient < 0 ||
     final + transient !== checked
   ) {
-    throw new Error("SES reporting intake source-fate assertion is incomplete");
+    throw new ClientInputError("SES reporting intake source-fate assertion is incomplete");
   }
   return { checked, final, transient };
 }

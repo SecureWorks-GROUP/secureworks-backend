@@ -38911,7 +38911,7 @@ async function completeAndInvoice(
       }
       const totalExGst = lineItems.reduce((sum: number, li: any) => sum + (li.unit_price ?? 0) * (li.quantity ?? 1), 0)
       if (totalExGst <= 0) {
-        throw new Error('report job needs a charge amount before invoicing: line items sum to $0 or less')
+        throw new ClientInputError('report job needs a charge amount before invoicing: line items sum to $0 or less')
       }
     }
   }

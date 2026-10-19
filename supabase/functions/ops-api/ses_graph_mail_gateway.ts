@@ -19,6 +19,7 @@ import {
   SesExternalOutcomeUnknownError,
 } from "./ses_external_effects.ts";
 import { assertSesSampleSendAllowed } from "./ses_sample_destination.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export interface SesRouteSendResult {
   message_id: string;
@@ -616,7 +617,7 @@ export function createSesGraphMailGateway(
     const seenPages = new Set<string>();
     for (let page = 0; nextUrl; page++) {
       if (page >= 20 || seenPages.has(nextUrl)) {
-        throw new Error(
+        throw new ClientInputError(
           "Recovered Graph draft attachment pagination did not terminate; refusing send.",
         );
       }
@@ -636,7 +637,7 @@ export function createSesGraphMailGateway(
     for (const row of listed) {
       const id = String(row.id || "").trim();
       if (!id || row.isInline === true) {
-        throw new Error(
+        throw new ClientInputError(
           "Recovered Graph draft carries an unidentifiable or inline attachment; refusing send.",
         );
       }
@@ -709,7 +710,7 @@ export function createSesGraphMailGateway(
     ];
     const expected = await deps.loadAttachments(hashes);
     if (expected.length !== hashes.length) {
-      throw new Error(
+      throw new ClientInputError(
         "The frozen route attachment manifest could not be loaded exactly; refusing recovered draft send.",
       );
     }
@@ -730,7 +731,7 @@ export function createSesGraphMailGateway(
     const completed = await readDraftAttachments(draftId);
     const after = await compareDraftAttachmentManifest(expected, completed);
     if (after.missing.length > 0 || after.unexpected.length > 0) {
-      throw new Error(
+      throw new ClientInputError(
         "Recovered Graph draft attachment manifest is still incomplete after deterministic upload; refusing send.",
       );
     }
@@ -912,7 +913,7 @@ export function createSesGraphMailGateway(
         (html.includes(context.external_token) ||
           subject.includes(context.external_token))
       ) {
-        throw new Error(
+        throw new ClientInputError(
           "SES operation token must not appear in builder-facing subject or body",
         );
       }
@@ -921,7 +922,7 @@ export function createSesGraphMailGateway(
       ).trim();
       const requiresThread = route.requires_thread_reply === true;
       if (requiresThread && !threadId) {
-        throw new Error(
+        throw new ClientInputError(
           "Route requires an intake-thread reply but reply_to_thread_id is missing; refusing to open a new thread",
         );
       }
@@ -993,7 +994,7 @@ export function createSesGraphMailGateway(
         );
       }
       if (!message?.id) {
-        throw new Error("Microsoft Graph did not return the created draft id");
+        throw new ClientInputError("Microsoft Graph did not return the created draft id");
       }
       await deps.checkpointDraft(context, String(message.id));
       for (const attachment of attachments) {
@@ -1022,7 +1023,7 @@ export function createSesGraphMailGateway(
       const threadId = String(route?.reply_to_thread_id || "").trim();
       if (route?.requires_thread_reply === true) {
         if (!threadId) {
-          throw new Error(
+          throw new ClientInputError(
             "requires_thread_reply is true but no intake thread id is bound; refusing to reconcile or open a new thread",
           );
         }
@@ -1048,7 +1049,7 @@ export function createSesGraphMailGateway(
       await completeRecoveredDraftAttachments(draftId, route || {});
       if (deps.renewDispatchLease) {
         if (!context) {
-          throw new Error(
+          throw new ClientInputError(
             "Recovered Graph draft send requires the exact active dispatch generation.",
           );
         }

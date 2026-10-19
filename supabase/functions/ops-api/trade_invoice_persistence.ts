@@ -1,3 +1,4 @@
+import { ClientInputError } from "./client_input_error.ts";
 export type TradeInvoicePersistenceOps = {
   createInvoice: () => Promise<string>;
   insertLines: (invoiceId: string) => Promise<void>;
@@ -11,7 +12,7 @@ export type TradeInvoicePersistenceOps = {
 export function tradeInvoiceXeroIdempotencyKey(invoiceId: unknown): string {
   const normalized = String(invoiceId ?? "").trim();
   if (!normalized) {
-    throw new Error("Trade invoice ID is required for Xero idempotency");
+    throw new ClientInputError("Trade invoice ID is required for Xero idempotency");
   }
   return `trade-inv-${normalized}`;
 }
@@ -92,7 +93,7 @@ export async function replaceTradeInvoiceDraftKeepingPrior(
 
   try {
     if (!ops.replacePriorDraft) {
-      throw new Error(
+      throw new ClientInputError(
         "Draft replacement requires a guarded replacement boundary",
       );
     }

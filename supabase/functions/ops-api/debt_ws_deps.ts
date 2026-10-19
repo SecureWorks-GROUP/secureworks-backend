@@ -16,6 +16,7 @@ import { readJobStory } from "./job_story_read.ts";
 import type { BankTransaction } from "./debt_ws_rules.ts";
 import type { DebtWsDeps } from "./debt_ws_actions.ts";
 import { createSupabaseDebtWsStore, DEBT_WS_ORG_ID } from "./debt_ws_store.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Invoice ids per Xero GET /Invoices?IDs= call (keeps the URL short). */
@@ -82,10 +83,10 @@ export async function readXeroInvoicesByIds(
     for (const row of rows) {
       const id = String(row?.InvoiceID ?? "").toLowerCase();
       if (!part.includes(id)) {
-        throw new Error("Xero returned an invoice that was not asked for");
+        throw new ClientInputError("Xero returned an invoice that was not asked for");
       }
       if (String(row?.Type ?? "") !== "ACCREC") {
-        throw new Error("Xero returned a non-receivable invoice");
+        throw new ClientInputError("Xero returned a non-receivable invoice");
       }
       out.push(row);
     }

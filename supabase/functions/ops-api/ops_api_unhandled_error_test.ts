@@ -129,6 +129,8 @@ const MAIN_CLIENT_MESSAGES: Array<{ action: string; method: "GET" | "POST"; body
   { action: "act_nudge", method: "POST", body: {}, error: "nudge_id required" },
   { action: "list_job_actions", method: "GET", error: "job_id required" },
   { action: "get_email_events", method: "GET", error: "job_id required" },
+  { action: "materials_recon_assign", method: "POST", body: {}, error: "queue_id or xero_invoice_id is required" },
+  { action: "materials_recon_not_job_related", method: "POST", body: {}, error: "queue_id or xero_invoice_id is required" },
 ];
 
 Deno.test("client messages: caller-input refusals answer exactly as main does", async () => {
@@ -155,11 +157,18 @@ Deno.test("client messages: caller-input refusals answer exactly as main does", 
   }
 });
 
-Deno.test("client messages: no literal plain Error is thrown in ops-api index.ts", async () => {
+Deno.test("client messages: no literal plain Error is thrown in any ops-api module", async () => {
   // A literal message is caller-facing: it must be a ClientInputError so the
   // general catch keeps main's wording rather than answering "Internal error".
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const literal = /throw new Error\(('[^'`$\\]*'|"[^"$\\]*")\)/g;
-  const hits = [...source.matchAll(literal)].map((m) => m[0]);
+  // Any quote style, "$" included, across lines; a template literal counts
+  // only when it interpolates nothing.
+  const literal = /throw new Error\(\s*('[^'\\\n]*'|"[^"\\\n]*"|`[^`\\$]*`)\s*,?\s*\)/g;
+  const hits: string[] = [];
+  for await (const entry of Deno.readDir(new URL("./", import.meta.url))) {
+    // Test files and test helpers (`_test_helpers.ts`, `*_test_fakes.ts`) never serve a request.
+    if (!entry.isFile || !entry.name.endsWith(".ts") || entry.name.includes("test")) continue;
+    const source = await Deno.readTextFile(new URL(`./${entry.name}`, import.meta.url));
+    for (const m of source.matchAll(literal)) hits.push(`${entry.name}: ${m[0]}`);
+  }
   assertEquals(hits, []);
 });

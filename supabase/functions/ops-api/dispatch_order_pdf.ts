@@ -16,6 +16,7 @@ import {
   sha256Hex,
 } from "./dispatch_orders.ts";
 import { DISPATCH_ORDERS_ADDRESS } from "./dispatch_order_send.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export type DispatchOrderPdfInput = {
   poNumber: string;
@@ -61,10 +62,10 @@ export async function renderDispatchOrderPdf(
   input: DispatchOrderPdfInput,
 ): Promise<DispatchOrderPdf> {
   if (!input.poNumber) {
-    throw new Error("renderDispatchOrderPdf: poNumber required");
+    throw new ClientInputError("renderDispatchOrderPdf: poNumber required");
   }
   if (!Array.isArray(input.lines) || input.lines.length === 0) {
-    throw new Error("renderDispatchOrderPdf: at least one line required");
+    throw new ClientInputError("renderDispatchOrderPdf: at least one line required");
   }
   // deno-lint-ignore no-import-prefix
   const { jsPDF } = await import("https://esm.sh/jspdf@2.5.1");

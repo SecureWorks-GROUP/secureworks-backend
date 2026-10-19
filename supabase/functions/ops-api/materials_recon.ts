@@ -35,6 +35,7 @@
 // ─────────────────────────────────────────────────────────────
 // Row shapes (subset of the U3 migration columns we read/write).
 // ─────────────────────────────────────────────────────────────
+import { ClientInputError } from "./client_input_error.ts";
 export interface QueueRow {
   id: string;
   org_id: string;
@@ -166,7 +167,7 @@ async function loadQueueRow(
     if (error) throw error;
     return (data as QueueRow) ?? null;
   }
-  throw new Error("queue_id or xero_invoice_id is required");
+  throw new ClientInputError("queue_id or xero_invoice_id is required");
 }
 
 async function resolveJob(
@@ -293,21 +294,21 @@ export async function assignReconRow(
 ): Promise<Record<string, unknown>> {
   const now = args.nowIso || new Date().toISOString();
   const queue = await loadQueueRow(client, args);
-  if (!queue) throw new Error("reconciliation queue row not found");
+  if (!queue) throw new ClientInputError("reconciliation queue row not found");
 
   // Resolve the target job.
   const action: AssignAction = args.useSuggestion ? "accept-suggestion" : "assign-to-job";
   let job: JobRef | null;
   if (args.useSuggestion) {
     if (!queue.suggested_job_id) {
-      throw new Error("this row has no suggested job to accept — use assign-to-job with an explicit job");
+      throw new ClientInputError("this row has no suggested job to accept — use assign-to-job with an explicit job");
     }
     // Resolve to get a canonical job_number even if the suggestion column is stale.
     job = await resolveJob(client, queue.suggested_job_id, null);
     if (!job) job = { id: queue.suggested_job_id, job_number: queue.suggested_job_number };
   } else {
     if (!args.jobId && !args.jobNumber) {
-      throw new Error("job_id or job_number is required to assign this bill");
+      throw new ClientInputError("job_id or job_number is required to assign this bill");
     }
     job = await resolveJob(client, args.jobId, args.jobNumber);
     if (!job) throw new Error(`job not found: ${args.jobId || args.jobNumber}`);
@@ -400,7 +401,7 @@ export async function markReconNotJobRelated(
 ): Promise<Record<string, unknown>> {
   const now = args.nowIso || new Date().toISOString();
   const queue = await loadQueueRow(client, args);
-  if (!queue) throw new Error("reconciliation queue row not found");
+  if (!queue) throw new ClientInputError("reconciliation queue row not found");
 
   // If a fact already owns this bill, dismissing the queue row would contradict
   // the money. Refuse — the fact must be reverted first.

@@ -6,6 +6,7 @@ import {
   type IntakeSourceIssueReason,
   parseIntakeSourceIssueReason,
 } from "./makesafe_intake_source_issues.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export interface IntakeOperationalSourceIssue {
   reason_code: IntakeSourceIssueReason;
@@ -411,7 +412,7 @@ export function buildSourceIssueOperationalFact(
   const sourceIssues = aggregateSourceIssues(orderedRows);
   const primary = sourceIssues[0];
   if (!first || !primary) {
-    throw new Error("unsupported empty intake source issue group");
+    throw new ClientInputError("unsupported empty intake source issue group");
   }
   const at = first.received_at || first.observed_at;
   const instructionKeys = [

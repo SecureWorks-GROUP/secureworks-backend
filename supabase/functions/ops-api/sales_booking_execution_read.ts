@@ -16,6 +16,7 @@ import type {
   SalesBookingCase,
   SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 type Client = { from: (table: string) => BookingObject };
 
@@ -74,12 +75,12 @@ async function pages(query: () => BookingObject): Promise<BookingObject[]> {
   const rows: BookingObject[] = [];
   for (let offset = 0; offset <= MAX_ROWS; offset += PAGE) {
     const { data, error } = await query().range(offset, offset + PAGE - 1);
-    if (error || !Array.isArray(data)) throw new Error("store_unreadable");
+    if (error || !Array.isArray(data)) throw new ClientInputError("store_unreadable");
     rows.push(...data);
-    if (rows.length > MAX_ROWS) throw new Error("read_limit_reached");
+    if (rows.length > MAX_ROWS) throw new ClientInputError("read_limit_reached");
     if (data.length < PAGE) return rows;
   }
-  throw new Error("read_limit_reached");
+  throw new ClientInputError("read_limit_reached");
 }
 
 async function chunked(

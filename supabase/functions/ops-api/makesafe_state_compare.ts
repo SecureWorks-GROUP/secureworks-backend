@@ -32,6 +32,7 @@ import {
   type V1V2Diff,
   type VersionedCycleFact,
 } from "./makesafe_state_projection.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export interface MakesafeComparisonHealth {
   complete: true;
@@ -147,7 +148,7 @@ export async function loadMakesafeV2Facts(
     );
   }
   if (!projectionConfig || projectionConfig.compare_enabled !== true) {
-    throw new Error("makesafe-state.v2 comparison is not enabled");
+    throw new ClientInputError("makesafe-state.v2 comparison is not enabled");
   }
   const [
     jobFamilies,

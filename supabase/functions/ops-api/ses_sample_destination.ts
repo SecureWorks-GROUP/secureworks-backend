@@ -10,6 +10,7 @@
  * the Graph gateway (the gateway calls assertSesSampleSendAllowed).
  */
 
+import { ClientInputError } from "./client_input_error.ts";
 export const SES_SAMPLE_DESTINATION_ENV = "SES_SAMPLE_DESTINATION_OVERRIDE";
 
 const SAMPLE_JOB_NUMBER_RE = /^(SAMPLE|SWMS-SAMPLE)[-_]/i;
@@ -104,7 +105,7 @@ export function applySesSampleDestinationOverride<
 
 export function assertSesSampleSendAllowed(route: Record<string, any>): void {
   if (route.sample_destination_blocked === true) {
-    throw new Error(
+    throw new ClientInputError(
       "SAMPLE send refused: SES_SAMPLE_DESTINATION_OVERRIDE is not a personal inbox",
     );
   }
@@ -114,11 +115,11 @@ export function assertSesSampleSendAllowed(route: Record<string, any>): void {
     ...(Array.isArray(route.cc) ? route.cc : []),
   ].map((address) => String(address || "").trim().toLowerCase());
   if (dests.some((address) => SES_LIVE_BUILDER_MAILBOXES.includes(address))) {
-    throw new Error(
+    throw new ClientInputError(
       "SAMPLE send refused: envelope still names a live builder or ses@ mailbox",
     );
   }
   if (dests.length === 0) {
-    throw new Error("SAMPLE send refused: no personal inbox on the envelope");
+    throw new ClientInputError("SAMPLE send refused: no personal inbox on the envelope");
   }
 }

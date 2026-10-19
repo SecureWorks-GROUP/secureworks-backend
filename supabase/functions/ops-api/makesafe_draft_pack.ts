@@ -4,6 +4,7 @@ import {
   type ExistingFencePicketDecision,
 } from "./makesafe_existing_fence_pickets.ts";
 import { MAKESAFE_REPORT_PROSE_STYLE_RULES } from "./makesafe_report_prose.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 // MakeSafe Review & Send -- draft-only Claude pack generator helpers.
 //
@@ -197,7 +198,7 @@ export function extractJsonObject(text: string): string {
   if (clean.startsWith("{") && clean.endsWith("}")) return clean;
   const match = clean.match(/\{[\s\S]*\}/);
   if (!match) {
-    throw new Error("Claude draft response did not contain a JSON object");
+    throw new ClientInputError("Claude draft response did not contain a JSON object");
   }
   return match[0];
 }
@@ -226,7 +227,7 @@ export function normaliseDraftPackOutput(raw: unknown): DraftPackOutput {
   }).filter((li: DraftPackLineItem) => li.description);
 
   if (lines.length === 0) {
-    throw new Error(
+    throw new ClientInputError(
       "Claude draft response must include at least one invoice line item",
     );
   }
@@ -589,7 +590,7 @@ function applyPlaceholderRemoval(
   );
   if (filtered.length === output.invoice.line_items.length) return output;
   if (filtered.length === 0) {
-    throw new Error(
+    throw new ClientInputError(
       "Ops feedback asked to remove the $1 placeholder, but no non-placeholder invoice line remains",
     );
   }
@@ -1694,7 +1695,7 @@ function sanitizeAndValidateDraftPackOutput(
     change_summary: cleanDraftReviewSummary(output.change_summary),
   };
   if (!next.invoice.line_items.length) {
-    throw new Error(
+    throw new ClientInputError(
       "Draft pack must include at least one invoice line item after feedback overrides",
     );
   }

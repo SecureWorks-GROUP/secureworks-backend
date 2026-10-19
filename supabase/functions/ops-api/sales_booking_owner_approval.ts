@@ -64,6 +64,7 @@ import {
   type SalesBookingRoute,
 } from "./sales_booking_routes.ts";
 import { salesBookingRouteFor } from "./sales_booking_read.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const OWNER_APPROVAL_VERSION = "owner-authored-v1";
 const SCHEMA = "scope-booking-approval.v1";
@@ -925,7 +926,7 @@ export async function salesBookingOwnerApprovalAction(args: {
     }
     let ownership: SalesBookingOpportunityOwnership;
     try {
-      if (!row.opportunity_id) throw new Error("no opportunity");
+      if (!row.opportunity_id) throw new ClientInputError("no opportunity");
       ownership = await deps.readOpportunityOwnership(row.opportunity_id, {
         routes,
         forRoute: needsRoute,

@@ -124,6 +124,7 @@ import {
   debtReportTotals,
   perthClock,
 } from "./debt_ws_report.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export { DebtWsError } from "./debt_ws_store.ts";
 
@@ -1477,7 +1478,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
       message: input.text,
       operator_email: input.operatorEmail,
     });
-    if (sent?.success === false) throw new Error("SMS send failed");
+    if (sent?.success === false) throw new ClientInputError("SMS send failed");
     messageId = sent?.message_id ?? null;
   } catch (error) {
     if (error instanceof DebtWsSendRefusedError) {
@@ -3226,7 +3227,7 @@ async function payerAgentMessages(
     };
   });
   if (onFail === "throw" && conversation.held_read_failed === true) {
-    throw new Error("The payer's held messages could not be read");
+    throw new ClientInputError("The payer's held messages could not be read");
   }
   const split = splitConversation(
     conversation.messages ?? [],

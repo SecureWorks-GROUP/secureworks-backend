@@ -10,6 +10,7 @@ import type {
   BlockerFact,
   MakesafeStateV2,
 } from "./makesafe_state_projection.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 const VALID_DISPLAY_STAGES = new Set([
   "new",
@@ -42,7 +43,7 @@ export function chunkMakesafeStateRows<T>(
   size = MAKESAFE_STATE_RPC_CHUNK_SIZE,
 ): T[][] {
   if (!Number.isSafeInteger(size) || size < 1) {
-    throw new Error("chunk size must be a positive integer");
+    throw new ClientInputError("chunk size must be a positive integer");
   }
   const chunks: T[][] = [];
   for (let index = 0; index < rows.length; index += size) {
@@ -72,7 +73,7 @@ export function summarizeMakesafeStateSeedChunks(
   expectedRequested: number,
 ): MakesafeStateSeedSummary {
   if (!Number.isSafeInteger(expectedRequested) || expectedRequested < 0) {
-    throw new Error("expected seed count must be a non-negative integer");
+    throw new ClientInputError("expected seed count must be a non-negative integer");
   }
 
   let requested = 0;

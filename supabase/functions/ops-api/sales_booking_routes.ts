@@ -37,6 +37,7 @@ import {
   SALES_BOOKING_STRATCO_CALENDAR_ID,
   type SalesBookingLeadKind,
 } from "./sales_booking_sender.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export type SalesBookingTrade = "fencing" | "patio";
 export type SalesBookingRouteLeadSource = "stratco" | "normal";
@@ -384,11 +385,11 @@ export async function loadSalesBookingRoutes(
     .select(SALES_BOOKING_ROUTE_COLUMNS).order("position", { ascending: true })
     .order("id", { ascending: true });
   if (error || !Array.isArray(data)) {
-    throw new Error("booking_routes_unreadable");
+    throw new ClientInputError("booking_routes_unreadable");
   }
   const routes = data.map(salesBookingRouteFromRow);
   if (routes.some((r: SalesBookingRoute | null) => r === null)) {
-    throw new Error("booking_routes_malformed");
+    throw new ClientInputError("booking_routes_malformed");
   }
   return routes as SalesBookingRoute[];
 }

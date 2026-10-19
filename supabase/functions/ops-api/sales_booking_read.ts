@@ -89,6 +89,7 @@ import {
   salesBookingRoutesNeedLeadSource,
   salesBookingRoutesNeedTags,
 } from "./sales_booking_routes.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
 
@@ -674,7 +675,7 @@ export async function withSalesBookingGhl429Retry<T>(
       now().getTime() >= opts.deadlineMs
     ) {
       if (lastError) throw lastError;
-      throw new Error("time budget exhausted");
+      throw new ClientInputError("time budget exhausted");
     }
     try {
       return await run();
@@ -3367,11 +3368,11 @@ export async function readSalesBookingOpportunityOwnership(
 ): Promise<SalesBookingOpportunityOwnership> {
   const routes = options.routes ?? SALES_BOOKING_SEED_ROUTES;
   const location = Deno.env.get("GHL_LOCATION_ID") || "";
-  if (!location) throw new Error("location_unconfigured");
+  if (!location) throw new ClientInputError("location_unconfigured");
   const remainingMs = retry.deadlineMs == null
     ? 10_000
     : retry.deadlineMs - (retry.now?.() ?? new Date()).getTime();
-  if (remainingMs <= 0) throw new Error("time budget exhausted");
+  if (remainingMs <= 0) throw new ClientInputError("time budget exhausted");
   const response = await ghlRead(
     `/opportunities/${encodeURIComponent(opportunityId)}`,
     {
@@ -3389,7 +3390,7 @@ export async function readSalesBookingOpportunityOwnership(
       opportunity.locationId !== location) ||
     !Object.hasOwn(opportunity, "assignedTo") ||
     typeof opportunity.pipelineId !== "string" || !opportunity.pipelineId.trim()
-  ) throw new Error("opportunity_assignment_unreadable");
+  ) throw new ClientInputError("opportunity_assignment_unreadable");
   const pipelineId = opportunity.pipelineId;
   const unassigned = opportunity.assignedTo === null ||
     opportunity.assignedTo === "";
@@ -3398,7 +3399,7 @@ export async function readSalesBookingOpportunityOwnership(
     (typeof opportunity.assignedTo !== "string" ||
       !opportunity.assignedTo.trim())
   ) {
-    throw new Error("opportunity_assignment_unreadable");
+    throw new ClientInputError("opportunity_assignment_unreadable");
   }
   const assignedTo = unassigned ? null : opportunity.assignedTo as string;
   if (
@@ -3433,17 +3434,17 @@ export async function salesBookingContactHasStratcoAppointment(
   contactId: string | null,
   retry: GhlRetryHooks,
 ): Promise<boolean> {
-  if (!contactId) throw new Error("contact_unreadable");
+  if (!contactId) throw new ClientInputError("contact_unreadable");
   const remainingMs = retry.deadlineMs == null
     ? 10_000
     : retry.deadlineMs - (retry.now?.() ?? new Date()).getTime();
-  if (remainingMs <= 0) throw new Error("time budget exhausted");
+  if (remainingMs <= 0) throw new ClientInputError("time budget exhausted");
   const response = await ghlRead(
     `/contacts/${encodeURIComponent(contactId)}/appointments`,
     { signal: AbortSignal.timeout(Math.min(10_000, remainingMs)) },
     retry,
   );
-  if (!Array.isArray(response?.events)) throw new Error("contact_unreadable");
+  if (!Array.isArray(response?.events)) throw new ClientInputError("contact_unreadable");
   return response.events.some((event) =>
     !!event && typeof event === "object" &&
     (event as Record<string, unknown>).calendarId ===
@@ -3458,7 +3459,7 @@ export async function ghlRead(
   retry: GhlRetryHooks = {},
 ): Promise<Record<string, unknown>> {
   const token = Deno.env.get("GHL_API_TOKEN") || "";
-  if (!token) throw new Error("GHL API token not configured");
+  if (!token) throw new ClientInputError("GHL API token not configured");
   return await withSalesBookingGhl429Retry(async () => {
     const res = await fetch(`${GHL_BASE}${path}`, {
       ...init,
@@ -3987,7 +3988,7 @@ async function outlookGraphGetLive(
   const remaining = opts.deadlineMs != null
     ? opts.deadlineMs - Date.now()
     : 20_000;
-  if (remaining <= 0) throw new Error("read budget exhausted");
+  if (remaining <= 0) throw new ClientInputError("read budget exhausted");
   let token = await getGraphToken();
   const res = await graphFetch(url, token, {
     init: {

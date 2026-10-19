@@ -29,6 +29,7 @@ import {
     as SharedIntakeSourceAuthoritySupersessionRow,
   resolveEffectiveIntakeSourceAuthority,
 } from "./makesafe_intake_source_authority.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_MAILBOX = "ses@secureworkswa.com.au";
@@ -982,7 +983,7 @@ export function buildIntakeExceptionProjection(
 ): IntakeExceptionProjection {
   const generatedAtMs = Date.parse(input.generatedAt);
   if (!Number.isFinite(generatedAtMs)) {
-    throw new Error("intake exception projection generatedAt must be ISO time");
+    throw new ClientInputError("intake exception projection generatedAt must be ISO time");
   }
   const windowFromMs = generatedAtMs -
     INTAKE_EXCEPTION_RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -1525,7 +1526,7 @@ export async function loadIntakeExceptionProjection(
   const generatedAt = options.generatedAt || new Date().toISOString();
   const generatedAtMs = Date.parse(generatedAt);
   if (!Number.isFinite(generatedAtMs)) {
-    throw new Error("intake exception projection generatedAt must be ISO time");
+    throw new ClientInputError("intake exception projection generatedAt must be ISO time");
   }
   const windowFrom = new Date(
     generatedAtMs - INTAKE_EXCEPTION_RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000,

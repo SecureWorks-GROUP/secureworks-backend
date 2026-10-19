@@ -22,6 +22,7 @@
 
 // ── Pure helpers (exported for unit tests; no jsPDF / no network) ──
 
+import { ClientInputError } from "./client_input_error.ts";
 export interface RoofReportPhoto {
   bytesBase64?: string;
   contentType?: string;
@@ -292,9 +293,9 @@ export interface RenderedReport {
 export async function renderRoofReportPdf(
   job: RoofReportJob,
 ): Promise<RenderedReport> {
-  if (!job?.ref) throw new Error("renderRoofReportPdf: job.ref required");
+  if (!job?.ref) throw new ClientInputError("renderRoofReportPdf: job.ref required");
   if (!job?.address) {
-    throw new Error("renderRoofReportPdf: job.address required");
+    throw new ClientInputError("renderRoofReportPdf: job.address required");
   }
 
   const fileName = roofReportFileName(job.ref, job.address);

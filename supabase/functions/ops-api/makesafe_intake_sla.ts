@@ -17,6 +17,7 @@
 import { contentFingerprintChecks } from "./makesafe_intake_dedup.ts";
 import type { IntakeReconcileInvariantItem } from "./makesafe_intake_reconciliation.ts";
 import { SYNTHETIC_LIVEFIRE_MARKER_PREFIX } from "./makesafe_synthetic_livefire.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export interface SlaLatencyRow {
   received_at?: string | null;
@@ -290,7 +291,7 @@ export function computeLogicalIntakeSla(
   const nowMs = timestamp(input.nowIso);
   const windowStartMs = timestamp(input.windowStartIso);
   if (nowMs === null || windowStartMs === null) {
-    throw new Error("logical intake SLA requires valid window timestamps");
+    throw new ClientInputError("logical intake SLA requires valid window timestamps");
   }
 
   const boardByJobId = new Map(

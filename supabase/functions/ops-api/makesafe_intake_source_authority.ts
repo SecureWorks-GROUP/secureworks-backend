@@ -1,3 +1,4 @@
+import { ClientInputError } from "./client_input_error.ts";
 export interface IntakeSourceAuthoritySourceRow {
   case_id: string;
   post_id: string;
@@ -61,7 +62,7 @@ export function resolveEffectiveIntakeSourceAuthority<
     }
     const stored = storedCaseByPost.get(correction.source_post_id) || null;
     if (correction.legacy_case_id && stored !== correction.legacy_case_id) {
-      throw new Error("intake source correction legacy authority mismatch");
+      throw new ClientInputError("intake source correction legacy authority mismatch");
     }
     correctionByPost.set(correction.source_post_id, correction);
   }
@@ -92,10 +93,10 @@ export function resolveEffectiveIntakeSourceAuthority<
         !correction ||
         correction.id !== supersession.superseded_correction_id
       ) {
-        throw new Error("intake source supersession target mismatch");
+        throw new ClientInputError("intake source supersession target mismatch");
       }
       if (effectiveCaseId !== supersession.prior_authority_case_id) {
-        throw new Error("intake source supersession prior authority mismatch");
+        throw new ClientInputError("intake source supersession prior authority mismatch");
       }
       effectiveCaseId = supersession.effective_case_id;
     }

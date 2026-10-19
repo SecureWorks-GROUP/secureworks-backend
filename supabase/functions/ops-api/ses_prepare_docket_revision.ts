@@ -85,6 +85,7 @@ import {
   normaliseDraftPackOutput,
   verifyDraftPackOutput,
 } from "./makesafe_draft_pack.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
@@ -4147,7 +4148,7 @@ async function prepareOne(
             sourceRawHash !== rawHash ||
             sourceRawSize !== resolved.bytes.byteLength
           ) {
-            throw new Error(
+            throw new ClientInputError(
               "exact own-roof source bytes failed PDF, raw SHA-256 or size verification",
             );
           }
@@ -4948,7 +4949,7 @@ async function prepareOne(
           artifact.path === "ASSEMBLER_ENVELOPE.json"
         );
         if (envelopeArtifactIndex < 0) {
-          throw new Error("docket assembler envelope artifact missing");
+          throw new ClientInputError("docket assembler envelope artifact missing");
         }
         artifacts[envelopeArtifactIndex] = await artifactFromText({
           role: "assembler_envelope",

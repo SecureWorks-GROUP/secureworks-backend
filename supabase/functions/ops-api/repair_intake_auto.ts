@@ -36,6 +36,7 @@ import {
 } from "../_shared/makesafe_refs.ts";
 import type { DeterministicCasePlan } from "./makesafe_deterministic_intake.ts";
 import { insuranceRepairStage } from "./insurance_repairs_board.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const REPAIR_INTAKE_AUTO_FLAG = "repair_intake_auto_v1";
 export const REPAIR_AUTO_INTAKE_VERSION = "repair-auto-intake/v1";
@@ -601,7 +602,7 @@ export async function landWorkOrderOnRepairJob(
   { relation: RepairJobPurchaseOrderRelation; eventCreated: boolean }
 > {
   if (!landing.attachments.length) {
-    throw new Error("repair landing refused: no work order PDF staged");
+    throw new ClientInputError("repair landing refused: no work order PDF staged");
   }
   const { data: job, error: jobError } = await client.from("jobs")
     .select("id,job_number,type,metadata")
@@ -615,14 +616,14 @@ export async function landWorkOrderOnRepairJob(
     );
   }
   if (String(job.type || "").toLowerCase() !== "repair") {
-    throw new Error("repair landing refused: target is not a repair job");
+    throw new ClientInputError("repair landing refused: target is not a repair job");
   }
   const metadata = job.metadata && typeof job.metadata === "object"
     ? job.metadata
     : {};
   const targetPo = canonicalObligationPoCore(landing.purchaseOrder);
   if (!targetPo) {
-    throw new Error("repair landing refused: no purchase order");
+    throw new ClientInputError("repair landing refused: no purchase order");
   }
   const relation = purchaseOrderRelation(
     targetPo,

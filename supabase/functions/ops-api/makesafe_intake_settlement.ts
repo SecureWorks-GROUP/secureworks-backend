@@ -2,6 +2,7 @@
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
 import { insertOrReadActiveMakesafeDocument } from "./makesafe_document_idempotency.ts";
 import { refreshMakesafeIdentityAfterWorkOrderAttach } from "./makesafe_work_order_identity_refresh.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION =
   "captain_authorized_exact_source_persist_recovery";
@@ -489,7 +490,7 @@ export async function ensureIntakeWorkOrderEvidence(
     )
   );
   if (!uniqueJobIds.length || !builderAttachments.length) {
-    throw new Error(
+    throw new ClientInputError(
       "work-order evidence settlement requires jobs and attachments",
     );
   }
@@ -673,7 +674,7 @@ export async function settleApprovedIntakeDraft(
           jobId: String(mint.job_id),
         })
       ) {
-        throw new Error(
+        throw new ClientInputError(
           "intake no-send settlement requires canonical board proof",
         );
       }

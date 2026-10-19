@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 
+import { ClientInputError } from "./client_input_error.ts"
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
 const FINAL_CASE_STATES = new Set([
@@ -28,7 +29,7 @@ export async function assertFreshMakesafeSourceSettled(
     Number(report?.totals?.cases_deferred || 0) > 0 ||
     acceptedNotifications < requiredNotifications
   ) {
-    throw new Error("fresh source deterministic settlement incomplete");
+    throw new ClientInputError("fresh source deterministic settlement incomplete");
   }
 
   const { data: source, error: sourceError } = await client

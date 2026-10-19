@@ -28,6 +28,7 @@ import {
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
 import { sesSha256 } from "./ses_docket_envelope.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const SES_TRADE_CHASE_VERSION = "ses.trade-chase/v1";
 
@@ -214,7 +215,7 @@ export async function runSesTradeChase(
       );
       dispatchingKey = effect.operation_key;
       const delivered = await deps.sendSms(phone, chaseText(card, dueLocal));
-      if (!delivered) throw new Error("GHL SMS send returned false");
+      if (!delivered) throw new ClientInputError("GHL SMS send returned false");
       await deps.store.transition(
         effect.operation_key,
         "dispatching",

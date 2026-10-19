@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 
+import { ClientInputError } from "./client_input_error.ts";
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const CANONICAL_BOARD_STAGES = new Set([
   "new",
@@ -264,7 +265,7 @@ export async function notifyDeterministicPhysicalJob(
     ? (await Promise.allSettled([
       Promise.resolve().then(() => {
         if (!deps.loadRepairConfig) {
-          throw new Error("repair recipient loader not wired");
+          throw new ClientInputError("repair recipient loader not wired");
         }
         return deps.loadRepairConfig(client);
       }),

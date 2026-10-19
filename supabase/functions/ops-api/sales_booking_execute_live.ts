@@ -31,6 +31,7 @@ import {
   SALES_BOOKING_GHL_USERS,
   salesBookingPublishedSuburb,
 } from "./sales_booking_read.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 // Supabase's structural query builder is owned by the pinned runtime client.
 // deno-lint-ignore no-explicit-any
@@ -49,7 +50,7 @@ export function executionLedger(client: Client): ExecutionLedger {
           "binding_hash,step,state,press_token,message_id,appointment_id",
         )
         .eq("binding_hash", bindingHash).maybeSingle();
-      if (error) throw new Error("execution_ledger_unreadable");
+      if (error) throw new ClientInputError("execution_ledger_unreadable");
       return data ?? null;
     },
     async claim(row) {
@@ -64,7 +65,7 @@ export function executionLedger(client: Client): ExecutionLedger {
       });
       if (!error) return true;
       if (error.code !== "23505") {
-        throw new Error("execution_ledger_unwritable");
+        throw new ClientInputError("execution_ledger_unwritable");
       }
       if (row.step !== "calendar") return false;
       const { data, error: updateError } = await client.from(table).update({
@@ -72,7 +73,7 @@ export function executionLedger(client: Client): ExecutionLedger {
         claimed_at: new Date().toISOString(),
       }).eq("binding_hash", row.binding_hash).eq("step", "calendar")
         .eq("state", "claimed").select("binding_hash");
-      if (updateError) throw new Error("execution_ledger_unwritable");
+      if (updateError) throw new ClientInputError("execution_ledger_unwritable");
       return Array.isArray(data) && data.length === 1;
     },
     async settle(bindingHash, outcome) {
@@ -85,7 +86,7 @@ export function executionLedger(client: Client): ExecutionLedger {
           : null,
         finished_at: new Date().toISOString(),
       }).eq("binding_hash", bindingHash).eq("state", prior);
-      if (error) throw new Error("execution_ledger_unwritable");
+      if (error) throw new ClientInputError("execution_ledger_unwritable");
     },
   };
 }
@@ -190,7 +191,7 @@ export function createSalesBookingExecuteDeps(
     const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
     const contact = body?.contact as Obj | undefined;
     if (contact?.id !== contactId || contact?.locationId !== locationId) {
-      throw new Error("contact_mismatch");
+      throw new ClientInputError("contact_mismatch");
     }
     return contact;
   }
@@ -200,16 +201,16 @@ export function createSalesBookingExecuteDeps(
         .select(
           "binding_hash,step,state,snapshot,approved_by_email,approved_at,expires_at",
         ).eq("binding_hash", bindingHash).maybeSingle();
-      if (error) throw new Error("approval_unreadable");
+      if (error) throw new ClientInputError("approval_unreadable");
       return (data as ExecutableApprovalRecord | null) ?? null;
     },
     async appointmentLedger(key) {
-      if (!locationId) throw new Error("location_unconfigured");
+      if (!locationId) throw new ClientInputError("location_unconfigured");
       const { data, error } = await client.from(
         "ghl_calendar_appointment_requests",
       ).select("state,result").eq("location_id", locationId)
         .eq("idempotency_key", key).maybeSingle();
-      if (error) throw new Error("appointment_ledger_unreadable");
+      if (error) throw new ClientInputError("appointment_ledger_unreadable");
       return data ?? null;
     },
     readThread: (contactId) =>
@@ -274,7 +275,7 @@ export function createOwnerApprovalDeps(
   const execute = createSalesBookingExecuteDeps(client);
   const locationId = () => {
     const id = Deno.env.get("GHL_LOCATION_ID") || "";
-    if (!id) throw new Error("location_unconfigured");
+    if (!id) throw new ClientInputError("location_unconfigured");
     return id;
   };
   return {
@@ -285,7 +286,7 @@ export function createOwnerApprovalDeps(
       const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
       const contact = body?.contact as Obj | undefined;
       if (contact?.id !== contactId || contact?.locationId !== location) {
-        throw new Error("contact_mismatch");
+        throw new ClientInputError("contact_mismatch");
       }
       const jobSites = await readJobSitesLive(
         client,
@@ -335,7 +336,7 @@ export function createOwnerApprovalDeps(
     },
     async readGhlBlockedSlots(userId, startIso, endIso) {
       const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
-      if (!locationId) throw new Error("location_unconfigured");
+      if (!locationId) throw new ClientInputError("location_unconfigured");
       const query = new URLSearchParams({
         locationId,
         userId,
@@ -350,7 +351,7 @@ export function createOwnerApprovalDeps(
         !Array.isArray(rows) ||
         !rows.every((r) => !!r && typeof r === "object" && !Array.isArray(r)) ||
         body.nextPage || body.nextPageUrl || body.hasMore || body.error
-      ) throw new Error("ghl_blocked_slots_incomplete");
+      ) throw new ClientInputError("ghl_blocked_slots_incomplete");
       return rows as Obj[];
     },
     async readGhlEvents(selector, startIso, endIso) {
@@ -373,7 +374,7 @@ export function createOwnerApprovalDeps(
     async readSystemOfferRecords(sinceIso) {
       const executions: Obj[] = [];
       for (let offset = 0;; offset += 500) {
-        if (offset >= 10_000) throw new Error("read_limit_reached");
+        if (offset >= 10_000) throw new ClientInputError("read_limit_reached");
         const { data, error } = await client.from("sales_booking_executions")
           .select(
             "binding_hash,step,contact_id,state,appointment_id,claimed_at",
@@ -381,7 +382,7 @@ export function createOwnerApprovalDeps(
           .gte("claimed_at", sinceIso).order("claimed_at", { ascending: true })
           .order("binding_hash", { ascending: true })
           .range(offset, offset + 499);
-        if (error || !Array.isArray(data)) throw new Error("unreadable");
+        if (error || !Array.isArray(data)) throw new ClientInputError("unreadable");
         executions.push(...data);
         if (data.length < 500) break;
       }
@@ -391,7 +392,7 @@ export function createOwnerApprovalDeps(
         const { data, error } = await client.from("sales_booking_approvals")
           .select("binding_hash,step,snapshot")
           .in("binding_hash", hashes.slice(i, i + 50));
-        if (error || !Array.isArray(data)) throw new Error("unreadable");
+        if (error || !Array.isArray(data)) throw new ClientInputError("unreadable");
         approvals.push(...data);
       }
       approvals.push(...await ownerApprovalReader(client)(sinceIso, null));
@@ -415,7 +416,7 @@ export function ownerApprovalReader(client: Client): OwnerApprovalReader {
     const { data, error } = await query.gte("approved_at", sinceIso)
       .filter("snapshot->>source", "eq", "owner")
       .order("approved_at", { ascending: false }).limit(1000);
-    if (error || !Array.isArray(data)) throw new Error("unreadable");
+    if (error || !Array.isArray(data)) throw new ClientInputError("unreadable");
     return data;
   };
 }

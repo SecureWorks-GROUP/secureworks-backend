@@ -5,6 +5,7 @@ import {
   runDeterministicIntake,
 } from "./makesafe_deterministic_intake_runtime.ts";
 import { persistIntakeSourceIssue } from "./makesafe_intake_source_issues.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -94,7 +95,7 @@ export async function drainLegacyIntakeDrafts(
 ): Promise<LegacyDraftDrainReport> {
   const maxDrafts = Number(options.maxDrafts ?? 5000);
   if (!Number.isInteger(maxDrafts) || maxDrafts < 1 || maxDrafts > 10_000) {
-    throw new Error(
+    throw new ClientInputError(
       "legacy draft drain maxDrafts must be an integer from 1 to 10000",
     );
   }

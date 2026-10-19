@@ -67,6 +67,7 @@ import {
   type RepairAutoIntakeStamp,
   type RepairWorkOrderLanding,
 } from "./repair_intake_auto.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -463,7 +464,7 @@ export async function loadDeterministicRolloutControls(
     );
   }
   if (selectionMode !== "full_open") {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic standing selection mode must be full_open",
     );
   }
@@ -473,7 +474,7 @@ export async function loadDeterministicRolloutControls(
     );
   }
   if (hasAllowlist) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic standing full_open mode requires empty exact allowlists",
     );
   }
@@ -1043,7 +1044,7 @@ async function resolvePersistedSourceAuthorities(
       if (
         row.legacy_case_id && actualLegacy !== row.legacy_case_id
       ) {
-        throw new Error(
+        throw new ClientInputError(
           "deterministic source correction legacy authority mismatch; reconciliation required",
         );
       }
@@ -1089,7 +1090,7 @@ async function resolvePersistedSourceAuthorities(
         correctionIdByPostId.get(row.source_post_id) !==
           row.superseded_correction_id
       ) {
-        throw new Error(
+        throw new ClientInputError(
           "deterministic source correction supersession target mismatch; reconciliation required",
         );
       }
@@ -1097,7 +1098,7 @@ async function resolvePersistedSourceAuthorities(
         caseIdByPostId.get(row.source_post_id) !==
           row.prior_authority_case_id
       ) {
-        throw new Error(
+        throw new ClientInputError(
           "deterministic source correction supersession prior authority mismatch; reconciliation required",
         );
       }
@@ -1136,7 +1137,7 @@ async function resolvePersistedSourceAuthorities(
   for (const [postId, caseId] of caseIdByPostId) {
     const authority = authorityByCaseId.get(caseId);
     if (!authority) {
-      throw new Error(
+      throw new ClientInputError(
         "deterministic source authority points to an unreadable canonical case",
       );
     }
@@ -1261,14 +1262,14 @@ export async function resolveDeterministicDraftMintAuthority(
   for (const sourcePostId of sourcePostIds) {
     const authority = resolved.byPostId.get(sourcePostId);
     if (!authority?.id) {
-      throw new Error(
+      throw new ClientInputError(
         "deterministic draft source does not have canonical case authority",
       );
     }
     caseIds.add(authority.id);
   }
   if (caseIds.size !== 1) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic draft sources resolve to multiple canonical cases",
     );
   }
@@ -1665,7 +1666,7 @@ async function readInputs(
     return row ? [row] : [];
   });
   if (recentRows.length !== recentIdentifiers.rows.length) {
-    throw new Error(
+    throw new ClientInputError(
       "recent source body read did not resolve every selected identifier",
     );
   }
@@ -1739,7 +1740,7 @@ async function readInputs(
     }
   }
   if (closureRowsByPostId.size !== missingClosurePostIds.length) {
-    throw new Error(
+    throw new ClientInputError(
       "recent exception closure did not resolve every required source",
     );
   }
@@ -2111,7 +2112,7 @@ function replaceInstructionKey(
 
 function instructionKeyForCycle(instructionKey: string, cycle: number): string {
   if (!/\/cycle:\d+$/.test(instructionKey)) {
-    throw new Error("deterministic instruction key has no cycle suffix");
+    throw new ClientInputError("deterministic instruction key has no cycle suffix");
   }
   return instructionKey.replace(/\/cycle:\d+$/, `/cycle:${cycle}`);
 }
@@ -2160,7 +2161,7 @@ function rekeyCasePlan(
 function deliverableSegment(instructionKey: string): string {
   const match = /\/deliverable:([^/]+)\//.exec(instructionKey);
   if (!match) {
-    throw new Error("deterministic instruction key has no deliverable segment");
+    throw new ClientInputError("deterministic instruction key has no deliverable segment");
   }
   return match[1];
 }
@@ -2743,7 +2744,7 @@ async function stageAttachments(
       ? existing.storage_locator
       : null;
     if (existing && existing.case_id !== caseId) {
-      throw new Error("artifact ledger case mismatch");
+      throw new ClientInputError("artifact ledger case mismatch");
     }
     if (!path) {
       path = `makesafe-deterministic/${
@@ -2806,7 +2807,7 @@ async function stageAttachments(
           racedError || raced?.case_id !== caseId ||
           raced?.status !== "completed"
         ) {
-          throw new Error(
+          throw new ClientInputError(
             "artifact ledger race did not resolve to the approved case",
           );
         }
@@ -2937,7 +2938,7 @@ async function resolveSelectedLineage(
     const cached = normalized.get(item);
     if (cached) return cached;
     if (visiting.has(item)) {
-      throw new Error("deterministic selected lineage contains a cycle");
+      throw new ClientInputError("deterministic selected lineage contains a cycle");
     }
     visiting.add(item);
 
@@ -4111,7 +4112,7 @@ async function ensureDraftAndJob(
       onPersistedOutcome,
     );
     if (!attachments.length) {
-      throw new Error("deterministic work-order attachment staging failed");
+      throw new ClientInputError("deterministic work-order attachment staging failed");
     }
     const splitObligation = deterministicSplitObligation(plan);
     const markedDescription = [
@@ -4251,7 +4252,7 @@ async function ensureDraftAndJob(
         parked: false,
       };
     }
-    throw new Error(
+    throw new ClientInputError(
       "approved deterministic draft has no job link; reconciliation required",
     );
   }
@@ -4283,7 +4284,7 @@ async function ensureDraftAndJob(
     };
   }
   if (!approveDraft) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic live mode requires the guarded approval callback",
     );
   }
@@ -4322,7 +4323,7 @@ async function ensureDraftAndJob(
     throw error;
   }
   const jobId = approved?.job?.id;
-  if (!jobId) throw new Error("guarded approval returned no job id");
+  if (!jobId) throw new ClientInputError("guarded approval returned no job id");
   return {
     jobId,
     draftCreated,
@@ -4638,7 +4639,7 @@ async function insertCaseAndSources(
       ? await findCase(client, plan.parentInstructionKey)
       : await findIdentityParent(client, plan);
     if (plan.parentInstructionKey && !parent) {
-      throw new Error("lineage parent is not persisted yet; retry child later");
+      throw new ClientInputError("lineage parent is not persisted yet; retry child later");
     }
     const { data, error } = await client.from("makesafe_intake_cases")
       .insert(casePayload(plan, jobId, parent))
@@ -5098,7 +5099,7 @@ async function readFreshSourceHealth(
     !Number.isSafeInteger(freshSourceLagSeconds) ||
     freshSourceLagSeconds < 0
   ) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic fresh-source health returned invalid counters",
     );
   }
@@ -5184,7 +5185,7 @@ export async function runDeterministicIntake(
   const dryRun = options.dryRun !== false;
   const selectionMode = options.selectionMode ?? "exact";
   if (selectionMode !== "exact" && selectionMode !== "full_open") {
-    throw new Error("deterministic selection mode must be exact or full_open");
+    throw new ClientInputError("deterministic selection mode must be exact or full_open");
   }
   const days = Math.max(1, Math.min(options.days ?? 60, 180));
   const nowIso = options.nowIso || new Date().toISOString();
@@ -5200,17 +5201,17 @@ export async function runDeterministicIntake(
   const hasAllowlist = allowSourcePostIds.length > 0 ||
     allowInstructionKeys.length > 0;
   if (!dryRun && selectionMode === "exact" && !hasAllowlist) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic exact mode requires a non-empty exact DB allowlist",
     );
   }
   if (selectionMode === "full_open" && hasAllowlist) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic full_open mode requires empty exact allowlists",
     );
   }
   if (options.includeSanitizedCases && !hasAllowlist) {
-    throw new Error(
+    throw new ClientInputError(
       "case-level dark observe requires a non-empty exact allowlist",
     );
   }
@@ -5237,7 +5238,7 @@ export async function runDeterministicIntake(
       !String(recoveryTarget.builderPurchaseOrder || "").trim()
     )
   ) {
-    throw new Error(
+    throw new ClientInputError(
       "source-persistence recovery requires one exact instruction, maxCases=1, maxSources<=4, guarded approval, and both notification paths suppressed",
     );
   }
@@ -5357,7 +5358,7 @@ export async function runDeterministicIntake(
       String(selectedCase.identity.builderPoCanonical || "") !==
         recoveryTarget.builderPurchaseOrder
     ) {
-      throw new Error(
+      throw new ClientInputError(
         "source-persistence recovery target did not resolve to one extracted exact obligation",
       );
     }
@@ -5646,7 +5647,7 @@ export async function runDeterministicIntake(
     );
   }
   if (options.advanceDrafts !== false && !options.approveDraft) {
-    throw new Error(
+    throw new ClientInputError(
       "deterministic live mode requires the guarded approval callback",
     );
   }

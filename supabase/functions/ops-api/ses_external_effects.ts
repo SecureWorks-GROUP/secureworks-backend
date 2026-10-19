@@ -1,5 +1,6 @@
 import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export type SesEffectKind =
   | "invoice_create"
@@ -385,10 +386,10 @@ export async function recordSesObservedExternalEffect(args: {
 }): Promise<SesExternalEffect> {
   const externalId = String(args.external_id || "").trim();
   if (!externalId) {
-    throw new Error("observed external effect requires an external id");
+    throw new ClientInputError("observed external effect requires an external id");
   }
   if (args.effect.effect_kind !== "invoice_authorise") {
-    throw new Error(
+    throw new ClientInputError(
       "provider-observed reconciliation is reserved for invoice_authorise",
     );
   }
@@ -397,14 +398,14 @@ export async function recordSesObservedExternalEffect(args: {
     `${args.actor}:observed:${crypto.randomUUID()}`,
   );
   if (claim.effect.payload_hash !== args.effect.payload_hash) {
-    throw new Error(
+    throw new ClientInputError(
       "the observed external effect payload differs from the immutable ledger effect",
     );
   }
   if (claim.effect.state === "confirmed" || claim.claim_mode === "confirmed") {
     const priorExternalId = String(claim.effect.external_id || "").trim();
     if (priorExternalId && priorExternalId !== externalId) {
-      throw new Error(
+      throw new ClientInputError(
         "the confirmed external effect names a different provider identity",
       );
     }

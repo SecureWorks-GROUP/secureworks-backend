@@ -7,6 +7,7 @@
  * and is bundled as an ops-api static file for deterministic Edge deploys.
  */
 
+import { ClientInputError } from "./client_input_error.ts";
 export const SES_MATERIALS_RATE_CARD_PATH =
   "references/materials-rate-card.md" as const;
 
@@ -121,7 +122,7 @@ function parseRateCard(markdown: string): ParsedRateCard {
     Number.isFinite(band.amount) && band.amount > 0
   ).sort((a, b) => a.upToSquareMetres - b.upToSquareMetres);
   if (tarpBands.length < 4) {
-    throw new Error("materials rate card settled tarp bands missing");
+    throw new ClientInputError("materials rate card settled tarp bands missing");
   }
 
   const basketRow =
@@ -132,7 +133,7 @@ function parseRateCard(markdown: string): ParsedRateCard {
     .map((match) => Number(match[1]))
     .filter((amount) => Number.isFinite(amount) && amount > 0);
   if (!basketFigures.length) {
-    throw new Error("materials rate card accepted basket figures missing");
+    throw new ClientInputError("materials rate card accepted basket figures missing");
   }
 
   return {

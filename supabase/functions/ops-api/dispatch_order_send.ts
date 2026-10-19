@@ -16,6 +16,7 @@
 // guarantee either way; the key only makes a person's retry safe.
 
 import { poEmailReferenceBanner } from "../_shared/po_reference.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const DISPATCH_ORDERS_ADDRESS = "orders@secureworksgroup.app";
 export const DISPATCH_ORDERS_FROM =
@@ -196,7 +197,7 @@ export function resendDispatchTransport(
   fetchImpl: typeof fetch = fetch,
 ): DispatchMailTransport {
   return async ({ payload, idempotencyKey }) => {
-    if (!apiKey) throw new Error("RESEND_API_KEY not configured");
+    if (!apiKey) throw new ClientInputError("RESEND_API_KEY not configured");
     const response = await fetchImpl(DISPATCH_RESEND_URL, {
       method: "POST",
       headers: {

@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 
+import { ClientInputError } from "./client_input_error.ts"
 export const MAKESAFE_ATTACH_KEY_CONSTRAINT =
   "ux_job_documents_makesafe_attach_key";
 
@@ -30,7 +31,7 @@ export async function insertOrReadActiveMakesafeDocument(
     .single();
   if (!inserted.error) {
     if (!inserted.data?.id) {
-      throw new Error("job document insert returned no row");
+      throw new ClientInputError("job document insert returned no row");
     }
     return { row: inserted.data, inserted: true };
   }

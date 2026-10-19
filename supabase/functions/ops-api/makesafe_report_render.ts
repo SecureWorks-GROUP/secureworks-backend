@@ -21,6 +21,7 @@
 // Colours: orange #F15A29, dark #293C46, mid #4C6A7C, light #F0F4F7.
 
 import { MAKESAFE_REPORT_LOGO_DATA_URL } from "./makesafe_report_logo.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 // ── Pure helpers (exported for unit tests; no jsPDF / no network) ──
 
@@ -181,7 +182,7 @@ export function assertCuratedReportPayload(job: MakesafeReportJob): void {
   }
   const crew = String(job.crew || "").trim();
   if (crew && !/^\d+(?:\.\d+)?\s+trades?$/i.test(crew)) {
-    throw new Error("curated make-safe report crew must be a trade count only");
+    throw new ClientInputError("curated make-safe report crew must be a trade count only");
   }
   const commercial = findCommercialContent(job);
   if (commercial.length) throw new CommercialContentError(commercial);
@@ -355,9 +356,9 @@ export interface RenderedReport {
 export async function renderMakesafeReportPdf(
   job: MakesafeReportJob,
 ): Promise<RenderedReport> {
-  if (!job?.ref) throw new Error("renderMakesafeReportPdf: job.ref required");
+  if (!job?.ref) throw new ClientInputError("renderMakesafeReportPdf: job.ref required");
   if (!job?.address) {
-    throw new Error("renderMakesafeReportPdf: job.address required");
+    throw new ClientInputError("renderMakesafeReportPdf: job.address required");
   }
   assertCuratedReportPayload(job);
 

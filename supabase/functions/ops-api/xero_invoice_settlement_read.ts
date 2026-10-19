@@ -6,6 +6,7 @@ import {
   xeroObject,
   xeroText,
 } from "../_shared/xero_settlement_evidence.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 type Invoice = {
   xero_invoice_id: string;
@@ -198,7 +199,7 @@ export async function readInvoiceSettlement(
   invoiceId: string,
 ) {
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(invoiceId)) {
-    throw new Error("xero_invoice_id must be a provider UUID");
+    throw new ClientInputError("xero_invoice_id must be a provider UUID");
   }
   const { data: invoice, error } = await sb.from("xero_invoices")
     .select(
@@ -206,7 +207,7 @@ export async function readInvoiceSettlement(
     )
     .eq("org_id", orgId).eq("xero_invoice_id", invoiceId.toLowerCase())
     .maybeSingle();
-  if (error) throw new Error("Invoice settlement invoice read failed");
+  if (error) throw new ClientInputError("Invoice settlement invoice read failed");
   if (!invoice || invoice.invoice_type !== "ACCREC") return null;
   const { data: connection, error: connectionError } = await sb.from(
     "xero_tokens",

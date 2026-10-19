@@ -1,4 +1,5 @@
 /** Storage boundary only: collectors own definitions, evidence and missing values. */
+import { ClientInputError } from "./client_input_error.ts";
 export type JsonObject = Record<string, unknown>;
 export interface PerformanceRow {
   org_id: string;
@@ -212,7 +213,7 @@ export function salesPerformanceStore(client: any): PerformanceStore {
       if (result.error.code === "42501") {
         throw new PerformanceError(403, "operator_access_required");
       }
-      throw new Error("sales_performance_storage_failed");
+      throw new ClientInputError("sales_performance_storage_failed");
     }
     return result.data;
   }

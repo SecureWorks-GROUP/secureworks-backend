@@ -2,6 +2,7 @@
 // lab. The token authorises one short-lived fixture from the one controlled
 // SecureWorks sender; it is not a general own-domain bypass.
 
+import { ClientInputError } from "./client_input_error.ts";
 export const SYNTHETIC_LIVEFIRE_MARKER_PREFIX = "SWG-SES-LIVEFIRE-TEST-ONLY-";
 export const SYNTHETIC_LIVEFIRE_SENDER = "marnin@secureworkswa.com.au";
 export const SYNTHETIC_LIVEFIRE_MAILBOX = "ses@secureworkswa.com.au";
@@ -53,7 +54,7 @@ function canonicalPart(value: string, label: string): string {
 function canonicalRef(value: string): string {
   const canonical = String(value || "").trim().toUpperCase();
   if (!SYNTHETIC_REF_RE.test(canonical)) {
-    throw new Error(
+    throw new ClientInputError(
       "ref must use the reserved SYNTHLIVE- prefix and safe ASCII characters",
     );
   }
@@ -66,7 +67,7 @@ function assertExpiresAt(value: number): number {
     String(value).length !== 13 ||
     value <= 0
   ) {
-    throw new Error(
+    throw new ClientInputError(
       "expiresAtMs must be a positive 13-digit epoch millisecond",
     );
   }
@@ -112,7 +113,7 @@ function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 async function hmac(secret: string, value: string): Promise<Uint8Array> {
   if (!String(secret || "").trim()) {
-    throw new Error("synthetic live-fire signing secret is required");
+    throw new ClientInputError("synthetic live-fire signing secret is required");
   }
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(

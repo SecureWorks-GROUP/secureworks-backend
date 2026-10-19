@@ -31,6 +31,7 @@ import {
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
 } from "./makesafe_report_render.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export interface MakesafeRendererAuthorityEntry {
   /** Wiki commit the renderer script was taken from. */
@@ -137,7 +138,7 @@ export function makesafeCurrentRendererAuthorityEntry(): MakesafeRendererAuthori
     entry.authorised_until === null
   );
   if (!current) {
-    throw new Error(
+    throw new ClientInputError(
       "makesafe renderer authority register has no open entry; a re-pin closed a window without appending its successor",
     );
   }
@@ -183,7 +184,7 @@ export function assertMakesafeRendererRegisterMatchesPin(
     script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   },
 ): void {
-  if (register.length === 0) throw new Error("register is empty");
+  if (register.length === 0) throw new ClientInputError("register is empty");
   for (const [index, entry] of register.entries()) {
     if (!/^[0-9a-f]{40}$/.test(entry.source_revision)) {
       throw new Error(`entry ${index} source_revision is not a git sha`);
@@ -223,14 +224,14 @@ export function assertMakesafeRendererRegisterMatchesPin(
     uniqueRevisions.size !== register.length ||
     uniqueShas.size !== register.length
   ) {
-    throw new Error("register repeats a renderer identity");
+    throw new ClientInputError("register repeats a renderer identity");
   }
   const current = register[register.length - 1];
   if (
     current.source_revision !== pin.source_revision ||
     current.script_sha256 !== pin.script_sha256
   ) {
-    throw new Error(
+    throw new ClientInputError(
       "the open register entry is not the current pin: a re-pin moved makesafe_report_render.ts without closing the outgoing window and appending the new identity here",
     );
   }

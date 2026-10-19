@@ -70,6 +70,7 @@ import {
   canonicalSesFamilyFromCard,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 export const SES_EVIDENCE_CONTRACT_VERSION =
   "ses-evidence-requirements/c1-repair-restoration-sealed-v5";
@@ -488,7 +489,7 @@ function q(
   ...questions: readonly SesCaptainQuestionId[]
 ): SesEvidenceRequirement {
   if (questions.length === 0) {
-    throw new Error("a question cell must name at least one Captain question");
+    throw new ClientInputError("a question cell must name at least one Captain question");
   }
   for (const id of questions) {
     // A ruled question is settled. Re-opening a cell under it would quietly

@@ -13,6 +13,7 @@
 
 // All agent reply notes begin with this. The trailing ' |' separates the prefix
 // from the change description in buildAgentReplyBody.
+import { ClientInputError } from "./client_input_error.ts"
 export const AGENT_REPLY_PREFIX = "MAKESAFE_AGENT_REPLY |";
 
 // The forbidden prefix for ANY note body. A pack-sent marker is the irreversible
@@ -36,7 +37,7 @@ export function isPackSentMarker(body: string): boolean {
 // validates presence/trim separately).
 export function rejectIfPackSentMarker(body: string): void {
   if (isPackSentMarker(body)) {
-    throw new Error("note body must not be a pack-sent marker");
+    throw new ClientInputError("note body must not be a pack-sent marker");
   }
 }
 

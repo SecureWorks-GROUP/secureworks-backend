@@ -27,6 +27,7 @@ import {
   validateSalesBookingRouteInput,
 } from "./sales_booking_routes.ts";
 import { SALES_BOOKING_SENDER_LINES } from "./sales_booking_sender.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -267,7 +268,7 @@ export function createSalesBookingRoutesDeps(
         )
         .order("id", { ascending: false }).limit(limit);
       if (error || !Array.isArray(data)) {
-        throw new Error("booking_route_changes_unreadable");
+        throw new ClientInputError("booking_route_changes_unreadable");
       }
       return data;
     },
@@ -282,7 +283,7 @@ export function createSalesBookingRoutesDeps(
         p_reason: a.reason,
       });
       if (error) throw new Error(String(error.message ?? "write_failed"));
-      if (!data || typeof data !== "object") throw new Error("write_failed");
+      if (!data || typeof data !== "object") throw new ClientInputError("write_failed");
       return data;
     },
   };

@@ -32,6 +32,7 @@
 import { loadReportReadyItems } from "./makesafe_gap_fill_report_ready.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 import { resolveEffectiveIntakeSourceAuthority } from "./makesafe_intake_source_authority.ts";
+import { ClientInputError } from "./client_input_error.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -631,7 +632,7 @@ function queueTuple(row: any): { receivedAt: number; caseId: string } {
   const receivedAt = Date.parse(String(row?.received_at ?? ""));
   const caseId = String(row?.id ?? "");
   if (!Number.isFinite(receivedAt) || !caseId) {
-    throw new Error("gap-fill case row has no stable received_at/id cursor");
+    throw new ClientInputError("gap-fill case row has no stable received_at/id cursor");
   }
   return { receivedAt, caseId };
 }
