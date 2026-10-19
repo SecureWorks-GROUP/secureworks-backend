@@ -77,6 +77,16 @@ export async function reconcileXeroInvoice(
 // open receivables must never starve the daily draft sweep.
 export const OPEN_RECONCILE_LIMIT = 50;
 export const DRAFT_RECONCILE_LIMIT = 5;
+// Rows whose stored status disagrees with their own stored Xero record (CFO-14,
+// 19 Oct 2026: 97 customer invoices, e.g. 6 open invoices stored as DELETED by
+// an old error branch). They are never stale in the open or draft sense, so
+// they never healed. A few are re-read once a day under the draft gate.
+export const MISMATCH_RECONCILE_LIMIT = 10;
+const XERO_INVOICE_STATUSES = ["DRAFT", "SUBMITTED", "AUTHORISED", "PAID", "VOIDED", "DELETED"];
+/** PostgREST filter: stored status is missing or differs from raw_json.Status. */
+export const STATUS_MISMATCH_FILTER = XERO_INVOICE_STATUSES
+  .map((st) => `and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`)
+  .join(",");
 // sync_invoices runs every 15 minutes. The draft sweep is a quota decision,
 // not a freshness decision: it costs one GET /Invoices/{id} per draft, so it
 // is gated to one pass per 24 hours through the existing sync-state table.
@@ -88,6 +98,8 @@ export interface StaleXeroSelection {
   // Whether this run spent quota on the daily draft sweep.
   draftsDue: boolean;
   drafts: number;
+  // Rows taken because their status disagrees with their stored Xero record.
+  mismatches: number;
   // A cursor that cannot prove 24 hours elapsed skips the drafts rather than
   // guessing. The reason travels to the run summary.
   draftGateSkipped: string | null;
@@ -187,6 +199,21 @@ export async function listStaleXeroInvoices(
     }
     draftRows = drafts.data;
   }
+  let mismatchRows: Array<{ xero_invoice_id: string }> = [];
+  if (gate.due) {
+    const mismatched = await client.from("xero_invoices")
+      .select("xero_invoice_id")
+      .eq("org_id", orgId).eq("invoice_type", "ACCREC")
+      .or(STATUS_MISMATCH_FILTER)
+      .order("reconcile_attempted_at", { ascending: true, nullsFirst: true })
+      .limit(MISMATCH_RECONCILE_LIMIT);
+    if (invalid(mismatched.data, mismatched.error)) {
+      throw new Error(
+        "Invoice reconciliation is incomplete: status mismatch selection failed",
+      );
+    }
+    mismatchRows = mismatched.data;
+  }
   const seen = new Set<string>();
   const merged: Array<{ xero_invoice_id: string }> = [];
   const take = (rows: Array<{ xero_invoice_id: string }>, cap: number) => {
@@ -204,10 +231,12 @@ export async function listStaleXeroInvoices(
   // full batch is at most OPEN_RECONCILE_LIMIT + DRAFT_RECONCILE_LIMIT.
   take(open.data, OPEN_RECONCILE_LIMIT);
   const drafts = take(draftRows, DRAFT_RECONCILE_LIMIT);
+  const mismatches = take(mismatchRows, MISMATCH_RECONCILE_LIMIT);
   return {
     invoices: merged,
     draftsDue: gate.due,
     drafts,
+    mismatches,
     draftGateSkipped: gate.skipped,
   };
 }
@@ -218,6 +247,7 @@ export interface StaleReconcileSummary {
   failed: number;
   last_error: Record<string, unknown> | null;
   drafts_selected: number;
+  mismatches_selected: number;
   draft_sweep_ran: boolean;
   draft_gate_skipped: string | null;
 }
@@ -273,6 +303,7 @@ export async function reconcileStaleXeroInvoices(
     failed: 0,
     last_error: null,
     drafts_selected: selection.drafts,
+    mismatches_selected: selection.mismatches,
     draft_sweep_ran: selection.draftsDue,
     draft_gate_skipped: selection.draftGateSkipped,
   };

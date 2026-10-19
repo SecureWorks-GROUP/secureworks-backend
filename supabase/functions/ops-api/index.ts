@@ -9344,8 +9344,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { accessToken: vAt, tenantId: vTi } = await getToken(client)
         const newStatus = body.void ? 'VOIDED' : 'DELETED'
         const vRes = await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
-        const vReturned = String(vRes?.Invoices?.[0]?.Status || newStatus).toUpperCase()
-        await client.from('xero_invoices').update({ status: vReturned, amount_due: 0 }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        // Store what Xero returned, never what was asked for: a reply without
+        // this invoice leaves the copy as it is (the daily mismatch re-read
+        // heals it), so an open invoice is never shown as deleted with $0 due
+        // (CFO-14, 19 Oct 2026).
+        const vInv = vRes?.Invoices?.[0]
+        const vVerified = !!vInv && vInv.InvoiceID === vid && typeof vInv.Status === 'string'
+        const vReturned = vVerified ? String(vInv.Status).toUpperCase() : null
+        if (vVerified) {
+          const vPatch: Record<string, unknown> = { status: vReturned, raw_json: vInv, synced_at: new Date().toISOString() }
+          if (typeof vInv.AmountDue === 'number' && Number.isFinite(vInv.AmountDue)) vPatch.amount_due = vInv.AmountDue
+          if (typeof vInv.AmountPaid === 'number' && Number.isFinite(vInv.AmountPaid)) vPatch.amount_paid = vInv.AmountPaid
+          await client.from('xero_invoices').update(vPatch).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        } else {
+          console.error(`[ops-api] void_invoice: Xero reply did not return invoice ${vid}; local copy left unchanged`)
+        }
         // Log business event (non-blocking)
         try {
           await client.from('business_events').insert({
@@ -9358,7 +9371,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
           })
         } catch (_) { /* non-blocking */ }
-        return json({ success: true, status: newStatus })
+        return json({ success: true, status: vReturned ?? newStatus, provider_verified: vVerified })
       }
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body

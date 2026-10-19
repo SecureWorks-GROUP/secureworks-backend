@@ -7,6 +7,8 @@ import {
   DRAFT_RECONCILE_KEY,
   DRAFT_RECONCILE_LIMIT,
   listStaleXeroInvoices,
+  MISMATCH_RECONCILE_LIMIT,
+  STATUS_MISMATCH_FILTER,
   OPEN_RECONCILE_LIMIT,
   reconcileStaleXeroInvoices,
   reconcileXeroInvoice,
@@ -154,6 +156,7 @@ const FRESH_CURSOR = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
 interface StaleClientOptions {
   open?: SelectionResult;
   drafts?: SelectionResult;
+  mismatches?: SelectionResult;
   // undefined means no cursor row at all, so the sweep has never run.
   cursorAt?: string | null;
   cursorError?: unknown;
@@ -193,6 +196,10 @@ function staleClient(options: StaleClientOptions = {}) {
       },
       order(field: string, opts: unknown) {
         calls.push(["order", field, opts]);
+        return query;
+      },
+      or(value: string) {
+        calls.push(["or", value]);
         return query;
       },
       limit(value: number) {
@@ -239,7 +246,9 @@ function staleClient(options: StaleClientOptions = {}) {
           selects++;
           const result = selects === 1
             ? options.open ?? { data: [], error: null }
-            : options.drafts ?? { data: [], error: null };
+            : selects === 2
+            ? options.drafts ?? { data: [], error: null }
+            : options.mismatches ?? { data: [], error: null };
           return selectQuery(result).select(value);
         },
         update(patch: Record<string, unknown>) {
@@ -299,6 +308,15 @@ const GATE_CALLS: Array<[string, ...unknown[]]> = [
   ["state.select", "cursor_at"],
   ["state.eq", "key", DRAFT_RECONCILE_KEY],
   ["state.maybeSingle"],
+];
+
+const MISMATCH_CALLS: Array<[string, ...unknown[]]> = [
+  ["select", "xero_invoice_id"],
+  ["eq", "org_id", ORG],
+  ["eq", "invoice_type", "ACCREC"],
+  ["or", STATUS_MISMATCH_FILTER],
+  ["order", "reconcile_attempted_at", { ascending: true, nullsFirst: true }],
+  ["limit", MISMATCH_RECONCILE_LIMIT],
 ];
 
 const DRAFT_CALLS: Array<[string, ...unknown[]]> = [
@@ -373,7 +391,7 @@ Deno.test("successful stale selection retains the tenant-independent org, receiv
     assertEquals(selection.invoices, expected);
     assertEquals(selection.draftsDue, true);
     assertEquals(selection.draftGateSkipped, null);
-    assertEquals(calls, [...OPEN_CALLS, ...GATE_CALLS, ...DRAFT_CALLS]);
+    assertEquals(calls, [...OPEN_CALLS, ...GATE_CALLS, ...DRAFT_CALLS, ...MISMATCH_CALLS]);
   }
 });
 
@@ -413,7 +431,7 @@ Deno.test("the draft sweep runs once the cursor is a day old, and on a first run
     const selection = await listStaleXeroInvoices(client, ORG, NOW);
     assertEquals(selection.draftsDue, true);
     assertEquals(selection.invoices, [{ xero_invoice_id: DRAFT }]);
-    assertEquals(calls, [...OPEN_CALLS, ...GATE_CALLS, ...DRAFT_CALLS]);
+    assertEquals(calls, [...OPEN_CALLS, ...GATE_CALLS, ...DRAFT_CALLS, ...MISMATCH_CALLS]);
   }
 });
 
@@ -455,7 +473,7 @@ Deno.test("a due sweep takes at most five drafts however many are stale", async 
     ["draft-0", "draft-1", "draft-2", "draft-3", "draft-4"],
   );
   // The database is asked for five, and the merge caps at five regardless.
-  assertEquals(calls.at(-1), ["limit", DRAFT_RECONCILE_LIMIT]);
+  assertEquals(calls.filter((c) => c[0] === "limit")[1], ["limit", DRAFT_RECONCILE_LIMIT]);
 });
 
 Deno.test("a full page of stale open receivables cannot starve the reserved draft slots", async () => {
@@ -754,4 +772,36 @@ Deno.test("a cooldown raised by the after-reconcile hook still stops the run", a
         )),
     XeroCooldownError,
   );
+});
+
+Deno.test("rows whose status disagrees with their own Xero record are re-read once a day, at most ten", async () => {
+  const { client, calls } = staleClient({
+    open: { data: [], error: null },
+    drafts: { data: [], error: null },
+    mismatches: { data: ids(25, "mismatch"), error: null },
+    cursorAt: DUE_CURSOR,
+  });
+  const selection = await listStaleXeroInvoices(client, ORG, NOW);
+  assertEquals(MISMATCH_RECONCILE_LIMIT, 10);
+  assertEquals(selection.mismatches, 10);
+  assertEquals(selection.invoices.length, 10);
+  assertEquals(calls, [...OPEN_CALLS, ...GATE_CALLS, ...DRAFT_CALLS, ...MISMATCH_CALLS]);
+  // Every Xero status is covered, and a missing stored status counts as a mismatch.
+  for (const st of ["DRAFT", "SUBMITTED", "AUTHORISED", "PAID", "VOIDED", "DELETED"]) {
+    assertEquals(STATUS_MISMATCH_FILTER.includes(`and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`), true);
+  }
+  // Inside the daily window no mismatch query runs.
+  const fresh = staleClient({ open: { data: [], error: null }, cursorAt: FRESH_CURSOR });
+  await listStaleXeroInvoices(fresh.client, ORG, NOW);
+  assertEquals(fresh.calls, [...OPEN_CALLS, ...GATE_CALLS]);
+});
+
+Deno.test("a failed status mismatch selection fails the batch rather than looking empty", async () => {
+  const { client } = staleClient({
+    open: { data: [], error: null },
+    drafts: { data: [], error: null },
+    mismatches: { data: null, error: { message: "fixture-only database failure" } },
+    cursorAt: DUE_CURSOR,
+  });
+  await assertRejects(() => listStaleXeroInvoices(client, ORG, NOW), Error, "status mismatch selection failed");
 });
