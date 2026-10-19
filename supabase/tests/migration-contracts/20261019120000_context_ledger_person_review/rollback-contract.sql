@@ -19,6 +19,9 @@ BEGIN
  IF to_regprocedure('public.context_ledger_person_review(jsonb,timestamptz)') IS NOT NULL THEN
   RAISE EXCEPTION 'person review rollback: the normaliser is still there';
  END IF;
+ IF to_regprocedure('public.context_ledger_person_review_ok(jsonb)') IS NOT NULL THEN
+  RAISE EXCEPTION 'person review rollback: the stored-shape check is still there';
+ END IF;
  IF EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = 'context_ledger_items' AND column_name = 'person_review')
   OR EXISTS (SELECT 1 FROM pg_constraint

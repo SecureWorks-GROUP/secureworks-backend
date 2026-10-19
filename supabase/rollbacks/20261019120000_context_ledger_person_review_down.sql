@@ -1,14 +1,15 @@
 -- Person review (18 Oct 2026) down.
--- Restores the four bodies this migration replaced, word for word, then drops the column and the
--- normaliser. Accepts this migration's bodies or the ones it replaced (a second run). Refuses any
--- other body: a later replacement has to roll this back while its own bodies are still live.
+-- Restores the four bodies this migration replaced, word for word, then drops the column, the
+-- normaliser and the stored-shape check. Accepts this migration's bodies or the ones it replaced
+-- (a second run). Refuses any other body: a later replacement has to roll this back while its own
+-- bodies are still live.
 DO $guard$
 DECLARE problems text[] := '{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['3880b68edb0806ad5c5c448b24d54c15', 'af976e59b8e6f35612d6383042d6e38e']),
   ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['3a9296d13a6543d2b4eecc11a5a469fb', '6da1007ff2a6331219f4d98f85749ca7']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['ba128c21e9d646168343bf57cdb92c16', '209d903df7a8732b4773dee0f0741593']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['74c2b3fb592cc6a53ff5499170b9ef7a', '209d903df7a8732b4773dee0f0741593']),
   ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['4e5cf782723cc108d161acfaeaada6ee', '09d28c282caf22c873f5673d7dd8073f'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
@@ -1939,3 +1940,4 @@ COMMENT ON FUNCTION public.context_job_story_ledger(uuid,uuid,timestamptz) IS
 
 ALTER TABLE public.context_ledger_items DROP COLUMN IF EXISTS person_review;
 DROP FUNCTION IF EXISTS public.context_ledger_person_review(jsonb, timestamptz);
+DROP FUNCTION IF EXISTS public.context_ledger_person_review_ok(jsonb);

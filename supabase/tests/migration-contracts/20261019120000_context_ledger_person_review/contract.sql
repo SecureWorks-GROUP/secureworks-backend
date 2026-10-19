@@ -67,6 +67,19 @@ BEGIN
   'the normaliser is service_role only');
  PERFORM pg_temp.pr_assert(obj_description('public.context_ledger_person_review(jsonb,timestamptz)'::regprocedure, 'pg_proc')
   LIKE '%(person review, 20261018120000)%', 'the normaliser names this migration');
+ PERFORM pg_temp.pr_assert(to_regprocedure('public.context_ledger_person_review_ok(jsonb)') IS NOT NULL, 'the stored-shape check exists');
+ SELECT p.provolatile, p.prosecdef INTO vol, sec FROM pg_proc p
+  WHERE p.oid = to_regprocedure('public.context_ledger_person_review_ok(jsonb)');
+ PERFORM pg_temp.pr_assert(vol = 's' AND sec IS TRUE
+  AND (SELECT p.proconfig = ARRAY['search_path=public, pg_temp'] FROM pg_proc p
+       WHERE p.oid = to_regprocedure('public.context_ledger_person_review_ok(jsonb)')),
+  'the stored-shape check is stable, security definer, search_path public, pg_temp');
+ PERFORM pg_temp.pr_assert(has_function_privilege('service_role', 'public.context_ledger_person_review_ok(jsonb)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'public.context_ledger_person_review_ok(jsonb)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'public.context_ledger_person_review_ok(jsonb)', 'EXECUTE'),
+  'the stored-shape check is service_role only');
+ PERFORM pg_temp.pr_assert(obj_description('public.context_ledger_person_review_ok(jsonb)'::regprocedure, 'pg_proc')
+  LIKE '%(person review, 20261018120000)%', 'the stored-shape check names this migration');
  FOREACH f IN ARRAY ARRAY[
   'public.context_ledger_check_item(uuid,jsonb,text,uuid,text)',
   'public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)',
@@ -234,6 +247,32 @@ BEGIN
   NULL;
  END;
 
+ -- an empty object, a missing raised_at and a non-timestamp are not a stored review
+ BEGIN
+  UPDATE public.context_ledger_items SET person_review = '{}'::jsonb
+   WHERE generation_id = gen AND item_key = k_omit;
+  PERFORM pg_temp.pr_assert(false, 'an empty review object was stored');
+ EXCEPTION WHEN check_violation THEN
+  NULL;
+ END;
+ BEGIN
+  UPDATE public.context_ledger_items SET person_review = jsonb_build_object(
+   'sentence', 'The notes say the width was confirmed.', 'reason', 'claimed_closed_unverified')
+   WHERE generation_id = gen AND item_key = k_omit;
+  PERFORM pg_temp.pr_assert(false, 'a review with no raised_at was stored');
+ EXCEPTION WHEN check_violation THEN
+  NULL;
+ END;
+ BEGIN
+  UPDATE public.context_ledger_items SET person_review = jsonb_build_object(
+   'sentence', 'The notes say the width was confirmed.', 'reason', 'claimed_closed_unverified',
+   'raised_at', 'not-a-timestamp')
+   WHERE generation_id = gen AND item_key = k_omit;
+  PERFORM pg_temp.pr_assert(false, 'a review with a non-timestamp raised_at was stored');
+ EXCEPTION WHEN check_violation THEN
+  NULL;
+ END;
+
  -- same status, a structured object: sentence, source line and raised_at are kept
  res := public.context_ledger_write(run, tok, gen, '[]', jsonb_build_array(jsonb_build_object(
   'item_key', k_omit, 'to_status', 'open', 'reason', 'object review',
@@ -331,6 +370,28 @@ BEGIN
   AND position('we owe:' IN asm #>> '{now,line}') > 0
   AND position('gate colour' IN coalesce(asm #>> '{now,next,what}', '')) = 0,
   'the unreviewed ask is still ours to the customer: ' || (asm -> 'now')::text);
+
+ -- an empty object, a missing raised_at, a non-timestamp and a sentence string are not a review
+ asm := public.context_job_story_assemble(
+  '{"id":"8f000000-0000-4000-8000-0000000000a1","job_number":"SWF-980101","status":"scheduled","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+  '{}'::jsonb,
+  jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+   'unread_rows', 0, 'transitions', '[]'::jsonb, 'items', jsonb_build_array(
+    plain || jsonb_build_object('item_key', 'request:gate:empty', 'what', 'The customer asked us to confirm the gate latch.',
+     'person_review', '{}'::jsonb),
+    plain || jsonb_build_object('item_key', 'request:gate:missing-at', 'what', 'The customer asked us to confirm the gate hinge.',
+     'person_review', jsonb_build_object('sentence', 'The notes say the hinge was confirmed.', 'reason', 'claimed_closed_unverified')),
+    plain || jsonb_build_object('item_key', 'request:gate:bad-at', 'what', 'The customer asked us to confirm the gate post.',
+     'person_review', jsonb_build_object('sentence', 'The notes say the post was confirmed.',
+      'reason', 'claimed_closed_unverified', 'raised_at', 'not-a-timestamp')),
+    plain || jsonb_build_object('item_key', 'request:gate:sentence', 'what', 'The customer asked us to confirm the gate screw.',
+     'person_review', to_jsonb('The notes say the screw was confirmed.'::text)))),
+  '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ PERFORM pg_temp.pr_assert(NOT EXISTS (
+   SELECT 1 FROM jsonb_array_elements(asm -> 'loops') x
+   WHERE x ->> 'key' IN ('request:gate:empty', 'request:gate:missing-at', 'request:gate:bad-at', 'request:gate:sentence')
+     AND (x ->> 'source' IS DISTINCT FROM 'ledger' OR x ->> 'rule' IS DISTINCT FROM 'request')),
+  'only a valid review object is a person review: ' || (asm -> 'loops')::text);
 END $c$;
 
 -- Wait score. A reviewed attachment does not hide a genuine money loop, and a reviewed unattached
@@ -421,6 +482,14 @@ BEGIN
   AND (SELECT x ->> 'status' FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'request:newer') = 'open'
   AND asm #>> '{now,next,what}' = 'The customer asked us to confirm the gate width.',
   'a reviewed invoice:INV-9 does not lead a newer unreviewed request: ' || (asm -> 'now')::text || ' / ' || (asm -> 'loops')::text);
+
+ -- an empty object on the only attachment is not a review, so the R8 still leads
+ led := jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+  'unread_rows', 0, 'items', jsonb_build_array(ask || jsonb_build_object('person_review', '{}'::jsonb), owe), 'transitions', '[]'::jsonb);
+ asm := public.context_job_story_assemble(job, jsonb_build_object('facts', facts, 'loops', jsonb_build_array(r8)), led, '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ PERFORM pg_temp.pr_assert((SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'rule' = 'R8_not_yet_invoiced') = 1
+  AND asm #>> '{now,next,what}' = 'Invoice the finished fence.',
+  'an empty review object does not clear a money loop: ' || (asm -> 'now')::text || ' / ' || (asm -> 'loops')::text);
 END $wait$;
 ROLLBACK;
 
@@ -434,11 +503,12 @@ CREATE TEMP TABLE pr_md5 AS
   'public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)'::regprocedure,
   'public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'::regprocedure,
   'public.context_job_story_ledger(uuid,uuid,timestamptz)'::regprocedure,
-  'public.context_ledger_person_review(jsonb,timestamptz)'::regprocedure);
+  'public.context_ledger_person_review(jsonb,timestamptz)'::regprocedure,
+  'public.context_ledger_person_review_ok(jsonb)'::regprocedure);
 \ir ../../../migrations/20261019120000_context_ledger_person_review.sql
 DO $c$
 BEGIN
- PERFORM pg_temp.pr_assert((SELECT count(*) FROM pr_md5) = 5, 'five functions before the re-apply');
+ PERFORM pg_temp.pr_assert((SELECT count(*) FROM pr_md5) = 6, 'six functions before the re-apply');
  PERFORM pg_temp.pr_assert(NOT EXISTS (SELECT 1 FROM pr_md5 b LEFT JOIN pg_proc p ON p.oid = to_regprocedure(b.sig)
    WHERE p.oid IS NULL OR md5(p.prosrc) <> b.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM b.c
       OR p.proacl::text IS DISTINCT FROM b.acl),
@@ -448,3 +518,34 @@ BEGIN
   're-applying keeps the column');
 END $c$;
 ROLLBACK;
+
+-- 5. The deploy script refuses a pending file that contains its own transaction, and a caller
+--    that includes this file must be able to roll the include back. The pattern is the one
+--    scripts/apply-pending-migrations.sh compiles. Paths are from the repository root.
+CREATE TEMP TABLE pr_file_b64 (which text, b64 text);
+\copy pr_file_b64 FROM PROGRAM 'printf "%s\t%s\n%s\t%s\n" migration "$(base64 -w 0 supabase/migrations/20261019120000_context_ledger_person_review.sql)" script "$(base64 -w 0 scripts/apply-pending-migrations.sh)"'
+DO $c$
+DECLARE migration text; script text; rx text;
+BEGIN
+ SELECT convert_from(decode(b64, 'base64'), 'UTF8') INTO migration FROM pr_file_b64 WHERE which = 'migration';
+ SELECT convert_from(decode(b64, 'base64'), 'UTF8') INTO script FROM pr_file_b64 WHERE which = 'script';
+ PERFORM pg_temp.pr_assert(migration IS NOT NULL AND script IS NOT NULL, 'the migration and the deploy script were read');
+ rx := substring(script FROM $re$transaction_control = re\.compile\(\s*r"([^"]+)"$re$);
+ PERFORM pg_temp.pr_assert(rx IS NOT NULL, 'the deploy script''s transaction-control pattern was not found');
+ PERFORM pg_temp.pr_assert('BEGIN;' ~ rx AND E'COMMIT;\n' ~ rx AND E'  rollback;\n' ~ rx
+  AND E'START TRANSACTION;\n' ~ rx, 'the deploy pattern did not match transaction control: ' || rx);
+ PERFORM pg_temp.pr_assert(E'BEGIN\n RAISE NOTICE ''x'';\n' !~ rx, 'a plpgsql BEGIN was read as transaction control');
+ PERFORM pg_temp.pr_assert(migration !~ rx, 'the migration contains explicit transaction control');
+END $c$;
+
+-- An outer transaction that includes the migration rolls the include back with itself.
+BEGIN;
+CREATE TABLE public.pr1078_tx_probe (id integer PRIMARY KEY);
+INSERT INTO public.pr1078_tx_probe VALUES (1);
+\ir ../../../migrations/20261019120000_context_ledger_person_review.sql
+ROLLBACK;
+DO $c$
+BEGIN
+ PERFORM pg_temp.pr_assert(to_regclass('public.pr1078_tx_probe') IS NULL,
+  'an outer rollback after including the migration left the probe table');
+END $c$;

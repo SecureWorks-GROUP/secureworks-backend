@@ -7,8 +7,11 @@
 -- transition with no evidence was evidence_missing, so an open item could not gain the review.
 --
 -- What it does:
---  1. context_ledger_items.person_review jsonb, nullable. Null is no review. An object is
---     {sentence, source_line_id, reason, raised_at} with reason claimed_closed_unverified.
+--  1. context_ledger_items.person_review jsonb, nullable. Null is no review. A stored
+--     review is {sentence, source_line_id, reason, raised_at}: sentence 1 to 600,
+--     reason claimed_closed_unverified, raised_at a timestamp.
+--     context_ledger_person_review_ok is that check. An empty object, a missing
+--     raised_at and a non-timestamp raised_at are not a review.
 --  2. context_ledger_person_review normalises the wire value. The reader sends a sentence string
 --     on a new item; that becomes the object. An object is accepted. JSON null is no review.
 --     Omitted is left alone. The item check returns the key only when the review is an object, so
@@ -20,11 +23,12 @@
 --     stays; JSON null clears a review that is set.
 --  4. context_job_story_ledger projects the object only when it is set.
 --  5. context_job_story_assemble sets an unattached ledger loop's source to person_review and its
---     rule to claimed_closed_unverified when the item carries one, and clears that loop's
---     customer_waiting and money so the open-loop wait score leaves it out. A money record loop
---     (R8, R1, M1, R2, R3) clears money only when every open ledger item attached to it carries a
---     review. A genuine money loop with no attachment, or with an attachment that has no review,
---     stays a leading money loop. An open request with no review stays source ledger, rule request.
+--     rule to claimed_closed_unverified when the item carries a valid review
+--     (context_ledger_person_review_ok), and clears that loop's customer_waiting and money so
+--     the open-loop wait score leaves it out. A money record loop (R8, R1, M1, R2, R3) clears
+--     money only when every open ledger item attached to it carries a valid review. A genuine
+--     money loop with no attachment, or with an attachment that is not a valid review, stays a
+--     leading money loop. An open request with no valid review stays source ledger, rule request.
 --     Item status is not changed.
 --
 -- What it does not do. context_ledger_packet is not replaced (a separate change owns it).
@@ -35,9 +39,12 @@
 -- Replaced bodies (each guarded on its live md5): context_ledger_check_item (20261015100000),
 --   context_ledger_write (20261007150000), context_job_story_assemble (20261011120000),
 --   context_job_story_ledger (20261015100000).
--- Added: column context_ledger_items.person_review, context_ledger_person_review.
+-- Added: column context_ledger_items.person_review, context_ledger_person_review,
+--   context_ledger_person_review_ok.
 -- Rollback: supabase/rollbacks/20261019120000_context_ledger_person_review_down.sql.
-BEGIN;
+-- The caller opens the transaction (the deploy runner, or a contract \ir). SET LOCAL
+-- then applies, as in the other context migrations. This file has no BEGIN/COMMIT:
+-- the deploy script refuses them, and a COMMIT would commit the caller's transaction.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
@@ -48,7 +55,7 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['af976e59b8e6f35612d6383042d6e38e', '3880b68edb0806ad5c5c448b24d54c15']),
   ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['6da1007ff2a6331219f4d98f85749ca7', '3a9296d13a6543d2b4eecc11a5a469fb']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['209d903df7a8732b4773dee0f0741593', 'ba128c21e9d646168343bf57cdb92c16']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['209d903df7a8732b4773dee0f0741593', '74c2b3fb592cc6a53ff5499170b9ef7a']),
   ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['09d28c282caf22c873f5673d7dd8073f', '4e5cf782723cc108d161acfaeaada6ee'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
@@ -68,7 +75,59 @@ BEGIN
  END IF;
 END $guard$;
 
--- 1. The column. Null is no review. The check is the stored shape, not the wire shape.
+-- 1. The stored-shape check. Always true or false, so a missing key cannot pass as NULL.
+--    The normaliser still accepts a wire value with no raised_at and fills one; a row
+--    stores the object it wrote, which always has a timestamp.
+CREATE OR REPLACE FUNCTION public.context_ledger_person_review_ok(p_review jsonb)
+ RETURNS boolean
+ LANGUAGE plpgsql
+ STABLE
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE v_raised timestamptz;
+BEGIN
+ IF p_review IS NULL OR jsonb_typeof(p_review) IS DISTINCT FROM 'object' THEN
+  RETURN false;
+ END IF;
+ IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_review) k
+            WHERE k NOT IN ('sentence', 'source_line_id', 'reason', 'raised_at')) THEN
+  RETURN false;
+ END IF;
+ IF jsonb_typeof(p_review -> 'sentence') IS DISTINCT FROM 'string'
+  OR length(btrim(p_review ->> 'sentence')) NOT BETWEEN 1 AND 600 THEN
+  RETURN false;
+ END IF;
+ IF p_review ? 'source_line_id' THEN
+  IF jsonb_typeof(p_review -> 'source_line_id') = 'null' THEN
+   NULL;
+  ELSIF jsonb_typeof(p_review -> 'source_line_id') IS DISTINCT FROM 'string'
+   OR length(btrim(p_review ->> 'source_line_id')) NOT BETWEEN 1 AND 200 THEN
+   RETURN false;
+  END IF;
+ END IF;
+ IF jsonb_typeof(p_review -> 'reason') IS DISTINCT FROM 'string'
+  OR p_review ->> 'reason' IS DISTINCT FROM 'claimed_closed_unverified' THEN
+  RETURN false;
+ END IF;
+ IF jsonb_typeof(p_review -> 'raised_at') IS DISTINCT FROM 'string'
+  OR nullif(btrim(p_review ->> 'raised_at'), '') IS NULL THEN
+  RETURN false;
+ END IF;
+ BEGIN
+  v_raised := (p_review ->> 'raised_at')::timestamptz;
+ EXCEPTION WHEN OTHERS THEN
+  RETURN false;
+ END;
+ RETURN v_raised IS NOT NULL;
+END $function$;
+COMMENT ON FUNCTION public.context_ledger_person_review_ok(jsonb) IS
+ 'Person review (20261018120000): true only for a stored person_review object. Sentence 1 to 600, source_line_id absent or null or 1 to 200, reason claimed_closed_unverified, raised_at a timestamp. An empty object, a missing raised_at and a non-timestamp raised_at are false. Never null. (person review, 20261018120000).';
+
+REVOKE ALL ON FUNCTION public.context_ledger_person_review_ok(jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.context_ledger_person_review_ok(jsonb) TO service_role;
+
+-- The column. Null is no review. The check is the stored shape, not the wire shape.
 ALTER TABLE public.context_ledger_items
  ADD COLUMN IF NOT EXISTS person_review jsonb;
 
@@ -77,30 +136,10 @@ ALTER TABLE public.context_ledger_items
  DROP CONSTRAINT IF EXISTS context_ledger_items_person_review_check;
 ALTER TABLE public.context_ledger_items
  ADD CONSTRAINT context_ledger_items_person_review_check
- CHECK (
-  person_review IS NULL
-  OR (
-   jsonb_typeof(person_review) = 'object'
-   AND (person_review - 'sentence' - 'source_line_id' - 'reason' - 'raised_at') = '{}'::jsonb
-   AND jsonb_typeof(person_review -> 'sentence') = 'string'
-   AND length(btrim(person_review ->> 'sentence')) BETWEEN 1 AND 600
-   AND (
-    NOT (person_review ? 'source_line_id')
-    OR jsonb_typeof(person_review -> 'source_line_id') = 'null'
-    OR (
-     jsonb_typeof(person_review -> 'source_line_id') = 'string'
-     AND length(btrim(person_review ->> 'source_line_id')) BETWEEN 1 AND 200
-    )
-   )
-   AND jsonb_typeof(person_review -> 'reason') = 'string'
-   AND person_review ->> 'reason' = 'claimed_closed_unverified'
-   AND jsonb_typeof(person_review -> 'raised_at') = 'string'
-   AND length(btrim(person_review ->> 'raised_at')) > 0
-  )
- );
+ CHECK (person_review IS NULL OR public.context_ledger_person_review_ok(person_review));
 
 COMMENT ON COLUMN public.context_ledger_items.person_review IS
- 'Person review (20261018120000): a claimed close the reader could not verify. Null when none. Object {sentence, source_line_id, reason, raised_at}; reason is claimed_closed_unverified. Set on insert or by a transition. (person review, 20261018120000).';
+ 'Person review (20261018120000): a claimed close the reader could not verify. Null when none. Object {sentence, source_line_id, reason, raised_at}; reason is claimed_closed_unverified and raised_at is a timestamp (context_ledger_person_review_ok). Set on insert or by a transition. (person review, 20261018120000).';
 
 -- 2. The normaliser. Does not RAISE: the item check returns its refusal as jsonb.
 CREATE OR REPLACE FUNCTION public.context_ledger_person_review(p_value jsonb, p_raised_at timestamptz DEFAULT NULL)
@@ -1138,7 +1177,8 @@ AS $fn$
    CASE WHEN r.owner_role IN ('us', 'crew') THEN 'us' WHEN r.owner_role IN ('customer', 'insurer_builder') THEN 'customer'
         WHEN r.owner_role IN ('supplier', 'third_party') THEN 'third_party' ELSE 'unknown' END AS owner,
    CASE WHEN r.counter_role IN ('us', 'crew') THEN 'us' WHEN r.counter_role IN ('customer', 'insurer_builder') THEN 'customer'
-        WHEN r.counter_role IN ('supplier', 'third_party') THEN 'third_party' ELSE 'unknown' END AS counterparty
+        WHEN r.counter_role IN ('supplier', 'third_party') THEN 'third_party' ELSE 'unknown' END AS counterparty,
+   public.context_ledger_person_review_ok(r.person_review) AS reviewed
   FROM lrole r
  ),
  loops0 AS (
@@ -1179,13 +1219,13 @@ AS $fn$
          g.about_key, g.amount,
          (g.rule IN ('R4_missed_call', 'R5_customer_wrote_last', 'C11_customer_mail_unanswered')) AS customer_waiting,
          -- (person review, 20261018120000) money clears only when at least one open item is
-         -- attached and every one of them carries a review. None attached, or one without a
-         -- review, leaves a genuine money loop leading.
+         -- attached and every one of them carries a valid review. None attached, or one that
+         -- is not a valid review, leaves a genuine money loop leading.
          (g.rule IN ('R1_overdue', 'M1_money_due', 'R2_part_paid', 'R3_draft', 'R8_not_yet_invoiced')
           AND NOT (
            EXISTS (SELECT 1 FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key)
            AND NOT EXISTS (SELECT 1 FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key
-                           WHERE jsonb_typeof(n.person_review) IS DISTINCT FROM 'object'))) AS money,
+                           WHERE NOT n.reviewed))) AS money,
          (g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL OR ph0.reopened IS NOT NULL FROM ph0)) AS not_due,
          -- held: not the move now (not due yet, or unconfirmed)
          (g.rule = 'R8_not_yet_invoiced' AND ((SELECT ph0.work_done_at IS NULL OR ph0.reopened IS NOT NULL FROM ph0) OR g.amount IS NULL)) AS held,
@@ -1193,13 +1233,13 @@ AS $fn$
   FROM recg g
   UNION ALL
   -- ledger loops not attached to a record loop
-  -- (person review, 20261018120000) an unattached ledger loop that carries a review is a person
-  -- review, and its customer_waiting and money are clear, so the open-loop wait score leaves it
-  -- out. A loop with none is as before.
+  -- (person review, 20261018120000) an unattached ledger loop that carries a valid review is a
+  -- person review, and its customer_waiting and money are clear, so the open-loop wait score
+  -- leaves it out. A loop with none, or with an object that is not a valid review, is as before.
   SELECT n.item_key,
-         CASE WHEN jsonb_typeof(n.person_review) = 'object' THEN 'person_review'
+         CASE WHEN n.reviewed THEN 'person_review'
               WHEN n.written_by LIKE 'person:%' THEN 'person' ELSE 'ledger' END,
-         CASE WHEN jsonb_typeof(n.person_review) = 'object' THEN 'claimed_closed_unverified' ELSE n.item_type END,
+         CASE WHEN n.reviewed THEN 'claimed_closed_unverified' ELSE n.item_type END,
          n.owner, n.owner_name,
          n.counterparty, n.what, coalesce('"' || left(n.excerpt, 200) || '"', NULL), n.opened_at, n.due_date,
          CASE WHEN n.closing IS NOT NULL THEN 'closing_evidence' ELSE 'open' END,
@@ -1209,9 +1249,9 @@ AS $fn$
               WHEN 'visit' THEN 'The visit happens' WHEN 'work_done' THEN 'The work is done' WHEN 'record' THEN 'A record shows it done'
               WHEN 'person' THEN 'A person closes it' ELSE 'Words or a record that show it done' END,
          nullif(n.blocks, 'none'), n.closing, coalesce(n.cites, '[]'::jsonb), n.about_key, NULL::numeric,
-         (jsonb_typeof(n.person_review) IS DISTINCT FROM 'object'
+         (NOT n.reviewed
           AND n.owner = 'us' AND n.counterparty = 'customer' AND (coalesce(n.needs_reply, false) OR n.item_type = 'request')),
-         (jsonb_typeof(n.person_review) IS DISTINCT FROM 'object'
+         (NOT n.reviewed
           AND (n.blocks IN ('payment', 'deposit') OR n.about_key LIKE 'invoice:%' OR n.about_key LIKE 'payment:%')),
          false, false,
          -- (story settled notes) opened only on the customer's words
@@ -1993,7 +2033,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) IS
- 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009133000) (story lead rank, 20261011100000) (story settled notes, 20261011120000) (person review, 20261018120000) an unattached ledger loop whose item carries person_review has source person_review and rule claimed_closed_unverified, and that loop''s customer_waiting and money are clear so the open-loop wait score leaves it out; a money record loop (R1, M1, R2, R3, R8) clears money only when every open ledger item attached to it carries a review, and a money record loop with no such item, or with one that has no review, is unchanged; an open request with no review is unchanged. Item status is not changed. Earlier, agreements, events and phase notes are newest first (items of one instant still by item key in C order); settled lists the notes the reader closed, declined or superseded and disputed the ones it found disputed, newest first, each with its status, when it settled or was disputed (the item''s closed_at, else the newest ledger transition the reader judged into that status: never its writing or a rebuild''s carry-forward), what settled it (closed_by: the item''s closing rows, else that transition''s evidence; reason: the reader''s; replaced_by: the item that supersedes it) or why it is disputed, and customer_reported; an event citing only call logs whose transcripts are on the job (meta call_transcripts, call row id to transcript id, from the story read) is not shown (meta.call_log_events_hidden counts them; meta.calls_with_transcript counts the pairs passed in); every loop carries customer_reported, true only on an issue or claim every opening row of which is the customer''s (its own stamp, else the citation check''s); and a job at install on a passed booking nobody marked, with an open completion-stage note (blocks completion, or phase complete or rectification) opened on or after that day, reads "Installed per messages; attendance not marked for <day>" ("Attended per messages" on builder work: a make-safe, repair or insurance job) (now.installed_per_messages true; the phase stays install). Nothing is closed, opened or written, and every loop stays. Earlier (story lead rank) the open loops that may lead the line rank first and the top item is one of them within the party whose move it is: a held loop never leads; of the open loops on one object (about_key) only the newest may lead; a loop that blocks an earlier stage (quote, acceptance, deposit, booking, install, completion, payment) than a newer open loop blocks never leads. Every loop stays in the list with its status (nothing is closed, hidden or written), whose move is unchanged, and the party still comes first, so when every loop of the party whose move it is may not lead, its best-ranked loop is still the top; a loop overtaken by a newer open loop at a later stage leaves now.blockers (it stays a loop, open, with its blocks); and the newest standing agreement (modality agreed, status open or info), made in the 14 days up to as_of and after every open loop that may lead of the party whose move it is (of every party while that is unclear), is the latest agreed position: the first line says it right after the phase ("Latest agreement <day>: ...", cut at a word at 160 characters), next is it unless a visit is booked (kind agreement), now.latest_agreement names it and now.cites carries its citations. Earlier (scoping pipeline) only a lead the rule calls not followed up (record lead state not_followed_up, or a lead row with no state, as before) is off: a draft the rule does not monitor (state draft_quiet or draft_no_activity) keeps its line, whose move and the off-job messages it names, and now.monitored is the rule''s own answer (false for such a draft, true when no lead is passed in); the lead words and the start of the window the off-job check uses are the job''s own window (context_lead_window_hours: "6 weeks" on a patio job, else "4 weeks"). Earlier (lead cutoff) a lead no longer followed up (record lead, from context_lead_monitored_jobs: still at quoted with no progress 28 days after the newer of its newest quote send and the customer''s newest text, email or call, wherever it is placed, so every customer contact the line names is one the rule counts) is never the customer''s move: whose_move not_followed_up, and the first line says "Lead not followed up since <day>: 4 weeks after the last quote or message with no progress" in place of whose move, then the item still open on it unless that is the quote waiting on the customer (whose own words end the same); on such a lead an off-job message newer than the start of its 4 weeks (meta off_job, unplaced, withheld_mail) is never named as the customer''s, since the rule counted every one of theirs (such a message is mail from one of our own addresses entered as the client''s); now.monitored and now.not_followed_up_since say so (true and null when the record carries no lead, as for any caller of the pure assembler). Earlier (ninth review) on builder work the job''s CRM contact and client email are the insured''s only when the make-safe details name the builder (facts.builder) and meta contact_shared says none of the job''s contact details (CRM contact, client phone, client email) sits on another client''s job; otherwise (a contact shared across clients, a builder''s or an agent''s, no builder named, or the meta silent) the line calls their messages the job contact''s ("the job contact''s newest message", "the job contact wrote last"), they hold the builder''s move as the customer''s messages do, who gives the insured no shared contact, and not_known says the contact details are on another client''s job. Earlier (eighth review) an off-job message changes the move only of what its sender owes: the customer''s own items on private work, never a neighbour''s or another payer''s, and never on builder work while the job''s CRM contact and client email are the insured''s (the line names them "the insured") and the builder owes; the customer''s newest message on the job (a text, an email, an answered call or a call recording) that no finished reading has read makes whose move unclear over the top item they or another party owe from before it, named with our last reply; a reading with an item hidden gives no all-clear and says how many are hidden; the contact facts also take meta off_job (their rows on their other jobs and on bucket jobs, their email by address with no CRM contact), where each sits named; a newer message off the job is named after the customer wrote last; a draft shown as an R3 check is said in the first line and the money line to maybe duplicate issued invoices. Earlier (seventh review) whose move is unclear while the customer''s newest message is off the job and newer than the opening of the top item they or another party owe, and the line names that message, where it sits and that the reader has not checked it, with our last reply (one older than that item leaves its move standing); the phase reads a job the job value calls accepted (facts.accepted: the job row''s acceptance, an accepted quote or a paid deposit invoice) as at least accepted, since then, and processing on work other than a make-safe as accepted once it is; not_known says the mail shown from the old inbox has its saved copy on no job or on an archived or holding job (a copy on a live job takes the mail off this job). Earlier (sixth review) a job in rectification now has no work done (the final invoice is not due, said so), and the final invoice is not due either while work recorded finished was opened again since (facts.reopened: a status change into rectification or a make-safe re-attend, nothing recording it finished since); a quote waiting (R7) is a check once the work is done; a reading that has read every row on the job gives no all-clear while the customer''s newest message is off the job (meta unplaced newest_customer_at or withheld_mail newest_at newer than every customer message on the job): whose move is unknown and the line names that message, where it sits, and that the reader has not checked it; the first line and the money line name what this job''s own Xero contact owes on invoices placed on no job (meta unplaced_invoices; money.placed_on_no_job), never counting them in owing; not_known names texts whose CRM time is no longer kept. Earlier: until a finished reading shown (live or retired, or a shadow the story shows only when asked for it by id, so a grade reads the line a promotion gives; never a building or failed one) has read every row on the job (none unread), nothing open on record is never nobody''s move: whose_move unknown, the first line says "Whose move is unclear:" first, then that no record item is open (or due yet) and the messages are not yet checked for promises or requests (a reading that lags: how many newer messages, calls, notes or documents, ours included, it has not checked), with the newest customer message and our last reply, of the job''s own, this customer''s messages placed on no job yet and their withheld mail, naming where the newest sits (with neither anywhere it says so and claims nothing unchecked); with no finished reading handling.commitments is null, and only a finished reading judges a customer message; work is done only on a completion status, a completion record (facts.completion) or a report pack sent, never because the newest booking is complete; a final invoice (R8) before the work is done is not due (loop status not_due), and after it with the job value unconfirmed (C2, no amount) it is unconfirmed (status unconfirmed): either ranks last and is never the move or the first line''s item; a value another record disagrees with (C2) states no amount left to invoice; a quote the customer was in touch about since it was sent, in a way that does not close it (R7 owner unknown), makes whose move unclear and is the item the first line names; the first line''s item is cut at a word (200 characters); the customer''s unread words are "not yet checked by the reader"; the first line names each invoice owing with its due date, who owes it ("owed by") with their role whenever a neighbour or another payer owes it (whatever the move: its payer role, else its R1, R2 or M1 loop''s owner), and each payer when more than one owes, a passed booking with no attendance, a quote declined and the newest unread customer words (R5, C11, C6); the first line names the top loop of the party whose move it is, never another party''s (the customer''s move never names a neighbour''s invoice); a quote waiting reads as waiting on the customer; another party''s invoice reads as another payer owing; on builder work the builder is the customer and the homeowner the insured; not_known names mail shown from the old inbox and texts dated before the job. Earlier, story fixes: every text sort and tiebreak that reaches the output is in C (byte) order (who, money parties, loops and their rank, cites, checks, timeline, phase notes, agreements, events, not known, changes, blockers), so the story reads the same on every server whatever the input order. Earlier: the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
+ 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009133000) (story lead rank, 20261011100000) (story settled notes, 20261011120000) (person review, 20261018120000) an unattached ledger loop whose item carries a valid person_review (context_ledger_person_review_ok) has source person_review and rule claimed_closed_unverified, and that loop''s customer_waiting and money are clear so the open-loop wait score leaves it out; a money record loop (R1, M1, R2, R3, R8) clears money only when every open ledger item attached to it carries a valid review, and a money record loop with no such item, or with one that is not a valid review, is unchanged; an open request with no valid review is unchanged. Item status is not changed. Earlier, agreements, events and phase notes are newest first (items of one instant still by item key in C order); settled lists the notes the reader closed, declined or superseded and disputed the ones it found disputed, newest first, each with its status, when it settled or was disputed (the item''s closed_at, else the newest ledger transition the reader judged into that status: never its writing or a rebuild''s carry-forward), what settled it (closed_by: the item''s closing rows, else that transition''s evidence; reason: the reader''s; replaced_by: the item that supersedes it) or why it is disputed, and customer_reported; an event citing only call logs whose transcripts are on the job (meta call_transcripts, call row id to transcript id, from the story read) is not shown (meta.call_log_events_hidden counts them; meta.calls_with_transcript counts the pairs passed in); every loop carries customer_reported, true only on an issue or claim every opening row of which is the customer''s (its own stamp, else the citation check''s); and a job at install on a passed booking nobody marked, with an open completion-stage note (blocks completion, or phase complete or rectification) opened on or after that day, reads "Installed per messages; attendance not marked for <day>" ("Attended per messages" on builder work: a make-safe, repair or insurance job) (now.installed_per_messages true; the phase stays install). Nothing is closed, opened or written, and every loop stays. Earlier (story lead rank) the open loops that may lead the line rank first and the top item is one of them within the party whose move it is: a held loop never leads; of the open loops on one object (about_key) only the newest may lead; a loop that blocks an earlier stage (quote, acceptance, deposit, booking, install, completion, payment) than a newer open loop blocks never leads. Every loop stays in the list with its status (nothing is closed, hidden or written), whose move is unchanged, and the party still comes first, so when every loop of the party whose move it is may not lead, its best-ranked loop is still the top; a loop overtaken by a newer open loop at a later stage leaves now.blockers (it stays a loop, open, with its blocks); and the newest standing agreement (modality agreed, status open or info), made in the 14 days up to as_of and after every open loop that may lead of the party whose move it is (of every party while that is unclear), is the latest agreed position: the first line says it right after the phase ("Latest agreement <day>: ...", cut at a word at 160 characters), next is it unless a visit is booked (kind agreement), now.latest_agreement names it and now.cites carries its citations. Earlier (scoping pipeline) only a lead the rule calls not followed up (record lead state not_followed_up, or a lead row with no state, as before) is off: a draft the rule does not monitor (state draft_quiet or draft_no_activity) keeps its line, whose move and the off-job messages it names, and now.monitored is the rule''s own answer (false for such a draft, true when no lead is passed in); the lead words and the start of the window the off-job check uses are the job''s own window (context_lead_window_hours: "6 weeks" on a patio job, else "4 weeks"). Earlier (lead cutoff) a lead no longer followed up (record lead, from context_lead_monitored_jobs: still at quoted with no progress 28 days after the newer of its newest quote send and the customer''s newest text, email or call, wherever it is placed, so every customer contact the line names is one the rule counts) is never the customer''s move: whose_move not_followed_up, and the first line says "Lead not followed up since <day>: 4 weeks after the last quote or message with no progress" in place of whose move, then the item still open on it unless that is the quote waiting on the customer (whose own words end the same); on such a lead an off-job message newer than the start of its 4 weeks (meta off_job, unplaced, withheld_mail) is never named as the customer''s, since the rule counted every one of theirs (such a message is mail from one of our own addresses entered as the client''s); now.monitored and now.not_followed_up_since say so (true and null when the record carries no lead, as for any caller of the pure assembler). Earlier (ninth review) on builder work the job''s CRM contact and client email are the insured''s only when the make-safe details name the builder (facts.builder) and meta contact_shared says none of the job''s contact details (CRM contact, client phone, client email) sits on another client''s job; otherwise (a contact shared across clients, a builder''s or an agent''s, no builder named, or the meta silent) the line calls their messages the job contact''s ("the job contact''s newest message", "the job contact wrote last"), they hold the builder''s move as the customer''s messages do, who gives the insured no shared contact, and not_known says the contact details are on another client''s job. Earlier (eighth review) an off-job message changes the move only of what its sender owes: the customer''s own items on private work, never a neighbour''s or another payer''s, and never on builder work while the job''s CRM contact and client email are the insured''s (the line names them "the insured") and the builder owes; the customer''s newest message on the job (a text, an email, an answered call or a call recording) that no finished reading has read makes whose move unclear over the top item they or another party owe from before it, named with our last reply; a reading with an item hidden gives no all-clear and says how many are hidden; the contact facts also take meta off_job (their rows on their other jobs and on bucket jobs, their email by address with no CRM contact), where each sits named; a newer message off the job is named after the customer wrote last; a draft shown as an R3 check is said in the first line and the money line to maybe duplicate issued invoices. Earlier (seventh review) whose move is unclear while the customer''s newest message is off the job and newer than the opening of the top item they or another party owe, and the line names that message, where it sits and that the reader has not checked it, with our last reply (one older than that item leaves its move standing); the phase reads a job the job value calls accepted (facts.accepted: the job row''s acceptance, an accepted quote or a paid deposit invoice) as at least accepted, since then, and processing on work other than a make-safe as accepted once it is; not_known says the mail shown from the old inbox has its saved copy on no job or on an archived or holding job (a copy on a live job takes the mail off this job). Earlier (sixth review) a job in rectification now has no work done (the final invoice is not due, said so), and the final invoice is not due either while work recorded finished was opened again since (facts.reopened: a status change into rectification or a make-safe re-attend, nothing recording it finished since); a quote waiting (R7) is a check once the work is done; a reading that has read every row on the job gives no all-clear while the customer''s newest message is off the job (meta unplaced newest_customer_at or withheld_mail newest_at newer than every customer message on the job): whose move is unknown and the line names that message, where it sits, and that the reader has not checked it; the first line and the money line name what this job''s own Xero contact owes on invoices placed on no job (meta unplaced_invoices; money.placed_on_no_job), never counting them in owing; not_known names texts whose CRM time is no longer kept. Earlier: until a finished reading shown (live or retired, or a shadow the story shows only when asked for it by id, so a grade reads the line a promotion gives; never a building or failed one) has read every row on the job (none unread), nothing open on record is never nobody''s move: whose_move unknown, the first line says "Whose move is unclear:" first, then that no record item is open (or due yet) and the messages are not yet checked for promises or requests (a reading that lags: how many newer messages, calls, notes or documents, ours included, it has not checked), with the newest customer message and our last reply, of the job''s own, this customer''s messages placed on no job yet and their withheld mail, naming where the newest sits (with neither anywhere it says so and claims nothing unchecked); with no finished reading handling.commitments is null, and only a finished reading judges a customer message; work is done only on a completion status, a completion record (facts.completion) or a report pack sent, never because the newest booking is complete; a final invoice (R8) before the work is done is not due (loop status not_due), and after it with the job value unconfirmed (C2, no amount) it is unconfirmed (status unconfirmed): either ranks last and is never the move or the first line''s item; a value another record disagrees with (C2) states no amount left to invoice; a quote the customer was in touch about since it was sent, in a way that does not close it (R7 owner unknown), makes whose move unclear and is the item the first line names; the first line''s item is cut at a word (200 characters); the customer''s unread words are "not yet checked by the reader"; the first line names each invoice owing with its due date, who owes it ("owed by") with their role whenever a neighbour or another payer owes it (whatever the move: its payer role, else its R1, R2 or M1 loop''s owner), and each payer when more than one owes, a passed booking with no attendance, a quote declined and the newest unread customer words (R5, C11, C6); the first line names the top loop of the party whose move it is, never another party''s (the customer''s move never names a neighbour''s invoice); a quote waiting reads as waiting on the customer; another party''s invoice reads as another payer owing; on builder work the builder is the customer and the homeowner the insured; not_known names mail shown from the old inbox and texts dated before the job. Earlier, story fixes: every text sort and tiebreak that reaches the output is in C (byte) order (who, money parties, loops and their rank, cites, checks, timeline, phase notes, agreements, events, not known, changes, blockers), so the story reads the same on every server whatever the input order. Earlier: the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
 
 -- 6. context_job_story_ledger
 CREATE OR REPLACE FUNCTION public.context_job_story_ledger(p_job_id uuid, p_generation_id uuid DEFAULT NULL::uuid, p_as_of timestamp with time zone DEFAULT now())
@@ -2142,5 +2182,3 @@ AS $function$
 $function$;
 COMMENT ON FUNCTION public.context_job_story_ledger(uuid,uuid,timestamptz) IS
  'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (notes freshness, 20261009132000) unread_rows and unread_ids read the ledger''s one rule (context_ledger_row_unread), as the judge, the due order and the go-live sweep do: a row of the store''s evidence that is not automated (a workflow text, a crew or staff template) and landed after the shown generation''s evidence_until, so an automated message alone never makes meta.ledger.stale true or puts the not-known line about newer messages on the card, and every other row the notes have not read does. Earlier (eighth review) each stored citation is re-checked by the citation check''s current rules (context_ledger_cite), so an item citing a row that is no longer this job''s evidence carries cites_ok false (the story hides it and asks for a rebuild; the judge raises citation_moved): a business_events row also needs, when it is a CRM text loaded from the cache (ghl_sms_cache_backfill), its CRM time kept and not more than 30 days before the job was created; an inbox_events mail must be placed on this job, or come from the client''s address on no job (the client with no other job, from 30 days before the job on), be worded, not spam, a newsletter or an auto-reply, with no saved copy on this job or on another live job (the judge''s live set: never archived, complete, completed, cancelled, lost, a draft or holding) by its source pointer, graph key or payload pointer, and no email on this job from its sender at its instant; and the check is never unknown (a cited row moved to no job, or with no attribution status, read as passing when the check came out null, is not this job''s evidence either, as the judge already said). Earlier, story fixes: items tie on opened_at by item_key in C (byte) order. Earlier: the ledger generation the story shows (the one live at p_as_of, or the one asked for in any status) with the items written by p_as_of, each at its status then, and the transitions by then; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; read_ids: the inbound evidence rows it has read (landed by its evidence_until), so a customer message is called judged only when the reader read it; all three null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only. Held notes (20261015100000): a not-certain item''s opening citation of a message still held for this job (context_ledger_held_citable as of p_as_of) is ok and carries held true; such an item carries job_certain false and certainty job_not_certain, and its what starts "Job not certain: ". When the message is later placed on this job the item reads as certain; placed on another job, the citation is not ok, the item is hidden and the judge asks for a rebuild, which drops it. No key changes for any other item. Person review (20261018120000): an item whose person_review is set carries that object; a null review adds no key. (person review, 20261018120000).';
-
-COMMIT;
