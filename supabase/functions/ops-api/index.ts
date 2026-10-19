@@ -1388,6 +1388,7 @@ import {
   runJobCloseoutAction,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
@@ -26506,6 +26507,10 @@ async function submitMakesafeReport(
       eventSync = { ok: false, error: err instanceof Error ? err.message : String(err) }
       warnings.push('event_sync_failed')
     }
+    // Context evidence: the crew's report words on this job, through
+    // capture_business_event only. Best effort, after every durable write; it
+    // never throws and never changes this response (trade_report_evidence.ts).
+    await captureTradeReportEvidence(client, report)
   }
 
   const isOffice = opts?.isOffice === true
@@ -44681,6 +44686,9 @@ async function submitServiceReport(
     } catch (e) {
       console.log('[ops-api] GHL stage move lookup failed (non-blocking):', e)
     }
+
+    // Context evidence (best effort, never throws): trade_report_evidence.ts.
+    await captureTradeReportEvidence(client, report)
   }
 
   return { report: presentTradeServiceReport(report, quoteVisible) }
