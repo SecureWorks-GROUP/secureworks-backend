@@ -65,4 +65,18 @@ BEGIN
                     OR obj_description(p.oid, 'pg_proc') LIKE 'SQ-23 remedy:%')) THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: a function of this migration remains, in some overload or renamed';
  END IF;
+ -- Found by shape, in any schema, whatever its name or comment (checker mutants m21c, m22,
+ -- m24): a relation carrying the attempt table's own columns, and a function whose body
+ -- reads the resolutions table (only the gap read does).
+ IF EXISTS (SELECT 1 FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+               AND a.attname IN ('handler_finished_at', 'handler_issues') AND NOT a.attisdropped) THEN
+  RAISE EXCEPTION 'quote accept atomic rollback contract: a relation shaped like the attempt table remains, in some schema or name';
+ END IF;
+ IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND p.prosrc LIKE '%quote\_acceptance\_gap\_resolutions%' ESCAPE '\') THEN
+  RAISE EXCEPTION 'quote accept atomic rollback contract: a function reading the resolutions table remains, in some schema or name';
+ END IF;
 END $$;
