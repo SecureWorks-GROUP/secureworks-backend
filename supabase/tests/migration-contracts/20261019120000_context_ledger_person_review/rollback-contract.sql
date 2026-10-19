@@ -29,4 +29,41 @@ BEGIN
                AND conrelid = 'public.context_ledger_items'::regclass) THEN
   RAISE EXCEPTION 'person review rollback: the column or its check is still there';
  END IF;
+ IF to_regprocedure('public.context_ledger_person_review_guard()') IS NOT NULL THEN
+  RAISE EXCEPTION 'person review rollback: the future-raised guard is still there';
+ END IF;
+ IF EXISTS (SELECT 1 FROM pg_trigger
+            WHERE tgname = 'context_ledger_items_person_review_guard'
+              AND tgrelid = 'public.context_ledger_items'::regclass AND NOT tgisinternal) THEN
+  RAISE EXCEPTION 'person review rollback: the person_review trigger is still there';
+ END IF;
+ IF to_regclass('public.context_ledger_person_review_archive') IS NULL THEN
+  RAISE EXCEPTION 'person review rollback: the archive table is missing';
+ END IF;
+ IF has_table_privilege('anon', 'public.context_ledger_person_review_archive', 'SELECT')
+  OR has_table_privilege('authenticated', 'public.context_ledger_person_review_archive', 'SELECT') THEN
+  RAISE EXCEPTION 'person review rollback: the archive is readable by anon or authenticated';
+ END IF;
+ IF coalesce(obj_description('public.context_ledger_person_review_archive'::regclass, 'pg_class'), '')
+    NOT LIKE '%(person review, 20261018120000)%' THEN
+  RAISE EXCEPTION 'person review rollback: the archive comment is missing the marker';
+ END IF;
+END $c$;
+
+-- A second down leaves the archive, including a row already in it.
+INSERT INTO public.context_ledger_person_review_archive
+ (item_id, job_id, generation_id, item_key, person_review)
+VALUES ('8f000000-0000-4000-8000-000000000196', '8f000000-0000-4000-8000-000000000196',
+ '8f000000-0000-4000-8000-000000000196', 'request:invoice:final:kept',
+ '{"sentence":"kept","source_line_id":null,"reason":"claimed_closed_unverified","raised_at":"2026-10-10T01:00:00+00:00"}');
+\ir ../../../rollbacks/20261019120000_context_ledger_person_review_down.sql
+DO $c$
+BEGIN
+ IF (SELECT count(*) FROM public.context_ledger_person_review_archive
+     WHERE item_id = '8f000000-0000-4000-8000-000000000196') <> 1 THEN
+  RAISE EXCEPTION 'person review rollback: a second down did not keep the archived review';
+ END IF;
+ IF to_regclass('public.context_ledger_person_review_archive') IS NULL THEN
+  RAISE EXCEPTION 'person review rollback: a second down dropped the archive';
+ END IF;
 END $c$;

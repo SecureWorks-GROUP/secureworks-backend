@@ -1,16 +1,17 @@
 -- Person review (18 Oct 2026) down.
--- Restores the four bodies this migration replaced, word for word, then drops the column, the
--- normaliser and the stored-shape check. Accepts this migration's bodies or the ones it replaced
--- (a second run). Refuses any other body: a later replacement has to roll this back while its own
--- bodies are still live.
+-- Restores the four bodies this migration replaced, word for word, copies any stored
+-- person_review into context_ledger_person_review_archive, then drops the column, the trigger,
+-- the normaliser and the stored-shape check. Accepts this migration's bodies or the ones it
+-- replaced (a second run, including after the column is already gone). Refuses any other body:
+-- a later replacement has to roll this back while its own bodies are still live.
 DO $guard$
 DECLARE problems text[] := '{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['3880b68edb0806ad5c5c448b24d54c15', 'af976e59b8e6f35612d6383042d6e38e']),
-  ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['3a9296d13a6543d2b4eecc11a5a469fb', '6da1007ff2a6331219f4d98f85749ca7']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['74c2b3fb592cc6a53ff5499170b9ef7a', '209d903df7a8732b4773dee0f0741593']),
-  ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['4e5cf782723cc108d161acfaeaada6ee', '09d28c282caf22c873f5673d7dd8073f'])
+  ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['a1391d76278839e1ad2ff0cfd08305cf', '3a9296d13a6543d2b4eecc11a5a469fb', '6da1007ff2a6331219f4d98f85749ca7']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['86870dff91163322bb98e1500f9648f3', '74c2b3fb592cc6a53ff5499170b9ef7a', '209d903df7a8732b4773dee0f0741593']),
+  ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['817453a22244213c2fd983f0dd4b6d66', '4e5cf782723cc108d161acfaeaada6ee', '09d28c282caf22c873f5673d7dd8073f'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
@@ -1938,6 +1939,34 @@ $function$;
 COMMENT ON FUNCTION public.context_job_story_ledger(uuid,uuid,timestamptz) IS
  'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (notes freshness, 20261009132000) unread_rows and unread_ids read the ledger''s one rule (context_ledger_row_unread), as the judge, the due order and the go-live sweep do: a row of the store''s evidence that is not automated (a workflow text, a crew or staff template) and landed after the shown generation''s evidence_until, so an automated message alone never makes meta.ledger.stale true or puts the not-known line about newer messages on the card, and every other row the notes have not read does. Earlier (eighth review) each stored citation is re-checked by the citation check''s current rules (context_ledger_cite), so an item citing a row that is no longer this job''s evidence carries cites_ok false (the story hides it and asks for a rebuild; the judge raises citation_moved): a business_events row also needs, when it is a CRM text loaded from the cache (ghl_sms_cache_backfill), its CRM time kept and not more than 30 days before the job was created; an inbox_events mail must be placed on this job, or come from the client''s address on no job (the client with no other job, from 30 days before the job on), be worded, not spam, a newsletter or an auto-reply, with no saved copy on this job or on another live job (the judge''s live set: never archived, complete, completed, cancelled, lost, a draft or holding) by its source pointer, graph key or payload pointer, and no email on this job from its sender at its instant; and the check is never unknown (a cited row moved to no job, or with no attribution status, read as passing when the check came out null, is not this job''s evidence either, as the judge already said). Earlier, story fixes: items tie on opened_at by item_key in C (byte) order. Earlier: the ledger generation the story shows (the one live at p_as_of, or the one asked for in any status) with the items written by p_as_of, each at its status then, and the transitions by then; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; read_ids: the inbound evidence rows it has read (landed by its evidence_until), so a customer message is called judged only when the reader read it; all three null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only. Held notes (20261015100000): a not-certain item''s opening citation of a message still held for this job (context_ledger_held_citable as of p_as_of) is ok and carries held true; such an item carries job_certain false and certainty job_not_certain, and its what starts "Job not certain: ". When the message is later placed on this job the item reads as certain; placed on another job, the citation is not ok, the item is hidden and the judge asks for a rebuild, which drops it. No key changes for any other item.';
 
+-- Keep the values. The column is about to go, and a second down finds it already gone.
+DO $archive$
+BEGIN
+ IF EXISTS (SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'context_ledger_items'
+              AND column_name = 'person_review') THEN
+  CREATE TABLE IF NOT EXISTS public.context_ledger_person_review_archive (
+   item_id uuid PRIMARY KEY,
+   job_id uuid NOT NULL,
+   generation_id uuid NOT NULL,
+   item_key text NOT NULL,
+   person_review jsonb NOT NULL,
+   archived_at timestamptz NOT NULL DEFAULT now()
+  );
+  EXECUTE $comment$COMMENT ON TABLE public.context_ledger_person_review_archive IS
+   'Person review (20261018120000): person_review values copied off context_ledger_items before that column is dropped. A second down leaves the table and its rows. (person review, 20261018120000).'$comment$;
+  INSERT INTO public.context_ledger_person_review_archive
+   (item_id, job_id, generation_id, item_key, person_review)
+  SELECT i.id, i.job_id, i.generation_id, i.item_key, i.person_review
+  FROM public.context_ledger_items i
+  WHERE i.person_review IS NOT NULL
+  ON CONFLICT (item_id) DO NOTHING;
+  EXECUTE 'REVOKE ALL ON TABLE public.context_ledger_person_review_archive FROM PUBLIC, anon, authenticated';
+ END IF;
+END $archive$;
+
+DROP TRIGGER IF EXISTS context_ledger_items_person_review_guard ON public.context_ledger_items;
+DROP FUNCTION IF EXISTS public.context_ledger_person_review_guard();
 ALTER TABLE public.context_ledger_items DROP COLUMN IF EXISTS person_review;
 DROP FUNCTION IF EXISTS public.context_ledger_person_review(jsonb, timestamptz);
 DROP FUNCTION IF EXISTS public.context_ledger_person_review_ok(jsonb);
