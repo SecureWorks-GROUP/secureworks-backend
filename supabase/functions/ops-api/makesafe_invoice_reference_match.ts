@@ -364,6 +364,7 @@ export function deriveSesUnlinkedInvoiceMatches(
   // Guard 4: same claim, different purchase order is other work.
   const survivors = uncontested.filter((match) => {
     const job = jobsById.get(match.job_id);
+    // A card missing from the index cannot be PO-checked; guard 5 holds it.
     if (!job || sesMatchPoRelation(job, match.invoice) !== "distinct_po") {
       return true;
     }
@@ -385,11 +386,12 @@ export function deriveSesUnlinkedInvoiceMatches(
   const manual_review: SesInvoiceManualReview[] = [];
   for (const match of survivors) {
     const job = jobsById.get(match.job_id);
-    if (!job || sesMatchPoRelation(job, match.invoice) !== "po_indeterminate") {
+    // Fail closed: only a PO-checked same_work pair is an accepted match.
+    if (job && sesMatchPoRelation(job, match.invoice) === "same_work") {
       matches.push(match);
       continue;
     }
-    const cardPos = sesMatchJobPurchaseOrders(job);
+    const cardPos = job ? sesMatchJobPurchaseOrders(job) : [];
     const invoicePo = splitRefPo(match.invoice.reference).po;
     manual_review.push({
       ...match,
