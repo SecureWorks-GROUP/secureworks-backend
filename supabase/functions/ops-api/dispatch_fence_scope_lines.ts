@@ -169,3 +169,38 @@ export function fenceScopeSuggestedLines(scope: any): FenceScopeLines {
     scope_supplier: text(job.supplier) || null,
   };
 }
+
+// The live working copy may be edited after the last freeze without a new
+// frozen revision (seen on a real job on 19 Oct 2026, whose order followed the
+// edit). The offer still comes from the frozen revision; this line, added to
+// `held`, tells the person to check the lines against the latest scope.
+export const FENCE_SCOPE_CHANGED_SINCE_FROZEN =
+  "The scope was changed after it was frozen: check these lines against the latest scope.";
+export const FENCE_SCOPE_CHANGE_UNCHECKED =
+  "Could not check whether the scope was changed after it was frozen: check these lines against the latest scope.";
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.keys(value as Record<string, unknown>).sort()
+      .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+      .map((key) =>
+        `${JSON.stringify(key)}:${
+          canonicalJson((value as Record<string, unknown>)[key])
+        }`
+      );
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+// True when the live runs differ from the frozen runs, compared as JSON values
+// (key order ignored, as jsonb equality does). No live runs: nothing to compare.
+export function fenceRunsChangedSinceFrozen(
+  frozenScope: any,
+  liveRuns: unknown,
+): boolean {
+  if (liveRuns === null || liveRuns === undefined) return false;
+  return canonicalJson(frozenScope?.job?.runs ?? null) !==
+    canonicalJson(liveRuns);
+}

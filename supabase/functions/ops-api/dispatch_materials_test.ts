@@ -27,6 +27,7 @@ import {
   DispatchMaterialsError,
   runDispatchMaterialsAction,
 } from "./dispatch_materials_store.ts";
+import { FENCE_SCOPE_CHANGED_SINCE_FROZEN } from "./dispatch_fence_scope_lines.ts";
 
 // index.ts reads SUPABASE_URL and the service key into module constants, so
 // they are set before it is imported (a closed local port: any real database
@@ -2213,7 +2214,12 @@ Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 pl
     assert(!("unit_price" in stored));
     assertEquals(stored.supplier_id, SUP.steel);
   }
-  // The frozen revision is read; the job's live scope_json and pricing never.
+  // The frozen revision is read; of the live scope only the runs are
+  // projected (to warn on a post-freeze edit), and the pricing never.
+  // This job's live scope has no fence runs, so there is no warning.
+  assert(
+    !answer.held.some((h: string) => h.includes("changed after it was frozen")),
+  );
   const revisionReads = db.requests.filter((r) =>
     r.table === "scope_revisions"
   );
@@ -2225,7 +2231,9 @@ Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 pl
   );
   assert(
     db.requests.filter((r) => r.table === "jobs").every((r) =>
-      !r.select.includes("scope_json") && !r.select.includes("pricing_json")
+      !r.select.includes("pricing_json") &&
+      (!r.select.includes("scope_json") ||
+        r.select === "id, live_runs:scope_json->job->runs")
     ),
   );
   assertOnlyOwnWrites(db);
@@ -2238,6 +2246,33 @@ Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 pl
     409,
     "lines_exist",
   );
+});
+
+Deno.test("suggest fence: live runs edited after the freeze add the warning to held; equal runs add none", async () => {
+  const revisions = [fenceRevision(3, "frozen", [FENCE_CASE_A_RUN])];
+  for (
+    const [liveRuns, warned] of [
+      [
+        [{ ...FENCE_CASE_A_RUN, panels: FENCE_CASE_A_RUN.panels.slice(1) }],
+        true,
+      ],
+      [[FENCE_CASE_A_RUN], false],
+    ] as const
+  ) {
+    const db = await fenceJobWithRevisions(revisions);
+    const fence = db.tables.jobs.find((row) => row.id === JOB.fence)!;
+    fence.scope_json = { job: { runs: structuredClone(liveRuns) } };
+    const answer = await call(db, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    });
+    // The lines still come from the frozen revision either way.
+    assertEquals(answer.added, 3);
+    assertEquals(
+      answer.held.includes(FENCE_SCOPE_CHANGED_SINCE_FROZEN),
+      warned,
+    );
+  }
 });
 
 Deno.test("suggest fence: an unreadable frozen scope is 409 scope_unreadable and writes nothing", async () => {

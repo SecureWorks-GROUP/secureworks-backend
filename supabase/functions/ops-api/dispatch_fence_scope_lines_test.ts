@@ -10,6 +10,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   FENCE_POST_LOOKUP,
+  fenceRunsChangedSinceFrozen,
   fenceScopeSuggestedLines,
 } from "./dispatch_fence_scope_lines.ts";
 
@@ -208,4 +209,24 @@ Deno.test("the post table is the fence designer's: sheet + plinths + 600 in the 
       assert(post >= Number(sheet) + Number(ret), `${sheet}/${ret}`);
     }
   }
+});
+
+Deno.test("scope change since frozen: compared as JSON values, key order ignored; no live runs is no change", () => {
+  const frozen = {
+    job: { runs: [{ panels: [{ height: 1800, retaining: 150 }] }] },
+  };
+  assertEquals(
+    fenceRunsChangedSinceFrozen(frozen, [{
+      panels: [{ retaining: 150, height: 1800 }],
+    }]),
+    false,
+  );
+  assertEquals(
+    fenceRunsChangedSinceFrozen(frozen, [{
+      panels: [{ height: 1800, retaining: 0 }],
+    }]),
+    true,
+  );
+  assertEquals(fenceRunsChangedSinceFrozen(frozen, null), false);
+  assertEquals(fenceRunsChangedSinceFrozen({ job: {} }, []), true);
 });

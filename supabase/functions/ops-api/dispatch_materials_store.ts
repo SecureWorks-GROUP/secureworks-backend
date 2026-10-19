@@ -12,7 +12,12 @@
 // PostgREST returns errors, it does not throw: every read and write below
 // reads `error`. A failed read is never "nothing there".
 
-import { fenceScopeSuggestedLines } from "./dispatch_fence_scope_lines.ts";
+import {
+  FENCE_SCOPE_CHANGE_UNCHECKED,
+  FENCE_SCOPE_CHANGED_SINCE_FROZEN,
+  fenceRunsChangedSinceFrozen,
+  fenceScopeSuggestedLines,
+} from "./dispatch_fence_scope_lines.ts";
 import type { DispatchSuggestedLine } from "./dispatch_materials.ts";
 import {
   cleanDispatchDescription,
@@ -966,9 +971,22 @@ async function readFrozenFenceOffer(
       `The job's frozen scope could not be read (${offer.reason})`,
     );
   }
+  // One single-job read of the live runs only (no media, no pricing), to warn
+  // when the scope was edited after the freeze. A failed read warns too.
+  const held = [...offer.held];
+  const { data: live, error: liveError } = await client.from("jobs")
+    .select("id, live_runs:scope_json->job->runs")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (liveError) {
+    console.error("[dispatch_materials] live runs read failed:", liveError);
+    held.push(FENCE_SCOPE_CHANGE_UNCHECKED);
+  } else if (fenceRunsChangedSinceFrozen(scope, live?.live_runs)) {
+    held.push(FENCE_SCOPE_CHANGED_SINCE_FROZEN);
+  }
   return {
     lines: offer.lines,
-    held: offer.held,
+    held,
     scope_supplier: offer.scope_supplier,
     revision: Number(revision.revision_number),
   };
