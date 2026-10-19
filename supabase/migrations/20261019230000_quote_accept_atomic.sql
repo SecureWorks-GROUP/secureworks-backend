@@ -345,7 +345,9 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) T
 --                            event id), including review-only failures and
 --                            staff-advanced acceptances
 --   won_with_open_sibling    a grouped job in a won status beside an open,
---                            unmarked option (ref: job@acceptance instant).
+--                            unmarked option, one row per sibling (ref:
+--                            winner>sibling@acceptance instant#sibling's
+--                            latest unsuperseded event).
 --                            Listed only while quote_option_supersede_v1 reads
 --                            true: with marking off, open siblings are by design
 --   more_than_one_won        a group with two or more won, unmarked options
@@ -366,7 +368,8 @@ BEGIN
   BEGIN
     v_supersede_on := coalesce((SELECT f.enabled FROM public.feature_flags f
                                  WHERE f.flag_name = 'quote_option_supersede_v1'), false) IS TRUE;
-  EXCEPTION WHEN OTHERS THEN
+  EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
+    -- Unreadable is off, as in the trigger: the reader still lists everything else.
     v_supersede_on := false;
   END;
   RETURN QUERY
@@ -379,16 +382,24 @@ BEGIN
       FROM public.job_events e
      WHERE e.event_type IN ('quote_option_review_needed', 'quote_acceptance_review_needed')
     UNION ALL
+    -- One row per (winner, open sibling). The ref names both, the winner's
+    -- acceptance instant and the sibling's latest unsuperseded event, so a
+    -- later or reopened sibling is a new obligation, never hidden by an
+    -- earlier resolution.
     SELECT 'won_with_open_sibling', w.id,
-           w.id::text || '@' || coalesce(extract(epoch FROM w.accepted_at)::text, 'none'), w.accepted_at
+           w.id::text || '>' || s.id::text
+             || '@' || coalesce(extract(epoch FROM w.accepted_at)::text, 'none')
+             || '#' || coalesce((SELECT u.id::text FROM public.job_events u
+                                  WHERE u.job_id = s.id AND u.event_type = 'quote_option_unsuperseded'
+                                  ORDER BY u.created_at DESC, u.id DESC LIMIT 1), 'none'),
+           w.accepted_at
       FROM public.jobs w
+      JOIN public.jobs s ON s.quote_option_group_id = w.quote_option_group_id AND s.id <> w.id
      WHERE v_supersede_on
        AND w.quote_option_group_id IS NOT NULL
        AND public.fence_quote_option_status_won(w.status)
        AND w.superseded_at IS NULL
-       AND EXISTS (SELECT 1 FROM public.jobs s
-                    WHERE s.quote_option_group_id = w.quote_option_group_id AND s.id <> w.id
-                      AND coalesce(s.status, 'draft') IN ('draft', 'quoted') AND s.superseded_at IS NULL)
+       AND coalesce(s.status, 'draft') IN ('draft', 'quoted') AND s.superseded_at IS NULL
     UNION ALL
     SELECT 'more_than_one_won', NULL::uuid,
            m.quote_option_group_id::text || '@' || string_agg(m.id::text, ',' ORDER BY m.id), max(m.accepted_at)

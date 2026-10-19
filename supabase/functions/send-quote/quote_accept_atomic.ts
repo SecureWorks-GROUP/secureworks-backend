@@ -104,12 +104,6 @@ export function quoteGuardsPassOnSnapshot(
   return quoteDocumentAcceptable(doc, siblings) ? 'ok' : 'sibling_accepted'
 }
 
-// Today's first run_line_items row for the run (the snapshot is in id order).
-export function snapshotRunNeighbourId(snap: QuoteAcceptanceSnapshotRead, runLabel: string | null): string | null {
-  if (runLabel === null) return null
-  return snap.runLineItems.find((r) => r.run_label === runLabel)?.job_contact_id || null
-}
-
 export type AtomicAcceptInput = {
   documentId: string
   shareToken: string

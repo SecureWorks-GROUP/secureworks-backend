@@ -8,7 +8,6 @@ import {
   quoteGuardsPassOnSnapshot,
   type QuoteAcceptanceSnapshotRead,
   readQuoteAcceptanceSnapshot,
-  snapshotRunNeighbourId,
 } from './quote_accept_atomic.ts'
 
 // A fake client: table reads return `reads[table]`; rpc calls return
@@ -107,14 +106,6 @@ Deno.test('the guards run on the snapshot with the legacy query filters', () => 
   assertEquals(quoteGuardsPassOnSnapshot(doc, snap([docRow, { ...sibling, job_contact_id: 'other' }]), null), 'ok',
     'another party\'s acceptance is not a sibling')
   assertEquals(quoteGuardsPassOnSnapshot(doc, snap([docRow, { ...sibling, superseded_at: '2026-10-18T00:00:00Z' }]), null), 'ok')
-})
-
-Deno.test('the run neighbour is the first run line item of that run', () => {
-  const s = snap([], { runLineItems: [{ run_label: 'B', job_contact_id: 'x' }, { run_label: 'A', job_contact_id: 'n1' },
-    { run_label: 'A', job_contact_id: 'n2' }] })
-  assertEquals(snapshotRunNeighbourId(s, 'A'), 'n1')
-  assertEquals(snapshotRunNeighbourId(s, 'C'), null)
-  assertEquals(snapshotRunNeighbourId(s, null), null)
 })
 
 const input: AtomicAcceptInput = {

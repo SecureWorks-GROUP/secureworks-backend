@@ -1,6 +1,6 @@
 # SQ-23 remedy: an acceptance can never commit its status with no record
 
-**Revision 8: the one current contract** (after the Codex review of `2a09949`, `docs/sq23/acceptance-atomic-review-codex-2a09949.md`). Earlier text (the original and revisions 2 to 6; revision 7 is replaced in place) is in `acceptance-atomic-design-history.md`, marked superseded, and is not operative.
+**Revision 9: the one current contract** (after the Codex reviews of `2a09949` and `1d41398`, saved beside this file, and the independent check at `2a09949`). Earlier text (the original and revisions 2 to 6; revision 7 is replaced in place) is in `acceptance-atomic-design-history.md`, marked superseded, and is not operative.
 
 Status: built on the isolated branch `sq23/acceptance-atomic` (base `sq23/quote-option-jobs` `996d234`). Not merged, not deployed, nothing live, no switch on. Provenance: routine Codex orchestration under standing scope. Requirement: CIO R1 to R5 (secureworks-projects `ctx/cio-20261019` `ef20d6f`). Design and build only; no approval of any merge, deploy, switch or send, and no residual accepted.
 
@@ -41,6 +41,10 @@ Only a readable `true` turns any of them on. Off, missing or unreadable is off.
 
 **`quote_option_strict_record_v1` is an owning-review decision, not settled.** Once on, a staff status change (ops-api `update_job_status`, staff screens, crons, any of the 40 writers) could be refused whenever the trigger cannot record. It should never go on before the atomic path. The order is compatible but not a full safety proof: if `quote_accept_atomic_v1` later reads unreadable while supersede is on, send-quote falls back to the split writes, and with strict on that again commits a document acceptance before refusing its status. Switch-off order is the reverse of switch-on.
 
+**An unreadable strict switch is off** (a timeout, cancel, permission or any other error while reading it), exactly like a missing row: the status change is kept with today's warning, plus a distinct warning `strict switch unreadable (SQLSTATE), treated as off`. So with the strict switch on, a read timeout silently keeps a status change that would otherwise be refused. This is predictable and logged, and it is a decision for the owning review. The alternative, unreadable means refuse, would block staff status changes whenever the switch read times out. The atomic path never depends on this read: the marker is checked first, and the independent check confirmed the full rollback even when the strict read fails or hangs.
+
+**Simultaneous winners stay live (CIO's accepted direction, 12:23Z).** If two options of one group are accepted at the same time in separate sessions, both end up won. The trigger writes a `more_than_one_option_won` review event, clears any marks, and settles its runs. The independent check at `2a09949`, with two real sessions, saw exactly this every time, with nothing unrecorded. The gap read lists the group as `more_than_one_won` until a person resolves it. That matches the direction; nothing here picks a winner.
+
 ## 4. Database (`20261019230000_quote_accept_atomic.sql`)
 - **Snapshot protocol.** The party rules stay in send-quote and are not ported to SQL.
   - `quote_acceptance_snapshot(job)` returns the decision inputs (the job's quote documents with the party-rule columns and `share_token`, its run acceptances, its run line items in id order) **and** their fingerprint from one statement, so both describe one database snapshot. A change between separate reads (A to B to A) cannot split them.
@@ -64,7 +68,7 @@ Only a readable `true` turns any of them on. Off, missing or unreadable is off.
 - **`quote_acceptance_gaps(grace)`** (R3), read-only, ids, codes and instants only. A row disappears only when its own `(kind, ref)` is in `quote_acceptance_gap_resolutions` (service role may insert and read, never change or delete), or for runs and attempts their `resolved_at` is set. Nothing else suppresses it.
   - `settle_run_unsettled`
   - `review_needed`: every `quote_option_review_needed` and `quote_acceptance_review_needed` event, so review-only failures and staff-advanced acceptances are listed
-  - `won_with_open_sibling`: listed only while the supersede switch reads true, since open siblings are by design when marking is off
+  - `won_with_open_sibling`: one row per (winner, open sibling); its ref names both, the winner's acceptance instant and the sibling's latest unsuperseded event, so resolving one sibling never hides another and a reopened sibling is listed again. Listed only while the supersede switch reads true (open siblings are by design when marking is off); an unreadable switch, for the same errors the trigger catches (including 57014 and P0004), is off and the rest is still listed
   - `more_than_one_won`
   - `acceptance_handler_unfinished`
 
@@ -72,7 +76,7 @@ Only a readable `true` turns any of them on. Off, missing or unreadable is off.
 - Switch off, missing or unreadable: today's code path. Every legacy write is unchanged, behind `atomicDocId === null`, and today's three pre-reads run as before. The only addition is one uncached switch read per acceptance with a job.
 - Switch on:
   1. read the snapshot; the token-read document must equal its snapshot row in every guard and party-rule field, including the current token (retry page otherwise);
-  2. today's guards still run, then run again on the snapshot with the same query filters; the party rules run on the snapshot (no separate pre-reads);
+  2. today's guards still run, then run again on the snapshot with the same query filters; the party rules run on the snapshot. The run neighbour is chosen by today's own query (`LIMIT 1`, no order), so the choice is the legacy one; the rows it chooses among are fingerprinted;
   3. for a whole quote, read the job and contacts and build today's `quote_accepted` detail;
   4. call the function with a fresh request id.
 - Outcomes:
@@ -94,6 +98,10 @@ Migration contract `supabase/tests/migration-contracts/20261019230000_quote_acce
 - rollback contract and break contract (the break removes the marker; R4 must fail)
 
 send-quote unit test `quote_accept_atomic_test.ts`: the switch read; snapshot read failures; the document-to-snapshot match (each field, the token, instants in another format); the guards on the snapshot; the run neighbour; outcome mapping and arguments; a SQLSTATE error is never recovered; lost-response recovery by request id (same instant, other request is a replay; nothing found is unknown after one re-read); finishing.
+
+Each mutation in the contract runs in its own statement and is verified in the next, since a statement's own subqueries cannot see writes made by a function it calls.
+
+**Coverage limits:** the fingerprint and document-match cases mutate the main fields one at a time, not every field. Timestamps are compared to the millisecond, as the party rules already order them.
 
 **Not proven here:** two-session concurrency (single-session runner); a full send-quote handler run (no handler harness in index.ts; the legacy writes are untouched and guarded); all three switches integrated (the Ops reader switch is not on this branch). These go to the independent check and the reader's own review. Universal R5 is **not met by design** while every other writer keeps warning-only behaviour; it needs the owning review's decision on the strict switch.
 

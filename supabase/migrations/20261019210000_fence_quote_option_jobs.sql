@@ -508,7 +508,10 @@ BEGIN
           v_strict := coalesce((SELECT enabled FROM public.feature_flags
                                  WHERE flag_name = 'quote_option_strict_record_v1'), false) IS TRUE;
         EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
+          -- Unreadable is off, like missing: the status change is kept, as
+          -- today, with its own warning. Owning-review decision (design 3).
           v_strict := false;
+          RAISE WARNING 'jobs_quote_option_supersede: strict switch unreadable (%), treated as off', SQLSTATE;
         END;
       END IF;
       IF v_strict THEN

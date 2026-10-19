@@ -58,7 +58,6 @@ import {
   quoteGuardsPassOnSnapshot,
   type QuoteAcceptanceSnapshotRead,
   readQuoteAcceptanceSnapshot,
-  snapshotRunNeighbourId,
 } from './quote_accept_atomic.ts'
 import {
   persistTradePackOnDocuments,
@@ -1726,10 +1725,24 @@ serve(async (req: Request) => {
             { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
           )
         }
+        // The run neighbour by today's own query (LIMIT 1, no order), so the
+        // choice is the legacy one; the rows it chooses from are fingerprinted.
+        const runItemsRead = sourceRunLabel !== null
+          ? await sb.from('run_line_items')
+            .select('job_contact_id')
+            .eq('job_id', doc.job_id)
+            .eq('run_label', sourceRunLabel)
+            .limit(1)
+          : { data: [], error: null }
+        if (quoteAcceptanceReadFailed([runItemsRead])) {
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
         acceptanceSnapshot = withPendingAcceptance({
           documents: atomicSnap.documents,
           acceptances: atomicSnap.acceptances,
-          runNeighbourId: snapshotRunNeighbourId(atomicSnap, sourceRunLabel),
+          runNeighbourId: (runItemsRead.data as Array<{ job_contact_id?: string | null }> | null)?.[0]?.job_contact_id || null,
         }, doc, sourceRunLabel, acceptedAt)
       } else if (doc.job_id) {
         const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
