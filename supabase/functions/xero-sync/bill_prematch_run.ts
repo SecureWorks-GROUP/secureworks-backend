@@ -104,6 +104,18 @@ function businessUnit(tracking: unknown): string | null {
 }
 
 /** A xero_invoices row (with line_items) as the matcher reads it. */
+/** The supplier-document identity of a bill as Xero holds it now (queue copy only as a fallback). */
+export function currentDocument(bill: PrematchBill, inv: any) {
+  if (!inv) return bill;
+  return {
+    xero_invoice_id: bill.xero_invoice_id,
+    invoice_number: inv.invoice_number ?? null,
+    xero_contact_id: inv.xero_contact_id ?? null,
+    contact_name: inv.contact_name ?? null,
+    sub_total: inv.sub_total ?? null,
+  };
+}
+
 export function toPrematchBill(q: any, inv: any): PrematchBill {
   const lines = Array.isArray(inv?.line_items) ? inv.line_items : [];
   return {
@@ -221,7 +233,7 @@ export async function runBillPrematch(
   const invoices = await readIn<any>(
     sb,
     "xero_invoices",
-    "xero_invoice_id, invoice_number, status, reference, line_items, job_id",
+    "xero_invoice_id, invoice_number, status, reference, line_items, job_id, xero_contact_id, contact_name, sub_total",
     "xero_invoice_id",
     queue.map((q) => q.xero_invoice_id),
   );
@@ -361,7 +373,8 @@ export async function runBillPrematch(
       pos,
       poFactBills,
       emailJobIds: emailJobs.get(bill.xero_invoice_id) || [],
-      duplicateDocuments: duplicateDocumentsOf(bill, documentIndex),
+      // Detected on the bill as Xero holds it now, not the queue's older copy.
+      duplicateDocuments: duplicateDocumentsOf(currentDocument(bill, invById.get(bill.xero_invoice_id)), documentIndex),
     });
     const bucket = d.kind === "job" ? `job_${d.confidence}` : d.kind;
     result.decided[bucket] = (result.decided[bucket] || 0) + 1;
@@ -375,6 +388,15 @@ export async function runBillPrematch(
     const undone = placedBefore.has(bill.xero_invoice_id); // a person undid an agent placement
     // A row held for a person (the sync removed a contradicted fact, or Xero
     // links another job) is proposed but never placed by the agent.
+    // A duplicated supplier document is held on its queue row for good: if a
+    // copy is voided later, the bill left still waits for a person.
+    if (d.kind === "review" && d.rule === "duplicate_document" && q.suggestion_reason !== "duplicate_document") {
+      const { data: heldRows, error: hErr } = await sb.from("materials_reconciliation_queue")
+        .update({ suggestion_reason: "duplicate_document", updated_at: now })
+        .eq("id", q.id).eq("status", "open").select("id");
+      if (hErr || !Array.isArray(heldRows)) result.errors++;
+      else if (heldRows.length) q.suggestion_reason = "duplicate_document";
+    }
     const held = HELD_QUEUE_REASONS.has(String(q.suggestion_reason || ""));
     const canPlace = d.kind === "job" && d.confidence === "high" && !hasFact.has(bill.xero_invoice_id) && !undone && !held;
     if (current && current.input_hash === hash && current.outcome === "queued_for_review") {

@@ -314,10 +314,29 @@ export function documentKey(invoiceNumber: string | null | undefined): string | 
   return runs.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
-/** A supplier key that survives "Pty Ltd" and similar: the first word of 3+ letters. */
+/**
+ * Every key a document number is known by: its longest 5+ digit run, and all
+ * its digits joined without leading zeros (3+ digits), so "1 449 582",
+ * "144-9582", "01449582" and "Qute 1449582" all meet "1449582". Letters are
+ * dropped on purpose: A12345 and B12345 from one supplier at one amount go to
+ * a person, which is the safe side.
+ */
+export function documentKeys(invoiceNumber: string | null | undefined): string[] {
+  const keys = new Set<string>();
+  const run = documentKey(invoiceNumber);
+  if (run) keys.add(run.replace(/^0+/, ""));
+  const joined = String(invoiceNumber || "").replace(/\D/g, "").replace(/^0+/, "");
+  if (joined.length >= 3) keys.add(joined);
+  return [...keys];
+}
+
+const LEGAL_WORDS = new Set(["pty", "ltd", "limited", "proprietary", "inc", "co", "company", "corp", "group", "the", "australia", "aust", "wa", "trust", "trustee", "for", "atf", "and"]);
+
+/** A supplier's name without legal words: "Metecno Pty Ltd" and "Metecno" are one supplier; "National Steel" and "National Hire" are not. */
 export function supplierKey(name: string | null | undefined): string | null {
-  const w = String(name || "").toLowerCase().match(/[a-z]{3,}/);
-  return w ? w[0] : null;
+  const words = String(name || "").toLowerCase().match(/[a-z0-9]+/g) || [];
+  const kept = words.filter((w) => !LEGAL_WORDS.has(w));
+  return kept.length ? kept.join(" ") : null;
 }
 
 export interface DocumentRow {
@@ -329,37 +348,60 @@ export interface DocumentRow {
   status: string | null;
 }
 
-/** Index every live supplier bill by its document key. */
+/** Index every live supplier bill by each of its document keys. */
 export function buildDocumentIndex(rows: DocumentRow[]): Map<string, DocumentRow[]> {
   const idx = new Map<string, DocumentRow[]>();
   for (const r of rows) {
     const st = String(r.status || "").toUpperCase();
     if (st === "VOIDED" || st === "DELETED") continue;
-    const k = documentKey(r.invoice_number);
-    if (!k) continue;
-    if (!idx.has(k)) idx.set(k, []);
-    idx.get(k)!.push(r);
+    for (const k of documentKeys(r.invoice_number)) {
+      if (!idx.has(k)) idx.set(k, []);
+      idx.get(k)!.push(r);
+    }
   }
   return idx;
 }
 
+function sameSupplier(a: { xero_contact_id: string | null; contact_name: string | null }, b: { xero_contact_id: string | null; contact_name: string | null }): boolean {
+  if (a.xero_contact_id && b.xero_contact_id && a.xero_contact_id === b.xero_contact_id) return true;
+  const ka = supplierKey(a.contact_name);
+  const kb = supplierKey(b.contact_name);
+  if (ka !== null && ka === kb) return true;
+  // A side with no supplier identity at all cannot clear the guard.
+  return (!a.xero_contact_id && ka === null) || (!b.xero_contact_id && kb === null);
+}
+
+function sameAmount(a: number | null, b: number | null): boolean {
+  // An unknown amount cannot clear the guard either.
+  if (!amountKnown(a) || !amountKnown(b)) return true;
+  return Math.abs(Number(a) - Number(b)) < 0.005;
+}
+
+function amountKnown(v: unknown): boolean {
+  return v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v));
+}
+
 /**
- * Other live bills that look like the same document: same document key, same
- * ex-GST amount to the cent, and the same supplier (same contact, or contacts
- * whose names share their first word). Each is described for a person.
+ * Other live bills that look like the same document: a shared document key,
+ * the same ex-GST amount to the cent (or an amount not known), and the same
+ * supplier (same contact, or the same name without legal words, or no identity
+ * known). Each is described for a person. Uncertainty holds; it never clears.
  */
 export function duplicateDocumentsOf(
   bill: { xero_invoice_id: string; invoice_number: string | null; xero_contact_id: string | null; contact_name: string | null; sub_total: number | null },
   index: Map<string, DocumentRow[]>,
 ): string[] {
-  const k = documentKey(bill.invoice_number);
-  if (!k || bill.sub_total == null) return [];
-  const sk = supplierKey(bill.contact_name);
-  return (index.get(k) || [])
-    .filter((r) => r.xero_invoice_id !== bill.xero_invoice_id)
-    .filter((r) => r.sub_total != null && Math.abs(Number(r.sub_total) - Number(bill.sub_total)) < 0.005)
-    .filter((r) => (bill.xero_contact_id && r.xero_contact_id === bill.xero_contact_id) || (sk !== null && supplierKey(r.contact_name) === sk))
-    .map((r) => `${r.invoice_number} (${r.contact_name}, ${String(r.status || "").toUpperCase()})`);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of documentKeys(bill.invoice_number)) {
+    for (const r of index.get(k) || []) {
+      if (r.xero_invoice_id === bill.xero_invoice_id || seen.has(r.xero_invoice_id)) continue;
+      if (!sameAmount(bill.sub_total, r.sub_total) || !sameSupplier(bill, r)) continue;
+      seen.add(r.xero_invoice_id);
+      out.push(`${r.invoice_number} (${r.contact_name}, ${String(r.status || "").toUpperCase()})`);
+    }
+  }
+  return out.sort();
 }
 
 export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {

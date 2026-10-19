@@ -8,7 +8,9 @@ import {
   buildJobMaps,
   decideBillPrematch,
   documentKey,
+  documentKeys,
   duplicateDocumentsOf,
+  supplierKey,
   type PrematchBill,
   type PrematchJob,
   type PrematchPO,
@@ -352,6 +354,29 @@ Deno.test("a voided copy, another amount, or another supplier with the same numb
   assertEquals(duplicateDocumentsOf(METECNO[0], index), []);
 });
 
+Deno.test("the same number written with spaces, a dash or a leading zero is still the same document", () => {
+  for (const n of ["1 449 582", "144-9582", "01449582", "INV 1449582"]) {
+    const index = buildDocumentIndex([{ ...METECNO[1], invoice_number: n }]);
+    assertEquals(duplicateDocumentsOf(METECNO[0], index).length, 1, n);
+  }
+  assertEquals(documentKeys("INV-0347"), ["347"]);
+  const short = buildDocumentIndex([{ ...METECNO[1], invoice_number: "INV-0347", sub_total: 50 }]);
+  assertEquals(duplicateDocumentsOf({ ...METECNO[0], invoice_number: "347", sub_total: 50 }, short).length, 1);
+});
+
+Deno.test("an unknown amount or an unknown supplier holds; it never clears the guard", () => {
+  const noAmount = buildDocumentIndex([{ ...METECNO[2], sub_total: null }]);
+  assertEquals(duplicateDocumentsOf(METECNO[0], noAmount).length, 1);
+  const noSupplier = buildDocumentIndex([{ ...METECNO[1], xero_contact_id: null, contact_name: null }]);
+  assertEquals(duplicateDocumentsOf(METECNO[0], noSupplier).length, 1);
+});
+
+Deno.test("suppliers sharing only a first word are different suppliers; legal words do not split one", () => {
+  assertEquals([supplierKey("Metecno Pty Ltd"), supplierKey("Metecno"), supplierKey("Bunnings Group Limited")], ["metecno", "metecno", "bunnings"]);
+  const index = buildDocumentIndex([{ xero_invoice_id: "n-2", invoice_number: "55501", xero_contact_id: "c-nh", contact_name: "National Hire", sub_total: 100, status: "AUTHORISED" }]);
+  assertEquals(duplicateDocumentsOf({ xero_invoice_id: "n-1", invoice_number: "55501", xero_contact_id: "c-ns", contact_name: "National Steel", sub_total: 100 }, index), []);
+});
+
 Deno.test("a nightly run holds the duplicated Metecno bills for a person and places none", async () => {
   const seed = baseSeed();
   seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref")
@@ -370,12 +395,40 @@ Deno.test("a nightly run holds the duplicated Metecno bills for a person and pla
   const p = store.materials_bill_proposals.find((r) => r.xero_invoice_id === "m-pty")!;
   assertEquals([p.proposal_kind, p.rule, p.outcome], ["review", "duplicate_document", "queued_for_review"]);
   assertEquals(store.materials_reconciliation_queue[0].status, "open");
+  // The hold is kept on the queue row itself.
+  assertEquals(store.materials_reconciliation_queue[0].suggestion_reason, "duplicate_document");
+
+  // Later both other copies are voided in Xero: the bill left still waits for a person.
+  for (const inv of store.xero_invoices) if (inv.xero_invoice_id !== "m-pty") inv.status = "VOIDED";
+  const again = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-10-20T12:00:00.000Z" });
+  assertEquals([again.ran, again.assigned ?? 0], [true, 0]);
+  assertEquals((store.job_materials_facts ?? []).filter((f) => f.xero_invoice_id === "m-pty").length, 0);
+});
+
+Deno.test("a stale queue amount never hides a duplicate: Xero's current amount is used", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref")
+    .map((q) => ({ ...q, xero_invoice_id: "m-pty", invoice_number: "1449582", xero_contact_id: "c-metecno-pty", contact_name: "Metecno Pty Ltd", sub_total: 1900 }));
+  seed.jobs = [{ id: "job-patio", job_number: "SWP-25029", status: "in_progress", created_at: "2026-03-17", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [];
+  const lines = [{ Description: "SpanPlus For SWP-25029", AccountCode: "305", LineAmount: 1902.7 }];
+  seed.xero_invoices = METECNO.slice(0, 2).map((m) => ({ ...m, org_id: ORG, invoice_type: "ACCPAY", reference: null, line_items: lines, job_id: null }));
+  seed.context_email_attachments = [];
+  seed.materials_bill_proposals = [];
+  const { client, store } = makeFakeClient(seed);
+  const out = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-10-19T12:00:00.000Z" });
+  assertEquals(out.assigned ?? 0, 0);
+  assertEquals(store.materials_bill_proposals.find((r) => r.xero_invoice_id === "m-pty")!.rule, "duplicate_document");
 });
 
 Deno.test("the sync never places a bill whose supplier document is duplicated (reference or PO path)", async () => {
   const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
   const at = src.indexOf("const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0");
   assertEquals(at > 0, true);
-  assertEquals(src.slice(at, at + 600).includes("verdict === 'remove' || duplicateDocument\n        ? { reference: false, poFallback: false }"), true);
+  const gate = src.slice(at, src.indexOf("const m = matchBill(bill", at));
+  // Checked before an existing automatic fact is kept, which it takes off into a held row.
+  assertEquals(gate.includes("const verdict = duplicateDocument && existingSource && OWN_FACT_SOURCES.has(existingSource)\n        ? 'remove'"), true);
+  assertEquals(gate.includes("verdict === 'remove' || duplicateDocument\n        ? { reference: false, poFallback: false }"), true);
+  assertEquals(src.includes("const holdReason: SuggestionReason | null = duplicateDocument\n          ? 'duplicate_document'"), true);
   assertEquals(src.includes("if (!allSupplierBills) throw new Error('supplier bills unreadable')"), true);
 });

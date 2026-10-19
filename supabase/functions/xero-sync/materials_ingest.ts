@@ -136,7 +136,9 @@ export type SuggestionReason =
   // a person. Neither the reference path nor the agent places this bill again.
   | "fact_contradicted"
   // Xero links the bill to a job that the bill's own job number does not name.
-  | "xero_link_conflict";
+  | "xero_link_conflict"
+  // The same supplier document is entered more than once in Xero (CFO-16).
+  | "duplicate_document";
 
 /** Is a bill amount a known number (not null, blank or NaN)? */
 export function amountIsKnown(v: unknown): boolean {
@@ -144,7 +146,7 @@ export function amountIsKnown(v: unknown): boolean {
 }
 
 /** Queue reasons that hold a bill for a person: no automatic placement while open. */
-export const HELD_QUEUE_REASONS = new Set<string>(["fact_contradicted", "xero_link_conflict"]);
+export const HELD_QUEUE_REASONS = new Set<string>(["fact_contradicted", "xero_link_conflict", "duplicate_document"]);
 
 export interface MatchResult {
   outcome: MatchOutcome;

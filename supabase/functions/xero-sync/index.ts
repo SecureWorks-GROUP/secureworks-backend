@@ -1565,7 +1565,17 @@ async function ingestMaterialsActuals(
         .map((p) => p.job_id ?? null)
       const existingSource = factSourceById.get(bill.xero_invoice_id)
       const factJobId = factJobById.get(bill.xero_invoice_id)
-      const verdict = existingFactVerdict({
+      // The same supplier document entered more than once: a person decides
+      // which bill is real. No automatic path places any of them, and this
+      // path's own earlier fact on one is taken off into a held row.
+      const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0
+      if (duplicateDocument) {
+        const counts = result as Record<string, unknown>
+        counts.duplicate_documents_held = Number(counts.duplicate_documents_held || 0) + 1
+      }
+      const verdict = duplicateDocument && existingSource && OWN_FACT_SOURCES.has(existingSource)
+        ? 'remove'
+        : existingFactVerdict({
         source: existingSource,
         factJobId,
         factJobNumber: factJobId ? jobNumberById.get(factJobId) ?? null : null,
@@ -1610,13 +1620,6 @@ async function ingestMaterialsActuals(
       const named = new Set([...refTokens, ...lineTokens])
       const xeroLinkConflict = !!b.job_id && named.size > 0 &&
         !(xeroJobNumber && named.has(String(xeroJobNumber).toUpperCase()))
-      // The same supplier document entered more than once: a person decides
-      // which bill is real, so no automatic path places any of them.
-      const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0
-      if (duplicateDocument) {
-        const counts = result as Record<string, unknown>
-        counts.duplicate_documents_held = Number(counts.duplicate_documents_held || 0) + 1
-      }
       const allowed = verdict === 'remove' || duplicateDocument
         ? { reference: false, poFallback: false }
         : newPlacementAllowed({
@@ -1668,7 +1671,9 @@ async function ingestMaterialsActuals(
       } else if (m.outcome === 'queue') {
         // Why a person must decide: a removed fact, or a Xero link the bill's
         // job number does not back. Kept on the row so no automatic path places it.
-        const holdReason: SuggestionReason | null = verdict === 'remove'
+        const holdReason: SuggestionReason | null = duplicateDocument
+          ? 'duplicate_document'
+          : verdict === 'remove'
           ? 'fact_contradicted'
           : held
           ? heldReason as SuggestionReason
