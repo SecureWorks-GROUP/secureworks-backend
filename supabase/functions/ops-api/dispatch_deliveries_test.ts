@@ -522,3 +522,25 @@ Deno.test("write: a failed order write is a 500, never a quiet success", async (
     "deliveries_write_failed",
   );
 });
+
+Deno.test("write: the ops key cannot name a person from another organisation", async () => {
+  const w = world();
+  w.users = [{
+    id: USER,
+    email: "person@example.test",
+    org_id: "other-org",
+    name: "Person A",
+  }];
+  const { client, writes } = fakeClient(w);
+  await refused(
+    runDispatchDeliveriesAction(client, "dispatch_delivery_mark_sighted", {
+      purchase_order_id: PO,
+      expected_updated_at: T0,
+      sighted: true,
+      operator_email: "person@example.test",
+    }, terminal),
+    400,
+    "operator_required",
+  );
+  assertEquals(writes, []);
+});

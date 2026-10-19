@@ -26,6 +26,7 @@ type Write = { table: string; op: string; value: Row };
 function fakeClient(
   tables: Record<string, Row[]>,
   fail: Record<string, any> = {},
+  beforeUpdate?: (table: string) => void,
 ) {
   const writes: Write[] = [];
   const from = (table: string) => {
@@ -68,7 +69,12 @@ function fakeClient(
           r.status == null || r.status !== "cancelled"
         ),
           b),
-      update: (v: Row) => ((op = "update"), (value = v), b),
+      update: (v: Row) => {
+        beforeUpdate?.(table);
+        op = "update";
+        value = v;
+        return b;
+      },
       insert: (v: Row) => ((op = "insert"), (value = v), b),
       maybeSingle: () => {
         const res = run();
@@ -432,4 +438,40 @@ Deno.test("install: a failed audit row is reported, the mark stands", async () =
   );
   assertEquals(res.audit_logged, false);
   assertEquals(writes.map((w) => w.table), ["job_dispatch_state"]);
+});
+
+Deno.test("install: a mark changed between the read and the update is a 409, nothing written", async () => {
+  const at = "2026-10-18T03:00:00.000Z";
+  const w = world([booking("2026-10-21")], {
+    install_confirmed_at: at,
+    install_confirmed_by_email: "person@example.test",
+    install_confirmed_for_day: "2026-10-21",
+  });
+  // Another press lands after this one read the row and before it writes.
+  const { client, writes } = fakeClient(w, {}, (table) => {
+    if (table === "job_dispatch_state") {
+      w.job_dispatch_state[0].install_confirmed_at = "2026-10-19T00:30:00.000Z";
+    }
+  });
+  await refused(
+    setDispatchInstallConfirmed(
+      client,
+      {
+        job_id: JOB,
+        confirmed: false,
+        expected_install_day: "2026-10-21",
+        expected_confirmed_at: at,
+      },
+      jwt,
+      ORG,
+      TODAY,
+    ),
+    409,
+    "confirmation_changed",
+  );
+  assertEquals(writes, []);
+  assertEquals(
+    w.job_dispatch_state[0].install_confirmed_at,
+    "2026-10-19T00:30:00.000Z",
+  );
 });
