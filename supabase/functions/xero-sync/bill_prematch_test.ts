@@ -199,3 +199,31 @@ Deno.test("a proposal past the first 1,000 rows of a bill's history still counts
   assertEquals(store.job_materials_facts ?? [], []);
   assertEquals(store.materials_reconciliation_queue[0].status, "open");
 });
+
+// Live cases, 19 Oct 2026 (Projects/job-profit/verify/evidence/20261019-guarded-placement).
+Deno.test("a job number written without its hyphen still names the job (R&R 85228, SWF261060)", () => {
+  const d = decideBillPrematch(bill([["INV-85228 Tax Invoice (SWF261009) Delivery", "305", 930.27]]), ctx());
+  assertEquals(d.kind, "job");
+  if (d.kind === "job") assertEquals([d.confidence, d.job_number], ["high", "SWF-261009"]);
+});
+
+Deno.test("a longer job number never names the shorter one (SWF-261009 is not SWF-26100)", () => {
+  const d = decideBillPrematch(bill([["Panels for SWF-261009", "305", 500]]), ctx());
+  assertEquals(d.kind === "job" ? d.job_number : null, "SWF-261009");
+});
+
+Deno.test("a bill naming a job that was never won goes to a person, not onto the job", () => {
+  const jobs: PrematchJob[] = [...JOBS, { id: "j6", job_number: "SWF-26958", status: "draft", created_at: "2026-07-01", site_address: null, holding: false }];
+  const d = decideBillPrematch(bill([["SWF26958 caps", "305", 40.91]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] });
+  assertEquals([d.kind, d.rule], ["review", "job_number_not_live"]);
+});
+
+Deno.test("the same digits on two prefixes go to a person (SWF-26328 and SWP-26328)", () => {
+  const jobs: PrematchJob[] = [
+    ...JOBS,
+    { id: "j7", job_number: "SWF-26328", status: "archived", created_at: "2026-04-01", site_address: null, holding: false },
+    { id: "j8", job_number: "SWP-26328", status: "in_progress", created_at: "2026-05-01", site_address: null, holding: false },
+  ];
+  const d = decideBillPrematch(bill([["Metroll order SWP-26328", "305", 355.54]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] });
+  assertEquals(d.kind, "review");
+});

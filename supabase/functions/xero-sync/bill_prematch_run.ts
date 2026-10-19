@@ -255,7 +255,7 @@ export async function runBillPrematch(
   );
   if (!jobRows) return { ...result, reason: "jobs_unreadable" };
   const jobs = toPrematchJobs(jobRows);
-  const { jobsById, jobsByNumber, duplicateNumbers } = buildJobMaps(jobs);
+  const { jobsById, jobsByNumber, duplicateNumbers, digitTwins } = buildJobMaps(jobs);
   const addressIndex = buildAddressIndex(jobs);
 
   const pos = await readAll<PrematchPO>(() =>
@@ -334,6 +334,7 @@ export async function runBillPrematch(
       jobsById,
       jobsByNumber,
       duplicateNumbers,
+      digitTwins,
       addressIndex,
       pos,
       poFactBills,

@@ -30,8 +30,11 @@
 
 import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from "./materials_ingest.ts";
 
-// The canonical job-number grammar (materials_ingest.ts JOB_NUMBER_RE), global.
-export const JOB_NUMBER_RE_GLOBAL = /SW(?:MS|[A-Z])-\d{4,6}(?!\d)/gi;
+// The canonical job-number grammar (materials_ingest.ts JOB_NUMBER_RE), global,
+// widened for how suppliers write it: "SWF261060" and "SWF 261060" are
+// SWF-261060 (5 or 6 digits when the hyphen is missing). Never part of a longer
+// word or number, so "SWF-261060" is never SWF-26106. jobNumbersIn normalises.
+export const JOB_NUMBER_RE_GLOBAL = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t]?-?[ \t]?(\d{5,6}))(?!\d)/gi;
 
 // Subcontractor labour: out of the agent for now (owner call, 15 Oct 2026).
 export const LABOUR_ACCOUNTS = new Set(["306", "301"]);
@@ -46,7 +49,9 @@ export const OVERHEAD_ACCOUNTS = new Set([
 ]);
 
 export const GROUP_BUSINESS_UNIT = "SW - GROUP";
-export const DEAD_JOB_STATUSES = new Set(["cancelled", "lost"]);
+// Jobs that were never won: a bill is never placed on one by rule ("SWF-26058"
+// is a cancelled fencing job; the bill's real job was patio SWP-26058).
+export const DEAD_JOB_STATUSES = new Set(["cancelled", "lost", "draft", "quoted"]);
 // A bill dated this many days before its job existed disagrees with that job.
 export const BILL_BEFORE_JOB_GRACE_DAYS = 14;
 
@@ -93,6 +98,7 @@ export interface PrematchContext {
   jobsById: Map<string, PrematchJob>;
   jobsByNumber: Map<string, PrematchJob>; // unique numbers only
   duplicateNumbers?: Set<string>; // a number two jobs share names neither
+  digitTwins?: Map<string, string[]>; // job number -> other job numbers with the same digits (SWF-26328 / SWP-26328)
   addressIndex: Map<string, string[]>; // "12 smith" -> job ids
   pos: PrematchPO[];
   emailJobIds: string[]; // jobs the context system filed this bill's invoice email on
@@ -159,7 +165,7 @@ export function billTexts(bill: PrematchBill): Array<{ where: string; text: stri
 
 export function jobNumbersIn(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(JOB_NUMBER_RE_GLOBAL)) out.push(m[0].toUpperCase());
+  for (const m of text.matchAll(JOB_NUMBER_RE_GLOBAL)) out.push(`SW${m[1].toUpperCase()}-${m[2] ?? m[3]}`);
   return out;
 }
 
@@ -193,6 +199,7 @@ export function buildJobMaps(jobs: PrematchJob[]): {
   jobsById: Map<string, PrematchJob>;
   jobsByNumber: Map<string, PrematchJob>;
   duplicateNumbers: Set<string>;
+  digitTwins: Map<string, string[]>;
 } {
   const jobsById = new Map(jobs.map((j) => [j.id, j]));
   const jobsByNumber = new Map<string, PrematchJob>();
@@ -202,7 +209,18 @@ export function buildJobMaps(jobs: PrematchJob[]): {
     else jobsByNumber.set(j.job_number, j);
   }
   for (const n of duplicateNumbers) jobsByNumber.delete(n);
-  return { jobsById, jobsByNumber, duplicateNumbers };
+  const byDigits = new Map<string, string[]>();
+  for (const j of jobs) {
+    const d = j.job_number.replace(/\D/g, "");
+    if (!byDigits.has(d)) byDigits.set(d, []);
+    if (!byDigits.get(d)!.includes(j.job_number)) byDigits.get(d)!.push(j.job_number);
+  }
+  const digitTwins = new Map<string, string[]>();
+  for (const nums of byDigits.values()) {
+    if (nums.length < 2) continue;
+    for (const n of nums) digitTwins.set(n, nums.filter((x) => x !== n));
+  }
+  return { jobsById, jobsByNumber, duplicateNumbers, digitTwins };
 }
 
 export function buildAddressIndex(jobs: PrematchJob[]): Map<string, string[]> {
@@ -308,7 +326,11 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
       else if (!job) problems.push(`${num} (${t.where}) is not a job on record`);
       else if (job.holding) continue; // a holding job is never evidence
       else if (!jobIsLive(job)) problems.push(`${num} (${t.where}) is ${String(job.status).toLowerCase()}`);
-      else add(job, "job_number", t.where);
+      else {
+        add(job, "job_number", t.where);
+        const twins = ctx.digitTwins?.get(num);
+        if (twins?.length) problems.push(`${num} (${t.where}) has the same digits as ${twins.join(", ")}`);
+      }
     }
   }
   // 1b. The purchase order the bill is linked to, or names: its job.
