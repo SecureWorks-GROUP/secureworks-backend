@@ -189,6 +189,14 @@ function fakeClient(
         k: string,
         vs: unknown[],
       ) => (filters.push((r) => vs.includes(r[k])), b),
+      // The shared operator lookup reads users case-blind with escaped
+      // wildcards; an exact case-blind compare is enough here.
+      ilike: (k: string, v: string) => (
+        filters.push((r) =>
+          String(r[k] ?? "").toLowerCase() ===
+            v.replace(/\\/g, "").toLowerCase()
+        ), b
+      ),
       update: (v: Row) => ((op = "update"), (value = v), b),
       insert: (v: Row) => ((op = "insert"), (value = v), b),
       maybeSingle: () => {

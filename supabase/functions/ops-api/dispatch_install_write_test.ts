@@ -117,7 +117,7 @@ function world(
       job_number: "SWF-TEST",
       ...job,
     }],
-    users: [{ id: USER, email: "person@example.test" }],
+    users: [{ id: USER, email: "person@example.test", org_id: ORG }],
     job_assignments: bookings,
     job_dispatch_state: state ? [{ job_id: JOB, ...state }] : [],
   };
