@@ -14,6 +14,12 @@ SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT N
 -- the story since: its down goes first, inside this transaction only.
 SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
 \if :held_notes_live
+-- (same payer close, 20261019130000, replaced the citation check, the item check and the write since:
+-- its down goes first, inside this transaction only)
+SELECT to_regprocedure('public.context_ledger_obligation_closes(jsonb,jsonb)') IS NOT NULL AS same_payer_close_live \gset
+\if :same_payer_close_live
+\ir ../../../rollbacks/20261019130000_context_ledger_same_payer_close_down.sql
+\endif
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 \endif
 \ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
@@ -50,6 +56,12 @@ SELECT to_regprocedure('public.context_ledger_request_rebuild(uuid,text,text)') 
 -- the story since: its down goes first, inside this transaction only.
 SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
 \if :held_notes_live
+-- (same payer close, 20261019130000, replaced the citation check, the item check and the write since:
+-- its down goes first, inside this transaction only)
+SELECT to_regprocedure('public.context_ledger_obligation_closes(jsonb,jsonb)') IS NOT NULL AS same_payer_close_live \gset
+\if :same_payer_close_live
+\ir ../../../rollbacks/20261019130000_context_ledger_same_payer_close_down.sql
+\endif
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 \endif
 \ir ../../../rollbacks/20261013153000_context_rebuild_request_down.sql

@@ -162,12 +162,17 @@ BEGIN
  -- context_ledger_mail_rule_since and context_ledger_mail_copies, are plain SQL with no SET
  -- read inside the definer evidence and judge; and by notes freshness, 20261009132000: its one
  -- rule for a row a reading has not read, context_ledger_row_unread, is plain SQL with no SET
- -- read inside the definer judge, due list, sweep and story ledger read)
+ -- read inside the definer judge, due list, sweep and story ledger read; and by same payer close,
+ -- 20261019130000: its nine obligation helpers are plain SQL or plpgsql with no SET read inside the
+ -- definer citation check, item check and write)
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
     'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes',
-    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_ledger_row_unread') THEN
+    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_ledger_row_unread',
+    'context_ledger_invoice_kind_of', 'context_ledger_obligation_kind', 'context_ledger_obligation_class', 'context_ledger_invoice_payer',
+    'context_ledger_invoice_facts', 'context_ledger_obligation_job_facts', 'context_ledger_obligation_payer_match',
+    'context_ledger_obligated_party', 'context_ledger_obligation_closes') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');

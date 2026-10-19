@@ -124,6 +124,12 @@ BEGIN
   UNION ALL SELECT 'story', public.context_job_story(a, now(), (cl ->> 'generation_id')::uuid);
  PERFORM pg_temp.hn_assert((SELECT count(*) FROM hn_off WHERE v IS NOT NULL) = 7, 'seven off answers');
 END $c$;
+-- (same payer close, 20261019130000, replaced the citation check, the item check and the write since:
+-- its down goes first, inside this transaction only)
+SELECT to_regprocedure('public.context_ledger_obligation_closes(jsonb,jsonb)') IS NOT NULL AS same_payer_close_live \gset
+\if :same_payer_close_live
+\ir ../../../rollbacks/20261019130000_context_ledger_same_payer_close_down.sql
+\endif
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; g uuid; r record; v jsonb;
@@ -271,6 +277,12 @@ ROLLBACK;
 
 -- 4. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (same payer close, 20261019130000, replaced the citation check, the item check and the write since:
+-- its down goes first, inside this transaction only)
+SELECT to_regprocedure('public.context_ledger_obligation_closes(jsonb,jsonb)') IS NOT NULL AS same_payer_close_live \gset
+\if :same_payer_close_live
+\ir ../../../rollbacks/20261019130000_context_ledger_same_payer_close_down.sql
+\endif
 CREATE TEMP TABLE hn_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_held_notes_on', 'context_ledger_held_placed_copy',
