@@ -2952,17 +2952,48 @@ Deno.test("quote builder: a first press that fails before writing any order rele
   assertEquals(store.quote_builder_order_marks.length, 2);
 });
 
-Deno.test("quote builder: a failed make keeps the marker when an order of that kind exists", async () => {
-  const { store, client, issued } = await issuedForOrders();
-  await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
-  // A work order exists but its marker is gone (made before markers); a new
-  // make that faults must not leave the version open for a second one.
-  store.quote_builder_order_marks = [];
-  store.work_orders[0].quote_builder_version_id = issued.id;
-  const marks = store.quote_builder_order_marks;
-  assertEquals(marks.length, 0);
-  // The existing order is returned before any marker is claimed.
-  const again: any = await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
-  assertEquals(again.work_order?.id, store.work_orders[0].id);
-  assertEquals(store.work_orders.length, 1);
+Deno.test("quote builder: a make whose write may have landed keeps its marker, so a set removed later is never made again", async () => {
+  // The insert throws (no answer): it may have committed.
+  for (const kind of ["purchase_orders", "work_orders"] as const) {
+    const { store, issued } = await issuedForOrders();
+    const lost = makeFakeClient(store, {
+      afterInsert: (table) => {
+        if (table === kind) throw new Error("connection reset after commit");
+      },
+    }).client;
+    const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
+    await assertRejects(() => make(lost, { version_id: issued.id }, ACTOR));
+    // The rows landed; the marker stays.
+    assert(store[kind].length > 0);
+    assertEquals(store.quote_builder_order_marks.length, 1);
+    // Staff remove the orders by hand: the next press refuses, never re-makes.
+    store[kind] = [];
+    const code = await make(makeFakeClient(store).client, { version_id: issued.id }, ACTOR)
+      .then(() => "made", (e) => e.code);
+    assertEquals(code, kind === "purchase_orders" ? "purchase_orders_unsettled" : "work_order_unsettled");
+    assertEquals(store[kind].length, 0);
+  }
+});
+
+Deno.test("quote builder: a gateway error with no database code keeps the marker", async () => {
+  const { store, issued } = await issuedForOrders();
+  const gateway = makeFakeClient(store, {
+    insertError: (table) => table === "purchase_orders" ? { message: "502 bad gateway" } : null,
+  }).client;
+  await assertRejects(() => makeQuoteBuilderPurchaseOrders(gateway, { version_id: issued.id }, ACTOR));
+  assertEquals(store.quote_builder_order_marks.length, 1);
+});
+
+Deno.test("quote builder: a failure after the orders were written keeps the marker", async () => {
+  const { store, issued } = await issuedForOrders();
+  const failingRead = makeFakeClient(store, {
+    selectError: (table) =>
+      // The read-back after a successful insert fails.
+      table === "purchase_orders" && store.purchase_orders.length > 0
+        ? { code: "57014", message: "statement timeout" }
+        : null,
+  }).client;
+  await assertRejects(() => makeQuoteBuilderPurchaseOrders(failingRead, { version_id: issued.id }, ACTOR));
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(store.quote_builder_order_marks.length, 1);
 });

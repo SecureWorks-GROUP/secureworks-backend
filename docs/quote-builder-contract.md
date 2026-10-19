@@ -709,11 +709,14 @@ From an issued version:
   being made or were removed, and staff reconcile the job's orders before
   making any by hand. A set missing a row comes back with
   `purchase_orders_incomplete: { expected, present, missing_seq }` and is
-  never re-made. A make that fails re-reads the version: with no order of
-  that kind written, it releases its marker so a later press can make them
-  (the unique keys still refuse a second set if a write it could not see
-  lands later); with any order there, or if the re-read fails, the marker
-  stays and later presses get `409 *_unsettled`.
+  never re-made. A make that fails releases its marker only when every
+  order write it sent came back with a PostgreSQL error (a SQLSTATE, so the
+  statement was rolled back): then a later press can make them. If any write
+  threw, never answered, answered without a SQLSTATE, or returned rows, the
+  marker stays and later presses get `409 *_unsettled` (staff reconcile). No
+  re-read decides this, since an empty read proves nothing about a write in
+  flight. The unique keys refuse a second set only while the first set's rows
+  exist; the kept marker is what protects a set that was removed.
 
 With the switch on, `quote_builder_get_job` adds these keys on every version
 (drafts included): `work_order: {id, wo_number, status} | null` and

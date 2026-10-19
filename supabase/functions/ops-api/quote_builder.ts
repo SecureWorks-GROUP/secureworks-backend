@@ -2277,10 +2277,11 @@ export async function makeQuoteBuilderWorkOrder(
   }
   const scope = quoteBuilderCrewScope(version);
   let data: any = null;
+  const state: MakeState = { maybeWritten: false };
   try {
     for (let attempt = 0; attempt < 3 && !data; attempt++) {
       const woNumber = `WO-${orderStamp()}`;
-      const res = await client.from("work_orders").insert({
+      const res = await trackedInsert(state, () => client.from("work_orders").insert({
         org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
         job_id: version.job_id,
         wo_number: woNumber,
@@ -2290,7 +2291,7 @@ export async function makeQuoteBuilderWorkOrder(
         site_address: siteLine(job),
         created_by: uuidOrNull(actor.id),
         quote_builder_version_id: version.id,
-      }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
+      }).select("id, wo_number, status, quote_builder_version_id").maybeSingle());
       if (res.error?.code === "23505") {
         // Another press made this version's work order first
         // (uq_work_orders_one_quote_builder_version): return it. No order for
@@ -2307,7 +2308,7 @@ export async function makeQuoteBuilderWorkOrder(
     }
     if (!data) readError("work order create failed", "order number clashed three times");
   } catch (error) {
-    await releaseIfNothingWritten(client, version.id, "work_order");
+    await releaseIfNothingWritten(client, version.id, "work_order", state);
     throw error;
   }
   await recordOrderEvent(
@@ -2364,16 +2365,17 @@ export async function makeQuoteBuilderPurchaseOrders(
       409,
     );
   }
+  const state: MakeState = { maybeWritten: false };
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const made = await insertPurchaseOrderSet(client, actor, version, groups);
+      const made = await insertPurchaseOrderSet(client, actor, version, groups, state);
       if (made) return made;
       // The order number clashed: try again with a new number.
       await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
     }
     readError("purchase order create failed", "order number clashed three times");
   } catch (error) {
-    await releaseIfNothingWritten(client, version.id, "purchase_orders");
+    await releaseIfNothingWritten(client, version.id, "purchase_orders", state);
     throw error;
   }
 }
@@ -2402,29 +2404,47 @@ async function claimOrderMark(
 }
 
 /**
- * After this press's own make failed: release the marker when the version has
- * no order of that kind, so a later press can make them. Safe for the one-set
- * rule: even if a write this press could not see lands later, the unique keys
- * (one work order per version; version and seq for purchase orders) refuse a
- * second set. If the re-read fails the marker stays (409 unsettled).
+ * What this press's own order writes are known to have done. A statement that
+ * came back with a database error was rolled back: nothing of it landed. A
+ * write that threw or never answered may have landed; one that returned rows
+ * did.
+ */
+type MakeState = { maybeWritten: boolean };
+
+/**
+ * After this press's own make failed: release the marker only when every
+ * order write this press sent is known to have written nothing. Any doubt
+ * keeps it (409 unsettled for later presses; staff reconcile), so a set that
+ * landed unseen and was later removed is never made again. No re-read decides
+ * this: an empty read proves nothing about a write still in flight.
  */
 async function releaseIfNothingWritten(
   client: any,
   versionId: string,
   kind: OrderKind,
+  state: MakeState,
 ) {
-  try {
-    const orders = await ordersForVersion(client, versionId);
-    const none = kind === "work_order"
-      ? !orders.work_order
-      : orders.purchase_orders.length === 0;
-    if (!none) return;
-    await client.from("quote_builder_order_marks").delete()
-      .eq("quote_builder_version_id", versionId)
-      .eq("kind", kind);
-  } catch {
-    // Keep the marker: the safe side.
+  if (state.maybeWritten) return;
+  await client.from("quote_builder_order_marks").delete()
+    .eq("quote_builder_version_id", versionId)
+    .eq("kind", kind)
+    .then(() => {}, () => {});
+}
+
+/** Send one order insert, recording whether it may have written. */
+async function trackedInsert(state: MakeState, send: () => Promise<any>) {
+  state.maybeWritten = true;
+  const res = await send();
+  // Only a PostgreSQL error (a five-character SQLSTATE such as 23505 or
+  // 42703) is a refused, rolled-back statement. A gateway or network error
+  // with no SQLSTATE may have come after a commit: it stays "maybe written".
+  if (
+    res?.error && !res?.data &&
+    /^[0-9A-Z]{5}$/.test(String(res.error.code || ""))
+  ) {
+    state.maybeWritten = false;
   }
+  return res;
 }
 
 /** A press that lost the marker waits a moment for the winner's rows. */
@@ -2467,6 +2487,7 @@ async function insertPurchaseOrderSet(
   actor: QuoteBuilderActor,
   version: any,
   groups: Array<{ supplier_name: string; lines: any[] }>,
+  state: MakeState,
 ) {
   const stamp = orderStamp();
   const rows = groups.map((group, i) => {
@@ -2499,9 +2520,11 @@ async function insertPurchaseOrderSet(
       quote_builder_po_seq: i + 1,
     };
   });
-  const { data, error } = await client.from("purchase_orders")
-    .insert(rows)
-    .select("id, po_number, supplier_name, status, quote_builder_version_id");
+  const { data, error } = await trackedInsert(state, () =>
+    client.from("purchase_orders")
+      .insert(rows)
+      .select("id, po_number, supplier_name, status, quote_builder_version_id")
+  );
   if (error?.code === "23505") {
     // Another press made this version's set first; the whole insert was
     // refused, so nothing of ours landed. Return the winner's set. No winner:
