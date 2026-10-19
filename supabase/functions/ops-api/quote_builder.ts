@@ -2404,10 +2404,10 @@ async function claimOrderMark(
 }
 
 /**
- * What this press's own order writes are known to have done. A statement that
- * came back with a database error was rolled back: nothing of it landed. A
- * write that threw or never answered may have landed; one that returned rows
- * did.
+ * Whether this press's own order writes may have landed. Only an error on the
+ * REFUSED_CODES allow-list (its code trusted as given) counts as nothing
+ * written. A write that threw, never answered, returned rows or failed with
+ * any other code may have landed.
  */
 type MakeState = { maybeWritten: boolean };
 
