@@ -8,6 +8,7 @@
 
 import type { WsInvoice, WsJob } from "./debt_ws_rules.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
+import type { ClaimClient } from "../_shared/outbound_send_claim.ts";
 
 export const DEBT_WS_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const IN_CHUNK = 50;
@@ -157,6 +158,13 @@ export interface WsEvidence {
 }
 
 export interface DebtWsStore {
+  /** The org these rows belong to (the debt report's send claim is keyed on it). */
+  readonly orgId: string;
+  /**
+   * The outbound send claims (20261019170000_outbound_send_claims.sql). Every statement and
+   * report email claims its item here before it is sent (_shared/outbound_send_claim.ts).
+   */
+  readonly claims: ClaimClient;
   settings(): Promise<DebtWsSettings>;
   /** ACCREC, AUTHORISED, amount due above zero (the SAMPLE- filter is a rule, not a query). */
   openInvoices(): Promise<WsInvoice[]>;
@@ -214,8 +222,12 @@ export interface DebtWsStore {
     from?: Array<WsSuggestion["status"]>,
   ): Promise<boolean>;
   statementsForWeek(weekStart: string): Promise<WsStatementRow[]>;
-  /** The claim: inserts a 'sending' statement row. Null when this week's is claimed or sent. */
+  /**
+   * The claim: inserts a 'sending' statement row (with the id given, which names its send
+   * attempt). Null when this week's is claimed or sent.
+   */
   claimStatement(row: {
+    id?: string;
     company_key: string;
     week_start: string;
     xero_invoice_ids: string[];
@@ -232,6 +244,8 @@ export interface DebtWsStore {
       > & { html: string }
     >,
   ): Promise<void>;
+  /** Settles a statement row only while it is still 'sending'. False when it was not. */
+  releaseStatement(id: string, patch: { status: "failed"; error: string }): Promise<boolean>;
   janList(visitDate: string): Promise<WsJanListRow | null>;
   /** Creates the week's row (status open) if missing, and returns it. */
   ensureJanList(visitDate: string): Promise<WsJanListRow>;
@@ -275,6 +289,8 @@ export interface DebtWsStore {
   /** The claim: inserts a 'sending' report row. Null when this week's auto report is taken. */
   claimReport(row: WsReportClaim): Promise<WsReportRow | null>;
   settleReport(id: string, patch: WsReportSettle): Promise<void>;
+  /** Settles a report row only while it is still 'sending'. False when it was not. */
+  releaseReport(id: string, patch: { status: "failed"; error: string }): Promise<boolean>;
 }
 
 /** debt_ws_settings report columns (20261015170000_debt_ws_report.sql). */
@@ -312,6 +328,8 @@ export interface WsReportRow {
 }
 
 export interface WsReportClaim {
+  /** The row id, which names its send attempt (debt_ws_actions.ts). */
+  id?: string;
   kind: "manual" | "auto";
   week_start: string;
   to_emails: string[];
@@ -485,6 +503,10 @@ export function createSupabaseDebtWsStore(
   }
 
   return {
+    orgId,
+    claims: {
+      rpc: (fn: string, args?: Record<string, unknown>) => client.rpc(fn, args),
+    },
     async settings() {
       const { data, error } = await client.from("debt_ws_settings").select(
         "owner_user_ids, tab_visible, sending_enabled, agent_enabled, auto_send_steps, jan_list_auto_send, not_chased_contacts, statement_emails, company_aliases",
@@ -789,6 +811,13 @@ export function createSupabaseDebtWsStore(
         writeFailed("the statement", { message: "claim row not found" });
       }
     },
+    async releaseStatement(id, patch) {
+      const { data, error } = await client.from("debt_ws_statements").update(
+        patch,
+      ).eq("id", id).eq("status", "sending").select("id");
+      if (error) writeFailed("the statement", error);
+      return (data || []).length === 1;
+    },
     async janList(visitDate) {
       const { data, error } = await client.from("debt_ws_jan_lists").select(
         "id, visit_date, items, removed_share_keys, status, locked_at, sent_at, error",
@@ -930,6 +959,12 @@ export function createSupabaseDebtWsStore(
       if ((data || []).length !== 1) {
         writeFailed("the report send", { message: "claim row not found" });
       }
+    },
+    async releaseReport(id, patch) {
+      const { data, error } = await client.from("debt_ws_reports").update(patch)
+        .eq("id", id).eq("status", "sending").select("id");
+      if (error) writeFailed("the report send", error);
+      return (data || []).length === 1;
     },
   };
 }

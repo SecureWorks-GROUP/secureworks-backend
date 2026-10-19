@@ -30,8 +30,21 @@
 //     can reply; the planned steps stay paused. Its claim is keyed on a client_ref the
 //     screen makes once per message, so a double tap never texts twice.
 
-// The one reader of a send-outlook-email failure reply (invoice email uses it too).
-import { classifyInvoiceEmailFailure } from "./invoice_status_evidence.ts";
+// Every statement and report email claims its item before it is sent, and only an explicit
+// "checked" press (a named person) releases an earlier unconfirmed send.
+import {
+  claimSend,
+  readSendHolds,
+  reconcileActor,
+  reconcileThenClaim,
+  SEND_UNCERTAIN_MESSAGE,
+  SEND_UNCERTAIN_RECOVERY,
+  type SendClaimRefusal,
+  sendClaimRefusalBody,
+  sendClaimRefusalStatus,
+  type SendHold,
+  settleSend,
+} from "../_shared/outbound_send_claim.ts";
 import {
   addDays,
   type BankTransaction,
@@ -2090,21 +2103,52 @@ function statementView(
   };
 }
 
+/** What one send-outlook-email answer proves about the email. */
+export type DebtEmailOutcome = "sent" | "refused" | "failed" | "unknown";
+
+function replyObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** An answer (or its error object) that says the outcome is not known. */
+function saysUnknown(r: Record<string, unknown> | null): boolean {
+  if (!r) return false;
+  return r.outcomeUnknown === true || r.outcome_unknown === true ||
+    r.state === "outcome_unknown" || r.delivery_status === "outcome_unknown";
+}
+
 /**
- * What a non-ok send-outlook-email reply proves. Only a refusal, or a reply that says
- * retry_safe: true, proves nothing went; anything else may have reached the client.
+ * The one reader of a send-outlook-email answer for the debt workshop. Sent only on a 2xx
+ * whose body reads as JSON with success: true and no uncertainty in it (retry_safe: false
+ * rides every genuine send, so it alone is not doubt there). Refused or failed only on a
+ * readable JSON refusal: a 4xx whose body cannot be read, a bare 401/403 included, may
+ * still have sent. Anything uncertain, at the top level or under error, is unknown.
  */
-function emailReplyMayHaveSent(
-  result: { status: number; reply?: unknown },
-): boolean {
-  return classifyInvoiceEmailFailure(result.status, result.reply ?? null) === "unknown";
+export function debtEmailOutcome(
+  result: { ok: boolean; status: number; reply?: unknown },
+): DebtEmailOutcome {
+  const r = replyObject(result.reply);
+  const inner = replyObject(r?.error);
+  if (saysUnknown(r) || saysUnknown(inner)) return "unknown";
+  if (result.ok && result.status >= 200 && result.status < 300) {
+    return r?.success === true ? "sent" : "unknown";
+  }
+  if (!r) return "unknown";
+  if (r.retry_safe === false || inner?.retry_safe === false) return "unknown";
+  if (r.success === true) return "unknown";
+  if (r.state === "refused") return "refused";
+  if ((result.status === 401 || result.status === 403) && (r.code || r.error)) {
+    return "refused";
+  }
+  if (r.retry_safe === true) return "failed";
+  return "unknown";
 }
 
 /** The reply's code and state only: never its raw text. */
 function emailReplyFacts(result: { status: number; reply?: unknown }) {
-  const r = (result.reply && typeof result.reply === "object")
-    ? result.reply as Record<string, unknown>
-    : {};
+  const r = replyObject(result.reply) ?? {};
   return {
     email_status: result.status,
     reply_code: typeof r.code === "string" ? r.code : null,
@@ -2112,8 +2156,104 @@ function emailReplyFacts(result: { status: number; reply?: unknown }) {
   };
 }
 
+/** The checker a "checked" press records: a named signed-in person, never the agent. */
+function checkerOf(actor: Actor): string | null {
+  return actor.user_id ? reconcileActor(`${actor.label} (${actor.user_id})`) : null;
+}
+
+/** The send attempt that names one statement or report row (the row's id is in it). */
+function attemptFor(kind: "debt_statement" | "debt_report", rowId: string): string {
+  return `${kind}_attempt:${rowId}`;
+}
+
+/** The row id inside an attempt id made by attemptFor, or null for any other attempt. */
+function rowOfAttempt(
+  kind: "debt_statement" | "debt_report",
+  attemptId: string,
+): string | null {
+  const prefix = `${kind}_attempt:`;
+  return attemptId.startsWith(prefix) ? attemptId.slice(prefix.length) : null;
+}
+
+/** A refused claim as the DebtWsError a door throws: fixed wording, never provider text. */
+function claimRefusalError(result: SendClaimRefusal): DebtWsError {
+  const body = sendClaimRefusalBody(result);
+  // The Debt tab keys its "checked Sent Items" button on send_not_confirmed, so an earlier
+  // unconfirmed send keeps that code; the claim's own code rides along as claim_code.
+  const code = body.state === "outcome_unknown"
+    ? "send_not_confirmed"
+    : body.state === "sending"
+    ? "send_in_progress"
+    : result.code;
+  return new DebtWsError(
+    `${body.error} ${body.recovery_action}`,
+    sendClaimRefusalStatus(result),
+    code,
+    {
+      claim_code: result.code,
+      state: body.state,
+      retry_safe: false,
+      recovery_action: body.recovery_action,
+      held: body.held,
+    },
+  );
+}
+
+/**
+ * Claims the item for one send attempt. A "checked" press releases the earlier unconfirmed
+ * attempt first (only that one, by name, compare-and-set, never a live send), recording
+ * who checked. Returns the attempts it released.
+ */
+async function claimItem(
+  deps: DebtWsDeps,
+  input: {
+    key: string;
+    attemptId: string;
+    actor: Actor;
+    checked: boolean;
+    detail: Record<string, unknown>;
+  },
+): Promise<{ ok: true; released: SendHold[] } | { ok: false; refusal: SendClaimRefusal }> {
+  const client = deps.store.claims;
+  if (!input.checked) {
+    const claim = await claimSend(client, {
+      keys: [input.key],
+      attemptId: input.attemptId,
+      actor: input.actor.label,
+      detail: input.detail,
+    });
+    return claim.ok ? { ok: true, released: [] } : { ok: false, refusal: claim };
+  }
+  const before = await readSendHolds(client, [input.key]);
+  if (!before.ok) return { ok: false, refusal: before };
+  const claim = await reconcileThenClaim(client, {
+    keys: [input.key],
+    attemptId: input.attemptId,
+    actor: checkerOf(input.actor),
+    checkedAt: deps.now().toISOString(),
+    evidence: "sent_items_checked",
+    detail: input.detail,
+  });
+  return claim.ok ? { ok: true, released: before.holds } : { ok: false, refusal: claim };
+}
+
+/** Settles a claim. A lost settle leaves the claim holding the item, which is safe. */
+async function settleItem(
+  deps: DebtWsDeps,
+  attemptId: string,
+  state: "sent" | "failed" | "outcome_unknown",
+  detail: Record<string, unknown>,
+) {
+  const settled = await settleSend(deps.store.claims, attemptId, state, detail);
+  if (!settled.ok) {
+    console.error("[debt_ws] send claim not settled", attemptId, state, settled.code);
+  }
+}
+
 const NOT_CONFIRMED_ADVICE =
   "Check the Sent Items folder of the admin mailbox. If it is not there, send again with sent_items_checked set to true";
+/** The fixed wording for an earlier email that may have gone (never provider text). */
+const MAY_HAVE_GONE = `${SEND_UNCERTAIN_MESSAGE} ${SEND_UNCERTAIN_RECOVERY}`;
 
 function companyKeyParam(value: unknown): string {
   if (typeof value !== "string" || !value.trim() || value.length > 200) {
@@ -2200,40 +2340,73 @@ export async function debtWsStatementSend(
   if (!company.to_email) {
     await refuseStatement("no_email", "No accounts email set for this company");
   }
-  // A claim still 'sending' is an email that may have gone: it holds the week until
-  // someone has checked Sent Items. Then it is released as failed and sent again.
-  const unconfirmed = (await deps.store.statementsForWeek(weekStart)).find((s) =>
+  // Statement identity: the item is the customer (debt_statement:<company>), not the week.
+  // A statement whose send is not confirmed holds every later statement to that customer,
+  // next week's included, until someone checks Sent Items and presses again marked as
+  // checked; a statement sent and confirmed frees it. The week's row below is the record
+  // of what went; the claim is what stops a second email.
+  const rowId = crypto.randomUUID();
+  const attemptId = attemptFor("debt_statement", rowId);
+  const item = await claimItem(deps, {
+    key: `debt_statement:${key}`,
+    attemptId,
+    actor,
+    checked: sentItemsChecked,
+    detail: { statement_id: rowId, company_key: key, week_start: weekStart },
+  });
+  if (!item.ok) {
+    const error = claimRefusalError(item.refusal);
+    await refuseStatement(error.code, error.message, error.status, error.details);
+  }
+  /** Nothing was sent: frees the claim, then refuses with the reason. */
+  const refuseFree = async (
+    code: string,
+    message: string,
+    status = 409,
+    details: Record<string, unknown> = {},
+  ): Promise<never> => {
+    await settleItem(deps, attemptId, "failed", { refused: code });
+    return await refuseStatement(code, message, status, details);
+  };
+  const checker = sentItemsChecked ? checkerOf(actor) : null;
+  const releasedRows = new Set(
+    (item.ok ? item.released : []).map((h) => rowOfAttempt("debt_statement", h.attempt_id))
+      .filter((id): id is string => !!id),
+  );
+  // A week's row still 'sending' is an email that may have gone. One released by the
+  // checked press above is closed as failed (only while it is still 'sending'). One with no
+  // claim of its own (sent before claims existed) holds the week the same way until a
+  // checked press releases it.
+  const unconfirmed = (await deps.store.statementsForWeek(weekStart)).filter((s) =>
     s.company_key === key && s.status === "sending"
   );
-  let reconciled = false;
-  if (unconfirmed) {
-    if (!sentItemsChecked || !unconfirmed.error?.startsWith("not confirmed")) {
-      await refuseStatement(
-        "send_not_confirmed",
-        unconfirmed.error?.startsWith("not confirmed")
-          ? `This week's statement may already have gone. ${NOT_CONFIRMED_ADVICE}`
-          : "This week's statement is being sent now",
-        409,
-        { statement_id: unconfirmed.id },
-      );
+  let reconciled = releasedRows.size > 0;
+  for (const row of unconfirmed) {
+    if (!releasedRows.has(row.id) && !checker) {
+      await refuseFree("send_not_confirmed", MAY_HAVE_GONE, 409, {
+        statement_id: row.id,
+        state: "outcome_unknown",
+        retry_safe: false,
+      });
     }
-    await deps.store.settleStatement(unconfirmed.id, {
+    await deps.store.releaseStatement(row.id, {
       status: "failed",
       error: `reconciled: not in Sent Items, checked by ${actor.label}`.slice(0, 500),
     });
     reconciled = true;
   }
   if (company.statement.status === "sent" && !reconciled) {
-    await refuseStatement(
+    await refuseFree(
       "already_sent",
       "This week's statement was already sent",
     );
   }
   if (!entries.length) {
-    await refuseStatement("nothing_due", "Nothing on this company is past due");
+    await refuseFree("nothing_due", "Nothing on this company is past due");
   }
 
   const claim = await deps.store.claimStatement({
+    id: rowId,
     company_key: key,
     week_start: weekStart,
     xero_invoice_ids: entries.map((e) => e.inv.xero_invoice_id),
@@ -2241,9 +2414,12 @@ export async function debtWsStatementSend(
       100,
     to_email: company.to_email!,
     approved_by: actor.label,
+  }).catch(async (error) => {
+    await settleItem(deps, attemptId, "failed", { refused: "row_not_written" });
+    throw error;
   });
   if (!claim) {
-    await refuseStatement(
+    await refuseFree(
       "already_sent",
       "This week's statement was already sent",
     );
@@ -2259,7 +2435,7 @@ export async function debtWsStatementSend(
       status: "refused",
       error: code,
     }).catch(() => {});
-    return await refuseStatement(code, message, status, details);
+    return await refuseFree(code, message, status, details);
   };
 
   // The live re-check: drop anything Xero shows paid or no longer open. A failed read
@@ -2342,39 +2518,41 @@ export async function debtWsStatementSend(
       subject: view.subject,
       htmlBody: view.html,
     });
-  } catch (error) {
-    // The email may have gone: the claim stays (status sending) so it never sends twice.
+  } catch (_error) {
+    // The email may have gone: the claim holds the customer and the row stays 'sending'.
+    await settleItem(deps, attemptId, "outcome_unknown", { reason: "send_threw" });
     await deps.store.settleStatement(claim!.id, {
-      error: `not confirmed: ${
-        String((error as Error)?.message ?? error).slice(0, 300)
-      }`,
+      error: "not confirmed: the send did not answer",
       html: view.html,
     }).catch(() => {});
     throw new DebtWsError(
-      `The email could not be confirmed and may already have gone. It stays claimed for this week so it cannot send twice. ${NOT_CONFIRMED_ADVICE}`,
+      `The email could not be confirmed and may already have gone. It stays held so it cannot send twice. ${NOT_CONFIRMED_ADVICE}`,
       502,
       "send_not_confirmed",
-      { retry_safe: false },
+      { state: "outcome_unknown", retry_safe: false },
     );
   }
-  if (!result.ok && emailReplyMayHaveSent(result)) {
-    // The reply does not prove nothing went: the claim stays 'sending'.
+  const outcome = debtEmailOutcome(result);
+  if (outcome === "unknown") {
+    // The answer does not prove the email went, nor that it did not.
     const facts = emailReplyFacts(result);
+    await settleItem(deps, attemptId, "outcome_unknown", facts);
     await deps.store.settleStatement(claim!.id, {
       error: `not confirmed: email ${facts.email_status} ${facts.reply_code ?? ""}`.trim(),
       html: view.html,
     }).catch(() => {});
     throw new DebtWsError(
-      `The email could not be confirmed and may already have gone. It stays claimed for this week so it cannot send twice. ${NOT_CONFIRMED_ADVICE}`,
+      `The email could not be confirmed and may already have gone. It stays held so it cannot send twice. ${NOT_CONFIRMED_ADVICE}`,
       502,
       "send_not_confirmed",
-      { ...facts, retry_safe: false },
+      { ...facts, state: "outcome_unknown", retry_safe: false },
     );
   }
-  if (!result.ok) {
+  if (outcome !== "sent") {
+    await settleItem(deps, attemptId, "failed", emailReplyFacts(result));
     await deps.store.settleStatement(claim!.id, {
       status: "failed",
-      error: String(result.error ?? `email ${result.status}`).slice(0, 500),
+      error: `email ${result.status} ${outcome}`,
       html: view.html,
     }).catch(() => {});
     throw new DebtWsError(
@@ -2384,6 +2562,7 @@ export async function debtWsStatementSend(
       { email_status: result.status },
     );
   }
+  await settleItem(deps, attemptId, "sent", { statement_id: claim!.id });
   const sentAt = deps.now().toISOString();
   await deps.store.settleStatement(claim!.id, {
     status: "sent",
@@ -3622,17 +3801,77 @@ async function sendDebtReport(
   kind: "manual" | "auto",
   addresses: { to: string[]; cc: string[] },
   weekStart: string,
+  checked = false,
 ) {
   const sentBy = kind === "auto" ? DEBT_WS_REPORT_AUTO_LABEL : actor.label;
-  const claim = await deps.store.claimReport({
-    kind,
-    week_start: weekStart,
-    to_emails: addresses.to,
-    cc_emails: addresses.cc,
-    sent_by: actor.user_id,
-    sent_by_name: sentBy,
+  // The item is the org's debt report (debt_report:<org>), shared by the manual and the
+  // automatic send: a report email that is in flight or not confirmed holds both, however
+  // old it is, until a checked press releases it. Only a manual checked press releases.
+  const rowId = crypto.randomUUID();
+  const attemptId = attemptFor("debt_report", rowId);
+  const item = await claimItem(deps, {
+    key: `debt_report:${deps.store.orgId}`,
+    attemptId,
+    actor,
+    checked: checked && kind === "manual",
+    detail: { report_id: rowId, kind, week_start: weekStart },
   });
-  if (!claim) return null;
+  if (!item.ok) {
+    if (kind === "auto") return { held: item.refusal } as const;
+    throw claimRefusalError(item.refusal);
+  }
+  const free = (code: string) => settleItem(deps, attemptId, "failed", { refused: code });
+  // Report rows still 'sending'. One released by the checked press above is closed as
+  // failed (only while it is still 'sending'). One with no claim of its own (sent before
+  // claims existed) holds the report until a manual checked press releases it.
+  const releasedRows = new Set(
+    item.released.map((h) => rowOfAttempt("debt_report", h.attempt_id))
+      .filter((id): id is string => !!id),
+  );
+  let unconfirmed: WsReportRow[];
+  try {
+    unconfirmed = (await deps.store.reportSends(50)).filter((r) =>
+      r.status === "sending"
+    );
+  } catch (error) {
+    await free("report_sends_unreadable");
+    throw error;
+  }
+  const checker = checked && kind === "manual" ? checkerOf(actor) : null;
+  for (const row of unconfirmed) {
+    if (!releasedRows.has(row.id) && !checker) {
+      await free("send_not_confirmed");
+      if (kind === "auto") return { held: null } as const;
+      throw new DebtWsError(MAY_HAVE_GONE, 409, "send_not_confirmed", {
+        report_id: row.id,
+        state: "outcome_unknown",
+        retry_safe: false,
+      });
+    }
+    await deps.store.releaseReport(row.id, {
+      status: "failed",
+      error: `reconciled: not in Sent Items, checked by ${actor.label}`.slice(0, 500),
+    });
+  }
+  let claim: WsReportRow | null;
+  try {
+    claim = await deps.store.claimReport({
+      id: rowId,
+      kind,
+      week_start: weekStart,
+      to_emails: addresses.to,
+      cc_emails: addresses.cc,
+      sent_by: actor.user_id,
+      sent_by_name: sentBy,
+    });
+  } catch (error) {
+    await free("row_not_written");
+    throw error;
+  }
+  if (!claim) {
+    await free("already_sent");
+    return null;
+  }
   let report: DebtReport;
   let pdf: { bytes: Uint8Array; pageCount: number } | null = null;
   let stale: string | null = null;
@@ -3643,6 +3882,7 @@ async function sendDebtReport(
     if (!stale) pdf = await deps.renderReportPdf(report);
   } catch (error) {
     // Nothing was sent: release the claim with the reason.
+    await free("not_built");
     await deps.store.settleReport(claim.id, {
       status: "failed",
       error: `not built: ${String((error as Error)?.name ?? error).slice(0, 200)}`,
@@ -3659,6 +3899,7 @@ async function sendDebtReport(
     // as 'refused' with the reason, which frees this week's auto slot, and the refusal is
     // logged where the Debt tab shows the report's history.
     const reason = stale ?? "The report could not be built just now";
+    await free("xero_copy_stale");
     await deps.store.settleReport(claim.id, {
       status: "refused",
       error: `xero copy not fresh: ${reason}`.slice(0, 500),
@@ -3711,24 +3952,25 @@ async function sendDebtReport(
       }],
       internal_report: "debt_report",
     });
-  } catch (error) {
-    // The email may have gone: the row stays 'sending' with the reason, never resent by itself.
+  } catch (_error) {
+    // The email may have gone: the claim holds the report and the row stays 'sending'.
+    await settleItem(deps, attemptId, "outcome_unknown", { reason: "send_threw" });
     await deps.store.settleReport(claim.id, {
       ...copy,
-      error: `not confirmed: ${
-        String((error as Error)?.message ?? error).slice(0, 300)
-      }`,
+      error: "not confirmed: the send did not answer",
     }).catch(() => {});
     throw new DebtWsError(
       `The email could not be confirmed and may already have gone. ${NOT_CONFIRMED_ADVICE}`,
       502,
       "send_not_confirmed",
-      { retry_safe: false },
+      { state: "outcome_unknown", retry_safe: false },
     );
   }
-  if (!result.ok && emailReplyMayHaveSent(result)) {
-    // The reply does not prove nothing went: the row stays 'sending'.
+  const outcome = debtEmailOutcome(result);
+  if (outcome === "unknown") {
+    // The answer does not prove the email went, nor that it did not.
     const facts = emailReplyFacts(result);
+    await settleItem(deps, attemptId, "outcome_unknown", facts);
     await deps.store.settleReport(claim.id, {
       ...copy,
       error: `not confirmed: email ${facts.email_status} ${facts.reply_code ?? ""}`.trim(),
@@ -3737,14 +3979,15 @@ async function sendDebtReport(
       `The email could not be confirmed and may already have gone. ${NOT_CONFIRMED_ADVICE}`,
       502,
       "send_not_confirmed",
-      { ...facts, retry_safe: false },
+      { ...facts, state: "outcome_unknown", retry_safe: false },
     );
   }
-  if (!result.ok) {
+  if (outcome !== "sent") {
+    await settleItem(deps, attemptId, "failed", emailReplyFacts(result));
     await deps.store.settleReport(claim.id, {
       ...copy,
       status: "failed",
-      error: String(result.error ?? `email ${result.status}`).slice(0, 500),
+      error: `email ${result.status} ${outcome}`,
     }).catch(() => {});
     throw new DebtWsError(
       `The email was refused (${result.status}). Nothing was sent`,
@@ -3753,6 +3996,7 @@ async function sendDebtReport(
       { email_status: result.status },
     );
   }
+  await settleItem(deps, attemptId, "sent", { report_id: claim.id });
   const sentAt = deps.now().toISOString();
   await deps.store.settleReport(claim.id, {
     ...copy,
@@ -3831,44 +4075,48 @@ export async function debtWsReportSend(
   if (addresses.problem) {
     await refuseReport(addresses.problem.code, addresses.problem.message);
   }
-  // A double click: a manual report already went (or is going) in the last two minutes.
+  // A report sent and confirmed in the last two minutes is not sent again by a second tap.
+  // (One in flight or not confirmed is held by the send claim in sendDebtReport.)
   const recent = (await deps.store.reportSends(5)).find((r) =>
-    r.kind === "manual" && (r.status === "sent" || r.status === "sending") &&
+    r.kind === "manual" && r.status === "sent" &&
     deps.now().getTime() - Date.parse(r.created_at) < DEBT_WS_REPORT_RESEND_MS
   );
   if (recent) {
     await refuseReport(
       "recently_sent",
-      "The report was just sent. Wait two minutes before sending it again",
+      "The report was sent less than two minutes ago, so it was not sent again",
     );
   }
-  // A report email that may have gone (still 'sending') holds the next send until
-  // someone has checked Sent Items; then it is released as failed.
-  const unconfirmed = (await deps.store.reportSends(50)).filter((r) =>
-    r.status === "sending"
-  );
-  if (unconfirmed.length) {
-    if (body.sent_items_checked !== true) {
-      await refuseReport(
-        "send_not_confirmed",
-        `An earlier report email may already have gone. ${NOT_CONFIRMED_ADVICE}`,
-      );
-    }
-    for (const r of unconfirmed) {
-      await deps.store.settleReport(r.id, {
-        status: "failed",
-        error: `reconciled: not in Sent Items, checked by ${actor.label}`.slice(0, 500),
-      });
-    }
+  const checked = body.sent_items_checked === true;
+  if (checked && !checkerOf(actor)) {
+    await refuseReport(
+      "send_reconcile_actor_required",
+      "A checked press needs a signed-in person, so nothing was sent",
+    );
   }
-  const sent = await sendDebtReport(
-    deps,
-    actor,
-    "manual",
-    addresses,
-    mondayOf(today),
-  );
-  if (!sent) {
+  let sent: Awaited<ReturnType<typeof sendDebtReport>>;
+  try {
+    sent = await sendDebtReport(
+      deps,
+      actor,
+      "manual",
+      addresses,
+      mondayOf(today),
+      checked,
+    );
+  } catch (error) {
+    if (error instanceof DebtWsError && error.status === 409) {
+      await log(
+        deps,
+        { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+        actor,
+        "send_refused",
+        { body: error.message, meta: { code: error.code, report: true } },
+      ).catch(() => {});
+    }
+    throw error;
+  }
+  if (!sent || "held" in sent) {
     throw new DebtWsError(
       "The report could not be claimed for sending. Try again shortly",
       409,
@@ -3881,7 +4129,8 @@ export async function debtWsReportSend(
 /**
  * The Wednesday 12:00 Perth cron. Off unless report_auto_send and sending are both on; once
  * a week (the week is Monday to Sunday, Perth, so week_start is still that Monday). Refuses
- * (xero_copy_stale) when our Xero copy is not fresh, like a manual send.
+ * (xero_copy_stale) when our Xero copy is not fresh, like a manual send. A report email in
+ * flight or not confirmed (manual or automatic) holds it: it sends nothing and says so.
  */
 export async function debtWsReportAuto(deps: DebtWsDeps) {
   const settings = await deps.store.settings();
@@ -3912,6 +4161,7 @@ export async function debtWsReportAuto(deps: DebtWsDeps) {
     addresses,
     weekStart,
   );
+  if (sent && "held" in sent) return skipped("send_not_confirmed");
   return sent ?? skipped("already_sent");
 }
 

@@ -21,6 +21,7 @@ import {
 import type { DebtWsCaller, DebtWsDeps } from "./debt_ws_actions.ts";
 import type { BankAccountBalance } from "./debt_ws_report.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
+import { makeFakeClaimStore } from "../_shared/outbound_send_claim_fake.ts";
 
 export const SHAUN_ID = "30000000-0000-4000-8000-0000000000aa";
 export const OTHER_STAFF_ID = "30000000-0000-4000-8000-0000000000bb";
@@ -264,6 +265,9 @@ export function fixtureJobs(): WsJob[] {
 }
 
 export class FakeStore implements DebtWsStore {
+  orgId = "00000000-0000-0000-0000-000000000001";
+  /** The outbound send claims (same rules as the database functions). */
+  claims = makeFakeClaimStore({ now: NOW.getTime() });
   settingsRow: DebtWsSettings = {
     ...DEBT_WS_SETTINGS_OFF,
     owner_user_ids: [SHAUN_ID],
@@ -525,6 +529,7 @@ export class FakeStore implements DebtWsStore {
     );
   }
   claimStatement(row: {
+    id?: string;
     company_key: string;
     week_start: string;
     xero_invoice_ids: string[];
@@ -540,7 +545,7 @@ export class FakeStore implements DebtWsStore {
     ) return Promise.resolve(null);
     const full = {
       ...row,
-      id: nextId(),
+      id: row.id ?? nextId(),
       status: "sending" as const,
       sent_at: null,
       error: null,
@@ -553,6 +558,12 @@ export class FakeStore implements DebtWsStore {
     if (!row) throw new Error("no statement");
     Object.assign(row, patch);
     return Promise.resolve();
+  }
+  releaseStatement(id: string, patch: { status: "failed"; error: string }) {
+    const row = this.statementRows.find((s) => s.id === id);
+    if (!row || row.status !== "sending") return Promise.resolve(false);
+    Object.assign(row, patch);
+    return Promise.resolve(true);
   }
   janList(visitDate: string) {
     return Promise.resolve(
@@ -632,7 +643,7 @@ export class FakeStore implements DebtWsStore {
     ) return Promise.resolve(null);
     const full = {
       ...row,
-      id: nextId(),
+      id: row.id ?? nextId(),
       status: "sending" as const,
       subject: null,
       error: null,
@@ -647,6 +658,12 @@ export class FakeStore implements DebtWsStore {
     if (!row) throw new Error("no report row");
     Object.assign(row, patch);
     return Promise.resolve();
+  }
+  releaseReport(id: string, patch: { status: "failed"; error: string }) {
+    const row = this.reportRows.find((r) => r.id === id);
+    if (!row || row.status !== "sending") return Promise.resolve(false);
+    Object.assign(row, patch);
+    return Promise.resolve(true);
   }
   /** The time new report rows are stamped with (tests move it on). */
   clock: () => Date = () => NOW;
@@ -769,7 +786,13 @@ export function fakeDeps(
       rec.emails.push(payload);
       if (options.emailError) return Promise.reject(options.emailError);
       return Promise.resolve(
-        options.emailResult ?? { ok: true, status: 200, error: null },
+        options.emailResult ??
+          {
+            ok: true,
+            status: 202,
+            error: null,
+            reply: { success: true, accepted: true, retry_safe: false },
+          },
       );
     },
     bankSummary: () => {
