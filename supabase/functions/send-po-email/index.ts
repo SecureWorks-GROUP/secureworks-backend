@@ -51,6 +51,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // so the canonical job ref + quote-back ask never drift between the two channels.
 import { canonicalJobRef, poEmailReferenceBanner } from '../_shared/po_reference.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { sharedKeyGate } from '../_shared/shared_key_containment.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -213,7 +214,8 @@ if (import.meta.main) serve(async (req: Request) => {
   const apiKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
   const validKey = Deno.env.get('SW_API_KEY')
   // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
-  const sharedKeyOk = !!apiKey && !!validKey && apiKey === validKey
+  // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off.
+  const sharedKeyOk = sharedKeyGate({ presented: [apiKey], sharedKey: validKey, fn: 'send-po-email' }) === 'accepted'
   if (!sharedKeyOk && !(await verifyServiceCredential(req.headers))) {
     return json({ error: 'Unauthorized' }, 401)
   }

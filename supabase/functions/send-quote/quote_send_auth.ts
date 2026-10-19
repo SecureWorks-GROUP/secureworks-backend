@@ -6,6 +6,8 @@
 // serve(). Trade, estimator, lead_installer, allocated, and makesafe_open
 // are not send authority. API-key / service-role stays office.
 
+import { isSharedKey, sharedKeyGate } from '../_shared/shared_key_containment.ts'
+
 export const SEND_QUOTE_STAFF_OPERATOR_ROLES = new Set([
   'admin',
   'owner',
@@ -242,6 +244,8 @@ export async function decideSendQuoteAuth(input: {
   // The service credential this request presented and that
   // verifyServiceCredential accepted, never the raw env value.
   serviceRoleKey: string | null | undefined
+  // Env reader for SW_SHARED_KEY_CONTAINMENT (tests inject; default Deno.env).
+  env?: (name: string) => string | undefined
 }): Promise<SendQuoteAuthDecision> {
   const { req, sb, path, corsHeaders, swApiKey, serviceRoleKey } = input
   if (!QUOTE_SEND_AUTH_PATHS.has(String(path || ''))) {
@@ -258,11 +262,34 @@ export async function decideSendQuoteAuth(input: {
     logSendAuth({ path, authMode: 'api_key', user: null })
     return { kind: 'allow', mode: 'api_key', user: null }
   }
-  if (xApiKey && (xApiKey === swApiKey || xApiKey === serviceRoleKey)) {
+  if (
+    (xApiKey && serviceRoleKey && xApiKey === serviceRoleKey) ||
+    (bearerToken && serviceRoleKey && bearerToken === serviceRoleKey)
+  ) {
     logSendAuth({ path, authMode: 'api_key', user: null })
     return { kind: 'allow', mode: 'api_key', user: null }
   }
-  if (bearerToken && (bearerToken === swApiKey || bearerToken === serviceRoleKey)) {
+  // The shared browser key keeps the quote send the scoping tools use, but not
+  // the invoice send, whose api_key mode lets body fields replace the job's
+  // client email and payment details (resolveSendInvoiceDelivery). With
+  // SW_SHARED_KEY_CONTAINMENT on, /send-invoice needs the service credential
+  // (ops-api already sends it) or an office JWT.
+  if (isSharedKey(xApiKey, swApiKey) || isSharedKey(bearerToken, swApiKey)) {
+    const gated = path === 'send-invoice'
+      ? sharedKeyGate({
+        presented: [xApiKey, bearerToken],
+        sharedKey: swApiKey,
+        fn: 'send-quote',
+        route: path,
+        env: input.env,
+      })
+      : 'accepted'
+    if (gated === 'refused') {
+      return rejectJson(corsHeaders, 401, {
+        error: 'Invoice send needs an office session or a server credential',
+        code: 'shared_key_contained',
+      })
+    }
     logSendAuth({ path, authMode: 'api_key', user: null })
     return { kind: 'allow', mode: 'api_key', user: null }
   }

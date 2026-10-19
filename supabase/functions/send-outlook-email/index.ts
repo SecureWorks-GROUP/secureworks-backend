@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════
 
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { sharedKeyGate } from '../_shared/shared_key_containment.ts'
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
@@ -1990,7 +1991,10 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
         opsAgentKey !== Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') &&
         suppliedCredential === opsAgentKey),
     )
-    const isAuthed = opsAuthorized || Boolean(validKey && suppliedCredential === validKey)
+    // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off.
+    // Server callers (ops-api included) present the service credential instead.
+    const isAuthed = opsAuthorized ||
+      sharedKeyGate({ presented: [suppliedCredential], sharedKey: validKey, fn: 'send-outlook-email' }) === 'accepted'
     if (!isAuthed) return json({ error: 'Unauthorized' }, 401)
 
     if (req.method === 'GET') {

@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { isSharedKey, sharedKeyGate } from '../_shared/shared_key_containment.ts'
 import { opsAiReviewRequestMessage } from './review_request.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -3314,13 +3315,14 @@ serve(async (req: Request) => {
 
   let isAuthed = false
   // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
+  // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off
+  // (see ../_shared/shared_key_containment.ts). A Bearer that is the shared key
+  // is never treated as a user JWT.
   if (await verifyServiceCredential(req.headers)) {
     isAuthed = true
-  } else if (xApiKey && xApiKey === validKey) {
+  } else if (sharedKeyGate({ presented: [xApiKey, bearerToken], sharedKey: validKey, fn: 'ops-ai' }) === 'accepted') {
     isAuthed = true
-  } else if (bearerToken && bearerToken === validKey) {
-    isAuthed = true
-  } else if (bearerToken) {
+  } else if (bearerToken && !isSharedKey(bearerToken, validKey)) {
     try {
       const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const { data: { user }, error } = await authClient.auth.getUser(bearerToken)

@@ -1377,6 +1377,7 @@ import {
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { serverCallHeaders } from '../_shared/shared_key_containment.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
 import {
   type JobCloseoutCaller,
@@ -3947,7 +3948,7 @@ export type SendInvoiceVerifyDeps = {
   logBusinessEvent: (client: any, event: any) => Promise<void>
   fetch: typeof globalThis.fetch
   xeroFetch: typeof globalThis.fetch
-  env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string }
+  env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string; SUPABASE_SERVICE_KEY?: string }
 }
 
 export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): Promise<Response> {
@@ -4180,9 +4181,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   const siPdfB64 = btoa(siBin)
 
   // Send via Outlook with PDF attached
+  // Server credential, not the shared browser key (SW_SHARED_KEY_CONTAINMENT).
   const siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': env.SW_API_KEY },
+    headers: serverCallHeaders(env.SUPABASE_SERVICE_KEY, env.SW_API_KEY),
     body: JSON.stringify({
       to: siTo,
       cc: siCcSafe,
@@ -8343,7 +8345,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           sendEmail: async (payload) => {
             const resp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+              headers: serverCallHeaders(SUPABASE_SERVICE_KEY, SW_API_KEY),
               body: JSON.stringify(payload),
             })
             const text = resp.ok ? null : (await resp.text().catch(() => '')).slice(0, 500)
@@ -9437,7 +9439,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           getToken, xeroGet, logBusinessEvent,
           fetch: globalThis.fetch.bind(globalThis),
           xeroFetch: xeroAccountingFetch,
-          env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
+          env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '', SUPABASE_SERVICE_KEY },
         })
       }
 
@@ -50233,7 +50235,7 @@ async function makesafeSendPack(
   const _sendEmail = deps?.sendEmail || (async (payload: any) => {
     const r = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+      headers: serverCallHeaders(SUPABASE_SERVICE_KEY, SW_API_KEY),
       body: JSON.stringify(payload),
     })
     return { ok: r.ok, status: r.status, bodyText: () => r.text(), json: () => r.json() }
@@ -51170,7 +51172,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     emailAttempted = true
     const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+      headers: serverCallHeaders(SUPABASE_SERVICE_KEY, SW_API_KEY),
       body: JSON.stringify({
         from: MAKESAFE_ADMIN_FROM,
         to: recipientEmail,

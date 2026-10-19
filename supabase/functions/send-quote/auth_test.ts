@@ -566,3 +566,67 @@ Deno.test("I2 — api_key send-invoice may use office-derived body fields", () =
   assertEquals(d.share_token, "tok-1");
   assertEquals(d.invoice_number, "INV-9");
 });
+
+// ── Shared browser key containment (SW_SHARED_KEY_CONTAINMENT) ──
+// The patio scoping tool sends the shared key on /send, so /send stays open to
+// it. /send-invoice lets an api_key caller replace the client email and payment
+// fields, so with containment on it needs the service credential or an office JWT.
+
+function decideContained(
+  headers: Record<string, string>,
+  path: string,
+  containment: string | undefined,
+) {
+  return decideSendQuoteAuth({
+    req: req(headers, path),
+    sb: makeAuthSb({ role: "admin" }),
+    path,
+    corsHeaders,
+    swApiKey: ENV.SW_API_KEY,
+    serviceRoleKey: ENV.SUPABASE_SERVICE_ROLE_KEY,
+    env: (name) => name === "SW_SHARED_KEY_CONTAINMENT" ? containment : undefined,
+  });
+}
+
+Deno.test("C1 — containment on: shared key refused on /send-invoice (x-api-key and Bearer)", async () => {
+  const variants: Record<string, string>[] = [
+    { "x-api-key": ENV.SW_API_KEY },
+    { authorization: `Bearer ${ENV.SW_API_KEY}` },
+  ];
+  for (const headers of variants) {
+    const d = await decideContained(headers, "send-invoice", "on");
+    assertEquals(d.kind, "reject");
+    assert(d.kind === "reject");
+    assertEquals(d.response.status, 401);
+    assertEquals((await d.response.json()).code, "shared_key_contained");
+  }
+});
+
+Deno.test("C2 — containment on: shared key still sends quotes (/send, /send-runs) for the scoping tools", async () => {
+  for (const path of ["send", "send-runs"]) {
+    const d = await decideContained({ "x-api-key": ENV.SW_API_KEY }, path, "on");
+    assert(d.kind === "allow", path);
+    assertEquals(d.mode, "api_key");
+  }
+});
+
+Deno.test("C3 — containment on: service credential and office JWT still send invoices", async () => {
+  const svc = await decideContained(
+    { authorization: `Bearer ${ENV.SUPABASE_SERVICE_ROLE_KEY}` },
+    "send-invoice",
+    "on",
+  );
+  assert(svc.kind === "allow");
+  assertEquals(svc.mode, "api_key");
+  const jwt = await decideContained({ authorization: `Bearer ${VALID_JWT}` }, "send-invoice", "on");
+  assert(jwt.kind === "allow");
+  assertEquals(jwt.mode, "jwt");
+});
+
+Deno.test("C4 — containment off: shared key still sends invoices (unchanged until switched on)", async () => {
+  for (const v of [undefined, "", "off"]) {
+    const d = await decideContained({ "x-api-key": ENV.SW_API_KEY }, "send-invoice", v);
+    assert(d.kind === "allow", String(v));
+    assertEquals(d.mode, "api_key");
+  }
+});
