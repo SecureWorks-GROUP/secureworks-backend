@@ -686,7 +686,14 @@ From an issued version:
   quantity and our unit cost (`unit_price`). Lines with no supplier go on one
   draft named `Supplier to be named`, which staff rename;
 - a second press of either action returns what the first made and inserts
-  nothing, and writes no second event.
+  nothing, and writes no second event. Presses at the same instant are held by
+  the database, not only by the read before the insert: one work order per
+  version (`uq_work_orders_one_quote_builder_version`) and one set of purchase
+  orders per version (`uq_purchase_orders_quote_builder_version_seq`, on the
+  version and `quote_builder_po_seq`, the supplier group's place 1, 2, ...;
+  migration `20261019183000`). The losing press's insert is refused whole and
+  it returns the winner's rows. A refused insert that leaves the version with no
+  order is a `500 read_failed`, never an empty success.
 
 With the switch on, `quote_builder_get_job` adds these keys on every version
 (drafts included): `work_order: {id, wo_number, status} | null` and

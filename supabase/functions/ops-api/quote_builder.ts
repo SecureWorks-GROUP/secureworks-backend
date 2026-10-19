@@ -2261,7 +2261,12 @@ export async function makeQuoteBuilderWorkOrder(
     quote_builder_version_id: version.id,
   }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
   if (error?.code === "23505") {
-    return ordersReply(version, await ordersForVersion(client, version.id));
+    // Another press made this version's work order first
+    // (uq_work_orders_one_quote_builder_version). A clash on anything else,
+    // such as the number, leaves no order for the version and is an error.
+    const winner = await ordersForVersion(client, version.id);
+    if (!winner.work_order) readError("work order create failed", error);
+    return ordersReply(version, winner);
   }
   if (error || !data) readError("work order create failed", error || "no row");
   await recordOrderEvent(
@@ -2322,11 +2327,23 @@ export async function makeQuoteBuilderPurchaseOrders(
       status: "draft",
       created_by: uuidOrNull(actor.id),
       quote_builder_version_id: version.id,
+      // With the version id, the database's one-set-per-version key
+      // (uq_purchase_orders_quote_builder_version_seq, 20261019183000).
+      quote_builder_po_seq: i + 1,
     };
   });
   const { data, error } = await client.from("purchase_orders")
     .insert(rows)
     .select("id, po_number, supplier_name, status, quote_builder_version_id");
+  if (error?.code === "23505") {
+    // Another press made this version's set first; the whole insert was
+    // refused, so nothing of ours landed. Return the winner's set.
+    const winner = await ordersForVersion(client, version.id);
+    if (!winner.purchase_orders.length) {
+      readError("purchase order create failed", error);
+    }
+    return ordersReply(version, winner);
+  }
   if (error) readError("purchase order create failed", error);
   const inserted = Array.isArray(data) ? data : data ? [data] : [];
   if (!inserted.length) readError("purchase order create failed", "no row");

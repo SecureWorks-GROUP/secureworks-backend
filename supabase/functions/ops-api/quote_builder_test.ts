@@ -13,6 +13,8 @@ import {
   listQuoteBuilderJobs,
   loadQuoteBuilderCardValues,
   loadQuoteBuilderSettings,
+  makeQuoteBuilderPurchaseOrders,
+  makeQuoteBuilderWorkOrder,
   normaliseChargeLines,
   normaliseCostLines,
   QUOTE_BUILDER_ACTIONS,
@@ -87,6 +89,19 @@ function uniqueKey(table: string, r: Row): string | null {
       r.declined_at == null;
     return live
       ? [r.job_id, r.job_contact_id ?? ZERO_UUID, r.run_label ?? ""].join("|")
+      : null;
+  }
+  // uq_work_orders_one_quote_builder_version (20261014140000) and
+  // uq_purchase_orders_quote_builder_version_seq (20261019183000): one work
+  // order and one set of purchase orders per quote builder version.
+  if (table === "work_orders") {
+    return r.quote_builder_version_id != null
+      ? `wo|${r.quote_builder_version_id}`
+      : null;
+  }
+  if (table === "purchase_orders") {
+    return r.quote_builder_version_id != null && r.quote_builder_po_seq != null
+      ? `po|${r.quote_builder_version_id}|${r.quote_builder_po_seq}`
       : null;
   }
   if (table === "jobs") {
@@ -2670,4 +2685,89 @@ Deno.test("quote builder: the pricing settings are a goal, and a quote priced aw
     target_margin_pct: 33,
   });
   assertEquals(priced(opened.scope.versions[0]), asSent);
+});
+
+// ── One work order and one set of purchase orders per version (SQ-17) ───────
+
+const ORDER_COST = [
+  { line_id: "c-l1", line_type: "labour", description: "Carpenter", qty: 6, unit: "hr", unit_cost_ex_gst: 65, supplier_or_trade: "Crew" },
+  { line_id: "c-m1", line_type: "material", description: "Fascia board", qty: 3, unit: "len", unit_cost_ex_gst: 41.5, supplier_or_trade: "Bunnings" },
+  { line_id: "c-m2", line_type: "material", description: "Gutter", qty: 2, unit: "len", unit_cost_ex_gst: 58, supplier_or_trade: "Stratco" },
+  { line_id: "c-m3", line_type: "material", description: "Screws", qty: 1, unit: "box", unit_cost_ex_gst: 12, supplier_or_trade: "bunnings" },
+  { line_id: "c-m4", line_type: "material", description: "Sealant", qty: 2, unit: "tube", unit_cost_ex_gst: 9, supplier_or_trade: "" },
+];
+
+async function issuedForOrders() {
+  const store = seed();
+  store.feature_flags = [{ flag_name: "quote_builder_orders_v1", enabled: true }];
+  store.work_orders = [];
+  store.purchase_orders = [];
+  const inserts: Record<string, number> = {};
+  const { client, upload } = makeFakeClient(store, {
+    insertError: (table) => {
+      inserts[table] = (inserts[table] || 0) + 1;
+      return null;
+    },
+  });
+  await issueScope(store, client, upload, REPAIR_JOB, { costLines: ORDER_COST });
+  const issued = store.quote_builder_versions.find((v) => v.status === "issued")!;
+  return { store, client, issued, inserts };
+}
+
+Deno.test("quote builder: presses at the same instant make one set of purchase orders, held by the database key", async () => {
+  const { store, client, issued, inserts } = await issuedForOrders();
+  const replies = await Promise.all([1, 2, 3].map(() =>
+    makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR)
+  ));
+  // All three read "no orders yet" and tried to insert: the race reached the key.
+  assertEquals(inserts.purchase_orders, 3);
+  // One set: Bunnings, Stratco and the unnamed supplier, numbered 1 to 3.
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(
+    store.purchase_orders.map((r) => r.quote_builder_po_seq).sort(),
+    [1, 2, 3],
+  );
+  // Every press gets the same set back; none fails.
+  const ids = (r: any) => r.purchase_orders.map((p: any) => p.id).sort();
+  for (const reply of replies) assertEquals(ids(reply), ids(replies[0]));
+  // A later press, after a rename, still makes nothing.
+  store.purchase_orders[0].supplier_name = "Bunnings Warehouse";
+  await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR);
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(
+    store.job_events.filter((e) => e.event_type === "quote_builder_purchase_orders_made").length,
+    1,
+  );
+});
+
+Deno.test("quote builder: presses at the same instant make one work order", async () => {
+  const { store, client, issued, inserts } = await issuedForOrders();
+  const replies = await Promise.all([1, 2, 3].map(() =>
+    makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR)
+  ));
+  assertEquals(inserts.work_orders, 3);
+  assertEquals(store.work_orders.length, 1);
+  for (const reply of replies) {
+    assertEquals(reply.work_order?.id, store.work_orders[0].id);
+  }
+});
+
+Deno.test("quote builder: a refused order insert that leaves no order for the version is an error, not an empty success", async () => {
+  const { store, client, issued } = await issuedForOrders();
+  const refusing = makeFakeClient(store, {
+    insertError: (table) =>
+      table === "work_orders" || table === "purchase_orders"
+        ? { code: "23505", message: "duplicate key on the order number" }
+        : null,
+  }).client;
+  await assertRejects(
+    () => makeQuoteBuilderWorkOrder(refusing, { version_id: issued.id }, ACTOR),
+    QuoteBuilderError,
+  );
+  await assertRejects(
+    () => makeQuoteBuilderPurchaseOrders(refusing, { version_id: issued.id }, ACTOR),
+    QuoteBuilderError,
+  );
+  assertEquals(store.work_orders.length, 0);
+  assertEquals(store.purchase_orders.length, 0);
 });
