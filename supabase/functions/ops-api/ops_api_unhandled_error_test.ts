@@ -162,20 +162,30 @@ Deno.test("client messages: caller-input refusals answer exactly as main does", 
 // ClientInputError (or ClientInputTypeError) so the general catch keeps main's
 // wording rather than answering "Internal error". A fixed message is a string
 // literal in any quote style (escapes and "$" included, a template only when it
-// interpolates nothing), or literals joined with "+", across lines. Thrown with
-// or without `new`, directly or through a const/let/var.
+// interpolates nothing), literals joined with "+", or a condition choosing
+// between two such messages, across lines. Thrown with or without `new`, by
+// its own name or through globalThis, with whitespace or comments before the
+// "(", in parentheses, directly or through a variable however it is declared,
+// typed or later assigned.
 const BUILTIN_ERRORS = "(?:Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError)";
+const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*(?:\\n|$))*";
+const CTOR = `(?:new${GAP})?(?:globalThis${GAP}\\.${GAP})?${BUILTIN_ERRORS}${GAP}\\(${GAP}`;
 const FIXED_TEXT = "(?:'(?:[^'\\\\\\n]|\\\\.)*'|\"(?:[^\"\\\\\\n]|\\\\.)*\"|`(?:[^`\\\\$]|\\\\.|\\$(?!\\{))*`)";
-const FIXED_MESSAGE = `${FIXED_TEXT}(?:\\s*\\+\\s*${FIXED_TEXT})*\\s*[,)]`;
+const FIXED_JOINED = `${FIXED_TEXT}(?:${GAP}\\+${GAP}${FIXED_TEXT})*`;
+const FIXED_MESSAGE = `(?:${FIXED_JOINED}|[^;?()]+?\\?${GAP}${FIXED_JOINED}${GAP}:${GAP}${FIXED_JOINED})${GAP}[,)]`;
+const OPEN = `(?:\\(${GAP})*`;
 
 function literalBuiltinThrows(source: string): string[] {
   const hits: string[] = [];
-  const direct = new RegExp(`throw\\s+(?:new\\s+)?${BUILTIN_ERRORS}\\(\\s*${FIXED_MESSAGE}`, "g");
+  const direct = new RegExp(`\\bthrow${GAP}${OPEN}${CTOR}${FIXED_MESSAGE}`, "g");
   for (const m of source.matchAll(direct)) hits.push(m[0]);
-  const assigned = new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:new\\s+)?${BUILTIN_ERRORS}\\(\\s*${FIXED_MESSAGE}`, "g");
+  const assigned = new RegExp(
+    `(?:\\b(?:const|let|var)\\s+)?\\b([A-Za-z_$][\\w$]*)(?:${GAP}:${GAP}[A-Za-z_$][\\w$.]*)?${GAP}=${GAP}${OPEN}${CTOR}${FIXED_MESSAGE}`,
+    "g",
+  );
   for (const m of source.matchAll(assigned)) {
     const name = m[1].replace(/\$/g, "\\$");
-    if (new RegExp(`throw\\s+${name}\\b`).test(source)) hits.push(m[0]);
+    if (new RegExp(`\\bthrow${GAP}${OPEN}${name}\\b`).test(source)) hits.push(m[0]);
   }
   return hits;
 }
@@ -196,6 +206,13 @@ Deno.test("client messages: the literal-throw matcher catches every planted shap
     "throw new Error('joined ' + 'literals')",
     "throw new Error('joined '\n  + \"across lines\")",
     "throw new Error('with a cause', { cause: err })",
+    "throw (new Error('in parentheses'))",
+    "throw new globalThis.Error('through globalThis')",
+    "throw new Error ('a space before the bracket')",
+    "throw new Error /* why */ ('a comment before the bracket')",
+    "const e: Error = new Error('typed'); throw e",
+    "let e; e = new TypeError('assigned later'); throw e",
+    "throw new Error(ok ? 'one fixed text' : 'another fixed text')",
   ];
   for (const sample of planted) assertEquals(literalBuiltinThrows(sample).length, 1, sample);
 });
@@ -205,6 +222,7 @@ Deno.test("client messages: the literal-throw matcher leaves redacted and client
     "throw new Error(`read failed: ${error.message}`)",
     "throw new Error('read failed: ' + error.message)",
     "throw new Error(message)",
+    "throw new Error(ok ? 'fixed' : error.message)",
     "throw new ClientInputError('caller text')",
     "throw new ClientInputTypeError('caller text')",
     "throw new ApiError('caller text', 400)",
@@ -227,6 +245,16 @@ const TEST_SUPPORT_MODULES = new Set([
   "xero_settlement_test_fake.ts",
 ]);
 
+// Every .ts module under ops-api, subdirectories included, as a path relative
+// to this folder ("index.ts", "fixtures/x.ts").
+async function* opsApiModules(dir = ""): AsyncGenerator<string> {
+  for await (const entry of Deno.readDir(new URL(`./${dir}`, import.meta.url))) {
+    const name = `${dir}${entry.name}`;
+    if (entry.isDirectory) yield* opsApiModules(`${name}/`);
+    else if (entry.isFile && entry.name.endsWith(".ts")) yield name;
+  }
+}
+
 async function servedModules(): Promise<Set<string>> {
   const served = new Set<string>();
   const pending = ["index.ts"];
@@ -245,14 +273,15 @@ Deno.test("client messages: no literal built-in error is thrown in any served op
   const served = await servedModules();
   for (const helper of TEST_SUPPORT_MODULES) assert(!served.has(helper), `${helper} is served; scan it`);
   const hits: string[] = [];
-  for await (const entry of Deno.readDir(new URL("./", import.meta.url))) {
-    if (!entry.isFile || !entry.name.endsWith(".ts") || entry.name.endsWith("_test.ts")) continue;
-    if (TEST_SUPPORT_MODULES.has(entry.name)) continue;
-    if (entry.name.includes("test") && !served.has(entry.name)) {
-      throw new Error(`unlisted test-named module ${entry.name}: add it to TEST_SUPPORT_MODULES or rename it`);
+  for await (const name of opsApiModules()) {
+    const base = name.slice(name.lastIndexOf("/") + 1);
+    if (base.endsWith("_test.ts")) continue;
+    if (TEST_SUPPORT_MODULES.has(name)) continue;
+    if (base.includes("test") && !served.has(name)) {
+      throw new Error(`unlisted test-named module ${name}: add it to TEST_SUPPORT_MODULES or rename it`);
     }
-    const source = await Deno.readTextFile(new URL(`./${entry.name}`, import.meta.url));
-    for (const hit of literalBuiltinThrows(source)) hits.push(`${entry.name}: ${hit}`);
+    const source = await Deno.readTextFile(new URL(`./${name}`, import.meta.url));
+    for (const hit of literalBuiltinThrows(source)) hits.push(`${name}: ${hit}`);
   }
   assertEquals(hits, []);
 });

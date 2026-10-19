@@ -38581,7 +38581,7 @@ async function updateInvoiceUnderClaim(
     raw_json: xeroInvoice,
     updated_at: new Date().toISOString(),
   }).eq('xero_invoice_id', xero_invoice_id)
-  if (cacheErr) throw new ApiError('update_invoice cache update failed: ' + cacheErr.message, 500)
+  if (cacheErr) throw new ApiError(`update_invoice cache update failed: store code ${safeStoreCode(cacheErr.code) ?? 'unknown'}`, 500)
 
   // Resend email if requested, under the claim taken before the update. Its
   // outcome is reported, never swallowed; an unknown holds the invoice.

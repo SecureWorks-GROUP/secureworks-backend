@@ -28,6 +28,32 @@ export const SAFE_INTERNET_MESSAGE_ID = /^<[A-Za-z0-9._+=\/-]{1,200}@[A-Za-z0-9.
 /** A Postgres SQLSTATE (`42P01`) or PostgREST code (`PGRST116`). */
 export const SAFE_STORE_CODE = /^(?:[0-9A-Z]{5}|PGRST[0-9]{3})$/;
 
+/**
+ * An error class name: PascalCase words of letters only (Error, TypeError,
+ * GraphProviderError), 1 to 48 long. Stricter than SAFE_IDENTIFIER because a
+ * thrown object's name is caller-controlled: a hex or base64 secret can be
+ * identifier-shaped, but it cannot be words of a capital and lowercase letters.
+ */
+export const SAFE_ERROR_NAME = /^(?:[A-Z][a-z]+){1,8}$/;
+
+/**
+ * A provider or runtime error code: letter words joined by _ . : or -
+ * (ErrorMailboxBusy, ECONNRESET, Request_ResourceNotFound), 1 to 64 long, no
+ * digits, or a store code (SAFE_STORE_CODE). A code with digits in it is not
+ * passed: that is the shape a hex or base64 secret takes.
+ */
+export const SAFE_ERROR_CODE = /^[A-Za-z]+(?:[_.:-][A-Za-z]+)*$/;
+
+export function safeErrorName(value: unknown): string | null {
+  return typeof value === "string" && value.length <= 48 && SAFE_ERROR_NAME.test(value) ? value : null;
+}
+
+export function safeErrorCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  if (SAFE_STORE_CODE.test(value)) return value;
+  return value.length <= 64 && SAFE_ERROR_CODE.test(value) ? value : null;
+}
+
 export function safeIdentifier(value: unknown): string | null {
   return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : null;
 }
@@ -167,9 +193,9 @@ export function safeErrorFacts(error: unknown): SafeErrorFacts {
   const e = (error && typeof error === "object") ? error as Record<string, unknown> : null;
   const context = (e?.context && typeof e.context === "object") ? e.context as Record<string, unknown> : null;
   const status = httpStatus(context?.provider_status) ?? httpStatus(e?.status);
-  const code = safeIdentifier(context?.provider_code) ?? safeIdentifier(e?.code);
+  const code = safeErrorCode(context?.provider_code) ?? safeErrorCode(e?.code);
   return {
-    error_name: safeIdentifier(e?.name),
+    error_name: safeErrorName(e?.name),
     ...(status !== null ? { provider_status: status } : {}),
     ...(code !== null ? { provider_code: code } : {}),
   };

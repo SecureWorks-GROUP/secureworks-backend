@@ -110,6 +110,22 @@ Deno.test("identifier validation: error facts never read the message", () => {
   assertEquals(safeErrorFacts(badName), { error_name: null });
 });
 
+// Codex B21: an identifier-shaped secret (64 hex, or base64url) is a valid
+// SAFE_IDENTIFIER, so a thrown object carrying one as its name or code must
+// not pass it. Synthetic values only.
+Deno.test("identifier validation: an identifier-shaped secret never passes as an error name or code", () => {
+  const hex = "0123456789abcdef".repeat(4);
+  const b64 = "Ab9_x-Zq".repeat(8);
+  for (const secret of [hex, hex.toUpperCase(), b64]) {
+    const thrown = Object.assign(new Error("x"), { name: secret, code: secret, context: { provider_code: secret } });
+    assertEquals(safeErrorFacts(thrown), { error_name: null }, secret.slice(0, 8));
+    assertEquals(safeErrorLine(thrown), "error");
+  }
+  const named = Object.assign(new Error("x"), { name: "TypeError", code: "ECONNRESET" });
+  assertEquals(safeErrorFacts(named), { error_name: "TypeError", provider_code: "ECONNRESET" });
+  assertEquals(safeErrorFacts(Object.assign(new Error("x"), { code: "42P01" })), { error_name: "Error", provider_code: "42P01" });
+});
+
 Deno.test("approved send: a store error's text never reaches the refusal", async () => {
   const store = supabaseApprovedSendStore(erroringClient({ message: SENTINEL, code: "42P01", details: SENTINEL }));
   const refusal = await assertRejects(() => store.loadApproval("a-1"), ApprovedSendRefusal);
