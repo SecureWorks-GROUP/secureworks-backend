@@ -435,5 +435,8 @@ Deno.test("the sync never places a bill whose supplier document is duplicated (r
   const sweep = src.slice(src.indexOf("// 5. This path's own facts outside this run's window or cap"), src.indexOf("// Bill pre-match (JP-06): after the queue upsert"));
   assertEquals(sweep.includes("if (seenNow.has(id) || !OWN_FACT_SOURCES.has(src)) continue"), true);
   assertEquals(sweep.includes("if (qs && qs !== 'open') continue"), true);
-  assertEquals(sweep.indexOf("suggestionReason: 'duplicate_document'") < sweep.indexOf(".delete().eq('xero_invoice_id', id).eq('automation_source', src)"), true);
+  assertEquals(sweep.indexOf("suggestionReason: 'duplicate_document'") < sweep.indexOf(".from('job_materials_facts').delete()"), true);
+  // A removal is counted only when the database confirms it.
+  assertEquals(sweep.includes("if (dErr || !Array.isArray(gone)) {"), true);
+  assertEquals(sweep.indexOf("if (gone.length === 0) continue") < sweep.indexOf("counts.duplicate_facts_held ="), true);
 });

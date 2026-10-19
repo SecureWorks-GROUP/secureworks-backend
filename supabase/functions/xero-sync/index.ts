@@ -1749,9 +1749,17 @@ async function ingestMaterialsActuals(
           continue
         }
         // Only after the hold is saved: the fact goes, filtered by its own source.
-        await sb.from('job_materials_facts').delete().eq('xero_invoice_id', id).eq('automation_source', src)
-        result.cleaned++
+        const { data: gone, error: dErr } = await sb.from('job_materials_facts').delete()
+          .eq('xero_invoice_id', id).eq('automation_source', src).select('id')
         const counts = result as Record<string, unknown>
+        if (dErr || !Array.isArray(gone)) {
+          // Held row saved, fact still there: reported, and retried next run.
+          console.error(`[materials] duplicate fact removal failed ${id}:`, dErr?.message)
+          counts.duplicate_fact_removal_failed = Number(counts.duplicate_fact_removal_failed || 0) + 1
+          continue
+        }
+        if (gone.length === 0) continue // removed or changed meanwhile: nothing claimed
+        result.cleaned++
         counts.duplicate_facts_held = Number(counts.duplicate_facts_held || 0) + 1
       }
     }
