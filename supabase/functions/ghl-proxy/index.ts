@@ -2602,7 +2602,7 @@ serve(async (req: Request) => {
           .eq('ghl_contact_id', body.contactId)
           .limit(200)
         if (theirsError) return json({ error: 'Could not check this client\'s jobs', code: 'existing_jobs_unreadable' }, 503)
-        const open = openSameSiteFenceJobs(theirs || [], siteAddress)
+        const open = openSameSiteFenceJobs(theirs || [], siteAddress, siteSuburb)
         if (open.length) {
           return json({
             error: 'This client already has an open fence job at this address.',
@@ -2633,6 +2633,34 @@ serve(async (req: Request) => {
     if (action === 'create_contact_and_opportunity' && req.method === 'POST') {
       const body = await req.json()
       const { firstName, lastName, email, phone, address, suburb, skipOpportunity, name } = body
+      // SQ-23 route A: an existing fencing client with an open fence job at
+      // this address. Refuse before any opportunity is made, so the scoper
+      // can open that job, add another option to its quote, or confirm a new
+      // job (repeatConfirmed). Only an exact address match refuses.
+      const sameSiteFenceRefusal = async (forContactId: string, siteAddress: unknown, siteSuburb: unknown, existed = true) => {
+        const orgId = route.testMode
+          ? route.organisationId
+          : credential.mode === 'user_jwt'
+          ? authProfile?.org_id
+          : PRODUCTION_DEFAULT_ORG_ID
+        const sbGuard = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const { data: theirs, error: theirsError } = await sbGuard.from('jobs')
+          .select('id, job_number, status, site_address, site_suburb, superseded_at')
+          .eq('org_id', orgId)
+          .eq('type', 'fencing')
+          .eq('ghl_contact_id', forContactId)
+          .limit(200)
+        if (theirsError) return json({ error: 'Could not check this client\'s jobs', code: 'existing_jobs_unreadable', contactId: forContactId }, 503)
+        const open = openSameSiteFenceJobs(theirs || [], siteAddress, siteSuburb)
+        if (!open.length) return null
+        return json({
+          error: 'This client already has an open fence job at this address. Open it, or use New job for existing client to add an option or new work.',
+          code: 'choose_existing_or_option',
+          contactId: forContactId,
+          contactExisted: existed,
+          jobs: open,
+        }, 409)
+      }
       const toolType = body.toolType ?? body.tool_type ?? body.jobType ?? body.job_type
       const leadRoute = resolveLeadOpportunityRoute(toolType)
       if (!leadRoute.ok) return json({ error: leadRoute.error, code: leadRoute.code, allowed: [...leadRoute.allowed] }, leadRoute.status)
@@ -2669,6 +2697,13 @@ serve(async (req: Request) => {
             return json(prepared.body, prepared.status)
           }
           allocationWrite = { fieldId: prepared.fieldId, ref: prepared.ref }
+        }
+        // SQ-23 route A, as below: stop before a second opportunity for a
+        // fencing client with an open fence job at this address.
+        if (leadRoute.pipelineKey === 'fencing' && leadRoute.toolType === 'fencing' && !skipOpportunity &&
+            body.repeatConfirmed !== true) {
+          const refusal = await sameSiteFenceRefusal(providedContactId, address, suburb)
+          if (refusal) return refusal
         }
         const result = await createOpportunityForExistingContact({
           contactId: providedContactId,
@@ -2798,29 +2833,8 @@ serve(async (req: Request) => {
       // job (repeatConfirmed). No opportunity is created on the refusal.
       if (leadRoute.pipelineKey === 'fencing' && leadRoute.toolType === 'fencing' && contactExisted &&
           contactId && !skipOpportunity && body.repeatConfirmed !== true) {
-        const orgId = route.testMode
-          ? route.organisationId
-          : credential.mode === 'user_jwt'
-          ? authProfile?.org_id
-          : PRODUCTION_DEFAULT_ORG_ID
-        const sbGuard = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        const { data: theirs, error: theirsError } = await sbGuard.from('jobs')
-          .select('id, job_number, status, site_address, site_suburb, superseded_at')
-          .eq('org_id', orgId)
-          .eq('type', 'fencing')
-          .eq('ghl_contact_id', contactId)
-          .limit(200)
-        if (theirsError) return json({ error: 'Could not check this client\'s jobs', code: 'existing_jobs_unreadable', contactId }, 503)
-        const open = openSameSiteFenceJobs(theirs || [], address)
-        if (open.length) {
-          return json({
-            error: 'This client already has an open fence job at this address.',
-            code: 'choose_existing_or_option',
-            contactId,
-            contactExisted,
-            jobs: open,
-          }, 409)
-        }
+        const refusal = await sameSiteFenceRefusal(contactId, address, suburb, contactExisted)
+        if (refusal) return refusal
       }
 
       // Create opportunity in the correct pipeline (skip for neighbours)

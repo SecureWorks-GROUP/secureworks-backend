@@ -775,12 +775,18 @@ export async function linkFenceQuoteOption(args: {
   label: string | null;
   actorId: string;
 }): Promise<{ ok: true; groupId: string } | { ok: false; code: string }> {
-  const { data, error } = await args.rpc("link_fence_quote_option", {
-    p_job_id: args.jobId,
-    p_option_of_job_id: args.optionOfJobId,
-    p_label: args.label,
-    p_actor_id: args.actorId,
-  });
+  let data: unknown = null;
+  let error: any = null;
+  try {
+    ({ data, error } = await args.rpc("link_fence_quote_option", {
+      p_job_id: args.jobId,
+      p_option_of_job_id: args.optionOfJobId,
+      p_label: args.label,
+      p_actor_id: args.actorId,
+    }));
+  } catch (thrown) {
+    error = { message: String((thrown as Error)?.message || thrown) };
+  }
   if (error) {
     const message = String(error.message || "");
     const known = message.match(/quote_option_[a-z_]+/);
@@ -794,10 +800,15 @@ export async function linkFenceQuoteOption(args: {
 }
 
 /** Normalised site key for the same-site check: letters and digits, lower case. */
-// The street address only (the suburb is often inside it or missing), as the
-// 19 Oct 2026 duplicate-set measurement keyed it.
+// The street address as words: lower case, every run of punctuation or space
+// one space, so "1/23 Smith St" (unit 1 of 23) never equals "123 Smith St".
+// Only an exact match counts; a near match lets the save through as before.
 export function fenceSiteKey(address: unknown): string {
-  return String(address ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return String(address ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function suburbKey(suburb: unknown): string {
+  return String(suburb ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 /**
@@ -809,12 +820,17 @@ export function fenceSiteKey(address: unknown): string {
 export function openSameSiteFenceJobs(
   jobs: Array<{ id: string; job_number?: string | null; status?: string | null; site_address?: string | null; site_suburb?: string | null; superseded_at?: string | null }>,
   address: unknown,
+  suburb?: unknown,
 ) {
   const site = fenceSiteKey(address);
   if (!site) return [];
-  return jobs.filter((j) =>
-    !j.superseded_at &&
-    ["draft", "quoted"].includes(String(j.status || "draft")) &&
-    fenceSiteKey(j.site_address) === site
-  ).map((j) => ({ id: j.id, jobNumber: j.job_number ?? null, status: j.status ?? null }));
+  const area = suburbKey(suburb);
+  return jobs.filter((j) => {
+    if (j.superseded_at) return false;
+    if (!["draft", "quoted"].includes(String(j.status || "draft"))) return false;
+    if (fenceSiteKey(j.site_address) !== site) return false;
+    // Same street in two suburbs is two sites; a missing suburb is not a clash.
+    const theirs = suburbKey(j.site_suburb);
+    return !area || !theirs || area === theirs;
+  }).map((j) => ({ id: j.id, jobNumber: j.job_number ?? null, status: j.status ?? null }));
 }

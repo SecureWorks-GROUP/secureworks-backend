@@ -49,6 +49,19 @@ SELECT pg_temp.qo_assert((SELECT count(*) FROM public.job_events WHERE event_typ
 SELECT pg_temp.qo_assert(pg_temp.qo_refused($q$
  SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000000ff', '9c000000-0000-4000-8000-00000000000a', NULL, NULL)
 $q$), 'another customer''s job must not join the group');
+-- A job already past quoted is never made an option.
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id)
+VALUES ('9c000000-0000-4000-8000-0000000000a9', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'c-1');
+SELECT pg_temp.qo_assert(pg_temp.qo_refused($q$
+ SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000000a9', '9c000000-0000-4000-8000-00000000000a', NULL, NULL)
+$q$), 'a completed job must not be linked as an option');
+-- One party of a shared fence accepting does not decide between options.
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'quote_option_supersede_v1';
+UPDATE public.jobs SET status = 'partially_accepted' WHERE id = '9c000000-0000-4000-8000-00000000000c';
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.jobs WHERE superseded_at IS NOT NULL
+  AND id::text LIKE '9c000000-%') = 0, 'partially_accepted must supersede nothing');
+UPDATE public.jobs SET status = 'draft' WHERE id = '9c000000-0000-4000-8000-00000000000c';
+UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_supersede_v1';
 SELECT pg_temp.qo_assert(pg_temp.qo_refused($q$
  SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-00000000000a', '9c000000-0000-4000-8000-00000000000a', NULL, NULL)
 $q$), 'a job must not be its own option');
@@ -82,6 +95,22 @@ SELECT pg_temp.qo_assert((SELECT superseded_at IS NULL FROM public.jobs WHERE id
 SELECT pg_temp.qo_assert((SELECT bool_and(superseded_at IS NULL) FROM public.jobs
   WHERE id IN ('9c000000-0000-4000-8000-00000000000e', '9c000000-0000-4000-8000-00000000000f')),
  'a crewed or invoiced option must be left for a person');
+SELECT pg_temp.qo_assert((SELECT array_agg(detail_json->>'reason' ORDER BY job_id) FROM public.job_events
+  WHERE event_type = 'quote_option_review_needed'
+    AND job_id IN ('9c000000-0000-4000-8000-00000000000e', '9c000000-0000-4000-8000-00000000000f')) = ARRAY['crewed', 'invoiced'],
+ 'a crewed or invoiced option must be flagged for review, not superseded');
+-- The group is decided: no new options, and a progressed job is never linked.
+SELECT pg_temp.qo_assert(pg_temp.qo_refused($q$
+ SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-00000000000d', '9c000000-0000-4000-8000-00000000000e', NULL, NULL)
+$q$), 'a decided group must take no new options');
+-- The client accepts superseded A anyway: acceptance stands, A's mark clears, a person is told.
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-00000000000a';
+SELECT pg_temp.qo_assert((SELECT status = 'accepted' AND superseded_at IS NULL AND superseded_by_job_id IS NULL
+  FROM public.jobs WHERE id = '9c000000-0000-4000-8000-00000000000a'),
+ 'a superseded option the client accepts must be accepted and no longer marked');
+SELECT pg_temp.qo_assert(EXISTS (SELECT 1 FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-00000000000a'
+  AND event_type = 'quote_option_review_needed' AND detail_json->>'reason' = 'accepted_after_superseded'),
+ 'a late acceptance of a superseded option must be flagged for review');
 -- A superseded option cannot be linked again, and the shape holds.
 SELECT pg_temp.qo_assert(pg_temp.qo_refused($q$
  SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-00000000000d', '9c000000-0000-4000-8000-00000000000a', NULL, NULL)

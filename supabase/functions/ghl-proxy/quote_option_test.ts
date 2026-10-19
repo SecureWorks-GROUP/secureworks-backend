@@ -112,23 +112,38 @@ Deno.test("SQ-23: the link returns the group, or a refusal code, and never throw
 
 Deno.test("SQ-23 route A: only an open fence job at the same street address stops a new one", () => {
   const jobs = [
-    { id: "1", job_number: "SWF-1", status: "quoted", site_address: "1 Test St, Perth WA" },
-    { id: "2", job_number: "SWF-2", status: "draft", site_address: "1 test st perth wa" },
-    // Same site but past quoted: work in hand, not an open quote.
+    { id: "1", job_number: "SWF-1", status: "quoted", site_address: "1 Test St, Perth WA", site_suburb: "Perth" },
+    { id: "2", job_number: "SWF-2", status: "draft", site_address: "1 test st perth wa", site_suburb: null },
+    // Same site but won or in hand: not an open quote.
     { id: "3", job_number: "SWF-3", status: "scheduled", site_address: "1 Test St, Perth WA" },
     // Same site but already superseded by an accepted option.
     { id: "4", job_number: "SWF-4", status: "quoted", site_address: "1 Test St, Perth WA", superseded_at: "2026-10-19T00:00:00Z" },
     // Another site for the same customer: new work, never counted.
     { id: "5", job_number: "SWF-5", status: "quoted", site_address: "9 Other Rd, Perth WA" },
+    // Same street words in another suburb: another site.
+    { id: "6", job_number: "SWF-6", status: "quoted", site_address: "1 Test St, Perth WA", site_suburb: "Bayswater" },
+    // A unit on the same street: another site.
+    { id: "7", job_number: "SWF-7", status: "quoted", site_address: "1/23 Smith St" },
   ];
-  assertEquals(
-    openSameSiteFenceJobs(jobs, "1 Test St, Perth WA").map((j) => j.id),
-    ["1", "2"],
-  );
+  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA", "Perth").map((j) => j.id), ["1", "2"]);
+  // No suburb on the new save: a missing suburb is not a clash.
+  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA").map((j) => j.id), ["1", "2", "6"]);
   assertEquals(openSameSiteFenceJobs(jobs, "9 Other Rd Perth WA").map((j) => j.id), ["5"]);
+  assertEquals(openSameSiteFenceJobs(jobs, "123 Smith St"), []);
   assertEquals(openSameSiteFenceJobs(jobs, "12 New Ave"), []);
   // No address: no guess, nothing stops the save.
   assertEquals(openSameSiteFenceJobs(jobs, ""), []);
-  assertEquals(fenceSiteKey("1 Test St, Perth WA"), "1teststperthwa");
-  assert(fenceSiteKey("1 Test St") !== fenceSiteKey("1 Test St, Perth WA"));
+  assertEquals(fenceSiteKey("1/23 Smith St"), "1 23 smith st");
+  assert(fenceSiteKey("1/23 Smith St") !== fenceSiteKey("123 Smith St"));
+});
+
+Deno.test("SQ-23: a link whose call throws is a refusal code, not an exception", async () => {
+  const thrown = await linkFenceQuoteOption({
+    rpc: () => Promise.reject(new Error("socket hang up")),
+    jobId: OTHER,
+    optionOfJobId: EXISTING,
+    label: null,
+    actorId: "actor",
+  });
+  assertEquals(thrown, { ok: false, code: "quote_option_link_failed" });
 });
