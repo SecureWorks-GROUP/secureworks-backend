@@ -42,14 +42,14 @@ SELECT pg_temp.qa_assert(NOT EXISTS (
   SELECT 1 FROM unnest(ARRAY['public', 'anon', 'authenticated']) r(role),
        unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)',
                     'public.quote_acceptance_fingerprint(uuid)',
-                    'public.quote_acceptance_handler_finished(uuid, uuid)',
+                    'public.quote_acceptance_handler_finished(uuid, uuid, text)',
                     'public.quote_acceptance_snapshot(uuid, text)',
                     'public.quote_acceptance_gaps(interval, timestamptz)']) f(fn)
    WHERE has_function_privilege(r.role, f.fn, 'EXECUTE'))
  AND (SELECT bool_and(has_function_privilege('service_role', f.fn, 'EXECUTE'))
    FROM unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)',
                      'public.quote_acceptance_fingerprint(uuid)',
-                      'public.quote_acceptance_handler_finished(uuid, uuid)',
+                      'public.quote_acceptance_handler_finished(uuid, uuid, text)',
                     'public.quote_acceptance_snapshot(uuid, text)',
                      'public.quote_acceptance_gaps(interval, timestamptz)']) f(fn)),
  'the new functions must be the service role''s only');
@@ -59,7 +59,7 @@ SELECT pg_temp.qa_assert((SELECT count(*) = 5
   FROM pg_proc p
   WHERE p.oid IN ('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)'::regprocedure,
     'public.quote_acceptance_fingerprint(uuid)'::regprocedure,
-    'public.quote_acceptance_handler_finished(uuid, uuid)'::regprocedure,
+    'public.quote_acceptance_handler_finished(uuid, uuid, text)'::regprocedure,
     'public.quote_acceptance_snapshot(uuid, text)'::regprocedure,
     'public.quote_acceptance_gaps(interval, timestamptz)'::regprocedure)),
  'the new functions must run as their owner with a fixed search_path');
@@ -446,11 +446,44 @@ UPDATE public.jobs SET status = 'lost' WHERE id = '9a000000-0000-4000-8000-00000
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
  'R3: an accepted document on a job lost afterwards must be listed');
-INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by) VALUES
- ('accepted_document_job_not_won', '9d000000-0000-4000-8000-0000000000c3', '00000000-0000-0000-0000-000000000001');
+-- Condition-based (Codex fb11da4 must-fix 2): a resolution is refused, and the same
+-- document listed again after its job is won and then reopened.
+SELECT set_config('qa.r', pg_temp.qa_try($q$INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
+  VALUES ('accepted_document_job_not_won', '9d000000-0000-4000-8000-0000000000c3',
+          '00000000-0000-0000-0000-000000000001')$q$), true);
+SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:%',
+ 'R3: an accepted document on a job not won must not be resolvable');
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000c3';
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
- 'R3: a person can resolve an accepted document on a job not won');
+ 'R3: the accepted document drops out while its job is won');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000c3';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
+ 'R3: an accepted document whose job is reopened must be listed again');
+-- Codex fb11da4 must-fix 1: an earlier acceptance event does not cover a later win. Job C6
+-- has a run acceptance event from 1 October; a later win at a new instant writes no event.
+INSERT INTO public.jobs (id, org_id, status, type) VALUES
+ ('9a000000-0000-4000-8000-0000000000c6', '00000000-0000-0000-0000-000000000001', 'partially_accepted', 'fencing');
+INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES
+ ('9a000000-0000-4000-8000-0000000000c6', 'quote_run_accepted', '{"accepted_at":"2026-10-01T00:00:00+00:00","run_label":"A"}');
+UPDATE public.jobs SET status = 'accepted', accepted_at = '2026-10-19 09:00:00+00'
+ WHERE id = '9a000000-0000-4000-8000-0000000000c6';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000c6'),
+ 'R3: a win whose own acceptance has no event must be listed despite an earlier acceptance event');
+-- Reopened and re-won at a new instant: the original event no longer matches.
+INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES
+ ('9a000000-0000-4000-8000-0000000000c6', 'quote_accepted', '{"accepted_at":"2026-10-19T09:00:00+00:00"}');
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000c6'),
+ 'R3: a win with an event carrying its own acceptance instant must not be listed');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000c6';
+UPDATE public.jobs SET status = 'accepted', accepted_at = '2026-10-20 01:00:00+00'
+ WHERE id = '9a000000-0000-4000-8000-0000000000c6';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000c6'),
+ 'R3: a reopened job re-won without an event must be listed again');
 -- A won job with no acceptance event and no quote document at all (a staff write) is listed,
 -- unless p_since puts its acceptance before the bound.
 INSERT INTO public.jobs (id, org_id, status, type, accepted_at) VALUES
@@ -542,6 +575,24 @@ SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(
  AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps(interval '-1 second')
    WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000c1'),
  'a resolution must suppress exactly its own obligation');
+-- A follow-up write that failed after the commit is not swallowed: the handler reports it
+-- with its finish mark, and it is listed until a person resolves it.
+SELECT pg_temp.qa_assert(public.quote_acceptance_handler_finished('9d000000-0000-4000-8000-0000000000c1',
+   (SELECT request_id FROM public.quote_acceptance_attempts WHERE document_id = '9d000000-0000-4000-8000-0000000000c1'),
+   'quote.run_accepted: insert failed'),
+ 'the committing request must mark the handler finished with its follow-up issue');
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps(interval '-1 second')
+   WHERE kind = 'acceptance_follow_up_issue' AND ref = '9d000000-0000-4000-8000-0000000000c1')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '-1 second')
+   WHERE kind = 'acceptance_handler_unfinished' AND ref = '9d000000-0000-4000-8000-0000000000c1')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '-1 second')
+   WHERE kind = 'acceptance_follow_up_issue' AND ref = '9d000000-0000-4000-8000-0000000000b1'),
+ 'a reported follow-up failure must be listed, and a clean finish must not be');
+INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by) VALUES
+ ('acceptance_follow_up_issue', '9d000000-0000-4000-8000-0000000000c1', '00000000-0000-0000-0000-000000000001');
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '-1 second')
+   WHERE kind = 'acceptance_follow_up_issue' AND ref = '9d000000-0000-4000-8000-0000000000c1'),
+ 'a person can resolve a reported follow-up failure');
 
 -- R3 bypass: a grouped option set won with its trigger skipped (session_replication_role
 -- replica, which only a superuser can set) shows in the gap read.

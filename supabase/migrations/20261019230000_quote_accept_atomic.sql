@@ -53,6 +53,7 @@ CREATE TABLE public.quote_acceptance_attempts (
   accepted_at timestamptz NOT NULL,
   committed_at timestamptz NOT NULL DEFAULT now(),
   handler_finished_at timestamptz,
+  handler_issues text,
   resolved_at timestamptz,
   resolved_by uuid,
   CONSTRAINT quote_acceptance_attempts_status CHECK (job_status IN ('accepted', 'partially_accepted', 'quoted'))
@@ -64,7 +65,7 @@ GRANT SELECT, UPDATE (resolved_at, resolved_by) ON public.quote_acceptance_attem
 CREATE INDEX idx_quote_acceptance_attempts_open
   ON public.quote_acceptance_attempts (committed_at) WHERE handler_finished_at IS NULL AND resolved_at IS NULL;
 COMMENT ON TABLE public.quote_acceptance_attempts IS
-  'SQ-23 remedy: one row per quote document accepted through accept_quote_document_atomic, committed with the acceptance. handler_finished_at = the handler reached its response, not that follow-up work succeeded.';
+  'SQ-23 remedy: one row per quote document accepted through accept_quote_document_atomic, committed with the acceptance. handler_finished_at = the handler reached its response; handler_issues = follow-up writes it reported as failed.';
 
 -- A person marks a listed gap handled. One row per (kind, ref) as
 -- quote_acceptance_gaps names them; it suppresses only that one obligation.
@@ -72,13 +73,15 @@ COMMENT ON TABLE public.quote_acceptance_attempts IS
 -- clear when the data changes.
 CREATE TABLE public.quote_acceptance_gap_resolutions (
   kind text NOT NULL CHECK (kind IN ('review_needed', 'settle_run_unsettled', 'acceptance_handler_unfinished',
-                                     'accepted_document_job_not_won')),
+                                     'acceptance_follow_up_issue')),
   ref text NOT NULL,
   resolved_by uuid NOT NULL,
   resolved_at timestamptz NOT NULL DEFAULT now(),
   note text,
   PRIMARY KEY (kind, ref)
 );
+COMMENT ON TABLE public.quote_acceptance_gap_resolutions IS
+  'SQ-23 remedy: a person''s resolution of one listed acceptance gap (kind, ref).';
 ALTER TABLE public.quote_acceptance_gap_resolutions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.quote_acceptance_gap_resolutions DISABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.quote_acceptance_gap_resolutions FROM PUBLIC, anon, authenticated, service_role;
@@ -349,7 +352,8 @@ GRANT EXECUTE ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, 
 
 -- The committing request reached its customer response. Only that request
 -- (request_id), only once. Says nothing about follow-up success.
-CREATE OR REPLACE FUNCTION public.quote_acceptance_handler_finished(p_document_id uuid, p_request_id uuid)
+CREATE OR REPLACE FUNCTION public.quote_acceptance_handler_finished(p_document_id uuid, p_request_id uuid,
+                                                                    p_issues text DEFAULT NULL)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -357,19 +361,21 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE v_rows integer;
 BEGIN
-  UPDATE public.quote_acceptance_attempts SET handler_finished_at = now()
+  UPDATE public.quote_acceptance_attempts
+     SET handler_finished_at = now(), handler_issues = nullif(left(coalesce(p_issues, ''), 500), '')
    WHERE document_id = p_document_id AND request_id = p_request_id AND handler_finished_at IS NULL;
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   RETURN v_rows = 1;
 END $$;
-REVOKE ALL ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) TO service_role;
+REVOKE ALL ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, text) TO service_role;
 
 -- R3: read-only list of what needs a person. Ids, codes and instants only.
 -- Event and attempt rows disappear only when their own (kind, ref) is
 -- resolved (or, for runs and attempts, their resolved_at is set). The
 -- condition kinds (won_with_open_sibling, more_than_one_won,
--- won_without_acceptance_event, won_while_superseded) cannot be resolved:
+-- won_without_acceptance_event, won_while_superseded,
+-- accepted_document_job_not_won, supersede_switch_unreadable) cannot be resolved:
 -- they are listed while the condition holds.
 --   settle_run_unsettled     a supersede run whose work failed
 --   review_needed            every quote_option_review_needed and
@@ -386,7 +392,9 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) T
 --   won_without_acceptance_event   won job with no acceptance event (any
 --                            writer); condition-based; bounded by p_since
 --   accepted_document_job_not_won  live accepted quote document on a job
---                            neither won nor partially accepted; resolvable
+--                            neither won nor partially accepted; condition-based
+--   acceptance_follow_up_issue  the committing request reached its response but
+--                            reported a failed follow-up write (ref: document)
 --   won_while_superseded     won job still marked superseded; condition-based
 --   supersede_switch_unreadable  the reader could not read the supersede switch,
 --                            so open-sibling rows were not computed (CIO reader
@@ -451,24 +459,32 @@ BEGIN
      GROUP BY m.quote_option_group_id
     HAVING count(*) > 1
     UNION ALL
-    -- A job in a won status with no acceptance event (quote_accepted or
-    -- quote_run_accepted) at all: any writer that moved it to won without an
-    -- acceptance, including legacy send-quote and staff writers (CIO
-    -- condition 2). Condition-based. History before the switches holds many
-    -- such jobs: p_since limits it to jobs accepted since that instant (a job
-    -- with no accepted_at is always listed).
+    -- A job in a won status whose acceptance has no event of its own: no
+    -- quote_accepted or quote_run_accepted event carries the job's own
+    -- acceptance instant (the atomic path writes both from one value, so they
+    -- are equal exactly). Any older event does not count: an event's mere
+    -- existence is not chronology. So it lists any writer that moved the job
+    -- to won without its acceptance (CIO condition 2), every legacy
+    -- acceptance (held uncertain, as Context's rule asks), and jobs with no
+    -- accepted_at. Known limit: a later re-win that leaves accepted_at
+    -- unchanged looks, in the database, like the original acceptance.
+    -- Condition-based. p_since bounds the history by accepted_at.
     SELECT 'won_without_acceptance_event', j.id, j.id::text, j.accepted_at
       FROM public.jobs j
      WHERE public.fence_quote_option_status_won(j.status)
        AND (p_since IS NULL OR j.accepted_at IS NULL OR j.accepted_at >= p_since)
        AND NOT EXISTS (SELECT 1 FROM public.job_events e
-                        WHERE e.job_id = j.id AND e.event_type IN ('quote_accepted', 'quote_run_accepted'))
+                        WHERE e.job_id = j.id AND e.event_type IN ('quote_accepted', 'quote_run_accepted')
+                          AND j.accepted_at IS NOT NULL
+                          AND (e.detail_json->>'accepted_at')::timestamptz = j.accepted_at)
     UNION ALL
     -- A live accepted quote document on a job that is neither won nor
     -- partially accepted: the document committed and the status did not (the
     -- strict-on, atomic-off inverse gap; any split write), or the job was
-    -- moved back or lost afterwards. ref: the document, which is accepted at
-    -- most once, so this kind is resolvable by a person.
+    -- moved back or lost afterwards. ref: the document. Condition-based: the
+    -- same document's job can become inconsistent again after a resolution,
+    -- so it cannot be resolved; it clears when the job is won again or the
+    -- document is declined or superseded through the normal paths.
     SELECT 'accepted_document_job_not_won', d.job_id, d.id::text, d.accepted_at
       FROM public.job_documents d
       JOIN public.jobs j ON j.id = d.job_id
@@ -485,13 +501,27 @@ BEGIN
      WHERE w.quote_option_group_id IS NOT NULL
        AND public.fence_quote_option_status_won(w.status) AND w.superseded_at IS NOT NULL
     UNION ALL
+    -- The handler reached its response but a follow-up write it is meant to
+    -- make (for example the post-commit business event) failed: not swallowed.
+    SELECT 'acceptance_follow_up_issue', a.job_id, a.document_id::text, a.handler_finished_at
+      FROM public.quote_acceptance_attempts a
+     WHERE a.handler_issues IS NOT NULL AND a.resolved_at IS NULL
+    UNION ALL
     SELECT 'acceptance_handler_unfinished', a.job_id, a.document_id::text, a.committed_at
       FROM public.quote_acceptance_attempts a
      WHERE a.handler_finished_at IS NULL AND a.resolved_at IS NULL AND a.committed_at < now() - p_grace
   ) g
   WHERE g.kind IN ('won_with_open_sibling', 'more_than_one_won', 'won_without_acceptance_event',
-                   'won_while_superseded', 'supersede_switch_unreadable')
+                   'won_while_superseded', 'accepted_document_job_not_won', 'supersede_switch_unreadable')
      OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gap_resolutions x WHERE x.kind = g.kind AND x.ref = g.ref);
 END $$;
 REVOKE ALL ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) TO service_role;
+
+-- Every object this migration owns carries an 'SQ-23 remedy:' comment, so the
+-- rollback contract can find one that was renamed rather than dropped.
+COMMENT ON FUNCTION public.quote_acceptance_fingerprint(uuid) IS 'SQ-23 remedy: acceptance decision fingerprint.';
+COMMENT ON FUNCTION public.quote_acceptance_snapshot(uuid, text) IS 'SQ-23 remedy: acceptance decision snapshot.';
+COMMENT ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb) IS 'SQ-23 remedy: atomic quote acceptance.';
+COMMENT ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, text) IS 'SQ-23 remedy: handler reached its response.';
+COMMENT ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) IS 'SQ-23 remedy: R3 gap read.';

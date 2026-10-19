@@ -1632,6 +1632,10 @@ export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): P
       // Set once the atomic transaction has committed for this request.
       let atomicDocId: string | null = null
       const atomicRequestId = crypto.randomUUID()
+      // Follow-up writes that failed after the atomic commit. Recorded on the
+      // attempt row (listed for a person as acceptance_follow_up_issue), never
+      // swallowed. Unused on the legacy path.
+      const atomicIssues: string[] = []
 
       const sourceRunLabel = quoteDocumentRunLabel(doc)
 
@@ -2012,7 +2016,11 @@ export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): P
             both_accepted: allAccepted,
           },
           metadata: {},
-        }).then(() => {}, () => {})
+        }).then((r: any) => {
+          if (atomicDocId !== null && r?.error) atomicIssues.push(`quote.run_accepted: ${r.error.message ?? 'insert failed'}`)
+        }, (e: any) => {
+          if (atomicDocId !== null) atomicIssues.push(`quote.run_accepted: ${e?.message ?? 'insert threw'}`)
+        })
 
         // Update overall job status (the atomic path already wrote it)
         if (atomicDocId === null) {
@@ -2092,11 +2100,11 @@ export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): P
           }
 
           // Return "Next Steps" page for fully accepted run
-          await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId)
+          await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId, atomicIssues)
           return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || ''))
         } else {
           // ── WAITING FOR OTHER PARTY ──
-          await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId)
+          await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId, atomicIssues)
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
         }
       }
@@ -2411,7 +2419,7 @@ export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): P
           isPatio,
           jobId: job?.id || '',
         })
-        await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId)
+        await finishAtomicAcceptance(sb, atomicDocId, atomicRequestId, atomicIssues)
         return new Response(nextStepsHtml, {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'text/html' },

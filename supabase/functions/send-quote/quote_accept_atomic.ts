@@ -201,14 +201,21 @@ async function recoverAtomicAcceptance(sb: any, input: AtomicAcceptInput, waitMs
 }
 
 // Called before each response of an atomic acceptance. It records that the
-// handler reached its response, NOT that the follow-up work succeeded (those
-// steps keep today's best-effort handling). A no-op on the legacy path
-// (documentId null). Failure only leaves the attempt listed for a person.
+// handler reached its response, with any follow-up write that failed after the
+// commit (issues), so none is swallowed: a non-empty list is listed for a
+// person as acceptance_follow_up_issue. A no-op on the legacy path
+// (documentId null). If this mark itself fails, the attempt stays listed as
+// acceptance_handler_unfinished.
 // deno-lint-ignore no-explicit-any
-export async function finishAtomicAcceptance(sb: any, documentId: string | null, requestId: string): Promise<void> {
+export async function finishAtomicAcceptance(
+  sb: any, documentId: string | null, requestId: string, issues: string[] = [],
+): Promise<void> {
   if (!documentId) return
+  const args: Record<string, unknown> = { p_document_id: documentId, p_request_id: requestId }
+  if (issues.length > 0) args.p_issues = issues.join('; ')
   try {
-    await sb.rpc('quote_acceptance_handler_finished', { p_document_id: documentId, p_request_id: requestId })
+    const { error } = await sb.rpc('quote_acceptance_handler_finished', args)
+    if (error) console.error('[accept] atomic handler not marked finished:', error.message)
   } catch (e) {
     console.error('[accept] atomic handler not marked finished:', (e as Error).message)
   }

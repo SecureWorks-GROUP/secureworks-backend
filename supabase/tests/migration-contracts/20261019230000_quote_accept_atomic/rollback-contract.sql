@@ -13,7 +13,7 @@ BEGIN
  IF to_regprocedure('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_fingerprint(uuid)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_snapshot(uuid, text)') IS NOT NULL
-    OR to_regprocedure('public.quote_acceptance_handler_finished(uuid, uuid)') IS NOT NULL
+    OR to_regprocedure('public.quote_acceptance_handler_finished(uuid, uuid, text)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_gaps(interval, timestamptz)') IS NOT NULL THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: a function still exists';
  END IF;
@@ -27,8 +27,10 @@ BEGIN
 
  -- Nothing beyond this migration's own objects is touched (rollback mutants m12 to m19).
  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_jobs_quote_option_supersede'
-                 AND tgrelid = 'public.jobs'::regclass AND NOT tgisinternal) THEN
-  RAISE EXCEPTION 'quote accept atomic rollback contract: the supersede trigger must remain';
+                 AND tgrelid = 'public.jobs'::regclass AND NOT tgisinternal
+                 AND tgenabled <> 'D'
+                 AND tgfoid = 'public.jobs_quote_option_supersede()'::regprocedure) THEN
+  RAISE EXCEPTION 'quote accept atomic rollback contract: the supersede trigger must remain, enabled and bound to its function';
  END IF;
  IF (SELECT count(*) FROM public.feature_flags WHERE flag_name IN ('quote_option_supersede_v1', 'fence_same_site_guard_v1')
        AND enabled = false) <> 2 THEN
@@ -46,12 +48,19 @@ BEGIN
                     AND event_type = 'quote_accepted') THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: an acceptance committed before the down must survive it';
  END IF;
+ -- Owned objects are found by name prefix (underscore escaped) in public, and by the
+ -- 'SQ-23 remedy:' comment every one of them carries, so a renamed one is still found.
  IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relname LIKE 'quote_acceptance%' AND n.nspname NOT IN ('pg_catalog', 'information_schema')) THEN
-  RAISE EXCEPTION 'quote accept atomic rollback contract: a quote_acceptance relation remains (renamed or left)';
+             WHERE n.nspname = 'public'
+               AND (c.relname LIKE 'quote\_acceptance\_%' ESCAPE '\'
+                    OR obj_description(c.oid, 'pg_class') LIKE 'SQ-23 remedy:%')) THEN
+  RAISE EXCEPTION 'quote accept atomic rollback contract: a relation of this migration remains (renamed or left)';
  END IF;
- IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('accept_quote_document_atomic', 'quote_acceptance_fingerprint',
-             'quote_acceptance_snapshot', 'quote_acceptance_handler_finished', 'quote_acceptance_gaps')) THEN
-  RAISE EXCEPTION 'quote accept atomic rollback contract: a function of this migration remains, in some overload';
+ IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'public'
+               AND (p.proname IN ('accept_quote_document_atomic', 'quote_acceptance_fingerprint',
+                                  'quote_acceptance_snapshot', 'quote_acceptance_handler_finished', 'quote_acceptance_gaps')
+                    OR obj_description(p.oid, 'pg_proc') LIKE 'SQ-23 remedy:%')) THEN
+  RAISE EXCEPTION 'quote accept atomic rollback contract: a function of this migration remains, in some overload or renamed';
  END IF;
 END $$;
