@@ -62,11 +62,17 @@ Deno.test("legacy invoice sends hit the sealed SES release gate before provider 
     "assertLegacySesInvoiceActionAllowed(",
     approveStart,
   );
+  // Every provider effect of approve_and_send runs inside _approveAndSendInvoice.
   const approveProvider = INDEX.indexOf(
-    "xeroPost(`/Invoices/${asId}`",
+    "return await _approveAndSendInvoice(",
     approveStart,
   );
   assert(approveGate > approveStart && approveGate < approveProvider);
+  const approveFn = INDEX.indexOf("export async function _approveAndSendInvoice(");
+  assert(
+    approveFn > 0 &&
+      INDEX.indexOf("deps.xeroPost(`/Invoices/${asId}`", approveFn) > approveFn,
+  );
   assertStringIncludes(INDEX, "invoice_obligation_revision_id");
   assertStringIncludes(INDEX, "sealedSesMoneyRefusal(action");
   assertStringIncludes(FENCE, 'code: "sealed_ses_release_required"');

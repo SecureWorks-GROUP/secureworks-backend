@@ -107,6 +107,12 @@ import {
   touchInvoiceEmailSendClaim,
 } from './invoice_email_send_claim.ts'
 import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
+import {
+  dispatchInvoiceResend,
+  releaseSharedInvoiceSendNotSent,
+  SEND_INVOICE_OUTCOME_UNKNOWN_BODY,
+  takeSharedInvoiceSend,
+} from './invoice_shared_send.ts'
 import { sendRunsJobTypeRefusal, sendRunsRequestRefusal } from './send_runs_request.ts'
 import {
   decideSendQuoteAuth,
@@ -3356,18 +3362,33 @@ serve(async (req: Request) => {
         return jsonResponse({ error: 'No email address found for this invoice job' }, 400, corsHeaders)
       }
 
+      // The shared invoice hold first (invoice_shared_send.ts): one hold for
+      // every door that emails this invoice. This door's own claim row and
+      // Resend idempotency key below stay as they were.
+      const shared = await takeSharedInvoiceSend(sb, {
+        xeroInvoiceId: String(xero_invoice_id),
+        jobId: invoiceRecord.job_id || job_id || null,
+        sendClaim: body?.send_claim,
+      })
+      if (!shared.ok) {
+        return jsonResponse(shared.body, shared.status, corsHeaders)
+      }
+
       const invoiceClaim = await claimInvoiceEmailSend(
         sb,
         xero_invoice_id,
         invoiceRecord.job_id || job_id,
       )
       if (invoiceClaim.status === 'error') {
+        await releaseSharedInvoiceSendNotSent(sb, shared, 'local_claim_error')
         return jsonResponse({ error: 'Failed to claim invoice email send' }, 500, corsHeaders)
       }
       if (invoiceClaim.status === 'already_sent') {
+        await releaseSharedInvoiceSendNotSent(sb, shared, 'local_claim_already_sent')
         return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
       }
       if (invoiceClaim.status !== 'claimed') {
+        await releaseSharedInvoiceSendNotSent(sb, shared, 'local_claim_in_progress')
         return jsonResponse({
           error: 'Invoice email send already in progress',
           code: 'invoice_send_in_progress',
@@ -3401,6 +3422,7 @@ serve(async (req: Request) => {
       let resendMessageId: string | null = null
 
       if (!RESEND_API_KEY) {
+        await releaseSharedInvoiceSendNotSent(sb, shared, 'resend_not_configured')
         const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
           || jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
@@ -3417,6 +3439,7 @@ serve(async (req: Request) => {
           '[send-invoice] lease refresh failed:',
           invoiceLease.error?.message || String(invoiceLease.error),
         )
+        await releaseSharedInvoiceSendNotSent(sb, shared, 'local_lease_refresh_failed')
         const released = await revertInvoiceEmailSendClaim(
           sb,
           xero_invoice_id,
@@ -3427,12 +3450,14 @@ serve(async (req: Request) => {
           || jsonResponse({ error: 'Failed to refresh invoice send claim' }, 500, corsHeaders)
       }
       if (invoiceLeaseOutcome === 'lost') {
+        await releaseSharedInvoiceSendNotSent(sb, shared, 'local_lease_lost')
         return jsonResponse({ success: true, already_sent: true }, 200, corsHeaders)
       }
 
-      let emailRes: Response
-      try {
-        emailRes = await fetch('https://api.resend.com/emails', {
+      // The Resend call under the shared hold: fenced first, then settled from
+      // what Resend proved. Sent only with a Resend message id.
+      const sendOutcome = await dispatchInvoiceResend(sb, shared, () =>
+        fetch('https://api.resend.com/emails', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${RESEND_API_KEY}`,
@@ -3447,22 +3472,33 @@ serve(async (req: Request) => {
             html: emailHtml,
             cc: [getDivisionInbox(invoiceJob?.type || job_type), 'finance@secureworkswa.com.au'],
           }),
-        })
-      } catch (fetchErr) {
+        }))
+
+      if (sendOutcome.kind === 'fenced') {
+        // Stopped before Resend: nothing was sent.
+        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token)
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
+          || jsonResponse(sendOutcome.body, sendOutcome.status, corsHeaders)
+      }
+      if (sendOutcome.kind === 'unknown') {
+        // A thrown call, a 2xx with no message id, or an ambiguous status: the
+        // email may have gone. The shared hold stays (outcome unknown); the
+        // provider key is kept so a checked retry cannot send twice.
         const released = await revertInvoiceEmailSendClaim(
           sb,
           xero_invoice_id,
           invoiceClaim.claim.token,
           'keep_provider_key',
         )
-        console.log('[send-invoice] Resend fetch threw (provider key kept):', (fetchErr as Error).message)
+        console.log(sendOutcome.status === null
+          ? '[send-invoice] Resend fetch threw (provider key kept)'
+          : `[send-invoice] Resend outcome unknown (provider key kept): ${sendOutcome.status}`)
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
-          || jsonResponse({ error: 'Email send failed', detail: 'network error' }, 502, corsHeaders)
+          || jsonResponse({ ...SEND_INVOICE_OUTCOME_UNKNOWN_BODY, status: sendOutcome.status }, 502, corsHeaders)
       }
 
-      if (emailRes.ok) {
-        const resendData = await emailRes.json()
-        resendMessageId = resendData.id
+      if (sendOutcome.kind === 'sent') {
+        resendMessageId = sendOutcome.messageId
         await insertEmailEvent(sb, {
           emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
           subject: emailSubject, resendMessageId,
@@ -3480,20 +3516,21 @@ serve(async (req: Request) => {
         // Log note to GHL contact
         logEmailToGHL(invoiceJob?.ghl_contact_id, emailSubject, client_email)
       } else {
-        const errData = await emailRes.json().catch(() => ({}))
+        // A definite Resend rejection: nothing was sent (the shared hold is
+        // settled failed).
+        const errData = sendOutcome.errData as Record<string, any>
         console.log('[send-invoice] Resend failed:', JSON.stringify(errData))
         await insertEmailEvent(sb, {
           emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
           subject: emailSubject, status: 'failed',
-          failureReason: errData.message || `HTTP ${emailRes.status}`,
+          failureReason: errData.message || `HTTP ${sendOutcome.status}`,
           metadata: { xero_invoice_id, invoice_number, client_name },
         })
-        const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
-          ? 'pre_send'
-          : 'keep_provider_key'
-        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token, revertMode)
+        const released = await revertInvoiceEmailSendClaim(sb, xero_invoice_id, invoiceClaim.claim.token, 'pre_send')
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release invoice send claim')
-          || jsonResponse({ error: 'Email send failed', detail: errData.message }, 502, corsHeaders)
+          || jsonResponse({
+            error: 'Email send failed', detail: errData.message, code: 'invoice_email_failed', state: 'failed', retry_safe: true,
+          }, 502, corsHeaders)
       }
 
       const published = await publishInvoiceEmailSendOrRevert(
