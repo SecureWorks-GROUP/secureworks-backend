@@ -533,6 +533,34 @@ export async function loadQuoteBuilderSettings(client: any) {
   };
 }
 
+/**
+ * The goal is a note, never a block: a settings read that fails must not stop
+ * the scoper opening the job. Every setting then reads null (line types stay
+ * on, as the `settings` key switches them on) and `settings_unavailable` tells
+ * the app to hide the note rather than say "not set".
+ */
+async function quoteBuilderSettingsOrUnavailable(client: any): Promise<{
+  settings: Awaited<ReturnType<typeof loadQuoteBuilderSettings>>;
+  settings_unavailable?: true;
+}> {
+  try {
+    return { settings: await loadQuoteBuilderSettings(client) };
+  } catch (error) {
+    console.warn(
+      "quote_builder_get_job: settings unreadable, job opened without the goal note",
+      (error as Error)?.message || error,
+    );
+    return {
+      settings: {
+        labour_rate_ex_gst: null,
+        materials_multiplier: null,
+        target_margin_pct: null,
+      },
+      settings_unavailable: true,
+    };
+  }
+}
+
 // ── GET quote_builder_get_job ───────────────────────────────────────────────
 
 export async function getQuoteBuilderJob(
@@ -563,10 +591,11 @@ export async function getQuoteBuilderJob(
   // carries no settings keys at all, so the app opens it as it always has.
   const pricing: {
     settings?: Awaited<ReturnType<typeof loadQuoteBuilderSettings>>;
+    settings_unavailable?: boolean;
     can_edit_settings?: boolean;
   } = lane === "repair"
     ? {
-      settings: await loadQuoteBuilderSettings(client),
+      ...(await quoteBuilderSettingsOrUnavailable(client)),
       // No settings editor is offered yet: the numbers change by database update.
       can_edit_settings: false,
     }

@@ -1454,6 +1454,40 @@ Deno.test("quote builder: settings come from the settings table, null when a row
   assertEquals((await open()).settings?.labour_rate_ex_gst, 95);
 });
 
+Deno.test("quote builder: a repair job still opens when the settings read fails; the goal note is marked unavailable", async () => {
+  const store = seed();
+  const { client } = makeFakeClient(store, {
+    selectError: (table) =>
+      table === "quote_builder_settings"
+        ? { code: "42501", message: "permission denied" }
+        : null,
+  });
+  const opened = await getQuoteBuilderJob(
+    client,
+    new URLSearchParams(`job_id=${REPAIR_JOB}`),
+    ACTOR,
+  );
+  assertEquals(opened.job.id, REPAIR_JOB);
+  // The key is still sent so line types stay on; every figure reads null.
+  assertEquals(opened.settings, {
+    labour_rate_ex_gst: null,
+    materials_multiplier: null,
+    target_margin_pct: null,
+  });
+  assertEquals(opened.settings_unavailable, true);
+  assertEquals(opened.can_edit_settings, false);
+  // A good read carries no unavailable marker.
+  const fine = makeFakeClient(seed()).client;
+  const ok = await getQuoteBuilderJob(
+    fine,
+    new URLSearchParams(`job_id=${REPAIR_JOB}`),
+    ACTOR,
+  );
+  assertEquals("settings_unavailable" in ok, false);
+  // The direct loader still reports the failure to any other caller.
+  await assertRejects(() => loadQuoteBuilderSettings(client));
+});
+
 Deno.test("quote builder: a private job opens with no settings keys and no settings read, and still keeps line types", async () => {
   const store = seed();
   store.quote_builder_settings = [

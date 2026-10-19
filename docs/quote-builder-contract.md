@@ -190,6 +190,9 @@ included, and what we charge a builder per hour is not a trade's to read.
 `quote_builder_get_job` returns them as `settings` (5.2) for an insurance
 repair-family job. A missing row, or a value that is not a number, is `null`.
 The server has no fallback number.
+If the settings read itself fails, the job still opens: every value is
+`null` and the reply adds `settings_unavailable: true`, so the app hides the
+goal note instead of saying "not set". A settings fault never refuses the job.
 
 A private job (section 4) gets no `settings` and no `can_edit_settings` key at
 all, and the settings table is not read for it: the figures are the insurance
@@ -379,6 +382,8 @@ Returns everything the app needs to open a job:
   value a number or `null`. Its presence is what switches the app's line types
   and pricing bar on. The values shown above are placeholders, not the real
   numbers. A private job's reply has no `settings` key.
+- `settings_unavailable: true` is sent only when the settings read failed
+  (section 2c); every `settings` value is then `null`. Absent otherwise.
 - `can_edit_settings` is sent with `settings` and is `false` for everyone until
   a settings write action exists. A private job's reply has no such key.
 - `documents` is the client quote PDFs only. A scope of works PDF filed at issue
