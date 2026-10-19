@@ -178,6 +178,28 @@ Deno.test('an uncertain final send is outcome_unknown and never resent', async (
   assertEquals(replay.calls.length, 0)
 })
 
+Deno.test('a send answered retry_safe:false is outcome_unknown, keeps the draft and points at Sent Items', async () => {
+  // A mutating 401 after token refresh: Graph may have sent the message.
+  const provider = fakeGraph({
+    failAt: {
+      match: (path) => path.endsWith('/send'),
+      error: new GraphProviderError(401, 'rejected after refresh', false, {
+        token_refreshed: true,
+        retry_safe: false,
+      }),
+    },
+  })
+  const deps = emailDeps(provider.graph)
+  const id = await recordEmail(deps)
+  const result = await sendApprovedEmail(deps, id, CALLER)
+  assertEquals(result.body.state, 'outcome_unknown')
+  assertEquals(result.body.code, 'provider_outcome_unknown')
+  assert(String(result.body.recovery_action).includes('Sent Items'))
+  assert(!String(result.body.recovery_action).includes('Nothing was sent'))
+  assert(!provider.calls.some((call) => call.method === 'DELETE'))
+  assertEquals(deps.store.rows.get(id)!.status, 'outcome_unknown')
+})
+
 Deno.test('a definite provider refusal before sending records failed', async () => {
   const provider = fakeGraph({
     failAt: {
