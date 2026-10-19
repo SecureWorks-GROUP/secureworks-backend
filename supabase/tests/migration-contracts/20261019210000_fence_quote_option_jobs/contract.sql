@@ -315,10 +315,11 @@ DROP FUNCTION public.qo_contract_fail_event();
 DROP TRIGGER qo_contract_fail ON public.jobs;
 DROP FUNCTION public.qo_contract_fail();
 
--- The switch fails closed. With the switch row set true but its read raising (a cancel or
--- statement timeout 57014, a permission error 42501, a lock timeout 55P03, a missing table
--- 42P01, an ordinary error P0001, an assert failure P0004), accepting an option writes no pointer, no job_event and no
--- run record, and the acceptance stands. Group 6: customer c-7, G1 and G2. The read is made to
+-- The switch fails closed. With the switch false, NULL (where the column allows it) or missing,
+-- or set true but with its read raising (a cancel or statement timeout 57014, a permission error
+-- 42501, a lock timeout 55P03, a missing table 42P01, an ordinary error P0001, an assert failure
+-- P0004), accepting an option and reversing it write no pointer, no job_event and no run record,
+-- and the acceptance stands. Group 6: customer c-7, G1 and G2. The read is made to
 -- raise by putting a view over the switch table for this transaction only; other
 -- switches read through it as before.
 INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
@@ -327,45 +328,64 @@ INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
 SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000000f2', '9c000000-0000-4000-8000-0000000000f1', NULL, NULL);
 SELECT pg_temp.qo_assert((SELECT enabled FROM public.feature_flags WHERE flag_name = 'quote_option_supersede_v1'),
  'the fail-closed cases need the switch row set true');
+-- One silent round trip: accept G1, check nothing was written, put it back to quoted, check
+-- again. "Nothing" is measured against the counts before the first case, so a write by any
+-- acceptance or any reversal is caught.
+CREATE FUNCTION pg_temp.qo_group6_writes() RETURNS bigint LANGUAGE sql AS $$
+ SELECT (SELECT count(*) FROM public.jobs WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000f1'
+          AND superseded_at IS NOT NULL)
+      + (SELECT count(*) FROM public.job_events
+          WHERE job_id IN ('9c000000-0000-4000-8000-0000000000f1', '9c000000-0000-4000-8000-0000000000f2')
+            AND event_type LIKE 'quote_option_%' AND event_type <> 'quote_option_linked')
+      + (SELECT count(*) FROM public.quote_option_settle_runs
+          WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000f1')
+$$;
+CREATE FUNCTION pg_temp.qo_silent_round_trip(p_case text, p_baseline bigint) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000f1';
+ IF (SELECT status FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000f1') <> 'accepted' THEN
+  RAISE EXCEPTION 'fence quote option contract: switch %: the acceptance must stand', p_case;
+ END IF;
+ IF pg_temp.qo_group6_writes() <> p_baseline THEN
+  RAISE EXCEPTION 'fence quote option contract: switch %: an acceptance must write no pointer, event or run record', p_case;
+ END IF;
+ UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000f1';
+ IF pg_temp.qo_group6_writes() <> p_baseline THEN
+  RAISE EXCEPTION 'fence quote option contract: switch %: a reversal must write no pointer, event or run record', p_case;
+ END IF;
+END $$;
+CREATE TEMP TABLE qo_group6_baseline AS SELECT pg_temp.qo_group6_writes() AS n;
+SELECT pg_temp.qo_assert((SELECT n FROM qo_group6_baseline) = 0, 'group 6 must start with nothing written');
+-- Readable but not true: false, NULL, and no row at all.
+UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_supersede_v1';
+SELECT pg_temp.qo_silent_round_trip('false', (SELECT n FROM qo_group6_baseline));
+DO $$
+BEGIN
+ UPDATE public.feature_flags SET enabled = NULL WHERE flag_name = 'quote_option_supersede_v1';
+ PERFORM pg_temp.qo_silent_round_trip('NULL', (SELECT n FROM qo_group6_baseline));
+EXCEPTION WHEN not_null_violation THEN
+ RAISE NOTICE 'feature_flags.enabled is NOT NULL here, so a NULL switch cannot occur';
+END $$;
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'quote_option_supersede_v1';
 CREATE FUNCTION public.qo_contract_raise() RETURNS boolean LANGUAGE plpgsql AS $$
 BEGIN
  RAISE EXCEPTION 'contract forced switch read failure' USING ERRCODE = current_setting('qo.flag_error');
 END $$;
 ALTER TABLE public.feature_flags RENAME TO qo_contract_feature_flags;
 CREATE VIEW public.feature_flags AS
+ SELECT f.* FROM public.qo_contract_feature_flags f WHERE f.flag_name <> 'quote_option_supersede_v1';
+SELECT pg_temp.qo_silent_round_trip('row missing', (SELECT n FROM qo_group6_baseline));
+-- Unreadable: the switch row is true, but reading it raises.
+CREATE OR REPLACE VIEW public.feature_flags AS
  SELECT f.* FROM public.qo_contract_feature_flags f
   WHERE CASE WHEN f.flag_name = 'quote_option_supersede_v1' THEN public.qo_contract_raise() ELSE true END;
 DO $$
 DECLARE
  v_code text;
- v_events_before bigint;
- v_runs_before bigint;
 BEGIN
  FOREACH v_code IN ARRAY ARRAY['57014', '42501', '55P03', '42P01', 'P0001', 'P0004'] LOOP
   PERFORM set_config('qo.flag_error', v_code, true);
-  SELECT count(*) INTO v_events_before FROM public.job_events
-   WHERE job_id IN ('9c000000-0000-4000-8000-0000000000f1', '9c000000-0000-4000-8000-0000000000f2')
-     AND event_type LIKE 'quote_option_%' AND event_type <> 'quote_option_linked';
-  SELECT count(*) INTO v_runs_before FROM public.quote_option_settle_runs
-   WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000f1';
-  UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000f1';
-  IF (SELECT status FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000f1') <> 'accepted' THEN
-   RAISE EXCEPTION 'fence quote option contract: an unreadable switch (%) must not undo the acceptance', v_code;
-  END IF;
-  IF EXISTS (SELECT 1 FROM public.jobs WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000f1'
-              AND superseded_at IS NOT NULL) THEN
-   RAISE EXCEPTION 'fence quote option contract: an unreadable switch (%) must write no pointer', v_code;
-  END IF;
-  IF (SELECT count(*) FROM public.job_events
-       WHERE job_id IN ('9c000000-0000-4000-8000-0000000000f1', '9c000000-0000-4000-8000-0000000000f2')
-         AND event_type LIKE 'quote_option_%' AND event_type <> 'quote_option_linked') <> v_events_before THEN
-   RAISE EXCEPTION 'fence quote option contract: an unreadable switch (%) must write no event', v_code;
-  END IF;
-  IF (SELECT count(*) FROM public.quote_option_settle_runs
-       WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000f1') <> v_runs_before THEN
-   RAISE EXCEPTION 'fence quote option contract: an unreadable switch (%) must write no run record', v_code;
-  END IF;
-  UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000f1';
+  PERFORM pg_temp.qo_silent_round_trip('read raising ' || v_code, (SELECT n FROM qo_group6_baseline));
  END LOOP;
 END $$;
 DROP VIEW public.feature_flags;
