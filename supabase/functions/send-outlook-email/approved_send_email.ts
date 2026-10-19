@@ -27,6 +27,7 @@ import {
   type SendDeps,
 } from '../_shared/approved_send.ts'
 import { assertGraphSendAccepted } from './graph_send_accept.ts'
+import { safeErrorFacts, safeProviderId } from '../_shared/safe_identifier.ts'
 
 export type GraphCall = (
   path: string,
@@ -117,7 +118,7 @@ export async function sendApprovedEmail(
         },
         { mutating: true },
       )
-      draftId = String((await created.json() as any)?.id || '') || null
+      draftId = safeProviderId((await created.json() as any)?.id)
       if (!draftId) throw new DraftMismatch('Graph reply draft had no id')
       const patched = await deps.graph(`${base}/${seg(draftId)}`, {
         method: 'PATCH',
@@ -143,10 +144,10 @@ export async function sendApprovedEmail(
         }),
       }, { mutating: true })
       draft = await created.json() as Record<string, unknown>
-      draftId = String(draft?.id || '') || null
+      draftId = safeProviderId(draft?.id)
       if (!draftId) throw new DraftMismatch('Graph draft had no id')
     }
-    internetMessageId = String(draft?.internetMessageId || '') || null
+    internetMessageId = safeProviderId(draft?.internetMessageId)
     if (
       !sameList(addresses(draft.toRecipients), payload.to) ||
       !sameList(addresses(draft.ccRecipients), payload.cc) ||
@@ -204,7 +205,9 @@ export async function sendApprovedEmail(
         mode: payload.mode,
         graph_draft_id: draftId,
         stage,
-        error: (error as Error).message,
+        // Provider and exception text never reaches the stored row: only the
+        // error class and the provider status and code it carries.
+        ...safeErrorFacts(error),
       },
     }, caller)
     return {
@@ -213,8 +216,7 @@ export async function sendApprovedEmail(
         state: status,
         code,
         approval_id: approvalId,
-        // The provider's own text stays in the recorded detail; the caller gets
-        // fixed wording only.
+        // The caller gets fixed wording only.
         error: unknown
           ? 'The email may have gone out. Check Sent Items before sending again.'
           : 'The email could not be sent.',

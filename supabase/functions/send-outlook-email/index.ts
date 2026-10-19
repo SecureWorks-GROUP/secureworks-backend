@@ -27,6 +27,11 @@ import {
   sealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
 import {
+  safeErrorFacts,
+  safeIdentifier,
+  safeProviderId,
+} from '../_shared/safe_identifier.ts'
+import {
   approvedSendSealSecret,
   ApprovedSendRefusal,
   auditQuietly,
@@ -147,6 +152,13 @@ type FetchLike = typeof fetch
 export type OutlookRoute =
   | { kind: 'mailbox'; mailbox: string }
   | { kind: 'group'; group: string; reason: string }
+
+/** A Graph draft id that may reach a reply: an id's shape, never free text. */
+function graphDraftId(value: unknown): string {
+  const id = safeProviderId(typeof value === 'string' ? value.trim() : value)
+  if (!id) throw new OutlookInputError('invalid_source', 'draft_id must be a Graph id')
+  return id
+}
 
 function nonEmptyString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) {
@@ -317,10 +329,11 @@ async function assertOutlookJobAllowed(
     if (error instanceof OutlookFenceError) throw error
     throw new OutlookFenceError(
       503,
+      // The thrown text is never echoed: fixed fact, class name and codes only.
       sealedSesFenceCheckFailedRefusal(
         action,
-        (error as Error).message,
-        { job_id: jobId },
+        'The sealed job lookup failed.',
+        { job_id: jobId, ...safeErrorFacts(error) },
       ),
     )
   }
@@ -341,8 +354,8 @@ async function resolveOutlookInvoiceJob(
       503,
       sealedSesFenceCheckFailedRefusal(
         'send_outlook_email',
-        `The invoice mirror lookup failed (${mirror.error.message}).`,
-        { xero_invoice_id: xeroInvoiceId },
+        'The invoice mirror lookup failed.',
+        { xero_invoice_id: xeroInvoiceId, store_code: safeIdentifier(mirror.error.code) },
       ),
     )
   }
@@ -594,8 +607,8 @@ export async function assertOutlookSesDeliveryAllowed(
         503,
         sealedSesFenceCheckFailedRefusal(
           'reply_outlook_email',
-          `The source-message job lookup failed (${source.error.message}).`,
-          { message_id: mailboxMessageId },
+          'The source-message job lookup failed.',
+          { message_id: mailboxMessageId, store_code: safeIdentifier(source.error.code) },
         ),
       )
     }
@@ -699,10 +712,11 @@ export async function assertOutlookSesDeliveryAllowed(
         503,
         sealedSesFenceCheckFailedRefusal(
           'forward_outlook_email',
-          `The source-message job lookup failed (${source.error.message}).`,
+          'The source-message job lookup failed.',
           {
             message_id: mailboxMessageId || null,
             post_id: groupPostId || null,
+            store_code: safeIdentifier(source.error.code),
           },
         ),
       )
@@ -807,9 +821,12 @@ export async function assertOutlookSesDeliveryAllowed(
           sealedSesFenceCheckFailedRefusal(
             'send_outlook_email',
             document.error
-              ? `The job document lookup failed (${document.error.message}).`
+              ? 'The job document lookup failed.'
               : 'The job document is missing or has no job link.',
-            { job_document_id: jobDocumentId },
+            {
+              job_document_id: jobDocumentId,
+              ...(document.error ? { store_code: safeIdentifier(document.error.code) } : {}),
+            },
           ),
         )
       }
@@ -1356,7 +1373,8 @@ export async function fetchAttachment(url: string, name: string, options: {
     } catch (error) {
       throw new OutlookInputError(
         'attachment_download_failed',
-        `Failed to download attachment: ${(error as Error).message}`,
+        // The fetch exception's text is not echoed back to the caller.
+        `Failed to download attachment (${safeErrorFacts(error).error_name ?? 'error'})`,
       )
     } finally {
       clearTimeout(timer)
@@ -1820,7 +1838,7 @@ async function handleForward(
     }
     let draftId: string
     try {
-      draftId = nonEmptyString(draft.id, 'draft_id')
+      draftId = graphDraftId(draft.id)
     } catch (error) {
       throw new GraphProviderError(
         0,
@@ -1849,6 +1867,7 @@ async function handleForward(
     } catch (error) {
       if (error instanceof GraphProviderError) {
         throw new GraphProviderError(error.status, error.message, true, {
+          ...error.context,
           draft_id: draftId,
         })
       }
@@ -1991,7 +2010,7 @@ export async function handleReply(
   }
   let draftId: string
   try {
-    draftId = nonEmptyString(draft.id, 'draft_id')
+    draftId = graphDraftId(draft.id)
   } catch (error) {
     throw new GraphProviderError(
       0,
@@ -2042,6 +2061,7 @@ export async function handleReply(
   } catch (error) {
     if (error instanceof GraphProviderError) {
       throw new GraphProviderError(error.status, error.message, true, {
+        ...error.context,
         draft_id: draftId,
       })
     }
@@ -2103,7 +2123,7 @@ export async function handleDraft(
   }
   let draftId: string
   try {
-    draftId = nonEmptyString(draft.id, 'draft_id')
+    draftId = graphDraftId(draft.id)
   } catch (error) {
     throw new GraphProviderError(
       0,

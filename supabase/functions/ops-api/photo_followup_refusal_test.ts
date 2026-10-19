@@ -21,7 +21,7 @@ const PHOTO_URL = "https://stub-storage.invalid/job-photo-1/photo.jpg";
 type State = {
   packStatus: string;
   packUpdates: Record<string, unknown>[];
-  finalPatchError: { message: string } | null;
+  finalPatchError: { message: string; code?: string } | null;
   finalPatchZeroRows?: boolean;
 };
 
@@ -83,7 +83,7 @@ class Query {
   }
 }
 
-function harness(finalPatchError: { message: string } | null = null, finalPatchZeroRows = false) {
+function harness(finalPatchError: { message: string; code?: string } | null = null, finalPatchZeroRows = false) {
   const state: State = { packStatus: "drafted", packUpdates: [], finalPatchError, finalPatchZeroRows };
   const claims = makeFakeClaimStore();
   const client = { from: (t: string) => new Query(t, state), rpc: claims.rpc };
@@ -163,4 +163,56 @@ Deno.test("photo follow-up: a 401 whose reply says the outcome is unknown stays 
   const last = state.packUpdates.at(-1)!;
   assertEquals(last.status, "sending");
   assertEquals(last.failed_step, "photo_send_unknown_outcome");
+});
+
+// Raw provider text that must not be echoed: a store error, a provider reply
+// or an exception planted with a sentinel never reaches the thrown error or the
+// pack row the follow-up saves.
+const SENTINEL = "SENTINEL raw provider text jane@example.com 0412 999 888";
+const PHOTOS = [{ url: PHOTO_URL, name: "photo.jpg" }];
+
+function assertNoSentinel(value: unknown, label: string) {
+  const text = JSON.stringify(value ?? null);
+  assert(!text.includes("SENTINEL"), `${label} echoed raw provider text: ${text}`);
+}
+
+Deno.test("raw provider text: a failed save of the photo pack names the store code only", async () => {
+  const { state, client } = harness({ message: SENTINEL, code: "57014" });
+  await withOutlookStatus(401, async () => {
+    const err = await quiet(() => assertRejects(() => makesafeSendPhotoFollowup(client, { job_id: JOB, approved_photos: PHOTOS })));
+    const message = String((err as Error).message);
+    assert(message.includes("photo pack state was not saved"), message);
+    assert(message.includes("store code 57014"), message);
+    assertNoSentinel(message, "thrown error");
+  }, { error: SENTINEL, details: SENTINEL });
+  assertNoSentinel(state.packUpdates, "pack updates");
+});
+
+Deno.test("raw provider text: a 502 whose reply carries provider text is saved without it", async () => {
+  const { state, client } = harness();
+  await withOutlookStatus(502, async () => {
+    const err = await quiet(() => assertRejects(() => makesafeSendPhotoFollowup(client, { job_id: JOB, approved_photos: PHOTOS })));
+    assertNoSentinel((err as Error).message, "thrown error");
+  }, { error: SENTINEL, details: SENTINEL });
+  assertEquals(state.packUpdates.at(-1)!.failed_step, "photo_send_unknown_outcome");
+  assertNoSentinel(state.packUpdates, "pack updates");
+});
+
+Deno.test("raw provider text: a send that throws is raised and saved without the exception text", async () => {
+  const { state, client } = harness();
+  const original = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url === PHOTO_URL) return Promise.resolve(new Response(new Uint8Array([0xff, 0xd8, 0xff]), { status: 200, headers: { "content-type": "image/jpeg" } }));
+    if (url.includes("/functions/v1/send-outlook-email")) return Promise.reject(new Error(SENTINEL));
+    return Promise.reject(new Error("unhandled stub fetch: " + url));
+  }) as typeof fetch;
+  try {
+    const err = await quiet(() => assertRejects(() => makesafeSendPhotoFollowup(client, { job_id: JOB, approved_photos: PHOTOS })));
+    assertNoSentinel((err as Error).message, "thrown error");
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert(state.packUpdates.length > 1, "the follow-up reached the send");
+  assertNoSentinel(state.packUpdates, "pack updates");
 });

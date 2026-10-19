@@ -24,6 +24,7 @@ import {
   type SendDeps,
   type SmsPayload,
 } from "./approved_send.ts";
+import { safeErrorFacts, safeProviderId } from "./safe_identifier.ts";
 
 export const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_TIMEOUT_MS = 20_000;
@@ -103,10 +104,12 @@ export async function resolveContactForMobile(
       method: "POST",
       body: JSON.stringify({ locationId, phone: mobile }),
     });
-    contactId = found?.contact?.id || null;
+    contactId = safeProviderId(found?.contact?.id);
   } catch (error) {
+    // GHL's reply text can carry the contact's own details: refusals name only
+    // the provider status.
     throw new ApprovedSendRefusal(503, "sms_contact_lookup_failed",
-      `The SMS contact lookup failed, so nothing was sent (${(error as Error).message}).`);
+      "The SMS contact lookup failed, so nothing was sent.", safeErrorFacts(error));
   }
   if (!contactId) {
     try {
@@ -114,13 +117,14 @@ export async function resolveContactForMobile(
         method: "POST",
         body: JSON.stringify({ locationId, phone: mobile }),
       });
-      contactId = created?.contact?.id || null;
+      contactId = safeProviderId(created?.contact?.id);
     } catch (error) {
       const match = String((error as Error).message || "").match(/"contactId"\s*:\s*"([^"]+)"/);
-      if (match?.[1]) contactId = match[1];
+      const duplicateId = safeProviderId(match?.[1]);
+      if (duplicateId) contactId = duplicateId;
       else {
         throw new ApprovedSendRefusal(503, "sms_contact_create_failed",
-          `The SMS contact could not be created, so nothing was sent (${(error as Error).message}).`);
+          "The SMS contact could not be created, so nothing was sent.", safeErrorFacts(error));
       }
     }
   }
@@ -132,7 +136,7 @@ export async function resolveContactForMobile(
     contact = (await ghl(`/contacts/${encodeURIComponent(contactId)}`))?.contact;
   } catch (error) {
     throw new ApprovedSendRefusal(503, "sms_contact_lookup_failed",
-      `The SMS contact could not be read back, so nothing was sent (${(error as Error).message}).`);
+      "The SMS contact could not be read back, so nothing was sent.", safeErrorFacts(error));
   }
   if (phoneOf(contact) !== mobile) {
     throw new ApprovedSendRefusal(409, "sms_contact_phone_mismatch",
@@ -179,8 +183,8 @@ export async function sendApprovedSms(
         fromNumber: payload.from_line,
       }),
     });
-    messageId = String(result?.messageId || result?.id || "") || null;
-    conversationId = String(result?.conversationId || "") || null;
+    messageId = safeProviderId(result?.messageId || result?.id);
+    conversationId = safeProviderId(result?.conversationId);
   } catch (error) {
     const unknown = !(error instanceof GhlCallError) || error.outcomeUnknown;
     const status = unknown ? "outcome_unknown" : "failed";
@@ -193,7 +197,7 @@ export async function sendApprovedSms(
         contact_id: contactId,
         to_mobile: payload.to_mobile,
         from_line: payload.from_line,
-        error: (error as Error).message,
+        ...safeErrorFacts(error),
       },
     }, caller);
     return {
@@ -202,7 +206,11 @@ export async function sendApprovedSms(
         state: status,
         code,
         approval_id: approvalId,
-        error: (error as Error).message,
+        // Fixed wording only: GHL's reply text never reaches the caller.
+        error: unknown
+          ? "The text may have gone out. Check the provider inbox before sending again."
+          : "The provider refused the text.",
+        ...safeErrorFacts(error),
         retry_safe: false,
         recovery_action: unknown
           ? "Check the provider inbox for this text before anything else; this approval is used and is never resent."

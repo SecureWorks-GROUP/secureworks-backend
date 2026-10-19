@@ -509,6 +509,7 @@ import {
   writeInvoiceEmailGateJobEvent,
 } from './invoice_email_resend_gate.ts'
 import { summariseSendReply } from './send_reply_summary.ts'
+import { safeErrorFacts, safeErrorLine, safeIdentifier, safeProviderId } from '../_shared/safe_identifier.ts'
 import {
   claimSend,
   newSendAttemptId,
@@ -51176,7 +51177,7 @@ async function makesafeSendPack(
       // authorised_not_sent here — re-sending could double-email. The operator
       // resolves via body.sending_resolution after verifying Sent Items.
       await settleSend(client, msAttemptId, 'outcome_unknown', { reason: 'send_call_threw' })
-      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send dispatch threw (outcome unknown, may have sent): ${(dispatchErr as Error).message}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send dispatch threw (outcome unknown, may have sent): ${safeErrorLine(dispatchErr)}`, retry_count: (locked[0].retry_count || 0) + 1 })
       throw new ApiError('email send outcome UNKNOWN (the request was dispatched but no response came back; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.', 502)
     }
     if (!emailResp.ok) {
@@ -51210,7 +51211,7 @@ async function makesafeSendPack(
       throw new ApiError(`email send outcome UNKNOWN (email fn returned ${emailResp.status} without a readable success; it may have dispatched; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.`, 502)
     }
     await settleSend(client, msAttemptId, 'sent', { status: emailResp.status })
-    const messageId = emailResult?.message_id || emailResult?.id || null
+    const messageId = safeProviderId(emailResult?.message_id) ?? safeProviderId(emailResult?.id)
 
     // ── STEP 6: SEND CONFIRMED. Write the MAKESAFE_PACK_SENT | main marker ──
     const markerText = buildPackSentMarkerText({ invoiceNumber, to: recipientEmail, nowIso: nowIso(), messageId })
@@ -51235,7 +51236,7 @@ async function makesafeSendPack(
     } catch (markerErr) {
       // Email genuinely sent but the marker write failed. Recoverable: a resume
       // sees the AUTHORISED invoice, writes the marker, and stops (no re-email).
-      await _patchPack(client, jobId, packKind, { status: 'sent_marker_failed', failed_step: 'marker', sent_at: nowIso(), error_detail: (markerErr as Error).message })
+      await _patchPack(client, jobId, packKind, { status: 'sent_marker_failed', failed_step: 'marker', sent_at: nowIso(), error_detail: `marker write failed: ${safeErrorLine(markerErr)}` })
       throw new ApiError('email sent but marker write failed (status=sent_marker_failed; resume writes the marker, no re-email)', 500)
     }
 
@@ -51253,9 +51254,12 @@ async function makesafeSendPack(
           approved_photos: approvedPhotosForFollowup,
         })
       } catch (photoErr) {
+        // An ApiError raised by the follow-up carries our own wording; any
+        // other throw is reduced to its class and codes.
         photoFollowupResult = {
           sent: false,
-          error: (photoErr as Error).message?.slice(0, 500) || String(photoErr),
+          error: photoErr instanceof ApiError ? photoErr.message.slice(0, 500) : 'The photo follow-up stopped unexpectedly.',
+          ...(photoErr instanceof ApiError ? {} : safeErrorFacts(photoErr)),
           requires: 'photo_followup_reconcile',
         }
         console.log('[makesafe_send_pack] immediate photo follow-up failed after main pack send:', photoFollowupResult.error)
@@ -51274,7 +51278,7 @@ async function makesafeSendPack(
       // Sent + marker written, but close failed. Recoverable: resume re-applies
       // the close only (marker present -> no re-email, invoice authorised -> no
       // re-authorise). Surfaced so the board can be reconciled.
-      await _patchPack(client, jobId, packKind, { status: 'sent_not_closed', failed_step: 'close', sent_at: nowIso(), error_detail: (closeErr as Error).message })
+      await _patchPack(client, jobId, packKind, { status: 'sent_not_closed', failed_step: 'close', sent_at: nowIso(), error_detail: `close failed: ${safeErrorLine(closeErr)}` })
       return { success: true, sent: true, closed: false, status: 'sent_not_closed', job_id: jobId, invoice_number: invoiceNumber, photo_followup: photoFollowupResult, warning: 'pack sent but make-safe close failed; resume to reconcile substatus' }
     }
 
@@ -51295,13 +51299,13 @@ async function makesafeSendPack(
     if (sendAttempted) {
       // First settle wins: after a confirmed send this changes nothing.
       if (msAttemptId) await settleSend(client, msAttemptId, 'outcome_unknown', { reason: 'post_dispatch_throw' })
-      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: ('post-dispatch unexpected throw (outcome unknown): ' + (err as Error).message).slice(0, 500) })
-      throw new ApiError('makesafe_send_pack failed AFTER the send was attempted (outcome UNKNOWN; status=sending, verify Sent Items then resume with sending_resolution): ' + (err as Error).message, 502)
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: 'post-dispatch unexpected throw (outcome unknown): ' + safeErrorLine(err) })
+      throw new ApiError('makesafe_send_pack failed AFTER the send was attempted (outcome UNKNOWN; status=sending, verify Sent Items then resume with sending_resolution): ' + safeErrorLine(err), 502)
     }
     // PRE-DISPATCH throw (getToken, the AUTHORISED-PDF fetch/attach, etc.) — the
     // email provably never began, so authorised_not_sent is safe (re-send later).
-    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'unexpected', error_detail: (err as Error).message?.slice(0, 500) })
-    throw new ApiError('makesafe_send_pack failed (state preserved for resume): ' + (err as Error).message, 500)
+    await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'unexpected', error_detail: 'unexpected throw before dispatch: ' + safeErrorLine(err) })
+    throw new ApiError('makesafe_send_pack failed (state preserved for resume): ' + safeErrorLine(err), 500)
   }
 }
 // Test-only export so the orchestration money-safety invariants (re-email ONCE,
@@ -51380,7 +51384,7 @@ async function _ensurePackRowStrict(client: any, jobId: string, packKind: string
     const { error: patchErr } = await client.from('makesafe_report_packs')
       .update({ ...extra, updated_at: new Date().toISOString() })
       .eq('id', existing.id)
-    if (patchErr) throw new ApiError(`pack row patch failed (${packKind}): ${patchErr.message}`, 500)
+    if (patchErr) throw new ApiError(`pack row patch failed (${packKind}): store code ${safeIdentifier(patchErr.code) ?? 'unknown'}`, 500)
   }
   await bindMakesafePackCycle(client, jobId, existing.id, packKind)
 }
@@ -51389,7 +51393,7 @@ async function _patchPackStrict(client: any, jobId: string, packKind: string, pa
   const { error } = await client.from('makesafe_report_packs')
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq('job_id', jobId).eq('pack_kind', packKind)
-  if (error) throw new ApiError(`pack patch failed (${packKind}): ${error.message}`, 500)
+  if (error) throw new ApiError(`pack patch failed (${packKind}): store code ${safeIdentifier(error.code) ?? 'unknown'}`, 500)
 }
 
 // As _patchPackStrict, and an update that matched no row is a failure too:
@@ -51401,7 +51405,7 @@ async function _patchPackStrictRow(client: any, jobId: string, packKind: string,
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq('job_id', jobId).eq('pack_kind', packKind)
     .select('id')
-  if (error) throw new ApiError(`pack patch failed (${packKind}): ${error.message}`, 500)
+  if (error) throw new ApiError(`pack patch failed (${packKind}): store code ${safeIdentifier(error.code) ?? 'unknown'}`, 500)
   if (!Array.isArray(data) || data.length === 0) {
     throw new ApiError(`pack patch failed (${packKind}): no pack row was updated`, 500)
   }
@@ -51456,7 +51460,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     .eq('job_id', jobId).eq('pack_kind', photoPackKind)
     .in('status', ['drafted', 'failed'])
     .select('id, status')
-  if (photoLockErr) throw new ApiError('photo follow-up lock failed: ' + photoLockErr.message, 500)
+  if (photoLockErr) throw new ApiError(`photo follow-up lock failed (code ${safeIdentifier(photoLockErr.code) ?? 'unknown'})`, 500)
   if (!photoLock || photoLock.length === 0) {
     const { data: currentPhotoPack } = await client.from('makesafe_report_packs')
       .select('status, failed_step').eq('job_id', jobId).eq('pack_kind', photoPackKind).maybeSingle()
@@ -51590,7 +51594,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       throw new ApiError(`photo follow-up email outcome UNKNOWN (${emailResp.status} without a readable success; status=sending). Verify Sent Items before anything else. NOT re-emailed.`, 502)
     }
     await settleSend(client, photoAttemptId, 'sent', { status: emailResp.status })
-    const messageId = emailResult?.message_id || emailResult?.id || null
+    const messageId = safeProviderId(emailResult?.message_id) ?? safeProviderId(emailResult?.id)
 
     // ── Write the photo follow-up marker (idempotency record) ──
     const nowIso = new Date().toISOString()
@@ -51609,7 +51613,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       await _patchPackStrictRow(client, jobId, photoPackKind, {
         status: 'sent_marker_failed',
         failed_step: 'photo_marker',
-        error_detail: markerErr.message.slice(0, 500),
+        error_detail: `photo marker write failed (code ${safeIdentifier(markerErr.code) ?? 'unknown'})`,
       })
       // Photos genuinely sent but the idempotency marker write failed. Tell the
       // operator clearly: the email WENT OUT. Do NOT retry.
@@ -51620,7 +51624,8 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
         message_id: messageId,
         job_id: jobId,
         marker_failed: true,
-        warning: 'PHOTOS WERE SENT but the idempotency marker write failed. Do NOT re-send (it would double-email the builder). Detail: ' + markerErr.message,
+        warning: 'PHOTOS WERE SENT but the idempotency marker write failed. Do NOT re-send (it would double-email the builder).',
+        marker_code: safeIdentifier(markerErr.code),
       }
     }
 
@@ -51639,7 +51644,9 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       job_id: jobId,
     }
   } catch (e) {
-    const message = ((e as Error).message || String(e)).slice(0, 500)
+    // Our own ApiErrors carry fixed wording; any other throw is reduced to its
+    // class and codes, here and in what the caller is told.
+    const message = e instanceof ApiError ? e.message.slice(0, 500) : `photo follow-up stopped: ${safeErrorLine(e)}`
     // First settle wins: after a confirmed send this changes nothing.
     if (photoAttemptId) await settleSend(client, photoAttemptId, emailAttempted && !emailRefused ? 'outcome_unknown' : 'failed', { reason: emailRefused ? 'photo_send_refused' : 'photo_followup_error' })
     // The saved state decides whether a retry may send again, so a failed save
@@ -51652,9 +51659,12 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       })
     } catch (patchErr) {
       console.error(JSON.stringify({ event: 'photo_followup_state_unsaved', job_id: jobId }))
-      throw new ApiError(`${message}; photo pack state was not saved: ${(patchErr as Error).message}`.slice(0, 500), 500)
+      // _patchPackStrictRow's own ApiErrors carry fixed wording and a store code.
+      const unsaved = patchErr instanceof ApiError ? patchErr.message : safeErrorLine(patchErr)
+      throw new ApiError(`${message}; photo pack state was not saved: ${unsaved}`.slice(0, 500), 500)
     }
-    throw e
+    if (e instanceof ApiError) throw e
+    throw new ApiError(message, 500)
   }
 }
 export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup

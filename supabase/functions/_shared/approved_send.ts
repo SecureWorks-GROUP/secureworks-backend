@@ -46,6 +46,7 @@ import {
   sendClaimRefusalStatus,
   settleSend,
 } from "./outbound_send_claim.ts";
+import { safeErrorFacts, safeIdentifier, safeProviderId } from "./safe_identifier.ts";
 
 export const APPROVED_SEND_EMAIL_SCHEMA = "secureworks.approved-send.email/v1";
 export const APPROVED_SEND_SMS_SCHEMA = "secureworks.approved-send.sms/v1";
@@ -647,8 +648,12 @@ export interface ApprovedSendStore {
 const APPROVAL_COLUMNS =
   "id,created_at,schema_version,channel,approved_by,approved_at,approval_words,approval_source,recorded_by_actor,recorded_via,payload,payload_hash,seal,expires_at,status,claimed_at,claim_token,outcome_at,outcome_code,provider_message_id,provider_detail";
 
-function storeUnreadable(what: string, message: string): never {
-  refuse(503, "approval_store_unreadable", `The approval store could not be ${what} (${message}).`);
+// The store's own error text can carry SQL detail or row values, so a refusal
+// names only the PostgREST code when it has a safe shape.
+function storeUnreadable(what: string, error: unknown): never {
+  const code = safeIdentifier((error as { code?: unknown } | null)?.code);
+  refuse(503, "approval_store_unreadable", `The approval store could not be ${what}.`,
+    code ? { store_code: code } : {});
 }
 
 /** PostgREST implementation over the service-role client. */
@@ -671,18 +676,18 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
         seal: row.seal,
         expires_at: row.expires_at,
       });
-      if (error) storeUnreadable("written", error.message);
+      if (error) storeUnreadable("written", error);
     },
     async loadApproval(id) {
       const { data, error } = await client.from("approved_send_approvals")
         .select(APPROVAL_COLUMNS).eq("id", id).maybeSingle();
-      if (error) storeUnreadable("read", error.message);
+      if (error) storeUnreadable("read", error);
       return (data as ApprovalRow) || null;
     },
     async hasClaimAudit(id) {
       const { data, error } = await client.from("approved_send_audit")
         .select("id").eq("approval_id", id).eq("event", "claimed").limit(1);
-      if (error) storeUnreadable("read", error.message);
+      if (error) storeUnreadable("read", error);
       return Array.isArray(data) && data.length > 0;
     },
     async claim(id, claimToken, nowIso) {
@@ -690,7 +695,7 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
         .update({ status: "sending", claimed_at: nowIso, claim_token: claimToken })
         .eq("id", id).eq("status", "approved").gt("expires_at", nowIso)
         .select("id");
-      if (error) storeUnreadable("claimed", error.message);
+      if (error) storeUnreadable("claimed", error);
       return Array.isArray(data) && data.length === 1;
     },
     async finish(id, claimToken, outcome) {
@@ -722,27 +727,30 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
         provider_message_id: entry.provider_message_id ?? null,
         detail: entry.detail ?? {},
       });
-      if (error) throw new Error(`approved_send audit write failed: ${error.message}`);
+      if (error) {
+        const code = safeIdentifier(error.code);
+        throw new Error(`approved_send audit write failed${code ? ` (code ${code})` : ""}`);
+      }
     },
     async findOutcomeUnknown(payloadHash) {
       const { data, error } = await client.from("approved_send_approvals")
         .select("id,outcome_at").eq("payload_hash", payloadHash).in("status", ["outcome_unknown", "sending"])
         .order("outcome_at", { ascending: false }).limit(5);
-      if (error) storeUnreadable("read", error.message);
+      if (error) storeUnreadable("read", error);
       return Array.isArray(data) ? data : [];
     },
     async findClaimedSince(payloadHash, exceptId, sinceIso) {
       const { data, error } = await client.from("approved_send_approvals")
         .select("id,status").eq("payload_hash", payloadHash).neq("id", exceptId)
         .in("status", ["sending", "sent", "outcome_unknown"]).gt("claimed_at", sinceIso).limit(5);
-      if (error) storeUnreadable("read", error.message);
+      if (error) storeUnreadable("read", error);
       return Array.isArray(data) ? data : [];
     },
     async listAudit(id) {
       const { data, error } = await client.from("approved_send_audit")
         .select("occurred_at,event,channel,actor,credential_class,code,payload_hash,provider_message_id,detail")
         .eq("approval_id", id).order("occurred_at", { ascending: true });
-      if (error) storeUnreadable("read", error.message);
+      if (error) storeUnreadable("read", error);
       return data || [];
     },
   };
@@ -1245,6 +1253,15 @@ export interface SendOutcome {
   detail: Record<string, unknown>;
 }
 
+// Free-text keys a provider or an exception fills. The doors record fixed
+// facts (stage, code, provider status) instead; this drops any that slip in so
+// the stored row and the audit never hold provider or exception text.
+const OUTCOME_FREE_TEXT_KEYS = new Set(["error", "message", "error_message", "provider_error"]);
+
+function outcomeDetailFacts(detail: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(detail).filter(([key]) => !OUTCOME_FREE_TEXT_KEYS.has(key)));
+}
+
 /** Write the outcome to the approval row and the audit. Never throws. */
 export async function finishApprovedSend(
   deps: SendDeps,
@@ -1253,13 +1270,15 @@ export async function finishApprovedSend(
   caller: { actor: string | null; credentialClass: string | null },
 ): Promise<{ outcome_recorded: boolean; audit_recorded: boolean }> {
   const at = deps.now().toISOString();
+  const detail = outcomeDetailFacts(outcome.detail);
+  const providerMessageId = safeProviderId(outcome.provider_message_id);
   let outcomeRecorded = false;
   try {
     outcomeRecorded = await deps.store.finish(claimed.row.id, claimed.claimToken, {
       status: outcome.status,
       code: outcome.code,
-      provider_message_id: outcome.provider_message_id,
-      provider_detail: outcome.detail,
+      provider_message_id: providerMessageId,
+      provider_detail: detail,
       at,
     });
   } catch (error) {
@@ -1283,8 +1302,8 @@ export async function finishApprovedSend(
       credential_class: caller.credentialClass,
       code: outcome.code,
       payload_hash: claimed.row.payload_hash,
-      provider_message_id: outcome.provider_message_id,
-      detail: { ...outcome.detail, at },
+      provider_message_id: providerMessageId,
+      detail: { ...detail, at },
     });
   } catch (error) {
     auditRecorded = false;
@@ -1348,7 +1367,7 @@ export function supabaseAttachmentReader(
       const { data, error } = await client.from("email_attachments")
         .select("id,name,content_type,storage_path,pii_purged_at")
         .eq("id", ref.id).maybeSingle();
-      if (error) storeUnreadable("read", error.message);
+      if (error) storeUnreadable("read", error);
       if (!data || !text(data.storage_path) || data.pii_purged_at) {
         refuse(409, "approval_attachment_unreadable", "The email attachment is missing or has no stored bytes.",
           { email_attachment_id: ref.id });
@@ -1359,7 +1378,7 @@ export function supabaseAttachmentReader(
     const { data, error } = await client.from("job_documents")
       .select("id,job_id,type,file_name,storage_url,pdf_url")
       .eq("id", ref.id).maybeSingle();
-    if (error) storeUnreadable("read", error.message);
+    if (error) storeUnreadable("read", error);
     if (!data) {
       refuse(409, "approval_attachment_unreadable", "The job document does not exist.", { job_document_id: ref.id });
     }
@@ -1369,8 +1388,8 @@ export function supabaseAttachmentReader(
       try {
         sealed = await isSealedSesJob(data.job_id);
       } catch (err) {
-        refuse(503, "approval_fence_check_failed", `The SES money fence could not be checked (${(err as Error).message}).`,
-          { job_document_id: ref.id });
+        refuse(503, "approval_fence_check_failed", "The SES money fence could not be checked.",
+          { job_document_id: ref.id, ...safeErrorFacts(err) });
       }
       if (sealed) {
         refuse(409, "approval_sealed_ses_money_document",

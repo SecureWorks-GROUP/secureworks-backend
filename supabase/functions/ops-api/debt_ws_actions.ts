@@ -32,6 +32,7 @@
 
 // Every statement and report email claims its item before it is sent, and only an explicit
 // "checked" press (a named person) releases an earlier unconfirmed send.
+import { safeErrorLine, safeIdentifier } from "../_shared/safe_identifier.ts";
 import {
   claimSend,
   readSendHolds,
@@ -1466,8 +1467,9 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     if (sent?.success === false) throw new Error("SMS send failed");
     messageId = sent?.message_id ?? null;
   } catch (error) {
-    const why = String((error as Error)?.message ?? error).slice(0, 300);
     if (error instanceof DebtWsSendRefusedError) {
+      // A guard refusal is our own wording, so it may be shown and stored.
+      const why = String(error.message).slice(0, 300);
       // Refused before any SMS was handed over: the claim is released.
       await deps.store.settleSend(claim!.id, { status: "refused", error: why })
         .catch(() => {});
@@ -1479,13 +1481,15 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
       );
     }
     // The provider may have sent it: the claim stays, so it can never text twice.
+    // Its text is never stored or shown: the error's class and codes only.
+    const why = safeErrorLine(error);
     await deps.store.settleSend(claim!.id, { error: `not confirmed: ${why}` })
       .catch(() => {});
     return await refuse(
       deps,
       input,
       "send_not_confirmed",
-      `${why}. The step stays claimed so it cannot text twice; check the GoHighLevel conversation`,
+      `The text was not confirmed (${why}). The step stays claimed so it cannot text twice; check the GoHighLevel conversation`,
       502,
     );
   }
@@ -2151,8 +2155,8 @@ function emailReplyFacts(result: { status: number; reply?: unknown }) {
   const r = replyObject(result.reply) ?? {};
   return {
     email_status: result.status,
-    reply_code: typeof r.code === "string" ? r.code : null,
-    reply_state: typeof r.state === "string" ? r.state : null,
+    reply_code: safeIdentifier(r.code),
+    reply_state: safeIdentifier(r.state),
   };
 }
 
@@ -2693,7 +2697,7 @@ export async function debtWsJanList(
     removed_share_keys: row?.removed_share_keys ?? [],
     locked_at: row?.locked_at ?? null,
     sent_at: row?.sent_at ?? null,
-    error: row?.error ?? null,
+    error: storedDebtErrorView(row?.error),
     auto_send_on: book.settings.jan_list_auto_send,
     sending_on: debtWsSendingOn(book.settings),
     jan: {
@@ -2966,7 +2970,7 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
   const text = janListText(visitDate, kept);
   const sent = await deps.sendStaffSms(mobile.phone, text);
   if (!sent.accepted || !sent.messageId) {
-    return await fail(sent.failureReason ?? "SMS not accepted");
+    return await fail(janSmsFailureCode(sent.failureReason));
   }
   await deps.store.updateJanList(visitDate, ["sending"], {
     status: "sent",
@@ -3505,7 +3509,7 @@ export async function debtWsAgentSubmit(
           attempted: true,
           sent: false,
           code: error instanceof DebtWsError ? error.code : "failed",
-          reason: (error as Error)?.message ?? String(error),
+          reason: error instanceof DebtWsError ? error.message : safeErrorLine(error),
         };
       }
     }
@@ -3709,8 +3713,27 @@ function reportSendView(row: WsReportRow | undefined | null) {
     cc: row.cc_emails ?? [],
     by: row.sent_by_name,
     subject: row.subject,
-    error: row.error,
+    error: storedDebtErrorView(row.error),
   };
+}
+
+/**
+ * The SMS sender's failure reason is `<code>:<provider detail>`; only the code
+ * is kept, so GoHighLevel's reply text never reaches a stored row or a reply.
+ */
+export function janSmsFailureCode(reason: string | null | undefined): string {
+  const head = typeof reason === "string" ? reason.split(":")[0].trim() : "";
+  return safeIdentifier(head) ?? "sms_not_accepted";
+}
+
+/**
+ * A stored error as a reader shows it. Rows written before provider text was
+ * kept out may still hold `<code>:<provider detail>`; only the code is shown.
+ */
+export function storedDebtErrorView(error: string | null | undefined): string | null {
+  if (typeof error !== "string" || !error) return null;
+  const legacy = /^(ghl_[a-z_]+?(?:_\d{3})?):/.exec(error);
+  return legacy ? legacy[1] : error;
 }
 
 const bytesToBase64 = (bytes: Uint8Array) => {
@@ -3885,7 +3908,7 @@ async function sendDebtReport(
     await free("not_built");
     await deps.store.settleReport(claim.id, {
       status: "failed",
-      error: `not built: ${String((error as Error)?.name ?? error).slice(0, 200)}`,
+      error: `not built: ${safeErrorLine(error)}`,
     }).catch(() => {});
     if (error instanceof DebtWsError) throw error;
     throw new DebtWsError(

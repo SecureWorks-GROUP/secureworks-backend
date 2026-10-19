@@ -586,3 +586,17 @@ Deno.test("auto: a stale copy at 12:00 sends nothing and is recorded as refused,
   assertEquals((again.body as any).sent, true, JSON.stringify(again.body));
   assertEquals(r2.emails.length, 1);
 });
+
+Deno.test("raw provider text: a report send that throws stores and answers fixed wording only", async () => {
+  const sentinel = "SENTINEL raw provider text jane@example.com 0412 999 888";
+  const store = new FakeStore();
+  store.settingsRow.sending_enabled = true;
+  const { deps } = fakeDeps(store, { emailError: new Error(sentinel) });
+  const res = await call(deps, "debt_ws_report_send", SHAUN);
+  assertEquals((res.body as any).code, "send_not_confirmed");
+  assertEquals(store.reportRows[0].error, "not confirmed: the send did not answer");
+  for (const [label, value] of [["reply", res.body], ["report rows", store.reportRows], ["store", store]] as const) {
+    const text = JSON.stringify(value);
+    assert(!text.includes("SENTINEL"), `${label} echoed raw provider text: ${text}`);
+  }
+});

@@ -2791,3 +2791,60 @@ Deno.test("manual text: refuses bad shapes before anything is read", async () =>
   assertEquals(draft.status, "pending");
   assertEquals(rec.sms.length + rec.liveReads.length, 0);
 });
+
+// ── Raw provider text that must not be echoed ──
+
+const RAW_SENTINEL = "SENTINEL raw provider text jane@example.com 0412 999 888";
+
+Deno.test("raw provider text: an unconfirmed send stores and answers the error's class only", async () => {
+  const store = new FakeStore();
+  const { deps } = fakeDeps(store, {
+    env: sendingOn(store),
+    smsError: Object.assign(new Error(RAW_SENTINEL), { status: 422 }),
+  });
+  const quietError = console.error;
+  console.error = () => {};
+  let unknown;
+  try {
+    unknown = await call(deps, "debt_ws_decide", SHAUN, D7_SEND);
+  } finally {
+    console.error = quietError;
+  }
+  assertEquals(unknown.status, 502);
+  assertEquals(unknown.body.code, "send_not_confirmed");
+  assertEquals(store.sendRows[0].status, "sending");
+  assert(String(store.sendRows[0].error).includes("status=422"));
+  for (const [label, value] of [["reply", unknown.body], ["send rows", store.sendRows], ["store", store]] as const) {
+    const text = JSON.stringify(value);
+    assert(!text.includes("SENTINEL"), `${label} echoed raw provider text: ${text}`);
+  }
+});
+
+Deno.test("raw provider text: Jan's list keeps the SMS failure code, never GoHighLevel's reply", async () => {
+  const { janSmsFailureCode, storedDebtErrorView } = await import("./debt_ws_actions.ts");
+  assertEquals(janSmsFailureCode(`ghl_send_failed_422:${RAW_SENTINEL}`), "ghl_send_failed_422");
+  assertEquals(janSmsFailureCode(RAW_SENTINEL), "sms_not_accepted");
+  assertEquals(janSmsFailureCode(null), "sms_not_accepted");
+  assertEquals(janSmsFailureCode(""), "sms_not_accepted");
+  // Rows stored before the fix show only their code.
+  assertEquals(storedDebtErrorView(`ghl_send_failed_422:${RAW_SENTINEL}`), "ghl_send_failed_422");
+  assertEquals(storedDebtErrorView(`ghl_no_contact:${RAW_SENTINEL}`), "ghl_no_contact");
+  assertEquals(storedDebtErrorView("not confirmed: Error status=422"), "not confirmed: Error status=422");
+  assertEquals(storedDebtErrorView(null), null);
+});
+
+Deno.test("raw provider text: a statement send that throws stores and answers fixed wording only", async () => {
+  const store = new FakeStore();
+  const { deps } = fakeDeps(store, {
+    env: sendingOn(store),
+    emailError: new Error(RAW_SENTINEL),
+  });
+  const res = await call(deps, "debt_ws_statement_send", SHAUN, { company_key: MLB_CONTACT });
+  assertEquals(res.status, 502);
+  assertEquals(res.body.code, "send_not_confirmed");
+  assertEquals(store.statementRows[0].error, "not confirmed: the send did not answer");
+  for (const [label, value] of [["reply", res.body], ["statement rows", store.statementRows], ["store", store]] as const) {
+    const text = JSON.stringify(value);
+    assert(!text.includes("SENTINEL"), `${label} echoed raw provider text: ${text}`);
+  }
+});

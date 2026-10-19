@@ -1111,3 +1111,104 @@ Deno.test("reset: REFUSES a pack that is not in 'failed' status", async () => {
   assert(res.error);
   assertEquals(packOf(client).status, "sent");
 });
+
+// ═════════════════════════════════════════════════════════════════
+// Raw provider text that must not be echoed: an exception's message never
+// reaches the pack row's error_detail, the thrown ApiError or the reply.
+// ═════════════════════════════════════════════════════════════════
+const RAW_SENTINEL = "SENTINEL raw provider text jane@example.com 0412 999 888";
+
+// The cycle row the send binds to is seeded: the fake insert returns no id.
+function cycleSeed(): Rows {
+  return readySeed({
+    makesafe_attendance_cycles: [{ id: "cyc-1", job_id: "job-1", cycle_number: 1 }],
+  } as Partial<Rows>);
+}
+
+function assertNoRawText(value: unknown, label: string) {
+  const text = JSON.stringify(value ?? null);
+  assert(!text.includes("SENTINEL"), `${label} echoed raw provider text: ${text}`);
+}
+
+async function sendPackCatching(client: any, deps: any): Promise<{ res: any; error: any }> {
+  const log = console.log, err = console.error, warn = console.warn;
+  console.log = console.error = console.warn = () => {};
+  try {
+    const res = await _makesafeSendPackForTest(
+      client,
+      {
+        job_id: "job-1",
+        recipient_email: "workorders@b.com",
+        subject: "Make Safe Completion B-1",
+        html_body: "<p>done</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
+      },
+      CTX,
+      deps,
+    );
+    return { res, error: null };
+  } catch (error) {
+    return { res: null, error };
+  } finally {
+    console.log = log; console.error = err; console.warn = warn;
+  }
+}
+
+Deno.test("raw provider text: a dispatch that throws stores and raises the error's class only", async () => {
+  const client = makeClient(cycleSeed());
+  const { deps } = makeSeams({ emailMode: "ok" });
+  (deps as any).sendEmail = async () => { throw Object.assign(new Error(RAW_SENTINEL), { name: "TypeError" }); };
+  const { error } = await sendPackCatching(client, deps);
+  assert(error, "the send refuses");
+  assertEquals(packOf(client).status, "sending");
+  assert(String(packOf(client).error_detail).includes("TypeError"), packOf(client).error_detail);
+  assertNoRawText(error.message, "thrown error");
+  assertNoRawText(client._tables.makesafe_report_packs, "pack rows");
+});
+
+Deno.test("raw provider text: a throw before dispatch stores and raises the error's class only", async () => {
+  const client = makeClient(cycleSeed());
+  const { deps } = makeSeams({ emailMode: "ok" });
+  (deps as any).getToken = async () => { throw new Error(RAW_SENTINEL); };
+  const { error } = await sendPackCatching(client, deps);
+  assert(error, "the send refuses");
+  assertEquals(packOf(client).error_detail, "unexpected throw before dispatch: Error");
+  assertNoRawText(error.message, "thrown error");
+  assertNoRawText(client._tables.makesafe_report_packs, "pack rows");
+});
+
+Deno.test("raw provider text: a refused or failed reply is summarised without its text", async () => {
+  for (const mode of ["status4xx", "status5xx"] as const) {
+    const client = makeClient(cycleSeed());
+    const { deps } = makeSeams({
+      emailMode: mode,
+      emailBody: JSON.stringify({ success: false, error: RAW_SENTINEL, details: RAW_SENTINEL, retry_safe: true }),
+    });
+    if (mode === "status5xx") {
+      (deps as any).sendEmail = async () => ({
+        ok: false,
+        status: 503,
+        bodyText: async () => RAW_SENTINEL,
+        json: async () => ({}),
+      });
+    }
+    const { res, error } = await sendPackCatching(client, deps);
+    assertEquals(packOf(client).failed_step, mode === "status4xx" ? "send" : "send_unknown_outcome");
+    assertNoRawText(error?.message, `${mode} thrown error`);
+    assertNoRawText(res, `${mode} reply`);
+    assertNoRawText(client._tables.makesafe_report_packs, `${mode} pack rows`);
+  }
+});
+
+Deno.test("raw provider text: a photo follow-up that throws is reported without its text", async () => {
+  const client = makeClient(cycleSeed());
+  const { deps } = makeSeams({ emailMode: "ok" });
+  (deps as any).sendPhotoFollowup = async () => { throw new Error(RAW_SENTINEL); };
+  const { res, error } = await sendPackCatching(client, deps);
+  assertEquals(error, null);
+  assertEquals(res.sent, true);
+  assertEquals(res.photo_followup.sent, false);
+  assertEquals(res.photo_followup.error_name, "Error");
+  assertNoRawText(res, "reply");
+  assertNoRawText(client._tables.makesafe_report_packs, "pack rows");
+});
