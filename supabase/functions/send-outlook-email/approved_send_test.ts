@@ -200,6 +200,31 @@ Deno.test('a send answered retry_safe:false is outcome_unknown, keeps the draft 
   assertEquals(deps.store.rows.get(id)!.status, 'outcome_unknown')
 })
 
+Deno.test('after an unknown outcome a new approval of the same message is refused until Sent Items is checked', async () => {
+  const provider = fakeGraph({
+    failAt: {
+      match: (path) => path.endsWith('/send'),
+      error: new GraphProviderError(401, 'rejected after refresh', false, { token_refreshed: true, retry_safe: false }),
+    },
+  })
+  const deps = emailDeps(provider.graph)
+  const first = await recordEmail(deps)
+  assertEquals((await sendApprovedEmail(deps, first, CALLER)).body.state, 'outcome_unknown')
+
+  // Second press: re-approving the same content is refused on the server.
+  const refusal = await assertRejects(() => recordEmail(deps), ApprovedSendRefusal)
+  assertEquals((refusal as ApprovedSendRefusal).code, 'approval_prior_outcome_unknown')
+  assert(String((refusal as ApprovedSendRefusal).message).includes('Sent Items'))
+  assertEquals(provider.calls.filter((call) => call.path.endsWith('/send')).length, 1)
+
+  // Once someone has checked Sent Items, the new approval records and says so.
+  const second = await recordEmail(deps, { ...emailApprovalBody(), sent_items_checked: true })
+  assert(second !== first)
+  const recorded = deps.store.auditRows.find((row) => row.approval_id === second && row.event === 'recorded')!
+  assertEquals((recorded.detail as any).sent_items_checked, true)
+  assertEquals((recorded.detail as any).prior_outcome_unknown_ids, [first])
+})
+
 Deno.test('a definite provider refusal before sending records failed', async () => {
   const provider = fakeGraph({
     failAt: {
