@@ -662,10 +662,12 @@ Deno.test("rule: ready counts In stock only, never a line on an order; no line i
   assertEquals(byJob.get("c"), undefined);
 });
 
-Deno.test("rule: the suggestion is offered on a patio job with no line only", () => {
+Deno.test("rule: the suggestion is offered on a patio or fencing job with no line only", () => {
   assertEquals(dispatchCanSuggest("patio", 0), true);
   assertEquals(dispatchCanSuggest("patio", 1), false);
-  for (const type of ["fencing", "repair", "decking", "makesafe"]) {
+  assertEquals(dispatchCanSuggest("fencing", 0), true);
+  assertEquals(dispatchCanSuggest("fencing", 1), false);
+  for (const type of ["repair", "decking", "makesafe"]) {
     assertEquals(dispatchCanSuggest(type, 0), false);
   }
 });
@@ -808,7 +810,8 @@ Deno.test("read: 400 for a missing or malformed id, 404 for another organisation
     ctx(),
   ) as any;
   assertEquals(answer.work_type, "fencing");
-  assertEquals(answer.can_suggest, false);
+  // Offered on a fence with no lines; the press itself answers no_frozen_scope.
+  assertEquals(answer.can_suggest, true);
 });
 
 Deno.test("read: a repair-family job stored as makesafe is allowed, as a repair", async () => {
@@ -1598,11 +1601,22 @@ Deno.test("suggest: two presses at once add the scope lines once; the second is 
   assertEquals((await read(db, JOB.patio)).counts, { total: 4, ready: 0 });
 });
 
-Deno.test("suggest: not a patio job 409, even with a patio-shaped scope; supplier not on the job 409", async () => {
+Deno.test("suggest: a repair job 409; a fence with no frozen scope 409; supplier not on the job 409", async () => {
   const db = await jobWithSuppliers(JOB.fence);
+  // The fence job carries a patio-shaped live scope_json and no frozen
+  // revision: the live working copy is never read for a fence.
   await refused(
     call(db, "dispatch_materials_suggest", {
       job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_frozen_scope",
+  );
+  const repair = await jobWithSuppliers(JOB.repair);
+  await refused(
+    call(repair, "dispatch_materials_suggest", {
+      job_id: JOB.repair,
       supplier_id: SUP.steel,
     }),
     409,
@@ -2110,4 +2124,145 @@ Deno.test("gate: the privileged key reaches the actions; a write by GET is 405 a
     assertEquals((await bad.json()).code, "invalid_request");
     assertEquals(calls, []);
   });
+});
+
+// ── The fence suggestion, from the frozen scope ─────────────────────────────
+
+// SWF-26979's panel geometry (job number only), as frozen revisions 2 and 3,
+// with a newer draft revision 4 that must never be read.
+function fenceRevision(revision: number, status: string, runs: Row[]): Row {
+  return {
+    id: uuid("e1", revision),
+    job_id: JOB.fence,
+    revision_number: revision,
+    status,
+    scope_canonical_text: JSON.stringify({
+      tool: "fence-designer",
+      job: {
+        profile: "Ridgeside",
+        colour: "Woodland Grey",
+        supplier: "RNR",
+        runs,
+      },
+    }),
+  };
+}
+const SWF_26979_RUN = {
+  length: 20,
+  panels: [
+    ...Array.from({ length: 8 }, () => ({ height: 1800, retaining: 150 })),
+    { height: 1800, retaining: 0 },
+  ],
+};
+
+async function fenceJobWithRevisions(revisions: Row[]) {
+  const initial = seed();
+  initial.scope_revisions = revisions;
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  return db;
+}
+
+Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 plinths, not_reviewed, no price; a newer draft is ignored", async () => {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(2, "frozen", [{ panels: [{ height: 1800, retaining: 0 }] }]),
+    fenceRevision(3, "frozen", [SWF_26979_RUN]),
+    fenceRevision(4, "draft", [{ panels: [{ height: 2100, retaining: 600 }] }]),
+  ]);
+  assertEquals((await read(db, JOB.fence)).can_suggest, true);
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 3);
+  assertEquals(answer.scope_revision_number, 3);
+  assertEquals(answer.scope_supplier, "RNR");
+  assert(answer.held.length > 0);
+  assertEquals(
+    answer.lines.map((
+      l: Row,
+    ) => [l.description, l.quantity, l.unit, l.status, l.source]),
+    [
+      [
+        "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2700 mm post",
+        8,
+        "panels",
+        "not_reviewed",
+        "scope",
+      ],
+      [
+        "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2400 mm post",
+        1,
+        "panels",
+        "not_reviewed",
+        "scope",
+      ],
+      [
+        "Retaining plinth 150 mm, Woodland Grey",
+        8,
+        "each",
+        "not_reviewed",
+        "scope",
+      ],
+    ],
+  );
+  for (const stored of db.tables.job_material_lines) {
+    assert(!("unit_price" in stored));
+    assertEquals(stored.supplier_id, SUP.steel);
+  }
+  // The frozen revision is read; the job's live scope_json and pricing never.
+  const revisionReads = db.requests.filter((r) =>
+    r.table === "scope_revisions"
+  );
+  assertEquals(revisionReads.length, 1);
+  assert(
+    revisionReads[0].filters.some(([op, col, v]) =>
+      op === "eq" && col === "status" && v === "frozen"
+    ),
+  );
+  assert(
+    db.requests.filter((r) => r.table === "jobs").every((r) =>
+      !r.select.includes("scope_json") && !r.select.includes("pricing_json")
+    ),
+  );
+  assertOnlyOwnWrites(db);
+  assertEquals((await read(db, JOB.fence)).counts, { total: 3, ready: 0 });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "lines_exist",
+  );
+});
+
+Deno.test("suggest fence: an unreadable frozen scope is 409 scope_unreadable and writes nothing", async () => {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(1, "frozen", [{ panels: [{ height: 1650, retaining: 0 }] }]),
+  ]);
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_unreadable",
+  );
+  const broken = await fenceJobWithRevisions([
+    { ...fenceRevision(1, "frozen", []), scope_canonical_text: "{not json" },
+  ]);
+  await refused(
+    call(broken, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_unreadable",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+  assertEquals(broken.tables.job_material_lines, []);
 });

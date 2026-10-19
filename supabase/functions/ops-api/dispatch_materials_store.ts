@@ -12,6 +12,8 @@
 // PostgREST returns errors, it does not throw: every read and write below
 // reads `error`. A failed read is never "nothing there".
 
+import { fenceScopeSuggestedLines } from "./dispatch_fence_scope_lines.ts";
+import type { DispatchSuggestedLine } from "./dispatch_materials.ts";
 import {
   cleanDispatchDescription,
   cleanDispatchQuantity,
@@ -918,17 +920,81 @@ async function suggestedLineId(jobId: string, index: number) {
   }-${hex.slice(20)}`;
 }
 
+// A fencing job's offer comes from its latest FROZEN scope revision, the
+// one the accepted quote and the crew work order are built from, never the
+// live working copy on jobs.scope_json (a draft revision can sit after the
+// frozen one). No frozen revision is a refusal, not a guess.
+type FenceOffer = {
+  lines: DispatchSuggestedLine[];
+  held: string[];
+  scope_supplier: string | null;
+  revision: number;
+};
+
+async function readFrozenFenceOffer(
+  client: any,
+  jobId: string,
+): Promise<FenceOffer> {
+  const { data: revision, error } = await client.from("scope_revisions")
+    .select("revision_number, scope_canonical_text")
+    .eq("job_id", jobId)
+    .eq("status", "frozen")
+    .order("revision_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) readFailed("frozen scope read", error);
+  if (!revision) {
+    throw new DispatchMaterialsError(
+      409,
+      "no_frozen_scope",
+      "This job has no frozen scope to suggest lines from",
+    );
+  }
+  let scope: any;
+  try {
+    scope = typeof revision.scope_canonical_text === "string"
+      ? JSON.parse(revision.scope_canonical_text)
+      : revision.scope_canonical_text;
+  } catch {
+    scope = null;
+  }
+  const offer = fenceScopeSuggestedLines(scope);
+  if (!offer.ok) {
+    throw new DispatchMaterialsError(
+      409,
+      "scope_unreadable",
+      `The job's frozen scope could not be read (${offer.reason})`,
+    );
+  }
+  return {
+    lines: offer.lines,
+    held: offer.held,
+    scope_supplier: offer.scope_supplier,
+    revision: Number(revision.revision_number),
+  };
+}
+
+function fenceOfferFields(fence: FenceOffer | null) {
+  return fence
+    ? {
+      scope_revision_number: fence.revision,
+      scope_supplier: fence.scope_supplier,
+      held: fence.held,
+    }
+    : {};
+}
+
 export async function suggestDispatchMaterialLines(
   client: any,
   body: any,
   ctx: DispatchMaterialsContext,
 ) {
   const job = await loadDispatchJob(client, bodyJobId(body), ctx);
-  if (job.work_type !== "patio") {
+  if (job.work_type !== "patio" && job.work_type !== "fencing") {
     throw new DispatchMaterialsError(
       409,
       "no_suggestion_for_work_type",
-      "Lines are suggested from the scope on patio jobs only",
+      "Lines are suggested from the scope on patio and fencing jobs only",
     );
   }
   const supplierId = body?.supplier_id;
@@ -943,32 +1009,40 @@ export async function suggestDispatchMaterialLines(
     );
   }
 
-  // One single-job read of the scope, and never the pricing: with null
-  // pricing the extractor's quote-lines fallback cannot run, so a customer's
-  // quote line and its price can never become a material line.
-  const { data: scopeRow, error: scopeError } = await client.from("jobs")
-    .select("id, scope_json")
-    .eq("id", job.id)
-    .eq("org_id", ctx.orgId)
-    .maybeSingle();
-  if (scopeError) readFailed("scope read", scopeError);
-  let items: any[];
-  try {
-    items = ctx.extractMaterialsFromScope(scopeRow?.scope_json ?? null, null);
-  } catch (error) {
-    console.error("[dispatch_materials] scope could not be read:", error);
-    throw new DispatchMaterialsError(
-      409,
-      "scope_unreadable",
-      "The job's scope could not be read",
-    );
+  let suggested: DispatchSuggestedLine[];
+  let fence: FenceOffer | null = null;
+  if (job.work_type === "fencing") {
+    fence = await readFrozenFenceOffer(client, job.id);
+    suggested = fence.lines;
+  } else {
+    // One single-job read of the scope, and never the pricing: with null
+    // pricing the extractor's quote-lines fallback cannot run, so a customer's
+    // quote line and its price can never become a material line.
+    const { data: scopeRow, error: scopeError } = await client.from("jobs")
+      .select("id, scope_json")
+      .eq("id", job.id)
+      .eq("org_id", ctx.orgId)
+      .maybeSingle();
+    if (scopeError) readFailed("scope read", scopeError);
+    let items: any[];
+    try {
+      items = ctx.extractMaterialsFromScope(scopeRow?.scope_json ?? null, null);
+    } catch (error) {
+      console.error("[dispatch_materials] scope could not be read:", error);
+      throw new DispatchMaterialsError(
+        409,
+        "scope_unreadable",
+        "The job's scope could not be read",
+      );
+    }
+    suggested = dispatchSuggestedLines(items);
   }
-  const suggested = dispatchSuggestedLines(items);
   if (suggested.length === 0) {
     return {
       success: true,
       added: 0,
       lines: [],
+      ...fenceOfferFields(fence),
       counts: await readJobCounts(client, job.id),
     };
   }
@@ -1016,6 +1090,7 @@ export async function suggestDispatchMaterialLines(
     success: true,
     added: insertedRows.length,
     lines: insertedRows.map((row: any) => projectDispatchMaterialLine(row)),
+    ...fenceOfferFields(fence),
     counts: await readJobCounts(client, job.id),
   };
 }
