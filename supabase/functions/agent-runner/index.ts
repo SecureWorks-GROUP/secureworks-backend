@@ -15,7 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
-import { isSharedKey, sharedKeyGate } from '../_shared/shared_key_containment.ts'
+import { authorizeKeyServiceOrUser } from '../_shared/shared_key_route_auth.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -758,24 +758,20 @@ serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Auth (same as ops-ai) ──
-  const validKey = Deno.env.get('SW_API_KEY')
-  const xApiKey = req.headers.get('x-api-key')
-  const authHeader = req.headers.get('authorization')
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-
-  let isAuthed = false
   // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
   // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off
-  // (see ../_shared/shared_key_containment.ts).
-  if (await verifyServiceCredential(req.headers)) isAuthed = true
-  else if (sharedKeyGate({ presented: [xApiKey, bearerToken], sharedKey: validKey, fn: 'agent-runner', headers: req.headers }) === 'accepted') isAuthed = true
-  else if (bearerToken && !isSharedKey(bearerToken, validKey)) {
-    try {
+  // (see ../_shared/shared_key_route_auth.ts).
+  const isAuthed = await authorizeKeyServiceOrUser({
+    req,
+    fn: 'agent-runner',
+    sharedKey: Deno.env.get('SW_API_KEY'),
+    verifyService: verifyServiceCredential,
+    verifyUserJwt: async (token) => {
       const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const { data: { user }, error } = await authClient.auth.getUser(bearerToken)
-      if (!error && user) isAuthed = true
-    } catch { /* invalid token */ }
-  }
+      const { data: { user }, error } = await authClient.auth.getUser(token)
+      return !error && !!user
+    },
+  })
   if (!isAuthed) return json({ error: 'Unauthorized' }, 401)
   if (!ANTHROPIC_API_KEY) return json({ error: 'ANTHROPIC_API_KEY not configured' }, 500)
 

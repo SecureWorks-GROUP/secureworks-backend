@@ -8,9 +8,10 @@
 // The containment is an env switch so it can be deployed dark and turned on
 // only after every legitimate server caller has moved to a service credential:
 //
-//   SW_SHARED_KEY_CONTAINMENT unset/anything else   shared key accepted (today)
-//   SW_SHARED_KEY_CONTAINMENT = 1 | true | on | yes  shared key refused on the
-//                                                    routes that call this module
+//   SW_SHARED_KEY_CONTAINMENT unset, 0, false, off, no  shared key accepted (today)
+//   SW_SHARED_KEY_CONTAINMENT = 1 | true | on | yes     shared key refused on the
+//                                                       routes that call this module
+//   any other value                                     logged as a typo, treated as on
 //
 // Browser routes the scoping tools still need (ghl-proxy browser actions, the
 // send-quote quote send) do not call this module and are unchanged.

@@ -21,10 +21,12 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildInvoiceAuthorisedEvidence,
   INVOICE_AUTHORISED_BODY_PREVIEW,
+  INVOICE_EMAIL_FAILED_BODY_PREVIEW,
   INVOICE_EMAILED_BODY_PREVIEW,
   type InvoiceAuthorisedSource,
   writeInvoiceAuthorisedEvidence,
@@ -280,4 +282,46 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
   }
   assertEquals(ev.payload.invoice_number, "INV-1477");
   assertEquals(ev.payload.to, "client@example.com");
+});
+
+// ── invoice.email_failed: a refused or failed Outlook send leaves a trail. ──
+// SW_SHARED_KEY_CONTAINMENT: a 401 from send-outlook-email means the server
+// credential was refused before Graph. The 502 still reaches the caller.
+Deno.test("K3 email failed: Outlook 401 writes one digit-free failure event and still throws", async () => {
+  const fix = happyFixture();
+  const { client } = makeStubClient(structuredClone(fix.seed));
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } });
+  const { fetch, calls } = makeStubFetch({
+    ...fix.fetchRoutes,
+    "https://stub-supabase.invalid/functions/v1/send-outlook-email": () =>
+      new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 }),
+  });
+  const { getToken } = makeStubGetToken();
+  const { logBusinessEvent, events } = makeStubLogBusinessEvent();
+  await assertRejects(() =>
+    _verifyAndSendInvoiceEmail({
+      client,
+      body: makeBody(),
+      getToken,
+      xeroGet,
+      logBusinessEvent,
+      fetch,
+      xeroFetch: fetch,
+      env: { ...STUB_ENV, SUPABASE_SERVICE_KEY: "stub-service-key" },
+    })
+  );
+  assertEquals(events.length, 1);
+  const ev = events[0];
+  assertEquals(ev.event_type, "invoice.email_failed");
+  assertEquals(ev.body_preview, INVOICE_EMAIL_FAILED_BODY_PREVIEW);
+  assert(!/\d/.test(ev.body_preview), "failure words must be digit-free");
+  assertEquals(ev.job_id, "job-uuid-1");
+  assertEquals(ev.payload.status, 401);
+  assertEquals(ev.payload.invoice_number, "INV-001");
+
+  // The send went out on the service credential, not the shared key.
+  const outlook = calls.find((c) => c.url.includes("send-outlook-email"))!;
+  const headers = new Headers(outlook.init?.headers);
+  assertEquals(headers.get("authorization"), "Bearer stub-service-key");
+  assertEquals(headers.get("x-api-key"), null);
 });

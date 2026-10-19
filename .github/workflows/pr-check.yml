@@ -269,6 +269,7 @@ jobs:
           deno test --allow-read --allow-env \
             supabase/functions/_shared/shared_key_containment_test.ts \
             supabase/functions/_shared/shared_key_containment_routes_test.ts \
+            supabase/functions/_shared/shared_key_route_auth_test.ts \
             supabase/functions/send-quote/auth_test.ts
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/send-outlook-email/shared_key_containment_test.ts

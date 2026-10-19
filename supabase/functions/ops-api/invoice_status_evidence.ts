@@ -20,6 +20,8 @@
 
 export const INVOICE_AUTHORISED_BODY_PREVIEW = "Invoice authorised in Xero.";
 export const INVOICE_EMAILED_BODY_PREVIEW = "Invoice emailed to the client.";
+// Digit-free for the same reason as the line above.
+export const INVOICE_EMAIL_FAILED_BODY_PREVIEW = "Invoice email to the client failed.";
 
 export type InvoiceAuthorisedSource =
   | "ops-api/approve_invoice"

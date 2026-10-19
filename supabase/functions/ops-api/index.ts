@@ -493,7 +493,7 @@ import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
 import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
-import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
+import { INVOICE_EMAILED_BODY_PREVIEW, INVOICE_EMAIL_FAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -4200,7 +4200,23 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       }],
     }),
   })
-  if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
+  if (!siEmailResp.ok) {
+    const siErrText = await siEmailResp.text().catch(() => '')
+    // Durable trail for a failed send: a 401 here means the server credential
+    // was refused (SW_SHARED_KEY_CONTAINMENT), so the office can see it after
+    // the response is gone. Best effort; never masks the 502.
+    try {
+      await logBusinessEvent(client, {
+        event_type: 'invoice.email_failed',
+        entity_type: 'xero_invoice',
+        entity_id: siId,
+        job_id: verifiedJobId || undefined,
+        body_preview: INVOICE_EMAIL_FAILED_BODY_PREVIEW,
+        payload: { invoice_number: siNum, status: siEmailResp.status, via: 'outlook', linked: Boolean(verifiedJobId) },
+      })
+    } catch { /* non-blocking */ }
+    throw new ApiError(`Outlook email failed: ${siErrText}`, 502)
+  }
 
   // Audit (non-blocking).
   //   - business_events: ALWAYS written. Accepts null job_id, so unlinked invoice sends
@@ -51092,6 +51108,9 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
   }
 
   let emailAttempted = false
+  // A 401 from send-outlook-email is a refusal before any Graph call, so the
+  // builder was provably not emailed; it is a failure, not an unknown outcome.
+  let emailRefused = false
 
   // ── Load job + builder detail for recipient + address ──
   try {
@@ -51185,6 +51204,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     })
     if (!emailResp.ok) {
       const errText = await emailResp.text().catch(() => '')
+      if (emailResp.status === 401) emailRefused = true
       throw new ApiError(`photo follow-up email failed (${emailResp.status}): ${errText}`.slice(0, 400), 502)
     }
     let emailResult: any = {}
@@ -51240,14 +51260,22 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
   } catch (e) {
     const message = ((e as Error).message || String(e)).slice(0, 500)
     await _patchPack(client, jobId, photoPackKind, {
-      status: emailAttempted ? 'sending' : 'failed',
-      failed_step: emailAttempted ? 'photo_send_unknown_outcome' : 'photo_followup',
+      ...photoFollowupFailureState(emailAttempted, emailRefused),
       error_detail: message,
     })
     throw e
   }
 }
 export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup
+
+// Where a failed photo follow-up leaves its pack. Once the email was attempted
+// the outcome is unknown ('sending', never re-sent blind) unless
+// send-outlook-email answered 401: that is a refusal before any Graph call, so
+// the builder was provably not emailed and the pack is plainly failed.
+export function photoFollowupFailureState(emailAttempted: boolean, emailRefused: boolean): { status: string; failed_step: string } {
+  if (emailAttempted && !emailRefused) return { status: 'sending', failed_step: 'photo_send_unknown_outcome' }
+  return { status: 'failed', failed_step: emailRefused ? 'photo_send_refused' : 'photo_followup' }
+}
 
 // (3d) makesafe_resume_close — TASK B / B1: CLOSE-ONLY resume for the
 // sent_not_closed / close_failed states. PRIVILEGED-CALLER ONLY (route-gated by

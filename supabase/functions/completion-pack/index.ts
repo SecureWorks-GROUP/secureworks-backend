@@ -20,7 +20,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
-import { sharedKeyGate } from '../_shared/shared_key_containment.ts'
+import { authorizeKeyOrServiceCaller } from '../_shared/shared_key_route_auth.ts'
 import { completionPackReviewPdfLine, completionPackReviewVisitHtml } from './review_cta.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -534,12 +534,15 @@ serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── API Key Authentication ──
-  const apiKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
-  const validKey = Deno.env.get('SW_API_KEY')
   // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
   // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off.
-  const sharedKeyOk = sharedKeyGate({ presented: [apiKey], sharedKey: validKey, fn: 'completion-pack', headers: req.headers }) === 'accepted'
-  if (!sharedKeyOk && !(await verifyServiceCredential(req.headers))) {
+  const authed = await authorizeKeyOrServiceCaller({
+    req,
+    fn: 'completion-pack',
+    sharedKey: Deno.env.get('SW_API_KEY'),
+    verifyService: verifyServiceCredential,
+  })
+  if (!authed) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
     })

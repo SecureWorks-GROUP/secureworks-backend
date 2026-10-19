@@ -1,10 +1,11 @@
 // deno test --allow-read supabase/functions/_shared/shared_key_containment_routes_test.ts
 //
-// Source guard for the shared browser key containment. Each contained route
-// must decide the shared key through sharedKeyGate (so SW_SHARED_KEY_CONTAINMENT
-// governs it) and must not keep a direct equality check against SW_API_KEY
-// that would bypass the switch. ops-ai, agent-runner and completion-pack boot
-// serve() on import, so their handlers cannot be imported in a unit test.
+// Wiring guard for the shared browser key containment. The behaviour of each
+// route's auth decision is tested in shared_key_route_auth_test.ts (ops-ai,
+// agent-runner, completion-pack, send-po-email), send-outlook-email/
+// shared_key_containment_test.ts and send-quote/auth_test.ts. This file only
+// checks each route still calls that decision and keeps no direct equality
+// check against SW_API_KEY that would bypass the switch.
 // deno-lint-ignore-file no-import-prefix
 import { assert, assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";
 
@@ -32,7 +33,10 @@ const BYPASS = [
 for (const [file, fn] of Object.entries(CONTAINED)) {
   Deno.test(`${fn}: shared key decided by sharedKeyGate, no bypass`, () => {
     const src = read(file);
-    assert(src.includes("../_shared/shared_key_containment.ts"), "imports the containment module");
+    assert(
+      src.includes("../_shared/shared_key_containment.ts") || src.includes("../_shared/shared_key_route_auth.ts"),
+      "imports the containment module",
+    );
     assert(src.includes(`fn: '${fn}'`), "calls sharedKeyGate with its own function name");
     for (const re of BYPASS) {
       assertEquals(re.test(src), false, `direct shared-key comparison ${re} must not remain`);
@@ -40,9 +44,12 @@ for (const [file, fn] of Object.entries(CONTAINED)) {
   });
 }
 
-Deno.test("ops-ai and agent-runner never treat a shared-key Bearer as a user JWT", () => {
+Deno.test("ops-ai, agent-runner, completion-pack and send-po-email use the tested auth decision", () => {
   for (const file of ["ops-ai/index.ts", "agent-runner/index.ts"]) {
-    assert(read(file).includes("bearerToken && !isSharedKey(bearerToken, validKey)"), file);
+    assert(read(file).includes("await authorizeKeyServiceOrUser({"), file);
+  }
+  for (const file of ["completion-pack/index.ts", "send-po-email/index.ts"]) {
+    assert(read(file).includes("await authorizeKeyOrServiceCaller({"), file);
   }
 });
 

@@ -14,6 +14,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _makesafeSendPhotoFollowupForTest as makesafeSendPhotoFollowup,
+  photoFollowupFailureState,
 } from "./index.ts";
 import {
   buildPhotoFollowUpMarkerText,
@@ -712,4 +713,12 @@ Deno.test("checkReportJobClientSendGate: FAIL without an invoice PDF", () => {
     failures.some((f) => f.includes("Xero invoice")),
     failures.join(" | "),
   );
+});
+
+// SW_SHARED_KEY_CONTAINMENT: a 401 from send-outlook-email is a refusal before
+// Graph, so the pack is failed (safe to retry), not left 'sending'.
+Deno.test("photo follow-up failure state: refused, unknown and pre-send failures", () => {
+  assertEquals(photoFollowupFailureState(true, true), { status: "failed", failed_step: "photo_send_refused" });
+  assertEquals(photoFollowupFailureState(true, false), { status: "sending", failed_step: "photo_send_unknown_outcome" });
+  assertEquals(photoFollowupFailureState(false, false), { status: "failed", failed_step: "photo_followup" });
 });
