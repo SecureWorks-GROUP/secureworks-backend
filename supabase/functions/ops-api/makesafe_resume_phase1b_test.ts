@@ -26,6 +26,7 @@ import {
   _makesafeResumeCloseForTest,
   _makesafeSendPackForTest,
 } from "./index.ts";
+import { emailReplyIsProvablyPreDispatch } from "./makesafe_send_pack.ts";
 
 // ─────────────────────────────────────────────────────────────────
 // A write-capable fake Supabase client. Tables are arrays of row objects.
@@ -161,6 +162,7 @@ function makeClient(seed: Rows, opts: FakeOpts = {}) {
 function makeSeams(opts: {
   emailMode?: "ok" | "throw" | "status5xx" | "status4xx";
   emailStatus?: number;
+  emailBody?: string;
 } = {}) {
   const counts = {
     getToken: 0,
@@ -224,7 +226,7 @@ function makeSeams(opts: {
         return {
           ok: false,
           status: opts.emailStatus ?? 400,
-          bodyText: async () => "bad payload",
+          bodyText: async () => opts.emailBody ?? "bad payload",
           json: async () => ({}),
         };
       }
@@ -844,6 +846,47 @@ Deno.test("D-d contrast: a CLEAN 4xx pre-dispatch reject -> authorised_not_sent 
     "authorised_not_sent",
     "a clean 4xx is provably not-sent -> authorised_not_sent",
   );
+});
+
+Deno.test("D-d: a 4xx whose reply says outcome_unknown stays 'sending', and the next press does not email", async () => {
+  // send-outlook-email answers retry_safe:false / outcome_unknown when Graph may
+  // have sent the message; the status alone must not make that look pre-dispatch.
+  for (const body of [
+    JSON.stringify({ state: "outcome_unknown", code: "provider_outcome_unknown", retry_safe: false }),
+    JSON.stringify({ error: "Graph API error", retry_safe: false }),
+  ]) {
+    // The cycle row the send binds to is seeded: the fake insert returns no id.
+    const client = makeClient(readySeed({
+      makesafe_attendance_cycles: [{ id: "cyc-1", job_id: "job-1", cycle_number: 1 }],
+    } as Partial<Rows>));
+    const { counts, deps } = makeSeams({ emailMode: "status4xx", emailStatus: 401, emailBody: body });
+    const req = {
+      job_id: "job-1",
+      recipient_email: "workorders@b.com",
+      subject: "s",
+      html_body: "<p>x</p>",
+      approved_photo_urls: APPROVED_PHOTOS,
+    };
+    try {
+      await _makesafeSendPackForTest(client, req, CTX, deps);
+    } catch (_e) { /* expected */ }
+    assertEquals(packOf(client).status, "sending");
+    assertEquals(packOf(client).failed_step, "send_unknown_outcome");
+    assertEquals(counts.email, 1);
+
+    // Second press: refused until someone resolves it after checking Sent Items.
+    const again: any = await _makesafeSendPackForTest(client, req, CTX, deps);
+    assertEquals(again.requires, "sending_resolution");
+    assertEquals(counts.email, 1);
+  }
+});
+
+Deno.test("emailReplyIsProvablyPreDispatch: an explicit unknown overrides a clean status", () => {
+  assertEquals(emailReplyIsProvablyPreDispatch(400, "bad payload"), true);
+  assertEquals(emailReplyIsProvablyPreDispatch(400, JSON.stringify({ error: "x", retry_safe: true })), true);
+  assertEquals(emailReplyIsProvablyPreDispatch(401, JSON.stringify({ retry_safe: false })), false);
+  assertEquals(emailReplyIsProvablyPreDispatch(403, JSON.stringify({ state: "outcome_unknown" })), false);
+  assertEquals(emailReplyIsProvablyPreDispatch(502, JSON.stringify({ retry_safe: true })), false);
 });
 
 // ═════════════════════════════════════════════════════════════════

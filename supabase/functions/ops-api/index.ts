@@ -1335,6 +1335,7 @@ import {
   RESUME_CLOSE_ALLOWED_STATUSES,
   checkResetFailedGate,
   emailFailureIsProvablyPreDispatch,
+  emailReplyIsProvablyPreDispatch,
   // Stage 1-2a — per-builder send parity
   isPackPhotoSentEvent as _isPackPhotoSentEvent,
   hasPackPhotoSentMarker,
@@ -51000,7 +51001,9 @@ async function makesafeSendPack(
       // re-send OK. A timeout/rate-limit/conflict 4xx (408/409/425/429/...) and ALL
       // 5xx are AMBIGUOUS — the fn may have dispatched to Outlook then errored — so
       // they are unknown-outcome => 'sending'. FAIL CLOSED: not-proven => ambiguous.
-      const provablyNotDispatched = emailFailureIsProvablyPreDispatch(emailResp.status)
+      // An explicit unknown in the reply (state outcome_unknown, retry_safe false)
+      // overrides the status: the pack stays 'sending'.
+      const provablyNotDispatched = emailReplyIsProvablyPreDispatch(emailResp.status, errText)
       if (provablyNotDispatched) {
         await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `send-outlook-email ${emailResp.status} (clean pre-dispatch reject): ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
         throw new ApiError(`email send rejected before dispatch (FAIL CLOSED — invoice authorised but provably NOT sent; status=authorised_not_sent, safe to re-send): ${emailResp.status}`, 502)

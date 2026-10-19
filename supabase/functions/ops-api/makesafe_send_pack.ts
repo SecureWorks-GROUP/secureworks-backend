@@ -1588,6 +1588,25 @@ export function emailFailureIsProvablyPreDispatch(status: number): boolean {
   return PROVABLY_PRE_DISPATCH_STATUSES.has(status);
 }
 
+/**
+ * The status test above, plus the reply's own words: a reply that says its
+ * outcome is unknown (state outcome_unknown, or retry_safe false) is never
+ * provably pre-dispatch, whatever its status. A body that is not JSON keeps
+ * the status-only answer.
+ */
+export function emailReplyIsProvablyPreDispatch(status: number, bodyText: string): boolean {
+  if (!emailFailureIsProvablyPreDispatch(status)) return false;
+  let reply: unknown = null;
+  try {
+    reply = JSON.parse(bodyText);
+  } catch {
+    return true;
+  }
+  if (!reply || typeof reply !== "object") return true;
+  const r = reply as Record<string, unknown>;
+  return r.state !== "outcome_unknown" && r.retry_safe !== false;
+}
+
 // ── makesafe_resume_close assertions (TASK B — close-only, fail-closed) ──────
 //
 // The close-only resume path is structurally incapable of emailing or
