@@ -104,6 +104,7 @@ export interface PrematchContext {
   pos: PrematchPO[];
   emailJobIds: string[]; // jobs the context system filed this bill's invoice email on
   poFactBills?: Map<string, string[]>; // PO id -> bills whose fact is already matched to it
+  duplicateDocuments?: string[]; // other live bills that look like this same supplier document
   config?: MatchConfig;
 }
 
@@ -299,6 +300,68 @@ function daysBetween(fromIso: string, toIso: string): number {
 // ─────────────────────────────────────────────────────────────
 // THE decision.
 // ─────────────────────────────────────────────────────────────
+
+// ── Duplicate supplier documents (CFO-16, 19 Oct 2026) ──
+// One supplier document can be entered in Xero more than once, even under two
+// contacts for the same supplier (Metecno 1449582: "Metecno" PAID, "Metecno Pty
+// Ltd" AUTHORISED, and "Qute 1449582"). The already-matched guard cannot see
+// that, so a bill whose document looks duplicated is held for a person.
+
+/** The supplier document key: the longest run of 5 or more digits in the number. */
+export function documentKey(invoiceNumber: string | null | undefined): string | null {
+  const runs = String(invoiceNumber || "").match(/\d{5,}/g);
+  if (!runs) return null;
+  return runs.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
+/** A supplier key that survives "Pty Ltd" and similar: the first word of 3+ letters. */
+export function supplierKey(name: string | null | undefined): string | null {
+  const w = String(name || "").toLowerCase().match(/[a-z]{3,}/);
+  return w ? w[0] : null;
+}
+
+export interface DocumentRow {
+  xero_invoice_id: string;
+  invoice_number: string | null;
+  xero_contact_id: string | null;
+  contact_name: string | null;
+  sub_total: number | null;
+  status: string | null;
+}
+
+/** Index every live supplier bill by its document key. */
+export function buildDocumentIndex(rows: DocumentRow[]): Map<string, DocumentRow[]> {
+  const idx = new Map<string, DocumentRow[]>();
+  for (const r of rows) {
+    const st = String(r.status || "").toUpperCase();
+    if (st === "VOIDED" || st === "DELETED") continue;
+    const k = documentKey(r.invoice_number);
+    if (!k) continue;
+    if (!idx.has(k)) idx.set(k, []);
+    idx.get(k)!.push(r);
+  }
+  return idx;
+}
+
+/**
+ * Other live bills that look like the same document: same document key, same
+ * ex-GST amount to the cent, and the same supplier (same contact, or contacts
+ * whose names share their first word). Each is described for a person.
+ */
+export function duplicateDocumentsOf(
+  bill: { xero_invoice_id: string; invoice_number: string | null; xero_contact_id: string | null; contact_name: string | null; sub_total: number | null },
+  index: Map<string, DocumentRow[]>,
+): string[] {
+  const k = documentKey(bill.invoice_number);
+  if (!k || bill.sub_total == null) return [];
+  const sk = supplierKey(bill.contact_name);
+  return (index.get(k) || [])
+    .filter((r) => r.xero_invoice_id !== bill.xero_invoice_id)
+    .filter((r) => r.sub_total != null && Math.abs(Number(r.sub_total) - Number(bill.sub_total)) < 0.005)
+    .filter((r) => (bill.xero_contact_id && r.xero_contact_id === bill.xero_contact_id) || (sk !== null && supplierKey(r.contact_name) === sk))
+    .map((r) => `${r.invoice_number} (${r.contact_name}, ${String(r.status || "").toUpperCase()})`);
+}
+
 export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {
   const cfg = ctx.config || DEFAULT_MATCH_CONFIG;
   const money = moneyLines(bill);
@@ -306,6 +369,18 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
   // 0. Subcontractor labour stays out of the agent for now.
   if (money.some((l) => LABOUR_ACCOUNTS.has(String(l.account_code || "")))) {
     return { kind: "excluded", rule: "subcontractor_labour", reason: "Subcontractor labour (account 306 or 301): left for its own lane." };
+  }
+
+  // 0b. The same supplier document entered more than once: a person decides
+  // which bill is real before any of them is placed.
+  if (ctx.duplicateDocuments?.length) {
+    return {
+      kind: "review",
+      confidence: "low",
+      rule: "duplicate_document",
+      reason: `This supplier document also appears as ${ctx.duplicateDocuments.join("; ")}. A person confirms which bill is real (supplier statement) before any is placed.`,
+      candidates: [],
+    };
   }
 
   // Evidence per job: which signals name it, and where.

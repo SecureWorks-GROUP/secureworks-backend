@@ -22,9 +22,11 @@
 
 import {
   buildAddressIndex,
+  buildDocumentIndex,
   buildJobMaps,
   decideBillPrematch,
   decisionFingerprint,
+  duplicateDocumentsOf,
   fileNameGrams,
   invoiceKeyForms,
   invoiceNumberKey,
@@ -307,6 +309,16 @@ export async function runBillPrematch(
     wanted.map((a) => ({ file_name: a.file_name, job_id: eventJob.get(a.business_event_id) ?? null })),
   );
 
+  // The same supplier document entered twice (even under two contacts) is held
+  // for a person: every live supplier bill is read so a duplicate is never missed.
+  const allBills = await readAll<any>(() =>
+    sb.from("xero_invoices")
+      .select("xero_invoice_id, invoice_number, xero_contact_id, contact_name, sub_total, status")
+      .eq("org_id", opts.orgId).eq("invoice_type", "ACCPAY").order("xero_invoice_id")
+  );
+  if (!allBills) return { ...result, reason: "supplier_documents_unreadable" };
+  const documentIndex = buildDocumentIndex(allBills);
+
   const facts = await readIn<any>(sb, "job_materials_facts", "xero_invoice_id, automation_source", "xero_invoice_id", bills.map((b) => b.xero_invoice_id));
   const proposals = await readIn<any>(
     sb,
@@ -349,6 +361,7 @@ export async function runBillPrematch(
       pos,
       poFactBills,
       emailJobIds: emailJobs.get(bill.xero_invoice_id) || [],
+      duplicateDocuments: duplicateDocumentsOf(bill, documentIndex),
     });
     const bucket = d.kind === "job" ? `job_${d.confidence}` : d.kind;
     result.decided[bucket] = (result.decided[bucket] || 0) + 1;

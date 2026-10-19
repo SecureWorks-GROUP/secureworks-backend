@@ -35,7 +35,7 @@ import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { readAll, runBillPrematch } from './bill_prematch_run.ts'
-import { DEAD_JOB_STATUSES, poIsDead, poNamedIn } from './bill_prematch.ts'
+import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -1409,6 +1409,16 @@ async function ingestMaterialsActuals(
       }
     }
 
+    // 2b. Every live supplier bill, so the same supplier document entered twice
+    //     (even under two contacts, Metecno 1449582) is never placed by this path.
+    const allSupplierBills = await readAll<any>(() =>
+      sb.from('xero_invoices')
+        .select('xero_invoice_id, invoice_number, xero_contact_id, contact_name, sub_total, status')
+        .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCPAY').order('xero_invoice_id')
+    )
+    if (!allSupplierBills) throw new Error('supplier bills unreadable')
+    const documentIndex = buildDocumentIndex(allSupplierBills)
+
     // 3. Candidate bills — ACCPAY, in window, not void/deleted.
     const { data: bills } = await sb
       .from('xero_invoices')
@@ -1600,7 +1610,14 @@ async function ingestMaterialsActuals(
       const named = new Set([...refTokens, ...lineTokens])
       const xeroLinkConflict = !!b.job_id && named.size > 0 &&
         !(xeroJobNumber && named.has(String(xeroJobNumber).toUpperCase()))
-      const allowed = verdict === 'remove'
+      // The same supplier document entered more than once: a person decides
+      // which bill is real, so no automatic path places any of them.
+      const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0
+      if (duplicateDocument) {
+        const counts = result as Record<string, unknown>
+        counts.duplicate_documents_held = Number(counts.duplicate_documents_held || 0) + 1
+      }
+      const allowed = verdict === 'remove' || duplicateDocument
         ? { reference: false, poFallback: false }
         : newPlacementAllowed({
           refTokens,

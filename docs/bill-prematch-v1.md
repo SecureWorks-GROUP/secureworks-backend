@@ -12,6 +12,7 @@ Supplier bills in Bills to place (`materials_reconciliation_queue`, status
 | # | Signal | Result |
 |---|---|---|
 | 0 | Any money line on account 306 or 301 (subcontractor labour) | left out, no proposal |
+| 0b | The same supplier document entered more than once: another live bill with the same document number (longest run of 5+ digits), the same ex-GST amount to the cent, and the same supplier (same contact, or contact names sharing their first word, such as "Metecno" and "Metecno Pty Ltd") | review, low, rule `duplicate_document`, nothing picked; the sync's own reference and PO paths also never place it |
 | 1 | A job number in the bill reference or any line, or the job of the PO the bill is linked to (`purchase_orders.xero_bill_id`) or names, naming exactly one live job, nothing disagreeing | **placed by the agent** (confidence high) |
 | 2 | Invoice email filed on one job, one site street address, supplier plus amount equals one PO (2% or $5), Xero links a real job: all naming the same one job | proposal, medium, one staff press |
 | 3 | Two or more jobs from any of the above, a job number not on record or not live, a bill dated more than 14 days before its job existed, more than one rule-1 PO, or a rule-1 PO already linked to or matched by another bill | review, low, candidates listed, nothing picked |

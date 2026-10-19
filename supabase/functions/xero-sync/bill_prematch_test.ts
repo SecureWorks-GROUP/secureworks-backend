@@ -4,8 +4,11 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildAddressIndex,
+  buildDocumentIndex,
   buildJobMaps,
   decideBillPrematch,
+  documentKey,
+  duplicateDocumentsOf,
   type PrematchBill,
   type PrematchJob,
   type PrematchPO,
@@ -310,4 +313,69 @@ Deno.test("a bill linked to a PO with no job is never placed by its job number",
   const linked: PrematchPO = { id: "p9", po_number: "PO-309999", job_id: null as unknown as string, xero_contact_id: "c-1", supplier_name: null, subtotal: 100, status: "sent", xero_bill_id: "x-1" };
   const d = decideBillPrematch(bill([["Fencing Material SWF-26535", "305", 1027.27]]), ctx({ pos: [linked] }));
   assertEquals(d.kind === "job", false);
+});
+
+// Metecno 1449582 (CFO-16, 19 Oct 2026): one supplier document entered three
+// times in Xero, under two contacts ("Metecno" PAID, "Metecno Pty Ltd" and
+// "Qute 1449582" AUTHORISED), each $1,902.70 ex GST, one naming SWP-25029.
+const METECNO = [
+  { xero_invoice_id: "m-paid", invoice_number: "1449582", xero_contact_id: "c-metecno", contact_name: "Metecno", sub_total: 1902.7, status: "PAID" },
+  { xero_invoice_id: "m-pty", invoice_number: "1449582", xero_contact_id: "c-metecno-pty", contact_name: "Metecno Pty Ltd", sub_total: 1902.7, status: "AUTHORISED" },
+  { xero_invoice_id: "m-qute", invoice_number: "Qute 1449582", xero_contact_id: "c-metecno", contact_name: "Metecno", sub_total: 1902.7, status: "AUTHORISED" },
+];
+
+Deno.test("the supplier document key is the longest run of five or more digits", () => {
+  assertEquals([documentKey("Qute 1449582"), documentKey("INV-0347"), documentKey(null), documentKey("SWF-26535 / 1449582")], ["1449582", null, null, "1449582"]);
+});
+
+Deno.test("one supplier document under two contacts of one supplier is held for a person, never placed", () => {
+  const index = buildDocumentIndex(METECNO);
+  const jobs: PrematchJob[] = [...JOBS, { id: "j9", job_number: "SWP-25029", status: "in_progress", created_at: "2026-03-17", site_address: null, holding: false }];
+  const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] };
+  // Even naming a live job outright, each of the three goes to a person.
+  for (const m of METECNO) {
+    const b = bill([["SpanPlus For SWP-25029", "305", 1902.7, "SW - PATIOS"]], { ...m, lines: undefined as never });
+    const withLines = { ...b, lines: [{ description: "SpanPlus For SWP-25029", account_code: "305", amount: 1902.7, business_unit: "SW - PATIOS" }] };
+    const dups = duplicateDocumentsOf(withLines, index);
+    assertEquals(dups.length, 2);
+    const d = decideBillPrematch(withLines, { ...c, duplicateDocuments: dups });
+    assertEquals([d.kind, d.rule], ["review", "duplicate_document"]);
+  }
+});
+
+Deno.test("a voided copy, another amount, or another supplier with the same number is not a duplicate", () => {
+  const index = buildDocumentIndex([
+    { ...METECNO[1], status: "VOIDED" },
+    { ...METECNO[2], xero_invoice_id: "m-other-amount", sub_total: 1902.71 },
+    { xero_invoice_id: "o-1", invoice_number: "1449582", xero_contact_id: "c-other", contact_name: "Bunnings", sub_total: 1902.7, status: "AUTHORISED" },
+  ]);
+  assertEquals(duplicateDocumentsOf(METECNO[0], index), []);
+});
+
+Deno.test("a nightly run holds the duplicated Metecno bills for a person and places none", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref")
+    .map((q) => ({ ...q, xero_invoice_id: "m-pty", invoice_number: "1449582", xero_contact_id: "c-metecno-pty", contact_name: "Metecno Pty Ltd", sub_total: 1902.7 }));
+  seed.jobs = [{ id: "job-patio", job_number: "SWP-25029", status: "in_progress", created_at: "2026-03-17", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [];
+  const lines = [{ Description: "SpanPlus For SWP-25029", AccountCode: "305", LineAmount: 1902.7 }];
+  seed.xero_invoices = METECNO.map((m) => ({ ...m, org_id: ORG, invoice_type: "ACCPAY", reference: null, line_items: lines, job_id: null }));
+  seed.context_email_attachments = [];
+  seed.materials_bill_proposals = [];
+  const { client, store } = makeFakeClient(seed);
+
+  const out = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-10-19T12:00:00.000Z" });
+  assertEquals([out.ran, out.assigned ?? 0], [true, 0]);
+  assertEquals((store.job_materials_facts ?? []).filter((f) => f.xero_invoice_id === "m-pty").length, 0);
+  const p = store.materials_bill_proposals.find((r) => r.xero_invoice_id === "m-pty")!;
+  assertEquals([p.proposal_kind, p.rule, p.outcome], ["review", "duplicate_document", "queued_for_review"]);
+  assertEquals(store.materials_reconciliation_queue[0].status, "open");
+});
+
+Deno.test("the sync never places a bill whose supplier document is duplicated (reference or PO path)", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const at = src.indexOf("const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0");
+  assertEquals(at > 0, true);
+  assertEquals(src.slice(at, at + 600).includes("verdict === 'remove' || duplicateDocument\n        ? { reference: false, poFallback: false }"), true);
+  assertEquals(src.includes("if (!allSupplierBills) throw new Error('supplier bills unreadable')"), true);
 });
