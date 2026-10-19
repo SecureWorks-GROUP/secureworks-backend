@@ -3304,7 +3304,8 @@ async function getAutoContext(view: string): Promise<any> {
 // MAIN HANDLER
 // ════════════════════════════════════════════════════════════
 
-serve(async (req: Request) => {
+// Exported so the auth refusal can be tested on the real handler.
+export async function handleOpsAiRequest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
@@ -3999,4 +4000,6 @@ serve(async (req: Request) => {
     console.error('[ops-ai] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(handleOpsAiRequest)

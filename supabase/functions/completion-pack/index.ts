@@ -530,7 +530,8 @@ function getWarrantyText(type: string): string[] {
 // MAIN HANDLER
 // ════════════════════════════════════════════════════════════
 
-serve(async (req: Request) => {
+// Exported so the auth refusal can be tested on the real handler.
+export async function handleCompletionPackRequest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── API Key Authentication ──
@@ -840,4 +841,6 @@ serve(async (req: Request) => {
     console.error('[completion-pack] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(handleCompletionPackRequest)

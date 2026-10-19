@@ -207,7 +207,8 @@ export async function _verifyPoEmailRecipient(
 // Only start the HTTP server when this module is the entry point — lets the
 // test file import `_verifyPoEmailRecipient` without spinning up the server
 // (mirrors the ops-api `if (import.meta.main) serve(...)` pattern).
-if (import.meta.main) serve(async (req: Request) => {
+// Exported so the auth refusal can be tested on the real handler.
+export async function handleSendPoEmailRequest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── API Key Authentication ──
@@ -476,4 +477,6 @@ if (import.meta.main) serve(async (req: Request) => {
     console.error('[send-po-email] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(handleSendPoEmailRequest)

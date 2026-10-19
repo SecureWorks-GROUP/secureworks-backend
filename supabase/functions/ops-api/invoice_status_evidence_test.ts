@@ -26,7 +26,10 @@ import {
 import {
   buildInvoiceAuthorisedEvidence,
   INVOICE_AUTHORISED_BODY_PREVIEW,
+  classifyInvoiceEmailFailure,
   INVOICE_EMAIL_FAILED_BODY_PREVIEW,
+  INVOICE_EMAIL_REFUSED_BODY_PREVIEW,
+  INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW,
   INVOICE_EMAILED_BODY_PREVIEW,
   type InvoiceAuthorisedSource,
   writeInvoiceAuthorisedEvidence,
@@ -284,44 +287,120 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
   assertEquals(ev.payload.to, "client@example.com");
 });
 
-// ── invoice.email_failed: a refused or failed Outlook send leaves a trail. ──
-// SW_SHARED_KEY_CONTAINMENT: a 401 from send-outlook-email means the server
-// credential was refused before Graph. The 502 still reaches the caller.
-Deno.test("K3 email failed: Outlook 401 writes one digit-free failure event and still throws", async () => {
+// ── A failed invoice email is recorded by what the reply proves. ──
+// send-outlook-email answers 401/403 only from its auth checks (before Graph),
+// and `outcome_unknown` / `retry_safe: false` when the email may have gone.
+// An unknown outcome must never be recorded as a plain failure: that invites
+// a resend that emails the client twice.
+Deno.test("invoice email failure: classification", () => {
+  assertEquals(classifyInvoiceEmailFailure(401, null), "refused");
+  assertEquals(classifyInvoiceEmailFailure(403, { error: "x" }), "refused");
+  assertEquals(classifyInvoiceEmailFailure(502, { state: "outcome_unknown", retry_safe: false }), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(502, { error: "Graph API error", retry_safe: false }), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(502, { error: "Graph API error", retry_safe: true }), "failed");
+  assertEquals(classifyInvoiceEmailFailure(500, null), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(400, { error: "bad", retry_safe: true }), "failed");
+  assertEquals(classifyInvoiceEmailFailure(409, { retry_safe: false }), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(null, null), "unknown");
+});
+
+async function sendWithOutlook(
+  outlook: () => Response | Promise<Response>,
+  opts: { failEvidence?: boolean } = {},
+) {
   const fix = happyFixture();
   const { client } = makeStubClient(structuredClone(fix.seed));
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } });
   const { fetch, calls } = makeStubFetch({
     ...fix.fetchRoutes,
-    "https://stub-supabase.invalid/functions/v1/send-outlook-email": () =>
-      new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 }),
+    "https://stub-supabase.invalid/functions/v1/send-outlook-email": outlook,
   });
   const { getToken } = makeStubGetToken();
-  const { logBusinessEvent, events } = makeStubLogBusinessEvent();
-  await assertRejects(() =>
-    _verifyAndSendInvoiceEmail({
-      client,
-      body: makeBody(),
-      getToken,
-      xeroGet,
-      logBusinessEvent,
-      fetch,
-      xeroFetch: fetch,
-      env: { ...STUB_ENV, SUPABASE_SERVICE_KEY: "stub-service-key" },
-    })
-  );
-  assertEquals(events.length, 1);
-  const ev = events[0];
-  assertEquals(ev.event_type, "invoice.email_failed");
-  assertEquals(ev.body_preview, INVOICE_EMAIL_FAILED_BODY_PREVIEW);
-  assert(!/\d/.test(ev.body_preview), "failure words must be digit-free");
-  assertEquals(ev.job_id, "job-uuid-1");
-  assertEquals(ev.payload.status, 401);
-  assertEquals(ev.payload.invoice_number, "INV-001");
+  const events: any[] = [];
+  const logBusinessEvent = (_c: unknown, ev: any) => {
+    events.push(ev);
+    return opts.failEvidence ? Promise.reject(new Error("evidence store down")) : Promise.resolve();
+  };
+  const error = console.error;
+  console.error = () => {};
+  let err: unknown;
+  try {
+    err = await assertRejects(() =>
+      _verifyAndSendInvoiceEmail({
+        client,
+        body: makeBody(),
+        getToken,
+        xeroGet,
+        logBusinessEvent,
+        fetch,
+        xeroFetch: fetch,
+        env: { ...STUB_ENV, SUPABASE_SERVICE_KEY: "stub-service-key" },
+      })
+    );
+  } finally {
+    console.error = error;
+  }
+  return { err: err as Error & { status: number; body?: any }, events, calls };
+}
 
-  // The send went out on the service credential, not the shared key.
+Deno.test("invoice email: 401 is recorded as refused, retry-safe, on the service credential", async () => {
+  const { err, events, calls } = await sendWithOutlook(() =>
+    new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 })
+  );
+  assertEquals(err.status, 502);
+  assertEquals(err.body?.code, "invoice_email_refused");
+  assertEquals(err.body?.retry_safe, true);
+  assertEquals(events.length, 1);
+  assertEquals(events[0].event_type, "invoice.email_refused");
+  assertEquals(events[0].body_preview, INVOICE_EMAIL_REFUSED_BODY_PREVIEW);
+  assertEquals(events[0].payload.status, 401);
+  assertEquals(events[0].payload.retry_safe, true);
+  assertEquals(events[0].job_id, "job-uuid-1");
+  assert(String(events[0].provider_message_id).startsWith("ops-api:invoice.email_refused:inv-123:"));
   const outlook = calls.find((c) => c.url.includes("send-outlook-email"))!;
   const headers = new Headers(outlook.init?.headers);
   assertEquals(headers.get("authorization"), "Bearer stub-service-key");
   assertEquals(headers.get("x-api-key"), null);
+});
+
+Deno.test("invoice email: outcome_unknown is recorded as unknown, never as failed", async () => {
+  const { err, events } = await sendWithOutlook(() =>
+    new Response(JSON.stringify({ state: "outcome_unknown", code: "provider_outcome_unknown", retry_safe: false }), { status: 502 })
+  );
+  assertEquals(err.body?.code, "invoice_email_outcome_unknown");
+  assertEquals(err.body?.retry_safe, false);
+  assert(err.message.includes("do not resend"));
+  assertEquals(events.length, 1);
+  assertEquals(events[0].event_type, "invoice.email_outcome_unknown");
+  assertEquals(events[0].body_preview, INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW);
+  assertEquals(events[0].payload.retry_safe, false);
+});
+
+Deno.test("invoice email: a definite failure is recorded as failed", async () => {
+  const { err, events } = await sendWithOutlook(() =>
+    new Response(JSON.stringify({ error: "Graph API error", retry_safe: true }), { status: 502 })
+  );
+  assertEquals(err.body?.code, "invoice_email_failed");
+  assertEquals(events[0].event_type, "invoice.email_failed");
+  assertEquals(events[0].body_preview, INVOICE_EMAIL_FAILED_BODY_PREVIEW);
+  for (const ev of events) assert(!/\d/.test(ev.body_preview), "words stay digit-free");
+});
+
+Deno.test("invoice email: a transport exception is recorded as unknown", async () => {
+  const { err, events } = await sendWithOutlook(() => Promise.reject(new Error("connection reset")));
+  assertEquals(err.status, 502);
+  assertEquals(err.body?.code, "invoice_email_outcome_unknown");
+  assertEquals(events.length, 1);
+  assertEquals(events[0].event_type, "invoice.email_outcome_unknown");
+  assertEquals(events[0].payload.status, null);
+});
+
+Deno.test("invoice email: an evidence write failure never masks the send error", async () => {
+  const { err, events } = await sendWithOutlook(
+    () => new Response(JSON.stringify({ state: "outcome_unknown", retry_safe: false }), { status: 502 }),
+    { failEvidence: true },
+  );
+  assertEquals(err.status, 502);
+  assertEquals(err.body?.code, "invoice_email_outcome_unknown");
+  assertEquals(events.length, 1);
 });

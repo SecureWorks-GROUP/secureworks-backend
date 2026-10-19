@@ -754,7 +754,8 @@ async function executeConfirmedAction(action: string, params: any): Promise<any>
 // MAIN HANDLER — The Agent Loop
 // ════════════════════════════════════════════════════════════
 
-serve(async (req: Request) => {
+// Exported so the auth refusal can be tested on the real handler.
+export async function handleAgentRunnerRequest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Auth (same as ops-ai) ──
@@ -1019,4 +1020,6 @@ serve(async (req: Request) => {
     console.error('[agent-runner] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(handleAgentRunnerRequest)

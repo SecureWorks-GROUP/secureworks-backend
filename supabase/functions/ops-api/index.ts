@@ -493,7 +493,7 @@ import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
 import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
-import { INVOICE_EMAILED_BODY_PREVIEW, INVOICE_EMAIL_FAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
+import { classifyInvoiceEmailFailure, INVOICE_EMAIL_FAILURE_EVENT, INVOICE_EMAILED_BODY_PREVIEW, type InvoiceEmailFailureOutcome, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -4182,40 +4182,63 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
 
   // Send via Outlook with PDF attached
   // Server credential, not the shared browser key (SW_SHARED_KEY_CONTAINMENT).
-  const siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
-    method: 'POST',
-    headers: serverCallHeaders(env.SUPABASE_SERVICE_KEY, env.SW_API_KEY),
-    body: JSON.stringify({
-      to: siTo,
-      cc: siCcSafe,
-      subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
-      htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
-      job_id: verifiedJobId,
-      xero_invoice_id: siId,
-      attachments: [{
-        contentBytes: siPdfB64,
-        name: `${siNum}.pdf`,
-        contentType: 'application/pdf',
-        xero_invoice_id: siId,
-      }],
-    }),
-  })
-  if (!siEmailResp.ok) {
-    const siErrText = await siEmailResp.text().catch(() => '')
-    // Durable trail for a failed send: a 401 here means the server credential
-    // was refused (SW_SHARED_KEY_CONTAINMENT), so the office can see it after
-    // the response is gone. Best effort; never masks the 502.
+  // A reply that is not 2xx is sorted by what it proves (see
+  // classifyInvoiceEmailFailure): refused and failed sends are safe to retry,
+  // an unknown outcome is not, because the client may already have the email.
+  const recordInvoiceEmailFailure = async (outcome: InvoiceEmailFailureOutcome, status: number | null) => {
+    const ev = INVOICE_EMAIL_FAILURE_EVENT[outcome]
+    // Always in the function log, even when the evidence write is off or fails.
+    console.error(JSON.stringify({ event: ev.event_type, entity_id: siId, status }))
     try {
       await logBusinessEvent(client, {
-        event_type: 'invoice.email_failed',
+        event_type: ev.event_type,
         entity_type: 'xero_invoice',
         entity_id: siId,
         job_id: verifiedJobId || undefined,
-        body_preview: INVOICE_EMAIL_FAILED_BODY_PREVIEW,
-        payload: { invoice_number: siNum, status: siEmailResp.status, via: 'outlook', linked: Boolean(verifiedJobId) },
+        body_preview: ev.body_preview,
+        payload: { invoice_number: siNum, status, via: 'outlook', linked: Boolean(verifiedJobId), retry_safe: outcome !== 'unknown' },
+        // One row per invoice, outcome and UTC day, so repeated presses do not stack rows.
+        provider_message_id: `ops-api:${ev.event_type}:${siId}:${new Date().toISOString().slice(0, 10)}`,
       })
-    } catch { /* non-blocking */ }
-    throw new ApiError(`Outlook email failed: ${siErrText}`, 502)
+    } catch { /* non-blocking: the log line above is the fallback trail */ }
+  }
+  const invoiceEmailError = (outcome: InvoiceEmailFailureOutcome, detail: string) =>
+    outcome === 'unknown'
+      ? new ApiError(`Outlook email outcome unknown: do not resend until Sent Items is checked. ${detail}`.trim(), 502, { code: 'invoice_email_outcome_unknown', retry_safe: false })
+      : outcome === 'refused'
+      ? new ApiError(`Outlook email refused before sending; nothing was sent. ${detail}`.trim(), 502, { code: 'invoice_email_refused', retry_safe: true })
+      : new ApiError(`Outlook email failed: ${detail}`, 502, { code: 'invoice_email_failed', retry_safe: true })
+  let siEmailResp: Response
+  try {
+    siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
+      method: 'POST',
+      headers: serverCallHeaders(env.SUPABASE_SERVICE_KEY, env.SW_API_KEY),
+      body: JSON.stringify({
+        to: siTo,
+        cc: siCcSafe,
+        subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
+        htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
+        job_id: verifiedJobId,
+        xero_invoice_id: siId,
+        attachments: [{
+          contentBytes: siPdfB64,
+          name: `${siNum}.pdf`,
+          contentType: 'application/pdf',
+          xero_invoice_id: siId,
+        }],
+      }),
+    })
+  } catch (e) {
+    await recordInvoiceEmailFailure('unknown', null)
+    throw invoiceEmailError('unknown', (e as Error).message || '')
+  }
+  if (!siEmailResp.ok) {
+    const siErrText = await siEmailResp.text().catch(() => '')
+    let siErrBody: unknown = null
+    try { siErrBody = JSON.parse(siErrText) } catch { /* not JSON */ }
+    const outcome = classifyInvoiceEmailFailure(siEmailResp.status, siErrBody)
+    await recordInvoiceEmailFailure(outcome, siEmailResp.status)
+    throw invoiceEmailError(outcome, siErrText)
   }
 
   // Audit (non-blocking).
@@ -51259,10 +51282,18 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     }
   } catch (e) {
     const message = ((e as Error).message || String(e)).slice(0, 500)
-    await _patchPack(client, jobId, photoPackKind, {
-      ...photoFollowupFailureState(emailAttempted, emailRefused),
-      error_detail: message,
-    })
+    // The saved state decides whether a retry may send again, so a failed save
+    // is surfaced rather than swallowed (a refused send left at 'sending'
+    // would block the retry).
+    try {
+      await _patchPackStrict(client, jobId, photoPackKind, {
+        ...photoFollowupFailureState(emailAttempted, emailRefused),
+        error_detail: message,
+      })
+    } catch (patchErr) {
+      console.error(JSON.stringify({ event: 'photo_followup_state_unsaved', job_id: jobId }))
+      throw new ApiError(`${message}; photo pack state was not saved: ${(patchErr as Error).message}`.slice(0, 500), 500)
+    }
     throw e
   }
 }
