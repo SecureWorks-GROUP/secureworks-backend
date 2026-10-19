@@ -44,7 +44,10 @@ import {
   buildQueueRow,
   DEFAULT_MATCH_CONFIG,
   extractJobNumber,
+  existingFactVerdict,
   JOB_NUMBER_RE,
+  jobNumbersInText,
+  newPlacementAllowed,
   matchBill,
   type BillInput,
   type MatchConfig,
@@ -1346,6 +1349,7 @@ async function ingestMaterialsActuals(
     // 2. Open PO candidates (all suppliers) — grouped by xero_contact_id. The PO
     //    anchor date is delivery_date if set, else created_at.
     const posByContact = new Map<string, POCandidate[]>()
+    let blockedJobIds = new Set<string>() // jobs not won, or holding: never a cost by rule
     {
       const pos = await readAll<any>(() =>
         sb.from('purchase_orders')
@@ -1361,7 +1365,7 @@ async function ingestMaterialsActuals(
         sb.from('jobs').select('id, status, do_not_schedule:metadata->do_not_schedule').eq('org_id', DEFAULT_ORG_ID).order('id')
       )
       if (!notLiveJobs) throw new Error('jobs unreadable')
-      const blockedJobIds = new Set(
+      blockedJobIds = new Set(
         notLiveJobs
           .filter((j: any) => DEAD_JOB_STATUSES.has(String(j.status || '').toLowerCase()) ||
             String(j.do_not_schedule ?? '').toLowerCase() === 'true')
@@ -1392,7 +1396,7 @@ async function ingestMaterialsActuals(
     const { data: bills } = await sb
       .from('xero_invoices')
       .select(
-        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type',
+        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type, line_items',
       )
       .eq('org_id', DEFAULT_ORG_ID)
       .eq('invoice_type', 'ACCPAY')
@@ -1405,12 +1409,16 @@ async function ingestMaterialsActuals(
     const factSourceById = new Map<string, string>() // xero_invoice_id -> automation_source
     const queueStatusById = new Map<string, string>() // xero_invoice_id -> status
     const queueAssignedById = new Map<string, string>() // xero_invoice_id -> assigned_by
+    const factJobById = new Map<string, string>() // xero_invoice_id -> job_id
     {
       const facts = await readAll<any>(() =>
-        sb.from('job_materials_facts').select('id, xero_invoice_id, automation_source').order('id')
+        sb.from('job_materials_facts').select('id, xero_invoice_id, automation_source, job_id').order('id')
       )
       if (!facts) throw new Error('materials facts unreadable')
-      for (const f of facts) factSourceById.set(f.xero_invoice_id, f.automation_source)
+      for (const f of facts) {
+        factSourceById.set(f.xero_invoice_id, f.automation_source)
+        factJobById.set(f.xero_invoice_id, f.job_id)
+      }
       const qrows = await readAll<any>(() =>
         sb.from('materials_reconciliation_queue').select('id, xero_invoice_id, status, assigned_by').order('id')
       )
@@ -1465,7 +1473,8 @@ async function ingestMaterialsActuals(
         // removed (a human placement is left for review), as for mirrors.
         const src = factSourceById.get(bill.xero_invoice_id)
         if (src && src !== 'manual_queue') {
-          await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+          await sb.from('job_materials_facts').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('automation_source', src)
           result.cleaned++
           // The agent's own placement is undone with it, so the bill is back on
           // the list for when Xero issues it. A person's decision is left alone.
@@ -1491,20 +1500,24 @@ async function ingestMaterialsActuals(
       // job, or a number whose digits another job also carries (SWF-26328 and
       // SWP-26328); those go to Bills to place for a person.
       const token = extractJobNumber(bill.reference)
-      // A reference naming two or more different jobs is a split for a person,
-      // never the first one's cost.
-      const allTokens = new Set(
-        [...String(bill.reference || '').matchAll(new RegExp(JOB_NUMBER_RE.source, 'gi'))].map((x) => x[0].toUpperCase()),
+      const refTokens = jobNumbersInText(bill.reference)
+      const lineTokens = jobNumbersInText(
+        (Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n '),
       )
       let jobFromRef: { id: string; job_number: string } | null = null
-      if (token && allTokens.size === 1) {
+      if (token && refTokens.size === 1) {
         const digits = token.replace(/\D/g, '')
-        const { data: sameDigits } = await sb
+        const { data: sameDigits, error: jErr } = await sb
           .from('jobs')
           .select('id, job_number, status, do_not_schedule:metadata->do_not_schedule')
           .eq('org_id', DEFAULT_ORG_ID)
           .like('job_number', `%${digits}`)
-        const rows = (sameDigits || []).filter((j: any) => String(j.job_number).replace(/\D/g, '') === digits)
+        // Evidence that could not be read is not a refusal: leave the bill as it is.
+        if (jErr || !Array.isArray(sameDigits)) {
+          console.error(`[materials] job lookup failed ${bill.xero_invoice_id}:`, jErr?.message)
+          continue
+        }
+        const rows = sameDigits.filter((j: any) => String(j.job_number).replace(/\D/g, '') === digits)
         const job = rows.find((j: any) => j.job_number === token)
         const live = job &&
           !DEAD_JOB_STATUSES.has(String(job.status || '').toLowerCase()) &&
@@ -1512,24 +1525,42 @@ async function ingestMaterialsActuals(
         if (job && live && rows.length === 1) jobFromRef = { id: job.id, job_number: job.job_number }
       }
 
-      const pos = bill.xero_contact_id
-        ? posByContact.get(bill.xero_contact_id) || []
-        : []
-
-      // A job number that was found but refused (not won, holding, or sharing its
-      // digits) must reach a person: no PO fallback may place the bill instead.
-      const m = matchBill(bill, { isMirror: false, jobFromRef, refToken: token, pos: token && !jobFromRef ? [] : pos, config })
-
-      // A reference fact this path wrote earlier is removed when the reference is
-      // now refused (job not won, holding, same digits as another job, or the
-      // reference names several jobs), so a refused job stops counting the cost.
-      // PO, pre-match and human facts are not touched here: a PO drops out of the
-      // candidate list once billed, which is not a reason to undo its fact.
-      const ownSource = factSourceById.get(bill.xero_invoice_id)
-      if (m.outcome !== 'fact' && ownSource === 'xero_ref_link' && token && !jobFromRef) {
-        await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+      // An existing fact: this path never moves it to another job. It keeps its
+      // own fact unless the bill now contradicts it, and then removes it (only
+      // that fact, by source) so a person decides on the queue row below.
+      const existingSource = factSourceById.get(bill.xero_invoice_id)
+      const factJobId = factJobById.get(bill.xero_invoice_id)
+      const verdict = existingFactVerdict({
+        source: existingSource,
+        factJobId,
+        factJobBlocked: !!factJobId && blockedJobIds.has(factJobId),
+        refTokens,
+        lineTokens,
+        jobFromRefId: jobFromRef?.id ?? null,
+      })
+      if (verdict === 'not_ours' || verdict === 'keep') continue
+      if (verdict === 'remove') {
+        await sb.from('job_materials_facts').delete()
+          .eq('xero_invoice_id', bill.xero_invoice_id).eq('automation_source', existingSource as string)
         result.cleaned++
       }
+
+      // A new placement only on one consistent job number (the reference), or on
+      // the PO fallback when the bill names no job at all; after a removal, never
+      // in the same pass. Anything else is a queue row for a person.
+      const allowed = verdict === 'remove'
+        ? { reference: false, poFallback: false }
+        : newPlacementAllowed({ refTokens, lineTokens, jobFromRefId: jobFromRef?.id ?? null })
+      const pos = allowed.poFallback && bill.xero_contact_id
+        ? posByContact.get(bill.xero_contact_id) || []
+        : []
+      const m = matchBill(bill, {
+        isMirror: false,
+        jobFromRef: allowed.reference ? jobFromRef : null,
+        refToken: token ?? ([...refTokens, ...lineTokens][0] ?? null),
+        pos,
+        config,
+      })
 
       if (m.outcome === 'fact') {
         const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)

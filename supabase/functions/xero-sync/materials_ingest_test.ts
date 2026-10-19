@@ -22,7 +22,10 @@ import {
   buildQueueRow,
   dateWithinWindow,
   DEFAULT_MATCH_CONFIG,
+  existingFactVerdict,
   extractJobNumber,
+  jobNumbersInText,
+  newPlacementAllowed,
   findUniquePOMatch,
   isOpenPO,
   matchBill,
@@ -456,4 +459,38 @@ Deno.test("extractJobNumber: a product code that starts like a job number is not
   assertEquals(extractJobNumber("SWF-261009XL"), null);
   assertEquals(extractJobNumber("XSWF-261009"), null);
   assertEquals(extractJobNumber("Order SWF-261009-DEP50"), "SWF-261009");
+});
+
+// Fourth second-model review, 19 Oct 2026: the older path never moves a fact.
+const T = (...xs: string[]) => new Set(xs);
+Deno.test("existing fact: a PO fact whose bill now names two jobs is removed for a person", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobBlocked: false, refTokens: T("SWF-26535", "SWP-261060"), lineTokens: T(), jobFromRefId: null }), "remove");
+});
+Deno.test("existing fact: a billed PO dropping out of the candidates keeps its fact (never moved)", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobBlocked: false, refTokens: T(), lineTokens: T(), jobFromRefId: null }), "keep");
+});
+Deno.test("existing fact: a reference fact whose reference is gone, refused or now names another job is removed", () => {
+  const base = { source: "xero_ref_link", factJobId: "A", factJobBlocked: false, lineTokens: T() };
+  assertEquals(existingFactVerdict({ ...base, refTokens: T(), jobFromRefId: null }), "remove");
+  assertEquals(existingFactVerdict({ ...base, refTokens: T("SWF-26535"), jobFromRefId: null }), "remove");
+  assertEquals(existingFactVerdict({ ...base, refTokens: T("SWF-26999"), jobFromRefId: "B" }), "remove");
+  assertEquals(existingFactVerdict({ ...base, refTokens: T("SWF-26535"), jobFromRefId: "A" }), "keep");
+});
+Deno.test("existing fact: lines naming a different job than the reference remove the fact", () => {
+  assertEquals(existingFactVerdict({ source: "xero_ref_link", factJobId: "A", factJobBlocked: false, refTokens: T("SWF-26535"), lineTokens: T("SWF-26999"), jobFromRefId: "A" }), "remove");
+});
+Deno.test("existing fact: a job that is no longer won or is a holding job loses this path's fact", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobBlocked: true, refTokens: T(), lineTokens: T(), jobFromRefId: null }), "remove");
+});
+Deno.test("existing fact: pre-match and human facts are never this path's to change", () => {
+  for (const source of ["agent_prematch", "manual_queue"]) {
+    assertEquals(existingFactVerdict({ source, factJobId: "A", factJobBlocked: true, refTokens: T("X", "Y"), lineTokens: T(), jobFromRefId: null }), "not_ours");
+  }
+});
+Deno.test("new placement: only one consistent job number, and never the PO fallback once a job is named", () => {
+  assertEquals(newPlacementAllowed({ refTokens: T("SWF-26535"), lineTokens: T("SWF-26999"), jobFromRefId: "A" }), { reference: false, poFallback: false });
+  assertEquals(newPlacementAllowed({ refTokens: T(), lineTokens: T("SWF-26999"), jobFromRefId: null }), { reference: false, poFallback: false });
+  assertEquals(newPlacementAllowed({ refTokens: T("SWF-26535"), lineTokens: T("SWF-26535"), jobFromRefId: "A" }), { reference: true, poFallback: false });
+  assertEquals(newPlacementAllowed({ refTokens: T(), lineTokens: T(), jobFromRefId: null }), { reference: false, poFallback: true });
+  assertEquals([...jobNumbersInText("SWF-26535 / swp-261060 and SWF-26535XL")], ["SWF-26535", "SWP-261060"]);
 });

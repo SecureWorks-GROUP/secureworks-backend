@@ -355,3 +355,55 @@ export function buildQueueRow(
     updated_at: now,
   };
 }
+
+// ─────────────────────────────────────────────────────────────
+// Existing automatic facts on the older ingest path (19 Oct 2026 reviews).
+// This path never MOVES a fact to another job. It keeps its own fact
+// (xero_ref_link or po_deterministic) unless the bill now hard-contradicts it,
+// and then removes it so a person decides. Pre-match and human facts are not
+// this path's to change.
+// ─────────────────────────────────────────────────────────────
+export const OWN_FACT_SOURCES = new Set(["xero_ref_link", "po_deterministic"]);
+
+/** Every distinct job number in a text, whole tokens only, upper case. */
+export function jobNumbersInText(text: string | null | undefined): Set<string> {
+  const re = new RegExp(JOB_NUMBER_RE.source, "gi");
+  return new Set([...String(text || "").matchAll(re)].map((m) => m[0].toUpperCase()));
+}
+
+export function existingFactVerdict(input: {
+  source: string | null | undefined; // the fact's automation_source
+  factJobId: string | null | undefined;
+  factJobBlocked: boolean; // the fact's job is not won, or is a holding job
+  refTokens: Set<string>; // job numbers in the bill's reference
+  lineTokens: Set<string>; // job numbers in the bill's line descriptions
+  jobFromRefId: string | null; // the reference's job when it resolved and passed every guard
+}): "none" | "not_ours" | "keep" | "remove" {
+  if (!input.source) return "none";
+  if (!OWN_FACT_SOURCES.has(input.source)) return "not_ours";
+  const all = new Set([...input.refTokens, ...input.lineTokens]);
+  if (input.factJobBlocked) return "remove";
+  if (all.size > 1) return "remove"; // the bill names several jobs: a split for a person
+  if (input.source === "xero_ref_link") {
+    if (input.refTokens.size === 0) return "remove"; // the reference that placed it is gone
+    if (!input.jobFromRefId) return "remove"; // the reference is now refused
+  }
+  if (input.jobFromRefId && input.jobFromRefId !== input.factJobId) return "remove"; // names another job
+  return "keep";
+}
+
+/** May this path place a bill that has no fact yet? Only on one consistent job number, or none at all. */
+export function newPlacementAllowed(input: {
+  refTokens: Set<string>;
+  lineTokens: Set<string>;
+  jobFromRefId: string | null;
+}): { reference: boolean; poFallback: boolean } {
+  const all = new Set([...input.refTokens, ...input.lineTokens]);
+  if (all.size > 1) return { reference: false, poFallback: false };
+  if (all.size === 1) {
+    // One number: only the reference path, and only when it resolved and the
+    // lines (if they name a job) name the same one. Never the PO fallback.
+    return { reference: !!input.jobFromRefId && input.refTokens.size === 1, poFallback: false };
+  }
+  return { reference: false, poFallback: true };
+}
