@@ -12,8 +12,8 @@ DECLARE problems text[] := '{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_ledger_cite(uuid,jsonb)', ARRAY['44b8faee5207fa4a4604dbcb25cbfc12', 'cefd4fe399725489eeb3d67705e951c6']),
-  ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['af976e59b8e6f35612d6383042d6e38e', '606205ed695102cda92086510902ea9e']),
-  ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['6da1007ff2a6331219f4d98f85749ca7', '88c75603e8483337fd146dd8392e72d5'])
+  ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['af976e59b8e6f35612d6383042d6e38e', 'ae35dea41a3c51b6afe29366cc496823']),
+  ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['6da1007ff2a6331219f4d98f85749ca7', '63c8d04b7fcba89a7bf5519581601298'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
