@@ -320,7 +320,7 @@ BEGIN
  END LOOP;
 END $c$;
 
--- 3 to 5. The 38 fixtures.
+-- 3 to 5. The 38 fixtures, and four review traps (39 to 42).
 BEGIN;
 DO $c$
 DECLARE j uuid; j2 uuid; j3 uuid; own uuid; nb uuid; nb2 uuid; e1 uuid; e2 uuid; e3 uuid; x1 uuid; x2 uuid; x3 uuid; t1 timestamptz := '2026-09-01 02:00Z';
@@ -486,8 +486,8 @@ BEGIN
  e1 := pg_temp.sp_note(23, 1, j, 'The neighbour is to sign off the fence line before the install.', tn);
  x1 := pg_temp.sp_inv(23, 1, j, 'ACCREC', 'PAID', 'SWF-90025-B-FIN', 'Balance', 0, 0, 0, paid, nb, 'XC-NB1', NULL, '2026-09-06');
  PERFORM pg_temp.sp_fx_add(23, j, 'dependency', 'record', 'install', 'us', 'The neighbour is to sign off the fence line before the install.',
-  jsonb_build_array(pg_temp.sp_cb(e1, 'The neighbour is to sign off the fence line before the install.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O',
-  'wrong_obligation_class', 'approval:neighbour-signoff');
+  jsonb_build_array(pg_temp.sp_cb(e1, 'The neighbour is to sign off the fence line before the install.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?',
+  'record_not_person', 'approval:neighbour-signoff');
  -- 24. A receipt asked for the day of payment: a payment is not the reply.
  j := pg_temp.sp_job(24, 1, 'SWF-90026');
  own := pg_temp.sp_party(24, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
@@ -554,10 +554,11 @@ BEGIN
  x1 := pg_temp.sp_inv(31, 1, j, 'ACCREC', 'PAID', 'SWF-90034-FIN', 'Balance of the fence', 1500, 0, 1500, paid, NULL, 'XC-OTHER');
  PERFORM pg_temp.sp_fx_add(31, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay the fence invoice this week.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the fence invoice this week.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'payer_contact_not_on_job');
- -- 32. Builder work paid by the insured (the job's own Xero contact), not the builder.
+ -- 32. Builder work paid by the insured, a resolved party on the job, not the builder.
  j := pg_temp.sp_job(32, 1, 'SWMS-90035', 'makesafe', 'scheduled', 'XC-INS');
+ own := pg_temp.sp_party(32, 1, j, 'primary', 'owner', true, 'G-INS', 'XC-INS');
  e1 := pg_temp.sp_note(32, 1, j, 'The builder is to pay the make-safe invoice for this job.', tn);
- x1 := pg_temp.sp_inv(32, 1, j, 'ACCREC', 'PAID', 'MLB-77007PO-60008', 'Make safe works', 800, 0, 800, paid, NULL, 'XC-INS');
+ x1 := pg_temp.sp_inv(32, 1, j, 'ACCREC', 'PAID', 'MLB-77007PO-60008', 'Make safe works', 800, 0, 800, paid, own, 'XC-INS');
  PERFORM pg_temp.sp_fx_add(32, j, 'commitment', 'payment', 'payment', 'us', 'The builder is to pay the make-safe invoice.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'The builder is to pay the make-safe invoice for this job.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O', 'other_payer');
  -- 33. The builder's second, unlisted Xero contact.
@@ -602,7 +603,34 @@ BEGIN
  x1 := pg_temp.sp_inv(38, 1, j, 'ACCREC', 'PAID', 'SWF-90042-FIN', 'Balance of the fence', 1500, 0, 1500, paid, NULL, 'XC-FAM');
  PERFORM pg_temp.sp_fx_add(38, j, 'commitment', 'payment', 'payment', 'unknown', 'The fence invoice will be paid this week.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the fence invoice this week.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'unmatched_sender');
- PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 38, 'the 38 fixtures');
+ -- Review r2 traps.
+ -- 39 (M1). Builder work billed under the job's own Xero contact, no party: may be the builder's, unproven.
+ j := pg_temp.sp_job(39, 1, 'SWMS-90043', 'makesafe', 'scheduled', 'XC-JOB');
+ e1 := pg_temp.sp_note(39, 1, j, 'The builder is to pay the make-safe invoice for this job.', tn);
+ x1 := pg_temp.sp_inv(39, 1, j, 'ACCREC', 'PAID', 'MLB-77010PO-60012', 'Make safe works', 800, 0, 800, paid, NULL, 'XC-JOB');
+ PERFORM pg_temp.sp_fx_add(39, j, 'commitment', 'payment', 'payment', 'us', 'The builder is to pay the make-safe invoice.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'The builder is to pay the make-safe invoice for this job.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?',
+  'payer_job_contact');
+ -- 40 (M2). A record cited to close a person's item is evidence only.
+ j := pg_temp.sp_job(40, 1, 'SWF-90044');
+ own := pg_temp.sp_party(40, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_note(40, 1, j, 'I will send the owner the colour chart.', tn);
+ x1 := pg_temp.sp_inv(40, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90044-FIN', 'Balance of the fence', 1000, 1000, 0, NULL, own, 'XC-OWN', NULL, '2026-09-06');
+ PERFORM pg_temp.sp_fx_add(40, j, 'commitment', 'person', NULL, 'us', 'Send the owner the colour chart.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will send the owner the colour chart.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'record_not_person');
+ -- 41 and 42 (M3). Our own message with no named sender: a later row of ours closes it, a customer's never.
+ j := pg_temp.sp_job(41, 1, 'SWF-90045');
+ own := pg_temp.sp_party(41, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_ev(41, 1, j, 'client.sms_out', 'sms', 'outbound', 'We will book the install date by Friday.', tn, 'G-OWN');
+ e2 := pg_temp.sp_ev(41, 2, j, 'client.sms_out', 'sms', 'outbound', 'Your install is booked for Tuesday the 8th.', '2026-09-03 02:00Z', 'G-OWN');
+ e3 := pg_temp.sp_text(41, 3, j, 'Tuesday works for us, thanks.', '2026-09-03 03:00Z', 'G-OWN');
+ PERFORM pg_temp.sp_fx_add(41, j, 'commitment', 'person', NULL, 'us', 'Book the install date by Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'We will book the install date by Friday.')),
+  jsonb_build_array(pg_temp.sp_cb(e2, 'Your install is booked for Tuesday the 8th.')), 'C', 'closes');
+ PERFORM pg_temp.sp_fx_add(42, j, 'commitment', 'person', NULL, 'us', 'Book the install date by the Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'We will book the install date by Friday.')),
+  jsonb_build_array(pg_temp.sp_cb(e3, 'Tuesday works for us, thanks.')), 'O', 'other_person');
+ PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 42, 'the 42 fixtures');
 END $c$;
 
 -- 3. Today's answers: the bodies before this migration (its down, undone at the savepoint).
