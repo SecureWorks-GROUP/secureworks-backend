@@ -34,9 +34,15 @@
 // "checked" press (a named person) releases an earlier unconfirmed send.
 import {
   claimSend,
+  debtReportSendKey,
+  debtStatementSendKey,
   readSendHolds,
   reconcileActor,
+  reconcileHeld,
   reconcileThenClaim,
+  SEND_CLAIM_LEASE_SECONDS,
+  SEND_IN_PROGRESS_MESSAGE,
+  SEND_IN_PROGRESS_RECOVERY,
   SEND_UNCERTAIN_MESSAGE,
   SEND_UNCERTAIN_RECOVERY,
   type SendClaimRefusal,
@@ -104,6 +110,7 @@ import {
   type DebtWsStore,
   type WsLogRow,
   type WsReportRow,
+  type WsStatementRow,
   type WsSuggestion,
 } from "./debt_ws_store.ts";
 import {
@@ -208,6 +215,12 @@ export interface DebtWsDeps {
       { name: string; contentType: string; contentBytes: string }
     >;
     internal_report?: "debt_report";
+    /**
+     * The debt item's claim: send-outlook-email joins this attempt (its email content key
+     * is added to it) instead of opening a separate one, so one checked press reconciles
+     * both the item and the content.
+     */
+    send_claim?: { item_key: string; attempt_id: string };
   }) => Promise<{ ok: boolean; status: number; error: string | null; reply?: unknown }>;
   /** Xero's Bank Summary read live: one closing balance per bank account. */
   bankSummary: () => Promise<BankAccountBalance[]>;
@@ -2203,19 +2216,35 @@ function claimRefusalError(result: SendClaimRefusal): DebtWsError {
  * Claims the item for one send attempt. A "checked" press releases the earlier unconfirmed
  * attempt first (only that one, by name, compare-and-set, never a live send), recording
  * who checked. Returns the attempts it released.
+ *
+ * legacyKeys are keys this item was claimed under before (debt_statement:<company>, with
+ * no org). They are never claimed again, but a hold on one still holds the item, and a
+ * checked press reconciles it the same way.
  */
 async function claimItem(
   deps: DebtWsDeps,
   input: {
     key: string;
+    legacyKeys?: string[];
     attemptId: string;
     actor: Actor;
     checked: boolean;
+    checkedAt: string;
     detail: Record<string, unknown>;
   },
 ): Promise<{ ok: true; released: SendHold[] } | { ok: false; refusal: SendClaimRefusal }> {
   const client = deps.store.claims;
+  const legacy = (input.legacyKeys ?? []).filter((k) => k && k !== input.key);
+  const legacyHolds = legacy.length ? await readSendHolds(client, legacy) : null;
+  if (legacyHolds && !legacyHolds.ok) return { ok: false, refusal: legacyHolds };
+  const heldUnderLegacy = legacyHolds?.ok ? legacyHolds.holds : [];
   if (!input.checked) {
+    if (heldUnderLegacy.length) {
+      return {
+        ok: false,
+        refusal: { ok: false, code: "send_claim_held", held: heldUnderLegacy },
+      };
+    }
     const claim = await claimSend(client, {
       keys: [input.key],
       attemptId: input.attemptId,
@@ -2226,16 +2255,72 @@ async function claimItem(
   }
   const before = await readSendHolds(client, [input.key]);
   if (!before.ok) return { ok: false, refusal: before };
+  if (heldUnderLegacy.length) {
+    const legacyReconciled = await reconcileHeld(client, {
+      keys: legacy,
+      result: "not_sent",
+      actor: checkerOf(input.actor),
+      checkedAt: input.checkedAt,
+      evidence: "sent_items_checked",
+    });
+    if (!legacyReconciled.ok) return { ok: false, refusal: legacyReconciled };
+  }
   const claim = await reconcileThenClaim(client, {
     keys: [input.key],
     attemptId: input.attemptId,
     actor: checkerOf(input.actor),
-    checkedAt: deps.now().toISOString(),
+    checkedAt: input.checkedAt,
     evidence: "sent_items_checked",
     detail: input.detail,
   });
-  return claim.ok ? { ok: true, released: before.holds } : { ok: false, refusal: claim };
+  return claim.ok
+    ? { ok: true, released: [...heldUnderLegacy, ...before.holds] }
+    : { ok: false, refusal: claim };
 }
+
+/**
+ * Answers for the item's rows still 'sending' before a new send. A row whose attempt this
+ * press's claim released is closed as failed. Any other (a legacy row with no claim, or
+ * one whose row write was lost) is an email that may have gone: an unchecked press is
+ * refused (send_not_confirmed). A checked press releases it only once it is older than
+ * the send lease; until then that send may still be live and the press is refused
+ * (send_in_progress). Every release records who checked and when. Nothing is released
+ * unless every row may be.
+ */
+async function answerUnconfirmedRows<R extends { id: string; created_at?: string }>(
+  deps: DebtWsDeps,
+  input: {
+    rows: R[];
+    releasedRows: Set<string>;
+    checker: string | null;
+    checkedAt: string;
+    release: (id: string, patch: { status: "failed"; error: string }) => Promise<boolean>;
+  },
+): Promise<
+  | { ok: true; reconciled: boolean }
+  | { ok: false; code: "send_not_confirmed" | "send_in_progress"; row: R }
+> {
+  for (const row of input.rows) {
+    if (input.releasedRows.has(row.id)) continue;
+    const at = Date.parse(String(row.created_at ?? ""));
+    // An unreadable age is treated as live: it never releases.
+    const live = !Number.isFinite(at) ||
+      deps.now().getTime() - at < SEND_CLAIM_LEASE_SECONDS * 1000;
+    if (live) return { ok: false, code: "send_in_progress", row };
+    if (!input.checker) return { ok: false, code: "send_not_confirmed", row };
+  }
+  for (const row of input.rows) {
+    await input.release(row.id, {
+      status: "failed",
+      error: `reconciled: not in Sent Items, checked by ${input.checker} at ${input.checkedAt}`
+        .slice(0, 500),
+    });
+  }
+  return { ok: true, reconciled: input.rows.length > 0 };
+}
+
+/** The fixed wording for a legacy row that may still be sending (never provider text). */
+const STILL_SENDING = `${SEND_IN_PROGRESS_MESSAGE} ${SEND_IN_PROGRESS_RECOVERY}`;
 
 /** Settles a claim. A lost settle leaves the claim holding the item, which is safe. */
 async function settleItem(
@@ -2244,8 +2329,13 @@ async function settleItem(
   state: "sent" | "failed" | "outcome_unknown",
   detail: Record<string, unknown>,
 ) {
-  const settled = await settleSend(deps.store.claims, attemptId, state, detail);
-  if (!settled.ok) {
+  // The email door joins this attempt (send_claim), so the debt side settles as the caller:
+  // while the door's dispatch is open the settle is deferred and the door's own settle
+  // records the outcome; once the door has settled, this one finds it already settled.
+  const settled = await settleSend(deps.store.claims, attemptId, state, detail, {
+    settler: "caller",
+  });
+  if (!settled.ok && settled.code !== "send_claim_not_sending") {
     console.error("[debt_ws] send claim not settled", attemptId, state, settled.code);
   }
 }
@@ -2340,18 +2430,24 @@ export async function debtWsStatementSend(
   if (!company.to_email) {
     await refuseStatement("no_email", "No accounts email set for this company");
   }
-  // Statement identity: the item is the customer (debt_statement:<company>), not the week.
+  // Statement identity: the item is the customer (debt_statement:<org>:<company>), not the week.
   // A statement whose send is not confirmed holds every later statement to that customer,
   // next week's included, until someone checks Sent Items and presses again marked as
   // checked; a statement sent and confirmed frees it. The week's row below is the record
   // of what went; the claim is what stops a second email.
+  // The key carries the org (debt_statement:<org>:<company>); a hold still on the older
+  // debt_statement:<company> key from before holds the customer too.
   const rowId = crypto.randomUUID();
   const attemptId = attemptFor("debt_statement", rowId);
+  const itemKey = debtStatementSendKey(deps.store.orgId, key);
+  const checkedAt = deps.now().toISOString();
   const item = await claimItem(deps, {
-    key: `debt_statement:${key}`,
+    key: itemKey,
+    legacyKeys: [`debt_statement:${key}`],
     attemptId,
     actor,
     checked: sentItemsChecked,
+    checkedAt,
     detail: { statement_id: rowId, company_key: key, week_start: weekStart },
   });
   if (!item.ok) {
@@ -2373,28 +2469,36 @@ export async function debtWsStatementSend(
     (item.ok ? item.released : []).map((h) => rowOfAttempt("debt_statement", h.attempt_id))
       .filter((id): id is string => !!id),
   );
-  // A week's row still 'sending' is an email that may have gone. One released by the
-  // checked press above is closed as failed (only while it is still 'sending'). One with no
-  // claim of its own (sent before claims existed) holds the week the same way until a
-  // checked press releases it.
-  const unconfirmed = (await deps.store.statementsForWeek(weekStart)).filter((s) =>
-    s.company_key === key && s.status === "sending"
-  );
-  let reconciled = releasedRows.size > 0;
-  for (const row of unconfirmed) {
-    if (!releasedRows.has(row.id) && !checker) {
-      await refuseFree("send_not_confirmed", MAY_HAVE_GONE, 409, {
-        statement_id: row.id,
-        state: "outcome_unknown",
-        retry_safe: false,
-      });
-    }
-    await deps.store.releaseStatement(row.id, {
-      status: "failed",
-      error: `reconciled: not in Sent Items, checked by ${actor.label}`.slice(0, 500),
-    });
-    reconciled = true;
+  // A row still 'sending' to this customer, in any week, is an email that may have gone
+  // (answerUnconfirmedRows). One with no claim of its own (sent before claims existed)
+  // holds the customer the same way as a claim does.
+  let unconfirmed: WsStatementRow[];
+  try {
+    unconfirmed = await deps.store.unconfirmedStatementsForCompany(key);
+  } catch (error) {
+    await settleItem(deps, attemptId, "failed", { refused: "statements_unreadable" });
+    throw error;
   }
+  const answered = await answerUnconfirmedRows(deps, {
+    rows: unconfirmed,
+    releasedRows,
+    checker,
+    checkedAt,
+    release: (id, patch) => deps.store.releaseStatement(id, patch),
+  });
+  if (!answered.ok) {
+    await refuseFree(
+      answered.code,
+      answered.code === "send_in_progress" ? STILL_SENDING : MAY_HAVE_GONE,
+      409,
+      {
+        statement_id: answered.row.id,
+        state: answered.code === "send_in_progress" ? "sending" : "outcome_unknown",
+        retry_safe: false,
+      },
+    );
+  }
+  const reconciled = releasedRows.size > 0 || (answered.ok && answered.reconciled);
   if (company.statement.status === "sent" && !reconciled) {
     await refuseFree(
       "already_sent",
@@ -2517,6 +2621,7 @@ export async function debtWsStatementSend(
       to: company.to_email!,
       subject: view.subject,
       htmlBody: view.html,
+      send_claim: { item_key: itemKey, attempt_id: attemptId },
     });
   } catch (_error) {
     // The email may have gone: the claim holds the customer and the row stays 'sending'.
@@ -3809,11 +3914,15 @@ async function sendDebtReport(
   // old it is, until a checked press releases it. Only a manual checked press releases.
   const rowId = crypto.randomUUID();
   const attemptId = attemptFor("debt_report", rowId);
+  const itemKey = debtReportSendKey(deps.store.orgId);
+  const checkedAt = deps.now().toISOString();
   const item = await claimItem(deps, {
-    key: `debt_report:${deps.store.orgId}`,
+    key: itemKey,
+    legacyKeys: [`debt_report:${deps.store.orgId}`],
     attemptId,
     actor,
     checked: checked && kind === "manual",
+    checkedAt,
     detail: { report_id: rowId, kind, week_start: weekStart },
   });
   if (!item.ok) {
@@ -3821,36 +3930,36 @@ async function sendDebtReport(
     throw claimRefusalError(item.refusal);
   }
   const free = (code: string) => settleItem(deps, attemptId, "failed", { refused: code });
-  // Report rows still 'sending'. One released by the checked press above is closed as
-  // failed (only while it is still 'sending'). One with no claim of its own (sent before
-  // claims existed) holds the report until a manual checked press releases it.
+  // Report rows still 'sending', however old and however many newer rows there are
+  // (answerUnconfirmedRows). One with no claim of its own (sent before claims existed)
+  // holds the report until a manual checked press releases it.
   const releasedRows = new Set(
     item.released.map((h) => rowOfAttempt("debt_report", h.attempt_id))
       .filter((id): id is string => !!id),
   );
   let unconfirmed: WsReportRow[];
   try {
-    unconfirmed = (await deps.store.reportSends(50)).filter((r) =>
-      r.status === "sending"
-    );
+    unconfirmed = await deps.store.unconfirmedReports();
   } catch (error) {
     await free("report_sends_unreadable");
     throw error;
   }
   const checker = checked && kind === "manual" ? checkerOf(actor) : null;
-  for (const row of unconfirmed) {
-    if (!releasedRows.has(row.id) && !checker) {
-      await free("send_not_confirmed");
-      if (kind === "auto") return { held: null } as const;
-      throw new DebtWsError(MAY_HAVE_GONE, 409, "send_not_confirmed", {
-        report_id: row.id,
-        state: "outcome_unknown",
-        retry_safe: false,
-      });
-    }
-    await deps.store.releaseReport(row.id, {
-      status: "failed",
-      error: `reconciled: not in Sent Items, checked by ${actor.label}`.slice(0, 500),
+  const answered = await answerUnconfirmedRows(deps, {
+    rows: unconfirmed,
+    releasedRows,
+    checker,
+    checkedAt,
+    release: (id, patch) => deps.store.releaseReport(id, patch),
+  });
+  if (!answered.ok) {
+    await free(answered.code);
+    if (kind === "auto") return { held: null } as const;
+    const inProgress = answered.code === "send_in_progress";
+    throw new DebtWsError(inProgress ? STILL_SENDING : MAY_HAVE_GONE, 409, answered.code, {
+      report_id: answered.row.id,
+      state: inProgress ? "sending" : "outcome_unknown",
+      retry_safe: false,
     });
   }
   let claim: WsReportRow | null;
@@ -3951,6 +4060,7 @@ async function sendDebtReport(
         contentBytes: pdfBase64,
       }],
       internal_report: "debt_report",
+      send_claim: { item_key: itemKey, attempt_id: attemptId },
     });
   } catch (_error) {
     // The email may have gone: the claim holds the report and the row stays 'sending'.

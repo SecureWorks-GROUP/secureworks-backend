@@ -138,6 +138,8 @@ export interface WsStatementRow {
   approved_by: string | null;
   sent_at: string | null;
   error: string | null;
+  /** When the row was written (the claim). Legacy 'sending' rows are aged by it. */
+  created_at?: string;
 }
 
 export interface WsJanListRow {
@@ -223,6 +225,11 @@ export interface DebtWsStore {
   ): Promise<boolean>;
   statementsForWeek(weekStart: string): Promise<WsStatementRow[]>;
   /**
+   * Every statement to one company still 'sending' (not confirmed), in any week, oldest
+   * first. A statement that may have gone holds every later one to that customer.
+   */
+  unconfirmedStatementsForCompany(companyKey: string): Promise<WsStatementRow[]>;
+  /**
    * The claim: inserts a 'sending' statement row (with the id given, which names its send
    * attempt). Null when this week's is claimed or sent.
    */
@@ -286,6 +293,8 @@ export interface DebtWsStore {
   lastInvoiceSync(): Promise<string | null>;
   /** The newest report sends, newest first (without the HTML and PDF copies). */
   reportSends(limit: number): Promise<WsReportRow[]>;
+  /** Every report send still 'sending' (not confirmed), however old, oldest first. No cap. */
+  unconfirmedReports(): Promise<WsReportRow[]>;
   /** The claim: inserts a 'sending' report row. Null when this week's auto report is taken. */
   claimReport(row: WsReportClaim): Promise<WsReportRow | null>;
   settleReport(id: string, patch: WsReportSettle): Promise<void>;
@@ -349,6 +358,9 @@ export interface WsReportSettle {
   pdf_base64?: string;
   pdf_sha256?: string;
 }
+
+const STATEMENT_ROW_SELECT =
+  "id, company_key, week_start, xero_invoice_ids, total, to_email, status, approved_by, sent_at, error, created_at";
 
 const REPORT_ROW_SELECT =
   "id, kind, week_start, status, to_emails, cc_emails, subject, sent_by_name, error, created_at, sent_at";
@@ -783,11 +795,19 @@ export function createSupabaseDebtWsStore(
     },
     async statementsForWeek(weekStart) {
       const { data, error } = await client.from("debt_ws_statements").select(
-        "id, company_key, week_start, xero_invoice_ids, total, to_email, status, approved_by, sent_at, error",
+        STATEMENT_ROW_SELECT,
       ).eq("org_id", orgId).eq("week_start", weekStart).order("created_at", {
         ascending: true,
       });
       if (error) readFailed("this week's statements", error);
+      return (data || []) as WsStatementRow[];
+    },
+    async unconfirmedStatementsForCompany(companyKey) {
+      const { data, error } = await client.from("debt_ws_statements").select(
+        STATEMENT_ROW_SELECT,
+      ).eq("org_id", orgId).eq("company_key", companyKey).eq("status", "sending")
+        .order("created_at", { ascending: true });
+      if (error) readFailed("the unconfirmed statements", error);
       return (data || []) as WsStatementRow[];
     },
     async claimStatement(row) {
@@ -796,7 +816,7 @@ export function createSupabaseDebtWsStore(
         org_id: orgId,
         status: "sending",
       }).select(
-        "id, company_key, week_start, xero_invoice_ids, total, to_email, status, approved_by, sent_at, error",
+        STATEMENT_ROW_SELECT,
       ).single();
       if (!error) return data as WsStatementRow;
       if (String(error?.code ?? "") === "23505") return null;
@@ -940,6 +960,15 @@ export function createSupabaseDebtWsStore(
         limit,
       );
       if (error) readFailed("the report sends", error);
+      return (data || []) as WsReportRow[];
+    },
+    async unconfirmedReports() {
+      const { data, error } = await client.from("debt_ws_reports").select(
+        REPORT_ROW_SELECT,
+      ).eq("org_id", orgId).eq("status", "sending").order("created_at", {
+        ascending: true,
+      });
+      if (error) readFailed("the unconfirmed report sends", error);
       return (data || []) as WsReportRow[];
     },
     async claimReport(row) {
