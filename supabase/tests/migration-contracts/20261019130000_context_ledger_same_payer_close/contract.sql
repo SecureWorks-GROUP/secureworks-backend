@@ -321,7 +321,7 @@ BEGIN
 END $c$;
 
 -- 3 to 5. The 38 fixtures, four review r2 traps (39 to 42), seven review r3 traps (43 to 49), five
--- review r4 traps (50 to 54), nine review r5 traps (55 to 63), three review r6 traps (64 to 66) and three review r7 traps (67 to 69).
+-- review r4 traps (50 to 54), nine review r5 traps (55 to 63), three review r6 traps (64 to 66), three review r7 traps (67 to 69) and seven review r8 traps (70 to 76).
 BEGIN;
 DO $c$
 DECLARE j uuid; j2 uuid; j3 uuid; own uuid; nb uuid; nb2 uuid; e1 uuid; e2 uuid; e3 uuid; x1 uuid; x2 uuid; x3 uuid; t1 timestamptz := '2026-09-01 02:00Z';
@@ -880,7 +880,75 @@ BEGIN
  PERFORM pg_temp.sp_fx_add(69, j, 'commitment', 'person', NULL, 'customer', 'The owner will send photos of the side gate.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'The owner said they will send photos of the side gate.')),
   jsonb_build_array(pg_temp.sp_cb(e2, 'My partner will send the photos tonight.')), 'O?', 'author_unknown');
- PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 69, 'the 69 fixtures');
+ -- Review r8 traps (M13, M14).
+ -- 70 (M13). Three parties; our own text, sent to the first neighbour alone, asks them to pay their share.
+ -- Their own paid FINBAL50 invoice closes it, whatever the owner and the second neighbour still owe.
+ j := pg_temp.sp_job(70, 1, 'SWF-90073');
+ own := pg_temp.sp_party(70, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(70, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ nb2 := pg_temp.sp_party(70, 3, j, 'nb-2', 'neighbour', false, 'G-NB2', 'XC-NB2');
+ e1 := pg_temp.sp_ev(70, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(70, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90073-FINBAL50', 'Balance of the fence', 1500, 1500, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(70, 2, j, 'ACCREC', 'PAID', 'SWF-90073-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ x3 := pg_temp.sp_inv(70, 3, j, 'ACCREC', 'AUTHORISED', 'SWF-90073-C-FINBAL50', 'Balance of the fence', 750, 750, 0, NULL, nb2, 'XC-NB2');
+ PERFORM pg_temp.sp_fx_add(70, j, 'commitment', 'payment', 'payment', 'us', 'The first neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'C', 'closes');
+ -- 71 (M13). As 70, the second neighbour's paid invoice cited: another payer's invoice never closes it
+ -- (the first neighbour has no invoice yet).
+ j := pg_temp.sp_job(71, 1, 'SWF-90074');
+ own := pg_temp.sp_party(71, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(71, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ nb2 := pg_temp.sp_party(71, 3, j, 'nb-2', 'neighbour', false, 'G-NB2', 'XC-NB2');
+ e1 := pg_temp.sp_ev(71, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(71, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90074-FINBAL50', 'Balance of the fence', 1500, 1500, 0, NULL, own, 'XC-OWN');
+ x3 := pg_temp.sp_inv(71, 3, j, 'ACCREC', 'PAID', 'SWF-90074-C-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb2, 'XC-NB2');
+ PERFORM pg_temp.sp_fx_add(71, j, 'commitment', 'payment', 'payment', 'us', 'The first neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x3)), 'O', 'other_payer');
+ -- 72 (M13). As 70, our own text with no recipient read (no contact, no recipients): payer not certain.
+ j := pg_temp.sp_job(72, 1, 'SWF-90075');
+ own := pg_temp.sp_party(72, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(72, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ nb2 := pg_temp.sp_party(72, 3, j, 'nb-2', 'neighbour', false, 'G-NB2', 'XC-NB2');
+ e1 := pg_temp.sp_ev(72, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, NULL);
+ x2 := pg_temp.sp_inv(72, 2, j, 'ACCREC', 'PAID', 'SWF-90075-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(72, j, 'commitment', 'payment', 'payment', 'us', 'The first neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'recipient_unknown');
+ -- 73 (M13). As 70, our own text sent to a contact that is no party on the job: payer not certain.
+ j := pg_temp.sp_job(73, 1, 'SWF-90076');
+ own := pg_temp.sp_party(73, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(73, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ nb2 := pg_temp.sp_party(73, 3, j, 'nb-2', 'neighbour', false, 'G-NB2', 'XC-NB2');
+ e1 := pg_temp.sp_ev(73, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-ELSE');
+ x2 := pg_temp.sp_inv(73, 2, j, 'ACCREC', 'PAID', 'SWF-90076-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(73, j, 'commitment', 'payment', 'payment', 'us', 'The first neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'unmatched_recipient');
+ -- 74 (M13). As 70, the recipient's contact carried by both neighbours: payer not certain.
+ j := pg_temp.sp_job(74, 1, 'SWF-90077');
+ own := pg_temp.sp_party(74, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(74, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ nb2 := pg_temp.sp_party(74, 3, j, 'nb-2', 'neighbour', false, 'G-NB1', 'XC-NB2');
+ e1 := pg_temp.sp_ev(74, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x2 := pg_temp.sp_inv(74, 2, j, 'ACCREC', 'PAID', 'SWF-90077-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(74, j, 'commitment', 'payment', 'payment', 'us', 'The first neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'ambiguous_recipient');
+ -- 75 (M14). An archived job whose only invoices are two DELETED deposits (never issued): payer not certain.
+ j := pg_temp.sp_job(75, 1, 'SWF-90078', 'fencing', 'archived');
+ own := pg_temp.sp_party(75, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_text(75, 1, j, 'I will pay the deposit this week.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(75, 1, j, 'ACCREC', 'DELETED', 'SWF-90078-DEP', 'Deposit 30%', 900, 0, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(75, 2, j, 'ACCREC', 'DELETED', 'SWF-90078-DEP2', 'Deposit 30%', 900, 0, 0, NULL, own, 'XC-OWN');
+ PERFORM pg_temp.sp_fx_add(75, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay the deposit this week.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the deposit this week.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'deleted_only');
+ -- 76 (M14). A lost job whose only invoice is a VOIDED deposit (issued, then cancelled): voided_only stays
+ -- certain, as fixture 9.
+ j := pg_temp.sp_job(76, 1, 'SWF-90079', 'fencing', 'lost');
+ own := pg_temp.sp_party(76, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_text(76, 1, j, 'I will pay the deposit this week.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(76, 1, j, 'ACCREC', 'VOIDED', 'SWF-90079-DEP', 'Deposit 30%', 900, 0, 900, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(76, 2, j, 'ACCREC', 'DELETED', 'SWF-90079-DEP2', 'Deposit 30%', 900, 0, 0, NULL, own, 'XC-OWN');
+ PERFORM pg_temp.sp_fx_add(76, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay the deposit this week.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the deposit this week.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O', 'voided_only');
+ PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 76, 'the 76 fixtures');
 END $c$;
 
 -- 3. Today's answers: the bodies before this migration (its down, undone at the savepoint).
