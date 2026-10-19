@@ -8511,8 +8511,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
               body: JSON.stringify(payload),
             })
-            const text = resp.ok ? null : (await resp.text().catch(() => '')).slice(0, 500)
-            return { ok: resp.ok, status: resp.status, error: text }
+            const text = resp.ok ? null : await resp.text().catch(() => '')
+            let reply: unknown = null
+            if (text) { try { reply = JSON.parse(text) } catch { /* not JSON: reads as unknown */ } }
+            return { ok: resp.ok, status: resp.status, error: text === null ? null : text.slice(0, 500), reply }
           },
           invoicePdf: (id: string) => getInvoicePdf(client, new URLSearchParams({ xero_invoice_id: id }), {
             mode: authMode,

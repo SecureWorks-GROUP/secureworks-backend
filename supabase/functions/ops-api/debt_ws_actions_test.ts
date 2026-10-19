@@ -1161,6 +1161,54 @@ Deno.test("statement: send emails HTML once a week, after the live re-check", as
   assertEquals(ov.companies[0].statement.status, "sent");
 });
 
+Deno.test("statement: an unknown reply keeps the week's claim and holds the next press until Sent Items is checked", async () => {
+  const store = new FakeStore();
+  const options: Parameters<typeof fakeDeps>[1] = {
+    env: sendingOn(store),
+    emailResult: {
+      ok: false, status: 502, error: "raw provider text",
+      reply: { state: "outcome_unknown", code: "provider_outcome_unknown", retry_safe: false },
+    },
+  };
+  const { deps, rec } = fakeDeps(store, options);
+  const first = await call(deps, "debt_ws_statement_send", SHAUN, { company_key: MLB_CONTACT });
+  assertEquals(first.status, 502);
+  assertEquals(first.body.code, "send_not_confirmed");
+  assertEquals((first.body as any).retry_safe, false);
+  assert(String(first.body.error).includes("Sent Items"));
+  assert(!/nothing was sent/i.test(String(first.body.error)));
+  assert(!JSON.stringify(first.body).includes("raw provider text"));
+  assertEquals(store.statementRows[0].status, "sending");
+
+  const second = await call(deps, "debt_ws_statement_send", SHAUN, { company_key: MLB_CONTACT });
+  assertEquals(second.status, 409);
+  assertEquals(second.body.code, "send_not_confirmed");
+  assertEquals(rec.emails.length, 1);
+
+  options.emailResult = { ok: true, status: 200, error: null };
+  const third = await call(deps, "debt_ws_statement_send", SHAUN, {
+    company_key: MLB_CONTACT, sent_items_checked: true,
+  });
+  assertEquals(third.status, 200);
+  assertEquals(rec.emails.length, 2);
+  assertEquals(store.statementRows[0].status, "failed");
+  assert(String(store.statementRows[0].error).startsWith("reconciled"));
+  assertEquals(store.statementRows[1].status, "sent");
+});
+
+Deno.test("statement: a reply that proves nothing went is failed and frees the week", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, {
+    env: sendingOn(store),
+    emailResult: { ok: false, status: 409, error: "fence", reply: { state: "refused", fact: "fence" } },
+  });
+  const res = await call(deps, "debt_ws_statement_send", SHAUN, { company_key: MLB_CONTACT });
+  assertEquals(res.body.code, "email_failed");
+  assertEquals(store.statementRows[0].status, "failed");
+  await call(deps, "debt_ws_statement_send", SHAUN, { company_key: MLB_CONTACT });
+  assertEquals(rec.emails.length, 2);
+});
+
 Deno.test("statement: everything paid since drops to nothing due; no email set refuses", async () => {
   const store = new FakeStore();
   const { deps, rec } = fakeDeps(store, {

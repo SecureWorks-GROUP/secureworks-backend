@@ -400,7 +400,7 @@ Deno.test("send: a refused email keeps the copy as failed; an unconfirmed one st
   const store = new FakeStore();
   store.settingsRow.sending_enabled = true;
   const { deps } = fakeDeps(store, {
-    emailResult: { ok: false, status: 409, error: "fence" },
+    emailResult: { ok: false, status: 409, error: "fence", reply: { state: "refused", fact: "fence" } },
   });
   const res = await call(deps, "debt_ws_report_send", SHAUN);
   assertEquals(res.status, 502);
@@ -415,6 +415,40 @@ Deno.test("send: a refused email keeps the copy as failed; an unconfirmed one st
   // While it is unconfirmed, a second click inside two minutes is still refused.
   const again = await call(d2, "debt_ws_report_send", SHAUN);
   assertEquals((again.body as any).code, "recently_sent");
+});
+
+Deno.test("send: an unknown reply keeps the claim and holds the next send until Sent Items is checked", async () => {
+  const store = new FakeStore();
+  store.settingsRow.sending_enabled = true;
+  const options: Parameters<typeof fakeDeps>[1] = {
+    emailResult: {
+      ok: false, status: 502, error: "raw provider text",
+      reply: { state: "outcome_unknown", code: "provider_outcome_unknown", retry_safe: false },
+    },
+  };
+  const { deps, rec } = fakeDeps(store, options);
+  const first = await call(deps, "debt_ws_report_send", SHAUN);
+  assertEquals(first.status, 502);
+  assertEquals((first.body as any).code, "send_not_confirmed");
+  assertEquals((first.body as any).retry_safe, false);
+  assertStringIncludes(String((first.body as any).error), "Sent Items");
+  assert(!/nothing was sent/i.test(String((first.body as any).error)));
+  assert(!JSON.stringify(first.body).includes("raw provider text"));
+  assertEquals(store.reportRows[0].status, "sending");
+
+  // Past the two-minute double-click window, the next send is still refused.
+  options!.now = new Date(NOW.getTime() + 5 * 60_000);
+  const second = await call(deps, "debt_ws_report_send", SHAUN);
+  assertEquals((second.body as any).code, "send_not_confirmed");
+  assertEquals(rec.emails.length, 1);
+
+  // Sent Items checked: the old row is released as failed and the report goes.
+  options.emailResult = { ok: true, status: 200, error: null };
+  const third = await call(deps, "debt_ws_report_send", SHAUN, { sent_items_checked: true });
+  assertEquals(third.status, 200);
+  assertEquals(rec.emails.length, 2);
+  assertEquals(store.reportRows[0].status, "failed");
+  assertStringIncludes(String(store.reportRows[0].error), "reconciled");
 });
 
 Deno.test("send: a PDF that cannot be drawn sends nothing and releases the claim", async () => {
