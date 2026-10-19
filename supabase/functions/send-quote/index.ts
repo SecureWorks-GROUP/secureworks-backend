@@ -679,8 +679,10 @@ async function recordReleasedQuoteRevision(
   }
 }
 
-if (import.meta.main) {
-serve(async (req: Request) => {
+// The request handler, exported so tests can drive it with a fake client
+// (deps.sb). Production passes no deps and gets today's service client.
+// deno-lint-ignore no-explicit-any
+export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): Promise<Response> {
   const url = new URL(req.url)
   const path = url.pathname.split('/').pop()
 
@@ -695,7 +697,7 @@ serve(async (req: Request) => {
     return new Response(null, { headers: corsHeaders })
   }
 
-  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const sb = deps.sb ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
   try {
     // ── Auth (only for send/send-invoice/send-runs — view/accept/decline are public client endpoints) ──
@@ -1770,7 +1772,15 @@ serve(async (req: Request) => {
         const jobStatus = sourceRunLabel === null
           ? (everyQuotePartyAccepted(snapshot.documents, snapshot.acceptances) ? 'accepted' : 'partially_accepted')
           : quoteRunAcceptanceDecision(snapshot.documents, snapshot.acceptances, sourceRunLabel, snapshot.runNeighbourId).jobStatus
-        let acceptEvent: Record<string, unknown> | null = null
+        // Every atomic acceptance writes its acceptance event in the same
+        // transaction: quote_accepted (whole quote, today's detail) or
+        // quote_run_accepted (run). The database stamps document_id,
+        // accepted_at (the acceptance instant), run_label and new_status.
+        let acceptEvent: Record<string, unknown> = {
+          accepted_via: 'share_link',
+          contact_id: doc.job_contact_id || null,
+          contact_name: doc.job_contacts?.client_name || '',
+        }
         if (sourceRunLabel === null) {
           // The quote_accepted job_event, as the whole-quote path writes it
           // today, now inside the transaction.
@@ -1988,7 +1998,8 @@ serve(async (req: Request) => {
         await insertCapturedEvidence(sb, {
           event_type: 'quote.run_accepted',
           source: 'send-quote',
-          occurred_at: new Date().toISOString(),
+          // The acceptance instant on the atomic path (R2); today's clock read otherwise.
+          occurred_at: atomicDocId !== null ? acceptedAt : new Date().toISOString(),
           recorded_at: new Date().toISOString(),
           entity_type: 'job',
           entity_id: doc.job_id,
@@ -3903,7 +3914,10 @@ serve(async (req: Request) => {
     console.error('Send-quote error:', err)
     return jsonResponse({ error: err.message || 'Internal error' }, 500, corsHeaders)
   }
-})
+}
+
+if (import.meta.main) {
+  serve((req: Request) => sendQuoteHandler(req))
 }
 
 // ════════════════════════════════════════════════════════════

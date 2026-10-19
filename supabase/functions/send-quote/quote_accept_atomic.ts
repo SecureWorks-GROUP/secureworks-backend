@@ -121,7 +121,7 @@ export type AtomicAcceptInput = {
   fingerprint: string
   runLabel: string | null
   runNeighbour: string | null
-  acceptEvent: Record<string, unknown> | null
+  acceptEvent: Record<string, unknown>
 }
 
 export type AtomicAcceptOutcome =

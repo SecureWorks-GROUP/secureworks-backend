@@ -71,7 +71,8 @@ COMMENT ON TABLE public.quote_acceptance_attempts IS
 -- Only event- and attempt-based kinds can be resolved; the condition kinds
 -- clear when the data changes.
 CREATE TABLE public.quote_acceptance_gap_resolutions (
-  kind text NOT NULL CHECK (kind IN ('review_needed', 'settle_run_unsettled', 'acceptance_handler_unfinished')),
+  kind text NOT NULL CHECK (kind IN ('review_needed', 'settle_run_unsettled', 'acceptance_handler_unfinished',
+                                     'accepted_document_job_not_won')),
   ref text NOT NULL,
   resolved_by uuid NOT NULL,
   resolved_at timestamptz NOT NULL DEFAULT now(),
@@ -192,6 +193,11 @@ BEGIN
   IF p_document_id IS NULL OR p_request_id IS NULL OR p_accepted_at IS NULL OR p_share_token IS NULL THEN
     RAISE EXCEPTION 'quote_accept_bad_input' USING ERRCODE = '22023';
   END IF;
+  -- Every acceptance, whole quote or run, carries its acceptance event, written
+  -- in this transaction (CIO condition 1).
+  IF p_accept_event IS NULL THEN
+    RAISE EXCEPTION 'quote_accept_event_missing' USING ERRCODE = '22023';
+  END IF;
   SELECT d.job_id INTO v_job FROM public.job_documents d WHERE d.id = p_document_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'quote_accept_document_missing' USING ERRCODE = 'P0002';
@@ -249,9 +255,6 @@ BEGIN
   IF v_run IS NULL THEN
     IF p_job_status IS NULL OR p_job_status NOT IN ('accepted', 'partially_accepted') THEN
       RAISE EXCEPTION 'quote_accept_bad_status: %', p_job_status USING ERRCODE = '22023';
-    END IF;
-    IF p_accept_event IS NULL THEN
-      RAISE EXCEPTION 'quote_accept_event_missing' USING ERRCODE = '22023';
     END IF;
     -- The same recipient's other whole-quote option already accepted.
     IF EXISTS (SELECT 1 FROM public.job_documents d
@@ -324,10 +327,14 @@ BEGIN
                                'previous_status', v_prev_status, 'new_status', p_job_status));
   END IF;
 
-  IF p_accept_event IS NOT NULL THEN
-    INSERT INTO public.job_events (job_id, event_type, detail_json)
-    VALUES (v_job, 'quote_accepted', p_accept_event);
-  END IF;
+  -- The acceptance event, in this transaction, stamped with the acceptance
+  -- instant (detail_json.accepted_at) whatever the caller sent: job_events
+  -- has no occurred_at, and its created_at is commit time.
+  INSERT INTO public.job_events (job_id, event_type, detail_json)
+  VALUES (v_job, CASE WHEN v_run IS NULL THEN 'quote_accepted' ELSE 'quote_run_accepted' END,
+          p_accept_event || jsonb_build_object('document_id', p_document_id, 'accepted_at', p_accepted_at,
+                                               'new_status', p_job_status)
+            || CASE WHEN v_run IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('run_label', v_run) END);
 
   INSERT INTO public.quote_acceptance_attempts (document_id, request_id, job_id, run_label, job_status,
                                                 previous_status, accepted_at)
@@ -360,9 +367,10 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) T
 
 -- R3: read-only list of what needs a person. Ids, codes and instants only.
 -- Event and attempt rows disappear only when their own (kind, ref) is
--- resolved (or, for runs and attempts, their resolved_at is set). The two
--- condition kinds (won_with_open_sibling, more_than_one_won) cannot be
--- resolved: they are listed while the condition holds.
+-- resolved (or, for runs and attempts, their resolved_at is set). The
+-- condition kinds (won_with_open_sibling, more_than_one_won,
+-- won_without_acceptance_event, won_while_superseded) cannot be resolved:
+-- they are listed while the condition holds.
 --   settle_run_unsettled     a supersede run whose work failed
 --   review_needed            every quote_option_review_needed and
 --                            quote_acceptance_review_needed event (ref: the
@@ -373,12 +381,21 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) T
 --                            winner>sibling); condition-based.
 --                            Listed only while quote_option_supersede_v1 reads
 --                            true: with marking off, open siblings are by design
---   more_than_one_won        a group with two or more won, unmarked options
+--   more_than_one_won        a group with two or more won options (marked or not)
 --                            (ref: group@won ids); condition-based
+--   won_without_acceptance_event   won job with no acceptance event (any
+--                            writer); condition-based; bounded by p_since
+--   accepted_document_job_not_won  live accepted quote document on a job
+--                            neither won nor partially accepted; resolvable
+--   won_while_superseded     won job still marked superseded; condition-based
+--   supersede_switch_unreadable  the reader could not read the supersede switch,
+--                            so open-sibling rows were not computed (CIO reader
+--                            rule: never read an empty answer as clean)
 --   acceptance_handler_unfinished  committed, the handler never reached its
 --                            response (follow-up work state unknown)
 -- p_grace: how old an attempt must be before it is listed.
-CREATE OR REPLACE FUNCTION public.quote_acceptance_gaps(p_grace interval DEFAULT interval '15 minutes')
+CREATE OR REPLACE FUNCTION public.quote_acceptance_gaps(p_grace interval DEFAULT interval '15 minutes',
+                                                        p_since timestamptz DEFAULT NULL)
 RETURNS TABLE (kind text, job_id uuid, ref text, at timestamptz)
 LANGUAGE plpgsql STABLE
 SECURITY DEFINER
@@ -387,16 +404,23 @@ AS $$
 #variable_conflict use_column
 DECLARE
   v_supersede_on boolean := false;
+  v_unreadable boolean := false;
 BEGIN
   BEGIN
     v_supersede_on := coalesce((SELECT f.enabled FROM public.feature_flags f
                                  WHERE f.flag_name = 'quote_option_supersede_v1'), false) IS TRUE;
   EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
-    -- Unreadable is off, as in the trigger: the reader still lists everything else.
+    -- Unreadable is off, as in the trigger: the reader still lists everything
+    -- else, plus one row saying so, so an empty answer is never read as clean.
     v_supersede_on := false;
+    v_unreadable := true;
   END;
   RETURN QUERY
   SELECT g.kind, g.job_id, g.ref, g.at FROM (
+    SELECT 'supersede_switch_unreadable'::text AS kind, NULL::uuid AS job_id, 'quote_option_supersede_v1'::text AS ref,
+           now() AS at
+     WHERE v_unreadable
+    UNION ALL
     SELECT 'settle_run_unsettled'::text AS kind, r.job_id, r.id::text AS ref, r.created_at AS at
       FROM public.quote_option_settle_runs r
      WHERE r.settled_at IS NULL AND r.resolved_at IS NULL
@@ -423,16 +447,51 @@ BEGIN
            max(m.accepted_at)
       FROM public.jobs m
      WHERE m.quote_option_group_id IS NOT NULL
-       AND public.fence_quote_option_status_won(m.status) AND m.superseded_at IS NULL
+       AND public.fence_quote_option_status_won(m.status)
      GROUP BY m.quote_option_group_id
     HAVING count(*) > 1
+    UNION ALL
+    -- A job in a won status with no acceptance event (quote_accepted or
+    -- quote_run_accepted) at all: any writer that moved it to won without an
+    -- acceptance, including legacy send-quote and staff writers (CIO
+    -- condition 2). Condition-based. History before the switches holds many
+    -- such jobs: p_since limits it to jobs accepted since that instant (a job
+    -- with no accepted_at is always listed).
+    SELECT 'won_without_acceptance_event', j.id, j.id::text, j.accepted_at
+      FROM public.jobs j
+     WHERE public.fence_quote_option_status_won(j.status)
+       AND (p_since IS NULL OR j.accepted_at IS NULL OR j.accepted_at >= p_since)
+       AND NOT EXISTS (SELECT 1 FROM public.job_events e
+                        WHERE e.job_id = j.id AND e.event_type IN ('quote_accepted', 'quote_run_accepted'))
+    UNION ALL
+    -- A live accepted quote document on a job that is neither won nor
+    -- partially accepted: the document committed and the status did not (the
+    -- strict-on, atomic-off inverse gap; any split write), or the job was
+    -- moved back or lost afterwards. ref: the document, which is accepted at
+    -- most once, so this kind is resolvable by a person.
+    SELECT 'accepted_document_job_not_won', d.job_id, d.id::text, d.accepted_at
+      FROM public.job_documents d
+      JOIN public.jobs j ON j.id = d.job_id
+     WHERE d.type = 'quote' AND d.accepted_at IS NOT NULL AND d.superseded_at IS NULL AND d.declined_at IS NULL
+       AND NOT public.fence_quote_option_status_won(j.status)
+       AND coalesce(j.status, '') <> 'partially_accepted'
+       AND (p_since IS NULL OR d.accepted_at >= p_since)
+    UNION ALL
+    -- A job in a won status still marked superseded: only a write that
+    -- skipped the trigger can leave this (the trigger clears a winner's own
+    -- mark). Condition-based.
+    SELECT 'won_while_superseded', w.id, w.id::text, w.accepted_at
+      FROM public.jobs w
+     WHERE w.quote_option_group_id IS NOT NULL
+       AND public.fence_quote_option_status_won(w.status) AND w.superseded_at IS NOT NULL
     UNION ALL
     SELECT 'acceptance_handler_unfinished', a.job_id, a.document_id::text, a.committed_at
       FROM public.quote_acceptance_attempts a
      WHERE a.handler_finished_at IS NULL AND a.resolved_at IS NULL AND a.committed_at < now() - p_grace
   ) g
-  WHERE g.kind IN ('won_with_open_sibling', 'more_than_one_won')
+  WHERE g.kind IN ('won_with_open_sibling', 'more_than_one_won', 'won_without_acceptance_event',
+                   'won_while_superseded', 'supersede_switch_unreadable')
      OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gap_resolutions x WHERE x.kind = g.kind AND x.ref = g.ref);
 END $$;
-REVOKE ALL ON FUNCTION public.quote_acceptance_gaps(interval) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.quote_acceptance_gaps(interval) TO service_role;
+REVOKE ALL ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) TO service_role;

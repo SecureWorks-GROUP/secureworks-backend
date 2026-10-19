@@ -29,7 +29,7 @@ CREATE FUNCTION pg_temp.qa_accept(p_doc uuid, p_status text, p_run text DEFAULT 
    coalesce(p_fp, public.quote_acceptance_fingerprint((SELECT job_id FROM public.job_documents WHERE id = p_doc))),
    p_run,
    (public.quote_acceptance_snapshot((SELECT job_id FROM public.job_documents WHERE id = p_doc), p_run)->>'run_neighbour')::uuid,
-   CASE WHEN p_event IS NULL AND p_run IS NULL THEN '{"contract":true}'::jsonb ELSE p_event END)
+   coalesce(p_event, '{"contract":true}'::jsonb))
 $$;
 
 -- Switches seeded off.
@@ -44,14 +44,14 @@ SELECT pg_temp.qa_assert(NOT EXISTS (
                     'public.quote_acceptance_fingerprint(uuid)',
                     'public.quote_acceptance_handler_finished(uuid, uuid)',
                     'public.quote_acceptance_snapshot(uuid, text)',
-                    'public.quote_acceptance_gaps(interval)']) f(fn)
+                    'public.quote_acceptance_gaps(interval, timestamptz)']) f(fn)
    WHERE has_function_privilege(r.role, f.fn, 'EXECUTE'))
  AND (SELECT bool_and(has_function_privilege('service_role', f.fn, 'EXECUTE'))
    FROM unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)',
                      'public.quote_acceptance_fingerprint(uuid)',
                       'public.quote_acceptance_handler_finished(uuid, uuid)',
                     'public.quote_acceptance_snapshot(uuid, text)',
-                     'public.quote_acceptance_gaps(interval)']) f(fn)),
+                     'public.quote_acceptance_gaps(interval, timestamptz)']) f(fn)),
  'the new functions must be the service role''s only');
 SELECT pg_temp.qa_assert((SELECT count(*) = 5
    AND bool_and(coalesce(p.prosecdef, false))
@@ -61,7 +61,7 @@ SELECT pg_temp.qa_assert((SELECT count(*) = 5
     'public.quote_acceptance_fingerprint(uuid)'::regprocedure,
     'public.quote_acceptance_handler_finished(uuid, uuid)'::regprocedure,
     'public.quote_acceptance_snapshot(uuid, text)'::regprocedure,
-    'public.quote_acceptance_gaps(interval)'::regprocedure)),
+    'public.quote_acceptance_gaps(interval, timestamptz)'::regprocedure)),
  'the new functions must run as their owner with a fixed search_path');
 SELECT pg_temp.qa_assert(has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'SELECT')
  AND NOT has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'INSERT')
@@ -146,6 +146,16 @@ BEGIN
  UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000a1';
 END $$;
 SELECT pg_temp.qa_today('false');
+-- CIO condition 3: the strict-off plain-UPDATE triple failure keeps a status with nothing
+-- recorded, and the gap read lists it (a won job with no acceptance event, and its open
+-- sibling while the supersede switch reads true).
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000a1';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000a1')
+ AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000a1'),
+ 'R4/R3: a status kept with nothing recorded must be listed by the gap read');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000a1';
 DO $$
 DECLARE v_nullable boolean := true;
 BEGIN
@@ -394,6 +404,9 @@ INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_
  ('9d000000-0000-4000-8000-0000000000e2', '9a000000-0000-4000-8000-0000000000e1', 'quote', true, NULL, 'A');
 SELECT set_config('qa.r', ((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000e1', 'partially_accepted', 'A')))::text, true);
 SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted'
+ AND (SELECT count(*) = 1 FROM public.job_events WHERE job_id = '9a000000-0000-4000-8000-0000000000e1'
+       AND event_type = 'quote_run_accepted' AND detail_json->>'run_label' = 'A'
+       AND (detail_json->>'accepted_at')::timestamptz = '2026-10-19 12:00:00+00')
  AND (SELECT count(*) = 1 FROM public.run_acceptances WHERE job_id = '9a000000-0000-4000-8000-0000000000e1'
        AND job_contact_id = '9c000000-0000-4000-8000-0000000000e1' AND run_label = 'A' AND status = 'accepted'
        AND job_document_id = '9d000000-0000-4000-8000-0000000000e1')
@@ -406,6 +419,48 @@ SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted'
  AND (SELECT count(*) = 1 FROM public.run_acceptances WHERE job_id = '9a000000-0000-4000-8000-0000000000e1')
  AND (SELECT status = 'accepted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000e1'),
  'a run document with no contact must accept as today: no run acceptance row, the status written');
+
+-- CIO condition 2: a live accepted document on a job still quoted (a split write whose
+-- status never landed, e.g. strict on with the atomic path off) is listed; a job won through
+-- the atomic path, which carries its acceptance event, is not.
+INSERT INTO public.jobs (id, org_id, status, type) VALUES
+ ('9a000000-0000-4000-8000-0000000000c3', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio');
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client) VALUES
+ ('9d000000-0000-4000-8000-0000000000c3', '9a000000-0000-4000-8000-0000000000c3', 'quote', true);
+UPDATE public.job_documents SET accepted_at = '2026-10-19 12:00:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000c3';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000b1')
+ AND (SELECT count(*) = 0 FROM public.quote_acceptance_gaps(interval '15 minutes', '2026-10-20 00:00:00+00')
+   WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
+ 'R3: an accepted document on a job not won must be listed (and p_since must bound it); an atomic win must not be');
+-- A won job with a sent quote and no acceptance event (a staff or legacy writer) is listed.
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000c3';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000c3')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
+ 'R3: a won job with no acceptance event must be listed, and the accepted document then drops out');
+UPDATE public.jobs SET status = 'lost' WHERE id = '9a000000-0000-4000-8000-0000000000c3';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
+ 'R3: an accepted document on a job lost afterwards must be listed');
+INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by) VALUES
+ ('accepted_document_job_not_won', '9d000000-0000-4000-8000-0000000000c3', '00000000-0000-0000-0000-000000000001');
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'accepted_document_job_not_won' AND ref = '9d000000-0000-4000-8000-0000000000c3'),
+ 'R3: a person can resolve an accepted document on a job not won');
+-- A won job with no acceptance event and no quote document at all (a staff write) is listed,
+-- unless p_since puts its acceptance before the bound.
+INSERT INTO public.jobs (id, org_id, status, type, accepted_at) VALUES
+ ('9a000000-0000-4000-8000-0000000000c4', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio', '2026-09-01 00:00:00+00');
+UPDATE public.jobs SET status = 'scheduled' WHERE id = '9a000000-0000-4000-8000-0000000000c4';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000c4')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(interval '15 minutes', '2026-10-01 00:00:00+00')
+   WHERE kind = 'won_without_acceptance_event' AND job_id = '9a000000-0000-4000-8000-0000000000c4'),
+ 'R3: a staff-won job with no acceptance event must be listed, bounded by p_since');
 
 -- The run neighbour the caller passes must be a value the legacy selection could return in
 -- the locked state. Job N (fencing), contacts NA and NB, run documents per case.
@@ -427,7 +482,8 @@ INSERT INTO public.run_line_items (job_id, run_label, job_contact_id, descriptio
  ('9a000000-0000-4000-8000-0000000000c5', 'X', '9c000000-0000-4000-8000-0000000000c6', 'one neighbour');
 CREATE FUNCTION pg_temp.qa_run_accept(p_doc uuid, p_run text, p_neighbour uuid) RETURNS jsonb LANGUAGE sql AS $$
  SELECT public.accept_quote_document_atomic(p_doc, 'tok-' || p_doc::text, gen_random_uuid(), '2026-10-19 12:00:00+00',
-   'partially_accepted', public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000c5'), p_run, p_neighbour, NULL)
+   'partially_accepted', public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000c5'), p_run, p_neighbour,
+   '{"contract":true}'::jsonb)
 $$;
 -- Mixed run: NULL (a NULL-contact item exists) and NB are both legitimate legacy choices.
 SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c5', 'M', NULL)::text, true);
@@ -501,8 +557,9 @@ SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps(
    WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000f1'),
  'R3: a won option whose status was written without its trigger must be listed');
 UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_supersede_v1';
-SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'won_with_open_sibling'),
- 'R3: with marking off, an open sibling beside a won option is by design and must not be listed');
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'won_with_open_sibling')
+ AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'supersede_switch_unreadable'),
+ 'R3: with marking off, an open sibling beside a won option is by design and must not be listed (off is not unreadable)');
 SET LOCAL session_replication_role = replica;
 UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000f2';
 SET LOCAL session_replication_role = origin;
@@ -568,6 +625,26 @@ SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps(
    WHERE kind = 'won_with_open_sibling'
      AND ref = '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8'),
  'R3: a reopened sibling must be listed again');
+-- Independent check at 60df50f (b3x): an option already marked superseded, then won without
+-- the trigger, is listed as won while superseded and as a second winner.
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9a000000-0000-4000-8000-0000000000fa', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-k'),
+ ('9a000000-0000-4000-8000-0000000000fb', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-k');
+SELECT public.link_fence_quote_option('9a000000-0000-4000-8000-0000000000fb', '9a000000-0000-4000-8000-0000000000fa', NULL, NULL);
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000fb';
+SELECT pg_temp.qa_assert((SELECT superseded_by_job_id = '9a000000-0000-4000-8000-0000000000fb'
+  FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000fa'), 'b3x setup: accepting FB must mark FA');
+SET LOCAL session_replication_role = replica;
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000fa';
+SET LOCAL session_replication_role = origin;
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_while_superseded' AND job_id = '9a000000-0000-4000-8000-0000000000fa')
+ AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'more_than_one_won' AND ref LIKE '9a000000-0000-4000-8000-0000000000fa@%'),
+ 'R3: a superseded option won without the trigger must be listed');
+SELECT set_config('qa.r', pg_temp.qa_try($q$INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
+  VALUES ('won_while_superseded', '9a000000-0000-4000-8000-0000000000fa', '00000000-0000-0000-0000-000000000001')$q$), true);
+SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:%', 'R3: a won-while-superseded gap must not be resolvable');
 -- The gap reader treats an unreadable supersede switch as off, for every error the trigger
 -- treats so, and still lists everything else.
 CREATE FUNCTION public.qa_gap_raise() RETURNS boolean LANGUAGE plpgsql AS $$
@@ -581,7 +658,8 @@ BEGIN
  FOREACH v_code IN ARRAY ARRAY['57014', 'P0004', '42501', 'P0001'] LOOP
   PERFORM set_config('qa.flag_error', v_code, true);
   IF EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'won_with_open_sibling')
-     OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'review_needed') THEN
+     OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'review_needed')
+     OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps() WHERE kind = 'supersede_switch_unreadable') THEN
    RAISE EXCEPTION 'quote accept atomic contract: gap reader with the switch unreadable (%) must read it as off and list the rest', v_code;
   END IF;
  END LOOP;

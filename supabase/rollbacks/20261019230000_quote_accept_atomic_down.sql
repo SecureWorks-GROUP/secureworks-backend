@@ -5,7 +5,7 @@
 -- statuses and job_events are not touched). The supersede trigger's strict
 -- raise reads quote_option_strict_record_v1; with the row gone it reads off,
 -- which is today's behaviour.
-DROP FUNCTION IF EXISTS public.quote_acceptance_gaps(interval);
+DROP FUNCTION IF EXISTS public.quote_acceptance_gaps(interval, timestamptz);
 DROP FUNCTION IF EXISTS public.quote_acceptance_handler_finished(uuid, uuid);
 DROP FUNCTION IF EXISTS public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb);
 DROP FUNCTION IF EXISTS public.quote_acceptance_snapshot(uuid, text);

@@ -34,3 +34,18 @@ ALTER TABLE public.run_acceptances
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_accept_unique
   ON public.run_acceptances (job_id, job_contact_id, run_label);
 ALTER TABLE public.job_events ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+
+-- A committed acceptance that exists before this migration, so the rollback contract can
+-- prove the down keeps acceptances (document, job status and accepted_at, event) in place.
+INSERT INTO public.jobs (id, org_id, status, type, accepted_at)
+VALUES ('9e9e0000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'accepted', 'patio',
+        '2026-10-01 00:00:00+00')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, accepted_at)
+VALUES ('9e9e0000-0000-4000-8000-0000000000d1', '9e9e0000-0000-4000-8000-000000000001', 'quote', true,
+        '2026-10-01 00:00:00+00')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.job_events (id, job_id, event_type, detail_json)
+VALUES ('9e9e0000-0000-4000-8000-0000000000e1', '9e9e0000-0000-4000-8000-000000000001', 'quote_accepted',
+        '{"document_id":"9e9e0000-0000-4000-8000-0000000000d1"}')
+ON CONFLICT (id) DO NOTHING;
