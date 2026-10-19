@@ -90,6 +90,8 @@ import {
   type FenceMintCanonical,
   type FenceMintContact,
   FenceMintError,
+  linkFenceQuoteOption,
+  openSameSiteFenceJobs,
   type FenceMintOpportunity,
   type FenceMintProgress,
   opportunityHasFenceMintStamp,
@@ -2450,6 +2452,22 @@ serve(async (req: Request) => {
           },
         })
 
+        // SQ-23: another option of an existing quote. The job exists whatever
+        // the link says; a refused or failed link is returned for the app to
+        // retry with link_quote_option, never thrown.
+        let quoteOption: Record<string, unknown> | undefined
+        if (input.quoteOptionOfJobId) {
+          const linked = await linkFenceQuoteOption({
+            rpc: async (name, params) => await sb.rpc(name, params),
+            jobId: result.jobId,
+            optionOfJobId: input.quoteOptionOfJobId,
+            label: input.optionLabel,
+            actorId: authUserId!,
+          })
+          quoteOption = linked.ok
+            ? { linked: true, groupId: linked.groupId, optionOfJobId: input.quoteOptionOfJobId }
+            : { linked: false, code: linked.code, optionOfJobId: input.quoteOptionOfJobId }
+        }
         const serverTiming = Object.entries(result.timingMs)
           .map(([name, duration]) => `${name.replace(/[^a-z0-9_]/gi, '_')};dur=${Number(duration).toFixed(1)}`)
           .join(', ')
@@ -2461,7 +2479,7 @@ serve(async (req: Request) => {
           timing_ms: result.timingMs,
           communication_sent: false,
         }))
-        return new Response(JSON.stringify(result), {
+        return new Response(JSON.stringify(quoteOption ? { ...result, quoteOption } : result), {
           status: 200,
           headers: {
             'Content-Type': 'application/json',
@@ -2485,6 +2503,44 @@ serve(async (req: Request) => {
         }))
         return json({ error: typed.message, code: typed.code, details: typed.details || null }, typed.status)
       }
+    }
+
+    // ── SQ-23: link a fence job as another option of an existing quote ──
+    // Staff with a fence mint role only. Idempotent; the server checks both
+    // jobs are open fencing jobs of one customer (link_fence_quote_option).
+    if (action === 'link_quote_option' && req.method === 'POST') {
+      const body = await req.json().catch(() => null)
+      const jobId = typeof body?.jobId === 'string' ? body.jobId.trim().toLowerCase() : ''
+      const optionOfJobId = typeof body?.optionOfJobId === 'string' ? body.optionOfJobId.trim().toLowerCase() : ''
+      const uuidShape = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+      if (!uuidShape.test(jobId) || !uuidShape.test(optionOfJobId)) {
+        return json({ error: 'jobId and optionOfJobId must be job UUIDs', code: 'invalid_request' }, 400)
+      }
+      try {
+        authorizeFenceMintCaller({
+          mode: credential.mode,
+          authUserId,
+          profile: authProfile,
+          organisationId: String(authProfile?.org_id || ''),
+        })
+      } catch (error) {
+        const typed = error as FenceMintError
+        return json({ error: typed.message, code: typed.code }, typed.status || 403)
+      }
+      const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const { data: owned } = await sb.from('jobs').select('id')
+        .in('id', [jobId, optionOfJobId]).eq('org_id', String(authProfile?.org_id || ''))
+      if (!owned || owned.length !== 2) return json({ error: 'Job not found', code: 'job_not_found' }, 404)
+      const label = typeof body?.label === 'string' ? body.label.slice(0, 120) : null
+      const linked = await linkFenceQuoteOption({
+        rpc: async (name, params) => await sb.rpc(name, params),
+        jobId,
+        optionOfJobId,
+        label,
+        actorId: authUserId!,
+      })
+      if (!linked.ok) return json({ error: 'Could not link the quote option', code: linked.code }, 409)
+      return json({ linked: true, groupId: linked.groupId, jobId, optionOfJobId })
     }
 
     // ── Create a Supabase job linked to a GHL opportunity ──
@@ -2530,6 +2586,29 @@ serve(async (req: Request) => {
         if (existing && existing.length > 0) {
           console.log('[ghl-proxy] create_job: idempotent return existing job', existing[0].id)
           return json({ job: existing[0] })
+        }
+      }
+
+      // SQ-23 route A: a fencing save for a customer who already has an open
+      // fence job at this site would mint a silent duplicate (each save makes
+      // a new opportunity, so the guard above never matches). Refuse and let
+      // the scoper choose: open that job, another option of its quote, or a
+      // new job (repeatConfirmed).
+      if (resolvedType === 'fencing' && body.contactId && body.repeatConfirmed !== true) {
+        const { data: theirs, error: theirsError } = await sb.from('jobs')
+          .select('id, job_number, status, site_address, site_suburb, superseded_at')
+          .eq('org_id', orgId)
+          .eq('type', 'fencing')
+          .eq('ghl_contact_id', body.contactId)
+          .limit(200)
+        if (theirsError) return json({ error: 'Could not check this client\'s jobs', code: 'existing_jobs_unreadable' }, 503)
+        const open = openSameSiteFenceJobs(theirs || [], siteAddress)
+        if (open.length) {
+          return json({
+            error: 'This client already has an open fence job at this address.',
+            code: 'choose_existing_or_option',
+            jobs: open,
+          }, 409)
         }
       }
 
@@ -2711,6 +2790,37 @@ serve(async (req: Request) => {
           return json(prepared.body, prepared.status)
         }
         allocationWrite = { fieldId: prepared.fieldId, ref: prepared.ref }
+      }
+
+      // SQ-23 route A: an existing fencing client with an open fence job at
+      // this address. Stop before a new opportunity is made, so the scoper
+      // can open that job, add another option to its quote, or confirm a new
+      // job (repeatConfirmed). No opportunity is created on the refusal.
+      if (leadRoute.pipelineKey === 'fencing' && leadRoute.toolType === 'fencing' && contactExisted &&
+          contactId && !skipOpportunity && body.repeatConfirmed !== true) {
+        const orgId = route.testMode
+          ? route.organisationId
+          : credential.mode === 'user_jwt'
+          ? authProfile?.org_id
+          : PRODUCTION_DEFAULT_ORG_ID
+        const sbGuard = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const { data: theirs, error: theirsError } = await sbGuard.from('jobs')
+          .select('id, job_number, status, site_address, site_suburb, superseded_at')
+          .eq('org_id', orgId)
+          .eq('type', 'fencing')
+          .eq('ghl_contact_id', contactId)
+          .limit(200)
+        if (theirsError) return json({ error: 'Could not check this client\'s jobs', code: 'existing_jobs_unreadable', contactId }, 503)
+        const open = openSameSiteFenceJobs(theirs || [], address)
+        if (open.length) {
+          return json({
+            error: 'This client already has an open fence job at this address.',
+            code: 'choose_existing_or_option',
+            contactId,
+            contactExisted,
+            jobs: open,
+          }, 409)
+        }
       }
 
       // Create opportunity in the correct pipeline (skip for neighbours)

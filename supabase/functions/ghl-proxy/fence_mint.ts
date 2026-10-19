@@ -34,6 +34,11 @@ export type FenceMintInput = {
   suburb: string;
   expectedExistingJobIds: string[];
   repeatReason: string | null;
+  // SQ-23: the new job is another option of this existing job's quote. Only
+  // with DELIBERATE_REPEAT, and only one of expectedExistingJobIds. Not in the
+  // mint fingerprint: the link is a separate idempotent step after the mint.
+  quoteOptionOfJobId: string | null;
+  optionLabel: string | null;
 };
 
 export type FenceMintContact = {
@@ -302,12 +307,38 @@ export function validateFenceMintInput(rawBody: unknown): FenceMintInput {
     );
   }
 
+  const rawOptionOf = body.quoteOptionOfJobId ?? body.quote_option_of_job_id;
+  const quoteOptionOfJobId = rawOptionOf == null || rawOptionOf === ""
+    ? null
+    : boundedString(rawOptionOf, "quoteOptionOfJobId", 64).toLowerCase();
+  if (quoteOptionOfJobId) {
+    if (intent !== "DELIBERATE_REPEAT") {
+      throw new FenceMintError(
+        400,
+        "quote_option_requires_repeat",
+        "quoteOptionOfJobId is only accepted with DELIBERATE_REPEAT",
+      );
+    }
+    if (!expectedExistingJobIds.includes(quoteOptionOfJobId)) {
+      throw new FenceMintError(
+        400,
+        "quote_option_not_existing_job",
+        "quoteOptionOfJobId must be one of expectedExistingJobIds",
+      );
+    }
+  }
+  const optionLabel = quoteOptionOfJobId
+    ? (boundedString(body.optionLabel ?? body.option_label, "optionLabel", 120) || null)
+    : null;
+
   return {
     requestId,
     organisationId,
     intent,
     contactId,
     opportunityId,
+    quoteOptionOfJobId,
+    optionLabel,
     firstName: boundedString(
       body.firstName ?? body.first_name,
       "firstName",
@@ -729,4 +760,61 @@ export async function executeFenceJobMint(args: {
     }
     throw typed;
   }
+}
+
+/**
+ * SQ-23: link a minted fence job as another option of an existing job's
+ * quote (link_fence_quote_option, 20261019210000). Idempotent. A refusal is
+ * returned, not thrown: the job already exists, and the caller may retry the
+ * link with the link_quote_option action.
+ */
+export async function linkFenceQuoteOption(args: {
+  rpc: (name: string, params: Record<string, unknown>) => Promise<{ data: unknown; error: any }>;
+  jobId: string;
+  optionOfJobId: string;
+  label: string | null;
+  actorId: string;
+}): Promise<{ ok: true; groupId: string } | { ok: false; code: string }> {
+  const { data, error } = await args.rpc("link_fence_quote_option", {
+    p_job_id: args.jobId,
+    p_option_of_job_id: args.optionOfJobId,
+    p_label: args.label,
+    p_actor_id: args.actorId,
+  });
+  if (error) {
+    const message = String(error.message || "");
+    const known = message.match(/quote_option_[a-z_]+/);
+    return { ok: false, code: known ? known[0] : "quote_option_link_failed" };
+  }
+  const groupId = Array.isArray(data) ? data[0] : data;
+  if (typeof groupId !== "string" || !groupId) {
+    return { ok: false, code: "quote_option_link_failed" };
+  }
+  return { ok: true, groupId };
+}
+
+/** Normalised site key for the same-site check: letters and digits, lower case. */
+// The street address only (the suburb is often inside it or missing), as the
+// 19 Oct 2026 duplicate-set measurement keyed it.
+export function fenceSiteKey(address: unknown): string {
+  return String(address ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * SQ-23 route A guard: the open fence jobs (draft or quoted, not superseded) a
+ * new job for this GHL contact at this site would sit beside. The caller
+ * refuses with choose_existing_or_option unless the scoper confirmed a
+ * repeat. Jobs at another site are not counted: a new site is new work.
+ */
+export function openSameSiteFenceJobs(
+  jobs: Array<{ id: string; job_number?: string | null; status?: string | null; site_address?: string | null; site_suburb?: string | null; superseded_at?: string | null }>,
+  address: unknown,
+) {
+  const site = fenceSiteKey(address);
+  if (!site) return [];
+  return jobs.filter((j) =>
+    !j.superseded_at &&
+    ["draft", "quoted"].includes(String(j.status || "draft")) &&
+    fenceSiteKey(j.site_address) === site
+  ).map((j) => ({ id: j.id, jobNumber: j.job_number ?? null, status: j.status ?? null }));
 }
