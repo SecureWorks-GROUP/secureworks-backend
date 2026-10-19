@@ -506,6 +506,7 @@ import {
   readInvoiceEmailGate,
   writeInvoiceEmailGateJobEvent,
 } from './invoice_email_resend_gate.ts'
+import { summariseSendReply } from './send_reply_summary.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -8516,7 +8517,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const text = resp.ok ? null : await resp.text().catch(() => '')
             let reply: unknown = null
             if (text) { try { reply = JSON.parse(text) } catch { /* not JSON: reads as unknown */ } }
-            return { ok: resp.ok, status: resp.status, error: text === null ? null : text.slice(0, 500), reply }
+            return { ok: resp.ok, status: resp.status, error: text === null ? null : summariseSendReply(resp.status, text), reply }
           },
           invoicePdf: (id: string) => getInvoicePdf(client, new URLSearchParams({ xero_invoice_id: id }), {
             mode: authMode,
@@ -51006,11 +51007,11 @@ async function makesafeSendPack(
       // overrides the status: the pack stays 'sending'.
       const provablyNotDispatched = emailReplyIsProvablyPreDispatch(emailResp.status, errText)
       if (provablyNotDispatched) {
-        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `send-outlook-email ${emailResp.status} (clean pre-dispatch reject): ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `${summariseSendReply(emailResp.status, errText)} (clean pre-dispatch reject)`, retry_count: (locked[0].retry_count || 0) + 1 })
         throw new ApiError(`email send rejected before dispatch (FAIL CLOSED — invoice authorised but provably NOT sent; status=authorised_not_sent, safe to re-send): ${emailResp.status}`, 502)
       }
       // 5xx / unknown: do NOT offer a re-send; the email may have gone out.
-      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send-outlook-email ${emailResp.status} (ambiguous; may have dispatched): ${errText}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `${summariseSendReply(emailResp.status, errText)} (ambiguous; may have dispatched)`, retry_count: (locked[0].retry_count || 0) + 1 })
       throw new ApiError(`email send outcome UNKNOWN (email fn returned ${emailResp.status}; it may have dispatched; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.`, 502)
     }
     let emailResult: any = {}
@@ -51372,7 +51373,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       // Refused only on what the reply proves (the same rule as the invoice
       // email): an explicit unknown or retry_safe:false wins over a 401.
       if (classifyInvoiceEmailFailure(emailResp.status, errBody) === 'refused') emailRefused = true
-      throw new ApiError(`photo follow-up email failed (${emailResp.status}): ${errText}`.slice(0, 400), 502)
+      throw new ApiError(`photo follow-up email failed (${summariseSendReply(emailResp.status, errText)})`, 502)
     }
     let emailResult: any = {}
     try { emailResult = await emailResp.json() } catch { emailResult = {} }

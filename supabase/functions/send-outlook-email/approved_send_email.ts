@@ -209,7 +209,11 @@ export async function sendApprovedEmail(
         state: status,
         code,
         approval_id: approvalId,
-        error: (error as Error).message,
+        // The provider's own text stays in the recorded detail; the caller gets
+        // fixed wording only.
+        error: unknown
+          ? 'The email may have gone out. Check Sent Items before sending again.'
+          : 'The email could not be sent.',
         retry_safe: false,
         recovery_action: unknown
           ? 'Check the mailbox Sent Items for this message before anything else; this approval is used and is never resent.'

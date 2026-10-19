@@ -325,7 +325,7 @@ Deno.test("an unreadable error body on a mutating request is an unknown outcome"
     GraphProviderError,
   );
   assertEquals(mutating.outcomeUnknown, true);
-  assertEquals(mutating.context, { retry_safe: false });
+  assertEquals(mutating.context, { provider_status: 400, retry_safe: false });
 
   resetGraphTokenCache();
   const read = await assertRejects(

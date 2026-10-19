@@ -1033,15 +1033,36 @@ export async function graphRequest(
     const unknown = mutating &&
       (bodyUnreadable || response.status >= 500 || response.status === 408 ||
         response.status === 429)
+    const providerCode = graphErrorCode(detail)
     throw new GraphProviderError(
       response.status,
       `Graph request failed: ${response.status}${detail ? ` ${detail}` : ''}`,
       unknown,
-      unknown ? { retry_safe: false } : {},
+      {
+        provider_status: response.status,
+        ...(providerCode ? { provider_code: providerCode } : {}),
+        ...(unknown ? { retry_safe: false } : {}),
+      },
     )
   }
   return response
 }
+
+// Graph's own machine code (`error.code`) from an error body, only when it is a
+// short identifier. The rest of the body is provider text and never leaves the
+// function in a response.
+function graphErrorCode(detail: string): string | null {
+  try {
+    const parsed = JSON.parse(detail)
+    const code = parsed?.error?.code
+    return typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(code) ? code : null
+  } catch (_) {
+    return null
+  }
+}
+
+const OUTCOME_UNKNOWN_TEXT =
+  'The email may have gone out. Check Sent Items before sending again.'
 
 // ── Download + Base64 encode attachment from URL ──
 
@@ -1955,13 +1976,16 @@ export async function handleApprovedEmailRequest(
       ? new ApprovedSendRefusal(
         502,
         'mailbox_unverified',
-        `The sending mailbox could not be verified, so nothing was sent (${err.message}).`,
+        `The sending mailbox could not be verified, so nothing was sent (Graph ${err.status || 'no reply'}).`,
       )
       : new ApprovedSendRefusal(
         500,
         'approved_send_error',
-        `The approved send stopped before anything was sent (${(err as Error).message}).`,
+        'The approved send stopped before anything was sent.',
       )
+    if (!(err instanceof ApprovedSendRefusal) && !(err instanceof OutlookInputError)) {
+      console.error('[send-outlook-email] approved send error:', (err as Error).message)
+    }
     await auditQuietly(deps.store, {
       approval_id: approvalId,
       event: 'send_refused',
@@ -2194,12 +2218,15 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           400,
         )
       }
+      // Provider and exception text is logged here and never returned: it can
+      // carry Graph's message, recipient addresses or internal detail.
+      console.error('[send-outlook-email] Error:', (err as Error).message)
       if (err instanceof GraphProviderError) {
         if (err.outcomeUnknown) {
           return json({
             state: 'outcome_unknown',
             code: 'provider_outcome_unknown',
-            error: err.message,
+            error: OUTCOME_UNKNOWN_TEXT,
             retry_safe: false,
             ...err.context,
           }, 502)
@@ -2208,24 +2235,22 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           ...err.context,
           error: 'Graph API error',
           status: err.status || 502,
-          detail: err.message,
           retry_safe: typeof err.context.retry_safe === 'boolean'
             ? err.context.retry_safe
             : true,
         }, 502)
       }
-      console.error('[send-outlook-email] Error:', (err as Error).message)
       if (mutationMayHaveStarted) {
         // Retry-safe needs positive evidence that nothing was dispatched.
         // Once a mutating request may have started there is none.
         return json({
           state: 'outcome_unknown',
           code: 'provider_outcome_unknown',
-          error: (err as Error).message,
+          error: OUTCOME_UNKNOWN_TEXT,
           retry_safe: false,
         }, 502)
       }
-      return json({ error: (err as Error).message, retry_safe: true }, 500)
+      return json({ error: 'The email could not be sent.', code: 'send_error', retry_safe: true }, 500)
     }
 }
 

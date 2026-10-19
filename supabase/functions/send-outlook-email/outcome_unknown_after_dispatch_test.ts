@@ -109,3 +109,35 @@ Deno.test('a Graph 400 on sendMail with a readable body stays a definite failure
   assertEquals(result.status, 502)
   assertEquals(result.body.retry_safe, true)
 })
+
+Deno.test('no send-outlook-email answer carries the provider\'s own text', async () => {
+  const providerText = 'mailbox busy for someone@example.com'
+  const graphBody = (status: number) => () =>
+    new Response(JSON.stringify({ error: { code: 'ErrorMailboxBusy', message: providerText } }), { status })
+
+  // Unknown outcome (5xx after dispatch): fixed wording, Graph's code and status only.
+  const unknown = await send(graphBody(503))
+  assertEquals(unknown.body.state, 'outcome_unknown')
+  assertEquals(unknown.body.provider_status, 503)
+  assertEquals(unknown.body.provider_code, 'ErrorMailboxBusy')
+  assertEquals(/Sent Items/.test(unknown.body.error), true)
+  assertEquals(/nothing was sent/i.test(unknown.body.error), false)
+  assertEquals(JSON.stringify(unknown.body).includes(providerText), false)
+
+  // Definite failure (readable 400): no detail field and no provider text.
+  const definite = await send(graphBody(400))
+  assertEquals(definite.body.detail, undefined)
+  assertEquals(definite.body.provider_code, 'ErrorMailboxBusy')
+  assertEquals(JSON.stringify(definite.body).includes(providerText), false)
+
+  // A plain exception after dispatch: fixed wording only.
+  const thrown = await send(
+    () => new Response(null, { status: 202 }),
+    (url) => {
+      if (url.includes('/functions/v1/ghl-proxy')) throw new Error(`note transport failed ${providerText}`)
+      return Response.json([])
+    },
+    { ghl_contact_id: 'contact-fixture' },
+  )
+  assertEquals(JSON.stringify(thrown.body).includes(providerText), false)
+})
