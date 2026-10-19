@@ -68,8 +68,10 @@ COMMENT ON TABLE public.quote_acceptance_attempts IS
 
 -- A person marks a listed gap handled. One row per (kind, ref) as
 -- quote_acceptance_gaps names them; it suppresses only that one obligation.
+-- Only event- and attempt-based kinds can be resolved; the condition kinds
+-- clear when the data changes.
 CREATE TABLE public.quote_acceptance_gap_resolutions (
-  kind text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('review_needed', 'settle_run_unsettled', 'acceptance_handler_unfinished')),
   ref text NOT NULL,
   resolved_by uuid NOT NULL,
   resolved_at timestamptz NOT NULL DEFAULT now(),
@@ -262,12 +264,15 @@ BEGIN
     IF p_job_status IS NULL OR p_job_status NOT IN ('accepted', 'partially_accepted', 'quoted') THEN
       RAISE EXCEPTION 'quote_accept_bad_status: %', p_job_status USING ERRCODE = '22023';
     END IF;
-    -- The neighbour the caller decided with must be one of the run's line
-    -- item contacts in the locked (fingerprint-equal) state, or NULL when
-    -- the run has none.
+    -- The neighbour the caller decided with must be a value the legacy
+    -- selection (LIMIT 1, no order) could return in the locked
+    -- (fingerprint-equal) state: the contact of one of the run's line items,
+    -- including NULL when a NULL-contact item exists, or NULL when the run
+    -- has no line items at all.
     IF p_run_neighbour IS NULL THEN
-      IF EXISTS (SELECT 1 FROM public.run_line_items r
-                  WHERE r.job_id = v_job AND r.run_label = v_run AND r.job_contact_id IS NOT NULL) THEN
+      IF EXISTS (SELECT 1 FROM public.run_line_items r WHERE r.job_id = v_job AND r.run_label = v_run)
+         AND NOT EXISTS (SELECT 1 FROM public.run_line_items r
+                          WHERE r.job_id = v_job AND r.run_label = v_run AND r.job_contact_id IS NULL) THEN
         RETURN jsonb_build_object('outcome', 'stale', 'reason', 'run_neighbour_unbound');
       END IF;
     ELSIF NOT EXISTS (SELECT 1 FROM public.run_line_items r
@@ -354,8 +359,10 @@ REVOKE ALL ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) FROM
 GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) TO service_role;
 
 -- R3: read-only list of what needs a person. Ids, codes and instants only.
--- A row disappears only when its own (kind, ref) is resolved (or, for runs
--- and attempts, their resolved_at is set); nothing else suppresses it.
+-- Event and attempt rows disappear only when their own (kind, ref) is
+-- resolved (or, for runs and attempts, their resolved_at is set). The two
+-- condition kinds (won_with_open_sibling, more_than_one_won) cannot be
+-- resolved: they are listed while the condition holds.
 --   settle_run_unsettled     a supersede run whose work failed
 --   review_needed            every quote_option_review_needed and
 --                            quote_acceptance_review_needed event (ref: the
@@ -363,12 +370,11 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) T
 --                            staff-advanced acceptances
 --   won_with_open_sibling    a grouped job in a won status beside an open,
 --                            unmarked option, one row per sibling (ref:
---                            winner>sibling@winner row version#sibling row
---                            version).
+--                            winner>sibling); condition-based.
 --                            Listed only while quote_option_supersede_v1 reads
 --                            true: with marking off, open siblings are by design
 --   more_than_one_won        a group with two or more won, unmarked options
---                            (ref: group@won ids with row versions)
+--                            (ref: group@won ids); condition-based
 --   acceptance_handler_unfinished  committed, the handler never reached its
 --                            response (follow-up work state unknown)
 -- p_grace: how old an attempt must be before it is listed.
@@ -399,14 +405,11 @@ BEGIN
       FROM public.job_events e
      WHERE e.event_type IN ('quote_option_review_needed', 'quote_acceptance_review_needed')
     UNION ALL
-    -- One row per (winner, open sibling). The ref names both and both rows'
-    -- current versions (xmin changes on every update of a row), so any
-    -- re-win, reopening or other change to either job is a new obligation,
-    -- never hidden by an earlier resolution. An unrelated edit also re-lists
-    -- (the safe direction).
-    SELECT 'won_with_open_sibling', w.id,
-           w.id::text || '>' || s.id::text || '@' || w.xmin::text || '#' || s.xmin::text,
-           w.accepted_at
+    -- One row per (winner, open sibling), ref winner>sibling. Condition-based:
+    -- listed for as long as the condition holds, and never suppressed by a
+    -- resolution (a row version is not a durable occurrence id). A person
+    -- clears it by changing the data through the normal paths.
+    SELECT 'won_with_open_sibling', w.id, w.id::text || '>' || s.id::text, w.accepted_at
       FROM public.jobs w
       JOIN public.jobs s ON s.quote_option_group_id = w.quote_option_group_id AND s.id <> w.id
      WHERE v_supersede_on
@@ -416,7 +419,7 @@ BEGIN
        AND coalesce(s.status, 'draft') IN ('draft', 'quoted') AND s.superseded_at IS NULL
     UNION ALL
     SELECT 'more_than_one_won', NULL::uuid,
-           m.quote_option_group_id::text || '@' || string_agg(m.id::text || ':' || m.xmin::text, ',' ORDER BY m.id),
+           m.quote_option_group_id::text || '@' || string_agg(m.id::text, ',' ORDER BY m.id),
            max(m.accepted_at)
       FROM public.jobs m
      WHERE m.quote_option_group_id IS NOT NULL
@@ -428,7 +431,8 @@ BEGIN
       FROM public.quote_acceptance_attempts a
      WHERE a.handler_finished_at IS NULL AND a.resolved_at IS NULL AND a.committed_at < now() - p_grace
   ) g
-  WHERE NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gap_resolutions x WHERE x.kind = g.kind AND x.ref = g.ref);
+  WHERE g.kind IN ('won_with_open_sibling', 'more_than_one_won')
+     OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gap_resolutions x WHERE x.kind = g.kind AND x.ref = g.ref);
 END $$;
 REVOKE ALL ON FUNCTION public.quote_acceptance_gaps(interval) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.quote_acceptance_gaps(interval) TO service_role;

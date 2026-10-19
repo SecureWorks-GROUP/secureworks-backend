@@ -407,6 +407,55 @@ SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted'
  AND (SELECT status = 'accepted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000e1'),
  'a run document with no contact must accept as today: no run acceptance row, the status written');
 
+-- The run neighbour the caller passes must be a value the legacy selection could return in
+-- the locked state. Job N (fencing), contacts NA and NB, run documents per case.
+INSERT INTO public.jobs (id, org_id, status, type) VALUES
+ ('9a000000-0000-4000-8000-0000000000c5', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing');
+INSERT INTO public.job_contacts (id, job_id) VALUES
+ ('9c000000-0000-4000-8000-0000000000c5', '9a000000-0000-4000-8000-0000000000c5'),
+ ('9c000000-0000-4000-8000-0000000000c6', '9a000000-0000-4000-8000-0000000000c5');
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_id, run_label) VALUES
+ ('9d000000-0000-4000-8000-0000000000c5', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'M'),
+ ('9d000000-0000-4000-8000-0000000000c6', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'L'),
+ ('9d000000-0000-4000-8000-0000000000c7', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'E'),
+ ('9d000000-0000-4000-8000-0000000000c8', '9a000000-0000-4000-8000-0000000000c5', 'quote', true, '9c000000-0000-4000-8000-0000000000c5', 'X');
+INSERT INTO public.run_line_items (job_id, run_label, job_contact_id, description) VALUES
+ ('9a000000-0000-4000-8000-0000000000c5', 'M', NULL, 'mixed: no contact'),
+ ('9a000000-0000-4000-8000-0000000000c5', 'M', '9c000000-0000-4000-8000-0000000000c6', 'mixed: neighbour'),
+ ('9a000000-0000-4000-8000-0000000000c5', 'L', NULL, 'all no contact'),
+ ('9a000000-0000-4000-8000-0000000000c5', 'X', '9c000000-0000-4000-8000-0000000000c6', 'one neighbour');
+CREATE FUNCTION pg_temp.qa_run_accept(p_doc uuid, p_run text, p_neighbour uuid) RETURNS jsonb LANGUAGE sql AS $$
+ SELECT public.accept_quote_document_atomic(p_doc, 'tok-' || p_doc::text, gen_random_uuid(), '2026-10-19 12:00:00+00',
+   'partially_accepted', public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000c5'), p_run, p_neighbour, NULL)
+$$;
+-- Mixed run: NULL (a NULL-contact item exists) and NB are both legitimate legacy choices.
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c5', 'M', NULL)::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted',
+ 'run neighbour: NULL must be accepted when the run has a NULL-contact item');
+-- All-NULL run: NULL accepted; a contact not on the run refused.
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c6', 'L', '9c000000-0000-4000-8000-0000000000c6')::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'reason' = 'run_neighbour_unbound',
+ 'run neighbour: a contact not on the run must be refused');
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c6', 'L', NULL)::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted',
+ 'run neighbour: NULL must be accepted on an all-NULL run');
+-- Empty run: NULL accepted.
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c7', 'E', NULL)::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted',
+ 'run neighbour: NULL must be accepted when the run has no line items');
+-- Single-neighbour run: NULL refused (the legacy choice is always NB); NB accepted.
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c8', 'X', NULL)::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'reason' = 'run_neighbour_unbound',
+ 'run neighbour: NULL must be refused when every item has a contact');
+SELECT set_config('qa.r', pg_temp.qa_run_accept('9d000000-0000-4000-8000-0000000000c8', 'X', '9c000000-0000-4000-8000-0000000000c6')::text, true);
+SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'outcome' = 'accepted',
+ 'run neighbour: the run''s contact must be accepted');
+SELECT pg_temp.qa_assert((public.quote_acceptance_snapshot('9a000000-0000-4000-8000-0000000000c5', 'X')->>'run_neighbour')
+   = '9c000000-0000-4000-8000-0000000000c6'
+ AND public.quote_acceptance_snapshot('9a000000-0000-4000-8000-0000000000c5', 'E')->>'run_neighbour' IS NULL
+ AND public.quote_acceptance_snapshot('9a000000-0000-4000-8000-0000000000c5', NULL)->>'run_neighbour' IS NULL,
+ 'the snapshot must return the legacy neighbour choice for the run');
+
 -- The handler-finished mark: only the committing request, only once.
 SELECT pg_temp.qa_assert(NOT public.quote_acceptance_handler_finished('9d000000-0000-4000-8000-0000000000b1', gen_random_uuid()),
  'another request must not mark the handler finished');
@@ -493,27 +542,28 @@ UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0
 SET LOCAL session_replication_role = origin;
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000f7'
-     AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%'),
+     AND ref = '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8'),
  'R3: a won option with no acceptance instant must be listed despite an older unrelated review event');
--- Each open sibling is its own obligation: resolving one never hides another.
-INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
-SELECT g.kind, g.ref, '00000000-0000-0000-0000-000000000001' FROM public.quote_acceptance_gaps() g
- WHERE g.kind = 'won_with_open_sibling' AND g.ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%';
-SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%')
- AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f9@%'),
- 'R3: resolving one open sibling must leave the other listed');
--- Reopening the unmarked sibling (cancelled, then quoted again: no trigger run, no event) is a
--- new obligation. It is done in a subtransaction, as a later transaction would be, so the row
--- carries a new version (xmin); within one transaction every write shares one.
-SAVEPOINT qa_reopen;
+-- The two condition kinds cannot be resolved (a row version is not a durable occurrence id):
+-- each open sibling is listed for as long as the condition holds, and a reopened sibling
+-- (cancelled, then quoted again: no trigger run, no event) is listed again.
+SELECT set_config('qa.r', pg_temp.qa_try($q$INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
+  VALUES ('won_with_open_sibling', '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8',
+          '00000000-0000-0000-0000-000000000001')$q$), true);
+SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:%',
+ 'R3: an open-sibling gap must not be resolvable');
+SELECT pg_temp.qa_assert((SELECT count(*) = 2 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000f7'),
+ 'R3: each open sibling must be listed on its own');
 UPDATE public.jobs SET status = 'cancelled' WHERE id = '9a000000-0000-4000-8000-0000000000f8';
-UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000f8';
-RELEASE SAVEPOINT qa_reopen;
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%'),
- 'R3: a reopened sibling must be listed again despite the earlier resolution');
+   WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000f7'),
+ 'R3: a sibling no longer open must drop out');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000f8';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'won_with_open_sibling'
+     AND ref = '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8'),
+ 'R3: a reopened sibling must be listed again');
 -- The gap reader treats an unreadable supersede switch as off, for every error the trigger
 -- treats so, and still lists everything else.
 CREATE FUNCTION public.qa_gap_raise() RETURNS boolean LANGUAGE plpgsql AS $$
