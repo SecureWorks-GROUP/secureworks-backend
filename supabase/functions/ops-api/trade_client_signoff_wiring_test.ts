@@ -83,6 +83,17 @@ Deno.test("on site: no name, no signature, or only a stale one records nothing",
   assertEquals(stale.inserts.job_client_signoffs, undefined);
 });
 
+Deno.test("on site: a failed sign-off write leaves a not-recorded event and still throws", async () => {
+  const c = fakeClient(
+    { job_media: [{ id: "sig-1", job_id: "job-1", phase: "signature", uploaded_by: TRADE.id, created_at: recent }] },
+    { errors: { job_client_signoffs: { message: "x", code: "23514" } } },
+  );
+  await assertRejects(() => recordOnSiteClientSignoff(c, { signatureName: "A", satisfaction_rating: 5 }, TRADE, JOB));
+  assertEquals(c.inserts.job_events.length, 1);
+  assertEquals(c.inserts.job_events[0].event_type, "client_signoff_not_recorded");
+  assertEquals(c.inserts.job_events[0].detail_json, { method: "on_site", signature_media_id: "sig-1", code: "23514" });
+});
+
 Deno.test("on site: a named signature id must be this job's and this trade's", async () => {
   const c = fakeClient({ job_media: [{ id: "sig-x", job_id: "job-2", phase: "signature", uploaded_by: TRADE.id, created_at: recent }] });
   const out = await recordOnSiteClientSignoff(c, { signatureName: "A", signature_media_id: "sig-x" }, TRADE, JOB);

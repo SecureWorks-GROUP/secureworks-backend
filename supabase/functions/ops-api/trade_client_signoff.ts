@@ -39,6 +39,8 @@ export const CLIENT_SIGNOFF_FLAG = 'trade_invoice_requires_client_signoff_v1'
 export const CLIENT_SIGNOFF_BLOCK_REASON = 'client_signoff'
 export const CLIENT_SIGNED_OFF_EVENT = 'client_signed_off'
 export const CLIENT_SIGNOFF_NOT_HAPPY_EVENT = 'client_signoff_not_happy'
+/** The trade sent a sign-off but it could not be stored: not the same as unsigned. */
+export const CLIENT_SIGNOFF_NOT_RECORDED_EVENT = 'client_signoff_not_recorded'
 export const SIGNATURE_MEDIA_PHASE = 'signature'
 
 export type ClientSignoffSettings = {

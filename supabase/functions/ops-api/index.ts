@@ -183,6 +183,7 @@ import {
   CLIENT_SIGNED_OFF_EVENT,
   CLIENT_SIGNOFF_BLOCK_REASON,
   CLIENT_SIGNOFF_NOT_HAPPY_EVENT,
+  CLIENT_SIGNOFF_NOT_RECORDED_EVENT,
   SIGNATURE_MEDIA_PHASE,
   clientSignoffMessage,
   clientSignoffRequired,
@@ -53082,7 +53083,20 @@ async function recordOnSiteClientSignoff(client: any, body: any, tradeUser: Trad
     captured_by: tradeUser.id,
     captured_by_actor: `user:${tradeUser.id}`,
   }).select('id, job_id, method, signed_name, happy, satisfaction_rating, signature_media_id, waiver_reason, created_at').single()
-  if (insErr) throw insErr
+  if (insErr) {
+    // A lost sign-off would otherwise read as "never signed", so the failure
+    // leaves a trace for the office (ids only; job_events is readable by trades).
+    try {
+      const { error: evErr } = await client.from('job_events').insert({
+        job_id: job.id,
+        user_id: tradeUser.id,
+        event_type: CLIENT_SIGNOFF_NOT_RECORDED_EVENT,
+        detail_json: { method: 'on_site', signature_media_id: signature.id, code: String(insErr.code || '') || null },
+      })
+      if (evErr) console.error('[ops-api] client sign-off failure event write failed:', evErr.message)
+    } catch (e) { console.error('[ops-api] client sign-off failure event write threw:', e instanceof Error ? e.message : e) }
+    throw insErr
+  }
   const { settings } = await loadClientSignoffSettings(client)
   const counts = signoffRowCounts(row, settings)
   // Audit is non-blocking, but PostgREST returns its error rather than throwing.
