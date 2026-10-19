@@ -781,6 +781,17 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|job_dispatch_workings.sketch_png
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_supplier_on_job_fkey
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_status_valid
+# 20261018140000 is the scope-order store: dispatch_scope_order_lines and
+# dispatch_scope_order_import read and write it, so ops-api must not deploy
+# ahead of it.
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|table|dispatch_scope_order_lines
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|column|dispatch_scope_order_lines.demand_id
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|column|dispatch_scope_order_lines.product_unknown
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|column|dispatch_scope_order_lines.length_mm
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|column|dispatch_scope_order_lines.cut_size
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|column|dispatch_scope_order_lines.cuts
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|column|dispatch_scope_order_lines.supplier_name
+ops-api|supabase/migrations/20261018140000_dispatch_scope_order_lines.sql|constraint|dispatch_scope_order_lines_job_demand_key
 # 20261014140000 quote-builder draft orders is intentionally NOT a preflight
 # requirement for ops-api. work_orders.quote_builder_version_id and
 # purchase_orders.quote_builder_version_id are read and written only while

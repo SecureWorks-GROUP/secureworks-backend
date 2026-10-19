@@ -1,0 +1,53 @@
+{
+  "schema": "scope-engine-v2/job@1",
+  "id": "mid-chord-dogleg",
+  "name": "Welded mid-chord with stepped heels and a dogleg",
+  "house": "none",
+  "revision": 1,
+  "elements": [
+    {
+      "kind": "roof-area",
+      "id": "house-plane",
+      "outline": [[0, -1095], [6600, -1095], [6600, 0], [0, 0]],
+      "seat": { "at": [0, -1095], "z": 2578, "pitchDeg": 22, "fallDeg": 90 }
+    },
+    {
+      "kind": "roof-area",
+      "id": "outer-plane",
+      "outline": [[0, -2190], [6600, -2190], [6600, -1095], [0, -1095]],
+      "seat": { "at": [0, -1095], "z": 2578, "pitchDeg": 22, "fallDeg": 270 }
+    },
+    {
+      "kind": "member",
+      "id": "house-beam",
+      "role": "beam",
+      "productKey": "rhs:100x50x2.0:c450l0",
+      "top": { "z": 2075.59 },
+      "from": [0, 175],
+      "to": [6600, 175]
+    },
+    {
+      "kind": "member",
+      "id": "outer-beam",
+      "role": "beam",
+      "productKey": "rhs:76x38x1.6:grade-unpublished",
+      "top": { "z": 2075.59 },
+      "from": [0, -2374],
+      "to": [6600, -2374]
+    },
+    {
+      "kind": "truss-set",
+      "id": "trusses",
+      "productKey": "rhs:76x38x1.6:grade-unpublished",
+      "roofAreaIds": ["house-plane", "outer-plane"],
+      "layout": { "offsetsMm": [45, 6555] },
+      "ends": false,
+      "webs": "none",
+      "heelMm": [150, 165],
+      "heelBeams": ["house-beam", "outer-beam"],
+      "topChordFoot": "feathered",
+      "midChord": { "heelDropMm": 60, "dogleg": { "side": 1, "lengthMm": 1050, "pitchDeg": 22 } }
+    }
+  ],
+  "profiles": []
+}

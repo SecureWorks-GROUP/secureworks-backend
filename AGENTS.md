@@ -537,6 +537,11 @@ Slice 7's install step and its To do rule at Trade scheduled live only in
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
 by `set_dispatch_install_confirmed`, never the calendar's booking lock.
 Contract: `docs/dispatch-slice-7-contract.md`.
+Scope order lines, stage 1, live only in `dispatch_scope_order.ts` and
+`dispatch_scope_order_store.ts` on `dispatch_scope_order_lines`: a stated Scope
+Engine demand attached to the job. Do not widen `dispatch_materials_suggest`
+for it. A stated supplier name is text only, a blank product is flagged, and
+the row has no price and no send. Contract: `docs/dispatch-scope-order-lines-v1.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 

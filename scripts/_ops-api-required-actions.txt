@@ -132,6 +132,12 @@ dispatch_materials_delete_line       # probe=source-only
 dispatch_materials_suggest           # probe=source-only
 dispatch_materials_save_workings     # probe=source-only
 
+# ── Dispatch scope order lines, stage 1 (docs/dispatch-scope-order-lines-v1.md).
+#    The read is pure; a bare call is refused 400 "job_id required" before any
+#    query. The import writes and is source-only: no smoke run may fire it. ──
+dispatch_scope_order_lines
+dispatch_scope_order_import          # probe=source-only
+
 # ── Ops screen Dispatch tab, a purchase order and its email
 #    (docs/dispatch-slice-5-contract.md). The two reads are pure; a bare call is
 #    refused 400 before any query. The nine writes are staff-guarded and

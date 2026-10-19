@@ -1,0 +1,6 @@
+[
+  {"id":"fence-rails","engineKey":"synthetic:rail","description":"Synthetic fencing rails","colour":"Surfmist","unit":"m","quantity":8.4,"cuts":[{"lengthMm":2800,"qty":3}],"widthMm":null,"girthMm":null,"profile":null,"references":["fence-bay-1","fence-bay-2"],"toConfirm":[]},
+  {"id":"fixings","engineKey":"synthetic:screw","description":"Synthetic rail screws","colour":null,"unit":"each","quantity":103,"cuts":[],"widthMm":null,"girthMm":null,"profile":null,"references":["fence-bay-1","fence-bay-2"],"toConfirm":[]},
+  {"id":"flashing","engineKey":"synthetic:apron","description":"Synthetic folded apron","colour":"Surfmist","unit":"m2","quantity":1.874,"cuts":[{"lengthMm":2342,"qty":2}],"widthMm":null,"girthMm":400,"profile":"apron","references":["edge-1"],"toConfirm":[]},
+  {"id":"missing","engineKey":"synthetic:unknown","description":"Unconfirmed latch","colour":null,"unit":"each","quantity":1,"cuts":[],"widthMm":null,"girthMm":null,"profile":null,"references":["gate-1"],"toConfirm":[]}
+]
