@@ -25,7 +25,10 @@
 --   so two requests carrying one caller attempt cannot both dispatch. The
 --   extension must name one of the attempt's own keys as its caller
 --   (send_claim_item_mismatch otherwise). An extension replaces the token: the
---   caller's token stops confirming and only the door dispatches.
+--   caller's token stops confirming and only the door dispatches. Once the
+--   current dispatch is confirmed, no extension is allowed at all
+--   (send_claim_dispatch_taken): a provider call may be in flight, and a
+--   request that took it over could settle the attempt underneath it.
 -- * confirm_outbound_dispatch is the pre-send fence: the holder of the current
 --   token calls it immediately before the provider call, and it answers ok
 --   only while the attempt is still sending, the token is current and the
@@ -37,6 +40,9 @@
 --   is still open changes nothing and is recorded as caller_settle_deferred:
 --   the door that dispatched settles the attempt, and if it never does the
 --   attempt lapses and needs reconciliation.
+--   While the current dispatch is confirmed and open, only the holder of its
+--   token may settle (send_settle_not_dispatcher otherwise; the attempt stays
+--   sending).
 -- * Only reconcile_outbound_send releases an unresolved attempt, and only the
 --   named attempt in the named state, recording who checked, when and what
 --   they found. It is refused (send_reconcile_live_send) while any row is
@@ -91,6 +97,10 @@ ALTER TABLE public.outbound_send_claims ADD COLUMN IF NOT EXISTS dispatch_token 
 ALTER TABLE public.outbound_send_claims ADD COLUMN IF NOT EXISTS dispatch_started_at timestamptz;
 ALTER TABLE public.outbound_send_claims ADD COLUMN IF NOT EXISTS dispatch_ended_at timestamptz;
 ALTER TABLE public.outbound_send_claims ADD COLUMN IF NOT EXISTS dispatch_via text;
+-- Set when the token holder passes the pre-send fence: from then a provider
+-- call may be in flight, so no extension may take the dispatch over and only
+-- the token holder may settle the attempt.
+ALTER TABLE public.outbound_send_claims ADD COLUMN IF NOT EXISTS dispatch_confirmed_at timestamptz;
 ALTER TABLE public.outbound_send_claims DROP CONSTRAINT IF EXISTS outbound_send_claims_dispatch_via;
 ALTER TABLE public.outbound_send_claims ADD CONSTRAINT outbound_send_claims_dispatch_via
   CHECK (dispatch_via IS NULL OR dispatch_via IN ('claim', 'extend'));
@@ -158,6 +168,7 @@ GRANT SELECT ON public.outbound_send_claim_events TO service_role;
 -- overload of a door survives a re-apply.
 DROP FUNCTION IF EXISTS public.extend_outbound_send_claim(text, text[], text, jsonb);
 DROP FUNCTION IF EXISTS public.settle_outbound_send(text, text, jsonb);
+DROP FUNCTION IF EXISTS public.settle_outbound_send(text, text, jsonb, text);
 
 -- Internal: the transaction-scoped advisory lock for one attempt or one key.
 CREATE OR REPLACE FUNCTION public.outbound_send_claim_lock(p_kind text, p_name text)
@@ -285,7 +296,10 @@ BEGIN
     v_code := 'send_claim_item_mismatch';
   ELSIF EXISTS (SELECT 1 FROM public.outbound_send_claims
                  WHERE attempt_id = p_attempt_id
-                   AND (item_key = ANY (v_keys) OR dispatch_via = 'extend')) THEN
+                   AND (item_key = ANY (v_keys) OR dispatch_via = 'extend'
+                        OR dispatch_confirmed_at IS NOT NULL)) THEN
+    -- A confirmed dispatch may already be calling the provider: it is never
+    -- handed to another request, which could then settle it under that call.
     v_code := 'send_claim_dispatch_taken';
   END IF;
   IF v_code IS NOT NULL THEN
@@ -303,7 +317,7 @@ BEGIN
   END IF;
   UPDATE public.outbound_send_claims
      SET dispatch_token = v_token, dispatch_started_at = now(), dispatch_ended_at = NULL,
-         dispatch_via = 'extend', lease_until = v_lease
+         dispatch_confirmed_at = NULL, dispatch_via = 'extend', lease_until = v_lease
    WHERE attempt_id = p_attempt_id;
   RETURN jsonb_build_object('ok', true, 'attempt_id', p_attempt_id, 'keys', to_jsonb(v_keys),
                             'dispatch_token', v_token);
@@ -331,6 +345,9 @@ BEGIN
   IF NOT v_ok THEN
     RETURN jsonb_build_object('ok', false, 'code', 'send_dispatch_fenced');
   END IF;
+  UPDATE public.outbound_send_claims
+     SET dispatch_confirmed_at = coalesce(dispatch_confirmed_at, now())
+   WHERE attempt_id = p_attempt_id;
   RETURN jsonb_build_object('ok', true, 'attempt_id', p_attempt_id);
 END $$;
 
@@ -338,9 +355,14 @@ END $$;
 -- send definitely did not happen) or outcome_unknown. p_settler: 'dispatcher'
 -- (whoever made the provider call) or 'caller' (a caller whose door may have
 -- extended the attempt). A caller settle while the door's dispatch is open is
--- deferred: nothing changes and the door settles.
+-- deferred: nothing changes and the door settles. Once the current dispatch is
+-- confirmed and still open, only the holder of its token (p_dispatch_token)
+-- may settle: anyone else is settle_refused (send_settle_not_dispatcher) and
+-- the attempt stays sending, so a fenced or stale request can never release
+-- an item while another request's provider call is in flight.
 CREATE OR REPLACE FUNCTION public.settle_outbound_send(
-  p_attempt_id text, p_state text, p_detail jsonb DEFAULT '{}'::jsonb, p_settler text DEFAULT 'dispatcher'
+  p_attempt_id text, p_state text, p_detail jsonb DEFAULT '{}'::jsonb, p_settler text DEFAULT 'dispatcher',
+  p_dispatch_token text DEFAULT NULL
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v_count integer;
@@ -360,6 +382,17 @@ BEGIN
     VALUES (p_attempt_id, 'caller_settle_deferred', 'sending', 'sending', 'caller',
             jsonb_build_object('requested_state', p_state, 'detail', coalesce(p_detail, '{}'::jsonb)));
     RETURN jsonb_build_object('ok', true, 'attempt_id', p_attempt_id, 'deferred', true, 'state', 'sending');
+  END IF;
+  IF EXISTS (
+      SELECT 1 FROM public.outbound_send_claims
+       WHERE attempt_id = p_attempt_id AND state = 'sending'
+         AND dispatch_confirmed_at IS NOT NULL AND dispatch_ended_at IS NULL
+         AND (dispatch_token IS NULL
+              OR dispatch_token::text <> lower(btrim(coalesce(p_dispatch_token, ''))))) THEN
+    INSERT INTO public.outbound_send_claim_events (attempt_id, event, to_state, actor, detail)
+    VALUES (p_attempt_id, 'settle_refused', p_state, p_settler,
+            jsonb_build_object('code', 'send_settle_not_dispatcher', 'detail', coalesce(p_detail, '{}'::jsonb)));
+    RETURN jsonb_build_object('ok', false, 'code', 'send_settle_not_dispatcher');
   END IF;
   WITH moved AS (
     UPDATE public.outbound_send_claims
@@ -445,13 +478,13 @@ REVOKE ALL ON FUNCTION public.read_outbound_send_holds(text[]) FROM PUBLIC, anon
 REVOKE ALL ON FUNCTION public.claim_outbound_send(text[], text, text, jsonb, integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.extend_outbound_send_claim(text, text[], text, text, jsonb) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.confirm_outbound_dispatch(text, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.settle_outbound_send(text, text, jsonb, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.settle_outbound_send(text, text, jsonb, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.reconcile_outbound_send(text, text, text, text, timestamptz, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.read_outbound_send_holds(text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_outbound_send(text[], text, text, jsonb, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.extend_outbound_send_claim(text, text[], text, text, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.confirm_outbound_dispatch(text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.settle_outbound_send(text, text, jsonb, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.settle_outbound_send(text, text, jsonb, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.reconcile_outbound_send(text, text, text, text, timestamptz, text) TO service_role;
 
 COMMENT ON TABLE public.outbound_send_claims IS

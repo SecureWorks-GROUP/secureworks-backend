@@ -35,7 +35,7 @@ BEGIN
     'public.claim_outbound_send(text[], text, text, jsonb, integer)',
     'public.extend_outbound_send_claim(text, text[], text, text, jsonb)',
     'public.confirm_outbound_dispatch(text, text)',
-    'public.settle_outbound_send(text, text, jsonb, text)',
+    'public.settle_outbound_send(text, text, jsonb, text, text)',
     'public.reconcile_outbound_send(text, text, text, text, timestamptz, text)'
   ] LOOP
     IF has_function_privilege('anon', p, 'EXECUTE') OR has_function_privilege('authenticated', p, 'EXECUTE') THEN
@@ -58,7 +58,8 @@ BEGIN
     END IF;
   END LOOP;
   IF to_regprocedure('public.extend_outbound_send_claim(text, text[], text, jsonb)') IS NOT NULL
-     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb)') IS NOT NULL THEN
+     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb)') IS NOT NULL
+     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb, text)') IS NOT NULL THEN
     RAISE EXCEPTION 'contract 1: an old door signature survived';
   END IF;
   IF (SELECT pg_get_function_arguments('public.claim_outbound_send(text[], text, text, jsonb, integer)'::regprocedure))
@@ -74,6 +75,7 @@ DECLARE
   r jsonb;
   t1 text;
   te text;
+  tc text;
 BEGIN
   -- 1b. service_role cannot write a claim row around the doors.
   BEGIN
@@ -108,12 +110,42 @@ BEGIN
   IF r->>'code' IS DISTINCT FROM 'send_claim_attempt_exists' THEN RAISE EXCEPTION 'contract 2: attempt id reused: %', r; END IF;
 
   -- 3. The pre-send fence answers the current token only.
-  r := public.confirm_outbound_dispatch('a1', t1);
-  IF NOT coalesce((r->>'ok')::boolean, false) THEN RAISE EXCEPTION 'contract 3: the claim token did not confirm: %', r; END IF;
   r := public.confirm_outbound_dispatch('a1', gen_random_uuid()::text);
   IF r->>'code' IS DISTINCT FROM 'send_dispatch_fenced' THEN RAISE EXCEPTION 'contract 3: a stranger token confirmed: %', r; END IF;
   r := public.confirm_outbound_dispatch('a1', 'not-a-uuid');
   IF r->>'code' IS DISTINCT FROM 'send_dispatch_fenced' THEN RAISE EXCEPTION 'contract 3: a malformed token confirmed: %', r; END IF;
+  IF EXISTS (SELECT 1 FROM public.outbound_send_claims WHERE attempt_id = 'a1' AND dispatch_confirmed_at IS NOT NULL) THEN
+    RAISE EXCEPTION 'contract 3: a fenced confirm marked the dispatch confirmed';
+  END IF;
+  r := public.claim_outbound_send(ARRAY['invoice:inv-3c'], 'a3c', NULL, '{}'::jsonb);
+  tc := r->>'dispatch_token';
+  r := public.confirm_outbound_dispatch('a3c', tc);
+  IF NOT coalesce((r->>'ok')::boolean, false) THEN RAISE EXCEPTION 'contract 3: the claim token did not confirm: %', r; END IF;
+  IF EXISTS (SELECT 1 FROM public.outbound_send_claims WHERE attempt_id = 'a3c' AND dispatch_confirmed_at IS NULL) THEN
+    RAISE EXCEPTION 'contract 3: a confirm did not record that the dispatch is confirmed';
+  END IF;
+
+  -- 3b. A confirmed dispatch is never handed over, and only its token holder
+  -- settles it: another request carrying the attempt id cannot take it over
+  -- and release the item while the provider call may be in flight.
+  r := public.extend_outbound_send_claim('a3c', ARRAY['send_quote_invoice:inv-3c'], 'invoice:inv-3c', NULL, '{}'::jsonb);
+  IF r->>'code' IS DISTINCT FROM 'send_claim_dispatch_taken' THEN RAISE EXCEPTION 'contract 3b: a confirmed dispatch was extended: %', r; END IF;
+  IF EXISTS (SELECT 1 FROM public.outbound_send_claims WHERE item_key = 'send_quote_invoice:inv-3c') THEN
+    RAISE EXCEPTION 'contract 3b: a refused extend left a row behind';
+  END IF;
+  r := public.settle_outbound_send('a3c', 'failed', '{}'::jsonb);
+  IF r->>'code' IS DISTINCT FROM 'send_settle_not_dispatcher' THEN RAISE EXCEPTION 'contract 3b: a settle with no token released a confirmed dispatch: %', r; END IF;
+  r := public.settle_outbound_send('a3c', 'failed', '{}'::jsonb, 'dispatcher', gen_random_uuid()::text);
+  IF r->>'code' IS DISTINCT FROM 'send_settle_not_dispatcher' THEN RAISE EXCEPTION 'contract 3b: a stranger token released a confirmed dispatch: %', r; END IF;
+  r := public.settle_outbound_send('a3c', 'failed', '{}'::jsonb, 'caller');
+  IF r->>'code' IS DISTINCT FROM 'send_settle_not_dispatcher' THEN RAISE EXCEPTION 'contract 3b: a caller released a confirmed claim dispatch: %', r; END IF;
+  IF EXISTS (SELECT 1 FROM public.outbound_send_claims WHERE attempt_id = 'a3c' AND state <> 'sending') THEN
+    RAISE EXCEPTION 'contract 3b: a refused settle changed state';
+  END IF;
+  r := public.claim_outbound_send(ARRAY['invoice:inv-3c'], 'a3d', NULL, '{}'::jsonb);
+  IF r->>'code' IS DISTINCT FROM 'send_claim_held' THEN RAISE EXCEPTION 'contract 3b: a fresh claim got past a confirmed dispatch: %', r; END IF;
+  r := public.settle_outbound_send('a3c', 'sent', '{}'::jsonb, 'dispatcher', upper(tc));
+  IF NOT coalesce((r->>'ok')::boolean, false) THEN RAISE EXCEPTION 'contract 3b: the token holder could not settle: %', r; END IF;
 
   -- 4. Extend is single-use and must name one of the attempt's own keys.
   r := public.extend_outbound_send_claim('a1', ARRAY['email_content:abc'], 'invoice:other', NULL, '{}'::jsonb);
@@ -151,6 +183,10 @@ BEGIN
   r := public.settle_outbound_send('a1', 'sent', '{}'::jsonb, 'nobody');
   IF r->>'code' IS DISTINCT FROM 'send_settle_invalid_settler' THEN RAISE EXCEPTION 'contract 5: unknown settler accepted: %', r; END IF;
   r := public.settle_outbound_send('a1', 'outcome_unknown', '{"why":"timeout"}'::jsonb);
+  IF r->>'code' IS DISTINCT FROM 'send_settle_not_dispatcher' THEN RAISE EXCEPTION 'contract 5: a settle without the door token: %', r; END IF;
+  r := public.settle_outbound_send('a1', 'outcome_unknown', '{"why":"timeout"}'::jsonb, 'dispatcher', t1);
+  IF r->>'code' IS DISTINCT FROM 'send_settle_not_dispatcher' THEN RAISE EXCEPTION 'contract 5: the replaced caller token settled: %', r; END IF;
+  r := public.settle_outbound_send('a1', 'outcome_unknown', '{"why":"timeout"}'::jsonb, 'dispatcher', te);
   IF NOT coalesce((r->>'ok')::boolean, false) OR (r->>'rows')::int IS DISTINCT FROM 2 THEN RAISE EXCEPTION 'contract 5: dispatcher settle: %', r; END IF;
   IF EXISTS (SELECT 1 FROM public.outbound_send_claims WHERE attempt_id = 'a1' AND dispatch_ended_at IS NULL) THEN
     RAISE EXCEPTION 'contract 5: the dispatcher settle did not end the dispatch';

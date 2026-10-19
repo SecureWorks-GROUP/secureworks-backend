@@ -67,23 +67,36 @@ function newestAt(rows: Array<{ event_type: string; at: unknown }>, type: string
 }
 
 /**
+ * The spellings a Xero invoice id may be stored under: as given, lowercase and
+ * uppercase. The claim key lowercases the id, so a hold recorded before the
+ * claim store must be found whichever case the earlier send or this one used.
+ */
+export function invoiceIdSpellings(xeroInvoiceId: string): string[] {
+  const id = String(xeroInvoiceId ?? '').trim()
+  return [...new Set([id, id.toLowerCase(), id.toUpperCase()])].filter(Boolean)
+}
+
+/**
  * The unknown-send hold recorded before the claim store: the newest
  * `invoice.email_outcome_unknown` in either store, unless a reconciled event
  * is at or after it. `invoice.emailed` is not read. Any read error is
- * unreadable, never clear.
+ * unreadable, never clear. The id is matched in any of its spellings
+ * (invoiceIdSpellings), so an uppercase resend still finds a lowercase hold.
  */
 export async function readLegacyInvoiceEmailHold(client: any, xeroInvoiceId: string): Promise<LegacyInvoiceEmailHold> {
+  const ids = invoiceIdSpellings(xeroInvoiceId)
+  if (ids.length === 0) return { state: 'unreadable' }
   try {
     const [be, je] = await Promise.all([
       client.from('business_events')
         .select('event_type, occurred_at')
         .eq('entity_type', 'xero_invoice')
-        .eq('entity_id', xeroInvoiceId)
+        .in('entity_id', ids)
         .in('event_type', LEGACY_HOLD_EVENT_TYPES)
         .order('occurred_at', { ascending: false }),
       client.from('job_events')
         .select('event_type, created_at')
-        .eq('detail_json->>xero_invoice_id', xeroInvoiceId)
+        .in('detail_json->>xero_invoice_id', ids)
         .in('event_type', LEGACY_HOLD_EVENT_TYPES)
         .order('created_at', { ascending: false }),
     ])
@@ -265,9 +278,12 @@ export async function settleInvoiceEmailSend(
   attemptId: string,
   state: SettleState,
   detail: Record<string, unknown> = {},
-  opts: { settler?: 'dispatcher' | 'caller' } = {},
+  opts: { settler?: 'dispatcher' | 'caller'; dispatchToken?: string | null } = {},
 ): Promise<boolean> {
-  const settled = await settleSend(client, attemptId, state, detail, { settler: opts.settler ?? 'dispatcher' })
+  const settled = await settleSend(client, attemptId, state, detail, {
+    settler: opts.settler ?? 'dispatcher',
+    dispatchToken: opts.dispatchToken ?? null,
+  })
   // A door settles a caller's claim itself when it can; the first settle wins
   // (compare-and-set), so a later one finding it settled is fine.
   if (!settled.ok && settled.code === 'send_claim_not_sending') return true

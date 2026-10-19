@@ -26,6 +26,7 @@ export type FakeClaimRow = {
   dispatch_started_at: string | null
   dispatch_ended_at: string | null
   dispatch_via: "claim" | "extend" | null
+  dispatch_confirmed_at: string | null
   settled_detail?: Record<string, unknown>
   reconciled_by?: string
   reconcile_checked_at?: string
@@ -144,6 +145,7 @@ export function makeFakeClaimStore(options: { now?: number } = {}): FakeClaimSto
         attempt_id: attemptId, item_key: key, state: "sending", actor, detail,
         claimed_at: iso(nowMs), lease_until: iso(leaseUntilMs),
         dispatch_token: token, dispatch_started_at: iso(nowMs), dispatch_ended_at: null, dispatch_via: via,
+        dispatch_confirmed_at: null,
       })
       events.push({ attempt_id: attemptId, item_key: key, event, to_state: "sending", actor, detail })
     }
@@ -177,7 +179,9 @@ export function makeFakeClaimStore(options: { now?: number } = {}): FakeClaimSto
         let code: string | null = null
         if (mine.length === 0 || mine.some((r) => r.state !== "sending")) code = "send_claim_not_sending"
         else if (callerKey !== null && !mine.some((r) => r.item_key === callerKey)) code = "send_claim_item_mismatch"
-        else if (mine.some((r) => keys.includes(r.item_key) || r.dispatch_via === "extend")) code = "send_claim_dispatch_taken"
+        else if (mine.some((r) => keys.includes(r.item_key) || r.dispatch_via === "extend" || r.dispatch_confirmed_at !== null)) {
+          code = "send_claim_dispatch_taken"
+        }
         if (code) {
           events.push({ attempt_id: attemptId, event: "extend_refused", actor, detail: { code, keys, caller_item_key: callerKey } })
           return { ok: false, code }
@@ -190,6 +194,7 @@ export function makeFakeClaimStore(options: { now?: number } = {}): FakeClaimSto
           r.dispatch_token = token
           r.dispatch_started_at = iso(nowMs)
           r.dispatch_ended_at = null
+          r.dispatch_confirmed_at = null
           r.dispatch_via = "extend"
           r.lease_until = iso(leaseUntil)
         }
@@ -203,6 +208,7 @@ export function makeFakeClaimStore(options: { now?: number } = {}): FakeClaimSto
           r.dispatch_token !== null && r.dispatch_token === token
         )
         events.push({ attempt_id: attemptId, event: ok ? "dispatch_confirmed" : "dispatch_fenced" })
+        if (ok) for (const r of mine) r.dispatch_confirmed_at = r.dispatch_confirmed_at ?? iso(nowMs)
         return ok ? { ok: true, attempt_id: attemptId } : { ok: false, code: "send_dispatch_fenced" }
       }
       case "settle_outbound_send": {
@@ -216,6 +222,17 @@ export function makeFakeClaimStore(options: { now?: number } = {}): FakeClaimSto
             actor: "caller", detail: { requested_state: state, detail },
           })
           return { ok: true, attempt_id: attemptId, deferred: true, state: "sending" }
+        }
+        const settleToken = String(a.p_dispatch_token ?? "").trim().toLowerCase()
+        if (mine.some((r) =>
+          r.state === "sending" && r.dispatch_confirmed_at !== null && r.dispatch_ended_at === null &&
+          (r.dispatch_token === null || r.dispatch_token !== settleToken)
+        )) {
+          events.push({
+            attempt_id: attemptId, event: "settle_refused", to_state: state, actor: settler,
+            detail: { code: "send_settle_not_dispatcher", detail },
+          })
+          return { ok: false, code: "send_settle_not_dispatcher" }
         }
         const moved = mine.filter((r) => r.state === "sending")
         if (moved.length === 0) {

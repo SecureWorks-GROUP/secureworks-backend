@@ -21,6 +21,7 @@ BEGIN
     RAISE EXCEPTION 'outbound send claims unresolved: settle or reconcile every sending and outcome_unknown attempt before rolling back 20261019170000';
   END IF;
   DROP FUNCTION IF EXISTS public.reconcile_outbound_send(text, text, text, text, timestamptz, text);
+  DROP FUNCTION IF EXISTS public.settle_outbound_send(text, text, jsonb, text, text);
   DROP FUNCTION IF EXISTS public.settle_outbound_send(text, text, jsonb, text);
   DROP FUNCTION IF EXISTS public.settle_outbound_send(text, text, jsonb);
   DROP FUNCTION IF EXISTS public.confirm_outbound_dispatch(text, text);

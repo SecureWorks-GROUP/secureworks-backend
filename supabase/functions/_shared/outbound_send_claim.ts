@@ -77,6 +77,7 @@ export type SettleCode =
   | "send_claim_not_sending"
   | "send_settle_invalid_state"
   | "send_settle_invalid_settler"
+  | "send_settle_not_dispatcher"
 /** deferred: a caller settle held back because the door's dispatch is still open; the attempt is still sending. */
 export type SettleResult = { ok: true; deferred?: true; state?: "sending" } | { ok: false; code: SettleCode }
 /** "dispatcher": whoever made the provider call (default). "caller": a caller whose door may have extended the attempt. */
@@ -237,26 +238,31 @@ export async function confirmSendDispatch(
  * Settle an attempt out of sending, once. A failed write leaves the hold in
  * place. With { settler: "caller" } a settle while the door's extended
  * dispatch is open is deferred: { ok: true, deferred: true, state: "sending" }.
+ * Once the current dispatch is confirmed, only the holder of its token
+ * (dispatchToken) may settle; anyone else is send_settle_not_dispatcher and the
+ * attempt stays sending, so a request whose own dispatch was fenced or taken
+ * over can never release an item under another request's provider call.
  */
 export async function settleSend(
   client: ClaimClient,
   attemptId: string,
   state: SettleState,
   detail: Record<string, unknown> = {},
-  opts: { settler?: SendSettler } = {},
+  opts: { settler?: SendSettler; dispatchToken?: string | null } = {},
 ): Promise<SettleResult> {
   const { data, failed } = await callRpc(client, "settle_outbound_send", {
     p_attempt_id: attemptId,
     p_state: state,
     p_detail: detail,
     p_settler: opts.settler ?? "dispatcher",
+    p_dispatch_token: opts.dispatchToken ?? null,
   })
   const row = data as Record<string, unknown> | null
   if (failed || !row || typeof row !== "object") return { ok: false, code: "send_settle_failed" }
   if (row.ok === true) return row.deferred === true ? { ok: true, deferred: true, state: "sending" } : { ok: true }
   if (
     row.code === "send_claim_not_sending" || row.code === "send_settle_invalid_state" ||
-    row.code === "send_settle_invalid_settler"
+    row.code === "send_settle_invalid_settler" || row.code === "send_settle_not_dispatcher"
   ) return { ok: false, code: row.code }
   return { ok: false, code: "send_settle_failed" }
 }

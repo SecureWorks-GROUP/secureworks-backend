@@ -34,6 +34,7 @@ const { ApprovedSendRefusal, recordApproval } = await import('../_shared/approve
 const { makeDeps, RECORDER } = await import('../_shared/approved_send_test_fakes.ts')
 const { sendApprovedEmail } = await import('./approved_send_email.ts')
 const { assertGraphSendAccepted } = await import('./graph_send_accept.ts')
+const { emailDeliveryKey } = await import('../_shared/approved_send_content_key.ts')
 type Store = ReturnType<typeof makeFakeClaimStore>
 type GraphCall = Parameters<typeof sendApprovedEmail>[0]['graph']
 
@@ -390,6 +391,68 @@ Deno.test('P1#3: reordered and recased recipients give the same key and are held
   assertEquals(p.sendMails(), 1)
 })
 
+// Codex B21: the plain reply door sends the provider's own reply subject and
+// keys a reply with no subject; the approved door sets its stored subject. A
+// reply's identity leaves the subject out on both doors, so an unresolved
+// plain reply holds the approved reply of the same message, and back.
+Deno.test('P1#3: an unresolved plain reply holds the approved reply of the same message, whatever its subject', async () => {
+  const keyOf = (mode: string, subject: string) => emailDeliveryKey({
+    mailbox: MAILBOX, mode, replyTo: 'source-message-9', to: ['client@example.com'], cc: [],
+    subject, html: HTML,
+  })
+  assertEquals(await keyOf('reply', 'Re: Your quote'), await keyOf('createReply', ''))
+  assertEquals(await keyOf('createReplyAll', ''), await keyOf('createReply', ''))
+  assert(await keyOf('new', 'One') !== await keyOf('new', 'Two'), 'a new email keeps its subject in its identity')
+
+  const g = approvedGraph()
+  const d = approvedDeps(g.graph)
+  const store = d.store.claims
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes('/oauth2/v2.0/token')) return Response.json({ access_token: 'reply-token', expires_in: 3600 })
+    if (url.endsWith('/createReply')) {
+      return Response.json({
+        id: 'reply-draft-9',
+        subject: 'RE: Your quote',
+        toRecipients: [{ emailAddress: { address: 'client@example.com' } }],
+        ccRecipients: [],
+      }, { status: 201 })
+    }
+    if (url.endsWith('/send') && init?.method === 'POST') return new Response('upstream', { status: 503 })
+    return new Response(null, { status: 202 })
+  }) as typeof fetch
+  resetGraphTokenCache()
+  try {
+    const hold = makeOutlookSendHold(store, null, 'ops-fixture-actor')
+    await handleReply({
+      action: 'reply',
+      mailbox: MAILBOX,
+      message_id: 'source-message-9',
+      htmlBody: HTML,
+      content_reviewed: true,
+      expected_to: ['client@example.com'],
+      expected_cc: [],
+    }, hold).catch(() => {})
+  } finally {
+    globalThis.fetch = originalFetch
+    resetGraphTokenCache()
+  }
+  const plainRows = rowsByPrefix(store, 'email_content:')
+  assertEquals(plainRows.length, 1)
+  assert(plainRows[0].state === 'sending' || plainRows[0].state === 'outcome_unknown', plainRows[0].state)
+
+  const id = await recordEmail(d, {
+    mode: 'reply',
+    reply_to_message_id: 'source-message-9',
+    to: ['client@example.com'],
+    subject: 'Re: Your quote',
+  })
+  const refused = await assertRejects(() => sendApprovedEmail(d, id, CALLER), ApprovedSendRefusal)
+  assertEquals((refused as InstanceType<typeof ApprovedSendRefusal>).code, 'send_claim_held')
+  assertEquals(g.posts.length + g.sends.length, 0)
+})
+
 Deno.test('P1#3: a plain invoice-anchored request is refused while invoice:<id> is held, and holds it itself', async () => {
   const store = makeFakeClaimStore()
   const p = provider(() => new Response(null, { status: 202 }))
@@ -419,6 +482,36 @@ Deno.test('P1#3: a plain invoice-anchored request is refused while invoice:<id> 
   const [row] = store.rowsFor(`invoice:${other}`)
   assertEquals(row.state, 'sent')
   assertEquals(store.rowsOf(row.attempt_id).map((r) => r.item_key.split(':')[0]).sort(), ['email_content', 'invoice'])
+})
+
+// Codex B21 note: a plain request naming an invoice also waits behind an
+// unknown-send event recorded before the claim store, as ops-api's doors do.
+Deno.test('P1#3: a plain invoice-anchored request is refused while a pre-claim unknown event holds the invoice', async () => {
+  const store = makeFakeClaimStore()
+  const p = provider(() => new Response(null, { status: 202 }))
+  const legacy = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes('/rest/v1/job_events')) {
+      return Promise.resolve(Response.json([{ event_type: 'invoice.email_outcome_unknown', created_at: '2026-10-01T00:00:00.000Z' }]))
+    }
+    return p.fetchImpl(input, init)
+  }) as typeof fetch
+  const held = await withProvider(store, { ...p, fetchImpl: legacy }, () =>
+    post({ subject: 'Invoice by mail', xero_invoice_id: INVOICE_ID }))
+  assertEquals(held.status, 409)
+  assertEquals(held.body.code, 'send_claim_held')
+  assertEquals(p.sendMails(), 0)
+  assertEquals(store.rows.length, 0, 'nothing was claimed')
+
+  const unreadable = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes('/rest/v1/business_events')) return Promise.resolve(Response.json({ message: 'denied' }, { status: 403 }))
+    return p.fetchImpl(input, init)
+  }) as typeof fetch
+  const refused = await withProvider(store, { ...p, fetchImpl: unreadable }, () =>
+    post({ subject: 'Invoice by mail', xero_invoice_id: INVOICE_ID }))
+  assertEquals(refused.status, 503)
+  assertEquals(p.sendMails(), 0)
 })
 
 // ── P1#7: a 2xx that says its outcome is uncertain ──

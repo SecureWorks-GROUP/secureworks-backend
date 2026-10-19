@@ -240,6 +240,14 @@ export async function sendApprovedEmail(
       : unknown
       ? 'provider_outcome_unknown'
       : `provider_failed_at_${stage}`
+    // Fixed text only: a provider or runtime error message can carry
+    // provider bodies or request detail, so neither the stored outcome nor
+    // the response repeats it. A draft mismatch is this module's own words.
+    const errorText = error instanceof DraftMismatch
+      ? error.message
+      : error instanceof DispatchFenced
+      ? 'send dispatch fenced'
+      : `provider call failed at ${stage}`
     if (!unknown && draftId) {
       // Leave no approved-content draft lying in the mailbox. Best effort.
       try {
@@ -257,7 +265,7 @@ export async function sendApprovedEmail(
         mode: payload.mode,
         graph_draft_id: draftId,
         stage,
-        error: (error as Error).message,
+        error: errorText,
       },
     }, caller)
     if (error instanceof DispatchFenced) {
@@ -278,7 +286,7 @@ export async function sendApprovedEmail(
         state: status,
         code,
         approval_id: approvalId,
-        error: (error as Error).message,
+        error: errorText,
         retry_safe: false,
         recovery_action: unknown
           ? 'Check the mailbox Sent Items for this message before anything else; this approval is used and is never resent.'

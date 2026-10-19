@@ -1305,7 +1305,7 @@ export async function finishApprovedSend(
   const settled = await settleSend(deps.store.claims, claimed.sendAttemptId, outcome.status, {
     approval_id: claimed.row.id,
     code: outcome.code,
-  }, { settler: "dispatcher" });
+  }, { settler: "dispatcher", dispatchToken: claimed.dispatchToken });
   if (!settled.ok) console.error("[approved_send] send claim settle failed:", settled.code);
   let auditRecorded = true;
   try {

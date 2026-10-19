@@ -216,6 +216,26 @@ Deno.test("legacy hold: an unknown event with an empty claim store holds, and tw
   assertEquals(reconciled.length, 1)
 })
 
+// Codex B21: the claim key lowercases the id, so a hold recorded before the
+// claim store must hold a resend whatever case either press used.
+Deno.test("legacy hold: an uppercase resend still finds a lowercase hold, and the other way round", async () => {
+  for (const [stored, pressed] of [["inv-abc", "INV-ABC"], ["INV-ABC", "inv-abc"]]) {
+    const claims = makeFakeClaimStore()
+    const t = xeroDirect(claims, async () => ({}), {
+      business_events: [],
+      job_events: [{
+        event_type: INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, detail_json: { xero_invoice_id: stored },
+        created_at: "2026-10-01T00:00:00.000Z",
+      }],
+    })
+    const resp = await _sendInvoiceEmailViaXeroDirect({ ...t.deps(), body: { xero_invoice_id: pressed } })
+    assertEquals(resp.status, 409, `${stored} pressed as ${pressed}`)
+    assertEquals((await jsonBody(resp)).code, "invoice_email_outcome_unreconciled")
+    assertEquals(t.posts(), 0)
+    assertEquals(claims.rowsFor("invoice:inv-abc").length, 0)
+  }
+})
+
 Deno.test("legacy hold: an unreadable event history refuses with 503 and sends nothing", async () => {
   const claims = makeFakeClaimStore()
   const t = xeroDirect(claims, async () => ({}), { read_errors: { business_events: "permission denied" } })

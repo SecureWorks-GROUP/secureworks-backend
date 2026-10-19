@@ -88,7 +88,9 @@ export async function releaseSharedInvoiceSendNotSent(client: ClaimClient, share
 }
 
 async function settleShared(client: ClaimClient, shared: SharedInvoiceSend, state: SettleState, detail: Record<string, unknown>) {
-  const settled = await settleSend(client, shared.attemptId, state, { door: 'send-quote/send-invoice', ...detail })
+  const settled = await settleSend(client, shared.attemptId, state, { door: 'send-quote/send-invoice', ...detail }, {
+    dispatchToken: shared.dispatchToken,
+  })
   if (!settled.ok && settled.code !== 'send_claim_not_sending') {
     // The hold stays at sending; it reads as unknown once its lease passes.
     console.error(JSON.stringify({ event: 'send_invoice_shared_settle_failed', attempt_id: shared.attemptId, state, code: settled.code }))
