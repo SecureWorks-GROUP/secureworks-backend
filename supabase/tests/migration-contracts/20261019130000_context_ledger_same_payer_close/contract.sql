@@ -330,7 +330,7 @@ BEGIN
 END $c$;
 
 -- 3 to 5. The 38 fixtures, four review r2 traps (39 to 42), seven review r3 traps (43 to 49), five
--- review r4 traps (50 to 54), nine review r5 traps (55 to 63), three review r6 traps (64 to 66), three review r7 traps (67 to 69), seven review r8 traps (70 to 76) and seven review r9 traps (77 to 83).
+-- review r4 traps (50 to 54), nine review r5 traps (55 to 63), three review r6 traps (64 to 66), three review r7 traps (67 to 69), seven review r8 traps (70 to 76), seven review r9 traps (77 to 83) and eight review r10 traps (84 to 91).
 BEGIN;
 DO $c$
 DECLARE j uuid; j2 uuid; j3 uuid; own uuid; nb uuid; nb2 uuid; e1 uuid; ib uuid; e2 uuid; e3 uuid; x1 uuid; x2 uuid; x3 uuid; t1 timestamptz := '2026-09-01 02:00Z';
@@ -1008,10 +1008,10 @@ BEGIN
  PERFORM pg_temp.sp_fx_add(81, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
   jsonb_build_array(pg_temp.sp_c('inbox_events', ib, 'Could you please pay your share of the fence this week.')),
   jsonb_build_array(pg_temp.sp_cx(x1), pg_temp.sp_cx(x2)), 'O?', 'recipient_unknown');
- -- 82 (review r9, M15, the live shape where r8 wrongly closed). Three active parties; one payment item
- -- about the deposit, opened by our own text sent to the owner, cites the owner's own PAID deposit; the
- -- first neighbour's deposit (same kind) is still AUTHORISED and owed. r7 kept it O? other_invoice_owed,
- -- r8 closed it by recipient: payer not certain (other_invoice_owed).
+ -- 82 (review r9, M15; a payment:deposit variant, not the live shape: see 84). Three active parties; one
+ -- payment item about the deposit, opened by our own text sent to the owner, cites the owner's own PAID
+ -- deposit; the first neighbour's deposit (same kind) is still AUTHORISED and owed. r8 closed it by
+ -- recipient: payer not certain (other_invoice_owed).
  j := pg_temp.sp_job(82, 1, 'SWF-90085');
  own := pg_temp.sp_party(82, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
  nb := pg_temp.sp_party(82, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
@@ -1033,7 +1033,92 @@ BEGIN
  PERFORM pg_temp.sp_fx_add(83, j, 'commitment', 'payment', 'payment', 'us', 'The owner is to pay their deposit for the fence.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your deposit for the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'C', 'closes',
   'payment:deposit');
- PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 83, 'the 83 fixtures');
+ -- 84 (review r10, the live shape). One payment item about one named invoice (about_key invoice:<the
+ -- neighbour's invoice>; the opening text names no invoice, so the item is held to that invoice's kind and
+ -- bound to its recipient), opened by our own text to the neighbour; the neighbour's FINBAL50 is PAID and
+ -- cited; the owner's final (same kind) is AUTHORISED with a balance: payer not certain
+ -- (other_invoice_owed), today's safe default (whether it should close is the owner's call).
+ j := pg_temp.sp_job(84, 1, 'SWF-90087');
+ own := pg_temp.sp_party(84, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(84, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(84, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(84, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90087-FINBAL50', 'Balance of the fence', 1500, 1500, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(84, 2, j, 'ACCREC', 'PAID', 'SWF-90087-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(84, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'other_invoice_owed', 'invoice:inv-90842');
+ -- 85 (review r10, the unknown-kind hold). As 77, the owner's owed invoice has no known kind: it holds
+ -- (payer not certain, other_invoice_owed).
+ j := pg_temp.sp_job(85, 1, 'SWF-90088');
+ own := pg_temp.sp_party(85, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(85, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(85, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(85, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90088-MISC', 'Fence works', 1500, 1500, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(85, 2, j, 'ACCREC', 'PAID', 'SWF-90088-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(85, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'other_invoice_owed', NULL);
+ -- 86 (review r10, control for 85). As 85, the owner's no-kind invoice PAID: closes.
+ j := pg_temp.sp_job(86, 1, 'SWF-90089');
+ own := pg_temp.sp_party(86, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(86, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(86, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(86, 1, j, 'ACCREC', 'PAID', 'SWF-90089-MISC', 'Fence works', 1500, 0, 1500, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(86, 2, j, 'ACCREC', 'PAID', 'SWF-90089-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(86, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'C', 'closes', NULL);
+ -- 87 (review r10, the zero-balance hold). As 77, the owner's final (same kind) is AUTHORISED at a zero
+ -- balance and not paid: it holds (payer not certain, other_invoice_owed).
+ j := pg_temp.sp_job(87, 1, 'SWF-90090');
+ own := pg_temp.sp_party(87, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(87, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(87, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(87, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90090-FINBAL50', 'Balance of the fence', 1500, 0, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(87, 2, j, 'ACCREC', 'PAID', 'SWF-90090-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(87, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'other_invoice_owed', NULL);
+ -- 88 (review r10, control for 87). As 87, the owner's zero-balance invoice is a deposit (another
+ -- kind): closes.
+ j := pg_temp.sp_job(88, 1, 'SWF-90091');
+ own := pg_temp.sp_party(88, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(88, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(88, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(88, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90091-DEP', 'Deposit 30%', 900, 0, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(88, 2, j, 'ACCREC', 'PAID', 'SWF-90091-B-FINBAL50', 'Balance of the fence', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(88, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'C', 'closes', NULL);
+ -- 89 (review r10, the unknown-cited-kind widening). The neighbour's PAID and cited invoice has no known
+ -- kind; the owner's owed invoice is a deposit: any kind holds (payer not certain, other_invoice_owed).
+ j := pg_temp.sp_job(89, 1, 'SWF-90092');
+ own := pg_temp.sp_party(89, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(89, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(89, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(89, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90092-DEP', 'Deposit 30%', 900, 900, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(89, 2, j, 'ACCREC', 'PAID', 'SWF-90092-B-MISC', 'Fence works', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(89, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'O?', 'other_invoice_owed', NULL);
+ -- 90 (review r10, control for 89). As 89, the owner's deposit PAID: closes.
+ j := pg_temp.sp_job(90, 1, 'SWF-90093');
+ own := pg_temp.sp_party(90, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(90, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(90, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your share of the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(90, 1, j, 'ACCREC', 'PAID', 'SWF-90093-DEP', 'Deposit 30%', 900, 0, 900, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(90, 2, j, 'ACCREC', 'PAID', 'SWF-90093-B-MISC', 'Fence works', 750, 0, 750, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(90, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their share of the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your share of the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'C', 'closes', NULL);
+ -- 91 (review r10, control for 84, modelled on a live item r9 closes correctly). An invoice-bound deposit:
+ -- about_key invoice:<the neighbour's deposit>, opened by our own text to the neighbour; the neighbour's
+ -- deposit PAID and cited; the owner's deposit (same kind) PAID too; the owner's only owed invoice is a
+ -- final (another kind, AUTHORISED): closes, never held as other_invoice_owed.
+ j := pg_temp.sp_job(91, 1, 'SWF-90094');
+ own := pg_temp.sp_party(91, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ nb := pg_temp.sp_party(91, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_ev(91, 1, j, 'client.sms_out', 'sms', 'outbound', 'Could you please pay your deposit for the fence this week.', tn, 'G-NB1');
+ x1 := pg_temp.sp_inv(91, 1, j, 'ACCREC', 'PAID', 'SWF-90094-DEP', 'Deposit 30%', 900, 0, 900, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(91, 2, j, 'ACCREC', 'PAID', 'SWF-90094-B-DEP', 'Deposit 30%', 450, 0, 450, paid, nb, 'XC-NB1');
+ x3 := pg_temp.sp_inv(91, 3, j, 'ACCREC', 'AUTHORISED', 'SWF-90094-FINBAL50', 'Balance of the fence', 2100, 2100, 0, NULL, own, 'XC-OWN');
+ PERFORM pg_temp.sp_fx_add(91, j, 'commitment', 'payment', 'payment', 'us', 'The neighbour is to pay their deposit for the fence.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Could you please pay your deposit for the fence this week.')), jsonb_build_array(pg_temp.sp_cx(x2)), 'C', 'closes',
+  'invoice:inv-90912');
+ PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 91, 'the 91 fixtures');
 END $c$;
 
 -- 3. Today's answers: the bodies before this migration (its down, undone at the savepoint).
