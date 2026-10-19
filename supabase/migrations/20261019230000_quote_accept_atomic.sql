@@ -73,7 +73,7 @@ COMMENT ON TABLE public.quote_acceptance_attempts IS
 -- clear when the data changes.
 CREATE TABLE public.quote_acceptance_gap_resolutions (
   kind text NOT NULL CHECK (kind IN ('review_needed', 'settle_run_unsettled', 'acceptance_handler_unfinished',
-                                     'acceptance_follow_up_issue')),
+                                     'acceptance_follow_up_issue', 'acceptance_status_not_written')),
   ref text NOT NULL,
   resolved_by uuid NOT NULL,
   resolved_at timestamptz NOT NULL DEFAULT now(),
@@ -401,9 +401,13 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, t
 --   run_acceptance_document_not_live  accepted run row whose document is
 --                            superseded, declined or not accepted; condition-based
 --   partially_accepted_all_documents_accepted  document heuristic: job
---                            partially accepted although every live quote
---                            document (two or more) is accepted and none is
---                            declined; condition-based
+--                            partially accepted although the current document
+--                            of every party (two or more) is accepted and none
+--                            is declined; condition-based
+--   acceptance_status_not_written  send-quote recorded that a legacy
+--                            acceptance's status write did not land, and the
+--                            job is not in that status (ref: the event id);
+--                            resolvable
 --   accepted_quote_with_open_sibling_document  accepted whole quote beside an
 --                            older open option for the same recipient
 --                            (ref: accepted>sibling); condition-based
@@ -515,10 +519,27 @@ BEGIN
     -- quote beside party documents) keeps a job out; a single-document job is
     -- never listed; documents are counted, not parties, so a listed job may
     -- still be legitimately partial. Condition-based.
-    SELECT 'partially_accepted_all_documents_accepted', j.id, j.id::text, max(d.accepted_at)
+    SELECT 'partially_accepted_all_documents_accepted', j.id, j.id::text, max(p.accepted_at)
       FROM public.jobs j
-      JOIN public.job_documents d ON d.job_id = j.id AND d.type = 'quote'
-                                 AND d.superseded_at IS NULL AND d.declined_at IS NULL
+      JOIN LATERAL (
+        -- One current document per party (contact and run label), as the
+        -- handler takes the current quote per party: the newest live revision.
+        -- A contactless whole-job document beside party documents is not a
+        -- party (the handler ignores it) and is left out (checker 70fd7db L1);
+        -- an older live revision is left out (L2).
+        SELECT DISTINCT ON (d.job_contact_id, coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label))
+               d.job_contact_id, coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label) AS run_key,
+               d.version, d.created_at, d.id, d.accepted_at
+          FROM public.job_documents d
+         WHERE d.job_id = j.id AND d.type = 'quote' AND d.superseded_at IS NULL AND d.declined_at IS NULL
+           AND NOT (d.job_contact_id IS NULL
+                    AND coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label) IS NULL
+                    AND EXISTS (SELECT 1 FROM public.job_documents pd
+                                 WHERE pd.job_id = j.id AND pd.type = 'quote' AND pd.job_contact_id IS NOT NULL
+                                   AND pd.superseded_at IS NULL AND pd.declined_at IS NULL))
+         ORDER BY d.job_contact_id, coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label),
+                  d.version DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id
+      ) p ON true
      WHERE j.status = 'partially_accepted'
        AND NOT EXISTS (SELECT 1 FROM public.job_documents x
                         WHERE x.job_id = j.id AND x.type = 'quote' AND x.declined_at IS NOT NULL
@@ -528,8 +549,23 @@ BEGIN
                         WHERE r.job_id = j.id AND r.status = 'declined'
                           AND (rd.id IS NULL OR rd.superseded_at IS NULL))
      GROUP BY j.id
-    HAVING count(*) >= 2 AND bool_and(d.accepted_at IS NOT NULL)
-       AND (p_since IS NULL OR max(d.accepted_at) >= p_since)
+    HAVING count(*) >= 2 AND bool_and(p.accepted_at IS NOT NULL)
+       AND (p_since IS NULL OR max(p.accepted_at) >= p_since)
+    UNION ALL
+    -- The legacy acceptance's own status write did not land (any returned
+    -- error, a refused fallback PATCH, or a call that threw): send-quote
+    -- records a quote_acceptance_status_not_written event with the status it
+    -- meant to write. Listed while the job is not in that status (or, for
+    -- 'accepted', not in any won status), whatever the documents look like:
+    -- this covers the shapes the document heuristic cannot (checker 70fd7db
+    -- L1 to L3). ref: the event id, a durable occurrence, so a person can
+    -- resolve it. Not listed if the event write itself failed.
+    SELECT 'acceptance_status_not_written', e.job_id, e.id::text, e.created_at
+      FROM public.job_events e
+      JOIN public.jobs j ON j.id = e.job_id
+     WHERE e.event_type = 'quote_acceptance_status_not_written'
+       AND j.status IS DISTINCT FROM (e.detail_json->>'intended_status')
+       AND NOT ((e.detail_json->>'intended_status') = 'accepted' AND public.fence_quote_option_status_won(j.status))
     UNION ALL
     -- An accepted run document with a contact but no accepted run acceptance
     -- pointing at it: the legacy run upsert failed after the document

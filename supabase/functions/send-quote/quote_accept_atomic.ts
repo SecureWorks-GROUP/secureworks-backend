@@ -229,16 +229,47 @@ export async function finishAtomicAcceptance(
 // (PGRST202, which can also be a stale PostgREST schema cache, or 42883: no
 // transaction committed) is today's PATCH sent instead. That fallback PATCH
 // is unmarked, so the C4 guarantee holds only while the call is reachable:
-// strict stays off until it is (design section 2b). Any other returned error is ignored, as
-// today's PATCH result is (a separate residual, design section 3); an
-// uncertain call is never retried through an unmarked PATCH.
+// strict stays off until it is (design section 2b).
+// If the status write does not land (any other returned error, a refused
+// fallback PATCH, or a call that throws), a quote_acceptance_status_not_written
+// job event records the status it meant to write, so the gap read lists the
+// job (acceptance_status_not_written). The handler still carries on as today
+// (a separate residual, design section 3); an uncertain call is never retried
+// through an unmarked PATCH, and a throw is rethrown after the record.
 // deno-lint-ignore no-explicit-any
-export async function setLegacyAcceptanceStatus(sb: any, jobId: string, status: string, acceptedAtIso: string | null): Promise<void> {
-  const { error } = await sb.rpc('quote_accept_legacy_set_status', {
-    p_job_id: jobId, p_status: status, p_accepted_at: acceptedAtIso,
-  })
-  if (error && (error.code === 'PGRST202' || error.code === '42883')) {
-    console.error('[accept] legacy status call unavailable (%s); sending the unmarked status write', error.code)
-    await sb.from('jobs').update({ status, ...(acceptedAtIso !== null ? { accepted_at: acceptedAtIso } : {}) }).eq('id', jobId)
+export async function setLegacyAcceptanceStatus(
+  sb: any, jobId: string, documentId: string, status: string, acceptedAtIso: string | null,
+): Promise<void> {
+  let failure: string | null = null
+  try {
+    const { error } = await sb.rpc('quote_accept_legacy_set_status', {
+      p_job_id: jobId, p_status: status, p_accepted_at: acceptedAtIso,
+    })
+    if (error && (error.code === 'PGRST202' || error.code === '42883')) {
+      console.error('[accept] legacy status call unavailable (%s); sending the unmarked status write', error.code)
+      const patch = await sb.from('jobs')
+        .update({ status, ...(acceptedAtIso !== null ? { accepted_at: acceptedAtIso } : {}) }).eq('id', jobId)
+      if (patch?.error) failure = `fallback:${String(patch.error.code || 'error')}`
+    } else if (error) {
+      failure = `call:${String(error.code || 'error')}`
+    }
+  } catch (e) {
+    await recordStatusNotWritten(sb, jobId, documentId, status, 'call:threw')
+    throw e
+  }
+  if (failure) await recordStatusNotWritten(sb, jobId, documentId, status, failure)
+}
+
+// deno-lint-ignore no-explicit-any
+async function recordStatusNotWritten(sb: any, jobId: string, documentId: string, status: string, reason: string) {
+  try {
+    const { error } = await sb.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'quote_acceptance_status_not_written',
+      detail_json: { document_id: documentId, intended_status: status, reason },
+    })
+    if (error) console.error('[accept] status-not-written record failed:', String(error.code || 'error'))
+  } catch {
+    console.error('[accept] status-not-written record failed: threw')
   }
 }

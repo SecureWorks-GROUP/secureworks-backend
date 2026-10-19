@@ -193,6 +193,9 @@ async function withSteppingClock<T>(fn: () => Promise<T>): Promise<T> {
 const acceptRequest = () => new Request('http://local/send-quote/accept?token=tok-1', { method: 'POST' })
 const writes = (calls: Call[], table: string, op: string) =>
   calls.filter((c) => c.kind === 'from' && c.name === table && c.ops.some(([m]) => m === op))
+const statusRecords = (calls: Call[]) => writes(calls, 'job_events', 'insert')
+  .map((c) => c.ops.find(([m]) => m === 'insert')![1][0] as Record<string, unknown>)
+  .filter((row) => row.event_type === 'quote_acceptance_status_not_written')
 
 Deno.test('atomic run acceptance: one RPC with its event, no split writes, event instant, finish after commit', async () => {
   const sb = fakeClient({ atomicOn: true })
@@ -315,6 +318,7 @@ Deno.test('legacy run acceptance, status call returns another error: ignored as 
   const res = await sendQuoteHandler(acceptRequest(), { sb })
   assertEquals(res.status, 302, 'today ignores a returned status error (separate residual)')
   assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, 'an uncertain call is never retried through an unmarked PATCH')
+  assertEquals(statusRecords(sb.calls).length, 1, 'and it is recorded')
 })
 
 // Whole quote (no run label), both paths. The fixture has one party, so the
@@ -349,11 +353,14 @@ Deno.test('legacy run acceptance, 42883: the same fallback as PGRST202', async (
 })
 
 for (const legacyStatus of ['transport', 'throw'] as const) {
-  Deno.test(`legacy run acceptance, status call ${legacyStatus}: never retried through an unmarked PATCH`, async () => {
+  Deno.test(`legacy run acceptance, status call ${legacyStatus}: recorded, never retried through an unmarked PATCH`, async () => {
     const sb = fakeClient({ atomicOn: false, legacyStatus })
-    let threw = false
-    try { await sendQuoteHandler(acceptRequest(), { sb }) } catch { threw = true }
-    assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, `no PATCH after an uncertain call (handler threw: ${threw})`)
+    const res = await sendQuoteHandler(acceptRequest(), { sb })
+    assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, 'no PATCH after an uncertain call')
+    assertEquals(statusRecords(sb.calls).length, 1, 'the status write that did not land is recorded')
+    // A returned error carries on as today; a thrown call is rethrown after the
+    // record and reaches the handler's outer error response, as before.
+    assertEquals(res.status, legacyStatus === 'throw' ? 500 : 302)
   })
 }
 
@@ -387,6 +394,14 @@ for (const legacyStatus of ['ok', 'error'] as const) {
     assertEquals(legacy[0].args!.p_status, 'accepted', 'the final party makes the job accepted')
     assertEquals(res.status, 302, 'the customer sees the run-accepted page either way')
     assertEquals(depositRequests(), 2, 'both parties\' deposit requests go out either way')
+    const rec = statusRecords(sb.calls)
+    if (legacyStatus === 'ok') {
+      assertEquals(rec.length, 0, 'a status that lands records nothing extra')
+    } else {
+      assertEquals(rec.length, 1, 'a status that does not land is recorded, so the gap read lists the job')
+      assertEquals((rec[0].detail_json as Record<string, unknown>).intended_status, 'accepted')
+      assertEquals((rec[0].detail_json as Record<string, unknown>).document_id, 'd-1')
+    }
     assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, 'no unmarked status write')
   })
   Deno.test(`c4d last contact of a whole quote, legacy, status call ${legacyStatus}: status and customer page`, async () => {

@@ -1022,34 +1022,37 @@ DROP FUNCTION public.qa_combo_fail();
 DROP FUNCTION public.qa_combo_fail_review();
 DROP FUNCTION public.qa_combo_raise();
 -- C4 parity: with every switch off, the legacy status write has exactly the database effect
--- of the PATCH it replaces. Twin ungrouped jobs, one written each way, compared column by
--- column (id excepted); the same for a partial write (no accepted_at), a missing job (no row,
+-- of the PATCH it replaces. Twin ungrouped jobs (their own ids, 9a00c4c4-..., used nowhere
+-- else in this transaction) are written one each way and compared column by column, except
+-- id, job_number and work_order_id: each new job gets its own from insert triggers (the job
+-- number sequence and the job work-orders trigger, 20261012130000), and no status write
+-- touches them, so they differ between twins whatever the write does. The same for a partial write (no accepted_at), a missing job (no row,
 -- no error either way) and a refused value (an error either way).
 UPDATE public.feature_flags SET enabled = false
  WHERE flag_name IN ('quote_option_supersede_v1', 'quote_accept_atomic_v1', 'quote_option_strict_record_v1');
 INSERT INTO public.jobs (id, org_id, status, type) VALUES
- ('9a000000-0000-4000-8000-0000000000d1', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio'),
- ('9a000000-0000-4000-8000-0000000000d2', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio'),
- ('9a000000-0000-4000-8000-0000000000d3', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing'),
- ('9a000000-0000-4000-8000-0000000000d4', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing');
+ ('9a00c4c4-0000-4000-8000-0000000000d1', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio'),
+ ('9a00c4c4-0000-4000-8000-0000000000d2', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio'),
+ ('9a00c4c4-0000-4000-8000-0000000000d3', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing'),
+ ('9a00c4c4-0000-4000-8000-0000000000d4', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing');
 UPDATE public.jobs SET status = 'accepted', accepted_at = '2026-10-20 04:00:00+00'
- WHERE id = '9a000000-0000-4000-8000-0000000000d1';
-SELECT public.quote_accept_legacy_set_status('9a000000-0000-4000-8000-0000000000d2', 'accepted', '2026-10-20 04:00:00+00');
-UPDATE public.jobs SET status = 'partially_accepted' WHERE id = '9a000000-0000-4000-8000-0000000000d3';
-SELECT public.quote_accept_legacy_set_status('9a000000-0000-4000-8000-0000000000d4', 'partially_accepted');
+ WHERE id = '9a00c4c4-0000-4000-8000-0000000000d1';
+SELECT public.quote_accept_legacy_set_status('9a00c4c4-0000-4000-8000-0000000000d2', 'accepted', '2026-10-20 04:00:00+00');
+UPDATE public.jobs SET status = 'partially_accepted' WHERE id = '9a00c4c4-0000-4000-8000-0000000000d3';
+SELECT public.quote_accept_legacy_set_status('9a00c4c4-0000-4000-8000-0000000000d4', 'partially_accepted');
 SELECT pg_temp.qa_assert(
- (SELECT to_jsonb(j) - 'id' FROM public.jobs j WHERE id = '9a000000-0000-4000-8000-0000000000d1')
-   = (SELECT to_jsonb(j) - 'id' FROM public.jobs j WHERE id = '9a000000-0000-4000-8000-0000000000d2')
- AND (SELECT to_jsonb(j) - 'id' FROM public.jobs j WHERE id = '9a000000-0000-4000-8000-0000000000d3')
-   = (SELECT to_jsonb(j) - 'id' FROM public.jobs j WHERE id = '9a000000-0000-4000-8000-0000000000d4')
- AND (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a000000-0000-4000-8000-0000000000d1', '9a000000-0000-4000-8000-0000000000d3'))
-   = (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a000000-0000-4000-8000-0000000000d2', '9a000000-0000-4000-8000-0000000000d4')),
+ (SELECT to_jsonb(j) - ARRAY['id', 'job_number', 'work_order_id'] FROM public.jobs j WHERE id = '9a00c4c4-0000-4000-8000-0000000000d1')
+   = (SELECT to_jsonb(j) - ARRAY['id', 'job_number', 'work_order_id'] FROM public.jobs j WHERE id = '9a00c4c4-0000-4000-8000-0000000000d2')
+ AND (SELECT to_jsonb(j) - ARRAY['id', 'job_number', 'work_order_id'] FROM public.jobs j WHERE id = '9a00c4c4-0000-4000-8000-0000000000d3')
+   = (SELECT to_jsonb(j) - ARRAY['id', 'job_number', 'work_order_id'] FROM public.jobs j WHERE id = '9a00c4c4-0000-4000-8000-0000000000d4')
+ AND (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a00c4c4-0000-4000-8000-0000000000d1', '9a00c4c4-0000-4000-8000-0000000000d3'))
+   = (SELECT count(*) FROM public.job_events WHERE job_id IN ('9a00c4c4-0000-4000-8000-0000000000d2', '9a00c4c4-0000-4000-8000-0000000000d4')),
  'C4 parity: the legacy status write must leave exactly the row the PATCH leaves');
-SELECT pg_temp.qa_assert(pg_temp.qa_try($q$SELECT public.quote_accept_legacy_set_status('9a000000-0000-4000-8000-00000000ffff', 'accepted', now())$q$) = 'ok',
+SELECT pg_temp.qa_assert(pg_temp.qa_try($q$SELECT public.quote_accept_legacy_set_status('9a00c4c4-0000-4000-8000-00000000ffff', 'accepted', now())$q$) = 'ok',
  'C4 parity: a missing job is no row and no error, like the PATCH');
 SELECT pg_temp.qa_assert(
- (pg_temp.qa_try($q$UPDATE public.jobs SET status = 'qa-not-a-status' WHERE id = '9a000000-0000-4000-8000-0000000000d1'$q$) LIKE 'err:%')
- = (pg_temp.qa_try($q$SELECT public.quote_accept_legacy_set_status('9a000000-0000-4000-8000-0000000000d2', 'qa-not-a-status')$q$) LIKE 'err:%'),
+ (pg_temp.qa_try($q$UPDATE public.jobs SET status = 'qa-not-a-status' WHERE id = '9a00c4c4-0000-4000-8000-0000000000d1'$q$) LIKE 'err:%')
+ = (pg_temp.qa_try($q$SELECT public.quote_accept_legacy_set_status('9a00c4c4-0000-4000-8000-0000000000d2', 'qa-not-a-status')$q$) LIKE 'err:%'),
  'C4 parity: a value the PATCH refuses, the legacy write refuses too (and vice versa)');
 SELECT pg_temp.qa_assert(NOT has_function_privilege('anon', 'public.quote_accept_legacy_set_status(uuid, text, timestamptz)', 'EXECUTE')
  AND NOT has_function_privilege('authenticated', 'public.quote_accept_legacy_set_status(uuid, text, timestamptz)', 'EXECUTE')
@@ -1106,13 +1109,17 @@ UPDATE public.job_documents SET superseded_at = '2026-10-20 07:00:00+00' WHERE i
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'accepted_quote_with_open_sibling_document' AND job_id = '9a000000-0000-4000-8000-0000000000e6'),
  'gap: it clears once the sibling is superseded');
--- A decline legitimately leaves a job partially accepted: not listed.
+-- The party heuristic (checker 70fd7db L1, L2). Job E9 has three parties (contacts).
 INSERT INTO public.jobs (id, org_id, status, type) VALUES
  ('9a000000-0000-4000-8000-0000000000e9', '00000000-0000-0000-0000-000000000001', 'partially_accepted', 'patio');
-INSERT INTO public.job_documents (id, job_id, type, sent_to_client, accepted_at, declined_at) VALUES
- ('9d000000-0000-4000-8000-0000000000e9', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '2026-10-20 01:00:00+00', NULL),
- ('9d000000-0000-4000-8000-0000000000ea', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '2026-10-20 01:00:00+00', NULL),
- ('9d000000-0000-4000-8000-0000000000eb', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, NULL, '2026-10-20 02:00:00+00');
+INSERT INTO public.job_contacts (id, job_id) VALUES
+ ('9c00c4c4-0000-4000-8000-0000000000e1', '9a000000-0000-4000-8000-0000000000e9'), ('9c00c4c4-0000-4000-8000-0000000000e2', '9a000000-0000-4000-8000-0000000000e9'),
+ ('9c00c4c4-0000-4000-8000-0000000000e3', '9a000000-0000-4000-8000-0000000000e9');
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_id, accepted_at, declined_at) VALUES
+ ('9d000000-0000-4000-8000-0000000000e9', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '9c00c4c4-0000-4000-8000-0000000000e1', '2026-10-20 01:00:00+00', NULL),
+ ('9d000000-0000-4000-8000-0000000000ea', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '9c00c4c4-0000-4000-8000-0000000000e2', '2026-10-20 01:00:00+00', NULL),
+ ('9d000000-0000-4000-8000-0000000000eb', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '9c00c4c4-0000-4000-8000-0000000000e3', NULL, '2026-10-20 02:00:00+00');
+-- A decline legitimately leaves a job partially accepted: not listed.
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
  'gap: a job partially accepted because a party declined must not be listed');
@@ -1120,14 +1127,49 @@ SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(
 UPDATE public.job_documents SET superseded_at = '2026-10-20 03:00:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000eb';
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
- 'gap: a superseded historical decline must not hide a partial job whose live documents are all accepted');
--- An unaccepted live document (an unsent alternative, say) keeps the job out: a known limit
--- of this document heuristic, recorded here so a change to it is deliberate.
+ 'gap: a superseded historical decline must not hide a partial job whose parties have all accepted');
+-- L1: a contactless whole-job document beside the party documents (sent or not) is not a
+-- party, as in the handler, so the job stays listed.
 INSERT INTO public.job_documents (id, job_id, type, sent_to_client) VALUES
- ('9d000000-0000-4000-8000-0000000000ec', '9a000000-0000-4000-8000-0000000000e9', 'quote', false);
+ ('9d000000-0000-4000-8000-0000000000ec', '9a000000-0000-4000-8000-0000000000e9', 'quote', true);
+-- L2: an older live revision for a party beside its accepted current one.
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_id, version, created_at) VALUES
+ ('9d000000-0000-4000-8000-0000000000ed', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '9c00c4c4-0000-4000-8000-0000000000e2', 0,
+  '2026-10-18 00:00:00+00');
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
+ 'gap (L1, L2): a contactless job-wide document and an older live revision must not drop the job');
+-- A newer unaccepted revision for a party makes that party pending, as in the handler: out.
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, job_contact_id, version) VALUES
+ ('9d000000-0000-4000-8000-0000000000ee', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '9c00c4c4-0000-4000-8000-0000000000e1', 2);
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
- 'gap (known limit): any live unaccepted document keeps the job out of the heuristic');
+ 'gap: a party whose current revision is unaccepted is pending, so the job is not listed');
+-- L3 and every other shape: send-quote's record of a status write that did not land. Job EF
+-- has one live document (the other party retired), which the heuristic never lists.
+INSERT INTO public.jobs (id, org_id, status, type) VALUES
+ ('9a000000-0000-4000-8000-0000000000ef', '00000000-0000-0000-0000-000000000001', 'partially_accepted', 'fencing');
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client, accepted_at) VALUES
+ ('9d000000-0000-4000-8000-0000000000ef', '9a000000-0000-4000-8000-0000000000ef', 'quote', true, '2026-10-20 08:00:00+00');
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE job_id = '9a000000-0000-4000-8000-0000000000ef'),
+ 'gap (L3): without the record, a single-document partial job is listed by no kind');
+INSERT INTO public.job_events (id, job_id, event_type, detail_json) VALUES
+ ('9e000000-0000-4000-8000-0000000000ef', '9a000000-0000-4000-8000-0000000000ef', 'quote_acceptance_status_not_written',
+  '{"document_id":"9d000000-0000-4000-8000-0000000000ef","intended_status":"accepted","reason":"call:57014"}');
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'acceptance_status_not_written' AND ref = '9e000000-0000-4000-8000-0000000000ef'),
+ 'gap (L3): a recorded status write that did not land must be listed');
+UPDATE public.jobs SET status = 'scheduled' WHERE id = '9a000000-0000-4000-8000-0000000000ef';
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'acceptance_status_not_written' AND ref = '9e000000-0000-4000-8000-0000000000ef'),
+ 'gap: it clears once the job is in a won status');
+UPDATE public.jobs SET status = 'partially_accepted' WHERE id = '9a000000-0000-4000-8000-0000000000ef';
+INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by) VALUES
+ ('acceptance_status_not_written', '9e000000-0000-4000-8000-0000000000ef', '00000000-0000-0000-0000-000000000001');
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'acceptance_status_not_written' AND ref = '9e000000-0000-4000-8000-0000000000ef'),
+ 'gap: a person can resolve a recorded status write by its event');
 -- A run row with no document pointer is listed as not live.
 INSERT INTO public.run_acceptances (job_id, job_contact_id, job_document_id, run_label, status, accepted_at) VALUES
  ('9a000000-0000-4000-8000-0000000000e5', '9c000000-0000-4000-8000-0000000000e5', NULL, 'B', 'accepted', '2026-10-20 05:00:00+00');
