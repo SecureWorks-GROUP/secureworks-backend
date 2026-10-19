@@ -2950,7 +2950,9 @@ async function syncBankBalances(sb: any) {
     else synced++
   }
   console.log(`[xero-sync] Synced ${synced} bank closing balances from Bank Summary report`)
-  return { success: true, accounts_synced: synced }
+  // Nothing stored is a failed refresh, never a quiet success.
+  if (synced === 0) return { success: false, accounts_synced: 0, error: rows.length ? 'bank_balance_writes_failed' : 'no_readable_balances' }
+  return { success: true, accounts_synced: synced, accounts_skipped: rows.length - synced }
 }
 
 

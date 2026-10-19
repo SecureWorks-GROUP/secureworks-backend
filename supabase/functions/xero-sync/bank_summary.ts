@@ -30,8 +30,8 @@ export function parseBankSummary(report: any): { rows: BankBalanceRow[]; closing
       if (raw === undefined || raw === null || String(raw).trim() === "") continue;
       const balance = Number(String(raw).replace(/,/g, ""));
       if (!Number.isFinite(balance)) continue;
-      const id = row.Cells[0]?.Attributes?.find?.((a: any) => a?.Id === "accountID")?.Value ||
-        row.Cells[0]?.Attributes?.[0]?.Value || name;
+      // Same key as before 19 Oct 2026, so new rows continue the old series.
+      const id = row.Cells[0]?.Attributes?.[0]?.Value || name;
       rows.push({ account_id: String(id), account_name: name, balance });
     }
   }
