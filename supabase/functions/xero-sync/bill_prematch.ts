@@ -342,8 +342,12 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
   for (const po of ctx.pos) {
     if (poIsDead(po)) continue;
     if (!po.job_id) {
-      const t = texts.find((x) => poNamedIn(po, x.text));
-      if (t) problems.push(`${po.po_number} (${t.where}) has no job`);
+      if (po.xero_bill_id && po.xero_bill_id === bill.xero_invoice_id) {
+        problems.push(`the bill is linked to ${po.po_number || "a purchase order"}, which has no job`);
+      } else {
+        const t = texts.find((x) => poNamedIn(po, x.text));
+        if (t) problems.push(`${po.po_number} (${t.where}) has no job`);
+      }
       continue;
     }
     let where: string | null = null;

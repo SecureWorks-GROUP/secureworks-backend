@@ -305,3 +305,9 @@ Deno.test("a bill naming a PO on a holding job, or a PO with no job, is never pl
   const b2 = bill([["Your order PO-302382", "305", 410], ["and PO-302400", "305", 90]], { xero_contact_id: "c-9" });
   assertEquals(decideBillPrematch(b2, ctx({ pos: [live, nojob] })).kind === "job", false);
 });
+
+Deno.test("a bill linked to a PO with no job is never placed by its job number", () => {
+  const linked: PrematchPO = { id: "p9", po_number: "PO-309999", job_id: null as unknown as string, xero_contact_id: "c-1", supplier_name: null, subtotal: 100, status: "sent", xero_bill_id: "x-1" };
+  const d = decideBillPrematch(bill([["Fencing Material SWF-26535", "305", 1027.27]]), ctx({ pos: [linked] }));
+  assertEquals(d.kind === "job", false);
+});
