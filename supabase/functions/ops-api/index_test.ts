@@ -83,7 +83,9 @@ Deno.test("T1: mismatched to_email → 400 recipient_mismatch, no PDF/Outlook ca
 // ─────────────────────────────────────────────────────────────────
 Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit written", async () => {
   const fix = happyFixture()
-  const { client, calls: dbCalls } = makeStubClient(fix.seed)
+  const seed = structuredClone(fix.seed)
+  ;(seed.jobs["job-uuid-1"] as { ghl_contact_id?: string }).ghl_contact_id = "ghl-customer-1"
+  const { client, calls: dbCalls } = makeStubClient(seed)
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
   const { fetch, calls: fetchCalls } = makeStubFetch(fix.fetchRoutes)
   const { getToken } = makeStubGetToken()
@@ -115,6 +117,10 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   const jobEventInserts = dbCalls.inserts.filter(i => i.table === "job_events")
   assertEquals(jobEventInserts.length, 1)
   assertEquals(jobEventInserts[0].row.job_id, "job-uuid-1")
+  assertEquals(jobEventInserts[0].row.detail_json.to, "client@example.com")
+  assertEquals(jobEventInserts[0].row.detail_json.contact_id, "ghl-customer-1")
+  const outlookBody = JSON.parse(String(outlookCalls[0].init?.body))
+  assertEquals(outlookBody.ghl_contact_id, undefined)
 })
 
 // ─────────────────────────────────────────────────────────────────
@@ -942,8 +948,10 @@ Deno.test("Quick Quote — both canonical events carry handler='ops-api/send_qui
 
 Deno.test("company report recipient anchor authorizes", async () => {
   const fix = happyFixture()
-  const { client } = makeStubClient({
-    ...fix.seed,
+  const seed = structuredClone(fix.seed)
+  ;(seed.jobs["job-uuid-1"] as { ghl_contact_id?: string }).ghl_contact_id = "ghl-customer-1"
+  const { client, calls } = makeStubClient({
+    ...seed,
     makesafe_job_details: {
       "job-uuid-1": { job_id: "job-uuid-1", requesting_company_id: "company-1" },
     },
@@ -964,4 +972,8 @@ Deno.test("company report recipient anchor authorizes", async () => {
     getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
   assertEquals(response.status, 200)
+  const jobEventInserts = calls.inserts.filter(i => i.table === "job_events")
+  assertEquals(jobEventInserts.length, 1)
+  assertEquals(jobEventInserts[0].row.detail_json.to, "reports@builder.test")
+  assertEquals("contact_id" in jobEventInserts[0].row.detail_json, false)
 })

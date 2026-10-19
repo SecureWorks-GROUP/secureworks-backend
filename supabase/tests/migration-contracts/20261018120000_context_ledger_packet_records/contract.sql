@@ -181,6 +181,15 @@ INSERT INTO public.xero_invoices (id, org_id, job_id, xero_invoice_id, contact_n
  ('18f00000-0000-4000-8000-000000000208', '00000000-0000-4000-8000-0000000000aa', '18f00000-0000-4000-8000-000000000001',
   '18f00000-0000-4000-8000-000000000297', 'Payer Eight', 'INV-78', 'ACCREC', 'DRAFT', 78, NULL, '2026-10-01 00:00Z', '[]');
 
+-- Money numbers are emitted only when currency is certainly AUD. These rows
+-- name none; stamp the raw code the helper reads.
+UPDATE public.xero_invoices
+SET raw_json = CASE
+  WHEN jsonb_typeof(raw_json) = 'object' THEN raw_json || '{"CurrencyCode":"AUD"}'::jsonb
+  ELSE '{"CurrencyCode":"AUD"}'::jsonb
+ END
+WHERE COALESCE(raw_json->>'CurrencyCode', '') = '';
+
 INSERT INTO public.email_events (id, job_id, email_type, recipient, subject, status, sent_at, created_at, metadata) VALUES
  ('18f00000-0000-4000-8000-000000000401', '18f00000-0000-4000-8000-000000000001', 'quote', 'client@example.test', 'Your paperwork',
   'sent', '2026-10-01 00:00Z', '2026-10-01 00:00Z', '{"quote_number":"Q-1042"}'),
@@ -315,15 +324,16 @@ BEGIN
   jsonb_build_object('kind','attachment','table','job_documents','id','18f00000-0000-4000-8000-000000000601','job_id',j1,
    'document_id','18f00000-0000-4000-8000-000000000302','about','quote:q-77'),
   jsonb_build_object('kind','job_event','table','job_events','id','18f00000-0000-4000-8000-000000000501','job_id',j1,
-   'event_type','quote_sent','about','invoice:inv-88'),
+   -- 20261019140000 types a quote_sent number as a quote, including INV-88.
+   'event_type','quote_sent','about','quote:inv-88'),
   jsonb_build_object('kind','paid_bill','table','xero_invoices','id','18f00000-0000-4000-8000-000000000101','job_id',j1,
-   'supplier','Other Metals','amount','90.00'),
+   'supplier','Other Metals','amount','90.00','xero_id','xero-lpr-bill-metals','currency','AUD','total','90.00'),
   jsonb_build_object('kind','paid_invoice','table','xero_invoices','id','18f00000-0000-4000-8000-000000000201','job_id',j1,
-   'number','invoice:inv-1307'),
+   'number','invoice:inv-1307','invoice_number','INV-1307','xero_id','xero-lpr-token-1307','supplier','Payer One','currency','AUD','total','165.00'),
   jsonb_build_object('kind','sent_document','table','job_documents','id','18f00000-0000-4000-8000-000000000301','job_id',j1,
-   'about','quote:q-9'),
+   'about','quote:q-9','document_id','18f00000-0000-4000-8000-000000000301','quote_number','Q-9'),
   jsonb_build_object('kind','system_email','table','email_events','id','18f00000-0000-4000-8000-000000000401','job_id',j1,
-   'email_type','quote','status','sent','about','quote:q-1042','system', true));
+   'email_type','quote','status','sent','about','quote:q-1042','system', true, 'recipient','client@example.test'));
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM expected, 'paid bill link got ' || coalesce(got_full::text, '<none>'));
  PERFORM pg_temp.lpr_assert(jsonb_typeof(got_full->5->'system') = 'boolean' AND (got_full->5->>'system') = 'true', 'system not boolean');
  PERFORM pg_temp.lpr_assert(jsonb_typeof(got_full->2->'amount') = 'string', 'amount type ' || coalesce(jsonb_typeof(got_full->2->'amount'), '<none>'));
@@ -334,12 +344,12 @@ BEGIN
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000003';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','system_email','table','email_events','id','18f00000-0000-4000-8000-000000000402','job_id',j1,
-  'email_type','quote','status','delivered','about','quote:q-2001','system', true)), 'alias email ' || coalesce(got_full::text, '<none>'));
+  'email_type','quote','status','delivered','about','quote:q-2001','system', true, 'recipient','client@example.test')), 'alias email ' || coalesce(got_full::text, '<none>'));
 
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000004';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_invoice','table','xero_invoices','id','18f00000-0000-4000-8000-000000000201','job_id',j1,
-  'number','invoice:inv-1307')), 'token invoice ' || coalesce(got_full::text, '<none>'));
+  'number','invoice:inv-1307','invoice_number','INV-1307','xero_id','xero-lpr-token-1307','supplier','Payer One','currency','AUD','total','165.00')), 'token invoice ' || coalesce(got_full::text, '<none>'));
 
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000005';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
@@ -349,17 +359,17 @@ BEGIN
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000006';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','system_email','table','email_events','id','18f00000-0000-4000-8000-000000000405','job_id',j1,
-  'email_type','quote','status','accepted','about','quote:q-55','system', true)), 'document fallback email ' || coalesce(got_full::text, '<none>'));
+  'email_type','quote','status','accepted','about','quote:q-55','system', true, 'recipient','client@example.test')), 'document fallback email ' || coalesce(got_full::text, '<none>'));
 
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000014';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_invoice','table','xero_invoices','id','18f00000-0000-4000-8000-000000000202','job_id',j1,
-  'number','invoice:inv-44')), 'uuid token ' || coalesce(got_full::text, '<none>'));
+  'number','invoice:inv-44','invoice_number','INV-44','xero_id','18f00000-0000-4000-8000-000000000299','supplier','Payer Two','currency','AUD','total','44.00')), 'uuid token ' || coalesce(got_full::text, '<none>'));
 
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000016';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','system_email','table','email_events','id','18f00000-0000-4000-8000-000000000406','job_id',j1,
-  'email_type','client_email','status','accepted','about','quote:q-3001','system', true)), 'reverse email ' || coalesce(got_full::text, '<none>'));
+  'email_type','client_email','status','accepted','about','quote:q-3001','system', true)) AND NOT (got_full->0 ? 'recipient'), 'reverse email ' || coalesce(got_full::text, '<none>'));
 
  SELECT e->'records' INTO got_full FROM jsonb_array_elements(pkt->'evidence') e WHERE e->>'id' = '18f10000-0000-4000-8000-000000000018';
  PERFORM pg_temp.lpr_assert(got_full IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(

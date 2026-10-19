@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════
 
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { sendRecipientMetadata } from '../_shared/ledger_send_fields.ts'
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
@@ -1660,6 +1661,19 @@ async function handleForward(body: Record<string, unknown>): Promise<Response> {
       }),
     ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
   }
+  let forwardBcc: string[] = []
+  let forwardBccUnreadable = false
+  try {
+    forwardBcc = splitRecipientInput(body.bcc, 'bcc')
+  } catch {
+    forwardBccUnreadable = true
+  }
+  const forwardRecipient = sendRecipientMetadata({
+    recipients: to,
+    cc,
+    bcc: forwardBcc,
+    uncertainExtra: forwardBccUnreadable,
+  })
   Promise.resolve(
     sb.from('email_events').insert({
       email_type: 'forward',
@@ -1671,6 +1685,7 @@ async function handleForward(body: Record<string, unknown>): Promise<Response> {
       subject,
       status: 'accepted',
       sent_at: new Date().toISOString(),
+      ...(Object.keys(forwardRecipient).length ? { metadata: forwardRecipient } : {}),
     }),
   ).catch(() => {})
   const warnings = sourceType === 'group'
@@ -2125,6 +2140,22 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           }),
         ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
       }
+      let clientEmail: unknown = null
+      if (typeof body.job_id === 'string' && body.job_id) {
+        const { data: clientJob, error: clientJobErr } = await sb.from('jobs')
+          .select('client_email')
+          .eq('id', body.job_id)
+          .maybeSingle()
+        if (!clientJobErr) clientEmail = clientJob?.client_email ?? null
+      }
+      const clientRecipient = sendRecipientMetadata({
+        recipients: to,
+        cc,
+        bcc,
+        contactId: body.ghl_contact_id,
+        clientEmail,
+        matchCustomer: true,
+      })
       Promise.resolve(
         sb.from('email_events').insert({
           email_type: 'client_email',
@@ -2136,6 +2167,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           subject,
           status: 'accepted',
           sent_at: new Date().toISOString(),
+          ...(Object.keys(clientRecipient).length ? { metadata: clientRecipient } : {}),
         }),
       ).catch(() => {})
       if (body.ghl_contact_id) {

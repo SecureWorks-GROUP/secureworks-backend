@@ -1,5 +1,6 @@
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
+import { customerContactForAddress } from "../_shared/ledger_send_fields.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
@@ -4062,9 +4063,11 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     }, 400)
   }
   const jobEmails = new Set<string>()
+  let siJob: { client_email?: string | null; ghl_contact_id?: string | null } | null = null
   if (verifiedJobId) {
-    const { data: siJob } = await client.from('jobs')
-      .select('client_email').eq('id', verifiedJobId).maybeSingle()
+    const { data } = await client.from('jobs')
+      .select('client_email, ghl_contact_id').eq('id', verifiedJobId).maybeSingle()
+    siJob = data
     addDelimitedEmails(jobEmails, siJob?.client_email)
   }
 
@@ -4218,10 +4221,20 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   })
   if (verifiedJobId) {
     try {
+      const invoiceContactId = customerContactForAddress(
+        siTo,
+        siJob?.client_email,
+        siJob?.ghl_contact_id,
+      )
       await client.from('job_events').insert({
         job_id: verifiedJobId,
         event_type: 'invoice.emailed',
-        detail_json: { invoice_number: siNum, to: siTo, via: 'outlook' },
+        detail_json: {
+          invoice_number: siNum,
+          to: siTo,
+          via: 'outlook',
+          ...(invoiceContactId ? { contact_id: invoiceContactId } : {}),
+        },
       })
     } catch { /* non-blocking */ }
   }
@@ -36155,7 +36168,11 @@ async function reconcilePayment(client: any, body: any) {
     console.log('[ops-api] cache update after payment failed:', e)
   }
 
-  // Log the payment event
+  // Log the payment event. The insert names no job_id, matching the
+  // previous body. job_events.job_id is nullable in this repo
+  // (20260727080821). Whether a null job_id lands in production was
+  // not measured. A job-linked insert waits on
+  // docs/reconcile-payment-insert-proposal.md.
   try {
     await client.from('job_events').insert({
       event_type: 'payment_recorded',
@@ -38826,7 +38843,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (!job_id) throw new Error('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
-    .select('id, job_number, type, client_name, client_email, client_phone, site_address, site_suburb, pricing_json')
+    .select('id, job_number, type, client_name, client_email, client_phone, site_address, site_suburb, pricing_json, ghl_contact_id')
     .eq('id', job_id)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
@@ -39109,7 +39126,13 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     })
   }
 
-  // Log email event (existing behaviour, preserved)
+  // Log email event (existing behaviour, preserved). The contact id is the
+  // job's own customer only, because this send always uses client_email.
+  const quoteContactId = customerContactForAddress(
+    job.client_email,
+    job.client_email,
+    job.ghl_contact_id,
+  )
   await client.from('email_events').insert({
     email_type: 'quote',
     entity_type: 'job',
@@ -39121,6 +39144,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     resend_message_id: resendResult.id || null,
     status: 'sent',
     sent_at: new Date().toISOString(),
+    ...(quoteContactId ? { metadata: { contact_id: quoteContactId } } : {}),
   })
 
   return { success: true, resend_id: resendResult.id, sent_to: job.client_email, released: transitioned }
