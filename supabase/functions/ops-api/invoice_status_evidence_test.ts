@@ -28,6 +28,7 @@ import {
   INVOICE_EMAILED_BODY_PREVIEW,
   type InvoiceAuthorisedSource,
   classifyInvoiceEmailFailure,
+  invoiceEmailReplyAccepted,
   INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW,
   writeInvoiceAuthorisedEvidence,
 } from "./invoice_status_evidence.ts";
@@ -291,7 +292,9 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
 // a resend that emails the client twice. Only positive evidence of no
 // dispatch (`retry_safe: true`, a refusal) makes a send retry-safe.
 Deno.test("invoice email failure: classification", () => {
-  assertEquals(classifyInvoiceEmailFailure(401, null), "refused");
+  // A bodyless or unreadable 401 proves nothing: unknown, never refused.
+  assertEquals(classifyInvoiceEmailFailure(401, null), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(401, { error: "Unauthorized" }), "refused");
   assertEquals(classifyInvoiceEmailFailure(403, { error: "x" }), "refused");
   assertEquals(classifyInvoiceEmailFailure(422, { state: "refused", fact: "fenced" }), "refused");
   assertEquals(classifyInvoiceEmailFailure(502, { state: "outcome_unknown", retry_safe: false }), "unknown");
@@ -315,6 +318,30 @@ Deno.test("invoice email failure: an explicit unknown reply wins over 401 and 40
     assertEquals(classifyInvoiceEmailFailure(status, { state: "outcome_unknown" }), "unknown");
     assertEquals(classifyInvoiceEmailFailure(status, { retry_safe: false }), "unknown");
     assertEquals(classifyInvoiceEmailFailure(status, { state: "refused", retry_safe: false }), "unknown");
+  }
+});
+
+Deno.test("invoice email failure: outcomeUnknown and a nested error say unknown, whatever the status", () => {
+  for (const status of [400, 401, 403, 422, 502]) {
+    assertEquals(classifyInvoiceEmailFailure(status, { outcomeUnknown: true }), "unknown", `${status} outcomeUnknown`);
+    assertEquals(classifyInvoiceEmailFailure(status, { outcome_unknown: true, retry_safe: true }), "unknown", `${status} outcome_unknown`);
+    assertEquals(classifyInvoiceEmailFailure(status, { error: { outcomeUnknown: true } }), "unknown", `${status} nested`);
+    assertEquals(classifyInvoiceEmailFailure(status, { error: { state: "outcome_unknown" }, retry_safe: true }), "unknown", `${status} nested state`);
+  }
+  // Bodyless 401/403 and non-object bodies are unknown.
+  for (const body of [null, undefined, "", "Forbidden", [], 42]) {
+    assertEquals(classifyInvoiceEmailFailure(403, body), "unknown", `403 ${JSON.stringify(body)}`);
+  }
+});
+
+Deno.test("invoice email reply: a 2xx is sent only on a readable success without uncertainty", () => {
+  assertEquals(invoiceEmailReplyAccepted({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), true);
+  for (const body of [
+    null, {}, { ok: true }, { success: false }, { success: true, state: "outcome_unknown" },
+    { success: true, outcomeUnknown: true }, { success: true, error: "Graph error" },
+    { success: true, error: { outcome_unknown: true } }, "sent", [],
+  ]) {
+    assertEquals(invoiceEmailReplyAccepted(body), false, JSON.stringify(body));
   }
 });
 

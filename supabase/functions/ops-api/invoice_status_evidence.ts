@@ -29,15 +29,48 @@ export const INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW =
 
 export type InvoiceEmailFailureOutcome = "refused" | "failed" | "unknown";
 
+function replyObject(body: unknown): Record<string, unknown> | null {
+  return body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+}
+
+/**
+ * True when a reply says, anywhere it is readable, that the outcome is not
+ * known: `state: "outcome_unknown"`, `outcome_unknown: true`,
+ * `outcomeUnknown: true`, or `retry_safe: false`, at the top level or under
+ * `error`. `retry_safe: false` is NOT a signal on a success envelope (a real
+ * send-outlook-email success carries it), so callers check success first.
+ */
+export function replySaysOutcomeUnknown(body: unknown, opts: { includeRetrySafe?: boolean } = {}): boolean {
+  const includeRetrySafe = opts.includeRetrySafe !== false;
+  const levels = [replyObject(body), replyObject(replyObject(body)?.error)].filter(Boolean) as Record<string, unknown>[];
+  return levels.some((b) =>
+    b.state === "outcome_unknown" || b.outcome_unknown === true || b.outcomeUnknown === true ||
+    (includeRetrySafe && b.retry_safe === false)
+  );
+}
+
+/**
+ * What a 2xx reply from send-outlook-email proves. Sent only on readable JSON
+ * with `success: true` and no explicit uncertainty. A 2xx whose body is
+ * unreadable, not JSON, or says anything else is an unknown outcome.
+ */
+export function invoiceEmailReplyAccepted(body: unknown): boolean {
+  const b = replyObject(body);
+  if (!b || b.success !== true) return false;
+  if (b.error != null) return false;
+  return !replySaysOutcomeUnknown(b, { includeRetrySafe: false });
+}
+
 /**
  * What a non-2xx reply (or no reply) from send-outlook-email proves. A send
- * is called retry-safe only on positive evidence that it never dispatched;
- * anything else is unknown.
- *   unknown  the call threw, or the reply said `outcome_unknown` or
- *            `retry_safe: false`. That reply wins over every status code.
- *   refused  a 401/403, or a reply with `state: "refused"`: its auth checks
- *            and fences run before any Graph call, so nothing was sent.
- *   failed   any other reply carrying `retry_safe: true`.
+ * is called retry-safe only on positive, readable evidence that it never
+ * dispatched; anything else is unknown.
+ *   unknown  the call threw, the body could not be read as a JSON object, or
+ *            it said the outcome is unknown anywhere (see above). That wins
+ *            over every status code, a bare or bodyless 401/403 included.
+ *   refused  a readable 401/403, or a readable reply with `state: "refused"`:
+ *            its auth checks and fences run before any Graph call.
+ *   failed   any other readable reply carrying `retry_safe: true`.
  *   unknown  everything else, a bare 408, 429 or 5xx included.
  */
 export function classifyInvoiceEmailFailure(
@@ -45,8 +78,9 @@ export function classifyInvoiceEmailFailure(
   body: unknown,
 ): InvoiceEmailFailureOutcome {
   if (status === null) return "unknown";
-  const b = (body && typeof body === "object") ? body as Record<string, unknown> : {};
-  if (b.state === "outcome_unknown" || b.retry_safe === false) return "unknown";
+  const b = replyObject(body);
+  if (!b) return "unknown";
+  if (replySaysOutcomeUnknown(b)) return "unknown";
   if (status === 401 || status === 403 || b.state === "refused") return "refused";
   if (b.retry_safe === true) return "failed";
   return "unknown";

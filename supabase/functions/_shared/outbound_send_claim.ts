@@ -249,6 +249,61 @@ export async function reconcileThenClaim(
   })
 }
 
+/**
+ * Record the result of a check on every attempt holding keys, without claiming
+ * a new send: `sent` when the earlier send was found, `not_sent` when it was
+ * not. The same rules as reconcileThenClaim: a named checker, never a live
+ * send, compare-and-set on the state each attempt was read in.
+ */
+export async function reconcileHeld(
+  client: ClaimClient,
+  input: {
+    keys: string[]
+    result: "sent" | "not_sent"
+    actor: string | null
+    checkedAt?: string | null
+    evidence?: string | null
+    expectedAttemptId?: string | null
+  },
+): Promise<{ ok: true; reconciled: string[] } | SendClaimRefusal> {
+  const actor = reconcileActor(input.actor)
+  if (!actor) return refusal("send_reconcile_actor_required")
+  const read = await readSendHolds(client, input.keys)
+  if (!read.ok) return read
+  const holds = read.holds
+  if (holds.some((h) => h.state === "sending" && !h.stale)) return refusal("send_reconcile_live_send", holds)
+  const attempts = new Map<string, SendHoldState>()
+  for (const hold of holds) attempts.set(hold.attempt_id, hold.state)
+  const expected = String(input.expectedAttemptId ?? "").trim()
+  if (expected && (attempts.size !== 1 || !attempts.has(expected))) {
+    return refusal("send_reconcile_attempt_mismatch", holds)
+  }
+  const checkedAt = input.checkedAt && !Number.isNaN(Date.parse(input.checkedAt))
+    ? new Date(input.checkedAt).toISOString()
+    : new Date().toISOString()
+  for (const [attemptId, state] of attempts) {
+    const { data, failed } = await callRpc(client, "reconcile_outbound_send", {
+      p_attempt_id: attemptId,
+      p_expected_state: state,
+      p_result: input.result,
+      p_actor: actor,
+      p_checked_at: checkedAt,
+      p_evidence: input.evidence ?? null,
+    })
+    const row = data as Record<string, unknown> | null
+    if (failed || !row || typeof row !== "object") return refusal("send_claim_unavailable", holds)
+    if (row.ok !== true) {
+      const code = row.code
+      if (
+        code === "send_reconcile_invalid" || code === "send_reconcile_actor_required" ||
+        code === "send_reconcile_live_send" || code === "send_reconcile_state_changed"
+      ) return refusal(code, holds)
+      return refusal("send_claim_unavailable", holds)
+    }
+  }
+  return { ok: true, reconciled: [...attempts.keys()] }
+}
+
 // ---------------------------------------------------------------------------
 // Refusal wording. Fixed text only: no provider or exception text.
 

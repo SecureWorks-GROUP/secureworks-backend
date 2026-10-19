@@ -1589,10 +1589,12 @@ export function emailFailureIsProvablyPreDispatch(status: number): boolean {
 }
 
 /**
- * The status test above, plus the reply's own words: a reply that says its
- * outcome is unknown (state outcome_unknown, or retry_safe false) is never
- * provably pre-dispatch, whatever its status. A body that is not JSON keeps
- * the status-only answer.
+ * The status test above, plus the reply's own words. Only a readable JSON
+ * reply can prove a send never started: a body that is empty, unreadable or
+ * not a JSON object is NOT proof (it is an unknown outcome), and a reply that
+ * says its outcome is unknown anywhere (state outcome_unknown, outcome_unknown
+ * or outcomeUnknown true, retry_safe false, at the top level or under error)
+ * is never provably pre-dispatch, whatever its status.
  */
 export function emailReplyIsProvablyPreDispatch(status: number, bodyText: string): boolean {
   if (!emailFailureIsProvablyPreDispatch(status)) return false;
@@ -1600,11 +1602,19 @@ export function emailReplyIsProvablyPreDispatch(status: number, bodyText: string
   try {
     reply = JSON.parse(bodyText);
   } catch {
-    return true;
+    return false;
   }
-  if (!reply || typeof reply !== "object") return true;
+  if (!reply || typeof reply !== "object" || Array.isArray(reply)) return false;
   const r = reply as Record<string, unknown>;
-  return r.state !== "outcome_unknown" && r.retry_safe !== false;
+  const nested = r.error && typeof r.error === "object" ? r.error as Record<string, unknown> : null;
+  for (const level of [r, nested]) {
+    if (!level) continue;
+    if (
+      level.state === "outcome_unknown" || level.outcome_unknown === true ||
+      level.outcomeUnknown === true || level.retry_safe === false
+    ) return false;
+  }
+  return true;
 }
 
 // ── makesafe_resume_close assertions (TASK B — close-only, fail-closed) ──────

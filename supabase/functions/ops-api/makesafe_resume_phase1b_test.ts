@@ -27,6 +27,7 @@ import {
   _makesafeSendPackForTest,
 } from "./index.ts";
 import { emailReplyIsProvablyPreDispatch } from "./makesafe_send_pack.ts";
+import { makeFakeClaimStore } from "../_shared/outbound_send_claim_fake.ts";
 
 // ─────────────────────────────────────────────────────────────────
 // A write-capable fake Supabase client. Tables are arrays of row objects.
@@ -144,8 +145,11 @@ function makeClient(seed: Rows, opts: FakeOpts = {}) {
     return b;
   }
 
+  const claims = makeFakeClaimStore();
   return {
     _tables: tables,
+    _claims: claims,
+    rpc: (fn: string, args?: Record<string, unknown>) => claims.rpc(fn, args),
     from: (table: string) => builder(table),
     storage: {
       from: () => ({
@@ -160,7 +164,7 @@ function makeClient(seed: Rows, opts: FakeOpts = {}) {
 
 // Side-effect counters + injectable network seams for makesafeSendPack.
 function makeSeams(opts: {
-  emailMode?: "ok" | "throw" | "status5xx" | "status4xx";
+  emailMode?: "ok" | "throw" | "status5xx" | "status4xx" | "ok2xxUnreadable";
   emailStatus?: number;
   emailBody?: string;
 } = {}) {
@@ -226,15 +230,23 @@ function makeSeams(opts: {
         return {
           ok: false,
           status: opts.emailStatus ?? 400,
-          bodyText: async () => opts.emailBody ?? "bad payload",
+          bodyText: async () => opts.emailBody ?? JSON.stringify({ success: false, error: "bad payload", retry_safe: true }),
           json: async () => ({}),
+        };
+      }
+      if (opts.emailMode === "ok2xxUnreadable") {
+        return {
+          ok: true,
+          status: 202,
+          bodyText: async () => "<html>gateway</html>",
+          json: async () => { throw new SyntaxError("Unexpected token <"); },
         };
       }
       return {
         ok: true,
-        status: 200,
+        status: 202,
         bodyText: async () => "",
-        json: async () => ({ message_id: "msg-1" }),
+        json: async () => ({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false, message_id: "msg-1" }),
       };
     },
     sendPhotoFollowup: async (_client: any, payload: any) => {
@@ -882,7 +894,11 @@ Deno.test("D-d: a 4xx whose reply says outcome_unknown stays 'sending', and the 
 });
 
 Deno.test("emailReplyIsProvablyPreDispatch: an explicit unknown overrides a clean status", () => {
-  assertEquals(emailReplyIsProvablyPreDispatch(400, "bad payload"), true);
+  // A body that is not JSON proves nothing: unknown, never pre-dispatch.
+  assertEquals(emailReplyIsProvablyPreDispatch(400, "bad payload"), false);
+  assertEquals(emailReplyIsProvablyPreDispatch(401, ""), false);
+  assertEquals(emailReplyIsProvablyPreDispatch(400, JSON.stringify({ error: { outcomeUnknown: true } })), false);
+  assertEquals(emailReplyIsProvablyPreDispatch(400, JSON.stringify({ outcomeUnknown: true })), false);
   assertEquals(emailReplyIsProvablyPreDispatch(400, JSON.stringify({ error: "x", retry_safe: true })), true);
   assertEquals(emailReplyIsProvablyPreDispatch(401, JSON.stringify({ retry_safe: false })), false);
   assertEquals(emailReplyIsProvablyPreDispatch(403, JSON.stringify({ state: "outcome_unknown" })), false);

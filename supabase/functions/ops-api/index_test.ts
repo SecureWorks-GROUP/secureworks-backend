@@ -268,7 +268,7 @@ Deno.test("T7: unlinked ACCREC invoice + caller job_id → invoice_link_required
   const { client, calls: dbCalls } = makeStubClient(seed)
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-999": xeroInvoice } })
   const okPdf = () => new Response(new Uint8Array([0x25]), { status: 200 })
-  const okOutlook = () => new Response(JSON.stringify({ ok: true }), { status: 200 })
+  const okOutlook = () => new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 })
   const { fetch, calls: fetchCalls } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: okPdf,
     [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: okOutlook,
@@ -366,7 +366,7 @@ Deno.test("T10: CC string 'a@x,b@x' both in allowlist → 200, normalized CC sen
   const { client } = makeStubClient(seed)
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
   const okPdf = () => new Response(new Uint8Array([0x25]), { status: 200 })
-  const okOutlook = () => new Response(JSON.stringify({ ok: true }), { status: 200 })
+  const okOutlook = () => new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 })
   const { fetch, calls } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: okPdf,
     [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: okOutlook,
@@ -409,7 +409,7 @@ Deno.test("T11: CC array ['a@x','b@x'] both in allowlist → 200, joined CC sent
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
   const { fetch, calls } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: () => new Response(new Uint8Array([0x25]), { status: 200 }),
-    [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () => new Response("{}", { status: 200 }),
+    [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () => new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 }),
   })
   const { getToken } = makeStubGetToken()
   const { logBusinessEvent } = makeStubLogBusinessEvent()
@@ -449,7 +449,7 @@ Deno.test("T12: CC array with comma-injected entry ['a@x,b@x'] → split, both v
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
   const { fetch, calls } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: () => new Response(new Uint8Array([0x25]), { status: 200 }),
-    [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () => new Response("{}", { status: 200 }),
+    [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () => new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 }),
   })
   const { getToken } = makeStubGetToken()
   const { logBusinessEvent } = makeStubLogBusinessEvent()
@@ -523,7 +523,7 @@ Deno.test("T14: Xero contact has no email but jobs.client_email matches → 200 
   const { client } = makeStubClient(seed)
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
   const okPdf = () => new Response(new Uint8Array([0x25]), { status: 200 })
-  const okOutlook = () => new Response("{}", { status: 200 })
+  const okOutlook = () => new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 })
   const { fetch } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: okPdf,
     [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: okOutlook,
@@ -623,7 +623,7 @@ Deno.test("T15: ContactPersons email authorizes send", async () => {
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
   const { fetch } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: () => new Response(new Uint8Array([0x25]), { status: 200 }),
-    [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () => new Response("{}", { status: 200 }),
+    [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: () => new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 }),
   })
   const { getToken } = makeStubGetToken()
   const { logBusinessEvent } = makeStubLogBusinessEvent()
