@@ -2975,13 +2975,43 @@ Deno.test("quote builder: a make whose write may have landed keeps its marker, s
   }
 });
 
-Deno.test("quote builder: a gateway error with no database code keeps the marker", async () => {
-  const { store, issued } = await issuedForOrders();
-  const gateway = makeFakeClient(store, {
-    insertError: (table) => table === "purchase_orders" ? { message: "502 bad gateway" } : null,
-  }).client;
-  await assertRejects(() => makeQuoteBuilderPurchaseOrders(gateway, { version_id: issued.id }, ACTOR));
-  assertEquals(store.quote_builder_order_marks.length, 1);
+Deno.test("quote builder: only a known rolled-back database error releases the marker, for both kinds", async () => {
+  const cases: Array<[Record<string, unknown>, boolean]> = [
+    [{ message: "502 bad gateway" }, false],
+    [{ code: "PROXY", message: "upstream answered after commit" }, false],
+    [{ code: "08007", message: "transaction resolution unknown" }, false],
+    [{ code: "40003", message: "statement completion unknown" }, false],
+    [{ code: "PGRST116", message: "postgrest" }, false],
+    [{ code: "42703", message: "column does not exist" }, true],
+    [{ code: "23502", message: "not null" }, true],
+    [{ code: "57014", message: "statement timeout" }, true],
+    [{ code: "40001", message: "serialization failure" }, true],
+  ];
+  for (const kind of ["purchase_orders", "work_orders"] as const) {
+    for (const [error, released] of cases) {
+      const { store, issued } = await issuedForOrders();
+      const failing = makeFakeClient(store, {
+        insertError: (table) => table === kind ? error : null,
+      }).client;
+      const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
+      await assertRejects(() => make(failing, { version_id: issued.id }, ACTOR));
+      assertEquals(store.quote_builder_order_marks.length, released ? 0 : 1, `${kind} ${error.code ?? error.message}`);
+    }
+  }
+});
+
+Deno.test("quote builder: once a write may have landed, a later refused write does not release the marker", async () => {
+  for (const kind of ["purchase_orders", "work_orders"] as const) {
+    const { store, issued } = await issuedForOrders();
+    // First a number clash with no winner (refused, retried), then an unknown outcome.
+    const answers = [{ code: "23505", message: "number clash" }, { code: "08007", message: "unknown" }];
+    const failing = makeFakeClient(store, {
+      insertError: (table) => table === kind ? answers.shift() ?? { code: "23505", message: "x" } : null,
+    }).client;
+    const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
+    await assertRejects(() => make(failing, { version_id: issued.id }, ACTOR));
+    assertEquals(store.quote_builder_order_marks.length, 1, kind);
+  }
 });
 
 Deno.test("quote builder: a failure after the orders were written keeps the marker", async () => {

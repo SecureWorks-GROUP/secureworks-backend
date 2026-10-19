@@ -2412,6 +2412,19 @@ async function claimOrderMark(
 type MakeState = { maybeWritten: boolean };
 
 /**
+ * PostgreSQL errors that mean the statement was refused and rolled back. An
+ * allow-list, not the code's shape: a proxy can answer a committed write with
+ * its own five-character code, and 08007 / 40003 mean the outcome is unknown.
+ * Classes 22 (data), 23 (integrity) and 42 (a missing column or table: the
+ * statement never ran), serialization failure, deadlock and statement timeout.
+ */
+function refusedAndRolledBack(error: any): boolean {
+  const code = String(error?.code || "");
+  return /^(22|23|42)[0-9A-Z]{3}$/.test(code) ||
+    code === "40001" || code === "40P01" || code === "57014";
+}
+
+/**
  * After this press's own make failed: release the marker only when every
  * order write this press sent is known to have written nothing. Any doubt
  * keeps it (409 unsettled for later presses; staff reconcile), so a set that
@@ -2431,18 +2444,17 @@ async function releaseIfNothingWritten(
     .then(() => {}, () => {});
 }
 
-/** Send one order insert, recording whether it may have written. */
+/**
+ * Send one order insert. Sticky: once any write may have landed (it threw,
+ * returned rows, or failed with an error not on the allow-list), the press
+ * keeps its marker whatever later writes do.
+ */
 async function trackedInsert(state: MakeState, send: () => Promise<any>) {
+  const before = state.maybeWritten;
   state.maybeWritten = true;
   const res = await send();
-  // Only a PostgreSQL error (a five-character SQLSTATE such as 23505 or
-  // 42703) is a refused, rolled-back statement. A gateway or network error
-  // with no SQLSTATE may have come after a commit: it stays "maybe written".
-  if (
-    res?.error && !res?.data &&
-    /^[0-9A-Z]{5}$/.test(String(res.error.code || ""))
-  ) {
-    state.maybeWritten = false;
+  if (res?.error && !res?.data && refusedAndRolledBack(res.error)) {
+    state.maybeWritten = before;
   }
   return res;
 }
