@@ -244,7 +244,9 @@ export async function runBillPrematch(
       else if (Array.isArray(data) && data.length) result.voided_closed++;
       continue;
     }
-    if (inv) live.push(q);
+    // Only an issued bill can become a job's cost: DRAFT and SUBMITTED bills
+    // stay on the list untouched until Xero authorises them.
+    if (inv && (st === "AUTHORISED" || st === "PAID")) live.push(q);
   }
 
   // 2. Everything a decision reads. Any failure stops the matching (never a partial population).

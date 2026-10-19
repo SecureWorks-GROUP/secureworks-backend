@@ -35,6 +35,7 @@ import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { runBillPrematch } from './bill_prematch_run.ts'
+import { DEAD_JOB_STATUSES } from './bill_prematch.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -1436,17 +1437,34 @@ async function ingestMaterialsActuals(
         continue
       }
 
-      // Resolve reference → job (the caller side of the pure function).
+      // Only an issued bill can become a job's cost: a DRAFT or SUBMITTED bill
+      // waits until Xero authorises it (no fact, no queue row yet).
+      const billStatus = String(bill.status || '').toUpperCase()
+      if (billStatus !== 'AUTHORISED' && billStatus !== 'PAID') {
+        const counts = result as Record<string, unknown>
+        counts.skipped_unissued = Number(counts.skipped_unissued || 0) + 1
+        continue
+      }
+
+      // Resolve reference → job (the caller side of the pure function). The
+      // same guards as the pre-match: never a job that was not won, a holding
+      // job, or a number whose digits another job also carries (SWF-26328 and
+      // SWP-26328); those go to Bills to place for a person.
       const token = extractJobNumber(bill.reference)
       let jobFromRef: { id: string; job_number: string } | null = null
       if (token) {
-        const { data: job } = await sb
+        const digits = token.replace(/\D/g, '')
+        const { data: sameDigits } = await sb
           .from('jobs')
-          .select('id, job_number')
+          .select('id, job_number, status, do_not_schedule:metadata->do_not_schedule')
           .eq('org_id', DEFAULT_ORG_ID)
-          .eq('job_number', token)
-          .maybeSingle()
-        if (job) jobFromRef = { id: job.id, job_number: job.job_number }
+          .like('job_number', `%${digits}`)
+        const rows = (sameDigits || []).filter((j: any) => String(j.job_number).replace(/\D/g, '') === digits)
+        const job = rows.find((j: any) => j.job_number === token)
+        const live = job &&
+          !DEAD_JOB_STATUSES.has(String(job.status || '').toLowerCase()) &&
+          String(job.do_not_schedule ?? '').toLowerCase() !== 'true'
+        if (job && live && rows.length === 1) jobFromRef = { id: job.id, job_number: job.job_number }
       }
 
       const pos = bill.xero_contact_id

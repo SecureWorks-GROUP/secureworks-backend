@@ -33,8 +33,9 @@ import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from ".
 // The canonical job-number grammar (materials_ingest.ts JOB_NUMBER_RE), global,
 // widened for how suppliers write it: "SWF261060" and "SWF 261060" are
 // SWF-261060 (5 or 6 digits when the hyphen is missing). Never part of a longer
-// word or number, so "SWF-261060" is never SWF-26106. jobNumbersIn normalises.
-export const JOB_NUMBER_RE_GLOBAL = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t]?-?[ \t]?(\d{5,6}))(?!\d)/gi;
+// word or number, so "SWF-261060" is never SWF-26106 and a product code such
+// as "SWF261009XL" is no job number. jobNumbersIn normalises.
+export const JOB_NUMBER_RE_GLOBAL = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t]?-?[ \t]?(\d{5,6}))(?![A-Z0-9])/gi;
 
 // Subcontractor labour: out of the agent for now (owner call, 15 Oct 2026).
 export const LABOUR_ACCOUNTS = new Set(["306", "301"]);
@@ -342,7 +343,21 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
     if (po.xero_bill_id && po.xero_bill_id === bill.xero_invoice_id) where = `linked ${po.po_number || "PO"}`;
     else {
       const t = texts.find((x) => poNamedIn(po, x.text));
-      if (t) where = `${po.po_number} on ${t.where}`;
+      if (t) {
+        // A PO named in the text counts only when it is this supplier's PO and
+        // was actually issued; otherwise it is a question for a person.
+        const sameSupplier = (bill.xero_contact_id && po.xero_contact_id === bill.xero_contact_id) ||
+          (normWords(bill.contact_name).trim().length > 0 && normWords(po.supplier_name).trim() === normWords(bill.contact_name).trim());
+        if (String(po.status || "").toLowerCase() === "draft") {
+          problems.push(`${po.po_number} (${t.where}) is a draft purchase order`);
+          continue;
+        }
+        if (!sameSupplier) {
+          problems.push(`${po.po_number} (${t.where}) is another supplier's purchase order`);
+          continue;
+        }
+        where = `${po.po_number} on ${t.where}`;
+      }
     }
     if (!where) continue;
     const job = ctx.jobsById.get(po.job_id);
@@ -389,6 +404,10 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
   if (bill.xero_job_id) {
     const job = ctx.jobsById.get(bill.xero_job_id);
     if (job && jobIsLive(job)) add(job, "xero_job_link", "Xero link");
+    // The bill already sits on another real job: placing it elsewhere would
+    // count it twice (the cost view only drops a fact on the same job).
+    else if (job && !job.holding) problems.push(`the bill is already linked in Xero to ${job.job_number} (${String(job.status).toLowerCase()})`);
+    else if (!job) problems.push("the bill is already linked in Xero to a job not on record");
   }
 
   const candidates: PrematchCandidate[] = [...hits.values()]

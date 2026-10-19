@@ -61,7 +61,7 @@ Deno.test("a job number on a line naming one live job is placed automatically", 
 
 Deno.test("the job on the purchase order the bill names is placed automatically", () => {
   const po: PrematchPO = { id: "p1", po_number: "PO-302382", job_id: "j2", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null };
-  const d = decideBillPrematch(bill([["Your order PO-302382", "305", 410]]), ctx({ pos: [po] }));
+  const d = decideBillPrematch(bill([["Your order PO-302382", "305", 410]], { xero_contact_id: "c-9" }), ctx({ pos: [po] }));
   assertEquals(d.kind === "job" && [d.confidence, d.job_number, d.rule], ["high", "SWF-261009", "po_job_number"]);
 });
 
@@ -128,7 +128,7 @@ Deno.test("a bill placed through the PO it names is matched to that PO, and a PO
   const po: PrematchPO = { id: "po-9", po_number: "PO-302382", job_id: "job-fence-1", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null };
   const place = (poFactBills?: Map<string, string[]>, linked: string | null = null) =>
     decideBillPrematch(
-      bill([["Your order PO-302382", "305", 1000]], { xero_invoice_id: "xinv-001", invoice_date: "2026-07-02" }),
+      bill([["Your order PO-302382", "305", 1000]], { xero_invoice_id: "xinv-001", invoice_date: "2026-07-02", xero_contact_id: "c-9" }),
       { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [{ ...po, xero_bill_id: linked }], emailJobIds: [], poFactBills },
     );
 
@@ -155,7 +155,9 @@ Deno.test("two bills naming one purchase order in one sync: the first is placed 
   const seed = baseSeed();
   seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref" || q.id === "q-open-refnojob");
   seed.jobs = [{ id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, org_id: ORG }];
-  seed.purchase_orders = [{ id: "po-9", po_number: "PO-302382", job_id: "job-fence-1", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null }];
+  seed.purchase_orders = [{ id: "po-9", po_number: "PO-302382", job_id: "job-fence-1", xero_contact_id: "c-fwwa", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null }];
+  // Both bills come from the PO's own supplier (a PO named by another supplier is a review on its own).
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.map((q) => ({ ...q, xero_contact_id: "c-fwwa" }));
   const line = (amount: number) => [{ Description: "Your order PO-302382", AccountCode: "305", LineAmount: amount }];
   seed.xero_invoices = [
     { xero_invoice_id: "xinv-001", invoice_number: "12345678", status: "AUTHORISED", reference: null, line_items: line(1000), job_id: null },
@@ -226,4 +228,40 @@ Deno.test("the same digits on two prefixes go to a person (SWF-26328 and SWP-263
   ];
   const d = decideBillPrematch(bill([["Metroll order SWP-26328", "305", 355.54]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] });
   assertEquals(d.kind, "review");
+});
+
+// Second-model review fixes, 19 Oct 2026.
+Deno.test("a product code that starts like a job number is not a job number (SWF261009XL)", () => {
+  const d = decideBillPrematch(bill([["Product SWF261009XL panel", "305", 120]]), ctx());
+  assertEquals(d.kind === "job", false);
+});
+
+Deno.test("a PO named by another supplier, or a draft PO, never places a bill", () => {
+  const po: PrematchPO = { id: "p1", po_number: "PO-90001", job_id: "j2", xero_contact_id: "c-B", supplier_name: "Vendor B", subtotal: 500, status: "sent", xero_bill_id: null };
+  const other = decideBillPrematch(bill([["Re PO-90001", "305", 500]], { xero_contact_id: "c-A", contact_name: "Vendor A" }), ctx({ pos: [po] }));
+  assertEquals(other.kind, "review");
+  const draft = decideBillPrematch(bill([["Re PO-90001", "305", 500]], { xero_contact_id: "c-B", contact_name: "Vendor B" }), ctx({ pos: [{ ...po, status: "draft" }] }));
+  assertEquals(draft.kind, "review");
+});
+
+Deno.test("a bill already linked in Xero to another real job is never placed on a second job", () => {
+  const d = decideBillPrematch(bill([["Fencing Material SWF-26535", "305", 300]], { xero_job_id: "j3" }), ctx());
+  assertEquals(d.kind, "review");
+});
+
+Deno.test("a DRAFT bill naming one job gets no fact and stays on the list until Xero authorises it", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref");
+  seed.jobs = [{ id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [];
+  seed.xero_invoices = [
+    { xero_invoice_id: "xinv-001", invoice_number: "12345678", status: "DRAFT", reference: null, line_items: [{ Description: "Materials for SWF-25010", AccountCode: "305", LineAmount: 1000 }], job_id: null },
+  ];
+  seed.context_email_attachments = [];
+  seed.materials_bill_proposals = [];
+  const { client, store } = makeFakeClient(seed);
+  const out = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:00:00.000Z" });
+  assertEquals(out.assigned ?? 0, 0);
+  assertEquals(store.job_materials_facts.filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
+  assertEquals(store.materials_reconciliation_queue.find((q) => q.id === "q-open-noref")!.status, "open");
 });
