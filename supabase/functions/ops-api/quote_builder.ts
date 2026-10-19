@@ -2417,8 +2417,8 @@ type MakeState = { maybeWritten: boolean };
  * write with a code of its own, 08007 / 40003 mean the outcome is unknown, and
  * a timeout or cancel (57014) does not prove the insert rolled back, so all of
  * those keep the marker. Even these are trusted from the code alone; a wrong
- * code from a gateway would release a marker, which the unique keys still back
- * while the first set's rows exist.
+ * code from a gateway after a commit is caught by the re-read in
+ * releaseIfNothingWritten while the committed rows are still there.
  */
 const REFUSED_CODES = new Set([
   "23502", // not null

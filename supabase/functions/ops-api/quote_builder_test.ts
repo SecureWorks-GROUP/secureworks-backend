@@ -3068,3 +3068,23 @@ Deno.test("quote builder: a refused code reported after a commit does not releas
     );
   }
 });
+
+Deno.test("quote builder: a refused insert whose cleanup re-read fails keeps the marker", async () => {
+  for (const kind of ["purchase_orders", "work_orders"] as const) {
+    const { store, issued } = await issuedForOrders();
+    let refused = false;
+    const client = makeFakeClient(store, {
+      insertError: (table) => {
+        if (table !== kind) return null;
+        refused = true;
+        return { code: "23502", message: "not null" };
+      },
+      // Once the insert was refused, the version read fails.
+      selectError: (table) => refused && table === kind ? { code: "57014", message: "timeout" } : null,
+    }).client;
+    const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
+    await assertRejects(() => make(client, { version_id: issued.id }, ACTOR));
+    assertEquals(store[kind].length, 0);
+    assertEquals(store.quote_builder_order_marks.length, 1, `${kind} marker kept`);
+  }
+});
