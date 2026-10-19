@@ -55,7 +55,7 @@ type Fault = 'none' | 'event_write' | 'status_write' | 'run_insert' | 'lost_not_
 type Opts = {
   atomicOn: boolean; fault?: Fault; businessEventFails?: boolean; deferMs?: number
   // The legacy status call's result: ok, the function missing (migration not applied), or another error.
-  legacyStatus?: 'ok' | 'missing' | 'error'
+  legacyStatus?: 'ok' | 'missing' | 'missing42883' | 'error' | 'transport' | 'throw'
   whole?: boolean
   // The checker's c4c/c4d shapes: the other party has already accepted, so this is the final party.
   finalParty?: boolean
@@ -152,6 +152,13 @@ function fakeClient(o: Opts) {
           if (o.legacyStatus === 'missing') {
             return Promise.resolve({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } })
           }
+          if (o.legacyStatus === 'missing42883') {
+            return Promise.resolve({ data: null, error: { code: '42883', message: 'function does not exist' } })
+          }
+          if (o.legacyStatus === 'transport') {
+            return Promise.resolve({ data: null, error: { message: 'TypeError: fetch failed' } })
+          }
+          if (o.legacyStatus === 'throw') return Promise.reject(new TypeError('connection reset'))
           if (o.legacyStatus === 'error') {
             return Promise.resolve({ data: null, error: { code: '23514', message: 'violates check constraint' } })
           }
@@ -331,7 +338,24 @@ Deno.test('legacy whole-quote acceptance, status function missing: today\'s PATC
   const body = patch[0].ops.find(([m]) => m === 'update')![1][0] as Record<string, unknown>
   assertEquals(Object.keys(body).sort(), ['accepted_at', 'status'])
   assertEquals(body.status, 'accepted')
+  const call = sb.calls.find((c) => c.name === 'quote_accept_legacy_set_status')!
+  assertEquals(body.accepted_at, call.args!.p_accepted_at, 'the fallback reuses the clock read taken for the call (not re-read)')
 })
+
+Deno.test('legacy run acceptance, 42883: the same fallback as PGRST202', async () => {
+  const sb = fakeClient({ atomicOn: false, legacyStatus: 'missing42883' })
+  await sendQuoteHandler(acceptRequest(), { sb })
+  assertEquals(writes(sb.calls, 'jobs', 'update').length, 1)
+})
+
+for (const legacyStatus of ['transport', 'throw'] as const) {
+  Deno.test(`legacy run acceptance, status call ${legacyStatus}: never retried through an unmarked PATCH`, async () => {
+    const sb = fakeClient({ atomicOn: false, legacyStatus })
+    let threw = false
+    try { await sendQuoteHandler(acceptRequest(), { sb }) } catch { threw = true }
+    assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, `no PATCH after an uncertain call (handler threw: ${threw})`)
+  })
+}
 
 Deno.test('atomic whole-quote acceptance: one RPC, no legacy status call, no split writes', async () => {
   const sb = fakeClient({ atomicOn: true, whole: true })

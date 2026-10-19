@@ -400,8 +400,9 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, t
 --                            contact) with no accepted run row; condition-based
 --   run_acceptance_document_not_live  accepted run row whose document is
 --                            superseded, declined or not accepted; condition-based
---   partially_accepted_every_party_accepted  job partially accepted although
---                            every live quote document is accepted and none is
+--   partially_accepted_all_documents_accepted  document heuristic: job
+--                            partially accepted although every live quote
+--                            document (two or more) is accepted and none is
 --                            declined; condition-based
 --   accepted_quote_with_open_sibling_document  accepted whole quote beside an
 --                            older open option for the same recipient
@@ -503,22 +504,29 @@ BEGIN
        AND coalesce(j.status, '') <> 'partially_accepted'
        AND (p_since IS NULL OR d.accepted_at >= p_since)
     UNION ALL
-    -- A job left partially accepted although every party has accepted: the
-    -- final party's status write did not land (the checker's c4c and c4d at
-    -- d98903c: the last party of a shared fence run, the last contact of a
-    -- multi-contact quote). Every live quote document on the job (not
+    -- A document heuristic, not the handler's party decision: a job left
+    -- partially accepted although every live quote document on it (not
     -- superseded, not declined; sent or not) is accepted, there are at least
-    -- two, and no quote document or run acceptance on the job is declined (a
-    -- decline legitimately leaves a job partially accepted). Condition-based.
-    SELECT 'partially_accepted_every_party_accepted', j.id, j.id::text, max(d.accepted_at)
+    -- two, and no live document or current run row on it is declined (a
+    -- decline legitimately leaves a job partially accepted). It shows the
+    -- checker's c4c and c4d result at d98903c (the final party's status did
+    -- not land). Known limits (design section 3): an unaccepted live document
+    -- (an unsent alternative, an older run revision, a contactless whole-job
+    -- quote beside party documents) keeps a job out; a single-document job is
+    -- never listed; documents are counted, not parties, so a listed job may
+    -- still be legitimately partial. Condition-based.
+    SELECT 'partially_accepted_all_documents_accepted', j.id, j.id::text, max(d.accepted_at)
       FROM public.jobs j
       JOIN public.job_documents d ON d.job_id = j.id AND d.type = 'quote'
                                  AND d.superseded_at IS NULL AND d.declined_at IS NULL
      WHERE j.status = 'partially_accepted'
        AND NOT EXISTS (SELECT 1 FROM public.job_documents x
-                        WHERE x.job_id = j.id AND x.type = 'quote' AND x.declined_at IS NOT NULL)
+                        WHERE x.job_id = j.id AND x.type = 'quote' AND x.declined_at IS NOT NULL
+                          AND x.superseded_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM public.run_acceptances r
-                        WHERE r.job_id = j.id AND r.status = 'declined')
+                         LEFT JOIN public.job_documents rd ON rd.id = r.job_document_id
+                        WHERE r.job_id = j.id AND r.status = 'declined'
+                          AND (rd.id IS NULL OR rd.superseded_at IS NULL))
      GROUP BY j.id
     HAVING count(*) >= 2 AND bool_and(d.accepted_at IS NOT NULL)
        AND (p_since IS NULL OR max(d.accepted_at) >= p_since)
@@ -537,15 +545,17 @@ BEGIN
                         WHERE ra.job_document_id = d.id AND ra.status = 'accepted')
     UNION ALL
     -- An accepted run acceptance whose document is no longer live (superseded,
-    -- declined, or not accepted): the run row outlived its document. Codex
-    -- d98903c finding 4. Condition-based; may include a re-quote that replaced
-    -- the document without clearing the run row.
+    -- declined, not accepted, missing, or no pointer at all): the run row
+    -- outlived its document. Codex d98903c finding 4. Condition-based; may
+    -- include a re-quote that replaced the document without clearing the run
+    -- row. Bounded by p_since on the run row's acceptance.
     SELECT 'run_acceptance_document_not_live', ra.job_id,
            ra.job_id::text || '/' || coalesce(ra.job_contact_id::text, 'none') || '/' || ra.run_label, ra.accepted_at
       FROM public.run_acceptances ra
-      JOIN public.job_documents d ON d.id = ra.job_document_id
+      LEFT JOIN public.job_documents d ON d.id = ra.job_document_id
      WHERE ra.status = 'accepted'
-       AND (d.superseded_at IS NOT NULL OR d.declined_at IS NOT NULL OR d.accepted_at IS NULL)
+       AND (d.id IS NULL OR d.superseded_at IS NOT NULL OR d.declined_at IS NOT NULL OR d.accepted_at IS NULL)
+       AND (p_since IS NULL OR ra.accepted_at IS NULL OR ra.accepted_at >= p_since)
     UNION ALL
     -- An accepted whole-quote document beside a sibling option for the same
     -- recipient (same job, no run label, same contact or both none) that was
@@ -585,7 +595,7 @@ BEGIN
   WHERE g.kind IN ('won_with_open_sibling', 'more_than_one_won', 'won_without_acceptance_event',
                    'won_while_superseded', 'accepted_document_job_not_won', 'supersede_switch_unreadable',
                    'accepted_run_document_without_run_acceptance', 'run_acceptance_document_not_live',
-                   'accepted_quote_with_open_sibling_document', 'partially_accepted_every_party_accepted')
+                   'accepted_quote_with_open_sibling_document', 'partially_accepted_all_documents_accepted')
      OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gap_resolutions x WHERE x.kind = g.kind AND x.ref = g.ref);
 END $$;
 REVOKE ALL ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) FROM PUBLIC, anon, authenticated;

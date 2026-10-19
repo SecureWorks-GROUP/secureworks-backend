@@ -331,7 +331,9 @@ BEGIN
   RAISE EXCEPTION 'quote accept atomic contract: C4 %: the legacy status write must stand (got %)', p_case, v_res;
  END IF;
 END $$;
--- Partially accepted to accepted (Codex finding 1; the checker's c4c at d98903c). A1 is
+-- Partially accepted to accepted (Codex finding 1; the checker's c4c at d98903c). The
+-- triple failure here is reached through the review-event and run-insert injectors (the
+-- mark injector only fires where a sibling is marked). A1 is
 -- shaped as a shared fence run: two parties' run documents and run acceptances, both
 -- accepted, then party 2's status write. A2 is shaped as c4d: a whole quote with two
 -- contacts' documents, both accepted. The trigger never reads documents, so the shapes
@@ -347,10 +349,13 @@ INSERT INTO public.job_documents (id, job_id, type, sent_to_client, run_label, j
 INSERT INTO public.run_acceptances (job_id, job_contact_id, job_document_id, run_label, status, accepted_at) VALUES
  ('9a000000-0000-4000-8000-0000000000a1', '9c000000-0000-4000-8000-0000000000f5', '9d000000-0000-4000-8000-0000000000f5', 'A', 'accepted', '2026-10-20 01:00:00+00'),
  ('9a000000-0000-4000-8000-0000000000a1', '9c000000-0000-4000-8000-0000000000f6', '9d000000-0000-4000-8000-0000000000f6', 'A', 'accepted', '2026-10-20 02:00:00+00');
+-- A1's original whole-job quote DA1 (live, unaccepted) is retired for these cases and put
+-- back in the reset below, so A1 holds only the two run documents (Codex 1327792 finding 1).
+UPDATE public.job_documents SET superseded_at = '2026-10-20 00:30:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000a1';
 UPDATE public.jobs SET status = 'partially_accepted' WHERE id IN ('9a000000-0000-4000-8000-0000000000a1', '9a000000-0000-4000-8000-0000000000a2');
 -- Before the fix lands its status: each job is listed (visible, not silent as at d98903c).
 SELECT pg_temp.qa_assert((SELECT count(*) = 2 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'partially_accepted_every_party_accepted' AND job_id IN ('9a000000-0000-4000-8000-0000000000a1', '9a000000-0000-4000-8000-0000000000a2')),
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id IN ('9a000000-0000-4000-8000-0000000000a1', '9a000000-0000-4000-8000-0000000000a2')),
  'C4: a job left partially accepted with every party accepted must be listed (c4c, c4d)');
 SELECT pg_temp.qa_cross('9a000000-0000-4000-8000-0000000000a1', 'accepted', 'partial to accepted', true);
 SELECT pg_temp.qa_assert((SELECT status = 'partially_accepted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a1'),
@@ -358,7 +363,7 @@ SELECT pg_temp.qa_assert((SELECT status = 'partially_accepted' FROM public.jobs 
 SELECT pg_temp.qa_legacy('9a000000-0000-4000-8000-0000000000a1', 'accepted', '2026-10-20 02:00:00+00', 'partial to accepted');
 SELECT pg_temp.qa_assert((SELECT status = 'accepted' AND accepted_at = '2026-10-20 02:00:00+00' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a1')
  AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
-   WHERE kind IN ('partially_accepted_every_party_accepted', 'accepted_document_job_not_won') AND job_id = '9a000000-0000-4000-8000-0000000000a1')
+   WHERE kind IN ('partially_accepted_all_documents_accepted', 'accepted_document_job_not_won') AND job_id = '9a000000-0000-4000-8000-0000000000a1')
  AND coalesce(current_setting('sw.quote_accept_legacy', true), '') = '',
  'C4: the legacy write stands with its accepted_at, and its marker does not outlive the call');
 -- No leak: an unmarked write later in the same transaction is still refused.
@@ -366,8 +371,8 @@ SELECT pg_temp.qa_cross('9a000000-0000-4000-8000-0000000000a2', 'accepted', 'unm
 SELECT pg_temp.qa_legacy('9a000000-0000-4000-8000-0000000000a2', 'accepted', NULL, 'second winner');
 SELECT pg_temp.qa_assert((SELECT status = 'accepted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a2')
  AND NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'partially_accepted_every_party_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000a2'),
- 'C4 (c4d shape): the last contact\'s legacy status write stands and the job drops out');
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000a2'),
+ 'C4 (c4d shape): the last contact''s legacy status write stands and the job drops out');
 -- Won to partially accepted, and won to quoted (Codex finding 2): A1 leaving won makes the
 -- trigger mark A1 under the remaining winner A2, which is forced to fail.
 SELECT pg_temp.qa_cross('9a000000-0000-4000-8000-0000000000a1', 'partially_accepted', 'won to partial', true);
@@ -396,6 +401,7 @@ UPDATE public.feature_flags SET enabled = false
 SET LOCAL session_replication_role = replica;
 UPDATE public.jobs SET status = 'quoted', accepted_at = NULL, superseded_at = NULL, superseded_by_job_id = NULL
  WHERE id IN ('9a000000-0000-4000-8000-0000000000a1', '9a000000-0000-4000-8000-0000000000a2');
+UPDATE public.job_documents SET superseded_at = NULL WHERE id = '9d000000-0000-4000-8000-0000000000a1';
 DELETE FROM public.run_acceptances WHERE job_document_id IN ('9d000000-0000-4000-8000-0000000000f5', '9d000000-0000-4000-8000-0000000000f6');
 DELETE FROM public.job_documents WHERE id IN ('9d000000-0000-4000-8000-0000000000f5', '9d000000-0000-4000-8000-0000000000f6',
   '9d000000-0000-4000-8000-0000000000f7', '9d000000-0000-4000-8000-0000000000f8');
@@ -1108,8 +1114,26 @@ INSERT INTO public.job_documents (id, job_id, type, sent_to_client, accepted_at,
  ('9d000000-0000-4000-8000-0000000000ea', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, '2026-10-20 01:00:00+00', NULL),
  ('9d000000-0000-4000-8000-0000000000eb', '9a000000-0000-4000-8000-0000000000e9', 'quote', true, NULL, '2026-10-20 02:00:00+00');
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'partially_accepted_every_party_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
  'gap: a job partially accepted because a party declined must not be listed');
+-- A decline on a superseded (historical) document does not hide a current inconsistency.
+UPDATE public.job_documents SET superseded_at = '2026-10-20 03:00:00+00' WHERE id = '9d000000-0000-4000-8000-0000000000eb';
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
+ 'gap: a superseded historical decline must not hide a partial job whose live documents are all accepted');
+-- An unaccepted live document (an unsent alternative, say) keeps the job out: a known limit
+-- of this document heuristic, recorded here so a change to it is deliberate.
+INSERT INTO public.job_documents (id, job_id, type, sent_to_client) VALUES
+ ('9d000000-0000-4000-8000-0000000000ec', '9a000000-0000-4000-8000-0000000000e9', 'quote', false);
+SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'partially_accepted_all_documents_accepted' AND job_id = '9a000000-0000-4000-8000-0000000000e9'),
+ 'gap (known limit): any live unaccepted document keeps the job out of the heuristic');
+-- A run row with no document pointer is listed as not live.
+INSERT INTO public.run_acceptances (job_id, job_contact_id, job_document_id, run_label, status, accepted_at) VALUES
+ ('9a000000-0000-4000-8000-0000000000e5', '9c000000-0000-4000-8000-0000000000e5', NULL, 'B', 'accepted', '2026-10-20 05:00:00+00');
+SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
+   WHERE kind = 'run_acceptance_document_not_live' AND ref = '9a000000-0000-4000-8000-0000000000e5/9c000000-0000-4000-8000-0000000000e5/B'),
+ 'gap: an accepted run row with no document must be listed');
 -- New condition kinds cannot be resolved.
 SELECT pg_temp.qa_assert(pg_temp.qa_try($q$INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
   VALUES ('run_acceptance_document_not_live', 'x', '00000000-0000-0000-0000-000000000001')$q$) LIKE 'err:%',
