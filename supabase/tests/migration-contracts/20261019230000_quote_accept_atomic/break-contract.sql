@@ -2,7 +2,7 @@
 -- acceptance whose supersede run records nothing is not rolled back.
 CREATE OR REPLACE FUNCTION public.accept_quote_document_atomic(
   p_document_id uuid, p_share_token text, p_request_id uuid, p_accepted_at timestamptz,
-  p_job_status text, p_fingerprint text, p_run_label text, p_accept_event jsonb
+  p_job_status text, p_fingerprint text, p_run_label text, p_run_neighbour uuid, p_accept_event jsonb
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE v_job uuid;
 BEGIN

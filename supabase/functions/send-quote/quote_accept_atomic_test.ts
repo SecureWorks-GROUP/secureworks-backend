@@ -69,11 +69,15 @@ Deno.test('the atomic switch is on only for a readable true', async () => {
 })
 
 Deno.test('a failed or malformed snapshot read is null, so the caller writes nothing', async () => {
-  const good = { fingerprint: 'fp', documents: [], acceptances: [], run_line_items: [] }
-  assertEquals((await readQuoteAcceptanceSnapshot(fakeClient({}, { quote_acceptance_snapshot: { data: good } }), 'j'))?.fingerprint, 'fp')
+  const good = { fingerprint: 'fp', documents: [], acceptances: [], run_line_items: [], run_neighbour: 'n1' }
+  const read = await readQuoteAcceptanceSnapshot(fakeClient({}, { quote_acceptance_snapshot: { data: good } }), 'j', 'A')
+  assertEquals([read?.fingerprint, read?.runNeighbour], ['fp', 'n1'])
+  const sb = fakeClient({}, { quote_acceptance_snapshot: { data: { ...good, run_neighbour: null } } })
+  assertEquals((await readQuoteAcceptanceSnapshot(sb, 'j', null))?.runNeighbour, null)
+  assertEquals(sb.calls[0].args, { p_job_id: 'j', p_run_label: null })
   for (const bad of [{ error: { code: '57014' } }, { data: null }, { data: { ...good, fingerprint: null } },
     { data: { ...good, documents: null } }, boom as () => never]) {
-    assertEquals(await readQuoteAcceptanceSnapshot(fakeClient({}, { quote_acceptance_snapshot: bad as Result }), 'j'), null)
+    assertEquals(await readQuoteAcceptanceSnapshot(fakeClient({}, { quote_acceptance_snapshot: bad as Result }), 'j', null), null)
   }
 })
 
@@ -83,7 +87,7 @@ const docRow = {
   superseded_at: null, created_at: '2026-10-17T00:00:00+00:00', version: 1, data_snapshot_json: null,
 }
 const snap = (documents: unknown[], extra: Partial<QuoteAcceptanceSnapshotRead> = {}) =>
-  ({ fingerprint: 'fp', documents, acceptances: [], runLineItems: [], ...extra }) as QuoteAcceptanceSnapshotRead
+  ({ fingerprint: 'fp', documents, acceptances: [], runLineItems: [], runNeighbour: null, ...extra }) as QuoteAcceptanceSnapshotRead
 
 Deno.test('the handler document must be exactly its snapshot row and current token', () => {
   const doc = { ...docRow, sent_at: '2026-10-18T00:00:00.000Z', job_id: 'j', job_contacts: null }
@@ -116,6 +120,7 @@ const input: AtomicAcceptInput = {
   jobStatus: 'accepted',
   fingerprint: 'fp',
   runLabel: null,
+  runNeighbour: null,
   acceptEvent: { document_id: 'd-1' },
 }
 
@@ -131,7 +136,7 @@ Deno.test('the RPC outcomes map one to one, with the inputs passed through', asy
     assertEquals(await acceptQuoteDocumentAtomically(sb, input, 0), expected)
     assertEquals(sb.calls[0].args, {
       p_document_id: 'd-1', p_share_token: 'tok', p_request_id: 'r-1', p_accepted_at: input.acceptedAt,
-      p_job_status: 'accepted', p_fingerprint: 'fp', p_run_label: null, p_accept_event: { document_id: 'd-1' },
+      p_job_status: 'accepted', p_fingerprint: 'fp', p_run_label: null, p_run_neighbour: null, p_accept_event: { document_id: 'd-1' },
     })
   }
 })

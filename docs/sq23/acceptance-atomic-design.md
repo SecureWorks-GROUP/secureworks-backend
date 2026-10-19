@@ -1,6 +1,6 @@
 # SQ-23 remedy: an acceptance can never commit its status with no record
 
-**Revision 9: the one current contract** (after the Codex reviews of `2a09949` and `1d41398`, saved beside this file, and the independent check at `2a09949`). Earlier text (the original and revisions 2 to 6; revision 7 is replaced in place) is in `acceptance-atomic-design-history.md`, marked superseded, and is not operative.
+**Revision 10: the one current contract** (after the Codex reviews of `2a09949`, `1d41398` and `ad95394`, saved beside this file, and the independent check at `2a09949`). Earlier text (the original and revisions 2 to 6; revision 7 is replaced in place) is in `acceptance-atomic-design-history.md`, marked superseded, and is not operative.
 
 Status: built on the isolated branch `sq23/acceptance-atomic` (base `sq23/quote-option-jobs` `996d234`). Not merged, not deployed, nothing live, no switch on. Provenance: routine Codex orchestration under standing scope. Requirement: CIO R1 to R5 (secureworks-projects `ctx/cio-20261019` `ef20d6f`). Design and build only; no approval of any merge, deploy, switch or send, and no residual accepted.
 
@@ -68,7 +68,7 @@ Only a readable `true` turns any of them on. Off, missing or unreadable is off.
 - **`quote_acceptance_gaps(grace)`** (R3), read-only, ids, codes and instants only. A row disappears only when its own `(kind, ref)` is in `quote_acceptance_gap_resolutions` (service role may insert and read, never change or delete), or for runs and attempts their `resolved_at` is set. Nothing else suppresses it.
   - `settle_run_unsettled`
   - `review_needed`: every `quote_option_review_needed` and `quote_acceptance_review_needed` event, so review-only failures and staff-advanced acceptances are listed
-  - `won_with_open_sibling`: one row per (winner, open sibling); its ref names both, the winner's acceptance instant and the sibling's latest unsuperseded event, so resolving one sibling never hides another and a reopened sibling is listed again. Listed only while the supersede switch reads true (open siblings are by design when marking is off); an unreadable switch, for the same errors the trigger catches (including 57014 and P0004), is off and the rest is still listed
+  - `won_with_open_sibling`: one row per (winner, open sibling); its ref names both jobs and both rows' current versions (`xmin`, which changes with every update of a row), so resolving one sibling never hides another, and any re-win, reopening (for example cancelled then quoted, which runs no trigger and writes no event) or other change to either job is listed again. An unrelated edit to either job also re-lists it: the safe direction. `more_than_one_won` refs carry the members' row versions the same way. Listed only while the supersede switch reads true (open siblings are by design when marking is off); an unreadable switch, for the same errors the trigger catches (including 57014 and P0004), is off and the rest is still listed
   - `more_than_one_won`
   - `acceptance_handler_unfinished`
 
@@ -76,7 +76,7 @@ Only a readable `true` turns any of them on. Off, missing or unreadable is off.
 - Switch off, missing or unreadable: today's code path. Every legacy write is unchanged, behind `atomicDocId === null`, and today's three pre-reads run as before. The only addition is one uncached switch read per acceptance with a job.
 - Switch on:
   1. read the snapshot; the token-read document must equal its snapshot row in every guard and party-rule field, including the current token (retry page otherwise);
-  2. today's guards still run, then run again on the snapshot with the same query filters; the party rules run on the snapshot. The run neighbour is chosen by today's own query (`LIMIT 1`, no order), so the choice is the legacy one; the rows it chooses among are fingerprinted;
+  2. today's guards still run, then run again on the snapshot with the same query filters; the party rules run on the snapshot. The run neighbour comes from the snapshot statement itself, chosen the legacy way (`LIMIT 1`, no order), so it belongs to the same snapshot as the fingerprint; the database also checks, under the lock, that it is still one of the run's line item contacts (or that the run has none when it is NULL);
   3. for a whole quote, read the job and contacts and build today's `quote_accepted` detail;
   4. call the function with a fresh request id.
 - Outcomes:
@@ -97,9 +97,9 @@ Migration contract `supabase/tests/migration-contracts/20261019230000_quote_acce
 - handler-finished only by the committing request, once; gap read: unfinished handler, review events listed, a resolution suppresses exactly its own row, trigger bypass, supersede-off gating, two winners, a review-only failure listed with its open sibling
 - rollback contract and break contract (the break removes the marker; R4 must fail)
 
-send-quote unit test `quote_accept_atomic_test.ts`: the switch read; snapshot read failures; the document-to-snapshot match (each field, the token, instants in another format); the guards on the snapshot; the run neighbour; outcome mapping and arguments; a SQLSTATE error is never recovered; lost-response recovery by request id (same instant, other request is a replay; nothing found is unknown after one re-read); finishing.
+send-quote unit test `quote_accept_atomic_test.ts`: the switch read; snapshot read failures; the document-to-snapshot match (the token, instants in another format, and a mutation of each of seven fields); the guards on the snapshot; the snapshot's run neighbour and its arguments; outcome mapping and arguments; a SQLSTATE error is never recovered; lost-response recovery by request id (same instant, other request is a replay; nothing found is unknown after one re-read); finishing.
 
-Each mutation in the contract runs in its own statement and is verified in the next, since a statement's own subqueries cannot see writes made by a function it calls.
+Each mutation in the contract runs in its own statement (or its own PL/pgSQL assignment) and is verified in the next, since a statement's own subqueries cannot see writes made by a function it calls. Row-version cases run their change in a subtransaction, because inside one transaction every write shares one `xmin`.
 
 **Coverage limits:** the fingerprint and document-match cases mutate the main fields one at a time, not every field. Timestamps are compared to the millisecond, as the party rules already order them.
 

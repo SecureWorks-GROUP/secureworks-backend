@@ -1620,7 +1620,7 @@ serve(async (req: Request) => {
       // Off, missing or unreadable: today's path, unchanged.
       let atomicSnap: QuoteAcceptanceSnapshotRead | null = null
       if (doc.job_id && await quoteAcceptAtomicOn(sb)) {
-        atomicSnap = await readQuoteAcceptanceSnapshot(sb, doc.job_id)
+        atomicSnap = await readQuoteAcceptanceSnapshot(sb, doc.job_id, quoteDocumentRunLabel(doc))
         if (!atomicSnap || !quoteDocumentMatchesSnapshot(doc, atomicSnap, token)) {
           return new Response(quoteViewRetryPage(), {
             status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
@@ -1725,24 +1725,12 @@ serve(async (req: Request) => {
             { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
           )
         }
-        // The run neighbour by today's own query (LIMIT 1, no order), so the
-        // choice is the legacy one; the rows it chooses from are fingerprinted.
-        const runItemsRead = sourceRunLabel !== null
-          ? await sb.from('run_line_items')
-            .select('job_contact_id')
-            .eq('job_id', doc.job_id)
-            .eq('run_label', sourceRunLabel)
-            .limit(1)
-          : { data: [], error: null }
-        if (quoteAcceptanceReadFailed([runItemsRead])) {
-          return new Response(quoteViewRetryPage(), {
-            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-          })
-        }
         acceptanceSnapshot = withPendingAcceptance({
           documents: atomicSnap.documents,
           acceptances: atomicSnap.acceptances,
-          runNeighbourId: (runItemsRead.data as Array<{ job_contact_id?: string | null }> | null)?.[0]?.job_contact_id || null,
+          // Today's neighbour choice, from the same snapshot; the database
+          // checks it is still one of the run's contacts under the lock.
+          runNeighbourId: atomicSnap.runNeighbour,
         }, doc, sourceRunLabel, acceptedAt)
       } else if (doc.job_id) {
         const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
@@ -1822,6 +1810,7 @@ serve(async (req: Request) => {
           jobStatus,
           fingerprint: atomicSnap.fingerprint,
           runLabel: sourceRunLabel,
+          runNeighbour: sourceRunLabel !== null ? atomicSnap.runNeighbour : null,
           acceptEvent,
         })
         if (atomic.kind === 'replay') return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)

@@ -117,8 +117,10 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_fingerprint(uuid) TO service_r
 
 -- The decision inputs and their fingerprint from one statement. Documents
 -- carry the columns send-quote's party rules read (QUOTE_PARTY_DOCUMENT_COLUMNS)
--- plus share_token; run line items are in id order.
-CREATE OR REPLACE FUNCTION public.quote_acceptance_snapshot(p_job_id uuid)
+-- plus share_token; run line items are in id order. run_neighbour is today's
+-- own choice (send-quote's LIMIT 1, no order) for p_run_label, taken in the
+-- same statement, so it belongs to the same snapshot as the fingerprint.
+CREATE OR REPLACE FUNCTION public.quote_acceptance_snapshot(p_job_id uuid, p_run_label text)
 RETURNS jsonb
 LANGUAGE sql STABLE
 SECURITY DEFINER
@@ -142,10 +144,12 @@ AS $$
     'run_line_items', coalesce((SELECT jsonb_agg(jsonb_build_object(
         'run_label', r.run_label, 'job_contact_id', r.job_contact_id)
         ORDER BY r.id)
-       FROM public.run_line_items r WHERE r.job_id = p_job_id), '[]'::jsonb))
+       FROM public.run_line_items r WHERE r.job_id = p_job_id), '[]'::jsonb),
+    'run_neighbour', (SELECT r.job_contact_id FROM public.run_line_items r
+                       WHERE p_run_label IS NOT NULL AND r.job_id = p_job_id AND r.run_label = p_run_label LIMIT 1))
 $$;
-REVOKE ALL ON FUNCTION public.quote_acceptance_snapshot(uuid) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.quote_acceptance_snapshot(uuid) TO service_role;
+REVOKE ALL ON FUNCTION public.quote_acceptance_snapshot(uuid, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.quote_acceptance_snapshot(uuid, text) TO service_role;
 
 -- The atomic acceptance. Returns jsonb {outcome, ...}:
 --   accepted  committed now, by p_request_id.
@@ -166,6 +170,7 @@ CREATE OR REPLACE FUNCTION public.accept_quote_document_atomic(
   p_job_status text,
   p_fingerprint text,
   p_run_label text,
+  p_run_neighbour uuid,
   p_accept_event jsonb
 ) RETURNS jsonb
 LANGUAGE plpgsql
@@ -257,6 +262,18 @@ BEGIN
     IF p_job_status IS NULL OR p_job_status NOT IN ('accepted', 'partially_accepted', 'quoted') THEN
       RAISE EXCEPTION 'quote_accept_bad_status: %', p_job_status USING ERRCODE = '22023';
     END IF;
+    -- The neighbour the caller decided with must be one of the run's line
+    -- item contacts in the locked (fingerprint-equal) state, or NULL when
+    -- the run has none.
+    IF p_run_neighbour IS NULL THEN
+      IF EXISTS (SELECT 1 FROM public.run_line_items r
+                  WHERE r.job_id = v_job AND r.run_label = v_run AND r.job_contact_id IS NOT NULL) THEN
+        RETURN jsonb_build_object('outcome', 'stale', 'reason', 'run_neighbour_unbound');
+      END IF;
+    ELSIF NOT EXISTS (SELECT 1 FROM public.run_line_items r
+                       WHERE r.job_id = v_job AND r.run_label = v_run AND r.job_contact_id = p_run_neighbour) THEN
+      RETURN jsonb_build_object('outcome', 'stale', 'reason', 'run_neighbour_unbound');
+    END IF;
   END IF;
 
   UPDATE public.job_documents SET accepted_at = p_accepted_at WHERE id = p_document_id;
@@ -315,8 +332,8 @@ BEGIN
   RETURN jsonb_build_object('outcome', 'accepted', 'attempt_id', v_attempt.id, 'request_id', p_request_id,
     'job_id', v_job, 'job_status', p_job_status, 'previous_status', v_prev_status, 'accepted_at', p_accepted_at);
 END $$;
-REVOKE ALL ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb) TO service_role;
+REVOKE ALL ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb) TO service_role;
 
 -- The committing request reached its customer response. Only that request
 -- (request_id), only once. Says nothing about follow-up success.
@@ -346,12 +363,12 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid) T
 --                            staff-advanced acceptances
 --   won_with_open_sibling    a grouped job in a won status beside an open,
 --                            unmarked option, one row per sibling (ref:
---                            winner>sibling@acceptance instant#sibling's
---                            latest unsuperseded event).
+--                            winner>sibling@winner row version#sibling row
+--                            version).
 --                            Listed only while quote_option_supersede_v1 reads
 --                            true: with marking off, open siblings are by design
 --   more_than_one_won        a group with two or more won, unmarked options
---                            (ref: group@won ids)
+--                            (ref: group@won ids with row versions)
 --   acceptance_handler_unfinished  committed, the handler never reached its
 --                            response (follow-up work state unknown)
 -- p_grace: how old an attempt must be before it is listed.
@@ -382,16 +399,13 @@ BEGIN
       FROM public.job_events e
      WHERE e.event_type IN ('quote_option_review_needed', 'quote_acceptance_review_needed')
     UNION ALL
-    -- One row per (winner, open sibling). The ref names both, the winner's
-    -- acceptance instant and the sibling's latest unsuperseded event, so a
-    -- later or reopened sibling is a new obligation, never hidden by an
-    -- earlier resolution.
+    -- One row per (winner, open sibling). The ref names both and both rows'
+    -- current versions (xmin changes on every update of a row), so any
+    -- re-win, reopening or other change to either job is a new obligation,
+    -- never hidden by an earlier resolution. An unrelated edit also re-lists
+    -- (the safe direction).
     SELECT 'won_with_open_sibling', w.id,
-           w.id::text || '>' || s.id::text
-             || '@' || coalesce(extract(epoch FROM w.accepted_at)::text, 'none')
-             || '#' || coalesce((SELECT u.id::text FROM public.job_events u
-                                  WHERE u.job_id = s.id AND u.event_type = 'quote_option_unsuperseded'
-                                  ORDER BY u.created_at DESC, u.id DESC LIMIT 1), 'none'),
+           w.id::text || '>' || s.id::text || '@' || w.xmin::text || '#' || s.xmin::text,
            w.accepted_at
       FROM public.jobs w
       JOIN public.jobs s ON s.quote_option_group_id = w.quote_option_group_id AND s.id <> w.id
@@ -402,7 +416,8 @@ BEGIN
        AND coalesce(s.status, 'draft') IN ('draft', 'quoted') AND s.superseded_at IS NULL
     UNION ALL
     SELECT 'more_than_one_won', NULL::uuid,
-           m.quote_option_group_id::text || '@' || string_agg(m.id::text, ',' ORDER BY m.id), max(m.accepted_at)
+           m.quote_option_group_id::text || '@' || string_agg(m.id::text || ':' || m.xmin::text, ',' ORDER BY m.id),
+           max(m.accepted_at)
       FROM public.jobs m
      WHERE m.quote_option_group_id IS NOT NULL
        AND public.fence_quote_option_status_won(m.status) AND m.superseded_at IS NULL

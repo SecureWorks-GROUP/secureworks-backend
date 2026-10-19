@@ -7,8 +7,8 @@
 -- which is today's behaviour.
 DROP FUNCTION IF EXISTS public.quote_acceptance_gaps(interval);
 DROP FUNCTION IF EXISTS public.quote_acceptance_handler_finished(uuid, uuid);
-DROP FUNCTION IF EXISTS public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb);
-DROP FUNCTION IF EXISTS public.quote_acceptance_snapshot(uuid);
+DROP FUNCTION IF EXISTS public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb);
+DROP FUNCTION IF EXISTS public.quote_acceptance_snapshot(uuid, text);
 DROP FUNCTION IF EXISTS public.quote_acceptance_fingerprint(uuid);
 DROP TABLE IF EXISTS public.quote_acceptance_gap_resolutions;
 DROP TABLE IF EXISTS public.quote_acceptance_attempts;

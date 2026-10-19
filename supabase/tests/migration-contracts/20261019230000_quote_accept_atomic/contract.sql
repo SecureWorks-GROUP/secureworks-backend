@@ -27,7 +27,9 @@ CREATE FUNCTION pg_temp.qa_accept(p_doc uuid, p_status text, p_run text DEFAULT 
    coalesce(p_token, (SELECT share_token FROM public.job_documents WHERE id = p_doc), 'no-token'),
    coalesce(p_request, gen_random_uuid()), '2026-10-19 12:00:00+00', p_status,
    coalesce(p_fp, public.quote_acceptance_fingerprint((SELECT job_id FROM public.job_documents WHERE id = p_doc))),
-   p_run, CASE WHEN p_event IS NULL AND p_run IS NULL THEN '{"contract":true}'::jsonb ELSE p_event END)
+   p_run,
+   (public.quote_acceptance_snapshot((SELECT job_id FROM public.job_documents WHERE id = p_doc), p_run)->>'run_neighbour')::uuid,
+   CASE WHEN p_event IS NULL AND p_run IS NULL THEN '{"contract":true}'::jsonb ELSE p_event END)
 $$;
 
 -- Switches seeded off.
@@ -38,27 +40,27 @@ SELECT pg_temp.qa_assert((SELECT enabled = false FROM public.feature_flags WHERE
 -- Service role only; owner rights with a fixed search_path.
 SELECT pg_temp.qa_assert(NOT EXISTS (
   SELECT 1 FROM unnest(ARRAY['public', 'anon', 'authenticated']) r(role),
-       unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)',
+       unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)',
                     'public.quote_acceptance_fingerprint(uuid)',
                     'public.quote_acceptance_handler_finished(uuid, uuid)',
-                    'public.quote_acceptance_snapshot(uuid)',
+                    'public.quote_acceptance_snapshot(uuid, text)',
                     'public.quote_acceptance_gaps(interval)']) f(fn)
    WHERE has_function_privilege(r.role, f.fn, 'EXECUTE'))
  AND (SELECT bool_and(has_function_privilege('service_role', f.fn, 'EXECUTE'))
-   FROM unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)',
+   FROM unnest(ARRAY['public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)',
                      'public.quote_acceptance_fingerprint(uuid)',
                       'public.quote_acceptance_handler_finished(uuid, uuid)',
-                    'public.quote_acceptance_snapshot(uuid)',
+                    'public.quote_acceptance_snapshot(uuid, text)',
                      'public.quote_acceptance_gaps(interval)']) f(fn)),
  'the new functions must be the service role''s only');
 SELECT pg_temp.qa_assert((SELECT count(*) = 5
    AND bool_and(coalesce(p.prosecdef, false))
    AND bool_and(coalesce(p.proconfig @> ARRAY['search_path=public, pg_temp'], false))
   FROM pg_proc p
-  WHERE p.oid IN ('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)'::regprocedure,
+  WHERE p.oid IN ('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)'::regprocedure,
     'public.quote_acceptance_fingerprint(uuid)'::regprocedure,
     'public.quote_acceptance_handler_finished(uuid, uuid)'::regprocedure,
-    'public.quote_acceptance_snapshot(uuid)'::regprocedure,
+    'public.quote_acceptance_snapshot(uuid, text)'::regprocedure,
     'public.quote_acceptance_gaps(interval)'::regprocedure)),
  'the new functions must run as their owner with a fixed search_path');
 SELECT pg_temp.qa_assert(has_table_privilege('service_role', 'public.quote_acceptance_attempts', 'SELECT')
@@ -133,8 +135,11 @@ SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps(
 -- the status change stands with nothing recorded. The writer is a plain UPDATE, which is what
 -- every one of the 40 writers sends. Each case is put back to quoted afterwards.
 CREATE FUNCTION pg_temp.qa_today(p_case text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE v_res text;
 BEGIN
- IF pg_temp.qa_try($q$UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000a1'$q$) <> 'ok'
+ -- The write in one statement, its effect read in the next.
+ v_res := pg_temp.qa_try($q$UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000a1'$q$);
+ IF v_res <> 'ok'
     OR (SELECT status FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a1') <> 'accepted' THEN
   RAISE EXCEPTION 'quote accept atomic contract: strict %: a status change outside the atomic path must stand as today', p_case;
  END IF;
@@ -175,12 +180,12 @@ END $$;
 -- The atomic marker is read before, and apart from, the strict switch: with the strict
 -- switch unreadable the atomic acceptance must still be refused and roll back.
 DO $$
-DECLARE v_code text;
+DECLARE v_code text; v_res text;
 BEGIN
  FOREACH v_code IN ARRAY ARRAY['57014', 'P0001'] LOOP
   PERFORM set_config('qa.flag_error', v_code, true);
-  IF pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000a1', 'accepted')$q$)
-     NOT LIKE 'err:quote_option_unrecorded%'
+  v_res := pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000a1', 'accepted')$q$);
+  IF v_res NOT LIKE 'err:quote_option_unrecorded%'
      OR (SELECT accepted_at IS NOT NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000a1') THEN
    RAISE EXCEPTION 'quote accept atomic contract: strict unreadable %: the atomic acceptance must still roll back', v_code;
   END IF;
@@ -247,7 +252,7 @@ SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb
 SELECT pg_temp.qa_assert((SELECT (x->>'fingerprint') = public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1')
    AND jsonb_array_length(x->'documents') = 4
    AND (x->'documents'->0) ? 'share_token' AND (x->'documents'->0) ? 'data_snapshot_json'
-  FROM (SELECT public.quote_acceptance_snapshot('9a000000-0000-4000-8000-0000000000b1') AS x) s),
+  FROM (SELECT public.quote_acceptance_snapshot('9a000000-0000-4000-8000-0000000000b1', NULL) AS x) s),
  'the snapshot must return its documents and the matching fingerprint');
 -- Each input the guards and party rules read changes the fingerprint, and putting it back
 -- restores it. A NULL-to-value move between columns is not lost.
@@ -319,18 +324,18 @@ SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb
 -- A whole quote without its acceptance event raises and writes nothing.
 SELECT set_config('qa.r', pg_temp.qa_try($q$SELECT public.accept_quote_document_atomic('9d000000-0000-4000-8000-0000000000b1',
    'tok-9d000000-0000-4000-8000-0000000000b1', gen_random_uuid(), now(), 'partially_accepted',
-   public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1'), NULL, NULL)$q$), true);
+   public.quote_acceptance_fingerprint('9a000000-0000-4000-8000-0000000000b1'), NULL, NULL, NULL)$q$), true);
 SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:quote_accept_event_missing%'
  AND (SELECT accepted_at IS NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b1'),
  'a whole-quote acceptance must carry its acceptance event');
 -- Bad inputs raise and write nothing.
 SELECT set_config('qa.r', pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b1', 'scheduled')$q$), true);
-SELECT pg_temp.qa_assert(current_setting('qa.r')
-  LIKE 'err:quote_accept_bad_status%'
- AND pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-00000000ffff', 'accepted')$q$)
-  LIKE 'err:quote_accept_document_missing%'
+SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:quote_accept_bad_status%'
  AND (SELECT accepted_at IS NULL FROM public.job_documents WHERE id = '9d000000-0000-4000-8000-0000000000b1'),
- 'an invalid status or a missing document must raise and write nothing');
+ 'an invalid status must raise and write nothing');
+SELECT set_config('qa.r', pg_temp.qa_try($q$SELECT pg_temp.qa_accept('9d000000-0000-4000-8000-00000000ffff', 'accepted')$q$), true);
+SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:quote_accept_document_missing%',
+ 'a missing document must raise');
 SELECT set_config('qa.r', ((pg_temp.qa_accept('9d000000-0000-4000-8000-0000000000b4', 'accepted')))::text, true);
 SELECT pg_temp.qa_assert(current_setting('qa.r')::jsonb->>'reason' = 'not_a_sent_quote',
  'an unsent document must be refused');
@@ -488,23 +493,26 @@ UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0
 SET LOCAL session_replication_role = origin;
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'won_with_open_sibling' AND job_id = '9a000000-0000-4000-8000-0000000000f7'
-     AND ref = '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@none#none'),
+     AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%'),
  'R3: a won option with no acceptance instant must be listed despite an older unrelated review event');
 -- Each open sibling is its own obligation: resolving one never hides another.
-INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by) VALUES
- ('won_with_open_sibling', '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@none#none',
-  '00000000-0000-0000-0000-000000000001');
+INSERT INTO public.quote_acceptance_gap_resolutions (kind, ref, resolved_by)
+SELECT g.kind, g.ref, '00000000-0000-0000-0000-000000000001' FROM public.quote_acceptance_gaps() g
+ WHERE g.kind = 'won_with_open_sibling' AND g.ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%';
 SELECT pg_temp.qa_assert(NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%')
  AND (SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
    WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f9@%'),
  'R3: resolving one open sibling must leave the other listed');
--- A reopened sibling (a new unsuperseded event) is a new obligation.
-INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES
- ('9a000000-0000-4000-8000-0000000000f8', 'quote_option_unsuperseded', '{"reason":"contract"}');
+-- Reopening the unmarked sibling (cancelled, then quoted again: no trigger run, no event) is a
+-- new obligation. It is done in a subtransaction, as a later transaction would be, so the row
+-- carries a new version (xmin); within one transaction every write shares one.
+SAVEPOINT qa_reopen;
+UPDATE public.jobs SET status = 'cancelled' WHERE id = '9a000000-0000-4000-8000-0000000000f8';
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9a000000-0000-4000-8000-0000000000f8';
+RELEASE SAVEPOINT qa_reopen;
 SELECT pg_temp.qa_assert((SELECT count(*) = 1 FROM public.quote_acceptance_gaps()
-   WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@none#%'
-     AND ref <> '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@none#none'),
+   WHERE kind = 'won_with_open_sibling' AND ref LIKE '9a000000-0000-4000-8000-0000000000f7>9a000000-0000-4000-8000-0000000000f8@%'),
  'R3: a reopened sibling must be listed again despite the earlier resolution');
 -- The gap reader treats an unreadable supersede switch as off, for every error the trigger
 -- treats so, and still lists everything else.

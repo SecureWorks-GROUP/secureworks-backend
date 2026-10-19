@@ -10,9 +10,9 @@ BEGIN
  IF to_regclass('public.quote_acceptance_gap_resolutions') IS NOT NULL THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: the resolutions table still exists';
  END IF;
- IF to_regprocedure('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, jsonb)') IS NOT NULL
+ IF to_regprocedure('public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_fingerprint(uuid)') IS NOT NULL
-    OR to_regprocedure('public.quote_acceptance_snapshot(uuid)') IS NOT NULL
+    OR to_regprocedure('public.quote_acceptance_snapshot(uuid, text)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_handler_finished(uuid, uuid)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_gaps(interval)') IS NOT NULL THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: a function still exists';

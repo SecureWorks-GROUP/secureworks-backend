@@ -34,14 +34,21 @@ export type QuoteAcceptanceSnapshotRead = {
   documents: Array<QuotePartyDocument & { share_token?: string | null }>
   acceptances: QuoteRunAcceptance[]
   runLineItems: Array<{ run_label: string | null; job_contact_id: string | null }>
+  // Today's neighbour choice for the run (LIMIT 1, no order), from the same
+  // statement as the fingerprint. null for a whole quote or a run without one.
+  runNeighbour: string | null
 }
 
 // The decision inputs and their fingerprint, from one database statement.
 // null means the read failed: the caller shows the retry page, writes nothing.
-// deno-lint-ignore no-explicit-any
-export async function readQuoteAcceptanceSnapshot(sb: any, jobId: string): Promise<QuoteAcceptanceSnapshotRead | null> {
+export async function readQuoteAcceptanceSnapshot(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  jobId: string,
+  runLabel: string | null,
+): Promise<QuoteAcceptanceSnapshotRead | null> {
   try {
-    const { data, error } = await sb.rpc('quote_acceptance_snapshot', { p_job_id: jobId })
+    const { data, error } = await sb.rpc('quote_acceptance_snapshot', { p_job_id: jobId, p_run_label: runLabel })
     if (error || !data || typeof data.fingerprint !== 'string'
       || !Array.isArray(data.documents) || !Array.isArray(data.acceptances) || !Array.isArray(data.run_line_items)) {
       return null
@@ -51,6 +58,7 @@ export async function readQuoteAcceptanceSnapshot(sb: any, jobId: string): Promi
       documents: data.documents,
       acceptances: data.acceptances,
       runLineItems: data.run_line_items,
+      runNeighbour: typeof data.run_neighbour === 'string' ? data.run_neighbour : null,
     }
   } catch {
     return null
@@ -112,6 +120,7 @@ export type AtomicAcceptInput = {
   jobStatus: 'accepted' | 'partially_accepted' | 'quoted'
   fingerprint: string
   runLabel: string | null
+  runNeighbour: string | null
   acceptEvent: Record<string, unknown> | null
 }
 
@@ -142,6 +151,7 @@ export async function acceptQuoteDocumentAtomically(sb: any, input: AtomicAccept
       p_job_status: input.jobStatus,
       p_fingerprint: input.fingerprint,
       p_run_label: input.runLabel,
+      p_run_neighbour: input.runNeighbour,
       p_accept_event: input.acceptEvent,
     })
     if (res.error) {
