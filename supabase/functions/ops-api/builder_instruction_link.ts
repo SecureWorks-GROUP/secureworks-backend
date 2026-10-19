@@ -7,41 +7,55 @@
 // approved instruction is the BUILDER'S work order / purchase order, held as a
 // `job_documents` row of type `work_order` plus the job's stated references,
 // never a `work_orders` row (job work orders are fencing and patio only). No
-// table links a `trade_invoice_lines` row to it today (live 19 Oct: 0 of 649
-// insurance lines carry any work order id), so a claim cannot be checked
+// table links a `trade_invoice_lines` row to it today (live 19 Oct: 0 of 657
+// builder-job lines carry any work order id), so a claim cannot be checked
 // against what the builder asked for.
 //
 // Rules held here, each from an existing ruling rather than a new one:
-//   - The orders on a job are its first order (`metadata.builder_po_number`,
-//     else the PO the sealed grammar reads from `makesafe_job_details
-//     .external_ref`) plus every further order a repair landing listed
-//     (`metadata.builder_additional_work_orders`), in arrival order.
-//   - A work order document belongs to an order only when the sealed grammar
-//     (`extractBuilderWorkOrderIdentity`) reads that order's PO from the file
-//     name. Self-generated `work-order-SWMS-*.pdf` files never count (the
-//     grammar refuses them). A document naming no PO stays unmatched.
-//   - Several orders on one job: which order governs is the owner's pending
-//     decision (insurance_repairs_board.ts, "Repair Mints As A Real SWR- Job
-//     Type"), so the line is `several_orders` with every candidate listed and
-//     none chosen. Array order and dates never pick one: make-safe work often
-//     happens before the order arrives, so a received date cannot exclude it.
+//   - An instruction is the canonical instruction key
+//     (`builderInstructionKey`, captain 2026-08-02): builder scope plus
+//     purchase order; AJ on its job number (AJ issues no purchase order);
+//     repair on its work order. The job's instructions are the keys its own
+//     DECLARED identity proves (`declaredBuilderInstructionKeysForCard`: the
+//     typed metadata triple and the stored external reference, never file
+//     names) plus every further order a repair landing listed
+//     (`metadata.builder_additional_work_orders`), collapsed by
+//     `distinctBuilderInstructionKeys`. A declared purchase order whose
+//     builder scope cannot be told (no prefix, unknown company) is still an
+//     instruction on its own job, kept as `UNSCOPED:PO-n`.
+//   - A work order document belongs to an instruction only when the key read
+//     from its file name is that instruction's key. MLB attaches every PDF of
+//     a claim to every card, so a key read from a file name never creates an
+//     instruction; it only attaches the PDF to one the job declared. Our own
+//     `work-order-SWMS-*.pdf` never counts.
+//   - Several instructions on one job: which governs is the owner's pending
+//     decision ("which order governs" on the Repairs card), so the line is
+//     `several_orders` with every candidate listed and none chosen. Array
+//     order and dates never pick one: make-safe work often happens before the
+//     order arrives, so a received date cannot exclude it.
 //   - The line's assignment ids must be assignments on the line's own job.
 
+import { isInsuranceRepairFamily } from "./insurance_repairs_board.ts";
 import {
+  builderInstructionKey,
+  type BuilderInstructionKeyOptions,
+  declaredBuilderInstructionKeysForCard,
+  distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity,
-  normaliseRef,
 } from "./makesafe_builder_work_order_identity.ts";
 
-export const BUILDER_INSTRUCTION_LINK_SCHEMA = "builder-instruction-link.v1";
+export const BUILDER_INSTRUCTION_LINK_SCHEMA = "builder-instruction-link.v2";
 
 export interface BuilderInstructionJobInput {
   job: {
     id?: string | null;
+    type?: string | null;
     metadata?: Record<string, any> | null;
   };
   makesafe_details?: {
     external_ref?: string | null;
     requesting_company_slug?: string | null;
+    report_type?: string | null;
   } | null;
   // job_documents rows of type `work_order` on the job.
   work_order_documents?:
@@ -54,11 +68,11 @@ export interface BuilderInstructionJobInput {
 }
 
 export interface BuilderInstruction {
-  purchase_order: string;
-  work_order_number: string | null;
-  claim_ref: string | null;
+  // e.g. `MLB:PO-56236`, `AJ:JOB-70271`, `MLB:WO-24645`, `UNSCOPED:PO-20919`.
+  key: string;
+  purchase_order: string | null;
   received_at: string | null;
-  source: "job_first_order" | "additional_order";
+  source: "job_declared" | "additional_order";
   document_ids: string[];
 }
 
@@ -72,28 +86,41 @@ function clean(value: unknown): string | null {
   return text === "" ? null : text;
 }
 
-// Comparison form of one purchase order. A stored value may be fused with its
-// claim ("MLB-25147PO-56236"), so it is read through the sealed grammar first
-// and only a value the grammar cannot split is compared as written.
-function poKey(value: unknown): string {
-  const text = clean(value);
-  if (!text) return "";
-  const read = extractBuilderWorkOrderIdentity({ externalRef: text } as any)
-    .builder_po_number;
-  return normaliseRef(read ?? text).replace(/^PO/, "");
+function poOf(key: string): string | null {
+  const match = key.match(/:PO-(\d+)$/);
+  return match ? `PO-${match[1]}` : null;
 }
 
-function documentPoKey(
-  fileName: string | null | undefined,
-  companySlug: string | null | undefined,
-): string {
-  const name = clean(fileName);
-  if (!name) return "";
-  const identity = extractBuilderWorkOrderIdentity({
-    attachmentNames: [name],
-    requestingCompanySlug: companySlug ?? null,
-  } as any);
-  return poKey(identity.builder_po_number);
+// A key, or for a purchase order the grammar reads but no scope can be told
+// for, the unscoped purchase-order key.
+function keyFor(
+  text: string | null,
+  options: BuilderInstructionKeyOptions,
+  attachment = false,
+): string | null {
+  if (!text) return null;
+  const identity = extractBuilderWorkOrderIdentity(
+    attachment
+      ? {
+        attachmentNames: [text],
+        requestingCompanySlug: options.requestingCompanySlug,
+      }
+      : {
+        externalRef: text,
+        requestingCompanySlug: options.requestingCompanySlug,
+      },
+  );
+  const key = builderInstructionKey(identity, options);
+  if (key) return key;
+  const po = String(identity.builder_po_number || "").match(/(\d{3,})$/);
+  return po ? `UNSCOPED:PO-${po[1]}` : null;
+}
+
+function sameInstruction(a: string, b: string): boolean {
+  if (a === b) return true;
+  const pa = poOf(a);
+  return pa !== null && pa === poOf(b) &&
+    (a.startsWith("UNSCOPED:") || b.startsWith("UNSCOPED:"));
 }
 
 export function listBuilderInstructions(
@@ -101,55 +128,74 @@ export function listBuilderInstructions(
 ): BuilderInstructionSet {
   const meta = input.job?.metadata ?? {};
   const slug = input.makesafe_details?.requesting_company_slug ?? null;
-  const fromRef = extractBuilderWorkOrderIdentity({
-    externalRef: input.makesafe_details?.external_ref ?? null,
+  const repair = isInsuranceRepairFamily({
+    ...input.job,
+    makesafe_details: input.makesafe_details ?? null,
+  });
+  const options: BuilderInstructionKeyOptions = {
     requestingCompanySlug: slug,
-  } as any);
-
-  const orders: BuilderInstruction[] = [];
-  const seen = new Set<string>();
-  const push = (order: Omit<BuilderInstruction, "document_ids">) => {
-    const key = poKey(order.purchase_order);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    orders.push({ ...order, document_ids: [] });
+    family: repair ? "repair" : (clean(meta.makesafe_job_family) ?? null),
   };
+  const detailRef = clean(input.makesafe_details?.external_ref);
 
-  const firstPo = clean(meta.builder_po_number) ??
-    clean(fromRef.builder_po_number);
-  if (firstPo) {
-    push({
-      purchase_order: firstPo,
-      work_order_number: clean(meta.builder_work_order_number) ??
-        clean(fromRef.builder_work_order_number),
-      claim_ref: clean(meta.builder_claim_ref) ??
-        clean(fromRef.builder_claim_ref),
-      received_at: null,
-      source: "job_first_order",
-    });
+  const declared = declaredBuilderInstructionKeysForCard({
+    requestingCompanySlug: slug,
+    family: options.family,
+    metadata: meta,
+    detailExternalRef: detailRef,
+  });
+  if (declared.length === 0) {
+    // Unscoped fallback: a declared purchase order with no readable scope.
+    const structured = [
+      meta.builder_work_order_number,
+      meta.builder_claim_ref,
+      meta.builder_po_number,
+    ].filter(Boolean).join(" ");
+    for (const text of [clean(structured), detailRef]) {
+      const key = keyFor(text, options);
+      if (key?.startsWith("UNSCOPED:") && !declared.includes(key)) {
+        declared.push(key);
+      }
+    }
   }
+
+  const additional: Array<{ key: string; received_at: string | null }> = [];
   for (
     const entry of Array.isArray(meta.builder_additional_work_orders)
       ? meta.builder_additional_work_orders
       : []
   ) {
-    const po = clean(entry?.purchase_order);
-    if (!po) continue;
-    push({
-      purchase_order: po,
-      work_order_number: clean(entry?.work_order_number),
-      claim_ref: clean(entry?.claim_ref),
-      received_at: clean(entry?.received_at),
-      source: "additional_order",
+    const text = [
+      entry?.claim_ref,
+      entry?.work_order_number,
+      entry?.purchase_order,
+    ]
+      .map(clean).filter(Boolean).join(" ");
+    const key = keyFor(text || null, options);
+    if (key) additional.push({ key, received_at: clean(entry?.received_at) });
+  }
+
+  const all = [...declared, ...additional.map((a) => a.key)];
+  const distinct = distinctBuilderInstructionKeys(all, all);
+  const orders: BuilderInstruction[] = [];
+  for (const key of distinct) {
+    if (orders.some((o) => sameInstruction(o.key, key))) continue;
+    const extra = additional.find((a) => a.key === key);
+    orders.push({
+      key,
+      purchase_order: poOf(key),
+      received_at: declared.includes(key) ? null : extra?.received_at ?? null,
+      source: declared.includes(key) ? "job_declared" : "additional_order",
+      document_ids: [],
     });
   }
 
   const unmatched: string[] = [];
   for (const doc of input.work_order_documents ?? []) {
     if (!clean(doc?.id)) continue;
-    const key = documentPoKey(doc.file_name, slug);
+    const key = keyFor(clean(doc.file_name), options, true);
     const order = key
-      ? orders.find((o) => poKey(o.purchase_order) === key)
+      ? orders.find((o) => sameInstruction(o.key, key))
       : undefined;
     if (order) order.document_ids.push(doc.id);
     else unmatched.push(doc.id);
