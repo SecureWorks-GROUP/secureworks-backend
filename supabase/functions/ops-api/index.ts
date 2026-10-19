@@ -1420,7 +1420,7 @@ import {
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
-import { ClientInputError } from './client_input_error.ts'
+import { ClientInputError, ClientInputTypeError } from './client_input_error.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -14508,7 +14508,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     }
     // A caller-input or business-rule message carries no store or provider
     // text, so it is answered exactly as main answers it.
-    if (err instanceof ClientInputError) {
+    if (err instanceof ClientInputError || err instanceof ClientInputTypeError) {
       return json({ error: err.message || 'Internal error' }, 500)
     }
     // Anything else is unexpected: its message and stack can carry store or

@@ -85,7 +85,7 @@ import {
   normaliseDraftPackOutput,
   verifyDraftPackOutput,
 } from "./makesafe_draft_pack.ts";
-import { ClientInputError } from "./client_input_error.ts";
+import { ClientInputError, ClientInputTypeError } from "./client_input_error.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
@@ -2703,7 +2703,7 @@ function validateRequest(request: SesPrepareRequest): void {
     throw new TypeError(`assembler_version must be ${SES_ASSEMBLER_VERSION}`);
   }
   if (!text(request.idempotency_key)) {
-    throw new TypeError("idempotency_key is required");
+    throw new ClientInputTypeError("idempotency_key is required");
   }
   const mode = request.selection?.mode;
   if (mode === "job_id") {
@@ -2712,7 +2712,7 @@ function validateRequest(request: SesPrepareRequest): void {
       request.selection.job_number ||
       request.selection.limit
     ) {
-      throw new TypeError("job_id selection requires only job_id");
+      throw new ClientInputTypeError("job_id selection requires only job_id");
     }
     return;
   }
@@ -2722,7 +2722,7 @@ function validateRequest(request: SesPrepareRequest): void {
       request.selection.job_id ||
       request.selection.limit
     ) {
-      throw new TypeError("job_number selection requires only job_number");
+      throw new ClientInputTypeError("job_number selection requires only job_number");
     }
     return;
   }
@@ -2735,7 +2735,7 @@ function validateRequest(request: SesPrepareRequest): void {
       request.selection.job_id ||
       request.selection.job_number
     ) {
-      throw new TypeError("board_batch requires limit between 1 and 50");
+      throw new ClientInputTypeError("board_batch requires limit between 1 and 50");
     }
     // One authorised materials figure describes one card's materials. Spreading
     // it across a batch would bill cards nobody priced, and withdrawing across
@@ -2744,13 +2744,13 @@ function validateRequest(request: SesPrepareRequest): void {
       request.materials_charge || request.materials_charge_cleared ||
       request.draft_pack_output !== undefined
     ) {
-      throw new TypeError(
+      throw new ClientInputTypeError(
         "materials_charge and draft_pack_output require a job_id or job_number selection",
       );
     }
     return;
   }
-  throw new TypeError("selection.mode is invalid");
+  throw new ClientInputTypeError("selection.mode is invalid");
 }
 
 function draftPackContextForInput(
@@ -5027,7 +5027,7 @@ async function prepareSesDocketRevision(
   >;
   if (request.selection.mode === "board_batch") {
     if (!deps.listBoardJobs) {
-      throw new TypeError(
+      throw new ClientInputTypeError(
         "board_batch requires the canonical U2 queue adapter",
       );
     }

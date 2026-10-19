@@ -4,3 +4,7 @@
 // other plain Error reaching that catch is unexpected and is answered
 // 'Internal error'.
 export class ClientInputError extends Error {}
+
+// The same, for a refusal that has always been a TypeError: it stays a
+// TypeError (name and instanceof unchanged) for every caller that inspects it.
+export class ClientInputTypeError extends TypeError {}

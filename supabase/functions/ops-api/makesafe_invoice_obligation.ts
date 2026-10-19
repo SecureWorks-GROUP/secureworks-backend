@@ -5,6 +5,7 @@ import {
 } from "./ses_docket_envelope.ts";
 import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate_resolver.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
+import { ClientInputTypeError } from "./client_input_error.ts";
 
 export type SesPricingDisposition =
   | "priced_from_canon"
@@ -167,7 +168,7 @@ export async function prepareSesInvoiceObligation(
 ): Promise<SesPreparedInvoiceObligation> {
   const cycles = sortedUnique(input.attendance_cycle_ids);
   if (cycles.length === 0) {
-    throw new TypeError("at least one attendance_cycle_id is required");
+    throw new ClientInputTypeError("at least one attendance_cycle_id is required");
   }
 
   const priorReleased = input.existing &&

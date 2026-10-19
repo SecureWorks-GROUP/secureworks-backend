@@ -4,7 +4,7 @@ import type {
   SesPersistPayload,
   SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
-import { ClientInputError } from "./client_input_error.ts";
+import { ClientInputError, ClientInputTypeError } from "./client_input_error.ts";
 
 export const SES_DOCKET_BUCKET = "makesafe-docket-artifacts";
 
@@ -178,8 +178,8 @@ async function resolveLegacyDocketRevision(
 export function createSesDocketPersistenceAdapter(
   options: SesDocketPersistenceOptions,
 ): NonNullable<SesPrepareDependencies["persist"]> {
-  if (!options.org_id.trim()) throw new TypeError("org_id is required");
-  if (!options.created_by.trim()) throw new TypeError("created_by is required");
+  if (!options.org_id.trim()) throw new ClientInputTypeError("org_id is required");
+  if (!options.created_by.trim()) throw new ClientInputTypeError("created_by is required");
   return async (payload: SesPersistPayload) => {
     const legacyCommitted = await resolveLegacyDocketRevision(
       options.client,

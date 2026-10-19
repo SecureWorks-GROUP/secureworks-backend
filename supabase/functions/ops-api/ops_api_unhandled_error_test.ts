@@ -131,6 +131,7 @@ const MAIN_CLIENT_MESSAGES: Array<{ action: string; method: "GET" | "POST"; body
   { action: "get_email_events", method: "GET", error: "job_id required" },
   { action: "materials_recon_assign", method: "POST", body: {}, error: "queue_id or xero_invoice_id is required" },
   { action: "materials_recon_not_job_related", method: "POST", body: {}, error: "queue_id or xero_invoice_id is required" },
+  { action: "resolve_ses_invoice_duplicates", method: "POST", body: {}, error: "requests must contain 1..50 invoice duplicate probes" },
 ];
 
 Deno.test("client messages: caller-input refusals answer exactly as main does", async () => {
@@ -157,18 +158,101 @@ Deno.test("client messages: caller-input refusals answer exactly as main does", 
   }
 });
 
-Deno.test("client messages: no literal plain Error is thrown in any ops-api module", async () => {
-  // A literal message is caller-facing: it must be a ClientInputError so the
-  // general catch keeps main's wording rather than answering "Internal error".
-  // Any quote style, "$" included, across lines; a template literal counts
-  // only when it interpolates nothing.
-  const literal = /throw new Error\(\s*('[^'\\\n]*'|"[^"\\\n]*"|`[^`\\$]*`)\s*,?\s*\)/g;
+// A built-in error thrown with a fixed message is caller-facing: it must be a
+// ClientInputError (or ClientInputTypeError) so the general catch keeps main's
+// wording rather than answering "Internal error". A fixed message is a string
+// literal in any quote style (escapes and "$" included, a template only when it
+// interpolates nothing), or literals joined with "+", across lines. Thrown with
+// or without `new`, directly or through a const/let/var.
+const BUILTIN_ERRORS = "(?:Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError)";
+const FIXED_TEXT = "(?:'(?:[^'\\\\\\n]|\\\\.)*'|\"(?:[^\"\\\\\\n]|\\\\.)*\"|`(?:[^`\\\\$]|\\\\.|\\$(?!\\{))*`)";
+const FIXED_MESSAGE = `${FIXED_TEXT}(?:\\s*\\+\\s*${FIXED_TEXT})*\\s*[,)]`;
+
+function literalBuiltinThrows(source: string): string[] {
+  const hits: string[] = [];
+  const direct = new RegExp(`throw\\s+(?:new\\s+)?${BUILTIN_ERRORS}\\(\\s*${FIXED_MESSAGE}`, "g");
+  for (const m of source.matchAll(direct)) hits.push(m[0]);
+  const assigned = new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:new\\s+)?${BUILTIN_ERRORS}\\(\\s*${FIXED_MESSAGE}`, "g");
+  for (const m of source.matchAll(assigned)) {
+    const name = m[1].replace(/\$/g, "\\$");
+    if (new RegExp(`throw\\s+${name}\\b`).test(source)) hits.push(m[0]);
+  }
+  return hits;
+}
+
+Deno.test("client messages: the literal-throw matcher catches every planted shape", () => {
+  const planted = [
+    "throw new Error('amount must be $0 or less')",
+    "throw new Error(\n  'spans lines',\n)",
+    "throw new Error(`a template with $ but nothing interpolated`)",
+    "throw new Error('can\\'t do that')",
+    'throw new Error("say \\"no\\"")',
+    "throw Error('no new keyword')",
+    "const e = new Error('assigned then thrown'); throw e",
+    "let failure = new RangeError('later'); if (x) throw failure;",
+    "throw new TypeError('a type error')",
+    "throw new RangeError('a range error')",
+    "throw new SyntaxError('a syntax error')",
+    "throw new Error('joined ' + 'literals')",
+    "throw new Error('joined '\n  + \"across lines\")",
+    "throw new Error('with a cause', { cause: err })",
+  ];
+  for (const sample of planted) assertEquals(literalBuiltinThrows(sample).length, 1, sample);
+});
+
+Deno.test("client messages: the literal-throw matcher leaves redacted and client errors alone", () => {
+  const clean = [
+    "throw new Error(`read failed: ${error.message}`)",
+    "throw new Error('read failed: ' + error.message)",
+    "throw new Error(message)",
+    "throw new ClientInputError('caller text')",
+    "throw new ClientInputTypeError('caller text')",
+    "throw new ApiError('caller text', 400)",
+    "const e = new Error('never thrown'); console.log(e)",
+    "throw err",
+  ];
+  for (const sample of clean) assertEquals(literalBuiltinThrows(sample), [], sample);
+});
+
+// Files named for tests that are not themselves `_test.ts` files. Each is a
+// fake, fixture or support module; the guard skips one only while nothing
+// index.ts serves imports it.
+const TEST_SUPPORT_MODULES = new Set([
+  "_test_helpers.ts",
+  "debt_ws_test_fakes.ts",
+  "makesafe_hugo_notification_test_fakes.ts",
+  "materials_recon_test_support.ts",
+  "ses_pack_photo_order_test_fixture.ts",
+  "trade_app_visibility_rules_test_env.ts",
+  "xero_settlement_test_fake.ts",
+]);
+
+async function servedModules(): Promise<Set<string>> {
+  const served = new Set<string>();
+  const pending = ["index.ts"];
+  const importPath = /(?:from|import)\s*\(?\s*["']\.\/([^"']+\.ts)["']/g;
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (served.has(name)) continue;
+    served.add(name);
+    const source = await Deno.readTextFile(new URL(`./${name}`, import.meta.url));
+    for (const m of source.matchAll(importPath)) if (!served.has(m[1])) pending.push(m[1]);
+  }
+  return served;
+}
+
+Deno.test("client messages: no literal built-in error is thrown in any served ops-api module", async () => {
+  const served = await servedModules();
+  for (const helper of TEST_SUPPORT_MODULES) assert(!served.has(helper), `${helper} is served; scan it`);
   const hits: string[] = [];
   for await (const entry of Deno.readDir(new URL("./", import.meta.url))) {
-    // Test files and test helpers (`_test_helpers.ts`, `*_test_fakes.ts`) never serve a request.
-    if (!entry.isFile || !entry.name.endsWith(".ts") || entry.name.includes("test")) continue;
+    if (!entry.isFile || !entry.name.endsWith(".ts") || entry.name.endsWith("_test.ts")) continue;
+    if (TEST_SUPPORT_MODULES.has(entry.name)) continue;
+    if (entry.name.includes("test") && !served.has(entry.name)) {
+      throw new Error(`unlisted test-named module ${entry.name}: add it to TEST_SUPPORT_MODULES or rename it`);
+    }
     const source = await Deno.readTextFile(new URL(`./${entry.name}`, import.meta.url));
-    for (const m of source.matchAll(literal)) hits.push(`${entry.name}: ${m[0]}`);
+    for (const hit of literalBuiltinThrows(source)) hits.push(`${entry.name}: ${hit}`);
   }
   assertEquals(hits, []);
 });

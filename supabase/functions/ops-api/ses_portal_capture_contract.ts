@@ -1,4 +1,5 @@
 import { type SesSha256, sesSha256 } from "./ses_docket_envelope.ts";
+import { ClientInputTypeError } from "./client_input_error.ts";
 
 export const SES_PORTAL_CAPTURE_PRODUCER =
   "capture_portal_evidence.py/v1" as const;
@@ -271,7 +272,7 @@ export function captureScreenshotStoragePath(
   >,
 ): string {
   if (!content.screenshot_content_hash) {
-    throw new TypeError("screenshot_content_hash is required");
+    throw new ClientInputTypeError("screenshot_content_hash is required");
   }
   return [
     "portal-captures",

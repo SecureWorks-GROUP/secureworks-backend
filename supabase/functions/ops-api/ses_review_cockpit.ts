@@ -7,6 +7,7 @@ import {
   describeExistingCardMoney,
   type SesExistingCardMoney,
 } from "./ses_existing_card_money.ts";
+import { ClientInputTypeError } from "./client_input_error.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
@@ -61,7 +62,7 @@ export function assertSesRouteRecipients(
 ): void {
   const invalid = invalidSesRouteRecipients(route);
   if (invalid.length > 0) {
-    throw new TypeError("release route contains a non-email recipient");
+    throw new ClientInputTypeError("release route contains a non-email recipient");
   }
 }
 
@@ -1236,7 +1237,7 @@ export async function buildSesReleaseRevision(args: {
   report_route_applicable?: boolean;
 }): Promise<SesReleaseRevisionPlan> {
   if (args.members.length === 0) {
-    throw new TypeError("release members required");
+    throw new ClientInputTypeError("release members required");
   }
   const routeByKind = new Map(
     args.routes.map((route) => [route.route_kind, route]),

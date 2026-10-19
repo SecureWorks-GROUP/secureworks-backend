@@ -153,6 +153,7 @@ import {
   type OwnRoofReportDocumentRow,
   type OwnRoofReportDraftRow,
 } from "./ses_roof_report_artifact.ts";
+import { ClientInputTypeError } from "./client_input_error.ts";
 
 interface SupabaseResponse<T> {
   data: T | null;
@@ -2229,7 +2230,7 @@ export async function resolveSesInvoiceDuplicatesAction(
   requests: SesInvoiceDuplicateRequest[],
 ) {
   if (!Array.isArray(requests) || requests.length < 1 || requests.length > 50) {
-    throw new TypeError("requests must contain 1..50 invoice duplicate probes");
+    throw new ClientInputTypeError("requests must contain 1..50 invoice duplicate probes");
   }
   const rows = await loadIndexedInvoiceRows(client, orgId, requests);
   return {
@@ -4703,10 +4704,10 @@ export async function storeSesXeroInvoicePdfBytes(
 ): Promise<SesDraftInvoicePdfBinding> {
   const invoiceId = String(args.invoice.xero_invoice_id || "").trim();
   if (!invoiceId) {
-    throw new TypeError("storeSesXeroInvoicePdfBytes requires xero_invoice_id");
+    throw new ClientInputTypeError("storeSesXeroInvoicePdfBytes requires xero_invoice_id");
   }
   if (!(args.pdf instanceof Uint8Array) || args.pdf.byteLength < 5) {
-    throw new TypeError("storeSesXeroInvoicePdfBytes requires PDF bytes");
+    throw new ClientInputTypeError("storeSesXeroInvoicePdfBytes requires PDF bytes");
   }
   // %PDF magic — refuse storing a non-PDF concoction under the invoice role.
   const magic = String.fromCharCode(
@@ -4716,7 +4717,7 @@ export async function storeSesXeroInvoicePdfBytes(
     args.pdf[3],
   );
   if (magic !== "%PDF") {
-    throw new TypeError("storeSesXeroInvoicePdfBytes requires a PDF payload");
+    throw new ClientInputTypeError("storeSesXeroInvoicePdfBytes requires a PDF payload");
   }
   const contentHash = await sesSha256Bytes(args.pdf);
   const invoiceNumber = String(args.invoice.invoice_number || invoiceId)
