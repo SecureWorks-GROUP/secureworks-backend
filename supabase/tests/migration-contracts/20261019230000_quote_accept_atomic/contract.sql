@@ -242,6 +242,73 @@ SELECT set_config('qa.r', pg_temp.qa_try($q$UPDATE public.jobs SET status = 'acc
 SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:quote_option_unrecorded%'
  AND (SELECT status = 'quoted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a1'),
  'strict and atomic on: a status change whose supersede run records nothing must be refused');
+-- Aggregate controls (Codex 25df33f should-fix 1), with strict and atomic both stored true.
+-- Each fixture view injects its value or fault in the projected enabled column, so it can
+-- only fire for a row the reader selected: the supersede read (its own row) cannot trigger
+-- it. A sequence (nextval is never rolled back) counts the injected read failures, proving
+-- each fault fired at the final gate's read and not elsewhere.
+CREATE SEQUENCE public.qa_contract_flag_faults;
+CREATE FUNCTION public.qa_contract_raise() RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+ PERFORM nextval('public.qa_contract_flag_faults');
+ RAISE EXCEPTION 'contract forced switch read failure' USING ERRCODE = current_setting('qa.flag_error');
+END $$;
+ALTER TABLE public.feature_flags RENAME TO qa_contract_feature_flags;
+CREATE FUNCTION pg_temp.qa_flags_view(p_select text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ EXECUTE 'DROP VIEW IF EXISTS public.feature_flags';
+ EXECUTE 'CREATE VIEW public.feature_flags AS ' || p_select;
+END $$;
+CREATE FUNCTION pg_temp.qa_refused(p_case text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE v_res text;
+BEGIN
+ v_res := pg_temp.qa_try($q$UPDATE public.jobs SET status = 'accepted' WHERE id = '9a000000-0000-4000-8000-0000000000a1'$q$);
+ IF v_res NOT LIKE 'err:quote_option_unrecorded%'
+    OR (SELECT status FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a1') <> 'quoted' THEN
+  RAISE EXCEPTION 'quote accept atomic contract: strict %: the status change must be refused', p_case;
+ END IF;
+END $$;
+-- Control: the plain projecting view, both true, refuses (so the cases below reach the gate).
+SELECT pg_temp.qa_flags_view($v$SELECT f.flag_name, f.enabled FROM public.qa_contract_feature_flags f$v$);
+SELECT pg_temp.qa_refused('control, both true');
+-- atomic NULL: stands.
+SELECT pg_temp.qa_flags_view($v$SELECT f.flag_name,
+  CASE WHEN f.flag_name = 'quote_accept_atomic_v1' THEN NULL::boolean ELSE f.enabled END AS enabled
+  FROM public.qa_contract_feature_flags f$v$);
+SELECT pg_temp.qa_today('on, atomic NULL');
+-- Duplicate atomic rows, both true: refuses. One true and one false, or one NULL: stands.
+SELECT pg_temp.qa_flags_view($v$SELECT f.flag_name, f.enabled FROM public.qa_contract_feature_flags f
+  UNION ALL SELECT 'quote_accept_atomic_v1', true$v$);
+SELECT pg_temp.qa_refused('duplicate atomic rows, both true');
+SELECT pg_temp.qa_flags_view($v$SELECT f.flag_name, f.enabled FROM public.qa_contract_feature_flags f
+  UNION ALL SELECT 'quote_accept_atomic_v1', false$v$);
+SELECT pg_temp.qa_today('duplicate atomic rows, true and false');
+SELECT pg_temp.qa_flags_view($v$SELECT f.flag_name, f.enabled FROM public.qa_contract_feature_flags f
+  UNION ALL SELECT 'quote_option_strict_record_v1', NULL::boolean$v$);
+SELECT pg_temp.qa_today('duplicate strict rows, true and NULL');
+-- Either row unreadable while the other is true: stands, and the fault fired at the gate.
+DO $$
+DECLARE v_code text; v_flag text; v_before bigint; v_after bigint;
+BEGIN
+ FOREACH v_flag IN ARRAY ARRAY['quote_option_strict_record_v1', 'quote_accept_atomic_v1'] LOOP
+  PERFORM pg_temp.qa_flags_view(format($v$SELECT f.flag_name,
+    CASE WHEN f.flag_name = %L THEN public.qa_contract_raise() ELSE f.enabled END AS enabled
+    FROM public.qa_contract_feature_flags f$v$, v_flag));
+  FOREACH v_code IN ARRAY ARRAY['57014', 'P0001'] LOOP
+   PERFORM set_config('qa.flag_error', v_code, true);
+   SELECT last_value + CASE WHEN is_called THEN 0 ELSE -1 END INTO v_before FROM public.qa_contract_flag_faults;
+   PERFORM pg_temp.qa_today(v_flag || ' unreadable ' || v_code || ', other true');
+   SELECT last_value + CASE WHEN is_called THEN 0 ELSE -1 END INTO v_after FROM public.qa_contract_flag_faults;
+   IF v_after <= v_before THEN
+    RAISE EXCEPTION 'quote accept atomic contract: % unreadable %: the fault must fire at the final gate''s read', v_flag, v_code;
+   END IF;
+  END LOOP;
+ END LOOP;
+END $$;
+DROP VIEW public.feature_flags;
+ALTER TABLE public.qa_contract_feature_flags RENAME TO feature_flags;
+DROP FUNCTION public.qa_contract_raise();
+DROP SEQUENCE public.qa_contract_flag_faults;
 UPDATE public.feature_flags SET enabled = false
  WHERE flag_name IN ('quote_option_strict_record_v1', 'quote_accept_atomic_v1');
 -- The marker is cooperative, not proof of origin: any SQL writer that sets it gets the raise.
