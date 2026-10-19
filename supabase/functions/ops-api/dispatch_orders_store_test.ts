@@ -499,6 +499,15 @@ function makeDb(initial = seed()) {
       if (failures.has(`${request.kind}:${table}`)) {
         return violation("XX000", `forced failure on ${request.kind} ${table}`);
       }
+      // `select:<table>:<column>` fails only the selects naming that column.
+      if (
+        request.kind === "select" &&
+        columnsOf(request.select).some(([, e]) =>
+          failures.has(`select:${table}:${baseColumn(e)}`)
+        )
+      ) {
+        return violation("XX000", `forced failure on select ${table}`);
+      }
       const rows = tables[table] ||= [];
       const named = [
         ...columnsOf(
@@ -3230,5 +3239,17 @@ Deno.test("read: the job's open orders from outside Dispatch are listed before a
   );
   assert(read.other_open_orders_note.includes("PO-0901 (Example Steel)"));
   assert(!JSON.stringify(read.other_open_orders).includes("812"));
+  assertEquals(read.drafts.length, 1);
+});
+
+Deno.test("read: a failed read of the other orders answers failed, never none, and the drafts still show", async () => {
+  const db = withLines();
+  await create(db);
+  // Only the other-orders read selects quote_builder_version_id.
+  db.failures.add("select:purchase_orders:quote_builder_version_id");
+  const read = await get(db, "dispatch_order_emails", { job_id: JOB.fence });
+  assertEquals(read.other_open_orders_status, "failed");
+  assertEquals("other_open_orders" in read, false);
+  assertEquals("other_open_orders_note" in read, false);
   assertEquals(read.drafts.length, 1);
 });
