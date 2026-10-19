@@ -324,7 +324,8 @@ BEGIN
   jsonb_build_object('kind','attachment','table','job_documents','id','18f00000-0000-4000-8000-000000000601','job_id',j1,
    'document_id','18f00000-0000-4000-8000-000000000302','about','quote:q-77'),
   jsonb_build_object('kind','job_event','table','job_events','id','18f00000-0000-4000-8000-000000000501','job_id',j1,
-   'event_type','quote_sent','about','invoice:inv-88'),
+   -- 20261019140000 types a quote_sent number as a quote, including INV-88.
+   'event_type','quote_sent','about','quote:inv-88'),
   jsonb_build_object('kind','paid_bill','table','xero_invoices','id','18f00000-0000-4000-8000-000000000101','job_id',j1,
    'supplier','Other Metals','amount','90.00','xero_id','xero-lpr-bill-metals','currency','AUD','total','90.00'),
   jsonb_build_object('kind','paid_invoice','table','xero_invoices','id','18f00000-0000-4000-8000-000000000201','job_id',j1,

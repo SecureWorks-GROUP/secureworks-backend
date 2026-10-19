@@ -102,13 +102,18 @@ COMMENT ON FUNCTION public.context_ledger_record_xero_date(text) IS
 -- whenever the column is set. Money numbers are copied only for AUD. A missing
 -- or unreadable currency omits every money number and the currency key. Any
 -- other currency keeps the currency key and omits the numbers, so the reader
--- can refuse. VOIDED and DELETED payments are not payments. paid and owing are
--- recomputed from the payments that remain; when amount_paid disagrees with
--- that sum both are omitted. A credit uses AppliedAmount only. A credit with
--- no AppliedAmount sets credits_unknown and is left off the list, and owing
--- is omitted with it. Amount is never a credit. amount_due and amount_paid
--- are not key names. A verified paid of zero is kept as 0.00. A bill link
--- renames invoice_number to bill_number and keeps credits.
+-- can refuse. A payment counts only when its Status is absent or AUTHORISED
+-- (trimmed, either case). DRAFT, PENDING, SUBMITTED and any other present
+-- status do not. A repeated PaymentID counts once, the first row. VOIDED and
+-- DELETED credits, overpayments and prepayments are not applied cash. paid
+-- and owing are recomputed from the payments and credits that remain; when
+-- amount_paid disagrees with that payment sum both are omitted. A negative
+-- owing is omitted. A credit uses AppliedAmount only. A live credit with no
+-- AppliedAmount sets credits_unknown and is left off the list, and owing is
+-- omitted with it even when the Payments key is absent. Amount is never a
+-- credit. amount_due and amount_paid are not key names. A verified paid of
+-- zero is kept as 0.00. A bill link renames invoice_number to bill_number
+-- and keeps credits.
 CREATE OR REPLACE FUNCTION public.context_ledger_record_invoice_money(
  p_invoice_number text,
  p_xero_id text,
@@ -151,64 +156,62 @@ AS $fn$
     ELSE NULL
    END AS paid_text,
    CASE
+    WHEN cred.credits_unknown THEN NULL
     WHEN NOT pay.payments_seen THEN
-     CASE WHEN p_amount_due IS NOT NULL THEN round(p_amount_due, 2)::text END
+     CASE WHEN p_amount_due IS NOT NULL AND round(p_amount_due, 2) >= 0
+      THEN round(p_amount_due, 2)::text END
     WHEN p_amount_paid IS NOT NULL
      AND round(p_amount_paid, 2) IS DISTINCT FROM round(pay.active_sum, 2) THEN NULL
-    WHEN cred.credits_unknown OR p_total IS NULL THEN NULL
+    WHEN p_total IS NULL THEN NULL
+    WHEN round(p_total - pay.active_sum - cred.applied_sum, 2) < 0 THEN NULL
     ELSE round(p_total - pay.active_sum - cred.applied_sum, 2)::text
    END AS owing_text
   FROM (
    SELECT upper(btrim(p_raw->>'CurrencyCode')) AS cc
   ) cur
   CROSS JOIN LATERAL (
+   -- A present Status counts only when it is AUTHORISED. A missing Status
+   -- still counts. The same PaymentID is one payment, the earliest row.
    SELECT
     coalesce(jsonb_typeof(p_raw->'Payments') = 'array', false) AS payments_seen,
-    coalesce(sum(a.amt) FILTER (WHERE a.keep), 0) AS active_sum,
-    (SELECT CASE WHEN count(*) > 0 THEN jsonb_agg(p.row ORDER BY p.dt COLLATE "C", p.amt COLLATE "C", p.ord) END
-     FROM (
-      SELECT
-       jsonb_strip_nulls(jsonb_build_object(
-        'date', public.context_ledger_record_xero_date(el.el->>'Date'),
-        'amount', public.context_ledger_record_money(el.amt)
-       )) AS row,
-       coalesce(public.context_ledger_record_xero_date(el.el->>'Date'), '') AS dt,
-       coalesce(public.context_ledger_record_money(el.amt), '') AS amt,
-       el.ord
-      FROM (
-       SELECT e.el, e.ord,
-        CASE WHEN e.el->>'Amount' ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (e.el->>'Amount')::numeric END AS amt
-       FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Payments') = 'array' THEN p_raw->'Payments' ELSE '[]'::jsonb END)
-        WITH ORDINALITY AS e(el, ord)
-      ) el
-      WHERE el.amt > 0
-       AND upper(coalesce(btrim(el.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED')
-     ) p
-     WHERE p.row ? 'amount') AS payments
+    coalesce(sum(k.amt) FILTER (WHERE k.keep), 0) AS active_sum,
+    CASE WHEN count(*) FILTER (WHERE k.keep AND public.context_ledger_record_money(k.amt) IS NOT NULL) > 0
+     THEN jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+      'date', public.context_ledger_record_xero_date(k.el->>'Date'),
+      'amount', public.context_ledger_record_money(k.amt)
+     )) ORDER BY coalesce(public.context_ledger_record_xero_date(k.el->>'Date'), '') COLLATE "C",
+      coalesce(public.context_ledger_record_money(k.amt), '') COLLATE "C", k.ord)
+     FILTER (WHERE k.keep AND public.context_ledger_record_money(k.amt) IS NOT NULL)
+    END AS payments
    FROM (
-    SELECT parsed.amt,
-     (parsed.amt > 0
-      AND upper(coalesce(btrim(parsed.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED')) AS keep
+    SELECT DISTINCT ON (src.dedupe_key)
+     src.el, src.ord, src.amt,
+     (src.amt > 0 AND (
+      nullif(btrim(src.el->>'Status'), '') IS NULL
+      OR upper(btrim(src.el->>'Status')) = 'AUTHORISED'
+     )) AS keep
     FROM (
-     SELECT e.el,
-      CASE WHEN e.el->>'Amount' ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (e.el->>'Amount')::numeric END AS amt
-     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Payments') = 'array' THEN p_raw->'Payments' ELSE '[]'::jsonb END) e(el)
-    ) parsed
-   ) a
+     SELECT e.el, e.ord,
+      CASE WHEN e.el->>'Amount' ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (e.el->>'Amount')::numeric END AS amt,
+      CASE
+       WHEN nullif(btrim(e.el->>'PaymentID'), '') IS NOT NULL THEN 'id:' || btrim(e.el->>'PaymentID')
+       ELSE 'row:' || e.ord::text
+      END AS dedupe_key
+     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Payments') = 'array' THEN p_raw->'Payments' ELSE '[]'::jsonb END)
+      WITH ORDINALITY AS e(el, ord)
+    ) src
+    ORDER BY src.dedupe_key, src.ord
+   ) k
   ) pay
   CROSS JOIN LATERAL (
    SELECT
     coalesce(bool_or(
-     nullif(btrim(c.el->>'AppliedAmount'), '') IS NULL
-     OR nullif(btrim(c.el->>'AppliedAmount'), '') !~ '^-?[0-9]+(\.[0-9]+)?$'
+     c.live AND (
+      nullif(btrim(c.el->>'AppliedAmount'), '') IS NULL
+      OR nullif(btrim(c.el->>'AppliedAmount'), '') !~ '^-?[0-9]+(\.[0-9]+)?$'
+     )
     ), false) AS credits_unknown,
-    coalesce(sum(CASE
-     WHEN nullif(btrim(c.el->>'AppliedAmount'), '') ~ '^-?[0-9]+(\.[0-9]+)?$'
-     THEN CASE
-      WHEN nullif(btrim(c.el->>'AppliedAmount'), '')::numeric > 0
-      THEN nullif(btrim(c.el->>'AppliedAmount'), '')::numeric
-     END
-    END), 0) AS applied_sum,
+    coalesce(sum(got.applied) FILTER (WHERE c.live AND got.applied > 0), 0) AS applied_sum,
     (SELECT CASE WHEN count(*) > 0 THEN jsonb_agg(r.row ORDER BY r.kind COLLATE "C", r.num COLLATE "C", r.dt COLLATE "C", r.amt COLLATE "C", r.ord) END
      FROM (
       SELECT
@@ -224,15 +227,18 @@ AS $fn$
        coalesce(public.context_ledger_record_money(nullif(btrim(c2.el->>'AppliedAmount'), '')::numeric), '') AS amt,
        c2.ord
       FROM (
-       SELECT 'credit_note'::text AS kind, e.el, e.ord
+       SELECT 'credit_note'::text AS kind, e.el, e.ord,
+        upper(coalesce(btrim(e.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED') AS live
        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'CreditNotes') = 'array' THEN p_raw->'CreditNotes' ELSE '[]'::jsonb END)
         WITH ORDINALITY AS e(el, ord)
        UNION ALL
-       SELECT 'overpayment', e.el, e.ord
+       SELECT 'overpayment', e.el, e.ord,
+        upper(coalesce(btrim(e.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED')
        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Overpayments') = 'array' THEN p_raw->'Overpayments' ELSE '[]'::jsonb END)
         WITH ORDINALITY AS e(el, ord)
        UNION ALL
-       SELECT 'prepayment', e.el, e.ord
+       SELECT 'prepayment', e.el, e.ord,
+        upper(coalesce(btrim(e.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED')
        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Prepayments') = 'array' THEN p_raw->'Prepayments' ELSE '[]'::jsonb END)
         WITH ORDINALITY AS e(el, ord)
       ) c2
@@ -242,19 +248,28 @@ AS $fn$
         THEN nullif(btrim(c2.el->>'AppliedAmount'), '')::numeric
        END AS applied
       ) got
-      WHERE got.applied > 0
+      WHERE c2.live AND got.applied > 0
      ) r
      WHERE r.row ? 'amount') AS credits
    FROM (
-    SELECT e.el
+    SELECT e.el,
+     upper(coalesce(btrim(e.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED') AS live
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'CreditNotes') = 'array' THEN p_raw->'CreditNotes' ELSE '[]'::jsonb END) e(el)
     UNION ALL
-    SELECT e.el
+    SELECT e.el,
+     upper(coalesce(btrim(e.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED')
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Overpayments') = 'array' THEN p_raw->'Overpayments' ELSE '[]'::jsonb END) e(el)
     UNION ALL
-    SELECT e.el
+    SELECT e.el,
+     upper(coalesce(btrim(e.el->>'Status'), '')) NOT IN ('VOIDED', 'DELETED')
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw->'Prepayments') = 'array' THEN p_raw->'Prepayments' ELSE '[]'::jsonb END) e(el)
    ) c
+   CROSS JOIN LATERAL (
+    SELECT CASE
+     WHEN nullif(btrim(c.el->>'AppliedAmount'), '') ~ '^-?[0-9]+(\.[0-9]+)?$'
+     THEN nullif(btrim(c.el->>'AppliedAmount'), '')::numeric
+    END AS applied
+   ) got
   ) cred
  ) src
  CROSS JOIN LATERAL (
@@ -266,7 +281,7 @@ AS $fn$
  ) ident
 $fn$;
 COMMENT ON FUNCTION public.context_ledger_record_invoice_money(text, text, text, numeric, numeric, numeric, jsonb) IS
- 'Send recipient fields (20261019140000): identity whenever the column is set. Money numbers only for AUD, from active payments and AppliedAmount credits. Uncertain paid, owing or credit amounts are omitted.';
+ 'Send recipient fields (20261019140000): identity whenever the column is set. Money numbers only for AUD. A payment counts when Status is absent or AUTHORISED. A credit counts from AppliedAmount unless Status is VOIDED or DELETED. Uncertain, disagreed or negative owing amounts are omitted.';
 
 REVOKE ALL ON FUNCTION public.context_ledger_record_email(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_ledger_record_contact(text) FROM PUBLIC, anon, authenticated;
@@ -392,7 +407,7 @@ WITH src AS (
    'recipient', CASE WHEN ship.blocked THEN NULL ELSE ship.addr END,
    'contact_id', CASE
      WHEN ship.blocked OR ship.addr IS NULL THEN NULL
-     WHEN et.t = 'client_email' AND NOT EXISTS (
+     WHEN NOT EXISTS (
        SELECT 1 FROM public.jobs j
        WHERE j.id = p_job_id
          AND lower(btrim(j.client_email)) = lower(ship.addr)) THEN NULL
@@ -456,21 +471,88 @@ WITH src AS (
    'event_type', public.context_ledger_record_trim(je.event_type), 'about', ab.a,
    'to', CASE WHEN lower(public.context_ledger_record_trim(je.event_type)) = 'invoice.emailed'
      THEN public.context_ledger_record_email(je.detail_json->>'to') END,
-   'contact_id', CASE WHEN lower(public.context_ledger_record_trim(je.event_type)) = 'invoice.emailed'
+   'contact_id', CASE
+     WHEN lower(public.context_ledger_record_trim(je.event_type)) = 'invoice.emailed'
+      AND public.context_ledger_record_email(je.detail_json->>'to') IS NOT NULL
+      AND EXISTS (
+       SELECT 1 FROM public.jobs j
+       WHERE j.id = p_job_id
+         AND lower(btrim(j.client_email))
+           = lower(public.context_ledger_record_email(je.detail_json->>'to')))
      THEN public.context_ledger_record_contact(je.detail_json->>'contact_id') END)) AS rec,
   'job_event'::text AS kind, je.id::text AS ident, ''::text AS doc_id
  FROM je_id i
  JOIN public.job_events je ON je.id = i.event_id AND je.job_id = p_job_id
- CROSS JOIN LATERAL (SELECT coalesce(
-  public.context_ledger_record_link_about(je.detail_json->>'about'),
-  public.context_ledger_record_link_about(je.detail_json->>'quote_number'),
-  public.context_ledger_record_link_about(je.detail_json->>'invoice_number'),
-  public.context_ledger_record_link_about(je.detail_json->>'scheduled_date'),
-  public.context_ledger_record_link_about(je.detail_json->>'date'),
-  public.context_ledger_record_link_about(je.detail_json->>'new_date'),
-  (SELECT public.context_ledger_record_link_about(d.quote_number) FROM public.job_documents d
-   WHERE d.id = public.context_ledger_record_uuid(je.detail_json->>'document_id') AND d.job_id = p_job_id)
- ) AS a) ab
+ -- quote_sent is typed from the document, the same way a sent document is.
+ -- With no quote or invoice document, the event type types the stored number
+ -- as a quote, including a number that begins INV-.
+ LEFT JOIN LATERAL (
+  SELECT CASE lower(btrim(d.type))
+    WHEN 'quote' THEN 'quote'
+    WHEN 'supplier_quote' THEN 'quote'
+    WHEN 'invoice' THEN 'invoice'
+    WHEN 'supplier_invoice' THEN 'invoice'
+    ELSE NULL
+   END AS family,
+   public.context_ledger_record_trim(d.quote_number) AS num
+  FROM public.job_documents d
+  WHERE d.id = public.context_ledger_record_uuid(je.detail_json->>'document_id')
+    AND d.job_id = p_job_id
+ ) doc ON true
+ CROSS JOIN LATERAL (
+  SELECT CASE
+   WHEN doc.family = 'invoice'
+    THEN public.context_ledger_record_invoice_about(doc.num)
+   WHEN doc.family = 'quote'
+    AND public.context_ledger_record_link_about(doc.num) LIKE 'quote:%'
+    THEN public.context_ledger_record_link_about(doc.num)
+   WHEN doc.family = 'quote'
+    AND doc.num IS NOT NULL
+    AND length(lower(doc.num)) <= 62
+    AND lower(doc.num) ~ '^[a-z0-9][a-z0-9-]{0,60}$'
+    THEN 'quote:' || lower(doc.num)
+   ELSE NULL
+  END AS doc_about
+ ) typed
+ CROSS JOIN LATERAL (SELECT CASE
+  WHEN lower(public.context_ledger_record_trim(je.event_type)) = 'quote_sent' THEN coalesce(
+   typed.doc_about,
+   CASE
+    WHEN public.context_ledger_record_link_about(je.detail_json->>'quote_number') LIKE 'quote:%'
+     THEN public.context_ledger_record_link_about(je.detail_json->>'quote_number')
+    WHEN public.context_ledger_record_trim(je.detail_json->>'quote_number') IS NOT NULL
+     AND length(lower(public.context_ledger_record_trim(je.detail_json->>'quote_number'))) <= 62
+     AND lower(public.context_ledger_record_trim(je.detail_json->>'quote_number')) ~ '^[a-z0-9][a-z0-9-]{0,60}$'
+     THEN 'quote:' || lower(public.context_ledger_record_trim(je.detail_json->>'quote_number'))
+   END,
+   CASE
+    WHEN public.context_ledger_record_link_about(je.detail_json->>'invoice_number') LIKE 'quote:%'
+     THEN public.context_ledger_record_link_about(je.detail_json->>'invoice_number')
+    WHEN public.context_ledger_record_trim(je.detail_json->>'invoice_number') IS NOT NULL
+     AND length(lower(public.context_ledger_record_trim(je.detail_json->>'invoice_number'))) <= 62
+     AND lower(public.context_ledger_record_trim(je.detail_json->>'invoice_number')) ~ '^[a-z0-9][a-z0-9-]{0,60}$'
+     THEN 'quote:' || lower(public.context_ledger_record_trim(je.detail_json->>'invoice_number'))
+   END,
+   CASE WHEN public.context_ledger_record_link_about(je.detail_json->>'about') LIKE 'quote:%'
+    THEN public.context_ledger_record_link_about(je.detail_json->>'about') END,
+   CASE
+    WHEN public.context_ledger_record_link_about(je.detail_json->>'about') LIKE 'invoice:%'
+     AND substring(public.context_ledger_record_link_about(je.detail_json->>'about') FROM 9) ~ '^[a-z0-9][a-z0-9-]{0,60}$'
+     THEN 'quote:' || substring(public.context_ledger_record_link_about(je.detail_json->>'about') FROM 9)
+   END,
+   public.context_ledger_record_link_about(je.detail_json->>'scheduled_date'),
+   public.context_ledger_record_link_about(je.detail_json->>'date'),
+   public.context_ledger_record_link_about(je.detail_json->>'new_date'))
+  ELSE coalesce(
+   public.context_ledger_record_link_about(je.detail_json->>'about'),
+   public.context_ledger_record_link_about(je.detail_json->>'quote_number'),
+   public.context_ledger_record_link_about(je.detail_json->>'invoice_number'),
+   public.context_ledger_record_link_about(je.detail_json->>'scheduled_date'),
+   public.context_ledger_record_link_about(je.detail_json->>'date'),
+   public.context_ledger_record_link_about(je.detail_json->>'new_date'),
+   (SELECT public.context_ledger_record_link_about(d.quote_number) FROM public.job_documents d
+    WHERE d.id = public.context_ledger_record_uuid(je.detail_json->>'document_id') AND d.job_id = p_job_id))
+ END AS a) ab
  WHERE je.created_at IS NOT NULL AND je.created_at <= p_as_of
    AND public.context_ledger_record_trim(je.event_type) IS NOT NULL AND ab.a IS NOT NULL
 ), docs AS (
@@ -577,7 +659,7 @@ WITH src AS (
 ), xi_one AS (
  SELECT r.st, r.sid, r.raw FROM xi_raw r GROUP BY r.st, r.sid, r.raw HAVING count(DISTINCT r.id) = 1
 ), xi AS (
- SELECT o.st, o.sid, o.raw, inv.id, public.context_ledger_record_trim(inv.contact_name) AS supplier,
+ SELECT o.st, o.sid, o.raw, inv.id, inv.raw_json, public.context_ledger_record_trim(inv.contact_name) AS supplier,
   public.context_ledger_record_invoice_about(inv.invoice_number) AS number, inv.invoice_type, inv.total,
   public.context_ledger_record_invoice_money(
    inv.invoice_number, inv.xero_invoice_id, inv.contact_name, inv.total,
@@ -629,6 +711,13 @@ WITH src AS (
   'paid_invoice'::text AS kind, m.id::text AS ident, ''::text AS doc_id
  FROM xi m
  WHERE m.invoice_type = 'ACCREC' AND m.number IS NOT NULL
+  AND NOT (
+   coalesce(m.money->>'currency', '') = 'AUD'
+   AND coalesce(jsonb_typeof(m.raw_json->'Payments') = 'array', false)
+   AND NOT (m.money ? 'payments')
+   AND NOT (m.money ? 'credits')
+   AND coalesce(m.money->>'paid', '0.00') = '0.00'
+  )
 ), att AS (
  SELECT c.src_table AS st, c.src_id AS sid, c.rec, 'attachment'::text AS kind,
   c.rec->>'id' AS ident, c.rec->>'document_id' AS doc_id
@@ -653,4 +742,4 @@ GROUP BY g.st, g.sid
 $fn$;
 
 COMMENT ON FUNCTION public.context_ledger_evidence_record_links(uuid, timestamptz, jsonb) IS
- 'Ledger packet records (20261018120000): the records array for each worded source, built only from stored ids. No row when a source has no link the reader would accept. Send recipient fields (20261019140000): a system email copies a certain recipient, and an invoice.emailed row copies detail_json.to under to, when that stored value is one email address. A client_email contact id is copied only when that recipient is the job client email. A sent document is typed from job_documents.type and copies a recipient, email ids and delivery status only when every naming email succeeded. A paid invoice or bill copies money numbers only when the currency is AUD and the active payments and applied credits agree.';
+ 'Ledger packet records (20261018120000): the records array for each worded source, built only from stored ids. No row when a source has no link the reader would accept. Send recipient fields (20261019140000): a system email copies a certain recipient, and an invoice.emailed row copies detail_json.to under to, when that stored value is one email address. A quote, invoice or client_email contact id is copied only when that recipient is the job''s current client email, and an invoice.emailed contact id only when detail_json.to is that address. A quote_sent about is typed from the document type, or as a quote from the event when no document family resolves. A sent document is typed from job_documents.type and copies a recipient, email ids and delivery status only when every naming email succeeded. A paid invoice or bill copies money numbers only when the currency is AUD and the counted payments and applied credits agree. A paid invoice with no counted payment and no credit is omitted.';

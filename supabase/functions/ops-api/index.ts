@@ -36168,9 +36168,11 @@ async function reconcilePayment(client: any, body: any) {
     console.log('[ops-api] cache update after payment failed:', e)
   }
 
-  // Log the payment event. This insert has no job_id, and job_events.job_id
-  // is NOT NULL, so the row does not land. Restored on purpose: a live
-  // money-path insert waits on docs/reconcile-payment-insert-proposal.md.
+  // Log the payment event. The insert names no job_id, matching the
+  // previous body. job_events.job_id is nullable in this repo
+  // (20260727080821). Whether a null job_id lands in production was
+  // not measured. A job-linked insert waits on
+  // docs/reconcile-payment-insert-proposal.md.
   try {
     await client.from('job_events').insert({
       event_type: 'payment_recorded',

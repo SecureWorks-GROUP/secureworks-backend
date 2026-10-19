@@ -164,7 +164,15 @@ INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at) 
  ('19f00000-0000-4000-8000-000000000516', '19f00000-0000-4000-8000-000000000001', 'quote_sent',
   '{"document_id":"19f00000-0000-4000-8000-000000000316","to":"other@example.test","sent_to":"client@example.test"}', '2026-10-01 00:00Z'),
  ('19f00000-0000-4000-8000-000000000517', '19f00000-0000-4000-8000-000000000001', 'invoice.emailed',
-  '{"document_id":"19f00000-0000-4000-8000-000000000320","to":"client@example.test"}', '2026-10-01 00:00Z');
+  '{"document_id":"19f00000-0000-4000-8000-000000000320","to":"client@example.test"}', '2026-10-01 00:00Z'),
+ ('19f00000-0000-4000-8000-000000000518', '19f00000-0000-4000-8000-000000000001', 'quote_sent',
+  '{"document_id":"19f00000-0000-4000-8000-000000000312","sent_to":"client@example.test"}', '2026-10-01 00:00Z'),
+ ('19f00000-0000-4000-8000-000000000519', '19f00000-0000-4000-8000-000000000001', 'quote_sent',
+  '{"quote_number":"INV-19","sent_to":"client@example.test"}', '2026-10-01 00:00Z'),
+ ('19f00000-0000-4000-8000-000000000520', '19f00000-0000-4000-8000-000000000001', 'invoice.emailed',
+  '{"to":"client@old.test","contact_id":"ghl-customer-1","invoice_number":"INV-19"}', '2026-10-01 00:00Z'),
+ ('19f00000-0000-4000-8000-000000000521', '19f00000-0000-4000-8000-000000000001', 'quote_sent',
+  '{"document_id":"19f00000-0000-4000-8000-000000000320","sent_to":"client@example.test"}', '2026-10-01 00:00Z');
 
 INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at) VALUES
  ('19f00000-0000-4000-8000-000000000311', '19f00000-0000-4000-8000-000000000001', 'quote', 'Q-19', 1, '2026-10-01 00:00Z', '2026-10-01 00:00Z'),
@@ -231,7 +239,13 @@ INSERT INTO public.email_events (id, job_id, email_type, recipient, sender, subj
   '{"about":"quote:q-19","contact_id":"ghl-customer-1","several_recipients":false}'),
  ('19f00000-0000-4000-8000-000000000427', '19f00000-0000-4000-8000-000000000001', 'quote', 'client@example.test',
   'orders@secureworks.test', 'Your paperwork', 'failed', '2026-10-01 00:00Z', '2026-10-01 00:00Z',
-  '{"document_id":"19f00000-0000-4000-8000-000000000321","quote_number":"Q-197"}');
+  '{"document_id":"19f00000-0000-4000-8000-000000000321","quote_number":"Q-197"}'),
+ ('19f00000-0000-4000-8000-000000000429', '19f00000-0000-4000-8000-000000000001', 'quote', 'client@old.test',
+  'orders@secureworks.test', 'Your paperwork', 'sent', '2026-10-01 00:00Z', '2026-10-01 00:00Z',
+  '{"quote_number":"Q-19","contact_id":"ghl-customer-1"}'),
+ ('19f00000-0000-4000-8000-000000000430', '19f00000-0000-4000-8000-000000000001', 'invoice', 'client@old.test',
+  'orders@secureworks.test', 'Your paperwork', 'sent', '2026-10-01 00:00Z', '2026-10-01 00:00Z',
+  '{"invoice_number":"INV-19","contact_id":"ghl-customer-1"}');
 
 INSERT INTO public.xero_invoices (id, org_id, job_id, xero_invoice_id, contact_name, invoice_number, invoice_type, status,
  total, fully_paid_on, created_at, line_items) VALUES
@@ -288,7 +302,31 @@ INSERT INTO public.xero_invoices (id, org_id, job_id, xero_invoice_id, contact_n
   '{"CurrencyCode":"USD"}'),
  ('19f00000-0000-4000-8000-000000000212', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
   'xero-lsf-212', 'Usd Raw', 'INV-212', 'ACCREC', 'PAID', 60, 60, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
-  '{"CurrencyCode":"USD"}');
+  '{"CurrencyCode":"USD"}'),
+ ('19f00000-0000-4000-8000-000000000213', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-213', 'Draft Pay', 'INV-213', 'ACCREC', 'PAID', 100, 100, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":"DRAFT"}]}'),
+ ('19f00000-0000-4000-8000-000000000214', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-214', 'Pending Pay', 'INV-214', 'ACCREC', 'PAID', 100, 100, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":"PENDING"}]}'),
+ ('19f00000-0000-4000-8000-000000000215', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-215', 'Submitted Pay', 'INV-215', 'ACCREC', 'PAID', 100, 100, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":" submitted "}]}'),
+ ('19f00000-0000-4000-8000-000000000216', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-216', 'Authorised Pay', 'INV-216', 'ACCREC', 'PAID', 80, 80, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":80,"Status":" authorised "}]}'),
+ ('19f00000-0000-4000-8000-000000000217', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-217', 'Void Credit', 'INV-217', 'ACCREC', 'PAID', 100, 100, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":"AUTHORISED","PaymentID":"pay-217"}],"CreditNotes":[{"CreditNoteNumber":"CN-V","Date":"2026-10-02","AppliedAmount":100,"Status":"VOIDED"}]}'),
+ ('19f00000-0000-4000-8000-000000000218', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-218', 'Deleted Credit', 'INV-218', 'ACCREC', 'PAID', 100, 100, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":"AUTHORISED"}],"CreditNotes":[{"CreditNoteNumber":"CN-D","Date":"2026-10-02","AppliedAmount":100,"Status":"DELETED"}]}'),
+ ('19f00000-0000-4000-8000-000000000219', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-219', 'Unknown Credit', 'INV-219', 'ACCREC', 'PAID', 100, 100, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","CreditNotes":[{"CreditNoteNumber":"CN-U","Date":"2026-10-02","Amount":500}]}'),
+ ('19f00000-0000-4000-8000-000000000225', '00000000-0000-4000-8000-0000000000aa', '19f00000-0000-4000-8000-000000000001',
+  'xero-lsf-225', 'Credit Settled', 'INV-225', 'ACCREC', 'PAID', 100, 0, 0, '2026-10-02', '2026-10-01 00:00Z', '[]',
+  '{"CurrencyCode":"AUD","Payments":[],"CreditNotes":[{"CreditNoteNumber":"CN-225","Date":"2026-10-02","AppliedAmount":100}]}');
 
 UPDATE public.xero_invoices SET currency_code = 'AUD'
 WHERE id = '19f00000-0000-4000-8000-000000000205';
@@ -345,9 +383,23 @@ SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000209', '{"xero_invoice_id
 SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000210', '{"xero_invoice_id":"xero-lsf-210"}');
 SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000211', '{"xero_invoice_id":"xero-lsf-211"}');
 SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000212', '{"xero_invoice_id":"xero-lsf-212"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000213', '{"xero_invoice_id":"xero-lsf-213"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000214', '{"xero_invoice_id":"xero-lsf-214"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000215', '{"xero_invoice_id":"xero-lsf-215"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000216', '{"xero_invoice_id":"xero-lsf-216"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000217', '{"xero_invoice_id":"xero-lsf-217"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000218', '{"xero_invoice_id":"xero-lsf-218"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000219', '{"xero_invoice_id":"xero-lsf-219"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000225', '{"xero_invoice_id":"xero-lsf-225"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000429', '{"email_event_id":"19f00000-0000-4000-8000-000000000429"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000430', '{"email_event_id":"19f00000-0000-4000-8000-000000000430"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000518', '{"job_event_id":"19f00000-0000-4000-8000-000000000518"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000519', '{"job_event_id":"19f00000-0000-4000-8000-000000000519"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000520', '{"job_event_id":"19f00000-0000-4000-8000-000000000520"}');
+SELECT pg_temp.lsf_ev('19f10000-0000-4000-8000-000000000521', '{"job_event_id":"19f00000-0000-4000-8000-000000000521"}');
 
 DO $proof$
-DECLARE got jsonb; bare jsonb;
+DECLARE got jsonb; bare jsonb; money jsonb;
 BEGIN
  got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000401');
  PERFORM pg_temp.lsf_assert(got = jsonb_build_object(
@@ -544,14 +596,10 @@ BEGIN
  PERFORM pg_temp.lsf_assert(got->>'invoice_number' = 'INV-205' AND NOT (got ? 'currency')
   AND NOT (got ? 'total') AND NOT (got ? 'paid') AND NOT (got ? 'owing') AND NOT (got ? 'payments'),
   'currency disagreement ' || coalesce(got::text, '<none>'));
- got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000206');
- PERFORM pg_temp.lsf_assert(got->>'paid' = '0.00' AND got->>'owing' = '100.00' AND got->>'total' = '100.00'
-  AND NOT (got ? 'payments') AND got->>'currency' = 'AUD',
-  'deleted payment ' || coalesce(got::text, '<none>'));
- got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000207');
- PERFORM pg_temp.lsf_assert(got->>'total' = '100.00' AND got->>'currency' = 'AUD'
-  AND NOT (got ? 'paid') AND NOT (got ? 'owing') AND NOT (got ? 'payments'),
-  'voided payment ' || coalesce(got::text, '<none>'));
+ PERFORM pg_temp.lsf_assert(pg_temp.lsf_one('19f10000-0000-4000-8000-000000000206') IS NULL,
+  'deleted payment is not a paid invoice');
+ PERFORM pg_temp.lsf_assert(pg_temp.lsf_one('19f10000-0000-4000-8000-000000000207') IS NULL,
+  'voided payment is not a paid invoice');
  got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000208');
  PERFORM pg_temp.lsf_assert(got->>'paid' = '100.00' AND got->>'credits_unknown' = 'true'
   AND NOT (got ? 'credits') AND NOT (got ? 'owing') AND got->>'total' = '100.00',
@@ -579,6 +627,96 @@ BEGIN
  PERFORM pg_temp.lsf_assert(got->>'currency' = 'USD' AND got->>'invoice_number' = 'INV-212'
   AND NOT (got ? 'total') AND NOT (got ? 'paid') AND NOT (got ? 'owing'),
   'usd raw ' || coalesce(got::text, '<none>'));
+
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000518');
+ PERFORM pg_temp.lsf_assert(got->>'event_type' = 'quote_sent' AND got->>'about' = 'quote:inv-19'
+  AND NOT (got ? 'to') AND NOT (got ? 'contact_id'),
+  'quote_sent document INV-19 ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000519');
+ PERFORM pg_temp.lsf_assert(got->>'event_type' = 'quote_sent' AND got->>'about' = 'quote:inv-19',
+  'quote_sent detail INV-19 ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000521');
+ PERFORM pg_temp.lsf_assert(got->>'event_type' = 'quote_sent' AND got->>'about' = 'invoice:inv-20',
+  'quote_sent on an invoice document ' || coalesce(got::text, '<none>'));
+
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000429');
+ PERFORM pg_temp.lsf_assert(got->>'email_type' = 'quote' AND got->>'recipient' = 'client@old.test'
+  AND got->>'about' = 'quote:q-19' AND NOT (got ? 'contact_id'),
+  'quote email after the job email changed ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000430');
+ PERFORM pg_temp.lsf_assert(got->>'email_type' = 'invoice' AND got->>'recipient' = 'client@old.test'
+  AND got->>'about' = 'invoice:inv-19' AND NOT (got ? 'contact_id'),
+  'invoice email after the job email changed ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000520');
+ PERFORM pg_temp.lsf_assert(got->>'event_type' = 'invoice.emailed' AND got->>'to' = 'client@old.test'
+  AND got->>'about' = 'invoice:inv-19' AND NOT (got ? 'contact_id'),
+  'invoice.emailed after the job email changed ' || coalesce(got::text, '<none>'));
+
+ PERFORM pg_temp.lsf_assert(pg_temp.lsf_one('19f10000-0000-4000-8000-000000000213') IS NULL,
+  'draft payment is not a paid invoice');
+ PERFORM pg_temp.lsf_assert(pg_temp.lsf_one('19f10000-0000-4000-8000-000000000214') IS NULL,
+  'pending payment is not a paid invoice');
+ PERFORM pg_temp.lsf_assert(pg_temp.lsf_one('19f10000-0000-4000-8000-000000000215') IS NULL,
+  'submitted payment is not a paid invoice');
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000216');
+ PERFORM pg_temp.lsf_assert(got->>'paid' = '80.00' AND got->>'owing' = '0.00' AND got->>'currency' = 'AUD'
+  AND got->'payments' = jsonb_build_array(jsonb_build_object('date','2026-10-02','amount','80.00')),
+  'authorised payment ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000217');
+ PERFORM pg_temp.lsf_assert(got->>'paid' = '100.00' AND got->>'owing' = '0.00' AND NOT (got ? 'credits'),
+  'voided credit ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000218');
+ PERFORM pg_temp.lsf_assert(got->>'paid' = '100.00' AND got->>'owing' = '0.00' AND NOT (got ? 'credits'),
+  'deleted credit ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000219');
+ PERFORM pg_temp.lsf_assert(got->>'paid' = '100.00' AND got->>'credits_unknown' = 'true'
+  AND NOT (got ? 'owing') AND NOT (got ? 'credits') AND NOT (got ? 'payments'),
+  'credits unknown without payments ' || coalesce(got::text, '<none>'));
+ got := pg_temp.lsf_one('19f10000-0000-4000-8000-000000000225');
+ PERFORM pg_temp.lsf_assert(got->>'kind' = 'paid_invoice' AND got->>'paid' = '0.00' AND got->>'owing' = '0.00'
+  AND got->'credits' = jsonb_build_array(jsonb_build_object(
+   'kind','credit_note','number','CN-225','date','2026-10-02','amount','100.00'))
+  AND NOT (got ? 'payments'),
+  'invoice settled by credit ' || coalesce(got::text, '<none>'));
+
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 70, 0,
+  '{"CurrencyCode":"AUD","Payments":[{"Amount":70,"Status":"AUTHORISED"}],"CreditNotes":[{"CreditNoteNumber":"CN-OK","AppliedAmount":30,"Status":"PAID","Date":"2026-10-02"}],"Overpayments":[{"CreditNoteNumber":"OP-D","AppliedAmount":50,"Status":"DELETED"}],"Prepayments":[{"AppliedAmount":25,"Status":"VOIDED"}]}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '70.00' AND money->>'owing' = '0.00'
+  AND money->'credits' = jsonb_build_array(jsonb_build_object('kind','credit_note','number','CN-OK','date','2026-10-02','amount','30.00')),
+  'paid credit kept, voided over and pre dropped ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 100, 0,
+  '{"CurrencyCode":"AUD","Payments":[{"Amount":100,"Status":"AUTHORISED"}],"CreditNotes":[{"CreditNoteNumber":"CN-VU","Amount":500,"Status":"VOIDED"}]}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '100.00' AND money->>'owing' = '0.00'
+  AND NOT (money ? 'credits_unknown') AND NOT (money ? 'credits'),
+  'voided credit without applied is not uncertain ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 40, 60,
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":40,"Status":"AUTHORISED","PaymentID":"pay-223"},{"Date":"2026-10-02","Amount":60,"Status":"DRAFT","PaymentID":"draft-223"}]}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '40.00' AND money->>'owing' = '60.00'
+  AND money->'payments' = jsonb_build_array(jsonb_build_object('date','2026-10-02','amount','40.00')),
+  'draft beside authorised ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 100, 0,
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":"AUTHORISED","PaymentID":"dup-220"},{"Date":"2026-10-03","Amount":100,"Status":"AUTHORISED","PaymentID":"dup-220"}]}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '100.00' AND money->>'owing' = '0.00'
+  AND jsonb_array_length(money->'payments') = 1
+  AND money->'payments'->0->>'date' = '2026-10-02',
+  'duplicate payment id agrees ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 200, 0,
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":100,"Status":"AUTHORISED","PaymentID":"dup-221"},{"Date":"2026-10-03","Amount":100,"Status":"AUTHORISED","PaymentID":"dup-221"}]}');
+ PERFORM pg_temp.lsf_assert(NOT (money ? 'paid') AND NOT (money ? 'owing')
+  AND jsonb_array_length(money->'payments') = 1,
+  'duplicate payment id disagrees ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 30, 30, 0,
+  '{"CurrencyCode":"AUD","Payments":[{"Date":"2026-10-02","Amount":10},{"Date":"2026-10-03","Amount":20}]}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '30.00' AND money->>'owing' = '0.00'
+  AND jsonb_array_length(money->'payments') = 2,
+  'missing payment ids stay distinct ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 105, -5, '{"CurrencyCode":"AUD"}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '105.00' AND NOT (money ? 'owing'),
+  'negative amount_due ' || coalesce(money::text, '<none>'));
+ money := public.context_ledger_record_invoice_money('INV-M', 'x', 'S', 100, 150, -50,
+  '{"CurrencyCode":"AUD","Payments":[{"Amount":150,"Status":"AUTHORISED"}]}');
+ PERFORM pg_temp.lsf_assert(money->>'paid' = '150.00' AND NOT (money ? 'owing'),
+  'negative computed owing ' || coalesce(money::text, '<none>'));
 END $proof$;
 
 ROLLBACK;

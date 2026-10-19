@@ -126,6 +126,7 @@ Deno.test("outlook writes stamp several_recipients and client_email matches the 
     ops.indexOf("async function createWorkOrder("),
   )
   assertEquals(reconcile.includes("job_id: gated.job_id"), false)
+  assertEquals(reconcile.includes("NOT NULL"), false)
   assertEquals(reconcile.includes("event_type: 'payment_recorded'"), true)
   const insert = reconcile.slice(reconcile.indexOf("await client.from('job_events').insert({"))
   assertEquals(insert.includes("job_id"), false)
