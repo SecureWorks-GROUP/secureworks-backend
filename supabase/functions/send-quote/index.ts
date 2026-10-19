@@ -51,6 +51,12 @@ import {
   sendRetiresPriorPartyQuotes,
 } from './quote_party_view.ts'
 import {
+  acceptQuoteDocumentAtomically,
+  finishAtomicAcceptance,
+  quoteAcceptAtomicOn,
+  readQuoteAcceptanceFingerprint,
+} from './quote_accept_atomic.ts'
+import {
   persistTradePackOnDocuments,
   persistTradePackWriteConfirmed,
   quoteDocumentHasClientSend,
@@ -1602,6 +1608,34 @@ serve(async (req: Request) => {
 
       if (error || !doc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
 
+      // SQ-23 remedy: with quote_accept_atomic_v1 readable and true, the
+      // acceptance's writes go through one database transaction below. The
+      // fingerprint of everything the party rules read is taken FIRST, so the
+      // database can refuse ('stale') if anything changed after this point.
+      // Off, missing or unreadable: today's path, unchanged.
+      let atomicFingerprint: string | null = null
+      if (doc.job_id && await quoteAcceptAtomicOn(sb)) {
+        atomicFingerprint = await readQuoteAcceptanceFingerprint(sb, doc.job_id)
+        const { data: docAgain, error: docAgainError } = await sb
+          .from('job_documents')
+          .select('id, job_id, job_contact_id, run_label, data_snapshot_json, accepted_at, declined_at, superseded_at')
+          .eq('id', doc.id)
+          .single()
+        if (atomicFingerprint === null || docAgainError || !docAgain
+          || docAgain.job_id !== doc.job_id
+          || docAgain.job_contact_id !== doc.job_contact_id
+          || quoteDocumentRunLabel(docAgain) !== quoteDocumentRunLabel(doc)
+          || docAgain.accepted_at !== doc.accepted_at
+          || docAgain.declined_at !== doc.declined_at
+          || docAgain.superseded_at !== doc.superseded_at) {
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+      }
+      // Set once the atomic transaction has committed for this request.
+      let atomicDocId: string | null = null
+
       const sourceRunLabel = quoteDocumentRunLabel(doc)
 
       if (doc.accepted_at) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
@@ -1715,11 +1749,79 @@ serve(async (req: Request) => {
         }, doc, sourceRunLabel, acceptedAt)
       }
 
+      if (atomicFingerprint !== null) {
+        // One transaction: accepted_at, the sibling supersession or the run
+        // acceptance, the job status, the acceptance event and the attempt
+        // row. The status comes from today's party rules on the same snapshot.
+        const snapshot = acceptanceSnapshot!
+        const jobStatus = sourceRunLabel === null
+          ? (everyQuotePartyAccepted(snapshot.documents, snapshot.acceptances) ? 'accepted' : 'partially_accepted')
+          : quoteRunAcceptanceDecision(snapshot.documents, snapshot.acceptances, sourceRunLabel, snapshot.runNeighbourId).jobStatus
+        let acceptEvent: Record<string, unknown> | null = null
+        if (sourceRunLabel === null) {
+          // The quote_accepted job_event, as the whole-quote path writes it
+          // today, now inside the transaction.
+          const [jobRead, contactsRead] = await Promise.all([
+            sb.from('jobs').select('job_number, client_name, pricing_json').eq('id', doc.job_id).single(),
+            sb.from('job_contacts').select('id').eq('job_id', doc.job_id),
+          ])
+          if (jobRead.error || contactsRead.error) {
+            return new Response(quoteViewRetryPage(), {
+              status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+            })
+          }
+          const evJob = jobRead.data
+          const evPricing = typeof evJob?.pricing_json === 'string' ? JSON.parse(evJob.pricing_json || '{}') : (evJob?.pricing_json || {})
+          const evTotal = evPricing.totalIncGST || 0
+          const evMulti = !!contactsRead.data && contactsRead.data.length > 1
+          const evName = doc.job_contacts?.client_name || evJob?.client_name || 'Client'
+          const evLabel = doc.job_contacts?.contact_label || ''
+          acceptEvent = {
+            document_id: doc.id,
+            accepted_via: 'share_link',
+            accepted_at: acceptedAt,
+            job_number: evJob?.job_number || null,
+            client_name: evName,
+            contact_label: evLabel,
+            amount: evTotal || null,
+            is_multi_contact: evMulti,
+            new_status: jobStatus,
+            message: `${evName}${evLabel ? ' (' + evLabel + ')' : ''} accepted quote${evJob?.job_number ? ' for ' + evJob.job_number : ''}${evMulti ? ' — status: ' + jobStatus : ''}`,
+          }
+        }
+        const atomic = await acceptQuoteDocumentAtomically(sb, {
+          documentId: doc.id,
+          acceptedAt,
+          jobStatus,
+          fingerprint: atomicFingerprint,
+          runLabel: sourceRunLabel,
+          acceptEvent,
+        })
+        if (atomic.kind === 'replay') return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
+        if (atomic.kind === 'refused') {
+          if (atomic.reason === 'already_accepted') return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
+          if (atomic.reason === 'already_declined') return jsonResponse({ error: 'Already declined' }, 400, corsHeaders)
+          if (atomic.reason === 'not_a_sent_quote') return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
+          return new Response(
+            errorPage('This option is no longer available — another option was already accepted.'),
+            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
+        if (atomic.kind !== 'accepted') {
+          // stale or failed: nothing was written; the customer can try again.
+          console.error('[accept] atomic acceptance not committed:', atomic.kind)
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+        atomicDocId = doc.id
+      } else {
       const { error: acceptError } = await sb
         .from('job_documents')
         .update({ accepted_at: acceptedAt })
         .eq('id', doc.id)
       if (acceptError) throw acceptError
+      }
 
       // ── SUPERSEDE SIBLING OPTIONS ON ACCEPT (money-path, awaited) ──
       // Right after the accepted_at write: mark the OTHER whole-quote options for
@@ -1728,7 +1830,7 @@ serve(async (req: Request) => {
       // so a primary client's accept does NOT supersede a NEIGHBOUR's quote
       // (different job_contact_id). run_label docs (per-run fencing) are never
       // touched — their lifecycle is the run state machine below.
-      if (doc.job_id && sourceRunLabel === null) {
+      if (doc.job_id && sourceRunLabel === null && atomicDocId === null) {
         let supersedeQuery = sb.from('job_documents')
           .update({ superseded_at: new Date().toISOString() })
           .eq('job_id', doc.job_id)
@@ -1834,7 +1936,8 @@ serve(async (req: Request) => {
         const runLabel = sourceRunLabel
         const contactId = doc.job_contact_id
 
-        // Update run_acceptances
+        // Update run_acceptances (the atomic path already wrote it)
+        if (atomicDocId === null) {
         await sb.from('run_acceptances').upsert({
           job_id: doc.job_id,
           job_contact_id: contactId,
@@ -1843,6 +1946,7 @@ serve(async (req: Request) => {
           status: 'accepted',
           accepted_at: acceptedAt,
         }, { onConflict: 'job_id,job_contact_id,run_label' })
+        }
 
         // Get job data
         const { data: job } = await sb.from('jobs')
@@ -1880,8 +1984,10 @@ serve(async (req: Request) => {
           metadata: {},
         }).then(() => {}, () => {})
 
-        // Update overall job status
+        // Update overall job status (the atomic path already wrote it)
+        if (atomicDocId === null) {
         await sb.from('jobs').update({ status: jobStatus, ...(jobStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}) }).eq('id', doc.job_id)
+        }
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
         // baseline the first time this job reaches 'accepted'. Best-effort +
@@ -1956,9 +2062,11 @@ serve(async (req: Request) => {
           }
 
           // Return "Next Steps" page for fully accepted run
+          await finishAtomicAcceptance(sb, atomicDocId)
           return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || ''))
         } else {
           // ── WAITING FOR OTHER PARTY ──
+          await finishAtomicAcceptance(sb, atomicDocId)
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
         }
       }
@@ -1986,6 +2094,7 @@ serve(async (req: Request) => {
           ? 'accepted'
           : 'partially_accepted'
 
+        if (atomicDocId === null) {
         await sb
           .from('jobs')
           .update({
@@ -1993,6 +2102,7 @@ serve(async (req: Request) => {
             ...(newStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}),
           })
           .eq('id', doc.job_id)
+        }
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
         // baseline the first time this job is fully accepted. Best-effort +
@@ -2017,7 +2127,7 @@ serve(async (req: Request) => {
         const acceptorName = doc.job_contacts?.client_name || job?.client_name || 'Client'
         const contactLabel = doc.job_contacts?.contact_label || ''
 
-        await sb.from('job_events').insert({
+        if (atomicDocId === null) await sb.from('job_events').insert({
           job_id: doc.job_id,
           event_type: 'quote_accepted',
           detail_json: {
@@ -2271,6 +2381,7 @@ serve(async (req: Request) => {
           isPatio,
           jobId: job?.id || '',
         })
+        await finishAtomicAcceptance(sb, atomicDocId)
         return new Response(nextStepsHtml, {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'text/html' },

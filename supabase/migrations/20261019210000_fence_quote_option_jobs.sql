@@ -328,10 +328,12 @@ REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uu
 -- A timeout or cancel during that work is caught the same way. The run's
 -- row in quote_option_settle_runs is written first and stays unsettled when
 -- the work fails, so the failure is on record even if the review event
--- cannot be written. The status change always stands (send-quote commits
--- the customer's acceptance before the job status). Only if the first,
--- plain insert into that trigger-less table and the review event both fail
--- is a run unrecorded; a warning is then logged. A timeout elsewhere in the
+-- cannot be written. The status change stands (send-quote's legacy path
+-- commits the customer's acceptance before the job status). Only if the
+-- first, plain insert into that trigger-less table and the review event both
+-- fail is a run unrecorded; a warning is then logged, unless the atomic
+-- acceptance marker or quote_option_strict_record_v1 asks for a raise
+-- (20261019230000; both off by default). A timeout elsewhere in the
 -- status change's statement still fails it, as before.
 CREATE OR REPLACE FUNCTION public.jobs_quote_option_supersede()
 RETURNS trigger
@@ -352,6 +354,7 @@ DECLARE
   v_review_state text;
   v_flag_on boolean;
   v_run bigint;
+  v_strict boolean := false;
 BEGIN
   -- The switch fails closed: off, missing or unreadable (a cancel, a
   -- timeout, a permission error, an assert failure, anything) means the trigger writes
@@ -488,6 +491,27 @@ BEGIN
       NULL;
     END;
     IF v_run IS NULL AND v_review_state IS NOT NULL THEN
+      -- Nothing could be recorded. By default the status change is kept
+      -- with a warning (today's behaviour). Two opt-in contexts raise
+      -- instead, so the whole transaction rolls back (20261019230000):
+      --   * the atomic acceptance RPC's transaction-local marker
+      --     sw.quote_accept_atomic = 'on' (a cooperative marker, not proof
+      --     of origin; only reached when quote_accept_atomic_v1 is on);
+      --   * the switch quote_option_strict_record_v1, for every writer. An
+      --     owning-review decision, seeded off. Missing or unreadable is off.
+      -- This raise is outside every swallowing block, so it propagates.
+      BEGIN
+        v_strict := coalesce(current_setting('sw.quote_accept_atomic', true), '') = 'on'
+          OR coalesce((SELECT enabled FROM public.feature_flags
+                        WHERE flag_name = 'quote_option_strict_record_v1'), false) IS TRUE;
+      EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
+        v_strict := false;
+      END;
+      IF v_strict THEN
+        RAISE EXCEPTION 'quote_option_unrecorded'
+          USING DETAIL = format('work %s, review event %s, no run record', v_err_state, v_review_state),
+                HINT = 'status change refused: nothing about the supersede run could be recorded';
+      END IF;
       RAISE WARNING 'jobs_quote_option_supersede: % (%), review event failed (%) and no run record; status change kept',
         v_err_msg, v_err_state, v_review_state;
     END IF;

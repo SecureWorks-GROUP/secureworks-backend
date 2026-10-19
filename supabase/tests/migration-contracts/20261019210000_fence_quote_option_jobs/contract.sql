@@ -320,7 +320,8 @@ DROP FUNCTION public.qo_contract_fail();
 --   a. Work succeeds: the marks and events are written, with no run row.
 --   b. Work fails, review event succeeds: the review event is the record.
 --   c. Work fails and the review event fails too: the status change stands with nothing
---      recorded. This is the stated residual, pinned so it cannot change unnoticed.
+--      recorded. This is the stated residual, pinned so it cannot change unnoticed. It holds
+--      with no atomic marker and quote_option_strict_record_v1 off (20261019230000).
 INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
  ('9c000000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-8'),
  ('9c000000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-8');
