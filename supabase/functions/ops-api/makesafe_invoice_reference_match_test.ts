@@ -655,6 +655,46 @@ Deno.test("po_indeterminate: a one-sided PO is manual review, never a match", ()
   assert(cardOnly.manual_review[0].detail.includes("names no PO"));
 });
 
+Deno.test("po_mismatch never creates a match: a refused card still contests its invoice", () => {
+  // V's B1 on fad6a11. Card A's claim and invoice agree but the POs differ;
+  // card B names the invoice's PO under a different claim. main refuses both
+  // (two claimants). If guard 4 dropped A before guard 3 counted claimants, B
+  // would win an invoice whose claim is A's.
+  for (
+    const cardB of [
+      { id: "job-b", job_number: "SWMS-B", external_ref: "MLB-80000PO-55555" },
+      {
+        id: "job-b",
+        job_number: "SWMS-B",
+        external_ref: "MLB-80000",
+        builder_po_number: "55555",
+      },
+    ] as SesMatchJob[]
+  ) {
+    const { matches, manual_review, exclusions } =
+      deriveSesUnlinkedInvoiceMatches(
+        [
+          {
+            id: "job-a",
+            job_number: "SWMS-A",
+            external_ref: "MLB-90001PO-22222",
+          },
+          cardB,
+        ],
+        [invoice({ id: "inv-1", reference: "MLB-90001PO-55555" })],
+      );
+    assertEquals(matches, [], JSON.stringify(cardB));
+    assertEquals(manual_review, [], JSON.stringify(cardB));
+    assertEquals(
+      exclusions.map((e) => `${e.job_number}:${e.reason}`).sort(),
+      [
+        "SWMS-A:invoice_claimed_by_multiple_cards",
+        "SWMS-B:invoice_claimed_by_multiple_cards",
+      ],
+    );
+  }
+});
+
 Deno.test("po_indeterminate: a contested invoice is still excluded, not reviewed", () => {
   // Guard 3 runs before guard 5, so an invoice two cards claim is excluded on
   // both, whatever its PO evidence.

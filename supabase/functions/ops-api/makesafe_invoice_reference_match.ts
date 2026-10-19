@@ -246,6 +246,10 @@ export function sesMatchPoRelation(
  *    only one side names a PO (`po_indeterminate`) is reported in
  *    `manual_review`, never in `matches`.
  *
+ * Guards 4 and 5 run AFTER guard 3 counts every claimant, so a card they
+ * refuse still contests its invoice: neither PO guard can create a match main
+ * refuses.
+ *
  * `jobs` must be the FULL job population, not just board cards, or guard 2
  * silently weakens. Only jobs with `on_board !== false` can receive a match.
  */
@@ -324,22 +328,6 @@ export function deriveSesUnlinkedInvoiceMatches(
       continue;
     }
 
-    // Guard 4: same claim, different purchase order is other work.
-    if (sesMatchPoRelation(job, candidates[0].invoice) === "distinct_po") {
-      exclusions.push({
-        job_id: job.id,
-        job_number: job.job_number ?? null,
-        external_ref: job.external_ref ?? null,
-        reason: "po_mismatch",
-        detail: `${
-          candidates[0].invoice.invoice_number ?? candidates[0].invoice.id
-        } names PO ${
-          splitRefPo(candidates[0].invoice.reference).po
-        }; card declares ${sesMatchJobPurchaseOrders(job).join(",")}`,
-      });
-      continue;
-    }
-
     provisional.push({
       job_id: job.id,
       job_number: job.job_number ?? null,
@@ -350,12 +338,16 @@ export function deriveSesUnlinkedInvoiceMatches(
   }
 
   // Guard 3: one invoice may fund only one card. A contested invoice is removed
-  // from every claimant rather than arbitrated here.
+  // from every claimant rather than arbitrated here. It counts EVERY claimant
+  // before the PO guards drop any: a card the PO guards would refuse still
+  // contests the invoice, or dropping it would hand the invoice to the other
+  // claimant and CREATE a match main refuses (V's B1 on fad6a11).
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
   const claims = new Map<string, number>();
   for (const match of provisional) {
     claims.set(match.invoice.id, (claims.get(match.invoice.id) ?? 0) + 1);
   }
-  const survivors = provisional.filter((match) => {
+  const uncontested = provisional.filter((match) => {
     if ((claims.get(match.invoice.id) ?? 0) <= 1) return true;
     exclusions.push({
       job_id: match.job_id,
@@ -369,9 +361,26 @@ export function deriveSesUnlinkedInvoiceMatches(
     return false;
   });
 
+  // Guard 4: same claim, different purchase order is other work.
+  const survivors = uncontested.filter((match) => {
+    const job = jobsById.get(match.job_id);
+    if (!job || sesMatchPoRelation(job, match.invoice) !== "distinct_po") {
+      return true;
+    }
+    exclusions.push({
+      job_id: match.job_id,
+      job_number: match.job_number,
+      external_ref: match.external_ref,
+      reason: "po_mismatch",
+      detail: `${match.invoice.invoice_number ?? match.invoice.id} names PO ${
+        splitRefPo(match.invoice.reference).po
+      }; card declares ${sesMatchJobPurchaseOrders(job).join(",")}`,
+    });
+    return false;
+  });
+
   // Guard 5: one-sided purchase-order evidence is never an accepted match. It
   // runs after guard 3 so a contested invoice is still excluded outright.
-  const jobsById = new Map(jobs.map((job) => [job.id, job]));
   const matches: SesInvoiceMatch[] = [];
   const manual_review: SesInvoiceManualReview[] = [];
   for (const match of survivors) {

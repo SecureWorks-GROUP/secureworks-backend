@@ -179,3 +179,15 @@ Deno.test("PO guards: a same-claim different-PO or one-sided-PO invoice is a can
   assertEquals(summary.matched, 1);
   assertEquals(summary.with_candidates, 2);
 });
+
+Deno.test("PO guards: a card refused for its PO still contests the invoice, so nobody is placed", () => {
+  // V's B1 shape through the runtime plan: the invoice names card 1's claim and
+  // card 2's PO. Neither card may be placed; the invoice stays a candidate.
+  const { plan } = buildXeroInvoiceEvidencePlan(
+    [card(J1, "MLB-90001PO-22222"), card(J2, "MLB-80000PO-55555")],
+    [invoice(I1, "MLB-90001PO-55555")],
+    [I1],
+  );
+  assertEquals(plan.matches, []);
+  assertEquals(plan.candidates, [{ invoice_id: I1, job_ids: [J1, J2] }]);
+});
