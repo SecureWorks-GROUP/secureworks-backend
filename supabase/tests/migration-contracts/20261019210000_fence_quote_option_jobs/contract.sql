@@ -41,17 +41,24 @@ SELECT pg_temp.qo_assert(NOT EXISTS (
                     'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)']) f(fn)
    WHERE has_function_privilege(r.role, f.fn, 'EXECUTE')),
  'the mark and clear helpers must not be callable directly by any API role');
-SELECT pg_temp.qo_assert((SELECT count(*) = 4 AND bool_and(p.prosecdef)
-   AND bool_and(p.proconfig @> ARRAY['search_path=public, pg_temp'])
-  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname = 'public' AND p.oid IN ('public.jobs_quote_option_supersede()'::regprocedure,
+SELECT pg_temp.qo_assert((SELECT count(*) = 3
+   AND bool_and(coalesce(p.prosecdef, false))
+   AND bool_and(coalesce(p.proconfig @> ARRAY['search_path=public, pg_temp'], false))
+  FROM pg_proc p
+  WHERE p.oid IN ('public.jobs_quote_option_supersede()'::regprocedure,
     'public.fence_quote_option_mark_options(uuid, text, uuid, uuid[])'::regprocedure,
-    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)'::regprocedure,
-    'public.fence_quote_option_unsettled_groups()'::regprocedure)),
- 'the trigger, its helpers and the unsettled read must run as their owner with a fixed search_path');
-SELECT pg_temp.qo_assert(has_function_privilege('service_role', 'public.fence_quote_option_unsettled_groups()', 'EXECUTE')
- AND NOT has_function_privilege('authenticated', 'public.fence_quote_option_unsettled_groups()', 'EXECUTE'),
- 'the unsettled groups read must be the service role''s only');
+    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)'::regprocedure)),
+ 'the trigger and its helpers must run as their owner with a fixed search_path');
+SELECT pg_temp.qo_assert(NOT EXISTS (SELECT 1 FROM pg_trigger
+  WHERE tgrelid = 'public.quote_option_settle_failures'::regclass AND NOT tgisinternal),
+ 'the last-resort failure table must have no triggers');
+SELECT pg_temp.qo_assert(has_table_privilege('service_role', 'public.quote_option_settle_failures', 'SELECT')
+ AND NOT has_table_privilege('service_role', 'public.quote_option_settle_failures', 'DELETE')
+ AND NOT has_table_privilege('service_role', 'public.quote_option_settle_failures', 'INSERT')
+ AND NOT has_table_privilege('authenticated', 'public.quote_option_settle_failures', 'SELECT')
+ AND NOT has_table_privilege('anon', 'public.quote_option_settle_failures', 'SELECT')
+ AND NOT has_table_privilege('public', 'public.quote_option_settle_failures', 'SELECT'),
+ 'the failure table must be read and resolved by the service role only, never deleted');
 
 BEGIN;
 -- One customer (c-1) at one site: A (first quote), B and C (options), D (a deliberate repeat, not
@@ -230,8 +237,8 @@ SELECT pg_temp.qo_assert((SELECT count(*) FROM public.job_events WHERE job_id = 
   AND event_type = 'quote_option_review_needed' AND detail_json->>'reason' = 'supersede_failed'
   AND detail_json->>'sqlstate' = 'P0001') = 1, 'an ordinary error in a mark must leave a durable review event');
 -- If even the review event cannot be written, the status change still stands (send-quote has
--- already committed the customer's acceptance), the group keeps no marks, and the unsettled
--- groups read finds it from the data alone. Group 4 (customer c-5: V, W) has no review events.
+-- already committed the customer's acceptance), the trigger's marks roll back, and a row in the
+-- last-resort table records it. Group 4: customer c-5, V and W.
 INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
  ('9c000000-0000-4000-8000-0000000000d1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-5'),
  ('9c000000-0000-4000-8000-0000000000d2', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-5');
@@ -252,15 +259,18 @@ SELECT pg_temp.qo_assert((SELECT status = 'accepted' FROM public.jobs WHERE id =
  'a status change whose failure could not be recorded must still stand');
 SELECT pg_temp.qo_assert((SELECT superseded_at IS NULL FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000d2')
  AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000000d2', 'quote_option_superseded') = 0,
- 'an unrecorded failure must leave the group with no marks and no supersede events');
-SELECT pg_temp.qo_assert((SELECT count(*) FROM public.fence_quote_option_unsettled_groups()
-  WHERE quote_option_group_id = '9c000000-0000-4000-8000-0000000000d1'
-    AND won_job_ids = ARRAY['9c000000-0000-4000-8000-0000000000d1'::uuid]
-    AND open_job_ids = ARRAY['9c000000-0000-4000-8000-0000000000d2'::uuid]) = 1,
- 'the unsettled groups read must report a group the trigger could not record');
-SELECT pg_temp.qo_assert(NOT EXISTS (SELECT 1 FROM public.fence_quote_option_unsettled_groups()
-  WHERE quote_option_group_id IN ('9c000000-0000-4000-8000-00000000000a', '9c000000-0000-4000-8000-0000000000b1')),
- 'a settled group must not be reported as unsettled');
+ 'an unrecorded failure must roll back the trigger''s marks and events');
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_failures
+  WHERE job_id = '9c000000-0000-4000-8000-0000000000d1'
+    AND quote_option_group_id = '9c000000-0000-4000-8000-0000000000d1'
+    AND status = 'accepted' AND sqlstate = 'P0001' AND resolved_at IS NULL) = 1,
+ 'a failure whose review event could not be written must leave a last-resort record');
+-- A later failure in a group with older review events is still recorded (no history suppresses it).
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000d1';
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000d1';
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_failures
+  WHERE job_id = '9c000000-0000-4000-8000-0000000000d1') = 2,
+ 'every unrecordable failure must get its own last-resort record');
 DROP TRIGGER qo_contract_fail_event ON public.job_events;
 DROP FUNCTION public.qo_contract_fail_event();
 DROP TRIGGER qo_contract_fail ON public.jobs;

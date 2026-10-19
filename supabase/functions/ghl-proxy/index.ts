@@ -2529,8 +2529,10 @@ serve(async (req: Request) => {
         return json({ error: typed.message, code: typed.code }, typed.status || 403)
       }
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-      const { data: owned } = await sb.from('jobs').select('id')
+      const { data: owned, error: ownedError } = await sb.from('jobs').select('id')
         .in('id', [jobId, optionOfJobId]).eq('org_id', String(authProfile?.org_id || ''))
+      // A failed read is retryable; only a successful read that misses a job is final.
+      if (ownedError) return json({ error: 'Could not check the jobs', code: 'quote_option_link_unavailable' }, 503)
       if (!owned || owned.length !== 2) return json({ error: 'Job not found', code: 'job_not_found' }, 404)
       const label = typeof body?.label === 'string' ? body.label.slice(0, 120) : null
       const linked = await linkFenceQuoteOption({
