@@ -1,11 +1,22 @@
 -- Rollback for 20261019200000_dispatch_material_line_provenance.sql.
--- Refuses while any quote_builder line exists: narrowing the source list would
--- fail on it, and dropping the columns would lose where those lines came from.
+-- Refuses while any line has recorded provenance (a quote_builder line, or a
+-- fence or patio line with its revision): narrowing the source list would fail,
+-- and dropping the columns would lose where those lines came from.
 
 DO $$
+DECLARE
+  v_kept boolean := false;
 BEGIN
-  IF EXISTS (SELECT 1 FROM public.job_material_lines WHERE source = 'quote_builder') THEN
-    RAISE EXCEPTION 'quote_builder material lines exist; move or remove them before rolling back 20261019200000';
+  -- Checked only while the column is there, so a second run is a no-op.
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'job_material_lines'
+                AND column_name = 'source_kind') THEN
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM public.job_material_lines
+                             WHERE source = ''quote_builder'' OR source_kind IS NOT NULL)'
+      INTO v_kept;
+  END IF;
+  IF v_kept THEN
+    RAISE EXCEPTION 'material lines with recorded provenance exist; keep or export them before rolling back 20261019200000';
   END IF;
 END $$;
 
