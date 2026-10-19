@@ -38,6 +38,7 @@
 import {
   type ClaimClient,
   claimSend,
+  extendSendClaim,
   reconcileActor,
   readSendHolds,
   reconcileThenClaim,
@@ -1076,6 +1077,8 @@ export interface ClaimedSend extends PreparedSend {
   claimToken: string;
   /** The outbound send claim attempt that holds this content while it sends. */
   sendAttemptId: string;
+  /** The attempt's current dispatch token, confirmed before each provider call. */
+  dispatchToken: string;
 }
 
 /** The send-claim item key for one approved payload, shared by every approval of it. */
@@ -1159,6 +1162,7 @@ export async function claimApprovedSend(
   deps: SendDeps,
   prepared: PreparedSend,
   caller: { actor: string | null; credentialClass: string | null },
+  options: { deliveryKeys?: string[] } = {},
 ): Promise<ClaimedSend> {
   const claimToken = deps.newId().toLowerCase();
   const sendAttemptId = approvedSendAttemptId(prepared.row.id);
@@ -1199,6 +1203,36 @@ export async function claimApprovedSend(
       detail: { held: held.held.map((h) => ({ attempt_id: h.attempt_id, state: h.state, stale: h.stale })) },
     });
     refuseClaim(held);
+  }
+  // The delivery identity every door shares (email_content:<sha256>, built
+  // by approved_send_content_key.ts from what will be sent, attachments
+  // loaded): joined to this attempt before the approval is used, so a plain
+  // send of the same message, live or unconfirmed, holds this one and this one
+  // holds it. A refusal leaves the approval unused.
+  let dispatchToken = held.dispatch_token;
+  const deliveryKeys = (options.deliveryKeys ?? []).filter((key) => key !== itemKey);
+  if (deliveryKeys.length > 0) {
+    const joined = await extendSendClaim(deps.store.claims, {
+      attemptId: sendAttemptId,
+      keys: deliveryKeys,
+      actor: caller.actor,
+      detail: { ...detail, delivery_identity: true },
+    });
+    if (!joined.ok) {
+      await settleSend(deps.store.claims, sendAttemptId, "failed", { reason: "delivery_identity_held" });
+      await auditQuietly(deps.store, {
+        approval_id: prepared.row.id,
+        event: "send_refused",
+        channel: prepared.row.channel,
+        actor: caller.actor,
+        credential_class: caller.credentialClass,
+        code: joined.code,
+        payload_hash: prepared.row.payload_hash,
+        detail: { held: joined.held.map((h) => ({ attempt_id: h.attempt_id, state: h.state, stale: h.stale })) },
+      });
+      refuseClaim(joined);
+    }
+    dispatchToken = joined.dispatch_token;
   }
   // Holding the content claim, nobody else can be sending it. An approval of
   // the same content that another approval has already sent (or may have
@@ -1250,7 +1284,7 @@ export async function claimApprovedSend(
     refuse(503, "approval_audit_unwritable",
       "The audit could not be written, so nothing was sent. The approval is used; record a new one.");
   }
-  return { ...prepared, claimToken, sendAttemptId };
+  return { ...prepared, claimToken, sendAttemptId, dispatchToken };
 }
 
 export interface SendOutcome {
@@ -1328,7 +1362,7 @@ export async function finishApprovedSend(
   const settled = await settleSend(deps.store.claims, claimed.sendAttemptId, outcome.status, {
     approval_id: claimed.row.id,
     code: outcome.code,
-  });
+  }, { settler: "dispatcher" });
   if (!settled.ok) console.error("[approved_send] send claim settle failed:", settled.code);
   let auditRecorded = true;
   try {

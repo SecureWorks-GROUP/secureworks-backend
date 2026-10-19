@@ -1,7 +1,9 @@
 // Graph's final /send answers 202 with an empty body. A 2xx is accepted only
-// when its body is empty or readable JSON with no error in it; a 2xx carrying
-// an error, or one whose body cannot be read, is an unknown outcome (the send
-// may have landed), never "sent" and never a definite failure.
+// when its body is empty or readable JSON with no error in it and nothing
+// saying its outcome is uncertain (outcomeUnknown, outcome_unknown,
+// state: 'outcome_unknown' or retry_safe: false, at the top level or under
+// error). Anything else, or a body that cannot be read, is an unknown outcome
+// (the send may have landed), never "sent" and never a definite failure.
 
 export class GraphSendNotConfirmed extends Error {
   readonly outcomeUnknown = true
@@ -37,7 +39,15 @@ export async function assertGraphSendAccepted(response: Response | null | undefi
     throw new GraphSendNotConfirmed(status, 'unreadable_body')
   }
   const body = parsed as Record<string, unknown>
-  if (body.error != null || body.success === false || body.outcomeUnknown === true || body.outcome_unknown === true) {
+  if (body.error != null || body.success === false || saysUncertain(body) || saysUncertain(body.error)) {
     throw new GraphSendNotConfirmed(status, 'error_body')
   }
+}
+
+/** A body (or its error) that says its own outcome is uncertain or not retry-safe. */
+function saysUncertain(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const v = value as Record<string, unknown>
+  return v.outcomeUnknown === true || v.outcome_unknown === true ||
+    v.state === 'outcome_unknown' || v.retry_safe === false
 }

@@ -1,12 +1,28 @@
 // Outbound send claims: the one hold every outbound send takes before it sends.
 //
-// The table and its five functions are 20261019170000_outbound_send_claims.sql.
+// The table and its six functions are 20261019170000_outbound_send_claims.sql.
 // A caller names the items a send may deliver (item keys), claims them under a
 // fresh attempt id, sends, then settles the attempt: sent, failed (definitely
 // not sent) or outcome_unknown. A key held by a sending or outcome_unknown
 // attempt refuses every new claim, so two presses that land together cannot
 // both send, and an unknown outcome holds the item until someone checks the
 // mailbox (or Xero History) and says so.
+//
+// Dispatch is single-use. A claim returns a dispatch_token; a door that joins
+// its caller's claim (extendSendClaim) gets a fresh one and the caller's stops
+// working. A second extension of the same attempt is refused
+// (send_claim_dispatch_taken), so two requests carrying one caller attempt
+// cannot both dispatch. Whoever holds the current token calls
+// confirmSendDispatch immediately before the provider call: it answers ok only
+// while the attempt is still sending, the token is current and the lease is
+// live, so a worker whose claim was reconciled or lapsed sends nothing. A
+// caller settling an attempt its door extended passes { settler: "caller" };
+// while the door's dispatch is open that settle is deferred (no state change,
+// deferred: true) and the door's own settle records the outcome.
+//
+// The lease (900 seconds) is expiry-based recovery, not proof a worker
+// stopped: release after expiry rests on the edge-function wall-clock limit
+// and on the pre-send fence above, and still needs a named checker.
 //
 // Every function here fails CLOSED. A claim that cannot be written is a refusal
 // (send_claim_unavailable), never a send; a settle that cannot be written leaves
@@ -41,6 +57,9 @@ export type SendClaimRefusalCode =
   | "send_claim_attempt_exists"
   | "send_claim_invalid"
   | "send_claim_not_sending"
+  | "send_claim_dispatch_taken"
+  | "send_claim_item_mismatch"
+  | "send_dispatch_fenced"
   | "send_reconcile_invalid"
   | "send_reconcile_actor_required"
   | "send_reconcile_live_send"
@@ -48,13 +67,24 @@ export type SendClaimRefusalCode =
   | "send_reconcile_attempt_mismatch"
 
 export type SendClaimRefusal = { ok: false; code: SendClaimRefusalCode; held: SendHold[] }
-export type SendClaim = { ok: true; attempt_id: string; keys: string[] }
+/** dispatch_token: the token confirmSendDispatch checks before the send ("" if the store returned none, which never confirms). */
+export type SendClaim = { ok: true; attempt_id: string; keys: string[]; dispatch_token: string }
 export type SendClaimResult = SendClaim | SendClaimRefusal
 
 export type SettleState = "sent" | "failed" | "outcome_unknown"
-export type SettleResult = { ok: true } | { ok: false; code: "send_settle_failed" | "send_claim_not_sending" | "send_settle_invalid_state" }
+export type SettleCode =
+  | "send_settle_failed"
+  | "send_claim_not_sending"
+  | "send_settle_invalid_state"
+  | "send_settle_invalid_settler"
+/** deferred: a caller settle held back because the door's dispatch is still open; the attempt is still sending. */
+export type SettleResult = { ok: true; deferred?: true; state?: "sending" } | { ok: false; code: SettleCode }
+/** "dispatcher": whoever made the provider call (default). "caller": a caller whose door may have extended the attempt. */
+export type SendSettler = "dispatcher" | "caller"
 
-export const SEND_CLAIM_LEASE_SECONDS = 600
+export type DispatchConfirmResult = { ok: true } | SendClaimRefusal
+
+export const SEND_CLAIM_LEASE_SECONDS = 900
 
 function refusal(code: SendClaimRefusalCode, held: SendHold[] = []): SendClaimRefusal {
   return { ok: false, code, held }
@@ -88,6 +118,15 @@ function asHold(value: unknown): SendHold | null {
 
 function asHolds(value: unknown): SendHold[] {
   return Array.isArray(value) ? value.map(asHold).filter((h): h is SendHold => h !== null) : []
+}
+
+function claimFromRow(row: Record<string, unknown>, attemptId: string, keys: string[]): SendClaim {
+  return {
+    ok: true,
+    attempt_id: attemptId,
+    keys,
+    dispatch_token: typeof row.dispatch_token === "string" ? row.dispatch_token : "",
+  }
 }
 
 async function callRpc(client: ClaimClient, fn: string, args: Record<string, unknown>): Promise<{ data: unknown; failed: boolean }> {
@@ -128,51 +167,97 @@ export async function claimSend(
   })
   const row = data as Record<string, unknown> | null
   if (failed || !row || typeof row !== "object") return refusal("send_claim_unavailable")
-  if (row.ok === true) return { ok: true, attempt_id: input.attemptId, keys }
+  if (row.ok === true) return claimFromRow(row, input.attemptId, keys)
   const code = row.code
   if (code === "send_claim_held") return refusal("send_claim_held", asHolds(row.held))
   if (code === "send_claim_attempt_exists" || code === "send_claim_invalid") return refusal(code)
   return refusal("send_claim_unavailable")
 }
 
-/** Add keys to a live attempt (a door joining a claim its caller already holds). */
+/**
+ * A door joins the live claim its caller holds and takes over the dispatch.
+ * Once per attempt: a repeat, with the same keys or others, is
+ * send_claim_dispatch_taken, never success. callerItemKey, when given, must
+ * be one of the attempt's own keys (send_claim_item_mismatch otherwise).
+ */
 export async function extendSendClaim(
   client: ClaimClient,
-  input: { attemptId: string; keys: string[]; actor?: string | null; detail?: Record<string, unknown> },
+  input: {
+    attemptId: string
+    keys: string[]
+    callerItemKey?: string | null
+    actor?: string | null
+    detail?: Record<string, unknown>
+  },
 ): Promise<SendClaimResult> {
   const keys = cleanKeys(input.keys)
   if (keys.length === 0 || !input.attemptId) return refusal("send_claim_invalid")
+  const callerItemKey = String(input.callerItemKey ?? "").trim()
   const { data, failed } = await callRpc(client, "extend_outbound_send_claim", {
     p_attempt_id: input.attemptId,
     p_keys: keys,
+    p_caller_item_key: callerItemKey || null,
     p_actor: input.actor ?? null,
     p_detail: input.detail ?? {},
   })
   const row = data as Record<string, unknown> | null
   if (failed || !row || typeof row !== "object") return refusal("send_claim_unavailable")
-  if (row.ok === true) return { ok: true, attempt_id: input.attemptId, keys }
+  if (row.ok === true) return claimFromRow(row, input.attemptId, keys)
   const code = row.code
   if (code === "send_claim_held") return refusal("send_claim_held", asHolds(row.held))
-  if (code === "send_claim_not_sending" || code === "send_claim_invalid") return refusal(code)
+  if (
+    code === "send_claim_not_sending" || code === "send_claim_invalid" ||
+    code === "send_claim_dispatch_taken" || code === "send_claim_item_mismatch"
+  ) return refusal(code)
   return refusal("send_claim_unavailable")
 }
 
-/** Settle an attempt out of sending, once. A failed write leaves the hold in place. */
+/**
+ * The pre-send fence: call immediately before the provider call with the
+ * current dispatch token. Anything but ok (a reconciled, settled or lapsed
+ * attempt, a replaced token, a store that cannot answer) is
+ * send_dispatch_fenced, and nothing may be sent.
+ */
+export async function confirmSendDispatch(
+  client: ClaimClient,
+  input: { attemptId: string; dispatchToken: string },
+): Promise<DispatchConfirmResult> {
+  const token = String(input.dispatchToken ?? "").trim()
+  if (!input.attemptId || !token) return refusal("send_dispatch_fenced")
+  const { data, failed } = await callRpc(client, "confirm_outbound_dispatch", {
+    p_attempt_id: input.attemptId,
+    p_dispatch_token: token,
+  })
+  const row = data as Record<string, unknown> | null
+  if (!failed && row && typeof row === "object" && row.ok === true) return { ok: true }
+  return refusal("send_dispatch_fenced")
+}
+
+/**
+ * Settle an attempt out of sending, once. A failed write leaves the hold in
+ * place. With { settler: "caller" } a settle while the door's extended
+ * dispatch is open is deferred: { ok: true, deferred: true, state: "sending" }.
+ */
 export async function settleSend(
   client: ClaimClient,
   attemptId: string,
   state: SettleState,
   detail: Record<string, unknown> = {},
+  opts: { settler?: SendSettler } = {},
 ): Promise<SettleResult> {
   const { data, failed } = await callRpc(client, "settle_outbound_send", {
     p_attempt_id: attemptId,
     p_state: state,
     p_detail: detail,
+    p_settler: opts.settler ?? "dispatcher",
   })
   const row = data as Record<string, unknown> | null
   if (failed || !row || typeof row !== "object") return { ok: false, code: "send_settle_failed" }
-  if (row.ok === true) return { ok: true }
-  if (row.code === "send_claim_not_sending" || row.code === "send_settle_invalid_state") return { ok: false, code: row.code }
+  if (row.ok === true) return row.deferred === true ? { ok: true, deferred: true, state: "sending" } : { ok: true }
+  if (
+    row.code === "send_claim_not_sending" || row.code === "send_settle_invalid_state" ||
+    row.code === "send_settle_invalid_settler"
+  ) return { ok: false, code: row.code }
   return { ok: false, code: "send_settle_failed" }
 }
 
@@ -318,10 +403,17 @@ export const SEND_IN_PROGRESS_RECOVERY =
 export const SEND_CLAIM_UNAVAILABLE_MESSAGE =
   "The send could not be recorded before sending, so nothing was sent."
 export const SEND_CLAIM_UNAVAILABLE_RECOVERY = "Nothing was sent. Try again shortly."
+export const SEND_FENCED_MESSAGE =
+  "This send was stopped before it went out, because its hold was released or ran out. Nothing was sent now."
+export const SEND_FENCED_RECOVERY =
+  "Check the item's current state before pressing again."
+export const SEND_ITEM_MISMATCH_MESSAGE =
+  "This send did not match the item it was claimed for, so nothing was sent."
+export const SEND_ITEM_MISMATCH_RECOVERY = "Nothing was sent. Start the send again from the item."
 
 /** The one refusal body every door returns when a claim is refused. */
 export function sendClaimRefusalBody(result: SendClaimRefusal): Record<string, unknown> {
-  const live = result.code === "send_reconcile_live_send" ||
+  const live = result.code === "send_reconcile_live_send" || result.code === "send_claim_dispatch_taken" ||
     (result.code === "send_claim_held" && result.held.some((h) => h.state === "sending" && !h.stale))
   const unavailable = result.code === "send_claim_unavailable" || result.code === "send_claim_unreadable"
   const held = result.held.map((h) => ({
@@ -330,12 +422,21 @@ export function sendClaimRefusalBody(result: SendClaimRefusal): Record<string, u
     state: h.state === "sending" && h.stale ? "outcome_unknown" : h.state,
     claimed_at: h.claimed_at,
   }))
+  const [state, error, recovery] = live
+    ? ["sending", SEND_IN_PROGRESS_MESSAGE, SEND_IN_PROGRESS_RECOVERY]
+    : unavailable
+    ? ["not_sent", SEND_CLAIM_UNAVAILABLE_MESSAGE, SEND_CLAIM_UNAVAILABLE_RECOVERY]
+    : result.code === "send_dispatch_fenced"
+    ? ["not_sent", SEND_FENCED_MESSAGE, SEND_FENCED_RECOVERY]
+    : result.code === "send_claim_item_mismatch"
+    ? ["not_sent", SEND_ITEM_MISMATCH_MESSAGE, SEND_ITEM_MISMATCH_RECOVERY]
+    : ["outcome_unknown", SEND_UNCERTAIN_MESSAGE, SEND_UNCERTAIN_RECOVERY]
   return {
     success: false,
     code: result.code,
-    state: live ? "sending" : unavailable ? "not_sent" : "outcome_unknown",
-    error: live ? SEND_IN_PROGRESS_MESSAGE : unavailable ? SEND_CLAIM_UNAVAILABLE_MESSAGE : SEND_UNCERTAIN_MESSAGE,
-    recovery_action: live ? SEND_IN_PROGRESS_RECOVERY : unavailable ? SEND_CLAIM_UNAVAILABLE_RECOVERY : SEND_UNCERTAIN_RECOVERY,
+    state,
+    error,
+    recovery_action: recovery,
     retry_safe: false,
     held,
   }
@@ -360,10 +461,35 @@ function addressList(value: unknown): string[] {
     .filter(Boolean).sort()
 }
 
+export type EmailContentAttachment = { sha256: string; name?: string | null; contentType?: string | null }
+
+function attachmentList(input: { attachments?: EmailContentAttachment[]; attachmentHashes?: string[] }) {
+  const listed = (input.attachments ?? []).map((a) => ({
+    sha256: String(a?.sha256 ?? "").trim().toLowerCase(),
+    name: a?.name == null ? null : String(a.name).trim(),
+    content_type: a?.contentType == null ? null : String(a.contentType).trim().toLowerCase(),
+  }))
+  // Older callers pass bare hashes: the file's name and type are unknown.
+  const bare = (input.attachmentHashes ?? []).map((h) => ({
+    sha256: String(h ?? "").trim().toLowerCase(),
+    name: null,
+    content_type: null,
+  }))
+  const text = (v: string | null) => v ?? ""
+  return [...listed, ...bare].sort((a, b) =>
+    a.sha256.localeCompare(b.sha256) || text(a.name).localeCompare(text(b.name)) ||
+    text(a.content_type).localeCompare(text(b.content_type))
+  )
+}
+
 /**
- * The key for one email's content: mailbox, mode, reply target, recipients,
- * subject, body and attachment hashes. Two requests that would deliver the same
- * email share the key, whichever door they come through.
+ * The key for one email's content: mailbox, mode, reply target, recipients
+ * (to, cc and bcc, each lowercased and sorted), subject, body and attachments
+ * (sha256, file name and content type; bare attachmentHashes count as name and
+ * type unknown). Two requests that would deliver the same email share the
+ * key, whichever door they come through, so both doors must describe
+ * attachments the same way: the same bytes with and without a name are two
+ * keys.
  */
 export async function emailContentKey(input: {
   mailbox?: string | null
@@ -374,6 +500,7 @@ export async function emailContentKey(input: {
   bcc?: unknown
   subject?: string | null
   html?: string | null
+  attachments?: EmailContentAttachment[]
   attachmentHashes?: string[]
 }): Promise<string> {
   const canonical = JSON.stringify({
@@ -385,7 +512,7 @@ export async function emailContentKey(input: {
     bcc: addressList(input.bcc),
     subject: String(input.subject ?? ""),
     html: String(input.html ?? ""),
-    attachments: [...(input.attachmentHashes ?? [])].map(String).sort(),
+    attachments: attachmentList(input),
   })
   return `email_content:${await sha256Hex(canonical)}`
 }
@@ -395,6 +522,45 @@ export async function bytesSha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** An id as it goes into a key: trimmed, and lowercased when UUID-shaped (Xero and Postgres ids). */
+export function canonicalSendId(id: unknown): string {
+  const text = String(id ?? "").trim()
+  return UUID_SHAPE.test(text) ? text.toLowerCase() : text
+}
+
+/** invoice:<xero invoice id>: one invoice, whichever door emails it. */
 export function invoiceSendKey(xeroInvoiceId: string): string {
-  return `invoice:${String(xeroInvoiceId).trim()}`
+  return `invoice:${canonicalSendId(xeroInvoiceId)}`
+}
+
+/** approved_send:<payload hash or approval id>: one approved message. */
+export function approvedSendKey(payloadHashOrApprovalId: string): string {
+  return `approved_send:${canonicalSendId(payloadHashOrApprovalId)}`
+}
+
+/** makesafe_pack:<job id>:<main|photo>: one pack email of one make-safe job. */
+export function makesafePackSendKey(jobId: string, packKind?: string | null): string {
+  return `makesafe_pack:${canonicalSendId(jobId)}:${String(packKind ?? "").trim().toLowerCase() || "main"}`
+}
+
+/**
+ * debt_report:<org>: the org's one debt report, manual and automatic alike.
+ * Deliberately broad: an unresolved report holds every report of that org,
+ * whoever it goes to, until it is checked.
+ */
+export function debtReportSendKey(orgId: string): string {
+  return `debt_report:${canonicalSendId(orgId)}`
+}
+
+/**
+ * debt_statement:<org>:<customer>: statements to one customer of one org,
+ * across weeks (an unresolved statement last week holds this week's). The
+ * older debt_statement:<customer> key, still built inline by the debt
+ * workshop, overblocks: it has no org, so two orgs that share a customer id
+ * hold each other. New callers use this one.
+ */
+export function debtStatementSendKey(orgId: string, companyId: string): string {
+  return `debt_statement:${canonicalSendId(orgId)}:${canonicalSendId(companyId)}`
 }

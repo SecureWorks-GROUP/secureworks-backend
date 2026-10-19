@@ -1293,3 +1293,34 @@ Deno.test("raw provider text: a pack reset or a close-out whose store write fail
     assertNoRawText(closeClient._tables.makesafe_report_packs, `${table} pack rows`);
   }
 });
+
+Deno.test("send_pack: a claim store that cannot answer refuses before anything is prepared or authorised", async () => {
+  const client = makeClient(readySeed());
+  client._claims.fail("claim_outbound_send");
+  const before = JSON.stringify(client._tables);
+  const { counts, deps } = makeSeams({ emailMode: "ok" });
+  let err: any = null;
+  try {
+    await _makesafeSendPackForTest(
+      client,
+      {
+        job_id: "job-1",
+        recipient_email: "workorders@b.com",
+        subject: "Make Safe Completion B-1",
+        html_body: "<p>done</p>",
+        approved_photo_urls: APPROVED_PHOTOS,
+      },
+      CTX,
+      deps,
+    );
+  } catch (e) {
+    err = e;
+  }
+  assert(err, "expected a refusal");
+  assertEquals(err.status, 503, String(err?.message));
+  assertEquals(err.body?.state, "not_sent");
+  assertEquals(err.body?.job_id, "job-1");
+  assertEquals(err.body?.pack_kind, "main");
+  assertEquals(JSON.stringify(client._tables), before, "no pack row, lock, invoice or event was written");
+  assertEquals(counts.getToken + counts.authorise + counts.fetchInvoicePdf + counts.attachDoc + counts.email, 0);
+});

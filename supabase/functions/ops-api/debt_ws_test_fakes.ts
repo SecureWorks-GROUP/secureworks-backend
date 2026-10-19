@@ -528,6 +528,13 @@ export class FakeStore implements DebtWsStore {
       this.statementRows.filter((s) => s.week_start === weekStart),
     );
   }
+  unconfirmedStatementsForCompany(companyKey: string) {
+    return Promise.resolve(
+      this.statementRows.filter((s) =>
+        s.company_key === companyKey && s.status === "sending"
+      ),
+    );
+  }
   claimStatement(row: {
     id?: string;
     company_key: string;
@@ -549,6 +556,7 @@ export class FakeStore implements DebtWsStore {
       status: "sending" as const,
       sent_at: null,
       error: null,
+      created_at: this.clock().toISOString(),
     };
     this.statementRows.push(full);
     return Promise.resolve(full);
@@ -631,6 +639,14 @@ export class FakeStore implements DebtWsStore {
       [...this.reportRows].sort((a, b) =>
         String(b.created_at).localeCompare(String(a.created_at))
       ).slice(0, limit),
+    );
+  }
+  unconfirmedReports() {
+    if (this.reportReadsFail) return Promise.reject(new Error("no table"));
+    return Promise.resolve(
+      this.reportRows.filter((r) => r.status === "sending").sort((a, b) =>
+        String(a.created_at).localeCompare(String(b.created_at))
+      ),
     );
   }
   claimReport(row: WsReportClaim) {

@@ -194,7 +194,7 @@ Deno.test("outlook: a settle that cannot be written after an unknown still holds
   assertEquals(t.claims.rowsFor("invoice:inv-123")[0].state, "sending")
   assertEquals((await _verifyAndSendInvoiceEmail(t.deps())).status, 409)
   // Past the lease it reads uncertain, and only a checked press releases it.
-  t.claims.advance(601_000)
+  t.claims.advance(901_000)
   const held = await _verifyAndSendInvoiceEmail(t.deps())
   assertEquals((await jsonBody(held)).state, "outcome_unknown")
   assertEquals(outlookCalls(t.spy), 1)

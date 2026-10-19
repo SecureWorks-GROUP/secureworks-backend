@@ -15,6 +15,14 @@
 // sent (status failed); an uncertain final send is outcome_unknown and is
 // never retried.
 //
+// The send holds two keys in one attempt: approved_send:<payload hash> (the
+// approval's provenance) and the delivery identity every door shares
+// (email_content:<sha256>, ../_shared/approved_send_content_key.ts, built from
+// the mailbox, mode, recipients, subject, body and the loaded attachments), so
+// a plain send of the same message and this one can never both go out. The
+// attempt's dispatch token is confirmed before every mutating Graph call; a
+// fenced confirm stops with nothing more sent.
+//
 // Approval checks, the claim and the audit are owned by
 // ../_shared/approved_send.ts.
 
@@ -26,6 +34,13 @@ import {
   prepareApprovedSend,
   type SendDeps,
 } from '../_shared/approved_send.ts'
+import { describeAttachment, emailDeliveryKey } from '../_shared/approved_send_content_key.ts'
+import {
+  confirmSendDispatch,
+  type EmailContentAttachment,
+  sendClaimRefusalBody,
+  type SendClaimRefusal,
+} from '../_shared/outbound_send_claim.ts'
 import { assertGraphSendAccepted } from './graph_send_accept.ts'
 import { safeErrorFacts, safeInternetMessageId, safeProviderId } from '../_shared/safe_identifier.ts'
 
@@ -88,6 +103,12 @@ function outcomeUnknown(error: unknown): boolean {
 
 class DraftMismatch extends Error {}
 
+class DispatchFenced extends Error {
+  constructor(readonly refusal: SendClaimRefusal) {
+    super('send dispatch fenced')
+  }
+}
+
 export async function sendApprovedEmail(
   deps: ApprovedEmailDeps,
   approvalId: string,
@@ -98,7 +119,32 @@ export async function sendApprovedEmail(
   // A read that proves the mailbox exists and primes the Graph token before
   // the approval is consumed.
   await deps.verifyMailbox(payload.mailbox)
-  const claimed = await claimApprovedSend(deps, prepared, caller)
+  const attachments: EmailContentAttachment[] = []
+  for (const attachment of prepared.attachments) {
+    attachments.push(
+      await describeAttachment(attachment.bytes, attachment.approved.name, attachment.approved.content_type),
+    )
+  }
+  const deliveryKey = await emailDeliveryKey({
+    mailbox: payload.mailbox,
+    mode: payload.mode,
+    replyTo: payload.reply_to_message_id,
+    to: payload.to,
+    cc: payload.cc,
+    bcc: payload.bcc,
+    subject: payload.subject,
+    html: payload.html_body,
+    attachments,
+  })
+  const claimed = await claimApprovedSend(deps, prepared, caller, { deliveryKeys: [deliveryKey] })
+  // The pre-send fence, immediately before each mutating Graph call.
+  const confirm = async () => {
+    const confirmed = await confirmSendDispatch(deps.store.claims, {
+      attemptId: claimed.sendAttemptId,
+      dispatchToken: claimed.dispatchToken,
+    })
+    if (!confirmed.ok) throw new DispatchFenced(confirmed)
+  }
 
   const base = `/users/${seg(payload.mailbox)}/messages`
   let draftId: string | null = null
@@ -107,6 +153,7 @@ export async function sendApprovedEmail(
   try {
     let draft: Record<string, unknown>
     if (payload.mode === 'reply') {
+      await confirm()
       const created = await deps.graph(
         `${base}/${seg(payload.reply_to_message_id || '')}/createReply`,
         {
@@ -120,6 +167,7 @@ export async function sendApprovedEmail(
       )
       draftId = safeProviderId((await created.json() as any)?.id)
       if (!draftId) throw new DraftMismatch('Graph reply draft had no id')
+      await confirm()
       const patched = await deps.graph(`${base}/${seg(draftId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -132,6 +180,7 @@ export async function sendApprovedEmail(
       }, { mutating: true })
       draft = await patched.json() as Record<string, unknown>
     } else {
+      await confirm()
       const created = await deps.graph(base, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -160,6 +209,7 @@ export async function sendApprovedEmail(
     }
     stage = 'attachments'
     for (const attachment of prepared.attachments) {
+      await confirm()
       await deps.graph(`${base}/${seg(draftId)}/attachments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -171,6 +221,7 @@ export async function sendApprovedEmail(
         }),
       }, { mutating: true })
     }
+    await confirm()
     stage = 'send'
     const sent = await deps.graph(`${base}/${seg(draftId)}/send`, {
       method: 'POST',
@@ -183,7 +234,9 @@ export async function sendApprovedEmail(
     // Before the final send nothing can have been delivered.
     const unknown = stage === 'send' && outcomeUnknown(error)
     const status = unknown ? 'outcome_unknown' : 'failed'
-    const code = error instanceof DraftMismatch
+    const code = error instanceof DispatchFenced
+      ? 'send_dispatch_fenced'
+      : error instanceof DraftMismatch
       ? 'provider_draft_mismatch'
       : unknown
       ? 'provider_outcome_unknown'
@@ -210,6 +263,18 @@ export async function sendApprovedEmail(
         ...safeErrorFacts(error),
       },
     }, caller)
+    if (error instanceof DispatchFenced) {
+      // Stopped before the final send: nothing was delivered.
+      return {
+        status: 409,
+        body: {
+          ...sendClaimRefusalBody(error.refusal),
+          approval_id: approvalId,
+          recovery_action: 'Nothing was sent. This approval is used; record a new approval to try again.',
+          ...recorded,
+        },
+      }
+    }
     return {
       status: 502,
       body: {
