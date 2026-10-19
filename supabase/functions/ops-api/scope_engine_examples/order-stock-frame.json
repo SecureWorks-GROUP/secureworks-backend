@@ -1,0 +1,9 @@
+{
+  "schema": "scope-engine-v2/job@1", "id": "order-stock-frame", "name": "Synthetic stock frame", "house": "none", "revision": 1,
+  "profiles": [],
+  "elements": [
+    {"id":"beam-a","kind":"member","role":"beam","productKey":"rhs:100x50x2.0:c450l0","colourId":"CB-SURFMIST","from":[0,0],"to":[2800,0],"top":{"z":2600}},
+    {"id":"beam-b","kind":"member","role":"beam","productKey":"rhs:100x50x2.0:c450l0","colourId":"CB-SURFMIST","from":[0,2000],"to":[2800,2000],"top":{"z":2600}},
+    {"id":"beam-c","kind":"member","role":"beam","productKey":"rhs:100x50x2.0:c450l0","colourId":"CB-MONUMENT","from":[0,4000],"to":[1800,4000],"top":{"z":2600}}
+  ]
+}

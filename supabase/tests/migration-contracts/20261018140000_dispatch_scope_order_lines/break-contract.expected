@@ -1,0 +1,1 @@
+scope order lines contract: browser roles must hold no privilege on public.dispatch_scope_order_lines

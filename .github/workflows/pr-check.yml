@@ -402,6 +402,7 @@ jobs:
             supabase/functions/ops-api/dispatch_job_list_test.ts \
             supabase/functions/ops-api/dispatch_stage_test.ts \
             supabase/functions/ops-api/dispatch_materials_test.ts \
+            supabase/functions/ops-api/dispatch_scope_order_test.ts \
             supabase/functions/ops-api/dispatch_order_pdf_test.ts \
             supabase/functions/ops-api/dispatch_orders_store_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \

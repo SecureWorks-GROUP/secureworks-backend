@@ -312,6 +312,11 @@ import {
   DispatchMaterialsError,
   runDispatchMaterialsAction,
 } from './dispatch_materials_store.ts'
+import { DispatchScopeOrderError } from './dispatch_scope_order.ts'
+import {
+  DISPATCH_SCOPE_ORDER_WRITE_ACTIONS,
+  runDispatchScopeOrderAction,
+} from './dispatch_scope_order_store.ts'
 import {
   DISPATCH_ORDERS_WRITE_ACTIONS,
   runDispatchOrdersAction,
@@ -6804,6 +6809,34 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Scope order lines, stage 1 (docs/dispatch-scope-order-lines-v1.md):
+      // one read and one import onto dispatch_scope_order_lines. Same staff
+      // gate as slice 4. No purchase order, no price, no send.
+      case 'dispatch_scope_order_lines':
+      case 'dispatch_scope_order_import': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if ((DISPATCH_SCOPE_ORDER_WRITE_ACTIONS as readonly string[]).includes(action) && req.method !== 'POST') {
+          throw new ApiError(`${action} requires POST`, 405)
+        }
+        const scopeOrderActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchScopeOrderAction(client, action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: scopeOrderActor,
+          }))
+        } catch (e) {
+          if (e instanceof DispatchScopeOrderError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
       }
