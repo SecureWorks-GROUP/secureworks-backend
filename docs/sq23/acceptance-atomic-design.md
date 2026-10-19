@@ -129,3 +129,42 @@ The re-review marked items 1, 3 and 4 resolved. Items 2 and 5 were partly resolv
 - an expired lease, both before and after the external call;
 - the `unknown` hold, which must never auto-resend;
 - a staff-advanced overwrite writing its review event.
+
+## Revision 4, after the Codex re-review at `9e2da34`
+
+Item 2 (staff-advanced jobs) is resolved. Item 1 (replay and recovery) has four remaining points, and each is answered below.
+
+**1. Replay inside the lock.** R1 runs these steps under the job and document locks, in this order:
+1. Look up the attempt row for the document. If one exists, return its stored result: the derived status and the step list. Stop there, with no overwrite, no new event and no eligibility check.
+2. Otherwise apply the eligibility rules. Accepted, declined or superseded with no attempt row returns today's refusal.
+3. Otherwise accept.
+
+send-quote's earlier check only saves a round trip; the RPC is the authority.
+
+**2. Steps are seeded at commit.** The same transaction that writes the attempt row inserts every step row this acceptance needs, in state `pending`. Which steps apply (job type, contacts, deposit configuration) is computed under the lock from the same snapshot. A crash after commit therefore always leaves a complete list of resumable steps. Steps are never rebuilt afterwards.
+
+**3. Lease fencing and the point of no return.**
+- Each claim is a compare-and-set: `pending`/`failed_retry_safe` → `running` with a fresh `claim_token` and `lease_until`, and the claimer keeps the token.
+- Every later write by that worker is conditioned on the token, so a worker whose lease has expired cannot write.
+- Before any external call the worker sets `dispatch_started_at` under its token. That is the durable "may have started" marker.
+- A step found `running` with an expired lease:
+  - **no** `dispatch_started_at`: goes back to `pending`;
+  - **with** `dispatch_started_at` and no outcome: becomes `unknown`. This also covers a crash before the outcome was saved.
+- `unknown` is never retried automatically.
+
+**4. Effects, keys and reconciliation, per step.** These are taken from the whole-quote path in `send-quote/index.ts` (~2000 to 2290 at `9e2da34`). Each step holds one external effect. The payload is frozen into the step row at commit, and a replay sends the frozen payload.
+
+| Step | Effect | Stable key | Provider idempotency | Reconciliation if `unknown` |
+|---|---|---|---|---|
+| `expected_costs` | `freezeExpectedCostsOnAcceptance` (internal, write-once) | job id | Write-once in our database | Re-read the frozen row. Internal, so it is safe to retry. |
+| `job_event` | `job_events` insert (`quote_accepted`) | `<attempt>:job_event`, stored in the event | Our database: unique key | Re-read. Safe to retry. |
+| `ghl_stage` | ghl-proxy `move_stage` to accepted | `<attempt>:ghl_stage` | None known | Read the opportunity's stage in GHL. "Already at accepted" counts as done. Stage moves are idempotent by target, so a retry is safe once the stage has been read. |
+| `client_update` | ops-api `send_client_update` (customer message) | `<attempt>:client_update` | Not verified | Customer send: never resend automatically. A person checks the message log (GHL conversation or Sent Items). |
+| `ghl_note` | GHL contact note (and neighbour contact create plus note) | `<attempt>:ghl_note[:contact]` | None | Read the contact's notes for the key text. Low harm. A person decides. |
+| `deposit_invoice` | ops-api `send_acceptance_invoice` (creates and sends an invoice) | `<attempt>:deposit_invoice[:contact]`, passed to ops-api | ops-api's own idempotency must be confirmed; not assumed | Money and a customer send: never resend automatically. A person checks Xero and the send record. |
+| `council_submission` | ops-api `create_council_submission` | `<attempt>:council` | Not verified | A person checks the council submissions list. |
+| `council_email` | Resend email "Next Steps & House Plans", plus the GHL log and the `po_communications` row | `<attempt>:council_email`, sent as the Resend `Idempotency-Key` | Resend supports an idempotency key (to be confirmed for this account) | Customer send: never resend automatically. A person checks Resend's log or Sent Items. |
+
+Steps whose provider idempotency is unproven run **at most once**: claim, mark dispatch started, call, record the outcome. Any doubt leaves them `unknown`. This is the same rule the containment work uses, extended past Sent Items to Xero, GHL and the council list as the table shows.
+
+**Unchanged by this revision:** the switch is off by default; per-run and legacy paths behave as today; what the customer sees is unchanged.
