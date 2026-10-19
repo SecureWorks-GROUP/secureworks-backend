@@ -217,6 +217,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { signatureMediaDeleteRefusal } from '../_shared/signature_media_guard.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import { findLiveJobContactForGhlContact } from '../_shared/job_contact_membership.ts'
 import {
@@ -18982,13 +18983,8 @@ async function generateWorkOrderDoc(client: any, body: any) {
 // the storage file is gone, so a signature used by a sign-off is refused here,
 // before storage is touched. An unreadable check refuses too.
 async function assertSignatureMediaNotSignedOff(client: any, media: Array<{ id: string; phase?: string | null }>) {
-  const ids = media.filter((m) => m && m.phase === SIGNATURE_MEDIA_PHASE).map((m) => String(m.id))
-  if (ids.length === 0) return
-  const { data, error } = await client.from('job_client_signoffs').select('id').in('signature_media_id', ids).limit(1)
-  if (error) throw new ApiError('This signature could not be checked against client sign-offs, so it was not deleted', 503)
-  if (Array.isArray(data) && data.length > 0) {
-    throw new ApiError('This signature is a client sign-off and cannot be deleted', 409)
-  }
+  const refusal = await signatureMediaDeleteRefusal(client, media)
+  if (refusal) throw new ApiError(refusal.message, refusal.status)
 }
 
 async function deleteMedia(client: any, body: any) {

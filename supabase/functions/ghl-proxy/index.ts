@@ -47,6 +47,7 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { signatureMediaDeleteRefusal } from '../_shared/signature_media_guard.ts'
 // Outbound SMS evidence goes through sms_capture.ts (context slice C1a): the
 // shared GHL row builder and the one SQL writer capture_business_event.
 import { computeHash } from '../_shared/evidence/storage.ts'
@@ -3349,16 +3350,9 @@ serve(async (req: Request) => {
       // A client's signature on a sign-off is evidence: the sign-off's foreign
       // key would refuse the row delete only after the file was gone, so it is
       // refused here, before storage is touched. An unreadable check refuses.
-      const signatureIds = (records || []).filter((r: any) => r.phase === 'signature').map((r: any) => r.id)
-      if (signatureIds.length > 0) {
-        const { data: signoffs, error: signoffError } = await sb.from('job_client_signoffs')
-          .select('id').in('signature_media_id', signatureIds).limit(1)
-        if (signoffError) {
-          return json({ error: 'A signature could not be checked against client sign-offs, so nothing was deleted', code: 'signoff_check_failed' }, 503)
-        }
-        if ((signoffs || []).length > 0) {
-          return json({ error: 'A signature is a client sign-off and cannot be deleted', code: 'signature_signed_off' }, 409)
-        }
+      const signatureRefusal = await signatureMediaDeleteRefusal(sb, records || [])
+      if (signatureRefusal) {
+        return json({ error: signatureRefusal.message, code: signatureRefusal.code }, signatureRefusal.status)
       }
 
       // Delete storage files
