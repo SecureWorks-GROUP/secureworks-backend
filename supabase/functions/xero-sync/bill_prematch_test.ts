@@ -431,4 +431,9 @@ Deno.test("the sync never places a bill whose supplier document is duplicated (r
   assertEquals(gate.includes("verdict === 'remove' || duplicateDocument\n        ? { reference: false, poFallback: false }"), true);
   assertEquals(src.includes("const holdReason: SuggestionReason | null = duplicateDocument\n          ? 'duplicate_document'"), true);
   assertEquals(src.includes("if (!allSupplierBills) throw new Error('supplier bills unreadable')"), true);
+  // Its own older facts, outside the window or cap, are swept too: hold first, then the fact goes by its own source.
+  const sweep = src.slice(src.indexOf("// 5. This path's own facts outside this run's window or cap"), src.indexOf("// Bill pre-match (JP-06): after the queue upsert"));
+  assertEquals(sweep.includes("if (seenNow.has(id) || !OWN_FACT_SOURCES.has(src)) continue"), true);
+  assertEquals(sweep.includes("if (qs && qs !== 'open') continue"), true);
+  assertEquals(sweep.indexOf("suggestionReason: 'duplicate_document'") < sweep.indexOf(".delete().eq('xero_invoice_id', id).eq('automation_source', src)"), true);
 });
