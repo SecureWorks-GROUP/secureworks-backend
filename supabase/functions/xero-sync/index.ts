@@ -36,7 +36,7 @@ import { readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { readAll, runBillPrematch } from './bill_prematch_run.ts'
-import { DEAD_JOB_STATUSES, poIsDead, poNamedIn } from './bill_prematch.ts'
+import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -1414,6 +1414,16 @@ async function ingestMaterialsActuals(
       }
     }
 
+    // 2b. Every live supplier bill, so the same supplier document entered twice
+    //     (even under two contacts, Metecno 1449582) is never placed by this path.
+    const allSupplierBills = await readAll<any>(() =>
+      sb.from('xero_invoices')
+        .select('xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type')
+        .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCPAY').order('xero_invoice_id')
+    )
+    if (!allSupplierBills) throw new Error('supplier bills unreadable')
+    const documentIndex = buildDocumentIndex(allSupplierBills)
+
     // 3. Candidate bills — ACCPAY, in window, not void/deleted. EVERY bill in
     //    the window, paged in a fixed order (CFO-12: a single .limit(500) read
     //    skipped bills once the window held more). A failed page stops the step.
@@ -1564,7 +1574,17 @@ async function ingestMaterialsActuals(
         .map((p) => p.job_id ?? null)
       const existingSource = factSourceById.get(bill.xero_invoice_id)
       const factJobId = factJobById.get(bill.xero_invoice_id)
-      const verdict = existingFactVerdict({
+      // The same supplier document entered more than once: a person decides
+      // which bill is real. No automatic path places any of them, and this
+      // path's own earlier fact on one is taken off into a held row.
+      const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0
+      if (duplicateDocument) {
+        const counts = result as Record<string, unknown>
+        counts.duplicate_documents_held = Number(counts.duplicate_documents_held || 0) + 1
+      }
+      const verdict = duplicateDocument && existingSource && OWN_FACT_SOURCES.has(existingSource)
+        ? 'remove'
+        : existingFactVerdict({
         source: existingSource,
         factJobId,
         factJobNumber: factJobId ? jobNumberById.get(factJobId) ?? null : null,
@@ -1609,7 +1629,7 @@ async function ingestMaterialsActuals(
       const named = new Set([...refTokens, ...lineTokens])
       const xeroLinkConflict = !!b.job_id && named.size > 0 &&
         !(xeroJobNumber && named.has(String(xeroJobNumber).toUpperCase()))
-      const allowed = verdict === 'remove'
+      const allowed = verdict === 'remove' || duplicateDocument
         ? { reference: false, poFallback: false }
         : newPlacementAllowed({
           refTokens,
@@ -1660,7 +1680,9 @@ async function ingestMaterialsActuals(
       } else if (m.outcome === 'queue') {
         // Why a person must decide: a removed fact, or a Xero link the bill's
         // job number does not back. Kept on the row so no automatic path places it.
-        const holdReason: SuggestionReason | null = verdict === 'remove'
+        const holdReason: SuggestionReason | null = duplicateDocument
+          ? 'duplicate_document'
+          : verdict === 'remove'
           ? 'fact_contradicted'
           : held
           ? heldReason as SuggestionReason
@@ -1693,6 +1715,45 @@ async function ingestMaterialsActuals(
         result.queued++
       }
       // skip_mirror / skip_non_accpay: nothing to do (guards above already handled).
+    }
+
+    // 5. This path's own facts outside this run's window or cap: a fact on a
+    //    supplier document entered more than once is taken off into a held row
+    //    too, so an older automatic cost never stays beside its duplicate.
+    {
+      const seenNow = new Set((bills || []).map((b: any) => b.xero_invoice_id))
+      const docById = new Map(allSupplierBills.map((r: any) => [r.xero_invoice_id, r]))
+      for (const [id, src] of factSourceById) {
+        if (seenNow.has(id) || !OWN_FACT_SOURCES.has(src)) continue
+        const doc: any = docById.get(id)
+        if (!doc) continue
+        const st = String(doc.status || '').toUpperCase()
+        if (st === 'VOIDED' || st === 'DELETED') continue
+        if (duplicateDocumentsOf(doc, documentIndex).length === 0) continue
+        const qs = queueStatusById.get(id)
+        if (qs && qs !== 'open') continue // a person's decision stands
+        const factJobId = factJobById.get(id) ?? null
+        const row = buildQueueRow(doc as BillInput, {
+          outcome: 'queue',
+          suggestedJobId: factJobId,
+          suggestedJobNumber: factJobId ? jobNumberById.get(factJobId) ?? null : null,
+          suggestionConfidence: 'low',
+          suggestionReason: 'duplicate_document',
+        }, DEFAULT_ORG_ID)
+        const write = qs === 'open'
+          ? sb.from('materials_reconciliation_queue').update(row).eq('xero_invoice_id', id).eq('status', 'open').select('id')
+          : sb.from('materials_reconciliation_queue').upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true }).select('id')
+        const { data: written, error: qErr } = await write
+        if (qErr || !Array.isArray(written) || written.length === 0) {
+          if (qErr) console.error(`[materials] duplicate hold failed ${id}:`, qErr.message)
+          continue
+        }
+        // Only after the hold is saved: the fact goes, filtered by its own source.
+        await sb.from('job_materials_facts').delete().eq('xero_invoice_id', id).eq('automation_source', src)
+        result.cleaned++
+        const counts = result as Record<string, unknown>
+        counts.duplicate_facts_held = Number(counts.duplicate_facts_held || 0) + 1
+      }
     }
 
     // Bill pre-match (JP-06): after the queue upsert, close bills voided or
