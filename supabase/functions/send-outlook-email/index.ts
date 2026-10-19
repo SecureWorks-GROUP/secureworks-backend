@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════
 
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { sendRecipientMetadata } from '../_shared/ledger_send_fields.ts'
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
@@ -1660,6 +1661,7 @@ async function handleForward(body: Record<string, unknown>): Promise<Response> {
       }),
     ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
   }
+  const forwardRecipient = sendRecipientMetadata({ recipients: to })
   Promise.resolve(
     sb.from('email_events').insert({
       email_type: 'forward',
@@ -1671,6 +1673,7 @@ async function handleForward(body: Record<string, unknown>): Promise<Response> {
       subject,
       status: 'accepted',
       sent_at: new Date().toISOString(),
+      ...(Object.keys(forwardRecipient).length ? { metadata: forwardRecipient } : {}),
     }),
   ).catch(() => {})
   const warnings = sourceType === 'group'
@@ -2125,6 +2128,10 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           }),
         ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
       }
+      const clientRecipient = sendRecipientMetadata({
+        recipients: to,
+        contactId: body.ghl_contact_id,
+      })
       Promise.resolve(
         sb.from('email_events').insert({
           email_type: 'client_email',
@@ -2136,6 +2143,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           subject,
           status: 'accepted',
           sent_at: new Date().toISOString(),
+          ...(Object.keys(clientRecipient).length ? { metadata: clientRecipient } : {}),
         }),
       ).catch(() => {})
       if (body.ghl_contact_id) {

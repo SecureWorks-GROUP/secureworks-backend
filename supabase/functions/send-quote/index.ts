@@ -1,4 +1,5 @@
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
+import { customerContactForAddress } from "../_shared/ledger_send_fields.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Send Quote Edge Function
 //
@@ -225,8 +226,11 @@ async function insertEmailEvent(sb: any, opts: {
   status: 'sent' | 'failed'
   failureReason?: string
   metadata?: Record<string, any>
+  contactId?: string | null
 }) {
   try {
+    const metadata = { ...(opts.metadata || {}) }
+    if (opts.contactId) metadata.contact_id = opts.contactId
     const { error } = await sb.from('email_events').insert({
       email_type: opts.emailType,
       entity_type: 'job',
@@ -240,7 +244,7 @@ async function insertEmailEvent(sb: any, opts: {
       sent_at: opts.status === 'sent' ? new Date().toISOString() : null,
       failed_at: opts.status === 'failed' ? new Date().toISOString() : null,
       failure_reason: opts.failureReason || null,
-      metadata: opts.metadata || {},
+      metadata,
     })
     if (error) console.log(`[send-quote] email_events insert failed:`, error.message)
   } catch (e: any) {
@@ -731,7 +735,7 @@ serve(async (req: Request) => {
       // staging time for the manifest snapshot.
       const { data: doc, error: docErr } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json, org_id), job_contacts(client_name, client_email)')
+        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, client_email, pricing_json, org_id), job_contacts(client_name, client_email)')
         .eq('id', document_id)
         .single()
 
@@ -924,6 +928,7 @@ serve(async (req: Request) => {
             emailType: 'quote', jobId: doc.job_id, recipient: client_email,
             subject: emailSubject, resendMessageId: resendData.id,
             status: 'sent',
+            contactId: customerContactForAddress(client_email, doc.jobs?.client_email, doc.jobs?.ghl_contact_id),
             metadata: { document_id: doc.id, quote_number: doc.quote_number, client_name: client_name, job_type: doc.jobs?.type, cc_emails: [...new Set([...(cc_emails || []), getDivisionInbox(doc.jobs?.type), 'admin@secureworkswa.com.au'])] },
           })
           // Log to po_communications for client email thread
@@ -943,6 +948,7 @@ serve(async (req: Request) => {
             emailType: 'quote', jobId: doc.job_id, recipient: client_email,
             subject: emailSubject, status: 'failed',
             failureReason: errData.message || `HTTP ${emailRes.status}`,
+            contactId: customerContactForAddress(client_email, doc.jobs?.client_email, doc.jobs?.ghl_contact_id),
             metadata: { document_id: doc.id, client_name: client_name },
           })
           const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)
@@ -3467,6 +3473,7 @@ serve(async (req: Request) => {
           emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
           subject: emailSubject, resendMessageId,
           status: 'sent',
+          contactId: customerContactForAddress(client_email, invoiceJob?.client_email, invoiceJob?.ghl_contact_id),
           metadata: { xero_invoice_id, invoice_number, deposit_amount, client_name, job_type },
         })
         // Log to po_communications for client email thread
@@ -3486,6 +3493,7 @@ serve(async (req: Request) => {
           emailType: 'invoice', jobId: invoiceRecord.job_id, recipient: client_email,
           subject: emailSubject, status: 'failed',
           failureReason: errData.message || `HTTP ${emailRes.status}`,
+          contactId: customerContactForAddress(client_email, invoiceJob?.client_email, invoiceJob?.ghl_contact_id),
           metadata: { xero_invoice_id, invoice_number, client_name },
         })
         const revertMode = resendResponseIsDefinitivePreSendRejection(emailRes.status)

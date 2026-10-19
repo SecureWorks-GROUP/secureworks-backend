@@ -273,7 +273,7 @@ BEGIN
  END IF;
  want_sup := jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id', inv::text, 'job_id', j1,
-  'supplier','Acme','amount','15.00'));
+  'supplier','Acme','amount','15.00','xero_id','xero-lpr-ws','total','15.00'));
  want_type := jsonb_build_array(jsonb_build_object(
   'kind','job_event','table','job_events','id', je::text, 'job_id', j1,
   'event_type','booking_set','about','booking:2026-10-02'));
@@ -296,7 +296,7 @@ BEGIN
  got := pg_temp.lpr_links(ev_sup);
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id', inv::text, 'job_id', j1,
-  'supplier', U&'\200B', 'amount','15.00')), 'zwsp supplier kept ' || coalesce(got::text, '<none>'));
+  'supplier', U&'\200B', 'amount','15.00','xero_id','xero-lpr-ws','total','15.00')), 'zwsp supplier kept ' || coalesce(got::text, '<none>'));
  RAISE NOTICE 'ledger packet records whitespace trim checks: %', nch * 4 + 1;
 END $ws$;
 
@@ -350,7 +350,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000012');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000925','job_id', j1,
-  'supplier','Twin Metals','amount','33.00')), '12 voided twin ' || coalesce(got::text, '<none>'));
+  'supplier','Twin Metals','amount','33.00','xero_id','xero-lpr-twin-paid','total','33.00')), '12 voided twin ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
  PERFORM pg_temp.lpr_assert(pg_temp.lpr_links('18f51000-0000-4000-8000-000000000013') IS NULL, '13 token on the other job');
@@ -401,7 +401,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000032');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','sent_document','table','job_documents','id','18f00000-0000-4000-8000-000000000301','job_id', j1,
-  'about','quote:q-9')) AND got::text NOT LIKE '%q-100%' AND got::text NOT LIKE '%000000000100%',
+  'about','quote:q-9','document_id','18f00000-0000-4000-8000-000000000301','quote_number','Q-9')) AND got::text NOT LIKE '%q-100%' AND got::text NOT LIKE '%000000000100%',
   '32 q-9 also cited q-100 ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
@@ -409,17 +409,17 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000033');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000933','job_id', j1,
-  'supplier','Case Metals','amount','19.00')), '33 lower paid ' || coalesce(got::text, '<none>'));
+  'supplier','Case Metals','amount','19.00','xero_id','xero-lpr-case','total','19.00')), '33 lower paid ' || coalesce(got::text, '<none>'));
  UPDATE public.xero_invoices SET status = 'Paid' WHERE id = '18f50000-0000-4000-8000-000000000933';
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000033');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000933','job_id', j1,
-  'supplier','Case Metals','amount','19.00')), '33 mixed paid ' || coalesce(got::text, '<none>'));
+  'supplier','Case Metals','amount','19.00','xero_id','xero-lpr-case','total','19.00')), '33 mixed paid ' || coalesce(got::text, '<none>'));
  UPDATE public.xero_invoices SET status = U&' paid\00A0' WHERE id = '18f50000-0000-4000-8000-000000000933';
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000033');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000933','job_id', j1,
-  'supplier','Case Metals','amount','19.00')), '33 padded paid ' || coalesce(got::text, '<none>'));
+  'supplier','Case Metals','amount','19.00','xero_id','xero-lpr-case','total','19.00')), '33 padded paid ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
  PERFORM pg_temp.lpr_assert(pg_temp.lpr_links('18f51000-0000-4000-8000-000000000034') IS NULL, '34 unsent borrowed');
@@ -427,7 +427,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000035');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','sent_document','table','job_documents','id','18f00000-0000-4000-8000-000000000301','job_id', j1,
-  'about','quote:q-9')), '35 current quote ' || coalesce(got::text, '<none>'));
+  'about','quote:q-9','document_id','18f00000-0000-4000-8000-000000000301','quote_number','Q-9')), '35 current quote ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
  -- 36 and 37. fully_paid_on is a Perth date. 17 Oct 15:30Z is still the 17th; 16:30Z is the 18th.
@@ -437,13 +437,13 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000036', '2026-10-17 16:30:00+00');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000936','job_id', j1,
-  'supplier','Perth Metals','amount','40.00')), '37 perth day ' || coalesce(got::text, '<none>'));
+  'supplier','Perth Metals','amount','40.00','xero_id','xero-lpr-perth','total','40.00')), '37 perth day ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000038');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f00000-0000-4000-8000-000000000101','job_id', j1,
-  'supplier','Other Metals','amount','90.00')) AND jsonb_array_length(got) = 1,
+  'supplier','Other Metals','amount','90.00','xero_id','xero-lpr-bill-metals','total','90.00')) AND jsonb_array_length(got) = 1,
   '38 four pointers ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  PERFORM pg_temp.lpr_assert(pg_temp.lpr_links('18f51000-0000-4000-8000-000000000039') IS NULL, '39 prose tax invoice');
@@ -453,7 +453,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000041');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000941','job_id', j1,
-  'supplier','Only Bill','amount','9.00')) AND NOT (got->0 ? 'number') AND got::text NOT LIKE '%paid_invoice%',
+  'supplier','Only Bill','amount','9.00','xero_id','xero-lpr-bill-inv9','bill_number','INV-9','total','9.00')) AND NOT (got->0 ? 'number') AND got::text NOT LIKE '%paid_invoice%',
   '41 bill with invoice number ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
@@ -464,36 +464,36 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000062');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','system_email','table','email_events','id','18f54000-0000-4000-8000-000000000062','job_id', j1,
-  'email_type','quote','status','sent','about','quote:q-9','system', true)),
+  'email_type','quote','status','sent','about','quote:q-9','system', true, 'recipient','client@example.test')),
   '42 quote kept ' || coalesce(got::text, '<none>'));
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000063');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','system_email','table','email_events','id','18f54000-0000-4000-8000-000000000063','job_id', j1,
-  'email_type','client_email','status','accepted','about','invoice:inv-44','system', true)),
+  'email_type','client_email','status','accepted','about','invoice:inv-44','system', true, 'recipient','client@example.test')),
   '42 client invoice ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000043');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000943','job_id', j1,
-  'supplier','Owing Metals','amount','50.00')), '43 still owing ' || coalesce(got::text, '<none>'));
+  'supplier','Owing Metals','amount','50.00','xero_id','xero-lpr-owing','total','50.00','owing','50.00')), '43 still owing ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000044');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000944','job_id', j1,
-  'supplier','Null Paid','amount','44.00')), '44 null paid date ' || coalesce(got::text, '<none>'));
+  'supplier','Null Paid','amount','44.00','xero_id','xero-lpr-nullpaid','total','44.00')), '44 null paid date ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000045');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','sent_document','table','job_documents','id','18f53000-0000-4000-8000-000000000045','job_id', j1,
-  'about','quote:q-45')), '45 sent at as_of ' || coalesce(got::text, '<none>'));
+  'about','quote:q-45','document_id','18f53000-0000-4000-8000-000000000045','quote_number','Q-45')), '45 sent at as_of ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  PERFORM pg_temp.lpr_assert(pg_temp.lpr_links('18f51000-0000-4000-8000-000000000046') IS NULL, '46 sent a second later');
  sn := sn + 1;
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000047');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000939','job_id', j1,
-  'supplier','Padded Metals','amount','39.00')), '47 padded uuid ' || coalesce(got::text, '<none>'));
+  'supplier','Padded Metals','amount','39.00','xero_id','xero-lpr-padded-939','total','39.00')), '47 padded uuid ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000048');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
@@ -503,7 +503,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000049');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f00000-0000-4000-8000-000000000101','job_id', j1,
-  'supplier','Other Metals','amount','90.00')), '49 mixed related ' || coalesce(got::text, '<none>'));
+  'supplier','Other Metals','amount','90.00','xero_id','xero-lpr-bill-metals','total','90.00')), '49 mixed related ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  PERFORM pg_temp.lpr_assert(pg_temp.lpr_links('18f51000-0000-4000-8000-000000000050') IS NULL, '50 attachment other job');
  sn := sn + 1;
@@ -514,7 +514,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000053');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','system_email','table','email_events','id','18f54000-0000-4000-8000-000000000053','job_id', j1,
-  'email_type','quote','status','accepted','about','quote:q-55','system', true)),
+  'email_type','quote','status','accepted','about','quote:q-55','system', true, 'recipient','client@example.test')),
   '53 unsent document cited ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  PERFORM pg_temp.lpr_assert(pg_temp.lpr_links('18f51000-0000-4000-8000-000000000054') IS NULL, '54 attachment prose');
@@ -543,7 +543,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000059');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000959','job_id', j1,
-  'supplier','Acme','amount','21.00')), '59 trimmed supplier ' || coalesce(got::text, '<none>'));
+  'supplier','Acme','amount','21.00','xero_id','xero-lpr-trimsup','total','21.00')), '59 trimmed supplier ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
  UPDATE public.job_events SET event_type = U&'\000Abooking_set\0009' WHERE id = '18f52000-0000-4000-8000-000000000060';
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000060');
@@ -554,7 +554,7 @@ BEGIN
  got := pg_temp.lpr_links('18f51000-0000-4000-8000-000000000061');
  PERFORM pg_temp.lpr_assert(got IS NOT DISTINCT FROM jsonb_build_array(jsonb_build_object(
   'kind','paid_bill','table','xero_invoices','id','18f50000-0000-4000-8000-000000000961','job_id', j1,
-  'supplier','Big Metals','amount','1000000000.50')) AND position('#' IN got::text) = 0,
+  'supplier','Big Metals','amount','1000000000.50','xero_id','xero-lpr-big','total','1000000000.50')) AND position('#' IN got::text) = 0,
   '61 ten digit amount ' || coalesce(got::text, '<none>'));
  sn := sn + 1;
 
