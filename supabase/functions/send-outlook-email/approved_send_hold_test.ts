@@ -140,7 +140,9 @@ Deno.test('Codex2: two approvals of the same content pressed together send once'
   const results = await both
   assertEquals(results.filter((r) => r.status === 'fulfilled').length, 1)
   const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
-  assertEquals((refused.reason as ApprovedSendRefusal).code, 'send_claim_held')
+  // Which refusal the second press meets depends on scheduling: the held claim,
+  // or the first approval's send having overtaken it. Either way nothing sends.
+  assert(['send_claim_held', 'approval_overtaken'].includes((refused.reason as ApprovedSendRefusal).code), (refused.reason as ApprovedSendRefusal).code)
   assertEquals(g.sends.length, 1)
 })
 
