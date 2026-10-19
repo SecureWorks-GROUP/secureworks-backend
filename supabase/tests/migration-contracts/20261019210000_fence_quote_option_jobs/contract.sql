@@ -360,11 +360,18 @@ SELECT pg_temp.qo_assert((SELECT n FROM qo_group6_baseline) = 0, 'group 6 must s
 UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_supersede_v1';
 SELECT pg_temp.qo_silent_round_trip('false', (SELECT n FROM qo_group6_baseline));
 DO $$
+DECLARE
+ v_nullable boolean := true;
 BEGIN
- UPDATE public.feature_flags SET enabled = NULL WHERE flag_name = 'quote_option_supersede_v1';
- PERFORM pg_temp.qo_silent_round_trip('NULL', (SELECT n FROM qo_group6_baseline));
-EXCEPTION WHEN not_null_violation THEN
- RAISE NOTICE 'feature_flags.enabled is NOT NULL here, so a NULL switch cannot occur';
+ BEGIN
+  UPDATE public.feature_flags SET enabled = NULL WHERE flag_name = 'quote_option_supersede_v1';
+ EXCEPTION WHEN not_null_violation THEN
+  v_nullable := false;
+  RAISE NOTICE 'feature_flags.enabled is NOT NULL here, so a NULL switch cannot occur';
+ END;
+ IF v_nullable THEN
+  PERFORM pg_temp.qo_silent_round_trip('NULL', (SELECT n FROM qo_group6_baseline));
+ END IF;
 END $$;
 UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'quote_option_supersede_v1';
 CREATE FUNCTION public.qo_contract_raise() RETURNS boolean LANGUAGE plpgsql AS $$
