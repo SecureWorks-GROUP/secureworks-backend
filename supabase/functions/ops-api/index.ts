@@ -9349,29 +9349,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // heals it), so an open invoice is never shown as deleted with $0 due
         // (CFO-14, 19 Oct 2026).
         const vInv = vRes?.Invoices?.[0]
-        const vVerified = !!vInv && vInv.InvoiceID === vid && typeof vInv.Status === 'string'
+        // Verified only with this invoice's id, a status and both balances,
+        // as reconcileXeroInvoice requires.
+        const vVerified = !!vInv && vInv.InvoiceID === vid && typeof vInv.Status === 'string' &&
+          typeof vInv.AmountDue === 'number' && Number.isFinite(vInv.AmountDue) &&
+          typeof vInv.AmountPaid === 'number' && Number.isFinite(vInv.AmountPaid)
         const vReturned = vVerified ? String(vInv.Status).toUpperCase() : null
-        if (vVerified) {
-          const vPatch: Record<string, unknown> = { status: vReturned, raw_json: vInv, synced_at: new Date().toISOString() }
-          if (typeof vInv.AmountDue === 'number' && Number.isFinite(vInv.AmountDue)) vPatch.amount_due = vInv.AmountDue
-          if (typeof vInv.AmountPaid === 'number' && Number.isFinite(vInv.AmountPaid)) vPatch.amount_paid = vInv.AmountPaid
-          await client.from('xero_invoices').update(vPatch).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
-        } else {
-          console.error(`[ops-api] void_invoice: Xero reply did not return invoice ${vid}; local copy left unchanged`)
+        if (!vVerified) {
+          console.error(`[ops-api] void_invoice: Xero did not confirm invoice ${vid}; local copy left unchanged`)
+          return json({
+            success: false,
+            provider_verified: false,
+            error: 'Xero did not confirm the change; nothing was recorded here. Check the invoice in Xero.',
+          }, 502)
         }
-        // Log business event (non-blocking)
-        try {
-          await client.from('business_events').insert({
-            event_type: newStatus === 'DELETED' ? 'invoice.deleted' : 'invoice.voided',
-            source: 'ops-api/void_invoice',
-            entity_type: 'invoice',
-            entity_id: vid,
-            // The invoice's own job, so the row lands on it (no job: the Xero placement step).
-            ...(voidInvRecord?.job_id ? { job_id: voidInvRecord.job_id, match_method: 'direct_job_id' } : {}),
-            payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
-          })
-        } catch (_) { /* non-blocking */ }
-        return json({ success: true, status: vReturned ?? newStatus, provider_verified: vVerified })
+        await client.from('xero_invoices').update({
+          status: vReturned,
+          amount_due: vInv.AmountDue,
+          amount_paid: vInv.AmountPaid,
+          raw_json: vInv,
+          synced_at: new Date().toISOString(),
+        }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        // An event only for the change Xero actually made.
+        if (vReturned === newStatus) {
+          try {
+            await client.from('business_events').insert({
+              event_type: newStatus === 'DELETED' ? 'invoice.deleted' : 'invoice.voided',
+              source: 'ops-api/void_invoice',
+              entity_type: 'invoice',
+              entity_id: vid,
+              // The invoice's own job, so the row lands on it (no job: the Xero placement step).
+              ...(voidInvRecord?.job_id ? { job_id: voidInvRecord.job_id, match_method: 'direct_job_id' } : {}),
+              payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
+            })
+          } catch (_) { /* non-blocking */ }
+        }
+        return json({ success: vReturned === newStatus, status: vReturned, provider_verified: true })
       }
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body
