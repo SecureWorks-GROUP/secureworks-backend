@@ -41,18 +41,27 @@ import {
   sendApprovedEmail,
 } from './approved_send_email.ts'
 import {
-  bytesSha256Hex,
   type ClaimClient,
   claimSend,
-  emailContentKey,
+  confirmSendDispatch,
   extendSendClaim,
   newSendAttemptId,
+  reconcileActor,
+  reconcileHeld,
+  reconcileThenClaim,
+  SEND_FENCED_RECOVERY,
   sendClaimRefusalBody,
   sendClaimRefusalStatus,
   type SendClaimRefusal,
   type SettleState,
   settleSend,
 } from '../_shared/outbound_send_claim.ts'
+import {
+  describeGraphAttachments,
+  type EmailDelivery,
+  emailDeliveryKey,
+  plainDoorInvoiceKeys,
+} from '../_shared/approved_send_content_key.ts'
 import { assertGraphSendAccepted, GraphSendNotConfirmed } from './graph_send_accept.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -1094,12 +1103,26 @@ async function acceptGraphSend(response: Response): Promise<void> {
 
 // ── Durable send hold (_shared/outbound_send_claim.ts) ──
 //
-// Every mail-sending action holds the email's content key before its first
-// mutating Graph call and settles it after. A caller that already claimed its
-// own item (ops-api invoice, debt, make-safe) passes
-// send_claim: { item_key, attempt_id }; the content key then joins that
-// attempt and the attempt is settled here. Otherwise the content key is
+// Every mail-sending action holds the email's delivery key
+// (_shared/approved_send_content_key.ts, the same key an approved send holds)
+// before its first mutating Graph call, plus invoice:<id> for each invoice the
+// body names, and settles the attempt after, as its dispatcher. A caller that
+// already claimed its own item (ops-api invoice, debt, make-safe) passes
+// send_claim: { item_key, attempt_id }; the keys then join that attempt
+// (extendSendClaim with the caller's item key, single use: a second request
+// carrying the same attempt is refused as in progress). Otherwise the keys are
 // claimed under a fresh attempt. A held key refuses with nothing sent.
+//
+// The claim's dispatch token is confirmed immediately before EVERY mutating
+// Graph call (confirmSendDispatch). A confirm that fails (the attempt was
+// reconciled, settled or lapsed, or its token was replaced) stops the send:
+// 409, retry-safe only when no mutating call had been made yet.
+//
+// A plain request after an unconfirmed send may say sent_items_checked: true
+// with checked_by (the named person who checked Sent Items) and optionally
+// held_attempt_id: each attempt holding its keys is then reconciled by name
+// (compare-and-set, never a live send) before the new claim, and the checker
+// and time are recorded on the claim.
 
 export class OutlookSendClaimRefused extends Error {
   constructor(readonly refusal: SendClaimRefusal) {
@@ -1108,14 +1131,26 @@ export class OutlookSendClaimRefused extends Error {
   }
 }
 
-export type EmailContentKeyInput = Parameters<typeof emailContentKey>[0]
+/** The pre-send fence refused: nothing more may be sent on this attempt. */
+export class OutlookSendFenced extends Error {
+  constructor(readonly refusal: SendClaimRefusal, readonly mutated: boolean) {
+    super('send dispatch fenced')
+    this.name = 'OutlookSendFenced'
+  }
+}
+
+export type EmailContentKeyInput = EmailDelivery
 
 export type OutlookSendHold = {
-  /** Claim (or join) the content key. Throws OutlookSendClaimRefused. */
+  /** Claim (or join) the delivery and invoice keys. Throws OutlookSendClaimRefused. */
   acquire: (content: EmailContentKeyInput) => Promise<void>
   acquired: () => boolean
+  /** The pre-send fence: call immediately before each mutating Graph call. Throws OutlookSendFenced. */
+  confirm: () => Promise<void>
   settle: (state: SettleState, detail?: Record<string, unknown>) => Promise<void>
 }
+
+export type OutlookSendCheck = { checkedBy: string; heldAttemptId: string | null }
 
 let sendClaimClientOverride: ClaimClient | null = null
 
@@ -1144,40 +1179,117 @@ export function readSendClaimField(
   return { item_key: itemKey, attempt_id: attemptId }
 }
 
+/**
+ * sent_items_checked: true needs checked_by, the person who checked Sent
+ * Items; held_attempt_id optionally names the attempt they checked.
+ */
+export function readSentItemsCheck(body: Record<string, unknown>): OutlookSendCheck | null {
+  if (!hasOwn(body, 'sent_items_checked') && !hasOwn(body, 'checked_by') && !hasOwn(body, 'held_attempt_id')) {
+    return null
+  }
+  if (body.sent_items_checked !== true) {
+    throw new OutlookInputError(
+      'invalid_sent_items_check',
+      'checked_by and held_attempt_id apply only with sent_items_checked: true',
+    )
+  }
+  const checkedBy = reconcileActor(typeof body.checked_by === 'string' ? body.checked_by : null)
+  if (!checkedBy) {
+    throw new OutlookInputError(
+      'checked_by_required',
+      'sent_items_checked needs checked_by: the person who checked Sent Items',
+    )
+  }
+  let heldAttemptId: string | null = null
+  if (hasOwn(body, 'held_attempt_id') && body.held_attempt_id !== null) {
+    heldAttemptId = typeof body.held_attempt_id === 'string' ? body.held_attempt_id.trim() : ''
+    if (!heldAttemptId) {
+      throw new OutlookInputError('invalid_sent_items_check', 'held_attempt_id must name an attempt')
+    }
+  }
+  return { checkedBy, heldAttemptId }
+}
+
 export function makeOutlookSendHold(
   client: ClaimClient,
   callerClaim: { item_key: string; attempt_id: string } | null,
   actor: string | null,
+  options: { invoiceKeys?: string[]; check?: OutlookSendCheck | null } = {},
 ): OutlookSendHold {
   let attemptId: string | null = null
+  let dispatchToken = ''
+  let mutated = false
+  let fenced = false
   let settled = false
+  const invoiceKeys = options.invoiceKeys ?? []
+  const check = options.check ?? null
   return {
     acquired: () => attemptId !== null,
     async acquire(content) {
       if (attemptId) return
-      const key = await emailContentKey(content)
-      const result = callerClaim
-        ? await extendSendClaim(client, {
+      const keys = [...new Set([await emailDeliveryKey(content), ...invoiceKeys])]
+      const detail: Record<string, unknown> = { door: 'send-outlook-email' }
+      if (check) detail.checked_by = check.checkedBy
+      let result
+      if (callerClaim) {
+        // The caller's attempt already holds its own item; join only the rest.
+        const joinKeys = keys.filter((key) => key !== callerClaim.item_key)
+        if (check) {
+          const released = await reconcileHeld(client, {
+            keys: joinKeys,
+            result: 'not_sent',
+            actor: check.checkedBy,
+            evidence: 'sent_items_checked',
+            expectedAttemptId: check.heldAttemptId,
+          })
+          if (!released.ok) throw new OutlookSendClaimRefused(released)
+        }
+        result = await extendSendClaim(client, {
           attemptId: callerClaim.attempt_id,
-          keys: [key],
+          keys: joinKeys,
+          callerItemKey: callerClaim.item_key,
           actor,
-          detail: { door: 'send-outlook-email', caller_item_key: callerClaim.item_key },
+          detail: { ...detail, caller_item_key: callerClaim.item_key },
         })
-        : await claimSend(client, {
-          keys: [key],
+      } else if (check) {
+        result = await reconcileThenClaim(client, {
+          keys,
+          attemptId: newSendAttemptId('outlook'),
+          actor: check.checkedBy,
+          evidence: 'sent_items_checked',
+          expectedAttemptId: check.heldAttemptId,
+          detail,
+        })
+      } else {
+        result = await claimSend(client, {
+          keys,
           attemptId: newSendAttemptId('outlook'),
           actor,
-          detail: { door: 'send-outlook-email' },
+          detail,
         })
+      }
       if (!result.ok) throw new OutlookSendClaimRefused(result)
       attemptId = result.attempt_id
+      dispatchToken = result.dispatch_token
+    },
+    async confirm() {
+      if (!attemptId) return
+      const confirmed = await confirmSendDispatch(client, { attemptId, dispatchToken })
+      if (!confirmed.ok) {
+        // The attempt is no longer this request's to send or settle.
+        fenced = true
+        throw new OutlookSendFenced(confirmed, mutated)
+      }
+      mutated = true
     },
     async settle(state, detail = {}) {
-      if (!attemptId || settled) return
+      if (!attemptId || settled || fenced) return
       settled = true
       // A lost settle leaves the hold at sending; it reads as unknown once
       // its lease passes, so the item stays held either way.
-      await settleSend(client, attemptId, state, { door: 'send-outlook-email', ...detail })
+      await settleSend(client, attemptId, state, { door: 'send-outlook-email', ...detail }, {
+        settler: 'dispatcher',
+      })
     },
   }
 }
@@ -1185,22 +1297,22 @@ export function makeOutlookSendHold(
 const NO_HOLD: OutlookSendHold = {
   acquire: async () => {},
   acquired: () => false,
+  confirm: async () => {},
   settle: async () => {},
 }
 
-function base64ToBytes(value: string): Uint8Array {
-  const raw = atob(value)
-  const bytes = new Uint8Array(raw.length)
-  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
-  return bytes
-}
-
-async function attachmentHashes(attachments: GraphFileAttachment[]): Promise<string[]> {
-  const hashes: string[] = []
-  for (const attachment of attachments) {
-    hashes.push(await bytesSha256Hex(base64ToBytes(attachment.contentBytes)))
+/** The 409 for a fenced send: retry-safe only when no mutating call was made. */
+export function outlookSendFencedBody(error: OutlookSendFenced): Record<string, unknown> {
+  const body = sendClaimRefusalBody(error.refusal)
+  if (!error.mutated) return { ...body, state: 'not_sent', retry_safe: true }
+  return {
+    ...body,
+    state: 'outcome_unknown',
+    error:
+      'This send was stopped before its last step, because its hold was released or ran out. An earlier step of it reached the mailbox, so the outcome is not certain.',
+    recovery_action: SEND_FENCED_RECOVERY,
+    retry_safe: false,
   }
-  return hashes
 }
 
 // ── Download + Base64 encode attachment from URL ──
@@ -1637,7 +1749,12 @@ function acceptedResponse(
   }, 202)
 }
 
-async function sendDraftById(mailbox: string, draftId: string): Promise<void> {
+async function sendDraftById(
+  mailbox: string,
+  draftId: string,
+  hold: OutlookSendHold = NO_HOLD,
+): Promise<void> {
+  await hold.confirm()
   const response = await graphRequest(
     `/users/${safeSegment(mailbox, 'mailbox')}/messages/${safeSegment(draftId, 'draft_id')}/send`,
     {
@@ -1653,11 +1770,13 @@ async function addDraftAttachments(
   mailbox: string,
   draftId: string,
   attachments: GraphFileAttachment[],
+  hold: OutlookSendHold = NO_HOLD,
 ): Promise<void> {
   // Graph's message attachment endpoint accepts each direct file attachment
   // below 3 MiB. Validate all bytes before createReply/createReplyAll, then
   // add them one by one to the already-created native draft.
   for (const attachment of attachments) {
+    await hold.confirm()
     await graphRequest(
       `/users/${safeSegment(mailbox, 'mailbox')}/messages/${safeSegment(draftId, 'draft_id')}/attachments`,
       {
@@ -1748,6 +1867,7 @@ async function handleForward(
       subject: '',
       html: comment,
     })
+    await hold.confirm()
     const forwardResp = await graphRequest(
       `/groups/${safeSegment(groupId, 'group id')}/threads/${
         safeSegment(threadId, 'thread_id')
@@ -1774,6 +1894,7 @@ async function handleForward(
       subject: '',
       html: comment,
     })
+    await hold.confirm()
     const createResp = await graphRequest(
       `/users/${safeSegment(mailbox, 'mailbox')}/messages/${
         safeSegment(messageId, 'message_id')
@@ -1808,6 +1929,7 @@ async function handleForward(
     try {
       subject = typeof draft.subject === 'string' && draft.subject ? draft.subject : subject
       if (cc.length) {
+        await hold.confirm()
         await graphRequest(
           `/users/${safeSegment(mailbox, 'mailbox')}/messages/${safeSegment(draftId, 'draft_id')}`,
           {
@@ -1822,8 +1944,9 @@ async function handleForward(
           { mutating: true },
         )
       }
-      await sendDraftById(mailbox, draftId)
+      await sendDraftById(mailbox, draftId, hold)
     } catch (error) {
+      if (error instanceof OutlookSendFenced) throw error
       if (error instanceof GraphProviderError) {
         throw new GraphProviderError(error.status, error.message, true, {
           draft_id: draftId,
@@ -1921,6 +2044,10 @@ export async function handleReply(
   const expectedCc = splitRecipientInput(body.expected_cc, 'expected_cc')
   const attachments = await prepareAttachments(body.attachments)
   const endpoint = body.reply_all ? 'createReplyAll' : 'createReply'
+  const replyHtml = htmlBody +
+    (/<!--\s*suppress-auto-appended-default-signature\s*-->/i.test(htmlBody)
+      ? ''
+      : getSignature(mailbox))
   await hold.acquire({
     mailbox,
     mode: endpoint,
@@ -1928,9 +2055,10 @@ export async function handleReply(
     to: expectedTo,
     cc: expectedCc,
     subject: '',
-    html: htmlBody,
-    attachmentHashes: await attachmentHashes(attachments),
+    html: replyHtml,
+    attachments: await describeGraphAttachments(attachments),
   })
+  await hold.confirm()
   const createResp = await graphRequest(
     `/users/${safeSegment(mailbox, 'mailbox')}/messages/${
       safeSegment(messageId, 'message_id')
@@ -1944,12 +2072,7 @@ export async function handleReply(
         message: {
           body: {
             contentType: 'HTML',
-            content: htmlBody +
-              (/<!--\s*suppress-auto-appended-default-signature\s*-->/i.test(
-                  htmlBody,
-                )
-                ? ''
-                : getSignature(mailbox)),
+            content: replyHtml,
           },
         },
       }),
@@ -2013,10 +2136,11 @@ export async function handleReply(
       )
     }
     if (attachments.length) {
-      await addDraftAttachments(mailbox, draftId, attachments)
+      await addDraftAttachments(mailbox, draftId, attachments, hold)
     }
-    await sendDraftById(mailbox, draftId)
+    await sendDraftById(mailbox, draftId, hold)
   } catch (error) {
+    if (error instanceof OutlookSendFenced) throw error
     if (error instanceof GraphProviderError) {
       throw new GraphProviderError(error.status, error.message, true, {
         draft_id: draftId,
@@ -2291,10 +2415,18 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           'send_claim applies to sends only',
         )
       }
+      const sentItemsCheck = readSentItemsCheck(body)
+      if (sentItemsCheck && body.action === 'draft') {
+        throw new OutlookInputError(
+          'invalid_sent_items_check',
+          'sent_items_checked applies to sends only',
+        )
+      }
       hold = body.action === 'draft' ? NO_HOLD : makeOutlookSendHold(
         sendClaimClient(),
         callerClaim,
         resolveRequestActor({ headers: req.headers, trustActorHeader: true }).actor ?? null,
+        { invoiceKeys: plainDoorInvoiceKeys(body), check: sentItemsCheck },
       )
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       await assertOutlookSesDeliveryAllowed(sb, body)
@@ -2342,9 +2474,10 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
         cc,
         bcc,
         subject,
-        html: htmlBody,
-        attachmentHashes: await attachmentHashes(graphAttachments),
+        html: String((message.body as { content: string }).content),
+        attachments: await describeGraphAttachments(graphAttachments),
       })
+      await hold.confirm()
       mutationMayHaveStarted = true
       const sendResp = await graphRequest(`/users/${safeSegment(from, 'from')}/sendMail`, {
         method: 'POST',
@@ -2409,6 +2542,10 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
     } catch (err) {
       if (err instanceof OutlookSendClaimRefused) {
         return json(sendClaimRefusalBody(err.refusal), sendClaimRefusalStatus(err.refusal))
+      }
+      if (err instanceof OutlookSendFenced) {
+        // The attempt is no longer this request's: it is not settled here.
+        return json(outlookSendFencedBody(err), 409)
       }
       if (hold.acquired()) {
         // Settle the hold from what is known: only a definite provider refusal

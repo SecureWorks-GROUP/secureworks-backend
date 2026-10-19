@@ -172,7 +172,7 @@ Deno.test('AS4: an outcome write and its claim settle both lost: held while live
 
   const live = await assertRejects(() => sendApprovedEmail(d, pre, CALLER), ApprovedSendRefusal)
   assertEquals(((live as ApprovedSendRefusal).evidence as any).state, 'sending')
-  d.store.claims.advance(11 * 60_000)
+  d.store.claims.advance(16 * 60_000) // past the 900 s lease
   const stale = await assertRejects(() => sendApprovedEmail(d, pre, CALLER), ApprovedSendRefusal)
   assertEquals(((stale as ApprovedSendRefusal).evidence as any).state, 'outcome_unknown')
   // Only an explicit check releases it.
@@ -203,9 +203,12 @@ Deno.test('AS5: two checked re-approvals together, exactly one sends', async () 
   assertEquals(sends.filter((r) => r.status === 'fulfilled').length, 1)
   assertEquals(g.sends.length, 2) // the unknown first send, then exactly one resend
   const reconciled = d.store.claims.rows.filter((r) => r.state === 'reconciled_not_sent' && r.attempt_id === `approved_send:${first}`)
-  assertEquals(reconciled.length, 1)
-  assertEquals(reconciled[0].reconciled_by, RECORDER.actor)
-  assert(reconciled[0].reconcile_checked_at)
+  // The first attempt held the approval key and the delivery key; both are released together.
+  assertEquals(reconciled.map((r) => r.item_key.split(':')[0]).sort(), ['approved_send', 'email_content'])
+  for (const row of reconciled) {
+    assertEquals(row.reconciled_by, RECORDER.actor)
+    assert(row.reconcile_checked_at)
+  }
 })
 
 Deno.test('AS5: after a checked re-approval, an approval recorded earlier stays held and only the checked one sends', async () => {

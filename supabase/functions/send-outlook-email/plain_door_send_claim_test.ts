@@ -97,8 +97,16 @@ Deno.test('plain door: a repeat of an unconfirmed send is refused and Graph is c
 
 Deno.test('plain door: two identical requests together send once', async () => {
   const store = makeFakeClaimStore()
-  const p = provider(() => new Response(null, { status: 202 }))
-  const results = await withProvider(store, p, () => Promise.all([post(), post()]))
+  // Graph's answer is held until both requests have gone as far as they can,
+  // so the two are certainly in flight together (not one after the other).
+  const waiting: Array<() => void> = []
+  const p = provider(() => new Promise<Response>((resolve) => waiting.push(() => resolve(new Response(null, { status: 202 })))))
+  const results = await withProvider(store, p, async () => {
+    const both = Promise.all([post(), post()])
+    for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0))
+    waiting.splice(0).forEach((release) => release())
+    return await both
+  })
   assertEquals(p.sendMails(), 1)
   assertEquals(results.map((r) => r.status).sort(), [202, 409])
 })
