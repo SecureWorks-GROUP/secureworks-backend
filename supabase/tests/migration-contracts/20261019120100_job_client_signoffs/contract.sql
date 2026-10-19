@@ -47,6 +47,23 @@ BEGIN
   RAISE EXCEPTION 'client signoff contract: a sign-off was deleted';
  EXCEPTION WHEN check_violation THEN NULL;
  END;
+ BEGIN
+  TRUNCATE public.job_client_signoffs;
+  RAISE EXCEPTION 'client signoff contract: the sign-offs were truncated';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+ IF has_table_privilege('service_role', 'public.job_client_signoffs', 'TRUNCATE')
+    OR has_table_privilege('service_role', 'public.job_client_signoffs', 'UPDATE')
+    OR has_table_privilege('service_role', 'public.job_client_signoffs', 'DELETE') THEN
+  RAISE EXCEPTION 'client signoff contract: service_role can change or remove sign-offs';
+ END IF;
+ IF has_table_privilege('service_role', 'public.client_signoff_settings', 'UPDATE')
+    OR has_table_privilege('service_role', 'public.client_signoff_settings', 'INSERT')
+    OR has_table_privilege('service_role', 'public.client_signoff_settings', 'DELETE')
+    OR has_table_privilege('service_role', 'public.client_signoff_settings', 'TRUNCATE')
+    OR NOT has_table_privilege('service_role', 'public.client_signoff_settings', 'SELECT') THEN
+  RAISE EXCEPTION 'client signoff contract: service_role must only read the settings';
+ END IF;
  IF has_table_privilege('authenticated', 'public.job_client_signoffs', 'SELECT')
     OR has_table_privilege('anon', 'public.job_client_signoffs', 'INSERT') THEN
   RAISE EXCEPTION 'client signoff contract: a browser role can reach job_client_signoffs';

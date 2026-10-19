@@ -27,6 +27,7 @@ function fakeClient(tables: Record<string, { data?: any; error?: any; throws?: b
         eq: () => q,
         in: () => q,
         limit: () => q,
+        order: () => q,
         then(resolve: any, reject: any) {
           if (result.throws) return Promise.reject(new Error("boom")).then(resolve, reject);
           return Promise.resolve({ data: result.data ?? null, error: result.error ?? null }).then(resolve, reject);
@@ -166,4 +167,12 @@ Deno.test("loader: with the flag on, a failed sign-off or settings read holds ev
   const badSettings = fakeClient({ ...flagOn, client_signoff_settings: { error: { message: "x" } } });
   const b = await loadClientSignoffByJob(badSettings, [{ id: "m", type: "makesafe" }]);
   assertEquals([b?.get("m")?.applies, b?.get("m")?.satisfied], [true, false]);
+});
+
+Deno.test("chunks: ids split at 100 per filter, nothing lost", async () => {
+  const { chunkClientSignoffIds } = await import("./trade_client_signoff.ts");
+  const ids = Array.from({ length: 205 }, (_, i) => `j${i}`);
+  const chunks = chunkClientSignoffIds(ids);
+  assertEquals(chunks.map((c) => c.length), [100, 100, 5]);
+  assertEquals(chunks.flat(), ids);
 });

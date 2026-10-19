@@ -2,6 +2,7 @@
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _assertClientSignoffForInvoiceForTest as assertClientSignoffForInvoice,
+  _assertSignatureMediaNotSignedOffForTest as assertSignatureMediaNotSignedOff,
   _recordOnSiteClientSignoffForTest as recordOnSiteClientSignoff,
   _waiveClientSignoffForTest as waiveClientSignoff,
 } from "./index.ts";
@@ -154,4 +155,32 @@ Deno.test("invoice gate: flag on and the job read fails holds the job", async ()
   const flag = [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: true }];
   const c = fakeClient({ feature_flags: flag }, { errors: { jobs: { message: "x" } } });
   await assertRejects(() => assertClientSignoffForInvoice(c, [{ id: "job-1", label: "SWF-1" }]), Error, "could not be checked");
+});
+
+Deno.test("invoice gate: a job id with no jobs row is held, not let through", async () => {
+  const flag = [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: true }];
+  const c = fakeClient({ feature_flags: flag, jobs: [] });
+  await assertRejects(() => assertClientSignoffForInvoice(c, [{ id: "job-gone", label: "SWF-9" }]), Error, "could not be checked");
+});
+
+Deno.test("invoice gate: a long job list is read in chunks and every job is judged", async () => {
+  const flag = [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: true }];
+  const jobs = Array.from({ length: 250 }, (_, i) => ({ id: `job-${i}`, type: "makesafe", completed_at: null }));
+  const c = fakeClient({ feature_flags: flag, jobs });
+  await assertClientSignoffForInvoice(c, jobs.map((j) => ({ id: j.id, label: j.id })));
+  assertEquals(c.reads.filter((t) => t === "jobs").length, 3);
+});
+
+Deno.test("media delete: a signature used by a sign-off is refused before storage; others pass", async () => {
+  const c = fakeClient({ job_client_signoffs: [{ id: "s1", signature_media_id: "sig-1" }] });
+  const err = await assertRejects(() => assertSignatureMediaNotSignedOff(c, [{ id: "sig-1", phase: "signature" }]), Error, "client sign-off");
+  assertEquals((err as any).status, 409);
+  await assertSignatureMediaNotSignedOff(c, [{ id: "sig-2", phase: "signature" }]);
+  // A photo is never checked.
+  const n = c.reads.length;
+  await assertSignatureMediaNotSignedOff(c, [{ id: "sig-1", phase: "completion" }]);
+  assertEquals(c.reads.length, n);
+  const bad = fakeClient({}, { errors: { job_client_signoffs: { message: "x" } } });
+  const e2 = await assertRejects(() => assertSignatureMediaNotSignedOff(bad, [{ id: "sig-1", phase: "signature" }]));
+  assertEquals((e2 as any).status, 503);
 });

@@ -2,6 +2,8 @@
 --
 -- Refuses while any sign-off is recorded: a client's signed acceptance is
 -- evidence and is never deleted to undo a migration.
+
+BEGIN;
 DO $$
 BEGIN
   IF to_regclass('public.job_client_signoffs') IS NOT NULL
@@ -14,3 +16,5 @@ DELETE FROM public.feature_flags WHERE flag_name = 'trade_invoice_requires_clien
 DROP TABLE IF EXISTS public.client_signoff_settings;
 DROP TABLE IF EXISTS public.job_client_signoffs;
 DROP FUNCTION IF EXISTS public.job_client_signoffs_append_only();
+
+COMMIT;

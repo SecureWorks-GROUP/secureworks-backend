@@ -3333,7 +3333,7 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       // Get storage URLs before deleting records
-      const { data: records } = await sb.from('job_media').select('id, job_id, storage_url').in('id', ids)
+      const { data: records } = await sb.from('job_media').select('id, job_id, storage_url, phase').in('id', ids)
       if (credential.mode === 'user_jwt') {
         const jobIds = [...new Set((records || []).map((r: any) => r.job_id).filter(Boolean))]
         if (jobIds.length === 0 || (records || []).length !== ids.length) {
@@ -3344,6 +3344,21 @@ serve(async (req: Request) => {
         const orgByJob = new Map((jobs || []).map((j: any) => [j.id, j.org_id]))
         const mismatch = (records || []).some((r: any) => !isSameOrg(authProfile?.org_id, orgByJob.get(r.job_id)))
         if (mismatch) return json({ error: 'Media belongs to a different organisation', code: 'org_mismatch' }, 403)
+      }
+
+      // A client's signature on a sign-off is evidence: the sign-off's foreign
+      // key would refuse the row delete only after the file was gone, so it is
+      // refused here, before storage is touched. An unreadable check refuses.
+      const signatureIds = (records || []).filter((r: any) => r.phase === 'signature').map((r: any) => r.id)
+      if (signatureIds.length > 0) {
+        const { data: signoffs, error: signoffError } = await sb.from('job_client_signoffs')
+          .select('id').in('signature_media_id', signatureIds).limit(1)
+        if (signoffError) {
+          return json({ error: 'A signature could not be checked against client sign-offs, so nothing was deleted', code: 'signoff_check_failed' }, 503)
+        }
+        if ((signoffs || []).length > 0) {
+          return json({ error: 'A signature is a client sign-off and cannot be deleted', code: 'signature_signed_off' }, 409)
+        }
       }
 
       // Delete storage files

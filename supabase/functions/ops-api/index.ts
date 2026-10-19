@@ -184,6 +184,7 @@ import {
   CLIENT_SIGNOFF_BLOCK_REASON,
   CLIENT_SIGNOFF_NOT_HAPPY_EVENT,
   CLIENT_SIGNOFF_NOT_RECORDED_EVENT,
+  chunkClientSignoffIds,
   SIGNATURE_MEDIA_PHASE,
   clientSignoffMessage,
   clientSignoffRequired,
@@ -18977,6 +18978,19 @@ async function generateWorkOrderDoc(client: any, body: any) {
   return { document_id: docId, url: publicUrl, file_name: fileName }
 }
 
+// The sign-off row's foreign key refuses the job_media delete, but only after
+// the storage file is gone, so a signature used by a sign-off is refused here,
+// before storage is touched. An unreadable check refuses too.
+async function assertSignatureMediaNotSignedOff(client: any, media: Array<{ id: string; phase?: string | null }>) {
+  const ids = media.filter((m) => m && m.phase === SIGNATURE_MEDIA_PHASE).map((m) => String(m.id))
+  if (ids.length === 0) return
+  const { data, error } = await client.from('job_client_signoffs').select('id').in('signature_media_id', ids).limit(1)
+  if (error) throw new ApiError('This signature could not be checked against client sign-offs, so it was not deleted', 503)
+  if (Array.isArray(data) && data.length > 0) {
+    throw new ApiError('This signature is a client sign-off and cannot be deleted', 409)
+  }
+}
+
 async function deleteMedia(client: any, body: any) {
   const mediaId = body.mediaId || body.media_id
   if (!mediaId) throw new Error('mediaId required')
@@ -18989,6 +19003,8 @@ async function deleteMedia(client: any, body: any) {
 
   if (fetchErr) throw fetchErr
   if (!media) throw new Error('Media not found')
+  // A client's signature on a sign-off is evidence: refuse before the file goes.
+  await assertSignatureMediaNotSignedOff(client, [media])
 
   // Delete from storage
   if (media.storage_url) {
@@ -52970,23 +52986,31 @@ async function assertFencingCompletionEvidence(
 // trade_invoice_requires_client_signoff_v1 is off. Job type and completion
 // time are read here so every invoice path asks the same question.
 async function loadClientSignoffForJobIds(client: any, jobIds: string[]): Promise<Map<string, ClientSignoff> | null> {
-  // Flag first: while it is off no invoice path makes an extra read.
+  // Flag first: while it is off the only extra read is the flag itself, and an
+  // unreadable flag counts as off.
   if (!(await clientSignoffRequired(client))) return null
   const ids = [...new Set((jobIds || []).map((id) => String(id || '')).filter(Boolean))]
   if (ids.length === 0) return new Map()
-  const { data, error } = await client.from('jobs').select('id, type, completed_at').in('id', ids)
-  if (error) {
-    console.error('[ops-api] client sign-off job read failed:', error.message)
-    // Unknown job type: with the flag on every job is held until the read succeeds.
-    const map = new Map<string, ClientSignoff>()
-    for (const id of ids) {
-      map.set(id, { job_id: id, applies: true, satisfied: false, current: null, missing: 'evidence_unavailable', read_failed: true })
+  const jobs: any[] = []
+  for (const chunk of chunkClientSignoffIds(ids)) {
+    const { data, error } = await client.from('jobs').select('id, type, completed_at').in('id', chunk)
+    if (error) {
+      console.error('[ops-api] client sign-off job read failed:', error.message)
+      // Unknown job type: with the flag on every job is held until the read succeeds.
+      return new Map(ids.map((id) => [id, clientSignoffUnavailable(id)]))
     }
-    return map
+    jobs.push(...(data || []))
   }
-  return await loadClientSignoffByJob(client, (data || []).map((j: any) => ({
+  const map = await loadClientSignoffByJob(client, jobs.map((j: any) => ({
     id: String(j.id), type: String(j.type || ''), completed_at: j.completed_at || null,
-  })))
+  }))) || new Map<string, ClientSignoff>()
+  // A job id the read did not return cannot be shown to be outside the gate.
+  for (const id of ids) if (!map.has(id)) map.set(id, clientSignoffUnavailable(id))
+  return map
+}
+
+function clientSignoffUnavailable(id: string): ClientSignoff {
+  return { job_id: id, applies: true, satisfied: false, current: null, missing: 'evidence_unavailable', read_failed: true }
 }
 
 async function assertClientSignoffForInvoice(
@@ -52998,8 +53022,8 @@ async function assertClientSignoffForInvoice(
   const map = await loadClientSignoffForJobIds(client, wanted.map((j) => j.id))
   if (!map) return
   for (const job of wanted) {
-    const ev = map.get(job.id)
-    if (ev && ev.applies && !ev.satisfied) {
+    const ev = map.get(job.id) ?? clientSignoffUnavailable(job.id)
+    if (ev.applies && !ev.satisfied) {
       throw new ApiError(clientSignoffMessage(ev, job.label || null), 422)
     }
   }
@@ -53148,6 +53172,7 @@ async function waiveClientSignoff(client: any, body: any, actor: { actor: string
 }
 export const _recordOnSiteClientSignoffForTest = recordOnSiteClientSignoff
 export const _waiveClientSignoffForTest = waiveClientSignoff
+export const _assertSignatureMediaNotSignedOffForTest = assertSignatureMediaNotSignedOff
 export const _assertClientSignoffForInvoiceForTest = assertClientSignoffForInvoice
 
 // ── complete-to-invoice (2026-09-08, Marnin) ──────────────────────────────────

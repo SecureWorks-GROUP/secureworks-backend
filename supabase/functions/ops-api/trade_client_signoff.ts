@@ -272,19 +272,25 @@ export async function loadClientSignoffByJob(
   let rows: ClientSignoffRow[] = []
   if (!readFailed) {
     try {
-      const { data, error } = await client.from('job_client_signoffs')
-        .select('id, job_id, method, signed_name, happy, satisfaction_rating, signature_media_id, waiver_reason, created_at')
-        .in('job_id', gated.map((j) => j.id))
-      if (error) {
-        readFailed = true
-        console.error('[ops-api] client sign-off read failed:', error.message)
-      } else {
-        rows = data || []
+      // Chunked so a long weekly invoice never overflows the request URL, and
+      // newest first so the row cap can only ever cut older sign-offs.
+      for (const chunk of chunkClientSignoffIds(gated.map((j) => j.id))) {
+        const { data, error } = await client.from('job_client_signoffs')
+          .select('id, job_id, method, signed_name, happy, satisfaction_rating, signature_media_id, waiver_reason, created_at')
+          .in('job_id', chunk)
+          .order('created_at', { ascending: false })
+        if (error) {
+          readFailed = true
+          console.error('[ops-api] client sign-off read failed:', error.message)
+          break
+        }
+        rows.push(...(data || []))
       }
     } catch (error) {
       readFailed = true
       console.error('[ops-api] client sign-off read threw:', error instanceof Error ? error.message : String(error))
     }
+    if (readFailed) rows = []
   }
   for (const job of gated) {
     const ev = evaluateClientSignoff({
@@ -296,5 +302,14 @@ export async function loadClientSignoffByJob(
     // An unreadable settings row cannot say the job is outside the gate.
     out.set(job.id, readFailed ? { ...ev, applies: true, satisfied: false } : ev)
   }
+  return out
+}
+
+/** Job ids per .in() filter: 100 uuids keep a request well inside the URL budget. */
+export const CLIENT_SIGNOFF_ID_CHUNK = 100
+
+export function chunkClientSignoffIds(ids: string[], size = CLIENT_SIGNOFF_ID_CHUNK): string[][] {
+  const out: string[][] = []
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size))
   return out
 }
