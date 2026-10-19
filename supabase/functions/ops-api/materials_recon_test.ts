@@ -308,3 +308,25 @@ Deno.test("worklist — shows the agent's proposal and its reason, and Use it ac
   const fact = store.job_materials_facts.find((f) => f.xero_invoice_id === "xinv-001")!;
   assertEquals([fact.job_id, fact.automation_source], ["job-fence-1", "manual_queue"]);
 });
+
+Deno.test("agent placement — a row held for staff is never placed, even if the hold arrived after the read", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue[0].suggestion_reason = "fact_contradicted";
+  const { client, store } = makeFakeClient(seed);
+  await assertRejects(
+    () => assignReconRow(client, { queueId: "q-open-noref", jobId: "job-fence-1", actor: "agent_prematch", orgId: ORG, nowIso: NOW, agent: { matchReason: "x" } }),
+    Error, "held for staff",
+  );
+  assertEquals((store.job_materials_facts || []).filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
+});
+
+Deno.test("assign — a bill with no known amount is never placed as $0", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue[0].sub_total = null;
+  const { client, store } = makeFakeClient(seed);
+  await assertRejects(
+    () => assignReconRow(client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "staff@x", orgId: ORG, nowIso: NOW }),
+    Error, "no known amount",
+  );
+  assertEquals((store.job_materials_facts || []).filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
+});

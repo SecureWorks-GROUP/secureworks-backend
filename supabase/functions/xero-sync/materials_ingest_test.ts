@@ -22,6 +22,7 @@ import {
   buildQueueRow,
   dateWithinWindow,
   DEFAULT_MATCH_CONFIG,
+  amountIsKnown,
   existingFactVerdict,
   HELD_QUEUE_REASONS,
   extractJobNumber,
@@ -555,4 +556,12 @@ Deno.test("a held queue row is never placed automatically", () => {
   assertEquals(HELD_QUEUE_REASONS.has("fact_contradicted"), true);
   assertEquals(HELD_QUEUE_REASONS.has("xero_link_conflict"), true);
   assertEquals(HELD_QUEUE_REASONS.has("no_ref_no_po"), false);
+});
+
+Deno.test("an unknown bill amount blocks every automatic placement", () => {
+  assertEquals(
+    newPlacementAllowed({ refTokens: jobNumbersInText("SWF-26535"), lineTokens: new Set(), jobFromRefId: "a", amountKnown: false }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals([amountIsKnown(null), amountIsKnown(""), amountIsKnown(0), amountIsKnown("12.5")], [false, false, true, true]);
 });

@@ -325,7 +325,9 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
       const job = ctx.jobsByNumber.get(num);
       if (ctx.duplicateNumbers?.has(num)) problems.push(`${num} (${t.where}) is held by more than one job`);
       else if (!job) problems.push(`${num} (${t.where}) is not a job on record`);
-      else if (job.holding) continue; // a holding job is never evidence
+      // A holding job is never evidence for a placement, but it is a second job
+      // named: the bill is for a person, never placed whole elsewhere.
+      else if (job.holding) problems.push(`${num} (${t.where}) is a holding job`);
       else if (!jobIsLive(job)) problems.push(`${num} (${t.where}) is ${String(job.status).toLowerCase()}`);
       else {
         add(job, "job_number", t.where);

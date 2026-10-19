@@ -138,6 +138,11 @@ export type SuggestionReason =
   // Xero links the bill to a job that the bill's own job number does not name.
   | "xero_link_conflict";
 
+/** Is a bill amount a known number (not null, blank or NaN)? */
+export function amountIsKnown(v: unknown): boolean {
+  return v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v));
+}
+
 /** Queue reasons that hold a bill for a person: no automatic placement while open. */
 export const HELD_QUEUE_REASONS = new Set<string>(["fact_contradicted", "xero_link_conflict"]);
 
@@ -423,8 +428,11 @@ export function newPlacementAllowed(input: {
   jobFromRefId: string | null;
   xeroJobId?: string | null; // xero_invoices.job_id: the job Xero links the bill to
   held?: boolean; // the open queue row holds the bill for a person
+  amountKnown?: boolean; // false when the bill's ex-GST subtotal is missing
 }): { reference: boolean; poFallback: boolean } {
   if (input.held) return { reference: false, poFallback: false };
+  // Unknown cost is never placed as $0: wait until the amount is known.
+  if (input.amountKnown === false) return { reference: false, poFallback: false };
   const all = new Set([...input.refTokens, ...input.lineTokens]);
   if (all.size > 1) return { reference: false, poFallback: false };
   // A Xero job link this path cannot confirm is left to the pre-match, which

@@ -22,12 +22,13 @@ const MAX_ROWS = 1000;
 
 export type Store = Record<string, Array<Record<string, any>>>;
 
-type Filter = { kind: "eq" | "ilike" | "in" | "neq" | "not_null"; col: string; val: any };
+type Filter = { kind: "eq" | "ilike" | "in" | "neq" | "not_null" | "null_or_not_in"; col: string; val: any };
 
 function rowMatches(row: Record<string, any>, filters: Filter[]): boolean {
   return filters.every((f) => {
     if (f.kind === "eq") return row[f.col] === f.val;
     if (f.kind === "neq") return row[f.col] !== f.val;
+    if (f.kind === "null_or_not_in") return row[f.col] == null || !f.val.includes(row[f.col]);
     if (f.kind === "in") return (f.val as any[]).includes(row[f.col]);
     if (f.kind === "not_null") return row[f.col] != null;
     // ilike → case-insensitive full-string equality on trimmed values
@@ -106,6 +107,13 @@ class Query {
   range(from: number, to: number) {
     this.rangeFrom = from;
     this.rangeTo = to;
+    return this;
+  }
+  // Only the form "c.is.null,c.not.in.(a,b)" (a column is null or not one of a list).
+  or(expr: string) {
+    const m = expr.match(/^(\w+)\.is\.null,(\w+)\.not\.in\.\(([^)]*)\)$/);
+    if (!m || m[1] !== m[2]) throw new Error(`fake client: unsupported or(${expr})`);
+    this.filters.push({ kind: "null_or_not_in", col: m[1], val: m[3].split(",") });
     return this;
   }
   not(col: string, op: string, val: any) {

@@ -281,3 +281,10 @@ Deno.test("an open queue bill that is a trade-invoice mirror is never given a ma
   await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:00:00.000Z" });
   assertEquals(store.job_materials_facts.filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
 });
+
+Deno.test("a bill naming a live job and a numbered holding job is never placed whole on the live job", () => {
+  const jobs = [...JOBS, { id: "j6", job_number: "SWF-260001", status: "accepted", created_at: "2026-01-01", site_address: null, holding: true }];
+  const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] };
+  const d = decideBillPrematch(bill([["SWF-26535 posts", "305", 300], ["SWF-260001 rails", "305", 200]]), c);
+  assertEquals(d.kind === "job", false);
+});

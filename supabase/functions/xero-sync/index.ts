@@ -44,6 +44,7 @@ import {
   buildQueueRow,
   DEFAULT_MATCH_CONFIG,
   extractJobNumber,
+  amountIsKnown,
   existingFactVerdict,
   HELD_QUEUE_REASONS,
   JOB_NUMBER_RE,
@@ -1548,11 +1549,8 @@ async function ingestMaterialsActuals(
         xeroJobId: b.job_id ?? null,
       })
       if (verdict === 'not_ours' || verdict === 'keep') continue
-      if (verdict === 'remove') {
-        await sb.from('job_materials_facts').delete()
-          .eq('xero_invoice_id', bill.xero_invoice_id).eq('automation_source', existingSource as string)
-        result.cleaned++
-      }
+      // verdict 'remove': the fact is deleted only after the hold below is saved,
+      // so a failed write can never leave the bill with neither fact nor hold.
 
       // A new placement only on one consistent job number (the reference), or on
       // the PO fallback when the bill names no job at all; after a removal, never
@@ -1575,6 +1573,7 @@ async function ingestMaterialsActuals(
           jobFromRefId: jobFromRef?.id ?? null,
           xeroJobId: b.job_id ?? null,
           held,
+          amountKnown: amountIsKnown(bill.sub_total),
         })
       const pos = allowed.poFallback && bill.xero_contact_id
         ? posByContact.get(bill.xero_contact_id) || []
@@ -1588,6 +1587,18 @@ async function ingestMaterialsActuals(
       })
 
       if (m.outcome === 'fact') {
+        // A bill is a fact XOR a queue row. Take the open row off first, and
+        // only if it is still open: a person who filed it meanwhile wins.
+        if (existingQueueStatus === 'open') {
+          const { data: gone, error: dErr } = await sb.from('materials_reconciliation_queue').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('status', 'open')
+            .or(`suggestion_reason.is.null,suggestion_reason.not.in.(${[...HELD_QUEUE_REASONS].join(',')})`)
+            .select('id')
+          if (dErr || !Array.isArray(gone) || gone.length === 0) {
+            result.skipped_manual++
+            continue
+          }
+        }
         const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)
         const { error: fErr } = await sb
           .from('job_materials_facts')
@@ -1595,12 +1606,10 @@ async function ingestMaterialsActuals(
           // never overwritten.
           .upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true })
         if (fErr) {
+          // The bill has neither now; the next run sees no fact and no row and
+          // decides it again from scratch.
           console.error(`[materials] fact upsert failed ${bill.xero_invoice_id}:`, fErr.message)
           continue
-        }
-        // A bill is a fact XOR a queue row — clear any open queue suggestion.
-        if (existingQueueStatus === 'open') {
-          await sb.from('materials_reconciliation_queue').delete().eq('xero_invoice_id', bill.xero_invoice_id)
         }
         result.facts++
       } else if (m.outcome === 'queue') {
@@ -1614,12 +1623,27 @@ async function ingestMaterialsActuals(
           ? 'xero_link_conflict'
           : null
         const row = buildQueueRow(bill, holdReason ? { ...m, suggestionReason: holdReason } : m, DEFAULT_ORG_ID)
-        const { error: qErr } = await sb
-          .from('materials_reconciliation_queue')
-          .upsert(row, { onConflict: 'xero_invoice_id' })
+        // A new row is inserted only if none exists; an existing row is updated
+        // only while still open. A person's decision made during this run stands.
+        const write = existingQueueStatus === 'open'
+          ? sb.from('materials_reconciliation_queue').update(row)
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('status', 'open').select('id')
+          : sb.from('materials_reconciliation_queue')
+            .upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true }).select('id')
+        const { data: written, error: qErr } = await write
         if (qErr) {
-          console.error(`[materials] queue upsert failed ${bill.xero_invoice_id}:`, qErr.message)
+          console.error(`[materials] queue write failed ${bill.xero_invoice_id}:`, qErr.message)
           continue
+        }
+        if (!Array.isArray(written) || written.length === 0) {
+          // Someone else wrote the row first: re-read it next run, change nothing now.
+          result.skipped_manual++
+          continue
+        }
+        if (verdict === 'remove') {
+          await sb.from('job_materials_facts').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('automation_source', existingSource as string)
+          result.cleaned++
         }
         result.queued++
       }

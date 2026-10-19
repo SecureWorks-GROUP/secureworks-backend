@@ -31,6 +31,7 @@
 // CP1 Option A: facts are DERIVED rows keyed by xero_invoice_id, reversible by
 // delete; source tables (xero_invoices / trade_invoices) are NEVER mutated.
 // ════════════════════════════════════════════════════════════
+import { amountIsKnown, HELD_QUEUE_REASONS } from "../xero-sync/materials_ingest.ts";
 
 // ─────────────────────────────────────────────────────────────
 // Row shapes (subset of the U3 migration columns we read/write).
@@ -398,6 +399,15 @@ export async function assignReconRow(
   if (args.agent && queue.status !== "open") {
     throw new Error(`bill ${queue.xero_invoice_id} is ${queue.status}; the agent never moves a placed or filed bill`);
   }
+  // A row held for a person (the sync removed a contradicted fact, or Xero links
+  // another job) is never placed by the agent.
+  if (args.agent && HELD_QUEUE_REASONS.has(String((queue as any).suggestion_reason || ""))) {
+    throw new Error(`bill ${queue.xero_invoice_id} is held for staff (${(queue as any).suggestion_reason})`);
+  }
+  // Unknown cost is never placed as $0: the bill's amount must be known.
+  if (!amountIsKnown(queue.sub_total)) {
+    throw new Error(`bill ${queue.xero_invoice_id} has no known amount yet; it cannot be placed on a job`);
+  }
 
   // Resolve the target job.
   const action: AssignAction = args.useSuggestion ? "accept-suggestion" : "assign-to-job";
@@ -480,7 +490,11 @@ export async function assignReconRow(
       updated_at: now,
     })
     .eq("id", queue.id);
-  if (args.agent) flip = flip.eq("status", "open");
+  if (args.agent) {
+    // Re-checked at the write: still open and still not held.
+    flip = flip.eq("status", "open")
+      .or(`suggestion_reason.is.null,suggestion_reason.not.in.(${[...HELD_QUEUE_REASONS].join(",")})`);
+  }
   const { data: updatedQueue, error: qErr } = await flip.select().single();
   if (qErr) {
     if (args.agent && fact?.id) {
