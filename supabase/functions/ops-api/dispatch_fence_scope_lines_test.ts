@@ -1,8 +1,9 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 // The fence scope offer (dispatch_fence_scope_lines.ts). The fixtures are the
-// panel geometry of seven real fencing jobs, read-only on 19 Oct 2026 from
-// scope_json.job.runs (job numbers only; no client, address or price), and
-// each expectation is what that job's own purchase order actually carried.
+// panel geometry of seven real fencing jobs (cases A to G), read-only on
+// 19 Oct 2026 from the live scope_json.job.runs, not a frozen revision (no
+// client, address, price or job number here), and each expectation is what
+// that job's own purchase order actually carried.
 import {
   assert,
   assertEquals,
@@ -29,7 +30,7 @@ function scope(
     job: {
       profile,
       colour,
-      supplier: "RNR",
+      supplier: "SUPPLIER-A",
       gates,
       runs: runs.map((groups) => ({
         panels: groups.flatMap(([count, height, retaining, long]) =>
@@ -66,7 +67,7 @@ function panelsByPost(lines: any[]): Record<string, number> {
   return out;
 }
 
-Deno.test("real job SWF-26979: 9 panels and 8 plinths, as PO-298035", () => {
+Deno.test("fence case A: 9 panels and 8 plinths, as its order", () => {
   const { lines } = offer(
     scope("Ridgeside", "Woodland Grey", [[[8, 1800, 150], [1, 1800, 0]]]),
   );
@@ -75,13 +76,13 @@ Deno.test("real job SWF-26979: 9 panels and 8 plinths, as PO-298035", () => {
   assertEquals(qty(lines, /Patio tube/), 0);
 });
 
-Deno.test("real job SWF-261271: 7 panels and 7 plinths, as PO-294460", () => {
+Deno.test("fence case B: 7 panels and 7 plinths, as its order", () => {
   const { lines } = offer(scope("Sameside", "Monument", [[[7, 1800, 150]]]));
   assertEquals(qty(lines, /panel kit/), 7);
   assertEquals(qty(lines, /plinth/), 7);
 });
 
-Deno.test("real job SWF-26824: 18 panels, 41 plinths, 6 patio tubes, as PO-683376", () => {
+Deno.test("fence case C: 18 panels, 41 plinths, 6 patio tubes, as its order", () => {
   const { lines } = offer(scope("Trimclad", "Monument", [
     [[5, 1800, 300], [5, 1800, 600], [3, 1800, 300], [3, 1800, 150], [
       1,
@@ -97,7 +98,7 @@ Deno.test("real job SWF-26824: 18 panels, 41 plinths, 6 patio tubes, as PO-68337
   assert(lines.some((l) => /1200 mm sheet.*long panel/.test(l.description)));
 });
 
-Deno.test("real job SWF-26041: 23 panels on 2700 posts and 3 on 2400, 27 plinths, as its order", () => {
+Deno.test("fence case D: 23 panels on 2700 posts and 3 on 2400, 27 plinths, as its order", () => {
   const { lines } = offer(scope("Sameside", "Monument", [
     [[4, 1800, 300], [10, 1800, 150]],
     [[9, 1800, 150], [3, 1800, 0]],
@@ -107,7 +108,7 @@ Deno.test("real job SWF-26041: 23 panels on 2700 posts and 3 on 2400, 27 plinths
   assertEquals(qty(lines, /Patio tube/), 0);
 });
 
-Deno.test("real job SWF-26017: 3 panels on 2700 posts and 3 plinths, as its order", () => {
+Deno.test("fence case E: 3 panels on 2700 posts and 3 plinths, as its order", () => {
   const { lines } = offer(
     scope("Neetascreen", "Woodland Grey", [[[3, 1800, 150]]]),
   );
@@ -115,7 +116,7 @@ Deno.test("real job SWF-26017: 3 panels on 2700 posts and 3 plinths, as its orde
   assertEquals(qty(lines, /plinth/), 3);
 });
 
-Deno.test("real job SWF-26057: 5 panels and 8 plinths match; the post length did not (order took 2400, the table says 2700)", () => {
+Deno.test("fence case F: 5 panels and 8 plinths match; the post length did not (order took 2400, the table says 2700)", () => {
   const { lines } = offer(scope("Sameside", "Domain", [
     [[1, 1800, 0]],
     [[4, 1800, 300]],
@@ -127,7 +128,7 @@ Deno.test("real job SWF-26057: 5 panels and 8 plinths match; the post length did
   assertEquals(panelsByPost(lines), { "2400": 1, "2700": 4 });
 });
 
-Deno.test("real job SWF-26029: 1 panel on a 2400 post, 2 gate kits, 4 gate posts, as its order", () => {
+Deno.test("fence case G: 1 panel on a 2400 post, 2 gate kits, 4 gate posts, as its order", () => {
   const { lines } = offer(scope("Trimclad", "Basalt", [[[1, 1800, 0]]], [
     { type: "single", width: 1500 },
     { type: "single", width: 1170 },
@@ -155,7 +156,7 @@ Deno.test("every line is a suggestion shape: description within 300, a unit, a w
       "Retaining plinth 150 mm, Woodland Grey",
     ],
   );
-  assertEquals(scope_supplier, "RNR");
+  assertEquals(scope_supplier, "SUPPLIER-A");
   assert(held.some((h) => /end post/.test(h)));
   assert(held.some((h) => /Concrete is a crew buy/.test(h)));
 });

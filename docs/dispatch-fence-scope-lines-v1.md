@@ -4,7 +4,7 @@ Extends slice 4's scope suggestion (`docs/dispatch-slice-4-contract.md`) to fenc
 
 ## Source
 
-The job's latest `scope_revisions` row with `status = 'frozen'` (highest `revision_number`), its `scope_canonical_text` parsed as the scoper document. Never `jobs.scope_json` (the live working copy: a draft revision can sit after the frozen one, as on SWF-261551 on 19 Oct 2026) and never `pricing_json`. No frozen revision is `409 no_frozen_scope`. A revision that does not parse, or any panel the rules cannot read, is `409 scope_unreadable` with the reason; nothing is written.
+The job's latest `scope_revisions` row with `status = 'frozen'` (highest `revision_number`), its `scope_canonical_text` parsed as the scoper document. Never `jobs.scope_json` (the live working copy: a draft revision can sit after the frozen one; one job had one on 19 Oct 2026) and never `pricing_json`. No frozen revision is `409 no_frozen_scope`. A revision that does not parse, or any panel the rules cannot read, is `409 scope_unreadable` with the reason; nothing is written.
 
 ## Rules
 
@@ -24,4 +24,7 @@ Not lines, returned in `held` for the person: the one end post beyond the panel 
 
 ## Evidence
 
-Real jobs, read-only 19 Oct 2026 (`~/Projects/dispatch/workstreams/W1/evidence/20261019-scope-sources-read.md`): against each job's own purchase order, panels match 7 of 7, plinths 6 of 6, patio tubes 1 of 1, gate kits and gate posts 1 of 1, post length 5 of 6 (SWF-26057's order bought 2400 mm posts where the table says 2700). Pinned in `dispatch_fence_scope_lines_test.ts`.
+Real jobs, read-only 19 Oct 2026 (job numbers kept in the private evidence, not here). Two measurements, and only the second is the path this action reads:
+
+- **Live scope (`jobs.scope_json.job.runs`) against each job's own purchase order**, 7 jobs: panels 7 of 7, plinths 6 of 6, patio tubes 1 of 1, gate kits and gate posts 1 of 1, post length 5 of 6 (one order bought 2400 mm posts where the table says 2700). These are the fixtures pinned in `dispatch_fence_scope_lines_test.ts` (cases A to G).
+- **Latest frozen revision against the same orders** (independent check): only 3 of the 7 jobs have a frozen revision. Panels 2 of 3, plinths 3 of 3, patio tubes 1 of 1; gates and post length not testable. The miss is case A: its frozen revision has 8 panels (7 standard and 1 long) where its order took 9; its live scope holds 9 panels, differs from that frozen revision and was never frozen again, and the order matches the live scope. The rules read the frozen revision faithfully; the gap is a scope changed after freezing, which the person sees when reviewing every line.

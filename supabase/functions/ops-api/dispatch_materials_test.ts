@@ -2128,7 +2128,7 @@ Deno.test("gate: the privileged key reaches the actions; a write by GET is 405 a
 
 // ── The fence suggestion, from the frozen scope ─────────────────────────────
 
-// SWF-26979's panel geometry (job number only), as frozen revisions 2 and 3,
+// Fence case A's panel geometry (a real job, no job number), as frozen revisions 2 and 3,
 // with a newer draft revision 4 that must never be read.
 function fenceRevision(revision: number, status: string, runs: Row[]): Row {
   return {
@@ -2141,13 +2141,13 @@ function fenceRevision(revision: number, status: string, runs: Row[]): Row {
       job: {
         profile: "Ridgeside",
         colour: "Woodland Grey",
-        supplier: "RNR",
+        supplier: "SUPPLIER-A",
         runs,
       },
     }),
   };
 }
-const SWF_26979_RUN = {
+const FENCE_CASE_A_RUN = {
   length: 20,
   panels: [
     ...Array.from({ length: 8 }, () => ({ height: 1800, retaining: 150 })),
@@ -2169,7 +2169,7 @@ async function fenceJobWithRevisions(revisions: Row[]) {
 Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 plinths, not_reviewed, no price; a newer draft is ignored", async () => {
   const db = await fenceJobWithRevisions([
     fenceRevision(2, "frozen", [{ panels: [{ height: 1800, retaining: 0 }] }]),
-    fenceRevision(3, "frozen", [SWF_26979_RUN]),
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
     fenceRevision(4, "draft", [{ panels: [{ height: 2100, retaining: 600 }] }]),
   ]);
   assertEquals((await read(db, JOB.fence)).can_suggest, true);
@@ -2179,7 +2179,7 @@ Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 pl
   });
   assertEquals(answer.added, 3);
   assertEquals(answer.scope_revision_number, 3);
-  assertEquals(answer.scope_supplier, "RNR");
+  assertEquals(answer.scope_supplier, "SUPPLIER-A");
   assert(answer.held.length > 0);
   assertEquals(
     answer.lines.map((
