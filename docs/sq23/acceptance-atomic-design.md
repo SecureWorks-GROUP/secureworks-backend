@@ -168,3 +168,33 @@ send-quote's earlier check only saves a round trip; the RPC is the authority.
 Steps whose provider idempotency is unproven run **at most once**: claim, mark dispatch started, call, record the outcome. Any doubt leaves them `unknown`. This is the same rule the containment work uses, extended past Sent Items to Xero, GHL and the council list as the table shows.
 
 **Unchanged by this revision:** the switch is off by default; per-run and legacy paths behave as today; what the customer sees is unchanged.
+
+## Revision 5, after the Codex re-review at `9694135`
+
+**Lease fencing (was partly resolved).**
+- A claim and every later write are compare-and-sets on both conditions: `claim_token = :mine AND lease_until > now()`.
+- `dispatch_started_at` is written by such a compare-and-set. The external call is made **only after** that write is confirmed to have changed one row.
+- A worker whose lease has run out cannot record dispatch, so it never calls.
+- Outcome writes use the same condition. If an outcome write fails because the lease ran out after dispatch, the step is left for the expiry rule, which makes it `unknown`.
+
+**Compound steps are split into single-effect steps, with dependencies.** A step can name the step it depends on and read that step's stored result. A dependent step starts only after the step it depends on is `done`.
+
+| Step | Depends on | Effect | Stored result |
+|---|---|---|---|
+| `neighbour_contact:<contact>` | none | ghl-proxy `create_contact_and_opportunity` for a neighbour with no GHL contact | `{contactId}` |
+| `neighbour_contact_link:<contact>` | `neighbour_contact` | `job_contacts.ghl_contact_id` write (internal; compare-and-set from NULL) | none |
+| `neighbour_note:<contact>` | `neighbour_contact` | GHL note on that contact. The payload is frozen at commit with a placeholder; the contact id is taken from the result of the step it depends on. | none |
+| `ghl_note` | none | GHL note on the main contact | none |
+| `council_email` | none | Resend email | `{providerMessageId}` |
+| `council_email_ghl_log` | `council_email` | GHL conversation log | none |
+| `council_email_record` | `council_email` | `po_communications` row (internal, unique key) | none |
+
+The other steps from revision 4 are single-effect already. `deposit_invoice` stays one step because ops-api creates and sends the invoice in one call. Its recovery is ops-api's own: the step passes `<attempt>:deposit_invoice[:contact]`. Until ops-api is shown to honour that key, the step is at-most-once and lands in `unknown` on any doubt.
+
+**Success means the business result, not just HTTP.** A step is `done` only when **both** of these hold:
+- the response is 2xx;
+- the response body has the step's success field (`success:true`, or the id the step stores).
+
+A 2xx with an error or unknown body is `unknown` for send and money steps, and `failed` for the rest. A non-2xx follows the same classifier as the containment work: an explicit unknown, 408, 429, 5xx, an unreadable body or a transport error is `unknown`. Only a reply that says it is retry-safe makes the step retryable.
+
+**GHL stage reconciliation.** "The opportunity is already at accepted" counts as done only if the step had recorded no dispatch, or if the opportunity's stage history shows the move at or after `dispatch_started_at`. Otherwise the step is `unknown`, for a person to check. The move is idempotent by target, so the risk is only that nothing gets recorded, never a duplicate.
