@@ -19,7 +19,7 @@ import {
   makeStubXeroGet,
   STUB_ENV,
 } from "../ops-api/_test_helpers.ts"
-import { dispatchInvoiceResend, takeSharedInvoiceSend } from "./invoice_shared_send.ts"
+import { dispatchInvoiceResend, releaseSharedInvoiceSendNotSent, takeSharedInvoiceSend } from "./invoice_shared_send.ts"
 
 type Claims = ReturnType<typeof makeFakeClaimStore>
 
@@ -131,4 +131,68 @@ Deno.test("send-quote/index.ts takes the shared hold before its own claim and se
   assert(shared > 0 && local > shared, "shared hold before the local invoice_email_send_claims row")
   assert(dispatch > local, "Resend is called through dispatchInvoiceResend")
   assert(src.indexOf("sendClaim: body?.send_claim", shared) > shared, "a caller's claim is joined")
+})
+
+// Codex B21: a request carrying another request's attempt id must not take
+// over a dispatch that is already confirmed and calling Resend, and then
+// release it, or a fresh request could send the invoice a second time.
+Deno.test("a confirmed send cannot be taken over and released while Resend is in flight", async () => {
+  const claims = makeFakeClaimStore()
+  const key = invoiceSendKey("inv-123")
+  const resend = { calls: 0 }
+  let finish!: (r: Response) => void
+  const inFlight = brandedSend(claims, () => new Promise<Response>((r) => { finish = r }), resend)
+  while (resend.calls === 0) await tick(1)
+  const attemptId = claims.rowsFor(key)[0].attempt_id
+
+  const sb = sendQuoteClient(claims)
+  const joined = await takeSharedInvoiceSend(sb, {
+    xeroInvoiceId: "inv-123", jobId: "job-uuid-1", sendClaim: { item_key: key, attempt_id: attemptId },
+  })
+  assert(!joined.ok, "the confirmed dispatch was handed to another request")
+  assertEquals(joined.status, 409)
+  assertEquals(claims.rowsFor(key).length, 1, "a refused join added no key")
+
+  // Even holding the attempt id, a request whose own dispatch is not the
+  // confirmed one cannot release it.
+  await releaseSharedInvoiceSendNotSent(sb, { attemptId, dispatchToken: crypto.randomUUID(), joined: true }, "local_claim_in_progress")
+  assertEquals(claims.rowsFor(key)[0].state, "sending")
+  const again = await brandedSend(claims, async () => RESEND_OK(), resend)
+  assert(again.refused, "a fresh request sent while the first was in flight")
+
+  finish(RESEND_OK())
+  const first = await inFlight
+  assertEquals(first.outcome?.kind, "sent")
+  assertEquals(resend.calls, 1, "exactly one email went out")
+})
+
+Deno.test("a caller whose dispatch was taken over cannot release the door's confirmed send", async () => {
+  const claims = makeFakeClaimStore()
+  const key = invoiceSendKey("inv-123")
+  const sb = sendQuoteClient(claims)
+  const caller = await takeSharedInvoiceSend(sb, { xeroInvoiceId: "inv-123", jobId: "job-uuid-1" })
+  assert(caller.ok)
+  const door = await takeSharedInvoiceSend(sb, {
+    xeroInvoiceId: "inv-123", jobId: "job-uuid-1", sendClaim: { item_key: key, attempt_id: caller.attemptId },
+  })
+  assert(door.ok, "the door joins an unconfirmed claim")
+  const resend = { calls: 0 }
+  let finish!: (r: Response) => void
+  const doorSend = dispatchInvoiceResend(sb, door, () => {
+    resend.calls++
+    return new Promise<Response>((r) => { finish = r })
+  })
+  while (resend.calls === 0) await tick(1)
+
+  // The caller's own token was replaced: its confirm is fenced, and its
+  // fenced settle must leave the door's in-flight send holding the invoice.
+  const fenced = await dispatchInvoiceResend(sb, caller, async () => { resend.calls++; return RESEND_OK() })
+  assertEquals(fenced.kind, "fenced")
+  assertEquals(claims.rowsFor(key)[0].state, "sending")
+  const fresh = await brandedSend(claims, async () => RESEND_OK(), resend)
+  assert(fresh.refused, "a fresh request sent while the door was in flight")
+
+  finish(RESEND_OK())
+  assertEquals((await doorSend).kind, "sent")
+  assertEquals(resend.calls, 1, "exactly one email went out")
 })

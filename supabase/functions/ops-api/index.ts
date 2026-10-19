@@ -4032,7 +4032,7 @@ async function confirmInvoiceEmailDispatch(
 ): Promise<{ ok: true } | { ok: false; status: number; refusal: Record<string, unknown> }> {
   const fence = await confirmSendDispatch(client, { attemptId, dispatchToken })
   if (fence.ok) return { ok: true }
-  await settleInvoiceEmailSend(client, attemptId, 'failed', { reason: 'dispatch_fenced' })
+  await settleInvoiceEmailSend(client, attemptId, 'failed', { reason: 'dispatch_fenced' }, { dispatchToken })
   return {
     ok: false,
     status: sendClaimRefusalStatus(fence),
@@ -4145,27 +4145,27 @@ export async function _sendInvoiceEmailViaXeroDirect(deps: SendInvoiceXeroDirect
     } catch (e) {
       if (e instanceof XeroCooldownError) {
         // Xero did not take the request: nothing was sent.
-        await settleInvoiceEmailSend(client, gate.attemptId, 'failed', { reason: 'xero_cooldown' })
+        await settleInvoiceEmailSend(client, gate.attemptId, 'failed', { reason: 'xero_cooldown' }, { dispatchToken: gate.dispatchToken })
         throw e
       }
       // Xero answers a validation error before it sends anything.
       const refused = String((e as Error)?.message || '').startsWith('Xero validation error')
-      await settleInvoiceEmailSend(client, gate.attemptId, refused ? 'failed' : 'outcome_unknown', { reason: refused ? 'xero_validation' : 'xero_post_failed' })
+      await settleInvoiceEmailSend(client, gate.attemptId, refused ? 'failed' : 'outcome_unknown', { reason: refused ? 'xero_validation' : 'xero_post_failed' }, { dispatchToken: gate.dispatchToken })
       throw await invoiceEmailFailure({ ...gateDeps, outcome: refused ? 'refused' : 'unknown', status: refused ? 400 : null, replyBody: null })
     }
   } catch (e) {
     if (e instanceof ApiError || e instanceof XeroCooldownError) throw e
     // getToken failed: no request reached Xero.
-    await settleInvoiceEmailSend(client, gate.attemptId, 'failed', { reason: 'xero_token' })
+    await settleInvoiceEmailSend(client, gate.attemptId, 'failed', { reason: 'xero_token' }, { dispatchToken: gate.dispatchToken })
     throw e
   }
   if (!xeroInvoiceEmailAccepted(postResult)) {
     // A success status whose body carries an error, or that cannot be read as
     // Xero's acceptance, may still have emailed the client.
-    await settleInvoiceEmailSend(client, gate.attemptId, 'outcome_unknown', { reason: 'xero_reply_not_accepted' })
+    await settleInvoiceEmailSend(client, gate.attemptId, 'outcome_unknown', { reason: 'xero_reply_not_accepted' }, { dispatchToken: gate.dispatchToken })
     throw await invoiceEmailFailure({ ...gateDeps, outcome: 'unknown', status: null, replyBody: null })
   }
-  await settleInvoiceEmailSend(client, gate.attemptId, 'sent', { via: 'xero_direct' })
+  await settleInvoiceEmailSend(client, gate.attemptId, 'sent', { via: 'xero_direct' }, { dispatchToken: gate.dispatchToken })
   try {
     await client.from('job_events').insert({
       job_id: jobId,
@@ -4215,20 +4215,20 @@ export async function _postInvoiceEmailUnderClaim(
     const status = e instanceof XeroCooldownError || String((e as Error)?.message || '').startsWith('Xero validation error')
       ? 'failed' as const
       : rejectedInvoiceEmailStatus(e)
-    await settleInvoiceEmailSend(client, claim.attemptId, status === 'failed' ? 'failed' : 'outcome_unknown', { via: 'xero', reason: 'xero_post_failed' })
+    await settleInvoiceEmailSend(client, claim.attemptId, status === 'failed' ? 'failed' : 'outcome_unknown', { via: 'xero', reason: 'xero_post_failed' }, { dispatchToken: claim.dispatchToken })
     return {
       status,
       error: invoiceEmailErrorMetadata(e, { xeroInvoiceId: input.xeroInvoiceId, invoiceNumber: input.invoiceNumber }),
     }
   }
   if (!xeroInvoiceEmailAccepted(result)) {
-    await settleInvoiceEmailSend(client, claim.attemptId, 'outcome_unknown', { via: 'xero', reason: 'xero_reply_not_accepted' })
+    await settleInvoiceEmailSend(client, claim.attemptId, 'outcome_unknown', { via: 'xero', reason: 'xero_reply_not_accepted' }, { dispatchToken: claim.dispatchToken })
     return {
       status: 'unknown',
       error: { code: 'XERO_INVOICE_EMAIL_UNCONFIRMED', error: 'Invoice email acceptance could not be confirmed', xero_invoice_id: input.xeroInvoiceId, invoice_number: input.invoiceNumber },
     }
   }
-  await settleInvoiceEmailSend(client, claim.attemptId, 'sent', { via: 'xero' })
+  await settleInvoiceEmailSend(client, claim.attemptId, 'sent', { via: 'xero' }, { dispatchToken: claim.dispatchToken })
   return { status: 'accepted', error: null }
 }
 
@@ -4427,11 +4427,11 @@ export async function _approveAndSendInvoice(deps: ApproveAndSendInvoiceDeps): P
       try {
         const asXeroResult = await deps.xeroPost(`/Invoices/${asId}/Email`, asAt, asTi, {})
         const accepted = xeroInvoiceEmailAccepted(asXeroResult)
-        await settleInvoiceEmailSend(client, asClaim.attemptId, accepted ? 'sent' : 'outcome_unknown', { via: 'xero' })
+        await settleInvoiceEmailSend(client, asClaim.attemptId, accepted ? 'sent' : 'outcome_unknown', { via: 'xero' }, { dispatchToken: asClaim.dispatchToken })
         if (!accepted) asEmailUnknown = true
       } catch (e) {
         const refused = e instanceof XeroCooldownError || String((e as Error)?.message || '').startsWith('Xero validation error')
-        await settleInvoiceEmailSend(client, asClaim.attemptId, refused ? 'failed' : 'outcome_unknown', { via: 'xero' })
+        await settleInvoiceEmailSend(client, asClaim.attemptId, refused ? 'failed' : 'outcome_unknown', { via: 'xero' }, { dispatchToken: asClaim.dispatchToken })
         if (!refused) asEmailUnknown = true
         console.log(JSON.stringify({ event: 'approve_and_send_xero_email_failed', entity_id: asId, refused }))
       }

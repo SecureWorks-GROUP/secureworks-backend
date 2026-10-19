@@ -10,7 +10,7 @@ BEGIN
   IF to_regprocedure('public.claim_outbound_send(text[], text, text, jsonb, integer)') IS NOT NULL
      OR to_regprocedure('public.extend_outbound_send_claim(text, text[], text, text, jsonb)') IS NOT NULL
      OR to_regprocedure('public.confirm_outbound_dispatch(text, text)') IS NOT NULL
-     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb, text)') IS NOT NULL
+     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb, text, text)') IS NOT NULL
      OR to_regprocedure('public.reconcile_outbound_send(text, text, text, text, timestamptz, text)') IS NOT NULL
      OR to_regprocedure('public.read_outbound_send_holds(text[])') IS NOT NULL
      OR to_regprocedure('public.outbound_send_claim_insert(text[], text, text, jsonb, timestamptz, uuid, text, text)') IS NOT NULL THEN
@@ -45,7 +45,7 @@ SELECT position('outbound send claims unresolved' IN :'LAST_ERROR_MESSAGE') > 0 
 DO $$
 BEGIN
   IF to_regprocedure('public.reconcile_outbound_send(text, text, text, text, timestamptz, text)') IS NULL
-     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb, text)') IS NULL THEN
+     OR to_regprocedure('public.settle_outbound_send(text, text, jsonb, text, text)') IS NULL THEN
     RAISE EXCEPTION 'rollback contract: a refused rollback still dropped a door';
   END IF;
 END $$;

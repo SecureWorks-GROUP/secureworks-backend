@@ -7,9 +7,15 @@
 // actually be delivered:
 //   - the mailbox it is sent from;
 //   - new or reply, and the message replied to (an approved "reply" is the
-//     provider's createReply, as on the plain door);
+//     provider's createReply, as on the plain door; createReplyAll is the
+//     same reply, since the recipients below say who it goes to);
 //   - To, CC and BCC, each lowercased and sorted (order never matters);
-//   - the subject and the HTML body as sent (signature included);
+//   - the subject, for a new email only. A reply's subject is not part of
+//     its identity: the plain door sends the provider's own reply subject,
+//     which it cannot know before the claim, while the approved door sets
+//     its stored subject. Leaving it out means one reply holds the other
+//     whatever either door would title it;
+//   - the HTML body as sent (signature included);
 //   - each attachment as { sha256, name, contentType } of the bytes sent.
 // Bare attachment hashes are never used: the same bytes with and without a
 // name are two different keys, so every door describes files the same way.
@@ -41,7 +47,7 @@ export type EmailDelivery = {
 function deliveryMode(mode: string | null | undefined): string {
   const value = String(mode ?? "").trim();
   if (!value) return "new";
-  return value === "reply" ? "createReply" : value;
+  return value === "reply" || value === "createReplyAll" ? "createReply" : value;
 }
 
 /** The email_content:<sha256> key every door holds for one delivered email. */
@@ -54,7 +60,7 @@ export function emailDeliveryKey(input: EmailDelivery): Promise<string> {
     to: input.to,
     cc: input.cc,
     bcc: input.bcc,
-    subject: input.subject ?? "",
+    subject: mode === "createReply" ? "" : input.subject ?? "",
     html: input.html ?? "",
     attachments: input.attachments ?? [],
   });

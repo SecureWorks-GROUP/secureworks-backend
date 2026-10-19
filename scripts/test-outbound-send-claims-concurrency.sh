@@ -7,7 +7,9 @@
 #   2. two "Sent Items checked" reconciles of one unknown attempt;
 #   3. two extends of one attempt (same content, then different content);
 #   4. a door's extend against its caller's settle, in both orders;
-#   5. a reconcile against a late pre-send confirm, in both orders.
+#   5. a reconcile against a late pre-send confirm, in both orders;
+#   6. a confirmed dispatch against a takeover: an extend by another request,
+#      and that request's settle, while the confirmed call is in flight.
 # Run against a disposable local database that already has 20261019170000
 # applied, connecting as its owner (the script lapses one lease directly):
 #   OUTBOUND_CLAIMS_DB_URL=postgresql://postgres@127.0.0.1:54329/osc_fwd \
@@ -129,3 +131,28 @@ x=$(first worker); y=$(first office)
 echo "5 confirm then reconcile: worker $x, office $y (waited $(ms office) ms)"
 [ "$x" = ok ] && [ "$y" = send_reconcile_live_send ] || fail "a reconcile released a send its worker had just confirmed"
 echo "PASS: confirm and reconcile serialise; a reconciled send is fenced and a live one is never released"
+
+# 6. A confirmed dispatch against a takeover. The holder confirms; another
+# request carrying the same attempt id tries to extend it, and then to settle
+# it failed, while the holder's provider call is in flight. Neither may win,
+# so a fresh claim of the item stays held until the holder settles.
+attempt="confirm-extend-$run"
+token=$(claim "invoice:$attempt" "$attempt")
+race worker "SELECT $(code "public.confirm_outbound_dispatch('$attempt', '$token')")" \
+     door "SELECT $(code "public.extend_outbound_send_claim('$attempt', ARRAY['send_quote_invoice:$attempt'], 'invoice:$attempt')")" 0.4
+x=$(first worker); y=$(first door)
+echo "6 confirm then extend: worker $x, door $y (waited $(ms door) ms)"
+[ "$x" = ok ] && [ "$y" = send_claim_dispatch_taken ] || fail "an extend took over a confirmed dispatch"
+race door "SELECT $(code "public.settle_outbound_send('$attempt', 'failed', '{}'::jsonb)")" \
+     fresh "SELECT $(code "public.claim_outbound_send(ARRAY['invoice:$attempt'], 'fresh-$attempt', 'concurrency-test', '{}'::jsonb)")" 0.4
+x=$(first door); y=$(first fresh)
+echo "6 stranger settle then fresh claim: door $x, fresh $y"
+[ "$x" = send_settle_not_dispatcher ] && [ "$y" = send_claim_held ] || fail "a stranger released a confirmed dispatch"
+attempt="extend-confirm-$run"
+token=$(claim "invoice:$attempt" "$attempt")
+race door "SELECT $(code "public.extend_outbound_send_claim('$attempt', ARRAY['send_quote_invoice:$attempt'], 'invoice:$attempt')")" \
+     worker "SELECT $(code "public.confirm_outbound_dispatch('$attempt', '$token')")" 0.4
+x=$(first door); y=$(first worker)
+echo "6 extend then confirm: door $x, worker $y (waited $(ms worker) ms)"
+[ "$x" = ok ] && [ "$y" = send_dispatch_fenced ] || fail "a replaced token still confirmed"
+echo "PASS: a confirmed dispatch is never taken over or released by another request"

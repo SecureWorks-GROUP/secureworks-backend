@@ -69,6 +69,7 @@ import {
   plainDoorInvoiceKeys,
 } from '../_shared/approved_send_content_key.ts'
 import { assertGraphSendAccepted, GraphSendNotConfirmed } from './graph_send_accept.ts'
+import { readLegacyInvoiceEmailHold } from '../ops-api/invoice_email_resend_gate.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ||
@@ -1171,6 +1172,25 @@ export class OutlookSendClaimRefused extends Error {
   }
 }
 
+/**
+ * A plain send naming an invoice also waits behind an unknown-send event
+ * recorded before the claim store, the hold ops-api's invoice doors read
+ * (readLegacyInvoiceEmailHold). A caller that passed its own claim already
+ * took that gate. Held or unreadable refuses before anything is sent; the
+ * hold is released through the invoice email door's checked press.
+ */
+async function assertNoLegacyInvoiceHold(sb: any, invoiceKeys: string[]): Promise<void> {
+  for (const key of invoiceKeys) {
+    const legacy = await readLegacyInvoiceEmailHold(sb, key.slice('invoice:'.length))
+    if (legacy.state === 'clear') continue
+    throw new OutlookSendClaimRefused({
+      ok: false,
+      code: legacy.state === 'held' ? 'send_claim_held' : 'send_claim_unreadable',
+      held: [],
+    })
+  }
+}
+
 /** The pre-send fence refused: nothing more may be sent on this attempt. */
 export class OutlookSendFenced extends Error {
   constructor(readonly refusal: SendClaimRefusal, readonly mutated: boolean) {
@@ -1329,6 +1349,7 @@ export function makeOutlookSendHold(
       // its lease passes, so the item stays held either way.
       await settleSend(client, attemptId, state, { door: 'send-outlook-email', ...detail }, {
         settler: 'dispatcher',
+        dispatchToken,
       })
     },
   }
@@ -2479,6 +2500,9 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
       )
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       await assertOutlookSesDeliveryAllowed(sb, body)
+      if (body.action !== 'draft' && !callerClaim) {
+        await assertNoLegacyInvoiceHold(sb, plainDoorInvoiceKeys(body))
+      }
       if (route.kind === 'mailbox') await verifyMailboxRoute(route.mailbox)
 
       // From here on a mutating Graph request may be issued. Any failure that
