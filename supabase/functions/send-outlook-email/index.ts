@@ -1017,7 +1017,15 @@ export async function graphRequest(
   }
 
   if (!response.ok) {
-    const detail = (await response.clone().text()).slice(0, 2000)
+    // Reading the error body can itself fail. That must not escape as a plain
+    // error: after a mutating request it would reach the generic catch and be
+    // answered retry_safe:true when the mutation may have landed.
+    let detail = ''
+    try {
+      detail = (await response.clone().text()).slice(0, 2000)
+    } catch (_) {
+      detail = '(error body unreadable)'
+    }
     const unknown = mutating &&
       (response.status >= 500 || response.status === 408 ||
         response.status === 429)
@@ -2017,6 +2025,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
     }
     if (req.method !== 'POST') return json({ error: 'POST only' }, 405)
 
+    let mutationMayHaveStarted = false
     try {
       const body = await req.json() as Record<string, unknown>
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -2083,6 +2092,12 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
       await assertOutlookSesDeliveryAllowed(sb, body)
       if (route.kind === 'mailbox') await verifyMailboxRoute(route.mailbox)
 
+      // From here on a mutating Graph request may be issued. Any failure that
+      // is not a typed input, fence or provider answer is an unknown outcome,
+      // never retry-safe (see the generic catch below).
+      if (body.action === 'forward' || body.action === 'reply' || body.action === 'draft') {
+        mutationMayHaveStarted = true
+      }
       // ── Forward action — genuine Graph forward, preserves original body + attachments ──
       if (body.action === 'forward') {
         return await handleForward(body)
@@ -2106,6 +2121,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
       }, from)
       const graphAttachments = await prepareAttachments(body.attachments)
       if (graphAttachments.length) message.attachments = graphAttachments
+      mutationMayHaveStarted = true
       await graphRequest(`/users/${safeSegment(from, 'from')}/sendMail`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2195,6 +2211,16 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
         }, 502)
       }
       console.error('[send-outlook-email] Error:', (err as Error).message)
+      if (mutationMayHaveStarted) {
+        // Retry-safe needs positive evidence that nothing was dispatched.
+        // Once a mutating request may have started there is none.
+        return json({
+          state: 'outcome_unknown',
+          code: 'provider_outcome_unknown',
+          error: (err as Error).message,
+          retry_safe: false,
+        }, 502)
+      }
       return json({ error: (err as Error).message, retry_safe: true }, 500)
     }
 }

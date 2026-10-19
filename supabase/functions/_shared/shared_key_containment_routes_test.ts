@@ -53,7 +53,7 @@ Deno.test("ops-ai, agent-runner, completion-pack and send-po-email use the teste
   }
 });
 
-Deno.test("ops-api sends its own Outlook emails with the server credential", () => {
+Deno.test("ops-api sends its own Outlook emails through the switchable server credential", () => {
   const src = read("ops-api/index.ts");
   const outlookCalls = src.split("/functions/v1/send-outlook-email`").slice(1)
     .map((after) => after.slice(0, 200));

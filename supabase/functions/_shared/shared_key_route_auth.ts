@@ -1,9 +1,10 @@
 // Route auth decisions for the functions contained by shared_key_containment.ts.
 //
-// ops-ai, agent-runner and completion-pack boot serve() on import, so their
-// handlers cannot be driven in a unit test. Each route's auth decision lives
-// here instead, with its verifiers injected, and the route calls it. The tests
-// in shared_key_route_auth_test.ts drive these with real Request headers.
+// ops-ai, agent-runner, completion-pack and send-po-email each take their auth
+// decision from here, with the verifiers injected. shared_key_route_auth_test.ts
+// drives these helpers with real Request headers, and
+// shared_key_route_handlers_test.ts drives the four exported handlers
+// themselves (each route serves only when it is the main module).
 //
 // Nothing here logs, returns or stores a credential.
 

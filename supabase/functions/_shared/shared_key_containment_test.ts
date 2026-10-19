@@ -4,6 +4,8 @@ import { assert, assertEquals } from "https://deno.land/std@0.208.0/assert/mod.t
 import {
   isSharedKey,
   serverCallHeaders,
+  serverCallUsesServiceCredential,
+  SERVER_CALL_SERVICE_CREDENTIAL_ENV,
   SHARED_KEY_CONTAINMENT_ENV,
   sharedKeyAccepted,
   sharedKeyContainmentOn,
@@ -45,18 +47,56 @@ Deno.test("wrong, empty or missing values never match", () => {
   assertEquals(isSharedKey("", ""), false);
 });
 
-Deno.test("server call headers carry the service credential, never the shared key", () => {
-  const h = serverCallHeaders(SERVICE, SHARED);
+const callEnv = (containment?: string, credential?: string) => (name: string) =>
+  name === SHARED_KEY_CONTAINMENT_ENV ? containment
+    : name === SERVER_CALL_SERVICE_CREDENTIAL_ENV ? credential
+    : undefined;
+
+Deno.test("server call headers: both switches off keep today's shared-key header", () => {
+  for (const credential of [undefined, "", "off", "0"]) {
+    const h = serverCallHeaders(SERVICE, SHARED, {}, undefined, callEnv(undefined, credential));
+    assertEquals(h, { "Content-Type": "application/json", "x-api-key": SHARED }, String(credential));
+  }
+});
+
+Deno.test("server call headers: the credential flag selects the service credential", () => {
+  const h = serverCallHeaders(SERVICE, SHARED, {}, undefined, callEnv(undefined, "on"));
   assertEquals(h["Authorization"], `Bearer ${SERVICE}`);
   assertEquals(h["apikey"], SERVICE);
   assertEquals(h["x-api-key"], undefined);
   assertEquals(h["Content-Type"], "application/json");
 });
 
+Deno.test("server call headers: containment on selects the service credential whatever the flag says", () => {
+  for (const credential of [undefined, "off", "onn"]) {
+    const h = serverCallHeaders(SERVICE, SHARED, {}, undefined, callEnv("on", credential));
+    assertEquals(h["Authorization"], `Bearer ${SERVICE}`, String(credential));
+    assertEquals(h["x-api-key"], undefined, String(credential));
+  }
+  assertEquals(serverCallUsesServiceCredential(callEnv("onn", undefined)), true, "a containment typo is on");
+});
+
+Deno.test("server call headers: a credential flag typo keeps today's header", () => {
+  const err = console.error;
+  console.error = () => {};
+  try {
+    assertEquals(serverCallUsesServiceCredential(callEnv(undefined, "onn")), false);
+    assertEquals(serverCallHeaders(SERVICE, SHARED, {}, undefined, callEnv(undefined, "onn"))["x-api-key"], SHARED);
+  } finally {
+    console.error = err;
+  }
+});
+
 Deno.test("server call headers fall back to the shared key only without a service key", () => {
-  const h = serverCallHeaders("", SHARED);
-  assertEquals(h["x-api-key"], SHARED);
-  assertEquals(h["Authorization"], undefined);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const h = serverCallHeaders("", SHARED, {}, undefined, callEnv(undefined, "on"));
+    assertEquals(h["x-api-key"], SHARED);
+    assertEquals(h["Authorization"], undefined);
+  } finally {
+    console.warn = warn;
+  }
 });
 
 Deno.test("gate: absent when no presented value is the shared key", () => {

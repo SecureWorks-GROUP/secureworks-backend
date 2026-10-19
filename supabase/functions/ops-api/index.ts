@@ -51070,6 +51070,21 @@ async function _patchPackStrict(client: any, jobId: string, packKind: string, pa
   if (error) throw new ApiError(`pack patch failed (${packKind}): ${error.message}`, 500)
 }
 
+// As _patchPackStrict, and an update that matched no row is a failure too:
+// PostgREST answers a zero-row update with no error, so a missing or renamed
+// pack row would otherwise read as saved. The photo follow-up's saved state
+// decides whether a retry may send again, so it must never be assumed.
+async function _patchPackStrictRow(client: any, jobId: string, packKind: string, patch: Record<string, any>) {
+  const { data, error } = await client.from('makesafe_report_packs')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('job_id', jobId).eq('pack_kind', packKind)
+    .select('id')
+  if (error) throw new ApiError(`pack patch failed (${packKind}): ${error.message}`, 500)
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new ApiError(`pack patch failed (${packKind}): no pack row was updated`, 500)
+  }
+}
+
 // (3c-ii) makesafe_send_photo_followup — Stage 1-2a EMAIL 2 for AJS/MLB.
 // Sends the approved site photos as individual email attachments after the main
 // pack (email 1) is confirmed sent. The main MAKESAFE_PACK_SENT | main marker
@@ -51227,7 +51242,11 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     })
     if (!emailResp.ok) {
       const errText = await emailResp.text().catch(() => '')
-      if (emailResp.status === 401) emailRefused = true
+      let errBody: unknown = null
+      try { errBody = JSON.parse(errText) } catch { errBody = null }
+      // Refused only on what the reply proves (the same rule as the invoice
+      // email): an explicit unknown or retry_safe:false wins over a 401.
+      if (classifyInvoiceEmailFailure(emailResp.status, errBody) === 'refused') emailRefused = true
       throw new ApiError(`photo follow-up email failed (${emailResp.status}): ${errText}`.slice(0, 400), 502)
     }
     let emailResult: any = {}
@@ -51248,7 +51267,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       detail_json: { text: markerText },
     })
     if (markerErr) {
-      await _patchPackStrict(client, jobId, photoPackKind, {
+      await _patchPackStrictRow(client, jobId, photoPackKind, {
         status: 'sent_marker_failed',
         failed_step: 'photo_marker',
         error_detail: markerErr.message.slice(0, 500),
@@ -51266,7 +51285,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       }
     }
 
-    await _patchPackStrict(client, jobId, photoPackKind, {
+    await _patchPackStrictRow(client, jobId, photoPackKind, {
       status: 'sent',
       sent_at: nowIso,
       failed_step: null,
@@ -51286,7 +51305,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     // is surfaced rather than swallowed (a refused send left at 'sending'
     // would block the retry).
     try {
-      await _patchPackStrict(client, jobId, photoPackKind, {
+      await _patchPackStrictRow(client, jobId, photoPackKind, {
         ...photoFollowupFailureState(emailAttempted, emailRefused),
         error_detail: message,
       })
@@ -51301,8 +51320,9 @@ export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup
 
 // Where a failed photo follow-up leaves its pack. Once the email was attempted
 // the outcome is unknown ('sending', never re-sent blind) unless
-// send-outlook-email answered 401: that is a refusal before any Graph call, so
-// the builder was provably not emailed and the pack is plainly failed.
+// send-outlook-email's reply proves a refusal before any Graph call (a 401/403
+// or a fence refusal, with no unknown-outcome body): then the builder was
+// provably not emailed and the pack is plainly failed.
 export function photoFollowupFailureState(emailAttempted: boolean, emailRefused: boolean): { status: string; failed_step: string } {
   if (emailAttempted && !emailRefused) return { status: 'sending', failed_step: 'photo_send_unknown_outcome' }
   return { status: 'failed', failed_step: emailRefused ? 'photo_send_refused' : 'photo_followup' }

@@ -13,6 +13,11 @@
 //                                                       routes that call this module
 //   any other value                                     logged as a typo, treated as on
 //
+// The server callers move with it: serverCallHeaders sends the service
+// credential once containment is on, or earlier when
+// SW_SERVER_CALL_SERVICE_CREDENTIAL is on, and today's shared-key header
+// otherwise. Both are env reads at call time, so no redeploy is needed.
+//
 // Browser routes the scoping tools still need (ghl-proxy browser actions, the
 // send-quote quote send) do not call this module and are unchanged.
 //
@@ -162,12 +167,43 @@ export function logSharedKeyAccepted(fn: string, route?: string | null, headers?
   }));
 }
 
+export const SERVER_CALL_SERVICE_CREDENTIAL_ENV = "SW_SERVER_CALL_SERVICE_CREDENTIAL";
+
 /**
- * Headers for an edge-to-edge call. Sends the service credential the way the
- * existing server callers do (Authorization Bearer + apikey, see
- * ops-api/job_work_orders.ts sendOutlookVariationEmail), so the callee's
- * verifyServiceCredential accepts it with containment on. Falls back to the
- * shared key only when no service key is configured (local tests).
+ * Which credential an edge-to-edge call presents. Read at call time, so it
+ * moves with an env change and needs no redeploy:
+ *
+ *   containment on                          service credential (the shared key
+ *                                           would be refused)
+ *   SW_SERVER_CALL_SERVICE_CREDENTIAL on    service credential, to prove the
+ *                                           callers before containment goes on
+ *   both off (the default)                  the shared key as x-api-key, which
+ *                                           is what these callers send today
+ *
+ * The credential flag uses the containment switch's on and off words. Any
+ * other value is logged and read as off, keeping today's credential: the
+ * flag only widens what is sent, and containment on overrides it anyway.
+ */
+export function serverCallUsesServiceCredential(env: EnvGet = defaultEnv): boolean {
+  if (sharedKeyContainmentOn(env)) return true;
+  const raw = (env(SERVER_CALL_SERVICE_CREDENTIAL_ENV) || "").trim().toLowerCase();
+  if (SWITCH_ON.has(raw)) return true;
+  if (SWITCH_OFF.has(raw)) return false;
+  console.error(JSON.stringify({
+    event: "server_call_credential_bad_value",
+    credential_env: SERVER_CALL_SERVICE_CREDENTIAL_ENV,
+    treated_as: "off",
+  }));
+  return false;
+}
+
+/**
+ * Headers for an edge-to-edge call. With the service credential selected (see
+ * serverCallUsesServiceCredential) it is sent the way the existing server
+ * callers do (Authorization Bearer + apikey, see ops-api/job_work_orders.ts
+ * sendOutlookVariationEmail), so the callee's verifyServiceCredential accepts
+ * it with containment on; with no service key configured it falls back to the
+ * shared key and warns. Otherwise the headers are exactly today's.
  */
 export function serverCallHeaders(
   serviceKey: string | null | undefined,
@@ -175,7 +211,11 @@ export function serverCallHeaders(
   extra: Record<string, string> = {},
   // Fixed operation name for the fallback warning (never request data).
   operation?: string,
+  env: EnvGet = defaultEnv,
 ): Record<string, string> {
+  if (!serverCallUsesServiceCredential(env)) {
+    return { "Content-Type": "application/json", "x-api-key": sharedKey ?? "", ...extra };
+  }
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (serviceKey) {
     h["Authorization"] = `Bearer ${serviceKey}`;

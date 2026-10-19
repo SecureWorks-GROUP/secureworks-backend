@@ -291,10 +291,12 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
 // send-outlook-email answers 401/403 only from its auth checks (before Graph),
 // and `outcome_unknown` / `retry_safe: false` when the email may have gone.
 // An unknown outcome must never be recorded as a plain failure: that invites
-// a resend that emails the client twice.
+// a resend that emails the client twice. Only positive evidence of no
+// dispatch (`retry_safe: true`, a refusal) makes a send retry-safe.
 Deno.test("invoice email failure: classification", () => {
   assertEquals(classifyInvoiceEmailFailure(401, null), "refused");
   assertEquals(classifyInvoiceEmailFailure(403, { error: "x" }), "refused");
+  assertEquals(classifyInvoiceEmailFailure(422, { state: "refused", fact: "fenced" }), "refused");
   assertEquals(classifyInvoiceEmailFailure(502, { state: "outcome_unknown", retry_safe: false }), "unknown");
   assertEquals(classifyInvoiceEmailFailure(502, { error: "Graph API error", retry_safe: false }), "unknown");
   assertEquals(classifyInvoiceEmailFailure(502, { error: "Graph API error", retry_safe: true }), "failed");
@@ -302,6 +304,27 @@ Deno.test("invoice email failure: classification", () => {
   assertEquals(classifyInvoiceEmailFailure(400, { error: "bad", retry_safe: true }), "failed");
   assertEquals(classifyInvoiceEmailFailure(409, { retry_safe: false }), "unknown");
   assertEquals(classifyInvoiceEmailFailure(null, null), "unknown");
+});
+
+Deno.test("invoice email failure: a bare status without proof of no dispatch is unknown", () => {
+  for (const status of [400, 404, 408, 409, 429, 500, 502, 503, 504]) {
+    assertEquals(classifyInvoiceEmailFailure(status, null), "unknown", `bare ${status}`);
+    assertEquals(classifyInvoiceEmailFailure(status, { error: "x" }), "unknown", `${status} without retry_safe`);
+  }
+});
+
+Deno.test("invoice email failure: an explicit unknown reply wins over 401 and 403", () => {
+  for (const status of [401, 403]) {
+    assertEquals(classifyInvoiceEmailFailure(status, { state: "outcome_unknown" }), "unknown");
+    assertEquals(classifyInvoiceEmailFailure(status, { retry_safe: false }), "unknown");
+    assertEquals(classifyInvoiceEmailFailure(status, { state: "refused", retry_safe: false }), "unknown");
+  }
+});
+
+Deno.test("invoice email failure: the unknown words name Sent Items and stay digit-free", () => {
+  assert(/Sent Items/.test(INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW));
+  assert(/[Dd]o not resend/.test(INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW));
+  assert(!/\d/.test(INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW));
 });
 
 async function sendWithOutlook(
@@ -343,7 +366,7 @@ async function sendWithOutlook(
   return { err: err as Error & { status: number; body?: any }, events, calls };
 }
 
-Deno.test("invoice email: 401 is recorded as refused, retry-safe, on the service credential", async () => {
+Deno.test("invoice email: 401 is recorded as refused, retry-safe, on today's credential by default", async () => {
   const { err, events, calls } = await sendWithOutlook(() =>
     new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 })
   );
@@ -357,10 +380,29 @@ Deno.test("invoice email: 401 is recorded as refused, retry-safe, on the service
   assertEquals(events[0].payload.retry_safe, true);
   assertEquals(events[0].job_id, "job-uuid-1");
   assert(String(events[0].provider_message_id).startsWith("ops-api:invoice.email_refused:inv-123:"));
+  // Both switches off: today's credential, unchanged.
   const outlook = calls.find((c) => c.url.includes("send-outlook-email"))!;
   const headers = new Headers(outlook.init?.headers);
-  assertEquals(headers.get("authorization"), "Bearer stub-service-key");
-  assertEquals(headers.get("x-api-key"), null);
+  assertEquals(headers.get("x-api-key"), STUB_ENV.SW_API_KEY);
+  assertEquals(headers.get("authorization"), null);
+});
+
+Deno.test("invoice email: the credential flag moves the send to the service credential, and back", async () => {
+  const reply = () => new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+  const outlookHeaders = (calls: { url: string; init?: RequestInit }[]) =>
+    new Headers(calls.find((c) => c.url.includes("send-outlook-email"))!.init?.headers);
+  Deno.env.set("SW_SERVER_CALL_SERVICE_CREDENTIAL", "on");
+  try {
+    const on = outlookHeaders((await sendWithOutlook(reply)).calls);
+    assertEquals(on.get("authorization"), "Bearer stub-service-key");
+    assertEquals(on.get("apikey"), "stub-service-key");
+    assertEquals(on.get("x-api-key"), null);
+  } finally {
+    Deno.env.delete("SW_SERVER_CALL_SERVICE_CREDENTIAL");
+  }
+  const off = outlookHeaders((await sendWithOutlook(reply)).calls);
+  assertEquals(off.get("x-api-key"), STUB_ENV.SW_API_KEY);
+  assertEquals(off.get("authorization"), null);
 });
 
 Deno.test("invoice email: outcome_unknown is recorded as unknown, never as failed", async () => {
