@@ -27,7 +27,7 @@ import {
   type SendDeps,
 } from '../_shared/approved_send.ts'
 import { assertGraphSendAccepted } from './graph_send_accept.ts'
-import { safeErrorFacts, safeProviderId } from '../_shared/safe_identifier.ts'
+import { safeErrorFacts, safeInternetMessageId, safeProviderId } from '../_shared/safe_identifier.ts'
 
 export type GraphCall = (
   path: string,
@@ -147,7 +147,7 @@ export async function sendApprovedEmail(
       draftId = safeProviderId(draft?.id)
       if (!draftId) throw new DraftMismatch('Graph draft had no id')
     }
-    internetMessageId = safeProviderId(draft?.internetMessageId)
+    internetMessageId = safeInternetMessageId(draft?.internetMessageId)
     if (
       !sameList(addresses(draft.toRecipients), payload.to) ||
       !sameList(addresses(draft.ccRecipients), payload.cc) ||

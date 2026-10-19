@@ -135,13 +135,23 @@ Deno.test('email door: an unverifiable mailbox and a throwing store answer fixed
   const broken = emailDeps(failingGraph(() => false, new Error('unused')))
   const brokenId = await recordEmail(broken)
   broken.store.loadApproval = () => Promise.reject(new Error(SENTINEL))
-  // The door's own console line keeps the raw message (left as it is); the
-  // reply, the row and the audit do not.
-  const stopped = await handleApprovedEmailRequest({ approval_id: brokenId }, CALLER, broken)
+  // Neither the reply, the row, the audit nor the door's own log line carries
+  // the exception text: the log names the error's class only.
+  const logged: unknown[] = []
+  const savedError = console.error
+  console.error = (...line: unknown[]) => { logged.push(line) }
+  let stopped: Response
+  try {
+    stopped = await handleApprovedEmailRequest({ approval_id: brokenId }, CALLER, broken)
+  } finally {
+    console.error = savedError
+  }
   assertEquals(stopped.status, 500)
   const stoppedBody = await stopped.json()
   assertEquals(stoppedBody.code, 'approved_send_error')
   assertNothingEchoed(broken, brokenId, stoppedBody)
+  assertNoSentinel(logged, 'door log line')
+  assert(JSON.stringify(logged).includes('approved_send_error'), JSON.stringify(logged))
 })
 
 // A PostgREST client whose named tables answer an error carrying raw text and

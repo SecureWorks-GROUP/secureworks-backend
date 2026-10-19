@@ -7,13 +7,22 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  SEND_REPLY_CODES,
+  SEND_REPLY_STATES,
   safeErrorFacts,
   safeErrorLine,
+  safeHttpStatus,
   safeIdentifier,
+  safeInternetMessageId,
   safeProviderId,
+  safeStoreCode,
+  sendReplyCode,
+  sendReplyState,
 } from "./safe_identifier.ts";
 import {
   ApprovedSendRefusal,
+  outcomeDetailFacts,
+  readApprovalStatus,
   recordApproval,
   supabaseApprovedSendStore,
   supabaseAttachmentReader,
@@ -56,9 +65,12 @@ Deno.test("identifier validation: codes and states pass only with a safe shape",
   assertEquals(safeIdentifier({ code: "x" }), null);
 });
 
-Deno.test("identifier validation: provider ids keep Graph and RFC shapes, nothing with spaces or quotes", () => {
-  assertEquals(safeProviderId("<reply-1@secureworks>"), "<reply-1@secureworks>");
+Deno.test("identifier validation: provider ids are base64 or hex-like, never with '@'", () => {
+  assertEquals(safeProviderId("<reply-1@secureworks>"), null);
+  assertEquals(safeProviderId("jane@example.com"), null);
   assertEquals(safeProviderId("AAMkAGI2T/hI+5ZQ=="), "AAMkAGI2T/hI+5ZQ==");
+  assertEquals(safeProviderId("AAMk_AGI2T-hI5ZQ"), "AAMk_AGI2T-hI5ZQ");
+  assertEquals(safeProviderId("a:b"), null);
   assertEquals(safeProviderId("ghl-msg-1"), "ghl-msg-1");
   assertEquals(safeProviderId("id with space"), null);
   assertEquals(safeProviderId('id"quoted'), null);
@@ -233,4 +245,163 @@ Deno.test("approved SMS: a provider message id that is free text is not stored",
   assertNoSentinel(result.body, "SMS reply");
   assertNoSentinel(deps.store.rows.get(id), "stored SMS approval row");
   assertNoSentinel(deps.store.auditRows, "SMS audit rows");
+});
+
+Deno.test("identifier validation: a Message-ID passes only bracketed, never bare text or an address", () => {
+  assertEquals(safeInternetMessageId("<reply-1@secureworks>"), "<reply-1@secureworks>");
+  assertEquals(
+    safeInternetMessageId("<SY4PR01MB0003.ausprd01.prod.outlook.com@SY4PR01MB0003.AUSPRD01.PROD.OUTLOOK.COM>"),
+    "<SY4PR01MB0003.ausprd01.prod.outlook.com@SY4PR01MB0003.AUSPRD01.PROD.OUTLOOK.COM>",
+  );
+  assertEquals(safeInternetMessageId("jane@example.com"), null);
+  assertEquals(safeInternetMessageId("<jane smith@example.com>"), null);
+  assertEquals(safeInternetMessageId(`<${SENTINEL}>`), null);
+  assertEquals(safeInternetMessageId("<a@b><c@d>"), null);
+  assertEquals(safeInternetMessageId("AAMkAGI2T"), null);
+  assertEquals(safeInternetMessageId(42), null);
+});
+
+Deno.test("identifier validation: store codes are SQLSTATE or PostgREST codes only", () => {
+  assertEquals(safeStoreCode("42P01"), "42P01");
+  assertEquals(safeStoreCode("23505"), "23505");
+  assertEquals(safeStoreCode("PGRST116"), "PGRST116");
+  assertEquals(safeStoreCode("ErrorMailboxBusy"), null);
+  assertEquals(safeStoreCode("42p01"), null);
+  assertEquals(safeStoreCode(SENTINEL), null);
+  assertEquals(safeStoreCode("jane@example.com"), null);
+  assertEquals(safeStoreCode(null), null);
+});
+
+Deno.test("identifier validation: send reply codes and states are closed sets; anything else is 'unrecognised'", () => {
+  for (const code of SEND_REPLY_CODES) assertEquals(sendReplyCode(code), code);
+  for (const state of SEND_REPLY_STATES) assertEquals(sendReplyState(state), state);
+  assertEquals(sendReplyState("sending"), "sending");
+  assertEquals(sendReplyState("not_sent"), "not_sent");
+  assertEquals(sendReplyCode("provider_outcome_unknown"), "provider_outcome_unknown");
+  for (const unsafe of [SENTINEL, "jane@example.com", "made_up_code", "ErrorMailboxBusy", "", 42, { code: "x" }]) {
+    assertEquals(sendReplyCode(unsafe), "unrecognised");
+    assertEquals(sendReplyState(unsafe), "unrecognised");
+  }
+  assertEquals(sendReplyCode(undefined), null);
+  assertEquals(sendReplyState(null), null);
+  for (const code of SEND_REPLY_CODES) assert(/^[a-z][a-z_]{1,63}$/.test(code), code);
+  assertEquals(new Set(SEND_REPLY_CODES).size, SEND_REPLY_CODES.length);
+});
+
+Deno.test("identifier validation: HTTP statuses are integers 100 to 599", () => {
+  assertEquals(safeHttpStatus(503), 503);
+  assertEquals(safeHttpStatus(100), 100);
+  assertEquals(safeHttpStatus(599), 599);
+  for (const bad of [99, 600, 503.5, "503", null, SENTINEL]) assertEquals(safeHttpStatus(bad), null);
+});
+
+Deno.test("approved send: outcome detail is an allowlist, unsafe shapes and unknown keys drop", () => {
+  const facts = outcomeDetailFacts({
+    mailbox: "admin@secureworkswa.com.au",
+    stage: "send",
+    error_name: "GraphProviderError",
+    provider_status: 503,
+    provider_code: "ErrorMailboxBusy",
+    graph_draft_id: "AAMkAGI2T",
+    internet_message_id: "<m-1@sw>",
+    error: SENTINEL,
+    message: SENTINEL,
+    graph_error_body: SENTINEL,
+    provider_text: SENTINEL,
+    nested: { detail: SENTINEL },
+  });
+  assertEquals(facts, {
+    mailbox: "admin@secureworkswa.com.au",
+    stage: "send",
+    error_name: "GraphProviderError",
+    provider_status: 503,
+    provider_code: "ErrorMailboxBusy",
+    graph_draft_id: "AAMkAGI2T",
+    internet_message_id: "<m-1@sw>",
+  });
+  const unsafe = outcomeDetailFacts({
+    stage: SENTINEL,
+    error_name: SENTINEL,
+    provider_code: "jane@example.com",
+    provider_status: "503 " + SENTINEL,
+    graph_draft_id: SENTINEL,
+    contact_id: "jane@example.com",
+    internet_message_id: SENTINEL,
+  });
+  assertNoSentinel(unsafe, "outcome detail");
+  assertEquals(unsafe, {
+    stage: null,
+    error_name: null,
+    provider_code: null,
+    provider_status: null,
+    graph_draft_id: null,
+    contact_id: null,
+    internet_message_id: null,
+  });
+});
+
+Deno.test("approved send: a status read filters provider text stored on older outcome rows", async () => {
+  const deps = makeDeps();
+  const id = await recordSms(deps);
+  const row = deps.store.rows.get(id)! as any;
+  row.status = "failed";
+  row.provider_detail = { stage: "send", error: SENTINEL, provider_error: SENTINEL, error_name: "GhlCallError" };
+  (deps.store.auditRows as any[]).push(
+    { approval_id: id, event: "failed", detail: { error_message: SENTINEL, stage: "send", at: "2026-10-19T00:00:00Z" } },
+  );
+  const status = await readApprovalStatus(deps.store, id);
+  assertNoSentinel(status, "approval status read");
+  assertEquals((status.approval as any).provider_detail, { stage: "send", error_name: "GhlCallError" });
+  const failed = (status.audit as any[]).find((entry) => entry.event === "failed");
+  assertEquals(failed.detail, { stage: "send", at: "2026-10-19T00:00:00Z" });
+  // A non-outcome audit row keeps its own detail.
+  assert((status.audit as any[]).some((entry) => entry.event === "recorded"));
+});
+
+Deno.test("approved send: an outcome or audit write that fails logs no store or exception text", async () => {
+  const deps = makeDeps();
+  const id = await recordSms(deps);
+  deps.store.finish = () => Promise.reject(new Error(SENTINEL));
+  const audit = deps.store.audit.bind(deps.store);
+  deps.store.audit = (entry: any) => entry.event === "sent" ? Promise.reject(new Error(SENTINEL)) : audit(entry);
+  const logged: unknown[] = [];
+  const savedError = console.error;
+  console.error = (...line: unknown[]) => { logged.push(line); };
+  let result: Awaited<ReturnType<typeof sendApprovedSms>>;
+  try {
+    result = await sendApprovedSms({ ...deps, ghl: ghlFake({}), locationId: "loc-1" }, id, CALLER);
+  } finally {
+    console.error = savedError;
+  }
+  assertEquals(result.body.state, "sent");
+  assertEquals(result.body.outcome_recorded, false);
+  assertEquals(result.body.audit_recorded, false);
+  assertNoSentinel(logged, "approved send log lines");
+  const text = JSON.stringify(logged);
+  assert(text.includes("approved_send_outcome_write_threw"), text);
+  assert(text.includes("approved_send_outcome_audit_failed"), text);
+
+  // The PostgREST store's own write failure logs its store code only.
+  const client: any = {
+    from: () => {
+      const builder: any = {
+        update: () => builder,
+        eq: () => builder,
+        select: () => Promise.resolve({ data: null, error: { message: SENTINEL, code: "57014", details: SENTINEL } }),
+      };
+      return builder;
+    },
+  };
+  const lines: unknown[] = [];
+  console.error = (...line: unknown[]) => { lines.push(line); };
+  try {
+    const finished = await supabaseApprovedSendStore(client).finish("a-1", "t-1", {
+      status: "sent", at: "2026-10-19T00:00:00Z", code: null, provider_message_id: null, provider_detail: {},
+    } as any);
+    assertEquals(finished, false);
+  } finally {
+    console.error = savedError;
+  }
+  assertNoSentinel(lines, "store write log line");
+  assert(JSON.stringify(lines).includes("57014"), JSON.stringify(lines));
 });

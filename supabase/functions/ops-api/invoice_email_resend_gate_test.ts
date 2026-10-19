@@ -10,6 +10,7 @@ import { _sendInvoiceEmailViaXeroDirect, _verifyAndSendInvoiceEmail } from "./in
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts"
 import { makeFakeClaimStore } from "../_shared/outbound_send_claim_fake.ts"
 import {
+  writeInvoiceEmailGateJobEvent,
   INVOICE_EMAIL_EMAILED_EVENT,
   INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT,
   INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT,
@@ -339,4 +340,87 @@ Deno.test("alternate door: an unknown Outlook send holds a Xero-direct send of t
   await caught(_verifyAndSendInvoiceEmail(o.deps()))
   assertEquals((await _sendInvoiceEmailViaXeroDirect(x.deps())).status, 409)
   assertEquals(x.posts(), 0)
+})
+
+// ── Raw text: the reply's code and state are closed sets, the lookup names a store code ──
+
+const RAW_TEXT = "raw provider text that must not be echoed jane@example.com"
+
+function recordConsole(): { lines: unknown[]; restore: () => void } {
+  const lines: unknown[] = []
+  const saved = { log: console.log, error: console.error, warn: console.warn }
+  console.log = console.error = console.warn = (...line: unknown[]) => { lines.push(line) }
+  return { lines, restore: () => Object.assign(console, saved) }
+}
+
+Deno.test("raw provider text: a reply's free-text code and state read 'unrecognised' in the error, events and log", async () => {
+  for (const status of [502, 400]) {
+    const t = outlookDeps(() => new Response(JSON.stringify({
+      error: RAW_TEXT, code: RAW_TEXT, state: RAW_TEXT, retry_safe: status === 400,
+    }), { status }))
+    const out = recordConsole()
+    let err: any
+    try { err = await caught(_verifyAndSendInvoiceEmail(t.deps())) } finally { out.restore() }
+    assertEquals(err.body.reply_code, "unrecognised", `${status}`)
+    assertEquals(err.body.reply_state, "unrecognised", `${status}`)
+    for (const [label, value] of [
+      ["error body", err.body], ["error message", err.message], ["business events", t.biz.events],
+      ["job events", t.seed.job_events], ["log lines", out.lines],
+    ] as const) {
+      assert(!JSON.stringify(value ?? null).includes("raw provider text"), `${status} ${label} echoed: ${JSON.stringify(value)}`)
+    }
+  }
+})
+
+Deno.test("raw provider text: a known reply code and state pass through unchanged", async () => {
+  const t = outlookDeps(() => new Response(JSON.stringify({
+    error: RAW_TEXT, code: "provider_outcome_unknown", state: "outcome_unknown", retry_safe: false,
+  }), { status: 502 }))
+  const out = recordConsole()
+  let err: any
+  try { err = await caught(_verifyAndSendInvoiceEmail(t.deps())) } finally { out.restore() }
+  assertEquals(err.body.reply_code, "provider_outcome_unknown")
+  assertEquals(err.body.reply_state, "outcome_unknown")
+})
+
+Deno.test("raw provider text: an invoice mirror lookup failure answers fixed text and the store code", async () => {
+  const t = outlookDeps(OUTLOOK_OK)
+  const deps = t.deps()
+  const base = deps.client
+  const failing = {
+    ...base,
+    from(table: string) {
+      if (table !== "xero_invoices") return base.from(table)
+      const b: any = {
+        select: () => b, eq: () => b,
+        maybeSingle: async () => ({ data: null, error: { message: RAW_TEXT, code: "42P01", details: RAW_TEXT, hint: RAW_TEXT } }),
+      }
+      return b
+    },
+  }
+  const res = await _verifyAndSendInvoiceEmail({ ...deps, client: failing })
+  assertEquals(res.status, 503)
+  const body = await jsonBody(res)
+  assertEquals(body.code, "sealed_ses_fence_check_failed")
+  assertEquals(body.evidence.store_code, "42P01")
+  assert(/The invoice mirror lookup failed\./.test(body.fact), body.fact)
+  assert(!JSON.stringify(body).includes("raw provider text"), JSON.stringify(body))
+  assertEquals(outlookCalls(t.spy), 0)
+})
+
+Deno.test("raw provider text: a gate job event that cannot be written logs the store code or error class only", async () => {
+  const returning = { from: () => ({ insert: async () => ({ data: null, error: { message: RAW_TEXT, code: "23503", details: RAW_TEXT } }) }) }
+  const throwing = { from: () => ({ insert: () => { throw new Error(RAW_TEXT) } }) }
+  for (const [label, client, fact] of [
+    ["returned error", returning, '"store_code":"23503"'],
+    ["thrown error", throwing, '"error_name":"Error"'],
+  ] as const) {
+    const out = recordConsole()
+    let ok: boolean
+    try { ok = await writeInvoiceEmailGateJobEvent(client, "job-1", INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, {}) } finally { out.restore() }
+    assertEquals(ok, false, label)
+    const text = JSON.stringify(out.lines)
+    assert(!text.includes("raw provider text"), `${label} logged: ${text}`)
+    assert(text.includes(fact.replaceAll('"', '\\"')), `${label}: ${text}`)
+  }
 })

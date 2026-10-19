@@ -28,6 +28,7 @@ import {
   type SendClaimRefusal,
   type SettleState,
 } from '../_shared/outbound_send_claim.ts'
+import { safeErrorFacts, safeStoreCode } from '../_shared/safe_identifier.ts'
 
 export const INVOICE_EMAIL_EMAILED_EVENT = 'invoice.emailed'
 export const INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT = 'invoice.email_outcome_unknown'
@@ -121,12 +122,12 @@ export async function writeInvoiceEmailGateJobEvent(
   try {
     const { error } = await client.from('job_events').insert({ job_id: jobId, event_type: eventType, detail_json: detail })
     if (error) {
-      console.error(JSON.stringify({ event: 'invoice_email_gate_job_event_failed', event_type: eventType, error: error.message }))
+      console.error(JSON.stringify({ event: 'invoice_email_gate_job_event_failed', event_type: eventType, store_code: safeStoreCode(error.code) }))
       return false
     }
     return true
   } catch (e) {
-    console.error(JSON.stringify({ event: 'invoice_email_gate_job_event_failed', event_type: eventType, error: (e as Error)?.message }))
+    console.error(JSON.stringify({ event: 'invoice_email_gate_job_event_failed', event_type: eventType, ...safeErrorFacts(e) }))
     return false
   }
 }

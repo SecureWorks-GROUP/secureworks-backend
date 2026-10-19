@@ -28,8 +28,8 @@ import {
 } from '../_shared/sealed_ses_money_fence.ts'
 import {
   safeErrorFacts,
-  safeIdentifier,
   safeProviderId,
+  safeStoreCode,
 } from '../_shared/safe_identifier.ts'
 import {
   approvedSendSealSecret,
@@ -355,7 +355,7 @@ async function resolveOutlookInvoiceJob(
       sealedSesFenceCheckFailedRefusal(
         'send_outlook_email',
         'The invoice mirror lookup failed.',
-        { xero_invoice_id: xeroInvoiceId, store_code: safeIdentifier(mirror.error.code) },
+        { xero_invoice_id: xeroInvoiceId, store_code: safeStoreCode(mirror.error.code) },
       ),
     )
   }
@@ -608,7 +608,7 @@ export async function assertOutlookSesDeliveryAllowed(
         sealedSesFenceCheckFailedRefusal(
           'reply_outlook_email',
           'The source-message job lookup failed.',
-          { message_id: mailboxMessageId, store_code: safeIdentifier(source.error.code) },
+          { message_id: mailboxMessageId, store_code: safeStoreCode(source.error.code) },
         ),
       )
     }
@@ -716,7 +716,7 @@ export async function assertOutlookSesDeliveryAllowed(
           {
             message_id: mailboxMessageId || null,
             post_id: groupPostId || null,
-            store_code: safeIdentifier(source.error.code),
+            store_code: safeStoreCode(source.error.code),
           },
         ),
       )
@@ -825,7 +825,7 @@ export async function assertOutlookSesDeliveryAllowed(
               : 'The job document is missing or has no job link.',
             {
               job_document_id: jobDocumentId,
-              ...(document.error ? { store_code: safeIdentifier(document.error.code) } : {}),
+              ...(document.error ? { store_code: safeStoreCode(document.error.code) } : {}),
             },
           ),
         )
@@ -1896,7 +1896,7 @@ async function handleForward(
         sent_at: new Date().toISOString(),
         created_by: body.sent_by || null,
       }),
-    ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
+    ).catch((e: any) => console.log(JSON.stringify({ event: 'po_comms_log_failed', ...safeErrorFacts(e) })))
   }
   Promise.resolve(
     sb.from('email_events').insert({
@@ -2200,7 +2200,7 @@ export async function handleApprovedEmailRequest(
         'The approved send stopped before anything was sent.',
       )
     if (!(err instanceof ApprovedSendRefusal) && !(err instanceof OutlookInputError)) {
-      console.error('[send-outlook-email] approved send error:', (err as Error).message)
+      console.error(JSON.stringify({ event: 'approved_send_error', ...safeErrorFacts(err) }))
     }
     await auditQuietly(deps.store, {
       approval_id: approvalId,
@@ -2418,7 +2418,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
             sent_at: new Date().toISOString(),
             created_by: body.sent_by || null,
           }),
-        ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
+        ).catch((e: any) => console.log(JSON.stringify({ event: 'po_comms_log_failed', ...safeErrorFacts(e) })))
       }
       Promise.resolve(
         sb.from('email_events').insert({
@@ -2476,9 +2476,9 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           400,
         )
       }
-      // Provider and exception text is logged here and never returned: it can
+      // Provider and exception text is neither logged nor returned: it can
       // carry Graph's message, recipient addresses or internal detail.
-      console.error('[send-outlook-email] Error:', (err as Error).message)
+      console.error(JSON.stringify({ event: 'send_outlook_email_error', ...safeErrorFacts(err) }))
       if (err instanceof GraphProviderError) {
         if (err.outcomeUnknown) {
           return json({

@@ -600,3 +600,21 @@ Deno.test("raw provider text: a report send that throws stores and answers fixed
     assert(!text.includes("SENTINEL"), `${label} echoed raw provider text: ${text}`);
   }
 });
+
+Deno.test("raw provider text: a report row stored with provider or database text is shown without it", async () => {
+  const sentinel = "SENTINEL raw provider text jane@example.com 0412 999 888";
+  const store = new FakeStore();
+  const at = (minutes: number) => new Date(Date.UTC(2026, 9, 14, 3, minutes)).toISOString();
+  store.reportRows.push(
+    { id: "r-old-1", kind: "manual", status: "sent", to_emails: [], cc_emails: [], sent_by_name: "Shaun",
+      subject: "Debt report", error: `email 502 ${sentinel}`, created_at: at(1), sent_at: at(1) } as any,
+    { id: "r-old-2", kind: "manual", status: "failed", to_emails: [], cc_emails: [], sent_by_name: "Shaun",
+      subject: "Debt report", error: `SENTINEL duplicate key value violates unique constraint`, created_at: at(2), sent_at: null } as any,
+  );
+  const { deps } = fakeDeps(store);
+  const view = (await call(deps, "debt_ws_report", SHAUN)).body as any;
+  assertEquals(view.last_attempt.error, "error_not_shown");
+  assertEquals(view.last_sent.error, "not sent: the email was refused or failed before sending");
+  const text = JSON.stringify(view);
+  assert(!text.includes("SENTINEL"), `report view echoed stored text: ${text}`);
+});

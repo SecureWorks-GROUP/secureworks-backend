@@ -32,7 +32,7 @@
 
 // Every statement and report email claims its item before it is sent, and only an explicit
 // "checked" press (a named person) releases an earlier unconfirmed send.
-import { safeErrorLine, safeIdentifier } from "../_shared/safe_identifier.ts";
+import { safeErrorLine, safeIdentifier, sendReplyCode, sendReplyState } from "../_shared/safe_identifier.ts";
 import {
   claimSend,
   readSendHolds,
@@ -2155,8 +2155,8 @@ function emailReplyFacts(result: { status: number; reply?: unknown }) {
   const r = replyObject(result.reply) ?? {};
   return {
     email_status: result.status,
-    reply_code: safeIdentifier(r.code),
-    reply_state: safeIdentifier(r.state),
+    reply_code: sendReplyCode(r.code),
+    reply_state: sendReplyState(r.state),
   };
 }
 
@@ -3726,14 +3726,44 @@ export function janSmsFailureCode(reason: string | null | undefined): string {
   return safeIdentifier(head) ?? "sms_not_accepted";
 }
 
+// Codes this file stores as a row's whole error.
+const STORED_DEBT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "already_sent",
+  "bank_check_unavailable",
+  "not_built",
+  "nothing_due",
+  "possible_payment",
+  "report_sends_unreadable",
+  "row_not_written",
+  "send_not_confirmed",
+  "xero_copy_stale",
+  "xero_unavailable",
+]);
+
+// Prefixes this file writes ahead of detail, each shown as fixed text only.
+const STORED_DEBT_ERROR_TEXTS: ReadonlyArray<readonly [string, string]> = [
+  ["not confirmed:", "not confirmed: the send may have gone out; check Sent Items before sending again"],
+  ["reconciled: not in Sent Items", "reconciled: a person checked Sent Items and it was not there"],
+  ["not built:", "not built: the report could not be built"],
+  ["xero copy not fresh:", "not sent: the Xero copy was not fresh"],
+  ["email ", "not sent: the email was refused or failed before sending"],
+];
+
 /**
- * A stored error as a reader shows it. Rows written before provider text was
- * kept out may still hold `<code>:<provider detail>`; only the code is shown.
+ * A stored error as a reader shows it, from a closed set: one of our codes, a
+ * legacy GoHighLevel code (rows written before provider text was kept out hold
+ * `<code>:<provider detail>`), or a fixed text for one of our prefixes. Stored
+ * text is never echoed: anything else reads as 'error_not_shown'.
  */
 export function storedDebtErrorView(error: string | null | undefined): string | null {
   if (typeof error !== "string" || !error) return null;
-  const legacy = /^(ghl_[a-z_]+?(?:_\d{3})?):/.exec(error);
-  return legacy ? legacy[1] : error;
+  if (STORED_DEBT_ERROR_CODES.has(error)) return error;
+  const legacy = /^(ghl_[a-z_]{1,48}?(?:_\d{3})?):/.exec(error);
+  if (legacy) return legacy[1];
+  for (const [prefix, text] of STORED_DEBT_ERROR_TEXTS) {
+    if (error.startsWith(prefix)) return text;
+  }
+  return "error_not_shown";
 }
 
 const bytesToBase64 = (bytes: Uint8Array) => {

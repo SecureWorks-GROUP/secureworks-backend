@@ -23,6 +23,10 @@ type State = {
   packUpdates: Record<string, unknown>[];
   finalPatchError: { message: string; code?: string } | null;
   finalPatchZeroRows?: boolean;
+  // A store error for one helper read or write: pack row read / insert /
+  // reread, cycle detail read, attendance cycle read, cycle bind.
+  fail?: Partial<Record<"packRead" | "packInsert" | "packReread" | "detailRead" | "cycleRead" | "cycleBind", { message: string; code?: string }>>;
+  noPackRow?: boolean;
 };
 
 class Query {
@@ -52,12 +56,29 @@ class Query {
       default: return null;
     }
   }
-  maybeSingle() { return Promise.resolve({ data: this.row(), error: null }); }
-  single() { return Promise.resolve({ data: this.row(), error: null }); }
+  private failure(): { message: string; code?: string } | undefined {
+    const fail = this.state.fail ?? {};
+    if (this.table === "makesafe_report_packs") return this.inserting ? fail.packInsert : this.patch ? undefined : fail.packRead;
+    if (this.table === "makesafe_job_details") return fail.detailRead;
+    if (this.table === "makesafe_attendance_cycles") return fail.cycleRead;
+    if (this.table === "makesafe_report_pack_cycles") return fail.cycleBind;
+    return undefined;
+  }
+  maybeSingle() {
+    const error = this.failure();
+    if (error) return Promise.resolve({ data: null, error });
+    if (this.table === "makesafe_report_packs" && this.state.noPackRow) return Promise.resolve({ data: null, error: null });
+    return Promise.resolve({ data: this.row(), error: null });
+  }
+  single() {
+    const reread = this.table === "makesafe_report_packs" ? this.state.fail?.packReread : undefined;
+    if (reread) return Promise.resolve({ data: null, error: reread });
+    return Promise.resolve({ data: this.row(), error: null });
+  }
   then(resolve: (v: unknown) => void, reject?: (e: unknown) => void) {
     let out: unknown = { data: null, error: null };
     if (this.inserting) {
-      out = { data: null, error: null };
+      out = { data: null, error: this.failure() ?? null };
     } else if (this.table === "makesafe_report_packs" && this.patch) {
       this.state.packUpdates.push(this.patch);
       if (this.selected && this.statusFiltered) {
@@ -215,4 +236,31 @@ Deno.test("raw provider text: a send that throws is raised and saved without the
   }
   assert(state.packUpdates.length > 1, "the follow-up reached the send");
   assertNoSentinel(state.packUpdates, "pack updates");
+});
+
+Deno.test("raw provider text: a store error in a pack row or cycle helper names the store code only", async () => {
+  const STORE_ERROR = { message: SENTINEL, code: "57014", details: SENTINEL } as { message: string; code?: string };
+  const cases: Array<[NonNullable<State["fail"]>, boolean, string]> = [
+    [{ packRead: STORE_ERROR }, false, "pack row read failed (photo): store code 57014"],
+    [{ packInsert: STORE_ERROR }, true, "pack row insert failed (photo): store code 57014"],
+    [{ packReread: STORE_ERROR }, true, "pack row reread failed (photo): store code 57014"],
+    [{ detailRead: STORE_ERROR }, false, "pack cycle detail read failed (photo): store code 57014"],
+    [{ cycleRead: STORE_ERROR }, false, "attendance cycle read failed: store code 57014"],
+    [{ cycleBind: STORE_ERROR }, false, "pack cycle bind failed (photo): store code 57014"],
+    [{ packRead: { message: SENTINEL, code: SENTINEL } }, false, "pack row read failed (photo): store code unknown"],
+  ];
+  for (const [fail, noPackRow, expected] of cases) {
+    const { state, client } = harness();
+    state.fail = fail;
+    state.noPackRow = noPackRow;
+    await withOutlookStatus(202, async (calls) => {
+      const err = await quiet(() => assertRejects(() => makesafeSendPhotoFollowup(client, { job_id: JOB, approved_photos: PHOTOS })));
+      const message = String((err as Error).message);
+      assert(message.includes(expected), `${expected}: ${message}`);
+      assertNoSentinel(message, expected);
+      assertNoSentinel((err as any).body ?? null, `${expected} body`);
+      assertEquals(calls.filter((url) => url.includes("send-outlook-email")).length, 0, `${expected}: nothing sent`);
+    }, { success: true });
+    assertNoSentinel(state.packUpdates, `${expected} pack updates`);
+  }
 });

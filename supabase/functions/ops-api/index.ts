@@ -509,7 +509,7 @@ import {
   writeInvoiceEmailGateJobEvent,
 } from './invoice_email_resend_gate.ts'
 import { summariseSendReply } from './send_reply_summary.ts'
-import { safeErrorFacts, safeErrorLine, safeIdentifier, safeProviderId } from '../_shared/safe_identifier.ts'
+import { safeErrorFacts, safeErrorLine, safeIdentifier, safeProviderId, safeStoreCode, sendReplyCode, sendReplyState } from '../_shared/safe_identifier.ts'
 import {
   claimSend,
   newSendAttemptId,
@@ -4027,15 +4027,16 @@ function xeroInvoiceEmailAccepted(result: unknown): boolean {
 // Records a failed invoice email as refused, failed or unknown and returns the
 // error to throw. An unknown outcome is also written to job_events, which the
 // resend gate reads, so it holds even when the business-event lane is off.
-// The error carries the reply's code and state only, never its raw text.
+// The error carries the reply's code and state only, each from its closed set
+// (anything else reads 'unrecognised'), never its raw text.
 async function invoiceEmailFailure(
   deps: InvoiceEmailGateDeps & { outcome: InvoiceEmailFailureOutcome; status: number | null; replyBody: unknown },
 ): Promise<ApiError> {
   const ev = INVOICE_EMAIL_FAILURE_EVENT[deps.outcome]
   const at = new Date().toISOString()
   const reply = (deps.replyBody && typeof deps.replyBody === 'object') ? deps.replyBody as Record<string, unknown> : {}
-  const replyCode = typeof reply.code === 'string' ? reply.code : null
-  const replyState = typeof reply.state === 'string' ? reply.state : null
+  const replyCode = sendReplyCode(reply.code)
+  const replyState = sendReplyState(reply.state)
   console.error(JSON.stringify({ event: ev.event_type, entity_id: deps.xeroInvoiceId, status: deps.status, reply_code: replyCode }))
   try {
     await deps.logBusinessEvent(deps.client, {
@@ -4166,8 +4167,8 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   if (siInvError) {
     return json(sealedSesFenceCheckFailedRefusal(
       'send_invoice_email',
-      `The invoice mirror lookup failed (${siInvError.message}).`,
-      { xero_invoice_id: siId },
+      'The invoice mirror lookup failed.',
+      { xero_invoice_id: siId, store_code: safeStoreCode(siInvError.code) },
     ), 503)
   }
   if (!siInv) {
@@ -14334,8 +14335,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     if (err instanceof ApiError) {
       return json(err.body || { error: err.message }, err.status)
     }
-    console.error('[ops-api] ERROR:', err)
-    return json({ error: (err as Error).message || 'Internal error' }, 500)
+    // Anything that is not an ApiError is unexpected: its message and stack can
+    // carry store or provider text, so neither is logged nor returned.
+    console.error(JSON.stringify({ event: 'ops_api_unhandled_error', action: safeIdentifier(auditAction), ...safeErrorFacts(err) }))
+    return json({ error: 'Internal error', ...safeErrorFacts(err) }, 500)
   }
 }
 
@@ -25889,7 +25892,7 @@ async function ensureMakesafeAttendanceCycle(
     .maybeSingle()
   const existing = await readCycle()
   if (existing.error) {
-    throw new ApiError(`attendance cycle read failed: ${existing.error.message || existing.error}`, 500)
+    throw new ApiError(`attendance cycle read failed: store code ${safeStoreCode(existing.error?.code) ?? 'unknown'}`, 500)
   }
   if (!existing.data?.id) {
     const inserted = await client.from('makesafe_attendance_cycles').insert({
@@ -25900,14 +25903,14 @@ async function ensureMakesafeAttendanceCycle(
     if (inserted.error) {
       const raced = await readCycle()
       if (raced.error || !raced.data?.id) {
-        throw new ApiError(`attendance cycle bind failed: ${inserted.error.message || inserted.error}`, 500)
+        throw new ApiError(`attendance cycle bind failed: store code ${safeStoreCode(inserted.error?.code) ?? 'unknown'}`, 500)
       }
       return raced.data
     }
   }
   const { data, error } = await readCycle()
   if (error || !data?.id) {
-    throw new ApiError(`attendance cycle bind failed: ${error?.message || 'missing cycle identity'}`, 500)
+    throw new ApiError(`attendance cycle bind failed: ${error ? `store code ${safeStoreCode(error.code) ?? 'unknown'}` : 'missing cycle identity'}`, 500)
   }
   return data
 }
@@ -38642,7 +38645,7 @@ async function completeAndInvoice(
   }
 
   if (lineItems.length === 0) {
-    throw new Error('No pricing data found on this job. Add pricing_json before invoicing.')
+    throw new ApiError('No pricing data found on this job. Add pricing_json before invoicing.', 500)
   }
 
   const total = lineItems.reduce((s: number, li: any) => s + ((li.quantity || 0) * (li.unit_price || 0)), 0)
@@ -39141,7 +39144,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   // `total`/`grandTotal` (not `totalIncGST`) are not falsely blocked.
   const totalIncGST = Number(pricing.totalIncGST ?? pricing.total ?? pricing.grandTotal ?? 0)
   if (!(totalIncGST > 0)) {
-    throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
+    throw new ApiError('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.', 500)
   }
   const paymentTerms = pricing.payment_terms || '50/50 split'
   const validDays = pricing.valid_days || 30
@@ -40408,7 +40411,7 @@ async function assertAssigned(client: any, jobId: string, userId: string, isAdmi
     .neq('status', 'cancelled')
     .limit(1)
     .maybeSingle()
-  if (!data) throw new Error('You are not assigned to this job')
+  if (!data) throw new ApiError('You are not assigned to this job', 500)
 }
 
 function isMakesafeAccessJob(job: any): boolean {
@@ -40815,7 +40818,7 @@ export function tradeJobAccessRefusal(decision: TradeJobAccessDecision): Error |
   if (decision.tier !== 'none') return null
   return decision.reason === 'tenant_mismatch'
     ? new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
-    : new Error('You are not assigned to this job')
+    : new ApiError('You are not assigned to this job', 500)
 }
 
 // Every existing door keeps calling this; it is now a thin throw-on-refuse
@@ -49910,13 +49913,13 @@ async function assertDraftPackRoutineEligible(
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
     .select('job_id, substatus, report_received_at, report_sent_at, report_type')
     .eq('job_id', jobId).maybeSingle()
-  if (detailErr) throw new ApiError('draft pack eligibility detail read failed: ' + detailErr.message, 500)
+  if (detailErr) throw new ApiError(`draft pack eligibility detail read failed: store code ${safeStoreCode(detailErr.code) ?? 'unknown'}`, 500)
   if (!detail) throw new ApiError('draft pack routine blocked: make-safe detail row not found', 404)
 
   const { data: packRows, error: packErr } = await client.from('makesafe_report_packs')
     .select('job_id, pack_kind, status, report_doc_id, invoice_doc_id, xero_invoice_id')
     .eq('job_id', jobId).eq('pack_kind', packKind)
-  if (packErr) throw new ApiError('draft pack eligibility pack read failed: ' + packErr.message, 500)
+  if (packErr) throw new ApiError(`draft pack eligibility pack read failed: store code ${safeStoreCode(packErr.code) ?? 'unknown'}`, 500)
 
   const due = selectDraftPackDueJobIds([detail], packRows || [], 1, packKind)
   if (!due.includes(jobId)) {
@@ -49946,7 +49949,7 @@ async function claimDraftPackForDrafting(
     .eq('job_id', jobId).eq('pack_kind', packKind)
     .in('status', fromStatuses)
     .select('id, status')
-  if (lockErr) throw new ApiError('draft pack claim failed: ' + lockErr.message, 500)
+  if (lockErr) throw new ApiError(`draft pack claim failed: store code ${safeStoreCode(lockErr.code) ?? 'unknown'}`, 500)
   if (!locked || locked.length === 0) {
     const { data: current } = await client.from('makesafe_report_packs')
       .select('status, failed_step').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
@@ -49962,14 +49965,15 @@ async function markDraftPackFailed(
   packKind: string,
   err: unknown,
 ): Promise<void> {
-  const detail = (err as Error)?.message || String(err)
+  // The error's class and codes only: its message can carry model or store text.
   await _patchPackStrict(client, jobId, packKind, {
     status: 'failed',
     failed_step: 'draft_pack',
-    error_detail: detail.slice(0, 500),
+    error_detail: `draft pack failed: ${safeErrorLine(err)}`,
     send_started_at: null,
   })
 }
+export const _markDraftPackFailedForTest = markDraftPackFailed
 
 // Load the context the Claude Draft Pack skill sees. This is read-only: job,
 // make-safe details, the trade/service report, current documents/photos, and the
@@ -50098,7 +50102,7 @@ async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any
     internalEvidenceOrigin('draft_pack_ready'),
     { select: 'job_id', row: 'rows' },
   )
-  if (error) throw new ApiError('draft pack ready mark failed: ' + error.message, 500)
+  if (error) throw new ApiError(`draft pack ready mark failed: store code ${safeStoreCode(error.code) ?? 'unknown'}`, 500)
   if (!data || data.length === 0) throw new ApiError('draft pack ready mark affected 0 rows', 500)
 }
 
@@ -50424,7 +50428,7 @@ async function applyMakesafeCloseOut(
   const { data: detailRows, error: detailErr } = await writeMakesafeSubstatus(
     client, jobId, detailPatch, opts.origin || internalEvidenceOrigin('closeout'), { row: 'rows' },
   )
-  if (detailErr) throw new ApiError('make-safe close detail update failed: ' + detailErr.message, 500)
+  if (detailErr) throw new ApiError(`make-safe close detail update failed: store code ${safeStoreCode(detailErr.code) ?? 'unknown'}`, 500)
   if (!detailRows || detailRows.length === 0) {
     throw new ApiError('make-safe close detail update affected 0 rows; verify the makesafe_job_details row exists', 409)
   }
@@ -50447,7 +50451,7 @@ async function applyMakesafeCloseOut(
     .update(jobPatch)
     .eq('id', jobId)
     .select()
-  if (jobErr) throw new ApiError('make-safe close job update failed: ' + jobErr.message, 500)
+  if (jobErr) throw new ApiError(`make-safe close job update failed: store code ${safeStoreCode(jobErr.code) ?? 'unknown'}`, 500)
   if (!jobRows || jobRows.length === 0) {
     throw new ApiError('make-safe close job update affected 0 rows; pack remains close-recoverable', 409)
   }
@@ -50982,7 +50986,7 @@ async function makesafeSendPack(
     .eq('job_id', jobId).eq('pack_kind', packKind)
     .in('status', LOCKABLE_STATUSES)
     .select()
-  if (lockErr) throw new ApiError('send-lock update failed: ' + lockErr.message, 500)
+  if (lockErr) throw new ApiError(`send-lock update failed: store code ${safeStoreCode(lockErr.code) ?? 'unknown'}`, 500)
   if (!locked || locked.length === 0) {
     return { error: 'conflict: pack is already sending or not in a sendable state', job_id: jobId, status: 'sending_or_terminal' }
   }
@@ -51254,15 +51258,15 @@ async function makesafeSendPack(
           approved_photos: approvedPhotosForFollowup,
         })
       } catch (photoErr) {
-        // An ApiError raised by the follow-up carries our own wording; any
-        // other throw is reduced to its class and codes.
+        // Fixed wording plus the error's class and status; never its message,
+        // ApiError or not. The photo pack row keeps its own failure detail.
         photoFollowupResult = {
           sent: false,
-          error: photoErr instanceof ApiError ? photoErr.message.slice(0, 500) : 'The photo follow-up stopped unexpectedly.',
-          ...(photoErr instanceof ApiError ? {} : safeErrorFacts(photoErr)),
+          error: `The photo follow-up did not complete (${safeErrorLine(photoErr)}). Reconcile the photo pack before sending it again.`,
+          ...safeErrorFacts(photoErr),
           requires: 'photo_followup_reconcile',
         }
-        console.log('[makesafe_send_pack] immediate photo follow-up failed after main pack send:', photoFollowupResult.error)
+        console.log(JSON.stringify({ event: 'makesafe_photo_followup_failed', job_id: jobId, ...safeErrorFacts(photoErr) }))
       }
     } else {
       photoFollowupResult = { skipped: true, reason: 'no approved photos supplied' }
@@ -51317,7 +51321,7 @@ async function bindMakesafePackCycle(client: any, jobId: string, packId: string 
   if (!packId) return
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
     .select('cycle_number, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
-  if (detailErr || !detail) throw new ApiError(`pack cycle detail read failed (${packKind}): ${detailErr?.message || 'missing detail'}`, 500)
+  if (detailErr || !detail) throw new ApiError(`pack cycle detail read failed (${packKind}): ${detailErr ? `store code ${safeStoreCode(detailErr.code) ?? 'unknown'}` : 'missing detail'}`, 500)
   const cycle = await ensureMakesafeAttendanceCycle(client, jobId, Number(detail.cycle_number || 1), 'pack_bind')
   const { error } = await client.from('makesafe_report_pack_cycles').upsert({
     pack_id: packId,
@@ -51325,7 +51329,7 @@ async function bindMakesafePackCycle(client: any, jobId: string, packId: string 
     attendance_cycle_id: cycle.id,
     cycle_attribution: 'bound',
   }, { onConflict: 'pack_id,attendance_cycle_id' })
-  if (error) throw new ApiError(`pack cycle bind failed (${packKind}): ${error.message}`, 500)
+  if (error) throw new ApiError(`pack cycle bind failed (${packKind}): store code ${safeStoreCode(error.code) ?? 'unknown'}`, 500)
 }
 
 // Upsert a pack row, leaving it in a lockable 'drafted' state if it does not yet
@@ -51359,7 +51363,7 @@ async function _ensurePackRow(client: any, jobId: string, packKind: string, extr
 async function _ensurePackRowStrict(client: any, jobId: string, packKind: string, extra?: Record<string, any>) {
   const { data: existing, error: readErr } = await client.from('makesafe_report_packs')
     .select('id, status').eq('job_id', jobId).eq('pack_kind', packKind).maybeSingle()
-  if (readErr) throw new ApiError(`pack row read failed (${packKind}): ${readErr.message}`, 500)
+  if (readErr) throw new ApiError(`pack row read failed (${packKind}): store code ${safeStoreCode(readErr.code) ?? 'unknown'}`, 500)
   if (!existing) {
     const { error: insertErr } = await client.from('makesafe_report_packs').insert({
       org_id: DEFAULT_ORG_ID,
@@ -51372,11 +51376,11 @@ async function _ensurePackRowStrict(client: any, jobId: string, packKind: string
     // Concurrent first callers may race on UNIQUE(job_id, pack_kind). That is
     // fine: the conditional UPDATE below is the real atomic claim.
     if (insertErr && insertErr.code !== '23505') {
-      throw new ApiError(`pack row insert failed (${packKind}): ${insertErr.message}`, 500)
+      throw new ApiError(`pack row insert failed (${packKind}): store code ${safeStoreCode(insertErr.code) ?? 'unknown'}`, 500)
     }
     const { data: row, error: rowErr } = await client.from('makesafe_report_packs')
       .select('id').eq('job_id', jobId).eq('pack_kind', packKind).single()
-    if (rowErr || !row?.id) throw new ApiError(`pack row reread failed (${packKind}): ${rowErr?.message || 'missing row'}`, 500)
+    if (rowErr || !row?.id) throw new ApiError(`pack row reread failed (${packKind}): ${rowErr ? `store code ${safeStoreCode(rowErr.code) ?? 'unknown'}` : 'missing row'}`, 500)
     await bindMakesafePackCycle(client, jobId, row.id, packKind)
     return
   }
@@ -51384,7 +51388,7 @@ async function _ensurePackRowStrict(client: any, jobId: string, packKind: string
     const { error: patchErr } = await client.from('makesafe_report_packs')
       .update({ ...extra, updated_at: new Date().toISOString() })
       .eq('id', existing.id)
-    if (patchErr) throw new ApiError(`pack row patch failed (${packKind}): store code ${safeIdentifier(patchErr.code) ?? 'unknown'}`, 500)
+    if (patchErr) throw new ApiError(`pack row patch failed (${packKind}): store code ${safeStoreCode(patchErr.code) ?? 'unknown'}`, 500)
   }
   await bindMakesafePackCycle(client, jobId, existing.id, packKind)
 }
@@ -51393,7 +51397,7 @@ async function _patchPackStrict(client: any, jobId: string, packKind: string, pa
   const { error } = await client.from('makesafe_report_packs')
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq('job_id', jobId).eq('pack_kind', packKind)
-  if (error) throw new ApiError(`pack patch failed (${packKind}): store code ${safeIdentifier(error.code) ?? 'unknown'}`, 500)
+  if (error) throw new ApiError(`pack patch failed (${packKind}): store code ${safeStoreCode(error.code) ?? 'unknown'}`, 500)
 }
 
 // As _patchPackStrict, and an update that matched no row is a failure too:
@@ -51405,7 +51409,7 @@ async function _patchPackStrictRow(client: any, jobId: string, packKind: string,
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq('job_id', jobId).eq('pack_kind', packKind)
     .select('id')
-  if (error) throw new ApiError(`pack patch failed (${packKind}): store code ${safeIdentifier(error.code) ?? 'unknown'}`, 500)
+  if (error) throw new ApiError(`pack patch failed (${packKind}): store code ${safeStoreCode(error.code) ?? 'unknown'}`, 500)
   if (!Array.isArray(data) || data.length === 0) {
     throw new ApiError(`pack patch failed (${packKind}): no pack row was updated`, 500)
   }
@@ -51460,7 +51464,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     .eq('job_id', jobId).eq('pack_kind', photoPackKind)
     .in('status', ['drafted', 'failed'])
     .select('id, status')
-  if (photoLockErr) throw new ApiError(`photo follow-up lock failed (code ${safeIdentifier(photoLockErr.code) ?? 'unknown'})`, 500)
+  if (photoLockErr) throw new ApiError(`photo follow-up lock failed (code ${safeStoreCode(photoLockErr.code) ?? 'unknown'})`, 500)
   if (!photoLock || photoLock.length === 0) {
     const { data: currentPhotoPack } = await client.from('makesafe_report_packs')
       .select('status, failed_step').eq('job_id', jobId).eq('pack_kind', photoPackKind).maybeSingle()
@@ -51468,7 +51472,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     if (currentStatus === 'sent') {
       return { already_sent: true, reason: 'photo pack row already sent', job_id: jobId }
     }
-    throw new ApiError(`photo follow-up blocked: current photo pack status is '${currentStatus}'`, 409)
+    throw new ApiError(`photo follow-up blocked: current photo pack status is '${safeIdentifier(currentStatus) ?? 'unrecognised'}'`, 409)
   }
 
   let emailAttempted = false
@@ -51543,7 +51547,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
           contentType: photo.contentType || 'image/jpeg',
         })
       } catch (e) {
-        console.log(`[makesafe_send_photo_followup] photo fetch threw: ${(e as Error).message}`)
+        console.log(JSON.stringify({ event: 'makesafe_photo_fetch_failed', job_id: jobId, ...safeErrorFacts(e) }))
       }
     }
     if (attachments.length === 0) {
@@ -51613,7 +51617,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       await _patchPackStrictRow(client, jobId, photoPackKind, {
         status: 'sent_marker_failed',
         failed_step: 'photo_marker',
-        error_detail: `photo marker write failed (code ${safeIdentifier(markerErr.code) ?? 'unknown'})`,
+        error_detail: `photo marker write failed (code ${safeStoreCode(markerErr.code) ?? 'unknown'})`,
       })
       // Photos genuinely sent but the idempotency marker write failed. Tell the
       // operator clearly: the email WENT OUT. Do NOT retry.
@@ -51625,7 +51629,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
         job_id: jobId,
         marker_failed: true,
         warning: 'PHOTOS WERE SENT but the idempotency marker write failed. Do NOT re-send (it would double-email the builder).',
-        marker_code: safeIdentifier(markerErr.code),
+        marker_code: safeStoreCode(markerErr.code),
       }
     }
 
@@ -51789,7 +51793,7 @@ async function makesafeResetFailedPack(client: any, body: any) {
       .update({ status: targetStatus, failed_step: null, error_detail: null, send_started_at: null, updated_at: nowIso() })
       .eq('id', pack.id).eq('status', 'sending').eq('failed_step', 'draft_pack')
       .select()
-    if (lockResetErr) throw new ApiError('makesafe_reset_failed_pack: draft lock reset failed: ' + lockResetErr.message, 500)
+    if (lockResetErr) throw new ApiError(`makesafe_reset_failed_pack: draft lock reset failed: store code ${safeStoreCode(lockResetErr.code) ?? 'unknown'}`, 500)
     if (!lockResetRows || lockResetRows.length === 0) {
       return { error: 'draft lock reset affected 0 rows (the pack was no longer in draft generation state); re-read and retry', job_id: jobId }
     }
@@ -51807,7 +51811,7 @@ async function makesafeResetFailedPack(client: any, body: any) {
     .update({ status: targetStatus, failed_step: null, error_detail: null, send_started_at: null, updated_at: nowIso() })
     .eq('id', pack.id).eq('status', 'failed') // conditional: only reset a still-failed row
     .select()
-  if (resetErr) throw new ApiError('makesafe_reset_failed_pack: reset update failed: ' + resetErr.message, 500)
+  if (resetErr) throw new ApiError(`makesafe_reset_failed_pack: reset update failed: store code ${safeStoreCode(resetErr.code) ?? 'unknown'}`, 500)
   if (!resetRows || resetRows.length === 0) {
     return { error: 'reset affected 0 rows (the pack was no longer in failed state); re-read and retry', job_id: jobId }
   }
@@ -54873,7 +54877,7 @@ async function tradeLabourBudget(
   // reach it. Refused at this door rather than in the predicate: the open-pool
   // tier is correct for the report/photo doors that depend on it.
   if (!tradeLabourCostVisibleForTier(accessDecision.tier)) {
-    throw new Error('You are not assigned to this job')
+    throw new ApiError('You are not assigned to this job', 500)
   }
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 

@@ -2829,8 +2829,41 @@ Deno.test("raw provider text: Jan's list keeps the SMS failure code, never GoHig
   // Rows stored before the fix show only their code.
   assertEquals(storedDebtErrorView(`ghl_send_failed_422:${RAW_SENTINEL}`), "ghl_send_failed_422");
   assertEquals(storedDebtErrorView(`ghl_no_contact:${RAW_SENTINEL}`), "ghl_no_contact");
-  assertEquals(storedDebtErrorView("not confirmed: Error status=422"), "not confirmed: Error status=422");
+  assertEquals(
+    storedDebtErrorView("not confirmed: Error status=422"),
+    "not confirmed: the send may have gone out; check Sent Items before sending again",
+  );
   assertEquals(storedDebtErrorView(null), null);
+});
+
+Deno.test("raw provider text: a stored debt error is shown from a closed set, never its stored text", async () => {
+  const { storedDebtErrorView } = await import("./debt_ws_actions.ts");
+  const DB_SENTINEL = "SENTINEL database error: duplicate key value violates unique constraint jane@example.com";
+  // Our own codes stored as the whole error pass as themselves.
+  for (const code of ["xero_unavailable", "nothing_due", "possible_payment", "bank_check_unavailable", "xero_copy_stale", "send_not_confirmed"]) {
+    assertEquals(storedDebtErrorView(code), code);
+  }
+  // Our prefixes are shown as fixed text, whatever detail followed them.
+  const views = [
+    storedDebtErrorView(`not confirmed: ${RAW_SENTINEL}`),
+    storedDebtErrorView(`reconciled: not in Sent Items, checked by ${RAW_SENTINEL}`),
+    storedDebtErrorView(`not built: ${RAW_SENTINEL}`),
+    storedDebtErrorView(`xero copy not fresh: ${RAW_SENTINEL}`),
+    storedDebtErrorView(`email 502 ${RAW_SENTINEL}`),
+  ];
+  assertEquals(views, [
+    "not confirmed: the send may have gone out; check Sent Items before sending again",
+    "reconciled: a person checked Sent Items and it was not there",
+    "not built: the report could not be built",
+    "not sent: the Xero copy was not fresh",
+    "not sent: the email was refused or failed before sending",
+  ]);
+  // Anything else, provider text, a database error or an identifier-shaped
+  // word, is never echoed.
+  for (const stored of [RAW_SENTINEL, DB_SENTINEL, "unauthorized", "jane@example.com", "ghl_:x", "Error: SENTINEL"]) {
+    assertEquals(storedDebtErrorView(stored), "error_not_shown", stored);
+  }
+  assert(!JSON.stringify(views).includes("SENTINEL"));
 });
 
 Deno.test("raw provider text: a statement send that throws stores and answers fixed wording only", async () => {

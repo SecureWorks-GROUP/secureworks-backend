@@ -227,3 +227,37 @@ Deno.test('reply: a /send 2xx carrying an error is unknown and the hold stays (C
     resetGraphTokenCache()
   }
 })
+
+const RAW_TEXT = 'raw provider text that must not be echoed jane@example.com'
+
+async function recordingConsole<T>(run: () => Promise<T>): Promise<{ value: T; lines: string }> {
+  const lines: unknown[] = []
+  const saved = { log: console.log, error: console.error, warn: console.warn }
+  console.log = console.error = console.warn = (...line: unknown[]) => { lines.push(line) }
+  try {
+    return { value: await run(), lines: JSON.stringify(lines) }
+  } finally {
+    Object.assign(console, saved)
+  }
+}
+
+Deno.test('raw provider text: a Graph refusal is neither replied nor logged, its status and code are kept', async () => {
+  for (const status of [400, 503]) {
+    const store = makeFakeClaimStore()
+    const p = provider(() => Response.json({ error: { code: 'ErrorInvalidRecipients', message: RAW_TEXT } }, { status }))
+    const { value: result, lines } = await recordingConsole(() => withProvider(store, p, () => post()))
+    assertEquals(result.body.provider_status, status)
+    assertEquals(result.body.provider_code, 'ErrorInvalidRecipients')
+    assert(!JSON.stringify(result.body).includes('raw provider text'), `${status} reply: ${JSON.stringify(result.body)}`)
+    assert(!lines.includes('raw provider text'), `${status} logged: ${lines}`)
+    assert(lines.includes('send_outlook_email_error'), `${status}: the failure is still logged`)
+  }
+})
+
+Deno.test('raw provider text: an unexpected throw is neither replied nor logged', async () => {
+  const store = makeFakeClaimStore()
+  const p = provider(() => { throw new Error(RAW_TEXT) })
+  const { value: result, lines } = await recordingConsole(() => withProvider(store, p, () => post()))
+  assert(!JSON.stringify(result.body).includes('raw provider text'), JSON.stringify(result.body))
+  assert(!lines.includes('raw provider text'), lines)
+})

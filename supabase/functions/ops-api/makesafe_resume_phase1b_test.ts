@@ -22,6 +22,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  ApiError,
   _makesafeResetFailedPackForTest,
   _makesafeResumeCloseForTest,
   _makesafeSendPackForTest,
@@ -41,6 +42,8 @@ type Rows = Record<string, any[]>;
 interface FakeOpts {
   // Force an .update() on this table to return an {error}.
   failUpdateTable?: string;
+  // The forced update error's text and code (a store error's own wording).
+  failUpdateError?: { message: string; code?: string };
   // Force an .update() on this table to affect 0 rows (no matching predicate).
   zeroRowUpdateTable?: string;
   // Force an .insert() on this table to THROW (models a DB write that crashes).
@@ -76,7 +79,7 @@ function makeClient(seed: Rows, opts: FakeOpts = {}) {
       if (opts.failUpdateTable === table) {
         return {
           data: null,
-          error: { message: `forced update error on ${table}` },
+          error: opts.failUpdateError ?? { message: `forced update error on ${table}` },
         };
       }
       const target = opts.zeroRowUpdateTable === table ? [] : matched();
@@ -1211,4 +1214,82 @@ Deno.test("raw provider text: a photo follow-up that throws is reported without 
   assertEquals(res.photo_followup.error_name, "Error");
   assertNoRawText(res, "reply");
   assertNoRawText(client._tables.makesafe_report_packs, "pack rows");
+});
+
+Deno.test("raw provider text: a send-lock update failure names the store code only", async () => {
+  const client = makeClient(cycleSeed(), {
+    failUpdateTable: "makesafe_report_packs",
+    failUpdateError: { message: RAW_SENTINEL, code: "57014" },
+  });
+  const { deps } = makeSeams({ emailMode: "ok" });
+  const { res, error } = await sendPackCatching(client, deps);
+  assert(error, "a failed send lock must throw");
+  assert(String(error.message).includes("send-lock update failed: store code 57014"), String(error.message));
+  assertNoRawText(error.message, "thrown error");
+  assertNoRawText(res, "reply");
+});
+
+Deno.test("raw provider text: a photo follow-up ApiError's message is neither replied nor logged", async () => {
+  const client = makeClient(cycleSeed());
+  const { deps } = makeSeams({ emailMode: "ok" });
+  (deps as any).sendPhotoFollowup = async () => {
+    throw new ApiError(`photo follow-up lock failed: ${RAW_SENTINEL}`, 500);
+  };
+  // sendPackCatching silences the console and restores it after; the follow-up
+  // swaps in a recorder just before it throws, so the pack's failure line lands there.
+  const logged: unknown[] = [];
+  const throwing = (deps as any).sendPhotoFollowup;
+  const { res, error } = await sendPackCatching(client, {
+    ...deps,
+    sendPhotoFollowup: (...args: unknown[]) => {
+      console.log = (...line: unknown[]) => logged.push(line);
+      return throwing(...args);
+    },
+  });
+  assertEquals(error, null);
+  assertEquals(res.sent, true);
+  assertEquals(res.photo_followup.sent, false);
+  assertEquals(res.photo_followup.requires, "photo_followup_reconcile");
+  assert(String(res.photo_followup.error).startsWith("The photo follow-up did not complete"), res.photo_followup.error);
+  assertNoRawText(res, "reply");
+  assertNoRawText(logged, "log lines");
+  assert(logged.length > 0, "the failure is still logged");
+  assertNoRawText(client._tables.makesafe_report_packs, "pack rows");
+});
+
+Deno.test("raw provider text: a pack reset or a close-out whose store write fails names the store code only", async () => {
+  const resetClient = makeClient(resetSeed("failed", "preflight_docs", false), {
+    failUpdateTable: "makesafe_report_packs",
+    failUpdateError: { message: RAW_SENTINEL, code: "57014" },
+  });
+  let resetError: any = null;
+  try {
+    await _makesafeResetFailedPackForTest(resetClient, { job_id: "job-1" });
+  } catch (error) {
+    resetError = error;
+  }
+  assert(resetError, "a failed reset write must throw");
+  assert(String(resetError.message).includes("store code 57014"), String(resetError.message));
+  assertNoRawText(resetError.message, "reset error");
+
+  for (const table of ["makesafe_job_details", "jobs"]) {
+    const closeClient = makeClient(closeSeed("sent_not_closed", true), {
+      failUpdateTable: table,
+      failUpdateError: { message: RAW_SENTINEL, code: "57014" },
+    });
+    let closeError: any = null;
+    let res: any = null;
+    const log = console.log, err = console.error, warn = console.warn;
+    console.log = console.error = console.warn = () => {};
+    try {
+      res = await _makesafeResumeCloseForTest(closeClient, { job_id: "job-1" });
+    } catch (error) {
+      closeError = error;
+    } finally {
+      console.log = log; console.error = err; console.warn = warn;
+    }
+    assertNoRawText(closeError?.message ?? null, `${table} close error`);
+    assertNoRawText(res, `${table} close reply`);
+    assertNoRawText(closeClient._tables.makesafe_report_packs, `${table} pack rows`);
+  }
 });

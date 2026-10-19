@@ -46,7 +46,14 @@ import {
   sendClaimRefusalStatus,
   settleSend,
 } from "./outbound_send_claim.ts";
-import { safeErrorFacts, safeIdentifier, safeProviderId } from "./safe_identifier.ts";
+import {
+  safeErrorFacts,
+  safeHttpStatus,
+  safeIdentifier,
+  safeInternetMessageId,
+  safeProviderId,
+  safeStoreCode,
+} from "./safe_identifier.ts";
 
 export const APPROVED_SEND_EMAIL_SCHEMA = "secureworks.approved-send.email/v1";
 export const APPROVED_SEND_SMS_SCHEMA = "secureworks.approved-send.sms/v1";
@@ -651,7 +658,7 @@ const APPROVAL_COLUMNS =
 // The store's own error text can carry SQL detail or row values, so a refusal
 // names only the PostgREST code when it has a safe shape.
 function storeUnreadable(what: string, error: unknown): never {
-  const code = safeIdentifier((error as { code?: unknown } | null)?.code);
+  const code = safeStoreCode((error as { code?: unknown } | null)?.code);
   refuse(503, "approval_store_unreadable", `The approval store could not be ${what}.`,
     code ? { store_code: code } : {});
 }
@@ -710,7 +717,7 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
         .eq("id", id).eq("status", "sending").eq("claim_token", claimToken)
         .select("id");
       if (error) {
-        console.error("[approved_send] outcome write failed:", error.message);
+        console.error(JSON.stringify({ event: "approved_send_outcome_write_failed", store_code: safeStoreCode(error.code) }));
         return false;
       }
       return Array.isArray(data) && data.length === 1;
@@ -728,7 +735,7 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
         detail: entry.detail ?? {},
       });
       if (error) {
-        const code = safeIdentifier(error.code);
+        const code = safeStoreCode(error.code);
         throw new Error(`approved_send audit write failed${code ? ` (code ${code})` : ""}`);
       }
     },
@@ -761,7 +768,7 @@ export async function auditQuietly(store: ApprovedSendStore, entry: AuditEntry):
   try {
     await store.audit(entry);
   } catch (error) {
-    console.error("[approved_send] audit write failed:", (error as Error).message);
+    console.error(JSON.stringify({ event: "approved_send_audit_write_failed", ...safeErrorFacts(error) }));
   }
 }
 
@@ -1253,13 +1260,42 @@ export interface SendOutcome {
   detail: Record<string, unknown>;
 }
 
-// Free-text keys a provider or an exception fills. The doors record fixed
-// facts (stage, code, provider status) instead; this drops any that slip in so
-// the stored row and the audit never hold provider or exception text.
-const OUTCOME_FREE_TEXT_KEYS = new Set(["error", "message", "error_message", "provider_error"]);
+// The outcome detail a door may store, as an allowlist. The approved content
+// (mailbox, recipients, subject, attachment names and hashes, mobile, line) is
+// what the approver already recorded; ids, codes and statuses pass only with
+// their safe shape. Any other key is dropped, so provider or exception text
+// can never reach the stored row or the audit under a new name.
+const OUTCOME_EVENTS: ReadonlySet<string> = new Set(["sent", "failed", "outcome_unknown"]);
+const keepApproved = (value: unknown) => value;
+const providerIdOrNull = (value: unknown) => value == null ? null : safeProviderId(value);
+const OUTCOME_DETAIL_FIELDS: Record<string, (value: unknown) => unknown> = {
+  mailbox: keepApproved,
+  mode: keepApproved,
+  to: keepApproved,
+  cc: keepApproved,
+  bcc: keepApproved,
+  subject: keepApproved,
+  attachments: keepApproved,
+  to_mobile: keepApproved,
+  from_line: keepApproved,
+  reply_to_message_id: providerIdOrNull,
+  graph_draft_id: providerIdOrNull,
+  contact_id: providerIdOrNull,
+  conversation_id: providerIdOrNull,
+  internet_message_id: (value) => value == null ? null : safeInternetMessageId(value),
+  stage: safeIdentifier,
+  error_name: safeIdentifier,
+  provider_code: safeIdentifier,
+  provider_status: safeHttpStatus,
+};
 
-function outcomeDetailFacts(detail: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(detail).filter(([key]) => !OUTCOME_FREE_TEXT_KEYS.has(key)));
+export function outcomeDetailFacts(detail: Record<string, unknown>): Record<string, unknown> {
+  const facts: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(detail)) {
+    const shape = Object.hasOwn(OUTCOME_DETAIL_FIELDS, key) ? OUTCOME_DETAIL_FIELDS[key] : null;
+    if (shape && value !== undefined) facts[key] = shape(value);
+  }
+  return facts;
 }
 
 /** Write the outcome to the approval row and the audit. Never throws. */
@@ -1271,7 +1307,9 @@ export async function finishApprovedSend(
 ): Promise<{ outcome_recorded: boolean; audit_recorded: boolean }> {
   const at = deps.now().toISOString();
   const detail = outcomeDetailFacts(outcome.detail);
-  const providerMessageId = safeProviderId(outcome.provider_message_id);
+  // A Graph send records its Message-ID (`<id@host>`); every other door an id.
+  const providerMessageId = safeProviderId(outcome.provider_message_id) ??
+    safeInternetMessageId(outcome.provider_message_id);
   let outcomeRecorded = false;
   try {
     outcomeRecorded = await deps.store.finish(claimed.row.id, claimed.claimToken, {
@@ -1282,7 +1320,7 @@ export async function finishApprovedSend(
       at,
     });
   } catch (error) {
-    console.error("[approved_send] outcome write threw:", (error as Error).message);
+    console.error(JSON.stringify({ event: "approved_send_outcome_write_threw", ...safeErrorFacts(error) }));
   }
   // The send claim carries the outcome even when the approval row write was
   // lost: an unknown (or unwritten) outcome keeps holding the content. A
@@ -1307,7 +1345,7 @@ export async function finishApprovedSend(
     });
   } catch (error) {
     auditRecorded = false;
-    console.error("[approved_send] outcome audit failed:", (error as Error).message);
+    console.error(JSON.stringify({ event: "approved_send_outcome_audit_failed", ...safeErrorFacts(error) }));
   }
   return { outcome_recorded: outcomeRecorded, audit_recorded: auditRecorded };
 }
@@ -1320,7 +1358,17 @@ export async function readApprovalStatus(
   const row = await store.loadApproval(approvalId);
   if (!row) refuse(404, "approval_not_found", "No recorded approval has this id.");
   const { seal: _seal, claim_token: _token, ...visible } = row;
-  return { approval: visible, audit: await store.listAudit(approvalId) };
+  // Rows written before the outcome allowlist may hold provider or exception
+  // text in their outcome detail; it is filtered on the way out too.
+  if (visible.provider_detail && typeof visible.provider_detail === "object") {
+    visible.provider_detail = outcomeDetailFacts(visible.provider_detail);
+  }
+  const audit = (await store.listAudit(approvalId)).map((entry) => {
+    if (!OUTCOME_EVENTS.has(String(entry.event)) || !entry.detail || typeof entry.detail !== "object") return entry;
+    const { at, ...rest } = entry.detail as Record<string, unknown>;
+    return { ...entry, detail: { ...outcomeDetailFacts(rest), ...(typeof at === "string" ? { at } : {}) } };
+  });
+  return { approval: visible, audit };
 }
 
 // ── Supabase-backed attachment reader ───────────────────────────────────────
