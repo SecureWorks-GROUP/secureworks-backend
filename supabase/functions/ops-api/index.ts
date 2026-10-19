@@ -318,6 +318,11 @@ import {
   runDispatchScopeOrderAction,
 } from './dispatch_scope_order_store.ts'
 import {
+  DISPATCH_SCOPE_MATERIAL_ACTIONS,
+  DISPATCH_SCOPE_MATERIAL_WRITE_ACTIONS,
+  runDispatchScopeMaterialAction,
+} from './dispatch_scope_materials_store.ts'
+import {
   DISPATCH_ORDERS_WRITE_ACTIONS,
   runDispatchOrdersAction,
 } from './dispatch_orders_store.ts'
@@ -6812,15 +6817,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw e
         }
       }
-      // Scope order lines, stage 1 (docs/dispatch-scope-order-lines-v1.md):
-      // one read and one import onto dispatch_scope_order_lines. Same staff
-      // gate as slice 4. No purchase order, no price, no send.
+      // Scope order lines, stage 1 (docs/dispatch-scope-order-lines-v1.md) and
+      // stage 2 (docs/dispatch-scope-material-lines-v1.md). Same staff gate as
+      // slice 4. Stage 2 copies known lines onto job_material_lines and may
+      // add a job_material_suppliers row for a supplier that already exists.
+      // It does not insert into suppliers, raise a purchase order, or send.
       case 'dispatch_scope_order_lines':
-      case 'dispatch_scope_order_import': {
+      case 'dispatch_scope_order_import':
+      case 'dispatch_scope_material_lines':
+      case 'dispatch_scope_order_apply': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
         }
-        if ((DISPATCH_SCOPE_ORDER_WRITE_ACTIONS as readonly string[]).includes(action) && req.method !== 'POST') {
+        const scopeWrite = (DISPATCH_SCOPE_ORDER_WRITE_ACTIONS as readonly string[]).includes(action)
+          || (DISPATCH_SCOPE_MATERIAL_WRITE_ACTIONS as readonly string[]).includes(action)
+        if (scopeWrite && req.method !== 'POST') {
           throw new ApiError(`${action} requires POST`, 405)
         }
         const scopeOrderActor = authMode === 'jwt'
@@ -6830,11 +6841,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             orgId: authUser?.orgId || null,
           }
           : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        const scopeCtx = { orgId: DEFAULT_ORG_ID, actor: scopeOrderActor }
         try {
-          return json(await runDispatchScopeOrderAction(client, action, url.searchParams, body, {
-            orgId: DEFAULT_ORG_ID,
-            actor: scopeOrderActor,
-          }))
+          const scopeResult = (DISPATCH_SCOPE_MATERIAL_ACTIONS as readonly string[]).includes(action)
+            ? await runDispatchScopeMaterialAction(client, action, url.searchParams, body, scopeCtx)
+            : await runDispatchScopeOrderAction(client, action, url.searchParams, body, scopeCtx)
+          return json(scopeResult)
         } catch (e) {
           if (e instanceof DispatchScopeOrderError) throw new ApiError(e.message, e.status, e.body)
           throw e

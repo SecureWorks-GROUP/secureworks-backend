@@ -41,10 +41,17 @@ export class DispatchScopeOrderError extends Error {
 
 export type ScopeOrderCut = { length_mm: number; qty: number };
 
+// The only note that is a price reminder. Any other note still means the
+// product itself is not settled.
+export const SCOPE_ORDER_PRICE_NOTE = "to confirm";
+
 export type ScopeOrderLine = {
   demand_id: string;
   product: string | null;
   product_unknown: boolean;
+  // True only when every toConfirm note is the generic price reminder.
+  // A named product with only that note is known: product_unknown stays false.
+  price_to_confirm: boolean;
   description: string;
   quantity: number | null;
   unit: string | null;
@@ -110,6 +117,21 @@ export function requireOrderVersion(value: unknown): string {
     throw new DispatchScopeOrderError(400, "invalid_request", "order_version required");
   }
   return trimmed;
+}
+
+export function scopeOrderConfirmFlags(
+  product: string | null,
+  notes: readonly string[],
+  extraUnknown: boolean,
+): { product_unknown: boolean; price_to_confirm: boolean } {
+  const priceOnly = notes.length > 0 && notes.every((note) =>
+    note.trim().toLowerCase() === SCOPE_ORDER_PRICE_NOTE
+  );
+  const otherNote = notes.some((note) => note.trim().toLowerCase() !== SCOPE_ORDER_PRICE_NOTE);
+  return {
+    product_unknown: product === null || extraUnknown || otherNote,
+    price_to_confirm: priceOnly,
+  };
 }
 
 export function formatScopeOrderLine(line: ScopeOrderLine): string {
@@ -278,6 +300,7 @@ function line(parts: {
   demand_id: string;
   product: string | null;
   product_unknown: boolean;
+  price_to_confirm: boolean;
   description: string;
   quantity: number | null;
   unit: string | null;
@@ -296,6 +319,7 @@ function line(parts: {
     demand_id: parts.demand_id,
     product: parts.product,
     product_unknown: unknown,
+    price_to_confirm: parts.price_to_confirm,
     description: parts.description,
     quantity: parts.quantity,
     unit: parts.unit,
@@ -356,7 +380,11 @@ function parseStrictLines(record: Record<string, unknown>): ScopeOrderLine[] {
     if (row.product_unknown !== undefined && typeof row.product_unknown !== "boolean") {
       invalid("product_unknown must be true or false");
     }
-    const flagged = row.product_unknown === true || unresolved || toConfirm.length > 0;
+    const flags = scopeOrderConfirmFlags(
+      product,
+      toConfirm,
+      row.product_unknown === true || unresolved,
+    );
     const statedLength = row.length_mm === undefined || row.length_mm === null
       ? null
       : wholeMm(row.length_mm, "length_mm");
@@ -365,7 +393,8 @@ function parseStrictLines(record: Record<string, unknown>): ScopeOrderLine[] {
     return line({
       demand_id: demandId(row.demand_id, `line ${index + 1} demand_id`),
       product,
-      product_unknown: flagged,
+      product_unknown: flags.product_unknown,
+      price_to_confirm: flags.price_to_confirm,
       description: descriptionOf(row.description, `line ${index + 1} description`),
       quantity,
       unit: unitOf(row.unit),
@@ -399,10 +428,12 @@ function demandLine(raw: unknown, label: string, forceUnknown = false): ScopeOrd
     }
   }
   const lengths = applyLengths(cutsOf(row.cuts, "lengthMm"), null, false);
+  const flags = scopeOrderConfirmFlags(product, toConfirm, forceUnknown);
   return line({
     demand_id: demandId(row.id ?? row.demand_id, `${label} id`),
     product,
-    product_unknown: forceUnknown || toConfirm.length > 0,
+    product_unknown: flags.product_unknown,
+    price_to_confirm: flags.price_to_confirm,
     description: descriptionOf(row.description, `${label} description`),
     quantity: quantityOf(row.quantity, `${label} quantity`),
     unit: unitOf(row.unit),
@@ -524,12 +555,14 @@ function supplierLine(
     : wholeMm(row.lengthMm, "lengthMm");
   const lengths = applyLengths(cuts, statedLength, true);
   const quantity = quantityOf(row.quantity, `${label} quantity`);
+  const flags = scopeOrderConfirmFlags(product, toConfirm, false);
   return {
     demandIds: unique,
     line: line({
       demand_id: unique.length === 1 ? unique[0] : unique.join("|"),
       product,
-      product_unknown: toConfirm.length > 0,
+      product_unknown: flags.product_unknown,
+      price_to_confirm: flags.price_to_confirm,
       description: descriptionOf(row.description, `${label} description`),
       quantity,
       unit: unitOf(row.unit),

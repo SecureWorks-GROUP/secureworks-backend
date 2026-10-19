@@ -29,7 +29,7 @@ export const DISPATCH_SCOPE_ORDER_WRITE_ACTIONS = [
 ] as const;
 
 const LINE_SELECT =
-  "id, job_id, scope_id, order_version, demand_id, product, product_unknown, description, quantity, unit, length_mm, stock_length_mm, stock_qty, cut_size, cuts, element_refs, supplier_name, position, created_at, created_by, created_by_email";
+  "id, job_id, scope_id, order_version, demand_id, product, product_unknown, price_to_confirm, description, quantity, unit, length_mm, stock_length_mm, stock_qty, cut_size, cuts, element_refs, supplier_name, supplier_match, position, created_at, created_by, created_by_email";
 
 export type DispatchScopeOrderActor = {
   userId: string | null;
@@ -50,6 +50,7 @@ export type DispatchScopeOrderLineRow = {
   demand_id: string;
   product: string | null;
   product_unknown: boolean;
+  price_to_confirm: boolean;
   description: string;
   quantity: number | null;
   unit: string | null;
@@ -60,6 +61,7 @@ export type DispatchScopeOrderLineRow = {
   cuts: ScopeOrderCut[];
   element_refs: string[];
   supplier_name: string | null;
+  supplier_match: string | null;
   position: number;
 };
 
@@ -132,6 +134,7 @@ function project(row: Record<string, unknown>): DispatchScopeOrderLineRow {
     demand_id: String(row.demand_id),
     product: row.product == null || row.product === "" ? null : String(row.product),
     product_unknown: row.product_unknown === true,
+    price_to_confirm: row.price_to_confirm === true,
     description: String(row.description ?? ""),
     quantity: numberOrNull(row.quantity),
     unit: row.unit == null || row.unit === "" ? null : String(row.unit),
@@ -144,6 +147,9 @@ function project(row: Record<string, unknown>): DispatchScopeOrderLineRow {
     supplier_name: row.supplier_name == null || row.supplier_name === ""
       ? null
       : String(row.supplier_name),
+    supplier_match: row.supplier_match == null || row.supplier_match === ""
+      ? null
+      : String(row.supplier_match),
     position: Number(row.position ?? 0),
   };
 }
@@ -228,6 +234,7 @@ async function linePayload(
     demand_id: row.demand_id,
     product: row.product,
     product_unknown: row.product_unknown,
+    price_to_confirm: row.price_to_confirm,
     description: row.description,
     quantity: row.quantity,
     unit: row.unit,
