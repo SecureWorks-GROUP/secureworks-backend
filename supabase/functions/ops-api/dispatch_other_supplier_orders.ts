@@ -116,7 +116,8 @@ export interface OtherSupplierOrder {
 export interface OtherSupplierOrdersAnswer {
   schema: typeof DISPATCH_OTHER_ORDERS_SCHEMA;
   orders: OtherSupplierOrder[];
-  // One line for the screen, null when there is nothing to say.
+  // One plain sentence for the screen, shown verbatim (no prices, no em
+  // dash), null when there is nothing to say.
   note: string | null;
 }
 
@@ -157,7 +158,7 @@ export function otherOpenSupplierOrders(
     const origins = [...new Set(others.map((o) => ORIGIN_WORDS[o.origin]))];
     note = `This job already has ${others.map(describe).join(", ")} from ${
       origins.join(" and ")
-    }. Check you are not ordering the same materials twice.`;
+    }, so check you are not ordering the same materials twice.`;
   }
   return { schema: DISPATCH_OTHER_ORDERS_SCHEMA, orders: others, note };
 }

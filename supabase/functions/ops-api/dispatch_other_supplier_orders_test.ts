@@ -104,7 +104,7 @@ Deno.test("screen: lists open non-Dispatch orders with no dollar figure, and say
   );
   assertEquals(
     answer.note,
-    "This job already has PO-0901 (Example Steel), PO-0903 (Example Sheets) from the old order screen or Xero and the quote builder. Check you are not ordering the same materials twice.",
+    "This job already has PO-0901 (Example Steel), PO-0903 (Example Sheets) from the old order screen or Xero and the quote builder, so check you are not ordering the same materials twice.",
   );
   const json = JSON.stringify(answer);
   assert(!/"(subtotal|total|amount_ex)"|812|893/.test(json));
