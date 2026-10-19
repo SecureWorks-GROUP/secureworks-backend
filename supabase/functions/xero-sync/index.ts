@@ -1520,11 +1520,13 @@ async function ingestMaterialsActuals(
       // digits) must reach a person: no PO fallback may place the bill instead.
       const m = matchBill(bill, { isMirror: false, jobFromRef, refToken: token, pos: token && !jobFromRef ? [] : pos, config })
 
-      // A fact this path wrote earlier (reference or PO) that the bill no longer
-      // supports is removed, so a refused job stops counting the cost. Facts
-      // from the pre-match agent or a person are not this path's to remove.
+      // A reference fact this path wrote earlier is removed when the reference is
+      // now refused (job not won, holding, same digits as another job, or the
+      // reference names several jobs), so a refused job stops counting the cost.
+      // PO, pre-match and human facts are not touched here: a PO drops out of the
+      // candidate list once billed, which is not a reason to undo its fact.
       const ownSource = factSourceById.get(bill.xero_invoice_id)
-      if (m.outcome !== 'fact' && (ownSource === 'xero_ref_link' || ownSource === 'po_deterministic')) {
+      if (m.outcome !== 'fact' && ownSource === 'xero_ref_link' && token && !jobFromRef) {
         await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
         result.cleaned++
       }
