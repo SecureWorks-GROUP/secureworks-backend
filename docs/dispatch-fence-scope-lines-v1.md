@@ -20,7 +20,7 @@ The job's latest `scope_revisions` row with `status = 'frozen'` (highest `revisi
 
 Post length: `FENCE_POST_LOOKUP` (sheet height x plinth height). A sheet height outside 1200/1500/1800/2100, or retaining not a multiple of 150, refuses the whole offer.
 
-Not lines, returned in `held` for the person: the one end post beyond the panel kits, concrete (crew buy, the designer's bag count), fixings, removal, delivery. When the job's live `scope_json.job.runs` differ from the frozen runs (compared as JSON values; one single-job projection of the runs only), `held` also carries "The scope was changed after it was frozen: check these lines against the latest scope." The lines still come from the frozen revision. If that read fails, `held` says the change could not be checked. The response also carries `scope_revision_number` and `scope_supplier` (the scoper's supplier text, shown only; a supplier name is never a key).
+Not lines, returned in `held` for the person: the one end post beyond the panel kits, concrete (crew buy, the designer's bag count), fixings, removal, delivery. When the job's live `scope_json.job.runs` differ from the frozen runs (compared as JSON values; one single-job projection of the runs only), `held` also carries "The scope was changed after it was frozen: check these lines against the latest scope." The lines still come from the frozen revision. If that read fails, or the live scope has no runs to compare, `held` says the change could not be checked. The read is filtered on the job's `org_id`. The response also carries `scope_revision_number` and `scope_supplier` (the scoper's supplier text, shown only; a supplier name is never a key).
 
 ## Evidence
 
