@@ -27,6 +27,8 @@ import {
   INVOICE_AUTHORISED_BODY_PREVIEW,
   INVOICE_EMAILED_BODY_PREVIEW,
   type InvoiceAuthorisedSource,
+  classifyInvoiceEmailFailure,
+  INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW,
   writeInvoiceAuthorisedEvidence,
 } from "./invoice_status_evidence.ts";
 import { _verifyAndSendInvoiceEmail } from "./index.ts";
@@ -280,4 +282,44 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
   }
   assertEquals(ev.payload.invoice_number, "INV-1477");
   assertEquals(ev.payload.to, "client@example.com");
+});
+
+// ── A failed invoice email is recorded by what the reply proves. ──
+// send-outlook-email answers 401/403 only from its auth checks (before Graph),
+// and `outcome_unknown` / `retry_safe: false` when the email may have gone.
+// An unknown outcome must never be recorded as a plain failure: that invites
+// a resend that emails the client twice. Only positive evidence of no
+// dispatch (`retry_safe: true`, a refusal) makes a send retry-safe.
+Deno.test("invoice email failure: classification", () => {
+  assertEquals(classifyInvoiceEmailFailure(401, null), "refused");
+  assertEquals(classifyInvoiceEmailFailure(403, { error: "x" }), "refused");
+  assertEquals(classifyInvoiceEmailFailure(422, { state: "refused", fact: "fenced" }), "refused");
+  assertEquals(classifyInvoiceEmailFailure(502, { state: "outcome_unknown", retry_safe: false }), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(502, { error: "Graph API error", retry_safe: false }), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(502, { error: "Graph API error", retry_safe: true }), "failed");
+  assertEquals(classifyInvoiceEmailFailure(500, null), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(400, { error: "bad", retry_safe: true }), "failed");
+  assertEquals(classifyInvoiceEmailFailure(409, { retry_safe: false }), "unknown");
+  assertEquals(classifyInvoiceEmailFailure(null, null), "unknown");
+});
+
+Deno.test("invoice email failure: a bare status without proof of no dispatch is unknown", () => {
+  for (const status of [400, 404, 408, 409, 429, 500, 502, 503, 504]) {
+    assertEquals(classifyInvoiceEmailFailure(status, null), "unknown", `bare ${status}`);
+    assertEquals(classifyInvoiceEmailFailure(status, { error: "x" }), "unknown", `${status} without retry_safe`);
+  }
+});
+
+Deno.test("invoice email failure: an explicit unknown reply wins over 401 and 403", () => {
+  for (const status of [401, 403]) {
+    assertEquals(classifyInvoiceEmailFailure(status, { state: "outcome_unknown" }), "unknown");
+    assertEquals(classifyInvoiceEmailFailure(status, { retry_safe: false }), "unknown");
+    assertEquals(classifyInvoiceEmailFailure(status, { state: "refused", retry_safe: false }), "unknown");
+  }
+});
+
+Deno.test("invoice email failure: the unknown words name Sent Items and stay digit-free", () => {
+  assert(/Sent Items/.test(INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW));
+  assert(/[Dd]o not resend/.test(INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW));
+  assert(!/\d/.test(INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW));
 });

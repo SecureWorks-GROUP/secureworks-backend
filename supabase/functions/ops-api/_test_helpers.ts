@@ -7,43 +7,85 @@ export type TableSeed = {
   jobs?: Record<string, any>           // keyed by id
   makesafe_job_details?: Record<string, any> // keyed by job_id
   makesafe_companies?: Record<string, any> // keyed by id
+  business_events?: any[]              // list reads (the invoice email resend gate)
+  job_events?: any[]                   // list reads; inserts are appended here too
+  read_errors?: Record<string, string> // table -> PostgREST error message on a list read
 }
 
 export type StubClientCalls = {
   inserts: Array<{ table: string; row: any }>
 }
 
-// Minimal Supabase-client stand-in: supports .from(t).select(...).eq(col, val).maybeSingle()
-// and .from(t).insert(row). Selects look up the seed by the .eq() predicate.
+function stubColumn(row: any, col: string): any {
+  const path = col.split("->>")
+  if (path.length === 2) return row?.[path[0]]?.[path[1]]
+  return row?.[col]
+}
+
+// Minimal Supabase-client stand-in. .select(...).eq(col, val).maybeSingle() looks
+// up a keyed seed by the first .eq() predicate; awaiting a select chain with
+// .eq/.in/.order/.limit reads a list seed. .insert(row) is recorded, and a
+// job_events insert is appended to that list so a later read sees it.
 export function makeStubClient(seed: TableSeed = {}): { client: any; calls: StubClientCalls } {
   const calls: StubClientCalls = { inserts: [] }
   const client = {
     from(table: string) {
       return {
         select(_cols: string) {
-          return {
+          const filters: Array<(row: any) => boolean> = []
+          let firstEq: [string, any] | null = null
+          let orderBy: { col: string; ascending: boolean } | null = null
+          let limitTo: number | null = null
+          const builder: any = {
             eq(col: string, val: any) {
-              return {
-                async maybeSingle() {
-                  const tableData = (seed as any)[table] || {}
-                  if (col === "xero_invoice_id") {
-                    return { data: tableData[val] || null, error: null }
-                  }
-                  if (col === "id") {
-                    return { data: tableData[val] || null, error: null }
-                  }
-                  // Fallback: linear scan
-                  for (const row of Object.values(tableData) as any[]) {
-                    if (row?.[col] === val) return { data: row, error: null }
-                  }
-                  return { data: null, error: null }
-                },
+              if (!firstEq) firstEq = [col, val]
+              filters.push((row) => stubColumn(row, col) === val)
+              return builder
+            },
+            in(col: string, vals: any[]) {
+              filters.push((row) => vals.includes(stubColumn(row, col)))
+              return builder
+            },
+            order(col: string, opts?: { ascending?: boolean }) {
+              orderBy = { col, ascending: opts?.ascending !== false }
+              return builder
+            },
+            limit(n: number) {
+              limitTo = n
+              return builder
+            },
+            async maybeSingle() {
+              const tableData = (seed as any)[table] || {}
+              const [col, val] = firstEq || ["", undefined]
+              if (col === "xero_invoice_id" || col === "id") {
+                return { data: tableData[val] || null, error: null }
               }
+              for (const row of Object.values(tableData) as any[]) {
+                if (row?.[col] === val) return { data: row, error: null }
+              }
+              return { data: null, error: null }
+            },
+            then(resolve: (v: any) => any, reject?: (e: any) => any) {
+              const err = seed.read_errors?.[table]
+              if (err) return Promise.resolve({ data: null, error: { message: err } }).then(resolve, reject)
+              const raw = (seed as any)[table]
+              let rows: any[] = Array.isArray(raw) ? raw.filter((r) => filters.every((f) => f(r))) : []
+              if (orderBy) {
+                const { col, ascending } = orderBy
+                rows = [...rows].sort((a, b) => (String(a[col]) < String(b[col]) ? -1 : 1) * (ascending ? 1 : -1))
+              }
+              if (limitTo !== null) rows = rows.slice(0, limitTo)
+              return Promise.resolve({ data: rows, error: null }).then(resolve, reject)
             },
           }
+          return builder
         },
         async insert(row: any) {
           calls.inserts.push({ table, row })
+          if (table === "job_events") {
+            seed.job_events = seed.job_events || []
+            seed.job_events.push({ ...row, created_at: row.created_at || new Date().toISOString() })
+          }
           return { error: null }
         },
       }

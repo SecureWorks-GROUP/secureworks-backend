@@ -493,7 +493,19 @@ import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
 import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
-import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
+import {
+  classifyInvoiceEmailFailure,
+  INVOICE_EMAIL_FAILURE_EVENT,
+  INVOICE_EMAILED_BODY_PREVIEW,
+  type InvoiceEmailFailureOutcome,
+  writeInvoiceAuthorisedEvidence,
+} from './invoice_status_evidence.ts'
+import {
+  INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT,
+  invoiceEmailGateRefusal,
+  readInvoiceEmailGate,
+  writeInvoiceEmailGateJobEvent,
+} from './invoice_email_resend_gate.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -3939,6 +3951,134 @@ async function resolveTradeXeroSupplierContact(
 // the prior inline body; this is a behaviour-preserving extraction.
 // ════════════════════════════════════════════════════════════
 
+type InvoiceEmailGateDeps = {
+  client: any
+  logBusinessEvent: (client: any, event: any) => Promise<void>
+  xeroInvoiceId: string
+  invoiceNumber: string
+  jobId: string | null
+  via: 'outlook' | 'xero'
+}
+
+// Runs the invoice email resend gate. With sent_items_checked the caller says
+// the earlier send is not in Sent Items: that is recorded, then the send goes ahead.
+async function passInvoiceEmailResendGate(
+  deps: InvoiceEmailGateDeps & { sentItemsChecked: boolean },
+): Promise<{ ok: true } | { ok: false; refusal: Record<string, unknown> }> {
+  const gate = await readInvoiceEmailGate(deps.client, deps.xeroInvoiceId)
+  if (gate.state === 'clear') return { ok: true }
+  if (gate.state === 'unreadable' || !deps.sentItemsChecked) {
+    console.error(JSON.stringify({ event: 'invoice_email_resend_gate_held', entity_id: deps.xeroInvoiceId, state: gate.state }))
+    return { ok: false, refusal: invoiceEmailGateRefusal(deps.xeroInvoiceId, gate) }
+  }
+  const at = new Date().toISOString()
+  try {
+    await deps.logBusinessEvent(deps.client, {
+      event_type: INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT,
+      entity_type: 'xero_invoice',
+      entity_id: deps.xeroInvoiceId,
+      job_id: deps.jobId || undefined,
+      body_preview: 'Sent Items was checked before the invoice email was sent again.',
+      payload: { invoice_number: deps.invoiceNumber, via: deps.via, unknown_since: gate.unknown_since },
+      provider_message_id: `ops-api:${INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT}:${deps.xeroInvoiceId}:${at}`,
+    })
+  } catch { /* the job event below and the log line are the other trails */ }
+  await writeInvoiceEmailGateJobEvent(deps.client, deps.jobId, INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT, {
+    invoice_number: deps.invoiceNumber, xero_invoice_id: deps.xeroInvoiceId, via: deps.via, unknown_since: gate.unknown_since,
+  })
+  console.log(JSON.stringify({ event: INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT, entity_id: deps.xeroInvoiceId }))
+  return { ok: true }
+}
+
+// Records a failed invoice email as refused, failed or unknown and returns the
+// error to throw. An unknown outcome is also written to job_events, which the
+// resend gate reads, so it holds even when the business-event lane is off.
+// The error carries the reply's code and state only, never its raw text.
+async function invoiceEmailFailure(
+  deps: InvoiceEmailGateDeps & { outcome: InvoiceEmailFailureOutcome; status: number | null; replyBody: unknown },
+): Promise<ApiError> {
+  const ev = INVOICE_EMAIL_FAILURE_EVENT[deps.outcome]
+  const at = new Date().toISOString()
+  const reply = (deps.replyBody && typeof deps.replyBody === 'object') ? deps.replyBody as Record<string, unknown> : {}
+  const replyCode = typeof reply.code === 'string' ? reply.code : null
+  const replyState = typeof reply.state === 'string' ? reply.state : null
+  console.error(JSON.stringify({ event: ev.event_type, entity_id: deps.xeroInvoiceId, status: deps.status, reply_code: replyCode }))
+  try {
+    await deps.logBusinessEvent(deps.client, {
+      event_type: ev.event_type,
+      entity_type: 'xero_invoice',
+      entity_id: deps.xeroInvoiceId,
+      job_id: deps.jobId || undefined,
+      body_preview: ev.body_preview,
+      payload: {
+        invoice_number: deps.invoiceNumber, status: deps.status, via: deps.via,
+        linked: Boolean(deps.jobId), retry_safe: deps.outcome !== 'unknown', reply_code: replyCode,
+      },
+      // An unknown outcome is one row per occurrence: the gate needs the newest.
+      provider_message_id: deps.outcome === 'unknown'
+        ? `ops-api:${ev.event_type}:${deps.xeroInvoiceId}:${at}`
+        : `ops-api:${ev.event_type}:${deps.xeroInvoiceId}:${at.slice(0, 10)}`,
+    })
+  } catch { /* non-blocking: the log line above and the job event below are the other trails */ }
+  if (deps.outcome === 'unknown') {
+    await writeInvoiceEmailGateJobEvent(deps.client, deps.jobId, ev.event_type, {
+      invoice_number: deps.invoiceNumber, xero_invoice_id: deps.xeroInvoiceId, via: deps.via,
+      status: deps.status, reply_code: replyCode,
+    })
+  }
+  const detail = { status: deps.status, reply_code: replyCode, reply_state: replyState }
+  const made = (message: string, code: string, retrySafe: boolean) =>
+    new ApiError(message, 502, { error: message, code, retry_safe: retrySafe, xero_invoice_id: deps.xeroInvoiceId, ...detail })
+  if (deps.outcome === 'unknown') {
+    return made(
+      deps.via === 'xero'
+        ? 'Invoice email outcome unknown: Xero may already have emailed it to the client. Check the invoice History in Xero before sending again.'
+        : 'Invoice email outcome unknown: it may already have reached the client. Check the Sent Items folder of the sending mailbox before sending again.',
+      'invoice_email_outcome_unknown', false,
+    )
+  }
+  if (deps.outcome === 'refused') return made('Invoice email refused before sending; nothing was sent.', 'invoice_email_refused', true)
+  return made('Invoice email failed before sending; nothing was sent.', 'invoice_email_failed', true)
+}
+
+export type SendInvoiceXeroDirectDeps = {
+  client: any
+  body: any
+  getToken: (client: any) => Promise<{ accessToken: string; tenantId: string }>
+  logBusinessEvent: (client: any, event: any) => Promise<void>
+  jobId: string | null
+  postEmail: (accessToken: string, tenantId: string) => Promise<any>
+}
+
+// send_invoice_email with no to_email: Xero emails the invoice itself. A
+// rate-limit or cooldown refusal means Xero did not take the request; any other
+// failure of the POST may have sent it, so it is recorded as unknown and the
+// resend gate holds the next press until Sent Items is checked.
+export async function _sendInvoiceEmailViaXeroDirect(deps: SendInvoiceXeroDirectDeps): Promise<Response> {
+  const { client, body, getToken, logBusinessEvent, jobId } = deps
+  const siId = String(body.xero_invoice_id)
+  const gateDeps = { client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siId, jobId, via: 'xero' as const }
+  const gate = await passInvoiceEmailResendGate({ ...gateDeps, sentItemsChecked: body.sent_items_checked === true })
+  if (!gate.ok) return json(gate.refusal, 409)
+  const { accessToken, tenantId } = await getToken(client)
+  try {
+    await deps.postEmail(accessToken, tenantId)
+  } catch (e) {
+    if (e instanceof XeroCooldownError) throw e
+    // Xero answers a validation error before it sends anything.
+    const refused = String((e as Error)?.message || '').startsWith('Xero validation error')
+    throw await invoiceEmailFailure({ ...gateDeps, outcome: refused ? 'refused' : 'unknown', status: refused ? 400 : null, replyBody: null })
+  }
+  try {
+    await client.from('job_events').insert({
+      job_id: jobId,
+      event_type: 'invoice.emailed',
+      detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
+    })
+  } catch { /* non-blocking */ }
+  return json({ success: true, emailed: true, via: 'xero_direct' })
+}
+
 export type SendInvoiceVerifyDeps = {
   client: any
   body: any
@@ -4168,6 +4308,14 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   }
   const siCcSafe = ccVerified.join(',')
 
+  // Resend gate: an earlier send whose outcome is unknown may already have
+  // reached the client, so nothing is sent until Sent Items has been checked.
+  const siGateOk = await passInvoiceEmailResendGate({
+    client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
+    sentItemsChecked: body.sent_items_checked === true, via: 'outlook',
+  })
+  if (!siGateOk.ok) return json(siGateOk.refusal, 409)
+
   // Download PDF from Xero
   const siPdfResp = await deps.xeroFetch(`${env.XERO_API_BASE}/Invoices/${siId}`, {
     headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
@@ -4180,25 +4328,42 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   const siPdfB64 = btoa(siBin)
 
   // Send via Outlook with PDF attached
-  const siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': env.SW_API_KEY },
-    body: JSON.stringify({
-      to: siTo,
-      cc: siCcSafe,
-      subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
-      htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
-      job_id: verifiedJobId,
-      xero_invoice_id: siId,
-      attachments: [{
-        contentBytes: siPdfB64,
-        name: `${siNum}.pdf`,
-        contentType: 'application/pdf',
+  let siEmailResp: Response
+  try {
+    siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': env.SW_API_KEY },
+      body: JSON.stringify({
+        to: siTo,
+        cc: siCcSafe,
+        subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
+        htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
+        job_id: verifiedJobId,
         xero_invoice_id: siId,
-      }],
-    }),
-  })
-  if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
+        attachments: [{
+          contentBytes: siPdfB64,
+          name: `${siNum}.pdf`,
+          contentType: 'application/pdf',
+          xero_invoice_id: siId,
+        }],
+      }),
+    })
+  } catch {
+    // The request may have reached send-outlook-email before the connection failed.
+    throw await invoiceEmailFailure({
+      client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
+      outcome: 'unknown', status: null, replyBody: null, via: 'outlook',
+    })
+  }
+  if (!siEmailResp.ok) {
+    let siErrBody: unknown = null
+    try { siErrBody = JSON.parse(await siEmailResp.text()) } catch { /* unreadable or not JSON */ }
+    throw await invoiceEmailFailure({
+      client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
+      outcome: classifyInvoiceEmailFailure(siEmailResp.status, siErrBody),
+      status: siEmailResp.status, replyBody: siErrBody, via: 'outlook',
+    })
+  }
 
   // Audit (non-blocking).
   //   - business_events: ALWAYS written. Accepts null job_id, so unlinked invoice sends
@@ -4221,7 +4386,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       await client.from('job_events').insert({
         job_id: verifiedJobId,
         event_type: 'invoice.emailed',
-        detail_json: { invoice_number: siNum, to: siTo, via: 'outlook' },
+        detail_json: { invoice_number: siNum, xero_invoice_id: siId, to: siTo, via: 'outlook' },
       })
     } catch { /* non-blocking */ }
   }
@@ -9419,16 +9584,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
         // Dashboard callers pass only xero_invoice_id; MCP sw_send_invoice_email passes to_email for Outlook+PDF.
         if (!siTo) {
-          const { accessToken: sAt, tenantId: sTi } = await getToken(client)
-          await xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST')
-          try {
-            await client.from('job_events').insert({
-              job_id: directSendInvoice?.job_id || null,
-              event_type: 'invoice.emailed',
-              detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
-            })
-          } catch { /* non-blocking */ }
-          return json({ success: true, emailed: true, via: 'xero_direct' })
+          return await _sendInvoiceEmailViaXeroDirect({
+            client, body, getToken, logBusinessEvent,
+            jobId: directSendInvoice?.job_id || null,
+            postEmail: (accessToken, tenantId) => xeroPost(`/Invoices/${siId}/Email`, accessToken, tenantId, {}, 'POST'),
+          })
         }
 
         // Enhanced path: to_email provided → delegate to extracted, testable helper.

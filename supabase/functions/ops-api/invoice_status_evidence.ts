@@ -20,6 +20,43 @@
 
 export const INVOICE_AUTHORISED_BODY_PREVIEW = "Invoice authorised in Xero.";
 export const INVOICE_EMAILED_BODY_PREVIEW = "Invoice emailed to the client.";
+// Digit-free for the same reason as the line above. One sentence per outcome,
+// because an unknown outcome may already have reached the client.
+export const INVOICE_EMAIL_FAILED_BODY_PREVIEW = "Invoice email to the client failed.";
+export const INVOICE_EMAIL_REFUSED_BODY_PREVIEW = "Invoice email was refused before sending.";
+export const INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW =
+  "Invoice email may already have reached the client. Do not resend until the Sent Items folder of the sending mailbox has been checked.";
+
+export type InvoiceEmailFailureOutcome = "refused" | "failed" | "unknown";
+
+/**
+ * What a non-2xx reply (or no reply) from send-outlook-email proves. A send
+ * is called retry-safe only on positive evidence that it never dispatched;
+ * anything else is unknown.
+ *   unknown  the call threw, or the reply said `outcome_unknown` or
+ *            `retry_safe: false`. That reply wins over every status code.
+ *   refused  a 401/403, or a reply with `state: "refused"`: its auth checks
+ *            and fences run before any Graph call, so nothing was sent.
+ *   failed   any other reply carrying `retry_safe: true`.
+ *   unknown  everything else, a bare 408, 429 or 5xx included.
+ */
+export function classifyInvoiceEmailFailure(
+  status: number | null,
+  body: unknown,
+): InvoiceEmailFailureOutcome {
+  if (status === null) return "unknown";
+  const b = (body && typeof body === "object") ? body as Record<string, unknown> : {};
+  if (b.state === "outcome_unknown" || b.retry_safe === false) return "unknown";
+  if (status === 401 || status === 403 || b.state === "refused") return "refused";
+  if (b.retry_safe === true) return "failed";
+  return "unknown";
+}
+
+export const INVOICE_EMAIL_FAILURE_EVENT: Record<InvoiceEmailFailureOutcome, { event_type: string; body_preview: string }> = {
+  refused: { event_type: "invoice.email_refused", body_preview: INVOICE_EMAIL_REFUSED_BODY_PREVIEW },
+  failed: { event_type: "invoice.email_failed", body_preview: INVOICE_EMAIL_FAILED_BODY_PREVIEW },
+  unknown: { event_type: "invoice.email_outcome_unknown", body_preview: INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW },
+};
 
 export type InvoiceAuthorisedSource =
   | "ops-api/approve_invoice"
