@@ -33,7 +33,8 @@
 --          one another transaction holds is skipped with one too.
 --      If the trigger's own work fails, it alone is rolled back and a
 --      quote_option_review_needed event records the failure; the status
---      change stands.
+--      change stands. If even that event cannot be written, the status
+--      change fails rather than commit with no record.
 --   4. Switch fence_same_site_guard_v1, seeded OFF: ghl-proxy's route A
 --      refusal (choose_existing_or_option) stays off until every fencing
 --      caller shows the chooser.
@@ -77,8 +78,9 @@ ALTER TABLE public.jobs ADD CONSTRAINT jobs_superseded_shape CHECK (
 -- The trigger and link function look a group up by this. jobs had 2,851
 -- rows on 19 Oct 2026 and every value is NULL, so the build is short. It
 -- shares the transaction (and the ACCESS EXCLUSIVE lock) of the ALTER above,
--- bounded by the 5s lock and 30s statement timeouts. If the release owner
--- wants it apart, build it CONCURRENTLY first; IF NOT EXISTS then skips it.
+-- bounded by the 5s lock and 30s statement timeouts (build time on the live
+-- table not measured). To build it apart, the release owner splits it into a
+-- later CREATE INDEX CONCURRENTLY step after the columns exist.
 CREATE INDEX IF NOT EXISTS idx_jobs_quote_option_group
   ON public.jobs (quote_option_group_id)
   WHERE quote_option_group_id IS NOT NULL;
@@ -218,6 +220,7 @@ CREATE OR REPLACE FUNCTION public.fence_quote_option_mark_options(
   p_candidates uuid[]
 ) RETURNS void
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
@@ -259,6 +262,7 @@ CREATE OR REPLACE FUNCTION public.fence_quote_option_clear_mark(
   p_group uuid
 ) RETURNS void
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
@@ -275,19 +279,25 @@ BEGIN
   END IF;
 END $$;
 
-REVOKE ALL ON FUNCTION public.fence_quote_option_mark_options(uuid, text, uuid, uuid[]) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uuid) FROM PUBLIC, anon, authenticated;
+-- The helpers and the trigger function run as their owner (SECURITY DEFINER,
+-- fixed search_path): whoever changes a job's status, through any role, the
+-- trigger's reads, locks and job_events writes behave the same and are not
+-- refused by RLS or grants. Nobody calls the helpers directly.
+REVOKE ALL ON FUNCTION public.fence_quote_option_mark_options(uuid, text, uuid, uuid[]) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uuid) FROM PUBLIC, anon, authenticated, service_role;
 
 -- Fires when a grouped job moves into or out of a won status (see the
--- header). The status change itself is never refused: the trigger's own
--- work runs in its own block, and if it fails that work is rolled back and a
--- quote_option_review_needed event (reason supersede_failed) is written in
--- its place. A timeout or cancel during that work is caught the same way. A
--- timeout elsewhere in the status change's statement still fails it, as
--- before this migration.
+-- header). The trigger's own work runs in its own block. If it fails, that
+-- work is rolled back and a quote_option_review_needed event (reason
+-- supersede_failed) is written in its place, and the status change stands.
+-- A timeout or cancel during that work is caught the same way. Only if that
+-- review event cannot be written either does the status change fail, so an
+-- unrecorded half state can never commit. A timeout elsewhere in the status
+-- change's statement still fails it, as before this migration.
 CREATE OR REPLACE FUNCTION public.jobs_quote_option_supersede()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
@@ -325,9 +335,14 @@ BEGIN
         v_busy := v_busy || v_id;
       END IF;
     END LOOP;
+    -- Winners: locked members as just read, and busy members by their last
+    -- committed status (a busy row is "unknown", never "not won"). A busy
+    -- member being accepted right now runs this trigger after we commit and
+    -- sees this job as a second winner.
     SELECT coalesce(array_agg(j.id ORDER BY j.id), '{}'::uuid[]) INTO v_won
       FROM public.jobs j
-     WHERE j.id = ANY (v_locked) AND public.fence_quote_option_status_won(j.status);
+     WHERE (j.id = ANY (v_locked) OR j.id = ANY (v_busy))
+       AND public.fence_quote_option_status_won(j.status);
 
     IF public.fence_quote_option_status_won(NEW.status) THEN
       IF cardinality(v_won) > 0 THEN
@@ -397,8 +412,10 @@ BEGIN
                                  'error', left(coalesce(v_err_msg, ''), 200),
                                  'status', NEW.status, 'quote_option_group_id', v_group));
     EXCEPTION WHEN query_canceled OR OTHERS THEN
-      RAISE WARNING 'jobs_quote_option_supersede: % (%), review event also failed; status change kept',
-        v_err_msg, v_err_state;
+      -- No durable record is possible, so the status change does not stand
+      -- either: nothing half-done is left, and the caller sees the error.
+      RAISE EXCEPTION 'quote_option_review_unrecorded: % (%)', v_err_msg, v_err_state
+        USING ERRCODE = 'P0001';
     END;
   END IF;
   RETURN NULL;

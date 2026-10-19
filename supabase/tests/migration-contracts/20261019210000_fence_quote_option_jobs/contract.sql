@@ -31,9 +31,20 @@ SELECT pg_temp.qo_assert((SELECT enabled = false FROM public.feature_flags
   WHERE flag_name = 'fence_same_site_guard_v1'), 'the same-site guard switch must be seeded off');
 SELECT pg_temp.qo_assert(NOT has_function_privilege('public', 'public.link_fence_quote_option(uuid, uuid, text, uuid)', 'EXECUTE'),
  'the link function must not be executable by PUBLIC');
-SELECT pg_temp.qo_assert(NOT has_function_privilege('public', 'public.fence_quote_option_mark_options(uuid, text, uuid, uuid[])', 'EXECUTE')
- AND NOT has_function_privilege('public', 'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)', 'EXECUTE'),
- 'the mark and clear helpers must not be executable by PUBLIC');
+SELECT pg_temp.qo_assert(has_function_privilege('service_role', 'public.link_fence_quote_option(uuid, uuid, text, uuid)', 'EXECUTE')
+ AND NOT has_function_privilege('authenticated', 'public.link_fence_quote_option(uuid, uuid, text, uuid)', 'EXECUTE')
+ AND NOT has_function_privilege('anon', 'public.link_fence_quote_option(uuid, uuid, text, uuid)', 'EXECUTE'),
+ 'the link function must be the service role''s only');
+SELECT pg_temp.qo_assert(NOT EXISTS (
+  SELECT 1 FROM unnest(ARRAY['public', 'anon', 'authenticated', 'service_role']) r(role),
+       unnest(ARRAY['public.fence_quote_option_mark_options(uuid, text, uuid, uuid[])',
+                    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)']) f(fn)
+   WHERE has_function_privilege(r.role, f.fn, 'EXECUTE')),
+ 'the mark and clear helpers must not be callable directly by any API role');
+SELECT pg_temp.qo_assert((SELECT bool_and(p.prosecdef) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public' AND p.proname IN ('jobs_quote_option_supersede', 'fence_quote_option_mark_options',
+                                                'fence_quote_option_clear_mark')),
+ 'the trigger and its helpers must run as their owner');
 
 BEGIN;
 -- One customer (c-1) at one site: A (first quote), B and C (options), D (a deliberate repeat, not
@@ -211,6 +222,31 @@ UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0
 SELECT pg_temp.qo_assert((SELECT count(*) FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000000c1'
   AND event_type = 'quote_option_review_needed' AND detail_json->>'reason' = 'supersede_failed'
   AND detail_json->>'sqlstate' = 'P0001') = 1, 'an ordinary error in a mark must leave a durable review event');
+-- If even the review event cannot be written, the status change fails: no unrecorded half
+-- state commits.
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000c1';
+CREATE FUNCTION public.qo_contract_fail_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.event_type = 'quote_option_review_needed' THEN RAISE EXCEPTION 'contract forced event failure'; END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER qo_contract_fail_event BEFORE INSERT ON public.job_events FOR EACH ROW
+ EXECUTE FUNCTION public.qo_contract_fail_event();
+DO $$
+BEGIN
+ BEGIN
+  UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000c1';
+  RAISE EXCEPTION 'qo_expected_failure_missing';
+ EXCEPTION WHEN OTHERS THEN
+  IF SQLERRM NOT LIKE 'quote_option_review_unrecorded%' THEN
+   RAISE EXCEPTION 'fence quote option contract: an unrecordable failure must fail the status change (got %)', SQLERRM;
+  END IF;
+ END;
+END $$;
+SELECT pg_temp.qo_assert((SELECT status = 'quoted' FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000c1'),
+ 'a status change whose failure could not be recorded must not stand');
+DROP TRIGGER qo_contract_fail_event ON public.job_events;
+DROP FUNCTION public.qo_contract_fail_event();
 DROP TRIGGER qo_contract_fail ON public.jobs;
 DROP FUNCTION public.qo_contract_fail();
 
