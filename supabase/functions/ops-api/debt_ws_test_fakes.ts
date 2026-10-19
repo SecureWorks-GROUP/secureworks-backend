@@ -692,7 +692,7 @@ export function fakeDeps(
     /** Drawing the report PDF fails with this. */
     pdfError?: Error;
     /** The email send answers with this (default: accepted), or throws this error. */
-    emailResult?: { ok: boolean; status: number; error: string | null };
+    emailResult?: { ok: boolean; status: number; error: string | null; reply?: unknown };
     emailError?: Error;
   } = {},
 ): { deps: DebtWsDeps; rec: Recorder } {

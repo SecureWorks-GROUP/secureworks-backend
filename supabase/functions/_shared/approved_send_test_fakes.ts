@@ -84,6 +84,13 @@ export class MemoryApprovedSendStore implements ApprovedSendStore {
       this.auditRows.filter((entry) => entry.approval_id === id) as unknown as Record<string, unknown>[],
     );
   }
+  findOutcomeUnknown(payloadHash: string): Promise<{ id: string; outcome_at: string | null }[]> {
+    return Promise.resolve(
+      [...this.rows.values()]
+        .filter((row) => row.payload_hash === payloadHash && row.status === "outcome_unknown")
+        .map((row) => ({ id: row.id, outcome_at: row.outcome_at ?? null })),
+    );
+  }
   events(id: string | null = null): string[] {
     return this.auditRows.filter((entry) => id === null || entry.approval_id === id)
       .map((entry) => entry.event);

@@ -15,7 +15,6 @@ Deno.env.set('MICROSOFT_CLIENT_ID', 'client-unknown-fixture')
 Deno.env.set('MICROSOFT_CLIENT_SECRET', 'secret-unknown-fixture')
 
 const { handleOutlookRequest, resetGraphTokenCache } = await import('./index.ts')
-const { _setDefaultLegacyKeyProbeForTest } = await import('../_shared/service_credential.ts')
 
 // The self-addressed synthetic shape skips the stored-job fence, so the only
 // provider calls are the token, the mailbox read and sendMail.
@@ -48,7 +47,7 @@ async function send(
     if (url.endsWith('/sendMail')) return Promise.resolve(onSendMail())
     return Promise.resolve(onOther(url))
   }) as typeof fetch
-  _setDefaultLegacyKeyProbeForTest(() => Promise.resolve('accepted'))
+
   resetGraphTokenCache()
   try {
     const response = await handleOutlookRequest(new Request('https://example.invalid/send-outlook-email', {
@@ -58,7 +57,7 @@ async function send(
     }))
     return { status: response.status, body: await response.json(), calls }
   } finally {
-    _setDefaultLegacyKeyProbeForTest(null)
+
     globalThis.fetch = originalFetch
     resetGraphTokenCache()
   }
@@ -83,6 +82,22 @@ Deno.test('a plain error after sendMail returned is outcome unknown, never retry
     },
     { ghl_contact_id: 'contact-fixture' },
   )
+  assertEquals(result.calls.filter((c) => c.endsWith('/sendMail')).length, 1)
+  assertEquals(result.status, 502)
+  assertEquals(result.body.state, 'outcome_unknown')
+  assertEquals(result.body.retry_safe, false)
+})
+
+Deno.test('a sendMail 400 whose body cannot be read is outcome unknown, never retry-safe', async () => {
+  const result = await send(() => new Response(erroredBody(), { status: 400 }))
+  assertEquals(result.calls.filter((c) => c.endsWith('/sendMail')).length, 1)
+  assertEquals(result.status, 502)
+  assertEquals(result.body.state, 'outcome_unknown')
+  assertEquals(result.body.retry_safe, false)
+})
+
+Deno.test('a sendMail 401 after token refresh is outcome unknown, never retry-safe', async () => {
+  const result = await send(() => new Response('expired', { status: 401 }))
   assertEquals(result.calls.filter((c) => c.endsWith('/sendMail')).length, 1)
   assertEquals(result.status, 502)
   assertEquals(result.body.state, 'outcome_unknown')

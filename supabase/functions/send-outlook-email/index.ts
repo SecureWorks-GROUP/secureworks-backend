@@ -990,17 +990,18 @@ export async function graphRequest(
       throw new GraphProviderError(
         401,
         `Graph request was rejected and token refresh failed: ${(error as Error).message}`,
-        false,
+        mutating,
         { token_refreshed: false, retry_safe: false },
       )
     }
     if (mutating) {
       // A 401 may arrive after Graph accepted a mutation. Refresh the cache for
       // a later read/reconciliation, but never replay the business write.
+      // The mutation may have landed, so the outcome is unknown.
       throw new GraphProviderError(
         401,
         'Graph rejected a mutating request after token refresh; the request was not replayed',
-        false,
+        true,
         { token_refreshed: true, retry_safe: false },
       )
     }
@@ -1019,15 +1020,18 @@ export async function graphRequest(
   if (!response.ok) {
     // Reading the error body can itself fail. That must not escape as a plain
     // error: after a mutating request it would reach the generic catch and be
-    // answered retry_safe:true when the mutation may have landed.
+    // answered retry_safe:true when the mutation may have landed. An
+    // unreadable body on a mutating request is an unknown outcome.
     let detail = ''
+    let bodyUnreadable = false
     try {
       detail = (await response.clone().text()).slice(0, 2000)
     } catch (_) {
       detail = '(error body unreadable)'
+      bodyUnreadable = true
     }
     const unknown = mutating &&
-      (response.status >= 500 || response.status === 408 ||
+      (bodyUnreadable || response.status >= 500 || response.status === 408 ||
         response.status === 429)
     throw new GraphProviderError(
       response.status,

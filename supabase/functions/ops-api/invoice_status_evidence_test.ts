@@ -411,7 +411,8 @@ Deno.test("invoice email: outcome_unknown is recorded as unknown, never as faile
   );
   assertEquals(err.body?.code, "invoice_email_outcome_unknown");
   assertEquals(err.body?.retry_safe, false);
-  assert(err.message.includes("do not resend"));
+  assert(/Sent Items/.test(err.message));
+  assert(!/nothing was sent/i.test(err.message));
   assertEquals(events.length, 1);
   assertEquals(events[0].event_type, "invoice.email_outcome_unknown");
   assertEquals(events[0].body_preview, INVOICE_EMAIL_UNKNOWN_BODY_PREVIEW);

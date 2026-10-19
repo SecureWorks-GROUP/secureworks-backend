@@ -618,6 +618,8 @@ export interface ApprovedSendStore {
   ): Promise<boolean>;
   audit(entry: AuditEntry): Promise<void>;
   listAudit(id: string): Promise<Record<string, unknown>[]>;
+  /** Earlier approvals of this exact payload whose send outcome is unknown. */
+  findOutcomeUnknown(payloadHash: string): Promise<{ id: string; outcome_at: string | null }[]>;
 }
 
 const APPROVAL_COLUMNS =
@@ -698,6 +700,13 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
         detail: entry.detail ?? {},
       });
       if (error) throw new Error(`approved_send audit write failed: ${error.message}`);
+    },
+    async findOutcomeUnknown(payloadHash) {
+      const { data, error } = await client.from("approved_send_approvals")
+        .select("id,outcome_at").eq("payload_hash", payloadHash).eq("status", "outcome_unknown")
+        .order("outcome_at", { ascending: false }).limit(5);
+      if (error) storeUnreadable("read", error.message);
+      return Array.isArray(data) ? data : [];
     },
     async listAudit(id) {
       const { data, error } = await client.from("approved_send_audit")
@@ -825,6 +834,16 @@ export async function recordApproval(
       { payload_hash: hash });
   }
 
+  // An earlier approval of this exact content may already have been delivered.
+  // A new approval of it is refused until someone has checked Sent Items (or,
+  // for an SMS, the conversation) and says so with sent_items_checked.
+  const priorUnknown = await deps.store.findOutcomeUnknown(hash);
+  if (priorUnknown.length > 0 && body.sent_items_checked !== true) {
+    refuse(409, "approval_prior_outcome_unknown",
+      "An earlier send of this exact message may already have been delivered. Check the mailbox Sent Items (or the SMS conversation) first; if it is not there, record again with sent_items_checked set to true.",
+      { prior_approval_ids: priorUnknown.map((row) => row.id) });
+  }
+
   const id = deps.newId().toLowerCase();
   const fields: SealFields = {
     id,
@@ -860,6 +879,9 @@ export async function recordApproval(
       approval_source: source,
       expires_at: expiresAt,
       payload,
+      ...(priorUnknown.length > 0
+        ? { sent_items_checked: true, prior_outcome_unknown_ids: priorUnknown.map((row) => row.id) }
+        : {}),
     },
   });
   return {

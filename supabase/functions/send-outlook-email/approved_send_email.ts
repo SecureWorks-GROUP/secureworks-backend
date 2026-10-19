@@ -77,6 +77,10 @@ function sameList(actual: string[], expected: string[]): boolean {
 function outcomeUnknown(error: unknown): boolean {
   if (error instanceof ApprovedSendRefusal) return false
   const flag = (error as { outcomeUnknown?: unknown })?.outcomeUnknown
+  // A provider answer that says a retry is not safe is never a definite
+  // failure, whatever its outcome flag.
+  const context = (error as { context?: { retry_safe?: unknown } })?.context
+  if (context?.retry_safe === false) return true
   return typeof flag === 'boolean' ? flag : true
 }
 

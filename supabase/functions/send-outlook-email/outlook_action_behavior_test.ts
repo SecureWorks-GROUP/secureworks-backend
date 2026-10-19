@@ -240,7 +240,8 @@ Deno.test("Graph refreshes after 401 without replaying a mutation", async () => 
     GraphProviderError,
   );
   assertEquals(unauthorized.status, 401);
-  assertEquals(unauthorized.outcomeUnknown, false);
+  // A 401 can arrive after Graph accepted the mutation: the outcome is unknown.
+  assertEquals(unauthorized.outcomeUnknown, true);
   assertEquals(unauthorized.context, {
     token_refreshed: true,
     retry_safe: false,
@@ -298,6 +299,44 @@ Deno.test("Graph refreshes after 401 without replaying a mutation", async () => 
   );
   assertEquals(outcomeUnknown.outcomeUnknown, true);
   assertEquals(failedGraphCalls, 1);
+});
+
+Deno.test("an unreadable error body on a mutating request is an unknown outcome", async () => {
+  const erroredBody = () =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("body read failed"));
+      },
+    });
+  const fetchFor = (body: () => ReadableStream<Uint8Array>) =>
+    async (input: string | URL | Request): Promise<Response> => {
+      if (String(input).includes("/oauth2/v2.0/token")) {
+        return Response.json({ access_token: "opaque-token", expires_in: 3600 });
+      }
+      return new Response(body(), { status: 400 });
+    };
+  resetGraphTokenCache();
+  const mutating = await assertRejects(
+    () =>
+      graphRequest("/users/admin/sendMail", { method: "POST", body: "{}" }, {
+        fetchImpl: fetchFor(erroredBody),
+        mutating: true,
+      }),
+    GraphProviderError,
+  );
+  assertEquals(mutating.outcomeUnknown, true);
+  assertEquals(mutating.context, { retry_safe: false });
+
+  resetGraphTokenCache();
+  const read = await assertRejects(
+    () =>
+      graphRequest("/users/admin/mailFolders/inbox", {}, {
+        fetchImpl: fetchFor(erroredBody),
+        mutating: false,
+      }),
+    GraphProviderError,
+  );
+  assertEquals(read.outcomeUnknown, false);
 });
 
 Deno.test("draft handler creates a draft and never sends it", async () => {
