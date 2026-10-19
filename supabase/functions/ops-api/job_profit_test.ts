@@ -679,6 +679,6 @@ Deno.test("costEventKind: an unknown po_ state is a purchase order, other unknow
 Deno.test("job profit labels name the CFO-12 commitment states", () => {
   assert(JOB_PROFIT_LABELS.committed_open_ex.includes("never counted here as $0.00"));
   assert(JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith("Ordered, not billed"));
-  assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, bill not placed"));
+  assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, no bill matched to this order"));
   assert(JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"));
 });

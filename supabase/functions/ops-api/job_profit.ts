@@ -38,7 +38,7 @@ export const JOB_PROFIT_LABELS = {
   ordered_not_billed_count:
     "Ordered, not billed: sent purchase orders with no price (every Dispatch order) and no invoice or bill yet. A count, never a dollar figure. ordered_not_billed_over_30_count is those first sent 30 or more days ago.",
   invoice_emailed_count:
-    "Invoice emailed, bill not placed: the supplier emailed an invoice for the order, but no bill is placed on the job yet. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
+    "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
 } as const;
 
 /**

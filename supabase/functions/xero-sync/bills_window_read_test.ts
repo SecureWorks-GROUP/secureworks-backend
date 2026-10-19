@@ -16,14 +16,14 @@ function fakeSb(rows: any[], failOnPage: number | null = null) {
       const ops: Array<[string, unknown[]]> = [];
       calls.push(ops);
       const q: any = {};
-      for (const m of ["select", "eq", "gte", "not", "order"]) {
+      for (const m of ["select", "eq", "gte", "not", "order", "or"]) {
         q[m] = (...args: unknown[]) => {
           ops.push([m, args]);
           return q;
         };
       }
-      q.range = (from: number, to: number) => {
-        ops.push(["range", [from, to]]);
+      q.limit = (n: number) => {
+        ops.push(["limit", [n]]);
         if (failOnPage !== null && calls.length === failOnPage) {
           return Promise.resolve({ data: null, error: { message: "boom" } });
         }
@@ -32,13 +32,17 @@ function fakeSb(rows: any[], failOnPage: number | null = null) {
           if (m === "eq") out = out.filter((r) => r[a[0] as string] === a[1]);
           if (m === "gte") out = out.filter((r) => r[a[0] as string] >= (a[1] as string));
           if (m === "not") out = out.filter((r) => !["VOIDED", "DELETED"].includes(r.status));
+          if (m === "or") {
+            const mm = String(a[0]).match(/^invoice_date\.lt\.([^,]+),and\(invoice_date\.eq\.([^,]+),xero_invoice_id\.gt\.([^)]+)\)$/)!;
+            out = out.filter((r) => r.invoice_date < mm[1] || (r.invoice_date === mm[2] && r.xero_invoice_id > mm[3]));
+          }
         }
         out.sort((x, y) =>
           x.invoice_date !== y.invoice_date
             ? (x.invoice_date < y.invoice_date ? 1 : -1)
             : (x.xero_invoice_id < y.xero_invoice_id ? -1 : 1)
         );
-        return Promise.resolve({ data: out.slice(from, to + 1), error: null });
+        return Promise.resolve({ data: out.slice(0, n), error: null });
       };
       return q;
     },
@@ -72,8 +76,9 @@ Deno.test("bills window: all 802 bills are read, none twice (19 Oct had 802 vs t
       ["xero_invoice_id", { ascending: true }],
     ]);
   }
-  assertEquals(sb.calls[0].find(([m]) => m === "range")![1], [0, 499]);
-  assertEquals(sb.calls[1].find(([m]) => m === "range")![1], [500, 999]);
+  assertEquals(sb.calls[0].find(([m]) => m === "limit")![1], [500]);
+  assert(!sb.calls[0].some(([m]) => m === "or"));
+  assert(sb.calls[1].some(([m]) => m === "or"));
 });
 
 Deno.test("bills window: an exact multiple of the page size reads one empty page and stops", async () => {
@@ -114,5 +119,23 @@ Deno.test("bills window: a manual cap stops at the cap", async () => {
   const r = await readBillsInWindow(sb, { orgId: "org", cutoff: "2026-07-21", cap: 600 });
   assert(r);
   assertEquals(r.bills.length, 600);
-  assertEquals(sb.calls[1].find(([m]) => m === "range")![1], [500, 599]);
+  assertEquals(sb.calls[1].find(([m]) => m === "limit")![1], [100]);
+});
+
+Deno.test("bills window: a bill voided between pages cannot push another bill out of the read", async () => {
+  const rows = bills(802);
+  const sb = fakeSb(rows);
+  // Wrap: after the first page is read, void one bill already read.
+  const realFrom = sb.from.bind(sb);
+  let n = 0;
+  (sb as any).from = (t: string) => {
+    if (n++ === 1) rows.find((r) => r.status === "AUTHORISED")!.status = "VOIDED";
+    return realFrom(t);
+  };
+  const r = await readBillsInWindow(sb, { orgId: "org", cutoff: "2026-07-21" });
+  assert(r);
+  // Every bill still in the window after the change was read.
+  const still = rows.filter((x) => x.status !== "VOIDED").map((x) => x.xero_invoice_id);
+  const got = new Set(r.bills.map((b) => b.xero_invoice_id));
+  for (const id of still) assert(got.has(id), id);
 });

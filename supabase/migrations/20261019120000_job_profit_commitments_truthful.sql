@@ -204,8 +204,10 @@ po_base AS (
     p.delivery_date,
     p.created_at,
     p.invoice_received_at,
-    COALESCE(p.subtotal, p.total / 1.1) AS po_amount_ex,
-    (COALESCE(p.subtotal, p.total) IS NULL OR COALESCE(p.subtotal, p.total) = 0) AS unpriced,
+    -- A positive subtotal, else a positive total less GST; otherwise no price.
+    -- A 0 subtotal never hides a known total, and no price is never $0.
+    CASE WHEN p.subtotal > 0 THEN p.subtotal WHEN p.total > 0 THEN p.total / 1.1 END AS po_amount_ex,
+    NOT (COALESCE(p.subtotal, 0) > 0 OR COALESCE(p.total, 0) > 0) AS unpriced,
     COALESCE(
       (SELECT min(oe.sent_at) FROM public.job_order_emails oe
         WHERE oe.purchase_order_id = p.id AND oe.status = 'sent' AND oe.sent_at IS NOT NULL),
@@ -671,6 +673,6 @@ COMMENT ON COLUMN public.v_job_profit.ordered_not_billed_count IS
 COMMENT ON COLUMN public.v_job_profit.ordered_not_billed_over_30_count IS
   'Of ordered_not_billed_count, those first sent 30 or more Perth days ago (flag ordered_not_billed_over_30_days).';
 COMMENT ON COLUMN public.v_job_profit.invoice_emailed_count IS
-  'Purchase orders whose supplier invoice was emailed (invoice_received_at) but whose bill is not placed on the job. Never nothing owed.';
+  'Purchase orders whose supplier invoice was emailed (invoice_received_at) with no bill linked to the order (the bill may be on the job without that link). Never nothing owed.';
 COMMENT ON COLUMN public.v_job_profit.invoice_emailed_ex IS
   'Ex-GST amount of the priced orders in invoice_emailed_count. Null when none carries a price. Not in committed_open_ex or actual_cost_ex.';

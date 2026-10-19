@@ -42,7 +42,9 @@ INSERT INTO public.purchase_orders (id, org_id, job_id, po_number, supplier_name
   ('a7c20000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'a7c00000-0000-4000-8000-000000000001', 'PO-CT-D-DRAFT', 'CT Concrete', 'a7c10000-0000-4000-8000-000000000003', 'dispatch', 'draft', 0, 0, '2026-08-01T00:00:00Z', NULL, NULL),
   ('a7c20000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'a7c00000-0000-4000-8000-000000000001', 'PO-CT-EMAILED', 'CT Steel', NULL, NULL, 'confirmed', 300, 330, '2026-08-01T00:00:00Z', NULL, '2026-09-01T20:00:00Z'),
   ('a7c20000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'a7c00000-0000-4000-8000-000000000001', 'PO-CT-EM-PLACED', 'CT Steel', NULL, NULL, 'confirmed', 150, 165, '2026-08-01T00:00:00Z', NULL, '2026-09-01T20:00:00Z'),
-  ('a7c20000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'a7c00000-0000-4000-8000-000000000001', 'PO-CT-D-EMAILED', 'CT Fixings', 'a7c10000-0000-4000-8000-000000000004', 'dispatch', 'sent', 0, 0, '2026-08-01T00:00:00Z', '2026-08-01T02:00:00Z', '2026-08-20T02:00:00Z');
+  ('a7c20000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'a7c00000-0000-4000-8000-000000000001', 'PO-CT-D-EMAILED', 'CT Fixings', 'a7c10000-0000-4000-8000-000000000004', 'dispatch', 'sent', 0, 0, '2026-08-01T00:00:00Z', '2026-08-01T02:00:00Z', '2026-08-20T02:00:00Z'),
+  -- A 0 subtotal never hides a known total: priced at 1100 / 1.1 = 1000 ex.
+  ('a7c20000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'a7c00000-0000-4000-8000-000000000001', 'PO-CT-TOTAL-ONLY', 'CT Steel', NULL, NULL, 'sent', 0, 1100, '2026-08-01T00:00:00Z', NULL, NULL);
 
 -- PO-CT-D-OLD: first sent 1 Aug 17:00Z (2 Aug Perth), resent 20 Sep.
 INSERT INTO public.job_order_emails (org_id, job_id, purchase_order_id, supplier_id, kind, status, subject, body_text, body_generated_sha, pdf_version, pdf_path, pdf_sha256, line_count, sent_at) VALUES
@@ -71,7 +73,7 @@ BEGIN
   INTO r
   FROM public.v_job_cost_events
   WHERE job_id = 'a7c00000-0000-4000-8000-000000000001';
-  IF r.committed_n <> 1 OR r.committed_ex <> 200 THEN RAISE EXCEPTION 'cfo12 cost: committed % rows, % ex; expected 1 row, 200', r.committed_n, r.committed_ex; END IF;
+  IF r.committed_n <> 2 OR r.committed_ex <> 1200 THEN RAISE EXCEPTION 'cfo12 cost: committed % rows, % ex; expected 2 rows, 1200 (200 + total-only 1000)', r.committed_n, r.committed_ex; END IF;
   IF r.committed_zero_n <> 0 THEN RAISE EXCEPTION 'cfo12 cost: an order with no price is shown as $0 committed'; END IF;
   IF r.ordered_n <> 3 THEN RAISE EXCEPTION 'cfo12 cost: ordered-not-billed rows %, expected 3', r.ordered_n; END IF;
   IF r.ordered_priced_n <> 0 THEN RAISE EXCEPTION 'cfo12 cost: an ordered-not-billed row carries a dollar figure'; END IF;
@@ -99,7 +101,7 @@ DECLARE
   r record;
 BEGIN
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CT-A';
-  IF r.committed_open_ex <> 200 THEN RAISE EXCEPTION 'cfo12 job: committed_open_ex %, expected 200', r.committed_open_ex; END IF;
+  IF r.committed_open_ex <> 1200 THEN RAISE EXCEPTION 'cfo12 job: committed_open_ex %, expected 1200', r.committed_open_ex; END IF;
   IF r.ordered_not_billed_count <> 3 OR r.ordered_not_billed_over_30_count <> 2 THEN
     RAISE EXCEPTION 'cfo12 job: ordered not billed % (over 30 days %), expected 3 (2)', r.ordered_not_billed_count, r.ordered_not_billed_over_30_count;
   END IF;
