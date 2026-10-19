@@ -23,6 +23,12 @@
 //   - Automatic sending (stage 5) stays two-key: on top of sending being on, it also needs
 //     env DEBT_WS_AUTO_SEND_ENABLED === "true" and debt_ws_settings.auto_send_steps[step]
 //     === true. Off by default.
+//   - A manual text (Shaun's own words from the job screen's reply box, step "manual") goes
+//     through the same guarded send and every check above. It is logged as a manual text,
+//     never as a step, so it never moves the day ladder. It may go while chasing is paused
+//     (says paid, rectification, a promise to pay, day 21: Shaun decided 16 Oct 2026), so he
+//     can reply; the planned steps stay paused. Its claim is keyed on a client_ref the
+//     screen makes once per message, so a double tap never texts twice.
 
 import {
   addDays,
@@ -93,6 +99,7 @@ import {
   debtReportFileName,
   debtReportHtml,
   debtReportTotals,
+  perthClock,
 } from "./debt_ws_report.ts";
 
 export { DebtWsError } from "./debt_ws_store.ts";
@@ -100,6 +107,12 @@ export { DebtWsError } from "./debt_ws_store.ts";
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
+/**
+ * The step a manual text is sent and logged under (Shaun's own words, not a planned step).
+ * Its claim row's step is "manual:<client_ref>", which is never a ladder step, so the
+ * ladder never counts it as done.
+ */
+export const DEBT_WS_MANUAL_STEP = "manual";
 /** Bank feed: one read, re-read at most every 15 minutes within a Perth day (spec section 6). */
 export const DEBT_WS_BANK_CACHE_MS = 15 * 60_000;
 /** Pages of 100 per bank-feed read at most: 10 Xero calls, well inside 60 a minute. */
@@ -547,6 +560,42 @@ export function payerSendBlock(
       code: "payer_not_linked",
       message:
         `Link ${who}'s GoHighLevel contact first: there is no contact to text`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Why a manual text (Shaun's own words, not a planned step) cannot go to this invoice's
+ * payer, or null when it can. The job screen shows the reason in place of its reply box;
+ * the guarded send refuses the same cases with the same code (not_chased_by_text):
+ *   a company invoice (the Monday statement), a contact we never chase, or an invoice that
+ *   is no longer open (paid, nothing owing).
+ * Paused chasing does NOT block a manual text (Shaun decided 16 Oct 2026): says paid,
+ * rectification, a promise to pay still ahead and day 21 (Jan's visit list) pause the
+ * planned steps only, so Shaun can still reply in his own words. The rest of the checks
+ * (sending on, the payer's contact, live Xero, the bank feed) run at the send itself,
+ * exactly as for a planned step.
+ */
+export function manualTextBlock(
+  entry: Pick<BookEntry, "kind" | "notChased" | "open">,
+): { code: string; message: string } | null {
+  if (entry.kind === "account") {
+    return {
+      code: "not_chased_by_text",
+      message: "Company invoices go on the Monday statement, not a text",
+    };
+  }
+  if (entry.notChased) {
+    return {
+      code: "not_chased_by_text",
+      message: "This contact is never chased",
+    };
+  }
+  if (!entry.open) {
+    return {
+      code: "not_chased_by_text",
+      message: "This invoice is no longer open in our Xero copy",
     };
   }
   return null;
@@ -1047,6 +1096,13 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
     },
     // Why Send is off for this payer (null: it can be texted once sending is on).
     send_block: entry.kind === "account" ? null : payerSendBlock(entry),
+    // Whether Shaun may type his own text here (step "manual"), and why not in words.
+    manual_text: (() => {
+      const block = manualTextBlock(entry);
+      return block
+        ? { allowed: false, code: block.code, reason: block.message }
+        : { allowed: true, code: null, reason: null };
+    })(),
     pay_link: payLink,
   };
 }
@@ -1188,6 +1244,11 @@ interface SendInput {
   override: boolean;
   /** The amount the draft was written against. */
   draftAmount: number;
+  /**
+   * Set for a manual text (step DEBT_WS_MANUAL_STEP): the screen's one-off reference for
+   * this message, which keys the claim so the same message is never texted twice.
+   */
+  manual?: { client_ref: string };
 }
 
 function liveCheck(
@@ -1273,11 +1334,18 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         : "Company invoices go on the Monday statement, not a text",
     );
   }
+  // (A manual text is blocked by exactly the cases above, as manualTextBlock tells the
+  // screen; paused chasing does not stop it: Shaun decided 16 Oct 2026.)
   // The text goes to the PAYER's own contact, never the job's: on a shared fence the
   // job's contact is the primary client, who may not owe this invoice.
   const block = payerSendBlock(entry);
   if (block) await refuse(deps, input, block.code, block.message);
   const contact = entry.payer.ghl_contact_id as string;
+  // The claim's step: the step itself, or "manual:<client_ref>" for a manual text, which
+  // is unique to that one message and is never a ladder step.
+  const claimStep = input.manual
+    ? `${DEBT_WS_MANUAL_STEP}:${input.manual.client_ref}`
+    : step;
   if (isLadderStep(step) && entry.row.step_due?.step !== step) {
     await refuse(
       deps,
@@ -1291,7 +1359,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     );
   }
   const already = entry.sends.find((s) =>
-    s.cycle_start === entry.dayZero && s.step === step &&
+    s.cycle_start === entry.dayZero && s.step === claimStep &&
     (s.status === "sending" || s.status === "sent")
   );
   if (already) {
@@ -1299,7 +1367,9 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
       deps,
       input,
       "already_sent",
-      "That step was already sent (or a send of it is not confirmed), so it is not sent twice",
+      input.manual
+        ? "That text was already sent (or a send of it is not confirmed), so it is not sent twice"
+        : "That step was already sent (or a send of it is not confirmed), so it is not sent twice",
     );
   }
 
@@ -1357,7 +1427,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
   const claim = await deps.store.claimSend({
     share_key: entry.row.share_key,
     cycle_start: entry.dayZero,
-    step,
+    step: claimStep,
     suggestion_id: input.suggestion?.id ?? null,
     actor: actor.label,
   });
@@ -1439,6 +1509,10 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         ...(input.override && payments.length
           ? { possible_payments: payments }
           : {}),
+        // A manual text is marked as one, so it never reads as a planned step.
+        ...(input.manual
+          ? { manual: true, client_ref: input.manual.client_ref }
+          : {}),
       },
     });
   } catch (error) {
@@ -1454,6 +1528,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     version: DEBT_WS_VERSION,
     sent: true,
     step,
+    manual: !!input.manual,
     send_id: claim!.id,
     provider_message_id: messageId,
     override_possible_payment: input.override && payments.length > 0,
@@ -1478,6 +1553,7 @@ export async function debtWsDecide(
     "override_possible_payment",
     "amount",
     "channel",
+    "client_ref",
   ]);
   // Texts only in v1: the screen may name the channel, and it must be sms.
   if (
@@ -1540,8 +1616,50 @@ export async function debtWsDecide(
 
   const id = uuidOf(body.xero_invoice_id, "xero_invoice_id");
   const step = body.step;
+
+  // A manual text: Shaun's own words, not a planned step. Sent only (never skipped), with
+  // no suggestion, the amount owing it was written against, and the screen's client_ref.
+  if (step === DEBT_WS_MANUAL_STEP) {
+    if (action !== "send") bad("A manual text can only be sent");
+    if (suggestion) bad("A manual text has no suggestion_id");
+    const clientRef = uuidOf(body.client_ref, "client_ref");
+    if (typeof body.text !== "string") bad("text is required to send");
+    if (
+      body.override_possible_payment !== undefined &&
+      typeof body.override_possible_payment !== "boolean"
+    ) bad("override_possible_payment must be true or false");
+    const owed = body.amount === undefined || body.amount === null
+      ? null
+      : Number(body.amount);
+    if (owed === null) {
+      bad(
+        "amount is required: send the amount owing the text was written for",
+        "amount_required",
+      );
+    }
+    if (!Number.isFinite(owed) || owed <= 0) {
+      bad("amount must be the positive amount the text was written for");
+    }
+    const { book, entry } = await oneEntry(deps, id);
+    return await guardedSend(deps, {
+      book,
+      entry,
+      step: DEBT_WS_MANUAL_STEP,
+      text: (body.text as string).trim(),
+      suggestion: null,
+      actor,
+      operatorEmail: caller.email ?? null,
+      override: body.override_possible_payment === true,
+      draftAmount: owed,
+      manual: { client_ref: clientRef },
+    });
+  }
+  if (body.client_ref !== undefined) {
+    bad("client_ref is only for a manual text");
+  }
+
   if (!isLadderStep(step) && !isReplyStep(step)) {
-    bad("step must be d1, d3, d7, d12, d17, d21 or a reply step");
+    bad("step must be d1, d3, d7, d12, d17, d21, a reply step or manual");
   }
   if (suggestion && suggestion.share_key !== id) {
     throw new DebtWsError(
@@ -3160,8 +3278,17 @@ export async function debtWsAgentSubmit(
 // debt_ws_report_pdf  GET, staff:  the same report as a PDF (Download PDF).
 // debt_ws_report_send POST, owner: emails the PDF to the report recipients (Marnin, cc
 //                                  Shaun), built fresh at the moment of sending.
-// debt_ws_report_auto POST, server key: the Monday 08:00 Perth cron. Does nothing unless
-//                                  report_auto_send is on; one auto report per week.
+// debt_ws_report_auto POST, server key: the Wednesday 12:00 Perth cron. Does nothing
+//                                  unless report_auto_send is on; one auto report per week.
+//
+// Consolidate first (Shaun, 16 Oct 2026: "it goes Wednesday at 12pm after consolidating the
+// debt for that day"). Every report is built fresh from the tab's own book at the moment it
+// is made, with the bank balances read live from Xero. The invoices come from our Xero copy,
+// which xero-sync brings up to date every 15 minutes, and on a Wednesday the cron
+// debt-ws-report-refresh runs one extra sync at 11:55 Perth so the copy is about five minutes
+// old at 12:00 (20261016180000_debt_ws_report_wednesday.sql). A send, automatic or by hand,
+// refuses when the copy is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS or its age is unknown,
+// so Marnin never gets a report built on stale debt.
 //
 // The report is internal: it holds every client's name and balance, so it only ever goes to
 // our own domain. The recipients are checked here before every send (and the database
@@ -3173,6 +3300,37 @@ export const DEBT_WS_REPORT_DOMAIN = "secureworkswa.com.au";
 export const DEBT_WS_REPORT_RESEND_MS = 2 * 60_000;
 /** The share_key the report's debt_ws_log rows sit on. */
 export const DEBT_WS_REPORT_LOG_KEY = "debt-report";
+/**
+ * The oldest our Xero copy of invoices may be when a report is sent. The sync runs every
+ * 15 minutes, so 20 minutes allows one run in flight; past that a run was missed.
+ */
+export const DEBT_WS_REPORT_MAX_COPY_AGE_MS = 20 * 60_000;
+/** Who the automatic report says it came from (the email and the record). */
+export const DEBT_WS_REPORT_AUTO_LABEL = "the Wednesday 12pm auto-send";
+
+/**
+ * Why a report must not be sent on this copy of the debt, or null when the copy is fresh:
+ * its sync time is unknown, or it is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS.
+ */
+export function reportCopyProblem(
+  syncedAt: string | null,
+  now: Date,
+): string | null {
+  const ms = syncedAt ? Date.parse(syncedAt) : NaN;
+  if (!syncedAt || !Number.isFinite(ms)) {
+    return "When our Xero copy of invoices was last synced is unknown, so the report cannot be sent";
+  }
+  if (now.getTime() - ms > DEBT_WS_REPORT_MAX_COPY_AGE_MS) {
+    const syncedDay = perthDate(new Date(ms));
+    const day = syncedDay === perthDate(now) ? "" : ` on ${longDate(syncedDay)}`;
+    return `Our Xero copy of invoices was last synced at ${
+      perthClock(syncedAt)
+    } Perth time${day}, more than ${
+      DEBT_WS_REPORT_MAX_COPY_AGE_MS / 60_000
+    } minutes ago, so the report would not show today's debt. Wait for the next sync (every 15 minutes) and try again`;
+  }
+  return null;
+}
 
 const OWN_ADDRESS = /^[a-z0-9._%+-]+@secureworkswa\.com\.au$/;
 
@@ -3335,7 +3493,8 @@ export async function debtWsReport(deps: DebtWsDeps, caller: DebtWsCaller) {
     ? "Only the workshop owner (Shaun) can send the report"
     : !sendingOn
     ? "Sending is off until you switch it on"
-    : addresses.problem?.message ?? null;
+    : addresses.problem?.message ??
+      reportCopyProblem(report.synced_at, deps.now());
   return {
     ok: true,
     version: DEBT_WS_VERSION,
@@ -3381,9 +3540,11 @@ export async function debtWsReportPdf(deps: DebtWsDeps, caller: DebtWsCaller) {
 }
 
 /**
- * One report email: claim the send, build the report fresh, draw the PDF, email it, then
- * keep the copy and log it. The claim is written first, so an auto report can never go
- * twice in a week, and an email that may have gone is never retried by itself.
+ * One report email: claim the send, build the report fresh, check our Xero copy is fresh,
+ * draw the PDF, email it, then keep the copy and log it. The claim is written first, so an
+ * auto report can never go twice in a week, and an email that may have gone is never
+ * retried by itself. A stale copy settles the claim as 'refused' (it does not hold the
+ * week's auto slot) and sends nothing.
  */
 async function sendDebtReport(
   deps: DebtWsDeps,
@@ -3392,7 +3553,7 @@ async function sendDebtReport(
   addresses: { to: string[]; cc: string[] },
   weekStart: string,
 ) {
-  const sentBy = kind === "auto" ? "the Monday auto-send" : actor.label;
+  const sentBy = kind === "auto" ? DEBT_WS_REPORT_AUTO_LABEL : actor.label;
   const claim = await deps.store.claimReport({
     kind,
     week_start: weekStart,
@@ -3403,10 +3564,13 @@ async function sendDebtReport(
   });
   if (!claim) return null;
   let report: DebtReport;
-  let pdf: { bytes: Uint8Array; pageCount: number };
+  let pdf: { bytes: Uint8Array; pageCount: number } | null = null;
+  let stale: string | null = null;
   try {
     report = await loadDebtReport(deps, sentBy);
-    pdf = await deps.renderReportPdf(report);
+    // Consolidate first: no PDF is drawn on a stale copy of the debt.
+    stale = reportCopyProblem(report.synced_at, deps.now());
+    if (!stale) pdf = await deps.renderReportPdf(report);
   } catch (error) {
     // Nothing was sent: release the claim with the reason.
     await deps.store.settleReport(claim.id, {
@@ -3419,6 +3583,35 @@ async function sendDebtReport(
       502,
       "report_pdf_failed",
     );
+  }
+  if (stale !== null || pdf === null) {
+    // Our Xero copy is too old (or its age is unknown): nothing is sent. The claim settles
+    // as 'refused' with the reason, which frees this week's auto slot, and the refusal is
+    // logged where the Debt tab shows the report's history.
+    const reason = stale ?? "The report could not be built just now";
+    await deps.store.settleReport(claim.id, {
+      status: "refused",
+      error: `xero copy not fresh: ${reason}`.slice(0, 500),
+    }).catch(() => {});
+    await log(
+      deps,
+      { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+      actor,
+      "send_refused",
+      {
+        body: reason,
+        meta: {
+          code: "xero_copy_stale",
+          report: true,
+          report_id: claim.id,
+          kind,
+          synced_at: report.synced_at,
+        },
+      },
+    ).catch(() => {});
+    throw new DebtWsError(reason, 409, "xero_copy_stale", {
+      synced_at: report.synced_at,
+    });
   }
   const email = debtReportEmail(report, {
     greeting: reportGreeting(addresses.to),
@@ -3577,7 +3770,11 @@ export async function debtWsReportSend(
   return sent;
 }
 
-/** The Monday cron. Off unless report_auto_send and sending are both on; once a week. */
+/**
+ * The Wednesday 12:00 Perth cron. Off unless report_auto_send and sending are both on; once
+ * a week (the week is Monday to Sunday, Perth, so week_start is still that Monday). Refuses
+ * (xero_copy_stale) when our Xero copy is not fresh, like a manual send.
+ */
 export async function debtWsReportAuto(deps: DebtWsDeps) {
   const settings = await deps.store.settings();
   const rs = await deps.store.reportSettings();
@@ -3602,7 +3799,7 @@ export async function debtWsReportAuto(deps: DebtWsDeps) {
   }
   const sent = await sendDebtReport(
     deps,
-    { user_id: null, label: "Monday auto-send" },
+    { user_id: null, label: "Wednesday 12pm auto-send" },
     "auto",
     addresses,
     weekStart,

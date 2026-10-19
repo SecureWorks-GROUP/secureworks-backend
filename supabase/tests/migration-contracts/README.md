@@ -56,6 +56,20 @@ An optional `rollback-contract.sql` executes after the matching down migration
 and proves both that it ran cleanly and that the promised legacy schema remains
 queryable.
 
+Each fail-closed, rollback and break proof runs in a copy of a database the
+runner already built (`CREATE DATABASE ... TEMPLATE`), never in a fresh replay
+of the whole registered stack: a fail-closed proof copies the forward walk just
+before its migration, a rollback proof copies a second walk just after its
+migration, and a break proof copies the full stack as it stood before any
+contract ran. Replaying the stack per proof made the job grow with the square
+of the case count (35 to 80 minutes on 16 Oct 2026, past the 90 minute job
+limit on slower runners). Do not reintroduce a per-proof replay.
+
+Every statement runs under a 15 minute `statement_timeout`
+(`MIGRATION_CONTRACT_STATEMENT_TIMEOUT` overrides it), so a statement that
+waits forever fails with its own error under its `== label ==` line instead of
+holding the job until GitHub cancels it.
+
 Run the suite locally only against disposable localhost PostgreSQL:
 
 ```sh

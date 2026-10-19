@@ -2865,11 +2865,11 @@ Deno.test(
             reference: roofInput.source.builder_reference,
             line_items: [{
               // This validates the DraftPackOutput against its own MLB labour
-              // contract. The roof fixed-price proposal is independently
-              // derived from the typed work-order storey fact below.
+              // contract ($90 weekday). The roof fixed-price proposal is
+              // independently derived from the typed work-order storey fact below.
               description: "Roof report attendance labour",
               quantity: 3,
-              unit_price: 85,
+              unit_price: 90,
             }],
           },
           change_summary: "Canonical roof draft fixture.",

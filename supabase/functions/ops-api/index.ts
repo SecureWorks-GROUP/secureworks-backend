@@ -317,6 +317,12 @@ import {
   runDispatchOrdersAction,
 } from './dispatch_orders_store.ts'
 import { resendDispatchTransport } from './dispatch_order_send.ts'
+import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
+import {
+  DISPATCH_DELIVERY_LIST_SELECT,
+  dispatchDeliveryListFields,
+  dispatchSightedOrderIds,
+} from './dispatch_deliveries.ts'
 import {
   purchaseOrderCreatedBy,
   supplierReplyMayMoveOrder,
@@ -663,7 +669,10 @@ import {
 } from './trade_invoice_time_entry.ts'
 import {
   approveJobWorkOrder,
+  autoIssueJobWorkOrderForJob,
+  autoIssueJobWorkOrders,
   backfillJobWorkOrders,
+  JOB_WORK_ORDER_OPEN_STATUSES,
   correctWorkOrderVariation,
   createJobWorkOrder,
   JobWorkOrderError,
@@ -685,6 +694,7 @@ import {
   createCustomerVariationXeroDraft,
   listCustomerVariations,
   prepareCustomerVariationInvoiceLine,
+  reconcileCustomerVariationXeroDraft,
   updateCustomerVariation,
 } from './work_order_customer_variations.ts'
 
@@ -6839,6 +6849,37 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw e
         }
       }
+      // Dispatch slice 6, Deliveries (docs/dispatch-slice-6-contract.md): three
+      // writes, gated exactly as slices 4 and 5. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Each updates one purchase_orders row (its own
+      // columns only) and adds one job_events row: no send, no Xero, no job or
+      // Dispatch stage write, no order status change.
+      case 'dispatch_delivery_set_expected':
+      case 'dispatch_delivery_set_confirmed':
+      case 'dispatch_delivery_mark_sighted': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const deliveriesActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchDeliveriesAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: deliveriesActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -8266,7 +8307,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'debt_ws_agent_queue':
       case 'debt_ws_agent_submit':
       // The debt report (docs/debt-workshop/README.md "The debt report"): the live view and
-      // its PDF for staff, the owner's send to Marnin, and the Monday cron (off by default).
+      // its PDF for staff, the owner's send to Marnin, and the Wednesday 12:00 cron (off by default).
       case 'debt_ws_report':
       case 'debt_ws_report_pdf':
       case 'debt_ws_report_send':
@@ -8879,6 +8920,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
+      // The automatic issue sweep (pg_cron job-work-order-auto-issue, every 2
+      // minutes): fills and issues job work orders with no human approval.
+      // Writes nothing while feature flag job_work_order_auto_issue_v1 is off.
+      case 'auto_issue_job_work_orders': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: auto_issue_job_work_orders requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+      }
       // Re-sends variation emails left failed or stuck in sending. Sends
       // nothing while feature flag work_order_variation_emails_v1 is off.
       case 'resend_work_order_variation_emails':
@@ -8923,6 +8976,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           accountCodeForJob: (jobType) => accountCodeForJob(jobType),
           createDraft: (payload) => createInvoiceDraftAction(client, payload, authMode, authUser, serverSecretPresented),
         })))
+      // A work order approver, after checking Xero by hand, answers for a
+      // variation's Xero draft record left `unknown` or stuck `creating`:
+      // records the draft that exists, or releases the line to `prepared`.
+      // Never calls Xero.
+      case 'reconcile_customer_variation_xero_draft':
+        return json(await runJobWorkOrder(() => reconcileCustomerVariationXeroDraft(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
@@ -16239,7 +16303,7 @@ async function pipeline(
   // nothing to fail on, so a search with no match never reads as a failed
   // load (docs/dispatch-slice-3-contract.md, docs/dispatch-slice-4-contract.md).
   const dispatchEmpty = dispatchList
-    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok' }
+    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok', dispatch_deliveries: 'ok' }
     : {}
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
@@ -16419,8 +16483,10 @@ async function pipeline(
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
         client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status' +
           (dispatchList ? ', ' + DISPATCH_INSTALL_BOOKING_COLUMNS : '')).in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
+      // Dispatch slice 6: under dispatch=1 only, the same read also takes what
+      // the delivery counts and Delivered lines need. po_count is unchanged.
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
-        client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
+        client.from('purchase_orders').select(dispatchList ? DISPATCH_DELIVERY_LIST_SELECT : 'job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
         client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
@@ -16489,13 +16555,32 @@ async function pipeline(
   // A failed materials read leaves both fields off every row and says
   // `dispatch_materials: 'failed'`: never 0, and never the whole list marked
   // degraded for it (docs/dispatch-slice-4-contract.md).
-  const dispatchMaterialsOk = dispatchList && !materialsRes.error
+  // Dispatch slice 6 (docs/dispatch-slice-6-contract.md): the order read feeds
+  // the delivery counts and Delivered lines, so a failed order read leaves the
+  // delivery fields AND the materials fields off every row (never 0).
+  const dispatchDeliveriesOk = dispatchList && !poRes.error
+  const dispatchMaterialsOk = dispatchList && !materialsRes.error && !poRes.error
   if (dispatchList && materialsRes.error) {
     console.error('[pipeline] pipeline.job_material_lines failed:', materialsRes.error)
   }
+  if (dispatchList && poRes.error) {
+    console.error('[pipeline] pipeline.purchase_orders failed: dispatch deliveries and materials marked failed')
+  }
   const materialCountsByJob = dispatchMaterialsOk
-    ? dispatchMaterialCountsByJob(materialsRes.data)
+    ? dispatchMaterialCountsByJob(materialsRes.data, dispatchSightedOrderIds(poRes.data || []))
     : new Map()
+  // Orders per job, only for the jobs the order read covered (a draft row is
+  // not read, so it gets no delivery fields rather than a made-up 0).
+  const deliveryReadJobIds = new Set(jobIds.map((id: any) => String(id)))
+  const deliveryOrdersByJob = new Map<string, any[]>()
+  if (dispatchDeliveriesOk) {
+    for (const po of poRes.data || []) {
+      const key = String(po.job_id)
+      const bucket = deliveryOrdersByJob.get(key)
+      if (bucket) bucket.push(po)
+      else deliveryOrdersByJob.set(key, [po])
+    }
+  }
 
   const enrichmentResults: Array<[string, PipelineEnrichmentResult]> = [
     ['pipeline.job_assignments', assignRes],
@@ -16698,6 +16783,9 @@ async function pipeline(
             })
             : {}),
           ...(dispatchMaterialsOk ? dispatchMaterialListFields(materialCountsByJob.get(String(j.id))) : {}),
+          ...(dispatchDeliveriesOk && deliveryReadJobIds.has(String(j.id))
+            ? dispatchDeliveryListFields(deliveryOrdersByJob.get(String(j.id)))
+            : {}),
         }
         : {}),
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
@@ -16779,6 +16867,7 @@ async function pipeline(
       : {}),
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchList ? { dispatch_deliveries: dispatchDeliveriesOk ? 'ok' : 'failed' } : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
@@ -17002,6 +17091,9 @@ async function jobDetail(
         variation_count: jwo.variations.length,
         customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
         quote_fill: jwo.quote_fill,
+        // Office only: lines the quote fill flagged (they never stop the work
+        // order going out) and why a draft has not gone to the trades.
+        needs_checking: jwo.needs_checking,
       }
     } catch (e) {
       console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
@@ -35548,6 +35640,23 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
+  // ── The job work order (job_work_orders.ts): a fencing or patio job moving
+  // into an open approved status had its draft opened by the database trigger
+  // in this same update; fill it from the accepted quote and issue it to the
+  // trades now, rather than on the next 2-minute sweep. A no-op while
+  // job_work_order_auto_issue_v1 is off, and it never throws: the status
+  // change stands whatever happens here.
+  if (
+    (data?.type === 'fencing' || data?.type === 'patio') &&
+    JOB_WORK_ORDER_OPEN_STATUSES.has(String(status)) &&
+    oldStatus !== status
+  ) {
+    const issue = await autoIssueJobWorkOrderForJob(client, jId)
+    if (!issue.issued && issue.reason !== 'switched_off') {
+      console.log('[ops-api] job work order not issued on status change:', jId, issue.reason, issue.code || '')
+    }
+  }
+
   // ── Acceptance trigger: auto-approve draft WOs + push labour POs to Xero (non-blocking) ──
   if (status === 'accepted') {
     (async () => {
@@ -35557,8 +35666,9 @@ async function updateJobStatus(client: any, body: any) {
         // not mention quote_builder_version_id (the column may not exist yet).
         const ordersOn = await quoteBuilderOrdersEnabled(client)
         // 1. Approve draft work orders for this job
-        // Crew work orders only: a job work order is approved by Shaun alone
-        // (job_work_orders.ts), never by job acceptance.
+        // Crew work orders only: a job work order is issued by its own rule
+        // (job_work_orders.ts: automatically while job_work_order_auto_issue_v1
+        // is on, else by Shaun), never by this acceptance step.
         let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
@@ -55878,11 +55988,14 @@ async function analyseSupplierQuote(client: any, body: any) {
 
   // Get the PO with its line items (what we ordered)
   const { data: po, error: poErr } = await client.from('purchase_orders')
-    .select('id, po_number, supplier_name, job_id, line_items, total, reference, status, source')
+    .select('id, po_number, supplier_name, job_id, line_items, total, reference, status, source, confirmed_delivery_set_at')
     .eq('id', pId)
     .single()
 
   if (poErr || !po) throw new Error('PO not found')
+  // Dispatch slice 6 (docs/dispatch-slice-6-contract.md): a confirmed date a
+  // person set by hand is never replaced by this reader's reading of an email.
+  const replyMayWriteConfirmedDate = !po.confirmed_delivery_set_at
 
   // Get the job's pricing_json (what was quoted to client)
   let jobPricing: any = null
@@ -56075,9 +56188,13 @@ Return ONLY valid JSON in this exact format:
 
   // Update PO status if this is a HIGH-CONFIDENCE confirmation
   if (replyMayMoveOrder && isConfirmation && confidence >= HIGH_CONFIDENCE && po.status !== 'delivered' && po.status !== 'billed') {
-    const poUpdate: any = { status: 'authorised' }
-    if (confirmedDeliveryDate) poUpdate.confirmed_delivery_date = confirmedDeliveryDate
-    await client.from('purchase_orders').update(poUpdate).eq('id', po.id)
+    await client.from('purchase_orders').update({ status: 'authorised' }).eq('id', po.id)
+    if (confirmedDeliveryDate && replyMayWriteConfirmedDate) {
+      await client.from('purchase_orders')
+        .update({ confirmed_delivery_date: confirmedDeliveryDate })
+        .eq('id', po.id)
+        .is('confirmed_delivery_set_at', null)
+    }
     console.log(`[ops-api] PO ${po.po_number} confirmed by supplier (${Math.round(confidence * 100)}% confidence)${confirmedDeliveryDate ? ', delivery ' + confirmedDeliveryDate : ''}`)
 
     // Create job_event for confirmation
@@ -56106,8 +56223,8 @@ Return ONLY valid JSON in this exact format:
   } else if (isConfirmation && confidence < HIGH_CONFIDENCE) {
     // Low confidence confirmation — flag for manual review, DON'T change PO status
     console.log(`[ops-api] PO ${po.po_number} classified as confirmation but low confidence (${Math.round(confidence * 100)}%) — flagging for review`)
-    if (replyMayMoveOrder && confirmedDeliveryDate) {
-      await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id)
+    if (replyMayMoveOrder && confirmedDeliveryDate && replyMayWriteConfirmedDate) {
+      await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id).is('confirmed_delivery_set_at', null)
     }
     try {
       await client.from('ai_annotations').insert({
@@ -56123,11 +56240,12 @@ Return ONLY valid JSON in this exact format:
         source: 'ai/analyse_supplier_quote',
       })
     } catch (e) { /* non-blocking */ }
-  } else if (replyMayMoveOrder && confirmedDeliveryDate && !isConfirmation) {
+  } else if (replyMayMoveOrder && confirmedDeliveryDate && !isConfirmation && replyMayWriteConfirmedDate) {
     // Delivery date mentioned but not a full confirmation — still save it
     await client.from('purchase_orders')
       .update({ confirmed_delivery_date: confirmedDeliveryDate })
       .eq('id', po.id)
+      .is('confirmed_delivery_set_at', null)
   }
 
   // Handle invoice classification — mark PO as invoice received

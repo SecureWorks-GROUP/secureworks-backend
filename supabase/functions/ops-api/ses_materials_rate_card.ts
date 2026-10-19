@@ -44,6 +44,8 @@ export type SesRateCardPricing =
     kind: "settled";
     lines: SesRateCardSettledLine[];
     materials: SesRateCardMaterialFact[];
+    /** Trade ticks with no settled rate. Omitted from the invoice. Never billed as a review proposal. */
+    omitted: string[];
   }
   | SesRateCardProposal
   | {
@@ -57,6 +59,8 @@ interface ParsedRateCard {
   consumablesLarge: number;
   flashingTape: number;
   silicone: number;
+  timberLength: number;
+  bugleEach: number;
   tarpBands: Array<{ upToSquareMetres: number; amount: number }>;
   proposalBasketFloor: number;
   roundMultiple: number;
@@ -93,6 +97,10 @@ function parseRateCard(markdown: string): ParsedRateCard {
   );
   const tape = headingSection(markdown, "Flashing tape");
   const silicone = headingSection(markdown, "Sikaflex / silicone");
+  const timber = headingSection(
+    markdown,
+    "Timber 2.4 m (includes two bugle screws)",
+  );
   const tarp = headingSection(markdown, "Make-safe tarpaulin");
   const unpriced = headingSection(
     markdown,
@@ -152,6 +160,16 @@ function parseRateCard(markdown: string): ParsedRateCard {
       silicone,
       /\| 1 \(floor\) \| one cartridge, part or whole \| \$([0-9.]+)/,
       "silicone",
+    ),
+    timberLength: requiredMoney(
+      timber,
+      /\| Timber 2\.4 m incl\. 2 bugle screws \| per 2\.4 m length \| \$([0-9.]+)/,
+      "timber length",
+    ),
+    bugleEach: requiredMoney(
+      timber,
+      /bugle screws\s+at `\$([0-9.]+)` each/,
+      "extra bugle screw",
     ),
     tarpBands,
     // F29 uses the smallest accepted basket figure as a REVIEW-ONLY proposal
@@ -245,12 +263,60 @@ function quantityForWholeUnits(fact: SesRateCardMaterialFact): number {
   return Math.max(1, Math.ceil(fact.quantity || 0));
 }
 
+function isTimber(label: string): boolean {
+  return /\btimber\b/i.test(label) && !/\btarpaulins?\b/i.test(label);
+}
+
+function isBugle(label: string): boolean {
+  return /\bbugles?\b/i.test(label);
+}
+
+function isTarp(label: string): boolean {
+  return /\b(?:make-safe )?tarps?|tarpaulins?\b/i.test(label);
+}
+
+function isHeldMaterial(label: string): boolean {
+  return /\b(?:heavy|xtreme|polyweave|builders film)\b/i.test(label);
+}
+
+function isConsumable(label: string): boolean {
+  return /\b(?:cable ties?|clips?|nails?|screws?|fixings?|small consumables?)\b/i
+    .test(label);
+}
+
+/**
+ * A styled line keeps quantity when unit × quantity lands on the styled
+ * amount. Otherwise the count stays in the description and the line is
+ * quantity 1 at the styled total, so cents cannot drift off the ruling.
+ */
+function settledMoneyLine(
+  description: string,
+  quantity: number,
+  rawAmount: number,
+  style: boolean,
+  multiple: number,
+): SesRateCardSettledLine {
+  const raw = Math.round(rawAmount * 100) / 100;
+  const amount = style ? styleProposalAmount(raw, multiple) : raw;
+  const unit = Math.round((amount / quantity) * 100) / 100;
+  if (Math.round(unit * quantity * 100) / 100 === amount) {
+    return { description, quantity, unit_price_ex_gst: unit };
+  }
+  return {
+    description,
+    quantity: 1,
+    unit_price_ex_gst: amount,
+  };
+}
+
 /**
  * Price the trade's recorded quantities from the markdown card.
  *
- * Silicone/tape retain their settled per-unit behavior. Every other executable
- * composition is one explicitly labelled review proposal, styled upward to a
- * non-round amount and paired with a release caveat by the caller.
+ * Settled rows bill under their invoice names. Sikaflex, tape, tarp and
+ * timber style up off a round line amount. Star pickets, cable ties and
+ * extra bugle screws stay on the exact guarded figure. A tick with no
+ * settled rate is omitted. Nothing here mints "Proposed materials for
+ * Captain review".
  */
 export function priceRecordedMaterialsFromRateCard(
   materialsUsed: unknown,
@@ -261,112 +327,133 @@ export function priceRecordedMaterialsFromRateCard(
   }
 
   const card = readSesMaterialsRateCard();
-  const settledOnly = facts.every((fact) =>
-    isSilicone(fact.label) || isFlashingTape(fact.label)
-  );
-  if (settledOnly) {
-    return {
-      kind: "settled",
-      materials: facts,
-      lines: facts.map((fact) => {
-        const silicone = isSilicone(fact.label);
-        return {
-          description: `Materials used: ${fact.label} (${
-            silicone ? "whole cartridge" : "whole roll"
-          })`,
-          quantity: quantityForWholeUnits(fact),
-          unit_price_ex_gst: silicone ? card.silicone : card.flashingTape,
-        };
-      }),
-    };
-  }
-
-  const components: number[] = [];
-  const rateCardKeys = new Set<string>();
+  const lines: SesRateCardSettledLine[] = [];
+  const omitted: string[] = [];
   let consumablesAdded = false;
-  let unmatchedQuantified = false;
+  let timberLengths = 0;
+  let bugleQuantity = 0;
+
   for (const fact of facts) {
     const label = fact.label;
     if (isSilicone(label)) {
-      components.push(card.silicone * quantityForWholeUnits(fact));
-      rateCardKeys.add("sikaflex_silicone");
+      const quantity = quantityForWholeUnits(fact);
+      lines.push(settledMoneyLine(
+        `Materials used: Sikaflex x ${quantity} (whole cartridge)`,
+        quantity,
+        card.silicone * quantity,
+        true,
+        card.roundMultiple,
+      ));
       continue;
     }
     if (isFlashingTape(label)) {
-      components.push(card.flashingTape * quantityForWholeUnits(fact));
-      rateCardKeys.add("flashing_tape");
+      const quantity = quantityForWholeUnits(fact);
+      lines.push(settledMoneyLine(
+        `Materials used: Flashing tape x ${quantity} (whole roll)`,
+        quantity,
+        card.flashingTape * quantity,
+        true,
+        card.roundMultiple,
+      ));
       continue;
     }
-    if (/\b(?:make-safe )?tarps?|tarpaulins?\b/i.test(label)) {
+    if (isTimber(label)) {
+      const metres = isAreaUnit(fact.unit) ? null : (
+        /^(?:m|metres?|meters?)$/i.test(String(fact.unit || ""))
+          ? fact.quantity
+          : null
+      );
+      if (metres === null || metres <= 0) {
+        omitted.push(label);
+        continue;
+      }
+      const lengths = Math.max(1, Math.ceil(metres / 2.4));
+      timberLengths += lengths;
+      lines.push(settledMoneyLine(
+        `Timber 2.4m (incl. 2 bugle screws) - ${lengths} length${
+          lengths === 1 ? "" : "s"
+        }`,
+        lengths,
+        card.timberLength * lengths,
+        true,
+        card.roundMultiple,
+      ));
+      continue;
+    }
+    if (isBugle(label)) {
+      // The timber rate already includes two bugle screws per length.
+      // Only screws beyond that pair are a separate $1 line.
+      bugleQuantity += quantityForWholeUnits(fact);
+      continue;
+    }
+    if (isTarp(label)) {
       if (
-        !isAreaUnit(fact.unit) ||
-        /\b(?:heavy|xtreme|polyweave|film)\b/i.test(label)
+        !isAreaUnit(fact.unit) || isHeldMaterial(label)
       ) {
-        unmatchedQuantified = true;
+        omitted.push(label);
         continue;
       }
       const band = card.tarpBands.find((candidate) =>
         (fact.quantity || 0) <= candidate.upToSquareMetres
       );
       if (!band) {
-        unmatchedQuantified = true;
+        omitted.push(label);
         continue;
       }
-      components.push(band.amount);
-      rateCardKeys.add("tarpaulin");
+      lines.push(settledMoneyLine(
+        `Materials used: Tarpaulin up to ${band.upToSquareMetres} m2`,
+        1,
+        band.amount,
+        true,
+        card.roundMultiple,
+      ));
       continue;
     }
     if (/\bstar(?:[\W_]+)?pickets?\b/i.test(label)) {
-      components.push(card.starPicket * (fact.quantity || 0));
-      rateCardKeys.add("star_picket");
+      const quantity = fact.quantity || 0;
+      if (quantity <= 0) {
+        omitted.push(label);
+        continue;
+      }
+      lines.push(settledMoneyLine(
+        `Materials used: Star pickets x ${quantity}`,
+        quantity,
+        card.starPicket * quantity,
+        false,
+        card.roundMultiple,
+      ));
       continue;
     }
-    if (
-      /\b(?:cable ties?|clips?|nails?|screws?|fixings?|small consumables?)\b/i
-        .test(label)
-    ) {
+    if (isConsumable(label)) {
       if (!consumablesAdded) {
-        components.push(
-          /\b(?:large|awkward|multi-area)\b/i.test(label)
-            ? card.consumablesLarge
-            : card.consumablesStandard,
-        );
-        rateCardKeys.add("cable_ties_consumables");
+        const large = /\b(?:large|awkward|multi-area)\b/i.test(label);
+        lines.push(settledMoneyLine(
+          large
+            ? "Materials used: Cable ties and small consumables (large job)"
+            : "Materials used: Cable ties and small consumables",
+          1,
+          large ? card.consumablesLarge : card.consumablesStandard,
+          false,
+          card.roundMultiple,
+        ));
         consumablesAdded = true;
       }
       continue;
     }
-    unmatchedQuantified = true;
+    omitted.push(label);
   }
 
-  if (unmatchedQuantified) {
-    components.push(card.proposalBasketFloor);
-    rateCardKeys.add("accepted_materials_basket_floor");
+  const extraBugles = bugleQuantity - timberLengths * 2;
+  if (extraBugles > 0) {
+    lines.push(settledMoneyLine(
+      `Materials used: Bugle screws x ${extraBugles}`,
+      extraBugles,
+      card.bugleEach * extraBugles,
+      false,
+      card.roundMultiple,
+    ));
   }
-  if (!components.length) return { kind: "unquantified", materials: facts };
 
-  const rawAmount = Math.round(
-    components.reduce((sum, amount) => sum + amount, 0) * 100,
-  ) / 100;
-  const styledAmount = styleProposalAmount(rawAmount, card.roundMultiple);
-  const listed = facts.map((fact) => fact.label).join("; ");
-  return {
-    kind: "proposal",
-    description:
-      `Proposed materials for Captain review: ${listed} (rate-card composition; non-round styled total)`,
-    amount_ex_gst: styledAmount,
-    raw_amount_ex_gst: rawAmount,
-    materials: facts,
-    rate_card_keys: [...rateCardKeys],
-    provenance: {
-      source: "materials_rate_card_review_proposal",
-      source_path: SES_MATERIALS_RATE_CARD_SOURCE,
-      rate_card_keys: [...rateCardKeys],
-      raw_amount_ex_gst: rawAmount,
-      styled_amount_ex_gst: styledAmount,
-      estimate: true,
-      captain_review_required: true,
-      quantities: facts,
-    },
-  };
+  if (!lines.length) return { kind: "unquantified", materials: facts };
+  return { kind: "settled", materials: facts, lines, omitted };
 }

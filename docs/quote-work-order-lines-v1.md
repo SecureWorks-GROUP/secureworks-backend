@@ -30,7 +30,8 @@ Code:
 
 - `supabase/functions/ops-api/quote_work_order_lines.ts`: the pure builder.
 - `supabase/functions/ops-api/job_work_order_quote_fill.ts`: the reads and the one write.
-- `job_work_orders.ts` calls the fill when staff open or read a draft, and in the backfill.
+- `job_work_orders.ts` calls the fill when staff open or read a draft, in the backfill, and
+  in the automatic issue while it is switched on.
 
 Tests: `quote_work_order_lines_test.ts`, `job_work_order_quote_fill_test.ts` and
 `job_work_order_quote_fill_handler_test.ts`.
@@ -44,15 +45,28 @@ job's live `pricing_json`. The rule is the one the expected-costs freeze uses
 - the revision recorded at acceptance (`jobs.expected_costs.scope_revision_id`), read whether
   it is still `frozen` or was `superseded` by a later revision (a re-quote after acceptance);
 - without one, the latest revision, `frozen` or `superseded`, frozen at or before
-  `jobs.accepted_at`.
+  `jobs.accepted_at`;
+- with neither a recorded revision nor an acceptance time, and only then (captain, 16 Oct
+  2026): a job that has moved past quoted (it is in an open status,
+  `JOB_WORK_ORDER_OPEN_STATUSES`) counts as accepted at its latest frozen quote, the newest
+  revision still in status `frozen`, whenever it was frozen. A `superseded` revision never
+  counts under this rule, so a re-quote fills from the current quote. A status change on the
+  Ops screen to `accepted` stamps `jobs.accepted_at`; one straight to another open status
+  (deposit, scheduled, ...) does not, so this is how those jobs' fence-tool or patio-tool
+  quote counts.
 
 Its pricing is read from `scope_revisions.pricing_canonical_text`. With no accepted revision
-(no recorded revision, no acceptance time, or only revisions frozen after acceptance) the
-result is flagged `no_accepted_quote` and the draft is not filled (`quote_fill.reason`
-`no_accepted_quote`); it stays empty for the approver to fill. An accepted revision whose
-pricing cannot be read adds `frozen_quote_unreadable` and is never replaced by another
-revision. Measured on 13 Oct 2026: 26 of the 81 open fencing and patio jobs have an accepted
-revision by this rule (17 recorded, 9 by acceptance time).
+(no recorded revision, no acceptance time and no frozen revision, a recorded revision that
+cannot be found, an acceptance time with only revisions frozen after it, or a job not in an
+open status) the result is flagged `no_accepted_quote` and the draft is not filled
+(`quote_fill.reason` `no_accepted_quote`); it stays empty for the approver to fill. An
+accepted revision whose pricing cannot be read adds `frozen_quote_unreadable` and is never
+replaced by another revision. Measured read-only on 16 Oct 2026: 55 of the 81 open fencing
+and patio jobs have an accepted revision by this rule (18 recorded, 8 by acceptance time, 29
+by the latest frozen quote: 5 fencing, 24 patio). The other 26 stay with the office to fill
+by hand, as the captain accepted: older quotes from before the tools froze quotes and jobs
+with no quote in the system. A quote saved with no labour figure is filled but held for the
+office too (`agreed_labour_missing`, docs/job-work-orders-v1.md).
 
 ## The lines
 
@@ -166,6 +180,15 @@ These rules apply to any job type.
   table row it uses changed, and `labour_differs_from_quote` marks every line priced from
   the table. `flags` and `needs_review` are office-only: trades never see them.
 
+## Issuing a draft with flagged lines
+
+While `job_work_order_auto_issue_v1` is on (`docs/job-work-orders-v1.md`, "Automatic
+issue"), a filled draft nobody has edited goes to the trades without an approval, flagged
+lines included: the flags stay on the sealed lines and reach the office as the
+`needs_checking` note, never the trades. The fill stamps `quote_filled_at` on the draft it
+writes (not on a draft someone already edited by hand), which is what the automatic issue
+requires. What follows applies while the switch is off, or to a draft held for the approver.
+
 ## Approving a draft with flagged lines
 
 Approval (`approve_work_order`, `docs/job-work-orders-v1.md`) does not refuse a draft whose
@@ -191,7 +214,7 @@ not be checked against it, `labour_unverified`) adds nothing to
 - **The event:** `job_work_order_draft_filled_from_quote` carries ids and counts only, never
   an amount.
 
-It runs at three points:
+It runs at four points:
 
 - `job_work_order` (and `job_detail`'s `job_work_order` block) fills an untouched draft on
   the staff read: a signed-in admin, owner or ops manager, or the ops server key. A read
@@ -210,8 +233,11 @@ It runs at three points:
   A draft is left untouched, and tried again on the next run, only when its quote gives no
   work order lines or the job has no accepted quote. A quote with lines but no labour figure
   is filled with lines only. A dry run fills nothing and counts `untouched_drafts`.
+- The automatic issue (`auto_issue_job_work_orders` and the `update_job_status` hook), only
+  while `job_work_order_auto_issue_v1` is on, fills an untouched draft nobody has edited by
+  hand before issuing it (`docs/job-work-orders-v1.md`, "Automatic issue").
 
-A fill failure never fails the open, the read or the backfill; the reason is reported
+A fill failure never fails the open, the read, the backfill or the automatic issue; the reason is reported
 instead. An unreadable cost table or quote is a failure (`fill_failed` with
 `code: cost_table_unreadable` / `quote_unreadable`), never a fill on missing rates.
 
@@ -222,8 +248,8 @@ and returns:
 
 `{job:{id, job_number, type, status}, quote:{source, scope_revision_id, frozen_at, flags}, result}`
 
-`quote.source` is `accepted_revision`, `revision_at_acceptance`, or null when the job has no
-accepted revision (`flags` then holds `no_accepted_quote`).
+`quote.source` is `accepted_revision`, `revision_at_acceptance`,
+`latest_frozen_revision`, or null when the job has no accepted revision (`flags` then holds `no_accepted_quote`).
 
 - 400 `job_id_required`, before any query, when `job_id` is missing or is not a job id
   (uuid). A job number is not accepted.
