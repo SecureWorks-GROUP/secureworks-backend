@@ -72,6 +72,7 @@ import {
   QuoteFillError,
   type QuoteFillOutcome,
 } from "./job_work_order_quote_fill.ts";
+import { QUOTE_LINE_FLAGS } from "./quote_work_order_lines.ts";
 
 export const JOB_WORK_ORDER_SCHEMA = "job-work-order.v1";
 export const TRADE_JOB_WORK_ORDER_SCHEMA = "trade-job-work-order.v1";
@@ -417,6 +418,7 @@ export type JobWorkOrderHeldReason =
   | "not_filled"
   | "agreed_labour_missing"
   | "filled_before_auto_issue"
+  | "labour_outside_agreed"
   | "auto_issue_switched_off"
   | "awaiting_auto_issue";
 
@@ -445,6 +447,8 @@ const HELD_MESSAGES: Record<JobWorkOrderHeldReason, string> = {
     "The quote has no labour figure. Set the agreed labour and approve it to send it to the trades.",
   filled_before_auto_issue:
     "Filled before automatic issue, and it cannot be shown untouched since. Approve it to send it to the trades.",
+  labour_outside_agreed:
+    "The quote has more labour on lines it did not count (labour saved as materials, or outside its labour figure) than in the agreed labour. Check the agreed labour and approve it to send it to the trades.",
   auto_issue_switched_off:
     "Goes to the trades automatically once automatic issue is switched on.",
   awaiting_auto_issue: "Goes to the trades automatically within a few minutes.",
@@ -456,7 +460,52 @@ const HELD_FOR_THE_OFFICE: ReadonlySet<JobWorkOrderHeldReason> = new Set([
   "not_filled",
   "agreed_labour_missing",
   "filled_before_auto_issue",
+  "labour_outside_agreed",
 ]);
+
+// Lines the quote fill could not count as agreed labour although they read as
+// labour: hours saved as a material, or labour outside the quote's own labour
+// figure (quote_work_order_lines.ts).
+const UNCOUNTED_LABOUR_FLAGS: ReadonlySet<string> = new Set([
+  QUOTE_LINE_FLAGS.savedAsMaterial,
+  QUOTE_LINE_FLAGS.outsideQuoteLabour,
+  QUOTE_LINE_FLAGS.labourUnverified,
+]);
+
+/**
+ * PROPOSAL (W2, 19 Oct 2026, after SWF-900001 went out at $0.35): the value of
+ * the uncounted labour-like lines on a quote-filled work order, and whether it
+ * is more than the agreed labour. When it is, the agreed figure cannot be the
+ * labour the job needs, so automatic issue holds the draft for the approver.
+ * A line's value is its total, else hours x rate; lines with neither add
+ * nothing (they stay on the "needs checking" note as before).
+ */
+export function uncountedLabourOverAgreed(
+  items: unknown,
+  agreedLabourEx: unknown,
+): { uncounted_labour_ex: number; over: boolean } {
+  let sum = 0;
+  for (const i of Array.isArray(items) ? items : []) {
+    if (!i || typeof i !== "object" || (i as any).counted === true) continue;
+    const flags = Array.isArray((i as any).flags) ? (i as any).flags.map(String) : [];
+    if (!flags.some((f: string) => UNCOUNTED_LABOUR_FLAGS.has(f))) continue;
+    const total = Number((i as any).total);
+    const hours = Number((i as any).hours);
+    const rate = Number((i as any).rate);
+    const value = Number.isFinite(total) && total > 0
+      ? total
+      : Number.isFinite(hours) && hours > 0 && Number.isFinite(rate) && rate > 0
+      ? hours * rate
+      : 0;
+    sum += value;
+  }
+  const agreed = Number(agreedLabourEx);
+  const uncounted = Math.round(sum * 100) / 100;
+  return {
+    uncounted_labour_ex: uncounted,
+    over: uncounted > 0 && Number.isFinite(agreed) && uncounted > agreed,
+  };
+}
 
 /**
  * The office-only note on a job work order: the lines the quote fill flagged
@@ -489,6 +538,8 @@ export function jobWorkOrderNeedsChecking(
       ? "agreed_labour_missing"
       : !wo.quote_filled_at
       ? "filled_before_auto_issue"
+      : uncountedLabourOverAgreed(items, wo.agreed_labour_ex).over
+      ? "labour_outside_agreed"
       : autoIssueOn === true
       ? "awaiting_auto_issue"
       : "auto_issue_switched_off";
@@ -1867,6 +1918,7 @@ export type JobWorkOrderAutoIssueReason =
   | "hand_edited"
   | "filled_before_auto_issue"
   | "agreed_labour_missing"
+  | "labour_outside_agreed"
   | "draft_changed"
   | "issue_failed";
 
@@ -1964,6 +2016,9 @@ export async function autoIssueJobWorkOrderForJob(
       draft.agreed_labour_ex === null || draft.agreed_labour_ex === undefined
     ) {
       return held("agreed_labour_missing");
+    }
+    if (uncountedLabourOverAgreed(items, draft.agreed_labour_ex).over) {
+      return held("labour_outside_agreed");
     }
     const { data, error } = await client.rpc("auto_issue_job_work_order", {
       p_work_order_id: draft.id,

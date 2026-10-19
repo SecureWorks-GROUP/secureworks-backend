@@ -121,6 +121,14 @@ What is issued, and what waits for the approver:
   quotes from before the tools froze quotes, or no quote in the system; 26 of
   the 81 open jobs on 16 Oct 2026), and a draft filled before this switch that
   cannot be shown untouched since (`filled_before_auto_issue`).
+- Held when the quote's uncounted labour is worth more than its agreed labour
+  (`labour_outside_agreed`, PROPOSAL from 19 Oct 2026, awaiting the captain's
+  word): the lines flagged `saved_as_material`, `outside_quote_labour` or
+  `labour_unverified`, valued at their total (else hours x rate), add up to more
+  than `agreed_labour_ex`. SWF-900001 went out at 0.35 with 1,200 of labour
+  saved as materials. Smaller flagged lines still never hold the work order.
+  Known residual: a held draft stays among the sweep's oldest candidates until
+  the approver acts on it.
 - Customer variations still need the work order approver, exactly as before
   ("Customer variations" below). They join an automatically issued work order
   the same way.
@@ -166,7 +174,7 @@ counts only, no user).
 
 `lines` are the work order's lines the fill flagged (`needs_review`).
 `held` is set only on a draft: `hand_edited`, `not_filled`,
-`agreed_labour_missing`, `filled_before_auto_issue` (each needs the office:
+`agreed_labour_missing`, `filled_before_auto_issue`, `labour_outside_agreed` (each needs the office:
 `needs_checking` true), or `auto_issue_switched_off` / `awaiting_auto_issue`
 (nothing to do). Computed at read time from the work order, stored nowhere.
 The trade read is an allowlist and never carries it.

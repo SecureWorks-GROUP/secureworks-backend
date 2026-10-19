@@ -12,6 +12,7 @@ import {
   createJobWorkOrder,
   JobWorkOrderError,
   jobWorkOrderNeedsChecking,
+  uncountedLabourOverAgreed,
   listJobWorkOrders,
   projectTradeJobWorkOrder,
   readJobWorkOrder,
@@ -2169,4 +2170,37 @@ Deno.test("old work order list: crew work orders only, never the job's own work 
     new URLSearchParams({ job_id: JOB }),
   );
   assertEquals(withDraft.work_orders.map((w: any) => w.id), ["crew-1"]);
+});
+
+Deno.test("uncounted labour guard: only labour-like uncounted lines, valued by total or hours x rate", () => {
+  const items = [
+    { counted: true, flags: [], total: 500 },
+    { counted: false, flags: ["saved_as_material", "outside_quote_labour"], total: 480 },
+    { counted: false, flags: ["labour_unverified"], hours: 9, rate: 80 },
+    { counted: false, flags: ["labour_or_material_unknown"], total: 9999 },
+    { counted: false, flags: ["saved_as_material"] },
+  ];
+  assertEquals(uncountedLabourOverAgreed(items, 0.35), { uncounted_labour_ex: 1200, over: true });
+  assertEquals(uncountedLabourOverAgreed(items, 1200), { uncounted_labour_ex: 1200, over: false });
+  assertEquals(uncountedLabourOverAgreed([], 0), { uncounted_labour_ex: 0, over: false });
+  assertEquals(uncountedLabourOverAgreed(null, 100).over, false);
+});
+
+Deno.test("needs checking: a filled draft whose uncounted labour beats the agreed labour waits for the office", () => {
+  const wo = {
+    kind: "job",
+    status: "draft",
+    scope_items: [
+      { description: "Fence install", counted: true, total: 0.35 },
+      { description: "Install labour", counted: false, needs_review: true, flags: ["saved_as_material", "outside_quote_labour"], hours: 15, rate: 80, total: 1200 },
+    ],
+    agreed_labour_ex: 0.35,
+    quote_filled_at: "2026-10-19T00:00:00Z",
+    hand_edited_at: null,
+  };
+  const note = jobWorkOrderNeedsChecking(wo, true)!;
+  assertEquals(note.held?.reason, "labour_outside_agreed");
+  assertEquals(note.needs_checking, true);
+  // Once approved the note no longer holds anything.
+  assertEquals(jobWorkOrderNeedsChecking({ ...wo, status: "approved" }, true)!.held, null);
 });
