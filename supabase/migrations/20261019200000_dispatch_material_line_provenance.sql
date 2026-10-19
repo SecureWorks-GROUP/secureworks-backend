@@ -29,6 +29,10 @@
 -- The partial unique index makes one source line land on a job at most once,
 -- whatever the press order: a second or concurrent take of the same quote line
 -- fails on the index (23505), as the suggest action's line ids already do.
+-- The same line id under a later version is a different row, so a reissue is
+-- handled on purpose by the take or refresh code, never by this index. The
+-- writer checks a version for repeated line ids first and refuses
+-- source_line_id_repeated, so a 23505 here never reads as "lines exist".
 --
 -- Rollback: supabase/rollbacks/20261019200000_dispatch_material_line_provenance_down.sql.
 
@@ -64,6 +68,10 @@ BEGIN
              OR (source_kind = 'quote_builder_version'
                  AND source_version_id IS NOT NULL
                  AND source_line_id IS NOT NULL))
+        -- A scope line names only a frozen fence or patio revision, never a
+        -- quote builder version.
+        AND (source <> 'scope' OR source_kind IS NULL
+             OR source_kind IN ('fence_scope_revision', 'patio_scope_revision'))
         AND (source_kind IS NULL) = (source_version_id IS NULL)
         AND (source_line_id IS NULL OR source_version_id IS NOT NULL)
         AND (source_line_id IS NULL OR char_length(source_line_id) BETWEEN 1 AND 100)
