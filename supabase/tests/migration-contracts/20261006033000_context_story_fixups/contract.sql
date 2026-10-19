@@ -464,7 +464,7 @@ BEGIN;
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
        LIKE '%(person review, 20261018120000)%' AS person_review_live \gset
 \if :person_review_live
-\ir ../../../rollbacks/20261018120000_context_ledger_person_review_down.sql
+\ir ../../../rollbacks/20261019120000_context_ledger_person_review_down.sql
 \endif
 -- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
 -- as the story settled notes' refuses while a later story read is live)

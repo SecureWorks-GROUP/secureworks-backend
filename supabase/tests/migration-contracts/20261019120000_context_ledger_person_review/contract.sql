@@ -1,8 +1,10 @@
--- Contract for 20261018120000_context_ledger_person_review.
+-- Contract for 20261019120000_context_ledger_person_review.
 -- A person review (claimed_closed_unverified) is stored on insert and on a transition that does
--- not change status, and an unattached ledger loop that carries one is a person review so the
--- open-loop wait score can leave it out. An open request with no review still counts. Every
--- fixture write is rolled back. Invented names only.
+-- not change status. An unattached ledger loop that carries one is a person review, and its
+-- customer_waiting and money are clear, so the open-loop wait score leaves it out. A money
+-- record loop clears money only when every open item attached to it carries a review. An open
+-- request with no review still counts, and a genuine money loop with no reviewed attachment
+-- still leads. Item status is not changed. Every fixture write is rolled back. Invented names only.
 
 CREATE FUNCTION pg_temp.pr_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF p_ok IS NOT TRUE THEN RAISE EXCEPTION 'person review contract: %', p_msg; END IF; END $$;
@@ -207,6 +209,31 @@ BEGIN
  SELECT * INTO it FROM public.context_ledger_items i WHERE i.generation_id = gen AND i.item_key = k_omit;
  PERFORM pg_temp.pr_assert(it.status = 'open' AND it.person_review IS NULL, 'the review is cleared and the item stays open');
 
+ -- same status, JSON null when the review is already null: no change, and no new transition
+ SELECT count(*) INTO n_tr FROM public.context_ledger_transitions t
+  JOIN public.context_ledger_items i ON i.id = t.item_id
+  WHERE i.generation_id = gen AND i.item_key = k_omit;
+ res := public.context_ledger_write(run, tok, gen, '[]', jsonb_build_array(jsonb_build_object(
+  'item_key', k_omit, 'to_status', 'open', 'person_review', 'null'::jsonb, 'reason', 'clear again')), 'luna-ledger:v1');
+ PERFORM pg_temp.pr_assert(res -> 'transitions_refused' -> 0 ->> 'code' = 'no_change'
+  AND coalesce((res ->> 'transitions_accepted')::int, 0) = 0,
+  'clearing a review that is already null is no change: ' || res::text);
+ SELECT * INTO it FROM public.context_ledger_items i WHERE i.generation_id = gen AND i.item_key = k_omit;
+ PERFORM pg_temp.pr_assert(it.status = 'open' AND it.person_review IS NULL
+  AND (SELECT count(*) FROM public.context_ledger_transitions t WHERE t.item_id = it.id) = n_tr,
+  'a null clear of an already-null review writes no transition');
+
+ -- a stored object with a field the normaliser does not keep is refused by the column check
+ BEGIN
+  UPDATE public.context_ledger_items SET person_review = jsonb_build_object(
+   'sentence', 'The notes say the width was confirmed.', 'source_line_id', NULL,
+   'reason', 'claimed_closed_unverified', 'raised_at', '2026-10-10T01:00:00Z', 'note', 'extra')
+   WHERE generation_id = gen AND item_key = k_omit;
+  PERFORM pg_temp.pr_assert(false, 'an extra review key was stored');
+ EXCEPTION WHEN check_violation THEN
+  NULL;
+ END;
+
  -- same status, a structured object: sentence, source line and raised_at are kept
  res := public.context_ledger_write(run, tok, gen, '[]', jsonb_build_array(jsonb_build_object(
   'item_key', k_omit, 'to_status', 'open', 'reason', 'object review',
@@ -272,8 +299,8 @@ BEGIN
   AND (SELECT count(*) FROM public.context_ledger_transitions t WHERE t.item_id = it.id) = n_tr,
   'a refused review leaves the locked item as it was');
 
- -- the assembler: an open request we owe, with no review, stays a ledger request; one that carries
- -- a review is source person_review, rule claimed_closed_unverified. Both stay our move.
+ -- the assembler: an open request we owe, with no review, stays a ledger request and leads; one
+ -- that carries a review is source person_review, rule claimed_closed_unverified, and does not lead.
  plain := jsonb_build_object('item_key', 'request:gate:plain', 'item_type', 'request', 'status', 'open',
   'from_role', 'customer', 'to_role', 'us', 'what', 'The customer asked us to confirm the gate width.',
   'blocks', 'none', 'needs_reply', true, 'closes_on', 'reply', 'written_by', 'model:luna-ledger:v1', 'cites_ok', true,
@@ -296,9 +323,105 @@ BEGIN
   'an open request with no review still counts: ' || note::text);
  note := (SELECT x FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'request:gate:reviewed');
  PERFORM pg_temp.pr_assert(note ->> 'source' = 'person_review' AND note ->> 'rule' = 'claimed_closed_unverified'
-  AND note ->> 'owner' = 'us' AND note ->> 'counterparty' = 'customer',
-  'a request that carries a review is a person review and still ours to the customer: ' || note::text);
+  AND note ->> 'owner' = 'us' AND note ->> 'counterparty' = 'customer' AND note ->> 'status' = 'open'
+  AND (note ->> 'rank')::int > (SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'request:gate:plain'),
+  'a request that carries a review is a person review and does not lead the unreviewed ask: ' || note::text);
+ PERFORM pg_temp.pr_assert(asm -> 'now' ->> 'whose_move' = 'us'
+  AND asm #>> '{now,next,what}' = 'The customer asked us to confirm the gate width.'
+  AND position('we owe:' IN asm #>> '{now,line}') > 0
+  AND position('gate colour' IN coalesce(asm #>> '{now,next,what}', '')) = 0,
+  'the unreviewed ask is still ours to the customer: ' || (asm -> 'now')::text);
 END $c$;
+
+-- Wait score. A reviewed attachment does not hide a genuine money loop, and a reviewed unattached
+-- invoice does not lead a newer unreviewed request. Item status on the fixture is left open.
+DO $wait$
+DECLARE
+ job jsonb := '{"id":"8f000000-0000-4000-8000-0000000000a1","job_number":"SWF-980101","status":"complete","type":"fencing","created_at":"2026-09-01T00:00:00Z"}';
+ facts jsonb := '{"status_completed_at":"2026-10-01T01:00:00Z"}';
+ review jsonb := '{"sentence":"The notes say this was already done.","source_line_id":"line-9","reason":"claimed_closed_unverified","raised_at":"2026-10-12T01:00:00Z"}';
+ r8 jsonb := jsonb_build_object('rule', 'R8_not_yet_invoiced', 'loop_key', 'R8:final', 'shown_as', 'loop',
+  'owner', 'us', 'counterparty', 'customer', 'what', 'Invoice the finished fence.',
+  'opened_at', '2026-10-02T01:00:00Z', 'amount', 1500, 'about_key', 'invoice:final',
+  'source_table', 'jobs', 'source_id', '8f000000-0000-4000-8000-0000000000a1');
+ cite jsonb := jsonb_build_array(jsonb_build_object('table', 'business_events', 'id', '8fb00000-0000-4000-8000-000000000001',
+  'excerpt', 'please invoice', 'customer', true, 'at', '2026-10-02T02:00:00Z'));
+ ask jsonb := jsonb_build_object('item_key', 'request:r8', 'item_type', 'request', 'status', 'open',
+  'from_role', 'customer', 'to_role', 'us', 'what', 'Please invoice the finished fence now.',
+  'about_key', 'invoice:final', 'blocks', 'none', 'needs_reply', true, 'closes_on', 'reply',
+  'written_by', 'model:luna-ledger:v1', 'cites_ok', true, 'opened_at', '2026-10-02T02:00:00Z', 'opened_by', cite);
+ other jsonb := jsonb_build_object('item_key', 'request:r8b', 'item_type', 'request', 'status', 'open',
+  'from_role', 'customer', 'to_role', 'us', 'what', 'Please send the invoice copy as well.',
+  'about_key', 'invoice:final', 'blocks', 'none', 'needs_reply', true, 'closes_on', 'reply',
+  'written_by', 'model:luna-ledger:v1', 'cites_ok', true, 'opened_at', '2026-10-03T02:00:00Z', 'opened_by', cite);
+ owe jsonb := jsonb_build_object('item_key', 'commitment:older', 'item_type', 'commitment', 'status', 'open',
+  'from_role', 'us', 'to_role', 'customer', 'what', 'We owe the customer the colour chart.',
+  'about_key', 'info:colours', 'blocks', 'none', 'needs_reply', false, 'closes_on', 'reply',
+  'written_by', 'model:luna-ledger:v1', 'cites_ok', true, 'opened_at', '2026-09-20T01:00:00Z',
+  'opened_by', jsonb_build_array(jsonb_build_object('table', 'business_events', 'id', '8fb00000-0000-4000-8000-000000000001',
+   'excerpt', 'colour chart', 'at', '2026-09-20T01:00:00Z')));
+ led jsonb; asm jsonb; note jsonb; plain jsonb;
+BEGIN
+ -- every attached open item reviewed: the older commitment leads, the R8 does not, the request is not its own loop
+ led := jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+  'unread_rows', 0, 'items', jsonb_build_array(ask || jsonb_build_object('person_review', review), owe), 'transitions', '[]'::jsonb);
+ asm := public.context_job_story_assemble(job, jsonb_build_object('facts', facts, 'loops', jsonb_build_array(r8)), led, '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ note := (SELECT x FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'rule' = 'R8_not_yet_invoiced');
+ PERFORM pg_temp.pr_assert(note ->> 'source' = 'record' AND note ->> 'rule' = 'R8_not_yet_invoiced' AND note ->> 'status' = 'open'
+  AND (note ->> 'rank')::int > 1
+  AND (SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'commitment:older') = 1
+  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'request:r8')
+  AND asm -> 'now' ->> 'whose_move' = 'us'
+  AND asm #>> '{now,next,what}' = 'We owe the customer the colour chart.'
+  AND asm #>> '{now,next,what}' IS DISTINCT FROM 'Invoice the finished fence.',
+  'a reviewed R8 attachment yields the lead to the older commitment: ' || (asm -> 'now')::text || ' / ' || (asm -> 'loops')::text);
+
+ -- no ledger item on the R8: it still ranks first
+ led := jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+  'unread_rows', 0, 'items', jsonb_build_array(owe), 'transitions', '[]'::jsonb);
+ asm := public.context_job_story_assemble(job, jsonb_build_object('facts', facts, 'loops', jsonb_build_array(r8)), led, '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ PERFORM pg_temp.pr_assert((SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'rule' = 'R8_not_yet_invoiced') = 1
+  AND asm #>> '{now,next,what}' = 'Invoice the finished fence.',
+  'a genuine R8 with no attachment still ranks first: ' || (asm -> 'now')::text);
+
+ -- an attached item with no review: the R8 still ranks first
+ led := jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+  'unread_rows', 0, 'items', jsonb_build_array(ask, owe), 'transitions', '[]'::jsonb);
+ asm := public.context_job_story_assemble(job, jsonb_build_object('facts', facts, 'loops', jsonb_build_array(r8)), led, '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ PERFORM pg_temp.pr_assert((SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'rule' = 'R8_not_yet_invoiced') = 1
+  AND asm #>> '{now,next,what}' = 'Invoice the finished fence.',
+  'an unreviewed R8 attachment still ranks first: ' || (asm -> 'loops')::text);
+
+ -- one reviewed and one not: still a leading money loop
+ led := jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+  'unread_rows', 0, 'items', jsonb_build_array(ask || jsonb_build_object('person_review', review), other, owe), 'transitions', '[]'::jsonb);
+ asm := public.context_job_story_assemble(job, jsonb_build_object('facts', facts, 'loops', jsonb_build_array(r8)), led, '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ PERFORM pg_temp.pr_assert((SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'rule' = 'R8_not_yet_invoiced') = 1
+  AND asm #>> '{now,next,what}' = 'Invoice the finished fence.',
+  'a mixed R8 attachment still ranks first: ' || (asm -> 'loops')::text);
+
+ -- unattached reviewed invoice:INV-9 does not lead a newer unreviewed request
+ plain := jsonb_build_object('item_key', 'request:newer', 'item_type', 'request', 'status', 'open',
+  'from_role', 'customer', 'to_role', 'us', 'what', 'The customer asked us to confirm the gate width.',
+  'about_key', 'info:width', 'blocks', 'none', 'needs_reply', true, 'closes_on', 'reply',
+  'written_by', 'model:luna-ledger:v1', 'cites_ok', true, 'opened_at', '2026-10-08T01:00:00Z', 'opened_by', cite);
+ note := jsonb_build_object('item_key', 'invoice:INV-9', 'item_type', 'request', 'status', 'open',
+  'from_role', 'customer', 'to_role', 'us', 'what', 'The customer asked about invoice INV-9.',
+  'about_key', 'invoice:INV-9', 'blocks', 'none', 'needs_reply', true, 'closes_on', 'reply',
+  'written_by', 'model:luna-ledger:v1', 'cites_ok', true, 'opened_at', '2026-10-01T01:00:00Z',
+  'opened_by', cite, 'person_review', review);
+ led := jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'status', 'live'),
+  'unread_rows', 0, 'items', jsonb_build_array(note, plain), 'transitions', '[]'::jsonb);
+ asm := public.context_job_story_assemble(job, jsonb_build_object('facts', facts), led, '{}'::jsonb, '2026-10-18T04:00:00Z', NULL);
+ PERFORM pg_temp.pr_assert((SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'request:newer') = 1
+  AND (SELECT (x ->> 'rank')::int FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'invoice:INV-9') = 2
+  AND (SELECT x ->> 'source' FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'invoice:INV-9') = 'person_review'
+  AND (SELECT x ->> 'rule' FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'invoice:INV-9') = 'claimed_closed_unverified'
+  AND (SELECT x ->> 'status' FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'invoice:INV-9') = 'open'
+  AND (SELECT x ->> 'status' FROM jsonb_array_elements(asm -> 'loops') x WHERE x ->> 'key' = 'request:newer') = 'open'
+  AND asm #>> '{now,next,what}' = 'The customer asked us to confirm the gate width.',
+  'a reviewed invoice:INV-9 does not lead a newer unreviewed request: ' || (asm -> 'now')::text || ' / ' || (asm -> 'loops')::text);
+END $wait$;
 ROLLBACK;
 
 -- 4. Re-applying the migration changes nothing (its guard accepts its own bodies).
@@ -312,7 +435,7 @@ CREATE TEMP TABLE pr_md5 AS
   'public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'::regprocedure,
   'public.context_job_story_ledger(uuid,uuid,timestamptz)'::regprocedure,
   'public.context_ledger_person_review(jsonb,timestamptz)'::regprocedure);
-\ir ../../../migrations/20261018120000_context_ledger_person_review.sql
+\ir ../../../migrations/20261019120000_context_ledger_person_review.sql
 DO $c$
 BEGIN
  PERFORM pg_temp.pr_assert((SELECT count(*) FROM pr_md5) = 5, 'five functions before the re-apply');
