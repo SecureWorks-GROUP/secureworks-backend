@@ -1012,6 +1012,7 @@ async function readFrozenFenceOffer(
 async function readFrozenPatioOffer(
   client: any,
   jobId: string,
+  orgId: string,
   ctx: DispatchMaterialsContext,
 ): Promise<ScopeOffer> {
   const { scope, revision } = await readFrozenScope(client, jobId);
@@ -1033,12 +1034,57 @@ async function readFrozenPatioOffer(
       "The job's frozen scope could not be read",
     );
   }
+  const lines = dispatchSuggestedLines(items);
   return {
-    lines: dispatchSuggestedLines(items),
-    held: null,
+    lines,
+    held: await patioScopeChangeHeld(client, jobId, orgId, lines, ctx),
     scope_supplier: null,
     revision,
   };
+}
+
+// The patio twin of the fence warning: the live working copy can be edited
+// after the last freeze (a patio was re-frozen days later on 19 Oct 2026). The
+// lines still come from the frozen revision. One single-job read of the live
+// scope, run through the same extractor with null pricing, and compared as
+// lines: a changed photo or note is not a changed order. A failed read, no
+// live scope, or a live scope the extractor cannot read says it could not be
+// checked, never that nothing changed.
+async function patioScopeChangeHeld(
+  client: any,
+  jobId: string,
+  orgId: string,
+  frozenLines: DispatchSuggestedLine[],
+  ctx: DispatchMaterialsContext,
+): Promise<string[]> {
+  const { data: live, error } = await client.from("jobs")
+    .select("id, scope_json")
+    .eq("id", jobId)
+    .eq("org_id", orgId)
+    .maybeSingle();
+  if (error) {
+    console.error("[dispatch_materials] live scope read failed:", error);
+    return [FENCE_SCOPE_CHANGE_UNCHECKED];
+  }
+  const liveScope = live?.scope_json;
+  if (!liveScope || typeof liveScope !== "object") {
+    return [FENCE_SCOPE_CHANGE_UNCHECKED];
+  }
+  let liveLines: DispatchSuggestedLine[];
+  try {
+    liveLines = dispatchSuggestedLines(
+      ctx.extractMaterialsFromScope(liveScope, null),
+    );
+  } catch {
+    return [FENCE_SCOPE_CHANGE_UNCHECKED];
+  }
+  const asText = (lines: DispatchSuggestedLine[]) =>
+    JSON.stringify(
+      lines.map((line) => [line.description, line.quantity, line.unit]),
+    );
+  return asText(liveLines) === asText(frozenLines)
+    ? []
+    : [FENCE_SCOPE_CHANGED_SINCE_FROZEN];
 }
 
 function offerFields(offer: ScopeOffer) {
@@ -1077,7 +1123,7 @@ export async function suggestDispatchMaterialLines(
 
   const offer = job.work_type === "fencing"
     ? await readFrozenFenceOffer(client, job.id, job.org_id)
-    : await readFrozenPatioOffer(client, job.id, ctx);
+    : await readFrozenPatioOffer(client, job.id, job.org_id, ctx);
   const suggested = offer.lines;
   if (suggested.length === 0) {
     return {

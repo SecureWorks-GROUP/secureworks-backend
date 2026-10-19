@@ -1573,12 +1573,17 @@ Deno.test("suggest: a patio scope shaped like SWP-26701 adds the four lines, cle
     assert(!("unit_price" in stored) && !("notes" in stored));
     assert(!/[—×]/.test(stored.description));
   }
-  // The frozen revision is read once; the live scope and the pricing never.
+  // The frozen revision is read once and gives the lines. The live scope is
+  // read once, for this one job, only to warn on a post-freeze edit (here it
+  // matches, so no warning); the pricing never.
   assertEquals(answer.scope_revision_number, 1);
-  assert(!("held" in answer) && !("scope_supplier" in answer));
+  assertEquals(answer.held, []);
+  assertEquals(answer.scope_supplier, null);
   const jobReads = db.requests.filter((r) => r.table === "jobs");
-  assert(
-    jobReads.every((r) => !/scope_json|pricing_json/.test(r.select)),
+  assert(jobReads.every((r) => !/pricing_json/.test(r.select)));
+  assertEquals(
+    jobReads.filter((r) => /scope_json/.test(r.select)).map((r) => r.select),
+    ["id, scope_json"],
   );
   assertEquals(
     db.requests.filter((r) => r.table === "scope_revisions").length,
@@ -1767,7 +1772,62 @@ Deno.test("suggest patio: the latest frozen revision is read; a newer draft and 
   });
   assertEquals(answer.scope_revision_number, 2);
   assertEquals(answer.added, 4);
+  // The live scope's lines differ from the frozen revision's: warned, and the
+  // lines still come from the frozen revision.
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
   assertOnlyOwnWrites(db);
+});
+
+Deno.test("suggest patio: no live scope, or a failed live read, says the change could not be checked", async () => {
+  for (const mode of ["no_live_scope", "read_fails"] as const) {
+    const initial = seed();
+    initial.jobs = initial.jobs.map((row) =>
+      row.id === JOB.patio
+        ? {
+          ...row,
+          // A live scope equal to the frozen one: only the failed read can
+          // make this "could not be checked".
+          scope_json: mode === "read_fails" ? PATIO_SCOPE : null,
+        }
+        : row
+    );
+    initial.scope_revisions = [
+      patioRevision(JOB.patio, 1, "frozen", PATIO_SCOPE),
+    ];
+    const db = makeDb(initial);
+    await call(db, "dispatch_materials_add_supplier", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    if (mode === "read_fails") {
+      const real = db.client.from;
+      db.client.from = (table: string) => {
+        const builder = real(table);
+        if (table !== "jobs") return builder;
+        const select = builder.select;
+        builder.select = (columns: string, ...rest: any[]) =>
+          columns === "id, scope_json"
+            ? {
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: null,
+                    error: { code: "XX000", message: "forced" },
+                  }),
+                }),
+              }),
+            }
+            : select.call(builder, columns, ...rest);
+        return builder;
+      };
+    }
+    const answer = await call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    assertEquals(answer.added, 4, mode);
+    assertEquals(answer.held, [FENCE_SCOPE_CHANGE_UNCHECKED], mode);
+  }
 });
 
 Deno.test("suggest patio: no frozen revision is 409 no_frozen_scope, even with a live scope; nothing written", async () => {
