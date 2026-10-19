@@ -651,6 +651,14 @@ when it had been counted.
 
 ## 6. Draft work order and purchase orders, built and switched off
 
+**Two switches (19 Oct 2026).** `quote_builder_make_purchase_orders` also needs
+its own switch, `quote_builder_purchase_orders_v1` (seeded off, migration
+`20261019183000`). Off, missing or unreadable, it returns
+`409 quote_builder_purchase_orders_off` whatever `quote_builder_orders_v1`
+says. Supplier orders for repair and private jobs go through Dispatch, so
+turning on the crew work order never turns supplier ordering from a quote
+back on.
+
 The owner asked for the quote to carry "information that we can use ... so we
 can create the work order from that". That is built. It stays off until the
 owner turns the switch on.

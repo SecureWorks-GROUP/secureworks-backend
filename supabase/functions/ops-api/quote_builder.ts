@@ -42,6 +42,11 @@ import { fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
 export const QUOTE_BUILDER_ORG_ID = "00000000-0000-0000-0000-000000000001";
 /** Seeded off in 20261014140000. Missing or unreadable reads as off. */
 export const QUOTE_BUILDER_ORDERS_FLAG = "quote_builder_orders_v1";
+// The purchase order press has its own switch, on top of the orders switch:
+// supplier orders for repair and private jobs go through Dispatch (Sales
+// answer, 19 Oct 2026), so turning the crew work order on never turns
+// supplier ordering from a quote back on.
+export const QUOTE_BUILDER_PURCHASE_ORDERS_FLAG = "quote_builder_purchase_orders_v1";
 /** Placeholder on a material group whose supplier was left blank. */
 export const QUOTE_BUILDER_UNNAMED_SUPPLIER = "Supplier to be named";
 export const QUOTE_BUILDER_PHOTO_BUCKET = "job-photos";
@@ -2013,10 +2018,19 @@ export function purchaseOrderSupplierIsUnusable(name: unknown): boolean {
 
 /** True only when quote_builder_orders_v1 is exactly enabled. Missing or unreadable is off. */
 export async function quoteBuilderOrdersEnabled(client: any): Promise<boolean> {
+  return await flagExactlyOn(client, QUOTE_BUILDER_ORDERS_FLAG);
+}
+
+/** The PO press's own switch. Missing or unreadable is off. */
+export async function quoteBuilderPurchaseOrdersEnabled(client: any): Promise<boolean> {
+  return await flagExactlyOn(client, QUOTE_BUILDER_PURCHASE_ORDERS_FLAG);
+}
+
+async function flagExactlyOn(client: any, flagName: string): Promise<boolean> {
   try {
     const { data, error } = await client.from("feature_flags")
       .select("enabled")
-      .eq("flag_name", QUOTE_BUILDER_ORDERS_FLAG)
+      .eq("flag_name", flagName)
       .maybeSingle();
     if (error || !data) return false;
     return data.enabled === true;
@@ -2317,6 +2331,14 @@ export async function makeQuoteBuilderPurchaseOrders(
   body: any,
   actor: QuoteBuilderActor,
 ) {
+  // Refused on its own switch first, whatever the orders switch says.
+  if (!(await quoteBuilderPurchaseOrdersEnabled(client))) {
+    fail(
+      "quote_builder_purchase_orders_off",
+      "Supplier orders are made in Dispatch, not from a quote.",
+      409,
+    );
+  }
   const { version } = await loadIssuedQuoteVersion(client, body, actor);
   const groups = materialGroups(version);
   const existing = await ordersForVersion(client, version.id);

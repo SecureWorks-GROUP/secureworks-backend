@@ -105,3 +105,15 @@ UNION
 SELECT DISTINCT quote_builder_version_id, 'work_order' FROM public.work_orders
  WHERE quote_builder_version_id IS NOT NULL
 ON CONFLICT DO NOTHING;
+
+-- The purchase order press's own switch, off. Supplier orders for repair and
+-- private jobs go through Dispatch (Sales answer to the repair and misc pack
+-- intake, 19 Oct 2026), so quote_builder_make_purchase_orders refuses unless
+-- this AND quote_builder_orders_v1 are on. Turning on the crew work order
+-- never turns supplier ordering from a quote back on. Owner's word only.
+INSERT INTO public.feature_flags (flag_name, enabled, description)
+SELECT 'quote_builder_purchase_orders_v1', false,
+  'Quote builder purchase order press, on top of quote_builder_orders_v1. Off: quote_builder_make_purchase_orders returns 409 quote_builder_purchase_orders_off whatever the orders switch says; supplier orders go through Dispatch. Turn on only on the owner''s word.'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.feature_flags WHERE flag_name = 'quote_builder_purchase_orders_v1'
+);

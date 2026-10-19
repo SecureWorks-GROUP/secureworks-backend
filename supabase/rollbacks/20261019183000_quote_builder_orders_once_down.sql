@@ -2,6 +2,7 @@
 -- Roll ops-api back first: the make action writes quote_builder_po_seq and
 -- fails against a table without it. With the older ops-api the double-press
 -- race of SQ-14 point 27 returns.
+DELETE FROM public.feature_flags WHERE flag_name = 'quote_builder_purchase_orders_v1';
 DROP TABLE IF EXISTS public.quote_builder_order_marks;
 DROP INDEX IF EXISTS public.uq_purchase_orders_quote_builder_version_seq;
 ALTER TABLE public.purchase_orders

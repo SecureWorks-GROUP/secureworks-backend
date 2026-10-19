@@ -2713,7 +2713,10 @@ const ORDER_COST = [
 
 async function issuedForOrders() {
   const store = seed();
-  store.feature_flags = [{ flag_name: "quote_builder_orders_v1", enabled: true }];
+  store.feature_flags = [
+    { flag_name: "quote_builder_orders_v1", enabled: true },
+    { flag_name: "quote_builder_purchase_orders_v1", enabled: true },
+  ];
   store.work_orders = [];
   store.purchase_orders = [];
   store.quote_builder_order_marks = [];
@@ -2880,4 +2883,28 @@ Deno.test("quote builder: the database refuses a version-linked purchase order w
     quote_builder_version_id: issued.id,
   });
   assertEquals(error?.code, "23514");
+});
+
+Deno.test("quote builder: the purchase order press has its own switch; the crew work order switch never turns it on", async () => {
+  const { store, client, issued } = await issuedForOrders();
+  const flag = (name: string) => store.feature_flags.find((f) => f.flag_name === name)!;
+  const poCode = () =>
+    makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR)
+      .then(() => "made", (e) => e.code);
+  // Orders on (crew work order works), PO switch off: the PO press refuses.
+  flag("quote_builder_purchase_orders_v1").enabled = false;
+  assertEquals(await poCode(), "quote_builder_purchase_orders_off");
+  const wo: any = await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
+  assert(wo.work_order);
+  // PO switch missing entirely: still off.
+  store.feature_flags = store.feature_flags.filter((f) => f.flag_name !== "quote_builder_purchase_orders_v1");
+  assertEquals(await poCode(), "quote_builder_purchase_orders_off");
+  // PO switch on but the orders switch off: refused by the orders switch.
+  store.feature_flags = [
+    { flag_name: "quote_builder_orders_v1", enabled: false },
+    { flag_name: "quote_builder_purchase_orders_v1", enabled: true },
+  ];
+  assertEquals(await poCode(), "quote_builder_orders_off");
+  assertEquals(store.purchase_orders.length, 0);
+  assertEquals(store.quote_builder_order_marks.filter((m) => m.kind === "purchase_orders").length, 0);
 });
