@@ -1545,6 +1545,9 @@ async function ingestMaterialsActuals(
       // An existing fact: this path never moves it to another job. It keeps its
       // own fact unless the bill now contradicts it, and then removes it (only
       // that fact, by source) so a person decides on the queue row below.
+      // The job of every PO the bill names (null for a PO with no job).
+      const billText = `${bill.reference || ''} \n ${(Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n ')}`
+      const namedPoJobs = namedPoPool.filter((p) => poNamedIn(p, billText)).map((p) => p.job_id ?? null)
       const existingSource = factSourceById.get(bill.xero_invoice_id)
       const factJobId = factJobById.get(bill.xero_invoice_id)
       const verdict = existingFactVerdict({
@@ -1556,6 +1559,7 @@ async function ingestMaterialsActuals(
         lineTokens,
         jobFromRefId: jobFromRef?.id ?? null,
         xeroJobId: b.job_id ?? null,
+        namedPoJobIds: namedPoJobs,
       })
       if (verdict === 'not_ours' || verdict === 'keep') continue
       // verdict 'remove': the fact is deleted only after the hold below is saved,
@@ -1568,9 +1572,6 @@ async function ingestMaterialsActuals(
       // stays held until a person resolves its queue row.
       const heldReason = existingQueueStatus === 'open' ? queueReasonById.get(bill.xero_invoice_id) : undefined
       const held = !!heldReason && HELD_QUEUE_REASONS.has(heldReason)
-      // The job of every PO the bill names (null for a PO with no job).
-      const billText = `${bill.reference || ''} \n ${(Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n ')}`
-      const namedPoJobs = namedPoPool.filter((p) => poNamedIn(p, billText)).map((p) => p.job_id ?? null)
       // Xero links the bill to a job, and the bill names job numbers, none of
       // them that job: a contradiction for a person, not for any automatic path.
       const xeroJobNumber = b.job_id ? jobNumberById.get(b.job_id) ?? null : null

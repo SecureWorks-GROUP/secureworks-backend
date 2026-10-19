@@ -586,3 +586,15 @@ Deno.test("a bill naming a PO on another job is never placed by its reference", 
     { reference: false, poFallback: false },
   );
 });
+
+Deno.test("an existing sync fact is removed for staff when the bill names a PO on another job", () => {
+  const base = {
+    source: "xero_ref_link", factJobId: "a", factJobNumber: "SWF-26535", factJobBlocked: false,
+    refTokens: jobNumbersInText("SWF-26535"), lineTokens: new Set<string>(), jobFromRefId: "a",
+  };
+  assertEquals(existingFactVerdict({ ...base, namedPoJobIds: ["b"] }), "remove");
+  assertEquals(existingFactVerdict({ ...base, namedPoJobIds: [null] }), "remove");
+  assertEquals(existingFactVerdict({ ...base, namedPoJobIds: ["a"] }), "keep");
+  // Staff and agent facts are never touched by this path.
+  assertEquals(existingFactVerdict({ ...base, source: "agent_prematch", namedPoJobIds: ["b"] }), "not_ours");
+});
