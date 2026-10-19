@@ -146,6 +146,27 @@ Deno.test('Codex2: two approvals of the same content pressed together send once'
   assertEquals(g.sends.length, 1)
 })
 
+Deno.test('Codex2: an approval pressed after another approval of the same content has sent is refused as overtaken and never sends', async () => {
+  const g = graphFake(() => 'ok')
+  const d = deps(g.graph)
+  const a = await record(d)
+  const b = await record(d)
+  assertEquals((await sendApprovedEmail(d, a, CALLER)).body.state, 'sent')
+
+  const overtaken = await assertRejects(() => sendApprovedEmail(d, b, CALLER), ApprovedSendRefusal)
+  assertEquals((overtaken as ApprovedSendRefusal).code, 'approval_overtaken')
+  assertEquals(d.store.rows.get(b)!.status, 'approved')
+  // Pressed again before it expires: its refused attempt is on the audit, so it
+  // is spent, never sent.
+  const again = await assertRejects(() => sendApprovedEmail(d, b, CALLER), ApprovedSendRefusal)
+  assertEquals((again as ApprovedSendRefusal).code, 'approval_already_used')
+  // A day later the approval has expired; it still never sends.
+  d.clock.advanceMinutes(60 * 24)
+  const later = await assertRejects(() => sendApprovedEmail(d, b, CALLER), ApprovedSendRefusal)
+  assertEquals((later as ApprovedSendRefusal).code, 'approval_expired')
+  assertEquals(g.sends.length, 1)
+})
+
 Deno.test('AS4: an outcome write that is lost still holds the content', async () => {
   const g = graphFake(() => 'timeout')
   const d = deps(g.graph)
