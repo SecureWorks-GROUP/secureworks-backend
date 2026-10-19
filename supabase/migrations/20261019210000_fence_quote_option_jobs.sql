@@ -347,13 +347,16 @@ DECLARE
   v_flag_on boolean;
   v_run bigint;
 BEGIN
-  -- The switch. An unreadable switch is treated as on, so the failure is
-  -- recorded below rather than skipped.
+  -- The switch fails closed: off, missing or unreadable (a cancel, a
+  -- timeout, a permission error, anything) means the trigger writes
+  -- nothing at all, not even its run record. Only a readable true turns it
+  -- on. (Ops V check of reader PR 1091, 19 Oct 2026.)
   BEGIN
     v_flag_on := coalesce((SELECT enabled FROM public.feature_flags
-                            WHERE flag_name = 'quote_option_supersede_v1'), false);
+                            WHERE flag_name = 'quote_option_supersede_v1'), false) IS TRUE;
   EXCEPTION WHEN query_canceled OR OTHERS THEN
-    v_flag_on := true;
+    v_flag_on := false;
+    RAISE WARNING 'jobs_quote_option_supersede: switch unreadable (%), treated as off', SQLSTATE;
   END;
   IF NOT v_flag_on THEN
     RETURN NULL;
