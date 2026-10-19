@@ -320,7 +320,8 @@ BEGIN
  END LOOP;
 END $c$;
 
--- 3 to 5. The 38 fixtures, four review r2 traps (39 to 42) and seven review r3 traps (43 to 49).
+-- 3 to 5. The 38 fixtures, four review r2 traps (39 to 42), seven review r3 traps (43 to 49) and five
+-- review r4 traps (50 to 54).
 BEGIN;
 DO $c$
 DECLARE j uuid; j2 uuid; j3 uuid; own uuid; nb uuid; nb2 uuid; e1 uuid; e2 uuid; e3 uuid; x1 uuid; x2 uuid; x3 uuid; t1 timestamptz := '2026-09-01 02:00Z';
@@ -687,7 +688,52 @@ BEGIN
  PERFORM pg_temp.sp_fx_add(49, j, 'commitment', 'person', NULL, 'us', 'Bring a spare gate latch over on Monday.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'We can bring a spare gate latch over on Monday.')),
   jsonb_build_array(pg_temp.sp_cb(e2, 'No need, we fixed the latch ourselves, thanks.')), 'O?', 'released_by_obligee');
- PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 49, 'the 49 fixtures');
+ -- Review r4 traps (M8): a closing citation never stands in for the payer.
+ -- 50. Fixture 3 with about key payment:deposit: the neighbour's paid deposit never closes the owner's deposit item.
+ j := pg_temp.sp_job(50, 1, 'SWF-90053');
+ own := pg_temp.sp_party(50, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(50, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(50, 1, j, 'I will pay my deposit on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(50, 1, j, 'ACCREC', 'PAID', 'SWF-90053-B-DEP', 'Deposit 30%', 900, 0, 900, paid, nb, 'XC-NB1');
+ x2 := pg_temp.sp_inv(50, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90053-DEP', 'Deposit 30%', 900, 900, 0, NULL, own, 'XC-OWN');
+ PERFORM pg_temp.sp_fx_add(50, j, 'commitment', 'payment', 'deposit', 'customer', 'The owner will pay their deposit on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my deposit on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O', 'invoice_unpaid',
+  'payment:deposit');
+ -- 51. Fixture 26 with about key invoice:<the neighbour's invoice number>: still the owner's own invoice decides.
+ j := pg_temp.sp_job(51, 1, 'SWF-90054');
+ own := pg_temp.sp_party(51, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(51, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(51, 1, j, 'I will pay my half of the fence on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(51, 1, j, 'ACCREC', 'PAID', 'SWF-90054-B-FIN', 'Balance of the fence', 2400, 0, 2400, paid, nb, 'XC-NB1');
+ x2 := pg_temp.sp_inv(51, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90054-FIN', 'Balance of the fence', 2400, 2400, 0, NULL, own, 'XC-OWN');
+ PERFORM pg_temp.sp_fx_add(51, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay their half of the fence on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my half of the fence on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O', 'invoice_unpaid',
+  'invoice:inv-90511');
+ -- 52. The owner's opening request names their own invoice, paid and cited (the item's words do not): closes,
+ -- whatever their variation invoice owes.
+ j := pg_temp.sp_job(52, 1, 'SWF-90055');
+ own := pg_temp.sp_party(52, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(52, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(52, 1, j, 'I will pay SWF-90055-FIN on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(52, 1, j, 'ACCREC', 'PAID', 'SWF-90055-FIN', 'Balance of the fence', 2400, 0, 2400, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(52, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90055-VAR', 'Extra labour', 300, 300, 0, NULL, own, 'XC-OWN');
+ x3 := pg_temp.sp_inv(52, 3, j, 'ACCREC', 'AUTHORISED', 'SWF-90055-B-FIN', 'Balance of the fence', 2400, 2400, 0, NULL, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(52, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay the fence balance on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay SWF-90055-FIN on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'C', 'closes');
+ -- 53. Only the item's own words name the neighbour's invoice: no binding, no payer bypass.
+ j := pg_temp.sp_job(53, 1, 'SWF-90056');
+ own := pg_temp.sp_party(53, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(53, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(53, 1, j, 'I will pay my half of the fence on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(53, 1, j, 'ACCREC', 'PAID', 'SWF-90056-B-FIN', 'Balance of the fence', 2400, 0, 2400, paid, nb, 'XC-NB1');
+ x2 := pg_temp.sp_inv(53, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90056-FIN', 'Balance of the fence', 2400, 2400, 0, NULL, own, 'XC-OWN');
+ PERFORM pg_temp.sp_fx_add(53, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay invoice SWF-90056-B-FIN on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my half of the fence on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O', 'invoice_unpaid');
+ -- 54. About a deposit, citing a paid deposit whose payer is unknown: payer not certain, never closed.
+ j := pg_temp.sp_job(54, 1, 'SWF-90057');
+ own := pg_temp.sp_party(54, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_text(54, 1, j, 'I will pay the deposit on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(54, 1, j, 'ACCREC', 'PAID', 'SWF-90057-DEP', 'Deposit 30%', 900, 0, 900, paid, NULL, 'XC-ELSE');
+ PERFORM pg_temp.sp_fx_add(54, j, 'commitment', 'payment', 'deposit', 'customer', 'The owner will pay the deposit on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the deposit on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'payer_contact_not_on_job',
+  'payment:deposit');
+ PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 54, 'the 54 fixtures');
 END $c$;
 
 -- 3. Today's answers: the bodies before this migration (its down, undone at the savepoint).

@@ -54,12 +54,16 @@
 --     later row of ours by its stamp, never on a customer's.
 --     Review r3: a payment item naming one of the job's invoices (its number or Xero reference as
 --     an exact token, never a substring) is bound to it and closes on that invoice being PAID,
---     whatever the payer's other invoices owe; so is an item about an invoice citing exactly one.
---     An unbound item failing only on an invoice it never cited stays open, payer not certain
+--     whatever the payer's other invoices owe. An unbound item failing only on an invoice it never
+--     cited, while a cited invoice of the payer's closes it, stays open, payer not certain
 --     (other_invoice_owed). An invoice cited on a reply, work or other item is evidence only, never
 --     certain. A closing citation that does not close and is not certain evidence against no longer
---     vetoes one that closes. The customer an item is owed to answering it (released_by_obligee,
---     obligee_replied) is never a close and never certain.
+--     vetoes one that closes. The customer an item is owed to releasing or declining it in words
+--     (released_by_obligee) is never a close and never certain.
+--     Review r4: only the opening request's own words (an opening citation's excerpt) bind an item
+--     to an invoice and stand in for the payer check; never the item's own words or about key. An
+--     item about one invoice that cites exactly one is held to that invoice's kind only, and the
+--     payer must still match (an unknown payer stays payer not certain).
 --  5. A close the verdict refuses stays open. check_item turns a closed item into an open one
 --     (obligation_ref.held_open, the refused closing citations as closing_evidence); a write's
 --     closing transition is refused obligation_not_closed and the item's certainty is recorded.
@@ -211,7 +215,7 @@ END $chk$;
 COMMENT ON COLUMN public.context_ledger_items.obligated_party IS
  'Same payer close (20261019130000): who owes the item, stored at open while context_ledger_same_payer_close_v1 is on: {kind builder_job|party|job_client|all_payers|person|us, key, job_contact_id?, active?, builder?, basis}; null is unknown (the basis is obligation_ref.party_basis) or, with obligation_ref null too, never computed (written while the switch was off).';
 COMMENT ON COLUMN public.context_ledger_items.obligation_ref IS
- 'Same payer close (20261019130000): the item''s obligation: {class payment|invoice|person|reply|work|other, invoice_id?, invoice_kind?, bound_by? (named: the invoice its words name; opening_invoice: its opening invoice citation, with invoice_kind), named_invoices? (two or more named: unbound), party_basis, reason, held_open?, closing_evidence? (the closing citations a close was refused on)}.';
+ 'Same payer close (20261019130000): the item''s obligation: {class payment|invoice|person|reply|work|other, invoice_id?, invoice_kind?, bound_by? (named: the invoice its opening request names; opening_invoice: its opening invoice citation, with invoice_kind), named_invoices? (two or more named: unbound), party_basis, reason, held_open?, closing_evidence? (the closing citations a close was refused on)}.';
 COMMENT ON COLUMN public.context_ledger_items.certainty IS
  'Same payer close (20261019130000): certain, payer_not_certain (the payer, the party or the money''s source cannot be proven) or settled_job_needs_person (a person''s item on a job finished and paid by the stored close-out outcome); null when never computed.';
 
@@ -419,7 +423,7 @@ AS $fn$
 DECLARE v_class text; v_ref jsonb; f jsonb; v_first jsonb; v_inv jsonb; v_payer jsonb; v_of jsonb; v_ob jsonb;
  v_matches jsonb; v_active jsonb; v_basis text; v_author text; v_parties jsonb := coalesce(p_job -> 'parties', '[]'::jsonb);
  v_n_active integer; v_n_nonowner integer; v_owner jsonb; v_n_owner integer; v_outside boolean;
- v_text text; v_tail text; v_named jsonb;
+ v_text text; v_named jsonb;
 BEGIN
  v_class := public.context_ledger_obligation_class(p_item ->> 'closes_on', p_item ->> 'blocks');
  v_ref := jsonb_build_object('class', v_class);
@@ -442,20 +446,17 @@ BEGIN
   END IF;
   RETURN jsonb_build_object('obligated_party', NULL, 'obligation_ref', v_ref || jsonb_build_object('party_basis', 'no_author'));
  END IF;
- -- (review r3, M4) a payment item is bound to the one invoice of this job it names: its invoice number
- -- or Xero reference as a whole token (letters, digits and hyphens on neither side, so never a
- -- substring) of the item's words or an opening excerpt, or the about key's tail (invoice:... or
- -- payment:...) equal to it in key form. Two or more named: unbound.
+ -- (review r3, M4; r4, M8) a payment item is bound to the one invoice of this job its opening request
+ -- names: its invoice number or Xero reference as a whole token (letters, digits and hyphens on
+ -- neither side, so never a substring) of an opening citation's excerpt. Never the item's own words
+ -- or about key (the reader's, not the request's). Two or more named: unbound.
  IF v_class = 'payment' THEN
-  v_text := concat_ws(' ', p_item ->> 'what', (SELECT string_agg(x #>> '{cite,excerpt}', ' ')
-   FROM jsonb_array_elements(coalesce(p_open_facts, '[]'::jsonb)) x));
-  v_tail := substring(coalesce(p_item ->> 'about_key', '') FROM '^(?:invoice|payment):(.+)$');
+  v_text := (SELECT string_agg(x #>> '{cite,excerpt}', ' ') FROM jsonb_array_elements(coalesce(p_open_facts, '[]'::jsonb)) x);
   SELECT coalesce(jsonb_agg(q), '[]'::jsonb) INTO v_named FROM jsonb_array_elements(coalesce(p_job -> 'invoices', '[]'::jsonb)) q
   WHERE coalesce((q ->> 'accrec')::boolean, false) AND NOT coalesce((q ->> 'credit_note')::boolean, false) AND EXISTS (
    SELECT 1 FROM unnest(ARRAY[q ->> 'number', q ->> 'reference']) t(v)
    WHERE length(t.v) >= 4 AND t.v ~ '[0-9]'
-    AND (coalesce(v_text, '') ~* ('(^|[^A-Za-z0-9-])' || regexp_replace(t.v, '([^A-Za-z0-9 ])', '\\\1', 'g') || '($|[^A-Za-z0-9-])')
-     OR v_tail = btrim(regexp_replace(lower(t.v), '[^a-z0-9]+', '-', 'g'), '-')));
+    AND coalesce(v_text, '') ~* ('(^|[^A-Za-z0-9-])' || regexp_replace(t.v, '([^A-Za-z0-9 ])', '\\\1', 'g') || '($|[^A-Za-z0-9-])'));
   IF jsonb_array_length(v_named) = 1 THEN
    v_ref := v_ref || jsonb_build_object('invoice_id', v_named -> 0 ->> 'id', 'bound_by', 'named');
    v_payer := v_named -> 0 -> 'payer';
@@ -539,7 +540,7 @@ BEGIN
   'obligation_ref', v_ref || jsonb_build_object('party_basis', coalesce(v_ob ->> 'basis', v_basis, 'payer_unknown')));
 END $fn$;
 COMMENT ON FUNCTION public.context_ledger_obligated_party(jsonb, jsonb, jsonb) IS
- 'Same payer close (20261019130000): an item''s obligated party and obligation from its closes_on and blocks, its opening citations'' facts (the citation check''s, with obligation_facts) and the job''s facts (context_ledger_obligation_job_facts): {obligated_party, obligation_ref {class, invoice_id?, invoice_kind?, party_basis}}. Only payment, invoice and person items carry a party. Person: the first opening note''s, text''s or email''s author (ours, a call, a note or a record); our own message with no named sender: us (opening_ours_unnamed); else unknown (no_author). Builder work: builder_job, this job''s own obligation. A payment item naming exactly one of the job''s invoices (its number or Xero reference as a whole token of the item''s words or an opening excerpt, never a substring, or the about key''s tail in key form) is bound to it (obligation_ref.invoice_id, bound_by named) and that invoice names its payer (review r3, M4); else an opening invoice citation binds the item to that invoice and its kind and names its payer (bound_by opening_invoice). A message from outside: the party its sender matches (CRM contact, else email key, else phone key; an active match wins, a single retired one is kept), else the job client with no active party, unknown with an active non-owner party (unmatched_sender) or several matches (ambiguous_sender), else the one active owner, else unknown (no_owner_marker). Our own row, a call, a note or a record: the job client with no active party, every paying party (all_payers) with an active non-owner party, else the one active owner, else unknown. Pure.';
+ 'Same payer close (20261019130000): an item''s obligated party and obligation from its closes_on and blocks, its opening citations'' facts (the citation check''s, with obligation_facts) and the job''s facts (context_ledger_obligation_job_facts): {obligated_party, obligation_ref {class, invoice_id?, invoice_kind?, party_basis}}. Only payment, invoice and person items carry a party. Person: the first opening note''s, text''s or email''s author (ours, a call, a note or a record); our own message with no named sender: us (opening_ours_unnamed); else unknown (no_author). Builder work: builder_job, this job''s own obligation. A payment item whose opening request names exactly one of the job''s invoices (its number or Xero reference as a whole token of an opening citation''s excerpt, never a substring, never the item''s own words or about key) is bound to it (obligation_ref.invoice_id, bound_by named) and that invoice names its payer (review r3, M4; r4, M8); else an opening invoice citation binds the item to that invoice and its kind and names its payer (bound_by opening_invoice). A message from outside: the party its sender matches (CRM contact, else email key, else phone key; an active match wins, a single retired one is kept), else the job client with no active party, unknown with an active non-owner party (unmatched_sender) or several matches (ambiguous_sender), else the one active owner, else unknown (no_owner_marker). Our own row, a call, a note or a record: the job client with no active party, every paying party (all_payers) with an active non-owner party, else the one active owner, else unknown. Pure.';
 
 CREATE OR REPLACE FUNCTION public.context_ledger_obligation_closes(p_item jsonb, p_cite_facts jsonb)
 RETURNS jsonb
@@ -553,21 +554,23 @@ DECLARE v_class text; v_ob jsonb := nullif(p_item -> 'obligated_party', 'null'::
  v_covered text[] := '{}'; v_reason text; v_ok boolean; v_cert boolean; q jsonb; v_own jsonb; v_any_owed boolean;
  v_any_partial boolean; v_any_issued boolean; v_any_voided boolean; v_any_zero boolean; v_last_paid timestamptz; v_party_short boolean := false;
  v_evidence jsonb := '[]'::jsonb; v_cited text[] := '{}'; v_ci text[]; v_tail text; v_cited_owed boolean := false; v_other jsonb := '[]'::jsonb;
+ v_kind_only text;
 BEGIN
  v_class := coalesce(v_ref ->> 'class', public.context_ledger_obligation_class(p_item ->> 'closes_on', p_item ->> 'blocks'));
  v_invs := coalesce(v_job -> 'invoices', '[]'::jsonb);
  v_bound_id := v_ref ->> 'invoice_id'; v_bound_kind := v_ref ->> 'invoice_kind';
- -- (review r3, M4) an unbound payment item about one invoice (about key invoice:..., or payment:<kind> with
- -- the one cited invoice of that kind) is bound to the one invoice it cites
+ -- (review r3, M4; r4, M8) an unbound payment item about one invoice (about key invoice:..., or
+ -- payment:<kind> with the one cited invoice of that kind) is held to the KIND of the one invoice it
+ -- cites: only that payer's invoices of that kind decide it, and the payer must still match. A
+ -- closing citation never binds the invoice itself and never stands in for the payer.
  IF v_class = 'payment' AND v_bound_id IS NULL THEN
   SELECT array_agg(DISTINCT x #>> '{cite,id}') INTO v_ci FROM jsonb_array_elements(v_cites) x WHERE x #>> '{cite,table}' = 'xero_invoices';
   v_tail := substring(coalesce(p_item ->> 'about_key', '') FROM '^payment:(.*)$');
   IF cardinality(v_ci) = 1 THEN
    SELECT x INTO v_inv FROM jsonb_array_elements(v_invs) x WHERE x ->> 'id' = v_ci[1] LIMIT 1;
-   IF v_inv IS NOT NULL AND (coalesce(p_item ->> 'about_key', '') LIKE 'invoice:%'
-     OR (v_tail IS NOT NULL AND v_inv ->> 'kind' IS NOT NULL
-         AND replace(CASE WHEN v_tail = 'balance' THEN 'final' ELSE v_tail END, '-', ' ') = v_inv ->> 'kind')) THEN
-    v_bound_id := v_ci[1];
+   IF v_inv IS NOT NULL AND v_inv ->> 'kind' IS NOT NULL AND (coalesce(p_item ->> 'about_key', '') LIKE 'invoice:%'
+     OR (v_tail IS NOT NULL AND replace(CASE WHEN v_tail = 'balance' THEN 'final' ELSE v_tail END, '-', ' ') = v_inv ->> 'kind')) THEN
+    v_kind_only := v_inv ->> 'kind';
    END IF;
    v_inv := NULL;
   END IF;
@@ -655,12 +658,14 @@ BEGIN
   RETURN CASE WHEN jsonb_array_length(v_evidence) > 0 THEN jsonb_build_object('evidence', v_evidence) ELSE '{}'::jsonb END || jsonb_build_object('closes', false, 'certainty', 'payer_not_certain', 'reason', 'obligated_party_retired');
  END IF;
  -- The obligated party's own invoices on this job; bound: its own invoice (and, bound by an opening
- -- invoice, that payer's invoices of its kind).
+ -- invoice, that payer's invoices of its kind); held to a kind by its closing citation: that payer's
+ -- invoices of that kind.
  IF v_class = 'payment' AND (v_ob IS NOT NULL OR v_bound_id IS NOT NULL) THEN
   SELECT coalesce(jsonb_agg(x), '[]'::jsonb) INTO v_own FROM jsonb_array_elements(v_invs) x
   WHERE (x ->> 'accrec')::boolean
    AND ((v_bound_id IS NOT NULL AND x ->> 'id' = v_bound_id)
-    OR ((v_bound_id IS NULL OR (v_bound_kind IS NOT NULL AND x ->> 'kind' = v_bound_kind)) AND v_ob IS NOT NULL
+    OR (((v_bound_id IS NULL AND (v_kind_only IS NULL OR x ->> 'kind' = v_kind_only))
+      OR (v_bound_kind IS NOT NULL AND x ->> 'kind' = v_bound_kind)) AND v_ob IS NOT NULL
      AND (public.context_ledger_obligation_payer_match(x -> 'payer', v_ob, v_job) = 'match'
       OR (v_ob ->> 'kind' = 'builder_job' AND x #>> '{payer,kind}' = 'unknown'
           AND x #>> '{payer,basis}' IN ('builder_contact_unmapped', 'no_contact'))
@@ -729,7 +734,7 @@ BEGIN
  RETURN CASE WHEN jsonb_array_length(v_evidence) > 0 THEN jsonb_build_object('evidence', v_evidence) ELSE '{}'::jsonb END || jsonb_build_object('closes', false, 'certainty', 'certain', 'reason', 'not_closed');
 END $fn$;
 COMMENT ON FUNCTION public.context_ledger_obligation_closes(jsonb, jsonb) IS
- 'Same payer close (20261019130000): the one closure rule, read by context_ledger_check_item (closed_by) and context_ledger_write (a closing transition): {closes, certainty, reason, evidence?} for an item (closes_on, blocks, about_key, opened_at, what, obligated_party, obligation_ref) and {job (context_ledger_obligation_job_facts), cites (the citation check''s facts for each closing citation, with obligation_facts)}. Runs only after the existing closing rules passed, so it can only refuse. It closes when at least one closing citation closes the item by its class rule and none is certain evidence against it (review r3, M6); a citation that neither closes nor is certain evidence against is kept as evidence. Payment: never a message (claim_not_record), a document, booking or system email (wrong_record_kind), a credit note (credit_note), a bill (not_customer_invoice), a voided invoice (voided), an unpaid or part paid one (invoice_unpaid, partially_paid), money from another contact or a credit (other_money_allocated), another payer''s invoice (other_payer), another invoice or kind than the one bound (other_obligation), an app event naming no invoice (payer_unknown). A bound item (the invoice it names, its opening invoice, or the one invoice cited by an item about an invoice: review r3, M4) closes on its own invoice being PAID, that invoice''s payer being its obligation; an unbound item closes only while none of the payer''s own issued invoices is owed or zeroed (all_payers: every paying party covered), and when the one owed is an invoice it never cited it stays open, payer not certain (other_invoice_owed), the owed invoices kept as evidence. Invoice: an invoice citation must be an ACCREC of the payer. Person: only a later message (or app event) by the opening author (other_person, author_unknown); an item opened by our own message with no named sender (us) only by a later row of ours by its stamp; the customer it is owed to releasing or declining it in words is never a close and never certain (released_by_obligee: review r3, M7), any other reply of the customer''s is other_person; a record is evidence only (record_not_person). An invoice cited on a reply, work or other item is evidence only, never certain (wrong_obligation_class, record_not_person: review r3, M5). On builder work the job''s own Xero contact (job_client) may be the builder''s: unproven, never other. When it does not close: certain when the payer''s own cited invoice is owed or a citation is certainly not the obligation, payer_not_certain when the payer, party or money''s source is unproven (no_own_invoice, zero_balance, paid_not_cited, paid_before_raised, obligated_party_retired, other_invoice_owed), settled_job_needs_person for a person''s item on a settled job. Pure.';
+ 'Same payer close (20261019130000): the one closure rule, read by context_ledger_check_item (closed_by) and context_ledger_write (a closing transition): {closes, certainty, reason, evidence?} for an item (closes_on, blocks, about_key, opened_at, what, obligated_party, obligation_ref) and {job (context_ledger_obligation_job_facts), cites (the citation check''s facts for each closing citation, with obligation_facts)}. Runs only after the existing closing rules passed, so it can only refuse. It closes when at least one closing citation closes the item by its class rule and none is certain evidence against it (review r3, M6); a citation that neither closes nor is certain evidence against is kept as evidence. Payment: never a message (claim_not_record), a document, booking or system email (wrong_record_kind), a credit note (credit_note), a bill (not_customer_invoice), a voided invoice (voided), an unpaid or part paid one (invoice_unpaid, partially_paid), money from another contact or a credit (other_money_allocated), another payer''s invoice (other_payer), another invoice or kind than the one bound (other_obligation), an app event naming no invoice (payer_unknown). A bound item (the invoice its opening request names, or its opening invoice: review r3, M4) closes on its own invoice being PAID, that invoice''s payer being its obligation; an item about one invoice citing exactly one is held to that invoice''s kind only, its payer still matched (review r4, M8); an unbound item closes only while none of the payer''s own issued invoices is owed or zeroed (all_payers: every paying party covered), and when the one owed is an invoice it never cited it stays open, payer not certain (other_invoice_owed), the owed invoices kept as evidence. Invoice: an invoice citation must be an ACCREC of the payer. Person: only a later message (or app event) by the opening author (other_person, author_unknown); an item opened by our own message with no named sender (us) only by a later row of ours by its stamp; the customer it is owed to releasing or declining it in words is never a close and never certain (released_by_obligee: review r3, M7), any other reply of the customer''s is other_person; a record is evidence only (record_not_person). An invoice cited on a reply, work or other item is evidence only, never certain (wrong_obligation_class, record_not_person: review r3, M5). On builder work the job''s own Xero contact (job_client) may be the builder''s: unproven, never other. When it does not close: certain when the payer''s own cited invoice is owed or a citation is certainly not the obligation, payer_not_certain when the payer, party or money''s source is unproven (no_own_invoice, zero_balance, paid_not_cited, paid_before_raised, obligated_party_retired, other_invoice_owed), settled_job_needs_person for a person''s item on a settled job. Pure.';
 
 -- 6. The citation check: the obligation facts while the switch is on.
 CREATE OR REPLACE FUNCTION public.context_ledger_cite(p_job_id uuid, p_cite jsonb)
