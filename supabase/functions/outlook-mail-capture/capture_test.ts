@@ -1214,6 +1214,73 @@ Deno.test("W7: a long history run saves its cursor on its running row as it goes
   assert(seen.length >= 2 && seen.at(-1) !== null);
 });
 
+Deno.test("W7: a conversation Graph answers 404 for is counted and passed; the walk is not held there", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
+  });
+  const d = deps(w);
+  const threads = d.mail.listGroupThreads;
+  const posts = d.mail.listGroupPosts;
+  d.mail.listGroupThreads = async (g, c) => {
+    if (c === "C005") throw new GraphReadError("graph_404", 404);
+    return await threads(g, c);
+  };
+  d.mail.listGroupPosts = async (g, th, topic) => {
+    if (th === "T-C007") throw new GraphReadError("graph_404", 404);
+    return await posts(g, th, topic);
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const run = historyRuns(w)[0];
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.error_code, null);
+  assertEquals(run.counts!.conversations_gone, 1);
+  assertEquals(run.counts!.threads_gone, 1);
+  assertEquals(run.counts!.conversations_read, 30);
+  assertEquals(w.captured.length, 28);
+  assert(!w.keys.has("email:c005-0@mail.example.org"));
+  assert(!w.keys.has("email:c007-0@mail.example.org"));
+});
+
+Deno.test("W7: any other fault reading a conversation still fails the run at it, cursor before it", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
+  });
+  const d = deps(w);
+  const threads = d.mail.listGroupThreads;
+  d.mail.listGroupThreads = async (g, c) => {
+    if (c === "C005") throw new GraphReadError("graph_403", 403);
+    return await threads(g, c);
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const run = historyRuns(w)[0];
+  assertEquals(run.status, "failed");
+  assertEquals(run.error_code, "graph_403");
+  assertEquals(w.captured.length, 5);
+  assertEquals(walkOf(run).before_ids, ["h:C004"]);
+});
+
+Deno.test("W7: a long conversation checkpoints inside itself, so an abandoned run hands on the posts it saved", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(1, 60) },
+    tick: 1_000,
+  });
+  const d = deps(w);
+  const save = d.recordRun;
+  const running: Array<unknown> = [];
+  d.recordRun = async (row) => {
+    if (row.status === "running" && row.run_id) {
+      running.push(((row.cursor as Record<string, unknown>)?.group as Record<string, unknown>)?.conv ?? null);
+    }
+    return await save(row);
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  // A running-row checkpoint already names the conversation cut point.
+  assert(running.includes("h:C000"), `checkpoints: ${JSON.stringify(running)}`);
+});
+
 // History depth PR B (7 Oct 2026): mode deep. One slice of a mailbox older
 // than the 60-day limit, kept only where it touches a monitored live job from
 // that job's lead-in on, every row marked history_tier deep; the counts-only
