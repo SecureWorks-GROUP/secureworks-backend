@@ -324,6 +324,55 @@ Deno.test("parser: a blank product stays flagged, and candidates are never chose
   });
   assertEquals(parsed.lines[0].product, null);
   assertEquals(parsed.lines[0].product_unknown, true);
+  assertEquals(parsed.lines[0].price_to_confirm, false);
+});
+
+Deno.test("parser: a named product with only the price note stays known", () => {
+  const parsed = parseScopeOrder({
+    schemaVersion: "supplier-order/v1",
+    suppliers: [{
+      supplier: "CMI",
+      lines: [{
+        demandIds: ["gutter"],
+        productId: "practice-cmi-patioline",
+        description: "Gutter",
+        quantity: 1,
+        unit: "each",
+        toConfirm: [" To Confirm "],
+      }, {
+        demandIds: ["flash"],
+        productId: "apron",
+        description: "Apron",
+        quantity: 1,
+        toConfirm: ["length"],
+      }, {
+        demandIds: ["blank"],
+        description: "Blank",
+        quantity: 1,
+        toConfirm: ["to confirm"],
+      }, {
+        demandIds: ["mixed"],
+        productId: "rhs:100x50",
+        description: "Mixed",
+        quantity: 1,
+        toConfirm: ["to confirm", "length"],
+      }],
+    }],
+  });
+  const gutter = parsed.lines.find((line) => line.demand_id === "gutter");
+  assertEquals(gutter?.product_unknown, false);
+  assertEquals(gutter?.price_to_confirm, true);
+  assertEquals(gutter?.product, "practice-cmi-patioline");
+  const flash = parsed.lines.find((line) => line.demand_id === "flash");
+  assertEquals(flash?.product_unknown, true);
+  assertEquals(flash?.price_to_confirm, false);
+  const blank = parsed.lines.find((line) => line.demand_id === "blank");
+  assertEquals(blank?.product, null);
+  assertEquals(blank?.product_unknown, true);
+  assertEquals(blank?.price_to_confirm, true);
+  const mixed = parsed.lines.find((line) => line.demand_id === "mixed");
+  assertEquals(mixed?.product_unknown, true);
+  assertEquals(mixed?.price_to_confirm, false);
 });
 
 Deno.test("parser: a string quantity is refused", async () => {
@@ -390,9 +439,11 @@ Deno.test("parser: a mixed unresolved purchase line is withheld, not split", () 
   });
   assertEquals(parsed.lines.map((line) => line.demand_id), ["only-known", "missing-flash"]);
   assertEquals(parsed.lines[0].product_unknown, true);
+  assertEquals(parsed.lines[0].price_to_confirm, false);
   assertEquals(parsed.lines[0].product, "rhs:100x50x2.0:c450l0");
   assertEquals(parsed.lines[0].supplier_name, "Example Steel");
   assertEquals(parsed.lines[1].product_unknown, true);
+  assertEquals(parsed.lines[1].price_to_confirm, false);
   assertEquals(parsed.withheld_demand_ids, ["known-beam"]);
   assert(!JSON.stringify(parsed).includes("SHOULD-NOT-COPY"));
 });
@@ -797,7 +848,8 @@ function expectLine(lines: ScopeOrderLine[], spec: ExpectLine): ScopeOrderLine {
   assertEquals(line.stock_qty, spec.stock_qty);
   assertEquals(line.length_mm, spec.length_mm);
   assertEquals(line.cuts, spec.cuts);
-  assertEquals(line.product_unknown, true);
+  assertEquals(line.product_unknown, false);
+  assertEquals(line.price_to_confirm, true);
   assert(!POSITIONAL.test(line.demand_id), line.demand_id);
   return line;
 }
@@ -1135,7 +1187,10 @@ Deno.test("orders: the four createOrder fixtures import qty, stock length and cu
     cuts: fencePost.cuts,
     element_refs: fencePost.element_refs,
     supplier_name: fencePost.supplier_name,
+    price_to_confirm: fencePost.price_to_confirm === true,
   }));
+  assertEquals(fencePost.product_unknown, false);
+  assertEquals(fencePost.price_to_confirm, false);
   const courtyard = parseScopeOrder(JSON.parse(
     await Deno.readTextFile(new URL("courtyard.json", ORDER_DIR)),
   ));

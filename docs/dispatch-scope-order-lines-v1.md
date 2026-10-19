@@ -20,7 +20,7 @@ A make-safe job is allowed. The patio-only `dispatch_materials_suggest` path is 
 The body is measured as UTF-8 JSON before it is parsed. Over 2,000,000 bytes is `order_too_large` and writes nothing.
 
 1. `{ schemaVersion: "supplier-order/v1", suppliers, unresolved, cutList }`. This is what `createOrder` writes. One stored line per purchase line. `lengthMm` is the bar to buy (`stock_length_mm`, `stock_qty` = the purchase quantity). `cuts` are the piece lengths, coalesced. `length_mm` is that piece length when every cut is the same length, otherwise null. `cutList` is not extra lines. When a purchase line has no cuts, the matching `cutList` demand fills them. When it has no element references, `cutList.references` fills those. A `cutList` entry with no demand id is refused. Cuts already on the purchase line are the pieces on that bar and are not replaced by a fuller `cutList`. `sku`, `cost`, `specification`, `candidates` and `knownSubtotalExGst` are ignored.
-2. `{ schema: "scope-engine-order/v1", lines: [...] }`. Quantity and length are numbers or null. A string is refused. A stated length that disagrees with the cuts is the buy length; the cuts stay the pieces. `product_unknown: true`, a non-empty `to_confirm`, or `unresolved: true` flags the line and keeps a stated product. A blank product is always flagged. `candidates` are ignored.
+2. `{ schema: "scope-engine-order/v1", lines: [...] }`. Quantity and length are numbers or null. A string is refused. A stated length that disagrees with the cuts is the buy length; the cuts stay the pieces. `product_unknown: true`, a `to_confirm` note other than the generic price note, or `unresolved: true` flags the product and keeps a stated product. A `to_confirm` list that is only `to confirm` sets `price_to_confirm` and leaves a named product known. A blank product is always flagged. `candidates` are ignored.
 3. A demand list. `product` is `engineKey`. The supplier is always null. The stated cut length is the piece (`length_mm`); `stock_length_mm` and `stock_qty` stay null. Cuts use `lengthMm`. A line whose key contains the word "unknown" is not flagged for that reason.
 
 `{ schema: "scope-engine-v2/job@1" }` is refused. A job's members are not quantities or cut lengths. Import the supplier order.
@@ -37,12 +37,14 @@ An empty parse is `no_lines` and writes nothing, so a bad payload cannot wipe th
 
 Re-import of one scope runs `dispatch_replace_scope_order_lines` and replaces only that scope, in that function's transaction. The function snapshots the scope, deletes it, then inserts the new lines: one statement cannot see its own delete through the primary key, so a re-import of the same row id would otherwise raise a duplicate key. A demand that is still present keeps `created_at`, `created_by` and `created_by_email`. Demands that left are counted in `removed`.
 
-The table has no `supplier_id`, no price, and no `purchase_order_id`. A stated `supplier_name` is text only. Unknown products are flagged and never guessed. The response always carries `sends: false`. No email, Xero, `job_events`, or `business_events` write happens here.
+The table has no `supplier_id`, no price, and no `purchase_order_id`. A stated `supplier_name` is text only. `price_to_confirm` is the generic price note, not a price. Unknown products are flagged and never guessed. The response always carries `sends: false`. No email, Xero, `job_events`, or `business_events` write happens here.
 
 ## Example orders
 
 `supabase/functions/ops-api/scope_engine_examples/` are the engine's `examples/` inputs, including `scope-engine-v2/job@1`. They are not imported as members.
 
-`supabase/functions/ops-api/scope_engine_orders/` are price-stripped `supplier-order/v1` documents produced by `createOrder` on `step-2-to-6-wip` for attached-fascia, attached-wall, carport and courtyard. Revisions are `patio-bought-items-2026-10-17`. `toConfirm` notes are reduced to the flag `to confirm` so a price sentence is not stored. On fascia, wall and carport the rafters and purlins share the RHS purchase lines. On courtyard the purlins and the rafters are separate lines.
+`supabase/functions/ops-api/scope_engine_orders/` are price-stripped `supplier-order/v1` documents produced by `createOrder` on `step-2-to-6-wip` for attached-fascia, attached-wall, carport and courtyard. Revisions are `patio-bought-items-2026-10-17`. `toConfirm` notes are reduced to the generic `to confirm` price note, stored as `price_to_confirm`. A named `productId` with only that note stays `product_unknown: false`. On fascia, wall and carport the rafters and purlins share the RHS purchase lines. On courtyard the purlins and the rafters are separate lines.
 
 A fence post is not an engine patio post. The stored rule is a 2550 mm cut (1800 sheet + 150 plinth rail + 600 in the ground) on a 2700 mm stock post.
+
+Stage 2 (`docs/dispatch-scope-material-lines-v1.md`) matches the stated supplier name and copies known lines onto `job_material_lines`.
