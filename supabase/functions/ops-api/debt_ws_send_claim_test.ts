@@ -1,6 +1,6 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 // Statement and report emails claim their item before they are sent (debt_report:<org>,
-// debt_statement:<company>), and only a named checked press releases an earlier
+// debt_statement:<org>:<company>), and only a named checked press releases an earlier
 // unconfirmed send. Each test here failed on c3de7498 (two presses together sent twice, an
 // old or automatic send slipped past the hold, or a contradictory answer read as sent).
 // Synthetic fixture only; nothing reaches Xero, email or a database.
