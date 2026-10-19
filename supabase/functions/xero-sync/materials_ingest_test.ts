@@ -598,3 +598,10 @@ Deno.test("an existing sync fact is removed for staff when the bill names a PO o
   // Staff and agent facts are never touched by this path.
   assertEquals(existingFactVerdict({ ...base, source: "agent_prematch", namedPoJobIds: ["b"] }), "not_ours");
 });
+
+Deno.test("an existing sync fact whose bill amount is now unknown goes to staff", () => {
+  assertEquals(existingFactVerdict({
+    source: "po_deterministic", factJobId: "a", factJobNumber: "SWF-26535", factJobBlocked: false,
+    refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, amountKnown: false,
+  }), "remove");
+});

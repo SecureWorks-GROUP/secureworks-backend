@@ -402,11 +402,13 @@ export function existingFactVerdict(input: {
   jobFromRefId: string | null; // the reference's job when it resolved and passed every guard
   xeroJobId?: string | null; // xero_invoices.job_id: the job Xero links the bill to
   namedPoJobIds?: Array<string | null>; // the job of each PO the bill names
+  amountKnown?: boolean; // false when the bill's ex-GST subtotal is now missing
 }): "none" | "not_ours" | "keep" | "remove" {
   if (!input.source) return "none";
   if (!OWN_FACT_SOURCES.has(input.source)) return "not_ours";
   const all = new Set([...input.refTokens, ...input.lineTokens]);
   if (input.factJobBlocked) return "remove";
+  if (input.amountKnown === false) return "remove"; // the amount can no longer be stated
   if (input.xeroJobId && input.xeroJobId !== input.factJobId) return "remove"; // Xero links another job
   // A PO the bill names that is on another job, or on no job.
   if ((input.namedPoJobIds ?? []).some((j) => j !== input.factJobId)) return "remove";

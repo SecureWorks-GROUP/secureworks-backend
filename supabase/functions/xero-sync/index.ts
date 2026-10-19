@@ -1355,7 +1355,7 @@ async function ingestMaterialsActuals(
     const posByContact = new Map<string, POCandidate[]>()
     // Every issued PO, whoever it is for: a PO the bill names must agree with
     // the job this path would place it on.
-    let namedPoPool: Array<{ po_number: string | null; job_id: string | null }> = []
+    let namedPoPool: Array<{ po_number: string | null; job_id: string | null; xero_bill_id: string | null }> = []
     let blockedJobIds = new Set<string>() // jobs not won, or holding: never a cost by rule
     const jobNumberById = new Map<string, string>()
     {
@@ -1368,7 +1368,7 @@ async function ingestMaterialsActuals(
       )
       if (!pos) throw new Error('purchase orders unreadable')
       const allPos = await readAll<any>(() =>
-        sb.from('purchase_orders').select('id, po_number, job_id, status').order('id')
+        sb.from('purchase_orders').select('id, po_number, job_id, status, xero_bill_id').order('id')
       )
       if (!allPos) throw new Error('purchase orders unreadable')
       // Drafts count here: a draft PO for another job still contradicts the reference.
@@ -1547,7 +1547,10 @@ async function ingestMaterialsActuals(
       // that fact, by source) so a person decides on the queue row below.
       // The job of every PO the bill names (null for a PO with no job).
       const billText = `${bill.reference || ''} \n ${(Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n ')}`
-      const namedPoJobs = namedPoPool.filter((p) => poNamedIn(p, billText)).map((p) => p.job_id ?? null)
+      // A PO linked to this bill counts the same as one it names.
+      const namedPoJobs = namedPoPool
+        .filter((p) => p.xero_bill_id === bill.xero_invoice_id || poNamedIn(p, billText))
+        .map((p) => p.job_id ?? null)
       const existingSource = factSourceById.get(bill.xero_invoice_id)
       const factJobId = factJobById.get(bill.xero_invoice_id)
       const verdict = existingFactVerdict({
@@ -1560,8 +1563,25 @@ async function ingestMaterialsActuals(
         jobFromRefId: jobFromRef?.id ?? null,
         xeroJobId: b.job_id ?? null,
         namedPoJobIds: namedPoJobs,
+        amountKnown: amountIsKnown(bill.sub_total),
       })
-      if (verdict === 'not_ours' || verdict === 'keep') continue
+      if (verdict === 'not_ours') continue
+      if (verdict === 'keep') {
+        // The bill may have been amended in Xero: keep this path's own fact in
+        // step with it (only while it is still that fact on that job).
+        const { error: uErr } = await sb.from('job_materials_facts')
+          .update({
+            amount_ex_gst: bill.sub_total,
+            amount_inc_gst: bill.total ?? null,
+            fact_date: bill.invoice_date,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('xero_invoice_id', bill.xero_invoice_id)
+          .eq('automation_source', existingSource as string)
+          .eq('job_id', factJobId as string)
+        if (uErr) console.error(`[materials] fact refresh failed ${bill.xero_invoice_id}:`, uErr.message)
+        continue
+      }
       // verdict 'remove': the fact is deleted only after the hold below is saved,
       // so a failed write can never leave the bill with neither fact nor hold.
 
