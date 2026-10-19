@@ -121,6 +121,21 @@ function job(id: string, overrides: Row = {}): Row {
   };
 }
 
+function patioRevision(
+  jobId: string,
+  revision: number,
+  status: string,
+  scope: unknown,
+): Row {
+  return {
+    id: uuid("e2", revision + jobId.charCodeAt(jobId.length - 1)),
+    job_id: jobId,
+    revision_number: revision,
+    status,
+    scope_canonical_text: JSON.stringify(scope),
+  };
+}
+
 function seed(): Record<string, Row[]> {
   return {
     jobs: [
@@ -144,6 +159,12 @@ function seed(): Record<string, Row[]> {
         },
       }),
       job(JOB.repair, { type: "repair" }),
+    ],
+    // Patio suggestions read the latest frozen revision, never jobs.scope_json.
+    scope_revisions: [
+      patioRevision(JOB.patio, 1, "frozen", PATIO_SCOPE),
+      patioRevision(JOB.patioNoScope, 1, "frozen", { config: {} }),
+      patioRevision(JOB.patioPricingOnly, 1, "frozen", { config: {} }),
     ],
     suppliers: [
       {
@@ -1552,11 +1573,20 @@ Deno.test("suggest: a patio scope shaped like SWP-26701 adds the four lines, cle
     assert(!("unit_price" in stored) && !("notes" in stored));
     assert(!/[—×]/.test(stored.description));
   }
-  // The scope is read once, for this job, and the pricing never.
+  // The frozen revision is read once and gives the lines. The live scope is
+  // read once, for this one job, only to warn on a post-freeze edit (here it
+  // matches, so no warning); the pricing never.
+  assertEquals(answer.scope_revision_number, 1);
+  assertEquals(answer.held, []);
+  assertEquals(answer.scope_supplier, null);
   const jobReads = db.requests.filter((r) => r.table === "jobs");
-  assert(jobReads.every((r) => !r.select.includes("pricing_json")));
+  assert(jobReads.every((r) => !/pricing_json/.test(r.select)));
   assertEquals(
-    jobReads.filter((r) => r.select.includes("scope_json")).length,
+    jobReads.filter((r) => /scope_json/.test(r.select)).map((r) => r.select),
+    ["id, scope_json"],
+  );
+  assertEquals(
+    db.requests.filter((r) => r.table === "scope_revisions").length,
     1,
   );
   assertOnlyOwnWrites(db);
@@ -1603,6 +1633,43 @@ Deno.test("suggest: two presses at once add the scope lines once; the second is 
     [1, 2, 3, 4],
   );
   assertEquals((await read(db, JOB.patio)).counts, { total: 4, ready: 0 });
+});
+
+Deno.test("suggest: three presses at the same instant all pass the no-lines read, and the line key lets one set in", async () => {
+  const db = await jobWithSuppliers();
+  const settled = await Promise.allSettled([
+    SUP.steel,
+    SUP.sheets,
+    SUP.steel,
+  ].map((supplierId) =>
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: supplierId,
+    })
+  ));
+  // Every press reached the insert: the race got past the read and was
+  // stopped by the key on the line id (fixed by job and place), not by luck.
+  const lineInserts = db.requests.filter((r) =>
+    r.kind === "insert" && r.table === "job_material_lines"
+  );
+  assertEquals(lineInserts.length, 3);
+  const won = settled.filter((r) => r.status === "fulfilled");
+  const lost = settled.filter((r) => r.status === "rejected");
+  assertEquals(won.length, 1);
+  assertEquals(lost.length, 2);
+  for (const loss of lost) {
+    const error = (loss as PromiseRejectedResult).reason;
+    assert(error instanceof DispatchMaterialsError);
+    assertEquals(error.status, 409);
+    assertEquals(error.body.code, "lines_exist");
+  }
+  // One set, under one supplier, nothing partial from the losers.
+  const stored = db.tables.job_material_lines.filter((l) =>
+    l.job_id === JOB.patio
+  );
+  assertEquals(stored.length, 4);
+  assertEquals(new Set(stored.map((l) => l.supplier_id)).size, 1);
+  assertEquals(stored.map((l) => l.position).sort(), [1, 2, 3, 4]);
 });
 
 Deno.test("suggest: a repair job 409; a fence with no frozen scope 409; supplier not on the job 409", async () => {
@@ -1678,6 +1745,128 @@ Deno.test("suggest: a scope the extractor cannot read is 409 scope_unreadable, n
         },
       }),
     ),
+    409,
+    "scope_unreadable",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("suggest patio: the latest frozen revision is read; a newer draft and the live scope are not", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: { config: {} } } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", { config: {} }),
+    patioRevision(JOB.patio, 2, "frozen", PATIO_SCOPE),
+    patioRevision(JOB.patio, 3, "draft", { config: {} }),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.scope_revision_number, 2);
+  assertEquals(answer.added, 4);
+  // The live scope's lines differ from the frozen revision's: warned, and the
+  // lines still come from the frozen revision.
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("suggest patio: no live scope, or a failed live read, says the change could not be checked", async () => {
+  for (const mode of ["no_live_scope", "read_fails"] as const) {
+    const initial = seed();
+    initial.jobs = initial.jobs.map((row) =>
+      row.id === JOB.patio
+        ? {
+          ...row,
+          // A live scope equal to the frozen one: only the failed read can
+          // make this "could not be checked".
+          scope_json: mode === "read_fails" ? PATIO_SCOPE : null,
+        }
+        : row
+    );
+    initial.scope_revisions = [
+      patioRevision(JOB.patio, 1, "frozen", PATIO_SCOPE),
+    ];
+    const db = makeDb(initial);
+    await call(db, "dispatch_materials_add_supplier", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    if (mode === "read_fails") {
+      const real = db.client.from;
+      db.client.from = (table: string) => {
+        const builder = real(table);
+        if (table !== "jobs") return builder;
+        const select = builder.select;
+        builder.select = (columns: string, ...rest: any[]) =>
+          columns === "id, scope_json"
+            ? {
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: null,
+                    error: { code: "XX000", message: "forced" },
+                  }),
+                }),
+              }),
+            }
+            : select.call(builder, columns, ...rest);
+        return builder;
+      };
+    }
+    const answer = await call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    assertEquals(answer.added, 4, mode);
+    assertEquals(answer.held, [FENCE_SCOPE_CHANGE_UNCHECKED], mode);
+  }
+});
+
+Deno.test("suggest patio: no frozen revision is 409 no_frozen_scope, even with a live scope; nothing written", async () => {
+  const initial = seed();
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "draft", PATIO_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_frozen_scope",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("suggest patio: a frozen revision that is not JSON is 409 scope_unreadable", async () => {
+  const initial = seed();
+  initial.scope_revisions = [{
+    ...patioRevision(JOB.patio, 1, "frozen", {}),
+    scope_canonical_text: "{not json",
+  }];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
     409,
     "scope_unreadable",
   );
