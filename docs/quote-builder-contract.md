@@ -709,9 +709,11 @@ From an issued version:
   being made or were removed, and staff reconcile the job's orders before
   making any by hand. A set missing a row comes back with
   `purchase_orders_incomplete: { expected, present, missing_seq }` and is
-  never re-made. Known limit: a make that fails part way keeps its marker, so
-  that version's orders are then made by hand (the safe side; the feature is
-  switched off and makes drafts only).
+  never re-made. A make that fails re-reads the version: with no order of
+  that kind written, it releases its marker so a later press can make them
+  (the unique keys still refuse a second set if a write it could not see
+  lands later); with any order there, or if the re-read fails, the marker
+  stays and later presses get `409 *_unsettled`.
 
 With the switch on, `quote_builder_get_job` adds these keys on every version
 (drafts included): `work_order: {id, wo_number, status} | null` and

@@ -2277,36 +2277,38 @@ export async function makeQuoteBuilderWorkOrder(
   }
   const scope = quoteBuilderCrewScope(version);
   let data: any = null;
-  for (let attempt = 0; attempt < 3 && !data; attempt++) {
-    const woNumber = `WO-${orderStamp()}`;
-    const res = await client.from("work_orders").insert({
-      org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
-      job_id: version.job_id,
-      wo_number: woNumber,
-      kind: "crew",
-      status: "draft",
-      scope_items: scope.scope_items,
-      site_address: siteLine(job),
-      created_by: uuidOrNull(actor.id),
-      quote_builder_version_id: version.id,
-    }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
-    if (res.error?.code === "23505") {
-      // Another press made this version's work order first
-      // (uq_work_orders_one_quote_builder_version): return it. No order for
-      // the version means the number clashed: try a new one.
-      const winner = await ordersForVersion(client, version.id);
-      if (winner.work_order) return ordersReply(version, winner);
-      await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
-      continue;
+  try {
+    for (let attempt = 0; attempt < 3 && !data; attempt++) {
+      const woNumber = `WO-${orderStamp()}`;
+      const res = await client.from("work_orders").insert({
+        org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
+        job_id: version.job_id,
+        wo_number: woNumber,
+        kind: "crew",
+        status: "draft",
+        scope_items: scope.scope_items,
+        site_address: siteLine(job),
+        created_by: uuidOrNull(actor.id),
+        quote_builder_version_id: version.id,
+      }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
+      if (res.error?.code === "23505") {
+        // Another press made this version's work order first
+        // (uq_work_orders_one_quote_builder_version): return it. No order for
+        // the version means the number clashed: try a new one.
+        const winner = await ordersForVersion(client, version.id);
+        if (winner.work_order) return ordersReply(version, winner);
+        await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+        continue;
+      }
+      if (res.error || !res.data) {
+        readError("work order create failed", res.error || "no row");
+      }
+      data = res.data;
     }
-    if (res.error || !res.data) {
-      readError("work order create failed", res.error || "no row");
-    }
-    data = res.data;
-  }
-  if (!data) {
-    await releaseOrderMark(client, version.id, "work_order");
-    readError("work order create failed", "order number clashed three times");
+    if (!data) readError("work order create failed", "order number clashed three times");
+  } catch (error) {
+    await releaseIfNothingWritten(client, version.id, "work_order");
+    throw error;
   }
   await recordOrderEvent(
     client,
@@ -2362,14 +2364,18 @@ export async function makeQuoteBuilderPurchaseOrders(
       409,
     );
   }
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const made = await insertPurchaseOrderSet(client, actor, version, groups);
-    if (made) return made;
-    // The order number clashed: try again with a new number.
-    await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const made = await insertPurchaseOrderSet(client, actor, version, groups);
+      if (made) return made;
+      // The order number clashed: try again with a new number.
+      await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+    }
+    readError("purchase order create failed", "order number clashed three times");
+  } catch (error) {
+    await releaseIfNothingWritten(client, version.id, "purchase_orders");
+    throw error;
   }
-  await releaseOrderMark(client, version.id, "purchase_orders");
-  readError("purchase order create failed", "order number clashed three times");
 }
 
 type OrderKind = "work_order" | "purchase_orders";
@@ -2395,12 +2401,30 @@ async function claimOrderMark(
   readError("order marker write failed", error);
 }
 
-/** Only after this press's own make failed with no order written. */
-async function releaseOrderMark(client: any, versionId: string, kind: OrderKind) {
-  await client.from("quote_builder_order_marks").delete()
-    .eq("quote_builder_version_id", versionId)
-    .eq("kind", kind)
-    .then(() => {}, () => {});
+/**
+ * After this press's own make failed: release the marker when the version has
+ * no order of that kind, so a later press can make them. Safe for the one-set
+ * rule: even if a write this press could not see lands later, the unique keys
+ * (one work order per version; version and seq for purchase orders) refuse a
+ * second set. If the re-read fails the marker stays (409 unsettled).
+ */
+async function releaseIfNothingWritten(
+  client: any,
+  versionId: string,
+  kind: OrderKind,
+) {
+  try {
+    const orders = await ordersForVersion(client, versionId);
+    const none = kind === "work_order"
+      ? !orders.work_order
+      : orders.purchase_orders.length === 0;
+    if (!none) return;
+    await client.from("quote_builder_order_marks").delete()
+      .eq("quote_builder_version_id", versionId)
+      .eq("kind", kind);
+  } catch {
+    // Keep the marker: the safe side.
+  }
 }
 
 /** A press that lost the marker waits a moment for the winner's rows. */

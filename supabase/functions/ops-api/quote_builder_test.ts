@@ -2925,3 +2925,44 @@ Deno.test("quote builder: an unreadable purchase order switch reads as off", asy
   );
   assertEquals(store.purchase_orders.length, 0);
 });
+
+Deno.test("quote builder: a first press that fails before writing any order releases its marker; the next press makes one set", async () => {
+  const { store, issued } = await issuedForOrders();
+  let fault = true;
+  const flaky = makeFakeClient(store, {
+    insertError: (table) =>
+      fault && (table === "purchase_orders" || table === "work_orders")
+        ? { code: "42703", message: "column does not exist" }
+        : null,
+  }).client;
+  for (const make of [makeQuoteBuilderPurchaseOrders, makeQuoteBuilderWorkOrder]) {
+    await assertRejects(() => make(flaky, { version_id: issued.id }, ACTOR), QuoteBuilderError);
+  }
+  assertEquals(store.quote_builder_order_marks.length, 0);
+  assertEquals(store.purchase_orders.length + store.work_orders.length, 0);
+  // The fault clears: the next presses make exactly one set and one work order.
+  fault = false;
+  await Promise.all([
+    makeQuoteBuilderPurchaseOrders(flaky, { version_id: issued.id }, ACTOR),
+    makeQuoteBuilderPurchaseOrders(flaky, { version_id: issued.id }, ACTOR),
+    makeQuoteBuilderWorkOrder(flaky, { version_id: issued.id }, ACTOR),
+  ]);
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(store.work_orders.length, 1);
+  assertEquals(store.quote_builder_order_marks.length, 2);
+});
+
+Deno.test("quote builder: a failed make keeps the marker when an order of that kind exists", async () => {
+  const { store, client, issued } = await issuedForOrders();
+  await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
+  // A work order exists but its marker is gone (made before markers); a new
+  // make that faults must not leave the version open for a second one.
+  store.quote_builder_order_marks = [];
+  store.work_orders[0].quote_builder_version_id = issued.id;
+  const marks = store.quote_builder_order_marks;
+  assertEquals(marks.length, 0);
+  // The existing order is returned before any marker is claimed.
+  const again: any = await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
+  assertEquals(again.work_order?.id, store.work_orders[0].id);
+  assertEquals(store.work_orders.length, 1);
+});
