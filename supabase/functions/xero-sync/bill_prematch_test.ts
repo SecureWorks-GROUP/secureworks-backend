@@ -80,7 +80,8 @@ Deno.test("a cancelled job is never proposed, and a holding job is never evidenc
   const cancelled = decideBillPrematch(bill([["SWF-26100 materials", "305", 34.54]]), ctx());
   assertEquals(cancelled.kind === "review" && cancelled.rule, "job_number_not_live");
   const holding = decideBillPrematch(bill([["materials", "305", 50]], { xero_job_id: "j4" }), ctx());
-  assertEquals(holding.kind, "none");
+  // Never placed; a Xero link to the holding job is shown to staff, not ignored.
+  assertEquals(holding.kind === "job", false);
 });
 
 Deno.test("a bill dated well before its job existed waits for staff", () => {
@@ -286,5 +287,11 @@ Deno.test("a bill naming a live job and a numbered holding job is never placed w
   const jobs = [...JOBS, { id: "j6", job_number: "SWF-260001", status: "accepted", created_at: "2026-01-01", site_address: null, holding: true }];
   const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] };
   const d = decideBillPrematch(bill([["SWF-26535 posts", "305", 300], ["SWF-260001 rails", "305", 200]]), c);
+  assertEquals(d.kind === "job", false);
+});
+
+Deno.test("a bill linked in Xero to a holding job is never placed on another job", () => {
+  const po: PrematchPO = { id: "p1", po_number: "PO-302382", job_id: "j2", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null };
+  const d = decideBillPrematch(bill([["Your order PO-302382", "305", 410]], { xero_contact_id: "c-9", xero_job_id: "j4" }), ctx({ pos: [po] }));
   assertEquals(d.kind === "job", false);
 });

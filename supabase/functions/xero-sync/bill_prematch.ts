@@ -408,7 +408,8 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
     if (job && jobIsLive(job)) add(job, "xero_job_link", "Xero link");
     // The bill already sits on another real job: placing it elsewhere would
     // count it twice (the cost view only drops a fact on the same job).
-    else if (job && !job.holding) problems.push(`the bill is already linked in Xero to ${job.job_number} (${String(job.status).toLowerCase()})`);
+    else if (job && job.holding) problems.push(`the bill is linked in Xero to the holding job ${job.job_number}`);
+    else if (job) problems.push(`the bill is already linked in Xero to ${job.job_number} (${String(job.status).toLowerCase()})`);
     else if (!job) problems.push("the bill is already linked in Xero to a job not on record");
   }
 

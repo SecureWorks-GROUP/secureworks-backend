@@ -330,3 +330,44 @@ Deno.test("assign — a bill with no known amount is never placed as $0", async 
   );
   assertEquals((store.job_materials_facts || []).filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
 });
+
+Deno.test("assign — a trade-invoice mirror is never placed as materials, by staff or the agent", async () => {
+  const seed = baseSeed();
+  seed.trade_invoices = [{ id: "ti-1", xero_bill_id: "xinv-001" }];
+  const { client, store } = makeFakeClient(seed);
+  await assertRejects(
+    () => assignReconRow(client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "staff@x", orgId: ORG, nowIso: NOW }),
+    Error, "trade invoice already counted as labour",
+  );
+  assertEquals((store.job_materials_facts || []).filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
+});
+
+Deno.test("not job related — refuses if the agent placed the bill after the person opened it", async () => {
+  const { client, store } = makeFakeClient(baseSeed());
+  // The person's read saw an open row; the agent then places the bill.
+  const row = store.materials_reconciliation_queue.find((q) => q.id === "q-open-noref")!;
+  const realFrom = client.from.bind(client);
+  let reads = 0;
+  (client as any).from = (t: string) => {
+    const b = realFrom(t);
+    if (t === "job_materials_facts" && reads++ === 0) {
+      // after the person's fact check, the agent lands its placement
+      queueMicrotask(() => {});
+      const r = b;
+      const origMaybe = r.maybeSingle.bind(r);
+      r.maybeSingle = async () => {
+        const out = await origMaybe();
+        row.status = "assigned";
+        row.assigned_by = "agent_prematch";
+        return out;
+      };
+      return r;
+    }
+    return b;
+  };
+  await assertRejects(
+    () => markReconNotJobRelated(client, { queueId: "q-open-noref", actor: "staff@x", orgId: ORG, nowIso: NOW }),
+    Error, "changed while you were filing it",
+  );
+  assertEquals(row.status, "assigned");
+});

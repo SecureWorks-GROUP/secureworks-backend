@@ -408,6 +408,16 @@ export async function assignReconRow(
   if (!amountIsKnown(queue.sub_total)) {
     throw new Error(`bill ${queue.xero_invoice_id} has no known amount yet; it cannot be placed on a job`);
   }
+  // A trade-invoice mirror is labour already counted from the trade lines: it
+  // never becomes a materials cost, whoever places it.
+  {
+    const { data: mirror, error: mErr } = await client
+      .from("trade_invoices").select("id").eq("xero_bill_id", queue.xero_invoice_id).limit(1);
+    if (mErr) throw mErr;
+    if (Array.isArray(mirror) && mirror.length > 0) {
+      throw new Error(`bill ${queue.xero_invoice_id} is a trade invoice already counted as labour; it is never a materials cost`);
+    }
+  }
 
   // Resolve the target job.
   const action: AssignAction = args.useSuggestion ? "accept-suggestion" : "assign-to-job";
@@ -561,8 +571,14 @@ export async function markReconNotJobRelated(
       updated_at: now,
     })
     .eq("id", queue.id)
+    // Only if the row is as it was read: if the agent placed the bill meanwhile,
+    // this refuses (and the person sees it placed) instead of hiding a live cost.
+    .eq("status", queue.status)
     .select()
     .single();
+  if (error?.code === "PGRST116") {
+    throw new Error(`bill ${queue.xero_invoice_id} changed while you were filing it; reload and try again`);
+  }
   if (error) throw error;
 
   // No fact written; audit lives on the queue row (status + assigned_by + assigned_at).
