@@ -252,8 +252,10 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'ingest_materials': {
         // Standalone materials-actuals ingest (also runs inside sync_invoices).
         const windowDays = parseInt(url.searchParams.get('window_days') || '90', 10)
-        const limit = parseInt(url.searchParams.get('limit') || '500', 10)
-        return json(await ingestMaterialsActuals(sb, { windowDays, limit }))
+        const limitParam = url.searchParams.get('limit')
+        const limit = parseInt(limitParam || '500', 10)
+        // An explicit ?limit is a capped test run (no pre-match placements).
+        return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
         return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials' }, 400)
@@ -1316,7 +1318,7 @@ export async function matchUnlinkedInvoices(client: any) {
 
 async function ingestMaterialsActuals(
   sb: any,
-  opts: { windowDays?: number; limit?: number; config?: MatchConfig } = {},
+  opts: { windowDays?: number; limit?: number; capped?: boolean; config?: MatchConfig } = {},
 ) {
   const windowDays = opts.windowDays ?? 90
   const limit = opts.limit ?? 500
@@ -1689,7 +1691,11 @@ async function ingestMaterialsActuals(
     // and place the confident ones. Isolated: it can never fail the ingest.
     let prematch: unknown
     try {
-      prematch = await runBillPrematch(sb, { orgId: DEFAULT_ORG_ID })
+      // A capped manual run (?limit=N) is a test of the ingest only: it never
+      // starts the organisation-wide pre-match and its placements.
+      prematch = opts.capped
+        ? { ran: false, reason: 'capped_manual_run' }
+        : await runBillPrematch(sb, { orgId: DEFAULT_ORG_ID })
     } catch (e: any) {
       if (e instanceof XeroCooldownError) throw e
       prematch = { ran: false, reason: 'error', error: (e as Error).message }
