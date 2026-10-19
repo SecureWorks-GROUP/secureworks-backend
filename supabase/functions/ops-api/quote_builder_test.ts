@@ -2908,3 +2908,20 @@ Deno.test("quote builder: the purchase order press has its own switch; the crew 
   assertEquals(store.purchase_orders.length, 0);
   assertEquals(store.quote_builder_order_marks.filter((m) => m.kind === "purchase_orders").length, 0);
 });
+
+Deno.test("quote builder: an unreadable purchase order switch reads as off", async () => {
+  const { store, issued } = await issuedForOrders();
+  const unreadable = makeFakeClient(store, {
+    selectError: (table) => table === "feature_flags" ? { message: "flags unreadable" } : null,
+  }).client;
+  assertEquals(
+    await makeQuoteBuilderPurchaseOrders(unreadable, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
+    "quote_builder_purchase_orders_off",
+  );
+  store.feature_flags = [];
+  assertEquals(
+    await makeQuoteBuilderPurchaseOrders(makeFakeClient(store).client, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
+    "quote_builder_purchase_orders_off",
+  );
+  assertEquals(store.purchase_orders.length, 0);
+});
