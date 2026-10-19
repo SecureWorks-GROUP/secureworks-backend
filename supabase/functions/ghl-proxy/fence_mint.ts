@@ -799,6 +799,26 @@ export async function linkFenceQuoteOption(args: {
   return { ok: true, groupId };
 }
 
+/**
+ * SQ-23 route A guard switch, fence_same_site_guard_v1, seeded off. Off,
+ * missing or unreadable means no refusal (the behaviour before SQ-23): the
+ * fencing callers of create_job and create_contact_and_opportunity (the
+ * patio repo's shared fence entry) do not show the chooser yet, so the guard
+ * must not refuse their saves until they do.
+ */
+export async function fenceSameSiteGuardOn(
+  read: () => PromiseLike<{ data: unknown; error: unknown }>,
+): Promise<boolean> {
+  try {
+    const { data, error } = await read();
+    if (error) return false;
+    const row = Array.isArray(data) ? data[0] : data;
+    return (row as { enabled?: unknown } | null)?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Normalised site key for the same-site check: letters and digits, lower case. */
 // The street address as words: lower case, every run of punctuation or space
 // one space, so "1/23 Smith St" (unit 1 of 23) never equals "123 Smith St".
@@ -829,8 +849,9 @@ export function openSameSiteFenceJobs(
     if (j.superseded_at) return false;
     if (!["draft", "quoted"].includes(String(j.status || "draft"))) return false;
     if (fenceSiteKey(j.site_address) !== site) return false;
-    // Same street in two suburbs is two sites; a missing suburb is not a clash.
-    const theirs = suburbKey(j.site_suburb);
-    return !area || !theirs || area === theirs;
+    // Same street in two suburbs is two sites. A suburb missing on one side
+    // only is not a match (no wildcard); with none on either side the street
+    // address alone decides (CIO, 19 Oct 2026).
+    return suburbKey(j.site_suburb) === area;
   }).map((j) => ({ id: j.id, jobNumber: j.job_number ?? null, status: j.status ?? null }));
 }

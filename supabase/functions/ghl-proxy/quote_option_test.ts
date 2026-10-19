@@ -2,6 +2,7 @@
 // change: mint input rules, the link call and the route A same-site guard.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  fenceSameSiteGuardOn,
   fenceMintFingerprint,
   FenceMintError,
   fenceSiteKey,
@@ -125,9 +126,11 @@ Deno.test("SQ-23 route A: only an open fence job at the same street address stop
     // A unit on the same street: another site.
     { id: "7", job_number: "SWF-7", status: "quoted", site_address: "1/23 Smith St" },
   ];
-  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA", "Perth").map((j) => j.id), ["1", "2"]);
-  // No suburb on the new save: a missing suburb is not a clash.
-  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA").map((j) => j.id), ["1", "2", "6"]);
+  // A suburb on one side only is not a match: job 2 has none.
+  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA", "Perth").map((j) => j.id), ["1"]);
+  // No suburb on either side: the street address alone decides.
+  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA").map((j) => j.id), ["2"]);
+  assertEquals(openSameSiteFenceJobs(jobs, "1 Test St, Perth WA", " perth ").map((j) => j.id), ["1"]);
   assertEquals(openSameSiteFenceJobs(jobs, "9 Other Rd Perth WA").map((j) => j.id), ["5"]);
   assertEquals(openSameSiteFenceJobs(jobs, "123 Smith St"), []);
   assertEquals(openSameSiteFenceJobs(jobs, "12 New Ave"), []);
@@ -135,6 +138,25 @@ Deno.test("SQ-23 route A: only an open fence job at the same street address stop
   assertEquals(openSameSiteFenceJobs(jobs, ""), []);
   assertEquals(fenceSiteKey("1/23 Smith St"), "1 23 smith st");
   assert(fenceSiteKey("1/23 Smith St") !== fenceSiteKey("123 Smith St"));
+});
+
+Deno.test("SQ-23 route A guard is off unless its switch reads true", async () => {
+  assertEquals(await fenceSameSiteGuardOn(() => Promise.resolve({ data: { enabled: true }, error: null })), true);
+  assertEquals(await fenceSameSiteGuardOn(() => Promise.resolve({ data: { enabled: false }, error: null })), false);
+  assertEquals(await fenceSameSiteGuardOn(() => Promise.resolve({ data: null, error: null })), false);
+  assertEquals(await fenceSameSiteGuardOn(() => Promise.resolve({ data: null, error: { message: "x" } })), false);
+  assertEquals(await fenceSameSiteGuardOn(() => Promise.reject(new Error("down"))), false);
+});
+
+Deno.test("SQ-23: a busy group is its own code, so the scoper retries", async () => {
+  const busy = await linkFenceQuoteOption({
+    rpc: () => Promise.resolve({ data: null, error: { code: "55P03", message: "quote_option_busy" } }),
+    jobId: OTHER,
+    optionOfJobId: EXISTING,
+    label: null,
+    actorId: "actor",
+  });
+  assertEquals(busy, { ok: false, code: "quote_option_busy" });
 });
 
 Deno.test("SQ-23: a link whose call throws is a refusal code, not an exception", async () => {

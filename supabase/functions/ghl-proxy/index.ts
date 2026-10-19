@@ -91,6 +91,7 @@ import {
   type FenceMintContact,
   FenceMintError,
   linkFenceQuoteOption,
+  fenceSameSiteGuardOn,
   openSameSiteFenceJobs,
   type FenceMintOpportunity,
   type FenceMintProgress,
@@ -2594,7 +2595,9 @@ serve(async (req: Request) => {
       // a new opportunity, so the guard above never matches). Refuse and let
       // the scoper choose: open that job, another option of its quote, or a
       // new job (repeatConfirmed).
-      if (resolvedType === 'fencing' && body.contactId && body.repeatConfirmed !== true) {
+      if (resolvedType === 'fencing' && body.contactId && body.repeatConfirmed !== true &&
+          await fenceSameSiteGuardOn(() => sb.from('feature_flags').select('enabled')
+            .eq('flag_name', 'fence_same_site_guard_v1').maybeSingle())) {
         const { data: theirs, error: theirsError } = await sb.from('jobs')
           .select('id, job_number, status, site_address, site_suburb, superseded_at')
           .eq('org_id', orgId)
@@ -2644,6 +2647,9 @@ serve(async (req: Request) => {
           ? authProfile?.org_id
           : PRODUCTION_DEFAULT_ORG_ID
         const sbGuard = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const guardOn = await fenceSameSiteGuardOn(() => sbGuard.from('feature_flags').select('enabled')
+          .eq('flag_name', 'fence_same_site_guard_v1').maybeSingle())
+        if (!guardOn) return null
         const { data: theirs, error: theirsError } = await sbGuard.from('jobs')
           .select('id, job_number, status, site_address, site_suburb, superseded_at')
           .eq('org_id', orgId)
