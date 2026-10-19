@@ -95,7 +95,7 @@ workings, purchase orders in one wave; then the chosen suppliers' contacts).
 |---|---|
 | `suppliers` | In `position` order. `name` and `email` from the supplier contact as it is now (email trimmed, null when blank). A contact that is gone or not active: `name` is the stored `supplier_name`, `email` null, `active` false. |
 | `lines` | Every line on the job, in `position` order, paged past the 1,000-row ceiling. `quantity` is a number or null. |
-| `can_suggest` | True only when the work type is `patio` and the job has no line at all. |
+| `can_suggest` | True only when the work type is `patio` or `fencing` and the job has no line at all (the press answers `no_frozen_scope` when there is no frozen revision). |
 | `workings` | Every field null when the job has no row yet. This is the only read that returns `sketch_png`. |
 | `orders` | The job's purchase orders, every status except `deleted`, oldest first. Only `id, po_number, supplier_name, status, created_at, line_items` are selected. Each stored line is flattened to `description`, `quantity` and `unit` (null where the line has none; text and numbers as stored). No price, total, account code or tax field is returned. Never written. |
 | `orders_status` | `failed` when the orders read failed: then there is no `orders` key and the lines still show. |
@@ -157,8 +157,14 @@ A contact with no email can be chosen; nothing is blocked.
 
 ### `dispatch_materials_suggest` `{ job_id, supplier_id }`
 
-Reads the job's `scope_json` once (a single-job read; `pricing_json` is never
-selected), runs `extractMaterialsFromScope(scope_json, null)` unchanged, and
+Since 19 Oct 2026 the scope is the job's latest **frozen** `scope_revisions`
+row (`scope_canonical_text`, the same scoper JSON), never the live
+`jobs.scope_json` (a draft revision can sit after the frozen one). No frozen
+revision is 409 `no_frozen_scope`; text that is not JSON is 409
+`scope_unreadable`. The answer adds `scope_revision_number`. Fencing jobs use
+the fence designer's rules (`docs/dispatch-fence-scope-lines-v1.md`); a patio
+reads its frozen scope once (`pricing_json` is never
+selected), runs `extractMaterialsFromScope(scope, null)` unchanged, and
 inserts one line per item under that supplier with `source: 'scope'` and
 `status: 'not_reviewed'`. With null pricing the extractor's quote-lines fallback
 cannot run, so a customer's quote line and its price never become a material
@@ -179,7 +185,8 @@ description is dropped.
 |---|---|
 | Lines added | `{ success, added: <n>, lines: [...], counts }` |
 | The scope gives nothing | `{ success, added: 0, lines: [], counts }` |
-| Work type not `patio` (a fencing job with a patio-shaped scope included) | 409 `no_suggestion_for_work_type` |
+| Work type not `patio` or `fencing` | 409 `no_suggestion_for_work_type` |
+| No frozen scope revision (a live scope alone included) | 409 `no_frozen_scope` |
 | Supplier not on the job | 409 `supplier_not_on_job` |
 | The job already has any line, including a second press landing at the same time | 409 `lines_exist` |
 | The extractor throws on the stored scope | 409 `scope_unreadable` (never `added: 0`) |

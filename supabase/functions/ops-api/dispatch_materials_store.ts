@@ -925,21 +925,21 @@ async function suggestedLineId(jobId: string, index: number) {
   }-${hex.slice(20)}`;
 }
 
-// A fencing job's offer comes from its latest FROZEN scope revision, the
-// one the accepted quote and the crew work order are built from, never the
-// live working copy on jobs.scope_json (a draft revision can sit after the
-// frozen one). No frozen revision is a refusal, not a guess.
-type FenceOffer = {
+// A job's offer comes from its latest FROZEN scope revision, the one the
+// accepted quote and the crew work order are built from, never the live
+// working copy on jobs.scope_json (a draft revision can sit after the frozen
+// one). No frozen revision is a refusal, not a guess. Fencing and patio alike.
+type ScopeOffer = {
   lines: DispatchSuggestedLine[];
-  held: string[];
+  held: string[] | null;
   scope_supplier: string | null;
   revision: number;
 };
 
-async function readFrozenFenceOffer(
+async function readFrozenScope(
   client: any,
   jobId: string,
-): Promise<FenceOffer> {
+): Promise<{ scope: any; revision: number }> {
   const { data: revision, error } = await client.from("scope_revisions")
     .select("revision_number, scope_canonical_text")
     .eq("job_id", jobId)
@@ -963,6 +963,14 @@ async function readFrozenFenceOffer(
   } catch {
     scope = null;
   }
+  return { scope, revision: Number(revision.revision_number) };
+}
+
+async function readFrozenFenceOffer(
+  client: any,
+  jobId: string,
+): Promise<ScopeOffer> {
+  const { scope, revision } = await readFrozenScope(client, jobId);
   const offer = fenceScopeSuggestedLines(scope);
   if (!offer.ok) {
     throw new DispatchMaterialsError(
@@ -988,18 +996,53 @@ async function readFrozenFenceOffer(
     lines: offer.lines,
     held,
     scope_supplier: offer.scope_supplier,
-    revision: Number(revision.revision_number),
+    revision,
   };
 }
 
-function fenceOfferFields(fence: FenceOffer | null) {
-  return fence
-    ? {
-      scope_revision_number: fence.revision,
-      scope_supplier: fence.scope_supplier,
-      held: fence.held,
-    }
-    : {};
+// A patio's frozen revision holds the same scoper JSON as jobs.scope_json, so
+// the patio extractor runs on it unchanged. Its pricing is never passed: with
+// null pricing the extractor's quote-lines fallback cannot run, so a
+// customer's quote line and its price can never become a material line.
+async function readFrozenPatioOffer(
+  client: any,
+  jobId: string,
+  ctx: DispatchMaterialsContext,
+): Promise<ScopeOffer> {
+  const { scope, revision } = await readFrozenScope(client, jobId);
+  if (!scope || typeof scope !== "object") {
+    throw new DispatchMaterialsError(
+      409,
+      "scope_unreadable",
+      "The job's frozen scope could not be read (not_json)",
+    );
+  }
+  let items: any[];
+  try {
+    items = ctx.extractMaterialsFromScope(scope, null);
+  } catch (error) {
+    console.error("[dispatch_materials] scope could not be read:", error);
+    throw new DispatchMaterialsError(
+      409,
+      "scope_unreadable",
+      "The job's frozen scope could not be read",
+    );
+  }
+  return {
+    lines: dispatchSuggestedLines(items),
+    held: null,
+    scope_supplier: null,
+    revision,
+  };
+}
+
+function offerFields(offer: ScopeOffer) {
+  return {
+    scope_revision_number: offer.revision,
+    ...(offer.held
+      ? { scope_supplier: offer.scope_supplier, held: offer.held }
+      : {}),
+  };
 }
 
 export async function suggestDispatchMaterialLines(
@@ -1027,40 +1070,16 @@ export async function suggestDispatchMaterialLines(
     );
   }
 
-  let suggested: DispatchSuggestedLine[];
-  let fence: FenceOffer | null = null;
-  if (job.work_type === "fencing") {
-    fence = await readFrozenFenceOffer(client, job.id);
-    suggested = fence.lines;
-  } else {
-    // One single-job read of the scope, and never the pricing: with null
-    // pricing the extractor's quote-lines fallback cannot run, so a customer's
-    // quote line and its price can never become a material line.
-    const { data: scopeRow, error: scopeError } = await client.from("jobs")
-      .select("id, scope_json")
-      .eq("id", job.id)
-      .eq("org_id", ctx.orgId)
-      .maybeSingle();
-    if (scopeError) readFailed("scope read", scopeError);
-    let items: any[];
-    try {
-      items = ctx.extractMaterialsFromScope(scopeRow?.scope_json ?? null, null);
-    } catch (error) {
-      console.error("[dispatch_materials] scope could not be read:", error);
-      throw new DispatchMaterialsError(
-        409,
-        "scope_unreadable",
-        "The job's scope could not be read",
-      );
-    }
-    suggested = dispatchSuggestedLines(items);
-  }
+  const offer = job.work_type === "fencing"
+    ? await readFrozenFenceOffer(client, job.id)
+    : await readFrozenPatioOffer(client, job.id, ctx);
+  const suggested = offer.lines;
   if (suggested.length === 0) {
     return {
       success: true,
       added: 0,
       lines: [],
-      ...fenceOfferFields(fence),
+      ...offerFields(offer),
       counts: await readJobCounts(client, job.id),
     };
   }
@@ -1108,7 +1127,7 @@ export async function suggestDispatchMaterialLines(
     success: true,
     added: insertedRows.length,
     lines: insertedRows.map((row: any) => projectDispatchMaterialLine(row)),
-    ...fenceOfferFields(fence),
+    ...offerFields(offer),
     counts: await readJobCounts(client, job.id),
   };
 }
