@@ -1661,7 +1661,19 @@ async function handleForward(body: Record<string, unknown>): Promise<Response> {
       }),
     ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
   }
-  const forwardRecipient = sendRecipientMetadata({ recipients: to })
+  let forwardBcc: string[] = []
+  let forwardBccUnreadable = false
+  try {
+    forwardBcc = splitRecipientInput(body.bcc, 'bcc')
+  } catch {
+    forwardBccUnreadable = true
+  }
+  const forwardRecipient = sendRecipientMetadata({
+    recipients: to,
+    cc,
+    bcc: forwardBcc,
+    uncertainExtra: forwardBccUnreadable,
+  })
   Promise.resolve(
     sb.from('email_events').insert({
       email_type: 'forward',
@@ -2128,9 +2140,21 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           }),
         ).catch((e: any) => console.log('[send-outlook-email] po_comms log failed:', e?.message))
       }
+      let clientEmail: unknown = null
+      if (typeof body.job_id === 'string' && body.job_id) {
+        const { data: clientJob, error: clientJobErr } = await sb.from('jobs')
+          .select('client_email')
+          .eq('id', body.job_id)
+          .maybeSingle()
+        if (!clientJobErr) clientEmail = clientJob?.client_email ?? null
+      }
       const clientRecipient = sendRecipientMetadata({
         recipients: to,
+        cc,
+        bcc,
         contactId: body.ghl_contact_id,
+        clientEmail,
+        matchCustomer: true,
       })
       Promise.resolve(
         sb.from('email_events').insert({

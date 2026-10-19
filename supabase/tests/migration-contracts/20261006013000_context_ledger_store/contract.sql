@@ -167,8 +167,9 @@ BEGIN
  -- and context_ledger_record_uuid, context_ledger_record_trim and context_ledger_record_money
  -- are plain SQL with no SET, read inside the definer packet; and by send recipient
  -- fields, 20261019140000: context_ledger_record_email, context_ledger_record_contact,
- -- context_ledger_record_xero_date and context_ledger_record_invoice_money are plain
- -- SQL with no SET, read inside the definer record-link function)
+ -- context_ledger_record_xero_date, context_ledger_record_invoice_money and
+ -- context_ledger_record_send_recipient are plain SQL with no SET, read inside
+ -- the definer record-link function)
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
@@ -177,7 +178,8 @@ BEGIN
     'context_ledger_record_invoice_about', 'context_ledger_record_link_about', 'context_ledger_record_uuid',
     'context_ledger_record_trim', 'context_ledger_record_money',
     'context_ledger_record_email', 'context_ledger_record_contact',
-    'context_ledger_record_xero_date', 'context_ledger_record_invoice_money') THEN
+    'context_ledger_record_xero_date', 'context_ledger_record_invoice_money',
+    'context_ledger_record_send_recipient') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');

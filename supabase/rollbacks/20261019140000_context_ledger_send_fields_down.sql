@@ -208,6 +208,7 @@ $fn$;
 COMMENT ON FUNCTION public.context_ledger_evidence_record_links(uuid, timestamptz, jsonb) IS
  'Ledger packet records (20261018120000): the records array for each worded source, built only from stored ids. No row when a source has no link the reader would accept.';
 
+DROP FUNCTION IF EXISTS public.context_ledger_record_send_recipient(text, text, jsonb);
 DROP FUNCTION IF EXISTS public.context_ledger_record_invoice_money(text, text, text, numeric, numeric, numeric, jsonb);
 DROP FUNCTION IF EXISTS public.context_ledger_record_xero_date(text);
 DROP FUNCTION IF EXISTS public.context_ledger_record_email(text);

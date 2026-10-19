@@ -36096,7 +36096,7 @@ async function reconcilePayment(client: any, body: any) {
   const { invoice_id, amount, payment_date, reference, account_code } = body
 
   if (!invoice_id || !amount) throw new Error('invoice_id and amount required')
-  const gated = await assertLegacySesInvoiceActionAllowed(
+  await assertLegacySesInvoiceActionAllowed(
     client,
     invoice_id,
     'reconcile_payment',
@@ -36168,20 +36168,21 @@ async function reconcilePayment(client: any, body: any) {
     console.log('[ops-api] cache update after payment failed:', e)
   }
 
-  // Log the payment event. job_events.job_id is NOT NULL; the gate already
-  // resolved it. PostgREST returns the error and does not throw.
-  const { error: paymentEventErr } = await client.from('job_events').insert({
-    job_id: gated.job_id,
-    event_type: 'payment_recorded',
-    detail_json: {
-      invoice_id,
-      payment_id: payment.PaymentID,
-      amount: Number(amount),
-      reference,
-      account_code: bankAccountCode,
-    },
-  })
-  if (paymentEventErr) console.log('[ops-api] payment_recorded insert failed:', paymentEventErr.message)
+  // Log the payment event. This insert has no job_id, and job_events.job_id
+  // is NOT NULL, so the row does not land. Restored on purpose: a live
+  // money-path insert waits on docs/reconcile-payment-insert-proposal.md.
+  try {
+    await client.from('job_events').insert({
+      event_type: 'payment_recorded',
+      detail_json: {
+        invoice_id,
+        payment_id: payment.PaymentID,
+        amount: Number(amount),
+        reference,
+        account_code: bankAccountCode,
+      },
+    })
+  } catch { /* non-blocking */ }
 
   return {
     success: true,

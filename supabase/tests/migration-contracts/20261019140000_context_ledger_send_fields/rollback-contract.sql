@@ -6,7 +6,8 @@ BEGIN
  IF to_regprocedure('public.context_ledger_record_email(text)') IS NOT NULL
   OR to_regprocedure('public.context_ledger_record_contact(text)') IS NOT NULL
   OR to_regprocedure('public.context_ledger_record_xero_date(text)') IS NOT NULL
-  OR to_regprocedure('public.context_ledger_record_invoice_money(text,text,text,numeric,numeric,numeric,jsonb)') IS NOT NULL THEN
+  OR to_regprocedure('public.context_ledger_record_invoice_money(text,text,text,numeric,numeric,numeric,jsonb)') IS NOT NULL
+  OR to_regprocedure('public.context_ledger_record_send_recipient(text,text,jsonb)') IS NOT NULL THEN
   RAISE EXCEPTION 'ledger send fields rollback: a helper is still there';
  END IF;
  note := coalesce(obj_description(to_regprocedure('public.context_ledger_evidence_record_links(uuid,timestamptz,jsonb)'), 'pg_proc'), '');

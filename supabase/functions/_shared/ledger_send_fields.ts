@@ -30,18 +30,31 @@ export function customerContactForAddress(
   return knownContactId(contactId)
 }
 
+// several_recipients is explicit. One address across to, cc and bcc is false.
+// Any other count is true. Zero addresses, with nothing unreadable, omits the
+// flag. contact_id is added only on that single address.
 export function sendRecipientMetadata(input: {
-  recipients: readonly unknown[]
+  recipients?: readonly unknown[]
+  cc?: readonly unknown[]
+  bcc?: readonly unknown[]
   contactId?: unknown
   clientEmail?: unknown
   matchCustomer?: boolean
-}): Record<string, string | boolean> {
-  const recipients = input.recipients ?? []
-  if (recipients.length !== 1) {
-    return recipients.length > 1 ? { several_recipients: true } : {}
-  }
+  uncertainExtra?: boolean
+}): Record<string, string | boolean | string[]> {
+  const to = input.recipients ?? []
+  const cc = (input.cc ?? []).filter((value): value is string => typeof value === "string")
+  const bcc = (input.bcc ?? []).filter((value): value is string => typeof value === "string")
+  const count = to.length + cc.length + bcc.length
+  if (count === 0 && !input.uncertainExtra) return {}
+  const several = input.uncertainExtra === true || count !== 1
+  const meta: Record<string, string | boolean | string[]> = { several_recipients: several }
+  if (cc.length) meta.cc_emails = cc
+  if (bcc.length) meta.bcc_emails = bcc
+  if (several) return meta
   const contact = input.matchCustomer
-    ? customerContactForAddress(recipients[0], input.clientEmail, input.contactId)
+    ? customerContactForAddress(to[0], input.clientEmail, input.contactId)
     : knownContactId(input.contactId)
-  return contact ? { contact_id: contact } : {}
+  if (contact) meta.contact_id = contact
+  return meta
 }
