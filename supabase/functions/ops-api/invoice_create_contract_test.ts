@@ -25,6 +25,7 @@ const {
   _updateJobStatus: updateJobStatus,
   _xeroPostForTest: xeroPost,
 } = await import("./index.ts");
+const { makeFakeClaimStore } = await import("../_shared/outbound_send_claim_fake.ts");
 if (savedServiceKey === undefined) Deno.env.delete("SUPABASE_SERVICE_ROLE_KEY");
 else Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", savedServiceKey);
 if (savedSupabaseUrl === undefined) Deno.env.delete("SUPABASE_URL");
@@ -54,7 +55,10 @@ function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJ
     metadata: {},
     ghl_opportunity_id: "fixture-opportunity",
   };
+  // The invoice email claim (outbound_send_claims) every invoice email holds.
+  const claims = makeFakeClaimStore();
   const client = {
+    rpc: (fn: string, args?: Record<string, unknown>) => claims.rpc(fn, args),
     from(table: string) {
       let updated = {};
       const filters: Record<string, string> = {};
