@@ -320,8 +320,8 @@ BEGIN
  END LOOP;
 END $c$;
 
--- 3 to 5. The 38 fixtures, four review r2 traps (39 to 42), seven review r3 traps (43 to 49) and five
--- review r4 traps (50 to 54).
+-- 3 to 5. The 38 fixtures, four review r2 traps (39 to 42), seven review r3 traps (43 to 49), five
+-- review r4 traps (50 to 54) and nine review r5 traps (55 to 63).
 BEGIN;
 DO $c$
 DECLARE j uuid; j2 uuid; j3 uuid; own uuid; nb uuid; nb2 uuid; e1 uuid; e2 uuid; e3 uuid; x1 uuid; x2 uuid; x3 uuid; t1 timestamptz := '2026-09-01 02:00Z';
@@ -423,7 +423,8 @@ BEGIN
   jsonb_build_array(pg_temp.sp_cb(e1, 'The gate latch sticks when it is closed.')), jsonb_build_array(pg_temp.sp_c('job_events', x1)), 'O', NULL);
  PERFORM pg_temp.sp_fx_add(13, j, 'commitment', 'work_done', 'completion', 'us', 'We will finish the install next week.',
   jsonb_build_array(pg_temp.sp_cb(e2, 'We will finish the install next week.')), jsonb_build_array(pg_temp.sp_c('job_events', x1)), 'C', NULL);
- -- 14 to 16. A staff member's own note on a job done and paid (the stored close-out outcome).
+ -- 14 to 16. A staff member's own note on a job done and paid (the stored close-out outcome). 16: the
+ -- customer's own reply is never certain (review r5, M10), so the settled job decides.
  j := pg_temp.sp_job(14, 1, 'SWF-90014', 'fencing', 'complete');
  INSERT INTO public.job_closeout_state (job_id, outcome) VALUES (j, 'paid');
  own := pg_temp.sp_party(14, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
@@ -437,7 +438,7 @@ BEGIN
   jsonb_build_array(pg_temp.sp_cb(e2, 'The supplier confirmed the Monument colour.')), 'C', 'closes');
  PERFORM pg_temp.sp_fx_add(16, j, 'commitment', 'person', NULL, 'us', 'Confirm the colour choice with the supplier.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'I will confirm the colour with the supplier.')),
-  jsonb_build_array(pg_temp.sp_cb(e3, 'The colour is fine thanks.')), 'O', 'other_person');
+  jsonb_build_array(pg_temp.sp_cb(e3, 'The colour is fine thanks.')), 'O?', 'job_finished_and_paid');
  -- 17. The deposit was paid before the automated reminder that raised the request.
  j := pg_temp.sp_job(17, 1, 'SWF-90017');
  own := pg_temp.sp_party(17, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
@@ -619,7 +620,8 @@ BEGIN
  x1 := pg_temp.sp_inv(40, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90044-FIN', 'Balance of the fence', 1000, 1000, 0, NULL, own, 'XC-OWN', NULL, '2026-09-06');
  PERFORM pg_temp.sp_fx_add(40, j, 'commitment', 'person', NULL, 'us', 'Send the owner the colour chart.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'I will send the owner the colour chart.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'record_not_person');
- -- 41 and 42 (M3). Our own message with no named sender: a later row of ours closes it, a customer's never.
+ -- 41 and 42 (M3). Our own message with no named sender: a later row of ours closes it, a customer's never
+ -- (and, being the customer the item is owed to, never certainly: review r5, M10).
  j := pg_temp.sp_job(41, 1, 'SWF-90045');
  own := pg_temp.sp_party(41, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
  e1 := pg_temp.sp_ev(41, 1, j, 'client.sms_out', 'sms', 'outbound', 'We will book the install date by Friday.', tn, 'G-OWN');
@@ -630,7 +632,7 @@ BEGIN
   jsonb_build_array(pg_temp.sp_cb(e2, 'Your install is booked for Tuesday the 8th.')), 'C', 'closes');
  PERFORM pg_temp.sp_fx_add(42, j, 'commitment', 'person', NULL, 'us', 'Book the install date by the Friday.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'We will book the install date by Friday.')),
-  jsonb_build_array(pg_temp.sp_cb(e3, 'Tuesday works for us, thanks.')), 'O', 'other_person');
+  jsonb_build_array(pg_temp.sp_cb(e3, 'Tuesday works for us, thanks.')), 'O?', 'released_by_obligee');
  -- Review r3 traps.
  -- 43 (M4). The item names its deposit invoice, which is paid; the balance invoice is owed: closes.
  j := pg_temp.sp_job(43, 1, 'SWF-90046');
@@ -733,7 +735,88 @@ BEGIN
  PERFORM pg_temp.sp_fx_add(54, j, 'commitment', 'payment', 'deposit', 'customer', 'The owner will pay the deposit on Friday.',
   jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the deposit on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'payer_contact_not_on_job',
   'payment:deposit');
- PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 54, 'the 54 fixtures');
+ -- Review r5 traps (M9, M10, known uncertainty).
+ -- 55 (M9). Fixture 3 reversed: the owner's own deposit paid and cited, the neighbour's deposit owed: closes.
+ j := pg_temp.sp_job(55, 1, 'SWF-90058');
+ own := pg_temp.sp_party(55, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(55, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(55, 1, j, 'I will pay my deposit on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(55, 1, j, 'ACCREC', 'PAID', 'SWF-90058-DEP', 'Deposit 30%', 900, 0, 900, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(55, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90058-B-DEP', 'Deposit 30%', 900, 900, 0, NULL, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(55, j, 'commitment', 'payment', 'deposit', 'customer', 'The owner will pay their deposit on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my deposit on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'C', 'closes',
+  'payment:deposit');
+ -- 56 (M9). Fixture 26 reversed, about the owner's own invoice number: closes.
+ j := pg_temp.sp_job(56, 1, 'SWF-90059');
+ own := pg_temp.sp_party(56, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(56, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(56, 1, j, 'I will pay my half of the fence on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(56, 1, j, 'ACCREC', 'PAID', 'SWF-90059-FIN', 'Balance of the fence', 2400, 0, 2400, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(56, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90059-B-FIN', 'Balance of the fence', 2400, 2400, 0, NULL, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(56, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay their half of the fence on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my half of the fence on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'C', 'closes',
+  'invoice:inv-90561');
+ -- 57 (M9). The owner's own deposit cited and still owed (the neighbour's paid): open and certain.
+ j := pg_temp.sp_job(57, 1, 'SWF-90060');
+ own := pg_temp.sp_party(57, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(57, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_text(57, 1, j, 'I will pay my deposit on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(57, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90060-DEP', 'Deposit 30%', 900, 900, 0, NULL, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(57, 2, j, 'ACCREC', 'PAID', 'SWF-90060-B-DEP', 'Deposit 30%', 900, 0, 900, paid, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(57, j, 'commitment', 'payment', 'deposit', 'customer', 'The owner will pay their deposit on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my deposit on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O', 'invoice_unpaid',
+  'payment:deposit');
+ -- 58 (M9). The owner's own deposit paid and cited; the only owed deposit has a payer not on the job: not certain.
+ j := pg_temp.sp_job(58, 1, 'SWF-90061');
+ own := pg_temp.sp_party(58, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_text(58, 1, j, 'I will pay my deposit on Friday.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(58, 1, j, 'ACCREC', 'PAID', 'SWF-90061-DEP', 'Deposit 30%', 900, 0, 900, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(58, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90061-DEP2', 'Deposit 30%', 900, 900, 0, NULL, NULL, 'XC-ELSE');
+ PERFORM pg_temp.sp_fx_add(58, j, 'commitment', 'payment', 'deposit', 'customer', 'The owner will pay their deposit on Friday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay my deposit on Friday.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'same_kind_payer_unproven',
+  'payment:deposit');
+ -- 59 (M9, the reported shape). Our own note on every payer's deposit, the owner's paid and cited, the
+ -- second party's owed and never cited: which party's deposit it is is not known, never certain.
+ j := pg_temp.sp_job(59, 1, 'SWF-90062');
+ own := pg_temp.sp_party(59, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN'); nb := pg_temp.sp_party(59, 2, j, 'nb-1', 'neighbour', false, 'G-NB1', 'XC-NB1');
+ e1 := pg_temp.sp_note(59, 1, j, 'Chase the fence deposit.', t1);
+ x1 := pg_temp.sp_inv(59, 1, j, 'ACCREC', 'PAID', 'SWF-90062-DEP', 'Deposit 30%', 900, 0, 900, paid, own, 'XC-OWN');
+ x2 := pg_temp.sp_inv(59, 2, j, 'ACCREC', 'AUTHORISED', 'SWF-90062-B-DEP', 'Deposit 30%', 900, 900, 0, NULL, nb, 'XC-NB1');
+ PERFORM pg_temp.sp_fx_add(59, j, 'commitment', 'payment', 'deposit', 'us', 'Chase the fence deposit.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'Chase the fence deposit.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'other_invoice_owed',
+  'payment:deposit');
+ -- 60 (M10). The customer the item is owed to, with no release words, gives it to someone else: never certain.
+ j := pg_temp.sp_job(60, 1, 'SWF-90063');
+ own := pg_temp.sp_party(60, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_ev(60, 1, j, 'client.sms_out', 'sms', 'outbound', 'We will send the crew to fix the gate on Monday.', t1, 'G-OWN');
+ e2 := pg_temp.sp_text(60, 2, j, 'Another contractor is doing the gate now.', '2026-09-03 03:00Z', 'G-OWN');
+ PERFORM pg_temp.sp_fx_add(60, j, 'commitment', 'person', NULL, 'us', 'Send the crew to fix the gate on Monday.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'We will send the crew to fix the gate on Monday.')),
+  jsonb_build_array(pg_temp.sp_cb(e2, 'Another contractor is doing the gate now.')), 'O?', 'released_by_obligee');
+ -- 61 (M10). Another of our people, not the one who promised: open and certain (other_person), unchanged.
+ j := pg_temp.sp_job(61, 1, 'SWF-90064');
+ own := pg_temp.sp_party(61, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_note(61, 1, j, 'I will call the supplier about the gate.', t1, 'ghl-s1');
+ e2 := pg_temp.sp_note(61, 2, j, 'Called the supplier about the gate.', '2026-09-03 03:00Z', 'ghl-s2');
+ PERFORM pg_temp.sp_fx_add(61, j, 'commitment', 'person', NULL, 'us', 'Call the supplier about the gate.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will call the supplier about the gate.')),
+  jsonb_build_array(pg_temp.sp_cb(e2, 'Called the supplier about the gate.')), 'O', 'other_person');
+ -- 62 (known uncertainty). The only owed invoice is to a company Xero contact that is no party on the job:
+ -- payer not certain, never widened to certain.
+ j := pg_temp.sp_job(62, 1, 'SWF-90065');
+ own := pg_temp.sp_party(62, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_text(62, 1, j, 'I will pay the fence invoice next week.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(62, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90065-FIN', 'Balance of the fence', 2400, 2400, 0, NULL, NULL, 'XC-COMPANY');
+ PERFORM pg_temp.sp_fx_add(62, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay the fence invoice next week.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the fence invoice next week.')), NULL, 'O?', 'no_own_invoice',
+  'invoice:inv-90621');
+ -- 63. As 62, closed citing that company invoice, unpaid: the existing rule refuses the close
+ -- (closing_not_issued) and the open item has no invoice of the owner's: payer not certain.
+ j := pg_temp.sp_job(63, 1, 'SWF-90066');
+ own := pg_temp.sp_party(63, 1, j, 'primary', 'owner', true, 'G-OWN', 'XC-OWN');
+ e1 := pg_temp.sp_text(63, 1, j, 'I will pay the fence invoice next week.', t1, 'G-OWN');
+ x1 := pg_temp.sp_inv(63, 1, j, 'ACCREC', 'AUTHORISED', 'SWF-90066-FIN', 'Balance of the fence', 2400, 2400, 0, NULL, NULL, 'XC-COMPANY');
+ PERFORM pg_temp.sp_fx_add(63, j, 'commitment', 'payment', 'payment', 'customer', 'The owner will pay the fence invoice next week.',
+  jsonb_build_array(pg_temp.sp_cb(e1, 'I will pay the fence invoice next week.')), jsonb_build_array(pg_temp.sp_cx(x1)), 'O?', 'no_own_invoice',
+  'invoice:inv-90631');
+ PERFORM pg_temp.sp_assert((SELECT count(*) FROM sp_fx) = 63, 'the 63 fixtures');
 END $c$;
 
 -- 3. Today's answers: the bodies before this migration (its down, undone at the savepoint).
