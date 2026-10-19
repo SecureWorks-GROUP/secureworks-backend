@@ -12,6 +12,7 @@ import {
 import {
   decideQuoteOptionGroups,
   decideSupersededJob,
+  dropSupersededQuoteOptions,
   loadQuoteOptionVisibility,
   openSupersessions,
   QUOTE_OPTION_OPS_READER_FLAG,
@@ -771,4 +772,52 @@ Deno.test("daily coverage audit: a superseded quoted option is not owed a nurtur
   assertEquals(on.quote_coverage.quoted_45d, 1);
   assertEquals(on.raw_unfiltered_universe.quoted_45d, 1);
   assertEquals("quote_options" in off, false);
+});
+
+// ── Readers outside ops-api ─────────────────────────────────────────────────
+
+Deno.test("drop superseded: switch off hands the rows back untouched", async () => {
+  const rows = fixture(false).jobs;
+  const { client, calls } = makeClient(fixture(false));
+  const out = await dropSupersededQuoteOptions(client, rows);
+  assertEquals(out.rows, rows);
+  assertEquals(out.visibility.status, "off");
+  assertEquals(optionCalls(calls), []);
+});
+
+Deno.test("drop superseded: switch on leaves out only the superseded option, looking up only open rows", async () => {
+  const tables = fixture(true);
+  const { client, calls } = makeClient(tables);
+  const out = await dropSupersededQuoteOptions(client, tables.jobs, {
+    asOf: NOW,
+  });
+  assertEquals(
+    out.rows.map((r) => r.id),
+    tables.jobs.map((r) => r.id).filter((x) => x !== id(2)),
+  );
+  assertEquals(optionCalls(calls)[0].in[0], ["job_id", [id(2), id(3), id(12)]]);
+});
+
+// reporting-api and ops-ai start a server when imported, so their reads are
+// pinned at source: each named list must go through the shared rule.
+const OUTSIDE_READERS: Array<[string, number, string]> = [
+  [
+    "../daily-digest/index.ts",
+    4,
+    "deep diagnostics stale quotes, stale_followup chases, digest and daily annotations",
+  ],
+  [
+    "../reporting-api/index.ts",
+    3,
+    "sales summary, sales pipeline, sales alerts",
+  ],
+  ["../ops-ai/index.ts", 1, "revenue forecast"],
+];
+
+Deno.test("readers outside ops-api: each named list goes through the shared rule", async () => {
+  for (const [file, count, what] of OUTSIDE_READERS) {
+    const src = await Deno.readTextFile(new URL(file, import.meta.url));
+    const calls = src.match(/await dropSupersededQuoteOptions\(/g) || [];
+    assertEquals(calls.length, count, `${file}: ${what}`);
+  }
 });

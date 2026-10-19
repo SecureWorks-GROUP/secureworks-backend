@@ -23,6 +23,7 @@ import {
 import { decideReportingStaffAuth } from './reporting_staff_gate.ts'
 import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { dropSupersededQuoteOptions } from '../_shared/quote_option_reader.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -3209,7 +3210,10 @@ async function salesSummaryAction(sb: any, params: URLSearchParams) {
   )
 
   // Filter out ghost drafts (scope-tool auto-saves with no job_number)
-  const jobs = allJobs.filter((j: any) => j.status !== 'draft' || j.job_number)
+  // A quote option another option of the same quote superseded is not live
+  // work (SQ-23, _shared/quote_option_reader.ts). Switch off: unchanged.
+  const { rows: jobs } = await dropSupersededQuoteOptions(sb,
+    allJobs.filter((j: any) => j.status !== 'draft' || j.job_number))
 
   const qv = (j: any) => { const p = j.pricing_json; if (!p) return 0; return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.subtotal || 0) || 0 }
 
@@ -3350,7 +3354,10 @@ async function salesPipelineAction(sb: any, params: URLSearchParams) {
   const qv = (j: any) => { const p = j.pricing_json; if (!p) return 0; return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.subtotal || 0) || 0 }
 
   // Filter out ghost drafts (scope-tool auto-saves with no job_number)
-  const realJobs = jobs.filter((j: any) => j.status !== 'draft' || j.job_number)
+  // A quote option another option of the same quote superseded is not live
+  // work (SQ-23, _shared/quote_option_reader.ts). Switch off: unchanged.
+  const { rows: realJobs } = await dropSupersededQuoteOptions(sb,
+    jobs.filter((j: any) => j.status !== 'draft' || j.job_number))
 
   // Filter by type
   const filtered = type_filter === 'all' ? realJobs : realJobs.filter((j: any) => j.type === type_filter)
@@ -3632,10 +3639,12 @@ async function salesAlertsAction(sb: any, params: URLSearchParams) {
   const filters: Record<string, any> = { org_id: DEFAULT_ORG_ID, legacy: false }
   if (salesperson_id) filters.created_by = salesperson_id
 
-  const jobs = await fetchAll(sb, 'jobs',
+  // A quote option another option of the same quote superseded is not live
+  // work (SQ-23, _shared/quote_option_reader.ts). Switch off: unchanged.
+  const { rows: jobs } = await dropSupersededQuoteOptions(sb, await fetchAll(sb, 'jobs',
     'id, status, type, client_name, client_phone, site_suburb, pricing_json, created_at, quoted_at, accepted_at, created_by',
     filters
-  )
+  ))
 
   // Get job_events for speed-to-lead check (last 30 days of drafts)
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000).toISOString()

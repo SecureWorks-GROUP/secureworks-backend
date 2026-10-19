@@ -445,3 +445,24 @@ export function quoteOptionSummary(visibility: QuoteOptionVisibility) {
     },
   };
 }
+
+// For a reader that only needs the superseded options left out: returns the
+// rows without them. Only draft and quoted rows (or rows with no status) are
+// looked up. Switch off or a failed read: the rows come back as they were.
+export async function dropSupersededQuoteOptions(
+  client: any,
+  rows: any[],
+  options: { asOf?: string } = {},
+): Promise<{ rows: any[]; visibility: QuoteOptionVisibility }> {
+  const visibility = await loadQuoteOptionVisibility(
+    client,
+    rows.filter((r) => isOpenQuoteStatus(r?.status)),
+    options,
+  );
+  return {
+    rows: visibility.hidden.size > 0
+      ? rows.filter((r) => !visibility.hidden.has(String(r?.id)))
+      : rows,
+    visibility,
+  };
+}
