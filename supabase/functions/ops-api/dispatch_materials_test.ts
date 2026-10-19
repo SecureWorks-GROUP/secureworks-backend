@@ -27,7 +27,10 @@ import {
   DispatchMaterialsError,
   runDispatchMaterialsAction,
 } from "./dispatch_materials_store.ts";
-import { FENCE_SCOPE_CHANGED_SINCE_FROZEN } from "./dispatch_fence_scope_lines.ts";
+import {
+  FENCE_SCOPE_CHANGE_UNCHECKED,
+  FENCE_SCOPE_CHANGED_SINCE_FROZEN,
+} from "./dispatch_fence_scope_lines.ts";
 
 // index.ts reads SUPABASE_URL and the service key into module constants, so
 // they are set before it is imported (a closed local port: any real database
@@ -2216,10 +2219,10 @@ Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 pl
   }
   // The frozen revision is read; of the live scope only the runs are
   // projected (to warn on a post-freeze edit), and the pricing never.
-  // This job's live scope has no fence runs, so there is no warning.
-  assert(
-    !answer.held.some((h: string) => h.includes("changed after it was frozen")),
-  );
+  // This job's live scope has no fence runs, so nothing can be compared: the
+  // person is told it could not be checked, never that it is unchanged.
+  assert(!answer.held.includes(FENCE_SCOPE_CHANGED_SINCE_FROZEN));
+  assert(answer.held.includes(FENCE_SCOPE_CHANGE_UNCHECKED));
   const revisionReads = db.requests.filter((r) =>
     r.table === "scope_revisions"
   );
@@ -2273,6 +2276,28 @@ Deno.test("suggest fence: live runs edited after the freeze add the warning to h
       warned,
     );
   }
+});
+
+Deno.test("suggest fence: a live scope with no runs says it could not be checked; the live read is scoped to the job's org", async () => {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const fence = db.tables.jobs.find((row) => row.id === JOB.fence)!;
+  fence.scope_json = { job: {} };
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 3);
+  assert(answer.held.includes(FENCE_SCOPE_CHANGE_UNCHECKED));
+  assert(!answer.held.includes(FENCE_SCOPE_CHANGED_SINCE_FROZEN));
+  const liveReads = db.requests.filter((r) =>
+    r.table === "jobs" && r.select === "id, live_runs:scope_json->job->runs"
+  );
+  assertEquals(liveReads.length, 1);
+  assert(
+    liveReads[0].filters.some(([op, col]) => op === "eq" && col === "org_id"),
+  );
 });
 
 Deno.test("suggest fence: an unreadable frozen scope is 409 scope_unreadable and writes nothing", async () => {

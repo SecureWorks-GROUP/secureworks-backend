@@ -939,6 +939,7 @@ type FenceOffer = {
 async function readFrozenFenceOffer(
   client: any,
   jobId: string,
+  orgId: string,
 ): Promise<FenceOffer> {
   const { data: revision, error } = await client.from("scope_revisions")
     .select("revision_number, scope_canonical_text")
@@ -972,14 +973,18 @@ async function readFrozenFenceOffer(
     );
   }
   // One single-job read of the live runs only (no media, no pricing), to warn
-  // when the scope was edited after the freeze. A failed read warns too.
+  // when the scope was edited after the freeze. A failed read, or a live scope
+  // with no runs to compare, says it could not be checked.
   const held = [...offer.held];
   const { data: live, error: liveError } = await client.from("jobs")
     .select("id, live_runs:scope_json->job->runs")
     .eq("id", jobId)
+    .eq("org_id", orgId)
     .maybeSingle();
   if (liveError) {
     console.error("[dispatch_materials] live runs read failed:", liveError);
+    held.push(FENCE_SCOPE_CHANGE_UNCHECKED);
+  } else if (live?.live_runs === null || live?.live_runs === undefined) {
     held.push(FENCE_SCOPE_CHANGE_UNCHECKED);
   } else if (fenceRunsChangedSinceFrozen(scope, live?.live_runs)) {
     held.push(FENCE_SCOPE_CHANGED_SINCE_FROZEN);
@@ -1030,7 +1035,7 @@ export async function suggestDispatchMaterialLines(
   let suggested: DispatchSuggestedLine[];
   let fence: FenceOffer | null = null;
   if (job.work_type === "fencing") {
-    fence = await readFrozenFenceOffer(client, job.id);
+    fence = await readFrozenFenceOffer(client, job.id, job.org_id);
     suggested = fence.lines;
   } else {
     // One single-job read of the scope, and never the pricing: with null
