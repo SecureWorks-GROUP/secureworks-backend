@@ -2256,8 +2256,8 @@ export async function makeQuoteBuilderWorkOrder(
     const winner = await awaitOrders(client, version.id, (o) => !!o.work_order);
     if (winner) return ordersReply(version, winner);
     fail(
-      "work_order_removed",
-      "This quote's work order was made before and is not there now. Make one by hand if it is still needed.",
+      "work_order_unsettled",
+      "This quote's work order is being made or was made and removed. Check the job's work orders and reconcile them before making one by hand.",
       409,
     );
   }
@@ -2333,9 +2333,10 @@ export async function makeQuoteBuilderPurchaseOrders(
   if (!(await claimOrderMark(client, actor, version.id, "purchase_orders"))) {
     const winner = await awaitOrders(client, version.id, (o) => o.purchase_orders.length > 0);
     if (winner) return withSetCheck(ordersReply(version, winner), winner, groups.length);
+    // Not proof they were removed: the winner may still be writing them.
     fail(
-      "purchase_orders_removed",
-      "This quote's purchase orders were made before and are not there now. Make any still needed by hand.",
+      "purchase_orders_unsettled",
+      "This quote's purchase orders are being made or were made and removed. Check the job's orders and reconcile them before making any by hand.",
       409,
     );
   }

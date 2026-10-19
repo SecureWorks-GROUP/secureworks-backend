@@ -693,7 +693,17 @@ From an issued version:
   version and `quote_builder_po_seq`, the supplier group's place 1, 2, ...;
   migration `20261019183000`). The losing press's insert is refused whole and
   it returns the winner's rows. A refused insert that leaves the version with no
-  order is a `500 read_failed`, never an empty success.
+  order is a `500 read_failed`, never an empty success. Before any order, the
+  press writes the version's lasting marker (`quote_builder_order_marks`,
+  version and kind); only the press that writes it makes the orders. A press
+  that finds the marker but no rows after a short wait gets
+  `409 purchase_orders_unsettled` / `409 work_order_unsettled`: the orders are
+  being made or were removed, and staff reconcile the job's orders before
+  making any by hand. A set missing a row comes back with
+  `purchase_orders_incomplete: { expected, present, missing_seq }` and is
+  never re-made. Known limit: a make that fails part way keeps its marker, so
+  that version's orders are then made by hand (the safe side; the feature is
+  switched off and makes drafts only).
 
 With the switch on, `quote_builder_get_job` adds these keys on every version
 (drafts included): `work_order: {id, wo_number, status} | null` and

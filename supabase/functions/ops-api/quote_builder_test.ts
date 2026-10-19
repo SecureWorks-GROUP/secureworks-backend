@@ -2818,21 +2818,21 @@ Deno.test("quote builder: a set removed entirely is refused, never made a second
     status = (e as any).status;
     c = (e as any).code;
   }
-  assertEquals([status, c], [409, "purchase_orders_removed"]);
+  assertEquals([status, c], [409, "purchase_orders_unsettled"]);
   assertEquals(store.purchase_orders.length, 0);
   // The marker, not the best-effort job event, is the record: with the event
   // gone too, the set is still not made again.
   store.job_events = [];
   assertEquals(
     await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
-    "purchase_orders_removed",
+    "purchase_orders_unsettled",
   );
   // The same for the work order.
   await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
   store.work_orders = [];
   assertEquals(
     await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
-    "work_order_removed",
+    "work_order_unsettled",
   );
   assertEquals(store.work_orders.length, 0);
 });
@@ -2849,7 +2849,7 @@ Deno.test("quote builder: a set made but failing its event write is still never 
   store.purchase_orders = [];
   assertEquals(
     await makeQuoteBuilderPurchaseOrders(noEvents, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
-    "purchase_orders_removed",
+    "purchase_orders_unsettled",
   );
   assertEquals(store.purchase_orders.length, 0);
 });
