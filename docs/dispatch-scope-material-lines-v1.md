@@ -21,15 +21,19 @@ A matched supplier that is not yet on the job gets one `job_material_suppliers` 
 
 ## What is copied
 
-A line is copied only when `product_unknown` is false, `product` is set, and the supplier match is exactly one active supplier. It is inserted into `job_material_lines` with `status` `to_order` and `source` `scope`. The row carries `product`, `quantity`, `length_mm` (the piece), `stock_length_mm`, `stock_qty`, `cuts`, the matched `supplier_id`, and `scope_id` plus `demand_id`. The row id is the SHA-256 of `dispatch-scope-material:<job id>:<scope id>:<demand id>`.
+A line is copied only when `product_unknown` is false, `product` is set, the supplier match is exactly one active supplier, and no cut is longer than the stated stock bar. It is inserted into `job_material_lines` with `status` `to_order` and `source` `scope`. The row carries `product`, `quantity`, `length_mm` (the piece), `stock_length_mm`, `stock_qty`, `cuts`, the matched `supplier_id`, and `scope_id` plus `demand_id`. The row id is the SHA-256 of `dispatch-scope-material:<job id>:<scope id>:<demand id>`.
 
-`unit_price` is set only when `material_price_ledger` has a `confirmed` row whose `material_code` is the engine product id and whose `supplier_name` normalises to the matched supplier's name or a known alias. Newest `confirmed_at`, then the smaller id, wins. Pending and dismissed rows do not count. A negative or non-numeric price is skipped. Anything else stores null. A failed ledger read, or a full page at the 200-row cap, fails the apply and writes nothing.
+A stated stock length shorter than any cut is `stock_shorter_than_cut` and is not copied. This step does not choose a bar. A fence post is cut to the sheet height, plus the plinth rail, plus 600 mm in the ground: an 1800 sheet and a 150 rail is a 2550 cut, bought from 2700 stock. A document that states 2400 for that 2550 cut is stored by the import and flagged here.
 
-Lines that are not copied come back in `flagged` with `unknown_product`, `supplier_unmatched`, `supplier_ambiguous`, `supplier_inactive` or `supplier_not_stated`. A line can carry a product reason and a supplier reason.
+`unit_price` is set only when `material_price_ledger` has a `confirmed` row whose `material_code` is the engine product id and whose `supplier_name` normalises to the matched supplier's name or a known alias. Newest `confirmed_at` wins, compared as a timestamp so `Z`, `+00:00` and a fractional second are one clock, then the smaller id. An unreadable timestamp is older than any real instant. Pending and dismissed rows do not count. A negative or non-numeric price is skipped. Anything else stores null. A failed ledger read, or a full page at the 200-row cap, fails the apply and writes nothing. The price is written on the first copy of that demand. A later apply does not replace it.
+
+Lines that are not copied come back in `flagged` with `unknown_product`, `supplier_unmatched`, `supplier_ambiguous`, `supplier_inactive`, `supplier_not_stated` or `stock_shorter_than_cut`. A line can carry more than one reason.
 
 ## Replace
 
 `dispatch_replace_scope_material_lines` is the one writer. It replaces only that scope's lines that are not already on a purchase order. A line with `purchase_order_id` set is left as stored, and it is not inserted again. Manual lines (`scope_id` and `demand_id` null, including a slice 4 suggestion) and every other scope stay. Re-apply keeps `created_at`, `created_by` and `created_by_email` for a demand that is still present.
+
+On a demand already copied and not on a purchase order, the scope update writes only the quantity and the length and cut fields: `quantity`, `length_mm`, `stock_length_mm`, `stock_qty`, `cut_size` and `cuts`. The stored `status`, `unit_price`, description, product, unit, supplier and position stay, so a hand-entered price and a status moved off `to_order` are not put back. A demand that is new on this apply is still inserted as `to_order` with the resolved price.
 
 An apply whose scope has stored order lines but nothing copyable still clears that scope's not-on-order material lines and writes the flags. An apply whose scope has no stored order lines is `no_lines` and writes nothing. Re-importing the scope order clears `supplier_match`; the next apply sets it again.
 

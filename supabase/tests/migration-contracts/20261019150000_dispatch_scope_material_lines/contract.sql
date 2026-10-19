@@ -308,21 +308,85 @@ SELECT pg_temp.sm_assert(
  (SELECT unit_price = 19.50 FROM public.job_material_lines WHERE id = '9f230000-0000-4000-8000-000000000012'),
  'a unit price the caller already resolved is stored');
 
+UPDATE public.job_material_lines
+SET unit_price = 42.00, status = 'in_stock', description = 'Hand wording'
+WHERE id = '9f230000-0000-4000-8000-000000000012';
+
+SELECT public.dispatch_replace_scope_material_lines(jsonb_build_object(
+ 'job_id', '9f200000-0000-4000-8000-000000000001',
+ 'org_id', '00000000-0000-0000-0000-000000000001',
+ 'scope_id', 'priced',
+ 'now', '2026-10-19T05:00:00Z',
+ 'actor', jsonb_build_object('email', 'bea@example.test'),
+ 'suppliers', '[]'::jsonb,
+ 'lines', jsonb_build_array(
+  jsonb_build_object(
+   'id', '9f230000-0000-4000-8000-000000000012',
+   'supplier_id', '9f210000-0000-4000-8000-000000000001',
+   'description', 'Scope wording',
+   'quantity', 2,
+   'unit', 'length',
+   'product', 'other-product',
+   'stock_length_mm', 7000,
+   'stock_qty', 2,
+   'length_mm', 6100,
+   'cut_size', '2 x 6100 mm',
+   'cuts', '[{"length_mm":6100,"qty":2}]'::jsonb,
+   'demand_id', 'gutter-1',
+   'unit_price', 99,
+   'position', 4
+  ),
+  jsonb_build_object(
+   'id', '9f230000-0000-4000-8000-000000000013',
+   'supplier_id', '9f210000-0000-4000-8000-000000000002',
+   'description', 'New downpipe',
+   'quantity', 3,
+   'unit', 'each',
+   'product', 'downpipe:rect',
+   'length_mm', 1800,
+   'stock_length_mm', 1800,
+   'stock_qty', 3,
+   'cuts', '[{"length_mm":1800,"qty":3}]'::jsonb,
+   'demand_id', 'downpipe-1',
+   'unit_price', 7.25,
+   'position', 1
+  )
+ ),
+ 'flags', '[]'::jsonb
+));
+
+SELECT pg_temp.sm_assert(
+ (SELECT unit_price = 42.00 AND status = 'in_stock' AND description = 'Hand wording'
+    AND product = 'practice-cmi-patioline'
+    AND supplier_id = '9f210000-0000-4000-8000-000000000002'
+    AND quantity = 2 AND length_mm = 6100 AND stock_length_mm = 7000 AND stock_qty = 2
+    AND cut_size = '2 x 6100 mm'
+    AND cuts = '[{"length_mm":6100,"qty":2}]'::jsonb
+    AND position = 0
+    AND updated_by_email = 'bea@example.test'
+  FROM public.job_material_lines WHERE id = '9f230000-0000-4000-8000-000000000012'),
+ 're-apply updates quantity and cuts and keeps a hand price and status');
+
+SELECT pg_temp.sm_assert(
+ (SELECT status = 'to_order' AND unit_price = 7.25 AND quantity = 3 AND description = 'New downpipe'
+  FROM public.job_material_lines WHERE id = '9f230000-0000-4000-8000-000000000013'),
+ 'a demand new on this apply is still inserted as to_order with its price');
+
 DO $$
 BEGIN
  PERFORM public.dispatch_replace_scope_material_lines(jsonb_build_object(
   'job_id', '9f200000-0000-4000-8000-000000000001',
   'org_id', '00000000-0000-0000-0000-000000000001',
-  'scope_id', 'priced',
-  'now', '2026-10-19T05:00:00Z',
+  'scope_id', 'bad-price',
+  'now', '2026-10-19T05:30:00Z',
   'suppliers', '[]'::jsonb,
   'lines', jsonb_build_array(jsonb_build_object(
-   'id', '9f230000-0000-4000-8000-000000000012',
+   'id', '9f230000-0000-4000-8000-000000000014',
    'supplier_id', '9f210000-0000-4000-8000-000000000002',
-   'description', 'Patioline gutter, minimum purchase roll',
+   'description', 'Negative',
    'quantity', 1,
    'product', 'practice-cmi-patioline',
-   'demand_id', 'gutter-1',
+   'demand_id', 'gutter-neg',
    'unit_price', -1,
    'position', 0
   )),
@@ -334,9 +398,10 @@ EXCEPTION WHEN check_violation THEN
 END $$;
 
 SELECT pg_temp.sm_assert(
- (SELECT unit_price = 19.50 AND quantity = 1 FROM public.job_material_lines
-   WHERE id = '9f230000-0000-4000-8000-000000000012'),
- 'a refused negative price leaves the stored line');
+ (SELECT unit_price = 42.00 AND status = 'in_stock' AND quantity = 2
+  FROM public.job_material_lines WHERE id = '9f230000-0000-4000-8000-000000000012')
+ AND (SELECT count(*) = 0 FROM public.job_material_lines WHERE scope_id = 'bad-price'),
+ 'a refused negative price writes nothing and leaves the hand-priced line');
 
 SELECT public.dispatch_replace_scope_order_lines(jsonb_build_object(
  'job_id', '9f200000-0000-4000-8000-000000000001',

@@ -389,7 +389,11 @@ export async function runDispatchScopeMaterialAction(
   for (const line of stored) matches.set(line.demand_id, matchSupplier(line.supplier_name, suppliers));
 
   const reasonsFor = (line: StoredOrderLine): string[] =>
-    scopeLineCopyReasons(line.product_unknown || line.product === null, matches.get(line.demand_id)!);
+    scopeLineCopyReasons(
+      line.product_unknown || line.product === null,
+      matches.get(line.demand_id)!,
+      { stock_length_mm: line.stock_length_mm, cuts: line.cuts },
+    );
   const copyable = stored.filter((line) => reasonsFor(line).length === 0);
   const prices = copyable.length === 0
     ? []

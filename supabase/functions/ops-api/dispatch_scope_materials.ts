@@ -73,6 +73,15 @@ export type ConfirmedPriceRow = {
   confirmed_at: string | null;
 };
 
+// A timestamp, not the text of one. PostgreSQL to_json writes +00:00, and a
+// caller may send Z or a fractional second. Those are one clock. An unreadable
+// value sorts as older than any real instant. A tie keeps the smaller id.
+function confirmedAtMillis(value: string | null): number | null {
+  if (!value) return null;
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? millis : null;
+}
+
 // Newest confirmed_at, then the smaller id. Pending and dismissed never count.
 // The supplier name must be the matched record's name or one of its aliases.
 export function confirmedUnitPrice(
@@ -91,21 +100,47 @@ export function confirmedUnitPrice(
     row.unit_price >= 0
   );
   hits.sort((a, b) => {
-    const at = a.confirmed_at ?? "";
-    const bt = b.confirmed_at ?? "";
-    if (at !== bt) return at < bt ? 1 : -1;
+    const am = confirmedAtMillis(a.confirmed_at);
+    const bm = confirmedAtMillis(b.confirmed_at);
+    if (am !== bm) {
+      if (am === null) return 1;
+      if (bm === null) return -1;
+      return bm - am;
+    }
     if (a.id !== b.id) return a.id < b.id ? -1 : 1;
     return 0;
   });
   return hits.length === 0 ? null : hits[0].unit_price;
 }
 
+// A fence post stands in 600 mm of ground. The cut is the sheet, the plinth
+// rail, and that bury. 1800 + 150 + 600 is a 2550 cut, bought as a 2700 bar.
+// This step does not choose the bar. It only refuses a stated bar that cannot
+// hold one of its cuts.
+export const FENCE_POST_IN_GROUND_MM = 600;
+
+export function fencePostCutMm(sheetHeightMm: number, plinthRailMm: number): number {
+  return sheetHeightMm + plinthRailMm + FENCE_POST_IN_GROUND_MM;
+}
+
+export function stockShorterThanCut(
+  stockLengthMm: number | null,
+  cuts: readonly { length_mm: number }[],
+): boolean {
+  if (stockLengthMm === null || !Number.isFinite(stockLengthMm)) return false;
+  return cuts.some((cut) => Number.isFinite(cut.length_mm) && cut.length_mm > stockLengthMm);
+}
+
 export function scopeLineCopyReasons(
   productUnknown: boolean,
   match: SupplierMatch,
+  lengths: { stock_length_mm: number | null; cuts: readonly { length_mm: number }[] },
 ): string[] {
   const reasons: string[] = [];
   if (productUnknown) reasons.push("unknown_product");
   if (match.status !== "matched") reasons.push(match.reason);
+  if (stockShorterThanCut(lengths.stock_length_mm, lengths.cuts)) {
+    reasons.push("stock_shorter_than_cut");
+  }
   return reasons;
 }

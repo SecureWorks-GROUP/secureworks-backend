@@ -284,8 +284,11 @@ GRANT EXECUTE ON FUNCTION public.dispatch_replace_scope_order_lines(jsonb) TO se
 -- Replace one scope's copied material lines. An empty lines array clears the
 -- scope's lines that are not already on a purchase order. A line already on a
 -- purchase order is left as it was, including when that demand has left the
--- scope. Manually added lines, and every other scope, stay. The 500 cap matches
--- DISPATCH_MATERIAL_LINES_PER_JOB_MAX and is checked before any write.
+-- scope. A demand already copied and not on a purchase order keeps its status,
+-- price, description, product, unit, supplier and position. Quantity, length
+-- and cut fields come from this apply. Manually added lines, and every other
+-- scope, stay. The 500 cap matches DISPATCH_MATERIAL_LINES_PER_JOB_MAX and is
+-- checked before any write.
 CREATE OR REPLACE FUNCTION public.dispatch_replace_scope_material_lines(p jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -340,7 +343,14 @@ BEGIN
     'purchase_order_id', purchase_order_id,
     'created_at', created_at,
     'created_by', created_by,
-    'created_by_email', created_by_email
+    'created_by_email', created_by_email,
+    'status', status,
+    'unit_price', unit_price,
+    'supplier_id', supplier_id,
+    'description', description,
+    'product', product,
+    'unit', unit,
+    'position', position
   )), '[]'::jsonb)
   INTO v_prior
   FROM public.job_material_lines
@@ -403,13 +413,13 @@ BEGIN
       x.id,
       v_org,
       v_job,
-      x.supplier_id,
-      x.description,
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.supplier_id ELSE x.supplier_id END,
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.description ELSE x.description END,
       x.quantity,
-      x.unit,
-      'to_order',
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.unit ELSE x.unit END,
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.status ELSE 'to_order' END,
       'scope',
-      x.product,
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.product ELSE x.product END,
       x.length_mm,
       x.stock_length_mm,
       x.stock_qty,
@@ -417,9 +427,9 @@ BEGIN
       coalesce(x.cuts, '[]'::jsonb),
       v_scope,
       x.demand_id,
-      x.unit_price,
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.unit_price ELSE x.unit_price END,
       NULL,
-      x.position,
+      CASE WHEN pr.demand_id IS NOT NULL THEN pr.position ELSE x.position END,
       coalesce(pr.created_at, v_now),
       coalesce(pr.created_by, v_user),
       coalesce(pr.created_by_email, v_email),
@@ -446,7 +456,14 @@ BEGIN
       demand_id text,
       created_at timestamptz,
       created_by uuid,
-      created_by_email text
+      created_by_email text,
+      status text,
+      unit_price numeric,
+      supplier_id uuid,
+      description text,
+      product text,
+      unit text,
+      position integer
     ) ON pr.demand_id = x.demand_id
     WHERE NOT EXISTS (
       SELECT 1 FROM public.job_material_lines existing
@@ -472,7 +489,7 @@ BEGIN
 END $$;
 
 COMMENT ON FUNCTION public.dispatch_replace_scope_material_lines(jsonb) IS
-  'Dispatch scope apply, one transaction: copy one scope onto job_material_lines as to_order. Leaves manual lines, other scopes, and lines already on a purchase order. Raises scope_id_required or too_many_lines. Does not create a suppliers row, a purchase order, or a price.';
+  'Dispatch scope apply, one transaction: copy one scope onto job_material_lines. A new line is to_order. A line already copied and not on a purchase order keeps its status, price, description, product, unit, supplier and position, and takes quantity, length and cuts from this apply. Leaves manual lines, other scopes, and lines already on a purchase order. Raises scope_id_required or too_many_lines. Does not create a suppliers row, a purchase order, or a price.';
 
 REVOKE ALL ON FUNCTION public.dispatch_replace_scope_material_lines(jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.dispatch_replace_scope_material_lines(jsonb) TO service_role;

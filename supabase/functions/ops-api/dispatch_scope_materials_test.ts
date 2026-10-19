@@ -13,8 +13,11 @@ import { DispatchScopeOrderError } from "./dispatch_scope_order.ts";
 import { runDispatchScopeOrderAction } from "./dispatch_scope_order_store.ts";
 import {
   confirmedUnitPrice,
+  fencePostCutMm,
   matchSupplier,
   normaliseSupplierName,
+  scopeLineCopyReasons,
+  stockShorterThanCut,
   type SupplierCandidate,
 } from "./dispatch_scope_materials.ts";
 import {
@@ -221,15 +224,27 @@ function replaceMaterials(tables: Record<string, Row[]>, payload: Row) {
   for (const line of lines) {
     if (still.has(line.demand_id)) continue;
     const old = priorByDemand.get(line.demand_id);
+    const kept = old && !old.purchase_order_id ? old : null;
     tables.job_material_lines.push({
       ...line,
       org_id: payload.org_id,
       job_id: jobId,
       scope_id: scopeId,
-      status: "to_order",
+      supplier_id: kept ? kept.supplier_id : line.supplier_id,
+      description: kept ? kept.description : line.description,
+      quantity: line.quantity,
+      unit: kept ? kept.unit ?? null : line.unit ?? null,
+      status: kept ? kept.status : "to_order",
       source: "scope",
-      purchase_order_id: null,
+      product: kept ? kept.product ?? null : line.product ?? null,
+      length_mm: line.length_mm ?? null,
+      stock_length_mm: line.stock_length_mm ?? null,
+      stock_qty: line.stock_qty ?? null,
+      cut_size: line.cut_size ?? null,
       cuts: line.cuts ?? [],
+      unit_price: kept ? kept.unit_price ?? null : line.unit_price ?? null,
+      purchase_order_id: null,
+      position: kept ? kept.position : line.position,
       created_at: old?.created_at ?? payload.now,
       created_by: old?.created_by ?? actor.user_id ?? null,
       created_by_email: old?.created_by_email ?? actor.email ?? null,
@@ -547,6 +562,72 @@ Deno.test("price: a confirmed ledger row is used, and nothing else is", () => {
   assertEquals(tied, 3);
 });
 
+Deno.test("price: confirmed_at is a timestamp, so .9Z is newer than a whole Z", () => {
+  const row = (id: string, unit_price: number, confirmed_at: string) => ({
+    id,
+    material_code: "post",
+    supplier_name: "Example Steel",
+    unit_price,
+    status: "confirmed",
+    confirmed_at,
+  });
+  // Lexicographic order puts 00:00:00Z after 00:00:00.9Z because "." < "Z".
+  assertEquals(confirmedUnitPrice("post", ["Example Steel"], [
+    row("old", 3, "2026-10-01T00:00:00Z"),
+    row("new", 4, "2026-10-01T00:00:00.9Z"),
+  ]), 4);
+  assertEquals(confirmedUnitPrice("post", ["Example Steel"], [
+    row("whole", 7, "2026-10-01T00:00:00+00:00"),
+    row("mid", 5, "2026-10-01T00:00:00.5+00:00"),
+    row("later", 6, "2026-10-01T00:00:00.9+00:00"),
+  ]), 6);
+  assertEquals(confirmedUnitPrice("post", ["Example Steel"], [
+    row("b", 8, "2026-10-01T00:00:00Z"),
+    row("a", 9, "2026-10-01T00:00:00+00:00"),
+  ]), 9);
+  assertEquals(confirmedUnitPrice("post", ["Example Steel"], [
+    row("b", 1, "2026-10-01T00:00:00.9Z"),
+    row("a", 2, "2026-10-01T00:00:00.900+00:00"),
+  ]), 2);
+  assertEquals(confirmedUnitPrice("post", ["Example Steel"], [
+    row("bad", 11, "not-a-time"),
+    row("ok", 12, "2026-10-01T00:00:00Z"),
+  ]), 12);
+  assertEquals(confirmedUnitPrice("post", ["Example Steel"], [
+    { ...row("none", 13, "2026-10-01T00:00:00Z"), confirmed_at: null },
+    row("ok", 14, "2026-10-01T00:00:00Z"),
+  ]), 14);
+});
+
+Deno.test("copy: a bar shorter than a cut is flagged, and a fence post is sheet plus rail plus 600", () => {
+  assertEquals(fencePostCutMm(1800, 150), 2550);
+  const matched = matchSupplier("Example Steel", CATALOGUE);
+  const lengths = (stock: number | null, cuts: number[]) => ({
+    stock_length_mm: stock,
+    cuts: cuts.map((length_mm) => ({ length_mm })),
+  });
+  assertEquals(stockShorterThanCut(2400, [{ length_mm: 2550 }]), true);
+  assertEquals(stockShorterThanCut(2700, [{ length_mm: 2550 }]), false);
+  assertEquals(stockShorterThanCut(2550, [{ length_mm: 2550 }]), false);
+  assertEquals(stockShorterThanCut(null, [{ length_mm: 2550 }]), false);
+  assertEquals(
+    stockShorterThanCut(2700, [{ length_mm: 2400 }, { length_mm: 2800 }]),
+    true,
+  );
+  assertEquals(
+    scopeLineCopyReasons(false, matched, lengths(2700, [fencePostCutMm(1800, 150)])),
+    [],
+  );
+  assertEquals(
+    scopeLineCopyReasons(false, matched, lengths(2400, [2550])),
+    ["stock_shorter_than_cut"],
+  );
+  assertEquals(
+    scopeLineCopyReasons(true, { status: "ambiguous", reason: "supplier_ambiguous" }, lengths(2400, [2550])),
+    ["unknown_product", "supplier_ambiguous", "stock_shorter_than_cut"],
+  );
+});
+
 Deno.test("apply: fence post, four patio fixtures, re-import, and a manual line", async () => {
   const manual = {
     id: MANUAL,
@@ -723,8 +804,99 @@ Deno.test("apply: fence post, four patio fixtures, re-import, and a manual line"
   assert((listed.material_lines as Row[]).some((row) => row.id === MANUAL));
   console.log("NOTE 19.50 is a planted confirmed material_price_ledger row for practice-cmi-patioline at CMI. The fixtures carry no price.");
   console.log("COUNTS " + JSON.stringify({ fixtures: counts, fence: { copied: 1, flagged: 0 } }));
-  console.log("SAMPLE fascia " + JSON.stringify(sampleOf(db, "example-attached-fascia")));
+  console.log(
+    "SAMPLE fascia after re-import (gutter quantity was set to 2 in this test; the engine document is quantity 1, stock 1 x 7000, cut 1 x 6000) " +
+      JSON.stringify(sampleOf(db, "example-attached-fascia")),
+  );
   console.log("SAMPLE fence " + JSON.stringify(sampleOf(db, "fence-example")));
+});
+
+Deno.test("apply: stock shorter than a cut is flagged and not copied", async () => {
+  const db = memory({ suppliers: [supplier(EXAMPLE_STEEL, "Example Steel")] });
+  await importOrder(db, "short-stock", knownOrder("Example Steel", {
+    lengthMm: 2400,
+    cuts: [{ lengthMm: 2550, qty: 1 }],
+  }));
+  const stored = db.tables.dispatch_scope_order_lines.find((row) => row.scope_id === "short-stock");
+  assertEquals(stored?.product_unknown, false);
+  assertEquals(stored?.stock_length_mm, 2400);
+  assertEquals(stored?.length_mm, 2550);
+  const applied = await applyScope(db, "short-stock");
+  assertEquals(applied.copied, 0);
+  assertEquals(linesFor(db.tables.job_material_lines, "short-stock"), []);
+  assertEquals((applied.flagged as Row[])[0].reasons, ["stock_shorter_than_cut"]);
+
+  await importOrder(db, "short-and-unknown", knownOrder("Example Steel", {
+    productId: "rhs:100",
+    description: "Beam to confirm",
+    toConfirm: ["length"],
+    demandIds: ["beam-x"],
+    lengthMm: 2400,
+    cuts: [{ lengthMm: 2550, qty: 1 }],
+  }));
+  const both = await applyScope(db, "short-and-unknown");
+  assertEquals(both.copied, 0);
+  assertEquals((both.flagged as Row[])[0].reasons, ["unknown_product", "stock_shorter_than_cut"]);
+});
+
+Deno.test("apply: re-apply updates quantity and cuts and keeps a hand price and status", async () => {
+  const db = memory({ suppliers: [supplier(EXAMPLE_STEEL, "Example Steel"), supplier(STRATCO, "Stratco")] });
+  await importOrder(db, "fence-example", FENCE);
+  const first = await applyScope(db, "fence-example");
+  const shown = (first.material_lines as Row[])[0];
+  assertEquals(shown.unit_price ?? null, null);
+  assertEquals(shown.status, "to_order");
+  const line = db.tables.job_material_lines.find((row) => row.demand_id === "post-1");
+  assert(line, "stored post");
+  line.unit_price = 88;
+  line.status = "in_stock";
+  line.description = "Hand wording";
+  line.position = 7;
+  db.tables.material_price_ledger.push({
+    id: "price-later",
+    org_id: ORG,
+    material_code: "practice-cmi-patioline",
+    supplier_name: "Stratco",
+    unit_price: 50,
+    status: "confirmed",
+    confirmed_at: "2026-10-02T00:00:00.9Z",
+  });
+  const revised = knownOrder("Stratco", {
+    productId: "practice-cmi-patioline",
+    description: "Scope wording",
+    quantity: 4,
+    unit: "length",
+    lengthMm: 2700,
+    cuts: [{ lengthMm: 2400, qty: 2 }],
+  });
+  await importOrder(db, "fence-example", revised, ctx({
+    userId: "user-2",
+    email: "bea@example.test",
+    orgId: ORG,
+  }));
+  const again = await applyScope(db, "fence-example", ctx({
+    userId: "user-2",
+    email: "bea@example.test",
+    orgId: ORG,
+  }));
+  const kept = (again.material_lines as Row[]).find((row) => row.demand_id === "post-1");
+  assert(kept, "reapplied post");
+  assertEquals(kept.quantity, 4);
+  assertEquals(kept.stock_qty, 4);
+  assertEquals(kept.length_mm, 2400);
+  assertEquals(kept.stock_length_mm, 2700);
+  assertEquals(kept.cuts, [{ length_mm: 2400, qty: 2 }]);
+  assertEquals(kept.cut_size, "2 x 2400 mm");
+  assertEquals(kept.unit_price, 88);
+  assertEquals(kept.status, "in_stock");
+  assertEquals(kept.description, "Hand wording");
+  assertEquals(kept.product, "post:shs:65x65");
+  assertEquals(kept.unit, "each");
+  assertEquals(kept.supplier_id, EXAMPLE_STEEL);
+  assertEquals(kept.position, 7);
+  assertEquals(kept.created_by, "user-1");
+  assertEquals(kept.updated_by, "user-2");
+  assertEquals(again.copied, 1);
 });
 
 Deno.test("apply: an ambiguous supplier is flagged and not copied", async () => {
