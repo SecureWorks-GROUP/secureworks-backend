@@ -121,6 +121,21 @@ function job(id: string, overrides: Row = {}): Row {
   };
 }
 
+function patioRevision(
+  jobId: string,
+  revision: number,
+  status: string,
+  scope: unknown,
+): Row {
+  return {
+    id: uuid("e2", revision + jobId.charCodeAt(jobId.length - 1)),
+    job_id: jobId,
+    revision_number: revision,
+    status,
+    scope_canonical_text: JSON.stringify(scope),
+  };
+}
+
 function seed(): Record<string, Row[]> {
   return {
     jobs: [
@@ -144,6 +159,12 @@ function seed(): Record<string, Row[]> {
         },
       }),
       job(JOB.repair, { type: "repair" }),
+    ],
+    // Patio suggestions read the latest frozen revision, never jobs.scope_json.
+    scope_revisions: [
+      patioRevision(JOB.patio, 1, "frozen", PATIO_SCOPE),
+      patioRevision(JOB.patioNoScope, 1, "frozen", { config: {} }),
+      patioRevision(JOB.patioPricingOnly, 1, "frozen", { config: {} }),
     ],
     suppliers: [
       {
@@ -1552,11 +1573,15 @@ Deno.test("suggest: a patio scope shaped like SWP-26701 adds the four lines, cle
     assert(!("unit_price" in stored) && !("notes" in stored));
     assert(!/[—×]/.test(stored.description));
   }
-  // The scope is read once, for this job, and the pricing never.
+  // The frozen revision is read once; the live scope and the pricing never.
+  assertEquals(answer.scope_revision_number, 1);
+  assert(!("held" in answer) && !("scope_supplier" in answer));
   const jobReads = db.requests.filter((r) => r.table === "jobs");
-  assert(jobReads.every((r) => !r.select.includes("pricing_json")));
+  assert(
+    jobReads.every((r) => !/scope_json|pricing_json/.test(r.select)),
+  );
   assertEquals(
-    jobReads.filter((r) => r.select.includes("scope_json")).length,
+    db.requests.filter((r) => r.table === "scope_revisions").length,
     1,
   );
   assertOnlyOwnWrites(db);
@@ -1678,6 +1703,73 @@ Deno.test("suggest: a scope the extractor cannot read is 409 scope_unreadable, n
         },
       }),
     ),
+    409,
+    "scope_unreadable",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("suggest patio: the latest frozen revision is read; a newer draft and the live scope are not", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: { config: {} } } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", { config: {} }),
+    patioRevision(JOB.patio, 2, "frozen", PATIO_SCOPE),
+    patioRevision(JOB.patio, 3, "draft", { config: {} }),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.scope_revision_number, 2);
+  assertEquals(answer.added, 4);
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("suggest patio: no frozen revision is 409 no_frozen_scope, even with a live scope; nothing written", async () => {
+  const initial = seed();
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "draft", PATIO_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_frozen_scope",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("suggest patio: a frozen revision that is not JSON is 409 scope_unreadable", async () => {
+  const initial = seed();
+  initial.scope_revisions = [{
+    ...patioRevision(JOB.patio, 1, "frozen", {}),
+    scope_canonical_text: "{not json",
+  }];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
     409,
     "scope_unreadable",
   );
