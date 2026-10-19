@@ -125,8 +125,8 @@ Deno.test("Job Profit: both kinds with the same supplier id are flagged, and the
   assertEquals(result.flag, "two_orders_same_supplier");
   assertEquals(result.shared_supplier_ids, [STEEL]);
   assertEquals(result.other_committed_ex, 812.5);
-  assertEquals(result.dispatch_billed_actual_ex, 790.1);
-  assertEquals(result.dispatch_orders[0].billed_actual_ex, 790.1);
+  assertEquals(result.dispatch_billed_ex, 790.1);
+  assertEquals(result.dispatch_orders[0].billed_ex, 790.1);
   assert(!("total" in result) && !("committed_ex" in result));
 });
 
@@ -180,4 +180,13 @@ Deno.test("Job Profit: a priced draft from another source is flagged but not in 
   assertEquals(result.flag, "two_orders_same_supplier");
   assertEquals(result.other_committed_ex, 0);
   assertEquals(result.other_priced_orders[0].in_committed, false);
+});
+
+Deno.test("amount follows the engine: subtotal, else total / 1.1", () => {
+  const result = jobOrderOverlap({
+    job_id: JOB,
+    orders: [dispatch(), office({ subtotal: null, total: 110 })],
+  });
+  assertEquals(result.other_priced_orders[0].amount_ex, 100);
+  assertEquals(result.other_committed_ex, 100);
 });

@@ -49,11 +49,18 @@ function text(value: unknown): string | null {
   return s === "" ? null : s;
 }
 
+// The engine's ex-GST amount: subtotal, else total / 1.1
+// (job_profit_engine.sql, po lane).
 function amountOf(order: any): number | null {
-  const raw = order?.subtotal ?? order?.total;
-  if (raw === null || raw === undefined || raw === "") return null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  const num = (raw: unknown) => {
+    if (raw === null || raw === undefined || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  const subtotal = num(order?.subtotal);
+  if (subtotal !== null) return subtotal;
+  const total = num(order?.total);
+  return total === null ? null : Math.round((total / 1.1) * 100) / 100;
 }
 
 export function orderOrigin(order: any): OrderOrigin {
@@ -172,7 +179,7 @@ export interface OverlapSide {
   status: string | null;
   amount_ex: number | null;
   in_committed: boolean;
-  billed_actual_ex: number | null;
+  billed_ex: number | null;
 }
 
 export interface JobOrderOverlap {
@@ -186,9 +193,14 @@ export interface JobOrderOverlap {
   // Each side's own committed figure. Deliberately no combined total: the
   // point of the flag is that adding these may count one delivery twice.
   other_committed_ex: number;
-  dispatch_billed_actual_ex: number;
+  dispatch_billed_ex: number;
 }
 
+// Actual bill facts (`job_materials_facts` kind `actual`) matched to ANY of
+// the job's orders: read by `matched_po_id` in the job's order ids, from any
+// job, as the engine does. The amounts are what was billed against these
+// orders, not the engine's actual lane (which drops a fact whose bill has
+// bill lines on the job).
 export interface BillFact {
   matched_po_id: string | null;
   amount_ex: number | null;
@@ -201,7 +213,6 @@ function round2(n: number): number {
 export function jobOrderOverlap(input: {
   job_id: string;
   orders: any[];
-  // job_materials_facts rows of kind `actual` on the job, if read.
   bill_facts?: BillFact[] | null;
 }): JobOrderOverlap {
   const billedOn = new Map<string, number>();
@@ -220,7 +231,7 @@ export function jobOrderOverlap(input: {
     status: text(order.status),
     amount_ex: amountOf(order),
     in_committed: countsInCommitted(order, billedIds),
-    billed_actual_ex: billedOn.has(String(order.id))
+    billed_ex: billedOn.has(String(order.id))
       ? round2(billedOn.get(String(order.id))!)
       : null,
   });
@@ -264,8 +275,8 @@ export function jobOrderOverlap(input: {
         0,
       ),
     ),
-    dispatch_billed_actual_ex: round2(
-      dispatch.reduce((sum, d) => sum + (d.billed_actual_ex ?? 0), 0),
+    dispatch_billed_ex: round2(
+      dispatch.reduce((sum, d) => sum + (d.billed_ex ?? 0), 0),
     ),
   };
 }
