@@ -2271,7 +2271,7 @@ export async function makeQuoteBuilderWorkOrder(
     if (winner) return ordersReply(version, winner);
     fail(
       "work_order_unsettled",
-      "This quote's work order is being made or was made and removed. Check the job's work orders and reconcile them before making one by hand.",
+      "Another press is making this quote's work order, or an earlier one did not finish. Wait a moment and press again. If you see this again, check the job's work orders before making one by hand.",
       409,
     );
   }
@@ -2361,7 +2361,7 @@ export async function makeQuoteBuilderPurchaseOrders(
     // Not proof they were removed: the winner may still be writing them.
     fail(
       "purchase_orders_unsettled",
-      "This quote's purchase orders are being made or were made and removed. Check the job's orders and reconcile them before making any by hand.",
+      "Another press is making this quote's purchase orders, or an earlier one did not finish. Wait a moment and press again. If you see this again, check the job's orders before making any by hand.",
       409,
     );
   }

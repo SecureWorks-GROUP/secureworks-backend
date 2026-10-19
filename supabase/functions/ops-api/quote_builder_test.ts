@@ -3088,3 +3088,19 @@ Deno.test("quote builder: a refused insert whose cleanup re-read fails keeps the
     assertEquals(store.quote_builder_order_marks.length, 1, `${kind} marker kept`);
   }
 });
+
+Deno.test("quote builder: the unsettled refusal tells the person to press again, not that it failed for good", async () => {
+  for (const kind of ["purchase_orders", "work_orders"] as const) {
+    const { store, client, issued } = await issuedForOrders();
+    // Another press holds the marker and has written nothing yet.
+    store.quote_builder_order_marks.push({
+      quote_builder_version_id: issued.id,
+      kind: kind === "purchase_orders" ? "purchase_orders" : "work_order",
+    });
+    const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
+    const err: any = await make(client, { version_id: issued.id }, ACTOR).then(() => null, (e) => e);
+    assertEquals(err?.status, 409);
+    assert(/press again/.test(err?.message), err?.message);
+    assert(!/fail/i.test(err?.message), err?.message);
+  }
+});

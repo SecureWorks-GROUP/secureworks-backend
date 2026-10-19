@@ -706,8 +706,9 @@ From an issued version:
   version and kind); only the press that writes it makes the orders. A press
   that finds the marker but no rows after a short wait gets
   `409 purchase_orders_unsettled` / `409 work_order_unsettled`: the orders are
-  being made or were removed, and staff reconcile the job's orders before
-  making any by hand. A set missing a row comes back with
+  being made, or an earlier press did not finish (its marker may since have
+  been released). The message asks the person to wait and press again, and
+  to check the job's orders before making any by hand if it repeats. A set missing a row comes back with
   `purchase_orders_incomplete: { expected, present, missing_seq }` and is
   never re-made. A make that fails releases its marker only when every
   order write it sent came back with one of a short allow-list of
