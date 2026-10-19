@@ -220,3 +220,22 @@ export async function finishAtomicAcceptance(
     console.error('[accept] atomic handler not marked finished:', (e as Error).message)
   }
 }
+
+// The legacy (switch off) acceptance's job status write. It goes through
+// quote_accept_legacy_set_status, which writes exactly what today's PATCH
+// wrote but marks its own transaction, so the supersede trigger's strict
+// switch can never refuse the status of an acceptance whose document has
+// already committed (C4). Only if the database does not have that function
+// yet (migration not applied, or rolled back: PGRST202 or 42883, so nothing
+// ran) is today's PATCH sent instead. Any other returned error is ignored, as
+// today's PATCH result is (a separate residual, design section 3); an
+// uncertain call is never retried through an unmarked PATCH.
+// deno-lint-ignore no-explicit-any
+export async function setLegacyAcceptanceStatus(sb: any, jobId: string, status: string, acceptedAtIso: string | null): Promise<void> {
+  const { error } = await sb.rpc('quote_accept_legacy_set_status', {
+    p_job_id: jobId, p_status: status, p_accepted_at: acceptedAtIso,
+  })
+  if (error && (error.code === 'PGRST202' || error.code === '42883')) {
+    await sb.from('jobs').update({ status, ...(acceptedAtIso !== null ? { accepted_at: acceptedAtIso } : {}) }).eq('id', jobId)
+  }
+}

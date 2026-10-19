@@ -36,10 +36,30 @@ const DOC = {
   version: 1, data_snapshot_json: null,
 }
 const DOC_READ = { ...DOC, job_contacts: { id: 'c-1', contact_label: 'Neighbour', client_name: 'N One', share_percentage: 50, quote_value_ex_gst: 1000 } }
+const DOC_WHOLE = { ...DOC, run_label: null, job_contact_id: null }
+// c4c: the neighbour (c-2) accepted run A first.
+const DOC_N = { ...DOC, id: 'd-2', share_token: 'tok-2', job_contact_id: 'c-2', accepted_at: '2026-10-19T00:00:00+00:00' }
+const ACC_N = { job_document_id: 'd-2', job_contact_id: 'c-2', run_label: 'A', status: 'accepted', accepted_at: '2026-10-19T00:00:00+00:00' }
+// c4d: a whole quote with two contacts' documents; c-2 accepted first.
+const DOC_W1 = { ...DOC_WHOLE, job_contact_id: 'c-1' }
+const DOC_W2 = { ...DOC_WHOLE, id: 'd-2', share_token: 'tok-2', job_contact_id: 'c-2', accepted_at: '2026-10-19T00:00:00+00:00' }
+const PRICING_RUN = { runs: [{ run_label: 'A', run_name: 'Run A', totals: { client_share_inc: 1100, neighbour_share_inc: 1100 } }] }
+const CONTACTS = [
+  { id: 'c-1', is_primary: false, client_name: 'N One', status: 'active' },
+  { id: 'c-2', is_primary: true, client_name: 'Client', status: 'active' },
+]
+const DOC_WHOLE_READ = { ...DOC_WHOLE, job_contacts: null }
 const JOB = { id: 'j-1', job_number: 'SWF-TEST', client_name: 'Client', type: 'fencing', pricing_json: {}, site_address: '1 Test St', site_suburb: 'Testville', ghl_contact_id: null }
 
 type Fault = 'none' | 'event_write' | 'status_write' | 'run_insert' | 'lost_not_committed' | 'lost_committed'
-type Opts = { atomicOn: boolean; fault?: Fault; businessEventFails?: boolean; deferMs?: number }
+type Opts = {
+  atomicOn: boolean; fault?: Fault; businessEventFails?: boolean; deferMs?: number
+  // The legacy status call's result: ok, the function missing (migration not applied), or another error.
+  legacyStatus?: 'ok' | 'missing' | 'error'
+  whole?: boolean
+  // The checker's c4c/c4d shapes: the other party has already accepted, so this is the final party.
+  finalParty?: boolean
+}
 
 // The database RPC is one transaction: a fault inside it (the in-transaction
 // acceptance event, the status write or the run insert) rolls everything back
@@ -63,11 +83,20 @@ function fakeClient(o: Opts) {
         return { data: [{ enabled: eqArg('flag_name') === 'quote_accept_atomic_v1' ? o.atomicOn : false }], error: null }
       case 'job_documents':
         if (has('update')) return { data: null, error: null }
-        if (eqArg('share_token') !== undefined) return { data: DOC_READ, error: null }
-        return { data: [DOC], error: null }
+        if (eqArg('share_token') !== undefined) {
+          if (o.whole && o.finalParty) return { data: { ...DOC_W1, job_contacts: DOC_READ.job_contacts }, error: null }
+          return { data: o.whole ? DOC_WHOLE_READ : DOC_READ, error: null }
+        }
+        if (o.finalParty) return { data: o.whole ? [DOC_W1, DOC_W2] : [DOC, DOC_N], error: null }
+        return { data: [o.whole ? DOC_WHOLE : DOC], error: null }
       case 'jobs':
         if (has('update')) return { data: null, error: null }
-        return { data: JOB, error: null }
+        return { data: o.finalParty ? { ...JOB, pricing_json: PRICING_RUN } : JOB, error: null }
+      case 'run_acceptances':
+        if (has('upsert')) return { data: null, error: null }
+        return { data: o.finalParty && !o.whole ? [ACC_N] : [], error: null }
+      case 'job_contacts':
+        return { data: o.finalParty ? CONTACTS : [], error: null }
       case 'run_line_items':
         return { data: [{ job_contact_id: 'c-2' }], error: null }
       case 'business_events':
@@ -104,8 +133,8 @@ function fakeClient(o: Opts) {
       switch (name) {
         case 'quote_acceptance_snapshot':
           return Promise.resolve({ data: {
-            fingerprint: 'fp-1', documents: [DOC], acceptances: [],
-            run_line_items: [{ run_label: 'A', job_contact_id: 'c-2' }], run_neighbour: 'c-2',
+            fingerprint: 'fp-1', documents: [o.whole ? DOC_WHOLE : DOC], acceptances: [],
+            run_line_items: o.whole ? [] : [{ run_label: 'A', job_contact_id: 'c-2' }], run_neighbour: o.whole ? null : 'c-2',
           }, error: null })
         case 'accept_quote_document_atomic':
           // Deferred: the transaction is still open until this resolves.
@@ -119,6 +148,14 @@ function fakeClient(o: Opts) {
           }, o.deferMs ?? 25))
         case 'automation_lane_enabled':
           return Promise.resolve({ data: true, error: null })
+        case 'quote_accept_legacy_set_status':
+          if (o.legacyStatus === 'missing') {
+            return Promise.resolve({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } })
+          }
+          if (o.legacyStatus === 'error') {
+            return Promise.resolve({ data: null, error: { code: '23514', message: 'violates check constraint' } })
+          }
+          return Promise.resolve({ data: null, error: null })
         default:
           return Promise.resolve({ data: true, error: null })
       }
@@ -166,6 +203,7 @@ Deno.test('atomic run acceptance: one RPC with its event, no split writes, event
   assertEquals(writes(sb.calls, 'job_documents', 'update').length, 0)
   assertEquals(writes(sb.calls, 'run_acceptances', 'upsert').length, 0)
   assertEquals(writes(sb.calls, 'jobs', 'update').length, 0)
+  assert(!sb.calls.some((c) => c.name === 'quote_accept_legacy_set_status'), 'the atomic path writes no legacy status')
   assertEquals(writes(sb.calls, 'run_line_items', 'select').length, 0, 'the neighbour comes from the snapshot')
   // The after-commit business event carries the acceptance instant (R2).
   const runEvents = writes(sb.calls, 'business_events', 'insert')
@@ -199,7 +237,12 @@ Deno.test('legacy run acceptance (switch off): today\'s writes, no RPC, no snaps
   }
   assertEquals(writes(sb.calls, 'job_documents', 'update').length, 1, 'accepted_at as today')
   assertEquals(writes(sb.calls, 'run_acceptances', 'upsert').length, 1, 'run acceptance as today')
-  assertEquals(writes(sb.calls, 'jobs', 'update').length, 1, 'status as today')
+  // C4: today's status write now goes through the marked legacy call, with
+  // the same values; no direct PATCH while the function exists.
+  assertEquals(writes(sb.calls, 'jobs', 'update').length, 0)
+  const legacy = sb.calls.filter((c) => c.name === 'quote_accept_legacy_set_status')
+  assertEquals(legacy.length, 1, 'status as today, through the marked call')
+  assertEquals(legacy[0].args, { p_job_id: 'j-1', p_status: 'partially_accepted', p_accepted_at: null })
   assertEquals(writes(sb.calls, 'run_line_items', 'select').length, 1, 'neighbour read as today')
 })
 
@@ -247,6 +290,92 @@ Deno.test('atomic run acceptance, post-commit business event fails: reported on 
   assert(String(finish.args!.p_issues ?? '').startsWith('quote.run_accepted:'),
     `the failed follow-up write is reported (listed as acceptance_follow_up_issue): ${JSON.stringify(finish.args)}`)
 })
+
+// C4 parity of the legacy status write.
+Deno.test('legacy run acceptance, status function missing: falls back to today\'s PATCH, same payload', async () => {
+  const sb = fakeClient({ atomicOn: false, legacyStatus: 'missing' })
+  const res = await sendQuoteHandler(acceptRequest(), { sb })
+  assertEquals(res.status, 302)
+  const patch = writes(sb.calls, 'jobs', 'update')
+  assertEquals(patch.length, 1, 'exactly one PATCH, only after the missing-function answer')
+  assertEquals(patch[0].ops.find(([m]) => m === 'update')![1][0], { status: 'partially_accepted' })
+  const iCall = sb.calls.findIndex((c) => c.name === 'quote_accept_legacy_set_status')
+  assert(iCall >= 0 && sb.calls.indexOf(patch[0]) > iCall)
+})
+
+Deno.test('legacy run acceptance, status call returns another error: ignored as today, no PATCH retry', async () => {
+  const sb = fakeClient({ atomicOn: false, legacyStatus: 'error' })
+  const res = await sendQuoteHandler(acceptRequest(), { sb })
+  assertEquals(res.status, 302, 'today ignores a returned status error (separate residual)')
+  assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, 'an uncertain call is never retried through an unmarked PATCH')
+})
+
+// Whole quote (no run label), both paths. The fixture has one party, so the
+// decision is 'accepted' with an accepted_at from the clock.
+Deno.test('legacy whole-quote acceptance: status through the marked call, accepted_at from the clock', async () => {
+  const sb = fakeClient({ atomicOn: false, whole: true })
+  await withSteppingClock(() => sendQuoteHandler(acceptRequest(), { sb }))
+  assert(!sb.calls.some((c) => c.name === 'accept_quote_document_atomic'))
+  assertEquals(writes(sb.calls, 'jobs', 'update').length, 0)
+  const legacy = sb.calls.filter((c) => c.name === 'quote_accept_legacy_set_status')
+  assertEquals(legacy.length, 1)
+  assertEquals([legacy[0].args!.p_job_id, legacy[0].args!.p_status], ['j-1', 'accepted'])
+  assert(typeof legacy[0].args!.p_accepted_at === 'string', 'accepted_at as today: a fresh clock read at the write')
+})
+
+Deno.test('legacy whole-quote acceptance, status function missing: today\'s PATCH with status and accepted_at', async () => {
+  const sb = fakeClient({ atomicOn: false, whole: true, legacyStatus: 'missing' })
+  await withSteppingClock(() => sendQuoteHandler(acceptRequest(), { sb }))
+  const patch = writes(sb.calls, 'jobs', 'update')
+  assertEquals(patch.length, 1)
+  const body = patch[0].ops.find(([m]) => m === 'update')![1][0] as Record<string, unknown>
+  assertEquals(Object.keys(body).sort(), ['accepted_at', 'status'])
+  assertEquals(body.status, 'accepted')
+})
+
+Deno.test('atomic whole-quote acceptance: one RPC, no legacy status call, no split writes', async () => {
+  const sb = fakeClient({ atomicOn: true, whole: true })
+  await withSteppingClock(() => sendQuoteHandler(acceptRequest(), { sb }))
+  const accepts = sb.calls.filter((c) => c.name === 'accept_quote_document_atomic')
+  assertEquals(accepts.length, 1)
+  assertEquals(accepts[0].args!.p_run_label, null)
+  assert(!sb.calls.some((c) => c.name === 'quote_accept_legacy_set_status'))
+  assertEquals(writes(sb.calls, 'jobs', 'update').length, 0)
+  assertEquals(writes(sb.calls, 'job_documents', 'update').length, 0)
+})
+
+// The checker's C4 shapes at d98903c (c4c: the final party of a shared fence
+// run; c4d: the last contact of a multi-contact quote). There, a refused
+// status left the job partially accepted while the customer saw success and
+// deposit requests went out. With the fix the legacy status write is the
+// marked call, which strict cannot refuse (contract C4 cases), so the status
+// lands as 'accepted'. What the customer sees and which deposit requests go
+// out are recorded for both outcomes of that call: they do not depend on it
+// (today's handling of a returned status error; a separate residual).
+const depositRequests = () => fetched.filter((u) => u.includes('action=send_acceptance_invoice')).length
+for (const legacyStatus of ['ok', 'error'] as const) {
+  Deno.test(`c4c final run party, legacy, status call ${legacyStatus}: customer page and deposit requests`, async () => {
+    fetched.length = 0
+    const sb = fakeClient({ atomicOn: false, finalParty: true, legacyStatus })
+    const res = await sendQuoteHandler(acceptRequest(), { sb })
+    const legacy = sb.calls.filter((c) => c.name === 'quote_accept_legacy_set_status')
+    assertEquals(legacy.length, 1)
+    assertEquals(legacy[0].args!.p_status, 'accepted', 'the final party makes the job accepted')
+    assertEquals(res.status, 302, 'the customer sees the run-accepted page either way')
+    assertEquals(depositRequests(), 2, 'both parties\' deposit requests go out either way')
+    assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, 'no unmarked status write')
+  })
+  Deno.test(`c4d last contact of a whole quote, legacy, status call ${legacyStatus}: status and customer page`, async () => {
+    fetched.length = 0
+    const sb = fakeClient({ atomicOn: false, whole: true, finalParty: true, legacyStatus })
+    const res = await withSteppingClock(() => sendQuoteHandler(acceptRequest(), { sb }))
+    const legacy = sb.calls.filter((c) => c.name === 'quote_accept_legacy_set_status')
+    assertEquals(legacy.length, 1)
+    assertEquals(legacy[0].args!.p_status, 'accepted', 'the last contact makes the job accepted')
+    assert(res.status === 200, `the customer sees the Next Steps page either way (got ${res.status})`)
+    assertEquals(writes(sb.calls, 'jobs', 'update').length, 0, 'no unmarked status write')
+  })
+}
 
 // Today's legacy path, recorded as it is (the switch off keeps it unchanged):
 // a failed post-commit business event is still swallowed there.

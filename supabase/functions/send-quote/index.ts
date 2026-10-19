@@ -53,6 +53,7 @@ import {
 import {
   acceptQuoteDocumentAtomically,
   finishAtomicAcceptance,
+  setLegacyAcceptanceStatus,
   quoteAcceptAtomicOn,
   quoteDocumentMatchesSnapshot,
   quoteGuardsPassOnSnapshot,
@@ -2024,7 +2025,7 @@ export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): P
 
         // Update overall job status (the atomic path already wrote it)
         if (atomicDocId === null) {
-        await sb.from('jobs').update({ status: jobStatus, ...(jobStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}) }).eq('id', doc.job_id)
+        await setLegacyAcceptanceStatus(sb, doc.job_id, jobStatus, jobStatus === 'accepted' ? new Date().toISOString() : null)
         }
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
@@ -2133,13 +2134,7 @@ export async function sendQuoteHandler(req: Request, deps: { sb?: any } = {}): P
           : 'partially_accepted'
 
         if (atomicDocId === null) {
-        await sb
-          .from('jobs')
-          .update({
-            status: newStatus,
-            ...(newStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}),
-          })
-          .eq('id', doc.job_id)
+        await setLegacyAcceptanceStatus(sb, doc.job_id, newStatus, newStatus === 'accepted' ? new Date().toISOString() : null)
         }
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost

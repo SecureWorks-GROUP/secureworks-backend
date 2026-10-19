@@ -396,6 +396,16 @@ GRANT EXECUTE ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, t
 --   acceptance_follow_up_issue  the committing request reached its response but
 --                            reported a failed follow-up write (ref: document)
 --   won_while_superseded     won job still marked superseded; condition-based
+--   accepted_run_document_without_run_acceptance  accepted run document (with a
+--                            contact) with no accepted run row; condition-based
+--   run_acceptance_document_not_live  accepted run row whose document is
+--                            superseded, declined or not accepted; condition-based
+--   partially_accepted_every_party_accepted  job partially accepted although
+--                            every live quote document is accepted and none is
+--                            declined; condition-based
+--   accepted_quote_with_open_sibling_document  accepted whole quote beside an
+--                            older open option for the same recipient
+--                            (ref: accepted>sibling); condition-based
 --   supersede_switch_unreadable  the reader could not read the supersede switch,
 --                            so open-sibling rows were not computed (CIO reader
 --                            rule: never read an empty answer as clean)
@@ -493,6 +503,67 @@ BEGIN
        AND coalesce(j.status, '') <> 'partially_accepted'
        AND (p_since IS NULL OR d.accepted_at >= p_since)
     UNION ALL
+    -- A job left partially accepted although every party has accepted: the
+    -- final party's status write did not land (the checker's c4c and c4d at
+    -- d98903c: the last party of a shared fence run, the last contact of a
+    -- multi-contact quote). Every live quote document on the job (not
+    -- superseded, not declined; sent or not) is accepted, there are at least
+    -- two, and no quote document or run acceptance on the job is declined (a
+    -- decline legitimately leaves a job partially accepted). Condition-based.
+    SELECT 'partially_accepted_every_party_accepted', j.id, j.id::text, max(d.accepted_at)
+      FROM public.jobs j
+      JOIN public.job_documents d ON d.job_id = j.id AND d.type = 'quote'
+                                 AND d.superseded_at IS NULL AND d.declined_at IS NULL
+     WHERE j.status = 'partially_accepted'
+       AND NOT EXISTS (SELECT 1 FROM public.job_documents x
+                        WHERE x.job_id = j.id AND x.type = 'quote' AND x.declined_at IS NOT NULL)
+       AND NOT EXISTS (SELECT 1 FROM public.run_acceptances r
+                        WHERE r.job_id = j.id AND r.status = 'declined')
+     GROUP BY j.id
+    HAVING count(*) >= 2 AND bool_and(d.accepted_at IS NOT NULL)
+       AND (p_since IS NULL OR max(d.accepted_at) >= p_since)
+    UNION ALL
+    -- An accepted run document with a contact but no accepted run acceptance
+    -- pointing at it: the legacy run upsert failed after the document
+    -- committed (Codex d98903c finding 4). Condition-based. A run document
+    -- with no contact is excluded: today's upsert fails for it by design.
+    SELECT 'accepted_run_document_without_run_acceptance', d.job_id, d.id::text, d.accepted_at
+      FROM public.job_documents d
+     WHERE d.type = 'quote' AND d.accepted_at IS NOT NULL AND d.superseded_at IS NULL AND d.declined_at IS NULL
+       AND d.job_contact_id IS NOT NULL
+       AND coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label) IS NOT NULL
+       AND (p_since IS NULL OR d.accepted_at >= p_since)
+       AND NOT EXISTS (SELECT 1 FROM public.run_acceptances ra
+                        WHERE ra.job_document_id = d.id AND ra.status = 'accepted')
+    UNION ALL
+    -- An accepted run acceptance whose document is no longer live (superseded,
+    -- declined, or not accepted): the run row outlived its document. Codex
+    -- d98903c finding 4. Condition-based; may include a re-quote that replaced
+    -- the document without clearing the run row.
+    SELECT 'run_acceptance_document_not_live', ra.job_id,
+           ra.job_id::text || '/' || coalesce(ra.job_contact_id::text, 'none') || '/' || ra.run_label, ra.accepted_at
+      FROM public.run_acceptances ra
+      JOIN public.job_documents d ON d.id = ra.job_document_id
+     WHERE ra.status = 'accepted'
+       AND (d.superseded_at IS NOT NULL OR d.declined_at IS NOT NULL OR d.accepted_at IS NULL)
+    UNION ALL
+    -- An accepted whole-quote document beside a sibling option for the same
+    -- recipient (same job, no run label, same contact or both none) that was
+    -- created before the acceptance and is still open: the legacy sibling
+    -- supersession failed after the acceptance committed (Codex d98903c
+    -- finding 4). ref: accepted>sibling. Condition-based.
+    SELECT 'accepted_quote_with_open_sibling_document', d.job_id, d.id::text || '>' || s.id::text, d.accepted_at
+      FROM public.job_documents d
+      JOIN public.job_documents s
+        ON s.job_id = d.job_id AND s.id <> d.id AND s.type = 'quote'
+       AND s.job_contact_id IS NOT DISTINCT FROM d.job_contact_id
+     WHERE d.type = 'quote' AND d.accepted_at IS NOT NULL AND d.superseded_at IS NULL AND d.declined_at IS NULL
+       AND coalesce(d.data_snapshot_json->'run'->>'run_label', d.run_label) IS NULL
+       AND coalesce(s.data_snapshot_json->'run'->>'run_label', s.run_label) IS NULL
+       AND s.superseded_at IS NULL AND s.declined_at IS NULL AND s.accepted_at IS NULL
+       AND s.created_at <= d.accepted_at
+       AND (p_since IS NULL OR d.accepted_at >= p_since)
+    UNION ALL
     -- A job in a won status still marked superseded: only a write that
     -- skipped the trigger can leave this (the trigger clears a winner's own
     -- mark). Condition-based.
@@ -512,7 +583,9 @@ BEGIN
      WHERE a.handler_finished_at IS NULL AND a.resolved_at IS NULL AND a.committed_at < now() - p_grace
   ) g
   WHERE g.kind IN ('won_with_open_sibling', 'more_than_one_won', 'won_without_acceptance_event',
-                   'won_while_superseded', 'accepted_document_job_not_won', 'supersede_switch_unreadable')
+                   'won_while_superseded', 'accepted_document_job_not_won', 'supersede_switch_unreadable',
+                   'accepted_run_document_without_run_acceptance', 'run_acceptance_document_not_live',
+                   'accepted_quote_with_open_sibling_document', 'partially_accepted_every_party_accepted')
      OR NOT EXISTS (SELECT 1 FROM public.quote_acceptance_gap_resolutions x WHERE x.kind = g.kind AND x.ref = g.ref);
 END $$;
 REVOKE ALL ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) FROM PUBLIC, anon, authenticated;
@@ -525,3 +598,37 @@ COMMENT ON FUNCTION public.quote_acceptance_snapshot(uuid, text) IS 'SQ-23 remed
 COMMENT ON FUNCTION public.accept_quote_document_atomic(uuid, text, uuid, timestamptz, text, text, text, uuid, jsonb) IS 'SQ-23 remedy: atomic quote acceptance.';
 COMMENT ON FUNCTION public.quote_acceptance_handler_finished(uuid, uuid, text) IS 'SQ-23 remedy: handler reached its response.';
 COMMENT ON FUNCTION public.quote_acceptance_gaps(interval, timestamptz) IS 'SQ-23 remedy: R3 gap read.';
+
+-- C4 (Codex d98903c): send-quote's legacy (split-write) status write, as one
+-- call that marks its own transaction. The supersede trigger's final site
+-- treats sw.quote_accept_legacy = 'on' like today's behaviour (warning, the
+-- status stands) whatever the strict and atomic switches read, so a switch
+-- read in the trigger can never refuse the status of a legacy acceptance whose
+-- document (and run acceptance) has already committed in an earlier request.
+-- The write is exactly the PATCH it replaces: status, and accepted_at only when
+-- one is given (the handler passes it only for 'accepted', from the same clock
+-- read as before). The atomic marker still wins over this one. Cooperative,
+-- like the atomic marker: a trusted-writer assumption; EXECUTE is service role
+-- only. A returned error is ignored by the handler, as today's PATCH result is
+-- (a separate residual, design section 3).
+CREATE OR REPLACE FUNCTION public.quote_accept_legacy_set_status(
+  p_job_id uuid, p_status text, p_accepted_at timestamptz DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_prev text := coalesce(current_setting('sw.quote_accept_legacy', true), '');
+BEGIN
+  PERFORM set_config('sw.quote_accept_legacy', 'on', true);
+  IF p_accepted_at IS NULL THEN
+    UPDATE public.jobs SET status = p_status WHERE id = p_job_id;
+  ELSE
+    UPDATE public.jobs SET status = p_status, accepted_at = p_accepted_at WHERE id = p_job_id;
+  END IF;
+  PERFORM set_config('sw.quote_accept_legacy', v_prev, true);
+END $$;
+REVOKE ALL ON FUNCTION public.quote_accept_legacy_set_status(uuid, text, timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.quote_accept_legacy_set_status(uuid, text, timestamptz) TO service_role;
+COMMENT ON FUNCTION public.quote_accept_legacy_set_status(uuid, text, timestamptz) IS 'SQ-23 remedy: legacy acceptance status write, marked so strict never refuses it.';

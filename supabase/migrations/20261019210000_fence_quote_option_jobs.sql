@@ -506,7 +506,11 @@ BEGIN
       -- The marker is read on its own, first, so an unreadable switch can
       -- never cancel the atomic path's raise.
       v_strict := coalesce(current_setting('sw.quote_accept_atomic', true), '') = 'on';
-      IF NOT v_strict THEN
+      -- send-quote's legacy status write marks its own transaction
+      -- (quote_accept_legacy_set_status, 20261019230000): its document has
+      -- already committed in an earlier request, so no switch read here may
+      -- refuse its status (C4). The atomic marker, read first, still wins.
+      IF NOT v_strict AND coalesce(current_setting('sw.quote_accept_legacy', true), '') <> 'on' THEN
         BEGIN
           v_strict := coalesce((SELECT count(DISTINCT f.flag_name) = 2 AND bool_and(f.enabled IS TRUE)
                                   FROM public.feature_flags f

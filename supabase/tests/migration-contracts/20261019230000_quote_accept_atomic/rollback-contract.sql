@@ -14,7 +14,8 @@ BEGIN
     OR to_regprocedure('public.quote_acceptance_fingerprint(uuid)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_snapshot(uuid, text)') IS NOT NULL
     OR to_regprocedure('public.quote_acceptance_handler_finished(uuid, uuid, text)') IS NOT NULL
-    OR to_regprocedure('public.quote_acceptance_gaps(interval, timestamptz)') IS NOT NULL THEN
+    OR to_regprocedure('public.quote_acceptance_gaps(interval, timestamptz)') IS NOT NULL
+    OR to_regprocedure('public.quote_accept_legacy_set_status(uuid, text, timestamptz)') IS NOT NULL THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: a function still exists';
  END IF;
  IF EXISTS (SELECT 1 FROM public.feature_flags
@@ -59,7 +60,8 @@ BEGIN
  IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE n.nspname = 'public'
                AND (p.proname IN ('accept_quote_document_atomic', 'quote_acceptance_fingerprint',
-                                  'quote_acceptance_snapshot', 'quote_acceptance_handler_finished', 'quote_acceptance_gaps')
+                                  'quote_acceptance_snapshot', 'quote_acceptance_handler_finished', 'quote_acceptance_gaps',
+                                  'quote_accept_legacy_set_status')
                     OR obj_description(p.oid, 'pg_proc') LIKE 'SQ-23 remedy:%')) THEN
   RAISE EXCEPTION 'quote accept atomic rollback contract: a function of this migration remains, in some overload or renamed';
  END IF;
