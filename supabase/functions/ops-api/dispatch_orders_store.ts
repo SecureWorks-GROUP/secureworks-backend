@@ -14,6 +14,7 @@
 // PostgREST returns errors, it does not throw: every read and write reads
 // `error`. A failed read is never "nothing there".
 
+import { findDispatchOperator } from "./dispatch_operator.ts";
 import {
   type DispatchMaterialsActor,
   DispatchMaterialsError,
@@ -476,14 +477,12 @@ async function resolveSender(
       "operator_email naming a person is required to send",
     );
   }
-  const { data, error } = await client.from("users")
-    .select("id, email, org_id")
-    .eq("org_id", ctx.orgId)
-    .in("email", [...new Set([raw, raw.toLowerCase()])]);
-  if (error) readFailed("operator read", error);
-  const match = (data || []).find((u: any) =>
-    String(u.email || "").toLowerCase() === raw.toLowerCase()
-  );
+  let match: { email: string } | null = null;
+  try {
+    match = await findDispatchOperator(client, ctx.orgId, raw);
+  } catch (error) {
+    readFailed("operator read", error);
+  }
   if (!match) {
     refuse(
       400,
@@ -492,7 +491,7 @@ async function resolveSender(
     );
   }
   // The key is not that person: sent_by stays null and the email names them.
-  return { userId: null, email: String(match.email) };
+  return { userId: null, email: match.email };
 }
 
 // ── Projections ─────────────────────────────────────────────────────────────
