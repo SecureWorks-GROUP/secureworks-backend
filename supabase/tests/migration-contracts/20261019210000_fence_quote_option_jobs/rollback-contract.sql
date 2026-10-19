@@ -14,8 +14,8 @@ BEGIN
              WHERE n.nspname = 'public' AND (p.proname LIKE 'fence_quote_option_%' OR p.proname = 'jobs_quote_option_supersede')) THEN
   RAISE EXCEPTION 'fence quote option rollback contract: a function still exists';
  END IF;
- IF to_regclass('public.quote_option_settle_failures') IS NOT NULL THEN
-  RAISE EXCEPTION 'fence quote option rollback contract: the failure table still exists';
+ IF to_regclass('public.quote_option_settle_runs') IS NOT NULL THEN
+  RAISE EXCEPTION 'fence quote option rollback contract: the run table still exists';
  END IF;
  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_jobs_quote_option_supersede') THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the trigger still exists';

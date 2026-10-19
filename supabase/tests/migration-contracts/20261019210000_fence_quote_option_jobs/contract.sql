@@ -50,15 +50,23 @@ SELECT pg_temp.qo_assert((SELECT count(*) = 3
     'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)'::regprocedure)),
  'the trigger and its helpers must run as their owner with a fixed search_path');
 SELECT pg_temp.qo_assert(NOT EXISTS (SELECT 1 FROM pg_trigger
-  WHERE tgrelid = 'public.quote_option_settle_failures'::regclass AND NOT tgisinternal),
- 'the last-resort failure table must have no triggers');
-SELECT pg_temp.qo_assert(has_table_privilege('service_role', 'public.quote_option_settle_failures', 'SELECT')
- AND NOT has_table_privilege('service_role', 'public.quote_option_settle_failures', 'DELETE')
- AND NOT has_table_privilege('service_role', 'public.quote_option_settle_failures', 'INSERT')
- AND NOT has_table_privilege('authenticated', 'public.quote_option_settle_failures', 'SELECT')
- AND NOT has_table_privilege('anon', 'public.quote_option_settle_failures', 'SELECT')
- AND NOT has_table_privilege('public', 'public.quote_option_settle_failures', 'SELECT'),
- 'the failure table must be read and resolved by the service role only, never deleted');
+  WHERE tgrelid = 'public.quote_option_settle_runs'::regclass AND NOT tgisinternal),
+ 'the run table must have no triggers');
+SELECT pg_temp.qo_assert(has_table_privilege('service_role', 'public.quote_option_settle_runs', 'SELECT')
+ AND NOT has_table_privilege('service_role', 'public.quote_option_settle_runs', 'DELETE')
+ AND NOT has_table_privilege('service_role', 'public.quote_option_settle_runs', 'INSERT')
+ AND NOT has_table_privilege('authenticated', 'public.quote_option_settle_runs', 'SELECT')
+ AND NOT has_table_privilege('anon', 'public.quote_option_settle_runs', 'SELECT')
+ AND NOT has_table_privilege('public', 'public.quote_option_settle_runs', 'SELECT')
+ AND NOT has_table_privilege('service_role', 'public.quote_option_settle_runs', 'TRUNCATE')
+ AND NOT has_table_privilege('service_role', 'public.quote_option_settle_runs', 'UPDATE')
+ AND has_column_privilege('service_role', 'public.quote_option_settle_runs', 'resolved_at', 'UPDATE')
+ AND has_column_privilege('service_role', 'public.quote_option_settle_runs', 'resolved_by', 'UPDATE')
+ AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'settled_at', 'UPDATE')
+ AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'sqlstate', 'UPDATE'),
+ 'the run table must be read and resolved by the service role only, never inserted, edited or deleted');
+SELECT pg_temp.qo_assert((SELECT NOT relrowsecurity AND NOT relforcerowsecurity FROM pg_class
+  WHERE oid = 'public.quote_option_settle_runs'::regclass), 'the run table must have no row level security');
 
 BEGIN;
 -- One customer (c-1) at one site: A (first quote), B and C (options), D (a deliberate repeat, not
@@ -260,17 +268,48 @@ SELECT pg_temp.qo_assert((SELECT status = 'accepted' FROM public.jobs WHERE id =
 SELECT pg_temp.qo_assert((SELECT superseded_at IS NULL FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000d2')
  AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000000d2', 'quote_option_superseded') = 0,
  'an unrecorded failure must roll back the trigger''s marks and events');
-SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_failures
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_runs
   WHERE job_id = '9c000000-0000-4000-8000-0000000000d1'
     AND quote_option_group_id = '9c000000-0000-4000-8000-0000000000d1'
-    AND status = 'accepted' AND sqlstate = 'P0001' AND resolved_at IS NULL) = 1,
- 'a failure whose review event could not be written must leave a last-resort record');
+    AND status = 'accepted' AND settled_at IS NULL AND sqlstate = 'P0001' AND review_sqlstate = 'P0001'
+    AND resolved_at IS NULL) = 1,
+ 'a run whose work and review event both failed must stay on record, unsettled, with both reasons');
 -- A later failure in a group with older review events is still recorded (no history suppresses it).
 UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000d1';
 UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000d1';
-SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_failures
-  WHERE job_id = '9c000000-0000-4000-8000-0000000000d1') = 2,
- 'every unrecordable failure must get its own last-resort record');
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_runs
+  WHERE job_id = '9c000000-0000-4000-8000-0000000000d1' AND settled_at IS NULL) = 2
+ AND (SELECT count(*) FROM public.quote_option_settle_runs
+  WHERE job_id = '9c000000-0000-4000-8000-0000000000d1' AND settled_at IS NOT NULL) = 1,
+ 'every failed run must stay unsettled on its own row, and the clean reversal must settle');
+-- The second-winner case: E1 is accepted and marks E2 and E3. E2 is then accepted too, so the
+-- trigger must clear every mark, but clearing E3 fails and so does the review event. E2's
+-- acceptance stands, the marks stay as they were, and the run is on record, unsettled.
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9c000000-0000-4000-8000-0000000000e7', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-6'),
+ ('9c000000-0000-4000-8000-0000000000e8', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-6'),
+ ('9c000000-0000-4000-8000-0000000000e9', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-6');
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000000e8', '9c000000-0000-4000-8000-0000000000e7', NULL, NULL);
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000000e9', '9c000000-0000-4000-8000-0000000000e7', NULL, NULL);
+DROP TRIGGER qo_contract_fail_event ON public.job_events;
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000e7';
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.jobs
+  WHERE superseded_by_job_id = '9c000000-0000-4000-8000-0000000000e7') = 2, 'E1 must mark E2 and E3');
+CREATE TRIGGER qo_contract_fail_event BEFORE INSERT ON public.job_events FOR EACH ROW
+ EXECUTE FUNCTION public.qo_contract_fail_event();
+DROP TRIGGER qo_contract_fail ON public.jobs;
+CREATE TRIGGER qo_contract_fail BEFORE UPDATE OF superseded_at ON public.jobs FOR EACH ROW
+ WHEN (NEW.id = '9c000000-0000-4000-8000-0000000000e9' AND NEW.superseded_at IS NULL)
+ EXECUTE FUNCTION public.qo_contract_fail('P0001');
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000000e8';
+SELECT pg_temp.qo_assert((SELECT status = 'accepted' AND superseded_by_job_id = '9c000000-0000-4000-8000-0000000000e7'
+  FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000e8')
+ AND (SELECT superseded_by_job_id = '9c000000-0000-4000-8000-0000000000e7'
+  FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000e9'),
+ 'a failed second-winner run must keep the status change and leave the marks as they were');
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_settle_runs
+  WHERE job_id = '9c000000-0000-4000-8000-0000000000e8' AND settled_at IS NULL AND sqlstate = 'P0001') = 1,
+ 'a failed second-winner run must stay on record, unsettled');
 DROP TRIGGER qo_contract_fail_event ON public.job_events;
 DROP FUNCTION public.qo_contract_fail_event();
 DROP TRIGGER qo_contract_fail ON public.jobs;

@@ -33,8 +33,9 @@
 --          one another transaction holds is skipped with one too.
 --      If the trigger's own work fails, it alone is rolled back and a
 --      quote_option_review_needed event records the failure; the status
---      change stands. If even that event cannot be written, a row in
---      quote_option_settle_failures (no triggers, owner-written) records it.
+--      change stands. Every run first writes a row to
+--      quote_option_settle_runs and marks it settled only when its work
+--      commits, so a failed run is recorded before anything can fail.
 --   4. Switch fence_same_site_guard_v1, seeded OFF: ghl-proxy's route A
 --      refusal (choose_existing_or_option) stays off until every fencing
 --      caller shows the chooser.
@@ -123,26 +124,33 @@ AS $$
   SELECT hashtextextended('fence_quote_option_group:' || p_group::text, 0)
 $$;
 
--- Last-resort record of a trigger run that could not write its review
--- event. No triggers, no RLS, written only by the trigger's owner, so the
--- only thing that can stop the insert also aborts the whole status change.
--- A row stays until a person resolves it (resolved_at, resolved_by).
-CREATE TABLE IF NOT EXISTS public.quote_option_settle_failures (
+-- One row per trigger run with the switch on, written before any of the
+-- trigger's work and marked settled_at at the end of that work, in the same
+-- subtransaction. If the work fails, settled_at stays NULL: the record of the
+-- failure exists before anything that can fail. No triggers and no RLS on
+-- this table; only the trigger (as owner) inserts. The service role reads
+-- it and fills resolved_at and resolved_by; nothing is deleted.
+CREATE TABLE public.quote_option_settle_runs (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   job_id uuid NOT NULL,
   quote_option_group_id uuid NOT NULL,
   status text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  settled_at timestamptz,
   sqlstate text,
   error text,
   review_sqlstate text,
-  created_at timestamptz NOT NULL DEFAULT now(),
   resolved_at timestamptz,
   resolved_by uuid
 );
-REVOKE ALL ON public.quote_option_settle_failures FROM PUBLIC, anon, authenticated;
-GRANT SELECT, UPDATE (resolved_at, resolved_by) ON public.quote_option_settle_failures TO service_role;
-COMMENT ON TABLE public.quote_option_settle_failures IS
-  'Fence quote options (SQ-23): a status change whose option marks failed and whose quote_option_review_needed event could not be written either. The status change stood; the trigger''s marks were rolled back to what they were before it. Unresolved rows need a person.';
+ALTER TABLE public.quote_option_settle_runs NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.quote_option_settle_runs DISABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.quote_option_settle_runs FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, UPDATE (resolved_at, resolved_by) ON public.quote_option_settle_runs TO service_role;
+CREATE INDEX idx_quote_option_settle_runs_unsettled
+  ON public.quote_option_settle_runs (created_at) WHERE settled_at IS NULL AND resolved_at IS NULL;
+COMMENT ON TABLE public.quote_option_settle_runs IS
+  'Fence quote options (SQ-23): one row per supersede-trigger run with the switch on. settled_at NULL means the run''s work failed and was rolled back (marks as they were before it); the status change stood. Unsettled, unresolved rows need a person.';
 
 -- Link p_job_id as another option of p_option_of_job_id's quote. Idempotent.
 -- Both must be fencing jobs of one organisation and one GHL contact, neither
@@ -311,11 +319,14 @@ REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uu
 -- header). The trigger's own work runs in its own block. If it fails, that
 -- work is rolled back and a quote_option_review_needed event (reason
 -- supersede_failed) is written in its place, and the status change stands.
--- A timeout or cancel during that work is caught the same way. If even that
--- event cannot be written, the status change still stands, the marks are as
--- they were before it, and a row in quote_option_settle_failures records it.
--- A timeout elsewhere in the status change's statement still fails it, as
--- before.
+-- A timeout or cancel during that work is caught the same way. The run's
+-- row in quote_option_settle_runs is written first and stays unsettled when
+-- the work fails, so the failure is on record even if the review event
+-- cannot be written. The status change always stands (send-quote commits
+-- the customer's acceptance before the job status). Only if the first,
+-- plain insert into that trigger-less table and the review event both fail
+-- is a run unrecorded; a warning is then logged. A timeout elsewhere in the
+-- status change's statement still fails it, as before.
 CREATE OR REPLACE FUNCTION public.jobs_quote_option_supersede()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -333,10 +344,30 @@ DECLARE
   v_err_state text;
   v_err_msg text;
   v_review_state text;
+  v_flag_on boolean;
+  v_run bigint;
 BEGIN
+  -- The switch. An unreadable switch is treated as on, so the failure is
+  -- recorded below rather than skipped.
   BEGIN
-    IF NOT coalesce((SELECT enabled FROM public.feature_flags
-                      WHERE flag_name = 'quote_option_supersede_v1'), false) THEN
+    v_flag_on := coalesce((SELECT enabled FROM public.feature_flags
+                            WHERE flag_name = 'quote_option_supersede_v1'), false);
+  EXCEPTION WHEN query_canceled OR OTHERS THEN
+    v_flag_on := true;
+  END;
+  IF NOT v_flag_on THEN
+    RETURN NULL;
+  END IF;
+  -- The run's record comes first, before anything that can fail.
+  BEGIN
+    INSERT INTO public.quote_option_settle_runs (job_id, quote_option_group_id, status)
+    VALUES (NEW.id, v_group, NEW.status) RETURNING id INTO v_run;
+  EXCEPTION WHEN query_canceled OR OTHERS THEN
+    v_run := NULL;
+    RAISE WARNING 'jobs_quote_option_supersede: run record not written (%)', SQLSTATE;
+  END;
+  BEGIN
+    IF NOT v_flag_on THEN
       RETURN NULL;
     END IF;
     -- One group at a time. Bounded: about 2 seconds, then review.
@@ -424,6 +455,9 @@ BEGIN
               jsonb_build_object('reason', 'sibling_busy', 'sibling_job_ids', to_jsonb(v_busy),
                                  'quote_option_group_id', v_group));
     END IF;
+    -- Settled: in the same subtransaction as the work, so it rolls back
+    -- with it.
+    UPDATE public.quote_option_settle_runs SET settled_at = now() WHERE id = v_run;
   EXCEPTION WHEN query_canceled OR OTHERS THEN
     GET STACKED DIAGNOSTICS v_err_state = RETURNED_SQLSTATE, v_err_msg = MESSAGE_TEXT;
   END;
@@ -436,20 +470,19 @@ BEGIN
                                  'status', NEW.status, 'quote_option_group_id', v_group));
     EXCEPTION WHEN query_canceled OR OTHERS THEN
       GET STACKED DIAGNOSTICS v_review_state = RETURNED_SQLSTATE;
-      -- The status change still stands: callers such as send-quote's
-      -- acceptance have already committed the customer's acceptance, so
-      -- failing here would split it from the job status. The trigger's own
-      -- work was rolled back (marks are as they were before it), and the
-      -- last-resort table records it for a person.
-      BEGIN
-        INSERT INTO public.quote_option_settle_failures
-          (job_id, quote_option_group_id, status, sqlstate, error, review_sqlstate)
-        VALUES (NEW.id, v_group, NEW.status, v_err_state, left(coalesce(v_err_msg, ''), 200), v_review_state);
-      EXCEPTION WHEN query_canceled OR OTHERS THEN
-        RAISE WARNING 'jobs_quote_option_supersede: % (%), no review record could be written; status change kept',
-          v_err_msg, v_err_state;
-      END;
     END;
+    -- The run's row already says the work did not settle; add why.
+    BEGIN
+      UPDATE public.quote_option_settle_runs
+         SET sqlstate = v_err_state, error = left(coalesce(v_err_msg, ''), 200), review_sqlstate = v_review_state
+       WHERE id = v_run;
+    EXCEPTION WHEN query_canceled OR OTHERS THEN
+      NULL;
+    END;
+    IF v_run IS NULL AND v_review_state IS NOT NULL THEN
+      RAISE WARNING 'jobs_quote_option_supersede: % (%), review event failed (%) and no run record; status change kept',
+        v_err_msg, v_err_state, v_review_state;
+    END IF;
   END IF;
   RETURN NULL;
 END $$;
