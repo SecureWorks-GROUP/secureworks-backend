@@ -1075,7 +1075,7 @@ import {
 import {
   loadQuoteOptionVisibility,
   quoteOptionSummary,
-} from './quote_option_reader.ts'
+} from '../_shared/quote_option_reader.ts'
 
 // Mission makesafe-inbound-filter-2026-06-16 — intake-draft gate. scanSesMakesafes
 // is the ONLY layer that creates makesafe_intake_drafts; this gate keeps it from

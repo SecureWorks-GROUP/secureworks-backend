@@ -8,8 +8,9 @@ import {
   _listQuotesForTest,
   _opsSummaryForTest,
   _pipelineForTest,
-} from "./index.ts";
+} from "../ops-api/index.ts";
 import {
+  decideQuoteOptionGroups,
   decideSupersededJob,
   loadQuoteOptionVisibility,
   openSupersessions,
@@ -332,41 +333,203 @@ Deno.test("quote options: anything that does not agree is shown, never hidden", 
   );
 });
 
-Deno.test("quote options: the won list matches the SQ-23 migration's", async () => {
-  // The migration is on the SQ-23 write branch; once both are on main this
-  // reads it. Until then the list is pinned to the one in that branch.
-  const path = new URL(
-    "../../migrations/20261019210000_fence_quote_option_jobs.sql",
-    import.meta.url,
+// fence_quote_option_status_won copied verbatim from the SQ-23 write branch
+// (sq23/quote-option-jobs at 57499c8, round 3). Used only while that
+// migration is not in this tree; once it is, the test reads the migration
+// itself and also fails if this copy has drifted from it. Set
+// SQ23_MIGRATION_PATH to check against a migration file elsewhere.
+const SQ23_WON_FUNCTION_57499C8 =
+  `CREATE OR REPLACE FUNCTION public.fence_quote_option_status_won(p_status text)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE
+AS $$
+  SELECT coalesce(p_status, '') IN ('accepted', 'awaiting_deposit', 'deposit', 'approvals',
+    'order_materials', 'order_confirmed', 'schedule_install', 'processing', 'awaiting_supplier',
+    'scheduled', 'in_progress', 'rectification', 'final_payment', 'invoiced', 'complete', 'get_review')
+$$;`;
+
+function wonFunction(sql: string): string {
+  const m = sql.match(
+    /CREATE OR REPLACE FUNCTION public\.fence_quote_option_status_won\(p_status text\)[\s\S]*?\$\$;/,
   );
+  assert(m, "fence_quote_option_status_won not found");
+  return m[0];
+}
+
+function wonList(fn: string): string[] {
+  const body = fn.match(/IN \(([\s\S]*?)\)/);
+  assert(body, "won list not found");
+  return [...body[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+}
+
+Deno.test("quote options: the won list equals the SQ-23 migration's", async () => {
+  const envPath = Deno.env.get("SQ23_MIGRATION_PATH");
+  const path = envPath ||
+    new URL(
+      "../../migrations/20261019210000_fence_quote_option_jobs.sql",
+      import.meta.url,
+    )
+      .pathname;
   let sql: string | null = null;
   try {
     sql = await Deno.readTextFile(path);
   } catch {
-    sql = null;
+    if (envPath) {
+      throw new Error(`SQ23_MIGRATION_PATH not readable: ${envPath}`);
+    }
   }
-  const expected = [
-    "accepted",
-    "processing",
-    "awaiting_supplier",
-    "scheduled",
-    "in_progress",
-    "rectification",
-    "final_payment",
-    "invoiced",
-    "complete",
-    "get_review",
-  ];
   if (sql) {
-    const body = sql.match(
-      /fence_quote_option_status_won[\s\S]*?IN \(([\s\S]*?)\)/,
+    assertEquals(
+      wonFunction(SQ23_WON_FUNCTION_57499C8),
+      wonFunction(sql),
+      "the copy here has drifted from the migration",
     );
-    assert(body, "won list not found in the migration");
-    const parsed = [...body[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
-    assertEquals([...QUOTE_OPTION_WON_STATUSES], parsed);
+    assertEquals([...QUOTE_OPTION_WON_STATUSES], wonList(wonFunction(sql)));
   }
-  assertEquals([...QUOTE_OPTION_WON_STATUSES], expected);
+  assertEquals(
+    [...QUOTE_OPTION_WON_STATUSES],
+    wonList(SQ23_WON_FUNCTION_57499C8),
+  );
+  assertEquals(QUOTE_OPTION_WON_STATUSES.length, 16);
   assert(!QUOTE_OPTION_WON_STATUSES.includes("partially_accepted"));
+});
+
+function rEvent(job: string, group: string, reason: string, at = T0): Row {
+  return {
+    id: `ev-r-${job}-${reason}-${at}`,
+    job_id: job,
+    event_type: "quote_option_review_needed",
+    created_at: at,
+    detail_json: { reason, quote_option_group_id: group },
+  };
+}
+
+const m = (
+  n: number,
+  status: string,
+  superseded = false,
+): QuoteOptionMember => ({
+  id: id(n),
+  status,
+  quote_option_group_id: G1,
+  superseded_at: superseded ? T0 : null,
+});
+
+Deno.test("quote options: a second winner at awaiting_deposit or deposit keeps the open sibling shown", () => {
+  for (
+    const status of [
+      "awaiting_deposit",
+      "deposit",
+      "approvals",
+      "order_materials",
+      "order_confirmed",
+      "schedule_install",
+    ]
+  ) {
+    const groups = new Map([[G1, [
+      m(1, "accepted"),
+      m(2, status),
+      m(3, "quoted", true),
+    ]]]);
+    const d = decideQuoteOptionGroups(
+      groups,
+      [ev(sEvent(id(3), id(1), G1))],
+      NOW,
+    );
+    assertEquals(d.get(id(3))?.state, "pending_review", status);
+    assertEquals(d.get(id(3))?.reason, "several_options_won", status);
+  }
+  // Accepted straight to deposit is one winner, for the right reason.
+  const groups = new Map([[G1, [m(1, "deposit"), m(3, "quoted", true)]]]);
+  const d = decideQuoteOptionGroups(
+    groups,
+    [ev(sEvent(id(3), id(1), G1))],
+    NOW,
+  );
+  assertEquals([d.get(id(3))?.state, d.get(id(3))?.reason], [
+    "superseded",
+    "one_option_won",
+  ]);
+});
+
+Deno.test("quote options: the round-3 two-winner shape labels the whole group pending review", () => {
+  // Second winner's trigger cleared the marks and wrote one review event.
+  const groups = new Map([[G1, [
+    m(1, "accepted"),
+    m(2, "accepted"),
+    m(3, "quoted"),
+  ]]]);
+  const events = [
+    ev(sEvent(id(3), id(1), G1)),
+    ev(uEvent(id(3), G1, "2026-10-19T02:00:00.000Z")),
+    ev(
+      rEvent(id(2), G1, "more_than_one_option_won", "2026-10-19T02:00:00.000Z"),
+    ),
+  ];
+  const d = decideQuoteOptionGroups(groups, events, NOW);
+  for (const n of [1, 2, 3]) {
+    assertEquals(d.get(id(n))?.state, "pending_review", String(n));
+  }
+  // Two winners even with no event at all.
+  const bare = decideQuoteOptionGroups(groups, [
+    ev(rEvent(id(2), G1, "crewed")),
+  ], NOW);
+  assertEquals(bare.get(id(3))?.reason, "several_options_won");
+});
+
+Deno.test("quote options: a busy or failed review keeps the group shown until a later supersede", () => {
+  for (const reason of ["sibling_busy", "supersede_failed"]) {
+    const groups = new Map([[G1, [
+      m(1, "accepted"),
+      m(2, "quoted", true),
+      m(3, "quoted"),
+    ]]]);
+    const events = [
+      ev(sEvent(id(2), id(1), G1)),
+      ev(rEvent(id(1), G1, reason)),
+    ];
+    let d = decideQuoteOptionGroups(groups, events, NOW);
+    assertEquals([d.get(id(2))?.state, d.get(id(2))?.reason], [
+      "pending_review",
+      "review_needed",
+    ], reason);
+    assertEquals(d.get(id(3))?.state, "pending_review", reason);
+    // A later run of the normal rule settles it.
+    const later = [
+      ...events,
+      ev(sEvent(id(3), id(1), G1, "2026-10-19T03:00:00.000Z")),
+    ];
+    d = decideQuoteOptionGroups(
+      new Map([[G1, [
+        m(1, "accepted"),
+        m(2, "quoted", true),
+        m(3, "quoted", true),
+      ]]]),
+      later,
+      NOW,
+    );
+    assertEquals(d.get(id(2))?.state, "superseded", reason);
+    assertEquals(d.get(id(3))?.state, "superseded", reason);
+  }
+});
+
+Deno.test("quote options: other review reasons leave the normal rule standing", () => {
+  for (
+    const reason of [
+      "accepted_job_lost",
+      "crewed",
+      "invoiced",
+      "accepted_after_superseded",
+    ]
+  ) {
+    const groups = new Map([[G1, [m(1, "lost"), m(2, "quoted", true)]]]);
+    const events = [
+      ev(sEvent(id(2), id(1), G1)),
+      ev(rEvent(id(1), G1, reason, "2026-10-19T05:00:00.000Z")),
+    ];
+    const d = decideQuoteOptionGroups(groups, events, NOW);
+    assertEquals(d.get(id(2))?.state, "superseded", reason);
+  }
 });
 
 // ── The reads ───────────────────────────────────────────────────────────────
@@ -387,14 +550,25 @@ Deno.test("quote options load: reads the open jobs' events, then their groups by
   assertEquals(v.status, "ok");
   assertEquals([...v.hidden].sort(), [id(2)]);
   assertEquals(v.decisions.get(id(12))?.state, "pending_review");
+  assertEquals(v.decisions.get(id(10))?.state, "pending_review");
   assertEquals(v.decisions.has(id(3)), false);
-  const [events, groups] = optionCalls(calls);
+  const calledOptions = optionCalls(calls);
+  // Every given job is in the group read, so no third read.
+  assertEquals(calledOptions.length, 2);
+  const [events, groups] = calledOptions;
   assertEquals(events.select, "job_id, event_type, created_at, detail_json");
-  // Only draft and quoted jobs are asked about.
-  assertEquals(events.in[0], ["job_id", [id(2), id(3), id(12)]]);
+  assertEquals(events.in[0], ["job_id", [
+    id(1),
+    id(2),
+    id(3),
+    id(10),
+    id(11),
+    id(12),
+  ]]);
   assertEquals(events.in[1], ["event_type", [
     "quote_option_superseded",
     "quote_option_unsuperseded",
+    "quote_option_review_needed",
   ]]);
   assertEquals(events.order, ["created_at"]);
   assertEquals(events.limit, 1000);
@@ -404,6 +578,36 @@ Deno.test("quote options load: reads the open jobs' events, then their groups by
   );
   assertEquals(groups.in[0], ["quote_option_group_id", [G1, G2]]);
   assertEquals(groups.limit, 1000);
+});
+
+Deno.test("quote options load: reads the events of group members it was not given", async () => {
+  const tables = fixture(true);
+  // Round-3 two-winner shape on group 10: marks cleared, review on job 11.
+  tables.jobs = tables.jobs.map((
+    j,
+  ) => (j.id === id(12) ? { ...j, superseded_at: null } : j));
+  tables.job_events = [
+    sEvent(id(2), id(1), G1),
+    sEvent(id(12), id(10), G2),
+    uEvent(id(12), G2, "2026-10-19T02:00:00.000Z"),
+    rEvent(id(11), G2, "more_than_one_option_won", "2026-10-19T02:00:00.000Z"),
+  ];
+  const { client, calls } = makeClient(tables);
+  // Only the open jobs, as list_quotes passes them.
+  const open = tables.jobs.filter((j) =>
+    j.status === "quoted" || j.status === "draft"
+  );
+  const v = await loadQuoteOptionVisibility(client, open, { asOf: NOW });
+  assertEquals([...v.hidden], [id(2)]);
+  assertEquals(v.decisions.get(id(12))?.state, "pending_review");
+  assertEquals(
+    v.decisions.has(id(11)),
+    false,
+    "decisions only for the given jobs",
+  );
+  const reads = optionCalls(calls);
+  assertEquals(reads.map((c) => c.table), ["job_events", "jobs", "job_events"]);
+  assertEquals(reads[2].in[0], ["job_id", [id(1), id(10), id(11)]]);
 });
 
 Deno.test("quote options load: no open supersession needs no group read", async () => {
@@ -464,7 +668,7 @@ Deno.test("pipeline: switch on leaves the superseded option out, keeps repeats a
   assertEquals(result.quote_options, {
     status: "ok",
     superseded_hidden: 1,
-    pending_review_job_ids: [id(12)],
+    pending_review_job_ids: [id(10), id(11), id(12)],
   });
 });
 
