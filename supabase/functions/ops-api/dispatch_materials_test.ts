@@ -1630,6 +1630,43 @@ Deno.test("suggest: two presses at once add the scope lines once; the second is 
   assertEquals((await read(db, JOB.patio)).counts, { total: 4, ready: 0 });
 });
 
+Deno.test("suggest: three presses at the same instant all pass the no-lines read, and the line key lets one set in", async () => {
+  const db = await jobWithSuppliers();
+  const settled = await Promise.allSettled([
+    SUP.steel,
+    SUP.sheets,
+    SUP.steel,
+  ].map((supplierId) =>
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: supplierId,
+    })
+  ));
+  // Every press reached the insert: the race got past the read and was
+  // stopped by the key on the line id (fixed by job and place), not by luck.
+  const lineInserts = db.requests.filter((r) =>
+    r.kind === "insert" && r.table === "job_material_lines"
+  );
+  assertEquals(lineInserts.length, 3);
+  const won = settled.filter((r) => r.status === "fulfilled");
+  const lost = settled.filter((r) => r.status === "rejected");
+  assertEquals(won.length, 1);
+  assertEquals(lost.length, 2);
+  for (const loss of lost) {
+    const error = (loss as PromiseRejectedResult).reason;
+    assert(error instanceof DispatchMaterialsError);
+    assertEquals(error.status, 409);
+    assertEquals(error.body.code, "lines_exist");
+  }
+  // One set, under one supplier, nothing partial from the losers.
+  const stored = db.tables.job_material_lines.filter((l) =>
+    l.job_id === JOB.patio
+  );
+  assertEquals(stored.length, 4);
+  assertEquals(new Set(stored.map((l) => l.supplier_id)).size, 1);
+  assertEquals(stored.map((l) => l.position).sort(), [1, 2, 3, 4]);
+});
+
 Deno.test("suggest: a repair job 409; a fence with no frozen scope 409; supplier not on the job 409", async () => {
   const db = await jobWithSuppliers(JOB.fence);
   // The fence job carries a patio-shaped live scope_json and no frozen
