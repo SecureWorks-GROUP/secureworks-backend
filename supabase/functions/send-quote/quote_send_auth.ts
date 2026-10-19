@@ -282,6 +282,7 @@ export async function decideSendQuoteAuth(input: {
         fn: 'send-quote',
         route: path,
         env: input.env,
+        headers: req.headers,
       })
       : 'accepted'
     if (gated === 'refused') {

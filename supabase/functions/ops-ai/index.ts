@@ -3320,7 +3320,7 @@ serve(async (req: Request) => {
   // is never treated as a user JWT.
   if (await verifyServiceCredential(req.headers)) {
     isAuthed = true
-  } else if (sharedKeyGate({ presented: [xApiKey, bearerToken], sharedKey: validKey, fn: 'ops-ai' }) === 'accepted') {
+  } else if (sharedKeyGate({ presented: [xApiKey, bearerToken], sharedKey: validKey, fn: 'ops-ai', headers: req.headers }) === 'accepted') {
     isAuthed = true
   } else if (bearerToken && !isSharedKey(bearerToken, validKey)) {
     try {

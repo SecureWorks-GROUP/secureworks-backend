@@ -66,33 +66,59 @@ export function sharedKeyGate(input: {
   fn: string;
   route?: string | null;
   env?: EnvGet;
+  // Request headers, for non-secret caller hints in the census log line.
+  headers?: Headers | null;
 }): SharedKeyGateResult {
   const hit = input.presented.some((p) => isSharedKey(p, input.sharedKey));
   if (!hit) return "absent";
   if (sharedKeyContainmentOn(input.env ?? defaultEnv)) {
-    logSharedKeyRefused(input.fn, input.route);
+    logSharedKeyRefused(input.fn, input.route, input.headers);
     return "refused";
   }
-  logSharedKeyAccepted(input.fn, input.route);
+  logSharedKeyAccepted(input.fn, input.route, input.headers);
   return "accepted";
 }
 
+/**
+ * Non-secret hints that help name the caller: origin, referer path, user agent
+ * and the self-declared actor header. Never a credential or a query string.
+ */
+export function callerHints(headers?: Headers | null): Record<string, string | null> {
+  const clip = (v: string | null | undefined, n = 120) => v ? v.slice(0, n) : null;
+  let refererPath: string | null = null;
+  try {
+    const r = headers?.get("referer");
+    if (r) {
+      const u = new URL(r);
+      refererPath = clip(u.origin + u.pathname);
+    }
+  } catch { /* not a URL */ }
+  return {
+    origin: clip(headers?.get("origin")),
+    referer: refererPath,
+    user_agent: clip(headers?.get("user-agent")),
+    actor: clip(headers?.get("x-sw-actor"), 80),
+  };
+}
+
 /** One log line per refused shared-key call, so callers still using it can be found. */
-export function logSharedKeyRefused(fn: string, route?: string | null): void {
+export function logSharedKeyRefused(fn: string, route?: string | null, headers?: Headers | null): void {
   console.warn(JSON.stringify({
     event: "shared_key_refused",
     function: fn,
     route: route ?? null,
     containment_env: SHARED_KEY_CONTAINMENT_ENV,
+    ...callerHints(headers),
   }));
 }
 
 /** One log line per accepted shared-key call while containment is off (dependency census). */
-export function logSharedKeyAccepted(fn: string, route?: string | null): void {
+export function logSharedKeyAccepted(fn: string, route?: string | null, headers?: Headers | null): void {
   console.log(JSON.stringify({
     event: "shared_key_accepted",
     function: fn,
     route: route ?? null,
+    ...callerHints(headers),
   }));
 }
 
@@ -113,6 +139,7 @@ export function serverCallHeaders(
     h["Authorization"] = `Bearer ${serviceKey}`;
     h["apikey"] = serviceKey;
   } else if (sharedKey) {
+    console.warn(JSON.stringify({ event: "server_call_shared_key_fallback" }));
     h["x-api-key"] = sharedKey;
   }
   return { ...h, ...extra };

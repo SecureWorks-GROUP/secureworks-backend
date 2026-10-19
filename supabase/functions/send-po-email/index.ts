@@ -215,7 +215,7 @@ if (import.meta.main) serve(async (req: Request) => {
   const validKey = Deno.env.get('SW_API_KEY')
   // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
   // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off.
-  const sharedKeyOk = sharedKeyGate({ presented: [apiKey], sharedKey: validKey, fn: 'send-po-email' }) === 'accepted'
+  const sharedKeyOk = sharedKeyGate({ presented: [apiKey], sharedKey: validKey, fn: 'send-po-email', headers: req.headers }) === 'accepted'
   if (!sharedKeyOk && !(await verifyServiceCredential(req.headers))) {
     return json({ error: 'Unauthorized' }, 401)
   }

@@ -768,7 +768,7 @@ serve(async (req: Request) => {
   // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off
   // (see ../_shared/shared_key_containment.ts).
   if (await verifyServiceCredential(req.headers)) isAuthed = true
-  else if (sharedKeyGate({ presented: [xApiKey, bearerToken], sharedKey: validKey, fn: 'agent-runner' }) === 'accepted') isAuthed = true
+  else if (sharedKeyGate({ presented: [xApiKey, bearerToken], sharedKey: validKey, fn: 'agent-runner', headers: req.headers }) === 'accepted') isAuthed = true
   else if (bearerToken && !isSharedKey(bearerToken, validKey)) {
     try {
       const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)

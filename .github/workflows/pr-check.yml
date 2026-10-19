@@ -260,6 +260,19 @@ jobs:
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/job_closeout_read_test.ts
 
+      # Shared browser key containment (SW_SHARED_KEY_CONTAINMENT): the switch,
+      # the six contained routes, send-quote /send-invoice and send-outlook-email
+      # behaviour with the switch on and off. send-outlook-email imports index.ts,
+      # so it runs with the index-importing flags.
+      - name: Test shared browser key containment
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/shared_key_containment_test.ts \
+            supabase/functions/_shared/shared_key_containment_routes_test.ts \
+            supabase/functions/send-quote/auth_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/send-outlook-email/shared_key_containment_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

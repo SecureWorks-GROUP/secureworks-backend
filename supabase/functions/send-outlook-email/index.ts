@@ -1994,7 +1994,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
     // Shared browser key: accepted only while SW_SHARED_KEY_CONTAINMENT is off.
     // Server callers (ops-api included) present the service credential instead.
     const isAuthed = opsAuthorized ||
-      sharedKeyGate({ presented: [suppliedCredential], sharedKey: validKey, fn: 'send-outlook-email' }) === 'accepted'
+      sharedKeyGate({ presented: [suppliedCredential], sharedKey: validKey, fn: 'send-outlook-email', headers: req.headers }) === 'accepted'
     if (!isAuthed) return json({ error: 'Unauthorized' }, 401)
 
     if (req.method === 'GET') {
