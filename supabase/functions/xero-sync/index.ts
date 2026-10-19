@@ -1350,6 +1350,7 @@ async function ingestMaterialsActuals(
     //    anchor date is delivery_date if set, else created_at.
     const posByContact = new Map<string, POCandidate[]>()
     let blockedJobIds = new Set<string>() // jobs not won, or holding: never a cost by rule
+    const jobNumberById = new Map<string, string>()
     {
       const pos = await readAll<any>(() =>
         sb.from('purchase_orders')
@@ -1362,9 +1363,10 @@ async function ingestMaterialsActuals(
       // A PO can only carry a cost to a job that was won and is not a holding
       // job, and only once it has been issued (never a draft).
       const notLiveJobs = await readAll<any>(() =>
-        sb.from('jobs').select('id, status, do_not_schedule:metadata->do_not_schedule').eq('org_id', DEFAULT_ORG_ID).order('id')
+        sb.from('jobs').select('id, job_number, status, do_not_schedule:metadata->do_not_schedule').eq('org_id', DEFAULT_ORG_ID).order('id')
       )
       if (!notLiveJobs) throw new Error('jobs unreadable')
+      for (const j of notLiveJobs) jobNumberById.set(j.id, j.job_number)
       blockedJobIds = new Set(
         notLiveJobs
           .filter((j: any) => DEAD_JOB_STATUSES.has(String(j.status || '').toLowerCase()) ||
@@ -1451,7 +1453,8 @@ async function ingestMaterialsActuals(
           // A human somehow assigned a mirror — leave it, but flag in logs.
           console.warn(`[materials] mirror ${bill.xero_invoice_id} has a manual fact — left untouched for review`)
         } else if (factSourceById.has(bill.xero_invoice_id)) {
-          await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+          await sb.from('job_materials_facts').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).neq('automation_source', 'manual_queue')
           result.cleaned++
         }
         continue
@@ -1533,6 +1536,7 @@ async function ingestMaterialsActuals(
       const verdict = existingFactVerdict({
         source: existingSource,
         factJobId,
+        factJobNumber: factJobId ? jobNumberById.get(factJobId) ?? null : null,
         factJobBlocked: !!factJobId && blockedJobIds.has(factJobId),
         refTokens,
         lineTokens,
@@ -1566,7 +1570,9 @@ async function ingestMaterialsActuals(
         const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)
         const { error: fErr } = await sb
           .from('job_materials_facts')
-          .upsert(row, { onConflict: 'xero_invoice_id' })
+          // Insert only: a fact written meanwhile (by a person or the agent) is
+          // never overwritten.
+          .upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true })
         if (fErr) {
           console.error(`[materials] fact upsert failed ${bill.xero_invoice_id}:`, fErr.message)
           continue

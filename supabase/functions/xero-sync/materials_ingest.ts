@@ -374,6 +374,7 @@ export function jobNumbersInText(text: string | null | undefined): Set<string> {
 export function existingFactVerdict(input: {
   source: string | null | undefined; // the fact's automation_source
   factJobId: string | null | undefined;
+  factJobNumber?: string | null; // the fact's job number, to compare with a job number the bill names
   factJobBlocked: boolean; // the fact's job is not won, or is a holding job
   refTokens: Set<string>; // job numbers in the bill's reference
   lineTokens: Set<string>; // job numbers in the bill's line descriptions
@@ -389,6 +390,11 @@ export function existingFactVerdict(input: {
     if (!input.jobFromRefId) return "remove"; // the reference is now refused
   }
   if (input.jobFromRefId && input.jobFromRefId !== input.factJobId) return "remove"; // names another job
+  // One job number on the bill (reference or lines) that is not the fact's job.
+  if (all.size === 1) {
+    const only = [...all][0];
+    if (!input.factJobNumber || only !== String(input.factJobNumber).toUpperCase()) return "remove";
+  }
   return "keep";
 }
 
