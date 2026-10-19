@@ -450,3 +450,10 @@ Deno.test("gold-set replay — precision 100%, mirrors excluded", () => {
   assertEquals(correctAuto, autoAssignments); // 100%
   assertEquals(factsFromMirrors, 0); // mirror exclusion proven
 });
+
+// Second-model review, 19 Oct 2026: a product code is no job reference.
+Deno.test("extractJobNumber: a product code that starts like a job number is not one", () => {
+  assertEquals(extractJobNumber("SWF-261009XL"), null);
+  assertEquals(extractJobNumber("XSWF-261009"), null);
+  assertEquals(extractJobNumber("Order SWF-261009-DEP50"), "SWF-261009");
+});

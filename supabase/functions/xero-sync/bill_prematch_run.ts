@@ -55,7 +55,7 @@ export interface BillPrematchResult {
   errors: number;
 }
 
-async function readAll<T>(build: () => any): Promise<T[] | null> {
+export async function readAll<T>(build: () => any): Promise<T[] | null> {
   const rows: T[] = [];
   for (let from = 0;; from += PAGE) {
     const { data, error } = await build().range(from, from + PAGE - 1);
@@ -277,6 +277,13 @@ export async function runBillPrematch(
     poFactBills.get(f.matched_po_id)!.push(f.xero_invoice_id);
   }
 
+  // A trade-invoice mirror is labour already counted from the trade lines; it is
+  // never a materials fact, even if its queue row is still open.
+  const mirrorRows = await readIn<any>(sb, "trade_invoices", "xero_bill_id", "xero_bill_id", live.map((q) => q.xero_invoice_id));
+  if (!mirrorRows) return { ...result, reason: "trade_mirrors_unreadable" };
+  const mirrorIds = new Set(mirrorRows.map((m) => m.xero_bill_id));
+  // Keep live and bills index-aligned: drop mirrors from live itself.
+  for (let i = live.length - 1; i >= 0; i--) if (mirrorIds.has(live[i].xero_invoice_id)) live.splice(i, 1);
   const bills = live.map((q) => toPrematchBill(q, invById.get(q.xero_invoice_id)));
   const atts = await readAll<any>(() =>
     sb.from("context_email_attachments").select("file_name, business_event_id")

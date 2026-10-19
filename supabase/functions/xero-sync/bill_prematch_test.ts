@@ -265,3 +265,19 @@ Deno.test("a DRAFT bill naming one job gets no fact and stays on the list until 
   assertEquals(store.job_materials_facts.filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
   assertEquals(store.materials_reconciliation_queue.find((q) => q.id === "q-open-noref")!.status, "open");
 });
+
+Deno.test("an open queue bill that is a trade-invoice mirror is never given a materials fact", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref");
+  seed.jobs = [{ id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [];
+  seed.xero_invoices = [
+    { xero_invoice_id: "xinv-001", invoice_number: "12345678", status: "AUTHORISED", reference: null, line_items: [{ Description: "Materials for SWF-25010", AccountCode: "305", LineAmount: 1000 }], job_id: null },
+  ];
+  (seed as Record<string, unknown>).trade_invoices = [{ id: "ti-1", xero_bill_id: "xinv-001" }];
+  seed.context_email_attachments = [];
+  seed.materials_bill_proposals = [];
+  const { client, store } = makeFakeClient(seed);
+  await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:00:00.000Z" });
+  assertEquals(store.job_materials_facts.filter((f) => f.xero_invoice_id === "xinv-001").length, 0);
+});

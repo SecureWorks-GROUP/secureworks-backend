@@ -34,7 +34,7 @@ import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
-import { runBillPrematch } from './bill_prematch_run.ts'
+import { readAll, runBillPrematch } from './bill_prematch_run.ts'
 import { DEAD_JOB_STATUSES } from './bill_prematch.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
@@ -1331,11 +1331,13 @@ async function ingestMaterialsActuals(
     //    trade-invoice mirror can never be a materials fact.
     const mirrorSet = new Set<string>()
     {
-      const { data: mirrors } = await sb
-        .from('trade_invoices')
-        .select('xero_bill_id')
-        .not('xero_bill_id', 'is', null)
-      for (const m of mirrors || []) {
+      // Every read below must be whole: a failed or truncated read would hide a
+      // mirror or a human placement, so it stops the step instead.
+      const mirrors = await readAll<any>(() =>
+        sb.from('trade_invoices').select('id, xero_bill_id').not('xero_bill_id', 'is', null).order('id')
+      )
+      if (!mirrors) throw new Error('trade invoice mirrors unreadable')
+      for (const m of mirrors) {
         if (m.xero_bill_id) mirrorSet.add(m.xero_bill_id)
       }
     }
@@ -1344,14 +1346,29 @@ async function ingestMaterialsActuals(
     //    anchor date is delivery_date if set, else created_at.
     const posByContact = new Map<string, POCandidate[]>()
     {
-      const { data: pos } = await sb
-        .from('purchase_orders')
-        .select(
-          'id, po_number, xero_contact_id, status, subtotal, total, job_id, xero_bill_id, delivery_date, created_at',
-        )
-        .not('xero_contact_id', 'is', null)
-        .is('xero_bill_id', null)
-      for (const po of pos || []) {
+      const pos = await readAll<any>(() =>
+        sb.from('purchase_orders')
+          .select('id, po_number, xero_contact_id, status, subtotal, total, job_id, xero_bill_id, delivery_date, created_at')
+          .not('xero_contact_id', 'is', null)
+          .is('xero_bill_id', null)
+          .order('id')
+      )
+      if (!pos) throw new Error('purchase orders unreadable')
+      // A PO can only carry a cost to a job that was won and is not a holding
+      // job, and only once it has been issued (never a draft).
+      const notLiveJobs = await readAll<any>(() =>
+        sb.from('jobs').select('id, status, do_not_schedule:metadata->do_not_schedule').eq('org_id', DEFAULT_ORG_ID).order('id')
+      )
+      if (!notLiveJobs) throw new Error('jobs unreadable')
+      const blockedJobIds = new Set(
+        notLiveJobs
+          .filter((j: any) => DEAD_JOB_STATUSES.has(String(j.status || '').toLowerCase()) ||
+            String(j.do_not_schedule ?? '').toLowerCase() === 'true')
+          .map((j: any) => j.id),
+      )
+      for (const po of pos) {
+        if (String(po.status || '').toLowerCase() === 'draft') continue
+        if (!po.job_id || blockedJobIds.has(po.job_id)) continue
         const cand: POCandidate = {
           id: po.id,
           po_number: po.po_number,
@@ -1387,14 +1404,16 @@ async function ingestMaterialsActuals(
     const factSourceById = new Map<string, string>() // xero_invoice_id -> automation_source
     const queueStatusById = new Map<string, string>() // xero_invoice_id -> status
     {
-      const { data: facts } = await sb
-        .from('job_materials_facts')
-        .select('xero_invoice_id, automation_source')
-      for (const f of facts || []) factSourceById.set(f.xero_invoice_id, f.automation_source)
-      const { data: qrows } = await sb
-        .from('materials_reconciliation_queue')
-        .select('xero_invoice_id, status')
-      for (const q of qrows || []) queueStatusById.set(q.xero_invoice_id, q.status)
+      const facts = await readAll<any>(() =>
+        sb.from('job_materials_facts').select('id, xero_invoice_id, automation_source').order('id')
+      )
+      if (!facts) throw new Error('materials facts unreadable')
+      for (const f of facts) factSourceById.set(f.xero_invoice_id, f.automation_source)
+      const qrows = await readAll<any>(() =>
+        sb.from('materials_reconciliation_queue').select('id, xero_invoice_id, status').order('id')
+      )
+      if (!qrows) throw new Error('materials queue unreadable')
+      for (const q of qrows) queueStatusById.set(q.xero_invoice_id, q.status)
     }
 
     for (const b of bills || []) {
@@ -1443,6 +1462,13 @@ async function ingestMaterialsActuals(
       if (billStatus !== 'AUTHORISED' && billStatus !== 'PAID') {
         const counts = result as Record<string, unknown>
         counts.skipped_unissued = Number(counts.skipped_unissued || 0) + 1
+        // An automatic fact written earlier for a bill that is not issued is
+        // removed (a human placement is left for review), as for mirrors.
+        const src = factSourceById.get(bill.xero_invoice_id)
+        if (src && src !== 'manual_queue') {
+          await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+          result.cleaned++
+        }
         continue
       }
 
@@ -1471,7 +1497,9 @@ async function ingestMaterialsActuals(
         ? posByContact.get(bill.xero_contact_id) || []
         : []
 
-      const m = matchBill(bill, { isMirror: false, jobFromRef, refToken: token, pos, config })
+      // A job number that was found but refused (not won, holding, or sharing its
+      // digits) must reach a person: no PO fallback may place the bill instead.
+      const m = matchBill(bill, { isMirror: false, jobFromRef, refToken: token, pos: token && !jobFromRef ? [] : pos, config })
 
       if (m.outcome === 'fact') {
         const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)

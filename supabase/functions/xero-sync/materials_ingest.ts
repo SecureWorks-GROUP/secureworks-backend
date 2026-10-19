@@ -43,7 +43,9 @@
 // so both passes now agree on what a job reference is.
 // ─────────────────────────────────────────────────────────────
 // 2026-09-10: job numbers are now six digits (SWP-261376, SWMS-261156).
-export const JOB_NUMBER_RE = /SW(?:MS|[A-Z])-\d{4,6}(?!\d)/i;
+// A whole token only: never inside a longer word, number or product code
+// ("SWF-261009XL" is no job number).
+export const JOB_NUMBER_RE = /(?<![A-Z0-9])SW(?:MS|[A-Z])-\d{4,6}(?![A-Z0-9])/i;
 
 export function extractJobNumber(
   ref: string | null | undefined,
