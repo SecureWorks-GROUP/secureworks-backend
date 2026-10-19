@@ -129,7 +129,16 @@ Deno.test("bills window: a bill voided between pages cannot push another bill ou
   const realFrom = sb.from.bind(sb);
   let n = 0;
   (sb as any).from = (t: string) => {
-    if (n++ === 1) rows.find((r) => r.status === "AUTHORISED")!.status = "VOIDED";
+    // Void a bill that page one returned (the newest-first order puts the
+    // latest invoice_date first), so later pages would shift under offsets.
+    if (n++ === 1) {
+      const firstPage = rows.filter((r) => r.status === "AUTHORISED").sort((x, y) =>
+        x.invoice_date !== y.invoice_date
+          ? (x.invoice_date < y.invoice_date ? 1 : -1)
+          : (x.xero_invoice_id < y.xero_invoice_id ? -1 : 1)
+      ).slice(0, 500);
+      firstPage[0].status = "VOIDED";
+    }
     return realFrom(t);
   };
   const r = await readBillsInWindow(sb, { orgId: "org", cutoff: "2026-07-21" });

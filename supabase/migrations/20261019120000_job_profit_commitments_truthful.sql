@@ -274,7 +274,7 @@ UNION ALL SELECT * FROM fact
 UNION ALL SELECT * FROM po;
 
 COMMENT ON VIEW public.v_job_cost_events IS
-  'Job profit engine (20261009130000, CFO-12 20261019120000): one row per job cost, lane labour/materials/commission/other, source trade_line/supplier_bill/materials_fact/po_committed/po_ordered/po_invoice_emailed. The three po_ sources are never actual (is_actual false): po_committed is a priced open order; po_ordered is a sent order with no price (amount null, counted, never $0); po_invoice_emailed is an order whose supplier invoice was emailed but whose bill is not placed on the job. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000): one row per job cost, lane labour/materials/commission/other, source trade_line/supplier_bill/materials_fact/po_committed/po_ordered/po_invoice_emailed. The three po_ sources are never actual (is_actual false): po_committed is a priced open order; po_ordered is a sent order with no price (amount null, counted, never $0); po_invoice_emailed is an order whose supplier invoice was emailed with no bill linked to the order (it may be on the job unlinked). Read only, service role only.';
 
 -- ─────────────────────────────────────────────────────────────
 -- v_job_profit
