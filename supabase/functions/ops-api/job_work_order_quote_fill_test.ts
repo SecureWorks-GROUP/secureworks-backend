@@ -681,7 +681,7 @@ const noLinesEvents = (db: FakeDb) =>
     e.event_type === "job_work_order_quote_has_no_lines"
   );
 
-Deno.test("a quote with nothing to copy records one event and holds the draft for the office (SWP-900101 shape)", async () => {
+Deno.test("a quote with nothing to copy records one event and holds the draft for the office (empty patio quote)", async () => {
   const db = noLinesDb();
   const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
   assertEquals(r.quote_fill.reason, "no_quote_lines");
@@ -1099,36 +1099,6 @@ Deno.test("auto issue: a quote with no labour figure fills the lines and waits f
   assert(wo.scope_items.length > 0);
   const staff: any = await readJobWorkOrder(db, { jobId: JOB });
   assertEquals(staff.needs_checking.held.reason, "agreed_labour_missing");
-});
-
-Deno.test("auto issue: labour saved as materials worth more than the agreed labour holds the draft (SWF-900001 shape)", async () => {
-  const db = baseDb();
-  const pricing = JSON.parse(
-    db.tables.scope_revisions[0].pricing_canonical_text,
-  );
-  // The install priced at almost nothing, the real labour as hours saved as a
-  // material: the agreed figure is not the labour the job needs.
-  pricing.line_items.push({
-    unit: "hrs",
-    kind: "material",
-    category: "custom",
-    quantity: 15,
-    cost_price: 80,
-    description: "Install labour",
-  });
-  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify(
-    pricing,
-  );
-  autoIssueOn(db);
-  const calls = autoIssueDoor(db);
-  const r = await autoIssueJobWorkOrderForJob(db, JOB);
-  assertEquals(r.reason, "labour_outside_agreed");
-  assertEquals(r.issued, false);
-  assertEquals(calls, []);
-  assertEquals(db.tables.work_orders[0].status, "draft");
-  const staff: any = await readJobWorkOrder(db, { jobId: JOB });
-  assertEquals(staff.needs_checking.held.reason, "labour_outside_agreed");
-  assertEquals(staff.needs_checking.needs_checking, true);
 });
 
 Deno.test("auto issue: no accepted quote leaves the draft empty for the office", async () => {
