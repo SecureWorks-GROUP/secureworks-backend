@@ -1185,7 +1185,7 @@ Deno.test("statement: an unknown reply keeps the week's claim and holds the next
   assertEquals(second.body.code, "send_not_confirmed");
   assertEquals(rec.emails.length, 1);
 
-  options.emailResult = { ok: true, status: 200, error: null };
+  options.emailResult = { ok: true, status: 202, error: null, reply: { success: true } };
   const third = await call(deps, "debt_ws_statement_send", SHAUN, {
     company_key: MLB_CONTACT, sent_items_checked: true,
   });

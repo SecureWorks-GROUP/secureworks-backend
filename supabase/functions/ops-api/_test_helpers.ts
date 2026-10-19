@@ -2,6 +2,8 @@
 // Pure helpers — no side effects, no network. Deno test imports these
 // and feeds the resulting deps object to _verifyAndSendInvoiceEmail.
 
+import { type FakeClaimStore, makeFakeClaimStore } from "../_shared/outbound_send_claim_fake.ts"
+
 export type TableSeed = {
   xero_invoices?: Record<string, any>  // keyed by xero_invoice_id
   jobs?: Record<string, any>           // keyed by id
@@ -10,6 +12,7 @@ export type TableSeed = {
   business_events?: any[]              // list reads (the invoice email resend gate)
   job_events?: any[]                   // list reads; inserts are appended here too
   read_errors?: Record<string, string> // table -> PostgREST error message on a list read
+  claims?: FakeClaimStore              // outbound send claims (client.rpc); one is made when absent
 }
 
 export type StubClientCalls = {
@@ -28,7 +31,12 @@ function stubColumn(row: any, col: string): any {
 // job_events insert is appended to that list so a later read sees it.
 export function makeStubClient(seed: TableSeed = {}): { client: any; calls: StubClientCalls } {
   const calls: StubClientCalls = { inserts: [] }
+  seed.claims = seed.claims || makeFakeClaimStore()
+  const claims = seed.claims
   const client = {
+    rpc(fn: string, args?: Record<string, unknown>) {
+      return claims.rpc(fn, args)
+    },
     from(table: string) {
       return {
         select(_cols: string) {
@@ -190,7 +198,8 @@ export function happyFixture() {
     },
   }
   const okPdf = () => new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), { status: 200 })
-  const okOutlook = () => new Response(JSON.stringify({ ok: true }), { status: 200 })
+  const okOutlook = () =>
+    new Response(JSON.stringify({ success: true, accepted: true, delivered: null, delivery_status: "unverified", retry_safe: false }), { status: 202 })
   return {
     seed: {
       xero_invoices: {

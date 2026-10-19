@@ -13,6 +13,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _makesafeSendPhotoFollowupForTest as makesafeSendPhotoFollowup } from "./index.ts";
+import { makeFakeClaimStore } from "../_shared/outbound_send_claim_fake.ts";
 
 const JOB = "job-photo-1";
 const PHOTO_URL = "https://stub-storage.invalid/job-photo-1/photo.jpg";
@@ -84,8 +85,9 @@ class Query {
 
 function harness(finalPatchError: { message: string } | null = null, finalPatchZeroRows = false) {
   const state: State = { packStatus: "drafted", packUpdates: [], finalPatchError, finalPatchZeroRows };
-  const client = { from: (t: string) => new Query(t, state) };
-  return { state, client };
+  const claims = makeFakeClaimStore();
+  const client = { from: (t: string) => new Query(t, state), rpc: claims.rpc };
+  return { state, client, claims };
 }
 
 async function withOutlookStatus<T>(status: number, fn: (calls: string[]) => Promise<T>, replyBody: Record<string, unknown> = { error: "Unauthorized" }): Promise<T> {
@@ -114,7 +116,7 @@ const quiet = async <T>(fn: () => Promise<T>) => {
 };
 
 Deno.test("photo follow-up: a 401 from send-outlook-email saves failed / photo_send_refused", async () => {
-  const { state, client } = harness();
+  const { state, client, claims } = harness();
   await withOutlookStatus(401, async (calls) => {
     await quiet(() => assertRejects(() => makesafeSendPhotoFollowup(client, { job_id: JOB, approved_photos: [{ url: PHOTO_URL, name: "photo.jpg" }] })));
     assert(calls.some((u) => u.includes("send-outlook-email")), "the email was attempted");
@@ -123,16 +125,18 @@ Deno.test("photo follow-up: a 401 from send-outlook-email saves failed / photo_s
   assertEquals(last.status, "failed");
   assertEquals(last.failed_step, "photo_send_refused");
   assertEquals(state.packStatus, "failed", "the pack is retryable: the lock accepts 'failed'");
+  assertEquals(claims.rowsFor(`makesafe_pack:${JOB}:photo`).map((r) => r.state), ["failed"], "a refusal frees the send claim");
 });
 
 Deno.test("photo follow-up: a 5xx after the attempt stays 'sending' (outcome unknown)", async () => {
-  const { state, client } = harness();
+  const { state, client, claims } = harness();
   await withOutlookStatus(502, async () => {
     await quiet(() => assertRejects(() => makesafeSendPhotoFollowup(client, { job_id: JOB, approved_photos: [{ url: PHOTO_URL, name: "photo.jpg" }] })));
   });
   const last = state.packUpdates.at(-1)!;
   assertEquals(last.status, "sending");
   assertEquals(last.failed_step, "photo_send_unknown_outcome");
+  assertEquals(claims.rowsFor(`makesafe_pack:${JOB}:photo`).map((r) => r.state), ["outcome_unknown"], "an unknown outcome holds the claim");
 });
 
 Deno.test("photo follow-up: a failed save of the refused state is surfaced, not swallowed", async () => {

@@ -497,16 +497,26 @@ import {
   classifyInvoiceEmailFailure,
   INVOICE_EMAIL_FAILURE_EVENT,
   INVOICE_EMAILED_BODY_PREVIEW,
+  invoiceEmailReplyAccepted,
   type InvoiceEmailFailureOutcome,
   writeInvoiceAuthorisedEvidence,
 } from './invoice_status_evidence.ts'
 import {
+  claimInvoiceEmailSend,
   INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT,
-  invoiceEmailGateRefusal,
-  readInvoiceEmailGate,
+  type InvoiceEmailVia,
+  settleInvoiceEmailSend,
   writeInvoiceEmailGateJobEvent,
 } from './invoice_email_resend_gate.ts'
 import { summariseSendReply } from './send_reply_summary.ts'
+import {
+  claimSend,
+  newSendAttemptId,
+  reconcileActor,
+  reconcileHeld,
+  sendClaimRefusalBody,
+  settleSend,
+} from '../_shared/outbound_send_claim.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -3960,37 +3970,57 @@ type InvoiceEmailGateDeps = {
   xeroInvoiceId: string
   invoiceNumber: string
   jobId: string | null
-  via: 'outlook' | 'xero'
+  via: InvoiceEmailVia
 }
 
-// Runs the invoice email resend gate. With sent_items_checked the caller says
-// the earlier send is not in Sent Items: that is recorded, then the send goes ahead.
-async function passInvoiceEmailResendGate(
-  deps: InvoiceEmailGateDeps & { sentItemsChecked: boolean },
-): Promise<{ ok: true } | { ok: false; refusal: Record<string, unknown> }> {
-  const gate = await readInvoiceEmailGate(deps.client, deps.xeroInvoiceId)
-  if (gate.state === 'clear') return { ok: true }
-  if (gate.state === 'unreadable' || !deps.sentItemsChecked) {
-    console.error(JSON.stringify({ event: 'invoice_email_resend_gate_held', entity_id: deps.xeroInvoiceId, state: gate.state }))
-    return { ok: false, refusal: invoiceEmailGateRefusal(deps.xeroInvoiceId, gate) }
-  }
-  const at = new Date().toISOString()
-  try {
-    await deps.logBusinessEvent(deps.client, {
-      event_type: INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT,
-      entity_type: 'xero_invoice',
-      entity_id: deps.xeroInvoiceId,
-      job_id: deps.jobId || undefined,
-      body_preview: 'Sent Items was checked before the invoice email was sent again.',
-      payload: { invoice_number: deps.invoiceNumber, via: deps.via, unknown_since: gate.unknown_since },
-      provider_message_id: `ops-api:${INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT}:${deps.xeroInvoiceId}:${at}`,
-    })
-  } catch { /* the job event below and the log line are the other trails */ }
-  await writeInvoiceEmailGateJobEvent(deps.client, deps.jobId, INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT, {
-    invoice_number: deps.invoiceNumber, xero_invoice_id: deps.xeroInvoiceId, via: deps.via, unknown_since: gate.unknown_since,
+// Claims the invoice (invoice_email_resend_gate.ts) before anything is sent.
+// With sent_items_checked the caller says the earlier send is not in Sent
+// Items: the claim layer records who checked and when against the attempt it
+// releases (that is the durable record); the event rows below are trails only.
+async function claimInvoiceEmailForSend(
+  deps: InvoiceEmailGateDeps & { sentItemsChecked: boolean; actor: string | null; body: any },
+): Promise<{ ok: true; attemptId: string } | { ok: false; status: number; refusal: Record<string, unknown> }> {
+  const claim = await claimInvoiceEmailSend(deps.client, {
+    xeroInvoiceId: deps.xeroInvoiceId,
+    via: deps.via,
+    actor: deps.actor,
+    sentItemsChecked: deps.sentItemsChecked,
+    checkedAt: typeof deps.body?.checked_at === 'string' ? deps.body.checked_at : null,
+    expectedAttemptId: typeof deps.body?.held_attempt_id === 'string' ? deps.body.held_attempt_id : null,
+    detail: { invoice_number: deps.invoiceNumber, job_id: deps.jobId },
   })
-  console.log(JSON.stringify({ event: INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT, entity_id: deps.xeroInvoiceId }))
-  return { ok: true }
+  if (!claim.ok) return { ok: false, status: claim.status, refusal: claim.body }
+  if (claim.reconciled) {
+    const at = new Date().toISOString()
+    try {
+      await deps.logBusinessEvent(deps.client, {
+        event_type: INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT,
+        entity_type: 'xero_invoice',
+        entity_id: deps.xeroInvoiceId,
+        job_id: deps.jobId || undefined,
+        body_preview: 'Sent Items was checked before the invoice email was sent again.',
+        payload: { invoice_number: deps.invoiceNumber, via: deps.via, checked_by: deps.actor, attempt_id: claim.attemptId },
+        provider_message_id: `ops-api:${INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT}:${deps.xeroInvoiceId}:${at}`,
+      })
+    } catch { /* the claim layer holds the durable record */ }
+    await writeInvoiceEmailGateJobEvent(deps.client, deps.jobId, INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT, {
+      invoice_number: deps.invoiceNumber, xero_invoice_id: deps.xeroInvoiceId, via: deps.via,
+      checked_by: deps.actor, attempt_id: claim.attemptId,
+    })
+    console.log(JSON.stringify({ event: INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT, entity_id: deps.xeroInvoiceId }))
+  }
+  return { ok: true, attemptId: claim.attemptId }
+}
+
+/** Xero's invoice Email answer: a 204 ({}) or a JSON object with no error in it. */
+function xeroInvoiceEmailAccepted(result: unknown): boolean {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false
+  const r = result as Record<string, any>
+  if (r.ErrorNumber != null || r.Type != null || r.Message != null) return false
+  const elements = Array.isArray(r.Elements) ? r.Elements : []
+  if (elements.some((el: any) => Array.isArray(el?.ValidationErrors) && el.ValidationErrors.length > 0)) return false
+  if (r.Status != null && String(r.Status).toUpperCase() !== 'OK') return false
+  return true
 }
 
 // Records a failed invoice email as refused, failed or unknown and returns the
@@ -4051,6 +4081,8 @@ export type SendInvoiceXeroDirectDeps = {
   logBusinessEvent: (client: any, event: any) => Promise<void>
   jobId: string | null
   postEmail: (accessToken: string, tenantId: string) => Promise<any>
+  /** Who pressed (request actor, or body.checked_by); required for a checked press. */
+  actor?: string | null
 }
 
 // send_invoice_email with no to_email: Xero emails the invoice itself. A
@@ -4061,17 +4093,40 @@ export async function _sendInvoiceEmailViaXeroDirect(deps: SendInvoiceXeroDirect
   const { client, body, getToken, logBusinessEvent, jobId } = deps
   const siId = String(body.xero_invoice_id)
   const gateDeps = { client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siId, jobId, via: 'xero' as const }
-  const gate = await passInvoiceEmailResendGate({ ...gateDeps, sentItemsChecked: body.sent_items_checked === true })
-  if (!gate.ok) return json(gate.refusal, 409)
-  const { accessToken, tenantId } = await getToken(client)
+  const gate = await claimInvoiceEmailForSend({
+    ...gateDeps, body, sentItemsChecked: body.sent_items_checked === true,
+    actor: reconcileActor(body.checked_by, deps.actor ?? null),
+  })
+  if (!gate.ok) return json(gate.refusal, gate.status)
+  let postResult: unknown
   try {
-    await deps.postEmail(accessToken, tenantId)
+    const { accessToken, tenantId } = await getToken(client)
+    try {
+      postResult = await deps.postEmail(accessToken, tenantId)
+    } catch (e) {
+      if (e instanceof XeroCooldownError) {
+        // Xero did not take the request: nothing was sent.
+        await settleInvoiceEmailSend(client, gate.attemptId, 'failed', { reason: 'xero_cooldown' })
+        throw e
+      }
+      // Xero answers a validation error before it sends anything.
+      const refused = String((e as Error)?.message || '').startsWith('Xero validation error')
+      await settleInvoiceEmailSend(client, gate.attemptId, refused ? 'failed' : 'outcome_unknown', { reason: refused ? 'xero_validation' : 'xero_post_failed' })
+      throw await invoiceEmailFailure({ ...gateDeps, outcome: refused ? 'refused' : 'unknown', status: refused ? 400 : null, replyBody: null })
+    }
   } catch (e) {
-    if (e instanceof XeroCooldownError) throw e
-    // Xero answers a validation error before it sends anything.
-    const refused = String((e as Error)?.message || '').startsWith('Xero validation error')
-    throw await invoiceEmailFailure({ ...gateDeps, outcome: refused ? 'refused' : 'unknown', status: refused ? 400 : null, replyBody: null })
+    if (e instanceof ApiError || e instanceof XeroCooldownError) throw e
+    // getToken failed: no request reached Xero.
+    await settleInvoiceEmailSend(client, gate.attemptId, 'failed', { reason: 'xero_token' })
+    throw e
   }
+  if (!xeroInvoiceEmailAccepted(postResult)) {
+    // A success status whose body carries an error, or that cannot be read as
+    // Xero's acceptance, may still have emailed the client.
+    await settleInvoiceEmailSend(client, gate.attemptId, 'outcome_unknown', { reason: 'xero_reply_not_accepted' })
+    throw await invoiceEmailFailure({ ...gateDeps, outcome: 'unknown', status: null, replyBody: null })
+  }
+  await settleInvoiceEmailSend(client, gate.attemptId, 'sent', { via: 'xero_direct' })
   try {
     await client.from('job_events').insert({
       job_id: jobId,
@@ -4091,6 +4146,8 @@ export type SendInvoiceVerifyDeps = {
   fetch: typeof globalThis.fetch
   xeroFetch: typeof globalThis.fetch
   env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string; SUPABASE_SERVICE_KEY?: string }
+  /** Who pressed (request actor, or body.checked_by); required for a checked press. */
+  actor?: string | null
 }
 
 export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): Promise<Response> {
@@ -4313,22 +4370,31 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
 
   // Resend gate: an earlier send whose outcome is unknown may already have
   // reached the client, so nothing is sent until Sent Items has been checked.
-  const siGateOk = await passInvoiceEmailResendGate({
+  const siGateOk = await claimInvoiceEmailForSend({
     client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
-    sentItemsChecked: body.sent_items_checked === true, via: 'outlook',
+    sentItemsChecked: body.sent_items_checked === true, via: 'outlook', body,
+    actor: reconcileActor(body.checked_by, deps.actor ?? null),
   })
-  if (!siGateOk.ok) return json(siGateOk.refusal, 409)
+  if (!siGateOk.ok) return json(siGateOk.refusal, siGateOk.status)
+  const siAttemptId = siGateOk.attemptId
 
-  // Download PDF from Xero
-  const siPdfResp = await deps.xeroFetch(`${env.XERO_API_BASE}/Invoices/${siId}`, {
-    headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
-  })
-  if (siPdfResp.status === 429) throw xeroRateLimitError(siPdfResp)
-  if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
-  const siBuffer = await siPdfResp.arrayBuffer()
-  const siBytes = new Uint8Array(siBuffer)
-  let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
-  const siPdfB64 = btoa(siBin)
+  // Download PDF from Xero. Nothing has been sent yet, so a failure here
+  // settles the claim as not sent.
+  let siPdfB64: string
+  try {
+    const siPdfResp = await deps.xeroFetch(`${env.XERO_API_BASE}/Invoices/${siId}`, {
+      headers: { 'Authorization': `Bearer ${siAt}`, 'Xero-tenant-id': siTi, 'Accept': 'application/pdf' },
+    })
+    if (siPdfResp.status === 429) throw xeroRateLimitError(siPdfResp)
+    if (!siPdfResp.ok) throw new ApiError(`Failed to fetch PDF from Xero: ${siPdfResp.status}`, 502)
+    const siBuffer = await siPdfResp.arrayBuffer()
+    const siBytes = new Uint8Array(siBuffer)
+    let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
+    siPdfB64 = btoa(siBin)
+  } catch (e) {
+    await settleInvoiceEmailSend(client, siAttemptId, 'failed', { reason: 'pdf_fetch_failed' })
+    throw e
+  }
 
   // Send via Outlook with PDF attached
   let siEmailResp: Response
@@ -4343,6 +4409,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
         htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
         job_id: verifiedJobId,
         xero_invoice_id: siId,
+        send_claim: { item_key: `invoice:${siId}`, attempt_id: siAttemptId },
         attachments: [{
           contentBytes: siPdfB64,
           name: `${siNum}.pdf`,
@@ -4353,20 +4420,34 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     })
   } catch {
     // The request may have reached send-outlook-email before the connection failed.
+    await settleInvoiceEmailSend(client, siAttemptId, 'outcome_unknown', { reason: 'send_call_threw' })
     throw await invoiceEmailFailure({
       client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
       outcome: 'unknown', status: null, replyBody: null, via: 'outlook',
     })
   }
+  let siReplyBody: unknown = null
+  try { siReplyBody = JSON.parse(await siEmailResp.text()) } catch { /* unreadable or not JSON */ }
   if (!siEmailResp.ok) {
-    let siErrBody: unknown = null
-    try { siErrBody = JSON.parse(await siEmailResp.text()) } catch { /* unreadable or not JSON */ }
+    const siOutcome = classifyInvoiceEmailFailure(siEmailResp.status, siReplyBody)
+    await settleInvoiceEmailSend(client, siAttemptId, siOutcome === 'unknown' ? 'outcome_unknown' : 'failed', {
+      reason: 'send_refused_or_failed', status: siEmailResp.status, outcome: siOutcome,
+    })
     throw await invoiceEmailFailure({
       client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
-      outcome: classifyInvoiceEmailFailure(siEmailResp.status, siErrBody),
-      status: siEmailResp.status, replyBody: siErrBody, via: 'outlook',
+      outcome: siOutcome, status: siEmailResp.status, replyBody: siReplyBody, via: 'outlook',
     })
   }
+  if (!invoiceEmailReplyAccepted(siReplyBody)) {
+    // A 2xx that is unreadable, or does not say success, or says the outcome
+    // is unknown: the email may have gone, so it holds, never "sent".
+    await settleInvoiceEmailSend(client, siAttemptId, 'outcome_unknown', { reason: 'reply_not_accepted', status: siEmailResp.status })
+    throw await invoiceEmailFailure({
+      client, logBusinessEvent, xeroInvoiceId: siId, invoiceNumber: siNum, jobId: verifiedJobId,
+      outcome: 'unknown', status: siEmailResp.status, replyBody: siReplyBody, via: 'outlook',
+    })
+  }
+  await settleInvoiceEmailSend(client, siAttemptId, 'sent', { via: 'outlook', status: siEmailResp.status })
 
   // Audit (non-blocking).
   //   - business_events: ALWAYS written. Accepts null job_id, so unlinked invoice sends
@@ -8514,10 +8595,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               headers: serverCallHeaders(SUPABASE_SERVICE_KEY, SW_API_KEY),
               body: JSON.stringify(payload),
             })
-            const text = resp.ok ? null : await resp.text().catch(() => '')
+            // Read the body whatever the status: a 2xx is a send only when its body says so.
+            const text = await resp.text().catch(() => null)
             let reply: unknown = null
             if (text) { try { reply = JSON.parse(text) } catch { /* not JSON: reads as unknown */ } }
-            return { ok: resp.ok, status: resp.status, error: text === null ? null : summariseSendReply(resp.status, text), reply }
+            return { ok: resp.ok, status: resp.status, error: resp.ok ? null : summariseSendReply(resp.status, text), reply }
           },
           invoicePdf: (id: string) => getInvoicePdf(client, new URLSearchParams({ xero_invoice_id: id }), {
             mode: authMode,
@@ -9592,6 +9674,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return await _sendInvoiceEmailViaXeroDirect({
             client, body, getToken, logBusinessEvent,
             jobId: directSendInvoice?.job_id || null,
+            actor: receiptActor(requestActor, authMode),
             postEmail: (accessToken, tenantId) => xeroPost(`/Invoices/${siId}/Email`, accessToken, tenantId, {}, 'POST'),
           })
         }
@@ -9603,6 +9686,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           fetch: globalThis.fetch.bind(globalThis),
           xeroFetch: xeroAccountingFetch,
           env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '', SUPABASE_SERVICE_KEY },
+          actor: receiptActor(requestActor, authMode),
         })
       }
 
@@ -9665,6 +9749,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
         // 3. Determine if we should send branded email
         let asBrandedSent = false
+        let asEmailHeld: Record<string, unknown> | null = null
+        let asEmailUnknown = false
         const asUseBranded = body.use_branded_email !== false
 
         if (asUseBranded) {
@@ -9695,7 +9781,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
 
           if (asClientEmail) {
-            try {
+            // Same invoice hold as send_invoice_email: claimed before the
+            // branded email goes out, settled sent only on a readable success.
+            const asClaim = await claimInvoiceEmailSend(client, {
+              xeroInvoiceId: asId, via: 'branded', actor: receiptActor(requestActor, authMode),
+              sentItemsChecked: false, detail: { invoice_number: asInvNumber, job_id: asJobId || null },
+            })
+            if (!asClaim.ok) {
+              asEmailHeld = asClaim.body
+            } else try {
               const asEmailRes = await fetch(`${SUPABASE_URL}/functions/v1/send-quote/send-invoice`, {
                 method: 'POST',
                 headers: {
@@ -9714,18 +9808,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   address: asAddress,
                 }),
               })
-              const asEmailResult = await asEmailRes.json()
-              asBrandedSent = asEmailResult.success || false
-            } catch (e) {
-              console.log('[approve_and_send] Branded email failed (non-blocking):', (e as Error).message)
+              let asEmailResult: any = null
+              try { asEmailResult = await asEmailRes.json() } catch { /* unreadable */ }
+              asBrandedSent = asEmailRes.ok && asEmailResult?.success === true
+              await settleInvoiceEmailSend(client, asClaim.attemptId, asBrandedSent ? 'sent' : 'outcome_unknown', {
+                via: 'branded', status: asEmailRes.status,
+              })
+              if (!asBrandedSent) asEmailUnknown = true
+            } catch (_e) {
+              await settleInvoiceEmailSend(client, asClaim.attemptId, 'outcome_unknown', { via: 'branded', reason: 'send_call_threw' })
+              asEmailUnknown = true
+              console.log(JSON.stringify({ event: 'approve_and_send_branded_email_unknown', entity_id: asId }))
             }
           }
         } else {
-          // Send plain Xero email
-          try {
-            await xeroPost(`/Invoices/${asId}/Email`, asAt, asTi, {}, 'POST')
-          } catch (e) {
-            console.log('[approve_and_send] Xero email failed:', (e as Error).message)
+          // Send plain Xero email, under the same invoice hold.
+          const asClaim = await claimInvoiceEmailSend(client, {
+            xeroInvoiceId: asId, via: 'xero', actor: receiptActor(requestActor, authMode),
+            sentItemsChecked: false, detail: { invoice_number: asInvNumber },
+          })
+          if (!asClaim.ok) {
+            asEmailHeld = asClaim.body
+          } else {
+            try {
+              const asXeroResult = await xeroPost(`/Invoices/${asId}/Email`, asAt, asTi, {}, 'POST')
+              const accepted = xeroInvoiceEmailAccepted(asXeroResult)
+              await settleInvoiceEmailSend(client, asClaim.attemptId, accepted ? 'sent' : 'outcome_unknown', { via: 'xero' })
+              if (!accepted) asEmailUnknown = true
+            } catch (e) {
+              const refused = e instanceof XeroCooldownError || String((e as Error)?.message || '').startsWith('Xero validation error')
+              await settleInvoiceEmailSend(client, asClaim.attemptId, refused ? 'failed' : 'outcome_unknown', { via: 'xero' })
+              if (!refused) asEmailUnknown = true
+              console.log(JSON.stringify({ event: 'approve_and_send_xero_email_failed', entity_id: asId, refused }))
+            }
           }
         }
 
@@ -9735,6 +9850,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           invoice_number: asInvNumber,
           branded_email_sent: asBrandedSent,
           payment_url: asPaymentUrl,
+          ...(asEmailHeld ? { email_held: asEmailHeld } : {}),
+          ...(asEmailUnknown
+            ? {
+              email_outcome_unknown: true,
+              email_recovery_action: 'The invoice email may already have reached the client. Check Sent Items (or the invoice History in Xero) before sending it again.',
+            }
+            : {}),
         })
       }
 
@@ -50196,6 +50318,11 @@ async function _fetchXeroInvoicePdfBytes(
 
 // Patch the pack row status + diagnostics. Best-effort but logged: state must
 // always reflect reality so a resume re-enters at the right step.
+/** The outbound send hold for one make-safe pack email. */
+function makesafePackSendKey(jobId: string, packKind: string): string {
+  return `makesafe_pack:${jobId}:${packKind || 'main'}`
+}
+
 async function _patchPack(client: any, jobId: string, packKind: string, patch: Record<string, any>) {
   try {
     await client.from('makesafe_report_packs')
@@ -50577,6 +50704,26 @@ async function makesafeSendPack(
           job_id: jobId,
         }
       }
+      // The check is recorded against the held send attempt(s) first: who
+      // checked, when, compare-and-set, never a send still in progress. A
+      // check with no named checker, or that loses the race, changes nothing.
+      const msChecked = await reconcileHeld(client, {
+        keys: [makesafePackSendKey(jobId, packKind)],
+        result: resolution.writeMarkerAndClose ? 'sent' : 'not_sent',
+        actor: reconcileActor(body.checked_by, ctx.approverEmail),
+        checkedAt: typeof body.checked_at === 'string' ? body.checked_at : null,
+        evidence: 'sent_items_checked',
+        expectedAttemptId: typeof body.held_attempt_id === 'string' ? body.held_attempt_id : null,
+      })
+      if (!msChecked.ok) {
+        return {
+          ...sendClaimRefusalBody(msChecked),
+          status: 'sending',
+          send_started_at: priorPack?.send_started_at || null,
+          requires: 'sending_resolution',
+          job_id: jobId,
+        }
+      }
       if (resolution.writeMarkerAndClose) {
         // confirmed_sent: the email DID go. Write marker + close, status='sent'.
         // NO re-email, NO re-authorise.
@@ -50596,7 +50743,23 @@ async function makesafeSendPack(
       // confirmed_not_sent: the email did NOT go. The invoice is already AUTHORISED,
       // so we move the pack to 'authorised_not_sent' (a lockable resume state) and
       // fall through to the normal lock -> (skip re-authorise) -> gate -> send path.
-      await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: null, error_detail: 'operator confirmed not-sent from sending; re-entering send' })
+      // Compare-and-set from the exact sending state that was checked: a second
+      // check, or a send that started since, finds the row changed and stops.
+      let msMove = client.from('makesafe_report_packs')
+        .update({ status: 'authorised_not_sent', failed_step: null, error_detail: 'operator confirmed not-sent from sending; re-entering send', updated_at: nowIso() })
+        .eq('job_id', jobId).eq('pack_kind', packKind).eq('status', 'sending')
+      msMove = priorPack?.send_started_at ? msMove.eq('send_started_at', priorPack.send_started_at) : msMove.is('send_started_at', null)
+      const { data: msMoved, error: msMoveErr } = await msMove.select('job_id')
+      if (msMoveErr || !Array.isArray(msMoved) || msMoved.length !== 1) {
+        return {
+          error: 'conflict: this pack changed after it was checked, so nothing was sent. Reload the pack and check again.',
+          code: 'sending_resolution_conflict',
+          status: 'sending',
+          requires: 'sending_resolution',
+          retry_safe: false,
+          job_id: jobId,
+        }
+      }
     }
   }
 
@@ -50830,6 +50993,7 @@ async function makesafeSendPack(
   // the outer catch consults it so ANY raw post-dispatch throw lands in 'sending',
   // never 'authorised_not_sent' (which would re-offer a send => double-email).
   let sendAttempted = false
+  let msAttemptId = ''
   try {
     const { accessToken, tenantId } = await _getToken(client)
 
@@ -50975,6 +51139,24 @@ async function makesafeSendPack(
     // ambiguous: a throw / timeout / 5xx may occur AFTER the message was handed
     // off. sendAttempted=true routes ALL such failures to 'sending' (never
     // authorised_not_sent) — the structural double-email firewall.
+    // The item hold: claimed before dispatch, one attempt per pack send, so a
+    // pack whose earlier send is still unresolved can never be emailed again.
+    const msClaim = await claimSend(client, {
+      keys: [makesafePackSendKey(jobId, packKind)],
+      attemptId: newSendAttemptId('makesafe_pack'),
+      actor: ctx.approverEmail || null,
+      detail: { job_id: jobId, pack_kind: packKind },
+    })
+    if (!msClaim.ok) {
+      const refusalBody = sendClaimRefusalBody(msClaim)
+      if (msClaim.code === 'send_claim_unavailable' || msClaim.code === 'send_claim_unreadable') {
+        await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send_claim', error_detail: 'send hold could not be recorded; nothing was sent' })
+        throw new ApiError(String(refusalBody.error), 503, refusalBody)
+      }
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_claim_held', error_detail: 'an earlier send of this pack is unresolved; nothing was sent' })
+      throw new ApiError(String(refusalBody.error), 409, refusalBody)
+    }
+    msAttemptId = msClaim.attempt_id
     sendAttempted = true
     try {
       emailResp = await _sendEmail({
@@ -50986,12 +51168,14 @@ async function makesafeSendPack(
         attachments,
         job_id: jobId,
         sent_by: ctx.approverEmail || null,
+        send_claim: { item_key: makesafePackSendKey(jobId, packKind), attempt_id: msAttemptId },
       })
     } catch (dispatchErr) {
       // The send THREW: the request began but we got no response (network error /
       // timeout / abort). Post-dispatch ambiguity => 'sending'. NEVER
       // authorised_not_sent here — re-sending could double-email. The operator
       // resolves via body.sending_resolution after verifying Sent Items.
+      await settleSend(client, msAttemptId, 'outcome_unknown', { reason: 'send_call_threw' })
       await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send dispatch threw (outcome unknown, may have sent): ${(dispatchErr as Error).message}`.slice(0, 500), retry_count: (locked[0].retry_count || 0) + 1 })
       throw new ApiError('email send outcome UNKNOWN (the request was dispatched but no response came back; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.', 502)
     }
@@ -51007,15 +51191,25 @@ async function makesafeSendPack(
       // overrides the status: the pack stays 'sending'.
       const provablyNotDispatched = emailReplyIsProvablyPreDispatch(emailResp.status, errText)
       if (provablyNotDispatched) {
+        await settleSend(client, msAttemptId, 'failed', { reason: 'pre_dispatch_reject', status: emailResp.status })
         await _patchPack(client, jobId, packKind, { status: 'authorised_not_sent', failed_step: 'send', error_detail: `${summariseSendReply(emailResp.status, errText)} (clean pre-dispatch reject)`, retry_count: (locked[0].retry_count || 0) + 1 })
         throw new ApiError(`email send rejected before dispatch (FAIL CLOSED — invoice authorised but provably NOT sent; status=authorised_not_sent, safe to re-send): ${emailResp.status}`, 502)
       }
       // 5xx / unknown: do NOT offer a re-send; the email may have gone out.
+      await settleSend(client, msAttemptId, 'outcome_unknown', { reason: 'ambiguous_reply', status: emailResp.status })
       await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `${summariseSendReply(emailResp.status, errText)} (ambiguous; may have dispatched)`, retry_count: (locked[0].retry_count || 0) + 1 })
       throw new ApiError(`email send outcome UNKNOWN (email fn returned ${emailResp.status}; it may have dispatched; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.`, 502)
     }
-    let emailResult: any = {}
-    try { emailResult = await emailResp.json() } catch { emailResult = {} }
+    let emailResult: any = null
+    try { emailResult = await emailResp.json() } catch { emailResult = null }
+    if (!invoiceEmailReplyAccepted(emailResult)) {
+      // A 2xx that is unreadable or does not say success may still have
+      // delivered: hold it as unknown, never record it as sent.
+      await settleSend(client, msAttemptId, 'outcome_unknown', { reason: 'reply_not_accepted', status: emailResp.status })
+      await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: `send-outlook-email ${emailResp.status} reply not confirmed (outcome unknown)`, retry_count: (locked[0].retry_count || 0) + 1 })
+      throw new ApiError(`email send outcome UNKNOWN (email fn returned ${emailResp.status} without a readable success; it may have dispatched; status=sending). Verify Sent Items, then resume with sending_resolution. NOT re-emailed.`, 502)
+    }
+    await settleSend(client, msAttemptId, 'sent', { status: emailResp.status })
     const messageId = emailResult?.message_id || emailResult?.id || null
 
     // ── STEP 6: SEND CONFIRMED. Write the MAKESAFE_PACK_SENT | main marker ──
@@ -51099,6 +51293,8 @@ async function makesafeSendPack(
     // resolves via sending_resolution). We NEVER write authorised_not_sent once a
     // send was attempted, because that would re-offer a send => double-email.
     if (sendAttempted) {
+      // First settle wins: after a confirmed send this changes nothing.
+      if (msAttemptId) await settleSend(client, msAttemptId, 'outcome_unknown', { reason: 'post_dispatch_throw' })
       await _patchPack(client, jobId, packKind, { status: 'sending', failed_step: 'send_unknown_outcome', send_started_at: nowIso(), error_detail: ('post-dispatch unexpected throw (outcome unknown): ' + (err as Error).message).slice(0, 500) })
       throw new ApiError('makesafe_send_pack failed AFTER the send was attempted (outcome UNKNOWN; status=sending, verify Sent Items then resume with sending_resolution): ' + (err as Error).message, 502)
     }
@@ -51275,6 +51471,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
   // A 401 from send-outlook-email is a refusal before any Graph call, so the
   // builder was provably not emailed; it is a failure, not an unknown outcome.
   let emailRefused = false
+  let photoAttemptId = ''
 
   // ── Load job + builder detail for recipient + address ──
   try {
@@ -51352,6 +51549,16 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     // ── Send email ──
     // Same permanent pack CC set as the main pack (AJS: ses@+vanessa@+mandi@).
     const photoPackCc = requiredPackCcForReportRecipient(recipientEmail).join(', ')
+    const photoClaim = await claimSend(client, {
+      keys: [makesafePackSendKey(jobId, photoPackKind)],
+      attemptId: newSendAttemptId('makesafe_photo'),
+      detail: { job_id: jobId, pack_kind: photoPackKind },
+    })
+    if (!photoClaim.ok) {
+      const refusalBody = sendClaimRefusalBody(photoClaim)
+      throw new ApiError(String(refusalBody.error), photoClaim.code === 'send_claim_unavailable' || photoClaim.code === 'send_claim_unreadable' ? 503 : 409, refusalBody)
+    }
+    photoAttemptId = photoClaim.attempt_id
     emailAttempted = true
     const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
       method: 'POST',
@@ -51364,6 +51571,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
         htmlBody,
         attachments,
         job_id: jobId,
+        send_claim: { item_key: makesafePackSendKey(jobId, photoPackKind), attempt_id: photoAttemptId },
       }),
     })
     if (!emailResp.ok) {
@@ -51375,8 +51583,13 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       if (classifyInvoiceEmailFailure(emailResp.status, errBody) === 'refused') emailRefused = true
       throw new ApiError(`photo follow-up email failed (${summariseSendReply(emailResp.status, errText)})`, 502)
     }
-    let emailResult: any = {}
-    try { emailResult = await emailResp.json() } catch { emailResult = {} }
+    let emailResult: any = null
+    try { emailResult = await emailResp.json() } catch { emailResult = null }
+    if (!invoiceEmailReplyAccepted(emailResult)) {
+      // A 2xx without a readable success may still have delivered: unknown.
+      throw new ApiError(`photo follow-up email outcome UNKNOWN (${emailResp.status} without a readable success; status=sending). Verify Sent Items before anything else. NOT re-emailed.`, 502)
+    }
+    await settleSend(client, photoAttemptId, 'sent', { status: emailResp.status })
     const messageId = emailResult?.message_id || emailResult?.id || null
 
     // ── Write the photo follow-up marker (idempotency record) ──
@@ -51427,6 +51640,8 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     }
   } catch (e) {
     const message = ((e as Error).message || String(e)).slice(0, 500)
+    // First settle wins: after a confirmed send this changes nothing.
+    if (photoAttemptId) await settleSend(client, photoAttemptId, emailAttempted && !emailRefused ? 'outcome_unknown' : 'failed', { reason: emailRefused ? 'photo_send_refused' : 'photo_followup_error' })
     // The saved state decides whether a retry may send again, so a failed save
     // is surfaced rather than swallowed (a refused send left at 'sending'
     // would block the retry).

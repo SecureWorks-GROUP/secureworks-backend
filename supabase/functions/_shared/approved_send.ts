@@ -35,6 +35,18 @@
 //
 // Schema: 20260929100000_approved_send_approvals.sql.
 
+import {
+  type ClaimClient,
+  claimSend,
+  reconcileActor,
+  readSendHolds,
+  reconcileThenClaim,
+  type SendClaimRefusal,
+  sendClaimRefusalBody,
+  sendClaimRefusalStatus,
+  settleSend,
+} from "./outbound_send_claim.ts";
+
 export const APPROVED_SEND_EMAIL_SCHEMA = "secureworks.approved-send.email/v1";
 export const APPROVED_SEND_SMS_SCHEMA = "secureworks.approved-send.sms/v1";
 export const APPROVED_SEND_SEAL_DOMAIN = "secureworks.approved-send.seal/v1";
@@ -618,8 +630,18 @@ export interface ApprovedSendStore {
   ): Promise<boolean>;
   audit(entry: AuditEntry): Promise<void>;
   listAudit(id: string): Promise<Record<string, unknown>[]>;
-  /** Earlier approvals of this exact payload whose send outcome is unknown. */
+  /**
+   * Earlier approvals of this exact payload whose send is unresolved: outcome
+   * unknown, or still sending (in flight, or its outcome write was lost).
+   */
   findOutcomeUnknown(payloadHash: string): Promise<{ id: string; outcome_at: string | null }[]>;
+  /**
+   * Other approvals of this exact payload that were claimed for sending after
+   * sinceIso and did not definitely fail (sending, sent or outcome unknown).
+   */
+  findClaimedSince(payloadHash: string, exceptId: string, sinceIso: string): Promise<{ id: string; status: string }[]>;
+  /** The outbound send claim functions (outbound_send_claim.ts). */
+  claims: ClaimClient;
 }
 
 const APPROVAL_COLUMNS =
@@ -632,6 +654,7 @@ function storeUnreadable(what: string, message: string): never {
 /** PostgREST implementation over the service-role client. */
 export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
   return {
+    claims: client,
     async insertApproval(row) {
       const { error } = await client.from("approved_send_approvals").insert({
         id: row.id,
@@ -703,8 +726,15 @@ export function supabaseApprovedSendStore(client: any): ApprovedSendStore {
     },
     async findOutcomeUnknown(payloadHash) {
       const { data, error } = await client.from("approved_send_approvals")
-        .select("id,outcome_at").eq("payload_hash", payloadHash).eq("status", "outcome_unknown")
+        .select("id,outcome_at").eq("payload_hash", payloadHash).in("status", ["outcome_unknown", "sending"])
         .order("outcome_at", { ascending: false }).limit(5);
+      if (error) storeUnreadable("read", error.message);
+      return Array.isArray(data) ? data : [];
+    },
+    async findClaimedSince(payloadHash, exceptId, sinceIso) {
+      const { data, error } = await client.from("approved_send_approvals")
+        .select("id,status").eq("payload_hash", payloadHash).neq("id", exceptId)
+        .in("status", ["sending", "sent", "outcome_unknown"]).gt("claimed_at", sinceIso).limit(5);
       if (error) storeUnreadable("read", error.message);
       return Array.isArray(data) ? data : [];
     },
@@ -834,17 +864,28 @@ export async function recordApproval(
       { payload_hash: hash });
   }
 
-  // An earlier approval of this exact content may already have been delivered.
-  // A new approval of it is refused until someone has checked Sent Items (or,
-  // for an SMS, the conversation) and says so with sent_items_checked.
+  // An earlier approval of this exact content may already have been delivered,
+  // or may be sending now. A new approval of it is refused until someone has
+  // checked Sent Items (or, for an SMS, the conversation) and says so with
+  // sent_items_checked. The check itself goes through the item's send claim:
+  // each unresolved attempt is reconciled by name with who checked and when,
+  // a send still inside its lease is never released, and two checked records
+  // together cannot both pass.
   const priorUnknown = await deps.store.findOutcomeUnknown(hash);
-  if (priorUnknown.length > 0 && body.sent_items_checked !== true) {
-    refuse(409, "approval_prior_outcome_unknown",
-      "An earlier send of this exact message may already have been delivered. Check the mailbox Sent Items (or the SMS conversation) first; if it is not there, record again with sent_items_checked set to true.",
-      { prior_approval_ids: priorUnknown.map((row) => row.id) });
+  const id = deps.newId().toLowerCase();
+  let reconciled: string[] = [];
+  if (body.sent_items_checked === true) {
+    reconciled = await reconcileApprovedSendHolds(deps.store.claims, hash, id, identity.actor);
+  } else {
+    if (priorUnknown.length > 0) {
+      refuse(409, "approval_prior_outcome_unknown",
+        "An earlier send of this exact message may already have been delivered, or is being sent now. Check the mailbox Sent Items (or the SMS conversation) first; if it is not there, record again with sent_items_checked set to true.",
+        { prior_approval_ids: priorUnknown.map((row) => row.id) });
+    }
+    const holds = await readApprovedSendHolds(deps.store.claims, hash);
+    if (holds) refuseClaim(holds);
   }
 
-  const id = deps.newId().toLowerCase();
   const fields: SealFields = {
     id,
     channel,
@@ -879,8 +920,12 @@ export async function recordApproval(
       approval_source: source,
       expires_at: expiresAt,
       payload,
-      ...(priorUnknown.length > 0
-        ? { sent_items_checked: true, prior_outcome_unknown_ids: priorUnknown.map((row) => row.id) }
+      ...(body.sent_items_checked === true
+        ? {
+          sent_items_checked: true,
+          prior_outcome_unknown_ids: priorUnknown.map((row) => row.id),
+          reconciled_attempts: reconciled,
+        }
         : {}),
     },
   });
@@ -1014,18 +1059,157 @@ export async function prepareApprovedSend(
 
 export interface ClaimedSend extends PreparedSend {
   claimToken: string;
+  /** The outbound send claim attempt that holds this content while it sends. */
+  sendAttemptId: string;
 }
 
-/** Consume the approval. After this the approval can never be sent again. */
+/** The send-claim item key for one approved payload, shared by every approval of it. */
+export function approvedSendItemKey(payloadHash: string): string {
+  return `approved_send:${payloadHash}`;
+}
+
+function approvedSendAttemptId(approvalId: string): string {
+  return `approved_send:${approvalId}`;
+}
+
+function approvedSendCheckAttemptId(approvalId: string): string {
+  return `approved_send_check:${approvalId}`;
+}
+
+function refuseClaim(result: SendClaimRefusal): never {
+  const body = sendClaimRefusalBody(result);
+  refuse(sendClaimRefusalStatus(result), result.code, String(body.error), {
+    state: body.state,
+    recovery_action: body.recovery_action,
+    retry_safe: false,
+    held: body.held,
+  });
+}
+
+async function readApprovedSendHolds(claims: ClaimClient, hash: string): Promise<SendClaimRefusal | null> {
+  // The approvals table and the send claim are written separately; either may
+  // be the one that recorded an unresolved attempt, so both are read.
+  const read = await readSendHolds(claims, [approvedSendItemKey(hash)]);
+  if (!read.ok) return read;
+  return read.holds.length > 0 ? { ok: false, code: "send_claim_held", held: read.holds } : null;
+}
+
+/**
+ * A checked re-approval: reconcile each attempt holding this content (named,
+ * compare-and-set, actor and time recorded), refusing while a send is live.
+ *
+ * The claim it takes is then settled outcome_unknown and left holding the
+ * content in this approval's name (approved_send_check:<approval id>). Only
+ * this approval's own send releases it (claimApprovedSend), so every other
+ * approval of the same content, recorded before or after, stays held: after
+ * an uncertain send, at most the one approval recorded against a check can
+ * send. A later checked re-approval reconciles this marker in turn and takes
+ * the hold over, which leaves this approval unsendable.
+ */
+async function reconcileApprovedSendHolds(
+  claims: ClaimClient,
+  hash: string,
+  approvalId: string,
+  actor: string | null,
+): Promise<string[]> {
+  const checker = reconcileActor(actor);
+  const attempt = approvedSendCheckAttemptId(approvalId);
+  const before = await readSendHolds(claims, [approvedSendItemKey(hash)]);
+  if (!before.ok) refuseClaim(before);
+  const result = await reconcileThenClaim(claims, {
+    keys: [approvedSendItemKey(hash)],
+    attemptId: attempt,
+    actor: checker,
+    evidence: "sent_items_checked",
+    detail: { approval_id: approvalId, check_only: true },
+    leaseSeconds: 60,
+  });
+  if (!result.ok) refuseClaim(result);
+  // A lost settle leaves the marker at sending; it reads stale after its
+  // lease and still holds.
+  await settleSend(claims, attempt, "outcome_unknown", { check_marker: true, approval_id: approvalId });
+  return [...new Set(before.holds.map((h) => h.attempt_id))];
+}
+
+/**
+ * Consume the approval. After this the approval can never be sent again.
+ *
+ * Before the approval is consumed, the content's send claim is taken under
+ * this approval's attempt. A claim held by any other approval of the same
+ * content (sending now, outcome unknown, or an outcome that was never written)
+ * refuses, and the approval stays unused. This is what stops a second approval
+ * of identical content delivering it twice.
+ */
 export async function claimApprovedSend(
   deps: SendDeps,
   prepared: PreparedSend,
   caller: { actor: string | null; credentialClass: string | null },
 ): Promise<ClaimedSend> {
   const claimToken = deps.newId().toLowerCase();
+  const sendAttemptId = approvedSendAttemptId(prepared.row.id);
+  const itemKey = approvedSendItemKey(prepared.row.payload_hash);
+  const detail = { approval_id: prepared.row.id, channel: prepared.row.channel };
+  let held = await claimSend(deps.store.claims, {
+    keys: [itemKey],
+    attemptId: sendAttemptId,
+    actor: caller.actor,
+    detail,
+  });
+  // This approval was recorded against a Sent Items check and its marker is
+  // the only hold: release that marker by name and claim, in one checked step.
+  const ownMarker = approvedSendCheckAttemptId(prepared.row.id);
+  if (!held.ok && held.code === "send_claim_held" && held.held.length > 0 &&
+    held.held.every((h) => h.attempt_id === ownMarker)) {
+    held = await reconcileThenClaim(deps.store.claims, {
+      keys: [itemKey],
+      attemptId: sendAttemptId,
+      actor: reconcileActor(caller.actor, prepared.row.recorded_by_actor),
+      evidence: "approval_recorded_with_sent_items_checked",
+      expectedAttemptId: ownMarker,
+      detail,
+    });
+  }
+  if (!held.ok) {
+    if (held.code === "send_claim_attempt_exists") {
+      refuse(409, "approval_already_used", "Another send claimed this approval first, or it expired.");
+    }
+    await auditQuietly(deps.store, {
+      approval_id: prepared.row.id,
+      event: "send_refused",
+      channel: prepared.row.channel,
+      actor: caller.actor,
+      credential_class: caller.credentialClass,
+      code: held.code,
+      payload_hash: prepared.row.payload_hash,
+      detail: { held: held.held.map((h) => ({ attempt_id: h.attempt_id, state: h.state, stale: h.stale })) },
+    });
+    refuseClaim(held);
+  }
+  // Holding the content claim, nobody else can be sending it. An approval of
+  // the same content that another approval has already sent (or may have
+  // sent) since this one was recorded is spent: the owner approved one
+  // delivery, and it has happened or may have.
+  let overtaken: { id: string; status: string }[];
+  try {
+    overtaken = await deps.store.findClaimedSince(
+      prepared.row.payload_hash,
+      prepared.row.id,
+      prepared.row.created_at || prepared.row.approved_at,
+    );
+  } catch (error) {
+    await settleSend(deps.store.claims, sendAttemptId, "failed", { reason: "approval_history_unreadable" });
+    throw error;
+  }
+  if (overtaken.length > 0) {
+    await settleSend(deps.store.claims, sendAttemptId, "failed", { reason: "approval_overtaken" });
+    refuse(409, "approval_overtaken",
+      "Another approval of this exact message has been sent, or may have been, since this one was recorded. Nothing was sent now; check Sent Items (or the SMS conversation) and record a new approval only if it is still needed.",
+      { other_approval_ids: overtaken.map((row) => row.id) });
+  }
   const nowIso = deps.now().toISOString();
   const won = await deps.store.claim(prepared.row.id, claimToken, nowIso);
   if (!won) {
+    await settleSend(deps.store.claims, sendAttemptId, "failed", { reason: "approval_not_claimed" });
     refuse(409, "approval_already_used", "Another send claimed this approval first, or it expired.");
   }
   try {
@@ -1044,13 +1228,14 @@ export async function claimApprovedSend(
       status: "failed",
       code: "audit_write_failed",
       provider_message_id: null,
-      provider_detail: { error: (error as Error).message },
+      provider_detail: { error: "audit_write_failed" },
       at: deps.now().toISOString(),
     });
+    await settleSend(deps.store.claims, sendAttemptId, "failed", { reason: "audit_write_failed" });
     refuse(503, "approval_audit_unwritable",
       "The audit could not be written, so nothing was sent. The approval is used; record a new one.");
   }
-  return { ...prepared, claimToken };
+  return { ...prepared, claimToken, sendAttemptId };
 }
 
 export interface SendOutcome {
@@ -1080,6 +1265,14 @@ export async function finishApprovedSend(
   } catch (error) {
     console.error("[approved_send] outcome write threw:", (error as Error).message);
   }
+  // The send claim carries the outcome even when the approval row write was
+  // lost: an unknown (or unwritten) outcome keeps holding the content. A
+  // settle that cannot be written leaves the claim at sending, which holds.
+  const settled = await settleSend(deps.store.claims, claimed.sendAttemptId, outcome.status, {
+    approval_id: claimed.row.id,
+    code: outcome.code,
+  });
+  if (!settled.ok) console.error("[approved_send] send claim settle failed:", settled.code);
   let auditRecorded = true;
   try {
     await deps.store.audit({

@@ -14,7 +14,8 @@ Deno.env.set('MICROSOFT_TENANT_ID', 'tenant-unknown-fixture')
 Deno.env.set('MICROSOFT_CLIENT_ID', 'client-unknown-fixture')
 Deno.env.set('MICROSOFT_CLIENT_SECRET', 'secret-unknown-fixture')
 
-const { handleOutlookRequest, resetGraphTokenCache } = await import('./index.ts')
+const { handleOutlookRequest, resetGraphTokenCache, setOutlookSendClaimClient } = await import('./index.ts')
+const { makeFakeClaimStore } = await import('../_shared/outbound_send_claim_fake.ts')
 
 // The self-addressed synthetic shape skips the stored-job fence, so the only
 // provider calls are the token, the mailbox read and sendMail.
@@ -49,6 +50,8 @@ async function send(
   }) as typeof fetch
 
   resetGraphTokenCache()
+  // A fresh claim store per call: these cases are about one send each.
+  setOutlookSendClaimClient(makeFakeClaimStore())
   try {
     const response = await handleOutlookRequest(new Request('https://example.invalid/send-outlook-email', {
       method: 'POST',
@@ -60,6 +63,7 @@ async function send(
 
     globalThis.fetch = originalFetch
     resetGraphTokenCache()
+    setOutlookSendClaimClient(null)
   }
 }
 

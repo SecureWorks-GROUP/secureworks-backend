@@ -412,9 +412,10 @@ Deno.test("send: a refused email keeps the copy as failed; an unconfirmed one st
   const unsure = await call(d2, "debt_ws_report_send", SHAUN);
   assertEquals((unsure.body as any).code, "send_not_confirmed");
   assertEquals(s2.reportRows[0].status, "sending");
-  // While it is unconfirmed, a second click inside two minutes is still refused.
+  // While it is unconfirmed, a second click is refused by the report's send claim.
   const again = await call(d2, "debt_ws_report_send", SHAUN);
-  assertEquals((again.body as any).code, "recently_sent");
+  assertEquals((again.body as any).code, "send_not_confirmed");
+  assertEquals((again.body as any).state, "outcome_unknown");
 });
 
 Deno.test("send: an unknown reply keeps the claim and holds the next send until Sent Items is checked", async () => {
@@ -443,7 +444,7 @@ Deno.test("send: an unknown reply keeps the claim and holds the next send until 
   assertEquals(rec.emails.length, 1);
 
   // Sent Items checked: the old row is released as failed and the report goes.
-  options.emailResult = { ok: true, status: 200, error: null };
+  options.emailResult = { ok: true, status: 202, error: null, reply: { success: true } };
   const third = await call(deps, "debt_ws_report_send", SHAUN, { sent_items_checked: true });
   assertEquals(third.status, 200);
   assertEquals(rec.emails.length, 2);
