@@ -119,6 +119,8 @@ function makeFakeClient(
   store: Store,
   hooks: {
     afterInsert?: (table: string, rows: Row[]) => void;
+    // Replace the answer to an insert that did land (a gateway bug).
+    insertAnswer?: (table: string) => { data: any; error: any } | null;
     updateError?: (table: string, payload: Row) => Row | null;
     insertError?: (table: string, payload: Row) => Row | null;
     selectError?: (table: string) => Row | null;
@@ -178,6 +180,8 @@ function makeFakeClient(
         }
         store[table].push(...rows);
         hooks.afterInsert?.(table, rows);
+        const replaced = hooks.insertAnswer?.(table);
+        if (replaced) return replaced;
         return { data: rows.map((r: Row) => ({ ...r })), error: null };
       }
       const matched = store[table].filter((r) => preds.every((p) => p(r)));
@@ -2988,6 +2992,7 @@ Deno.test("quote builder: only a known rolled-back database error releases the m
     [{ code: "57014", message: "statement timeout" }, false],
     [{ code: "42501", message: "permission denied" }, false],
     [{ code: "40001", message: "serialization failure" }, true],
+    [{ code: "PGRST204", message: "column not in the schema cache" }, true],
   ];
   for (const kind of ["purchase_orders", "work_orders"] as const) {
     for (const [error, released] of cases) {
@@ -3041,4 +3046,25 @@ Deno.test("quote builder: a failure after the orders were written keeps the mark
   await assertRejects(() => makeQuoteBuilderPurchaseOrders(failingRead, { version_id: issued.id }, ACTOR));
   assertEquals(store.purchase_orders.length, 3);
   assertEquals(store.quote_builder_order_marks.length, 1);
+});
+
+Deno.test("quote builder: a refused code reported after a commit does not release the marker while the rows are there", async () => {
+  for (const kind of ["purchase_orders", "work_orders"] as const) {
+    const { store, issued } = await issuedForOrders();
+    // The rows land, then the answer is a refused code (a gateway bug).
+    const wrapped = makeFakeClient(store, {
+      insertAnswer: (table) =>
+        table === kind ? { data: null, error: { code: "23502", message: "bogus after commit" } } : null,
+    }).client;
+    const make = kind === "purchase_orders" ? makeQuoteBuilderPurchaseOrders : makeQuoteBuilderWorkOrder;
+    await make(wrapped, { version_id: issued.id }, ACTOR).catch(() => null);
+    assert(store[kind].length > 0, `${kind} rows landed`);
+    assertEquals(store.quote_builder_order_marks.length, 1, `${kind} marker kept`);
+    // Staff remove the rows by hand: the next press still refuses.
+    store[kind] = [];
+    assertEquals(
+      await make(makeFakeClient(store).client, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
+      kind === "purchase_orders" ? "purchase_orders_unsettled" : "work_order_unsettled",
+    );
+  }
 });

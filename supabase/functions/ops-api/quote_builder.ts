@@ -2429,6 +2429,7 @@ const REFUSED_CODES = new Set([
   "42P01", // undefined table
   "40001", // serialization failure
   "40P01", // deadlock
+  "PGRST204", // PostgREST: a column not in its schema cache; no SQL was sent
 ]);
 function refusedAndRolledBack(error: any): boolean {
   return REFUSED_CODES.has(String(error?.code || ""));
@@ -2438,8 +2439,8 @@ function refusedAndRolledBack(error: any): boolean {
  * After this press's own make failed: release the marker only when every
  * order write this press sent is known to have written nothing. Any doubt
  * keeps it (409 unsettled for later presses; staff reconcile), so a set that
- * landed unseen and was later removed is never made again. No re-read decides
- * this: an empty read proves nothing about a write still in flight.
+ * landed unseen and was later removed is never made again. Then a re-read must
+ * also find no order of that kind: an extra bar, never the reason to release.
  */
 async function releaseIfNothingWritten(
   client: any,
@@ -2448,17 +2449,25 @@ async function releaseIfNothingWritten(
   state: MakeState,
 ) {
   if (state.maybeWritten) return;
+  // A second, independent condition: the version holds no order of this kind
+  // now. A refused code reported after a commit (a gateway bug) leaves the
+  // rows in place, so the marker stays. An empty read alone proves nothing,
+  // which is why it is only ever an extra bar, never the reason to release.
+  try {
+    const orders = await ordersForVersion(client, versionId);
+    const any = kind === "work_order"
+      ? !!orders.work_order
+      : orders.purchase_orders.length > 0;
+    if (any) return;
+  } catch {
+    return; // Could not check: keep the marker.
+  }
   await client.from("quote_builder_order_marks").delete()
     .eq("quote_builder_version_id", versionId)
     .eq("kind", kind)
     .then(() => {}, () => {});
 }
 
-/**
- * Send one order insert. Sticky: once any write may have landed (it threw,
- * returned rows, or failed with an error not on the allow-list), the press
- * keeps its marker whatever later writes do.
- */
 export async function _trackedInsertForTest(state: { maybeWritten: boolean }, send: () => Promise<any>) {
   return await trackedInsert(state, send);
 }
