@@ -2252,6 +2252,15 @@ export async function makeQuoteBuilderWorkOrder(
   const existing = await ordersForVersion(client, version.id);
   if (existing.work_order) return ordersReply(version, existing);
 
+  if (!(await claimOrderMark(client, actor, version.id, "work_order"))) {
+    const winner = await awaitOrders(client, version.id, (o) => !!o.work_order);
+    if (winner) return ordersReply(version, winner);
+    fail(
+      "work_order_removed",
+      "This quote's work order was made before and is not there now. Make one by hand if it is still needed.",
+      409,
+    );
+  }
   const scope = quoteBuilderCrewScope(version);
   let data: any = null;
   for (let attempt = 0; attempt < 3 && !data; attempt++) {
@@ -2281,7 +2290,10 @@ export async function makeQuoteBuilderWorkOrder(
     }
     data = res.data;
   }
-  if (!data) readError("work order create failed", "order number clashed three times");
+  if (!data) {
+    await releaseOrderMark(client, version.id, "work_order");
+    readError("work order create failed", "order number clashed three times");
+  }
   await recordOrderEvent(
     client,
     actor,
@@ -2316,40 +2328,70 @@ export async function makeQuoteBuilderPurchaseOrders(
     return withSetCheck(ordersReply(version, existing), existing, groups.length);
   }
   if (!groups.length) return ordersReply(version, existing);
-  // No rows, but this version's set was made once: they were removed by hand.
-  // Making them again could order twice, so staff must decide.
-  if (await purchaseOrdersWereMade(client, version.job_id, version.id)) {
+
+  // Only the press that writes the version's marker makes the set.
+  if (!(await claimOrderMark(client, actor, version.id, "purchase_orders"))) {
+    const winner = await awaitOrders(client, version.id, (o) => o.purchase_orders.length > 0);
+    if (winner) return withSetCheck(ordersReply(version, winner), winner, groups.length);
     fail(
       "purchase_orders_removed",
-      "This quote's purchase orders were made and then removed. Make any still needed by hand.",
+      "This quote's purchase orders were made before and are not there now. Make any still needed by hand.",
       409,
     );
   }
-
   for (let attempt = 0; attempt < 3; attempt++) {
     const made = await insertPurchaseOrderSet(client, actor, version, groups);
     if (made) return made;
-    // The insert clashed on something other than this version's set (the
-    // order number): try again with a new number.
+    // The order number clashed: try again with a new number.
     await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
   }
+  await releaseOrderMark(client, version.id, "purchase_orders");
   readError("purchase order create failed", "order number clashed three times");
 }
 
-/** The made event is the lasting record that a version's set once existed. */
-async function purchaseOrdersWereMade(
+type OrderKind = "work_order" | "purchase_orders";
+
+/**
+ * Write the version's lasting "orders made" marker (quote_builder_order_marks,
+ * 20261019183000) before any order. True: this press is the one that makes
+ * them. False: another press already did, or is doing it now.
+ */
+async function claimOrderMark(
   client: any,
-  jobId: string,
+  actor: QuoteBuilderActor,
   versionId: string,
+  kind: OrderKind,
 ): Promise<boolean> {
-  const { data, error } = await client.from("job_events")
-    .select("id")
-    .eq("job_id", jobId)
-    .eq("event_type", "quote_builder_purchase_orders_made")
-    .eq("detail_json->>quote_builder_version_id", versionId)
-    .limit(1);
-  if (error) readError("job events read failed", error);
-  return (data || []).length > 0;
+  const { error } = await client.from("quote_builder_order_marks").insert({
+    quote_builder_version_id: versionId,
+    kind,
+    made_by: uuidOrNull(actor.id),
+  });
+  if (!error) return true;
+  if (error.code === "23505") return false;
+  readError("order marker write failed", error);
+}
+
+/** Only after this press's own make failed with no order written. */
+async function releaseOrderMark(client: any, versionId: string, kind: OrderKind) {
+  await client.from("quote_builder_order_marks").delete()
+    .eq("quote_builder_version_id", versionId)
+    .eq("kind", kind)
+    .then(() => {}, () => {});
+}
+
+/** A press that lost the marker waits a moment for the winner's rows. */
+async function awaitOrders(
+  client: any,
+  versionId: string,
+  ready: (o: Awaited<ReturnType<typeof ordersForVersion>>) => boolean,
+) {
+  for (let i = 0; i < 4; i++) {
+    const orders = await ordersForVersion(client, versionId);
+    if (ready(orders)) return orders;
+    await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+  }
+  return null;
 }
 
 function withSetCheck(

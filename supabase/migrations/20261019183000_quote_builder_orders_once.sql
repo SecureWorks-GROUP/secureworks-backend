@@ -41,23 +41,24 @@ SET LOCAL statement_timeout = '30s';
 ALTER TABLE public.purchase_orders
   ADD COLUMN IF NOT EXISTS quote_builder_po_seq smallint NULL;
 
+-- Number every version-linked row still without a seq, after the version's
+-- highest seq so far, so mixed or re-run states never collide and the CHECK
+-- below always validates.
 UPDATE public.purchase_orders po
    SET quote_builder_po_seq = numbered.seq
   FROM (
-    SELECT id, row_number() OVER (
-      PARTITION BY quote_builder_version_id ORDER BY po_number, created_at, id
-    ) AS seq
-    FROM public.purchase_orders
-    WHERE quote_builder_version_id IS NOT NULL
+    SELECT u.id,
+           COALESCE((SELECT max(x.quote_builder_po_seq)
+                       FROM public.purchase_orders x
+                      WHERE x.quote_builder_version_id = u.quote_builder_version_id), 0)
+           + row_number() OVER (
+               PARTITION BY u.quote_builder_version_id ORDER BY u.po_number, u.created_at, u.id
+             ) AS seq
+      FROM public.purchase_orders u
+     WHERE u.quote_builder_version_id IS NOT NULL
+       AND u.quote_builder_po_seq IS NULL
   ) numbered
- WHERE po.id = numbered.id
-   AND po.quote_builder_po_seq IS NULL
-   -- A version already numbered is left alone, so a re-run cannot collide.
-   AND NOT EXISTS (
-     SELECT 1 FROM public.purchase_orders x
-      WHERE x.quote_builder_version_id = po.quote_builder_version_id
-        AND x.quote_builder_po_seq IS NOT NULL
-   );
+ WHERE po.id = numbered.id;
 
 ALTER TABLE public.purchase_orders
   DROP CONSTRAINT IF EXISTS purchase_orders_quote_builder_seq_with_version;
@@ -74,3 +75,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_quote_builder_version_seq
 
 COMMENT ON COLUMN public.purchase_orders.quote_builder_po_seq IS
   'Set only by quote_builder_make_purchase_orders with quote_builder_version_id: the supplier group''s place in the issued version. Unique per version, so a version makes one set of POs.';
+
+-- The lasting record that a version's orders were made: one row per version
+-- and kind, written by ops-api BEFORE the orders and never removed by it. Only
+-- the press that writes it makes the orders; every other press reads back. A
+-- version whose orders were all removed by hand is then refused, not re-made:
+-- the removed orders may already be with the supplier. A marker left by a make
+-- that failed part way also refuses (the safe side); staff make any order by
+-- hand. Same access as quote_builder_versions: RLS on, no policy, ops-api only.
+CREATE TABLE IF NOT EXISTS public.quote_builder_order_marks (
+  quote_builder_version_id uuid NOT NULL
+    REFERENCES public.quote_builder_versions(id) ON DELETE RESTRICT,
+  kind text NOT NULL CHECK (kind IN ('work_order', 'purchase_orders')),
+  made_at timestamptz NOT NULL DEFAULT now(),
+  made_by uuid NULL,
+  CONSTRAINT quote_builder_order_marks_pkey PRIMARY KEY (quote_builder_version_id, kind)
+);
+ALTER TABLE public.quote_builder_order_marks ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.quote_builder_order_marks FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, DELETE ON TABLE public.quote_builder_order_marks TO service_role;
+COMMENT ON TABLE public.quote_builder_order_marks IS
+  'One row per quote builder version and order kind once its orders were made (docs/quote-builder-contract.md section 6). Written before the orders; ops-api deletes it only when its own make failed with nothing written.';
+
+-- Orders made before this table existed get their marker.
+INSERT INTO public.quote_builder_order_marks (quote_builder_version_id, kind)
+SELECT DISTINCT quote_builder_version_id, 'purchase_orders' FROM public.purchase_orders
+ WHERE quote_builder_version_id IS NOT NULL
+UNION
+SELECT DISTINCT quote_builder_version_id, 'work_order' FROM public.work_orders
+ WHERE quote_builder_version_id IS NOT NULL
+ON CONFLICT DO NOTHING;

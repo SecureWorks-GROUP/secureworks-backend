@@ -104,6 +104,9 @@ function uniqueKey(table: string, r: Row): string | null {
       ? `po|${r.quote_builder_version_id}|${r.quote_builder_po_seq}`
       : null;
   }
+  if (table === "quote_builder_order_marks") {
+    return `mark|${r.quote_builder_version_id}|${r.kind}`;
+  }
   if (table === "jobs") {
     const requestId = r.metadata?.quote_builder?.request_id;
     return r.type === "miscellaneous" && requestId != null ? requestId : null;
@@ -2713,6 +2716,7 @@ async function issuedForOrders() {
   store.feature_flags = [{ flag_name: "quote_builder_orders_v1", enabled: true }];
   store.work_orders = [];
   store.purchase_orders = [];
+  store.quote_builder_order_marks = [];
   const inserts: Record<string, number> = {};
   const { client, upload } = makeFakeClient(store, {
     insertError: (table) => {
@@ -2730,8 +2734,11 @@ Deno.test("quote builder: presses at the same instant make one set of purchase o
   const replies = await Promise.all([1, 2, 3].map(() =>
     makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR)
   ));
-  // All three read "no orders yet" and tried to insert: the race reached the key.
-  assertEquals(inserts.purchase_orders, 3);
+  // All three read "no orders yet" and raced for the marker; one won and only
+  // it inserted the set.
+  assertEquals(inserts.quote_builder_order_marks, 3);
+  assertEquals(inserts.purchase_orders, 1);
+  assertEquals(store.quote_builder_order_marks.length, 1);
   // One set: Bunnings, Stratco and the unnamed supplier, numbered 1 to 3.
   assertEquals(store.purchase_orders.length, 3);
   assertEquals(
@@ -2756,7 +2763,8 @@ Deno.test("quote builder: presses at the same instant make one work order", asyn
   const replies = await Promise.all([1, 2, 3].map(() =>
     makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR)
   ));
-  assertEquals(inserts.work_orders, 3);
+  assertEquals(inserts.quote_builder_order_marks, 3);
+  assertEquals(inserts.work_orders, 1);
   assertEquals(store.work_orders.length, 1);
   for (const reply of replies) {
     assertEquals(reply.work_order?.id, store.work_orders[0].id);
@@ -2781,6 +2789,8 @@ Deno.test("quote builder: a refused order insert that leaves no order for the ve
   );
   assertEquals(store.work_orders.length, 0);
   assertEquals(store.purchase_orders.length, 0);
+  // Nothing was written, so the markers are released and a later press may try.
+  assertEquals(store.quote_builder_order_marks.length, 0);
 });
 
 Deno.test("quote builder: a set with a removed purchase order comes back named incomplete, and is not re-made", async () => {
@@ -2809,6 +2819,38 @@ Deno.test("quote builder: a set removed entirely is refused, never made a second
     c = (e as any).code;
   }
   assertEquals([status, c], [409, "purchase_orders_removed"]);
+  assertEquals(store.purchase_orders.length, 0);
+  // The marker, not the best-effort job event, is the record: with the event
+  // gone too, the set is still not made again.
+  store.job_events = [];
+  assertEquals(
+    await makeQuoteBuilderPurchaseOrders(client, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
+    "purchase_orders_removed",
+  );
+  // The same for the work order.
+  await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR);
+  store.work_orders = [];
+  assertEquals(
+    await makeQuoteBuilderWorkOrder(client, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
+    "work_order_removed",
+  );
+  assertEquals(store.work_orders.length, 0);
+});
+
+Deno.test("quote builder: a set made but failing its event write is still never made twice", async () => {
+  const { store, issued } = await issuedForOrders();
+  const noEvents = makeFakeClient(store, {
+    insertError: (table) =>
+      table === "job_events" ? { code: "XX000", message: "event write failed" } : null,
+  }).client;
+  await makeQuoteBuilderPurchaseOrders(noEvents, { version_id: issued.id }, ACTOR);
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(store.job_events.filter((e) => e.event_type === "quote_builder_purchase_orders_made").length, 0);
+  store.purchase_orders = [];
+  assertEquals(
+    await makeQuoteBuilderPurchaseOrders(noEvents, { version_id: issued.id }, ACTOR).then(() => "made", (e) => e.code),
+    "purchase_orders_removed",
+  );
   assertEquals(store.purchase_orders.length, 0);
 });
 
