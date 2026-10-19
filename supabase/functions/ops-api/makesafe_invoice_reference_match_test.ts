@@ -24,6 +24,8 @@ import {
   type SesMatchInvoice,
   type SesMatchJob,
   sesMatchJobIdentityDigits,
+  sesMatchJobPurchaseOrders,
+  sesMatchPoRelation,
   sesUnlinkedInvoiceDetail,
 } from "./makesafe_invoice_reference_match.ts";
 
@@ -417,7 +419,46 @@ Deno.test("siblings on one claim stay excluded when the PO cannot separate them"
   assertEquals(exclusions.length, 3);
 });
 
-Deno.test("identity no invoice names leaves the production cohort byte-identical", () => {
+// Guard 4 (`po_mismatch`, DSP-T3-GAP-1) is the one rule a declared purchase
+// order can trip: the two synthetic-PO cohort tests below give EVERY card a
+// declared PO, so the one fixture card whose invoice names its own PO
+// (SWMS-26931, INV-1051 `MLB-24664PO-55370`, the card itself declaring none)
+// now faces a declared PO that differs from the invoice's. That card, and only
+// that card, must move from a match to a `po_mismatch` exclusion; everything
+// else stays byte-identical, which is what keeps these tests' original
+// properties (unnamed identity contributes nothing; de-duplication) intact.
+const PO_MISMATCH_FIXTURE_JOB = "1106dd9c-d459-4e2d-a73d-5df416363a7a";
+
+function assertCohortMovedOnlyByPoMismatch(
+  base: ReturnType<typeof deriveSesUnlinkedInvoiceMatches>,
+  moved: ReturnType<typeof deriveSesUnlinkedInvoiceMatches>,
+) {
+  const baseMatch = base.matches.find((m) =>
+    m.job_id === PO_MISMATCH_FIXTURE_JOB
+  );
+  assert(baseMatch, "the fixture must carry the invoice-only-PO match");
+  assertEquals(baseMatch.invoice.reference, "MLB-24664PO-55370");
+  assertEquals(
+    moved.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+    base.matches
+      .filter((m) => m.job_id !== PO_MISMATCH_FIXTURE_JOB)
+      .map((m) => `${m.job_id}:${m.invoice.id}`),
+  );
+  assertEquals(
+    moved.exclusions
+      .filter((e) => e.reason !== "po_mismatch")
+      .map((e) => `${e.job_id}:${e.reason}`),
+    base.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+  );
+  assertEquals(
+    moved.exclusions
+      .filter((e) => e.reason === "po_mismatch")
+      .map((e) => e.job_id),
+    [PO_MISMATCH_FIXTURE_JOB],
+  );
+}
+
+Deno.test("identity no invoice names moves the cohort only through po_mismatch", () => {
   // The C1 safety property: a consumer that cannot reach `jobs.metadata` and
   // supplies `external_ref` ALONE gets the same answer as the PO-aware
   // consumers, because identity no eligible invoice names contributes nothing.
@@ -471,17 +512,10 @@ Deno.test("identity no invoice names leaves the production cohort byte-identical
     })),
     fixture.invoices,
   );
-  assertEquals(
-    withUnnamedPo.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
-    base.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
-  );
-  assertEquals(
-    withUnnamedPo.exclusions.map((e) => `${e.job_id}:${e.reason}`),
-    base.exclusions.map((e) => `${e.job_id}:${e.reason}`),
-  );
+  assertCohortMovedOnlyByPoMismatch(base, withUnnamedPo);
 });
 
-Deno.test("a redundant PO leaves the production cohort byte-identical", () => {
+Deno.test("a redundant PO moves the cohort only through po_mismatch", () => {
   // The self-contest regression at COHORT scale, not just on one hand-built
   // row. The commonest live shape is a card whose `external_ref` already embeds
   // its own purchase order, so re-declaring that same PO on every fixture job
@@ -499,12 +533,129 @@ Deno.test("a redundant PO leaves the production cohort byte-identical", () => {
     })),
     fixture.invoices,
   );
+  assertCohortMovedOnlyByPoMismatch(base, redundantPo);
+});
+
+// ---------------------------------------------------------------------------
+// Guard 4: po_mismatch (DSP-T3-GAP-1)
+// ---------------------------------------------------------------------------
+
+Deno.test("po_mismatch: same claim, different PO is excluded, not matched", () => {
+  // The CFO-15 shape: the claim digits alone used to be enough, so an invoice
+  // for another purchase order on the same claim attached to this card.
+  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
+    [{
+      id: "job-1",
+      job_number: "SWMS-1",
+      external_ref: "MLB-27037PO-2222",
+    }],
+    [invoice({ id: "inv-1", reference: "MLB-27037PO-1111" })],
+  );
+  assertEquals(matches, []);
+  assertEquals(exclusions.length, 1);
+  assertEquals(exclusions[0].reason, "po_mismatch");
+  assert(exclusions[0].detail.includes("1111"));
+  assert(exclusions[0].detail.includes("2222"));
+});
+
+Deno.test("po_mismatch: a declared builder_po_number counts, token or bare digits", () => {
+  for (const declared of ["PO-2222", "2222", "po 2222"]) {
+    const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
+      [{
+        id: "job-1",
+        job_number: "SWMS-1",
+        external_ref: "MLB-27037",
+        builder_po_number: declared,
+      }],
+      [invoice({ id: "inv-1", reference: "MLB-27037PO-1111" })],
+    );
+    assertEquals(matches, [], declared);
+    assertEquals(exclusions.map((e) => e.reason), ["po_mismatch"], declared);
+  }
+});
+
+Deno.test("po_mismatch: an equal PO still matches", () => {
+  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
+    [{
+      id: "job-1",
+      job_number: "SWMS-1",
+      external_ref: "MLB-27037",
+      builder_po_number: "PO-56395",
+    }],
+    [invoice({ id: "inv-1", reference: "MLB-27037PO-56395" })],
+  );
+  assertEquals(exclusions, []);
+  assertEquals(matches.length, 1);
+});
+
+Deno.test("po_mismatch: a one-sided PO is not excluded by the matcher", () => {
+  // Deliberately NOT a refusal (the delta-1 proposal named `po_one_sided`):
+  // the production cohort carries one genuine one-sided match (SWMS-26931),
+  // and refusing it would move a correct answer. `sesMatchPoRelation` reports
+  // the pair as `po_indeterminate` so a reader can hold it by hand.
+  const job: SesMatchJob = {
+    id: "job-1",
+    job_number: "SWMS-1",
+    external_ref: "MLB-24664",
+  };
+  const inv = invoice({ id: "inv-1", reference: "MLB-24664PO-55370" });
+  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches([job], [inv]);
+  assertEquals(exclusions, []);
+  assertEquals(matches.length, 1);
+  assertEquals(sesMatchPoRelation(job, inv), "po_indeterminate");
   assertEquals(
-    redundantPo.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
-    base.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+    sesMatchPoRelation(
+      { ...job, external_ref: "MLB-24664PO-55370" },
+      invoice({ id: "inv-2", reference: "MLB-24664" }),
+    ),
+    "po_indeterminate",
+  );
+});
+
+Deno.test("po_mismatch: relation and declared POs read the deployed PO grammar", () => {
+  assertEquals(
+    sesMatchJobPurchaseOrders({
+      id: "j",
+      external_ref: "MLB-24881PO-56387",
+      builder_po_number: "PO-56387",
+    }),
+    ["56387"],
   );
   assertEquals(
-    redundantPo.exclusions.map((e) => `${e.job_id}:${e.reason}`),
-    base.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+    sesMatchJobPurchaseOrders({
+      id: "j",
+      external_ref: "MLB-24881",
+      builder_po_number: null,
+    }),
+    [],
   );
+  assertEquals(
+    sesMatchPoRelation(
+      { id: "j", external_ref: "MLB-24881" },
+      invoice({ id: "i", reference: "MLB-24881" }),
+    ),
+    "same_work",
+  );
+  assertEquals(
+    sesMatchPoRelation(
+      { id: "j", external_ref: "MLB-24881", builder_po_number: "PO-2" },
+      invoice({ id: "i", reference: "MLB-24881 PO-1" }),
+    ),
+    "distinct_po",
+  );
+});
+
+Deno.test("po_mismatch: the 51-card production cohort carries no distinct-PO pair", () => {
+  // The guard moves no existing match: every one of the 51 is same_work or
+  // one-sided, never distinct_po.
+  const { matches } = deriveSesUnlinkedInvoiceMatches(
+    fixture.jobs,
+    fixture.invoices,
+  );
+  const byId = new Map(fixture.jobs.map((job) => [job.id, job]));
+  const relations = matches.map((m) =>
+    sesMatchPoRelation(byId.get(m.job_id)!, m.invoice)
+  );
+  assertEquals(relations.filter((r) => r === "distinct_po").length, 0);
+  assertEquals(relations.filter((r) => r === "po_indeterminate").length, 1);
 });

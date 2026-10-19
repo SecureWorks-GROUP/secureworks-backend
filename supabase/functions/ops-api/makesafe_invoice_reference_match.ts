@@ -23,6 +23,8 @@
 // wrong invoice attributed to a card is far worse than a card that still
 // reports its invoice missing.
 
+import { type SesWorkRefRelation, splitRefPo } from "./makesafe_send_pack.ts";
+
 /** Production's issued-invoice rule, mirrored from the C1 measure entrypoint. */
 export const SES_ISSUED_INVOICE_STATUSES: readonly string[] = [
   "AUTHORISED",
@@ -42,7 +44,8 @@ export const SES_MIN_REFERENCE_DIGITS = 5;
 export type SesInvoiceMatchExclusionReason =
   | "multiple_invoice_candidates"
   | "builder_reference_shared_with_other_job"
-  | "invoice_claimed_by_multiple_cards";
+  | "invoice_claimed_by_multiple_cards"
+  | "po_mismatch";
 
 export interface SesMatchJob {
   id: string;
@@ -160,6 +163,52 @@ export function isUnlinkedIssuedAccrec(invoice: SesMatchInvoice): boolean {
 }
 
 /**
+ * The purchase orders a card declares: the PO token in its own claim
+ * reference and its `builder_po_number`. The PO grammar is the deployed
+ * duplicate guard's (`splitRefPo`, `makesafe_send_pack.ts`), consumed rather
+ * than restated. A bare all-digit `builder_po_number` is that card's PO too:
+ * the field holds nothing else.
+ */
+export function sesMatchJobPurchaseOrders(job: SesMatchJob): string[] {
+  const pos = new Set<string>();
+  const fromRef = splitRefPo(job.external_ref).po;
+  if (fromRef) pos.add(fromRef);
+  const declared = String(job.builder_po_number ?? "").trim();
+  const fromField = splitRefPo(declared).po ??
+    (/^\d+$/.test(declared) ? declared : null);
+  if (fromField) pos.add(fromField);
+  return [...pos];
+}
+
+/**
+ * How a candidate invoice's purchase order relates to the card's, in the
+ * deployed guard's vocabulary (`SesWorkRefRelation`). The claim side is already
+ * settled by the digit-run match, so this answers only the PO question:
+ *
+ * - `same_work`        both sides name no PO, or the invoice names one of the
+ *                      card's own POs
+ * - `distinct_po`      both name a PO and they differ: other work on the claim
+ * - `po_indeterminate` exactly one side names a PO
+ *
+ * Only `distinct_po` excludes a match (guard 4). `po_indeterminate` stays
+ * matchable because the 51-card production cohort carries one such genuine
+ * match (a PO-bearing invoice on a card that declares none); a reader that must
+ * hold one-sided pairs reads this function instead.
+ */
+export function sesMatchPoRelation(
+  job: SesMatchJob,
+  invoice: SesMatchInvoice,
+): Exclude<SesWorkRefRelation, "unrelated"> {
+  const cardPos = sesMatchJobPurchaseOrders(job);
+  const invoicePo = splitRefPo(invoice.reference).po;
+  if (cardPos.length === 0 && !invoicePo) return "same_work";
+  if (cardPos.length > 0 && invoicePo) {
+    return cardPos.includes(invoicePo) ? "same_work" : "distinct_po";
+  }
+  return "po_indeterminate";
+}
+
+/**
  * Map SES board cards to their card-unique unlinked issued ACCREC invoice.
  *
  * Three guards, all of which must hold:
@@ -173,6 +222,10 @@ export function isUnlinkedIssuedAccrec(invoice: SesMatchInvoice): boolean {
  *    alone does not prove which card owns the money. Both sides of a contested
  *    reference are excluded - symmetrically, never by picking a winner.
  * 3. No other card claims the same invoice.
+ * 4. The invoice does not name a different purchase order from the card's own
+ *    (`sesMatchPoRelation` -> `distinct_po`). One claim routinely hosts several
+ *    POs, so the shared claim digits alone do not prove the money is this
+ *    card's (DSP-T3-GAP-1, 19 Oct 2026).
  *
  * `jobs` must be the FULL job population, not just board cards, or guard 2
  * silently weakens. Only jobs with `on_board !== false` can receive a match.
@@ -247,6 +300,22 @@ export function deriveSesUnlinkedInvoiceMatches(
         detail: `contested digits ${contested.join(",")}; also owned by ${
           [...siblings].sort().join(", ")
         }`,
+      });
+      continue;
+    }
+
+    // Guard 4: same claim, different purchase order is other work.
+    if (sesMatchPoRelation(job, candidates[0].invoice) === "distinct_po") {
+      exclusions.push({
+        job_id: job.id,
+        job_number: job.job_number ?? null,
+        external_ref: job.external_ref ?? null,
+        reason: "po_mismatch",
+        detail: `${
+          candidates[0].invoice.invoice_number ?? candidates[0].invoice.id
+        } names PO ${
+          splitRefPo(candidates[0].invoice.reference).po
+        }; card declares ${sesMatchJobPurchaseOrders(job).join(",")}`,
       });
       continue;
     }
