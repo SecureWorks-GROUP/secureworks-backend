@@ -1,6 +1,6 @@
 # SQ-23 remedy: an acceptance can never commit its status with no record
 
-**Revision 13: the one current contract** (after the Codex reviews of `2a09949`, `1d41398`, `ad95394`, `3f80a7a`, `9230af9` and `fb11da4`, saved beside this file; the independent checks at `2a09949` and `60df50f`; and CIO's consumer review of `1d41398` at secureworks-projects `ctx/cio-20261019` `debaa44`). Earlier text (the original and revisions 2 to 6; later revisions are replaced in place) is in `acceptance-atomic-design-history.md`, marked superseded, and is not operative.
+**Revision 14: the one current contract** (after the Codex reviews of `2a09949`, `1d41398`, `ad95394`, `3f80a7a`, `9230af9` and `fb11da4`, CIO's static review of `7999537` at `ctx/cio-20261019` `9738b65`, saved beside this file; the independent checks at `2a09949` and `60df50f`; and CIO's consumer review of `1d41398` at secureworks-projects `ctx/cio-20261019` `debaa44`). Earlier text (the original and revisions 2 to 6; later revisions are replaced in place) is in `acceptance-atomic-design-history.md`, marked superseded, and is not operative.
 
 Status: built on the isolated branch `sq23/acceptance-atomic` (base `sq23/quote-option-jobs` `996d234`). Not merged, not deployed, nothing live, no switch on. Provenance: routine Codex orchestration under standing scope. Requirement: CIO R1 to R5 (secureworks-projects `ctx/cio-20261019` `ef20d6f`). Design and build only; no approval of any merge, deploy, switch or send, and no residual accepted.
 
@@ -25,7 +25,20 @@ The supersede trigger runs inside that transaction. If its run record, work and 
 
 Outside the guarantee, behaving exactly as today: jobless documents; every other status writer (unless the strict switch below is on); every acceptance while the switch is off. Those are not refused, but the gap read now lists what they can leave behind (a won job with no acceptance event, an accepted document on a job not won, a winner still marked superseded).
 
-**R5 is open.** CIO's requirement is that no other writer can commit a status without its event. As built, that is refused only on the atomic path. The strict switch, if the owner turns it on, refuses other writers only at the trigger's final site: a grouped option's transition into a won status whose run record, work and review event all fail. It does **not** refuse an ungrouped job, or any status write that is merely missing its acceptance event. Everything else is made visible by the gap read, not prevented. CIO does not accept this staged scope (review at `1d41398`). It is an open requirement for the owning review, not settled by design.
+**R5 is open.** CIO's requirement is that no other writer can commit a status without its event. As built, that is refused only on the atomic path. The strict switch, if the owner turns it on, refuses other writers only at the trigger's final site: a grouped option's transition into a won status whose run record, work and review event all fail. It does **not** refuse an ungrouped job, or any status write that is merely missing its acceptance event. Everything else is made visible by the gap read, not prevented. CIO does not accept this staged scope (reviews at `1d41398` and `7999537`). It is an open requirement for the owner, not settled by design; the residual risk is stated in §2a.
+
+## 2a. R5 residual risk (owner decision for Marnin, separate from the engineering work)
+**What can still happen.** Any writer other than the atomic acceptance can move a job into a won status with no acceptance event of its own: staff screens and ops-api `update_job_status` (a phone or email acceptance recorded by staff, or a mistaken click), crons, the legacy send-quote path while `quote_accept_atomic_v1` is off, and any direct SQL. Nothing refuses it, except the narrow strict case in §3.
+
+**How often.** Not measured. Staff moving jobs into won statuses is routine, so this is expected to be common, and mostly legitimate (an acceptance taken outside the share link). The harmful case, a status with no acceptance behind it at all, is expected to be rare, but there is no count. CIO asks for one read-only sizing on production-shaped data; it has not been run, and no number is claimed here.
+
+**How it surfaces.** `quote_acceptance_gaps` lists every such job as `won_without_acceptance_event` (condition-based, never hidden by a resolution), and on grouped jobs also `won_with_open_sibling` or `more_than_one_won`. It is visible to a reader, not prevented. Expect noise: every legacy acceptance and every staff win is listed, so `p_since` and a scope choice are needed before anyone reads it daily. Context has no read access yet.
+
+**Accept or fix.**
+- *Accept the staged scope:* switch-on can proceed on the atomic path. Someone must own reading the gap list, and Context must treat a listed job as uncertain chronology. Cost: a reading routine, and the noise.
+- *Fix (a), record on every won transition:* a database trigger writes a `status_won_recorded` event (writer, previous status, instant) whenever any writer moves a job into a won status without an acceptance event. Nothing is blocked. The status then always has a record, but the record says "a status change", not "the customer accepted". Cost: a small migration and its review; Context must still distinguish the two.
+- *Fix (b), refuse:* refuse any won transition without an acceptance event, and give staff a "record acceptance" action in ops-api and the staff screens. Cost: changes to the 40 writers' paths, and staff are blocked until they use it.
+Choosing among these is Marnin's call. The builder does not pick one.
 
 What a "record" means: the review list is unsettled run rows **plus** `quote_option_review_needed` events. With the supersede switch off, missing or unreadable, the trigger writes nothing by design. Ungrouped jobs never run it. A failed run insert followed by successful work leaves marks and events but no run row.
 
@@ -41,9 +54,14 @@ Only a readable `true` turns any of them on. Off, missing or unreadable is off.
 
 **Compatible switch-on order** (for the owning review): `quote_accept_atomic_v1` first, so the split writes end while the trigger is still silent. Then `quote_option_ops_reader_v1`, once the readers are verified. Then `quote_option_supersede_v1`.
 
-**`quote_option_strict_record_v1` is an owning-review decision, not settled.** Once on, a staff status change (ops-api `update_job_status`, staff screens, crons, any of the 40 writers) could be refused whenever the trigger cannot record. It should never go on before the atomic path. The order is compatible but not a full safety proof: if `quote_accept_atomic_v1` later reads unreadable while supersede is on, send-quote falls back to the split writes, and with strict on that again commits a document acceptance before refusing its status. Switch-off order is the reverse of switch-on.
+**`quote_option_strict_record_v1` is an owning-review decision, not settled.** Once on, a staff status change (ops-api `update_job_status`, staff screens, crons, any of the 40 writers) could be refused whenever the trigger cannot record.
 
-**An unreadable strict switch is off** (a timeout, cancel, permission or any other error while reading it), exactly like a missing row: the status change is kept with today's warning, plus a distinct warning `strict switch unreadable (SQLSTATE), treated as off`. So with the strict switch on, a read timeout silently keeps a status change that would otherwise be refused. This is predictable and logged, and it is a decision for the owning review. The alternative, unreadable means refuse, would block staff status changes whenever the switch read times out. The atomic path never depends on this read: the marker is checked first, and the independent check confirmed the full rollback even when the strict read fails or hangs.
+**Strict after atomic is enforced in code** (CIO condition 4, revision 14). The trigger reads both switch rows in one statement, and strict takes effect only if `quote_option_strict_record_v1` **and** `quote_accept_atomic_v1` are both present and true. Strict on with atomic off, missing or unreadable has no effect (contract cases). This closes the hazard the written rule left open: if the atomic switch later reads off or unreadable while strict is on, send-quote falls back to the split writes, and strict no longer refuses their status after the document acceptance has committed. Switch-off order is the reverse of switch-on.
+
+**An unreadable switch read here is off** (a timeout, cancel, permission or any other error reading either row), exactly like a missing row: the status change is kept with today's warning, plus `strict or atomic switch unreadable (SQLSTATE), strict treated as off`, and the gap read lists the status (`won_without_acceptance_event`; `won_with_open_sibling` while supersede reads true). The atomic path never depends on this read: the marker is checked first, on its own.
+- *Chosen: unreadable is off.* Reasons: (1) strict's precondition is that the atomic switch reads reliably; an unreadable switch row means it does not, so send-quote is itself on the split writes; (2) on that path the document acceptance has already committed, so refusing its status would **create** the split state (`accepted_document_job_not_won`) rather than prevent one; (3) it keeps the all-switches-off and unreadable behaviour identical to today, which the 81-combination matrix pins; (4) the outcome is not silent: it is logged and listed.
+- *Rejected: unreadable is refuse.* It blocks staff status changes during the very database fault that made the read fail, and on the split-write path it turns a recorded-later status into a committed acceptance with no status.
+- *Rejected: cache the last readable value.* There is no safe place to keep it inside a trigger, and a stale "on" would refuse writes after the owner had turned strict off.
 
 **Simultaneous winners stay live (CIO's accepted direction, 12:23Z).** If two options of one group are accepted at the same time in separate sessions, both end up won. The trigger writes a `more_than_one_option_won` review event, clears any marks, and settles its runs. The independent check at `2a09949`, with two real sessions, saw exactly this every time, with nothing unrecorded. The gap read lists the group as `more_than_one_won` until a person resolves it. That matches the direction; nothing here picks a winner.
 
@@ -141,10 +159,11 @@ For a reader such as Context (`ctx/cio-20261019`): a failed or partial read of `
 
 ## 8. Owners and open questions
 - send-quote code owner: **not recorded** (register, `ORG.md` and `architecture/edge-functions.md` name none). Business owners of the quote stage are Khairo (fencing) and Nithin (patio) (`ORG.md` lines 13 and 14). Builder: this Sales thread. Reviewers: Codex (second model) and the independent check.
+- The Ops reader is built (`ebf87bd`, PR 1091, Marnin's correction to CIO's "not built"); only its new joint proof with this branch is outstanding.
 - For the owning review:
   1. the strict switch (raise for every writer), given the staff-block risk;
   2. the switch-on order above;
   3. whether a failed atomic acceptance should keep showing the retry page, or a "received, we will confirm" page (a new customer-facing page; Sales and Marnin);
   4. slice 2 before any switch-on;
   5. R5: whether the staged scope is acceptable, or the strict switch (or another refusal) is required before switch-on. CIO does not accept the staged scope;
-  6. a strict switch that is on but whose read times out is treated as off (logged); the alternative is refusing staff status changes on a slow read.
+  6. an unreadable switch read is off for strict (chosen in §3 with reasons; open to the owning review to overrule).

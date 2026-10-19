@@ -497,21 +497,33 @@ BEGIN
       --   * the atomic acceptance RPC's transaction-local marker
       --     sw.quote_accept_atomic = 'on' (a cooperative marker, not proof
       --     of origin; only reached when quote_accept_atomic_v1 is on);
-      --   * the switch quote_option_strict_record_v1, for every writer. An
-      --     owning-review decision, seeded off. Missing or unreadable is off.
+      --   * the switch quote_option_strict_record_v1, for any writer, and
+      --     only while quote_accept_atomic_v1 also reads true: both rows
+      --     are read in one statement, and strict takes effect only if both
+      --     are present and true (strict-after-atomic, enforced here rather
+      --     than by a written rule). Seeded off; an owning-review decision.
       -- This raise is outside every swallowing block, so it propagates.
-      -- The marker is read on its own, first, so an unreadable strict
-      -- switch can never cancel the atomic path's raise.
+      -- The marker is read on its own, first, so an unreadable switch can
+      -- never cancel the atomic path's raise.
       v_strict := coalesce(current_setting('sw.quote_accept_atomic', true), '') = 'on';
       IF NOT v_strict THEN
         BEGIN
-          v_strict := coalesce((SELECT enabled FROM public.feature_flags
-                                 WHERE flag_name = 'quote_option_strict_record_v1'), false) IS TRUE;
+          v_strict := coalesce((SELECT count(DISTINCT f.flag_name) = 2 AND bool_and(f.enabled IS TRUE)
+                                  FROM public.feature_flags f
+                                 WHERE f.flag_name IN ('quote_option_strict_record_v1', 'quote_accept_atomic_v1')),
+                               false);
         EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
           -- Unreadable is off, like missing: the status change is kept, as
-          -- today, with its own warning. Owning-review decision (design 3).
+          -- today, with its own warning, and the gap read lists the status
+          -- (won_without_acceptance_event; won_with_open_sibling while
+          -- supersede reads true). Refusing instead was rejected (design 3):
+          -- an unreadable switch row means quote_accept_atomic_v1 is not
+          -- reliably on either, so send-quote is on the split writes, whose
+          -- document acceptance has already committed; refusing its status
+          -- would create the split state (accepted document, job not won)
+          -- and block staff status changes during the same fault.
           v_strict := false;
-          RAISE WARNING 'jobs_quote_option_supersede: strict switch unreadable (%), treated as off', SQLSTATE;
+          RAISE WARNING 'jobs_quote_option_supersede: strict or atomic switch unreadable (%), strict treated as off', SQLSTATE;
         END;
       END IF;
       IF v_strict THEN

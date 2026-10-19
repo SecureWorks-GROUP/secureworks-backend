@@ -30,7 +30,7 @@ WHERE NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'quote_ac
 
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT 'quote_option_strict_record_v1', false,
-  'SQ-23: when on, ANY status change whose quote-option supersede run can record nothing (run row, work and review event all failed) is refused and rolls back. Off: the status change stands with a warning (today). Owning-review decision: it can block staff status changes. Never on unless quote_accept_atomic_v1 is on and reads reliably.'
+  'SQ-23: when on, ANY status change whose quote-option supersede run can record nothing (run row, work and review event all failed) is refused and rolls back. Off: the status change stands with a warning (today). Owning-review decision: it can block staff status changes. No effect unless quote_accept_atomic_v1 also reads true (enforced in the trigger); unreadable is off.'
 WHERE NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'quote_option_strict_record_v1');
 
 -- One row per document accepted through the atomic path, written in the

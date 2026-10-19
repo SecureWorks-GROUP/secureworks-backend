@@ -5,8 +5,9 @@
 -- CIO R4: with the supersede switch on and the run record, the work and the review event all
 -- failing, an atomic acceptance rolls back completely (no accepted document, no status, no
 -- marks, no attempt row). Every other status writer keeps today's behaviour while
--- quote_option_strict_record_v1 is off, missing or unreadable; with it on (an owning-review
--- decision) the same failure refuses the status change. Concurrency (two sessions) is not
+-- quote_option_strict_record_v1 is off, missing or unreadable, or while quote_accept_atomic_v1
+-- is off, missing or unreadable; with both on (an owning-review decision) the same failure
+-- refuses the status change. Concurrency (two sessions) is not
 -- provable in this single-session runner.
 \set ON_ERROR_STOP on
 CREATE FUNCTION pg_temp.qa_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
@@ -204,14 +205,45 @@ END $$;
 DROP VIEW public.feature_flags;
 ALTER TABLE public.qa_contract_feature_flags RENAME TO feature_flags;
 DROP FUNCTION public.qa_contract_raise();
--- With the strict switch readable and on (owning-review behaviour), the same plain UPDATE is
--- refused and rolls back: this is what could block a staff status change.
+-- Strict after atomic, enforced in the trigger (CIO condition 4): with the strict switch on
+-- and quote_accept_atomic_v1 off, missing or unreadable, strict has no effect and the plain
+-- UPDATE stands as today.
+SELECT pg_temp.qa_assert((SELECT enabled FROM public.feature_flags WHERE flag_name = 'quote_option_strict_record_v1')
+ AND NOT (SELECT enabled FROM public.feature_flags WHERE flag_name = 'quote_accept_atomic_v1'),
+ 'setup: strict on, atomic off');
+SELECT pg_temp.qa_today('on, atomic off');
+ALTER TABLE public.feature_flags RENAME TO qa_contract_feature_flags;
+CREATE VIEW public.feature_flags AS
+ SELECT f.* FROM public.qa_contract_feature_flags f WHERE f.flag_name <> 'quote_accept_atomic_v1';
+SELECT pg_temp.qa_today('on, atomic row missing');
+UPDATE public.qa_contract_feature_flags SET enabled = true WHERE flag_name = 'quote_accept_atomic_v1';
+CREATE FUNCTION public.qa_contract_raise() RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+ RAISE EXCEPTION 'contract forced switch read failure' USING ERRCODE = current_setting('qa.flag_error');
+END $$;
+CREATE OR REPLACE VIEW public.feature_flags AS
+ SELECT f.* FROM public.qa_contract_feature_flags f
+  WHERE CASE WHEN f.flag_name = 'quote_accept_atomic_v1' THEN public.qa_contract_raise() ELSE true END;
+DO $$
+DECLARE v_code text;
+BEGIN
+ FOREACH v_code IN ARRAY ARRAY['57014', 'P0001'] LOOP
+  PERFORM set_config('qa.flag_error', v_code, true);
+  PERFORM pg_temp.qa_today('on, atomic unreadable ' || v_code);
+ END LOOP;
+END $$;
+DROP VIEW public.feature_flags;
+ALTER TABLE public.qa_contract_feature_flags RENAME TO feature_flags;
+DROP FUNCTION public.qa_contract_raise();
+-- With both readable and on (owning-review behaviour), the same plain UPDATE is refused and
+-- rolls back: this is what could block a staff status change.
 SELECT set_config('qa.r', pg_temp.qa_try($q$UPDATE public.jobs SET status = 'accepted'
   WHERE id = '9a000000-0000-4000-8000-0000000000a1'$q$), true);
 SELECT pg_temp.qa_assert(current_setting('qa.r') LIKE 'err:quote_option_unrecorded%'
  AND (SELECT status = 'quoted' FROM public.jobs WHERE id = '9a000000-0000-4000-8000-0000000000a1'),
- 'strict on: a status change whose supersede run records nothing must be refused');
-UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_strict_record_v1';
+ 'strict and atomic on: a status change whose supersede run records nothing must be refused');
+UPDATE public.feature_flags SET enabled = false
+ WHERE flag_name IN ('quote_option_strict_record_v1', 'quote_accept_atomic_v1');
 -- The marker is cooperative, not proof of origin: any SQL writer that sets it gets the raise.
 -- Documented as a trusted-writer assumption.
 CREATE FUNCTION pg_temp.qa_marked_update() RETURNS void LANGUAGE plpgsql AS $$
