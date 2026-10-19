@@ -170,6 +170,19 @@ inserts one line per item under that supplier with `source: 'scope'` and
 cannot run, so a customer's quote line and its price never become a material
 line.
 
+A patio answer also carries `held` and `scope_supplier: null`. The live
+`jobs.scope_json` is read once for that job only to warn: it runs through the
+same extractor with null pricing, and when its lines differ from the frozen
+revision's, `held` carries "The scope was changed after it was frozen: check
+these lines against the latest scope." A failed read, no live scope or one the
+extractor cannot read gives "Could not check whether the scope was changed after
+it was frozen: ...". The lines always come from the frozen revision.
+
+Two presses at once both pass the no-lines read and both insert; a suggested
+line's id is fixed by job and place, so the database key on the line id lets one
+set in and the other press gets 409 `lines_exist` with nothing written (one
+multi-row insert is all or nothing). Tested with three presses at once.
+
 Each suggested line's `id` is a uuid made from the job id and the line's place in
 the suggestion, so two presses that both find no lines insert the same ids: the
 second insert clashes on the primary key and answers `lines_exist`, and the scope
