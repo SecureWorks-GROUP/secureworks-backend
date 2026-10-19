@@ -15,6 +15,10 @@
 // `error`. A failed read is never "nothing there".
 
 import {
+  OTHER_SUPPLIER_ORDER_SELECT,
+  otherOpenSupplierOrders,
+} from "./dispatch_other_supplier_orders.ts";
+import {
   type DispatchMaterialsActor,
   DispatchMaterialsError,
   readDispatchJobCounts,
@@ -274,6 +278,23 @@ async function readJobOrders(
   // purchase_orders.status is NOT NULL live, so neq drops no row it should keep.
   const { data, error } = await client.from("purchase_orders")
     .select(ORDER_SELECT)
+    .eq("job_id", jobId)
+    .eq("org_id", ctx.orgId)
+    .neq("status", "deleted")
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  return { data: (data || []) as any[], error };
+}
+
+// Every order on the job, filtered to non-Dispatch in code:
+// `.neq("source", "dispatch")` would drop the source-null office orders.
+async function readOtherSupplierOrders(
+  client: any,
+  jobId: string,
+  ctx: DispatchOrdersContext,
+) {
+  const { data, error } = await client.from("purchase_orders")
+    .select(OTHER_SUPPLIER_ORDER_SELECT)
     .eq("job_id", jobId)
     .eq("org_id", ctx.orgId)
     .neq("status", "deleted")
@@ -631,6 +652,19 @@ export async function readDispatchOrderEmails(
         supplier_name: o.supplier_name ?? null,
       })),
   };
+  // The job's open orders made outside Dispatch (the office "Create PO"
+  // press, the quote builder, Xero), shown before a send so the same
+  // materials are not ordered twice. Advisory only: it never blocks a send,
+  // carries no price, and a failed read says so rather than "none".
+  const others = await readOtherSupplierOrders(client, job.id, ctx);
+  if (others.error) {
+    answer.other_open_orders_status = "failed";
+  } else {
+    const found = otherOpenSupplierOrders(others.data);
+    answer.other_open_orders = found.orders;
+    answer.other_open_orders_note = found.note;
+    answer.other_open_orders_status = "ok";
+  }
   // Only the threads failed: the drafts still show.
   if (comms.error) {
     answer.threads_status = "failed";
