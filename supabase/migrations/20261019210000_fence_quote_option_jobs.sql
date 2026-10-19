@@ -348,13 +348,13 @@ DECLARE
   v_run bigint;
 BEGIN
   -- The switch fails closed: off, missing or unreadable (a cancel, a
-  -- timeout, a permission error, anything) means the trigger writes
+  -- timeout, a permission error, an assert failure, anything) means the trigger writes
   -- nothing at all, not even its run record. Only a readable true turns it
   -- on. (Ops V check of reader PR 1091, 19 Oct 2026.)
   BEGIN
     v_flag_on := coalesce((SELECT enabled FROM public.feature_flags
                             WHERE flag_name = 'quote_option_supersede_v1'), false) IS TRUE;
-  EXCEPTION WHEN query_canceled OR OTHERS THEN
+  EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
     v_flag_on := false;
     RAISE WARNING 'jobs_quote_option_supersede: switch unreadable (%), treated as off', SQLSTATE;
   END;
@@ -365,7 +365,7 @@ BEGIN
   BEGIN
     INSERT INTO public.quote_option_settle_runs (job_id, quote_option_group_id, status)
     VALUES (NEW.id, v_group, NEW.status) RETURNING id INTO v_run;
-  EXCEPTION WHEN query_canceled OR OTHERS THEN
+  EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
     v_run := NULL;
     RAISE WARNING 'jobs_quote_option_supersede: run record not written (%)', SQLSTATE;
   END;
@@ -461,7 +461,7 @@ BEGIN
     -- Settled: in the same subtransaction as the work, so it rolls back
     -- with it.
     UPDATE public.quote_option_settle_runs SET settled_at = now() WHERE id = v_run;
-  EXCEPTION WHEN query_canceled OR OTHERS THEN
+  EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
     GET STACKED DIAGNOSTICS v_err_state = RETURNED_SQLSTATE, v_err_msg = MESSAGE_TEXT;
   END;
   IF v_err_state IS NOT NULL THEN
@@ -471,7 +471,7 @@ BEGIN
               jsonb_build_object('reason', 'supersede_failed', 'sqlstate', v_err_state,
                                  'error', left(coalesce(v_err_msg, ''), 200),
                                  'status', NEW.status, 'quote_option_group_id', v_group));
-    EXCEPTION WHEN query_canceled OR OTHERS THEN
+    EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
       GET STACKED DIAGNOSTICS v_review_state = RETURNED_SQLSTATE;
     END;
     -- The run's row already says the work did not settle; add why.
@@ -479,7 +479,7 @@ BEGIN
       UPDATE public.quote_option_settle_runs
          SET sqlstate = v_err_state, error = left(coalesce(v_err_msg, ''), 200), review_sqlstate = v_review_state
        WHERE id = v_run;
-    EXCEPTION WHEN query_canceled OR OTHERS THEN
+    EXCEPTION WHEN query_canceled OR assert_failure OR OTHERS THEN
       NULL;
     END;
     IF v_run IS NULL AND v_review_state IS NOT NULL THEN

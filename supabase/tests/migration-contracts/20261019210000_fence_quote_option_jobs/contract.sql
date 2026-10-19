@@ -317,7 +317,7 @@ DROP FUNCTION public.qo_contract_fail();
 
 -- The switch fails closed. With the switch row set true but its read raising (a cancel or
 -- statement timeout 57014, a permission error 42501, a lock timeout 55P03, a missing table
--- 42P01, an ordinary error P0001), accepting an option writes no pointer, no job_event and no
+-- 42P01, an ordinary error P0001, an assert failure P0004), accepting an option writes no pointer, no job_event and no
 -- run record, and the acceptance stands. Group 6: customer c-7, G1 and G2. The read is made to
 -- raise by putting a view over the switch table for this transaction only; other
 -- switches read through it as before.
@@ -341,7 +341,7 @@ DECLARE
  v_events_before bigint;
  v_runs_before bigint;
 BEGIN
- FOREACH v_code IN ARRAY ARRAY['57014', '42501', '55P03', '42P01', 'P0001'] LOOP
+ FOREACH v_code IN ARRAY ARRAY['57014', '42501', '55P03', '42P01', 'P0001', 'P0004'] LOOP
   PERFORM set_config('qo.flag_error', v_code, true);
   SELECT count(*) INTO v_events_before FROM public.job_events
    WHERE job_id IN ('9c000000-0000-4000-8000-0000000000f1', '9c000000-0000-4000-8000-0000000000f2')
