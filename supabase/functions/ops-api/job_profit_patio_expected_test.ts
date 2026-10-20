@@ -3,8 +3,10 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  LABOUR_ACTUAL_OPEN,
   type LastSaveHashes,
   lastSaveHashes,
+  MATERIALS_ACTUAL_OPEN,
   PATIO_EXPECTED_SCOPE_PROJECTION,
   PATIO_FROZEN_REVISION_COLUMNS,
   PATIO_LAST_SAVE_HASH_COLUMNS,
@@ -597,4 +599,59 @@ Deno.test("job_profit: a job with no frozen patio row makes no whole-scope read"
   const c = fake({ v_job_profit: [row()], jobs: [{ id: JOB, ...current() }] });
   await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(c.calls.filter((x) => x.table === "jobs").length, 1);
+});
+
+// Pinned literally: removing a flag from either list fails here.
+const MATERIALS_OPEN_PINNED = [
+  "no_cost_linked",
+  "materials_not_linked",
+  "open_purchase_orders",
+  "ordered_not_billed",
+  "invoice_emailed_bill_not_placed",
+  "unclassified_lines",
+  "incomplete_invoice_lines",
+  "xero_project_exceeds_line_costs",
+];
+const LABOUR_OPEN_PINNED = [
+  "no_cost_linked",
+  "no_labour_linked",
+  "unapproved_trade_charges",
+  "unclassified_lines",
+  "incomplete_invoice_lines",
+  "xero_project_exceeds_line_costs",
+];
+
+Deno.test("patio expected: every open flag holds its lane (lists pinned)", () => {
+  assertEquals(
+    [...MATERIALS_ACTUAL_OPEN].sort(),
+    [...MATERIALS_OPEN_PINNED].sort(),
+  );
+  assertEquals([...LABOUR_ACTUAL_OPEN].sort(), [...LABOUR_OPEN_PINNED].sort());
+  for (const flag of MATERIALS_OPEN_PINNED) {
+    const out = pe(null, frozen(), row({ completeness: [flag] }))!;
+    assertEquals(out.lanes.materials.variance_ex, null, flag);
+    assert(out.flags.includes("actual_materials_open"), flag);
+  }
+  for (const flag of LABOUR_OPEN_PINNED) {
+    const out = pe(null, frozen(), row({ completeness: [flag] }))!;
+    assertEquals(out.lanes.labour.variance_ex, null, flag);
+    assert(out.flags.includes("actual_labour_open"), flag);
+  }
+  // informational engine flags do not hold a lane
+  for (
+    const flag of ["text_matched_lines", "xero_project_linked_by_contact_only"]
+  ) {
+    const out = pe(null, frozen(), row({ completeness: [flag] }))!;
+    assertEquals(out.lanes.materials.variance_ex, 300, flag);
+  }
+});
+
+Deno.test("patio expected: an unreadable completeness list holds both lanes open", () => {
+  for (const c of [null, undefined, "materials_not_linked", {}]) {
+    const out = pe(null, frozen(), row({ completeness: c }))!;
+    assertEquals(out.lanes.materials.variance_ex, null, String(c));
+    assertEquals(out.lanes.labour.variance_ex, null, String(c));
+    assert(out.flags.includes("actual_completeness_unreadable"), String(c));
+    assertEquals(out.status, "incomplete", String(c));
+  }
 });

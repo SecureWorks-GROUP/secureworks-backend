@@ -246,7 +246,12 @@ function figures(
 }
 
 // Completeness flags (v_job_profit) that leave a lane's actual not known.
-const MATERIALS_ACTUAL_OPEN = [
+// ordered_not_billed and invoice_emailed_bill_not_placed come from the
+// CFO-12 / allocation bodies (20261019120000, 20261020181800), not yet on
+// main; listed so they hold the lane the day those land. text_matched_lines
+// and xero_project_linked_by_contact_only are not here on purpose: the engine
+// marks both informational (the line cost is counted, margin not suppressed).
+export const MATERIALS_ACTUAL_OPEN = [
   "no_cost_linked",
   "materials_not_linked",
   "open_purchase_orders",
@@ -256,7 +261,7 @@ const MATERIALS_ACTUAL_OPEN = [
   "incomplete_invoice_lines",
   "xero_project_exceeds_line_costs",
 ];
-const LABOUR_ACTUAL_OPEN = [
+export const LABOUR_ACTUAL_OPEN = [
   "no_cost_linked",
   "no_labour_linked",
   "unapproved_trade_charges",
@@ -402,16 +407,19 @@ export function patioExpectedVersusActual(
   const fixed = frozenScope?.expected.cost_ex != null
     ? frozenScope.expected
     : null;
-  const completeness = Array.isArray(row.completeness)
-    ? row.completeness.map(String)
+  // An unreadable completeness list holds both lanes open (fail closed).
+  const completenessKnown = Array.isArray(row.completeness);
+  const completeness = completenessKnown
+    ? (row.completeness as unknown[]).map(String)
     : [];
+  if (!completenessKnown) flags.push("actual_completeness_unreadable");
   const lane = (
     expected: number | null,
     actualRaw: unknown,
     open: string[],
   ): PatioLane => {
     const actual = actualNum(actualRaw);
-    const actualComplete = actual !== null &&
+    const actualComplete = actual !== null && completenessKnown &&
       !open.some((f) => completeness.includes(f));
     return {
       expected_ex: expected,
