@@ -455,6 +455,70 @@ export function patioQuoteMaterialItems(
   return out;
 }
 
+// The patio scoper's sealed record (Sales SQ-29, `tool` 'patio-scoper',
+// `version` 2.x): `lines[]` is the revision's material list, each with a
+// catalogue `id`, `description`, `quantity` (null when it is still to
+// confirm), `unit` and `colour`, and no price. `supported: false` means the
+// family has no quote or order, so nothing is offered to order from it. The
+// record names its revision by `revision.n` and `revision.frozenId`. A v2
+// record is never read through the older readers: its shape is not theirs.
+export type PatioScoperRevision = { n: number | null; frozen_id: string | null };
+
+export type PatioScoperRecordRead =
+  | { kind: "not_v2" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "unsupported"; family: string | null; revision: PatioScoperRevision }
+  | {
+    kind: "lines";
+    items: { description: string; quantity: unknown; unit: unknown }[];
+    revision: PatioScoperRevision;
+  };
+
+export function readPatioScoperRecord(scope: unknown): PatioScoperRecordRead {
+  if (!scope || typeof scope !== "object") return { kind: "not_v2" };
+  const record = scope as Record<string, any>;
+  if (record.tool !== "patio-scoper") return { kind: "not_v2" };
+  if (!/^2(\.|$)/.test(String(record.version ?? ""))) return { kind: "not_v2" };
+  const rev = record.revision && typeof record.revision === "object"
+    ? record.revision
+    : {};
+  const n = Number.isInteger(rev.n) ? rev.n : null;
+  const frozenId = typeof rev.frozenId === "string" && rev.frozenId.trim()
+    ? rev.frozenId.trim()
+    : null;
+  const revision = { n, frozen_id: frozenId };
+  if (record.supported === false) {
+    const family = typeof record.family === "string" && record.family.trim()
+      ? record.family.trim()
+      : null;
+    return { kind: "unsupported", family, revision };
+  }
+  if (record.supported !== true) {
+    return { kind: "unreadable", reason: "supported_missing" };
+  }
+  if (!Array.isArray(record.lines)) {
+    return { kind: "unreadable", reason: "lines_missing" };
+  }
+  const items: { description: string; quantity: unknown; unit: unknown }[] =
+    [];
+  for (const line of record.lines) {
+    if (!line || typeof line !== "object") continue;
+    const description = typeof line.description === "string"
+      ? line.description.trim()
+      : "";
+    if (!description) continue;
+    const colour = typeof line.colour === "string" ? line.colour.trim() : "";
+    items.push({
+      description: colour && !description.toLowerCase().includes(colour.toLowerCase())
+        ? `${description}, ${colour}`
+        : description,
+      quantity: line.quantity ?? null,
+      unit: line.unit ?? null,
+    });
+  }
+  return { kind: "lines", items, revision };
+}
+
 // extractMaterialsFromScope writes its descriptions with a long dash and a
 // multiplication sign. A material line takes a comma and an `x` instead.
 export function cleanSuggestedDescription(value: unknown): string {

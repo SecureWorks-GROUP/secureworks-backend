@@ -21,6 +21,7 @@ import {
   dispatchMaterialDisplayStatus,
   flattenDispatchOrderLine,
   patioQuoteMaterialItems,
+  readPatioScoperRecord,
 } from "./dispatch_materials.ts";
 import {
   DISPATCH_MATERIALS_ACTIONS,
@@ -2030,6 +2031,148 @@ Deno.test("suggest patio: a frozen revision that is not JSON is 409 scope_unread
     "scope_unreadable",
   );
   assertEquals(db.tables.job_material_lines, []);
+});
+
+// ── SQ-29: the patio scoper's sealed record ────────────────────────────────
+
+const PATIO_V2_SCOPE = {
+  tool: "patio-scoper",
+  version: "2.0",
+  revision: {
+    n: 3,
+    scopeRevisionId: "rev-3",
+    parentRevisionId: "rev-2",
+    frozenId: "frz-abc",
+    catalogueRevisionId: "cat-9",
+    sealedAt: "2026-10-20T09:00:00Z",
+    outputsAgree: true,
+  },
+  family: "flat",
+  supported: true,
+  lines: [
+    { id: "p-1", description: "SpanPlus 330 sheet", quantity: 22, unit: "ea", colour: "Monument" },
+    { id: "p-2", description: "Gutter fixing kit", quantity: null, unit: "kit", colour: null },
+    { id: "p-3", description: "  ", quantity: 4, unit: "ea" },
+  ],
+  expected: { materials: null, labour: 1200, sale: null },
+  draft: { width: 6000 },
+  savedAt: "2026-10-20T09:01:00Z",
+  // An old-shape quote list beside the record must never be read instead.
+  _pricing_json: {
+    line_items: [{ description: "Old list line", quantity: 9, unit: "ea" }],
+  },
+};
+
+Deno.test("SQ-29 record: lines with colour, an unknown quantity kept null, revision named", () => {
+  const read = readPatioScoperRecord(PATIO_V2_SCOPE);
+  assertEquals(read.kind, "lines");
+  if (read.kind !== "lines") return;
+  assertEquals(read.revision, { n: 3, frozen_id: "frz-abc" });
+  assertEquals(read.items, [
+    { description: "SpanPlus 330 sheet, Monument", quantity: 22, unit: "ea" },
+    { description: "Gutter fixing kit", quantity: null, unit: "kit" },
+  ]);
+  assertEquals(readPatioScoperRecord({ ...PATIO_V2_SCOPE, supported: false }), {
+    kind: "unsupported",
+    family: "flat",
+    revision: { n: 3, frozen_id: "frz-abc" },
+  });
+  assertEquals(
+    readPatioScoperRecord({ ...PATIO_V2_SCOPE, supported: undefined }).kind,
+    "unreadable",
+  );
+  assertEquals(
+    readPatioScoperRecord({ ...PATIO_V2_SCOPE, lines: "x" }).kind,
+    "unreadable",
+  );
+  assertEquals(readPatioScoperRecord(PATIO_QUOTE_SCOPE).kind, "not_v2");
+  assertEquals(
+    readPatioScoperRecord({ ...PATIO_V2_SCOPE, version: "1.4" }).kind,
+    "not_v2",
+  );
+});
+
+Deno.test("SQ-29 suggest: the sealed record's lines are the order, an unknown quantity stays null, the revision is named", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: PATIO_V2_SCOPE } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_V2_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 2);
+  assertEquals(
+    answer.lines.map((l: Row) => [l.description, l.quantity, l.unit, l.status]),
+    [
+      ["SpanPlus 330 sheet, Monument", 22, "ea", "not_reviewed"],
+      ["Gutter fixing kit", null, "kit", "not_reviewed"],
+    ],
+  );
+  assertEquals(answer.scope_revision_number, 1);
+  assertEquals(answer.scope_revision_n, 3);
+  assertEquals(answer.scope_frozen_id, "frz-abc");
+  assertEquals(answer.held, []);
+  for (const stored of db.tables.job_material_lines) {
+    assert(!/Old list line/.test(stored.description));
+  }
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("SQ-29 suggest: an unsupported family is 409 scope_family_unsupported; nothing written", async () => {
+  const unsupported = { ...PATIO_V2_SCOPE, supported: false };
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: unsupported } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", unsupported),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_family_unsupported",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("SQ-29 suggest: a live record edited after the freeze is warned on", async () => {
+  const edited = structuredClone(PATIO_V2_SCOPE);
+  edited.lines[1].quantity = 2;
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: edited } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_V2_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.lines[1].quantity, null);
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
 });
 
 // ── Working out and sketch ──────────────────────────────────────────────────

@@ -178,6 +178,22 @@ these lines against the latest scope." A failed read, no live scope or one the
 extractor cannot read gives "Could not check whether the scope was changed after
 it was frozen: ...". The lines always come from the frozen revision.
 
+Since 20 Oct 2026 (Sales SQ-29) a patio scope saved by the patio scoper 2.0
+(`tool: "patio-scoper"`, `version` 2.x) is read by `readPatioScoperRecord`
+(`dispatch_materials.ts`), never by the older readers. Its `lines[]` is the
+material list for that revision, one material line per entry with a
+description: `description`, plus `, <colour>` when a colour is given and the
+description does not already name it; `quantity` and `unit` as given, so a null
+quantity stays null and the order shows it as to confirm (slice 5). The answer
+adds `scope_revision_n` and `scope_frozen_id` (the record's `revision.n` and
+`revision.frozenId`) beside Dispatch's own `scope_revision_number`. A record with
+`supported: false` is refused 409 `scope_family_unsupported` (with `family` and
+`scoper_revision`) and writes nothing; one with no boolean `supported` or no
+`lines` array is 409 `scope_unreadable`. The changed-after-freeze warning reads
+the live record by the same rule. Prices (`expected`) and any old list in the
+same record are never read. The revision still exists only once `freeze_scope`
+has frozen the job, which needs a non-empty `pricing_json`.
+
 Two presses at once both pass the no-lines read and both insert; a suggested
 line's id is fixed by job and place, so the database key on the line id lets one
 set in and the other press gets 409 `lines_exist` with nothing written (one
@@ -203,6 +219,7 @@ description is dropped.
 | Supplier not on the job | 409 `supplier_not_on_job` |
 | The job already has any line, including a second press landing at the same time | 409 `lines_exist` |
 | The extractor throws on the stored scope | 409 `scope_unreadable` (never `added: 0`) |
+| A patio scoper 2.0 record with `supported: false` | 409 `scope_family_unsupported` |
 
 A scope shaped like SWP-26701's gives the four lines in the slice 4 build note
 section 9.2; the test drives the real extractor on that shape.
