@@ -243,12 +243,12 @@ export async function readCloseoutSwitches(
 // ── The review text ──────────────────────────────────────────────────────────
 
 /**
- * The review text. A fencing or patio job that passes the paid rule gets the wording the
- * GHL review workflow and staff already send (captured 2026: "Thank you for trusting us
- * with your recent job! Payment is well received. ... Shaun, SecureWorks Fencing"); a patio
- * job signs "SecureWorks" (no captured patio wording exists; "SecureWorks" is a captured
- * sign-off). Every other request (another job type, or a job not paid) makes no payment
- * claim and signs "SecureWorks". Both carry the one review link.
+ * The review text. A fencing or patio job that passes the paid rule gets the owner's
+ * wording (20 Oct 2026): "Hi {first name}, Thank you for trusting us with your recent job!
+ * Payment is well received. We'd love to hear your feedback. ... Shaun, SecureWorks Fencing"
+ * (or "SecureWorks Patios" for a patio job). Every other request (another job type, or a
+ * job not paid) makes no payment claim and signs "SecureWorks". Both carry the one review
+ * link.
  */
 export function reviewRequestMessage(
   clientName: string | null | undefined,
@@ -256,17 +256,19 @@ export function reviewRequestMessage(
   paid: boolean,
 ): string {
   const first = text(clientName).split(/\s+/)[0] || "there";
-  const ask =
-    `If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. ` +
-    `Your review helps us continue to provide quality service to our customers. You can leave a review here: ${GOOGLE_REVIEW_URL}\n\n` +
-    `Thank you again for your business!`;
   if (!paid || !isCloseoutJobType(jobType)) {
+    const ask =
+      `If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. ` +
+      `Your review helps us continue to provide quality service to our customers. You can leave a review here: ${GOOGLE_REVIEW_URL}\n\n` +
+      `Thank you again for your business!`;
     return `Hi ${first},\n\nThank you for choosing SecureWorks for your recent job!\n\n${ask}\n\nSecureWorks`;
   }
   const signOff = text(jobType).toLowerCase() === "patio"
-    ? "SecureWorks"
+    ? "SecureWorks Patios"
     : "SecureWorks Fencing";
-  return `Hi ${first},\n\nThank you for trusting us with your recent job! Payment is well received.\n\n${ask}\n\nShaun\n${signOff}`;
+  return `Hi ${first},\n\nThank you for trusting us with your recent job!\nPayment is well received.\n\n` +
+    `We'd love to hear your feedback. If you have a moment, could you leave us a quick review here: ${GOOGLE_REVIEW_URL}\n\n` +
+    `Thank you again for your business!\n\nShaun\n${signOff}`;
 }
 
 // ── Quote side of the paid rule ──────────────────────────────────────────────

@@ -345,25 +345,46 @@ function addQuote(db: FakeDb, jobId: string, valueInc: number) {
 
 // ── Pure pieces ──────────────────────────────────────────────────────────────
 
-Deno.test("the review text is the existing GHL wording with the one review link", () => {
-  const fence = reviewRequestMessage("Jane Citizen", "fencing", true);
-  assertStringIncludes(
-    fence,
-    "Hi Jane,\n\nThank you for trusting us with your recent job! Payment is well received.",
+Deno.test("the paid review text is the owner's exact wording, signed by job type", () => {
+  const body = (first: string, signOff: string) =>
+    `Hi ${first},\n\n` +
+    "Thank you for trusting us with your recent job!\n" +
+    "Payment is well received.\n\n" +
+    "We'd love to hear your feedback. If you have a moment, could you leave us a quick review here: https://share.google/AFyfkE7jLfCZcxanV\n\n" +
+    "Thank you again for your business!\n\n" +
+    `Shaun\n${signOff}`;
+  assertEquals(
+    reviewRequestMessage("Luke Smith", "fencing", true),
+    body("Luke", "SecureWorks Fencing"),
   );
-  assertStringIncludes(
-    fence,
-    "You can leave a review here: https://share.google/AFyfkE7jLfCZcxanV",
+  assertEquals(
+    reviewRequestMessage("Luke Smith", "patio", true),
+    body("Luke", "SecureWorks Patios"),
   );
-  assert(
-    fence.endsWith(
-      "Thank you again for your business!\n\nShaun\nSecureWorks Fencing",
-    ),
+  assertEquals(
+    reviewRequestMessage(null, "patio", true),
+    body("there", "SecureWorks Patios"),
   );
-  assert(reviewRequestMessage(null, "patio", true).startsWith("Hi there,"));
-  assert(
-    reviewRequestMessage("Sam", "patio", true).endsWith("Shaun\nSecureWorks"),
+});
+
+Deno.test("the other review text is unchanged byte for byte", () => {
+  assertEquals(
+    reviewRequestMessage("Jane Citizen", "decking", true),
+    "Hi Jane,\n\nThank you for choosing SecureWorks for your recent job!\n\n" +
+      "If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. " +
+      "Your review helps us continue to provide quality service to our customers. You can leave a review here: https://share.google/AFyfkE7jLfCZcxanV\n\n" +
+      "Thank you again for your business!\n\nSecureWorks",
   );
+});
+
+Deno.test("the 90-day look-back still recognises the paid review text", () => {
+  for (const type of ["fencing", "patio"]) {
+    assert(
+      reviewRequestMessage("Luke", type, true).includes(
+        "share.google/AFyfkE7jLfCZcxanV",
+      ),
+    );
+  }
 });
 
 Deno.test("the review text makes no payment claim and signs SecureWorks for other types and unpaid jobs", () => {

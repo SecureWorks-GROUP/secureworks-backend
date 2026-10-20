@@ -67,8 +67,8 @@ Holds (never moved, texted or archived): status `rectification`, or
   by id), so cards that stay put never hide newer ones.
 - **Review text.** Any fencing or patio card entering `get_review` (by the sync
   or by hand) asks the one sender, `requestJobReview`. It re-checks get_review,
-  holds and the paid rule, then texts every paying owner once, in the wording
-  the GHL review workflow already used, with the one review link, through
+  holds and the paid rule, then texts every paying owner once, in the owner's
+  wording (20 Oct 2026), with the one review link, through
   ghl-proxy `send_sms` (the shared sender policy, +61489267771, and the
   contact/job guard). A `job_review_claims` row is inserted before any text, so
   a job is never texted twice by this system; a contact sent any review text in
@@ -180,6 +180,6 @@ which are not paid, so the sweep will not archive them. No `invoiced` or
 - Decking follows the patio stage list in the state machine, as before, so
   `get_review` reads as legal there too (shadow observation only); the close-out
   itself touches fencing and patio only.
-- A patio review text signs "SecureWorks" (no patio wording was captured);
-  fencing signs "SecureWorks Fencing"; a manual text on any other job, or on a
+- A paid review text signs "Shaun" then "SecureWorks Patios" for a patio job
+  or "SecureWorks Fencing" for a fencing job; a manual text on any other job, or on a
   job not paid, makes no payment claim and signs "SecureWorks".
