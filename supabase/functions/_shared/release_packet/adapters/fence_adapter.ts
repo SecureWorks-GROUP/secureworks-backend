@@ -191,6 +191,7 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   const labourTotal = asNumber(internal.labour ?? pricingJson.labourCostEstimate, 0)
   const commissionTotal = asNumber(internal.commission ?? pricingJson.commissionCostEstimate, 0)
   const marginPct = asNumber(internal.margin ?? pricingJson.margin_pct, 0)
+  const costsIncomplete = internal.costs_complete === false
 
   const internal_cost: InternalCostSnapshot = {
     schema_version: '2.0',
@@ -199,11 +200,22 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     version: 1,
     captured_at: '',
     line_costs: lineCosts,
-    cost_estimates: {
-      material_total: materialTotal,
-      labour_total: labourTotal,
-      subcontract_commission_total: commissionTotal,
-    },
+    // Fence scoper d4fc2ad: costs_complete false means the cost figures are
+    // only the lines that have one ("at least"). Sealing them would fix a short
+    // expected cost on the quote, so they are sealed as not known.
+    cost_estimates: costsIncomplete
+      ? {
+          material_total: null,
+          labour_total: null,
+          subcontract_commission_total: null,
+          costs_complete: false,
+          costs_to_confirm: asArray(internal.costs_to_confirm).map((k) => asString(k)).filter((k) => k.length > 0),
+        }
+      : {
+          material_total: materialTotal,
+          labour_total: labourTotal,
+          subcontract_commission_total: commissionTotal,
+        },
     margin: {
       pct: marginPct,
       floor_breached: marginPct > 0 && marginPct < 0.2,

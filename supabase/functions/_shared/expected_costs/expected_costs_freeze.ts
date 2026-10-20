@@ -21,6 +21,15 @@
 //      written. The read path (v_job_expected_cost_facts) reports suppressed.
 //      No fabricated baseline. This is the NULL-PRICING RULE.
 //
+// INCOMPLETE-COST RULE (Sales request 20 Oct 2026, fence scoper
+// sales/fence-revisions @ d4fc2ad): the chosen source saying
+// internal.costs_complete === false means its cost lanes hold only the lines
+// that have a figure ("at least"). A write-once baseline of those would read
+// as a low cost, so a high profit, forever: NO snapshot is written. A source
+// saying pricing_complete === false with costs complete still freezes its
+// costs, but not its margin_pct (that margin was worked on a short sell). A
+// source with neither field (every job saved before d4fc2ad) reads as today.
+//
 // This helper is a SEPARATE accept-time path from freezeScope() in
 // ../scope_freeze/scope_freeze.ts. It must NOT change freezeScope's null
 // rejection (scope_freeze.ts `job_missing_pricing`) — it does not route through
@@ -113,6 +122,7 @@ export type FreezeExpectedCostsResult =
         | 'no_pricing_source' // no frozen revision and no usable pricing_json
         | 'no_cost_lanes' // a pricing object exists but carries no cost lanes
         | 'zero_filled_pricing' // lanes present but all 0 — fabricated placeholder, not a baseline
+        | 'costs_incomplete' // source says internal.costs_complete === false: lanes are "at least"
         | 'frozen_hash_mismatch_no_live' // frozen row failed verification, no live fallback
       existing_confidence?: ExpectedCostConfidence
     }
@@ -141,6 +151,12 @@ function coercePricing(v: unknown): Record<string, unknown> | null {
 function finiteNumberOrNull(v: unknown): number | null {
   const n = typeof v === 'string' ? Number(v) : v
   return typeof n === 'number' && Number.isFinite(n) ? n : null
+}
+
+// Only an explicit false counts. A missing field is "not stated" (older saves).
+function costsIncomplete(pricing: Record<string, unknown>): boolean {
+  const internal = pricing.internal
+  return isPlainObject(internal) && internal.costs_complete === false
 }
 
 function extractLanes(
@@ -313,6 +329,10 @@ export async function freezeExpectedCostsOnAcceptance(
     }
   }
 
+  if (costsIncomplete(sourcePricing)) {
+    return { ok: true, snapshot: false, reason: 'costs_incomplete' }
+  }
+
   const lanes = extractLanes(sourcePricing)
   const lanes_written = EXPECTED_LANES.filter((l) => lanes[l] !== undefined)
   // A pricing object with none of the three cost lanes is not a baseline —
@@ -342,7 +362,9 @@ export async function freezeExpectedCostsOnAcceptance(
     lanes,
     totals: {
       total_cost_ex_gst: finiteNumberOrNull(sourcePricing[TOTAL_COST_KEY]),
-      margin_pct: finiteNumberOrNull(sourcePricing[MARGIN_PCT_KEY]),
+      margin_pct: sourcePricing.pricing_complete === false
+        ? null
+        : finiteNumberOrNull(sourcePricing[MARGIN_PCT_KEY]),
     },
   }
 
