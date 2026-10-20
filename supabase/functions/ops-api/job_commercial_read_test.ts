@@ -1509,3 +1509,92 @@ Deno.test("D1 invoice read: a failed variation read leaves promised.variations n
   assert(String(inv.sources.promised.error).includes("job_variations"));
   assertEquals(client.writes, []);
 });
+
+Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and provenance, never its figures", () => {
+  const scope = summariseScope({
+    id: "job-sq29",
+    type: "patio",
+    scope_json: {
+      tool: "patio-scoper",
+      version: "2.0",
+      revision: {
+        n: 3,
+        scopeRevisionId: "rev-3",
+        parentRevisionId: "rev-2",
+        frozenId: "frz-3",
+        catalogueRevisionId: "cat-1",
+        sealedAt: "2026-10-20T01:00:00Z",
+        outputsAgree: true,
+      },
+      family: "skillion",
+      supported: true,
+      lines: [
+        { id: "l1", description: "Roof sheet", quantity: 12, unit: "ea", colour: "Surfmist" },
+        { id: "l2", description: "Post", quantity: null, unit: "ea" },
+      ],
+      expected: { materials: 4321, labour: 1234, sale: 9876 },
+      draft: false,
+      savedAt: "2026-10-20T01:01:00Z",
+    },
+    pricing_json: null,
+    scope_version: 3,
+    scope_updated_at: "2026-10-20T01:01:00Z",
+  }, { newestQuoteSentAt: null, signedOff: null });
+  assertEquals(scope.status, "summarised");
+  assertEquals(scope.kind, "patio");
+  assertEquals(scope.lines, [
+    "Roof sheet (12 ea), Surfmist",
+    "Post (quantity to confirm)",
+  ]);
+  assertEquals(scope.scope_record, {
+    tool: "patio-scoper",
+    version: "2.0",
+    family: "skillion",
+    supported: true,
+    draft: false,
+    revision_n: 3,
+    scope_revision_id: "rev-3",
+    parent_revision_id: "rev-2",
+    frozen_id: "frz-3",
+    sealed_at: "2026-10-20T01:00:00Z",
+    parent_readable: false,
+  });
+  const text = JSON.stringify(scope);
+  for (const figure of ["4321", "1234", "9876"]) {
+    assert(!text.includes(figure), `figure ${figure} leaked`);
+  }
+});
+
+Deno.test("SQ-29 scope: an unsupported family says no quote or order is implied", () => {
+  const scope = summariseScope({
+    id: "job-sq29-u",
+    type: "patio",
+    scope_json: {
+      tool: "patio-scoper",
+      version: "2.0",
+      revision: { n: 1, scopeRevisionId: "rev-1", parentRevisionId: null },
+      family: "carport",
+      supported: false,
+      lines: [],
+      expected: { materials: null, labour: null, sale: null },
+    },
+    pricing_json: null,
+  }, { newestQuoteSentAt: null, signedOff: null });
+  assertEquals(scope.kind, "patio");
+  assertEquals(scope.lines, [
+    "carport: not a family the scoper prices, so no quote or order is implied",
+  ]);
+  assertEquals(scope.scope_record?.supported, false);
+  assertEquals(scope.scope_record?.parent_revision_id, null);
+});
+
+Deno.test("SQ-29 scope: the older patio tool shape still goes through the shared adapter", () => {
+  const scope = summariseScope({
+    id: "job-old",
+    type: "patio",
+    scope_json: { patios: [{ config: { dimensions: { width: 6, depth: 3 } } }] },
+    pricing_json: null,
+  }, { newestQuoteSentAt: null, signedOff: null });
+  assertEquals(scope.scope_record, undefined);
+  assertEquals(scope.kind, "patio");
+});

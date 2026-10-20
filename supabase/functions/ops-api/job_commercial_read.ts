@@ -994,6 +994,25 @@ export interface ScopeSummary {
   current_price_inc_gst: number | null;
   changed_since_last_quote: boolean | null;
   changed_since_last_quote_basis: string;
+  // Present only for a sealed patio-scoper v2 record (SQ-29): where this
+  // scope came from. Never its expected figures.
+  scope_record?: PatioScoperRecord;
+}
+
+export interface PatioScoperRecord {
+  tool: "patio-scoper";
+  version: string | null;
+  family: string | null;
+  supported: boolean | null;
+  draft: boolean | null;
+  revision_n: number | null;
+  scope_revision_id: string | null;
+  parent_revision_id: string | null;
+  frozen_id: string | null;
+  sealed_at: string | null;
+  // Only the current revision is kept on the job: save_scope replaces
+  // scope_json whole, so a parent revision is named, never readable here.
+  parent_readable: false;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> | null {
@@ -1139,6 +1158,59 @@ function changedSinceLastQuote(
 }
 
 /**
+ * The patio-scoper v2 record (Sales SQ-29) is the scoper's own shape, not the
+ * older patio tool's, so the shared release-packet adapter would read it as a
+ * bare "patio" with no lines. Read it here, lines only: `expected` holds
+ * figures and is never read. An unsupported family is a scope with no quote
+ * or order behind it, and its lines say so.
+ */
+function patioScoperSummary(
+  scopeJson: Record<string, unknown>,
+): { lines: string[]; record: PatioScoperRecord } | null {
+  if (scopeJson.tool !== "patio-scoper") return null;
+  const rev = scopeJson.revision && typeof scopeJson.revision === "object" &&
+      !Array.isArray(scopeJson.revision)
+    ? scopeJson.revision as Record<string, unknown>
+    : null;
+  if (!rev) return null;
+  const supported = typeof scopeJson.supported === "boolean"
+    ? scopeJson.supported
+    : null;
+  const family = str(scopeJson.family);
+  const lines: string[] = [];
+  if (supported === false) {
+    lines.push(
+      `${family ?? "this patio"}: not a family the scoper prices, so no quote or order is implied`,
+    );
+  }
+  for (const line of Array.isArray(scopeJson.lines) ? scopeJson.lines : []) {
+    const desc = str((line as any)?.description);
+    if (!desc) continue;
+    const qty = num((line as any)?.quantity);
+    const unit = str((line as any)?.unit);
+    const colour = str((line as any)?.colour);
+    const amount = qty === null ? "quantity to confirm" : `${qty}${unit ? ` ${unit}` : ""}`;
+    lines.push(`${desc} (${amount})${colour ? `, ${colour}` : ""}`);
+  }
+  return {
+    lines,
+    record: {
+      tool: "patio-scoper",
+      version: str(scopeJson.version),
+      family,
+      supported,
+      draft: typeof scopeJson.draft === "boolean" ? scopeJson.draft : null,
+      revision_n: num(rev.n),
+      scope_revision_id: str(rev.scopeRevisionId),
+      parent_revision_id: str(rev.parentRevisionId),
+      frozen_id: str(rev.frozenId),
+      sealed_at: str(rev.sealedAt),
+      parent_readable: false,
+    },
+  };
+}
+
+/**
  * Pure scope summary. Reads the adapter's scope block only (never pricing or
  * internal cost). newestQuoteSentAt is the newest CURRENT quote's sent_at.
  * Pass quoteReadFailed when the quote read itself failed so the field stays
@@ -1183,6 +1255,15 @@ export function summariseScope(
   };
   if (!scopeJson || Object.keys(scopeJson).length === 0) {
     return { ...base, status: "no_scope" };
+  }
+  const patioScoper = patioScoperSummary(scopeJson);
+  if (patioScoper) {
+    return {
+      ...base,
+      kind: "patio",
+      lines: patioScoper.lines,
+      scope_record: patioScoper.record,
+    };
   }
   try {
     const result = dispatchAdapter({
