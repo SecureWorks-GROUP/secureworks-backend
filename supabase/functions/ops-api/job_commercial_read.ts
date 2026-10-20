@@ -1369,6 +1369,12 @@ export function summariseScope(
 
 const SCOPE_REVISION_HISTORY_LIMIT = 50;
 
+// jobs.type -> scope_revisions.tool_kind, for the two tools on Sales' route.
+const SCOPE_TOOL_KIND_BY_JOB_TYPE: Record<string, string> = {
+  patio: "patio",
+  fencing: "fencing",
+};
+
 function scopeRevisionRef(row: any): ScopeRevisionRef {
   return {
     scope_revision_id: String(row?.id),
@@ -1405,6 +1411,7 @@ export async function readScopeRevisionAlignment(
   client: any,
   jobId: string,
   scopeJson: unknown,
+  jobType?: string | null,
 ): Promise<ScopeRevisionAlignment> {
   const failed = (code: string): ScopeRevisionAlignment => ({
     ok: false,
@@ -1432,7 +1439,14 @@ export async function readScopeRevisionAlignment(
   }
   const more = rows.length > SCOPE_REVISION_HISTORY_LIMIT;
   const kept = rows.slice(0, SCOPE_REVISION_HISTORY_LIMIT);
-  const frozenRow = rows.find((r) => r?.status === "frozen") ?? null;
+  // Sales' contract: the current revision is the job's one frozen row of the
+  // job's own tool kind. A frozen row of another kind is not this scope.
+  const expectedKind = SCOPE_TOOL_KIND_BY_JOB_TYPE[String(jobType ?? "")] ??
+    null;
+  const frozenRows = rows.filter((r) => r?.status === "frozen");
+  const frozenRow = frozenRows.find((r) =>
+    !expectedKind || r?.tool_kind === expectedKind
+  ) ?? null;
   const out: ScopeRevisionAlignment = {
     ok: true,
     history: kept.map(scopeRevisionRef),
@@ -1441,7 +1455,10 @@ export async function readScopeRevisionAlignment(
     last_save_matches_frozen: null,
     frozen_scope_json: null,
   };
-  if (!frozenRow) return out;
+  if (!frozenRow) {
+    if (frozenRows.length > 0) out.code = "frozen_tool_kind_mismatch";
+    return out;
+  }
 
   const lastSave = parseJsonObject(scopeJson);
   if (lastSave && Object.keys(lastSave).length > 0) {

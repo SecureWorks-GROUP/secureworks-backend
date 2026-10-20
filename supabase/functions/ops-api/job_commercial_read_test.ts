@@ -1738,3 +1738,20 @@ Deno.test("SQ-29 frozen: history is capped at 50 and says there is more", async 
   assertEquals(rev.more, true);
   assertEquals(rev.frozen?.scope_revision_id, "srv-52");
 });
+
+Deno.test("SQ-29 frozen: the frozen row must be the job's own tool kind", async () => {
+  const current = patioRecord(2, "frz-2", "Roof sheet");
+  const rows = await frozenRows(SQ29_JOB, current, patioRecord(1, "frz-1", "Old sheet"));
+  const asPatio = await readScopeRevisionAlignment(fakeClient({ scope_revisions: rows }), SQ29_JOB, current, "patio");
+  assertEquals(asPatio.frozen?.scope_revision_id, "srv-2");
+  const asFence = await readScopeRevisionAlignment(fakeClient({ scope_revisions: rows }), SQ29_JOB, current, "fencing");
+  assertEquals(asFence.frozen, null);
+  assertEquals(asFence.code, "frozen_tool_kind_mismatch");
+  assertEquals(asFence.history.length, 2);
+  const scope = summariseScope(
+    { id: SQ29_JOB, type: "fencing", scope_json: current, pricing_json: null },
+    { newestQuoteSentAt: null, signedOff: null, revisions: asFence },
+  );
+  assertEquals(scope.scope_source, "last_save");
+  assertEquals(scope.revision_read_code, "frozen_tool_kind_mismatch");
+});

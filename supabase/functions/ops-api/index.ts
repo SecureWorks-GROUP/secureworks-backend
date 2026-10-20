@@ -18209,7 +18209,7 @@ async function assembleJobDossier(client: any, body: any) {
     readJobQuotes(client, { id: jobId, client_email: jobRow.client_email ?? null }),
     readJobVariations(client, jobId),
     readScopeSignOff(client, jobId),
-    readScopeRevisionAlignment(client, jobId, jobRow.scope_json),
+    readScopeRevisionAlignment(client, jobId, jobRow.scope_json, jobRow.type),
     readJobFreshness(client, jobId),
     safeRead('job_brief', async () => {
       const { data, error } = await client.from('current_job_context_facts')
