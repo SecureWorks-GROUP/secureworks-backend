@@ -107,6 +107,8 @@ export { DebtWsError } from "./debt_ws_store.ts";
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
+/** Statements are signed by Shaun on admin@ (send-outlook-email signature "shaun"). */
+export const DEBT_WS_STATEMENT_SIGNATURE = "shaun";
 /**
  * The step a manual text is sent and logged under (Shaun's own words, not a planned step).
  * Its claim row's step is "manual:<client_ref>", which is never a ladder step, so the
@@ -193,6 +195,8 @@ export interface DebtWsDeps {
       { name: string; contentType: string; contentBytes: string }
     >;
     internal_report?: "debt_report";
+    /** send-outlook-email signature choice for this mailbox, e.g. "shaun". */
+    signature?: string;
   }) => Promise<{ ok: boolean; status: number; error: string | null }>;
   /** Xero's Bank Summary read live: one closing balance per bank account. */
   bankSummary: () => Promise<BankAccountBalance[]>;
@@ -2286,6 +2290,7 @@ export async function debtWsStatementSend(
       to: company.to_email!,
       subject: view.subject,
       htmlBody: view.html,
+      signature: DEBT_WS_STATEMENT_SIGNATURE,
     });
   } catch (error) {
     // The email may have gone: the claim stays (status sending) so it never sends twice.
