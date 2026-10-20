@@ -1,7 +1,8 @@
 -- Down for 20261020160000_context_recon_daily_list. Manual only: rollbacks are never applied by the
 -- deploy lane. Refuses while any invoice decision exists, so it never deletes a decision. Drops
 -- the daily list and the invoice functions and puts back the event-only subject check. Writes
--- no business row. Re-running is a no-op.
+-- no business row. Re-running is a no-op. Run it before 20261020155000's down: the daily list
+-- reads that migration's lane, so its own down must come first.
 
 DO $$
 BEGIN

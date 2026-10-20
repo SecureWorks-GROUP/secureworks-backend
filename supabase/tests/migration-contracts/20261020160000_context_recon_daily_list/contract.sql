@@ -56,7 +56,8 @@ BEGIN
   IF n <> 0 THEN RAISE EXCEPTION 'recon list contract: a voided invoice, a closed-job message or a defect row was listed'; END IF;
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
   IF r.band IS DISTINCT FROM 1 OR r.amount IS DISTINCT FROM 1500::numeric OR r.summary ->> 'invoice_number' IS DISTINCT FROM 'INV-98001'
-     OR r.offered_jobs -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001' THEN
+     OR r.offered_jobs -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001'
+     OR r.decision_state IS DISTINCT FROM 'none' OR r.owner IS DISTINCT FROM 'context_resolver' THEN
     RAISE EXCEPTION 'recon list contract: the owed invoice is not band 1 with its contact''s job offered';
   END IF;
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000001';
@@ -78,15 +79,19 @@ BEGIN
   BEGIN PERFORM public.context_recon_record_invoice_decision(inv, h, 'confirm', ARRAY[a], 'ambiguity:invoice_no_job', staff);
     RAISE EXCEPTION 'recon list contract: confirm was accepted on an invoice'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
 
-  -- 4. Escalate keeps it listed with its owner; correct takes it off and writes no invoice.
+  -- 4. Escalate keeps it listed with its owner; correct keeps it listed with Finance, names the
+  --    chosen job and writes no invoice.
   PERFORM public.context_recon_record_invoice_decision(inv, h, 'escalate', '{}', 'ambiguity:invoice_no_job', staff, 'finance');
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
   IF r.owner IS DISTINCT FROM 'finance' OR r.last_action IS DISTINCT FROM 'escalate' THEN
     RAISE EXCEPTION 'recon list contract: an escalated invoice left the list or lost its owner';
   END IF;
   PERFORM public.context_recon_record_invoice_decision(inv, h, 'correct', ARRAY[a], 'ambiguity:invoice_no_job', staff);
-  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
-    RAISE EXCEPTION 'recon list contract: a corrected invoice is still listed';
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
+  IF r.subject_id IS NULL OR r.owner IS DISTINCT FROM 'finance' OR r.last_action IS DISTINCT FROM 'correct'
+     OR r.decision_state IS DISTINCT FROM 'decided'
+     OR r.summary -> 'decided_jobs' -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001' THEN
+    RAISE EXCEPTION 'recon list contract: a corrected invoice left the list or is not with Finance naming its job';
   END IF;
   IF (SELECT job_id FROM public.xero_invoices WHERE id = inv) IS NOT NULL THEN
     RAISE EXCEPTION 'recon list contract: the decision wrote the invoice';
@@ -96,15 +101,36 @@ BEGIN
     RAISE EXCEPTION 'recon list contract: by is not the person';
   END IF;
 
-  -- 5. A part payment keeps the decision; a changed total reopens it.
+  -- 5. A part payment keeps the decision (still with Finance); a changed total reopens it.
   UPDATE public.xero_invoices SET amount_due = 500, amount_paid = 1000 WHERE id = inv;
-  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
-    RAISE EXCEPTION 'recon list contract: a part payment reopened the decision';
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
+  IF r.decision_state IS DISTINCT FROM 'decided' OR r.owner IS DISTINCT FROM 'finance' THEN
+    RAISE EXCEPTION 'recon list contract: a part payment reopened the decision or dropped it';
   END IF;
   UPDATE public.xero_invoices SET total = 1600, amount_due = 600 WHERE id = inv;
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
   IF r.decision_state IS DISTINCT FROM 'evidence_changed' THEN
     RAISE EXCEPTION 'recon list contract: a changed total did not reopen the decision';
+  END IF;
+  -- An unrelated decision also stays with Finance.
+  PERFORM public.context_recon_record_invoice_decision(inv, public.context_recon_invoice_evidence_hash(inv), 'unrelated', '{}',
+    'ambiguity:invoice_no_job', staff);
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
+  IF r.owner IS DISTINCT FROM 'finance' OR r.last_action IS DISTINCT FROM 'unrelated' THEN
+    RAISE EXCEPTION 'recon list contract: an unrelated invoice left the list or is not with Finance';
+  END IF;
+  -- Only Xero carrying the job takes it off the list.
+  UPDATE public.xero_invoices SET job_id = a WHERE id = inv;
+  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
+    RAISE EXCEPTION 'recon list contract: an invoice Xero now puts on a job is still listed';
+  END IF;
+  UPDATE public.xero_invoices SET job_id = NULL WHERE id = inv;
+  -- A sales invoice with no type recorded is still a sales invoice. This stack keeps the type
+  -- NOT NULL, so lift that inside this rolled-back transaction to prove the rule.
+  ALTER TABLE public.xero_invoices ALTER COLUMN invoice_type DROP NOT NULL;
+  UPDATE public.xero_invoices SET invoice_type = NULL WHERE id = inv;
+  IF NOT EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
+    RAISE EXCEPTION 'recon list contract: an owed invoice with no type recorded was dropped';
   END IF;
 
   -- 6. Event decisions still go through the event writer: confirm the band 3 message.
@@ -113,6 +139,20 @@ BEGIN
     ARRAY['7d000000-0000-0000-0000-00000000000b']::uuid[], 'ambiguity:no_candidate', staff);
   IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000002') THEN
     RAISE EXCEPTION 'recon list contract: a decided message is still listed';
+  END IF;
+
+  -- 7. Once go-live is set after these messages, the message bands keep to the live lane and the
+  --    owed invoice stays.
+  IF NOT EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000001') THEN
+    RAISE EXCEPTION 'recon list contract: the band 2 message is missing before go-live is set';
+  END IF;
+  UPDATE public.context_recon_settings SET live_from = '2026-10-19 00:00Z' WHERE id;
+  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_kind = 'event'
+             AND subject_id IN ('7d300000-0000-0000-0000-000000000001', '7d300000-0000-0000-0000-000000000002')) THEN
+    RAISE EXCEPTION 'recon list contract: a backlog message is on the daily list';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
+    RAISE EXCEPTION 'recon list contract: go-live took the owed invoice off the list';
   END IF;
 END $$;
 ROLLBACK;

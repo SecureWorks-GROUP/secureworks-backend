@@ -23,6 +23,9 @@ BEGIN
      OR to_regprocedure('public.context_recon_queue(timestamptz)') IS NULL THEN
     RAISE EXCEPTION 'context_recon_daily_list_prerequisite_missing: apply 20261020140000_context_reconciliation_decisions first';
   END IF;
+  IF to_regprocedure('public.context_recon_live_from()') IS NULL THEN
+    RAISE EXCEPTION 'context_recon_daily_list_prerequisite_missing: apply 20261020155000_context_recon_backlog_lane first';
+  END IF;
 END $$;
 
 ALTER TABLE public.context_reconciliation_decisions
@@ -139,24 +142,29 @@ RETURNS TABLE (band int, band_label text, subject_kind text, subject_id uuid, ev
 LANGUAGE sql STABLE AS $$
   WITH inv AS (
     SELECT i.id, i.amount_due, i.invoice_date, i.xero_contact_id,
-           s.state, s.action, s.escalate_to,
+           s.state, s.action, s.escalate_to, s.job_ids,
            jsonb_build_object('invoice_number', i.invoice_number, 'reference', i.reference, 'contact_name', i.contact_name,
                               'total', i.total, 'amount_due', i.amount_due, 'status', i.status,
                               'invoice_date', to_char(i.invoice_date, 'YYYY-MM-DD'),
                               'due_date', to_char(i.due_date, 'YYYY-MM-DD')) AS summary
     FROM public.xero_invoices i
     CROSS JOIN LATERAL public.context_recon_invoice_decision_state(i.id) s
-    WHERE upper(coalesce(i.invoice_type, '')) = 'ACCREC' AND i.job_id IS NULL
+    -- A decided item stays on the list with Finance until Xero carries the job (job_id set) or it
+    -- stops being owed: a choice here changes nothing in Xero, so it must never make an owed invoice vanish.
+    WHERE upper(coalesce(i.invoice_type, 'ACCREC')) = 'ACCREC' AND i.job_id IS NULL
       AND upper(coalesce(i.status, '')) NOT IN ('VOIDED', 'DELETED', 'DRAFT')
-      AND coalesce(i.amount_due, 0) > 0
-      AND NOT (s.state = 'decided' AND s.action IN ('correct', 'unrelated'))),
+      AND coalesce(i.amount_due, 0) > 0),
   band1 AS (
     SELECT 1 AS band, 'owed_invoice_no_job'::text AS band_label, 'invoice'::text AS subject_kind, inv.id AS subject_id,
            inv.amount_due AS amount,
            round((extract(epoch FROM p_as_of - inv.invoice_date::timestamptz) / 86400)::numeric, 1) AS waiting_days,
            'ambiguity:invoice_no_job'::text AS cause, inv.state, inv.action,
-           CASE WHEN inv.state = 'decided' AND inv.action = 'escalate' THEN inv.escalate_to ELSE 'context_resolver' END AS owner,
-           inv.summary,
+           CASE WHEN inv.state = 'decided' AND inv.action IN ('correct', 'unrelated') THEN 'finance'
+                WHEN inv.state = 'decided' AND inv.action = 'escalate' THEN inv.escalate_to
+                ELSE 'context_resolver' END AS owner,
+           inv.summary || jsonb_build_object('decided_jobs',
+             CASE WHEN inv.state = 'decided' AND inv.action = 'correct'
+                  THEN public.context_recon_job_choices(inv.job_ids) ELSE '[]'::jsonb END) AS summary,
            (SELECT array_agg(j.id) FROM public.jobs j WHERE inv.xero_contact_id IS NOT NULL AND j.xero_contact_id = inv.xero_contact_id) AS offered,
            NULL::uuid[] AS others
     FROM inv),
@@ -165,7 +173,7 @@ LANGUAGE sql STABLE AS $$
            coalesce(e.context_captured_at, e.occurred_at) AS captured,
            coalesce(nullif(e.metadata -> 'party_roles' ->> 'counterpart_role', ''), 'unstamped') AS role
     FROM public.context_recon_queue(p_as_of) q JOIN public.business_events e ON e.id = q.event_id
-    WHERE q.cause LIKE 'ambiguity:%' AND e.contact_id IS NOT NULL),
+    WHERE q.cause LIKE 'ambiguity:%' AND e.contact_id IS NOT NULL AND q.lane = 'live'),
   owed AS (SELECT * FROM public.context_recon_contact_owed((SELECT array_agg(DISTINCT contact_id) FROM q))),
   cj AS (
     SELECT j.ghl_contact_id AS contact_id, array_agg(j.id) AS job_ids,
