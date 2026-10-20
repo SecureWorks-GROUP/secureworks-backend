@@ -103,7 +103,8 @@
 --   - The events are kept: a guard trigger on job_events refuses to delete
 --     one while its job exists (ops-api delete_note deletes any row by id),
 --     and refuses an update that changes its event_type, job_id, created_at,
---     seq or at (other detail may change). Deleting the job itself still
+--     or any detail key it was written with (seq, at, superseded_by_job_id,
+--     quote_option_group_id, ...); new keys may be added. Deleting the job itself still
 --     cascades them away.
 -- Limits: a direct UPDATE of jobs.quote_option_group_id by an owner, outside
 -- link_fence_quote_option, would bypass this; an event written by anything
@@ -400,7 +401,8 @@ END $$;
 
 -- Keep the supersede history: while its job exists, a quote_option_superseded
 -- or quote_option_unsuperseded event is not deleted, and an update may not
--- change what orders or places it (event_type, job_id, created_at, seq, at).
+-- change what orders, places or means it (event_type, job_id, created_at,
+-- and any detail key it was written with; keys may be added).
 -- Runs as owner so the job read is not hidden by RLS. A job's own deletion
 -- cascades here after the job row is gone, so it is allowed.
 CREATE OR REPLACE FUNCTION public.fence_quote_option_event_guard()
@@ -418,14 +420,16 @@ BEGIN
     END IF;
     RETURN OLD;
   END IF;
+  -- Every key the writer put in detail_json keeps its value (seq, at,
+  -- superseded_by_job_id, quote_option_group_id, reason, ...); keys may be
+  -- added (the legacy variation path spreads the old detail and adds).
   IF NEW.event_type IS DISTINCT FROM OLD.event_type
      OR NEW.job_id IS DISTINCT FROM OLD.job_id
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
-     OR (NEW.detail_json -> 'seq') IS DISTINCT FROM (OLD.detail_json -> 'seq')
-     OR (NEW.detail_json -> 'at') IS DISTINCT FROM (OLD.detail_json -> 'at') THEN
+     OR NOT (coalesce(NEW.detail_json, '{}'::jsonb) @> coalesce(OLD.detail_json, '{}'::jsonb)) THEN
     RAISE EXCEPTION 'quote_option_event_immutable'
       USING ERRCODE = '42501',
-            DETAIL = format('event %s: event_type, job_id, created_at, seq and at of supersede history do not change', OLD.id);
+            DETAIL = format('event %s: event_type, job_id, created_at and the written detail of supersede history do not change', OLD.id);
   END IF;
   RETURN NEW;
 END $$;

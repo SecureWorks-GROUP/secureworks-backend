@@ -666,6 +666,20 @@ SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
  UPDATE public.job_events SET created_at = created_at - interval '1 second'
   WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
 $q$), 'a supersede event''s time must not change');
+-- CIO blocker for a pointer-reading slice: the written meaning is frozen too.
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('superseded_by_job_id', '9c000000-0000-4000-8000-0000000009a1')
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_superseded'
+    AND detail_json->>'superseded_by_job_id' = '9c000000-0000-4000-8000-0000000009c1'
+$q$), 'a superseded event''s superseded_by_job_id must not change');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('quote_option_group_id', '9c000000-0000-4000-8000-0000000009c1')
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event''s quote_option_group_id must not change');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET detail_json = detail_json - 'reason'
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a written detail key must not be removed');
 -- One review event, picked by id (job E holds several crewed review events by now).
 CREATE TEMP TABLE qo_retype_target AS
  SELECT id FROM public.job_events
@@ -676,13 +690,13 @@ SELECT pg_temp.qo_assert((SELECT count(*) FROM qo_retype_target) = 1
  UPDATE public.job_events SET event_type = 'quote_option_superseded'
   WHERE id = (SELECT id FROM qo_retype_target)
 $q$), 'another event must not be retyped into supersede history');
--- Allowed: other detail on a supersede event (the legacy variation path spreads detail and keeps
--- seq), and any change to other event types.
+-- Allowed: a new detail key on a supersede event (the legacy variation path spreads the old
+-- detail and adds), and any change to other event types.
 UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('qo_contract_note', true)
  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded';
 SELECT pg_temp.qo_assert((SELECT bool_and(detail_json ? 'qo_contract_note' AND detail_json ? 'seq' AND detail_json ? 'at')
   FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'),
- 'other detail on a supersede event may change while seq is kept');
+ 'a new detail key may be added to a supersede event while every written key is kept');
 SAVEPOINT qo_other_delete;
 DELETE FROM public.job_events WHERE job_id::text LIKE '9c000000-%' AND event_type = 'quote_option_linked';
 SELECT pg_temp.qo_assert((SELECT count(*) FROM public.job_events WHERE job_id::text LIKE '9c000000-%'
