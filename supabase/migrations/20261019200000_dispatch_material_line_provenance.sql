@@ -23,8 +23,11 @@
 --   source_version_id  the id of that version or revision row.
 --   source_version     its version number or label as shown to people.
 --   source_line_id     the source's own line id (quote builder cost_lines
---                      line_id). Null for fence and patio lines, which are
---                      worked out from the scope and have no line of their own.
+--                      line_id). Fence and patio lines are worked out from the
+--                      scope and have no line of their own, so they carry a
+--                      material key (dispatchScopeMaterialKey in
+--                      ops-api/dispatch_materials.ts), which the variation
+--                      press compares between revisions.
 --
 -- The partial unique index makes one source line land on a job at most once,
 -- whatever the press order: a second or concurrent take of the same quote line
@@ -86,4 +89,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_material_lines_source_line_once
 COMMENT ON COLUMN public.job_material_lines.source_version_id IS
   'The quote builder version or frozen scope revision this line was taken from. Null: hand-added, or taken before 20261019200000 (not recorded).';
 COMMENT ON COLUMN public.job_material_lines.source_line_id IS
-  'The source''s own line id (quote builder cost_lines line_id). Unique per job and version.';
+  'The source''s own line id (quote builder cost_lines line_id), or a fence or patio line''s material key. Unique per job and version.';
