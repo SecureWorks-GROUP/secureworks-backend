@@ -108,8 +108,10 @@ BEGIN
      OR EXISTS (SELECT 1 FROM public.context_recon_job_items(b) i WHERE i.event_id = placed) THEN
     RAISE EXCEPTION 'job recon contract: escalated placed row missing from its own job';
   END IF;
-  -- The mail cap is one over the ops-api page of 500.
-  IF (SELECT count(*) FROM public.context_job_mail(a, 9999)) > 501 THEN
+  -- Each cap is one over its ops-api page (500 mail, 200 items).
+  IF position('LIMIT least(greatest(coalesce(p_limit, 100), 1), 501)' IN
+              pg_get_functiondef('public.context_job_mail(uuid,int,text[])'::regprocedure)) = 0
+     OR position('LIMIT 201' IN pg_get_functiondef('public.context_recon_job_items(uuid)'::regprocedure)) = 0 THEN
     RAISE EXCEPTION 'job recon contract: mail cap';
   END IF;
 

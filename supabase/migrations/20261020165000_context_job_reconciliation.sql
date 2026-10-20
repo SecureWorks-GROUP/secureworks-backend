@@ -19,7 +19,7 @@
 -- row the list never shows. Its pool is the queue's, narrowed to this job: rows with this job
 -- as a candidate, every row on this job (the queue keeps a placed row while a decision on it is
 -- escalated, unresolved or stale), and rows a decision linked here; the queue's own filter then
--- decides. A call row carries no preview, so transcript words never reach this list. At most 201
+-- decides, except that copies marked duplicate_of are left out here (their original is listed). A call row carries no preview, so transcript words never reach this list. At most 201
 -- rows (one over ops-api's page of 200, so it can say there is more). The cause rule is
 -- context_recon_queue's, restated per row; the contract proves the two agree.
 
