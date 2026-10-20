@@ -128,21 +128,30 @@ sent_rev AS (
         ) > 0
 ),
 quote_costs_open AS (
-  -- The revision the job's quote stands on (newest accepted, else newest
-  -- sent), when its sealed cost estimates say a cost is still to confirm
-  -- (costs_complete false, sealed since 20 Oct 2026 by the fence seal). Read
-  -- only to name the job incomplete; it never supplies a figure.
-  SELECT n.job_id
+  -- The revision the job's quote stands on, picked exactly as accepted_rev and
+  -- sent_rev pick theirs (same filters, same order) but before their costed
+  -- filter: the newest accepted revision if the job has one, else the newest
+  -- sent. The job is named incomplete when that revision's sealed cost
+  -- estimates say a cost is still to confirm (costs_complete false, sealed
+  -- since 20 Oct 2026 by the fence seal). Read only to name the job
+  -- incomplete; it never supplies a figure.
+  SELECT COALESCE(a.job_id, s.job_id) AS job_id
   FROM (
     SELECT DISTINCT ON (r.job_id)
       r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
     FROM public.quote_revisions r
-    LEFT JOIN public.job_documents d ON d.id = r.job_document_id
-    WHERE d.accepted_at IS NOT NULL OR r.sent_at IS NOT NULL
-    ORDER BY r.job_id, (d.accepted_at IS NOT NULL) DESC, d.accepted_at DESC NULLS LAST,
-             r.sent_at DESC NULLS LAST, r.version DESC
-  ) n
-  WHERE n.ce ->> 'costs_complete' = 'false'
+    JOIN public.job_documents d ON d.id = r.job_document_id
+    WHERE d.accepted_at IS NOT NULL
+    ORDER BY r.job_id, d.accepted_at DESC, r.version DESC
+  ) a
+  FULL JOIN (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    WHERE r.sent_at IS NOT NULL
+    ORDER BY r.job_id, r.sent_at DESC, r.version DESC
+  ) s ON s.job_id = a.job_id
+  WHERE (CASE WHEN a.job_id IS NOT NULL THEN a.ce ELSE s.ce END) ->> 'costs_complete' = 'false'
 ),
 quote_docs AS (
   SELECT DISTINCT d.job_id
