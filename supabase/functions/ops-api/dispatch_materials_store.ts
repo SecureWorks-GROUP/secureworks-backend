@@ -39,7 +39,9 @@ import {
   dispatchSuggestedLines,
   isDispatchUuid,
   patioQuoteMaterialItems,
+  type PatioScoperRevision,
   projectDispatchMaterialLine,
+  readPatioScoperRecord,
   projectDispatchMaterialLineOnOrder,
   projectDispatchMaterialSupplier,
   projectDispatchOrder,
@@ -935,6 +937,9 @@ type ScopeOffer = {
   held: string[] | null;
   scope_supplier: string | null;
   revision: number;
+  // The patio scoper's own names for the revision (SQ-29), when the frozen
+  // scope is its sealed record.
+  scoper_revision?: PatioScoperRevision | null;
 };
 
 async function readFrozenScope(
@@ -1025,10 +1030,25 @@ async function readFrozenPatioOffer(
       "The job's frozen scope could not be read (not_json)",
     );
   }
+  const record = readPatioScoperRecord(scope);
+  if (record.kind === "unsupported") {
+    throw new DispatchMaterialsError(
+      409,
+      "scope_family_unsupported",
+      "This patio family has no quote or order, so there is nothing to order from its scope",
+      { family: record.family, scoper_revision: record.revision },
+    );
+  }
+  if (record.kind === "unreadable") {
+    throw new DispatchMaterialsError(
+      409,
+      "scope_unreadable",
+      `The job's frozen scope could not be read (${record.reason})`,
+    );
+  }
   let items: any[];
   try {
-    items = patioQuoteMaterialItems(scope) ??
-      ctx.extractMaterialsFromScope(scope, null);
+    items = patioOfferItems(scope, ctx);
   } catch (error) {
     console.error("[dispatch_materials] scope could not be read:", error);
     throw new DispatchMaterialsError(
@@ -1043,7 +1063,19 @@ async function readFrozenPatioOffer(
     held: await patioScopeChangeHeld(client, jobId, orgId, lines, ctx),
     scope_supplier: null,
     revision,
+    scoper_revision: record.kind === "lines" ? record.revision : null,
   };
+}
+
+// One reading for the frozen and the live patio scope: the scoper's sealed
+// record (SQ-29) when it is one, else the quote's own material list, else
+// the config extractor with null pricing. Throws when none can be read.
+function patioOfferItems(scope: unknown, ctx: DispatchMaterialsContext): any[] {
+  const record = readPatioScoperRecord(scope);
+  if (record.kind === "lines") return record.items;
+  if (record.kind !== "not_v2") throw new Error(`patio record ${record.kind}`);
+  return patioQuoteMaterialItems(scope) ??
+    ctx.extractMaterialsFromScope(scope, null);
 }
 
 // The patio twin of the fence warning: the live working copy can be edited
@@ -1076,10 +1108,7 @@ async function patioScopeChangeHeld(
   }
   let liveLines: DispatchSuggestedLine[];
   try {
-    liveLines = dispatchSuggestedLines(
-      patioQuoteMaterialItems(liveScope) ??
-        ctx.extractMaterialsFromScope(liveScope, null),
-    );
+    liveLines = dispatchSuggestedLines(patioOfferItems(liveScope, ctx));
   } catch {
     return [FENCE_SCOPE_CHANGE_UNCHECKED];
   }
@@ -1095,6 +1124,12 @@ async function patioScopeChangeHeld(
 function offerFields(offer: ScopeOffer) {
   return {
     scope_revision_number: offer.revision,
+    ...(offer.scoper_revision
+      ? {
+        scope_revision_n: offer.scoper_revision.n,
+        scope_frozen_id: offer.scoper_revision.frozen_id,
+      }
+      : {}),
     ...(offer.held
       ? { scope_supplier: offer.scope_supplier, held: offer.held }
       : {}),

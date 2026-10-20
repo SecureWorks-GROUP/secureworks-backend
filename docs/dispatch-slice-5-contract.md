@@ -214,6 +214,10 @@ price), uploads it, then commits. If the commit fails the file is removed (best
 effort) and the number is spent. Answer `{ success, order, draft, lines, counts }`
 (`order` in the supplier `order` shape).
 
+A line with no quantity is never given one: the email's line text reads
+`<description> (quantity to confirm)` and the PDF's quantity column prints
+"To confirm" (Sales SQ-29, 20 Oct 2026).
+
 **Update**: the new line set is the lines on the order, less
 `remove_line_ids`, plus every To order line on no order under the same supplier
 (`lines` must match that set). Nothing to change answers `unchanged: true` and

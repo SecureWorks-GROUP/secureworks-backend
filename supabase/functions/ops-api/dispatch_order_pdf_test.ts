@@ -143,3 +143,12 @@ Deno.test("pdf: no line is refused, and the path is job, order and version", asy
     "job-1/PO-1000001-v2.pdf",
   );
 });
+
+Deno.test("pdf: a line with no quantity says To confirm in the quantity column", async () => {
+  const pdf = await renderDispatchOrderPdf({
+    ...INPUT,
+    lines: [{ ...lines(1)[0], quantity: null }],
+  });
+  const text = await pdfText(pdf.bytes);
+  assert(text.includes("To confirm"), "missing: To confirm");
+});
