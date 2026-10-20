@@ -17,12 +17,15 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 //   sync_tracking_pl   — Pull P&L by tracking category (monthly, for service type breakdown)
 //   match_contacts     — Match GHL contacts to Xero contacts by email (daily 3am AWST)
 //   backfill_invoices  — One-time full invoice fetch (?year=2025 for batching)
+//   check_invoice_mirror: compare our invoice copy with Xero's open list now (also runs
+//                        hourly inside sync_invoices); see xero_mirror_check.ts
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
+import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
@@ -213,6 +216,9 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await backfillContacts(sb))
       case 'backfill_invoices':
         return json(await backfillInvoices(sb, url.searchParams))
+      case 'check_invoice_mirror':
+        // Reads Xero and heals only our copy; never writes to Xero. Same as the hourly run.
+        return json(await invoiceMirrorCheck(sb, true))
       case 'sync_purchase_orders':
         return json(await syncPurchaseOrders(sb))
       case 'sync_suppliers':
@@ -246,7 +252,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {
@@ -1073,16 +1079,48 @@ async function syncInvoices(sb: any) {
     console.error('[xero-sync] Settlement evidence capture failed:', e.message)
   }
 
+  // ── Mirror check: does our copy owe the same as Xero? At most once an hour. ──
+  // Last on purpose: it reads Xero's open list, heals our copy where Xero says money is
+  // owed and the copy disagrees, and records the result for the Debt tab. It never
+  // throws, so it cannot break the sync or skip any step above.
+  const mirrorCheck = await invoiceMirrorCheck(sb, false)
+
   // Log sync
   await sb.from('webhook_log').insert({
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// INVOICE MIRROR CHECK
+//
+// Compares our copy of open sales invoices with Xero's own open list and heals our copy
+// from Xero by id (xero_mirror_check.ts). force = true skips the once-an-hour gate.
+// ════════════════════════════════════════════════════════════
+
+async function invoiceMirrorCheck(sb: any, force: boolean) {
+  try {
+    const { accessToken, tenantId } = await getToken(sb)
+    return await runInvoiceMirrorCheck(sb, DEFAULT_ORG_ID, {
+      listPage: (status, page) => xeroGet('/Invoices', accessToken, tenantId, {
+        page: String(page),
+        where: 'Type=="ACCREC"',
+        Statuses: status,
+      }),
+      readInvoice: (invoiceId) => xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId, {}),
+    }, { force })
+  } catch (e: any) {
+    // Only the token read can land here; the check itself never throws.
+    console.error('[xero-sync] Mirror check could not start:', (e as Error).message)
+    return { ran: false, reason: 'token_unavailable', error: (e as Error).message }
+  }
 }
 
 

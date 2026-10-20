@@ -17,11 +17,17 @@
 //                          contact asked for a review in the last 90 days from any source,
 //                          re-checking get_review, the holds and the paid rule first. A job
 //                          paid more than PAID_WITHIN_DAYS ago is not texted and not claimed.
+//                          A job a person switched off (jobs.review_opt_out, set through
+//                          setReviewOptOut) is never texted automatically: no claim, one
+//                          job event, action opted_out. A manual Send review still sends.
+//   - setReviewOptOut      the per-job review switch (captain, 20 Oct 2026): on by default,
+//                          staff turn it off (or back on) from Complete onwards; refused
+//                          once the job has a review claim.
 //   - closeoutSweep        the job-closeout-sweep cron (closeout lane): archives a card that
 //                          entered get_review at least 24 hours ago, is still paid, is not
 //                          held and whose review was sent or deliberately skipped, could
-//                          not go (no linked contact, paid too long ago, or every send
-//                          refused by a guard: no claim is kept, so a later Send review
+//                          not go (no linked contact, paid too long ago, review switched
+//                          off for the job, or every send refused by a guard: no claim is kept, so a later Send review
 //                          still works), or the sender is not live. A claim stuck
 //                          'claimed' past STUCK_CLAIM_AFTER_MS is recorded unconfirmed
 //                          (never re-sent) and counts as finished.
@@ -32,7 +38,7 @@
 //
 // Switches, all off at deploy (migration 20261013150000_job_closeout_review_archive.sql):
 // job_closeout_settings.get_review_move_enabled, job_closeout_settings.review_sender_mode
-// (off | dry_run | live, and live needs env JOB_REVIEW_SENDING_ENABLED=true) and the
+// (off | dry_run | live; the database switch alone decides, Captain 20 Oct 2026) and the
 // closeout automation lane for the sweep. Builder, insurance, make-safe and repair jobs are
 // never touched here.
 
@@ -189,19 +195,16 @@ const text = (v: unknown): string => String(v ?? "").trim();
 
 // ── Switches ─────────────────────────────────────────────────────────────────
 
-export function effectiveSenderMode(
-  configured: unknown,
-  envValue: string | undefined,
-): ReviewSenderMode {
+export function effectiveSenderMode(configured: unknown): ReviewSenderMode {
   const mode = text(configured);
-  if (mode === "live") return envValue === "true" ? "live" : "dry_run";
+  if (mode === "live") return "live";
   if (mode === "dry_run") return "dry_run";
   return "off";
 }
 
 /** Fails closed: an unreadable row is every switch off. */
 export async function readCloseoutSwitches(
-  deps: Pick<JobCloseoutDeps, "client" | "env">,
+  deps: Pick<JobCloseoutDeps, "client">,
 ): Promise<CloseoutSwitches> {
   try {
     const { data, error } = await deps.client.from("job_closeout_settings")
@@ -223,10 +226,7 @@ export async function readCloseoutSwitches(
       : "off";
     return {
       move_enabled: data.get_review_move_enabled === true,
-      sender_mode: effectiveSenderMode(
-        configured,
-        deps.env("JOB_REVIEW_SENDING_ENABLED"),
-      ),
+      sender_mode: effectiveSenderMode(configured),
       sender_configured_mode: configured,
       read_ok: true,
     };
@@ -243,12 +243,12 @@ export async function readCloseoutSwitches(
 // ── The review text ──────────────────────────────────────────────────────────
 
 /**
- * The review text. A fencing or patio job that passes the paid rule gets the wording the
- * GHL review workflow and staff already send (captured 2026: "Thank you for trusting us
- * with your recent job! Payment is well received. ... Shaun, SecureWorks Fencing"); a patio
- * job signs "SecureWorks" (no captured patio wording exists; "SecureWorks" is a captured
- * sign-off). Every other request (another job type, or a job not paid) makes no payment
- * claim and signs "SecureWorks". Both carry the one review link.
+ * The review text. A fencing or patio job that passes the paid rule gets the owner's
+ * wording (20 Oct 2026): "Hi {first name}, Thank you for trusting us with your recent job!
+ * Payment is well received. We'd love to hear your feedback. ... Shaun, SecureWorks Fencing"
+ * (or "SecureWorks Patios" for a patio job). Every other request (another job type, or a
+ * job not paid) makes no payment claim and signs "SecureWorks". Both carry the one review
+ * link.
  */
 export function reviewRequestMessage(
   clientName: string | null | undefined,
@@ -256,17 +256,19 @@ export function reviewRequestMessage(
   paid: boolean,
 ): string {
   const first = text(clientName).split(/\s+/)[0] || "there";
-  const ask =
-    `If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. ` +
-    `Your review helps us continue to provide quality service to our customers. You can leave a review here: ${GOOGLE_REVIEW_URL}\n\n` +
-    `Thank you again for your business!`;
   if (!paid || !isCloseoutJobType(jobType)) {
+    const ask =
+      `If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. ` +
+      `Your review helps us continue to provide quality service to our customers. You can leave a review here: ${GOOGLE_REVIEW_URL}\n\n` +
+      `Thank you again for your business!`;
     return `Hi ${first},\n\nThank you for choosing SecureWorks for your recent job!\n\n${ask}\n\nSecureWorks`;
   }
   const signOff = text(jobType).toLowerCase() === "patio"
-    ? "SecureWorks"
+    ? "SecureWorks Patios"
     : "SecureWorks Fencing";
-  return `Hi ${first},\n\nThank you for trusting us with your recent job! Payment is well received.\n\n${ask}\n\nShaun\n${signOff}`;
+  return `Hi ${first},\n\nThank you for trusting us with your recent job!\nPayment is well received.\n\n` +
+    `We'd love to hear your feedback. If you have a moment, could you leave us a quick review here: ${GOOGLE_REVIEW_URL}\n\n` +
+    `Thank you again for your business!\n\nShaun\n${signOff}`;
 }
 
 // ── Quote side of the paid rule ──────────────────────────────────────────────
@@ -316,6 +318,10 @@ export interface CloseoutJobRow extends CloseoutJob {
   client_name: string | null;
   client_email: string | null;
   ghl_contact_id: string | null;
+  /** A person switched the review text off for this job (setReviewOptOut). */
+  review_opt_out?: boolean | null;
+  review_opt_out_at?: string | null;
+  review_opt_out_by?: string | null;
 }
 
 interface PartyRow extends CloseoutParty {
@@ -324,7 +330,7 @@ interface PartyRow extends CloseoutParty {
 }
 
 const JOB_COLUMNS =
-  "id, job_number, type, status, is_callback, deposit_invoice_id, client_name, client_email, ghl_contact_id";
+  "id, job_number, type, status, is_callback, deposit_invoice_id, client_name, client_email, ghl_contact_id, review_opt_out, review_opt_out_at, review_opt_out_by";
 const INVOICE_COLUMNS =
   "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_paid, job_contact_id, xero_contact_id, fully_paid_on, first_description:line_items->0->>Description";
 const PARTY_COLUMNS =
@@ -767,15 +773,16 @@ export interface ReviewRequestOptions {
   job_id: string;
   trigger: string;
   /** A person asked (send_review_request): the sender switch still applies; the status,
-   *  hold, paid and send-window checks do not, and the paid wording is used only for a
-   *  fencing or patio job that passes the paid rule. */
+   *  hold, review switch, paid and send-window checks do not, and the paid wording is used
+   *  only for a fencing or patio job that passes the paid rule. */
   manual?: boolean;
 }
 
 /**
  * The one review sender, automatic and manual alike, so neither ships on before its switch.
- * Order: switch -> job -> (automatic only) type, get_review, hold,
- * paid rule, send window -> recipients -> 90-day look-back -> claim -> send. Nothing is
+ * Order: switch -> job -> (automatic only) type, get_review, hold, the job's review
+ * switch, paid rule, send window -> recipients -> 90-day look-back -> claim -> (automatic
+ * only) the job's review switch again -> send. Nothing is
  * claimed until every read has answered, so a failed read is retried by the next sweep.
  * Nothing is kept claimed when nothing could go out (no linked contact, paid too long ago,
  * or every send refused by a guard before GHL), so fixing the cause and asking again sends;
@@ -804,6 +811,10 @@ export async function requestJobReview(
     }
     const hold = closeoutHold(job);
     if (hold) return { ok: true, action: "held", hold };
+    if (job.review_opt_out === true) {
+      await recordOptedOut(deps, job, f, opts.trigger, mode);
+      return { ok: true, action: "opted_out", dry_run: mode === "dry_run" };
+    }
     const verdict = await evaluateFacts(deps, f);
     if (verdict.outcome === "undecided") {
       return {
@@ -918,6 +929,28 @@ export async function requestJobReview(
     }
     return { ok: false, action: "claim_failed", error: claimError.message };
   }
+  // The switch is read again only now, with the claim held: setReviewOptOut writes the
+  // switch before it looks for a claim, so a switch turned off while this run was reading
+  // is seen here (nothing sent, claim released) or the switch sees this claim (409).
+  if (!opts.manual) {
+    const { data: fresh, error: freshError } = await deps.client.from("jobs")
+      .select("review_opt_out, review_opt_out_at, review_opt_out_by")
+      .eq("id", job.id).maybeSingle();
+    if (freshError || fresh?.review_opt_out === true) {
+      const { error: releaseError } = await deps.client.from(
+        "job_review_claims",
+      ).delete().eq("job_id", job.id).eq("status", "claimed");
+      if (releaseError) {
+        console.error(
+          "[job_closeout] review claim release failed:",
+          releaseError.message,
+        );
+      }
+      if (freshError) return { ok: true, action: "opt_out_unreadable" };
+      await recordOptedOut(deps, { ...job, ...fresh }, f, opts.trigger, mode);
+      return { ok: true, action: "opted_out", dry_run: false };
+    }
+  }
 
   for (const r of recipients) {
     if (r.result !== "to_send") continue;
@@ -1012,12 +1045,213 @@ export async function requestJobReview(
   };
 }
 
+/**
+ * A job a person switched the review off for, asked automatically: nothing is sent or
+ * claimed. A dry run logs it on its one review_request_dry_run row; a live run logs one
+ * review_request_not_sent row (status opted_out), not again on every sweep.
+ */
+async function recordOptedOut(
+  deps: JobCloseoutDeps,
+  job: CloseoutJobRow,
+  facts: JobFacts,
+  trigger: string,
+  mode: ReviewSenderMode,
+): Promise<void> {
+  const optedOut = {
+    by: job.review_opt_out_by ?? null,
+    at: job.review_opt_out_at ?? null,
+  };
+  if (mode === "dry_run") {
+    const { data: prior } = await deps.client.from("job_events").select("id")
+      .eq("job_id", job.id).eq("event_type", "review_request_dry_run").limit(1);
+    if (!prior?.length) {
+      await deps.client.from("job_events").insert({
+        job_id: job.id,
+        event_type: "review_request_dry_run",
+        detail_json: {
+          trigger,
+          skip_reason: "opted_out",
+          opted_out: optedOut,
+          recipients: reviewRecipients(job, facts.parties).map((r) => ({
+            label: r.label,
+            ghl_contact_id: r.ghl_contact_id,
+            would: "skipped_opted_out",
+          })),
+        },
+      });
+    }
+    return;
+  }
+  const { data: prior } = await deps.client.from("job_events").select("id")
+    .eq("job_id", job.id)
+    .eq("event_type", "review_request_not_sent")
+    .eq("detail_json->>status", "opted_out")
+    .limit(1);
+  if (!prior?.length) {
+    await deps.client.from("job_events").insert({
+      job_id: job.id,
+      event_type: "review_request_not_sent",
+      detail_json: {
+        trigger,
+        status: "opted_out",
+        reason: "opted_out",
+        opted_out: optedOut,
+      },
+    });
+  }
+}
+
+// ── The per-job review switch ────────────────────────────────────────────────
+
+export interface ReviewOptOutResult {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+/**
+ * set_review_opt_out { job_id, opt_out }: turns the job's review text off (opt_out true)
+ * or back on. Every change stamps who and when on the job and writes one job_events row
+ * (review_opt_out_changed); asking for the value the job already has changes nothing.
+ * Refused 409 review_already_sent once the job has a review claim (sent or in flight),
+ * since the switch can no longer stop it; the claim is looked for again after the write,
+ * so a sender that claimed in between is reported, never missed, and then (or when that
+ * look fails) the switch is put back as it was and no event is written. Staff only (the
+ * caller checks); `by` is the verified person, else the operator email the screen stamps.
+ */
+export async function setReviewOptOut(
+  deps: Pick<JobCloseoutDeps, "client" | "now">,
+  body: Record<string, unknown>,
+  by: string | null,
+): Promise<ReviewOptOutResult> {
+  const jobId = text(body.job_id ?? body.jobId);
+  if (!jobId) {
+    return { status: 400, body: { success: false, error: "job_id required" } };
+  }
+  if (typeof body.opt_out !== "boolean") {
+    return {
+      status: 400,
+      body: { success: false, error: "opt_out must be true or false" },
+    };
+  }
+  const optOut = body.opt_out;
+  const { client } = deps;
+  const { data: job, error: jobError } = await client.from("jobs")
+    .select("id, review_opt_out, review_opt_out_at, review_opt_out_by")
+    .eq("id", jobId).maybeSingle();
+  if (jobError) {
+    return {
+      status: 503,
+      body: { success: false, error: "job_unreadable" },
+    };
+  }
+  if (!job) {
+    return { status: 404, body: { success: false, error: "job_not_found" } };
+  }
+  const { data: claim, error: claimError } = await client.from(
+    "job_review_claims",
+  ).select("status").eq("job_id", jobId).maybeSingle();
+  if (claimError) {
+    return {
+      status: 503,
+      body: { success: false, error: "review_claim_unreadable" },
+    };
+  }
+  if (claim) return alreadySent(claim.status);
+  const current = job.review_opt_out === true;
+  if (current === optOut) {
+    return {
+      status: 200,
+      body: {
+        success: true,
+        changed: false,
+        review_opt_out: current,
+        review_opt_out_at: job.review_opt_out_at ?? null,
+        review_opt_out_by: job.review_opt_out_by ?? null,
+      },
+    };
+  }
+  const prior = {
+    review_opt_out: current,
+    review_opt_out_at: job.review_opt_out_at ?? null,
+    review_opt_out_by: job.review_opt_out_by ?? null,
+  };
+  const at = deps.now().toISOString();
+  const { error: writeError } = await client.from("jobs").update({
+    review_opt_out: optOut,
+    review_opt_out_at: at,
+    review_opt_out_by: by,
+  }).eq("id", jobId);
+  if (writeError) {
+    return {
+      status: 500,
+      body: { success: false, error: `write failed: ${writeError.message}` },
+    };
+  }
+  // A sender that claimed after the first look and before this write may not have seen it.
+  const { data: lateClaim, error: lateClaimError } = await client.from(
+    "job_review_claims",
+  ).select("status").eq("job_id", jobId).maybeSingle();
+  if (lateClaimError || lateClaim) {
+    const { error: restoreError } = await client.from("jobs").update(prior)
+      .eq("id", jobId);
+    if (restoreError) {
+      console.error(
+        "[job_closeout] review switch not put back:",
+        restoreError.message,
+      );
+    }
+    if (lateClaim) return alreadySent(lateClaim.status);
+    return {
+      status: 503,
+      body: { success: false, error: "review_claim_unreadable" },
+    };
+  }
+  const { error: eventError } = await client.from("job_events").insert({
+    job_id: jobId,
+    event_type: "review_opt_out_changed",
+    detail_json: {
+      review_opt_out: optOut,
+      review: optOut ? "off" : "on",
+      by,
+      at,
+    },
+  });
+  if (eventError) {
+    console.error(
+      "[job_closeout] review_opt_out_changed event not written:",
+      eventError.message,
+    );
+  }
+  return {
+    status: 200,
+    body: {
+      success: true,
+      changed: true,
+      review_opt_out: optOut,
+      review_opt_out_at: at,
+      review_opt_out_by: by,
+    },
+  };
+}
+
+function alreadySent(status: string | null | undefined): ReviewOptOutResult {
+  return {
+    status: 409,
+    body: {
+      success: false,
+      error: "review_already_sent",
+      review_claim_status: status ?? null,
+    },
+  };
+}
+
 // ── The 24-hour archive sweep ────────────────────────────────────────────────
 
 /** Sender answers that keep no claim but leave nothing to wait for: the card still archives. */
 const UNCLAIMED_REVIEW_ACTIONS: readonly string[] = [
   "no_contact",
   "paid_too_long_ago",
+  "opted_out",
   "refused",
 ];
 
@@ -1080,7 +1314,8 @@ export async function closeoutSweep(
       let claim = await readClaim(deps, job.id);
       let notClaimed = false;
       if (!claim && dryRun) {
-        reviewWouldSend = true;
+        if (job.review_opt_out === true) notClaimed = true;
+        else reviewWouldSend = true;
       } else if (!claim) {
         const review = await requestJobReview(deps, {
           job_id: job.id,
