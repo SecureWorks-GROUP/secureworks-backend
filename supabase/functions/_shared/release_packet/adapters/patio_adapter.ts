@@ -111,18 +111,41 @@ export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   })
 
   // Costs: the patio scoper (v2) saves pricing.internal.{materials, labour,
-  // costs_complete, costs_to_confirm}; the older patio tool saved the
-  // *CostEstimate scalars. A cost neither gives is not known, never 0, and a
-  // margin is sealed only from the tool's own margin_pct (a percent). The v2
-  // scoper saves no margin, so its floor check reads "not done", never passed.
+  // commission, costs_complete, costs_to_confirm}; the older patio tool saved
+  // the *CostEstimate scalars. A cost neither gives is not known, never 0.
+  // Commission has no set rate yet (owner call C1): the v2 scoper saves
+  // internal.commission null with commission_basis 'not_set', apart from its
+  // cost lines (an unset commission does not change the customer's price, so
+  // it must not hold the send gate). The snapshot lists 'commission' as a cost
+  // to confirm and says why (basis not_set), so no profit is sealed.
+  //
+  // Margin: the v2 scoper marks its margin_pct (a percent) as the scoper's
+  // selected target. That is sealed as target_pct only; pct is worked out
+  // from the sealed sell ex GST and materials plus labour, and only once
+  // every cost is known. The older patio tool's margin_pct is its stated
+  // margin, read as a percent as before.
   const internal = asObject(pricingJson.internal)
+  const commission = asNumberOrNull(internal.commission ?? pricingJson.commissionCostEstimate)
   const costs = sealedCostEstimates({
     material: asNumberOrNull(internal.materials ?? pricingJson.materialCostEstimate),
     labour: asNumberOrNull(internal.labour ?? pricingJson.labourCostEstimate),
-    commission: asNumberOrNull(pricingJson.commissionCostEstimate),
+    commission,
     toolSaysIncomplete: internal.costs_complete === false,
     toolToConfirm: asArray(internal.costs_to_confirm).map((k) => asString(k)).filter((k) => k.length > 0),
+    nameCommission: asString(internal.commission_basis) === 'not_set',
   })
+  const selectedTarget = asString(pricingJson.margin_basis) === 'selected_target'
+  const est = costs.estimates
+  const margin = selectedTarget
+    ? sealedMargin({
+      costsComplete: costs.complete,
+      targetPercent: pricingJson.margin_pct,
+      quoted: {
+        sellEx: pricingJson.totalExGST,
+        costEx: est.material_total != null && est.labour_total != null ? est.material_total + est.labour_total : null,
+      },
+    })
+    : sealedMargin({ marginPercent: pricingJson.margin_pct, costsComplete: costs.complete })
 
   const internal_cost: InternalCostSnapshot = {
     schema_version: '2.0',
@@ -132,11 +155,12 @@ export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     captured_at: '',
     line_costs: lineCosts,
     cost_estimates: costs.estimates,
-    margin: sealedMargin({ marginPercent: pricingJson.margin_pct, costsComplete: costs.complete }),
+    margin,
     commission: {
       rule: 'patio_10pct_gp',
       amount: costs.complete ? costs.estimates.subcontract_commission_total : null,
       salesperson_user_id: null,
+      ...(commission == null ? { basis: 'not_set' as const } : {}),
     },
   }
 

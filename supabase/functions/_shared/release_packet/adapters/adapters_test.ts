@@ -941,12 +941,107 @@ Deno.test('QuickQuoteAdapter — a line saved at cost 0 is a cost to confirm, ne
   assert(err && err.message.includes('costs still to confirm'))
 })
 
-Deno.test('QuickQuoteAdapter — every line priced but no margin saved: floor not passed', () => {
-  const { ic, err } = floorRule(buildQuickQuoteInputsProductionShape(), 'enforce')
+Deno.test('QuickQuoteAdapter — every line priced: margin worked out from the lines, real floor verdict, commission a declared 0', () => {
+  const { ic, v } = floorRule(buildQuickQuoteInputsProductionShape(), 'enforce')
   assertEquals(ic.cost_estimates.costs_complete, undefined)
+  assertEquals(ic.margin.pct, 0.4167)
+  assertEquals(ic.margin.floor_breached, false)
+  assertEquals(ic.commission.amount, 0)
+  assertEquals(ic.commission.basis, 'none_declared')
+  assert(v.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+})
+
+Deno.test('QuickQuoteAdapter — every line priced at a thin margin breaches the floor', () => {
+  const base = buildQuickQuoteInputsProductionShape()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const lines = (pricing.line_items as Record<string, unknown>[]).map((l, i) => (i === 0 ? { ...l, cost_price: 370 } : l))
+  const { ic, err } = floorRule(withPricing(base, { ...pricing, line_items: lines }), 'enforce')
+  assertEquals(ic.margin.pct, 0.1333)
+  assertEquals(ic.margin.floor_breached, true)
+  assert(err && err.message.includes('margin floor breached'))
+})
+
+Deno.test('QuickQuoteAdapter — a saved margin_pct is not trusted over the lines', () => {
+  const base = buildQuickQuoteInputsProductionShape()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const { ic } = floorRule(withPricing(base, { ...pricing, margin_pct: 90 }), 'enforce')
+  assertEquals(ic.margin.pct, 0.4167)
+})
+
+Deno.test('QuickQuoteAdapter — a stated 0 estimate never hides an unpriced line (O3)', () => {
+  const base = buildQuickQuoteInputsProductionShape()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const lines = (pricing.line_items as Record<string, unknown>[]).map((l, i) => (i === 1 ? { ...l, cost_price: 0 } : l))
+  const { ic, err } = floorRule(withPricing(base, { ...pricing, line_items: lines, materialCostEstimate: 0, labourCostEstimate: 0 }), 'enforce')
+  assertEquals(ic.cost_estimates.costs_complete, false)
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['qq-L-1'])
   assertEquals(ic.margin.pct, null)
-  assertEquals(ic.margin.floor_check, 'margin_not_given')
-  assert(err && err.message.includes('saved no margin'))
+  assert(err && err.message.includes('costs still to confirm'))
+})
+
+function patioV2(base: AdapterInputs, over: Record<string, unknown>): Record<string, unknown> {
+  const legacy = base.job.pricing_json as Record<string, unknown>
+  return {
+    tool: 'patio-scoper', version: '2.0', supported: true, pricing_complete: true, sell_to_confirm: [],
+    line_items: legacy.line_items, totalExGST: 10000, gst: 1000, totalIncGST: 11000,
+    margin_pct: 39, margin_basis: 'selected_target',
+    internal: { costs_complete: true, costs_to_confirm: [], materials: 3600, labour: 2500, cost: 6100, commission: null, commission_basis: 'not_set' },
+    ...over,
+  }
+}
+
+Deno.test('PatioAdapter — v2 priced with the slider set: target sealed apart, commission the only cost to confirm, no profit, floor not passed', () => {
+  const base = buildPatioInputs()
+  const { ic, err } = floorRule(withPricing(base, patioV2(base, {})), 'enforce')
+  assertEquals(ic.cost_estimates.costs_complete, false)
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['commission'])
+  assertEquals(ic.cost_estimates.material_total, null)
+  assertEquals(ic.margin.pct, null)
+  assertEquals(ic.margin.target_pct, 0.39)
+  assertEquals(ic.margin.floor_check, 'costs_to_confirm')
+  assertEquals(ic.margin.floor_breached, false)
+  assertEquals(ic.commission.amount, null)
+  assertEquals(ic.commission.basis, 'not_set')
+  assert(err && err.message.includes('costs still to confirm'))
+})
+
+Deno.test('PatioAdapter — v2 with a materials row and commission both open: both named', () => {
+  const base = buildPatioInputs()
+  const pj = patioV2(base, {
+    pricing_complete: false, totalExGST: null, gst: null, totalIncGST: null,
+    internal: { costs_complete: false, costs_to_confirm: ['Materials (1 row with no cost)'], materials: null, labour: 2500, cost: null, commission: null, commission_basis: 'not_set' },
+  })
+  const { ic } = floorRule(withPricing(base, pj), 'enforce')
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['Materials (1 row with no cost)', 'commission'])
+  assertEquals(ic.margin.target_pct, 0.39)
+  assertEquals(ic.margin.pct, null)
+})
+
+Deno.test('PatioAdapter — v2 once a commission is known: pct worked out from sealed sell and costs, target kept beside it', () => {
+  const base = buildPatioInputs()
+  const pj = patioV2(base, {
+    internal: { costs_complete: true, costs_to_confirm: [], materials: 3600, labour: 2500, cost: 6100, commission: 390 },
+  })
+  const { ic, v } = floorRule(withPricing(base, pj), 'enforce')
+  assertEquals(ic.cost_estimates.costs_complete, undefined)
+  assertEquals(ic.margin.pct, 0.39)
+  assertEquals(ic.margin.target_pct, 0.39)
+  assertEquals(ic.commission.amount, 390)
+  assertEquals(ic.commission.basis, undefined)
+  assert(v.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+})
+
+Deno.test('PatioAdapter — v2 selected target is never the verdict: a 50% target on costs that give 15% breaches', () => {
+  const base = buildPatioInputs()
+  const pj = patioV2(base, {
+    margin_pct: 50, totalExGST: 7176.47,
+    internal: { costs_complete: true, costs_to_confirm: [], materials: 3600, labour: 2500, cost: 6100, commission: 100 },
+  })
+  const { ic, err } = floorRule(withPricing(base, pj), 'enforce')
+  assertEquals(ic.margin.target_pct, 0.5)
+  assertEquals(ic.margin.pct, 0.15)
+  assertEquals(ic.margin.floor_breached, true)
+  assert(err && err.message.includes('margin floor breached'))
 })
 
 // ── Quick Quote adapter tests ───────────────────────────────────────────────
