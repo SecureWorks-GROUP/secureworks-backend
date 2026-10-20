@@ -49,8 +49,16 @@ import {
   dispatchDeliveryRows,
   dispatchDeliverySummary,
   type DispatchPersonNames,
-  dispatchSightedOrderIds,
 } from "./dispatch_deliveries.ts";
+import {
+  DISPATCH_LINE_RECEIPT_COUNT_SELECT,
+  DISPATCH_LINE_RECEIPT_SELECT,
+  DISPATCH_RECEIPT_ORDER_SELECT,
+  type DispatchLineDelivery,
+  dispatchLineDeliveryView,
+  dispatchOnSiteSummary,
+  dispatchReceiptPersonIds,
+} from "./dispatch_line_receipts.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 
 export class DispatchMaterialsError extends Error {
@@ -210,16 +218,99 @@ export async function readDispatchJobCounts(
     ),
   ];
   if (orderIds.length === 0) return dispatchMaterialCounts(lines);
-  const { data: orders, error: ordersError } = await client
-    .from("purchase_orders")
-    .select("id, delivery_sighted_at")
-    .in("id", orderIds)
-    .neq("status", "deleted");
-  if (ordersError) {
-    console.error(`[${label}] counts orders read failed:`, ordersError);
+  // S5: a line on an order is Delivered or Part delivered by its receipts as
+  // well as by its order's sighting (docs/dispatch-partial-deliveries-v1.md).
+  const [ordersRes, receiptsRes] = await Promise.all([
+    client.from("purchase_orders")
+      .select("id, delivery_sighted_at")
+      .in("id", orderIds)
+      .neq("status", "deleted"),
+    client.from("job_material_line_receipts")
+      .select(DISPATCH_LINE_RECEIPT_COUNT_SELECT)
+      .eq("job_id", jobId)
+      .is("voided_at", null),
+  ]);
+  if (ordersRes.error) {
+    console.error(`[${label}] counts orders read failed:`, ordersRes.error);
     return null;
   }
-  return dispatchMaterialCounts(lines, dispatchSightedOrderIds(orders || []));
+  if (receiptsRes.error) {
+    console.error(`[${label}] counts receipts read failed:`, receiptsRes.error);
+    return null;
+  }
+  return dispatchMaterialCounts(
+    lines,
+    dispatchLineDeliveryView(
+      lines,
+      ordersRes.data || [],
+      receiptsRes.data || [],
+    ),
+  );
+}
+
+export type DispatchJobDeliveryState = {
+  lines: any[];
+  orders: any[];
+  receipts: any[];
+  view: DispatchLineDelivery;
+  deliveries: {
+    counted: number;
+    sighted: number;
+    all_sighted: boolean;
+    on_site: number;
+    all_on_site: boolean;
+    lines_part_delivered: number;
+  };
+  counts: DispatchMaterialCounts;
+};
+
+// S5: the job's lines, orders and receipts read once, and everything the
+// delivery writes answer with. Null when any read fails: a write that landed
+// is not undone, and the screen keeps the figures it had.
+export async function readDispatchJobDeliveryState(
+  client: any,
+  jobId: string,
+  orgId: string,
+  label = "dispatch_deliveries",
+): Promise<DispatchJobDeliveryState | null> {
+  const [linesRes, ordersRes, receiptsRes] = await Promise.all([
+    client.from("job_material_lines")
+      .select(DISPATCH_MATERIALS_LIST_SELECT)
+      .eq("job_id", jobId),
+    client.from("purchase_orders")
+      .select(DISPATCH_RECEIPT_ORDER_SELECT)
+      .eq("job_id", jobId)
+      .eq("org_id", orgId)
+      .neq("status", "deleted"),
+    client.from("job_material_line_receipts")
+      .select(DISPATCH_LINE_RECEIPT_SELECT)
+      .eq("job_id", jobId)
+      .order("created_at", { ascending: true }),
+  ]);
+  const failed = linesRes.error || ordersRes.error || receiptsRes.error;
+  if (failed) {
+    console.error(`[${label}] delivery state read failed:`, failed);
+    return null;
+  }
+  const lines: any[] = linesRes.data || [];
+  const orders: any[] = ordersRes.data || [];
+  const receipts: any[] = receiptsRes.data || [];
+  const names = await readDispatchUserNames(
+    client,
+    dispatchReceiptPersonIds(receipts),
+  );
+  const view = dispatchLineDeliveryView(lines, orders, receipts, names);
+  return {
+    lines,
+    orders,
+    receipts,
+    view,
+    deliveries: {
+      ...dispatchDeliverySummary(orders),
+      ...dispatchOnSiteSummary(orders, view),
+    },
+    counts: dispatchMaterialCounts(lines, view),
+  };
 }
 
 function readJobCounts(
@@ -358,11 +449,21 @@ export function projectDispatchDeliveryOrder(
 // users.name for the people who set a confirmed date or sighted a delivery.
 // A failed read is not a failure of the page: names fall back to the stored
 // emails.
-export async function readDispatchPersonNames(
+export function readDispatchPersonNames(
   client: any,
   orders: any[],
+  extraIds: string[] = [],
 ): Promise<DispatchPersonNames> {
-  const ids = dispatchDeliveryPersonIds(orders);
+  return readDispatchUserNames(client, [
+    ...new Set([...dispatchDeliveryPersonIds(orders), ...extraIds]),
+  ]);
+}
+
+// users.name for a list of user ids (S5 adds the people on the receipts).
+export async function readDispatchUserNames(
+  client: any,
+  ids: string[],
+): Promise<DispatchPersonNames> {
   const names: DispatchPersonNames = new Map();
   if (ids.length === 0) return names;
   const { data, error } = await client.from("users")
@@ -445,11 +546,22 @@ export async function readDispatchMaterials(
   }
 
   const lines: any[] = linesRes.data || [];
+  // S5 (docs/dispatch-partial-deliveries-v1.md): with a line on an order, the
+  // job's receipts are read too. A failed receipts read is treated as a failed
+  // orders read: never "nothing received".
+  const anyOnOrder = lines.some((line) => !!line?.purchase_order_id);
+  const receiptsRes = !ordersRes.error && anyOnOrder
+    ? await client.from("job_material_line_receipts")
+      .select(DISPATCH_LINE_RECEIPT_SELECT)
+      .eq("job_id", job.id)
+      .order("created_at", { ascending: true })
+    : { data: [], error: null };
+  const ordersFailed = !!ordersRes.error || !!receiptsRes.error;
   // Slice 5 (docs/dispatch-slice-5-contract.md): each chosen supplier's open
   // Dispatch order and its chip, and each line's order number. A failed read of
   // the orders or of what the chip needs answers orders_status 'failed' and
   // leaves `order` off every supplier: never "Not ordered" by mistake.
-  const orderState = ordersRes.error ? null : await readDispatchOrderState(
+  const orderState = ordersFailed ? null : await readDispatchOrderState(
     client,
     job.id,
     ordersRes.data || [],
@@ -461,14 +573,21 @@ export async function readDispatchMaterials(
       ) => [String(o.id), o.po_number ?? null]),
     )
     : undefined;
-  // Slice 6: lines on a sighted order read Delivered. With the orders read
-  // failed nothing is sighted, as before slice 6 (the screen shows the failure).
-  const sightedOrderIds = ordersRes.error
-    ? undefined
-    : dispatchSightedOrderIds(ordersRes.data || []);
+  const receipts: any[] = receiptsRes.data || [];
   const names = orderState
-    ? await readDispatchPersonNames(client, ordersRes.data || [])
+    ? await readDispatchPersonNames(
+      client,
+      ordersRes.data || [],
+      dispatchReceiptPersonIds(receipts),
+    )
     : new Map<string, string>();
+  // Slice 6: lines on a sighted order read Delivered; S5: by their receipts
+  // too, and a line put on the order after its sighting needs its own. With
+  // the orders read failed nothing is delivered, as before slice 6 (the
+  // screen shows the failure).
+  const sightedOrderIds = ordersFailed
+    ? undefined
+    : dispatchLineDeliveryView(lines, ordersRes.data || [], receipts, names);
   const nowMs = Date.parse(nowIso(ctx));
   const answer: Record<string, unknown> = {
     job_id: job.id,
@@ -501,10 +620,10 @@ export async function readDispatchMaterials(
     workings: projectDispatchWorkings(workingsRes.data),
   };
   // A failed orders read must not hide the working lines.
-  if (ordersRes.error || !orderState) {
+  if (ordersFailed || !orderState || !sightedOrderIds) {
     console.error(
       "[dispatch_materials] orders read failed:",
-      ordersRes.error || "order state read failed",
+      ordersRes.error || receiptsRes.error || "order state read failed",
     );
     answer.orders_status = "failed";
   } else {
@@ -525,8 +644,10 @@ export async function readDispatchMaterials(
         })),
         orders,
         names,
+        sightedOrderIds,
       ),
       ...dispatchDeliverySummary(orders),
+      ...dispatchOnSiteSummary(orders, sightedOrderIds),
     };
   }
   return answer;
@@ -881,6 +1002,16 @@ export async function deleteDispatchMaterialLine(
     .eq("updated_at", expected)
     .is("purchase_order_id", null)
     .select("id");
+  // S5: a line with a delivery recorded against it keeps its receipts (the
+  // receipt's key is ON DELETE RESTRICT), so it cannot be deleted.
+  if (deleteError && errorCode(deleteError) === "23503") {
+    throw new DispatchMaterialsError(
+      409,
+      "line_has_receipts",
+      "This line has deliveries recorded against it and cannot be deleted",
+      { line: projectDispatchMaterialLine(stored) },
+    );
+  }
   if (deleteError) writeFailed("line delete", deleteError);
   if (!Array.isArray(deleted) || deleted.length === 0) {
     const latest = await readLineById(client, body.id);

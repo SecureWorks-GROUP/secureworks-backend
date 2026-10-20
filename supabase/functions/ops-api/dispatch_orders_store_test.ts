@@ -138,6 +138,25 @@ const SCHEMA: Record<string, string[]> = {
     "updated_by",
     "created_by_email",
     "updated_by_email",
+    // S5: stamped by the database when the line goes on an order.
+    "purchase_order_attached_at",
+  ],
+  // S5 (docs/dispatch-partial-deliveries-v1.md).
+  job_material_line_receipts: [
+    "id",
+    "org_id",
+    "job_id",
+    "line_id",
+    "purchase_order_id",
+    "quantity",
+    "received_on",
+    "note",
+    "created_at",
+    "created_by",
+    "created_by_email",
+    "voided_at",
+    "voided_by",
+    "voided_by_email",
   ],
   job_dispatch_workings: [
     "job_id",
@@ -1269,6 +1288,8 @@ const ALLOWED_TABLES = new Set([
   "users",
   "job_material_suppliers",
   "job_material_lines",
+  // S5: read (never written here) for Delivered and Part delivered.
+  "job_material_line_receipts",
   "purchase_orders",
   "job_order_emails",
   "po_communications",

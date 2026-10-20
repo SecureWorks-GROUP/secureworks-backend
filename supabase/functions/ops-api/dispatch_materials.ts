@@ -19,11 +19,35 @@ export type DispatchMaterialStoredStatus =
   typeof DISPATCH_MATERIAL_STORED_STATUSES[number];
 
 // Worked out on read, never stored, never accepted from a caller. `on_po` is
-// true when slice 5 stamps purchase_order_id; slice 6 adds `delivered` here.
+// true when slice 5 stamps purchase_order_id; slice 6 adds `delivered` here;
+// S5 (docs/dispatch-partial-deliveries-v1.md) adds `part_delivered`.
 export type DispatchMaterialDisplayStatus =
   | DispatchMaterialStoredStatus
   | "on_po"
+  | "part_delivered"
   | "delivered";
+
+// S5: what the receipts and sightings say about each line on an order, worked
+// out once by dispatchLineDeliveryView (dispatch_line_receipts.ts). Line ids.
+export type DispatchLineDeliveryView = {
+  delivered: ReadonlySet<string>;
+  part: ReadonlySet<string>;
+  received: ReadonlyMap<string, number>;
+  // Every receipt for the line on its current order, voided ones included,
+  // oldest first, already projected for the screen.
+  receipts: ReadonlyMap<string, unknown[]>;
+};
+
+// Slice 6 callers pass the set of sighted order ids; S5 callers pass the view.
+export type DispatchDeliveredInput =
+  | ReadonlySet<string>
+  | DispatchLineDeliveryView;
+
+function isLineDeliveryView(
+  input: DispatchDeliveredInput | undefined,
+): input is DispatchLineDeliveryView {
+  return !!input && !(input instanceof Set) && "delivered" in input;
+}
 
 const READY_DISPLAY_STATUSES = new Set<string>(["in_stock", "delivered"]);
 
@@ -41,8 +65,10 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 // The columns the list read takes from job_material_lines: enough for the
 // count rule and nothing else (never a description, never the sketch table).
+// S5 adds the line id, its quantity and when it went on its order, for the
+// receipts rule (dispatch_line_receipts.ts).
 export const DISPATCH_MATERIALS_LIST_SELECT =
-  "job_id, status, purchase_order_id";
+  "job_id, status, purchase_order_id, id, quantity, purchase_order_attached_at";
 
 // The single-job read's column lists. Verified against the live schema on
 // 14 Oct 2026 (suppliers, purchase_orders); the three job_ tables are this
@@ -50,7 +76,7 @@ export const DISPATCH_MATERIALS_LIST_SELECT =
 export const DISPATCH_MATERIAL_SUPPLIER_SELECT =
   "supplier_id, supplier_name, position, created_at";
 export const DISPATCH_MATERIAL_LINE_SELECT =
-  "id, job_id, supplier_id, description, quantity, unit, status, purchase_order_id, source, position, updated_at";
+  "id, job_id, supplier_id, description, quantity, unit, status, purchase_order_id, source, position, updated_at, purchase_order_attached_at";
 export const DISPATCH_SUPPLIER_CONTACT_SELECT =
   "id, org_id, name, email, is_active";
 export const DISPATCH_WORKINGS_SELECT =
@@ -73,12 +99,21 @@ export function isDispatchUuid(value: unknown): value is string {
 // Slice 6 (docs/dispatch-slice-6-contract.md): `sightedOrderIds` holds the
 // ids of the job's orders whose delivery is sighted on site; a line on one of
 // them is Delivered. Callers that read no orders pass none, and a line on an
-// order stays On PO.
+// order stays On PO. S5: a caller that read the receipts passes the line view
+// instead, and the view alone decides Delivered and Part delivered.
 export function dispatchMaterialDisplayStatus(
-  line: { status?: unknown; purchase_order_id?: unknown } | null | undefined,
-  sightedOrderIds?: ReadonlySet<string>,
+  line:
+    | { id?: unknown; status?: unknown; purchase_order_id?: unknown }
+    | null
+    | undefined,
+  sightedOrderIds?: DispatchDeliveredInput,
 ): DispatchMaterialDisplayStatus {
   if (line?.purchase_order_id) {
+    if (isLineDeliveryView(sightedOrderIds)) {
+      const id = String(line.id ?? "");
+      if (sightedOrderIds.delivered.has(id)) return "delivered";
+      return sightedOrderIds.part.has(id) ? "part_delivered" : "on_po";
+    }
     return sightedOrderIds?.has(String(line.purchase_order_id))
       ? "delivered"
       : "on_po";
@@ -93,7 +128,7 @@ export function dispatchMaterialDisplayStatus(
 
 export function isDispatchMaterialReady(
   line: any,
-  sightedOrderIds?: ReadonlySet<string>,
+  sightedOrderIds?: DispatchDeliveredInput,
 ): boolean {
   return READY_DISPLAY_STATUSES.has(
     dispatchMaterialDisplayStatus(line, sightedOrderIds),
@@ -106,7 +141,7 @@ export type DispatchMaterialCounts = { total: number; ready: number };
 // stock or Delivered.
 export function dispatchMaterialCounts(
   lines: any[] | null | undefined,
-  sightedOrderIds?: ReadonlySet<string>,
+  sightedOrderIds?: DispatchDeliveredInput,
 ): DispatchMaterialCounts {
   const all = Array.isArray(lines) ? lines : [];
   return {
@@ -120,7 +155,7 @@ export function dispatchMaterialCounts(
 // from the map; the list reads it as 0 and 0.
 export function dispatchMaterialCountsByJob(
   lines: any[] | null | undefined,
-  sightedOrderIds?: ReadonlySet<string>,
+  sightedOrderIds?: DispatchDeliveredInput,
 ): Map<string, DispatchMaterialCounts> {
   const grouped = new Map<string, any[]>();
   for (const line of Array.isArray(lines) ? lines : []) {
@@ -166,9 +201,9 @@ function numberOrNull(value: unknown): number | null {
 
 export function projectDispatchMaterialLine(
   row: any,
-  sightedOrderIds?: ReadonlySet<string>,
+  sightedOrderIds?: DispatchDeliveredInput,
 ) {
-  return {
+  const base = {
     id: row?.id,
     supplier_id: row?.supplier_id,
     description: row?.description,
@@ -182,6 +217,17 @@ export function projectDispatchMaterialLine(
     position: row?.position,
     updated_at: row?.updated_at,
   };
+  // S5: a line on an order, read with its receipts, carries what has arrived.
+  // A line on no order is exactly as before.
+  if (row?.purchase_order_id && isLineDeliveryView(sightedOrderIds)) {
+    const id = String(row?.id ?? "");
+    return {
+      ...base,
+      received_quantity: sightedOrderIds.received.get(id) ?? 0,
+      receipts: sightedOrderIds.receipts.get(id) ?? [],
+    };
+  }
+  return base;
 }
 
 // Slice 5: a line on an order also carries its order's number. `poNumbers` is
@@ -189,7 +235,7 @@ export function projectDispatchMaterialLine(
 export function projectDispatchMaterialLineOnOrder(
   row: any,
   poNumbers: Map<string, string | null>,
-  sightedOrderIds?: ReadonlySet<string>,
+  sightedOrderIds?: DispatchDeliveredInput,
 ) {
   const line = projectDispatchMaterialLine(row, sightedOrderIds);
   return row?.purchase_order_id
