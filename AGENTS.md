@@ -4722,9 +4722,9 @@ archive.
 Switches (migration `20261013150000`), all off; turn on in this order:
 `job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
 `dry_run` (read the `review_request_dry_run` job events); then someone must
-switch the old GoHighLevel review workflow OFF in GHL Automation; then env
-`JOB_REVIEW_SENDING_ENABLED=true` on ops-api and `review_sender_mode` `live`
-(live without the env reads as dry run); last, `automation_switches.closeout`
+switch the old GoHighLevel review workflow OFF in GHL Automation; then
+`review_sender_mode` `live` (the database switch alone decides; the env
+`JOB_REVIEW_SENDING_ENABLED` is retired and ignored); last, `automation_switches.closeout`
 for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
 moves the md5 four earlier migrations' guards pin: their contracts stand the old
 body back up from
