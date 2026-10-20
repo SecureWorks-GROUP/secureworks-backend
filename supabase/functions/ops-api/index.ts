@@ -9177,7 +9177,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const eventId = body.event_id || body.eventId
         if (!eventId) return json({ error: 'event_id required' }, 400)
         const { error: delErr } = await client.from('job_events').delete().eq('id', eventId)
-        if (delErr) return json({ error: delErr.message }, 500)
+        if (delErr) {
+          // Supersede history (SQ-23) is kept by a database guard: the row's
+          // kind forbids the delete, so answer 409 with a fixed code, not 500.
+          if (delErr.code === '42501' && delErr.message === 'quote_option_event_immutable') {
+            return json({ error: 'note_not_deletable', code: 'quote_option_event_immutable' }, 409)
+          }
+          return json({ error: delErr.message }, 500)
+        }
         return json({ success: true })
       }
       case 'create_invoice': return json(await createInvoice(client, body))

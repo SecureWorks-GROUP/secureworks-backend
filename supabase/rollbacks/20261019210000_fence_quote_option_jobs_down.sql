@@ -17,6 +17,9 @@ DROP FUNCTION IF EXISTS public.fence_quote_option_clear_mark(uuid, text, uuid, u
 DROP FUNCTION IF EXISTS public.link_fence_quote_option(uuid, uuid, text, uuid);
 DROP FUNCTION IF EXISTS public.fence_quote_option_status_won(text);
 DROP FUNCTION IF EXISTS public.fence_quote_option_lock_key(uuid);
+DROP FUNCTION IF EXISTS public.fence_quote_option_run_at(uuid);
+DROP FUNCTION IF EXISTS public.fence_quote_option_take_run_at(uuid);
+DROP FUNCTION IF EXISTS public.fence_quote_option_at_key(uuid);
 DROP SEQUENCE IF EXISTS public.quote_option_event_seq;
 DELETE FROM public.feature_flags WHERE flag_name IN ('quote_option_supersede_v1', 'fence_same_site_guard_v1');
 DROP TABLE IF EXISTS public.quote_option_settle_runs;

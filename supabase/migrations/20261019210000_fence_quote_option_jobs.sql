@@ -76,17 +76,25 @@
 --     go and their seq values are skipped, never reused. Gaps mean nothing.
 --   - CACHE 1 and NO CYCLE: with a per-session cache, two sessions could
 --     hand out seq out of order. The contract checks both.
---   - As of a time t: each event also carries detail_json.at, the
---     clock_timestamp() taken with its seq under the lock. A reader cuts off
---     by at <= t and orders by seq. created_at (transaction start) cannot be
---     the cutoff: a transaction that started first but waited for the lock
---     writes later with an earlier created_at (CIO S1-L1, condition C1).
---     Per job, at does not decrease as seq rises (barring a system clock
---     step back). Residual: an event counts from its at, not from its
---     commit; the gap is the rest of that one locked trigger run and its
---     transaction, during which the event is not yet visible to others.
+--   - As of a time t: each event also carries detail_json.at, one
+--     clock_timestamp() per transaction and group, taken when the trigger
+--     first holds the group's lock in that transaction. A reader cuts off by
+--     at <= t and orders by seq. So a cutoff takes all or none of one
+--     transaction's events for a job: no state from the middle of a
+--     transaction (a clear before its re-supersede) is ever returned.
+--     created_at (transaction start) cannot be the cutoff: a transaction
+--     that started first but waited for the lock writes later with an
+--     earlier created_at (CIO S1-L1, condition C1). Per job, at does not
+--     decrease as seq rises (equal within a transaction; barring a system
+--     clock step back). Residual: an event counts from its at, not from its
+--     commit. Until that transaction commits, a later read can see an as-of
+--     answer change; the window is from the first lock to commit, which the
+--     code does not bound. A value preset in the transaction is kept only if
+--     it lies inside the transaction, so a writer in the same transaction
+--     can move at only within its own window.
 --   - Mixed or missing seq (condition C2): a supersede or unsupersede event
---     without a valid seq or at is from no writer here; readers answer
+--     without a valid seq, or without an at that is a valid time, is from no
+--     writer here; readers answer
 --     unknown for that job and never guess. The switch-on proof counts such
 --     events (expected 0).
 --   - The events are kept: a guard trigger on job_events refuses to delete
@@ -180,6 +188,58 @@ $$;
 CREATE SEQUENCE IF NOT EXISTS public.quote_option_event_seq
   AS bigint INCREMENT BY 1 MINVALUE 1 NO MAXVALUE START WITH 1 CACHE 1 NO CYCLE;
 REVOKE ALL ON SEQUENCE public.quote_option_event_seq FROM PUBLIC, anon, authenticated, service_role;
+-- One as-of time per transaction and group (see "Event order"): the
+-- trigger sets it when it first holds the group's lock in a transaction;
+-- every supersede event the helpers write in that transaction for that group
+-- carries it. A transaction-local setting, so it ends with the transaction
+-- and reverts with a rolled-back block.
+CREATE OR REPLACE FUNCTION public.fence_quote_option_at_key(p_group uuid)
+RETURNS text
+LANGUAGE sql IMMUTABLE
+AS $$
+  SELECT 'sw.qo_at_' || replace(p_group::text, '-', '_')
+$$;
+-- Called by the trigger right after it takes the group lock. Keeps a value
+-- already set in this transaction only if it lies inside this transaction
+-- (from its start to now); anything else, or unreadable, is replaced by now.
+CREATE OR REPLACE FUNCTION public.fence_quote_option_take_run_at(p_group uuid)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_at timestamptz;
+  v_now timestamptz := clock_timestamp();
+BEGIN
+  BEGIN
+    v_at := nullif(current_setting(public.fence_quote_option_at_key(p_group), true), '')::timestamptz;
+  EXCEPTION WHEN OTHERS THEN
+    v_at := NULL;
+  END;
+  IF v_at IS NULL OR v_at < now() OR v_at > v_now THEN
+    v_at := v_now;
+    PERFORM set_config(public.fence_quote_option_at_key(p_group), v_at::text, true);
+  END IF;
+  RETURN v_at;
+END $$;
+-- Read by the helpers. Missing means the caller is not the trigger under the
+-- lock: refuse, so the trigger's block rolls back and records the failure.
+CREATE OR REPLACE FUNCTION public.fence_quote_option_run_at(p_group uuid)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_at timestamptz;
+BEGIN
+  v_at := nullif(current_setting(public.fence_quote_option_at_key(p_group), true), '')::timestamptz;
+  IF v_at IS NULL OR v_at < now() THEN
+    RAISE EXCEPTION 'quote_option_run_at_missing' USING ERRCODE = '55000';
+  END IF;
+  RETURN v_at;
+END $$;
+REVOKE ALL ON FUNCTION public.fence_quote_option_take_run_at(uuid) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.fence_quote_option_run_at(uuid) FROM PUBLIC, anon, authenticated, service_role;
 COMMENT ON SEQUENCE public.quote_option_event_seq IS
   'Order of quote_option_superseded and quote_option_unsuperseded job_events per job (detail_json.seq). Taken under the option group''s advisory lock; created_at and id do not order these events.';
 
@@ -340,7 +400,7 @@ BEGIN
                                  'quote_option_group_id', p_group,
                                  'accepted_status', p_winner_status,
                                  'seq', nextval('public.quote_option_event_seq'),
-                                 'at', clock_timestamp()));
+                                 'at', public.fence_quote_option_run_at(p_group)));
     END IF;
   END LOOP;
 END $$;
@@ -368,7 +428,7 @@ BEGIN
             jsonb_build_object('reason', p_reason, 'was_superseded_by_job_id', v_was,
                                'trigger_job_id', p_trigger_job_id, 'quote_option_group_id', p_group,
                                'seq', nextval('public.quote_option_event_seq'),
-                               'at', clock_timestamp()));
+                               'at', public.fence_quote_option_run_at(p_group)));
   END IF;
 END $$;
 
@@ -493,6 +553,8 @@ BEGIN
       END IF;
       PERFORM pg_sleep(0.05);
     END LOOP;
+    -- The as-of time for this transaction's supersede events in this group.
+    PERFORM public.fence_quote_option_take_run_at(v_group);
     -- Lock every other member in id order without waiting. Each is then read
     -- again under its lock; one another transaction holds is busy.
     FOR v_id IN SELECT j.id FROM public.jobs j

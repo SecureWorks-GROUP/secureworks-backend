@@ -17,6 +17,13 @@ BEGIN
 EXCEPTION WHEN invalid_parameter_value OR check_violation THEN
  RETURN true;
 END $$;
+CREATE FUNCTION pg_temp.qo_raises_code(p_sql text, p_code text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+ EXECUTE p_sql;
+ RETURN false;
+EXCEPTION WHEN OTHERS THEN
+ RETURN SQLSTATE = p_code;
+END $$;
 -- Events of one type (and optional reason) on one job.
 CREATE FUNCTION pg_temp.qo_events(p_job uuid, p_type text, p_reason text DEFAULT NULL) RETURNS bigint
 LANGUAGE sql AS $$
@@ -515,17 +522,34 @@ SELECT pg_temp.qo_assert((SELECT count(DISTINCT e.created_at) = 1 FROM public.jo
  'the runner is one transaction, so B9''s events share created_at: the tie this order exists for');
 -- Every supersede and unsupersede event carries a seq, no two share one, and for every fixture
 -- job the last event by seq agrees with the pointer: superseded while set, cleared otherwise.
-SELECT pg_temp.qo_assert((SELECT bool_and(e.detail_json->>'seq' ~ '^[1-9][0-9]*$')
+-- Counted, not bool_and, so a missing value fails the check instead of being skipped.
+SELECT pg_temp.qo_assert((SELECT count(*) > 0
+   AND count(*) FILTER (WHERE NOT coalesce(e.detail_json->>'seq' ~ '^[1-9][0-9]*$', false)) = 0
    AND count(*) = count(DISTINCT e.detail_json->>'seq')
   FROM public.job_events e WHERE e.job_id::text LIKE '9c000000-%'
    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
  'every supersede and unsupersede event must carry its own seq');
--- As-of cutoff (CIO condition C1): every event carries at, a timestamp no earlier than its
--- transaction's start, and per job at never decreases as seq rises.
-SELECT pg_temp.qo_assert((SELECT bool_and((e.detail_json->>'at')::timestamptz >= e.created_at)
+-- As-of cutoff (CIO condition C1): every event carries at, a valid time no earlier than its
+-- transaction's start, and per job at never decreases as seq rises. Counted, so a missing or
+-- invalid at fails.
+SELECT pg_temp.qo_assert((SELECT count(*) > 0
+   AND count(*) FILTER (WHERE NOT (coalesce(pg_input_is_valid(e.detail_json->>'at', 'timestamptz'), false)
+                                   AND (e.detail_json->>'at')::timestamptz >= e.created_at)) = 0
   FROM public.job_events e WHERE e.job_id::text LIKE '9c000000-%'
    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
- 'every supersede and unsupersede event must carry at, no earlier than its created_at');
+ 'every supersede and unsupersede event must carry at, a valid time no earlier than its created_at');
+-- One at per transaction and group: the runner is one transaction, so every event of group 9
+-- (A9, B9, C9) carries the same at, and a cutoff takes all of them or none. B9's clear and
+-- re-supersede in one statement can never be returned half done.
+SELECT pg_temp.qo_assert((SELECT count(*) = 6 AND count(DISTINCT e.detail_json->>'at') = 1
+  FROM public.job_events e WHERE e.job_id IN ('9c000000-0000-4000-8000-0000000009a1',
+    '9c000000-0000-4000-8000-0000000009b1', '9c000000-0000-4000-8000-0000000009c1')
+   AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
+ 'every event of one transaction for one group must share one at');
+-- Outside the trigger the helpers' as-of time is missing, and they refuse.
+SELECT pg_temp.qo_assert(pg_temp.qo_raises_code($q$
+ SELECT public.fence_quote_option_run_at('9c000000-0000-4000-8000-0000000000aa')
+$q$, '55000'), 'the as-of time must be refused where no trigger run set it');
 SELECT pg_temp.qo_assert(NOT EXISTS (
   SELECT 1 FROM (SELECT e.job_id, (e.detail_json->>'at')::timestamptz AS at,
                         lag((e.detail_json->>'at')::timestamptz) OVER (PARTITION BY e.job_id
@@ -584,11 +608,15 @@ SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
  UPDATE public.job_events SET created_at = created_at - interval '1 second'
   WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
 $q$), 'a supersede event''s time must not change');
-SELECT pg_temp.qo_assert(pg_temp.qo_events('9c000000-0000-4000-8000-00000000000e', 'quote_option_review_needed', 'crewed') = 1
+-- One review event, picked by id (job E holds several crewed review events by now).
+CREATE TEMP TABLE qo_retype_target AS
+ SELECT id FROM public.job_events
+  WHERE job_id = '9c000000-0000-4000-8000-00000000000e' AND event_type = 'quote_option_review_needed'
+  ORDER BY id LIMIT 1;
+SELECT pg_temp.qo_assert((SELECT count(*) FROM qo_retype_target) = 1
  AND pg_temp.qo_kept($q$
  UPDATE public.job_events SET event_type = 'quote_option_superseded'
-  WHERE job_id = '9c000000-0000-4000-8000-00000000000e' AND event_type = 'quote_option_review_needed'
-    AND detail_json->>'reason' = 'crewed'
+  WHERE id = (SELECT id FROM qo_retype_target)
 $q$), 'another event must not be retyped into supersede history');
 -- Allowed: other detail on a supersede event (the legacy variation path spreads detail and keeps
 -- seq), and any change to other event types.
@@ -605,6 +633,28 @@ ROLLBACK TO SAVEPOINT qo_other_delete;
 SELECT pg_temp.qo_assert(pg_temp.qo_events('9c000000-0000-4000-8000-0000000009b1', 'quote_option_superseded') = 2
  AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000009b1', 'quote_option_unsuperseded') = 1,
  'B9''s history must be intact after the refused writes');
+-- Deleting the job itself still takes its events, through the guard. Production has
+-- job_events.job_id REFERENCES jobs ON DELETE CASCADE; the runner's stack may not, so the same
+-- key is added here (NOT VALID: older fixture rows are not checked) unless one exists.
+SAVEPOINT qo_cascade;
+DO $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint c
+                 WHERE c.conrelid = 'public.job_events'::regclass AND c.contype = 'f'
+                   AND c.confrelid = 'public.jobs'::regclass) THEN
+  ALTER TABLE public.job_events ADD CONSTRAINT qo_contract_job_events_job_fk
+    FOREIGN KEY (job_id) REFERENCES public.jobs(id) ON DELETE CASCADE NOT VALID;
+ END IF;
+END $$;
+SELECT pg_temp.qo_assert((SELECT bool_and(c.confdeltype = 'c') FROM pg_constraint c
+  WHERE c.conrelid = 'public.job_events'::regclass AND c.contype = 'f'
+    AND c.confrelid = 'public.jobs'::regclass), 'the cascade case needs an ON DELETE CASCADE key');
+DELETE FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000009b1';
+SELECT pg_temp.qo_assert(NOT EXISTS (SELECT 1 FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000009b1')
+ AND NOT EXISTS (SELECT 1 FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1')
+ AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000009c1', 'quote_option_superseded') = 1,
+ 'deleting a job must cascade its supersede events through the guard and leave other jobs'' events');
+ROLLBACK TO SAVEPOINT qo_cascade;
 
 -- Message time: for every fixture job, superseded events minus unsuperseded events is 1 while
 -- the pointer is set and 0 otherwise, so the intervals can be rebuilt from events alone.
