@@ -899,11 +899,11 @@ Deno.test('PatioAdapter — v2 scoper with a cost to confirm: no zero costs, no 
   assertEquals(ic.cost_estimates.material_total, null)
   assertEquals(ic.cost_estimates.labour_total, null)
   assertEquals(ic.cost_estimates.costs_complete, false)
-  assertEquals(ic.cost_estimates.costs_to_confirm, ['Materials (1 row with no cost)'])
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['Materials (1 row with no cost)', 'commission'])
   assertEquals(ic.margin.pct, null)
   assertEquals(ic.margin.floor_check, 'costs_to_confirm')
   assertEquals(ic.commission.amount, null)
-  assert(err && err.message.includes('costs still to confirm (1 cost line with no price)'))
+  assert(err && err.message.includes('costs still to confirm'))
 })
 
 Deno.test('PatioAdapter — v2 scoper with every cost priced but no commission or margin: still not passed', () => {
@@ -1003,6 +1003,20 @@ Deno.test('PatioAdapter — v2 priced with the slider set: target sealed apart, 
   assertEquals(ic.commission.amount, null)
   assertEquals(ic.commission.basis, 'not_set')
   assert(err && err.message.includes('costs still to confirm'))
+})
+
+Deno.test('PatioAdapter — v2 recognised by tool and version even without its basis markers: target kept apart, commission named', () => {
+  const base = buildPatioInputs()
+  const pj = patioV2(base, {
+    margin_basis: undefined,
+    internal: { costs_complete: true, costs_to_confirm: [], materials: 3600, labour: 2500, cost: 6100, commission: null },
+  })
+  const { ic } = floorRule(withPricing(base, pj), 'enforce')
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['commission'])
+  assertEquals(ic.margin.pct, null)
+  assertEquals(ic.margin.target_pct, 0.39)
+  assertEquals(ic.margin.floor_check, 'costs_to_confirm')
+  assertEquals(ic.margin.floor_breached, false)
 })
 
 Deno.test('PatioAdapter — v2 with a materials row and commission both open: both named', () => {

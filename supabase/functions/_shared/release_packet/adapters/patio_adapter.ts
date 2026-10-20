@@ -124,6 +124,10 @@ export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   // from the sealed sell ex GST and materials plus labour, and only once
   // every cost is known. The older patio tool's margin_pct is its stated
   // margin, read as a percent as before.
+  // The v2 scoper is recognised by its own tool and version, not only by its
+  // basis markers, so a v2 save missing a marker still keeps its target apart
+  // and still names an unset commission.
+  const v2Scoper = asString(pricingJson.tool) === 'patio-scoper' && asString(pricingJson.version) === '2.0'
   const internal = asObject(pricingJson.internal)
   const commission = asNumberOrNull(internal.commission ?? pricingJson.commissionCostEstimate)
   const costs = sealedCostEstimates({
@@ -132,9 +136,9 @@ export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     commission,
     toolSaysIncomplete: internal.costs_complete === false,
     toolToConfirm: asArray(internal.costs_to_confirm).map((k) => asString(k)).filter((k) => k.length > 0),
-    nameCommission: asString(internal.commission_basis) === 'not_set',
+    nameCommission: asString(internal.commission_basis) === 'not_set' || (v2Scoper && commission === null),
   })
-  const selectedTarget = asString(pricingJson.margin_basis) === 'selected_target'
+  const selectedTarget = v2Scoper || asString(pricingJson.margin_basis) === 'selected_target'
   const est = costs.estimates
   const margin = selectedTarget
     ? sealedMargin({
