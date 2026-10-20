@@ -286,6 +286,36 @@ Deno.test("legacy hold: a mixed-case or padded stored id still holds, a differen
   assert(other.status !== 409, "a different invoice was held")
 })
 
+// Codex B21 delta P2: the wide match may only hold more. A reconciliation
+// stored under a longer id ("<id>-old") is another invoice's and must not
+// release this one; one stored under this id, padded or in any case, does.
+Deno.test("legacy hold: a reconciliation under a longer id never releases the hold", async () => {
+  const U = "aBcD1234-12Ab-4cDe-8F90-123456789aBc"
+  const unknown = { event_type: INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, at: "2026-10-01T00:00:00.000Z" }
+  const reconciled = { event_type: "invoice.email_outcome_reconciled", at: "2026-10-02T00:00:00.000Z" }
+  const seedFor = (where: "job_events" | "business_events", events: Array<{ event_type: string; at: string; id: string }>) =>
+    where === "job_events"
+      ? { business_events: [], job_events: events.map((e) => ({ event_type: e.event_type, detail_json: { xero_invoice_id: e.id }, created_at: e.at })) }
+      : {
+        job_events: [],
+        business_events: events.map((e) => ({ event_type: e.event_type, entity_type: "xero_invoice", entity_id: e.id, occurred_at: e.at })),
+      }
+  for (const where of ["job_events", "business_events"] as const) {
+    for (const other of [`${U}-old`, `old-${U}`, `${U.toLowerCase()}-OLD`]) {
+      const claims = makeFakeClaimStore()
+      const t = xeroDirect(claims, async () => ({}), seedFor(where, [{ ...unknown, id: U }, { ...reconciled, id: other }]))
+      const resp = await _sendInvoiceEmailViaXeroDirect({ ...t.deps(), body: { xero_invoice_id: U.toLowerCase() } })
+      assertEquals(resp.status, 409, `${where}: reconciled as ${other}`)
+      assertEquals(t.posts(), 0, `${where}: reconciled as ${other}`)
+    }
+    // The same invoice, padded and in another case, does release it.
+    const claims = makeFakeClaimStore()
+    const t = xeroDirect(claims, async () => ({}), seedFor(where, [{ ...unknown, id: U }, { ...reconciled, id: ` ${U.toUpperCase()} ` }]))
+    const resp = await _sendInvoiceEmailViaXeroDirect({ ...t.deps(), body: { xero_invoice_id: U.toLowerCase() } })
+    assert(resp.status !== 409, `${where}: a reconciliation of the same invoice did not release it`)
+  }
+})
+
 Deno.test("legacy hold: an unreadable event history refuses with 503 and sends nothing", async () => {
   const claims = makeFakeClaimStore()
   const t = xeroDirect(claims, async () => ({}), { read_errors: { business_events: "permission denied" } })
