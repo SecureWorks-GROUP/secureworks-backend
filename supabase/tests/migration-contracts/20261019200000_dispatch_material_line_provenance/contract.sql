@@ -81,8 +81,8 @@ END $$;
 SAVEPOINT before_down;
 \set ON_ERROR_STOP off
 \ir ../../../rollbacks/20261019200000_dispatch_material_line_provenance_down.sql
+\set down_failed :ERROR
 \set ON_ERROR_STOP on
-SELECT :'ERROR' AS down_failed \gset
 ROLLBACK TO SAVEPOINT before_down;
 SELECT pg_temp.mp_assert(:'down_failed' = 'true',
  'the down migration must refuse while a line has recorded provenance');
