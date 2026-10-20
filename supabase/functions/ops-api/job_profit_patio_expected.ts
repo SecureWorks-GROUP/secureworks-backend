@@ -1,4 +1,5 @@
-// Patio expected versus actual (CFO, Sales SQ-29).
+// Patio expected versus actual (CFO, Sales SQ-29). Contract:
+// docs/job-profit-patio-expected.md.
 //
 // The patio scoper 2.0 saves one sealed revision to the job (`scope_json`,
 // tool `patio-scoper`) with `expected: { materials, labour, sale }`: ex-GST
