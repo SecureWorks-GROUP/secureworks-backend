@@ -466,6 +466,7 @@ import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
+import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -7948,6 +7949,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await ledgerPersonEdit(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
         } catch (error) {
           if (error instanceof LedgerPersonEditError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Reconciliation daily list (CTX-R1, 20261020160000): the resolver's
+      // ranked list and the one-tap decision on an item. Staff front door (the
+      // default for an action on no static, profile, routine or agent list).
+      // recon_daily_list is GET only and writes nothing; recon_record_decision
+      // is POST only and the person is the verified session user, never a body
+      // field, so a server key call is refused (a decision needs a person).
+      case 'recon_daily_list':
+      case 'recon_record_decision': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        try {
+          if (action === 'recon_daily_list') {
+            if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+            return json(await reconDailyList(client, url.searchParams))
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          return json(await reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
+        } catch (error) {
+          if (error instanceof ReconDecisionError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }

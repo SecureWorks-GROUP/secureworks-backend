@@ -1,0 +1,118 @@
+-- Contract for 20261020160000_context_recon_daily_list. Proves the invoice subject, its writer
+-- and the ranked daily list against the real stacked schema. Every fixture write is rolled back.
+\set ON_ERROR_STOP 1
+
+-- 1. Shape: invoice subjects are accepted, and no browser role can call the new functions.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'context_reconciliation_decisions_subject_kind_check'
+                 AND pg_get_constraintdef(oid) LIKE '%invoice%') THEN
+    RAISE EXCEPTION 'recon list contract: the store does not take invoice subjects';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+     AND (has_function_privilege('authenticated', 'public.context_recon_daily_list(timestamptz,int)', 'EXECUTE')
+          OR has_function_privilege('anon', 'public.context_recon_record_invoice_decision(uuid,text,text,uuid[],text,uuid,text)', 'EXECUTE')
+          OR has_function_privilege('authenticated', 'public.context_recon_invoice_evidence_hash(uuid)', 'EXECUTE')) THEN
+    RAISE EXCEPTION 'recon list contract: a browser role holds a grant';
+  END IF;
+END $$;
+
+BEGIN;
+INSERT INTO public.jobs (id, org_id, type, status, job_number, ghl_contact_id, xero_contact_id, created_at) VALUES
+  ('7d000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'SWF-98001', 'recon-list-1', 'recon-xc-1', '2026-09-01'),
+  ('7d000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-000000000001', 'patio', 'accepted', 'SWP-98002', 'recon-list-2', 'recon-xc-2', '2026-09-01'),
+  ('7d000000-0000-0000-0000-00000000000c', '00000000-0000-0000-0000-000000000001', 'fencing', 'archived', 'SWF-98003', 'recon-list-3', NULL, '2026-01-01');
+INSERT INTO public.users (id, org_id, name, role) VALUES
+  ('7d100000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'List staff', 'ops_manager'),
+  ('7d100000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'List trade', 'lead_installer');
+INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, invoice_number, invoice_type, status, total, amount_due, amount_paid,
+                                  invoice_date, job_id, xero_contact_id, reference, contact_name) VALUES
+  -- owed, on no job: band 1
+  ('7d200000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'recon-x-1', 'INV-98001', 'ACCREC', 'AUTHORISED', 1500, 1500, 0,
+   '2026-10-01', NULL, 'recon-xc-1', 'Fence deposit', 'Contract client one'),
+  -- owed on job A: contact 1 owes, so its messages are band 2
+  ('7d200000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'recon-x-2', 'INV-98002', 'ACCREC', 'AUTHORISED', 900, 900, 0,
+   '2026-10-02', '7d000000-0000-0000-0000-00000000000a', 'recon-xc-1', 'SWF-98001', 'Contract client one'),
+  -- voided with no job: never listed
+  ('7d200000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'recon-x-3', 'INV-98003', 'ACCREC', 'VOIDED', 700, 700, 0,
+   '2026-10-03', NULL, 'recon-xc-2', 'Void', 'Contract client two');
+INSERT INTO public.business_events (id, channel, direction, occurred_at, contact_id, payload, event_type, source) VALUES
+  ('7d300000-0000-0000-0000-000000000001', 'sms', 'inbound', '2026-10-18 01:00Z', 'recon-list-1', '{"body":"About my fence"}', 'sms.inbound', 'recon-list'),
+  ('7d300000-0000-0000-0000-000000000002', 'sms', 'inbound', '2026-10-17 01:00Z', 'recon-list-2', '{"body":"Patio start date?"}', 'sms.inbound', 'recon-list'),
+  ('7d300000-0000-0000-0000-000000000003', 'sms', 'inbound', '2026-10-17 01:00Z', 'recon-list-3', '{"body":"Old job"}', 'sms.inbound', 'recon-list'),
+  ('7d300000-0000-0000-0000-000000000004', 'sms', 'inbound', '2026-10-17 01:00Z', NULL, '{"body":"Who is this"}', 'sms.inbound', 'recon-list');
+UPDATE public.business_events SET job_id = NULL, attribution_status = 'unplaced', attribution_checked_at = '2026-10-19 00:00Z',
+  context_captured_at = occurred_at
+WHERE source = 'recon-list';
+
+DO $$
+DECLARE asof timestamptz := '2026-10-20 00:00Z'; inv uuid := '7d200000-0000-0000-0000-000000000001';
+  a uuid := '7d000000-0000-0000-0000-00000000000a'; staff uuid := '7d100000-0000-0000-0000-000000000001';
+  h text; r record; n int;
+BEGIN
+  -- 2. Ranking: the owed invoice first, then the owing contact's message, then the live-job message.
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof) WHERE subject_id IN
+    ('7d200000-0000-0000-0000-000000000003', '7d300000-0000-0000-0000-000000000003', '7d300000-0000-0000-0000-000000000004');
+  IF n <> 0 THEN RAISE EXCEPTION 'recon list contract: a voided invoice, a closed-job message or a defect row was listed'; END IF;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
+  IF r.band IS DISTINCT FROM 1 OR r.amount IS DISTINCT FROM 1500::numeric OR r.summary ->> 'invoice_number' IS DISTINCT FROM 'INV-98001'
+     OR r.offered_jobs -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001' THEN
+    RAISE EXCEPTION 'recon list contract: the owed invoice is not band 1 with its contact''s job offered';
+  END IF;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000001';
+  IF r.band IS DISTINCT FROM 2 OR r.amount IS DISTINCT FROM 900::numeric OR r.other_jobs -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001' THEN
+    RAISE EXCEPTION 'recon list contract: the owing contact''s message is not band 2';
+  END IF;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000002';
+  IF r.band IS DISTINCT FROM 3 OR r.summary ->> 'preview' IS DISTINCT FROM 'Patio start date?'
+     OR r.evidence_hash IS DISTINCT FROM public.context_recon_evidence_hash('7d300000-0000-0000-0000-000000000002') THEN
+    RAISE EXCEPTION 'recon list contract: the live-job customer message is not band 3 with its hash';
+  END IF;
+
+  -- 3. The invoice writer refuses a non-staff person, a stale hash, confirm and split.
+  h := public.context_recon_invoice_evidence_hash(inv);
+  BEGIN PERFORM public.context_recon_record_invoice_decision(inv, h, 'correct', ARRAY[a], 'ambiguity:invoice_no_job', '7d100000-0000-0000-0000-000000000002');
+    RAISE EXCEPTION 'recon list contract: trade recorded an invoice decision'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN PERFORM public.context_recon_record_invoice_decision(inv, md5('x'), 'correct', ARRAY[a], 'ambiguity:invoice_no_job', staff);
+    RAISE EXCEPTION 'recon list contract: a stale hash was accepted'; EXCEPTION WHEN serialization_failure THEN NULL; END;
+  BEGIN PERFORM public.context_recon_record_invoice_decision(inv, h, 'confirm', ARRAY[a], 'ambiguity:invoice_no_job', staff);
+    RAISE EXCEPTION 'recon list contract: confirm was accepted on an invoice'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
+
+  -- 4. Escalate keeps it listed with its owner; correct takes it off and writes no invoice.
+  PERFORM public.context_recon_record_invoice_decision(inv, h, 'escalate', '{}', 'ambiguity:invoice_no_job', staff, 'finance');
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
+  IF r.owner IS DISTINCT FROM 'finance' OR r.last_action IS DISTINCT FROM 'escalate' THEN
+    RAISE EXCEPTION 'recon list contract: an escalated invoice left the list or lost its owner';
+  END IF;
+  PERFORM public.context_recon_record_invoice_decision(inv, h, 'correct', ARRAY[a], 'ambiguity:invoice_no_job', staff);
+  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
+    RAISE EXCEPTION 'recon list contract: a corrected invoice is still listed';
+  END IF;
+  IF (SELECT job_id FROM public.xero_invoices WHERE id = inv) IS NOT NULL THEN
+    RAISE EXCEPTION 'recon list contract: the decision wrote the invoice';
+  END IF;
+  IF (SELECT by FROM public.context_reconciliation_decisions WHERE subject_kind = 'invoice' AND subject_id = inv ORDER BY id DESC LIMIT 1)
+     IS DISTINCT FROM 'person:' || staff THEN
+    RAISE EXCEPTION 'recon list contract: by is not the person';
+  END IF;
+
+  -- 5. A part payment keeps the decision; a changed total reopens it.
+  UPDATE public.xero_invoices SET amount_due = 500, amount_paid = 1000 WHERE id = inv;
+  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
+    RAISE EXCEPTION 'recon list contract: a part payment reopened the decision';
+  END IF;
+  UPDATE public.xero_invoices SET total = 1600, amount_due = 600 WHERE id = inv;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
+  IF r.decision_state IS DISTINCT FROM 'evidence_changed' THEN
+    RAISE EXCEPTION 'recon list contract: a changed total did not reopen the decision';
+  END IF;
+
+  -- 6. Event decisions still go through the event writer: confirm the band 3 message.
+  PERFORM public.context_recon_record_decision('7d300000-0000-0000-0000-000000000002',
+    public.context_recon_evidence_hash('7d300000-0000-0000-0000-000000000002'), 'correct',
+    ARRAY['7d000000-0000-0000-0000-00000000000b']::uuid[], 'ambiguity:no_candidate', staff);
+  IF EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000002') THEN
+    RAISE EXCEPTION 'recon list contract: a decided message is still listed';
+  END IF;
+END $$;
+ROLLBACK;
