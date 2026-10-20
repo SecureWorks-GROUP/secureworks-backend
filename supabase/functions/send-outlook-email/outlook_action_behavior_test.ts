@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   classifyOutlookRoute,
+  composeSignedHtml,
   fetchAttachment,
   getSignature,
   getGraphToken,
@@ -16,8 +17,10 @@ import {
   OutlookInputError,
   prepareAttachments,
   resetGraphTokenCache,
+  SIGNATURE_LOGO_CID,
   splitRecipientInput,
   validateInlineAttachment,
+  withSignatureLogo,
 } from "./index.ts";
 
 Deno.test("Outlook route classification rejects group send fallthrough and preserves exact mailbox", () => {
@@ -67,15 +70,162 @@ Deno.test("Outlook route classification rejects group send fallthrough and prese
 });
 
 Deno.test("signatures never invent Marnin as the sender", () => {
-  assertEquals(
-    getSignature("marnin@secureworkswa.com.au").includes("Marnin Stobbe"),
-    true,
-  );
+  const marnin = getSignature("marnin@secureworkswa.com.au");
+  assertEquals(marnin.includes("Marnin Stobbe"), true);
+  assertEquals(marnin.includes("Operations Manager"), true);
+  assertEquals(marnin.includes("0404 777 984"), true);
   assertEquals(getSignature("hugo@secureworkswa.com.au"), "");
+  const maverick = getSignature("admin@secureworkswa.com.au");
+  assertEquals(maverick.includes("Maverick"), true);
+  assertEquals(maverick.includes("Operations Assist"), true);
+  assertEquals(maverick.includes("admin@secureworkswa.com.au"), true);
+  assertEquals(maverick.includes("+61 489 267 771"), true);
+  assertEquals(maverick.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
+  assertEquals(maverick.includes("ses@secureworkswa.com.au"), false);
+  assertEquals(maverick.includes("data:image"), false);
+  const shaun = getSignature("shaun@secureworkswa.com.au");
+  assertEquals(shaun.includes("Shaun Lee"), true);
+  assertEquals(shaun.includes("Operations Coordinator"), true);
+  assertEquals(shaun.includes("+61 489 267 771"), true);
+  assertEquals(shaun.includes("admin@secureworkswa.com.au"), true);
+  assertEquals(shaun.includes("Operations Manager"), false);
+  assertEquals(shaun.includes("ses@"), false);
+});
+
+Deno.test("a chosen signature replaces the mailbox default and none suppresses it", () => {
+  const admin = "admin@secureworkswa.com.au";
+  const asShaun = composeSignedHtml("<p>Hi</p>", admin, "shaun");
+  assertEquals(asShaun.includes("Shaun Lee"), true);
+  assertEquals(asShaun.includes("Operations Coordinator"), true);
+  assertEquals(asShaun.includes("Maverick"), false);
   assertEquals(
-    getSignature("admin@secureworkswa.com.au").includes("Maverick"),
-    true,
+    (asShaun.match(/data-secureworks-signature=/g) || []).length,
+    1,
   );
+  const marked = "<p>Hi</p><!-- suppress-auto-appended-default-signature -->";
+  assertEquals(composeSignedHtml(marked, admin, undefined), marked);
+  assertEquals(composeSignedHtml(marked, admin, "   "), marked);
+  assertEquals(
+    composeSignedHtml("<p>Hi</p>", "marnin@secureworkswa.com.au", "none"),
+    "<p>Hi</p>",
+  );
+  assertEquals(
+    composeSignedHtml("<p>Hi</p>", "marnin@secureworkswa.com.au", "suppress"),
+    "<p>Hi</p>",
+  );
+  const namedOverMarker = composeSignedHtml(marked, admin, "shaun");
+  assertEquals(namedOverMarker.includes("Shaun Lee"), true);
+  assertEquals(namedOverMarker.includes("Maverick"), false);
+  const jan = getSignature("jan@secureworkswa.com.au");
+  assertEquals(jan.includes("Jan Stobbe"), true);
+  assertEquals(jan.includes("Director"), true);
+  assertEquals(jan.includes('href="tel:"'), false);
+  assertEquals(jan.includes(">P:</b>"), false);
+  const fencing = getSignature("fencing@secureworkswa.com.au");
+  assertEquals(fencing.includes("08 6102 2796"), true);
+  assertEquals(fencing.includes("fencing@secureworkswa.com.au"), true);
+  const unknown = assertThrows(
+    () => composeSignedHtml("<p>Hi</p>", admin, "captain"),
+    OutlookInputError,
+  );
+  assertEquals(unknown.code, "invalid_signature");
+  const notString = assertThrows(
+    () => composeSignedHtml("<p>Hi</p>", admin, 1),
+    OutlookInputError,
+    "signature must be a string",
+  );
+  assertEquals(notString.code, "invalid_signature");
+});
+
+Deno.test("inline attachment metadata is kept and normalised", async () => {
+  const inline = validateInlineAttachment({
+    name: "logo.png",
+    contentType: "image/png",
+    contentBytes: "AA==",
+    isInline: true,
+    contentId: "cid:<logo@secureworkswa.com.au>",
+  });
+  assertEquals(inline.isInline, true);
+  assertEquals(inline.contentId, "logo@secureworkswa.com.au");
+  const implied = validateInlineAttachment({
+    name: "logo.png",
+    contentBytes: "AA==",
+    contentId: "logo@secureworkswa.com.au",
+  });
+  assertEquals(implied.isInline, true);
+  assertEquals(implied.contentId, "logo@secureworkswa.com.au");
+  const explicitOff = validateInlineAttachment({
+    name: "file.txt",
+    contentBytes: "AA==",
+    isInline: false,
+    contentId: "file@secureworkswa.com.au",
+  });
+  assertEquals(explicitOff.isInline, false);
+  assertEquals(explicitOff.contentId, "file@secureworkswa.com.au");
+  assertThrows(
+    () =>
+      validateInlineAttachment({
+        name: "logo.png",
+        contentBytes: "AA==",
+        isInline: true,
+      }),
+    OutlookInputError,
+    "requires contentId",
+  );
+  assertThrows(
+    () =>
+      validateInlineAttachment({
+        name: "logo.png",
+        contentBytes: "AA==",
+        isInline: "yes",
+        contentId: "logo@secureworkswa.com.au",
+      }),
+    OutlookInputError,
+    "must be a boolean",
+  );
+  assertThrows(
+    () =>
+      validateInlineAttachment({
+        name: "logo.png",
+        contentBytes: "AA==",
+        isInline: true,
+        contentId: "not a token",
+      }),
+    OutlookInputError,
+    "not a valid token",
+  );
+  const fetchImpl = async (): Promise<Response> =>
+    new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+  const fromUrl = await prepareAttachments([{
+    url: "https://fixtures.test/logo.png",
+    name: "logo.png",
+    isInline: true,
+    contentId: "cid:<fetched@secureworkswa.com.au>",
+  }], {
+    fetchImpl,
+    allowedHosts: ["fixtures.test"],
+  });
+  assertEquals(fromUrl[0].contentType, "image/png");
+  assertEquals(fromUrl[0].isInline, true);
+  assertEquals(fromUrl[0].contentId, "fetched@secureworkswa.com.au");
+  assertEquals(fromUrl[0].contentBytes, "AQIDBA==");
+});
+
+Deno.test("the signature logo is one CID attachment and only when the HTML asks for it", () => {
+  const plain = withSignatureLogo("<p>Hi</p>", []);
+  assertEquals(plain, []);
+  const once = withSignatureLogo(`<img src="cid:${SIGNATURE_LOGO_CID}">`, []);
+  assertEquals(once.length, 1);
+  assertEquals(once[0].isInline, true);
+  assertEquals(once[0].contentId, SIGNATURE_LOGO_CID);
+  assertEquals(once[0].contentType, "image/png");
+  assertEquals(once[0].name, "secureworks-logo.png");
+  const again = withSignatureLogo(
+    `cid:${SIGNATURE_LOGO_CID}`,
+    once,
+  );
+  assertEquals(again.length, 1);
+  assertEquals(again[0].contentId, SIGNATURE_LOGO_CID);
 });
 
 Deno.test("recipient and inline attachment inputs are strict and never silently dropped", async () => {
@@ -405,15 +555,29 @@ Deno.test("reply handler preserves native recipients and sends only after exact 
       calls.filter((call) => call.url.endsWith("/reply-draft-1/send")).length,
       1,
     );
-    assertEquals(
-      calls.filter((call) => call.url.endsWith("/reply-draft-1/attachments")).length,
-      1,
+    const attachmentCalls = calls.filter((call) =>
+      call.url.endsWith("/reply-draft-1/attachments")
     );
+    assertEquals(attachmentCalls.length, 2);
+    const logo = JSON.parse(attachmentCalls[0].body!);
+    const review = JSON.parse(attachmentCalls[1].body!);
+    assertEquals(logo.name, "secureworks-logo.png");
+    assertEquals(logo.isInline, true);
+    assertEquals(logo.contentId, SIGNATURE_LOGO_CID);
+    assertEquals(review.name, "review.txt");
+    assertEquals(review.isInline, undefined);
     const createBody = JSON.parse(
       calls.find((call) => call.url.endsWith("/createReply"))!.body!,
     );
     assertEquals(createBody.message.toRecipients, undefined);
     assertEquals(createBody.message.ccRecipients, undefined);
+    const html = createBody.message.body.content as string;
+    assertEquals(html.includes("Maverick"), true);
+    assertEquals(html.includes("admin@secureworkswa.com.au"), true);
+    assertEquals(html.includes("+61 489 267 771"), true);
+    assertEquals(html.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
+    assertEquals(html.includes("ses@secureworkswa.com.au"), false);
+    assertEquals(html.includes("data:image"), false);
   } finally {
     globalThis.fetch = originalFetch;
     resetGraphTokenCache();
@@ -461,6 +625,164 @@ Deno.test("reply recipient mismatch leaves the native draft and does not send", 
     assertEquals(error.outcomeUnknown, true);
     assertEquals(error.context.draft_id, "reply-draft-mismatch");
     assertEquals(calls.some((call) => call.endsWith("/send")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    resetGraphTokenCache();
+  }
+});
+
+Deno.test("reply signature shaun replaces Maverick and none sends no logo", async () => {
+  Deno.env.set("MICROSOFT_TENANT_ID", "tenant-sig-fixture");
+  Deno.env.set("MICROSOFT_CLIENT_ID", "client-sig-fixture");
+  Deno.env.set("MICROSOFT_CLIENT_SECRET", "secret-sig-fixture");
+  resetGraphTokenCache();
+  const calls: { url: string; body?: string }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({
+        url,
+        body: typeof init?.body === "string" ? init.body : undefined,
+      });
+      if (url.includes("/oauth2/v2.0/token")) {
+        return Response.json({ access_token: "sig-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/createReply")) {
+        return Response.json({
+          id: "reply-draft-sig",
+          toRecipients: [{ emailAddress: { address: "client@example.com" } }],
+          ccRecipients: [],
+        }, { status: 201 });
+      }
+      if (url.endsWith("/attachments")) {
+        return Response.json({ id: "attachment-sig" }, { status: 201 });
+      }
+      if (url.endsWith("/send")) return new Response(null, { status: 202 });
+      return new Response("unexpected provider call", { status: 500 });
+    }) as typeof fetch;
+  const base = {
+    action: "reply",
+    mailbox: "admin@secureworkswa.com.au",
+    message_id: "source-message-sig",
+    job_id: "job-sig",
+    htmlBody: "<p>Reviewed reply</p>",
+    content_reviewed: true,
+    expected_to: ["client@example.com"],
+    expected_cc: [],
+  };
+  try {
+    await handleReply({ ...base, signature: "shaun" });
+    const shaunHtml = JSON.parse(
+      calls.find((call) => call.url.endsWith("/createReply"))!.body!,
+    ).message.body.content as string;
+    assertEquals(shaunHtml.includes("Shaun Lee"), true);
+    assertEquals(shaunHtml.includes("Maverick"), false);
+    assertEquals(
+      calls.filter((call) => call.url.endsWith("/attachments")).length,
+      1,
+    );
+    calls.length = 0;
+    await handleReply({
+      ...base,
+      htmlBody:
+        "<p>Reviewed reply</p><!-- suppress-auto-appended-default-signature -->",
+    });
+    const suppressed = JSON.parse(
+      calls.find((call) => call.url.endsWith("/createReply"))!.body!,
+    ).message.body.content as string;
+    assertEquals(suppressed.includes("data-secureworks-signature"), false);
+    assertEquals(
+      calls.filter((call) => call.url.endsWith("/attachments")).length,
+      0,
+    );
+    calls.length = 0;
+    await handleReply({ ...base, signature: "none" });
+    assertEquals(
+      calls.filter((call) => call.url.endsWith("/attachments")).length,
+      0,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    resetGraphTokenCache();
+  }
+});
+
+Deno.test("an unknown reply signature refuses before any provider call", async () => {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = (async () => {
+    providerCalls++;
+    return new Response("provider must not be called", { status: 500 });
+  }) as typeof fetch;
+  try {
+    const error = await assertRejects(
+      () =>
+        handleReply({
+          action: "reply",
+          mailbox: "admin@secureworkswa.com.au",
+          message_id: "source-message-bad-sig",
+          htmlBody: "<p>Reviewed reply</p>",
+          content_reviewed: true,
+          expected_to: ["client@example.com"],
+          expected_cc: [],
+          signature: "not-a-person",
+        }),
+      OutlookInputError,
+      "Unknown signature",
+    );
+    assertEquals((error as OutlookInputError).code, "invalid_signature");
+    assertEquals(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("a draft from admin as shaun carries Shaun's block and the inline logo", async () => {
+  Deno.env.set("MICROSOFT_TENANT_ID", "tenant-draft-shaun");
+  Deno.env.set("MICROSOFT_CLIENT_ID", "client-draft-shaun");
+  Deno.env.set("MICROSOFT_CLIENT_SECRET", "secret-draft-shaun");
+  resetGraphTokenCache();
+  let posted = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/oauth2/v2.0/token")) {
+        return Response.json({
+          access_token: "draft-shaun-token",
+          expires_in: 3600,
+        });
+      }
+      if (url.endsWith("/messages")) {
+        posted = typeof init?.body === "string" ? init.body : "";
+        return Response.json({ id: "draft-shaun", changeKey: "ck-shaun" }, {
+          status: 201,
+        });
+      }
+      return new Response("unexpected provider call", { status: 500 });
+    }) as typeof fetch;
+  try {
+    const response = await handleDraft({
+      action: "draft",
+      mailbox: "admin@secureworkswa.com.au",
+      from: "admin@secureworkswa.com.au",
+      to: ["client@example.com"],
+      subject: "From Shaun",
+      htmlBody: "<p>Hello</p>",
+      content_reviewed: true,
+      signature: "shaun",
+    });
+    assertEquals(response.status, 202);
+    const message = JSON.parse(posted);
+    const html = message.body.content as string;
+    assertEquals(html.includes("Shaun Lee"), true);
+    assertEquals(html.includes("Operations Coordinator"), true);
+    assertEquals(html.includes("Maverick"), false);
+    assertEquals(message.attachments.length, 1);
+    assertEquals(message.attachments[0].isInline, true);
+    assertEquals(message.attachments[0].contentId, SIGNATURE_LOGO_CID);
+    assertEquals(message.attachments[0].contentType, "image/png");
   } finally {
     globalThis.fetch = originalFetch;
     resetGraphTokenCache();
