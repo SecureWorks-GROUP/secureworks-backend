@@ -54,6 +54,20 @@ export function makeStubClient(seed: TableSeed = {}): { client: any; calls: Stub
               filters.push((row) => vals.includes(stubColumn(row, col)))
               return builder
             },
+            // PostgREST ilike: no case, `*` and `%` any text, `_` one character.
+            ilike(col: string, pattern: string) {
+              const re = new RegExp(
+                "^" + String(pattern).split("").map((c) =>
+                  c === "*" || c === "%" ? "[\\s\\S]*" : c === "_" ? "[\\s\\S]" : c.replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+                ).join("") + "$",
+                "i",
+              )
+              filters.push((row) => {
+                const v = stubColumn(row, col)
+                return typeof v === "string" && re.test(v)
+              })
+              return builder
+            },
             order(col: string, opts?: { ascending?: boolean }) {
               orderBy = { col, ascending: opts?.ascending !== false }
               return builder

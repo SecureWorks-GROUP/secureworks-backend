@@ -94,6 +94,7 @@ function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJ
           return b;
         },
         in: () => b,
+        ilike: () => b,
         is: () => b,
         not: () => b,
         or: () => b,

@@ -17,7 +17,7 @@ import {
 } from "./index.ts"
 import { makeFakeClaimStore } from "../_shared/outbound_send_claim_fake.ts"
 import { confirmSendDispatch, extendSendClaim } from "../_shared/outbound_send_claim.ts"
-import { INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT } from "./invoice_email_resend_gate.ts"
+import { INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, invoiceIdHoldPattern } from "./invoice_email_resend_gate.ts"
 import {
   happyFixture,
   jsonBody,
@@ -234,6 +234,56 @@ Deno.test("legacy hold: an uppercase resend still finds a lowercase hold, and th
     assertEquals(t.posts(), 0)
     assertEquals(claims.rowsFor("invoice:inv-abc").length, 0)
   }
+})
+
+// Codex B21 delta: a hold stored in mixed case, or with whitespace around a
+// UUID, is found whichever case this press uses; a different invoice is not.
+Deno.test("legacy hold: a mixed-case or padded stored id still holds, a different id does not", async () => {
+  const stored = "aBcD1234-12Ab-4cDe-8F90-123456789aBc"
+  const pressedAs = [stored.toLowerCase(), stored.toUpperCase(), "AbCd1234-12aB-4CdE-8f90-123456789AbC"]
+  for (const where of ["job_events", "business_events"] as const) {
+    for (const storedAs of [stored, ` ${stored}\n`]) {
+      for (const pressed of pressedAs) {
+        const claims = makeFakeClaimStore()
+        const seed = where === "job_events"
+          ? {
+            business_events: [],
+            job_events: [{
+              event_type: INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, detail_json: { xero_invoice_id: storedAs },
+              created_at: "2026-10-01T00:00:00.000Z",
+            }],
+          }
+          : {
+            job_events: [],
+            business_events: [{
+              event_type: INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, entity_type: "xero_invoice", entity_id: storedAs,
+              occurred_at: "2026-10-01T00:00:00.000Z",
+            }],
+          }
+        const t = xeroDirect(claims, async () => ({}), seed)
+        const resp = await _sendInvoiceEmailViaXeroDirect({ ...t.deps(), body: { xero_invoice_id: pressed } })
+        const label = `${where} ${JSON.stringify(storedAs)} pressed as ${pressed}`
+        assertEquals(resp.status, 409, label)
+        assertEquals((await jsonBody(resp)).code, "invoice_email_outcome_unreconciled", label)
+        assertEquals(t.posts(), 0, label)
+      }
+    }
+  }
+  assertEquals(invoiceIdHoldPattern("aBcD1234-12Ab-4cDe-8F90-123456789aBc"), "*aBcD1234-12Ab-4cDe-8F90-123456789aBc*")
+  assertEquals(invoiceIdHoldPattern(" inv-123 "), "inv-123")
+  for (const wild of ["inv*", "inv%1", "inv_1", "a,b", ""]) assertEquals(invoiceIdHoldPattern(wild), null, wild)
+
+  // One character apart is another invoice: not held.
+  const claims = makeFakeClaimStore()
+  const t = xeroDirect(claims, async () => ({}), {
+    business_events: [],
+    job_events: [{
+      event_type: INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT, detail_json: { xero_invoice_id: stored },
+      created_at: "2026-10-01T00:00:00.000Z",
+    }],
+  })
+  const other = await _sendInvoiceEmailViaXeroDirect({ ...t.deps(), body: { xero_invoice_id: stored.slice(0, -1) + "d" } })
+  assert(other.status !== 409, "a different invoice was held")
 })
 
 Deno.test("legacy hold: an unreadable event history refuses with 503 and sends nothing", async () => {
