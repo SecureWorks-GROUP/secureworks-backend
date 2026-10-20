@@ -1,5 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
-// Context reconciliation from a job (CTX-N1, 20261020170000): two read-only
+// Context reconciliation from a job (CTX-N1, 20261020165000): two read-only
 // doors behind the ops-api staff front door.
 //
 //   GET ?action=context_job_mail&job_id=|job_number=[&limit=n][&roles=supplier,staff]

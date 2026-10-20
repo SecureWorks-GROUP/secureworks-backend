@@ -1,4 +1,4 @@
--- Context reconciliation from a job (CTX-N1, 20261020170000). Two read-only functions over the
+-- Context reconciliation from a job (CTX-N1, 20261020165000). Two read-only functions over the
 -- decision store (20261020140000). Neither writes anything, neither decides anything, and both
 -- read placement only through context_event_jobs.
 --
@@ -49,7 +49,7 @@ LANGUAGE sql STABLE AS $$
   LIMIT least(greatest(coalesce(p_limit, 100), 1), 500)
 $$;
 COMMENT ON FUNCTION public.context_job_mail(uuid, int, text[]) IS
- 'Context job reconciliation (20261020170000): email rows Context places on a job through context_event_jobs (certain or candidate; by person or ladder; reason), newest first, with the other jobs each row sits on. Leaves out copies marked duplicate_of. p_roles filters on party_roles.counterpart_role. Read only, service role only.';
+ 'Context job reconciliation (20261020165000): email rows Context places on a job through context_event_jobs (certain or candidate; by person or ladder; reason), newest first, with the other jobs each row sits on. Leaves out copies marked duplicate_of. p_roles filters on party_roles.counterpart_role. Read only, service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_recon_job_items(p_job uuid)
 RETURNS TABLE (event_id uuid, channel text, direction text, occurred_at timestamptz, from_address text,
@@ -94,7 +94,7 @@ LANGUAGE sql STABLE AS $$
   LIMIT 200
 $$;
 COMMENT ON FUNCTION public.context_recon_job_items(uuid) IS
- 'Context job reconciliation (20261020170000): the queued rows that offer a job, defects included, each with the evidence hash a decision echoes (context_recon_evidence_hash), the cause (context_recon_queue''s rule) and the jobs offered (candidates plus the ladder''s job, the set confirm accepts). Newest first, at most 200. Read only, service role only.';
+ 'Context job reconciliation (20261020165000): the queued rows that offer a job, defects included, each with the evidence hash a decision echoes (context_recon_evidence_hash), the cause (context_recon_queue''s rule) and the jobs offered (candidates plus the ladder''s job, the set confirm accepts). Newest first, at most 200. Read only, service role only.';
 
 DO $$
 DECLARE f text;

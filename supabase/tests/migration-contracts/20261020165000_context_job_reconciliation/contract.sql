@@ -1,4 +1,4 @@
--- Contract for 20261020170000_context_job_reconciliation (CTX-N1). Proves, against the real
+-- Contract for 20261020165000_context_job_reconciliation (CTX-N1). Proves, against the real
 -- stacked schema and the live ladder triggers: a candidate email shows on every candidate job
 -- with the other jobs named; a staff split shows it certain on each job; the per-job door lists
 -- defect rows the daily list leaves out, with the hash the writer accepts and the queue's cause;
