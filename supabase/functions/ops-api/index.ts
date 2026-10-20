@@ -1401,9 +1401,11 @@ import {
   requestJobReview,
   reviewRequestMessage as closeoutReviewRequestMessage,
   runJobCloseoutAction,
+  setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -9366,8 +9368,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { accessToken: vAt, tenantId: vTi } = await getToken(client)
         const newStatus = body.void ? 'VOIDED' : 'DELETED'
         const vRes = await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
-        const vReturned = String(vRes?.Invoices?.[0]?.Status || newStatus).toUpperCase()
-        await client.from('xero_invoices').update({ status: vReturned, amount_due: 0 }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        // Our copy only says VOIDED or DELETED when Xero's answer does (xero_void_mirror.ts).
+        const vPatch = voidMirrorPatch(vRes, vid)
+        if (vPatch) await client.from('xero_invoices').update(vPatch).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
         // Log business event (non-blocking)
         try {
           await client.from('business_events').insert({
@@ -9380,7 +9383,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
           })
         } catch (_) { /* non-blocking */ }
-        return json({ success: true, status: newStatus })
+        return json({ success: true, status: vPatch?.status ?? newStatus, mirror_updated: !!vPatch })
       }
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body
@@ -9924,6 +9927,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'send_payment_link': return json(await sendPaymentLink(client, body))
       case 'send_acceptance_invoice': return json(await sendAcceptanceInvoice(client, body))
       case 'send_review_request': return json(await sendReviewRequest(client, body))
+      // The per-job review switch (job_closeout.ts setReviewOptOut): staff sessions and
+      // the privileged ops key only, absent from ROUTINE_ALLOWED_ACTIONS. Refused 409
+      // review_already_sent once the job has a review claim.
+      case 'set_review_opt_out': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: set_review_opt_out requires the privileged ops key or a staff session' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError('set_review_opt_out requires POST', 405)
+        // A signed-in person is named by the verified session; the ops key has no user
+        // and is attributed by the operator email the screen stamps.
+        const optOutBy = authMode === 'jwt'
+          ? (authUser?.email || cleanReviewedString(body?.operator_email) || (authUser?.id ? `user:${authUser.id}` : null))
+          : (cleanReviewedString(body?.operator_email) || `ops-api:${authMode}`)
+        const optOut = await setReviewOptOut({ client, now: () => new Date() }, body || {}, optOutBy)
+        return json(optOut.body, optOut.status)
+      }
 
       // ── Quick Quote (Miscellaneous Jobs) ──
       case 'search_ghl_contacts': return json(await searchGHLContacts(client, url.searchParams))

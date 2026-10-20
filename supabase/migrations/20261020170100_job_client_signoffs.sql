@@ -1,4 +1,4 @@
--- 20261019120100_job_client_signoffs.sql
+-- 20261020170100_job_client_signoffs.sql
 --
 -- Client sign-off (Marnin, 19 Oct 2026, CALLS DSP-11): "trades should invoice
 -- when the job has been signed off by the client, they should have a workflow

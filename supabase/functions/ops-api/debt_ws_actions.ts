@@ -100,13 +100,22 @@ import {
   debtReportHtml,
   debtReportTotals,
   perthClock,
+  placeOpenInvoices,
+  totalOwedFrom,
 } from "./debt_ws_report.ts";
+import {
+  xeroCheckUnread,
+  xeroCheckView,
+  type XeroCheckView,
+} from "./debt_ws_xero_check.ts";
 
 export { DebtWsError } from "./debt_ws_store.ts";
 
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
+/** Statements are signed by Shaun on admin@ (send-outlook-email signature "shaun"). */
+export const DEBT_WS_STATEMENT_SIGNATURE = "shaun";
 /**
  * The step a manual text is sent and logged under (Shaun's own words, not a planned step).
  * Its claim row's step is "manual:<client_ref>", which is never a ladder step, so the
@@ -193,6 +202,8 @@ export interface DebtWsDeps {
       { name: string; contentType: string; contentBytes: string }
     >;
     internal_report?: "debt_report";
+    /** send-outlook-email signature choice for this mailbox, e.g. "shaun". */
+    signature?: string;
   }) => Promise<{ ok: boolean; status: number; error: string | null }>;
   /** Xero's Bank Summary read live: one closing balance per bank account. */
   bankSummary: () => Promise<BankAccountBalance[]>;
@@ -811,13 +822,37 @@ function notChasedGroups(open: BookEntry[]) {
   return [...groups.values()].sort((a, b) => b.amount - a.amount);
 }
 
+/**
+ * The newest check of our Xero copy against Xero, as the tab and the report show it. A
+ * check that cannot be read (its migration not applied yet, say) never stops the tab: it
+ * reads "Could not read the check against Xero", never "Matches Xero".
+ */
+async function xeroCheckFor(deps: DebtWsDeps, now: Date): Promise<XeroCheckView> {
+  try {
+    const { latest, latestComplete } = await deps.store.mirrorChecks();
+    return xeroCheckView(latest, latestComplete, now);
+  } catch (error) {
+    console.error("[debt_ws] the check against Xero is unavailable", (error as Error)?.name);
+    return xeroCheckUnread();
+  }
+}
+
+/** The not-chased names from the settings, without the contact ids. */
+function notChasedNamesOf(settings: DebtWsSettings): string[] {
+  return settings.not_chased_contacts.filter((x) => !UUID.test(x));
+}
+
 export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
   const now = deps.now();
-  const book = await loadBook(deps.store, { now });
+  // One read of the open invoices, shared by the book and "Total owed to us", so the
+  // breakdown always adds up to the same invoices the chart is drawn from.
+  const openInvoices = await deps.store.openInvoices();
+  const book = await loadBook(deps.store, { now, openInvoices });
   const weekStart = mondayOf(book.today);
-  const [statements, paid] = await Promise.all([
+  const [statements, paid, xeroCheck] = await Promise.all([
     deps.store.statementsForWeek(weekStart),
     paidThisWeek(deps.store, book.today),
+    xeroCheckFor(deps, now),
   ]);
   const open = book.entries.filter((e) => e.open);
   const notDue = open.filter((e) => e.category === null);
@@ -846,6 +881,13 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
     },
     not_chased: notChasedGroups(open),
     needs_a_look: book.needsALook,
+    // Every open invoice, broken down (debt_ws_report.ts totalOwedFrom), and whether our
+    // Xero copy matched Xero at the last hourly check. Display only: nothing here is chased.
+    total_owed: totalOwedFrom(
+      placeOpenInvoices(book, openInvoices),
+      notChasedNamesOf(book.settings),
+    ),
+    xero_check: xeroCheck,
     paid_this_week: paid,
     jan_list: {
       visit_date: book.janVisitDate,
@@ -2286,6 +2328,7 @@ export async function debtWsStatementSend(
       to: company.to_email!,
       subject: view.subject,
       htmlBody: view.html,
+      signature: DEBT_WS_STATEMENT_SIGNATURE,
     });
   } catch (error) {
     // The email may have gone: the claim stays (status sending) so it never sends twice.
@@ -3356,7 +3399,7 @@ async function loadDebtReport(
   const open = await deps.store.openInvoices();
   const book = await loadBook(deps.store, { now, openInvoices: open });
   const today = book.today;
-  const [statements, payments, syncedAt, bank, feed] = await Promise.all([
+  const [statements, payments, syncedAt, bank, feed, xeroCheck] = await Promise.all([
     deps.store.statementsForWeek(mondayOf(today)),
     // The extras never stop the report: a read that fails shows as "not read".
     deps.store.paymentsBetween(addDays(today, -29), today).catch((error) => {
@@ -3375,6 +3418,7 @@ async function loadDebtReport(
       deps,
       book.entries.filter((e) => e.open).map((e) => bankFromOf(e.inv)),
     ),
+    xeroCheckFor(deps, now),
   ]);
   const paidJobIds = [
     ...new Set(
@@ -3402,6 +3446,7 @@ async function loadDebtReport(
     feed: feed ? { txs: feed.txs, truncated: feed.truncated || !coversAll } : null,
     syncedAt,
     preparedBy,
+    xeroCheck,
   });
 }
 

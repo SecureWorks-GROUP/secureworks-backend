@@ -1,4 +1,4 @@
--- Prerequisites for 20261019120100_job_client_signoffs: jobs, job_media, feature_flags and the API
+-- Prerequisites for 20261020170100_job_client_signoffs: jobs, job_media, feature_flags and the API
 -- roles, all created by earlier registered setups (checked here).
 DO $$
 DECLARE t text;
