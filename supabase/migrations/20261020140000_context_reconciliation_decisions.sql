@@ -11,9 +11,11 @@
 --    CTX-01 (the ladder placing one message on all candidate jobs automatically).
 -- 3. context_event_jobs(event): the one read of which jobs a row is on and how sure. Consumers
 --    that read business_events.job_id move to it slice by slice.
--- 4. context_recon_hold_decided: while a decision's evidence still matches, no re-placement path
---    (reopen, bucket re-run, misfile repair, re-decide triggers) moves the row's placement
---    columns. When the evidence changes the decision stops applying and the row is queued again.
+-- 4. context_recon_hold_decided: while a decision's evidence still matches, a re-placement path
+--    (reopen, bucket re-run, misfile repair, re-decide triggers) that agrees with the person goes
+--    through; one that would move the row away from the person's answer is held and stamped
+--    metadata.recon_held, never silently. When the evidence changes the decision stops applying
+--    and the row is queued again. context_recon_health counts held rows.
 -- 5. context_recon_queue: what needs a person, with cause (ambiguity or a named defect).
 -- 6. context_job_owed_lines, context_job_view: read-time recorded-invoice lines (no stored table;
 --    Xero is authoritative for recorded balances and payment status only) and the job view that
@@ -95,13 +97,20 @@ CREATE TRIGGER cpl_no_truncate BEFORE TRUNCATE ON public.context_placement_links
 -- backfill adds to the payload (audience_basis, builder_refs, to_tag, job_id, ...) stay outside it
 -- and a rebuild, a re-stamp or a relabel never reads as changed evidence. The time is its epoch,
 -- so the session's TimeZone and DateStyle never change the hash. jsonb renders keys in a fixed
--- order. Evidence payload keys (from the writers in _shared/evidence): body, text, message,
--- subject, from, to, cc, email, line, from_line, attachments, transcript,
--- forwarded_correspondence, title, call_status, duration_seconds.
+-- order. Evidence payload keys (from the writers in _shared/evidence): the words (body, text,
+-- message, subject, transcript, turns, words, transcript_version, forwarded_correspondence,
+-- title, body_preview, body_hash, body_pointer), who and where (from, to, cc, email, line,
+-- from_line), what came with it (attachments), and what a call, appointment or task says
+-- (call_status, duration_seconds, start_time, end_time, due_date, appointment_status,
+-- appointment_action, task_action, completed). A content key missing from this list errs
+-- unsafe (a changed row keeps its decision), so a writer that adds one adds it here.
 CREATE OR REPLACE FUNCTION public.context_recon_evidence_keys() RETURNS text[]
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT ARRAY['body','text','message','subject','from','to','cc','email','line','from_line','attachments',
-               'transcript','forwarded_correspondence','title','call_status','duration_seconds']::text[]
+  SELECT ARRAY['body','text','message','subject','transcript','turns','words','transcript_version',
+               'forwarded_correspondence','title','body_preview','body_hash','body_pointer',
+               'from','to','cc','email','line','from_line','attachments',
+               'call_status','duration_seconds','start_time','end_time','due_date','appointment_status',
+               'appointment_action','task_action','completed']::text[]
 $$;
 
 CREATE OR REPLACE FUNCTION public.context_recon_evidence_hash_of(
@@ -220,20 +229,30 @@ $$;
 COMMENT ON FUNCTION public.context_event_jobs(uuid) IS
  'Context reconciliation decisions (20261020140000): the one read of which jobs a captured row is on (placement certain, candidate or none; by person or ladder; reason). Consumers of business_events.job_id move to it.';
 
--- While a decision's evidence still matches, a re-placement path keeps the row's placement as it
--- was: a person's decision outranks any later automatic re-decision. Sorts before
+-- While a decision's evidence still matches, a re-placement that agrees with the person goes
+-- through (confirm or correct onto the decided job, a split onto one of its jobs, unrelated onto
+-- no job), so existing readers of business_events.job_id follow the person's answer when the
+-- ladder reaches it. A re-placement that disagrees is held: the placement columns keep their old
+-- values and the row is stamped metadata.recon_held (decision id, when, the job and status the
+-- writer tried), never silently. context_recon_health counts held rows. Sorts before
 -- context_party_roles_business_event so the roles trigger stamps the placement that stands.
 CREATE OR REPLACE FUNCTION public.context_recon_hold_decided() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE d record;
 BEGIN
-  SELECT x.action, x.evidence_hash INTO d FROM public.context_reconciliation_decisions x
+  SELECT x.id, x.action, x.job_ids, x.evidence_hash INTO d FROM public.context_reconciliation_decisions x
    WHERE x.subject_kind = 'event' AND x.subject_id = OLD.id ORDER BY x.id DESC LIMIT 1;
   IF NOT FOUND OR d.action NOT IN ('confirm','correct','split','unrelated') THEN RETURN NEW; END IF;
   IF d.evidence_hash IS DISTINCT FROM
      public.context_recon_evidence_hash_of(NEW.channel, NEW.direction, NEW.occurred_at, NEW.contact_id, NEW.payload) THEN
     RETURN NEW;
   END IF;
+  IF NEW.job_id IS NOT DISTINCT FROM OLD.job_id THEN RETURN NEW; END IF;
+  IF (d.action = 'unrelated' AND NEW.job_id IS NULL) OR (d.action <> 'unrelated' AND NEW.job_id = ANY (d.job_ids)) THEN
+    RETURN NEW;
+  END IF;
+  NEW.metadata := coalesce(NEW.metadata, '{}'::jsonb) || jsonb_build_object('recon_held', jsonb_build_object(
+    'decision_id', d.id, 'at', now(), 'tried_job_id', NEW.job_id, 'tried_status', NEW.attribution_status));
   NEW.job_id := OLD.job_id;
   NEW.attribution_status := OLD.attribution_status;
   NEW.attribution_step := OLD.attribution_step;
@@ -360,7 +379,7 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
       AND nullif(btrim(jc.ghl_contact_id), '') IS NOT NULL),
   near AS (
     SELECT e.id FROM public.business_events e WHERE e.job_id = p_job
-    UNION SELECT e.id FROM public.business_events e WHERE p_job = ANY (e.candidate_job_ids)
+    UNION SELECT e.id FROM public.business_events e WHERE e.candidate_job_ids @> ARRAY[p_job]
     UNION SELECT l.event_id FROM public.context_placement_links l WHERE l.job_id = p_job
     UNION SELECT e.id FROM public.business_events e JOIN party ON e.contact_id = party.contact_id),
   placed AS (
@@ -399,6 +418,18 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
   WHERE EXISTS (SELECT 1 FROM j)
 $$;
 
+-- Counts for the daily health row: held re-placements (all time and since p_since) and the
+-- queue by cause.
+CREATE OR REPLACE FUNCTION public.context_recon_health(p_since timestamptz DEFAULT now() - interval '1 day')
+RETURNS jsonb LANGUAGE sql STABLE AS $$
+  SELECT jsonb_build_object(
+    'held_total', (SELECT count(*) FROM public.business_events e WHERE e.metadata ? 'recon_held'),
+    'held_since', (SELECT count(*) FROM public.business_events e
+                   WHERE e.metadata ? 'recon_held' AND (e.metadata -> 'recon_held' ->> 'at')::timestamptz >= p_since),
+    'queue_by_cause', coalesce((SELECT jsonb_object_agg(cause, n) FROM
+                       (SELECT q.cause, count(*) AS n FROM public.context_recon_queue() q GROUP BY q.cause) c), '{}'::jsonb))
+$$;
+
 DO $$
 DECLARE f text;
 BEGIN
@@ -415,7 +446,8 @@ BEGIN
     'public.context_recon_hold_decided()',
     'public.context_recon_queue(timestamptz)',
     'public.context_job_owed_lines(uuid[])',
-    'public.context_job_view(uuid)'] LOOP
+    'public.context_job_view(uuid)',
+    'public.context_recon_health(timestamptz)'] LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %s FROM anon, authenticated', f);
