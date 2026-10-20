@@ -77,8 +77,13 @@
 --   - CACHE 1 and NO CYCLE: with a per-session cache, two sessions could
 --     hand out seq out of order. The contract checks both.
 --   - As of a time t: each event also carries detail_json.at, one
---     clock_timestamp() per transaction and group, taken when the trigger
---     first holds the group's lock in that transaction. A reader cuts off by
+--     clock_timestamp() per transaction and group, read by the trigger only
+--     after it holds the group's lock, kept on that run's
+--     quote_option_settle_runs row (run_at, xact_id) and reused by later runs
+--     of the same transaction for that group. Nothing a caller can set is
+--     read, so a time preset before the lock wait cannot carry over (checker
+--     finding on c12dcf8). If the run row could not be written, that run
+--     reads the clock again, still under the lock. A reader cuts off by
 --     at <= t and orders by seq. So a cutoff takes all or none of one
 --     transaction's events for a job: no state from the middle of a
 --     transaction (a clear before its re-supersede) is ever returned.
@@ -89,9 +94,7 @@
 --     clock step back). Residual: an event counts from its at, not from its
 --     commit. Until that transaction commits, a later read can see an as-of
 --     answer change; the window is from the first lock to commit, which the
---     code does not bound. A value preset in the transaction is kept only if
---     it lies inside the transaction, so a writer in the same transaction
---     can move at only within its own window.
+--     code does not bound.
 --   - Mixed or missing seq (condition C2): a supersede or unsupersede event
 --     without a valid seq, or without an at that is a valid time, is from no
 --     writer here; readers answer
@@ -188,58 +191,6 @@ $$;
 CREATE SEQUENCE IF NOT EXISTS public.quote_option_event_seq
   AS bigint INCREMENT BY 1 MINVALUE 1 NO MAXVALUE START WITH 1 CACHE 1 NO CYCLE;
 REVOKE ALL ON SEQUENCE public.quote_option_event_seq FROM PUBLIC, anon, authenticated, service_role;
--- One as-of time per transaction and group (see "Event order"): the
--- trigger sets it when it first holds the group's lock in a transaction;
--- every supersede event the helpers write in that transaction for that group
--- carries it. A transaction-local setting, so it ends with the transaction
--- and reverts with a rolled-back block.
-CREATE OR REPLACE FUNCTION public.fence_quote_option_at_key(p_group uuid)
-RETURNS text
-LANGUAGE sql IMMUTABLE
-AS $$
-  SELECT 'sw.qo_at_' || replace(p_group::text, '-', '_')
-$$;
--- Called by the trigger right after it takes the group lock. Keeps a value
--- already set in this transaction only if it lies inside this transaction
--- (from its start to now); anything else, or unreadable, is replaced by now.
-CREATE OR REPLACE FUNCTION public.fence_quote_option_take_run_at(p_group uuid)
-RETURNS timestamptz
-LANGUAGE plpgsql
-SET search_path = public, pg_temp
-AS $$
-DECLARE
-  v_at timestamptz;
-  v_now timestamptz := clock_timestamp();
-BEGIN
-  BEGIN
-    v_at := nullif(current_setting(public.fence_quote_option_at_key(p_group), true), '')::timestamptz;
-  EXCEPTION WHEN OTHERS THEN
-    v_at := NULL;
-  END;
-  IF v_at IS NULL OR v_at < now() OR v_at > v_now THEN
-    v_at := v_now;
-    PERFORM set_config(public.fence_quote_option_at_key(p_group), v_at::text, true);
-  END IF;
-  RETURN v_at;
-END $$;
--- Read by the helpers. Missing means the caller is not the trigger under the
--- lock: refuse, so the trigger's block rolls back and records the failure.
-CREATE OR REPLACE FUNCTION public.fence_quote_option_run_at(p_group uuid)
-RETURNS timestamptz
-LANGUAGE plpgsql
-SET search_path = public, pg_temp
-AS $$
-DECLARE
-  v_at timestamptz;
-BEGIN
-  v_at := nullif(current_setting(public.fence_quote_option_at_key(p_group), true), '')::timestamptz;
-  IF v_at IS NULL OR v_at < now() THEN
-    RAISE EXCEPTION 'quote_option_run_at_missing' USING ERRCODE = '55000';
-  END IF;
-  RETURN v_at;
-END $$;
-REVOKE ALL ON FUNCTION public.fence_quote_option_take_run_at(uuid) FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.fence_quote_option_run_at(uuid) FROM PUBLIC, anon, authenticated, service_role;
 COMMENT ON SEQUENCE public.quote_option_event_seq IS
   'Order of quote_option_superseded and quote_option_unsuperseded job_events per job (detail_json.seq). Taken under the option group''s advisory lock; created_at and id do not order these events.';
 
@@ -261,12 +212,19 @@ CREATE TABLE public.quote_option_settle_runs (
   error text,
   review_sqlstate text,
   resolved_at timestamptz,
-  resolved_by uuid
+  resolved_by uuid,
+  -- The transaction that wrote the row, and the as-of time its run stamped
+  -- on its supersede events (see "Event order"). Written only by the
+  -- trigger, as owner; no API role can write either.
+  xact_id bigint NOT NULL DEFAULT txid_current(),
+  run_at timestamptz
 );
 ALTER TABLE public.quote_option_settle_runs NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.quote_option_settle_runs DISABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.quote_option_settle_runs FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT, UPDATE (resolved_at, resolved_by) ON public.quote_option_settle_runs TO service_role;
+CREATE INDEX idx_quote_option_settle_runs_group_xact
+  ON public.quote_option_settle_runs (quote_option_group_id, xact_id);
 CREATE INDEX idx_quote_option_settle_runs_unsettled
   ON public.quote_option_settle_runs (created_at) WHERE settled_at IS NULL AND resolved_at IS NULL;
 COMMENT ON TABLE public.quote_option_settle_runs IS
@@ -366,7 +324,8 @@ CREATE OR REPLACE FUNCTION public.fence_quote_option_mark_options(
   p_winner uuid,
   p_winner_status text,
   p_group uuid,
-  p_candidates uuid[]
+  p_candidates uuid[],
+  p_at timestamptz
 ) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -376,6 +335,9 @@ DECLARE
   v_row public.jobs%ROWTYPE;
   v_reason text;
 BEGIN
+  IF p_at IS NULL THEN
+    RAISE EXCEPTION 'quote_option_run_at_missing' USING ERRCODE = '55000';
+  END IF;
   FOR v_row IN SELECT * FROM public.jobs j
                 WHERE j.id = ANY (p_candidates) AND j.id <> p_winner ORDER BY j.id LOOP
     CONTINUE WHEN v_row.superseded_at IS NOT NULL
@@ -400,7 +362,7 @@ BEGIN
                                  'quote_option_group_id', p_group,
                                  'accepted_status', p_winner_status,
                                  'seq', nextval('public.quote_option_event_seq'),
-                                 'at', public.fence_quote_option_run_at(p_group)));
+                                 'at', p_at));
     END IF;
   END LOOP;
 END $$;
@@ -410,7 +372,8 @@ CREATE OR REPLACE FUNCTION public.fence_quote_option_clear_mark(
   p_job_id uuid,
   p_reason text,
   p_trigger_job_id uuid,
-  p_group uuid
+  p_group uuid,
+  p_at timestamptz
 ) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -419,6 +382,9 @@ AS $$
 DECLARE
   v_was uuid;
 BEGIN
+  IF p_at IS NULL THEN
+    RAISE EXCEPTION 'quote_option_run_at_missing' USING ERRCODE = '55000';
+  END IF;
   SELECT superseded_by_job_id INTO v_was FROM public.jobs
    WHERE id = p_job_id AND superseded_at IS NOT NULL;
   IF FOUND THEN
@@ -428,7 +394,7 @@ BEGIN
             jsonb_build_object('reason', p_reason, 'was_superseded_by_job_id', v_was,
                                'trigger_job_id', p_trigger_job_id, 'quote_option_group_id', p_group,
                                'seq', nextval('public.quote_option_event_seq'),
-                               'at', public.fence_quote_option_run_at(p_group)));
+                               'at', p_at));
   END IF;
 END $$;
 
@@ -482,8 +448,8 @@ CREATE TRIGGER trg_job_events_quote_option_keep_update
 -- fixed search_path): whoever changes a job's status, through any role, the
 -- trigger's reads, locks and job_events writes behave the same and are not
 -- refused by RLS or grants. Nobody calls the helpers directly.
-REVOKE ALL ON FUNCTION public.fence_quote_option_mark_options(uuid, text, uuid, uuid[]) FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uuid) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.fence_quote_option_mark_options(uuid, text, uuid, uuid[], timestamptz) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.fence_quote_option_clear_mark(uuid, text, uuid, uuid, timestamptz) FROM PUBLIC, anon, authenticated, service_role;
 
 -- Fires when a grouped job moves into or out of a won status (see the
 -- header). The trigger's own work runs in its own block. If it fails, that
@@ -519,6 +485,7 @@ DECLARE
   v_flag_on boolean;
   v_run bigint;
   v_strict boolean := false;
+  v_at timestamptz;
 BEGIN
   -- The switch fails closed: off, missing or unreadable (a cancel, a
   -- timeout, a permission error, an assert failure, anything) means the trigger writes
@@ -553,8 +520,15 @@ BEGIN
       END IF;
       PERFORM pg_sleep(0.05);
     END LOOP;
-    -- The as-of time for this transaction's supersede events in this group.
-    PERFORM public.fence_quote_option_take_run_at(v_group);
+    -- The as-of time, taken only now that the group lock is held. An earlier
+    -- run of this transaction for this group (its run row, written by this
+    -- trigger only) already took one under this lock: reuse it, so the
+    -- transaction's events share one time. Otherwise read the clock. Nothing
+    -- a caller can set is read.
+    SELECT min(r.run_at) INTO v_at FROM public.quote_option_settle_runs r
+     WHERE r.quote_option_group_id = v_group AND r.xact_id = txid_current() AND r.run_at IS NOT NULL;
+    v_at := coalesce(v_at, clock_timestamp());
+    UPDATE public.quote_option_settle_runs SET run_at = v_at WHERE id = v_run;
     -- Lock every other member in id order without waiting. Each is then read
     -- again under its lock; one another transaction holds is busy.
     FOR v_id IN SELECT j.id FROM public.jobs j
@@ -582,7 +556,7 @@ BEGIN
         FOR v_id IN SELECT j.id FROM public.jobs j
                      WHERE (j.id = ANY (v_locked) OR j.id = NEW.id) AND j.superseded_at IS NOT NULL
                      ORDER BY j.id LOOP
-          PERFORM public.fence_quote_option_clear_mark(v_id, 'more_than_one_option_won', NEW.id, v_group);
+          PERFORM public.fence_quote_option_clear_mark(v_id, 'more_than_one_option_won', NEW.id, v_group, v_at);
         END LOOP;
         INSERT INTO public.job_events (job_id, event_type, detail_json)
         VALUES (NEW.id, 'quote_option_review_needed',
@@ -593,14 +567,14 @@ BEGIN
         IF NEW.superseded_at IS NOT NULL THEN
           -- The client accepted an option already marked superseded (its
           -- superseder is no longer won). It is the winner now.
-          PERFORM public.fence_quote_option_clear_mark(NEW.id, 'accepted_after_superseded', NEW.id, v_group);
+          PERFORM public.fence_quote_option_clear_mark(NEW.id, 'accepted_after_superseded', NEW.id, v_group, v_at);
           INSERT INTO public.job_events (job_id, event_type, detail_json)
           VALUES (NEW.id, 'quote_option_review_needed',
                   jsonb_build_object('reason', 'accepted_after_superseded',
                                      'was_superseded_by_job_id', NEW.superseded_by_job_id,
                                      'quote_option_group_id', v_group));
         END IF;
-        PERFORM public.fence_quote_option_mark_options(NEW.id, NEW.status, v_group, v_locked);
+        PERFORM public.fence_quote_option_mark_options(NEW.id, NEW.status, v_group, v_locked, v_at);
       END IF;
     ELSE
       -- The job left a won status.
@@ -608,7 +582,7 @@ BEGIN
         -- Acceptance reversed: the options it superseded are live again.
         FOR v_id IN SELECT j.id FROM public.jobs j
                      WHERE j.id = ANY (v_locked) AND j.superseded_by_job_id = NEW.id ORDER BY j.id LOOP
-          PERFORM public.fence_quote_option_clear_mark(v_id, 'acceptance_reversed', NEW.id, v_group);
+          PERFORM public.fence_quote_option_clear_mark(v_id, 'acceptance_reversed', NEW.id, v_group, v_at);
         END LOOP;
       ELSIF EXISTS (SELECT 1 FROM public.jobs j
                      WHERE j.id = ANY (v_locked) AND j.superseded_by_job_id = NEW.id) THEN
@@ -622,7 +596,7 @@ BEGIN
       -- including to this job if it is open again.
       IF cardinality(v_won) = 1 AND cardinality(v_busy) = 0 THEN
         SELECT j.status INTO v_won_status FROM public.jobs j WHERE j.id = v_won[1];
-        PERFORM public.fence_quote_option_mark_options(v_won[1], v_won_status, v_group, v_locked || NEW.id);
+        PERFORM public.fence_quote_option_mark_options(v_won[1], v_won_status, v_group, v_locked || NEW.id, v_at);
       END IF;
     END IF;
 

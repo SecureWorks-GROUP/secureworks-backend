@@ -44,8 +44,8 @@ SELECT pg_temp.qo_assert(has_function_privilege('service_role', 'public.link_fen
  'the link function must be the service role''s only');
 SELECT pg_temp.qo_assert(NOT EXISTS (
   SELECT 1 FROM unnest(ARRAY['public', 'anon', 'authenticated', 'service_role']) r(role),
-       unnest(ARRAY['public.fence_quote_option_mark_options(uuid, text, uuid, uuid[])',
-                    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)']) f(fn)
+       unnest(ARRAY['public.fence_quote_option_mark_options(uuid, text, uuid, uuid[], timestamptz)',
+                    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid, timestamptz)']) f(fn)
    WHERE has_function_privilege(r.role, f.fn, 'EXECUTE')),
  'the mark and clear helpers must not be callable directly by any API role');
 SELECT pg_temp.qo_assert((SELECT count(*) = 3
@@ -53,8 +53,8 @@ SELECT pg_temp.qo_assert((SELECT count(*) = 3
    AND bool_and(coalesce(p.proconfig @> ARRAY['search_path=public, pg_temp'], false))
   FROM pg_proc p
   WHERE p.oid IN ('public.jobs_quote_option_supersede()'::regprocedure,
-    'public.fence_quote_option_mark_options(uuid, text, uuid, uuid[])'::regprocedure,
-    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid)'::regprocedure)),
+    'public.fence_quote_option_mark_options(uuid, text, uuid, uuid[], timestamptz)'::regprocedure,
+    'public.fence_quote_option_clear_mark(uuid, text, uuid, uuid, timestamptz)'::regprocedure)),
  'the trigger and its helpers must run as their owner with a fixed search_path');
 SELECT pg_temp.qo_assert(NOT EXISTS (SELECT 1 FROM pg_trigger
   WHERE tgrelid = 'public.quote_option_settle_runs'::regclass AND NOT tgisinternal),
@@ -70,7 +70,9 @@ SELECT pg_temp.qo_assert(has_table_privilege('service_role', 'public.quote_optio
  AND has_column_privilege('service_role', 'public.quote_option_settle_runs', 'resolved_at', 'UPDATE')
  AND has_column_privilege('service_role', 'public.quote_option_settle_runs', 'resolved_by', 'UPDATE')
  AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'settled_at', 'UPDATE')
- AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'sqlstate', 'UPDATE'),
+ AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'sqlstate', 'UPDATE')
+ AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'run_at', 'UPDATE')
+ AND NOT has_column_privilege('service_role', 'public.quote_option_settle_runs', 'xact_id', 'UPDATE'),
  'the run table must be read and resolved by the service role only, never inserted, edited or deleted');
 SELECT pg_temp.qo_assert((SELECT NOT relrowsecurity AND NOT relforcerowsecurity FROM pg_class
   WHERE oid = 'public.quote_option_settle_runs'::regclass), 'the run table must have no row level security');
@@ -546,10 +548,45 @@ SELECT pg_temp.qo_assert((SELECT count(*) = 6 AND count(DISTINCT e.detail_json->
     '9c000000-0000-4000-8000-0000000009b1', '9c000000-0000-4000-8000-0000000009c1')
    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
  'every event of one transaction for one group must share one at');
--- Outside the trigger the helpers' as-of time is missing, and they refuse.
+-- Without the trigger's as-of time the helpers refuse.
 SELECT pg_temp.qo_assert(pg_temp.qo_raises_code($q$
- SELECT public.fence_quote_option_run_at('9c000000-0000-4000-8000-0000000000aa')
-$q$, '55000'), 'the as-of time must be refused where no trigger run set it');
+ SELECT public.fence_quote_option_clear_mark('9c000000-0000-4000-8000-0000000009b1', 'qo_contract', NULL,
+   '9c000000-0000-4000-8000-0000000009a1', NULL)
+$q$, '55000'), 'a helper must refuse to write an event without the run''s as-of time');
+-- The run's as-of time is kept on its run row, by the trigger only, for this transaction.
+SELECT pg_temp.qo_assert((SELECT count(*) > 0 AND bool_and(r.xact_id = txid_current())
+   AND count(*) FILTER (WHERE r.run_at IS NULL) = 0
+  FROM public.quote_option_settle_runs r WHERE r.quote_option_group_id = '9c000000-0000-4000-8000-0000000009a1'
+   AND r.settled_at IS NOT NULL),
+ 'every settled group-9 run must carry this transaction''s id and its as-of time');
+SELECT pg_temp.qo_assert((SELECT count(DISTINCT r.run_at) = 1 AND min(r.run_at) = (
+    SELECT min((e.detail_json->>'at')::timestamptz) FROM public.job_events e
+     WHERE e.job_id = '9c000000-0000-4000-8000-0000000009b1' AND e.event_type = 'quote_option_superseded')
+  FROM public.quote_option_settle_runs r WHERE r.quote_option_group_id = '9c000000-0000-4000-8000-0000000009a1'
+   AND r.settled_at IS NOT NULL),
+ 'the events must carry the as-of time their first run kept, and later runs must reuse it');
+-- Checker finding on c12dcf8: a time preset in the transaction before the lock wait carried
+-- over. Group 10 (customer c-10) has had no run in this transaction. The old setting is preset
+-- to the transaction's start, the earliest value c12dcf8 would have kept; the run must ignore it
+-- and read the clock under the lock. (The two-session form, where the preset lands earlier than
+-- another transaction's committed at, needs two sessions: a checker probe.)
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9c000000-0000-4000-8000-00000000a0a1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-10'),
+ ('9c000000-0000-4000-8000-00000000a0b1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-10');
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-00000000a0b1', '9c000000-0000-4000-8000-00000000a0a1', NULL, NULL);
+SELECT set_config('sw.qo_at_' || replace('9c000000-0000-4000-8000-00000000a0a1', '-', '_'), now()::text, true);
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-00000000a0a1';
+SELECT pg_temp.qo_assert((SELECT (e.detail_json->>'at')::timestamptz > now()
+  FROM public.job_events e WHERE e.job_id = '9c000000-0000-4000-8000-00000000a0b1'
+   AND e.event_type = 'quote_option_superseded'),
+ 'a time preset before the lock must not become the run''s as-of time');
+SELECT pg_temp.qo_assert((SELECT (e.detail_json->>'at')::timestamptz > (
+    SELECT max((x.detail_json->>'at')::timestamptz) FROM public.job_events x
+     WHERE x.job_id::text LIKE '9c000000-%' AND x.job_id <> '9c000000-0000-4000-8000-00000000a0b1'
+       AND x.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded'))
+  FROM public.job_events e WHERE e.job_id = '9c000000-0000-4000-8000-00000000a0b1'
+   AND e.event_type = 'quote_option_superseded'),
+ 'a first run must stamp a time later than every event already written');
 SELECT pg_temp.qo_assert(NOT EXISTS (
   SELECT 1 FROM (SELECT e.job_id, (e.detail_json->>'at')::timestamptz AS at,
                         lag((e.detail_json->>'at')::timestamptz) OVER (PARTITION BY e.job_id
