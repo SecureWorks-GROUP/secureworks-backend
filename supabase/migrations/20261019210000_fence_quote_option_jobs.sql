@@ -18,8 +18,8 @@
 --      pointer is current state only. The job_events log is the history: a
 --      job is not live from each quote_option_superseded event to the next
 --      quote_option_unsuperseded event for it, and live outside those.
---      Order those events by detail_json->>'seq', never by created_at or id
---      (see "Event order" below).
+--      Order those events by detail_json->>'seq', never by created_at or id;
+--      cut "state as of t" off by detail_json->>'at' (see "Event order").
 --   3. When a grouped job moves into a won status, an AFTER UPDATE trigger
 --      marks the other open options superseded (pointer, time, one event
 --      each). It never changes a status, so no status side effect fires.
@@ -76,10 +76,23 @@
 --     go and their seq values are skipped, never reused. Gaps mean nothing.
 --   - CACHE 1 and NO CYCLE: with a per-session cache, two sessions could
 --     hand out seq out of order. The contract checks both.
+--   - As of a time t: each event also carries detail_json.at, the
+--     clock_timestamp() taken with its seq under the lock. A reader cuts off
+--     by at <= t and orders by seq. created_at (transaction start) cannot be
+--     the cutoff: a transaction that started first but waited for the lock
+--     writes later with an earlier created_at (CIO S1-L1, condition C1).
+--     Per job, at does not decrease as seq rises (barring a system clock
+--     step back). Residual: an event counts from its at, not from its
+--     commit; the gap is the rest of that one locked trigger run and its
+--     transaction, during which the event is not yet visible to others.
+--   - Mixed or missing seq (condition C2): a supersede or unsupersede event
+--     without a valid seq or at is from no writer here; readers answer
+--     unknown for that job and never guess. The switch-on proof counts such
+--     events (expected 0).
 --   - The events are kept: a guard trigger on job_events refuses to delete
 --     one while its job exists (ops-api delete_note deletes any row by id),
---     and refuses an update that changes its event_type, job_id, created_at
---     or seq (other detail may change). Deleting the job itself still
+--     and refuses an update that changes its event_type, job_id, created_at,
+--     seq or at (other detail may change). Deleting the job itself still
 --     cascades them away.
 -- Limits: a direct UPDATE of jobs.quote_option_group_id by an owner, outside
 -- link_fence_quote_option, would bypass this; an event written by anything
@@ -326,7 +339,8 @@ BEGIN
               jsonb_build_object('superseded_by_job_id', p_winner,
                                  'quote_option_group_id', p_group,
                                  'accepted_status', p_winner_status,
-                                 'seq', nextval('public.quote_option_event_seq')));
+                                 'seq', nextval('public.quote_option_event_seq'),
+                                 'at', clock_timestamp()));
     END IF;
   END LOOP;
 END $$;
@@ -353,13 +367,14 @@ BEGIN
     VALUES (p_job_id, 'quote_option_unsuperseded',
             jsonb_build_object('reason', p_reason, 'was_superseded_by_job_id', v_was,
                                'trigger_job_id', p_trigger_job_id, 'quote_option_group_id', p_group,
-                               'seq', nextval('public.quote_option_event_seq')));
+                               'seq', nextval('public.quote_option_event_seq'),
+                               'at', clock_timestamp()));
   END IF;
 END $$;
 
 -- Keep the supersede history: while its job exists, a quote_option_superseded
 -- or quote_option_unsuperseded event is not deleted, and an update may not
--- change what orders or places it (event_type, job_id, created_at, seq).
+-- change what orders or places it (event_type, job_id, created_at, seq, at).
 -- Runs as owner so the job read is not hidden by RLS. A job's own deletion
 -- cascades here after the job row is gone, so it is allowed.
 CREATE OR REPLACE FUNCTION public.fence_quote_option_event_guard()
@@ -380,10 +395,11 @@ BEGIN
   IF NEW.event_type IS DISTINCT FROM OLD.event_type
      OR NEW.job_id IS DISTINCT FROM OLD.job_id
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
-     OR (NEW.detail_json -> 'seq') IS DISTINCT FROM (OLD.detail_json -> 'seq') THEN
+     OR (NEW.detail_json -> 'seq') IS DISTINCT FROM (OLD.detail_json -> 'seq')
+     OR (NEW.detail_json -> 'at') IS DISTINCT FROM (OLD.detail_json -> 'at') THEN
     RAISE EXCEPTION 'quote_option_event_immutable'
       USING ERRCODE = '42501',
-            DETAIL = format('event %s: event_type, job_id, created_at and seq of supersede history do not change', OLD.id);
+            DETAIL = format('event %s: event_type, job_id, created_at, seq and at of supersede history do not change', OLD.id);
   END IF;
   RETURN NEW;
 END $$;

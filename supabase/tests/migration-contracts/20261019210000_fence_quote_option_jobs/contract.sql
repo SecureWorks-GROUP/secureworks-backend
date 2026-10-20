@@ -520,6 +520,20 @@ SELECT pg_temp.qo_assert((SELECT bool_and(e.detail_json->>'seq' ~ '^[1-9][0-9]*$
   FROM public.job_events e WHERE e.job_id::text LIKE '9c000000-%'
    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
  'every supersede and unsupersede event must carry its own seq');
+-- As-of cutoff (CIO condition C1): every event carries at, a timestamp no earlier than its
+-- transaction's start, and per job at never decreases as seq rises.
+SELECT pg_temp.qo_assert((SELECT bool_and((e.detail_json->>'at')::timestamptz >= e.created_at)
+  FROM public.job_events e WHERE e.job_id::text LIKE '9c000000-%'
+   AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
+ 'every supersede and unsupersede event must carry at, no earlier than its created_at');
+SELECT pg_temp.qo_assert(NOT EXISTS (
+  SELECT 1 FROM (SELECT e.job_id, (e.detail_json->>'at')::timestamptz AS at,
+                        lag((e.detail_json->>'at')::timestamptz) OVER (PARTITION BY e.job_id
+                          ORDER BY (e.detail_json->>'seq')::bigint) AS prev_at
+                   FROM public.job_events e WHERE e.job_id::text LIKE '9c000000-%'
+                    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')) x
+   WHERE x.at < x.prev_at),
+ 'per job, at must not decrease as seq rises');
 SELECT pg_temp.qo_assert(NOT EXISTS (
   SELECT 1 FROM public.jobs j
    CROSS JOIN LATERAL (SELECT e.event_type FROM public.job_events e
@@ -555,6 +569,10 @@ SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
   WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
 $q$), 'a supersede event''s seq must not be removed');
 SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('at', now() - interval '1 day')
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event''s at must not change');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
  UPDATE public.job_events SET event_type = 'note'
   WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
 $q$), 'a supersede event must not be retyped');
@@ -576,7 +594,7 @@ $q$), 'another event must not be retyped into supersede history');
 -- seq), and any change to other event types.
 UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('qo_contract_note', true)
  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded';
-SELECT pg_temp.qo_assert((SELECT bool_and(detail_json ? 'qo_contract_note' AND detail_json ? 'seq')
+SELECT pg_temp.qo_assert((SELECT bool_and(detail_json ? 'qo_contract_note' AND detail_json ? 'seq' AND detail_json ? 'at')
   FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'),
  'other detail on a supersede event may change while seq is kept');
 SAVEPOINT qo_other_delete;
