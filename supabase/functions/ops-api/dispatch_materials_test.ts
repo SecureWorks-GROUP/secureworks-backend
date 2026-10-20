@@ -2610,6 +2610,9 @@ Deno.test("variation: a newer frozen fence scope adds only the difference, names
   )!;
   kit.quantity = 9;
   const before = structuredClone(db.tables.job_material_lines);
+  // Freezing revision 5 supersedes revision 3, as scope_freeze does.
+  db.tables.scope_revisions.find((r) => r.revision_number === 3)!.status =
+    "superseded";
   db.tables.scope_revisions.push(
     fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
   );
@@ -2723,6 +2726,7 @@ Deno.test("variation: refused with no scope lines, unrecorded provenance, a miss
     fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
   ]);
   unrecorded.tables.job_material_lines[0].source_line_id = null;
+  unrecorded.tables.job_material_lines[1].source_version = null;
   await refused(
     call(unrecorded, "dispatch_materials_suggest_changes", {
       job_id: JOB.fence,
@@ -2735,9 +2739,11 @@ Deno.test("variation: refused with no scope lines, unrecorded provenance, a miss
   const lost = await fenceJobSuggestedAt([
     fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
   ]);
-  lost.tables.scope_revisions = [
+  // The base revision can only be read while frozen or superseded.
+  lost.tables.scope_revisions[0].status = "draft";
+  lost.tables.scope_revisions.push(
     fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
-  ];
+  );
   const writes = lost.writes().length;
   await refused(
     call(lost, "dispatch_materials_suggest_changes", {

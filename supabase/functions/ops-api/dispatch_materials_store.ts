@@ -950,15 +950,17 @@ async function readFrozenScope(
   jobId: string,
   revisionId: string | null = null,
 ): Promise<{ scope: any; revision: number; revision_id: string }> {
-  // With a revision id: that exact frozen revision of this job (the one a
-  // job's scope lines were taken from). Without: the latest frozen one.
+  // With a revision id: that exact revision of this job (the one a job's
+  // scope lines were taken from). Freezing a newer revision moves the older
+  // one to `superseded`, so either state is read; a draft never is. Without:
+  // the latest frozen one.
   let query = client.from("scope_revisions")
     .select("id, revision_number, scope_canonical_text")
-    .eq("job_id", jobId)
-    .eq("status", "frozen");
+    .eq("job_id", jobId);
   query = revisionId
-    ? query.eq("id", revisionId)
-    : query.order("revision_number", { ascending: false }).limit(1);
+    ? query.eq("id", revisionId).in("status", ["frozen", "superseded"])
+    : query.eq("status", "frozen")
+      .order("revision_number", { ascending: false }).limit(1);
   const { data: revision, error } = await query.maybeSingle();
   if (error) readFailed("frozen scope read", error);
   if (!revision) {
@@ -1330,6 +1332,7 @@ export async function suggestDispatchScopeChanges(
   if (
     scopeLines.some((row) =>
       !row?.source_line_id || !row?.source_version_id ||
+      !/^\d+$/.test(String(row?.source_version ?? "")) ||
       row?.source_kind !== expectedKind
     )
   ) {

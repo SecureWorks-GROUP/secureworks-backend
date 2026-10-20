@@ -239,7 +239,14 @@ in one revision is `<key>#2`, and the two add up when compared.
   (`changes.removed`, `after: 0`), or that has no quantity on either side
   (`changes.unchecked`) is listed as `{ description, unit, before, after }` for a
   person; nothing is written for it. A revision that only reduces adds nothing,
-  so the base stays and the reduction keeps being listed.
+  so the base stays and the reduction keeps being listed. Once a press adds
+  anything, the newer revision becomes the base, so its reductions are listed
+  on that press only: act on them then.
+- The base revision is read whether it is still `frozen` or was `superseded` by
+  the newer freeze; a draft never is.
+- Materials are matched by key, so a material the scoper renamed or gave a new
+  unit reads as removed plus new: the new name's full quantity is added and the
+  old one is listed under `removed`. Check both before ordering.
 
 | Case | Answer |
 |---|---|
@@ -249,7 +256,7 @@ in one revision is `<key>#2`, and the two add up when compared.
 | Work type not `patio` or `fencing` | 409 `no_suggestion_for_work_type` |
 | Supplier not on the job | 409 `supplier_not_on_job` |
 | No scope lines on the job | 409 `no_scope_lines` (use `dispatch_materials_suggest`) |
-| A scope line without its source recorded (made before the migration) | 409 `source_not_recorded`: compare by hand |
+| A scope line without its source recorded (made before the migration, or with no numeric `source_version`) | 409 `source_not_recorded`: compare by hand |
 | The base revision can no longer be read | 409 `base_scope_missing` |
 | The base revision is newer than the latest frozen one | 409 `base_scope_newer` |
 | A second press landing at the same time | 409 `changes_already_taken` (ids are fixed by job, revision and key) |
