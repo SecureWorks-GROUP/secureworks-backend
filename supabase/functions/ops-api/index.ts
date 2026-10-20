@@ -1376,7 +1376,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
-import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { type ServiceCredentialOptions, verifyServiceCredential } from '../_shared/service_credential.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
 import {
   type JobCloseoutCaller,
@@ -4777,6 +4777,25 @@ export function _authorizeOpsApiAction(input: {
   return { ok: true }
 }
 
+// Actions a pg_cron job calls with `Bearer <sw_service_key()>` (the Vault key).
+// That key is a signature-valid legacy service-role JWT that need not equal the
+// injected SUPABASE_SERVICE_ROLE_KEY, so the default exact-key check sends it to
+// the user-session path and it 401s (AGENTS.md "A pg_cron Bearer Is Not The
+// Function's Service Key"). For these actions only, a JWT whose role claim is
+// exactly service_role is also the server caller, and only while the platform
+// still accepts it (the shared helper's gateway probe: ops-api runs with
+// --no-verify-jwt, so the claim alone proves nothing). Closed list: add an
+// action only with its cron caller and a test in service_credential_handler_test.ts.
+export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new Set([
+  'job_closeout_sweep',
+])
+
+export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
+  return OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS.has(url.searchParams.get('action') || '')
+    ? { legacy: 'service_role_claim' }
+    : {}
+}
+
 export function _preferBearerForOpsApiAction(url: URL): boolean {
   // Browser wrappers may still send the legacy shared key alongside the real
   // signed-in session during cutover. The JWT must be the caller identity for
@@ -5288,7 +5307,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const validKey = Deno.env.get('SW_API_KEY')
   // The service credential this request presented, if Supabase-issued and live
   // (a new secret key, or the legacy key only while Supabase still accepts it).
-  const serviceKey = (await verifyServiceCredential(req.headers))?.token ?? null
+  const serviceKey = (await verifyServiceCredential(req.headers, _opsApiServiceCredentialOptions(_preAuthUrl)))?.token ?? null
   const serviceKeyEnv = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || null
   const apiKeyHeader = req.headers.get('apikey')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
