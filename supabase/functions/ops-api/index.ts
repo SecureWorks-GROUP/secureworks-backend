@@ -482,7 +482,7 @@ import {
 } from './approved_send_actions.ts'
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
-import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
+import { readJobQuotes, readJobVariations, readScopeRevisionAlignment, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
 import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
@@ -18205,10 +18205,11 @@ async function assembleJobDossier(client: any, body: any) {
   // ── State card inputs (state-card-v1): the newest stored brief, read on its
   // own so a busy run cannot push it out of the bounded facts read, and the
   // job's visit outcomes (by job, or by its contact when the row names no job).
-  const [quotesRead, variationsRead, signOffRead, freshnessRead, briefsRead, visitOutcomesRead] = await Promise.all([
+  const [quotesRead, variationsRead, signOffRead, scopeRevisionsRead, freshnessRead, briefsRead, visitOutcomesRead] = await Promise.all([
     readJobQuotes(client, { id: jobId, client_email: jobRow.client_email ?? null }),
     readJobVariations(client, jobId),
     readScopeSignOff(client, jobId),
+    readScopeRevisionAlignment(client, jobId, jobRow.scope_json),
     readJobFreshness(client, jobId),
     safeRead('job_brief', async () => {
       const { data, error } = await client.from('current_job_context_facts')
@@ -18248,6 +18249,7 @@ async function assembleJobDossier(client: any, body: any) {
     quoteReadFailed: !quotesRead.status.ok,
     boundRevision: quotesRead.quotes?.bound_revision ?? null,
     signedOff: signOffRead.signedOff,
+    revisions: scopeRevisionsRead,
   })
   sourceStatus.scope = scopeSourceStatus(scope, signOffRead.code)
 

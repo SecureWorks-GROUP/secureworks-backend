@@ -34,6 +34,7 @@
 // invent one.
 
 import { dispatchAdapter } from "../_shared/release_packet/adapters/dispatch.ts";
+import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
 import { OUR_DOMAINS } from "./makesafe_story.ts";
 
 export const JOB_COMMERCIAL_READ_VERSION = "job-commercial/v1";
@@ -997,6 +998,43 @@ export interface ScopeSummary {
   // Present only for a sealed patio-scoper v2 record (SQ-29): where this
   // scope came from. Never its expected figures.
   scope_record?: PatioScoperRecord;
+  // Present only when the frozen revisions were read (the dossier). Which
+  // content the lines above came from: the job's frozen scope_revisions row,
+  // or the last save when nothing frozen matches or could be read.
+  scope_source?: "frozen_revision" | "last_save";
+  frozen_revision?: ScopeRevisionRef | null;
+  // true: the last save is the frozen revision; false: it changed after the
+  // freeze (unfrozen); null: not known.
+  last_save_matches_frozen?: boolean | null;
+  // Every server revision of this scope, newest first, frozen and superseded
+  // alike. Open one with ops-api get_scope_revision_for_viewer. null when the
+  // read failed (revision_read_code says why), never an empty list.
+  revision_history?: ScopeRevisionRef[] | null;
+  revision_history_more?: boolean;
+  revision_read_code?: string;
+}
+
+export interface ScopeRevisionRef {
+  scope_revision_id: string;
+  revision_number: number | null;
+  status: string | null;
+  tool_kind: string | null;
+  tool_version: string | null;
+  frozen_at: string | null;
+  superseded_at: string | null;
+  superseded_by_scope_revision_id: string | null;
+}
+
+export interface ScopeRevisionAlignment {
+  ok: boolean;
+  code?: string;
+  history: ScopeRevisionRef[];
+  more: boolean;
+  frozen: ScopeRevisionRef | null;
+  last_save_matches_frozen: boolean | null;
+  // The frozen revision's own scope, read only when the last save differs and
+  // only once its text hashes to the stored scope_hash.
+  frozen_scope_json: Record<string, unknown> | null;
 }
 
 export interface PatioScoperRecord {
@@ -1010,9 +1048,6 @@ export interface PatioScoperRecord {
   parent_revision_id: string | null;
   frozen_id: string | null;
   sealed_at: string | null;
-  // Only the current revision is kept on the job: save_scope replaces
-  // scope_json whole, so a parent revision is named, never readable here.
-  parent_readable: false;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> | null {
@@ -1205,7 +1240,6 @@ function patioScoperSummary(
       parent_revision_id: str(rev.parentRevisionId),
       frozen_id: str(rev.frozenId),
       sealed_at: str(rev.sealedAt),
-      parent_readable: false,
     },
   };
 }
@@ -1234,9 +1268,10 @@ export function summariseScope(
     signedOff: { at: string; source: string } | null;
     quoteReadFailed?: boolean;
     boundRevision?: BoundRevision | null;
+    revisions?: ScopeRevisionAlignment;
   },
 ): ScopeSummary {
-  const scopeJson = parseJsonObject(job.scope_json);
+  const lastSave = parseJsonObject(job.scope_json);
   const pricingJson = parseJsonObject(job.pricing_json);
   const scopeUpdatedAt = job.scope_updated_at ?? null;
   const { changed, basis } = changedSinceLastQuote(job, opts);
@@ -1253,6 +1288,39 @@ export function summariseScope(
     changed_since_last_quote: changed,
     changed_since_last_quote_basis: basis,
   };
+
+  // Which content to summarise: the frozen revision when there is one we can
+  // read, else the last save. A freeze says nothing about quote acceptance.
+  let scopeJson = lastSave;
+  const rev = opts.revisions;
+  if (rev) {
+    if (!rev.ok) {
+      Object.assign(base, {
+        scope_source: "last_save",
+        frozen_revision: null,
+        last_save_matches_frozen: null,
+        revision_history: null,
+        revision_read_code: rev.code ?? "scope_revisions_read_failed",
+      });
+    } else {
+      Object.assign(base, {
+        frozen_revision: rev.frozen,
+        last_save_matches_frozen: rev.last_save_matches_frozen,
+        revision_history: rev.history,
+        revision_history_more: rev.more,
+      });
+      if (rev.frozen && rev.last_save_matches_frozen === true) {
+        base.scope_source = "frozen_revision";
+      } else if (rev.frozen && rev.frozen_scope_json) {
+        base.scope_source = "frozen_revision";
+        scopeJson = rev.frozen_scope_json;
+      } else {
+        base.scope_source = "last_save";
+        if (rev.code) base.revision_read_code = rev.code;
+      }
+    }
+  }
+
   if (!scopeJson || Object.keys(scopeJson).length === 0) {
     return { ...base, status: "no_scope" };
   }
@@ -1297,6 +1365,112 @@ export function summariseScope(
   } catch (_e) {
     return { ...base, status: "not_summarised:adapter_error" };
   }
+}
+
+const SCOPE_REVISION_HISTORY_LIMIT = 50;
+
+function scopeRevisionRef(row: any): ScopeRevisionRef {
+  return {
+    scope_revision_id: String(row?.id),
+    revision_number: num(row?.revision_number),
+    status: str(row?.status),
+    tool_kind: str(row?.tool_kind),
+    tool_version: str(row?.tool_version),
+    frozen_at: str(row?.frozen_at),
+    superseded_at: str(row?.superseded_at),
+    superseded_by_scope_revision_id: str(row?.superseded_by_scope_revision_id),
+  };
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * The job's server scope revisions (Sales' save-then-freeze route, SQ-29):
+ * history newest first, the one frozen row, and whether the last save is that
+ * frozen content. Matching is by scope_hash, the same canonical hash
+ * freeze_scope stores, never by the tool's own frozenId (a different id). The
+ * frozen row's text (it can run to megabytes) is read only when the last save
+ * differs, and used only once it hashes to scope_hash. Pricing text is never
+ * read. A failed read is ok:false with a code, never an empty history.
+ */
+export async function readScopeRevisionAlignment(
+  client: any,
+  jobId: string,
+  scopeJson: unknown,
+): Promise<ScopeRevisionAlignment> {
+  const failed = (code: string): ScopeRevisionAlignment => ({
+    ok: false,
+    code,
+    history: [],
+    more: false,
+    frozen: null,
+    last_save_matches_frozen: null,
+    frozen_scope_json: null,
+  });
+  let rows: any[];
+  try {
+    const { data, error } = await client.from("scope_revisions")
+      .select(
+        "id, revision_number, status, tool_kind, tool_version, scope_hash, frozen_at, superseded_at, superseded_by_scope_revision_id",
+      )
+      .eq("job_id", jobId)
+      .order("revision_number", { ascending: false })
+      .limit(SCOPE_REVISION_HISTORY_LIMIT + 1);
+    if (error) return failed("scope_revisions_read_failed");
+    if (!Array.isArray(data)) return failed("scope_revisions_not_a_list");
+    rows = data;
+  } catch (_e) {
+    return failed("scope_revisions_read_failed");
+  }
+  const more = rows.length > SCOPE_REVISION_HISTORY_LIMIT;
+  const kept = rows.slice(0, SCOPE_REVISION_HISTORY_LIMIT);
+  const frozenRow = rows.find((r) => r?.status === "frozen") ?? null;
+  const out: ScopeRevisionAlignment = {
+    ok: true,
+    history: kept.map(scopeRevisionRef),
+    more,
+    frozen: frozenRow ? scopeRevisionRef(frozenRow) : null,
+    last_save_matches_frozen: null,
+    frozen_scope_json: null,
+  };
+  if (!frozenRow) return out;
+
+  const lastSave = parseJsonObject(scopeJson);
+  if (lastSave && Object.keys(lastSave).length > 0) {
+    const { hash } = await canonicalJsonAndHash(lastSave);
+    out.last_save_matches_frozen = hash === frozenRow.scope_hash;
+  } else {
+    out.last_save_matches_frozen = false;
+  }
+  if (out.last_save_matches_frozen) return out;
+
+  try {
+    const { data, error } = await client.from("scope_revisions")
+      .select("scope_canonical_text, scope_hash")
+      .eq("id", frozenRow.id)
+      .maybeSingle();
+    const text = data?.scope_canonical_text;
+    if (error || typeof text !== "string") {
+      return { ...out, code: "frozen_text_unreadable" };
+    }
+    if ((await sha256Hex(text)) !== frozenRow.scope_hash) {
+      return { ...out, code: "frozen_text_hash_mismatch" };
+    }
+    const parsed = parseJsonObject(text);
+    if (!parsed) return { ...out, code: "frozen_text_unreadable" };
+    out.frozen_scope_json = parsed;
+  } catch (_e) {
+    return { ...out, code: "frozen_text_unreadable" };
+  }
+  return out;
 }
 
 /**
