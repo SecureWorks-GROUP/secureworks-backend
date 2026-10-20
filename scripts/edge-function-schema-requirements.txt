@@ -847,3 +847,11 @@ ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.re
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
 ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+# Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
+# invoice; ops-api job_receipt.ts reads the switch and writes the claims.
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
