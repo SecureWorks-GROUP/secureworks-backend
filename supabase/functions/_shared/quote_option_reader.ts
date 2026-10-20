@@ -25,6 +25,10 @@
 //   repeat job stays live.
 // - Anything that cannot be read or does not agree (events against the
 //   pointer, an unknown group) is shown, never hidden.
+// - A job whose newest superseded and unsuperseded events share one instant
+//   (one transaction's now(), as when the trigger clears a mark and marks it
+//   again) has no knowable order: it is shown, with reason
+//   `events_order_unknown`, never read as live or superseded from the tie.
 //
 // Switch `quote_option_ops_reader_v1`, missing or unreadable is off. Off, the
 // reads that use this are unchanged apart from reading the switch.
@@ -79,7 +83,8 @@ export type QuoteOptionReason =
   | "accepted_option_reopened"
   | "group_unknown"
   | "pointer_disagrees"
-  | "option_moved_on";
+  | "option_moved_on"
+  | "events_order_unknown";
 
 export interface QuoteOptionDecision {
   state: QuoteOptionState;
@@ -152,14 +157,10 @@ function eventsAsOf(events: QuoteOptionEvent[], asOf: string) {
   });
 }
 
-// The newest superseded event of each job that no later unsuperseded event
-// undoes, as of `asOf`. On a tie the unsuperseded event counts as later.
-export function openSupersessions(
+function supersessionEventsByJob(
   events: QuoteOptionEvent[],
   asOf: string,
-): Map<string, QuoteOptionEvent> {
-  const rank = (e: QuoteOptionEvent) =>
-    e.event_type === QUOTE_OPTION_UNSUPERSEDED_EVENT ? 1 : 0;
+): Map<string, QuoteOptionEvent[]> {
   const byJob = new Map<string, QuoteOptionEvent[]>();
   for (const e of eventsAsOf(events, asOf)) {
     if (
@@ -170,14 +171,48 @@ export function openSupersessions(
     list.push(e);
     byJob.set(e.job_id, list);
   }
+  return byJob;
+}
+
+// The events of one job at its newest instant.
+function newestInstant(list: QuoteOptionEvent[]): QuoteOptionEvent[] {
+  const newest = Math.max(...list.map((e) => Date.parse(e.created_at)));
+  return list.filter((e) => Date.parse(e.created_at) === newest);
+}
+
+function orderUnknown(list: QuoteOptionEvent[]): boolean {
+  const last = newestInstant(list);
+  return last.some((e) => e.event_type === QUOTE_OPTION_SUPERSEDED_EVENT) &&
+    last.some((e) => e.event_type === QUOTE_OPTION_UNSUPERSEDED_EVENT);
+}
+
+// The jobs whose newest superseded and unsuperseded events share one instant,
+// as of `asOf`. Event ids are random and created_at is the transaction's
+// now(), so nothing stored says which came first.
+export function supersessionOrderUnknown(
+  events: QuoteOptionEvent[],
+  asOf: string,
+): Set<string> {
+  const out = new Set<string>();
+  for (const [jobId, list] of supersessionEventsByJob(events, asOf)) {
+    if (orderUnknown(list)) out.add(jobId);
+  }
+  return out;
+}
+
+// The newest superseded event of each job that no later unsuperseded event
+// undoes, as of `asOf`. A job whose newest instant holds both kinds is not
+// open here (see supersessionOrderUnknown).
+export function openSupersessions(
+  events: QuoteOptionEvent[],
+  asOf: string,
+): Map<string, QuoteOptionEvent> {
   const open = new Map<string, QuoteOptionEvent>();
-  for (const [jobId, list] of byJob) {
-    list.sort((a, b) =>
-      Date.parse(a.created_at) - Date.parse(b.created_at) || rank(a) - rank(b)
-    );
-    const last = list[list.length - 1];
-    if (last.event_type === QUOTE_OPTION_SUPERSEDED_EVENT) {
-      open.set(jobId, last);
+  for (const [jobId, list] of supersessionEventsByJob(events, asOf)) {
+    if (orderUnknown(list)) continue;
+    const last = newestInstant(list);
+    if (last.every((e) => e.event_type === QUOTE_OPTION_SUPERSEDED_EVENT)) {
+      open.set(jobId, last[last.length - 1]);
     }
   }
   return open;
@@ -268,6 +303,7 @@ export function decideQuoteOptionGroups(
 ): Map<string, QuoteOptionDecision> {
   const decisions = new Map<string, QuoteOptionDecision>();
   const open = openSupersessions(events, asOf);
+  const unknownOrder = supersessionOrderUnknown(events, asOf);
   const groupOf = new Map<string, string>();
   for (const [g, members] of membersByGroup) {
     for (const m of members) groupOf.set(m.id, g);
@@ -289,6 +325,13 @@ export function decideQuoteOptionGroups(
         });
       } else if (event && isOpenQuoteStatus(m.status)) {
         decisions.set(m.id, decideSupersededJob(m.id, event, membersByGroup));
+      } else if (unknownOrder.has(m.id) && isOpenQuoteStatus(m.status)) {
+        decisions.set(m.id, {
+          state: "live",
+          reason: "events_order_unknown",
+          quote_option_group_id: g,
+          superseded_by_job_id: null,
+        });
       }
     }
   }
@@ -437,11 +480,15 @@ export function quoteOptionSummary(visibility: QuoteOptionVisibility) {
   const pending = [...visibility.decisions].filter(([, d]) =>
     d.state === "pending_review"
   ).map(([id]) => id).sort();
+  const orderUnknown = [...visibility.decisions].filter(([, d]) =>
+    d.reason === "events_order_unknown"
+  ).map(([id]) => id).sort();
   return {
     quote_options: {
       status: visibility.status,
       superseded_hidden: visibility.hidden.size,
       pending_review_job_ids: pending,
+      ...(orderUnknown.length ? { order_unknown_job_ids: orderUnknown } : {}),
     },
   };
 }
