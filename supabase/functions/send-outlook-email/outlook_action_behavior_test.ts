@@ -72,17 +72,29 @@ Deno.test("Outlook route classification rejects group send fallthrough and prese
 Deno.test("signatures never invent Marnin as the sender", () => {
   const marnin = getSignature("marnin@secureworkswa.com.au");
   assertEquals(marnin.includes("Marnin Stobbe"), true);
-  assertEquals(marnin.includes("Director"), true);
-  assertEquals(marnin.includes("Operations Manager"), false);
-  assertEquals(marnin.includes("0404 777 984"), true);
+  assertEquals(marnin.includes("Operations Manager"), true);
+  assertEquals(marnin.includes("Kind regards,"), true);
+  assertEquals(
+    marnin.includes(
+      'href="tel:0404777984" style="color:#4C6A7C;text-decoration:none">0404 777 984</a>',
+    ),
+    true,
+  );
   assertEquals(getSignature("hugo@secureworkswa.com.au"), "");
   const company = getSignature("admin@secureworkswa.com.au");
   assertEquals(company.includes('data-secureworks-signature="secureworks"'), true);
   assertEquals(company.includes(">SecureWorks Group</p>"), true);
   assertEquals(company.includes("Maverick"), false);
   assertEquals(company.includes("Shaun Lee"), false);
+  assertEquals(company.includes(">Operations</p>"), true);
   assertEquals(company.includes("admin@secureworkswa.com.au"), true);
-  assertEquals(company.includes("+61 489 267 771"), true);
+  assertEquals(
+    company.includes(
+      'href="tel:0489267771" style="color:#4C6A7C;text-decoration:none">0489 267 771</a>',
+    ),
+    true,
+  );
+  assertEquals(company.includes("+61"), false);
   assertEquals(company.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
   assertEquals(company.includes("ses@secureworkswa.com.au"), false);
   assertEquals(company.includes("data:image"), false);
@@ -90,8 +102,12 @@ Deno.test("signatures never invent Marnin as the sender", () => {
   assertEquals(shaun.includes("Shaun Lee"), true);
   assertEquals(shaun.includes("Operations Coordinator"), true);
   assertEquals(shaun.includes("mailto:shaun@secureworkswa.com.au"), true);
-  assertEquals(shaun.includes("+61 489 267 771"), false);
-  assertEquals(shaun.includes(">P:</b>"), false);
+  assertEquals(
+    shaun.includes(
+      'href="tel:0489267771" style="color:#4C6A7C;text-decoration:none">0489 267 771</a>',
+    ),
+    true,
+  );
   assertEquals(shaun.includes("admin@secureworkswa.com.au"), false);
   assertEquals(shaun.includes("Operations Manager"), false);
   assertEquals(shaun.includes("ses@"), false);
@@ -103,8 +119,14 @@ Deno.test("signatures never invent Marnin as the sender", () => {
   assertEquals(jan.includes("tel:0417976471"), true);
   assertEquals(jan.includes("jan@secureworkswa.com.au"), true);
   for (const html of [marnin, company, shaun, jan]) {
-    assertEquals(html.includes("border-top:2px solid #F15A29"), true);
-    assertEquals(html.includes("EXCELLENCE"), true);
+    assertEquals(html.includes("font-family:Calibri,sans-serif;font-size:11pt;color:#293C46"), true);
+    assertEquals(html.includes("padding:20px;border-top:2px solid #F15A29;font-family:Helvetica,Arial,sans-serif;max-width:400px"), true);
+    assertEquals(html.includes("font-size:14px;font-weight:bold;color:#293C46"), true);
+    assertEquals(html.includes("font-size:12px;color:#4C6A7C"), true);
+    assertEquals(html.includes("font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600"), true);
+    assertEquals(html.includes("EXCELLENCE | INTEGRITY | SERVICE"), true);
+    assertEquals(html.includes("text-decoration:underline"), false);
+    assertEquals(html.includes(`width="180"`), true);
     assertEquals(html.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
   }
 });
@@ -115,7 +137,7 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
   assertEquals(asShaun.includes("Shaun Lee"), true);
   assertEquals(asShaun.includes("Operations Coordinator"), true);
   assertEquals(asShaun.includes("mailto:admin@secureworkswa.com.au"), true);
-  assertEquals(asShaun.includes("+61 489 267 771"), true);
+  assertEquals(asShaun.includes("0489 267 771"), true);
   assertEquals(asShaun.includes("Maverick"), false);
   assertEquals(asShaun.includes('data-secureworks-signature="shaun"'), true);
   assertEquals(
@@ -693,7 +715,7 @@ Deno.test("reply handler preserves native recipients and sends only after exact 
     assertEquals(html.includes("Maverick"), false);
     assertEquals(html.includes("Shaun Lee"), false);
     assertEquals(html.includes("admin@secureworkswa.com.au"), true);
-    assertEquals(html.includes("+61 489 267 771"), true);
+    assertEquals(html.includes("0489 267 771"), true);
     assertEquals(html.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
     assertEquals(html.includes("ses@secureworkswa.com.au"), false);
     assertEquals(html.includes("data:image"), false);
@@ -797,7 +819,7 @@ Deno.test("reply signature shaun replaces Maverick and none sends no logo", asyn
     ).message.body.content as string;
     assertEquals(shaunHtml.includes("Shaun Lee"), true);
     assertEquals(shaunHtml.includes("mailto:admin@secureworkswa.com.au"), true);
-    assertEquals(shaunHtml.includes("+61 489 267 771"), true);
+    assertEquals(shaunHtml.includes("0489 267 771"), true);
     assertEquals(shaunHtml.includes("Maverick"), false);
     assertEquals(
       calls.filter((call) => call.url.endsWith("/attachments")).length,
@@ -900,7 +922,7 @@ Deno.test("a draft from admin as shaun carries Shaun's block and the inline logo
     assertEquals(html.includes("Shaun Lee"), true);
     assertEquals(html.includes("Operations Coordinator"), true);
     assertEquals(html.includes("mailto:admin@secureworkswa.com.au"), true);
-    assertEquals(html.includes("+61 489 267 771"), true);
+    assertEquals(html.includes("0489 267 771"), true);
     assertEquals(html.includes("Maverick"), false);
     assertEquals(message.attachments.length, 1);
     assertEquals(message.attachments[0].isInline, true);

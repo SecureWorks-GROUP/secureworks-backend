@@ -1407,15 +1407,16 @@ export async function prepareAttachments(attachments: unknown, options: {
 // ── Dynamic Signature Selection ──
 //
 // Send, reply and draft all append one signature through composeSignedHtml.
-// renderSignature is the one template: name, title, phone, email, web, logo.
+// renderSignature is the one template, matched to Marnin's phone signature:
+// Kind regards, then the card (logo, name, title, values, phone, email).
 //
 // - Omit `signature` and the mailbox default is appended. admin@ (and the
-//   literal mailbox "admin") is a neutral SecureWorks Group sign-off.
-//   shaun@ is Shaun Lee at shaun@ with no phone. An unmapped mailbox appends
-//   nothing.
+//   literal mailbox "admin") is SecureWorks Group, Operations, at admin@
+//   with 0489 267 771. shaun@ is Shaun Lee at shaun@ with that same phone.
+//   An unmapped mailbox appends nothing.
 // - An explicit signature must be on that mailbox's allow-list, or the call
 //   is 400 invalid_signature. admin@ may choose shaun, maverick, or none.
-//   shaun chosen from admin@ is Shaun Lee at admin@ with the company phone.
+//   shaun chosen from admin@ is Shaun Lee at admin@ with 0489 267 771.
 //   marnin@, jan@, shaun@, fencing@ and patios@ may choose only their own
 //   block or none. Any other mailbox may choose only none.
 // - `signature`: none (or suppress) appends nothing.
@@ -1437,7 +1438,6 @@ type SignatureFields = {
   phoneDisplay: string
   phoneTel: string
   email: string
-  website: string
 }
 
 function signatureFields(partial: {
@@ -1446,7 +1446,6 @@ function signatureFields(partial: {
   phoneDisplay?: string
   phoneTel?: string
   email: string
-  website?: string
 }): SignatureFields {
   return {
     name: partial.name,
@@ -1454,21 +1453,24 @@ function signatureFields(partial: {
     phoneDisplay: partial.phoneDisplay || '',
     phoneTel: partial.phoneTel || '',
     email: partial.email,
-    website: partial.website || '',
   }
 }
+
+// Local display of the company admin number +61 489 267 771.
+const COMPANY_PHONE_DISPLAY = '0489 267 771'
+const COMPANY_PHONE_TEL = '0489267771'
 
 const SIGNATURE_PROFILES: Record<string, SignatureFields> = {
   secureworks: signatureFields({
     name: 'SecureWorks Group',
-    phoneDisplay: '+61 489 267 771',
-    phoneTel: '+61489267771',
+    title: 'Operations',
+    phoneDisplay: COMPANY_PHONE_DISPLAY,
+    phoneTel: COMPANY_PHONE_TEL,
     email: 'admin@secureworkswa.com.au',
-    website: 'secureworksgroup.com.au',
   }),
   marnin: signatureFields({
     name: 'Marnin Stobbe',
-    title: 'Director',
+    title: 'Operations Manager',
     phoneDisplay: '0404 777 984',
     phoneTel: '0404777984',
     email: 'marnin@secureworkswa.com.au',
@@ -1476,15 +1478,15 @@ const SIGNATURE_PROFILES: Record<string, SignatureFields> = {
   maverick: signatureFields({
     name: 'Maverick',
     title: 'Operations Assist',
-    phoneDisplay: '+61 489 267 771',
-    phoneTel: '+61489267771',
+    phoneDisplay: COMPANY_PHONE_DISPLAY,
+    phoneTel: COMPANY_PHONE_TEL,
     email: 'admin@secureworkswa.com.au',
-    website: 'secureworksgroup.com.au',
   }),
-  // Shaun's own mailbox. No phone until one is configured on this profile.
   shaun: signatureFields({
     name: 'Shaun Lee',
     title: 'Operations Coordinator',
+    phoneDisplay: COMPANY_PHONE_DISPLAY,
+    phoneTel: COMPANY_PHONE_TEL,
     email: 'shaun@secureworkswa.com.au',
   }),
   // The shaun choice from admin@ only. Not a mailbox default and not selectable
@@ -1492,8 +1494,8 @@ const SIGNATURE_PROFILES: Record<string, SignatureFields> = {
   shaun_admin: signatureFields({
     name: 'Shaun Lee',
     title: 'Operations Coordinator',
-    phoneDisplay: '+61 489 267 771',
-    phoneTel: '+61489267771',
+    phoneDisplay: COMPANY_PHONE_DISPLAY,
+    phoneTel: COMPANY_PHONE_TEL,
     email: 'admin@secureworkswa.com.au',
   }),
   jan: signatureFields({
@@ -1564,21 +1566,21 @@ function profileForChoice(choice: string, mailbox: string): SignatureFields {
 
 function renderSignature(fields: SignatureFields, id: string): string {
   const title = fields.title
-    ? `<p style="margin:0 0 10px;font-size:12px;color:#4C6A7C">${fields.title}</p>\n  `
+    ? `<p style="margin:0 0 8px;font-size:12px;color:#4C6A7C">${fields.title}</p>\n  `
     : ''
+  // The whole displayed number sits inside the tel link. A split anchor
+  // leaves the rest of the number as plain text.
   const phone = fields.phoneDisplay
     ? `<b style="color:#293C46">P:</b> <a href="tel:${fields.phoneTel}" style="color:#4C6A7C;text-decoration:none">${fields.phoneDisplay}</a><br/>\n    `
     : ''
-  const website = fields.website
-    ? `<br/><b style="color:#293C46">W:</b> <a href="https://${fields.website}" style="color:#4C6A7C;text-decoration:none">${fields.website}</a>`
-    : ''
   return `
-<div data-secureworks-signature="${id}" style="margin-top:28px;padding-top:20px;border-top:2px solid #F15A29;font-family:Helvetica,Arial,sans-serif;max-width:400px">
+<p style="margin:0 0 16px;font-family:Calibri,sans-serif;font-size:11pt;color:#293C46">Kind regards,</p>
+<div data-secureworks-signature="${id}" style="padding:20px;border-top:2px solid #F15A29;font-family:Helvetica,Arial,sans-serif;max-width:400px">
   <img src="cid:${SIGNATURE_LOGO_CID}" width="180" alt="SecureWorks Group" style="display:block;margin-bottom:14px" />
   <p style="margin:0 0 2px;font-size:14px;font-weight:bold;color:#293C46">${fields.name}</p>
-  ${title}<p style="margin:0 0 10px;font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600">EXCELLENCE &nbsp;|&nbsp; INTEGRITY &nbsp;|&nbsp; SERVICE</p>
-  <p style="margin:0;font-size:12px;color:#4C6A7C;line-height:20px">
-    ${phone}<b style="color:#293C46">E:</b> <a href="mailto:${fields.email}" style="color:#F15A29;text-decoration:none">${fields.email}</a>${website}
+  ${title}<p style="margin:0 0 10px;font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600">EXCELLENCE | INTEGRITY | SERVICE</p>
+  <p style="margin:0;font-size:12px;line-height:20px">
+    ${phone}<b style="color:#293C46">E:</b> <a href="mailto:${fields.email}" style="color:#F15A29;text-decoration:none">${fields.email}</a>
   </p>
 </div>`
 }
