@@ -55,25 +55,37 @@ An invoice is emailed only when all of these hold (`requestInvoiceReceipt`):
    caught up. A payment bank-reconciled late but dated before the start day is
    skipped on purpose.
 5. No claim exists for it yet (one email per invoice, ever).
-6. The job is not held: status `rectification`, or `is_callback` (the
+6. **The customer paid money on it.** A receipt confirms money the customer
+   paid, so the mirrored `amount_paid` (Xero's AmountPaid) must be above zero.
+   A PAID invoice settled wholly by credit (a credit note, a write-off) is
+   skipped as `credit_settled`. Xero reports a prepayment or overpayment
+   allocated to the invoice as credit too, so an invoice paid only that way is
+   skipped as well: staff send those receipts by hand. The catch-up reads only
+   invoices with `amount_paid` above zero; the paid trigger records the skip.
+7. The job is not held: status `rectification`, or `is_callback` (the
    close-out's holds).
-7. **The wrong-party guard** (`receiptPartyCheck`). The invoice must have a
-   Xero contact. On a job with two or more paying parties (`job_contacts`, the
-   close-out's `payingParties`), the invoice's own party is found as the
-   close-out finds it (`invoicePartyKey`: its `job_contact_id`, the share
-   letter in its reference, its Xero contact, else the client). That party must
-   have its own `xero_contact_id`, it must equal the invoice's Xero contact, and
-   no other paying party may share it. So B's invoice sitting on A's Xero
-   contact is refused, never emailed to A.
-8. ops-api's own send guards pass: the sealed SES money fence and the synthetic
+8. **The wrong-party guard** (`receiptPartyCheck`), on every job. The invoice
+   must have a Xero contact. Whenever the invoice names a party
+   (`job_contact_id`), and on every invoice of a job with two or more paying
+   parties (`job_contacts`, the close-out's `payingParties`), the invoice's own
+   party is found as the close-out finds it (`invoicePartyKey`: its
+   `job_contact_id`, the share letter in its reference, its Xero contact, else
+   the client). That party must be a paying party (a named party that is
+   removed or has a zero share is refused), it must have its own
+   `xero_contact_id`, that must equal the invoice's Xero contact, and no other
+   paying party may share it. So B's invoice sitting on A's Xero contact is
+   refused, never emailed to A, and so is a one-payer job's invoice that names
+   its party but sits on another Xero contact. An invoice on a one-payer job
+   that names no party goes to its own Xero contact.
+9. ops-api's own send guards pass: the sealed SES money fence and the synthetic
    live-fire gate (`assertLegacySesInvoiceActionAllowed`, as every Xero invoice
    email path runs them).
 
-A refusal of ours (6 to 8) claims nothing. It is recorded once as a
+A refusal of ours (6 to 9) claims nothing. It is recorded once as a
 `receipt_not_sent` job event (`status` refused, `reason` the code:
-`held_rectification`, `held_callback`, `no_xero_contact`, `party_unmatched`,
-`party_unknown`, `party_xero_contact_unknown`, `xero_contact_mismatch`,
-`xero_contact_shared`, `guard_<code>`). Once staff fix it (put the invoice on
+`credit_settled`, `held_rectification`, `held_callback`, `no_xero_contact`,
+`party_unmatched`, `party_unknown`, `party_xero_contact_unknown`,
+`xero_contact_mismatch`, `xero_contact_shared`, `guard_<code>`). Once staff fix it (put the invoice on
 the right Xero contact, link the party), the next run sends it, inside the
 30-day window.
 
@@ -110,7 +122,8 @@ party.
   `xero_invoice_id` (only while the switch is `dry_run` or `live`, read once a
   run). ops-api decides everything.
 - **Catch-up.** After each run xero-sync posts `job_receipt_catch_up`: every
-  in-window PAID fencing or patio invoice with no claim goes through the same
+  in-window PAID fencing or patio invoice with `amount_paid` above zero and no
+  claim goes through the same
   sender. That covers a payment another writer mirrored first and a post that
   failed.
 

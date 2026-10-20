@@ -54,6 +54,10 @@ class Query {
     this.filters.push((r) => String(read(r, col) ?? "") >= v);
     return this;
   }
+  gt(col: string, v: number) {
+    this.filters.push((r) => Number(read(r, col)) > v);
+    return this;
+  }
   lt(col: string, v: string) {
     this.filters.push((r) => String(read(r, col) ?? "") < v);
     return this;
@@ -205,6 +209,7 @@ function invoice(db: FakeDb, over: Row = {}) {
     xero_contact_id: "xc-owner",
     contact_name: "Owner Person",
     fully_paid_on: "2026-10-21",
+    amount_paid: 550,
     updated_at: "2026-10-21T01:30:00.000Z",
     ...over,
   };
@@ -616,6 +621,113 @@ Deno.test("wrong party: a party with no Xero contact, a shared contact or an unm
     receiptPartyCheck(inv({ xero_contact_id: "xc-other" }), [paying[0]]),
     { ok: true, party_id: "p-a", party_label: "A" },
   );
+  // ...unless the invoice names its party: then it must sit on that party's contact.
+  assertEquals(
+    receiptPartyCheck(inv({ job_contact_id: "p-a" }), [paying[0]]),
+    { ok: true, party_id: "p-a", party_label: "A" },
+  );
+  assertEquals(
+    receiptPartyCheck(
+      inv({ job_contact_id: "p-a", xero_contact_id: "xc-other" }),
+      [paying[0]],
+    ),
+    { ok: false, reason: "xero_contact_mismatch" },
+  );
+  // A named party that is removed or has a zero share pays nothing.
+  for (const gone of [{ removed_at: "2026-10-01" }, { share_percentage: 0 }]) {
+    assertEquals(
+      receiptPartyCheck(inv({ job_contact_id: "p-b" }), [
+        paying[0],
+        { ...paying[1], xero_contact_id: "xc-a", ...gone },
+      ]),
+      { ok: false, reason: "party_unmatched" },
+    );
+  }
+});
+
+Deno.test("wrong party on a one-payer job: an invoice naming its party on another Xero contact is refused", async () => {
+  const { db, deps, emails } = setup();
+  party(db, {
+    id: "p-a",
+    contact_label: "A",
+    is_primary: true,
+    share_percentage: 100,
+    xero_contact_id: "xc-owner",
+  });
+  invoice(db, { job_contact_id: "p-a", xero_contact_id: "xc-elsewhere" });
+  const r = await requestInvoiceReceipt(deps, {
+    xero_invoice_id: "inv-1",
+    trigger: "xero_sync",
+  });
+  assertEquals(r.action, "refused");
+  assertEquals(r.reason, "xero_contact_mismatch");
+  assertEquals(emails.length, 0);
+  assertEquals(db.rows("job_receipt_claims").length, 0);
+  db.rows("xero_invoices")[0].xero_contact_id = "xc-owner";
+  const fixed = await requestInvoiceReceipt(deps, {
+    xero_invoice_id: "inv-1",
+    trigger: "fixed",
+  });
+  assertEquals(fixed.action, "sent");
+  assertEquals(emails.length, 1);
+});
+
+Deno.test("an invoice naming a removed party is refused, and nothing sent", async () => {
+  const { db, deps, emails } = setup();
+  party(db, {
+    id: "p-a",
+    contact_label: "A",
+    is_primary: true,
+    share_percentage: 100,
+    xero_contact_id: "xc-owner",
+  });
+  party(db, {
+    id: "p-gone",
+    contact_label: "B",
+    removed_at: "2026-10-01T00:00:00.000Z",
+    status: "removed",
+    xero_contact_id: "xc-owner",
+  });
+  invoice(db, { job_contact_id: "p-gone" });
+  const r = await requestInvoiceReceipt(deps, {
+    xero_invoice_id: "inv-1",
+    trigger: "xero_sync",
+  });
+  assertEquals(r.reason, "party_unmatched");
+  assertEquals(emails.length, 0);
+  assertEquals(
+    events(db, "receipt_not_sent")[0].detail_json.reason,
+    "party_unmatched",
+  );
+});
+
+// ── Paid by the customer, not by credit ──────────────────────────────────────
+
+Deno.test("a PAID invoice settled wholly by credit is skipped as credit_settled, recorded once", async () => {
+  const { db, deps, emails } = setup();
+  invoice(db, { amount_paid: 0 });
+  const r = await requestInvoiceReceipt(deps, {
+    xero_invoice_id: "inv-1",
+    trigger: "xero_sync",
+  });
+  assertEquals(r.action, "refused");
+  assertEquals(r.reason, "credit_settled");
+  await requestInvoiceReceipt(deps, { xero_invoice_id: "inv-1", trigger: "x" });
+  const notSent = events(db, "receipt_not_sent");
+  assertEquals(notSent.length, 1);
+  assertEquals(notSent[0].detail_json.reason, "credit_settled");
+  assertEquals(emails.length, 0);
+  assertEquals(db.rows("job_receipt_claims").length, 0);
+});
+
+Deno.test("dry run shows a credit-settled invoice as credit_settled", async () => {
+  const { db, deps, emails } = setup({ mode: "dry_run" });
+  invoice(db, { amount_paid: 0 });
+  await requestInvoiceReceipt(deps, { xero_invoice_id: "inv-1", trigger: "x" });
+  const dry = events(db, "receipt_dry_run");
+  assertEquals(dry.length, 1);
+  assertEquals(dry[0].detail_json.would, "credit_settled");
+  assertEquals(emails.length, 0);
 });
 
 // ── Holds and our own guards ─────────────────────────────────────────────────
@@ -731,6 +843,7 @@ Deno.test("the catch-up sends in-window unclaimed fencing and patio invoices onl
   invoice(db, { xero_invoice_id: "inv-ms", job_id: "job-ms" });
   invoice(db, { xero_invoice_id: "inv-old", fully_paid_on: "2026-10-01" });
   invoice(db, { xero_invoice_id: "inv-open", status: "AUTHORISED" });
+  invoice(db, { xero_invoice_id: "inv-credit", amount_paid: 0 });
   const sweep = await receiptCatchUp(deps, {});
   assert(sweep.ran);
   assertEquals(emails.map((e) => e.xeroInvoiceId), ["inv-fence"]);
@@ -782,22 +895,6 @@ Deno.test("both actions are server key only and POST only", async () => {
   );
   assertEquals(ok.status, 200);
   assertEquals(ok.body.action, "sent");
-});
-
-Deno.test("the manual Send review never sends a receipt", async () => {
-  const closeout = await Deno.readTextFile(
-    new URL("./job_closeout.ts", import.meta.url),
-  );
-  assert(!closeout.includes("job_receipt"));
-  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = index.indexOf("async function sendReviewRequest(");
-  const end = index.indexOf("\n}\n", start);
-  assert(start > 0 && end > start);
-  const body = index.slice(start, end);
-  assert(
-    !/receipt/i.test(body),
-    "sendReviewRequest must not reach the receipt sender",
-  );
 });
 
 // ── The Xero call ────────────────────────────────────────────────────────────

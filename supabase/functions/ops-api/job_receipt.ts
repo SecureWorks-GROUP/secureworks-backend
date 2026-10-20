@@ -12,7 +12,8 @@
 //                            invoice (ACCREC, PAID, on a job) -> job (fencing or patio,
 //                            not sealed) -> window (paid after the switch's current mode
 //                            began, and within PAID_WITHIN_DAYS) -> claim already taken ->
-//                            holds -> wrong-party guard -> ops-api's own send guards ->
+//                            paid by the customer (not wholly by credit) -> holds ->
+//                            wrong-party guard -> ops-api's own send guards ->
 //                            (dry run: one receipt_dry_run event) -> claim -> Xero.
 //   - receiptCatchUp         xero-sync calls job_receipt_catch_up after each run: every
 //                            in-window paid invoice with no claim, so a payment another
@@ -144,6 +145,8 @@ export interface ReceiptInvoice {
   xero_contact_id: string | null;
   contact_name: string | null;
   fully_paid_on: string | null;
+  /** Xero's AmountPaid: money the customer paid, never credit applied. */
+  amount_paid: number | string | null;
   /** Xero's UpdatedDateUTC as the sync mirrors it. */
   updated_at: string | null;
 }
@@ -207,10 +210,12 @@ export type PartyCheck =
   | { ok: false; reason: string };
 
 /**
- * The wrong-party guard. Xero emails the invoice's own Xero contact, so on a job with two
- * or more paying parties the invoice must sit on the Xero contact of the party it belongs
- * to (invoicePartyKey: its job_contact_id, its share letter, its Xero contact, else the
- * client), and that contact must be that party's alone. Pure.
+ * The wrong-party guard. Xero emails the invoice's own Xero contact, so whenever the
+ * invoice names a party (job_contact_id), and on every invoice of a job with two or more
+ * paying parties, the invoice must sit on the Xero contact of the party it belongs to
+ * (invoicePartyKey: its job_contact_id, its share letter, its Xero contact, else the
+ * client), and that contact must be that party's alone. A named party that is removed or
+ * has a zero share is no paying party, so its invoice is refused. Pure.
  */
 export function receiptPartyCheck(
   inv: Pick<
@@ -222,7 +227,7 @@ export function receiptPartyCheck(
   const invoiceContact = text(inv.xero_contact_id).toLowerCase();
   if (!invoiceContact) return { ok: false, reason: "no_xero_contact" };
   const paying = payingParties(parties) as ReceiptParty[];
-  if (paying.length < 2) {
+  if (paying.length < 2 && !text(inv.job_contact_id)) {
     const only = paying[0] ?? null;
     return {
       ok: true,
@@ -266,7 +271,7 @@ export function receiptPartyCheck(
 // ── Reads ────────────────────────────────────────────────────────────────────
 
 const INVOICE_COLUMNS =
-  "xero_invoice_id, invoice_number, invoice_type, status, reference, job_id, job_contact_id, xero_contact_id, contact_name, fully_paid_on, updated_at";
+  "xero_invoice_id, invoice_number, invoice_type, status, reference, job_id, job_contact_id, xero_contact_id, contact_name, fully_paid_on, amount_paid, updated_at";
 const JOB_COLUMNS =
   "id, job_number, type, status, is_callback, ses_money_sealed_at";
 const PARTY_COLUMNS =
@@ -457,7 +462,8 @@ export async function requestInvoiceReceipt(
   let refusal: string | null = null;
   let party: PartyCheck | null = null;
   const hold = closeoutHold(job);
-  if (hold) refusal = `held_${hold}`;
+  if (!(Number(inv.amount_paid) > 0)) refusal = "credit_settled";
+  else if (hold) refusal = `held_${hold}`;
   else {
     party = receiptPartyCheck(inv, (partyRead.data ?? []) as ReceiptParty[]);
     if (!party.ok) refusal = party.reason;
@@ -625,7 +631,8 @@ async function settleStuckClaims(deps: JobReceiptDeps): Promise<number> {
   return ids.length;
 }
 
-/** xero-sync, after each run: every in-window paid fencing or patio invoice with no claim. */
+/** xero-sync, after each run: every in-window fencing or patio invoice the customer paid
+ *  money on, with no claim. */
 export async function receiptCatchUp(
   deps: JobReceiptDeps,
   body: Record<string, unknown>,
@@ -645,6 +652,7 @@ export async function receiptCatchUp(
     .select("xero_invoice_id, job_id")
     .eq("invoice_type", "ACCREC")
     .eq("status", "PAID")
+    .gt("amount_paid", 0)
     .gte("fully_paid_on", floor)
     .not("job_id", "is", null)
     .order("fully_paid_on", { ascending: true })
