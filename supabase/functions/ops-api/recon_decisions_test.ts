@@ -182,6 +182,30 @@ Deno.test("the daily list reads with a bounded limit and reports a failed read",
   assertEquals([e.code, e.status], ["daily_list_unreadable", 502]);
 });
 
+Deno.test("the daily list asks one more than its page and says more only when it was cut", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ band: 1, subject_id: `s${i}` }));
+  const full = fakeRpc(rows(3));
+  const exact = await reconDailyList(full, new URLSearchParams("limit=3"), now);
+  assertEquals(full.calls[0].args.p_limit, 4);
+  assertEquals([exact.count, exact.more, exact.limit], [3, false, 3]);
+  const cut = await reconDailyList(fakeRpc(rows(4)), new URLSearchParams("limit=3"), now);
+  assertEquals([cut.count, cut.more, (cut.items as unknown[]).length], [3, true, 3]);
+  const top = fakeRpc(rows(201));
+  const big = await reconDailyList(top, new URLSearchParams("limit=200"), now);
+  assertEquals([top.calls[0].args.p_limit, big.count, big.more], [201, 200, true]);
+  const none = await reconDailyList(fakeRpc([]), new URLSearchParams(""), now);
+  assertEquals([none.count, none.more], [0, false]);
+});
+
+Deno.test("a daily list answer that is not a list is a failed read, never an empty list", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  for (const data of [null, undefined, {}, { items: [] }, "x", 0]) {
+    const e = await assertRejects(() => reconDailyList(fakeRpc(data), new URLSearchParams(""), now), ReconDecisionError);
+    assertEquals([e.code, e.status], ["daily_list_unreadable", 502]);
+  }
+});
+
 Deno.test("front door: staff only, never a trade, the shared key or agent-read", () => {
   for (const action of ["recon_daily_list", "recon_record_decision"]) {
     const url = new URL(`https://x.test/ops-api?action=${action}`);
