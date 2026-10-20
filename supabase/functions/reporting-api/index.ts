@@ -2973,10 +2973,13 @@ async function problemJobs(sb: any) {
 
   return worst5.map((p: any) => {
     const job = jobLookup[p.job_id] || {}
-    const quotedMarginPct = job.pricing_json?.margin_pct ?? job.pricing_json?.marginPercent ?? job.pricing_json?.margin_percent ?? null
-    // A selected target stays labelled as a target; a quote with commission not
-    // set has no quoted margin to compare (margin_hold.ts).
+    const savedMarginPct = job.pricing_json?.margin_pct ?? job.pricing_json?.marginPercent ?? job.pricing_json?.margin_percent ?? null
+    // A held quote has no verified quoted margin, so no slippage is worked out
+    // against it. A selected target is kept as a target, in its own field
+    // (margin_hold.ts).
     const quotedMarginHold = marginHoldOf(job.pricing_json)
+    const quotedMarginPct = quotedMarginHold ? null : savedMarginPct
+    const targetMarginPct = quotedMarginHold === 'selected_target' && savedMarginPct != null ? Math.round(parseFloat(savedMarginPct)) : null
     const actualMarginPct = p.margin_pct
     const slippage = quotedMarginPct != null ? Math.round(actualMarginPct - parseFloat(quotedMarginPct)) : null
     return {
@@ -2988,6 +2991,7 @@ async function problemJobs(sb: any) {
       margin_pct: actualMarginPct,
       quoted_margin_pct: quotedMarginPct != null ? Math.round(parseFloat(quotedMarginPct)) : null,
       ...(quotedMarginHold ? { quoted_margin_basis: quotedMarginHold } : {}),
+      ...(targetMarginPct != null ? { target_margin_pct: targetMarginPct } : {}),
       slippage,
       status: p.status,
     }
