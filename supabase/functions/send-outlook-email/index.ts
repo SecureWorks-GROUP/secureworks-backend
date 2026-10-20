@@ -1415,7 +1415,8 @@ export async function prepareAttachments(attachments: unknown, options: {
 //   with 0489 267 771. shaun@ is Shaun Lee at shaun@ with that same phone.
 //   An unmapped mailbox appends nothing.
 // - An explicit signature must be on that mailbox's allow-list, or the call
-//   is 400 invalid_signature. admin@ may choose shaun, maverick, or none.
+//   is 400 invalid_signature. admin@ may choose secureworks (its default),
+//   shaun, maverick, or none.
 //   shaun chosen from admin@ is Shaun Lee at admin@ with 0489 267 771.
 //   marnin@, jan@, shaun@, fencing@ and patios@ may choose only their own
 //   block or none. Any other mailbox may choose its own default or none.
@@ -1532,8 +1533,8 @@ const MAILBOX_DEFAULT_SIGNATURE: Record<string, string> = {
 }
 
 const MAILBOX_SIGNATURE_CHOICES: Record<string, readonly string[]> = {
-  'admin@secureworkswa.com.au': ['shaun', 'maverick', 'none'],
-  'admin': ['shaun', 'maverick', 'none'],
+  'admin@secureworkswa.com.au': ['secureworks', 'shaun', 'maverick', 'none'],
+  'admin': ['secureworks', 'shaun', 'maverick', 'none'],
   'marnin@secureworkswa.com.au': ['marnin', 'none'],
   'jan@secureworkswa.com.au': ['jan', 'none'],
   'shaun@secureworkswa.com.au': ['shaun', 'none'],
@@ -1568,25 +1569,33 @@ function profileForChoice(choice: string, mailbox: string): SignatureFields {
   return SIGNATURE_PROFILES[choice]
 }
 
+// The markup and every style value below are copied from Marnin's Outlook
+// mobile signature (Sent Items, 20 Oct 2026 12:43 AWST). Only the person
+// fields, the logo source (cid) and the tel link (it wraps the whole number;
+// the phone original wrapped only "0404 7") differ. Keep them identical:
+// fonts are set on the inner spans, the card has no side padding, and the
+// values line uses &nbsp;|&nbsp; with a space on each side.
 function renderSignature(fields: SignatureFields, id: string): string {
+  const helv = 'font-family:Helvetica,Arial,sans-serif'
   const title = fields.title
-    ? `<p style="margin:0 0 8px;font-size:12px;color:#4C6A7C">${fields.title}</p>\n  `
+    ? `<p style="text-align:left; text-indent:0px; text-transform:none; margin:0px 0px 10px; font-size:12px; color:rgb(76,106,124)"><span style="${helv}">${fields.title}</span></p>`
     : ''
-  // The whole displayed number sits inside the tel link. A split anchor
-  // leaves the rest of the number as plain text.
   const phone = fields.phoneDisplay
-    ? `<b style="color:#293C46">P:</b> <a href="tel:${fields.phoneTel}" style="color:#4C6A7C;text-decoration:none">${fields.phoneDisplay}</a><br/>\n    `
+    ? `<span style="${helv}; color:rgb(41,60,70)"><b>P:</b></span><span style="${helv}">&nbsp;<a href="tel:${fields.phoneTel}" style="color:rgb(76,106,124); text-decoration:none; margin-top:0px; margin-bottom:0px">${fields.phoneDisplay}</a><br></span>`
     : ''
-  return `
-<p style="margin:0 0 16px;font-family:Calibri,sans-serif;font-size:11pt;color:#293C46">Kind regards,</p>
-<div data-secureworks-signature="${id}" style="padding:20px;border-top:2px solid #F15A29;font-family:Helvetica,Arial,sans-serif;max-width:400px">
-  <img src="cid:${SIGNATURE_LOGO_CID}" width="180" alt="SecureWorks Group" style="display:block;margin-bottom:14px" />
-  <p style="margin:0 0 2px;font-size:14px;font-weight:bold;color:#293C46">${fields.name}</p>
-  ${title}<p style="margin:0 0 10px;font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600">EXCELLENCE | INTEGRITY | SERVICE</p>
-  <p style="margin:0;font-size:12px;line-height:20px">
-    ${phone}<b style="color:#293C46">E:</b> <a href="mailto:${fields.email}" style="color:#F15A29;text-decoration:none">${fields.email}</a>
-  </p>
-</div>`
+  return `<div style="font-family:Aptos,Aptos_MSFontService,-apple-system,Roboto,Arial,Helvetica,sans-serif; font-size:12pt; color:rgb(0,0,0)">` +
+    `<div style="max-width:680px"><p style="text-align:left; text-indent:0px; line-height:1.6; text-transform:none; margin-top:24px"><span style="font-family:Calibri,Helvetica,sans-serif; font-size:11pt; color:rgb(41,60,70)">Kind regards,</span></p></div>` +
+    `<div data-secureworks-signature="${id}" style="margin-top:28px; padding-top:20px; border-top:2px solid rgb(241,90,41); max-width:400px">` +
+    `<span style="${helv}; font-size:12pt; color:rgb(33,33,33)"><img src="cid:${SIGNATURE_LOGO_CID}" alt="SecureWorks Group" width="180" style="width:180px; height:auto; max-width:100%; margin-bottom:14px; display:block"></span> ` +
+    `<p style="text-align:left; text-indent:0px; text-transform:none; margin:0px 0px 2px; font-size:14px; color:rgb(41,60,70)"><span style="${helv}"><b>${fields.name}</b></span></p>` +
+    title +
+    `<p style="text-align:left; text-indent:0px; text-transform:none; margin:0px 0px 10px; letter-spacing:1.5px; font-size:10px; font-weight:600; color:rgb(41,60,70)"><span style="letter-spacing:1.5px; ${helv}">EXCELLENCE &nbsp;|&nbsp; INTEGRITY &nbsp;|&nbsp; SERVICE</span></p>` +
+    `<p style="text-align:left; text-indent:0px; line-height:20px; text-transform:none; margin:0px; font-size:12px; color:rgb(76,106,124)">` +
+    phone +
+    `<span style="${helv}; color:rgb(41,60,70)"><b>E:</b></span><span style="${helv}">&nbsp;</span><span style="${helv}; color:rgb(241,90,41)"><a href="mailto:${fields.email}" style="color:rgb(241,90,41); text-decoration:none; margin-top:0px; margin-bottom:0px">${fields.email}</a></span></p>` +
+    `</div>` +
+    `<div dir="ltr" style="line-height:1.3; font-family:Calibri,sans-serif; font-size:12pt; color:black"><br></div>` +
+    `</div>`
 }
 
 export function getSignature(from: string): string {

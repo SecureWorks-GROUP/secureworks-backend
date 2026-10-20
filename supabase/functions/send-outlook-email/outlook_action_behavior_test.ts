@@ -77,21 +77,21 @@ Deno.test("signatures never invent Marnin as the sender", () => {
   assertEquals(marnin.includes("Kind regards,"), true);
   assertEquals(
     marnin.includes(
-      'href="tel:0404777984" style="color:#4C6A7C;text-decoration:none">0404 777 984</a>',
+      'href="tel:0404777984" style="color:rgb(76,106,124); text-decoration:none; margin-top:0px; margin-bottom:0px">0404 777 984</a>',
     ),
     true,
   );
   assertEquals(getSignature("hugo@secureworkswa.com.au"), "");
   const company = getSignature("admin@secureworkswa.com.au");
   assertEquals(company.includes('data-secureworks-signature="secureworks"'), true);
-  assertEquals(company.includes(">SecureWorks Group</p>"), true);
+  assertEquals(company.includes("<b>SecureWorks Group</b>"), true);
   assertEquals(company.includes("Maverick"), false);
   assertEquals(company.includes("Shaun Lee"), false);
-  assertEquals(company.includes(">Operations</p>"), true);
+  assertEquals(company.includes(">Operations</span></p>"), true);
   assertEquals(company.includes("admin@secureworkswa.com.au"), true);
   assertEquals(
     company.includes(
-      'href="tel:0489267771" style="color:#4C6A7C;text-decoration:none">0489 267 771</a>',
+      'href="tel:0489267771" style="color:rgb(76,106,124); text-decoration:none; margin-top:0px; margin-bottom:0px">0489 267 771</a>',
     ),
     true,
   );
@@ -105,7 +105,7 @@ Deno.test("signatures never invent Marnin as the sender", () => {
   assertEquals(shaun.includes("mailto:shaun@secureworkswa.com.au"), true);
   assertEquals(
     shaun.includes(
-      'href="tel:0489267771" style="color:#4C6A7C;text-decoration:none">0489 267 771</a>',
+      'href="tel:0489267771" style="color:rgb(76,106,124); text-decoration:none; margin-top:0px; margin-bottom:0px">0489 267 771</a>',
     ),
     true,
   );
@@ -120,12 +120,17 @@ Deno.test("signatures never invent Marnin as the sender", () => {
   assertEquals(jan.includes("tel:0417976471"), true);
   assertEquals(jan.includes("jan@secureworkswa.com.au"), true);
   for (const html of [marnin, company, shaun, jan]) {
-    assertEquals(html.includes("font-family:Calibri,sans-serif;font-size:11pt;color:#293C46"), true);
-    assertEquals(html.includes("padding:20px;border-top:2px solid #F15A29;font-family:Helvetica,Arial,sans-serif;max-width:400px"), true);
-    assertEquals(html.includes("font-size:14px;font-weight:bold;color:#293C46"), true);
-    assertEquals(html.includes("font-size:12px;color:#4C6A7C"), true);
-    assertEquals(html.includes("font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600"), true);
-    assertEquals(html.includes("EXCELLENCE | INTEGRITY | SERVICE"), true);
+    // Values copied from Marnin's phone signature (20 Oct 2026 12:43 AWST).
+    assertEquals(html.includes("font-family:Aptos,Aptos_MSFontService,-apple-system,Roboto,Arial,Helvetica,sans-serif; font-size:12pt; color:rgb(0,0,0)"), true);
+    assertEquals(html.includes("line-height:1.6; text-transform:none; margin-top:24px\"><span style=\"font-family:Calibri,Helvetica,sans-serif; font-size:11pt; color:rgb(41,60,70)\">Kind regards,</span>"), true);
+    assertEquals(html.includes("margin-top:28px; padding-top:20px; border-top:2px solid rgb(241,90,41); max-width:400px"), true);
+    assertEquals(html.includes("padding:20px"), false);
+    assertEquals(html.includes("margin:0px 0px 2px; font-size:14px; color:rgb(41,60,70)\"><span style=\"font-family:Helvetica,Arial,sans-serif\"><b>"), true);
+    assertEquals(html.includes("margin:0px 0px 10px; font-size:12px; color:rgb(76,106,124)"), true);
+    assertEquals(html.includes("margin:0px 0px 10px; letter-spacing:1.5px; font-size:10px; font-weight:600; color:rgb(41,60,70)\"><span style=\"letter-spacing:1.5px; font-family:Helvetica,Arial,sans-serif\">EXCELLENCE &nbsp;|&nbsp; INTEGRITY &nbsp;|&nbsp; SERVICE</span>"), true);
+    assertEquals(html.includes("EXCELLENCE | INTEGRITY | SERVICE"), false);
+    assertEquals(html.includes("line-height:20px; text-transform:none; margin:0px; font-size:12px; color:rgb(76,106,124)"), true);
+    assertEquals(html.includes("line-height:1.3; font-family:Calibri,sans-serif; font-size:12pt; color:black\"><br></div>"), true);
     assertEquals(html.includes("text-decoration:underline"), false);
     assertEquals(html.includes(`width="180"`), true);
     assertEquals(html.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
@@ -145,6 +150,10 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
     (asShaun.match(/data-secureworks-signature=/g) || []).length,
     1,
   );
+  const asCompany = composeSignedHtml("<p>Hi</p>", admin, "secureworks");
+  assertEquals(asCompany.includes('data-secureworks-signature="secureworks"'), true);
+  assertEquals(asCompany.includes("<b>SecureWorks Group</b>"), true);
+  assertEquals(asCompany, composeSignedHtml("<p>Hi</p>", admin, undefined));
   const asMaverick = composeSignedHtml("<p>Hi</p>", admin, "maverick");
   assertEquals(asMaverick.includes("Maverick"), true);
   assertEquals(asMaverick.includes("Operations Assist"), true);
@@ -180,7 +189,7 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
   const unknown = assertThrows(
     () => composeSignedHtml("<p>Hi</p>", admin, "captain"),
     OutlookInputError,
-    "Choose shaun, maverick, none.",
+    "Choose secureworks, shaun, maverick, none.",
   );
   assertEquals(unknown.code, "invalid_signature");
   assertEquals(unknown.message.includes("captain"), false);
@@ -195,7 +204,7 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
     ["fencing@secureworkswa.com.au", "patios", "Choose fencing, none."],
     ["patios@secureworkswa.com.au", "fencing", "Choose patios, none."],
     ["hugo@secureworkswa.com.au", "marnin", "Choose none."],
-    ["admin@secureworkswa.com.au", "secureworks", "Choose shaun, maverick, none."],
+    ["admin@secureworkswa.com.au", "marnin", "Choose secureworks, shaun, maverick, none."],
   ] as const;
   for (const [mailbox, signature, hint] of refused) {
     const error = assertThrows(
@@ -880,7 +889,7 @@ Deno.test("an unknown reply signature refuses before any provider call", async (
           signature: "not-a-person",
         }),
       OutlookInputError,
-      "Choose shaun, maverick, none.",
+      "Choose secureworks, shaun, maverick, none.",
     );
     assertEquals((error as OutlookInputError).code, "invalid_signature");
     assertEquals(providerCalls, 0);
