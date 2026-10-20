@@ -579,6 +579,52 @@ Deno.test('FenceAdapter — costs_complete false seals the cost estimates as not
   }
 })
 
+Deno.test('FenceAdapter — commission not set: named as a cost to confirm, no $0 commission and no trusted margin sealed', () => {
+  const base = buildFenceInputs()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const inputs = buildFenceInputs({
+    job: {
+      ...base.job,
+      pricing_json: {
+        ...pricing,
+        commissionCostEstimate: null, totalCostEstimate: null, margin_pct: null,
+        internal: { commission: null, commission_basis: 'not_set', cost: 1840, labour: 900, margin: 1260, costs_complete: true, costs_to_confirm: [] },
+      },
+    },
+  })
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    const ic = r.output.internal_cost
+    assertEquals(ic.cost_estimates.costs_complete, false)
+    assertEquals(ic.cost_estimates.costs_to_confirm, ['commission'])
+    assertEquals(ic.cost_estimates.subcontract_commission_total, null)
+    assertEquals(ic.commission.amount, null)
+    assertEquals(ic.commission.basis, 'not_set')
+    assertEquals(ic.margin.pct, null)
+    assertEquals(ic.margin.floor_check, 'costs_to_confirm')
+    assertEquals(ic.margin.floor_breached, false)
+  }
+})
+
+Deno.test('FenceAdapter — commission not set alongside a cost line to confirm: both named', () => {
+  const base = buildFenceInputs()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const inputs = buildFenceInputs({
+    job: {
+      ...base.job,
+      pricing_json: {
+        ...pricing,
+        pricing_complete: false, commissionCostEstimate: null, totalCostEstimate: null, margin_pct: null,
+        internal: { commission: null, commission_basis: 'not_set', cost: 1200, labour: 900, margin: null, costs_complete: false, costs_to_confirm: ['delivery'] },
+      },
+    },
+  })
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) assertEquals(r.output.internal_cost.cost_estimates.costs_to_confirm, ['delivery', 'commission'])
+})
+
 // Sales, CFO note 1118-A: margin and commission are worked from the costs, so
 // with costs to confirm they are not known and the floor check never passes.
 function incompleteFenceInputs() {

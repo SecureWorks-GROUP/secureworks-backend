@@ -193,7 +193,19 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   const commissionTotal = asNumber(internal.commission ?? pricingJson.commissionCostEstimate, 0)
   // internal.margin is the fence tool's material margin in DOLLARS; the margin
   // is the top-level margin_pct, a percent (see sealed_costs.ts).
-  const costsIncomplete = internal.costs_complete === false
+  //
+  // A fence save with no commission rate set marks internal.commission_basis
+  // 'not_set' and saves commission null, apart from its cost lines (an unset
+  // commission does not change the customer's price, so it must not hold the
+  // send gate). The snapshot then lists 'commission' as a cost to confirm, so
+  // neither a $0 commission nor a trusted margin is sealed. Saves without the
+  // marker read exactly as before.
+  const commissionNotSet = asString(internal.commission_basis) === 'not_set'
+  const toolToConfirm = asArray(internal.costs_to_confirm).map((k) => asString(k)).filter((k) => k.length > 0)
+  const costsIncomplete = internal.costs_complete === false || commissionNotSet
+  const costsToConfirm = commissionNotSet && !toolToConfirm.includes('commission')
+    ? [...toolToConfirm, 'commission']
+    : toolToConfirm
 
   const internal_cost: InternalCostSnapshot = {
     schema_version: '2.0',
@@ -211,7 +223,7 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
           labour_total: null,
           subcontract_commission_total: null,
           costs_complete: false,
-          costs_to_confirm: asArray(internal.costs_to_confirm).map((k) => asString(k)).filter((k) => k.length > 0),
+          costs_to_confirm: costsToConfirm,
         }
       : {
           material_total: materialTotal,
@@ -227,6 +239,7 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
       rule: 'fence_5_25pct_inc_gst',
       amount: costsIncomplete ? null : commissionTotal,
       salesperson_user_id: null,
+      ...(commissionNotSet ? { basis: 'not_set' as const } : {}),
     },
   }
 
