@@ -6778,6 +6778,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_materials_save_line':
       case 'dispatch_materials_delete_line':
       case 'dispatch_materials_suggest':
+      case 'dispatch_materials_suggest_changes':
       case 'dispatch_materials_save_workings': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
