@@ -1409,6 +1409,8 @@ export async function prepareAttachments(attachments: unknown, options: {
 // Send, reply and draft all append one signature through composeSignedHtml.
 // renderSignature is the one template, matched to Marnin's phone signature:
 // Kind regards, then the card (logo, name, title, values, phone, email).
+// "Kind regards," is left out when the body already signs off
+// (bodyEndsWithSignOff), so every email has exactly one sign-off.
 //
 // - Omit `signature` and the mailbox default is appended. admin@ (and the
 //   literal mailbox "admin") is SecureWorks Group, Operations, at admin@
@@ -1575,7 +1577,11 @@ function profileForChoice(choice: string, mailbox: string): SignatureFields {
 // the phone original wrapped only "0404 7") differ. Keep them identical:
 // fonts are set on the inner spans, the card has no side padding, and the
 // values line uses &nbsp;|&nbsp; with a space on each side.
-function renderSignature(fields: SignatureFields, id: string): string {
+function renderSignature(
+  fields: SignatureFields,
+  id: string,
+  signOff = true,
+): string {
   const helv = 'font-family:Helvetica,Arial,sans-serif'
   const title = fields.title
     ? `<p style="text-align:left; text-indent:0px; text-transform:none; margin:0px 0px 10px; font-size:12px; color:rgb(76,106,124)"><span style="${helv}">${fields.title}</span></p>`
@@ -1584,7 +1590,9 @@ function renderSignature(fields: SignatureFields, id: string): string {
     ? `<span style="${helv}; color:rgb(41,60,70)"><b>P:</b></span><span style="${helv}">&nbsp;<a href="tel:${fields.phoneTel}" style="color:rgb(76,106,124); text-decoration:none; margin-top:0px; margin-bottom:0px">${fields.phoneDisplay}</a><br></span>`
     : ''
   return `<div style="font-family:Aptos,Aptos_MSFontService,-apple-system,Roboto,Arial,Helvetica,sans-serif; font-size:12pt; color:rgb(0,0,0)">` +
-    `<div style="max-width:680px"><p style="text-align:left; text-indent:0px; line-height:1.6; text-transform:none; margin-top:24px"><span style="font-family:Calibri,Helvetica,sans-serif; font-size:11pt; color:rgb(41,60,70)">Kind regards,</span></p></div>` +
+    (signOff
+      ? `<div style="max-width:680px"><p style="text-align:left; text-indent:0px; line-height:1.6; text-transform:none; margin-top:24px"><span style="font-family:Calibri,Helvetica,sans-serif; font-size:11pt; color:rgb(41,60,70)">Kind regards,</span></p></div>`
+      : '') +
     `<div data-secureworks-signature="${id}" style="margin-top:28px; padding-top:20px; border-top:2px solid rgb(241,90,41); max-width:400px">` +
     `<span style="${helv}; font-size:12pt; color:rgb(33,33,33)"><img src="cid:${SIGNATURE_LOGO_CID}" alt="SecureWorks Group" width="180" style="width:180px; height:auto; max-width:100%; margin-bottom:14px; display:block"></span> ` +
     `<p style="text-align:left; text-indent:0px; text-transform:none; margin:0px 0px 2px; font-size:14px; color:rgb(41,60,70)"><span style="${helv}"><b>${fields.name}</b></span></p>` +
@@ -1598,10 +1606,59 @@ function renderSignature(fields: SignatureFields, id: string): string {
     `</div>`
 }
 
+// One sign-off per email. The card opens with "Kind regards," unless the
+// body already ends with its own sign-off, so a caller we cannot see (jarvis,
+// a reviewed draft) never gets two. A sign-off is one of the closing phrases
+// below as its own line ("Cheers,") or followed by a capitalised name on the
+// same line ("Cheers, Shaun"), optionally followed by up to two short name or
+// company lines ("Shaun" / "SecureWorks Group"). Only the last four text
+// lines of the body are read; "Thanks for your help." is not a sign-off.
+const SIGN_OFF_PHRASE =
+  '(?:kind(?:est)? regards|warm(?:est)? regards|best regards|best wishes|regards|cheers|many thanks|thanks|thank you|best)'
+const SIGN_OFF_ALONE_RE = new RegExp(`^${SIGN_OFF_PHRASE}\\s*[,.!]?$`, 'i')
+const SIGN_OFF_WITH_NAME_RE = new RegExp(`^(${SIGN_OFF_PHRASE})\\s*,\\s*(.+)$`, 'i')
+const NAME_LINE_RE = /^[A-Z][\w.'&-]*(?:\s+[A-Za-z&][\w.'&-]*){0,4}$/
+
+function bodyTextLines(html: string): string[] {
+  const text = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(style|script|head)\b[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6]|table|blockquote)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+  return text.split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 0)
+}
+
+export function bodyEndsWithSignOff(html: string): boolean {
+  const lines = bodyTextLines(html || '').slice(-4)
+  for (let tail = 0; tail <= 2 && tail < lines.length; tail++) {
+    const candidate = lines[lines.length - 1 - tail]
+    const after = lines.slice(lines.length - tail)
+    if (!after.every((line) => line.length <= 60 && NAME_LINE_RE.test(line))) {
+      continue
+    }
+    if (SIGN_OFF_ALONE_RE.test(candidate)) return true
+    const named = SIGN_OFF_WITH_NAME_RE.exec(candidate)
+    if (named && named[2].length <= 60 && NAME_LINE_RE.test(named[2].trim())) {
+      return true
+    }
+  }
+  return false
+}
+
 export function getSignature(from: string): string {
+  return defaultSignature(from, true)
+}
+
+function defaultSignature(from: string, signOff: boolean): string {
   const key = MAILBOX_DEFAULT_SIGNATURE[mailboxAddress(from)]
   if (!key) return ''
-  return renderSignature(profileForChoice(key, from), key)
+  return renderSignature(profileForChoice(key, from), key, signOff)
 }
 
 export function resolveRequestedSignature(
@@ -1613,7 +1670,7 @@ export function resolveRequestedSignature(
     (typeof signature === 'string' && signature.trim() === '')
   if (omitted) {
     if (SIGNATURE_SUPPRESS_RE.test(htmlBody)) return ''
-    return getSignature(mailbox)
+    return defaultSignature(mailbox, !bodyEndsWithSignOff(htmlBody))
   }
   if (typeof signature !== 'string') {
     throw new OutlookInputError(
@@ -1631,7 +1688,11 @@ export function resolveRequestedSignature(
     )
   }
   const renderedAs = key === 'shaun' && isAdminMailbox(mailbox) ? 'shaun' : key
-  return renderSignature(profileForChoice(key, mailbox), renderedAs)
+  return renderSignature(
+    profileForChoice(key, mailbox),
+    renderedAs,
+    !bodyEndsWithSignOff(htmlBody),
+  )
 }
 
 export function composeSignedHtml(

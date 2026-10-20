@@ -22,6 +22,16 @@ import {
   validateInlineAttachment,
   withSignatureLogo,
 } from "./index.ts";
+import { bodyEndsWithSignOff } from "./index.ts";
+import { statementHtml } from "../ops-api/debt_ws_rules.ts";
+import {
+  DEBT_WS_STATEMENT_FROM,
+  DEBT_WS_STATEMENT_SIGNATURE,
+} from "../ops-api/debt_ws_actions.ts";
+import {
+  buildVariationEmails,
+  WORK_ORDER_VARIATION_SENDER_MAILBOX,
+} from "../ops-api/job_work_orders.ts";
 
 Deno.test("Outlook route classification rejects group send fallthrough and preserves exact mailbox", () => {
   assertEquals(classifyOutlookRoute({ from: "admin@secureworkswa.com.au" }), {
@@ -948,5 +958,133 @@ Deno.test("a draft from admin as shaun carries Shaun's block and the inline logo
   } finally {
     globalThis.fetch = originalFetch;
     resetGraphTokenCache();
+  }
+});
+
+// ── One sign-off per email ──────────────────────────────────────────────────
+
+const SIGN_OFF_COUNT_RE =
+  /\b(?:kind(?:est)? regards|warm regards|best regards|regards|cheers|many thanks)\b/gi;
+
+function signOffCount(html: string): number {
+  const text = html.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ");
+  return (text.match(SIGN_OFF_COUNT_RE) || []).length;
+}
+
+Deno.test("a body that already signs off gets the card without another Kind regards", () => {
+  const admin = "admin@secureworkswa.com.au";
+  const signedBodies = [
+    "<p>Hi Alex,</p><p>All booked in.</p><p>Cheers,<br>Shaun</p>",
+    "<p>Hi Alex,</p><p>All booked in.</p><p>Cheers, Shaun</p>",
+    "<p>All booked.</p><p>Kind regards,</p><p>Marnin Stobbe</p><p>SecureWorks Group</p>",
+    "<div>All booked.<br><br>kind regards,<br>Marnin</div>",
+    "<p>All booked.</p><p>Thanks!</p>",
+    "<p>All booked.</p><p>Many thanks,</p>",
+    "<p>All booked.</p><p>Warm regards,<br>The SecureWorks Group Team</p>",
+    "<p>All booked.</p><p>Best,<br>Jan</p>",
+    "<p>All booked.</p><p>Regards, Planning</p>",
+    "All booked.\n\nThank you,\nShaun Lee\nSecureWorks Group",
+    "<p>All booked.</p><p>Cheers,&nbsp;<br>Shaun</p><!-- note -->",
+  ];
+  for (const body of signedBodies) {
+    assertEquals(bodyEndsWithSignOff(body), true, body);
+    for (const signature of [undefined, "shaun", "maverick", "secureworks"]) {
+      const html = composeSignedHtml(body, admin, signature);
+      assertEquals(html.includes("Kind regards,</span>"), false, body);
+      assertEquals(html.includes("data-secureworks-signature="), true);
+      assertEquals(html.includes("EXCELLENCE &nbsp;|&nbsp; INTEGRITY"), true);
+    }
+  }
+});
+
+Deno.test("a plain body gets exactly one Kind regards from the card", () => {
+  const plainBodies = [
+    "<p>Hi Alex,</p><p>All booked in for Tuesday.</p>",
+    "<p>Thanks for your help today.</p>",
+    "<p>Thank you for your business</p>",
+    "<p>Hi Alex,</p><p>Thanks Alex!</p>",
+    "<p>Thanks, see you on Monday.</p>",
+    "<p>Best price we can do is $500.</p>",
+    "<p>Regards to the team, we start Monday.</p><p>Please confirm</p>",
+    "",
+  ];
+  for (const body of plainBodies) {
+    assertEquals(bodyEndsWithSignOff(body), false, body);
+    for (
+      const mailbox of [
+        "admin@secureworkswa.com.au",
+        "marnin@secureworkswa.com.au",
+        "shaun@secureworkswa.com.au",
+      ]
+    ) {
+      const html = composeSignedHtml(body, mailbox, undefined);
+      assertEquals(
+        (html.match(/Kind regards,<\/span>/g) || []).length,
+        1,
+        body,
+      );
+    }
+  }
+  // The v2 card itself is unchanged apart from the optional sign-off line.
+  const full = getSignature("marnin@secureworkswa.com.au");
+  const bare = composeSignedHtml(
+    "<p>x</p><p>Cheers,<br>Marnin</p>",
+    "marnin@secureworkswa.com.au",
+    undefined,
+  ).slice("<p>x</p><p>Cheers,<br>Marnin</p>".length);
+  const signOffBlock =
+    `<div style="max-width:680px"><p style="text-align:left; text-indent:0px; line-height:1.6; text-transform:none; margin-top:24px"><span style="font-family:Calibri,Helvetica,sans-serif; font-size:11pt; color:rgb(41,60,70)">Kind regards,</span></p></div>`;
+  assertEquals(full.replace(signOffBlock, ""), bare);
+});
+
+Deno.test("a company statement email has exactly one sign-off, signed by Shaun", () => {
+  const html = statementHtml({
+    company_name: "Example Builders",
+    week_start: "2026-10-05",
+    lines: [{
+      xero_invoice_id: "x1",
+      invoice_number: "INV-1",
+      job_ref: "SWMS-1, 1 Example Road",
+      invoice_date: "2026-09-01",
+      amount: 300,
+      days_overdue: 27,
+      pay_link: "https://in.xero.com/a",
+    }],
+  });
+  assertEquals(signOffCount(html), 0);
+  const sent = composeSignedHtml(
+    html,
+    DEBT_WS_STATEMENT_FROM,
+    DEBT_WS_STATEMENT_SIGNATURE,
+  );
+  assertEquals(signOffCount(sent), 1);
+  assertEquals(sent.includes("<b>Shaun Lee</b>"), true);
+  assertEquals(sent.includes("mailto:admin@secureworkswa.com.au"), true);
+  assertEquals(sent.includes("Maverick"), false);
+});
+
+Deno.test("work order variation emails have exactly one sign-off", () => {
+  const emails = buildVariationEmails({
+    jobNumber: "SWF-26123",
+    siteSuburb: "Duncraig",
+    woNumber: "WO-SWF-26123",
+    tradeName: "Trade One",
+    invoiceNumber: "TI-1",
+    description: "Extra post, rock found",
+    amountEx: 120,
+    figures: null,
+  });
+  assertEquals(emails.length, 2);
+  for (const email of emails) {
+    const sent = composeSignedHtml(
+      email.body_html,
+      WORK_ORDER_VARIATION_SENDER_MAILBOX,
+      undefined,
+    );
+    assertEquals(signOffCount(sent), 1);
+    assertEquals(
+      (sent.match(/SecureWorks Group/g) || []).length,
+      2, // the card name and the logo alt text, no closing line in the body
+    );
   }
 });

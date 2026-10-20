@@ -967,7 +967,9 @@ export function buildVariationEmails(
         facts.map(([k, v]) =>
           `<tr><td><strong>${esc(k)}</strong></td><td>${esc(v)}</td></tr>`
         ).join("") +
-        `</table><p>SecureWorks Group</p>`,
+        // No closing name: send-outlook-email appends "Kind regards," and the
+        // admin@ SecureWorks Group card, the one sign-off.
+        `</table>`,
     );
     return {
       recipient_role: role,

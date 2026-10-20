@@ -1161,6 +1161,8 @@ export function statementHtml(input: {
     }</strong></td><td ${cell} colspan="2"></td></tr></tfoot>`,
     `</table>`,
     `<p>If any of these have already been paid, please let us know the payment date so we can match it up.</p>`,
-    `<p>Cheers,<br>Shaun<br>SecureWorks Group</p>`,
+    // No sign-off here: send-outlook-email appends "Kind regards," and Shaun's
+    // card (signature "shaun", see DEBT_WS_STATEMENT_SIGNATURE), so the email
+    // has exactly one.
   ].join("\n");
 }
