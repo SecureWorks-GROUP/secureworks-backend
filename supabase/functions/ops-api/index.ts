@@ -39189,7 +39189,16 @@ async function deletePO(client: any, body: any) {
   }
 
   const { error } = await client.from('purchase_orders').delete().eq('id', id)
-  if (error) throw new Error('Failed to delete PO: ' + error.message)
+  if (error) {
+    // S5: Dispatch delivery receipts reference their order and are kept as
+    // evidence, so an order with receipts is cancelled, never deleted.
+    if (error.code === '23503' && String(error.message || '').includes('job_material_line_receipts')) {
+      throw new ApiError('Cannot delete: deliveries have been recorded against this PO. Cancel it instead.', 409, {
+        error: 'po_has_delivery_receipts',
+      })
+    }
+    throw new Error('Failed to delete PO: ' + error.message)
+  }
 
   return { success: true, deleted: po.po_number }
 }
