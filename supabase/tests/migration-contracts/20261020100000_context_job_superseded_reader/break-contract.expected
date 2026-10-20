@@ -1,1 +1,1 @@
-contract: superseded then unsuperseded before p_at: false (got t, expected f)
+contract: S1-M1 trap: clear plus re-supersede at one instant, p_at at t1: null (got f, expected <NULL>)

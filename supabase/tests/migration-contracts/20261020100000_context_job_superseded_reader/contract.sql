@@ -7,6 +7,11 @@
 -- event (status_without_event, "chronology unknown", held O?) is NOT detected:
 -- that needs the quote_acceptance_gaps grant held for the owner, and reading
 -- jobs.status is forbidden. false from this reader is never "no gap".
+--
+-- S1-M1 (fix 1): an opposite-type tie at the newest instant at or before p_at
+-- reads null, never a pick; the trap cases run first so the break proof (the
+-- old id-tiebreak body) fails on the trap. S1-L1
+-- writer_time_is_transaction_start is a named limit the reader cannot see.
 
 -- 1. Shape: STABLE, SECURITY INVOKER, LANGUAGE sql, no SET clause, the slice
 --    comment carrying both named limits, and no forbidden source in the body.
@@ -27,8 +32,10 @@ BEGIN
   END IF;
   IF f.cmt NOT LIKE 'Job superseded reader (20261020100000)%'
      OR position('status_without_event_not_detected_needs_gap_grant' IN f.cmt) = 0
-     OR position('same_instant_order_not_causal' IN f.cmt) = 0 THEN
-    RAISE EXCEPTION 'contract: reader comment must name the slice and both named limits';
+     OR position('S1-M1' IN f.cmt) = 0
+     OR position('S1-L1 writer_time_is_transaction_start' IN f.cmt) = 0
+     OR position('same_instant_order_not_causal' IN f.cmt) > 0 THEN
+    RAISE EXCEPTION 'contract: reader comment must name the slice, S1-M1 and both named limits';
   END IF;
   RAISE NOTICE 'pass: shape';
 END $$;
@@ -61,7 +68,13 @@ END $$;
 --    Job ids (synthetic):
 --      ...01 no events             ...02 superseded           ...03 superseded then cleared
 --      ...04 re-superseded         ...05 unpaired unsuperseded ...06 double superseded
---      ...07 tie, superseded id later   ...08 tie, unsuperseded id later
+--      ...07 opposite-type tie, superseded id later
+--      ...08 opposite-type tie, unsuperseded id later (both now read null: S1-M1)
+--      c...01 the S1-M1 trap: superseded at t0, then clear plus re-supersede at t1
+--      c...02 same-type control: two superseded at one instant
+--      c...03 opposite-type tie at t0, then a single superseded at t1
+--      c...04 opposite-type tie at t0, then a single unsuperseded at t1
+--      c...05 two unsuperseded at one instant
 --      ...09 other event types and a null created_at only
 --      b...01 has none, b...02 holds the events (another job's events ignored)
 BEGIN;
@@ -86,11 +99,28 @@ INSERT INTO public.job_events (id, job_id, event_type, created_at) VALUES
  ('00000000-0000-4000-8000-000000000902', 'a0000000-0000-4000-8000-000000000009', 'status_changed',             '2026-10-01 11:00+00'),
  ('00000000-0000-4000-8000-000000000903', 'a0000000-0000-4000-8000-000000000009', 'QUOTE_OPTION_SUPERSEDED',    '2026-10-01 12:00+00'),
  ('00000000-0000-4000-8000-000000000904', 'a0000000-0000-4000-8000-000000000009', 'quote_option_superseded',    NULL),
- ('00000000-0000-4000-8000-000000001201', 'b0000000-0000-4000-8000-000000000002', 'quote_option_superseded',    '2026-10-01 10:00+00');
+ ('00000000-0000-4000-8000-000000001201', 'b0000000-0000-4000-8000-000000000002', 'quote_option_superseded',    '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001301', 'c0000000-0000-4000-8000-000000000001', 'quote_option_superseded',    '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001302', 'c0000000-0000-4000-8000-000000000001', 'quote_option_superseded',    '2026-10-02 10:00+00'),
+ ('00000000-0000-4000-8000-000000001303', 'c0000000-0000-4000-8000-000000000001', 'quote_option_unsuperseded',  '2026-10-02 10:00+00'),
+ ('00000000-0000-4000-8000-000000001401', 'c0000000-0000-4000-8000-000000000002', 'quote_option_superseded',    '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001402', 'c0000000-0000-4000-8000-000000000002', 'quote_option_superseded',    '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001501', 'c0000000-0000-4000-8000-000000000003', 'quote_option_superseded',    '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001502', 'c0000000-0000-4000-8000-000000000003', 'quote_option_unsuperseded',  '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001503', 'c0000000-0000-4000-8000-000000000003', 'quote_option_superseded',    '2026-10-02 10:00+00'),
+ ('00000000-0000-4000-8000-000000001601', 'c0000000-0000-4000-8000-000000000004', 'quote_option_unsuperseded',  '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001602', 'c0000000-0000-4000-8000-000000000004', 'quote_option_superseded',    '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001603', 'c0000000-0000-4000-8000-000000000004', 'quote_option_unsuperseded',  '2026-10-02 10:00+00'),
+ ('00000000-0000-4000-8000-000000001701', 'c0000000-0000-4000-8000-000000000005', 'quote_option_unsuperseded',  '2026-10-01 10:00+00'),
+ ('00000000-0000-4000-8000-000000001702', 'c0000000-0000-4000-8000-000000000005', 'quote_option_unsuperseded',  '2026-10-01 10:00+00');
 
 CREATE TEMP TABLE t16b_cases (ord integer, label text, job uuid, at timestamptz, expected boolean) ON COMMIT DROP;
 GRANT SELECT ON t16b_cases TO service_role;
 INSERT INTO t16b_cases VALUES
+ (-3, 'S1-M1 trap: clear plus re-supersede at one instant, p_at at t1: null', 'c0000000-0000-4000-8000-000000000001', '2026-10-02 10:00+00', NULL),
+ (-2, 'S1-M1 trap: clear plus re-supersede at one instant, p_at after t1: null', 'c0000000-0000-4000-8000-000000000001', '2026-10-05 00:00+00', NULL),
+ (-1, 'S1-M1 trap: between t0 and t1: true',                   'c0000000-0000-4000-8000-000000000001', '2026-10-01 18:00+00', true),
+ (0,  'S1-M1 trap: before t0: false',                          'c0000000-0000-4000-8000-000000000001', '2026-10-01 09:00+00', false),
  (1,  'no events: false',                                       'a0000000-0000-4000-8000-000000000001', '2026-10-05 00:00+00', false),
  (2,  'superseded before p_at: true',                           'a0000000-0000-4000-8000-000000000002', '2026-10-05 00:00+00', true),
  (3,  'before the superseded event: false',                     'a0000000-0000-4000-8000-000000000002', '2026-10-01 09:59:59+00', false),
@@ -104,11 +134,16 @@ INSERT INTO t16b_cases VALUES
  (11, 'double superseded, between the two: true',               'a0000000-0000-4000-8000-000000000006', '2026-10-01 18:00+00', true),
  (12, 'double superseded, after the second: true',              'a0000000-0000-4000-8000-000000000006', '2026-10-02 18:00+00', true),
  (13, 'double superseded, one clear closes it: false',          'a0000000-0000-4000-8000-000000000006', '2026-10-05 00:00+00', false),
- (14, 'same-instant tie, superseded has the later id: true',    'a0000000-0000-4000-8000-000000000007', '2026-10-01 10:00+00', true),
- (15, 'same-instant tie, unsuperseded has the later id: false', 'a0000000-0000-4000-8000-000000000008', '2026-10-01 10:00+00', false),
+ (14, 'opposite-type tie, superseded has the later id: null (was true before S1-M1)',    'a0000000-0000-4000-8000-000000000007', '2026-10-01 10:00+00', NULL),
+ (15, 'opposite-type tie, unsuperseded has the later id: null (was false before S1-M1)', 'a0000000-0000-4000-8000-000000000008', '2026-10-01 10:00+00', NULL),
  (16, 'other event types and null created_at ignored: false',   'a0000000-0000-4000-8000-000000000009', '2026-10-05 00:00+00', false),
  (17, 'another job''s events ignored: false',                   'b0000000-0000-4000-8000-000000000001', '2026-10-05 00:00+00', false),
- (18, 'the other job itself reads true',                        'b0000000-0000-4000-8000-000000000002', '2026-10-05 00:00+00', true);
+ (18, 'the other job itself reads true',                        'b0000000-0000-4000-8000-000000000002', '2026-10-05 00:00+00', true),
+ (19, 'same-type control: two superseded at one instant: true', 'c0000000-0000-4000-8000-000000000002', '2026-10-01 10:00+00', true),
+ (20, 'two unsuperseded at one instant: false',                 'c0000000-0000-4000-8000-000000000005', '2026-10-01 10:00+00', false),
+ (21, 'earlier opposite-type tie while newest: null',           'c0000000-0000-4000-8000-000000000003', '2026-10-01 18:00+00', NULL),
+ (22, 'earlier tie then a later superseded: true',              'c0000000-0000-4000-8000-000000000003', '2026-10-05 00:00+00', true),
+ (23, 'earlier tie then a later unsuperseded: false',           'c0000000-0000-4000-8000-000000000004', '2026-10-05 00:00+00', false);
 
 SET LOCAL ROLE service_role;
 
@@ -123,7 +158,7 @@ BEGIN
     RAISE NOTICE 'pass: %', c.label;
     n := n + 1;
   END LOOP;
-  IF n <> 18 THEN RAISE EXCEPTION 'contract: expected 18 behaviour cases, ran %', n; END IF;
+  IF n <> 27 THEN RAISE EXCEPTION 'contract: expected 27 behaviour cases, ran %', n; END IF;
   IF public.context_job_superseded_during(NULL, '2026-10-05 00:00+00') IS NOT NULL
      OR public.context_job_superseded_during('a0000000-0000-4000-8000-000000000002', NULL) IS NOT NULL THEN
     RAISE EXCEPTION 'contract: a null job or instant must read null (unknown), never false';

@@ -21,8 +21,8 @@
 -- Never read: jobs.status, jobs.superseded_at, jobs.superseded_by_job_id,
 -- quote_acceptance_gaps or any SQ-23 flag.
 --
--- Edge semantics (the answer is the state after the newest such event at or
--- before p_at, ordered by created_at, then id::text COLLATE "C"):
+-- Edge semantics (the answer is read from the events at the newest instant,
+-- created_at, at or before p_at):
 --   - An event exactly at p_at has happened at p_at (created_at <= p_at). A
 --     superseded event at p_at makes p_at superseded; an unsuperseded event
 --     at p_at makes p_at live. Each interval is [superseded, unsuperseded).
@@ -30,14 +30,35 @@
 --     the job was live and stays live.
 --   - Two superseded events in a row: the second changes nothing; the
 --     interval stays open from the first until the next unsuperseded.
---   - Same-instant ties (equal created_at) are broken by id::text COLLATE
---     "C", the later id winning. That order is deterministic but NOT causal:
---     job_events.id is a random uuid, so a mark and a clear written in one
---     transaction (same now()) are ordered by chance. Named limit
---     same_instant_order_not_causal.
+--   - S1-M1, opposite-type tie: when the newest instant at or before p_at
+--     holds both a superseded and an unsuperseded event for the job, the
+--     answer is null (unknown). One is never picked. SQ-23 writes exactly this
+--     shape: when a job leaves a won status, its trigger can clear an option's
+--     mark (quote_option_unsuperseded) and then, with exactly one option still
+--     won, supersede it again (quote_option_superseded) in one transaction, so
+--     both rows carry the same now(). The true state there is superseded, but
+--     job_events.id is a random uuid, so no id order can tell; the old id
+--     tiebreak read live about half the time.
+--   - A same-type tie at the newest instant (two superseded, or two
+--     unsuperseded) answers by that type.
+--   - An opposite-type tie at an earlier instant matters only while it is the
+--     newest instant at or before p_at: once a later event exists at or
+--     before p_at, that later instant alone decides. So a job superseded at
+--     t0 and then cleared and re-superseded in one transaction at t1 reads
+--     true for t0 <= p_at < t1 and null for p_at >= t1 until a later event.
 --   - No such event at or before p_at: false (live).
 --   - p_job or p_at null: null (unknown), never false.
 --   - A row with created_at null has no instant and is not read.
+--   - job_events.id is no longer an input: with ties answered by the set of
+--     types at the instant, there is no text sort or tiebreak to collate.
+--
+-- Named limit S1-L1 writer_time_is_transaction_start: the SQ-23 writers take
+-- the default created_at, which is now(), the transaction start. A writer
+-- that waited on the group's advisory lock can therefore carry an earlier
+-- created_at than a write that committed before it, so order across
+-- transactions can invert. This reader cannot see that. The causal fix
+-- (clock_timestamp() or a sequence on the writers) belongs to the SQ-23
+-- owner; SQ-23 is not touched here.
 --
 -- Named limit status_without_event_not_detected_needs_gap_grant: the CTX-T16b
 -- reader rule also says a status change with no event (status_without_event)
@@ -99,20 +120,29 @@ PARALLEL SAFE
 AS $fn$
  SELECT CASE
   WHEN p_job IS NULL OR p_at IS NULL THEN NULL::boolean
-  ELSE coalesce((
-   SELECT e.event_type = 'quote_option_superseded'
+  ELSE (
+   -- The events at the newest instant at or before p_at. None: live (false).
+   -- Only superseded: true. Only unsuperseded: false. Both (S1-M1): null.
+   SELECT CASE
+           WHEN count(*) = 0 THEN false
+           WHEN bool_and(e.event_type = 'quote_option_superseded') THEN true
+           WHEN bool_and(e.event_type = 'quote_option_unsuperseded') THEN false
+           ELSE NULL::boolean
+          END
      FROM public.job_events e
     WHERE e.job_id = p_job
       AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
-      AND e.created_at IS NOT NULL
-      AND e.created_at OPERATOR(pg_catalog.<=) p_at
-    ORDER BY e.created_at DESC, e.id::text COLLATE "C" DESC
-    LIMIT 1), false)
+      AND e.created_at = (
+       SELECT max(m.created_at)
+         FROM public.job_events m
+        WHERE m.job_id = p_job
+          AND m.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
+          AND m.created_at OPERATOR(pg_catalog.<=) p_at))
  END
 $fn$;
 
 COMMENT ON FUNCTION public.context_job_superseded_during(uuid, timestamptz) IS
-'Job superseded reader (20261020100000): true when the job was superseded (not live) at p_at by the job_events log alone: the newest quote_option_superseded or quote_option_unsuperseded event for the job at or before p_at (created_at, then id::text COLLATE "C") is a superseded one. An event at p_at counts; an unpaired unsuperseded and a repeated superseded change nothing; null job or instant is null. Never reads jobs.status, jobs.superseded_at, jobs.superseded_by_job_id or quote_acceptance_gaps. Named limits: status_without_event_not_detected_needs_gap_grant (a status change with no event is not seen, so false is never "no gap"); same_instant_order_not_causal (equal created_at is ordered by random uuid). No consumer yet; slice 2 gates on feature_flags.context_job_superseded_reader_v1. Service role only.';
+'Job superseded reader (20261020100000): true when the job was superseded (not live) at p_at by the job_events log alone, read from the quote_option_superseded and quote_option_unsuperseded events for the job at the newest created_at at or before p_at: only superseded is true, only unsuperseded is false, none is false. An event at p_at counts; an unpaired unsuperseded and a repeated superseded change nothing; a same-type tie answers by its type; null job or instant is null. S1-M1: an opposite-type tie at that newest instant (a clear and a re-supersede in one transaction share now()) is null (unknown), never picked; an earlier tie matters only while it is the newest instant at or before p_at. Never reads jobs.status, jobs.superseded_at, jobs.superseded_by_job_id or quote_acceptance_gaps. Named limits: status_without_event_not_detected_needs_gap_grant (a status change with no event is not seen, so false is never "no gap"); S1-L1 writer_time_is_transaction_start (created_at is the writer''s transaction start, so order across transactions can invert unseen; the causal fix belongs to the SQ-23 owner). No consumer yet; slice 2 gates on feature_flags.context_job_superseded_reader_v1. Service role only.';
 
 REVOKE ALL ON FUNCTION public.context_job_superseded_during(uuid, timestamptz) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_job_superseded_during(uuid, timestamptz) TO service_role;
