@@ -47,9 +47,11 @@ export type InternalMargin = {
   // false): a margin worked on a short cost is not known, never a figure.
   pct: number | null
   floor_breached: boolean
-  // Present only when pct is null, so a complete release's canonical text and
-  // hash are unchanged. The floor check was not done; it never reads as passed.
-  floor_check?: 'costs_to_confirm'
+  // Present only when pct is null, so a release with a known margin keeps its
+  // canonical shape. The floor check was not done; it never reads as passed.
+  // costs_to_confirm: some cost lines have no price. margin_not_given: the
+  // tool saved no margin. pct is a FRACTION (0.495), never a percent.
+  floor_check?: 'costs_to_confirm' | 'margin_not_given'
   // When floor_breached is true, override_reason is required (validator
   // enforces). The approver UUID + role must match the project's configured
   // override-operator allowlist (Marnin or Shaun per §9 default).

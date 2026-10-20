@@ -35,6 +35,7 @@ import {
   asObject,
   asString,
 } from './_extract.ts'
+import { sealedCostEstimates, sealedMargin } from './sealed_costs.ts'
 
 export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): AdapterOutput => {
   const scopeJson = asObject(inputs.job.scope_json)
@@ -109,10 +110,19 @@ export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     }
   })
 
-  const materialTotal = asNumber(pricingJson.materialCostEstimate, 0)
-  const labourTotal = asNumber(pricingJson.labourCostEstimate, 0)
-  const commissionTotal = asNumber(pricingJson.commissionCostEstimate, 0)
-  const marginPct = asNumber(pricingJson.margin_pct, 0)
+  // Costs: the patio scoper (v2) saves pricing.internal.{materials, labour,
+  // costs_complete, costs_to_confirm}; the older patio tool saved the
+  // *CostEstimate scalars. A cost neither gives is not known, never 0, and a
+  // margin is sealed only from the tool's own margin_pct (a percent). The v2
+  // scoper saves no margin, so its floor check reads "not done", never passed.
+  const internal = asObject(pricingJson.internal)
+  const costs = sealedCostEstimates({
+    material: asNumberOrNull(internal.materials ?? pricingJson.materialCostEstimate),
+    labour: asNumberOrNull(internal.labour ?? pricingJson.labourCostEstimate),
+    commission: asNumberOrNull(pricingJson.commissionCostEstimate),
+    toolSaysIncomplete: internal.costs_complete === false,
+    toolToConfirm: asArray(internal.costs_to_confirm).map((k) => asString(k)).filter((k) => k.length > 0),
+  })
 
   const internal_cost: InternalCostSnapshot = {
     schema_version: '2.0',
@@ -121,20 +131,11 @@ export const buildPatioScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     version: 1,
     captured_at: '',
     line_costs: lineCosts,
-    cost_estimates: {
-      material_total: materialTotal,
-      labour_total: labourTotal,
-      subcontract_commission_total: commissionTotal,
-    },
-    margin: {
-      pct: marginPct,
-      floor_breached: marginPct > 0 && marginPct < 0.2,
-      override_reason: null,
-      override_approver_user_id: null,
-    },
+    cost_estimates: costs.estimates,
+    margin: sealedMargin({ marginPercent: pricingJson.margin_pct, costsComplete: costs.complete }),
     commission: {
       rule: 'patio_10pct_gp',
-      amount: commissionTotal,
+      amount: costs.complete ? costs.estimates.subcontract_commission_total : null,
       salesperson_user_id: null,
     },
   }

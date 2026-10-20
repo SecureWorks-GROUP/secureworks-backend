@@ -72,6 +72,7 @@ import {
   asObject,
   asString,
 } from './_extract.ts'
+import { sealedMargin } from './sealed_costs.ts'
 
 export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): AdapterOutput => {
   const scopeJson = asObject(inputs.job.scope_json)
@@ -190,7 +191,8 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
   const materialTotal = asNumber(internal.cost ?? pricingJson.materialCostEstimate, 0)
   const labourTotal = asNumber(internal.labour ?? pricingJson.labourCostEstimate, 0)
   const commissionTotal = asNumber(internal.commission ?? pricingJson.commissionCostEstimate, 0)
-  const marginPct = asNumber(internal.margin ?? pricingJson.margin_pct, 0)
+  // internal.margin is the fence tool's material margin in DOLLARS; the margin
+  // is the top-level margin_pct, a percent (see sealed_costs.ts).
   const costsIncomplete = internal.costs_complete === false
 
   const internal_cost: InternalCostSnapshot = {
@@ -220,20 +222,7 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
     // are worked from the costs, so with costs still to confirm they would be
     // worked on a short cost. They are sealed as not known, and the floor check
     // is marked as not done, never as passed.
-    margin: costsIncomplete
-      ? {
-          pct: null,
-          floor_breached: false,
-          floor_check: 'costs_to_confirm',
-          override_reason: null,
-          override_approver_user_id: null,
-        }
-      : {
-          pct: marginPct,
-          floor_breached: marginPct > 0 && marginPct < 0.2,
-          override_reason: null,
-          override_approver_user_id: null,
-        },
+    margin: sealedMargin({ marginPercent: pricingJson.margin_pct, costsComplete: !costsIncomplete }),
     commission: {
       rule: 'fence_5_25pct_inc_gst',
       amount: costsIncomplete ? null : commissionTotal,
@@ -530,7 +519,7 @@ export function _fencePresenceReport(inputs: AdapterInputs): {
   // Internal cost (pricing.internal scalars).
   const internal = asObject(pricingJson.internal)
   ;(typeof internal.cost === 'number' ? captured : partial).push('internal_cost.cost (from pricing.internal.cost)')
-  ;(typeof internal.margin === 'number' ? captured : partial).push('internal_cost.margin.pct (from pricing.internal.margin)')
+  ;(asNumberOrNull(pricingJson.margin_pct) !== null ? captured : partial).push('internal_cost.margin.pct (from pricing.margin_pct, a percent)')
 
   // Always-GAP fields for Fence today:
   ;(asString(jobBlock.council_status).length > 0 ? captured : missing).push('site.council_status')
