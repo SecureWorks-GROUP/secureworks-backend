@@ -18,7 +18,11 @@
 // - frozen_scope: the job's frozen scope_revisions row (status frozen; earlier
 //   ones are superseded and kept). The ONLY source compared with actuals. Its
 //   server id and revision_number are not the tool's frozenId, which is
-//   reported apart.
+//   reported apart. Whether the last save is still the frozen revision is
+//   decided by the hashes freeze_scope stores (scope_hash, pricing_hash over
+//   the canonical jobs.scope_json / pricing_json), never by matching ids
+//   (Sales final revision contract,
+//   company-os/sales-final-revision-contract-20261020.md).
 // - commercial_baseline: the engine's own expected cost (v_job_profit
 //   expected_source: frozen at acceptance, or an accepted or sent quote
 //   revision), passed through untouched.
@@ -37,13 +41,42 @@
 // The record carries no commission, so the expected profit is before
 // commission; the actual side carries commission as its own lane.
 
+import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
+
 const SALE_MATCH_TOLERANCE_EX = 1;
 
 export const PATIO_EXPECTED_SCOPE_PROJECTION =
   "ptool:scope_json->tool, prev:scope_json->revision, psup:scope_json->supported, pexp:scope_json->expected";
 
 export const PATIO_FROZEN_REVISION_COLUMNS =
-  "id, revision_number, status, tool_kind, tool_version, frozen_at, scope_canonical_text, pricing_canonical_text";
+  "id, revision_number, status, tool_kind, tool_version, frozen_at, scope_hash, pricing_hash, scope_canonical_text, pricing_canonical_text";
+
+// The whole last save, read for one patio job only, to hash it the way
+// freeze_scope does.
+export const PATIO_LAST_SAVE_HASH_COLUMNS = "scope_json, pricing_json";
+
+export interface LastSaveHashes {
+  scope_hash: string | null;
+  pricing_hash: string | null;
+}
+
+const HASH_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The last save's hashes, computed exactly as freeze_scope computes the frozen
+ * row's (canonicalJsonAndHash over the raw column). A value that is not an
+ * object gets no hash.
+ */
+export async function lastSaveHashes(
+  row: Record<string, unknown> | null,
+): Promise<LastSaveHashes> {
+  const hashOf = async (v: unknown) =>
+    obj(v) ? (await canonicalJsonAndHash(v)).hash : null;
+  return {
+    scope_hash: await hashOf(row?.scope_json),
+    pricing_hash: await hashOf(row?.pricing_json),
+  };
+}
 
 export interface ToolRevision {
   n: number | null;
@@ -99,7 +132,11 @@ export interface PatioExpectedVersusActual {
       costs_to_confirm: string[];
     };
     expected: ExpectedFigures;
-    same_revision_as_current: boolean | null;
+    // Compared by hash (scope_hash, pricing_hash), never by id. null: not
+    // compared (the last save or a stored hash could not be read).
+    last_save_matches_frozen: boolean | null;
+    scope_hash_match: boolean | null;
+    pricing_hash_match: boolean | null;
   } | null;
   commercial_baseline: {
     label: "commercial_baseline";
@@ -241,6 +278,7 @@ export function patioExpectedVersusActual(
   current: Record<string, unknown> | null,
   frozen: Record<string, unknown> | null,
   row: Record<string, unknown>,
+  lastSave: LastSaveHashes | null = null,
 ): PatioExpectedVersusActual | null {
   const flags: string[] = [];
 
@@ -283,13 +321,18 @@ export function patioExpectedVersusActual(
     const pricingComplete = bool(pricing.pricing_complete);
     const costsComplete = bool(internal.costs_complete);
     const sealed = bool(pRev.sealed);
-    // An explicit false or a name to confirm holds the figures; pricing with
-    // none of these flags is read as complete, as the send gate reads it.
-    const pricingOk = pricingComplete !== false && costsComplete !== false &&
-      sealed !== false && sellToConfirm === 0;
+    // Sales final revision contract: complete only when pricing_complete is
+    // true, revision.sealed is true, internal.costs_complete is not false and
+    // nothing is left to confirm. A missing flag is not a yes.
+    const pricingOk = pricingComplete === true && costsComplete !== false &&
+      sealed === true && sellToConfirm === 0;
     if (pricingComplete === false) flags.push("frozen_pricing_incomplete");
+    if (pricingComplete === null) {
+      flags.push("frozen_pricing_complete_not_stated");
+    }
     if (costsComplete === false) flags.push("frozen_costs_incomplete");
     if (sealed === false) flags.push("frozen_pricing_not_sealed");
+    if (sealed === null) flags.push("frozen_pricing_seal_not_stated");
     if (sellToConfirm > 0) flags.push("frozen_sell_to_confirm");
     if (revision.outputs_agree !== true) flags.push("outputs_not_confirmed");
     if (revision.frozen_id === null || revision.n === null) {
@@ -310,7 +353,12 @@ export function patioExpectedVersusActual(
     if (expected.sale_ex === null && supported === true) {
       flags.push("expected_sale_not_known");
     }
-    const curId = currentEstimate?.tool_revision.frozen_id ?? null;
+    const match = (stored: unknown, live: string | null | undefined) => {
+      const s = text(stored);
+      return s === null || !HASH_RE.test(s) || !live ? null : s === live;
+    };
+    const scopeMatch = match(frozen!.scope_hash, lastSave?.scope_hash);
+    const pricingMatch = match(frozen!.pricing_hash, lastSave?.pricing_hash);
     frozenScope = {
       label: "frozen_scope",
       source: "scope_revisions",
@@ -331,13 +379,18 @@ export function patioExpectedVersusActual(
         costs_to_confirm: costsToConfirm,
       },
       expected,
-      // tool ids compared with tool ids; the server row id is never a frozenId
-      same_revision_as_current: curId === null || revision.frozen_id === null
-        ? null
-        : curId === revision.frozen_id,
+      last_save_matches_frozen: scopeMatch === false || pricingMatch === false
+        ? false
+        : scopeMatch === true && pricingMatch === true
+        ? true
+        : null,
+      scope_hash_match: scopeMatch,
+      pricing_hash_match: pricingMatch,
     };
-    if (frozenScope.same_revision_as_current === false) {
+    if (frozenScope.last_save_matches_frozen === false) {
       flags.push("last_save_not_frozen");
+    } else if (frozenScope.last_save_matches_frozen === null) {
+      flags.push("last_save_freshness_not_checked");
     }
   }
 

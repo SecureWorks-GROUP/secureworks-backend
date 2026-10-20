@@ -17,8 +17,10 @@
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 import {
+  lastSaveHashes,
   PATIO_EXPECTED_SCOPE_PROJECTION,
   PATIO_FROZEN_REVISION_COLUMNS,
+  PATIO_LAST_SAVE_HASH_COLUMNS,
   patioExpectedVersusActual,
 } from "./job_profit_patio_expected.ts";
 
@@ -446,18 +448,19 @@ export async function jobProfitAction(
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       labels: JOB_PROFIT_LABELS,
-      ...patioExpectedPart(patioScope, patioFrozen, summary),
+      ...(await patioExpectedPart(client, patioScope, patioFrozen, summary)),
     },
   };
 }
 
 // Present only for a patio scoper 2.0 job, or when its scope could not be
 // read; every other job's response is unchanged.
-function patioExpectedPart(
+async function patioExpectedPart(
+  client: any,
   current: { data: any[] | null; error: { message: string } | null },
   frozen: { data: any[] | null; error: { message: string } | null },
   summary: Record<string, unknown>,
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const failed = current.error
     ? `job scope read failed: ${current.error.message}`
     : frozen.error
@@ -466,11 +469,18 @@ function patioExpectedPart(
   if (failed) {
     return { patio_expected: { status: "unreadable", error: failed } };
   }
-  const result = patioExpectedVersusActual(
-    current.data?.[0] ?? null,
-    frozen.data?.[0] ?? null,
-    summary,
-  );
+  const cur = current.data?.[0] ?? null;
+  const frz = frozen.data?.[0] ?? null;
+  // Only a patio job with a frozen row needs the whole last save, to compare
+  // it with the frozen row by hash. A failed read leaves freshness unchecked
+  // (flagged), never assumed.
+  let hashes = null;
+  if (frz && (cur?.ptool === "patio-scoper" || frz.tool_kind === "patio")) {
+    const full = await client.from("jobs").select(PATIO_LAST_SAVE_HASH_COLUMNS)
+      .eq("id", summary.job_id).limit(1);
+    if (!full.error) hashes = await lastSaveHashes(full.data?.[0] ?? null);
+  }
+  const result = patioExpectedVersusActual(cur, frz, summary, hashes);
   return result ? { patio_expected: result } : {};
 }
 
