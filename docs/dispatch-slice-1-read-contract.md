@@ -167,6 +167,28 @@ keeps its order. Slice 2's quote chips read them to show a sent date or
 "Superseded"; without them a superseded quote read "Sent". Projection:
 `projectJobDetailDocument`; test: `job_detail_document_dates_test.ts`.
 
+## 5. Client sign-off and "ready to raise the final invoice" (W2, 20 Oct 2026)
+
+Rules: `ops-api/dispatch_signoff.ts`, on the one sign-off rule in
+`trade_client_signoff.ts`. Read only: nothing here sends, books, chases or
+writes.
+
+- Top level on every non-empty `dispatch=1` answer: `dispatch_signoff` is
+  `off` (the switch `trade_invoice_requires_client_signoff_v1` is off or
+  unreadable; only the flag was read), `ok`, or `failed` (the read threw). With
+  `ok` there is also `final_invoice_ready_total`.
+- Per card, only with `ok` and only for a job the sign-off rule covers
+  (`client_signoff_settings.gated_job_types` and `applies_from`):
+  `client_signoff: {state, method, signed_at}` with `state` one of
+  `signed_off`, `waived`, `not_signed`, `not_happy`, `unknown`; and
+  `final_invoice_ready`: true when signed off or waived and the card's
+  final sales invoice is not raised yet (a DRAFT does not count, though `has_final_invoice` does), false otherwise, null when either answer is
+  unknown (a failed sign-off or invoice read). Other cards carry neither key.
+- The existing To do (`dispatch_todo`, `todo_total`) is unchanged. The screen
+  shows `final_invoice_ready` as its own To do group.
+- Payment is never an input. The four questions stay apart: work complete,
+  client signed off, final invoice raised, customer paid. The chase stays held.
+
 ## Who can call these
 
 Staff sessions only (admin, owner, ops manager), and the server key. `pipeline`

@@ -1650,3 +1650,82 @@ Deno.test("PAGE_SIZE matches the paging helper the list read uses", () => {
   // The stand-in pages at the PostgREST ceiling, as fetchAllRows does.
   assertEquals(PAGE_SIZE, ROW_CEILING);
 });
+
+// ── Client sign-off on the list (dispatch_signoff.ts) ────────────────────────
+// Made-up job numbers; read only. The switch is the trade invoice gate's own.
+function signoffBoard(flagOn: boolean): Record<string, Row[]> {
+  return {
+    jobs: [
+      job(91, { job_number: "SWX-S1", status: "complete", completed_at: "2026-10-18T02:00:00.000Z" }),
+      job(92, { job_number: "SWX-S2", status: "complete", completed_at: "2026-10-18T02:00:00.000Z" }),
+      job(93, { job_number: "SWX-S3", status: "complete", completed_at: "2026-10-18T02:00:00.000Z" }),
+      job(94, { job_number: "SWX-S4", status: "invoiced", completed_at: "2026-10-18T02:00:00.000Z" }),
+      job(95, { job_number: "SWX-S5", type: "repair", status: "complete" }),
+      job(96, { job_number: "SWX-S6", status: "complete", completed_at: "2026-10-18T02:00:00.000Z" }),
+    ],
+    feature_flags: [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: flagOn }],
+    client_signoff_settings: [{ id: 1, min_happy_rating: 4, gated_job_types: ["fencing", "patio"], applies_from: null }],
+    job_client_signoffs: [
+      { id: "so-1", job_id: jobId(91), method: "trade_app", signed_name: "x", happy: true, satisfaction_rating: 5, created_at: "2026-10-18T03:00:00.000Z" },
+      { id: "so-2", job_id: jobId(92), method: "trade_app", signed_name: "x", happy: false, satisfaction_rating: 2, created_at: "2026-10-18T03:00:00.000Z" },
+      { id: "so-6", job_id: jobId(96), method: "trade_app", signed_name: "x", happy: true, satisfaction_rating: 5, created_at: "2026-10-18T03:00:00.000Z" },
+      { id: "so-4", job_id: jobId(94), method: "office_waiver", waiver_reason: "client away", created_at: "2026-10-18T03:00:00.000Z" },
+    ],
+    xero_invoices: [
+      { job_id: jobId(94), status: "AUTHORISED", invoice_type: "ACCREC", reference: "SWX-S4 Final" },
+      { job_id: jobId(96), status: "DRAFT", invoice_type: "ACCREC", reference: "SWX-S6 Final" },
+    ],
+  };
+}
+
+Deno.test("pipeline dispatch=1: with the sign-off switch off nothing is read and no card carries sign-off", async () => {
+  const { client, calls } = makeClient(signoffBoard(false));
+  const result: any = await _pipelineForTest(client, params("dispatch=1"));
+  assertEquals(result.dispatch_signoff, "off");
+  assert(!("final_invoice_ready_total" in result));
+  for (const row of allRows(result)) {
+    assert(!("client_signoff" in row));
+    assert(!("final_invoice_ready" in row));
+  }
+  assertEquals(calls.filter((c) => c.table === "job_client_signoffs").length, 0);
+  assertEquals(calls.filter((c) => c.table === "client_signoff_settings").length, 0);
+});
+
+Deno.test("pipeline dispatch=1: with the switch on each fencing card shows its sign-off and whether the final invoice can be raised", async () => {
+  const { client, writes } = makeClient(signoffBoard(true));
+  const result: any = await _pipelineForTest(client, params("dispatch=1"));
+  assertEquals(result.dispatch_signoff, "ok");
+  const by = (n: string) => allRows(result).find((r) => r.job_number === n)!;
+  assertEquals(by("SWX-S1").client_signoff.state, "signed_off");
+  assertEquals(by("SWX-S1").final_invoice_ready, true);
+  assertEquals(by("SWX-S2").client_signoff.state, "not_happy");
+  assertEquals(by("SWX-S2").final_invoice_ready, false);
+  assertEquals(by("SWX-S3").client_signoff, { state: "not_signed", method: null, signed_at: null });
+  assertEquals(by("SWX-S3").final_invoice_ready, false);
+  // Waived, but the final invoice is already raised: not ready again.
+  assertEquals(by("SWX-S4").client_signoff.state, "waived");
+  assertEquals(by("SWX-S4").final_invoice_ready, false);
+  // A repair job is outside the sign-off rule: no keys.
+  assert(!("client_signoff" in by("SWX-S5")));
+  // A DRAFT final invoice still waits on the office: the job stays ready,
+  // while the card's own has_final_invoice keeps counting the draft.
+  assertEquals(by("SWX-S6").final_invoice_ready, true);
+  assertEquals(by("SWX-S6").has_final_invoice, true);
+  assertEquals(result.final_invoice_ready_total, 2);
+  // Payment is never an input, and the read writes nothing.
+  assertEquals(writes().length, 0);
+  // The existing To do is untouched by sign-off.
+  assertEquals(result.todo_total, allRows(result).filter((r) => r.dispatch_todo).length);
+});
+
+Deno.test("pipeline dispatch=1: a failed sign-off read is unknown, never not signed or ready", async () => {
+  const { client } = makeClient(signoffBoard(true), {
+    fail: { "job_client_signoffs:select": { message: "boom" } },
+  });
+  const result: any = await _pipelineForTest(client, params("dispatch=1"));
+  assertEquals(result.dispatch_signoff, "ok");
+  const s1 = allRows(result).find((r) => r.job_number === "SWX-S1")!;
+  assertEquals(s1.client_signoff.state, "unknown");
+  assertEquals(s1.final_invoice_ready, null);
+  assertEquals(result.final_invoice_ready_total, 0);
+});
