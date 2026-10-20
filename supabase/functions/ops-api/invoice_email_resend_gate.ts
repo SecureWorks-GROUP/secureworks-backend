@@ -67,37 +67,46 @@ function newestAt(rows: Array<{ event_type: string; at: unknown }>, type: string
   return best
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const PLAIN_ID = /^[A-Za-z0-9-]{1,64}$/
+
 /**
- * The spellings a Xero invoice id may be stored under: as given, lowercase and
- * uppercase. The claim key lowercases the id, so a hold recorded before the
- * claim store must be found whichever case the earlier send or this one used.
+ * The PostgREST `ilike` pattern that finds a Xero invoice id however an
+ * earlier send stored it. ilike compares without case, so a hold stored in
+ * any mix of upper and lower case is found (the claim key lowercases the id).
+ * A UUID-shaped id is also found with whitespace or other text around it,
+ * which can only hold more, never less: a 36-character id cannot sit inside a
+ * different id of the same shape. Null when the id holds anything but
+ * letters, digits and hyphens, so no wildcard can reach the pattern; the
+ * caller then reads the hold as unreadable.
  */
-export function invoiceIdSpellings(xeroInvoiceId: string): string[] {
+export function invoiceIdHoldPattern(xeroInvoiceId: string): string | null {
   const id = String(xeroInvoiceId ?? '').trim()
-  return [...new Set([id, id.toLowerCase(), id.toUpperCase()])].filter(Boolean)
+  if (!PLAIN_ID.test(id)) return null
+  return UUID_SHAPE.test(id) ? `*${id}*` : id
 }
 
 /**
  * The unknown-send hold recorded before the claim store: the newest
  * `invoice.email_outcome_unknown` in either store, unless a reconciled event
  * is at or after it. `invoice.emailed` is not read. Any read error is
- * unreadable, never clear. The id is matched in any of its spellings
- * (invoiceIdSpellings), so an uppercase resend still finds a lowercase hold.
+ * unreadable, never clear. The id is matched without case
+ * (invoiceIdHoldPattern), so a resend finds a hold stored in any case.
  */
 export async function readLegacyInvoiceEmailHold(client: any, xeroInvoiceId: string): Promise<LegacyInvoiceEmailHold> {
-  const ids = invoiceIdSpellings(xeroInvoiceId)
-  if (ids.length === 0) return { state: 'unreadable' }
+  const pattern = invoiceIdHoldPattern(xeroInvoiceId)
+  if (pattern === null) return { state: 'unreadable' }
   try {
     const [be, je] = await Promise.all([
       client.from('business_events')
         .select('event_type, occurred_at')
         .eq('entity_type', 'xero_invoice')
-        .in('entity_id', ids)
+        .ilike('entity_id', pattern)
         .in('event_type', LEGACY_HOLD_EVENT_TYPES)
         .order('occurred_at', { ascending: false }),
       client.from('job_events')
         .select('event_type, created_at')
-        .in('detail_json->>xero_invoice_id', ids)
+        .ilike('detail_json->>xero_invoice_id', pattern)
         .in('event_type', LEGACY_HOLD_EVENT_TYPES)
         .order('created_at', { ascending: false }),
     ])
