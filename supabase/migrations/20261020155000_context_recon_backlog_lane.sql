@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS public.context_recon_settings (
 INSERT INTO public.context_recon_settings (id, live_from) VALUES (true, NULL) ON CONFLICT (id) DO NOTHING;
 ALTER TABLE public.context_recon_settings ENABLE ROW LEVEL SECURITY;
 COMMENT ON TABLE public.context_recon_settings IS
-  'Context reconciliation settings (20261020150000). One row. live_from splits the queue into live and backlog lanes; null means no split.';
+  'Context reconciliation settings (20261020155000). One row. live_from splits the queue into live and backlog lanes; null means no split.';
 REVOKE ALL ON public.context_recon_settings FROM PUBLIC;
 DO $$
 BEGIN
@@ -85,7 +85,7 @@ LANGUAGE sql STABLE AS $$
   WHERE NOT (s.state = 'decided' AND s.action IN ('confirm','correct','split','unrelated'))
 $$;
 COMMENT ON FUNCTION public.context_recon_queue(timestamptz) IS
-  'Context reconciliation queue (20261020150000). What needs a person, with cause, owner and lane (live or backlog by live_from).';
+  'Context reconciliation queue (20261020155000). What needs a person, with cause, owner and lane (live or backlog by live_from).';
 
 -- Counts for the daily health row: held re-placements (all time and since p_since), the queue
 -- by cause and the queue by lane.

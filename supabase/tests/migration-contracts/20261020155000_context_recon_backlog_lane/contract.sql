@@ -1,4 +1,4 @@
--- Contract for 20261020150000_context_recon_backlog_lane. Proves the settings row, the browser
+-- Contract for 20261020155000_context_recon_backlog_lane. Proves the settings row, the browser
 -- revokes, and the lane rule against the real stacked schema. Every fixture write is rolled back.
 \set ON_ERROR_STOP 1
 

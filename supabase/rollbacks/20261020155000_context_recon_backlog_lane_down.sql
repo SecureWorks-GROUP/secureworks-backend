@@ -1,4 +1,4 @@
--- Down for 20261020150000_context_recon_backlog_lane. Manual only: rollbacks are never applied
+-- Down for 20261020155000_context_recon_backlog_lane. Manual only: rollbacks are never applied
 -- by the deploy lane. Restores the 20261020140000 queue and health bodies (no lane), then drops
 -- context_recon_live_from and context_recon_settings. A live_from that was set is lost with the
 -- settings row; note it before running. Run this before the 20261020140000 down, never after.
