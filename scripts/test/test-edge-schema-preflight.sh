@@ -931,7 +931,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261016160000", "job_dispatch_install_for_day_comment"),
                       # Paid close-out review switch: the per-job
                       # review_opt_out columns (job_closeout.ts).
-                      ("20261020093000", "job_review_opt_out")]:
+                      ("20261020093000", "job_review_opt_out"),
+                      # The invoice mirror check: debt_ws_overview and the debt
+                      # report read the newest xero_mirror_checks row.
+                      ("20261020150000", "xero_mirror_checks")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
