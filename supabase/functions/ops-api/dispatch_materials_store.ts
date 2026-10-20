@@ -18,7 +18,10 @@ import {
   fenceRunsChangedSinceFrozen,
   fenceScopeSuggestedLines,
 } from "./dispatch_fence_scope_lines.ts";
-import type { DispatchSuggestedLine } from "./dispatch_materials.ts";
+import type {
+  DispatchScopeSourceKind,
+  DispatchSuggestedLine,
+} from "./dispatch_materials.ts";
 import {
   cleanDispatchDescription,
   cleanDispatchQuantity,
@@ -34,10 +37,12 @@ import {
   DISPATCH_SUPPLIER_CONTACT_SELECT,
   DISPATCH_WORKINGS_SELECT,
   dispatchCanSuggest,
+  dispatchKeyedScopeLines,
   type DispatchMaterialCounts,
   dispatchMaterialCounts,
   dispatchSuggestedLines,
   isDispatchUuid,
+  planDispatchScopeVariation,
   projectDispatchMaterialLine,
   projectDispatchMaterialLineOnOrder,
   projectDispatchMaterialSupplier,
@@ -100,6 +105,7 @@ export const DISPATCH_MATERIALS_ACTIONS = [
   "dispatch_materials_save_line",
   "dispatch_materials_delete_line",
   "dispatch_materials_suggest",
+  "dispatch_materials_suggest_changes",
   "dispatch_materials_save_workings",
 ] as const;
 
@@ -934,21 +940,37 @@ type ScopeOffer = {
   held: string[] | null;
   scope_supplier: string | null;
   revision: number;
+  // The frozen scope_revisions row the lines come from (provenance).
+  revision_id: string;
+  kind: DispatchScopeSourceKind;
 };
 
 async function readFrozenScope(
   client: any,
   jobId: string,
-): Promise<{ scope: any; revision: number }> {
-  const { data: revision, error } = await client.from("scope_revisions")
-    .select("revision_number, scope_canonical_text")
-    .eq("job_id", jobId)
-    .eq("status", "frozen")
-    .order("revision_number", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  revisionId: string | null = null,
+): Promise<{ scope: any; revision: number; revision_id: string }> {
+  // With a revision id: that exact revision of this job (the one a job's
+  // scope lines were taken from). Freezing a newer revision moves the older
+  // one to `superseded`, so either state is read; a draft never is. Without:
+  // the latest frozen one.
+  let query = client.from("scope_revisions")
+    .select("id, revision_number, scope_canonical_text")
+    .eq("job_id", jobId);
+  query = revisionId
+    ? query.eq("id", revisionId).in("status", ["frozen", "superseded"])
+    : query.eq("status", "frozen")
+      .order("revision_number", { ascending: false }).limit(1);
+  const { data: revision, error } = await query.maybeSingle();
   if (error) readFailed("frozen scope read", error);
   if (!revision) {
+    if (revisionId) {
+      throw new DispatchMaterialsError(
+        409,
+        "base_scope_missing",
+        "The frozen scope this job's lines were taken from can no longer be read, so changes cannot be worked out; compare by hand",
+      );
+    }
     throw new DispatchMaterialsError(
       409,
       "no_frozen_scope",
@@ -963,7 +985,48 @@ async function readFrozenScope(
   } catch {
     scope = null;
   }
-  return { scope, revision: Number(revision.revision_number) };
+  return {
+    scope,
+    revision: Number(revision.revision_number),
+    revision_id: String(revision.id),
+  };
+}
+
+// The suggested lines of one frozen revision's scope, the same way the
+// suggest press reads it. Unreadable is a refusal, never zero lines.
+function frozenScopeLines(
+  scope: any,
+  workType: unknown,
+  ctx: DispatchMaterialsContext,
+): DispatchSuggestedLine[] {
+  if (workType === "fencing") {
+    const offer = fenceScopeSuggestedLines(scope);
+    if (!offer.ok) {
+      throw new DispatchMaterialsError(
+        409,
+        "scope_unreadable",
+        `The job's frozen scope could not be read (${offer.reason})`,
+      );
+    }
+    return offer.lines;
+  }
+  if (!scope || typeof scope !== "object") {
+    throw new DispatchMaterialsError(
+      409,
+      "scope_unreadable",
+      "The job's frozen scope could not be read (not_json)",
+    );
+  }
+  try {
+    return dispatchSuggestedLines(ctx.extractMaterialsFromScope(scope, null));
+  } catch (error) {
+    console.error("[dispatch_materials] scope could not be read:", error);
+    throw new DispatchMaterialsError(
+      409,
+      "scope_unreadable",
+      "The job's frozen scope could not be read",
+    );
+  }
 }
 
 async function readFrozenFenceOffer(
@@ -971,7 +1034,10 @@ async function readFrozenFenceOffer(
   jobId: string,
   orgId: string,
 ): Promise<ScopeOffer> {
-  const { scope, revision } = await readFrozenScope(client, jobId);
+  const { scope, revision, revision_id } = await readFrozenScope(
+    client,
+    jobId,
+  );
   const offer = fenceScopeSuggestedLines(scope);
   if (!offer.ok) {
     throw new DispatchMaterialsError(
@@ -1002,6 +1068,8 @@ async function readFrozenFenceOffer(
     held,
     scope_supplier: offer.scope_supplier,
     revision,
+    revision_id,
+    kind: "fence_scope_revision",
   };
 }
 
@@ -1015,31 +1083,18 @@ async function readFrozenPatioOffer(
   orgId: string,
   ctx: DispatchMaterialsContext,
 ): Promise<ScopeOffer> {
-  const { scope, revision } = await readFrozenScope(client, jobId);
-  if (!scope || typeof scope !== "object") {
-    throw new DispatchMaterialsError(
-      409,
-      "scope_unreadable",
-      "The job's frozen scope could not be read (not_json)",
-    );
-  }
-  let items: any[];
-  try {
-    items = ctx.extractMaterialsFromScope(scope, null);
-  } catch (error) {
-    console.error("[dispatch_materials] scope could not be read:", error);
-    throw new DispatchMaterialsError(
-      409,
-      "scope_unreadable",
-      "The job's frozen scope could not be read",
-    );
-  }
-  const lines = dispatchSuggestedLines(items);
+  const { scope, revision, revision_id } = await readFrozenScope(
+    client,
+    jobId,
+  );
+  const lines = frozenScopeLines(scope, "patio", ctx);
   return {
     lines,
     held: await patioScopeChangeHeld(client, jobId, orgId, lines, ctx),
     scope_supplier: null,
     revision,
+    revision_id,
+    kind: "patio_scope_revision",
   };
 }
 
@@ -1121,9 +1176,7 @@ export async function suggestDispatchMaterialLines(
     );
   }
 
-  const offer = job.work_type === "fencing"
-    ? await readFrozenFenceOffer(client, job.id, job.org_id)
-    : await readFrozenPatioOffer(client, job.id, job.org_id, ctx);
+  const offer = await readFrozenOffer(client, job, ctx);
   const suggested = offer.lines;
   if (suggested.length === 0) {
     return {
@@ -1139,7 +1192,8 @@ export async function suggestDispatchMaterialLines(
   const ids = await Promise.all(
     suggested.map((_line, index) => suggestedLineId(job.id, index)),
   );
-  const rows = suggested.map((line, index) => ({
+  const keyed = dispatchKeyedScopeLines(suggested);
+  const rows = keyed.map((line, index) => ({
     id: ids[index],
     org_id: job.org_id,
     job_id: job.id,
@@ -1149,6 +1203,7 @@ export async function suggestDispatchMaterialLines(
     unit: line.unit,
     status: "not_reviewed",
     source: "scope",
+    ...scopeProvenance(offer, line.key),
     position: index + 1,
     created_at: now,
     updated_at: now,
@@ -1179,6 +1234,208 @@ export async function suggestDispatchMaterialLines(
     added: insertedRows.length,
     lines: insertedRows.map((row: any) => projectDispatchMaterialLine(row)),
     ...offerFields(offer),
+    counts: await readJobCounts(client, job.id),
+  };
+}
+
+// The provenance a scope line keeps (migration 20261019200000): the frozen
+// revision row, its number as people see it, and the line's material key.
+function scopeProvenance(offer: ScopeOffer, key: string) {
+  return {
+    source_kind: offer.kind,
+    source_version_id: offer.revision_id,
+    source_version: String(offer.revision),
+    source_line_id: key,
+  };
+}
+
+async function readFrozenOffer(
+  client: any,
+  job: { id: string; org_id: string; work_type: unknown },
+  ctx: DispatchMaterialsContext,
+): Promise<ScopeOffer> {
+  return job.work_type === "fencing"
+    ? await readFrozenFenceOffer(client, job.id, job.org_id)
+    : await readFrozenPatioOffer(client, job.id, job.org_id, ctx);
+}
+
+// A variation line's id is fixed by its job, the revision it comes from and
+// its material key, so two presses on the same revision insert the same ids
+// and the second clashes (23505) instead of ordering the difference twice.
+async function variationLineId(jobId: string, revisionId: string, key: string) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(
+        `dispatch-scope-variation:${jobId}:${revisionId}:${key}`,
+      ),
+    ),
+  ).slice(0, 16);
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20)}`;
+}
+
+// The variation press (slice S7, materials): after the scope is frozen again,
+// add only what the newer revision asks for beyond the revision the job's
+// scope lines were last taken from, onto a supplier already chosen on the job.
+// It compares the two frozen revisions, never the lines on the job, so no
+// existing line is changed or second-guessed: a quantity a person edited, a
+// line a person deleted, and a line already on an order all stay as they are.
+// Less, removed or uncomparable materials are listed in `changes` for a
+// person. Every added line is `not_reviewed`, source `scope`, no price, no
+// order, no send, and names the newer revision, which makes it the base for
+// the next press. A revision that only reduces adds nothing, so the base stays
+// and the reduction keeps being listed until a person deals with it.
+export async function suggestDispatchScopeChanges(
+  client: any,
+  body: any,
+  ctx: DispatchMaterialsContext,
+) {
+  const job = await loadDispatchJob(client, bodyJobId(body), ctx);
+  if (job.work_type !== "patio" && job.work_type !== "fencing") {
+    throw new DispatchMaterialsError(
+      409,
+      "no_suggestion_for_work_type",
+      "Lines are suggested from the scope on patio and fencing jobs only",
+    );
+  }
+  const supplierId = body?.supplier_id;
+  if (!isDispatchUuid(supplierId)) badRequest("supplier_id must be a uuid");
+  const chosen = await readChosenSupplier(client, job.id, supplierId);
+  if (!chosen) supplierNotOnJob();
+
+  const { data: existing, error: existingError } = await client
+    .from("job_material_lines")
+    .select(
+      "id, position, source, source_kind, source_version_id, source_version, source_line_id",
+    )
+    .eq("job_id", job.id)
+    .limit(DISPATCH_MATERIAL_LINES_PER_JOB_MAX + 1);
+  if (existingError) readFailed("lines read", existingError);
+  const allLines: any[] = Array.isArray(existing) ? existing : [];
+  const scopeLines = allLines.filter((row) => row?.source === "scope");
+  if (scopeLines.length === 0) {
+    throw new DispatchMaterialsError(
+      409,
+      "no_scope_lines",
+      "This job has no lines taken from the scope yet; suggest lines first",
+    );
+  }
+  const expectedKind = job.work_type === "fencing"
+    ? "fence_scope_revision"
+    : "patio_scope_revision";
+  if (
+    scopeLines.some((row) =>
+      !row?.source_line_id || !row?.source_version_id ||
+      !/^\d+$/.test(String(row?.source_version ?? "")) ||
+      row?.source_kind !== expectedKind
+    )
+  ) {
+    throw new DispatchMaterialsError(
+      409,
+      "source_not_recorded",
+      "Some scope lines on this job do not record the frozen scope they came from, so changes cannot be worked out; compare by hand",
+    );
+  }
+  // The revision the job's scope lines were last taken from: the highest
+  // revision number any of them names.
+  const base = scopeLines.reduce((best, row) =>
+    Number(row.source_version) > Number(best.source_version) ? row : best
+  );
+  const baseRevisionId = String(base.source_version_id);
+
+  const offer = await readFrozenOffer(client, job, ctx);
+  const baseScope = offer.revision_id === baseRevisionId
+    ? null
+    : await readFrozenScope(client, job.id, baseRevisionId);
+  if (baseScope && baseScope.revision >= offer.revision) {
+    // The lines already come from the newest frozen revision or later.
+    throw new DispatchMaterialsError(
+      409,
+      "base_scope_newer",
+      "This job's scope lines come from a newer frozen scope than the latest one; compare by hand",
+    );
+  }
+  const plan = baseScope
+    ? planDispatchScopeVariation(
+      dispatchKeyedScopeLines(
+        frozenScopeLines(baseScope.scope, job.work_type, ctx),
+      ),
+      dispatchKeyedScopeLines(offer.lines),
+    )
+    : { add: [], reduce: [], removed: [], unchecked: [] };
+  const answer = (added: any[]) => ({
+    success: true,
+    added: added.length,
+    lines: added.map((row: any) => projectDispatchMaterialLine(row)),
+    changes: {
+      reduce: plan.reduce,
+      removed: plan.removed,
+      unchecked: plan.unchecked,
+    },
+    up_to_date: !baseScope,
+    taken_from_revision_number: baseScope ? baseScope.revision : offer.revision,
+    ...offerFields(offer),
+  });
+  if (plan.add.length === 0) {
+    return { ...answer([]), counts: await readJobCounts(client, job.id) };
+  }
+  if (allLines.length + plan.add.length > DISPATCH_MATERIAL_LINES_PER_JOB_MAX) {
+    throw new DispatchMaterialsError(
+      409,
+      "too_many_lines",
+      `A job holds at most ${DISPATCH_MATERIAL_LINES_PER_JOB_MAX} lines`,
+    );
+  }
+
+  const now = nowIso(ctx);
+  const startPosition = allLines.reduce(
+    (max, row) => Math.max(max, Number(row?.position) || 0),
+    0,
+  );
+  const rows = await Promise.all(plan.add.map(async (line, index) => ({
+    id: await variationLineId(job.id, offer.revision_id, line.key),
+    org_id: job.org_id,
+    job_id: job.id,
+    supplier_id: supplierId,
+    description: line.description,
+    quantity: line.quantity,
+    unit: line.unit,
+    status: "not_reviewed",
+    source: "scope",
+    ...scopeProvenance(offer, line.key),
+    position: startPosition + index + 1,
+    created_at: now,
+    updated_at: now,
+    created_by: ctx.actor.userId,
+    updated_by: ctx.actor.userId,
+    created_by_email: ctx.actor.email,
+    updated_by_email: ctx.actor.email,
+  })));
+  const { data: inserted, error: insertError } = await client
+    .from("job_material_lines")
+    .insert(rows)
+    .select(DISPATCH_MATERIAL_LINE_SELECT);
+  if (insertError) {
+    if (errorCode(insertError) === "23505") {
+      throw new DispatchMaterialsError(
+        409,
+        "changes_already_taken",
+        "These scope changes were already added to this job",
+      );
+    }
+    if (errorCode(insertError) === "23503") supplierNotOnJob();
+    writeFailed("variation lines insert", insertError);
+  }
+  const insertedRows: any[] = Array.isArray(inserted) ? inserted : [];
+  insertedRows.sort((a, b) => Number(a.position) - Number(b.position));
+  return {
+    ...answer(insertedRows),
     counts: await readJobCounts(client, job.id),
   };
 }
@@ -1322,6 +1579,8 @@ export async function runDispatchMaterialsAction(
       return await deleteDispatchMaterialLine(client, body, ctx);
     case "dispatch_materials_suggest":
       return await suggestDispatchMaterialLines(client, body, ctx);
+    case "dispatch_materials_suggest_changes":
+      return await suggestDispatchScopeChanges(client, body, ctx);
     case "dispatch_materials_save_workings":
       return await saveDispatchWorkings(client, body, ctx);
     default:

@@ -432,8 +432,27 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
         row.purchase_order_id ??= null;
         row.created_at ??= now;
         row.updated_at ??= now;
+        for (
+          const key of [
+            "source_kind",
+            "source_version_id",
+            "source_version",
+            "source_line_id",
+          ]
+        ) row[key] ??= null;
         if (existing.some((r) => r.id === row.id)) {
           return violation("23505", "job_material_lines_pkey");
+        }
+        // job_material_lines_source_line_once (migration 20261019200000).
+        if (
+          row.source_line_id !== null &&
+          existing.some((r) =>
+            r.job_id === row.job_id &&
+            r.source_version_id === row.source_version_id &&
+            r.source_line_id === row.source_line_id
+          )
+        ) {
+          return violation("23505", "job_material_lines_source_line_once");
         }
       }
       if (name === "job_dispatch_workings") {
@@ -1133,6 +1152,7 @@ Deno.test("save line: insert; the same id twice is one row; the answer is the re
     display_status: "not_reviewed",
     purchase_order_id: null,
     source: "manual",
+    source_version: null,
     position: 1,
     updated_at: answer.line.updated_at,
   });
@@ -2203,8 +2223,8 @@ Deno.test("list: an empty Dispatch answer still says dispatch_materials ok", asy
 
 // ── Who may call ────────────────────────────────────────────────────────────
 
-Deno.test("gate: the seven actions are staff only: a trade or division manager is refused, and no allow-list names them", () => {
-  assertEquals(DISPATCH_MATERIALS_ACTIONS.length, 7);
+Deno.test("gate: the eight actions are staff only: a trade or division manager is refused, and no allow-list names them", () => {
+  assertEquals(DISPATCH_MATERIALS_ACTIONS.length, 8);
   for (const action of DISPATCH_MATERIALS_ACTIONS) {
     const url = new URL(
       `https://example.test/functions/v1/ops-api?action=${action}`,
@@ -2514,4 +2534,242 @@ Deno.test("suggest fence: an unreadable frozen scope is 409 scope_unreadable and
   );
   assertEquals(db.tables.job_material_lines, []);
   assertEquals(broken.tables.job_material_lines, []);
+});
+
+// ── Scope provenance and the variation press (S3, S7 materials) ─────────────
+
+const FENCE_PLUS_TWO_RUN = {
+  length: 24,
+  panels: Array.from({ length: 10 }, () => ({ height: 1800, retaining: 150 })),
+};
+const FENCE_MINUS_TWO_RUN = {
+  length: 16,
+  panels: [
+    ...Array.from({ length: 6 }, () => ({ height: 1800, retaining: 150 })),
+    { height: 1800, retaining: 0 },
+  ],
+};
+const KIT_2700 =
+  "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2700 mm post";
+const KIT_2400 =
+  "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2400 mm post";
+const PLINTH = "Retaining plinth 150 mm, Woodland Grey";
+
+async function fenceJobSuggestedAt(revisions: Row[]) {
+  const db = await fenceJobWithRevisions(revisions);
+  await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  return db;
+}
+
+Deno.test("provenance: the suggest press records the frozen revision and a material key on every fence line", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const stored = db.tables.job_material_lines;
+  assertEquals(stored.length, 3);
+  for (const row of stored) {
+    assertEquals(row.source, "scope");
+    assertEquals(row.source_kind, "fence_scope_revision");
+    assertEquals(row.source_version_id, uuid("e1", 3));
+    assertEquals(row.source_version, "3");
+    assert(row.source_line_id.length <= 100);
+  }
+  assertEquals(new Set(stored.map((row) => row.source_line_id)).size, 3);
+  assertEquals(
+    (await read(db, JOB.fence)).lines.map((l: Row) => l.source_version),
+    ["3", "3", "3"],
+  );
+});
+
+Deno.test("provenance: a patio suggestion records the patio revision", async () => {
+  const db = await jobWithSuppliers();
+  await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const stored = db.tables.job_material_lines;
+  assertEquals(stored.length, 4);
+  for (const row of stored) {
+    assertEquals(row.source_kind, "patio_scope_revision");
+    assertEquals(row.source_version_id, patioRevision(JOB.patio, 1, "", {}).id);
+    assertEquals(row.source_version, "1");
+    assert(row.source_line_id.startsWith("m:"));
+  }
+});
+
+Deno.test("variation: a newer frozen fence scope adds only the difference, names the new revision, and leaves edited lines alone", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  // A person edits the 2700 kit line before the scope changes.
+  const kit = db.tables.job_material_lines.find((r) =>
+    r.description === KIT_2700
+  )!;
+  kit.quantity = 9;
+  const before = structuredClone(db.tables.job_material_lines);
+  // Freezing revision 5 supersedes revision 3, as scope_freeze does.
+  db.tables.scope_revisions.find((r) => r.revision_number === 3)!.status =
+    "superseded";
+  db.tables.scope_revisions.push(
+    fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
+  );
+
+  const answer = await call(db, "dispatch_materials_suggest_changes", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.taken_from_revision_number, 3);
+  assertEquals(answer.scope_revision_number, 5);
+  assertEquals(answer.up_to_date, false);
+  assertEquals(
+    answer.lines.map((l: Row) => [
+      l.description,
+      l.quantity,
+      l.status,
+      l.source,
+      l.source_version,
+      l.purchase_order_id,
+    ]),
+    [
+      [KIT_2700, 2, "not_reviewed", "scope", "5", null],
+      [PLINTH, 2, "not_reviewed", "scope", "5", null],
+    ],
+  );
+  assertEquals(answer.changes.removed, [
+    { description: KIT_2400, unit: "panels", before: 1, after: 0 },
+  ]);
+  assertEquals(answer.changes.reduce, []);
+  assertEquals(answer.changes.unchecked, []);
+  assertEquals(answer.counts, { total: 5, ready: 0 });
+  // The three earlier lines are untouched, the person's 9 included.
+  assertEquals(db.tables.job_material_lines.slice(0, 3), before);
+  for (const row of db.tables.job_material_lines.slice(3)) {
+    assertEquals(row.source_version_id, uuid("e1", 5));
+    assert(!("unit_price" in row));
+  }
+  assertOnlyOwnWrites(db);
+
+  // A second press on the same revision adds nothing and writes nothing.
+  const writes = db.writes().length;
+  const again = await call(db, "dispatch_materials_suggest_changes", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(again.added, 0);
+  assertEquals(again.up_to_date, true);
+  assertEquals(again.taken_from_revision_number, 5);
+  assertEquals(db.writes().length, writes);
+});
+
+Deno.test("variation: a scope that only shrinks adds nothing and lists the reductions for a person", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  db.tables.scope_revisions.push(
+    fenceRevision(4, "frozen", [FENCE_MINUS_TWO_RUN]),
+  );
+  const writes = db.writes().length;
+  const answer = await call(db, "dispatch_materials_suggest_changes", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 0);
+  assertEquals(answer.up_to_date, false);
+  assertEquals(answer.changes.reduce, [
+    { description: KIT_2700, unit: "panels", before: 8, after: 6 },
+    { description: PLINTH, unit: "each", before: 8, after: 6 },
+  ]);
+  assertEquals(answer.changes.removed, []);
+  assertEquals(db.writes().length, writes);
+});
+
+Deno.test("variation: two presses at once add the difference once", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  db.tables.scope_revisions.push(
+    fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
+  );
+  const results = await Promise.allSettled(
+    [0, 1].map(() =>
+      call(db, "dispatch_materials_suggest_changes", {
+        job_id: JOB.fence,
+        supplier_id: SUP.steel,
+      })
+    ),
+  );
+  assertEquals(db.tables.job_material_lines.length, 5);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      assertEquals((result.reason as any).body.code, "changes_already_taken");
+    }
+  }
+  assert(results.some((r) => r.status === "fulfilled" && r.value.added === 2));
+});
+
+Deno.test("variation: refused with no scope lines, unrecorded provenance, a missing base revision, or a repair job", async () => {
+  const empty = await jobWithSuppliers();
+  await addLine(empty, line(1));
+  await refused(
+    call(empty, "dispatch_materials_suggest_changes", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_scope_lines",
+  );
+
+  const unrecorded = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  unrecorded.tables.job_material_lines[0].source_line_id = null;
+  unrecorded.tables.job_material_lines[1].source_version = null;
+  await refused(
+    call(unrecorded, "dispatch_materials_suggest_changes", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "source_not_recorded",
+  );
+
+  const lost = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  // The base revision can only be read while frozen or superseded.
+  lost.tables.scope_revisions[0].status = "draft";
+  lost.tables.scope_revisions.push(
+    fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
+  );
+  const writes = lost.writes().length;
+  await refused(
+    call(lost, "dispatch_materials_suggest_changes", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "base_scope_missing",
+  );
+  assertEquals(lost.writes().length, writes);
+
+  await refused(
+    call(empty, "dispatch_materials_suggest_changes", {
+      job_id: JOB.repair,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_suggestion_for_work_type",
+  );
+});
+
+Deno.test("fake: a second line naming the same revision and material key is refused by the unique index", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const copy = { ...db.tables.job_material_lines[0], id: line(9) };
+  const { error } = await db.client.from("job_material_lines").insert(copy);
+  assertEquals(error?.code, "23505");
 });

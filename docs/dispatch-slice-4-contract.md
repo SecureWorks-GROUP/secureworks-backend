@@ -3,11 +3,11 @@
 What `ops-api` gives the Ops screen's Dispatch tab for Materials by supplier: the
 suppliers chosen for a job, an editable table of material lines under each
 supplier, the working-out pad and the sketch, the job's existing purchase orders
-(read only), and "x of y items ready" on the job card. One read, six writes and
+(read only), and "x of y items ready" on the job card. One read, seven writes and
 two fields on the Dispatch list.
 
 Code: `supabase/functions/ops-api/dispatch_materials.ts` (the rules, pure),
-`supabase/functions/ops-api/dispatch_materials_store.ts` (the read and the six
+`supabase/functions/ops-api/dispatch_materials_store.ts` (the read and the seven
 writes), the `pipeline` enrichment wave and the action switch in
 `supabase/functions/ops-api/index.ts`. Migration:
 `supabase/migrations/20261014130000_job_materials_by_supplier.sql` (rollback
@@ -52,10 +52,10 @@ write's answer and the list's two fields all call it.
 
 ## 3. Who may call
 
-All seven actions: staff sessions (`admin`, `owner`, `ops_manager`) and the
+All eight actions: staff sessions (`admin`, `owner`, `ops_manager`) and the
 privileged ops key, through `_opsApiCallerIsStaffOperator`, gated in the switch as
 `update_repair_stage` is. Refused (403) to a trade session, a division manager,
-the routine key (default-deny) and the agent read list. The six writes are POST
+the routine key (default-deny) and the agent read list. The seven writes are POST
 only (405 otherwise). A signed-in person is recorded by the verified session's
 user id and email; the ops key has no user and is recorded by the
 `operator_email` the screen stamps.
@@ -103,7 +103,7 @@ workings, purchase orders in one wave; then the chosen suppliers' contacts).
 A failed chosen-suppliers, lines, workings or supplier-contacts read answers 500
 `materials_read_failed`, never an empty section.
 
-## 5. The six writes
+## 5. The writes
 
 All POST. Every success carries `counts: { total, ready }` for the job, read after
 the write. If that one read fails after the write landed, `counts` is `null`
@@ -207,6 +207,62 @@ description is dropped.
 A scope shaped like SWP-26701's gives the four lines in the slice 4 build note
 section 9.2; the test drives the real extractor on that shape.
 
+Each suggested line also records where it came from (migration
+`20261019200000`, applied before the ops-api that reads it): `source_kind`
+(`fence_scope_revision` or `patio_scope_revision`), `source_version_id` (the
+frozen `scope_revisions` row), `source_version` (its revision number as text)
+and `source_line_id` (the material key, below). Every line the read returns
+carries `source_version` (null on a hand-made line). A unique index on
+`(job_id, source_version_id, source_line_id)` means one revision's material is
+taken once per job.
+
+### `dispatch_materials_suggest_changes` `{ job_id, supplier_id }`
+
+The variation press (delivery slice S7, materials). After the scope is frozen
+again, it adds only what the newest frozen revision asks for beyond the revision
+the job's scope lines were last taken from (the highest `source_version` they
+name), onto a supplier already chosen on the job. It compares the two frozen
+revisions by material key, never the lines on the job, so no existing line is
+changed or second-guessed: a quantity a person edited, a line a person deleted
+and a line already on an order all stay as they are.
+
+The material key is `m:<description, lower case, spaces collapsed>|<unit>`
+(cut with a short hash past 96 characters); a second line of the same material
+in one revision is `<key>#2`, and the two add up when compared.
+
+- A material the newer revision asks more of: one new line for the difference.
+- A material it newly asks for: its lines as suggested.
+- Every added line is `not_reviewed`, `source: 'scope'`, no price, no order, no
+  send, positioned after the job's last line, and names the newer revision, so
+  it becomes the base for the next press.
+- A material it asks less of (`changes.reduce`), no longer asks for
+  (`changes.removed`, `after: 0`), or that has no quantity on either side
+  (`changes.unchecked`) is listed as `{ description, unit, before, after }` for a
+  person; nothing is written for it. A revision that only reduces adds nothing,
+  so the base stays and the reduction keeps being listed. Once a press adds
+  anything, the newer revision becomes the base, so its reductions are listed
+  on that press only: act on them then.
+- The base revision is read whether it is still `frozen` or was `superseded` by
+  the newer freeze; a draft never is.
+- Materials are matched by key, so a material the scoper renamed or gave a new
+  unit reads as removed plus new: the new name's full quantity is added and the
+  old one is listed under `removed`. Check both before ordering.
+
+| Case | Answer |
+|---|---|
+| Lines added | `{ success, added, lines, changes, up_to_date: false, taken_from_revision_number, scope_revision_number, held?, scope_supplier?, counts }` |
+| The lines already come from the newest frozen revision | `added: 0`, `up_to_date: true`, nothing written |
+| Only reductions, removals or uncomparable materials | `added: 0`, `up_to_date: false`, `changes` filled, nothing written |
+| Work type not `patio` or `fencing` | 409 `no_suggestion_for_work_type` |
+| Supplier not on the job | 409 `supplier_not_on_job` |
+| No scope lines on the job | 409 `no_scope_lines` (use `dispatch_materials_suggest`) |
+| A scope line without its source recorded (made before the migration, or with no numeric `source_version`) | 409 `source_not_recorded`: compare by hand |
+| The base revision can no longer be read | 409 `base_scope_missing` |
+| The base revision is newer than the latest frozen one | 409 `base_scope_newer` |
+| A second press landing at the same time | 409 `changes_already_taken` (ids are fixed by job, revision and key) |
+| More than the job's line limit | 409 `too_many_lines` |
+| No frozen revision, or one that cannot be read | 409 `no_frozen_scope` / `scope_unreadable` |
+
 ### `dispatch_materials_save_workings` `{ job_id }` plus exactly one of
 
 - `working_out`: text, at most 20,000; an empty string clears it. Guard:
@@ -263,4 +319,4 @@ before and after the deploy and record both figures here.
   unreadable scope never looks like an empty one.
 - `OPS_AGENT_SERVER_KEY` is classified as the server key today
   (`_resolveOpsApiAuthIntent`), so the "agent read list" refusal is proved by the
-  seven actions' absence from `AGENT_READ_ALLOWED_ACTIONS`.
+  eight actions' absence from `AGENT_READ_ALLOWED_ACTIONS`.

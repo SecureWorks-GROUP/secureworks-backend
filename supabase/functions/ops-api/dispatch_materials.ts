@@ -29,6 +29,15 @@ const READY_DISPLAY_STATUSES = new Set<string>(["in_stock", "delivered"]);
 
 export const DISPATCH_MATERIAL_SOURCES = ["manual", "scope"] as const;
 
+// Where a scope line came from (migration 20261019200000). A line taken from a
+// frozen fence or patio revision names that revision and its own key in it.
+export const DISPATCH_SCOPE_SOURCE_KINDS = [
+  "fence_scope_revision",
+  "patio_scope_revision",
+] as const;
+export type DispatchScopeSourceKind =
+  typeof DISPATCH_SCOPE_SOURCE_KINDS[number];
+
 export const DISPATCH_MATERIAL_DESCRIPTION_MAX = 300;
 export const DISPATCH_MATERIAL_UNIT_MAX = 30;
 export const DISPATCH_MATERIAL_LINES_PER_JOB_MAX = 500;
@@ -50,7 +59,7 @@ export const DISPATCH_MATERIALS_LIST_SELECT =
 export const DISPATCH_MATERIAL_SUPPLIER_SELECT =
   "supplier_id, supplier_name, position, created_at";
 export const DISPATCH_MATERIAL_LINE_SELECT =
-  "id, job_id, supplier_id, description, quantity, unit, status, purchase_order_id, source, position, updated_at";
+  "id, job_id, supplier_id, description, quantity, unit, status, purchase_order_id, source, position, updated_at, source_kind, source_version, source_line_id";
 export const DISPATCH_SUPPLIER_CONTACT_SELECT =
   "id, org_id, name, email, is_active";
 export const DISPATCH_WORKINGS_SELECT =
@@ -179,6 +188,9 @@ export function projectDispatchMaterialLine(
     display_status: dispatchMaterialDisplayStatus(row, sightedOrderIds),
     purchase_order_id: row?.purchase_order_id ?? null,
     source: row?.source,
+    // The frozen revision a scope line was taken from, as shown to people.
+    // Null on a hand-added line or one taken before 20261019200000.
+    source_version: row?.source_version ?? null,
     position: row?.position,
     updated_at: row?.updated_at,
   };
@@ -450,4 +462,160 @@ export function dispatchSuggestedLines(items: any[]): DispatchSuggestedLine[] {
     });
   }
   return out;
+}
+
+// ── Scope line keys and the variation plan ──────────────────────────────────
+//
+// A fence or patio line is worked out from the scope, so the scope has no line
+// of its own for it. Its key is the material itself: the cleaned description
+// and unit, the same in every revision that asks for that material. A second
+// line with the same material in one revision takes "#2", "#3" in order, so a
+// revision's keys are unique (the database's source_line_once index). A key is
+// at most 100 characters; a longer one keeps its start and a short hash.
+export const DISPATCH_SCOPE_LINE_KEY_MAX = 100;
+
+function shortHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+export function dispatchScopeMaterialKey(line: DispatchSuggestedLine): string {
+  const description = String(line.description ?? "").toLowerCase()
+    .replace(/\s+/g, " ").trim();
+  const unit = String(line.unit ?? "").toLowerCase().replace(/\s+/g, " ")
+    .trim();
+  const key = `m:${description}|${unit}`;
+  // Room for "#nnn" after it.
+  const room = DISPATCH_SCOPE_LINE_KEY_MAX - 4;
+  return key.length <= room
+    ? key
+    : `${key.slice(0, room - 9)}~${shortHash(key)}`;
+}
+
+export function dispatchKeyedScopeLines(
+  lines: DispatchSuggestedLine[],
+): Array<DispatchSuggestedLine & { key: string }> {
+  const seen = new Map<string, number>();
+  return lines.map((line) => {
+    const base = dispatchScopeMaterialKey(line);
+    const count = (seen.get(base) ?? 0) + 1;
+    seen.set(base, count);
+    return { ...line, key: count === 1 ? base : `${base}#${count}` };
+  });
+}
+
+// What a newer frozen revision changes against the revision a job's scope
+// lines were last taken from, compared revision to revision by material key,
+// so a quantity a person edited, a line a person deleted and a line already on
+// an order are never touched or second-guessed. A material the newer revision
+// asks more of (or newly asks for) is a new line for the difference; a
+// material it asks less of, no longer asks for, or that cannot be compared (no
+// quantity on either side) is listed for a person to act on.
+export type DispatchScopeChange = {
+  description: string;
+  unit: string | null;
+  before: number | null;
+  after: number | null;
+};
+
+export type DispatchScopeVariationPlan = {
+  add: Array<DispatchSuggestedLine & { key: string }>;
+  reduce: DispatchScopeChange[];
+  removed: DispatchScopeChange[];
+  unchecked: DispatchScopeChange[];
+};
+
+function baseKey(key: string): string {
+  return key.replace(/#\d+$/, "");
+}
+
+type ScopeSide = {
+  description: string;
+  unit: string | null;
+  quantity: number;
+  known: boolean;
+};
+
+// "#2" lines of one revision add up with their first.
+function sumByMaterial(
+  lines: Array<DispatchSuggestedLine & { key: string }>,
+): Map<string, ScopeSide> {
+  const sides = new Map<string, ScopeSide>();
+  for (const line of lines) {
+    const key = baseKey(line.key);
+    const side = sides.get(key) ??
+      {
+        description: line.description,
+        unit: line.unit,
+        quantity: 0,
+        known: true,
+      };
+    if (line.quantity === null || !Number.isFinite(line.quantity)) {
+      side.known = false;
+    } else {
+      side.quantity = Math.round((side.quantity + line.quantity) * 1000) /
+        1000;
+    }
+    sides.set(key, side);
+  }
+  return sides;
+}
+
+export function planDispatchScopeVariation(
+  before: Array<DispatchSuggestedLine & { key: string }>,
+  after: Array<DispatchSuggestedLine & { key: string }>,
+): DispatchScopeVariationPlan {
+  const was = sumByMaterial(before);
+  const now = sumByMaterial(after);
+  const plan: DispatchScopeVariationPlan = {
+    add: [],
+    reduce: [],
+    removed: [],
+    unchecked: [],
+  };
+  for (const [key, want] of now) {
+    const had = was.get(key);
+    if (!had) {
+      for (const line of after) {
+        if (baseKey(line.key) === key) plan.add.push(line);
+      }
+      continue;
+    }
+    const change: DispatchScopeChange = {
+      description: want.description,
+      unit: want.unit,
+      before: had.known ? had.quantity : null,
+      after: want.known ? want.quantity : null,
+    };
+    if (!had.known || !want.known) {
+      plan.unchecked.push(change);
+      continue;
+    }
+    const difference = Math.round((want.quantity - had.quantity) * 1000) /
+      1000;
+    if (difference > 0) {
+      plan.add.push({
+        description: want.description,
+        unit: want.unit,
+        quantity: difference,
+        key,
+      });
+    } else if (difference < 0) {
+      plan.reduce.push(change);
+    }
+  }
+  for (const [key, had] of was) {
+    if (now.has(key)) continue;
+    plan.removed.push({
+      description: had.description,
+      unit: had.unit,
+      before: had.known ? had.quantity : null,
+      after: 0,
+    });
+  }
+  return plan;
 }
