@@ -4778,8 +4778,9 @@ export function _authorizeOpsApiAction(input: {
   return { ok: true }
 }
 
-// Actions a pg_cron job calls with `Bearer <sw_service_key()>` (the Vault key).
-// That key is a signature-valid legacy service-role JWT that need not equal the
+// Actions a pg_cron job calls with `Bearer <sw_service_key()>` or the Vault
+// `service_role_key` (each noted below). Each is a signature-valid legacy
+// service-role JWT that need not equal the
 // injected SUPABASE_SERVICE_ROLE_KEY, so the default exact-key check sends it to
 // the user-session path and it 401s (AGENTS.md "A pg_cron Bearer Is Not The
 // Function's Service Key"). For these actions only, a JWT whose role claim is
@@ -4788,7 +4789,10 @@ export function _authorizeOpsApiAction(input: {
 // --no-verify-jwt, so the claim alone proves nothing). Closed list: add an
 // action only with its cron caller and a test in service_credential_handler_test.ts.
 export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new Set([
-  'job_closeout_sweep',
+  'job_closeout_sweep', // trigger_job_closeout_sweep (sw_service_key())
+  'auto_issue_job_work_orders', // trigger_job_work_order_auto_issue (sw_service_key())
+  'makesafe_email_canary', // trigger_makesafe_reconcile, cron makesafe-canary-d4 (Vault service_role_key)
+  'makesafe_status_canary', // trigger_makesafe_status_canary (Vault service_role_key)
 ])
 
 export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
