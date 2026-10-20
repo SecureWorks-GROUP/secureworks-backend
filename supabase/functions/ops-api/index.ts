@@ -55892,7 +55892,15 @@ async function approveVariation(client: any, body: any) {
     detail.approved_by = user_id || userId || null
     detail.approved_at = new Date().toISOString()
     detail.approval_notes = notes || null
-    await client.from('job_events').update({ detail_json: detail }).eq('id', vId)
+    const { error: updateErr } = await client.from('job_events').update({ detail_json: detail }).eq('id', vId)
+    // The quote-option event guard freezes a decided event: a second press is
+    // refused there, so say so instead of reporting a decision that was not kept.
+    if (updateErr?.code === '42501' && updateErr?.message === 'quote_option_event_immutable') {
+      throw new ApiError('Variation already decided', 409, {
+        error: 'variation_already_decided',
+        code: 'quote_option_event_immutable',
+      })
+    }
   }
 
   const jobId = variation?.job_id
@@ -55928,6 +55936,7 @@ async function approveVariation(client: any, body: any) {
     message: approved ? 'Variation approved — crew can proceed.' : 'Variation rejected.',
   }
 }
+export const _approveVariationForTest = approveVariation
 
 async function listVariations(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id') || params.get('jobId')
