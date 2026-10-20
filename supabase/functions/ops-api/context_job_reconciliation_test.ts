@@ -150,6 +150,29 @@ Deno.test("a failed read is 502 read_failed, never an empty list", async () => {
   }
 });
 
+Deno.test("an answer that is not a list is a failed read; an empty list is a real empty list", async () => {
+  for (const rpcData of [null, undefined, {}, { mail: [] }, "x", 0]) {
+    for (const fn of [contextJobMail, reconJobItems]) {
+      const e = await assertRejects(
+        () =>
+          fn(fake({ rpcData }).client, new URLSearchParams("job_number=SWP-26376")),
+        ContextJobReconError,
+      );
+      assertEquals([e.code, e.status], ["read_failed", 502]);
+    }
+  }
+  const mail = await contextJobMail(
+    fake({ rpcData: [] }).client,
+    new URLSearchParams("job_number=SWP-26376"),
+  );
+  assertEquals([mail.mail.length, mail.more, mail.candidate_count], [0, false, 0]);
+  const items = await reconJobItems(
+    fake({ rpcData: [] }).client,
+    new URLSearchParams("job_number=SWP-26376"),
+  );
+  assertEquals([items.items.length, items.more], [0, false]);
+});
+
 Deno.test("unknown and ambiguous jobs refuse by name", async () => {
   let e = await assertRejects(
     () =>

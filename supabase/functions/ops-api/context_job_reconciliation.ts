@@ -142,8 +142,10 @@ export async function contextJobMail(client: any, params: URLSearchParams) {
     p_limit: args.p_limit + 1,
     p_roles: args.p_roles,
   });
+  // A failed read, or an answer that is not a list, is never an empty list.
   if (error) readFailed("job mail", error);
-  const rows = Array.isArray(data) ? data : [];
+  if (!Array.isArray(data)) readFailed("job mail", "result is not a list");
+  const rows: any[] = data;
   const mail = rows.slice(0, args.p_limit);
   return {
     job_id: job.id,
@@ -163,8 +165,10 @@ export async function reconJobItems(client: any, params: URLSearchParams) {
   const { data, error } = await client.rpc("context_recon_job_items", {
     p_job: job.id,
   });
+  // A failed read, or an answer that is not a list, is never an empty list.
   if (error) readFailed("job items", error);
-  const rows = Array.isArray(data) ? data : [];
+  if (!Array.isArray(data)) readFailed("job items", "result is not a list");
+  const rows: any[] = data;
   return {
     job_id: job.id,
     job_number: job.job_number,
