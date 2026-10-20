@@ -466,6 +466,7 @@ import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
+import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -7875,6 +7876,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : await contextUnlinkedRows(client, url.searchParams, actor))
         } catch (error) {
           if (error instanceof ContextUnlinkedError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Context reconciliation from a job (CTX-N1, 20261020170000): the
+      // email rows Context places on a job, with how sure and the other jobs
+      // each sits on, and the queued rows that offer the job (defects
+      // included) with the hash a decision echoes. Staff front door (the
+      // default for an action on no static, profile, routine or agent list),
+      // GET only, read-only SQL functions, nothing written.
+      case 'context_job_mail':
+      case 'recon_job_items': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(action === 'context_job_mail'
+            ? await contextJobMail(client, url.searchParams)
+            : await reconJobItems(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof ContextJobReconError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }
