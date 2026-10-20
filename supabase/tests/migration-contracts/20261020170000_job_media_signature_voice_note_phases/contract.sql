@@ -1,4 +1,4 @@
--- Contract: 20261019120000_job_media_signature_voice_note_phases. job_media accepts the completion
+-- Contract: 20261020170000_job_media_signature_voice_note_phases. job_media accepts the completion
 -- wizard's 'signature' and 'voice_note' rows, still accepts every earlier phase, and still refuses
 -- an unknown one.
 \set ON_ERROR_STOP on

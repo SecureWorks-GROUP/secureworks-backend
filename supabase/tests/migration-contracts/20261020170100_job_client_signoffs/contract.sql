@@ -1,4 +1,4 @@
--- Contract: 20261019120100_job_client_signoffs. An on-site sign-off needs a name and the stored
+-- Contract: 20261020170100_job_client_signoffs. An on-site sign-off needs a name and the stored
 -- signature; an office waiver needs a reason and names who made it; a row is never changed or
 -- deleted; browser roles cannot read or write it; the settings row and the switch are seeded with
 -- the switch OFF.

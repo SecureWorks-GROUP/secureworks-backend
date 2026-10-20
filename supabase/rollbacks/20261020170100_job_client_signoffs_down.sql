@@ -1,4 +1,4 @@
--- Rollback for 20261019120100_job_client_signoffs.sql.
+-- Rollback for 20261020170100_job_client_signoffs.sql.
 --
 -- Refuses while any sign-off is recorded: a client's signed acceptance is
 -- evidence and is never deleted to undo a migration.
@@ -8,7 +8,7 @@ DO $$
 BEGIN
   IF to_regclass('public.job_client_signoffs') IS NOT NULL
      AND EXISTS (SELECT 1 FROM public.job_client_signoffs) THEN
-    RAISE EXCEPTION 'client sign-offs are recorded: resolve them before rolling back 20261019120100_job_client_signoffs';
+    RAISE EXCEPTION 'client sign-offs are recorded: resolve them before rolling back 20261020170100_job_client_signoffs';
   END IF;
 END $$;
 

@@ -5,7 +5,7 @@
 // chase them up for payment and this allows the allocated trades to get onto
 // it".
 //
-// The record is public.job_client_signoffs (20261019120100): append-only, the
+// The record is public.job_client_signoffs (20261020170100): append-only, the
 // newest row per job is current. Two ways in:
 //   - on_site: the completion wizard. complete_my_job records the client's
 //     name, the stored signature (job_media phase 'signature'), the rating and,
