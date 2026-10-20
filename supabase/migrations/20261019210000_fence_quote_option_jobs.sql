@@ -108,8 +108,9 @@
 --     cascades them away.
 --   - Inserts are guarded too: an event of these two types is accepted only
 --     from inside a trigger (depth 2), with seq equal to this session's
---     currval of the sequence (only owner code can advance it) and an at
---     inside this transaction. The run record is not required, so a run
+--     currval of the sequence (only owner code can advance it), a seq no
+--     event has used before (quote_option_event_seq_used) and an at inside
+--     this transaction. The run record is not required, so a run
 --     whose run record could not be written still applies its marks and
 --     clears (a reversal is never left half undone for want of a record).
 -- Limits: a direct UPDATE of jobs.quote_option_group_id by an owner, outside
@@ -197,6 +198,16 @@ $$;
 CREATE SEQUENCE IF NOT EXISTS public.quote_option_event_seq
   AS bigint INCREMENT BY 1 MINVALUE 1 NO MAXVALUE START WITH 1 CACHE 1 NO CYCLE;
 REVOKE ALL ON SEQUENCE public.quote_option_event_seq FROM PUBLIC, anon, authenticated, service_role;
+-- Each seq is spent once: the insert guard records it here and refuses a
+-- second event with the same seq (a session's currval survives its
+-- transactions, so after a genuine write it could otherwise be reused).
+-- Written only by the guard, as owner.
+CREATE TABLE IF NOT EXISTS public.quote_option_event_seq_used (
+  seq bigint PRIMARY KEY
+);
+REVOKE ALL ON public.quote_option_event_seq_used FROM PUBLIC, anon, authenticated, service_role;
+COMMENT ON TABLE public.quote_option_event_seq_used IS
+  'SQ-23: each quote_option_event_seq value used by a supersede or unsupersede job_event, once. Written only by fence_quote_option_event_guard.';
 COMMENT ON SEQUENCE public.quote_option_event_seq IS
   'Order of quote_option_superseded and quote_option_unsuperseded job_events per job (detail_json.seq). Taken under the option group''s advisory lock; created_at and id do not order these events.';
 
@@ -447,6 +458,15 @@ BEGIN
         USING ERRCODE = '42501',
               DETAIL = 'supersede history is written only by the supersede trigger';
     END IF;
+    -- Spend the seq: a second event with it (currval reused later in the
+    -- same session) is refused.
+    BEGIN
+      INSERT INTO public.quote_option_event_seq_used (seq) VALUES (v_cur);
+    EXCEPTION WHEN unique_violation THEN
+      RAISE EXCEPTION 'quote_option_event_not_from_writer'
+        USING ERRCODE = '42501',
+              DETAIL = 'this seq is already used by supersede history';
+    END;
     RETURN NEW;
   END IF;
   IF TG_OP = 'DELETE' THEN

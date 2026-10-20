@@ -760,7 +760,11 @@ $q$), 'a direct seq-less insert of supersede history must be refused');
 CREATE TABLE public.qo_contract_forge (mode text);
 CREATE FUNCTION public.qo_contract_forge() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- IF NEW.mode = 'stale_seq' THEN
+ IF NEW.mode = 'reuse_currval' THEN
+  INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES ('9c000000-0000-4000-8000-0000000009b1',
+   'quote_option_unsuperseded', jsonb_build_object('reason', 'forged',
+   'seq', currval('public.quote_option_event_seq'), 'at', clock_timestamp()));
+ ELSIF NEW.mode = 'stale_seq' THEN
   INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES ('9c000000-0000-4000-8000-0000000009b1',
    'quote_option_unsuperseded', jsonb_build_object('reason', 'forged',
    'seq', currval('public.quote_option_event_seq') - 1, 'at', clock_timestamp()));
@@ -773,6 +777,20 @@ BEGIN
 END $$;
 CREATE TRIGGER qo_contract_forge AFTER INSERT ON public.qo_contract_forge FOR EACH ROW
  EXECUTE FUNCTION public.qo_contract_forge();
+-- Checker finding on 67eb4eb: right after genuine writes, this session's currval is the seq of
+-- the last genuine event. Reusing it from another trigger with a valid at must be refused.
+SELECT pg_temp.qo_assert((SELECT count(*) = 1 FROM public.job_events
+  WHERE event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
+    AND (detail_json->>'seq')::bigint = currval('public.quote_option_event_seq')),
+ 'this session''s currval must be the seq of a genuine event before the reuse case');
+SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$ INSERT INTO public.qo_contract_forge VALUES ('reuse_currval') $q$),
+ 'an insert from another trigger reusing the seq of a genuine event must be refused');
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.quote_option_event_seq_used u
+  WHERE u.seq IN (SELECT (e.detail_json->>'seq')::bigint FROM public.job_events e
+                   WHERE e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')))
+  = (SELECT count(*) FROM public.job_events
+      WHERE event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
+ 'every supersede event''s seq must be spent once in the seq-used table');
 SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$ INSERT INTO public.qo_contract_forge VALUES ('stale_seq') $q$),
  'an insert from another trigger with a seq this statement did not take must be refused');
 SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$ INSERT INTO public.qo_contract_forge VALUES ('old_at') $q$),

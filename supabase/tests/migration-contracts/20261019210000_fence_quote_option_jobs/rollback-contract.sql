@@ -17,6 +17,9 @@ BEGIN
  IF to_regclass('public.quote_option_settle_runs') IS NOT NULL THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the run table still exists';
  END IF;
+ IF to_regclass('public.quote_option_event_seq_used') IS NOT NULL THEN
+  RAISE EXCEPTION 'fence quote option rollback contract: the seq-used table still exists';
+ END IF;
  IF to_regclass('public.quote_option_event_seq') IS NOT NULL THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the event order sequence still exists';
  END IF;
