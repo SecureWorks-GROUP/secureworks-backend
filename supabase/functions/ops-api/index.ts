@@ -193,6 +193,7 @@ import {
   signoffRowCounts,
   type ClientSignoff,
 } from './trade_client_signoff.ts'
+import { dispatchSignoffFields, type DispatchSignoffRead } from './dispatch_signoff.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
@@ -16495,6 +16496,17 @@ async function pipeline(
       return null
     })
     : null
+  // Client sign-off on the Dispatch list (dispatch_signoff.ts): the same rule
+  // and switch as the trade invoice gate. null while the switch is off (only
+  // the flag is read), 'failed' on a throw; read beside the enrichment wave.
+  const dispatchSignoffRead: Promise<Map<string, ClientSignoff> | null | 'failed'> | null = dispatchList
+    ? loadClientSignoffByJob(client, jobs.map((j: any) => ({
+      id: String(j.id), type: String(j.type || ''), completed_at: j.completed_at || null,
+    }))).catch((e) => {
+      console.error('[pipeline] dispatch sign-off read failed:', (e as Error)?.message)
+      return 'failed' as const
+    })
+    : null
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -16660,6 +16672,11 @@ async function pipeline(
   const quoteBuilderValues = await quoteBuilderValuesRead
   if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const closeoutBlocks = closeoutRead ? await closeoutRead : null
+  const dispatchSignoffResult = dispatchSignoffRead ? await dispatchSignoffRead : null
+  const dispatchSignoff: DispatchSignoffRead = dispatchSignoffResult === 'failed'
+    ? 'failed'
+    : dispatchSignoffResult ? 'ok' : 'off'
+  const dispatchSignoffByJob = dispatchSignoffResult instanceof Map ? dispatchSignoffResult : null
   if (closeoutRead && !closeoutBlocks) enrichmentErrors.push('pipeline.closeout')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
@@ -16834,6 +16851,12 @@ async function pipeline(
           ...(dispatchDeliveriesOk && deliveryReadJobIds.has(String(j.id))
             ? dispatchDeliveryListFields(deliveryOrdersByJob.get(String(j.id)))
             : {}),
+          ...(dispatchSignoffByJob
+            ? dispatchSignoffFields(
+              dispatchSignoffByJob.get(String(j.id)),
+              invoiceRes.error || j.status === 'draft' ? null : !!invoiceMap[j.id]?.has_final,
+            )
+            : {}),
         }
         : {}),
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
@@ -16916,6 +16939,14 @@ async function pipeline(
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_deliveries: dispatchDeliveriesOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchList
+      ? {
+        dispatch_signoff: dispatchSignoff,
+        ...(dispatchSignoff === 'ok'
+          ? { final_invoice_ready_total: enriched.filter((j: any) => j.final_invoice_ready === true).length }
+          : {}),
+      }
+      : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
