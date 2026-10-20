@@ -353,14 +353,16 @@ Deno.test("not job related — refuses if the agent placed the bill after the pe
     if (t === "job_materials_facts" && reads++ === 0) {
       // after the person's fact check, the agent lands its placement
       queueMicrotask(() => {});
-      const r = b;
-      const origMaybe = r.maybeSingle.bind(r);
-      r.maybeSingle = async () => {
-        const out = await origMaybe();
-        row.status = "assigned";
-        row.assigned_by = "agent_prematch";
-        return out;
-      };
+      // The fact check reads every allocation row for the bill (a split bill
+      // has several), so the hook is on the awaited read.
+      const r: any = b;
+      const origThen = r.then.bind(r);
+      r.then = (ok: any, bad: any) =>
+        origThen((out: any) => {
+          row.status = "assigned";
+          row.assigned_by = "agent_prematch";
+          return ok ? ok(out) : out;
+        }, bad);
       return r;
     }
     return b;

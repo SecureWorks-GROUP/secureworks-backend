@@ -104,9 +104,13 @@ Deno.test("context signals alone are a proposal for one press, never a placement
   assertEquals(amount.kind === "job" && [amount.confidence, amount.rule], ["medium", "supplier_amount_po"]);
 });
 
-Deno.test("subcontractor labour (306, 301) is left out even with a job number", () => {
+Deno.test("installer bills (306, 301) are proposed for a person to confirm, never placed (JP-12)", () => {
   const d = decideBillPrematch(bill([["Fence Installation - SWF-26535", "306", 338]]), ctx());
-  assertEquals(d.kind, "excluded");
+  assertEquals(d.kind === "job" && d.confidence, "medium");
+  assertEquals(d.kind === "job" && d.rule.endsWith("+installer_confirm"), true);
+  assertEquals(d.kind === "job" && d.reason.startsWith("Installer bill"), true);
+  const unknown = decideBillPrematch(bill([["Labour week 12", "301", 900]]), ctx());
+  assertEquals(unknown.kind, "none");
 });
 
 Deno.test("overhead accounts and SW - GROUP lines are proposed not job related", () => {
