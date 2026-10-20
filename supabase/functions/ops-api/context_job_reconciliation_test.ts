@@ -12,6 +12,7 @@ import {
   contextJobMail,
   ContextJobReconError,
   contextMailArgs,
+  RECON_JOB_ITEMS_PAGE,
   reconJobItems,
 } from "./context_job_reconciliation.ts";
 import {
@@ -83,12 +84,38 @@ Deno.test("context_job_mail: job number matched whole, args passed, candidates c
     kind: "rpc",
     detail: {
       fn: "context_job_mail",
-      args: { p_job: JOB.id, p_limit: 20, p_roles: ["supplier", "staff"] },
+      args: { p_job: JOB.id, p_limit: 21, p_roles: ["supplier", "staff"] },
     },
   });
   assertEquals(out.job_number, "SWP-26376");
   assertEquals(out.candidate_count, 1);
   assertEquals(out.mail.length, 2);
+  assertEquals(out.more, false);
+});
+
+Deno.test("a cut list says more instead of reading as complete", async () => {
+  const mailRows = Array.from({ length: 3 }, (_, i) => ({
+    event_id: `e${i}`,
+    placement: "certain",
+  }));
+  const mail = await contextJobMail(
+    fake({ rpcData: mailRows }).client,
+    new URLSearchParams("job_number=SWP-26376&limit=2"),
+  );
+  assertEquals([mail.mail.length, mail.more], [2, true]);
+  const itemRows = Array.from({ length: RECON_JOB_ITEMS_PAGE + 1 }, (_, i) => ({
+    event_id: `e${i}`,
+  }));
+  const items = await reconJobItems(
+    fake({ rpcData: itemRows }).client,
+    new URLSearchParams("job_number=SWP-26376"),
+  );
+  assertEquals([items.items.length, items.more], [RECON_JOB_ITEMS_PAGE, true]);
+  const full = await reconJobItems(
+    fake({ rpcData: itemRows.slice(0, RECON_JOB_ITEMS_PAGE) }).client,
+    new URLSearchParams("job_number=SWP-26376"),
+  );
+  assertEquals([full.items.length, full.more], [RECON_JOB_ITEMS_PAGE, false]);
 });
 
 Deno.test("recon_job_items: job_id looked up by id, items returned", async () => {

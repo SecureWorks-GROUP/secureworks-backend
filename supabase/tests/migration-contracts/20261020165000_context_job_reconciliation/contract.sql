@@ -30,20 +30,27 @@ INSERT INTO public.business_events (id, channel, direction, occurred_at, payload
    'email.inbound', 'jobrecon-contract'),
   ('7d200000-0000-0000-0000-000000000003', 'email', 'inbound', '2026-10-08 09:10Z',
    '{"from":"orders@supplier.example","subject":"Material Order Ref SWP-97101 & SWP-97102","body":"Delivery moved to Friday"}',
-   'email.inbound', 'jobrecon-contract');
+   'email.inbound', 'jobrecon-contract'),
+  ('7d200000-0000-0000-0000-000000000004', 'call', 'inbound', '2026-10-06 09:10Z',
+   '{"body_preview":"Hi it is about the patio at the back","transcript":"Hi it is about the patio at the back"}',
+   'call.transcript_completed', 'jobrecon-contract');
 -- The split case as the ladder leaves it: no identity, two candidates. One placed row. One copy.
 UPDATE public.business_events SET job_id = NULL, contact_id = NULL, attribution_status = 'unplaced',
   candidate_job_ids = ARRAY['7d000000-0000-0000-0000-00000000000a', '7d000000-0000-0000-0000-00000000000b']::uuid[]
 WHERE id IN ('7d200000-0000-0000-0000-000000000001', '7d200000-0000-0000-0000-000000000003');
 UPDATE public.business_events SET job_id = '7d000000-0000-0000-0000-00000000000a', attribution_status = 'single_open',
   candidate_job_ids = NULL WHERE id = '7d200000-0000-0000-0000-000000000002';
+-- A call with this job as its one candidate (its transcript words must not reach the list).
+UPDATE public.business_events SET job_id = NULL, contact_id = NULL, attribution_status = 'unplaced',
+  candidate_job_ids = ARRAY['7d000000-0000-0000-0000-00000000000a']::uuid[]
+WHERE id = '7d200000-0000-0000-0000-000000000004';
 UPDATE public.business_events SET metadata = coalesce(metadata, '{}'::jsonb) || '{"duplicate_of":"7d200000-0000-0000-0000-000000000001"}'
 WHERE id = '7d200000-0000-0000-0000-000000000003';
 
 DO $$
 DECLARE a uuid := '7d000000-0000-0000-0000-00000000000a'; b uuid := '7d000000-0000-0000-0000-00000000000b';
   ev uuid := '7d200000-0000-0000-0000-000000000001'; placed uuid := '7d200000-0000-0000-0000-000000000002';
-  copy uuid := '7d200000-0000-0000-0000-000000000003'; staff uuid := '7d100000-0000-0000-0000-000000000001';
+  copy uuid := '7d200000-0000-0000-0000-000000000003'; callrow uuid := '7d200000-0000-0000-0000-000000000004'; staff uuid := '7d100000-0000-0000-0000-000000000001';
   it record; h text;
 BEGIN
   -- 1. Before a decision: candidate on both jobs, each naming the other; the placed row only on A.
@@ -85,6 +92,25 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM public.context_recon_job_items(a) i WHERE i.event_id = placed) THEN
     RAISE EXCEPTION 'job recon contract: a placed row is listed as queued';
+  END IF;
+  -- A call row is listed on its candidate job with no preview, so transcript words stay out.
+  IF NOT EXISTS (SELECT 1 FROM public.context_recon_job_items(a) i WHERE i.event_id = callrow AND i.preview IS NULL)
+     OR EXISTS (SELECT 1 FROM public.context_job_mail(a) m WHERE m.event_id = callrow) THEN
+    RAISE EXCEPTION 'job recon contract: call row preview shown, or a call listed as mail';
+  END IF;
+  -- A placed row a person escalated is on the queue, so the job's own door lists it too.
+  PERFORM public.context_recon_record_decision(placed, public.context_recon_evidence_hash(placed), 'escalate',
+                                               '{}'::uuid[], 'ambiguity:no_candidate', staff, 'finance');
+  IF NOT EXISTS (SELECT 1 FROM public.context_recon_queue('2026-10-20 05:00Z') q WHERE q.event_id = placed) THEN
+    RAISE EXCEPTION 'job recon contract: setup, escalated row not on the queue';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.context_recon_job_items(a) i WHERE i.event_id = placed AND i.last_action = 'escalate')
+     OR EXISTS (SELECT 1 FROM public.context_recon_job_items(b) i WHERE i.event_id = placed) THEN
+    RAISE EXCEPTION 'job recon contract: escalated placed row missing from its own job';
+  END IF;
+  -- The mail cap is one over the ops-api page of 500.
+  IF (SELECT count(*) FROM public.context_job_mail(a, 9999)) > 501 THEN
+    RAISE EXCEPTION 'job recon contract: mail cap';
   END IF;
 
   -- 3. A staff split with the shown hash puts the row certain, by a person, on both jobs, and it

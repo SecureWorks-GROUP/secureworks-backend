@@ -12,7 +12,8 @@
 //        job, defects included, each with the evidence hash a decision echoes
 //        (recon_record_decision's shown_hash) and every job offered.
 //
-// Neither writes. A failed read is a failed read, never an empty list: the
+// Both answer more: true when the list is cut at its page (the functions
+// return one row over it). Neither writes. A failed read is a failed read, never an empty list: the
 // database error is answered as 502 read_failed. A job number is matched whole
 // against the stored number, never by pattern.
 
@@ -41,6 +42,9 @@ export const CONTEXT_MAIL_ROLES = [
   "insurer_builder",
   "unknown",
 ] as const;
+
+// context_recon_job_items returns at most this many plus one.
+export const RECON_JOB_ITEMS_PAGE = 200;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const JOB_NUMBER = /^[A-Za-z0-9-]{1,40}$/;
@@ -132,16 +136,20 @@ export async function resolveContextJob(
 export async function contextJobMail(client: any, params: URLSearchParams) {
   const args = contextMailArgs(params);
   const job = await resolveContextJob(client, params);
+  // One row over the page, so a cut list says so instead of reading as complete.
   const { data, error } = await client.rpc("context_job_mail", {
     p_job: job.id,
-    ...args,
+    p_limit: args.p_limit + 1,
+    p_roles: args.p_roles,
   });
   if (error) readFailed("job mail", error);
-  const mail = Array.isArray(data) ? data : [];
+  const rows = Array.isArray(data) ? data : [];
+  const mail = rows.slice(0, args.p_limit);
   return {
     job_id: job.id,
     job_number: job.job_number,
     mail,
+    more: rows.length > args.p_limit,
     // A candidate row may belong to another job; the consumer marks it so.
     candidate_count:
       mail.filter((m: any) => m?.placement === "candidate").length,
@@ -156,9 +164,12 @@ export async function reconJobItems(client: any, params: URLSearchParams) {
     p_job: job.id,
   });
   if (error) readFailed("job items", error);
+  const rows = Array.isArray(data) ? data : [];
   return {
     job_id: job.id,
     job_number: job.job_number,
-    items: Array.isArray(data) ? data : [],
+    items: rows.slice(0, RECON_JOB_ITEMS_PAGE),
+    // The function returns one row over the page; more means the list is cut.
+    more: rows.length > RECON_JOB_ITEMS_PAGE,
   };
 }

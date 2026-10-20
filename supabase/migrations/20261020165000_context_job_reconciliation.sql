@@ -8,14 +8,20 @@
 -- for (handoff contract section 4: a candidate row shows on every candidate job marked "may belong
 -- to another job"; a split row shows certain on each of its jobs). Copies marked
 -- metadata.duplicate_of are left out. p_roles filters on metadata.party_roles.counterpart_role
--- (null = every role).
+-- (null = every role); a row with no party_roles stamp has no role and so is left out of any
+-- filtered read. p_limit is clamped to 1..501: ops-api asks for one row over its page (at most
+-- 500) so it can say there is more instead of a cut list reading as complete.
 --
 -- context_recon_job_items(job): the queued rows that offer this job (its candidates, or the
 -- ladder's job on a queued status), defects included, each with the evidence hash a decision must
 -- echo, the cause and every job offered. This is the per-job door onto the queue: the daily list
 -- ranks causes and leaves defect rows out, so a staff member who knows the job can still decide a
--- row the list never shows. The cause rule is context_recon_queue's, restated per row; the
--- contract proves the two agree.
+-- row the list never shows. Its pool is the queue's, narrowed to this job: rows with this job
+-- as a candidate, every row on this job (the queue keeps a placed row while a decision on it is
+-- escalated, unresolved or stale), and rows a decision linked here; the queue's own filter then
+-- decides. A call row carries no preview, so transcript words never reach this list. At most 201
+-- rows (one over ops-api's page of 200, so it can say there is more). The cause rule is
+-- context_recon_queue's, restated per row; the contract proves the two agree.
 
 CREATE OR REPLACE FUNCTION public.context_job_mail(p_job uuid, p_limit int DEFAULT 100, p_roles text[] DEFAULT NULL)
 RETURNS TABLE (event_id uuid, occurred_at timestamptz, direction text, from_address text, subject text,
@@ -36,7 +42,7 @@ LANGUAGE sql STABLE AS $$
          CASE WHEN jsonb_typeof(p.payload -> 'from') = 'string' THEN p.payload ->> 'from' END,
          p.payload ->> 'subject',
          left(coalesce(nullif(p.payload ->> 'body_preview', ''),
-                       regexp_replace(coalesce(p.payload ->> 'body', ''), '\s+', ' ', 'g')), 240),
+                       regexp_replace(left(coalesce(p.payload ->> 'body', ''), 2000), '\s+', ' ', 'g')), 240),
          p.provider_message_id, p.role, p.placement, p.by, p.reason,
          coalesce((SELECT jsonb_agg(jsonb_build_object('job_id', o.job_id, 'job_number', j.job_number,
                                                        'placement', o.placement)
@@ -46,7 +52,7 @@ LANGUAGE sql STABLE AS $$
   FROM placed p
   WHERE p_roles IS NULL OR p.role = ANY (p_roles)
   ORDER BY p.occurred_at DESC, p.id DESC
-  LIMIT least(greatest(coalesce(p_limit, 100), 1), 500)
+  LIMIT least(greatest(coalesce(p_limit, 100), 1), 501)
 $$;
 COMMENT ON FUNCTION public.context_job_mail(uuid, int, text[]) IS
  'Context job reconciliation (20261020165000): email rows Context places on a job through context_event_jobs (certain or candidate; by person or ladder; reason), newest first, with the other jobs each row sits on. Leaves out copies marked duplicate_of. p_roles filters on party_roles.counterpart_role. Read only, service role only.';
@@ -59,7 +65,6 @@ LANGUAGE sql STABLE AS $$
   WITH near AS (
     SELECT e.id FROM public.business_events e WHERE e.candidate_job_ids @> ARRAY[p_job]
     UNION SELECT e.id FROM public.business_events e WHERE e.job_id = p_job
-      AND (e.attribution_status = ANY (public.context_recon_queue_statuses()))
     UNION SELECT l.event_id FROM public.context_placement_links l WHERE l.job_id = p_job),
   q AS (
     SELECT e.*, s.state, s.action
@@ -73,8 +78,9 @@ LANGUAGE sql STABLE AS $$
   SELECT q.id, q.channel, q.direction, q.occurred_at,
          CASE WHEN jsonb_typeof(q.payload -> 'from') = 'string' THEN q.payload ->> 'from' END,
          q.payload ->> 'subject',
-         left(coalesce(nullif(q.payload ->> 'body_preview', ''), nullif(q.payload ->> 'text', ''),
-                       regexp_replace(coalesce(q.payload ->> 'body', ''), '\s+', ' ', 'g')), 240),
+         CASE WHEN q.channel IS DISTINCT FROM 'call' THEN
+           left(coalesce(nullif(q.payload ->> 'body_preview', ''), nullif(q.payload ->> 'text', ''),
+                         regexp_replace(left(coalesce(q.payload ->> 'body', ''), 2000), '\s+', ' ', 'g')), 240) END,
          q.metadata -> 'party_roles' ->> 'counterpart_role',
          CASE WHEN q.contact_id IS NULL THEN 'defect:no_identity'
               WHEN q.attribution_checked_at IS NULL THEN 'defect:backfill_never_asked'
@@ -91,10 +97,10 @@ LANGUAGE sql STABLE AS $$
                   '[]'::jsonb)
   FROM q
   ORDER BY q.occurred_at DESC, q.id DESC
-  LIMIT 200
+  LIMIT 201
 $$;
 COMMENT ON FUNCTION public.context_recon_job_items(uuid) IS
- 'Context job reconciliation (20261020165000): the queued rows that offer a job, defects included, each with the evidence hash a decision echoes (context_recon_evidence_hash), the cause (context_recon_queue''s rule) and the jobs offered (candidates plus the ladder''s job, the set confirm accepts). Newest first, at most 200. Read only, service role only.';
+ 'Context job reconciliation (20261020165000): the queued rows that offer a job, defects included, each with the evidence hash a decision echoes (context_recon_evidence_hash), the cause (context_recon_queue''s rule) and the jobs offered (candidates plus the ladder''s job, the set confirm accepts). Newest first, at most 201 (ops-api pages 200). Call rows carry no preview. Read only, service role only.';
 
 DO $$
 DECLARE f text;
