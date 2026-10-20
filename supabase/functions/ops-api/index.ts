@@ -1391,6 +1391,7 @@ import {
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -9354,8 +9355,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { accessToken: vAt, tenantId: vTi } = await getToken(client)
         const newStatus = body.void ? 'VOIDED' : 'DELETED'
         const vRes = await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
-        const vReturned = String(vRes?.Invoices?.[0]?.Status || newStatus).toUpperCase()
-        await client.from('xero_invoices').update({ status: vReturned, amount_due: 0 }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        // Our copy only says VOIDED or DELETED when Xero's answer does (xero_void_mirror.ts).
+        const vPatch = voidMirrorPatch(vRes, vid)
+        if (vPatch) await client.from('xero_invoices').update(vPatch).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
         // Log business event (non-blocking)
         try {
           await client.from('business_events').insert({
@@ -9368,7 +9370,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
           })
         } catch (_) { /* non-blocking */ }
-        return json({ success: true, status: newStatus })
+        return json({ success: true, status: vPatch?.status ?? newStatus, mirror_updated: !!vPatch })
       }
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body

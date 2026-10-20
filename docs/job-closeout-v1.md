@@ -202,8 +202,9 @@ nothing.
    the message).
 3. **Someone must switch the old GoHighLevel review workflow OFF** in GHL
    Automation before step 4, or customers can get two review texts.
-4. Set `JOB_REVIEW_SENDING_ENABLED=true` on ops-api, then
-   `review_sender_mode = 'live'`. Live without the env reads as dry run.
+4. `review_sender_mode = 'live'`. The database switch alone decides whether
+   real review texts go out (Captain, 20 Oct 2026); the old ops-api env
+   `JOB_REVIEW_SENDING_ENABLED` is retired and ignored.
 5. `UPDATE automation_switches SET closeout = true ... WHERE id = 1;` (the
    archive sweep). `all_stop` stops it like every other lane.
 
