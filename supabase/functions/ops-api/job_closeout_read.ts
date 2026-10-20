@@ -20,7 +20,16 @@
 //     archive_due_at: string | null,       entry + CLOSEOUT_ARCHIVE_AFTER_MS while the job
 //                                          is in get_review, else null
 //     held: 'rectification' | 'callback' | null,  closeoutHold
+//     review_opt_out: boolean,             jobs.review_opt_out: a person switched the
+//                                          review text off for this job (false when never)
+//     review_claim_status: string | null,  the job's job_review_claims status, or null
+//                                          with no claim; once set, the switch is refused
 //   }
+//
+// This block is the one place the screen reads review_opt_out and review_claim_status,
+// on the pipeline row and the job detail alike; neither is copied to the top level. The
+// job detail's job (select '*') still carries the raw jobs columns review_opt_out,
+// review_opt_out_at and review_opt_out_by; the pipeline row selects none of them.
 //
 // Every read is batched over the whole job list (chunked .in() filters, one wave), never
 // one query per job; each table reads its chunks one after another, so a full board holds
@@ -49,14 +58,18 @@ export interface CloseoutBlock {
   get_review_entered_at: string | null;
   archive_due_at: string | null;
   held: "rectification" | "callback" | null;
+  review_opt_out: boolean;
+  review_claim_status: string | null;
 }
 
-/** The job columns the block needs; is_callback is read here when a caller lacks it. */
+/** The job columns the block needs; is_callback and review_opt_out are read here when a
+ *  caller lacks them. */
 export interface CloseoutReadJob {
   id: string;
   type: string | null;
   status: string | null;
   is_callback?: boolean | null;
+  review_opt_out?: boolean | null;
 }
 
 /** Ids per PostgREST .in() filter. */
@@ -139,6 +152,8 @@ export async function loadCloseoutBlocks(
         get_review_entered_at: null,
         archive_due_at: null,
         held: j.is_callback === true ? "callback" : null,
+        review_opt_out: j.review_opt_out === true,
+        review_claim_status: null,
       });
     } else {
       closeoutJobs.push(j);
@@ -146,12 +161,12 @@ export async function loadCloseoutBlocks(
   }
   if (!closeoutJobs.length) return out;
   const ids = closeoutJobs.map((j) => j.id);
-  const missingCallback = closeoutJobs.filter((j) =>
-    j.is_callback === undefined
+  const missingJobColumns = closeoutJobs.filter((j) =>
+    j.is_callback === undefined || j.review_opt_out === undefined
   )
     .map((j) => j.id);
 
-  const [states, claims, notSent, entries, callbacks] = await Promise
+  const [states, claims, notSent, entries, jobColumns] = await Promise
     .all([
       readRows(
         client,
@@ -171,9 +186,14 @@ export async function loadCloseoutBlocks(
           }),
       ),
       loadGetReviewEntries(client, ids),
-      readRows(client, "jobs", "id, is_callback", missingCallback),
+      readRows(
+        client,
+        "jobs",
+        "id, is_callback, review_opt_out",
+        missingJobColumns,
+      ),
     ]);
-  if (!states || !claims || !notSent || !entries || !callbacks) {
+  if (!states || !claims || !notSent || !entries || !jobColumns) {
     return null;
   }
 
@@ -185,7 +205,7 @@ export async function loadCloseoutBlocks(
       notSentBy.set(r.job_id, r.detail_json ?? null);
     }
   }
-  const callbackBy = new Map(callbacks.map((r) => [r.id, r.is_callback]));
+  const jobColumnsBy = new Map(jobColumns.map((r) => [r.id, r]));
 
   for (const job of closeoutJobs) {
     const state = stateBy.get(job.id);
@@ -212,9 +232,13 @@ export async function loadCloseoutBlocks(
       held: closeoutHold({
         status: job.status,
         is_callback: job.is_callback === undefined
-          ? callbackBy.get(job.id) ?? null
+          ? jobColumnsBy.get(job.id)?.is_callback ?? null
           : job.is_callback,
       }),
+      review_opt_out: (job.review_opt_out === undefined
+        ? jobColumnsBy.get(job.id)?.review_opt_out
+        : job.review_opt_out) === true,
+      review_claim_status: claim?.status ?? null,
     });
   }
   return out;

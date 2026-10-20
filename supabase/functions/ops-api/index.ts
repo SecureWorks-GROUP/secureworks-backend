@@ -1386,6 +1386,7 @@ import {
   requestJobReview,
   reviewRequestMessage as closeoutReviewRequestMessage,
   runJobCloseoutAction,
+  setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
@@ -9902,6 +9903,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'send_payment_link': return json(await sendPaymentLink(client, body))
       case 'send_acceptance_invoice': return json(await sendAcceptanceInvoice(client, body))
       case 'send_review_request': return json(await sendReviewRequest(client, body))
+      // The per-job review switch (job_closeout.ts setReviewOptOut): staff sessions and
+      // the privileged ops key only, absent from ROUTINE_ALLOWED_ACTIONS. Refused 409
+      // review_already_sent once the job has a review claim.
+      case 'set_review_opt_out': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: set_review_opt_out requires the privileged ops key or a staff session' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError('set_review_opt_out requires POST', 405)
+        // A signed-in person is named by the verified session; the ops key has no user
+        // and is attributed by the operator email the screen stamps.
+        const optOutBy = authMode === 'jwt'
+          ? (authUser?.email || cleanReviewedString(body?.operator_email) || (authUser?.id ? `user:${authUser.id}` : null))
+          : (cleanReviewedString(body?.operator_email) || `ops-api:${authMode}`)
+        const optOut = await setReviewOptOut({ client, now: () => new Date() }, body || {}, optOutBy)
+        return json(optOut.body, optOut.status)
+      }
 
       // ── Quick Quote (Miscellaneous Jobs) ──
       case 'search_ghl_contacts': return json(await searchGHLContacts(client, url.searchParams))

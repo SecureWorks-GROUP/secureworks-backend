@@ -169,6 +169,8 @@ Deno.test("closeout read: the block shape for each case", async () => {
     get_review_entered_at: null,
     archive_due_at: null,
     held: null,
+    review_opt_out: false,
+    review_claim_status: null,
   });
   // Newest get_review entry, archive due 24 hours later; the claim decides the review.
   assertEquals(blocks.get(IN_REVIEW), {
@@ -178,6 +180,8 @@ Deno.test("closeout read: the block shape for each case", async () => {
     get_review_entered_at: "2026-10-13T02:00:00.000Z",
     archive_due_at: "2026-10-14T02:00:00.000Z",
     held: null,
+    review_opt_out: false,
+    review_claim_status: "sent",
   });
   // No claim and no event: null, even with no linked contact (nothing was recorded).
   assertEquals(blocks.get(NO_CONTACT)?.review, null);
@@ -195,6 +199,21 @@ Deno.test("closeout read: the block shape for each case", async () => {
   assertEquals(blocks.get(REFUSED)?.archive_due_at, null);
   assertEquals(blocks.get(CALLBACK)?.held, "callback");
   assertEquals(blocks.has(MAKESAFE), false);
+});
+
+Deno.test("closeout read: the review switch and the claim status, read from the job when the row lacks it", async () => {
+  const tables = closeoutTables();
+  tables.jobs.find((j) => j.id === PAID_SHORT)!.review_opt_out = true;
+  const blocks = await loadCloseoutBlocks(fakeClient(tables), [
+    ...JOBS,
+    // A caller that already holds the column is believed, never re-read.
+    { id: CALLBACK, type: "fencing", status: "complete", review_opt_out: true },
+  ]);
+  assertEquals(blocks?.get(PAID_SHORT)?.review_opt_out, true);
+  assertEquals(blocks?.get(PAID_SHORT)?.review_claim_status, null);
+  assertEquals(blocks?.get(IN_REVIEW)?.review_opt_out, false);
+  assertEquals(blocks?.get(IN_REVIEW)?.review_claim_status, "sent");
+  assertEquals(blocks?.get(CALLBACK)?.review_opt_out, true);
 });
 
 Deno.test("closeout read: rectification holds and has no archive time", async () => {
@@ -237,7 +256,7 @@ Deno.test("closeout read: one batched query per table, whatever the job count", 
     job_closeout_state: 1,
     job_review_claims: 1,
     job_events: 2, // review_request_not_sent and the get_review entries
-    jobs: 1, // is_callback, only because these rows lack it
+    jobs: 1, // is_callback and review_opt_out, only because these rows lack them
   });
   for (const c of client.calls) {
     const inFilter = c.filters.find(([m]) => m === "in");
@@ -258,6 +277,8 @@ Deno.test("closeout read: a draft gets the empty block and is never read", async
     get_review_entered_at: null,
     archive_due_at: null,
     held: null,
+    review_opt_out: false,
+    review_claim_status: null,
   });
   assertEquals(client.calls.length, 0);
 });
@@ -268,6 +289,7 @@ Deno.test("closeout read: a big board reads each table's chunks one at a time", 
     type: "fencing",
     status: "invoiced",
     is_callback: false,
+    review_opt_out: false,
   }));
   const base = fakeClient(closeoutTables());
   let inFlight = 0;
@@ -290,7 +312,7 @@ Deno.test("closeout read: a big board reads each table's chunks one at a time", 
   };
   const blocks = await loadCloseoutBlocks(client, many);
   assertEquals(blocks?.size, 120);
-  // Three chunks of 50 per table, four tables read (no is_callback read): never all at once.
+  // Three chunks of 50 per table, four tables read (no jobs read): never all at once.
   assertEquals(client.calls.length, 12);
   assert(peak <= 4, `peak in-flight ${peak}`);
 });
@@ -371,6 +393,14 @@ Deno.test("pipeline: fencing and patio rows carry closeout for staff only", asyn
     reason: null,
   });
   assertEquals("closeout" in (byId.get(MAKESAFE) ?? {}), false);
+  // The review switch and the claim status are read from the block only.
+  assertEquals(byId.get(PAID_SHORT)?.closeout.review_opt_out, false);
+  assertEquals(byId.get(PAID_SHORT)?.closeout.review_claim_status, null);
+  assertEquals(byId.get(IN_REVIEW)?.closeout.review_claim_status, "sent");
+  for (const id of [PAID_SHORT, IN_REVIEW, MAKESAFE]) {
+    assertEquals("review_opt_out" in (byId.get(id) ?? {}), false);
+    assertEquals("review_claim_status" in (byId.get(id) ?? {}), false);
+  }
 
   const notStaff = await _pipelineForTest(
     pipelineClient(),
@@ -378,7 +408,24 @@ Deno.test("pipeline: fencing and patio rows carry closeout for staff only", asyn
   );
   for (const r of Object.values(notStaff.columns).flat() as Row[]) {
     assertEquals("closeout" in r, false);
+    assertEquals("review_opt_out" in r, false);
+    assertEquals("review_claim_status" in r, false);
   }
+});
+
+Deno.test("pipeline: an opted-out card says so in its closeout block", async () => {
+  const tables = closeoutTables();
+  tables.jobs.find((j) => j.id === PAID_SHORT)!.review_opt_out = true;
+  const result = await _pipelineForTest(
+    fakeClient(tables, {
+      boardJobs: [pipelineJob(PAID_SHORT, "fencing", "complete")],
+    }),
+    new URLSearchParams(),
+    { includeCloseout: true },
+  );
+  const row = (Object.values(result.columns).flat() as Row[])[0];
+  assertEquals(row.closeout.review_opt_out, true);
+  assertEquals("review_opt_out" in row, false);
 });
 
 Deno.test("pipeline: a failed closeout read nulls the block and says so", async () => {
@@ -389,5 +436,7 @@ Deno.test("pipeline: a failed closeout read nulls the block and says so", async 
   const rows = Object.values(result.columns).flat() as Row[];
   const fencing = rows.find((r) => r.id === PAID_SHORT);
   assertEquals(fencing?.closeout, null);
+  assertEquals("review_opt_out" in (fencing ?? {}), false);
+  assertEquals("review_claim_status" in (fencing ?? {}), false);
   assert(result.enrichment_errors.includes("pipeline.closeout"));
 });
