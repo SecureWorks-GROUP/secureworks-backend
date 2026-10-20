@@ -928,7 +928,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261016150000", "dispatch_deliveries"),
                       # Dispatch slice 7, F2: the install_confirmed_for_day
                       # column comment states the mark rule.
-                      ("20261016160000", "job_dispatch_install_for_day_comment")]:
+                      ("20261016160000", "job_dispatch_install_for_day_comment"),
+                      # S6 (R7): the scope revision a job work order was
+                      # filled from (job_work_orders.ts).
+                      ("20261020120000", "job_work_order_fill_revision")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
