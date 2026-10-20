@@ -196,3 +196,24 @@ Deno.test("quote options seq: gaps in seq mean nothing, and seq is never compare
   assertEquals([...supersessionOrderUnknown(mixed, NOW)], [D]);
   assertEquals(openSupersessions(mixed, NOW).has(C), true);
 });
+
+Deno.test("quote options seq: one at per transaction (c12dcf8) is settled by seq, and a cutoff takes all of it or none", () => {
+  // The writer stamps every event of one transaction and group with the
+  // same at, taken when the trigger first holds the group lock.
+  const runAt = "2026-10-20T01:00:01.000350+00:00";
+  const events = [
+    s(C, A, T0, 2),
+    u(C, T1, 4, runAt),
+    s(C, B, T1, 6, runAt),
+  ];
+  for (const order of [events, [...events].reverse()]) {
+    assertEquals(supersessionOrderUnknown(order, NOW).size, 0);
+    assertEquals(openSupersessions(order, NOW).get(C)?.detail_json?.seq, 6);
+  }
+  // Before the run's at: neither the clear nor the re-mark counts.
+  assertEquals(
+    openSupersessions(events, "2026-10-20T01:00:00.500Z").get(C)?.detail_json
+      ?.seq,
+    2,
+  );
+});

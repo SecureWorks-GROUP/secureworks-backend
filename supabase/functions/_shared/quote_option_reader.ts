@@ -26,9 +26,10 @@
 // - Anything that cannot be read or does not agree (events against the
 //   pointer, an unknown group) is shown, never hidden.
 // - A job's superseded and unsuperseded events follow the writer's order
-//   contract (sq23/event-order 1696f83 + 9354f29 + 503cd6d, CIO c5db7b9
-//   conditions C1 and C2). Each carries detail_json.seq (a positive whole
-//   number) and detail_json.at (clock_timestamp() under the group lock).
+//   contract (sq23/event-order 1696f83, 9354f29, 503cd6d, c12dcf8; CIO
+//   c5db7b9 conditions C1 and C2). Each carries detail_json.seq (a positive
+//   whole number) and detail_json.at (one clock_timestamp() per transaction
+//   and group, taken under the group lock, so equal within a transaction).
 //   "As of t" keeps the events whose `at` is at or before t; an event with no
 //   usable `at` is kept when its created_at is (at is never before created_at,
 //   so nothing later is dropped). The kept event with the highest seq decides.
