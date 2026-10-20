@@ -1,5 +1,5 @@
 -- Rollback contract: 20261019210000_fence_quote_option_jobs. The down drops the trigger, every
--- function, the switch row, the index, the check and the four columns, and leaves jobs in place.
+-- function, the event order sequence, the switch row, the index, the check and the four columns, and leaves jobs in place.
 \set ON_ERROR_STOP on
 DO $$
 BEGIN
@@ -16,6 +16,9 @@ BEGIN
  END IF;
  IF to_regclass('public.quote_option_settle_runs') IS NOT NULL THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the run table still exists';
+ END IF;
+ IF to_regclass('public.quote_option_event_seq') IS NOT NULL THEN
+  RAISE EXCEPTION 'fence quote option rollback contract: the event order sequence still exists';
  END IF;
  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_jobs_quote_option_supersede') THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the trigger still exists';

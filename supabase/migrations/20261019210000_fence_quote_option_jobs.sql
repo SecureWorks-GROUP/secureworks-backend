@@ -18,6 +18,8 @@
 --      pointer is current state only. The job_events log is the history: a
 --      job is not live from each quote_option_superseded event to the next
 --      quote_option_unsuperseded event for it, and live outside those.
+--      Order those events by detail_json->>'seq', never by created_at or id
+--      (see "Event order" below).
 --   3. When a grouped job moves into a won status, an AFTER UPDATE trigger
 --      marks the other open options superseded (pointer, time, one event
 --      each). It never changes a status, so no status side effect fires.
@@ -54,6 +56,30 @@
 -- ever waits on a row: the link refuses with quote_option_busy and the trigger
 -- skips the row. So neither can deadlock. The trigger waits for the group
 -- lock for about 2 seconds at most, then records the failure for review.
+--
+-- Event order: every quote_option_superseded and quote_option_unsuperseded
+-- event carries detail_json.seq, a number from quote_option_event_seq taken
+-- at the insert. For one job, a higher seq means written later. created_at
+-- does not order them: it is now(), the transaction's start, so every event
+-- of one transaction shares it, and one trigger run can clear a job and mark
+-- it superseded again (reversal with exactly one other option still won).
+-- job_events.id is a random uuid, so it does not order them either.
+--   - Same transaction: seq follows statement order (nextval rises within a
+--     session).
+--   - Concurrent transactions: both insert sites (mark_options and
+--     clear_mark) run only inside the trigger, under the group's advisory
+--     lock, which is held to commit; a job's group never changes once set
+--     (link_fence_quote_option refuses another group). So for one job, a
+--     later transaction takes its seq after the earlier one has committed or
+--     rolled back, and seq order is commit order.
+--   - Rollback (whole transaction or the trigger's own block): the events
+--     go and their seq values are skipped, never reused. Gaps mean nothing.
+--   - CACHE 1 and NO CYCLE: with a per-session cache, two sessions could
+--     hand out seq out of order. The contract checks both.
+-- Limits: a direct UPDATE of jobs.quote_option_group_id by an owner, outside
+-- link_fence_quote_option, would bypass this; an event written by anything
+-- other than these two helpers has no seq, and a reader must treat a seq-less
+-- event as order unknown.
 --
 -- Nothing here changes what a customer is sent or how they accept. Existing
 -- jobs are not grouped or changed: the 25 duplicate sets found on 19 Oct 2026
@@ -128,6 +154,15 @@ LANGUAGE sql IMMUTABLE
 AS $$
   SELECT hashtextextended('fence_quote_option_group:' || p_group::text, 0)
 $$;
+
+-- Write order for quote_option_superseded and quote_option_unsuperseded
+-- events (see "Event order" in the header). Only the trigger's helpers
+-- (as owner) take values; no API role can read or advance it.
+CREATE SEQUENCE IF NOT EXISTS public.quote_option_event_seq
+  AS bigint INCREMENT BY 1 MINVALUE 1 NO MAXVALUE START WITH 1 CACHE 1 NO CYCLE;
+REVOKE ALL ON SEQUENCE public.quote_option_event_seq FROM PUBLIC, anon, authenticated, service_role;
+COMMENT ON SEQUENCE public.quote_option_event_seq IS
+  'Order of quote_option_superseded and quote_option_unsuperseded job_events per job (detail_json.seq). Taken under the option group''s advisory lock; created_at and id do not order these events.';
 
 -- One row per trigger run with the switch on, written before any of the
 -- trigger's work and marked settled_at at the end of that work, in the same
@@ -284,7 +319,8 @@ BEGIN
       VALUES (v_row.id, 'quote_option_superseded',
               jsonb_build_object('superseded_by_job_id', p_winner,
                                  'quote_option_group_id', p_group,
-                                 'accepted_status', p_winner_status));
+                                 'accepted_status', p_winner_status,
+                                 'seq', nextval('public.quote_option_event_seq')));
     END IF;
   END LOOP;
 END $$;
@@ -310,7 +346,8 @@ BEGIN
     INSERT INTO public.job_events (job_id, event_type, detail_json)
     VALUES (p_job_id, 'quote_option_unsuperseded',
             jsonb_build_object('reason', p_reason, 'was_superseded_by_job_id', v_was,
-                               'trigger_job_id', p_trigger_job_id, 'quote_option_group_id', p_group));
+                               'trigger_job_id', p_trigger_job_id, 'quote_option_group_id', p_group,
+                               'seq', nextval('public.quote_option_event_seq')));
   END IF;
 END $$;
 

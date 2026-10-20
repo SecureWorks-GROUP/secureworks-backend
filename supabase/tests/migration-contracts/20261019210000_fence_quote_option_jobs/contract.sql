@@ -464,6 +464,72 @@ SELECT pg_temp.qo_assert((SELECT superseded_by_job_id = '9c000000-0000-4000-8000
   FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000f2'),
  'with the switch readable and on, the same acceptance must supersede the sibling');
 
+-- Event order (CIO reviewer finding on equal-time ties, 20 Oct 2026). created_at is the
+-- transaction's start and job_events.id is random, so neither orders these events; seq does.
+SELECT pg_temp.qo_assert((SELECT s.cache_size = 1 AND NOT s.cycle AND s.increment_by = 1
+  FROM pg_sequences s WHERE s.schemaname = 'public' AND s.sequencename = 'quote_option_event_seq'),
+ 'the event order sequence must exist with CACHE 1, NO CYCLE and step 1');
+SELECT pg_temp.qo_assert(NOT EXISTS (
+  SELECT 1 FROM unnest(ARRAY['public', 'anon', 'authenticated', 'service_role']) r(role),
+       unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) p(priv)
+   WHERE has_sequence_privilege(r.role, 'public.quote_option_event_seq', p.priv)),
+ 'no API role may read or advance the event order sequence');
+-- Group 9 (customer c-9): A9 accepted marks B9 and C9. With the switch off, C9 is moved to
+-- accepted, so nothing reacts. With it on, A9 back to quoted clears B9 and C9 and, C9 being the
+-- one option still won, marks B9 again, now by C9: a clear and a re-supersede of B9 in one
+-- statement, so with the same created_at.
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9c000000-0000-4000-8000-0000000009a1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-9'),
+ ('9c000000-0000-4000-8000-0000000009b1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-9'),
+ ('9c000000-0000-4000-8000-0000000009c1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-9');
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000009b1', '9c000000-0000-4000-8000-0000000009a1', NULL, NULL);
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-0000000009c1', '9c000000-0000-4000-8000-0000000009a1', NULL, NULL);
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'quote_option_supersede_v1';
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000009a1';
+UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'quote_option_supersede_v1';
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-0000000009c1';
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'quote_option_supersede_v1';
+-- A rolled-back run takes seq values and leaves only a gap.
+SAVEPOINT qo_seq_gap;
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000009a1';
+ROLLBACK TO SAVEPOINT qo_seq_gap;
+SELECT pg_temp.qo_assert((SELECT superseded_by_job_id = '9c000000-0000-4000-8000-0000000009a1'
+  FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000009b1')
+ AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000009b1', 'quote_option_unsuperseded') = 0,
+ 'a rolled-back reversal must leave no event');
+UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000009a1';
+SELECT pg_temp.qo_assert((SELECT superseded_by_job_id = '9c000000-0000-4000-8000-0000000009c1'
+  FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000009b1'),
+ 'with C9 the one option still won, B9 must end superseded by C9');
+SELECT pg_temp.qo_assert((SELECT array_agg(e.event_type || ':' || coalesce(e.detail_json->>'superseded_by_job_id', e.detail_json->>'reason')
+                                 ORDER BY (e.detail_json->>'seq')::bigint)
+   FROM public.job_events e WHERE e.job_id = '9c000000-0000-4000-8000-0000000009b1'
+    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded'))
+  = ARRAY['quote_option_superseded:9c000000-0000-4000-8000-0000000009a1',
+          'quote_option_unsuperseded:acceptance_reversed',
+          'quote_option_superseded:9c000000-0000-4000-8000-0000000009c1'],
+ 'B9''s events by seq must read superseded by A9, cleared, superseded by C9');
+SELECT pg_temp.qo_assert((SELECT count(DISTINCT e.created_at) = 1 FROM public.job_events e
+  WHERE e.job_id = '9c000000-0000-4000-8000-0000000009b1'
+    AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
+ 'the runner is one transaction, so B9''s events share created_at: the tie this order exists for');
+-- Every supersede and unsupersede event carries a seq, no two share one, and for every fixture
+-- job the last event by seq agrees with the pointer: superseded while set, cleared otherwise.
+SELECT pg_temp.qo_assert((SELECT bool_and(e.detail_json->>'seq' ~ '^[1-9][0-9]*$')
+   AND count(*) = count(DISTINCT e.detail_json->>'seq')
+  FROM public.job_events e WHERE e.job_id::text LIKE '9c000000-%'
+   AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')),
+ 'every supersede and unsupersede event must carry its own seq');
+SELECT pg_temp.qo_assert(NOT EXISTS (
+  SELECT 1 FROM public.jobs j
+   CROSS JOIN LATERAL (SELECT e.event_type FROM public.job_events e
+                        WHERE e.job_id = j.id
+                          AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
+                        ORDER BY (e.detail_json->>'seq')::bigint DESC LIMIT 1) last
+   WHERE j.id::text LIKE '9c000000-%'
+     AND (last.event_type = 'quote_option_superseded') IS DISTINCT FROM (j.superseded_at IS NOT NULL)),
+ 'the last event by seq must agree with every job''s pointer');
+
 -- Message time: for every fixture job, superseded events minus unsuperseded events is 1 while
 -- the pointer is set and 0 otherwise, so the intervals can be rebuilt from events alone.
 SELECT pg_temp.qo_assert(NOT EXISTS (
