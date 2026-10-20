@@ -216,15 +216,27 @@ export const buildFenceScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): Ad
           labour_total: labourTotal,
           subcontract_commission_total: commissionTotal,
         },
-    margin: {
-      pct: marginPct,
-      floor_breached: marginPct > 0 && marginPct < 0.2,
-      override_reason: null,
-      override_approver_user_id: null,
-    },
+    // The same rule for margin and commission (Sales, CFO note 1118-A): both
+    // are worked from the costs, so with costs still to confirm they would be
+    // worked on a short cost. They are sealed as not known, and the floor check
+    // is marked as not done, never as passed.
+    margin: costsIncomplete
+      ? {
+          pct: null,
+          floor_breached: false,
+          floor_check: 'costs_to_confirm',
+          override_reason: null,
+          override_approver_user_id: null,
+        }
+      : {
+          pct: marginPct,
+          floor_breached: marginPct > 0 && marginPct < 0.2,
+          override_reason: null,
+          override_approver_user_id: null,
+        },
     commission: {
       rule: 'fence_5_25pct_inc_gst',
-      amount: commissionTotal,
+      amount: costsIncomplete ? null : commissionTotal,
       salesperson_user_id: null,
     },
   }

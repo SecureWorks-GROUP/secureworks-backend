@@ -573,6 +573,77 @@ Deno.test('FenceAdapter — costs_complete false seals the cost estimates as not
   }
 })
 
+// Sales, CFO note 1118-A: margin and commission are worked from the costs, so
+// with costs to confirm they are not known and the floor check never passes.
+function incompleteFenceInputs() {
+  const base = buildFenceInputs()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  return buildFenceInputs({
+    job: {
+      ...base.job,
+      pricing_json: {
+        ...pricing,
+        pricing_complete: false,
+        // An older save that still carries a margin worked on the short cost.
+        margin_pct: 0.62,
+        internal: { commission: 210, cost: 1200, labour: 900, margin: 0.62, costs_complete: false, costs_to_confirm: ['delivery', 'skipBin'] },
+      },
+    },
+  })
+}
+
+Deno.test('FenceAdapter — costs to confirm: margin and commission are not known, floor check marked not done', () => {
+  const r = dispatchAdapter(incompleteFenceInputs())
+  assert(r.ok)
+  if (r.ok) {
+    const ic = r.output.internal_cost
+    assertEquals(ic.margin.pct, null)
+    assertEquals(ic.margin.floor_breached, false)
+    assertEquals(ic.margin.floor_check, 'costs_to_confirm')
+    assertEquals(ic.commission.amount, null)
+    // The draft pricing the customer sees is kept.
+    assert(r.output.pricing_public.line_items.length > 0)
+  }
+})
+
+Deno.test('Validator — costs to confirm never pass the margin floor check', () => {
+  const inputs = incompleteFenceInputs()
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    const preliminary = stitchManifestForValidation(r.output, inputs)
+    const enforce = validatePacketV2(preliminary.manifest, preliminary.internal_cost, {
+      mode: 'enforce',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    const err = enforce.errors.find((e) => e.rule === 'internal_cost.margin_override_required_when_breached')
+    assert(err, 'enforce mode must refuse the floor check')
+    assert(err.message.includes('2 cost lines with no price'))
+    const warn = validatePacketV2(preliminary.manifest, preliminary.internal_cost, {
+      mode: 'warn',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    assert(!warn.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+    assert(warn.warnings.some((w) => w.rule === 'internal_cost.margin_override_required_when_breached'))
+  }
+})
+
+Deno.test('Validator — complete fence costs still pass the margin floor check, keys unchanged', () => {
+  const inputs = buildFenceInputs()
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    assertEquals(Object.keys(r.output.internal_cost.margin).sort(), ['floor_breached', 'override_approver_user_id', 'override_reason', 'pct'])
+    assertEquals(r.output.internal_cost.commission.amount, 210)
+    const preliminary = stitchManifestForValidation(r.output, inputs)
+    const v = validatePacketV2(preliminary.manifest, preliminary.internal_cost, {
+      mode: 'warn',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    assert(v.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+  }
+})
+
 Deno.test('FenceAdapter — complete pricing carries no completeness keys (canonical text unchanged)', () => {
   const r = dispatchAdapter(buildFenceInputs())
   assert(r.ok)

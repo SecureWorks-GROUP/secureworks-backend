@@ -43,8 +43,13 @@ export type InternalCostEstimates = {
 }
 
 export type InternalMargin = {
-  pct: number
+  // null only when the costs are not complete (cost_estimates.costs_complete
+  // false): a margin worked on a short cost is not known, never a figure.
+  pct: number | null
   floor_breached: boolean
+  // Present only when pct is null, so a complete release's canonical text and
+  // hash are unchanged. The floor check was not done; it never reads as passed.
+  floor_check?: 'costs_to_confirm'
   // When floor_breached is true, override_reason is required (validator
   // enforces). The approver UUID + role must match the project's configured
   // override-operator allowlist (Marnin or Shaun per §9 default).
@@ -59,7 +64,9 @@ export type CommissionRule =
 
 export type InternalCommission = {
   rule: CommissionRule
-  amount: number
+  // null only when the costs are not complete: a commission worked from a
+  // short cost is not known.
+  amount: number | null
   // GAP today — `jobs.created_by` captures the scoper, not necessarily the
   // salesperson. Captured by scoping tools at scope time once they expose
   // the salesperson selector. Nullable until that capture lands.
