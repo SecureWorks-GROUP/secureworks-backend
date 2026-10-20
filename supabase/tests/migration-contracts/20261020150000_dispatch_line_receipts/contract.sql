@@ -178,3 +178,50 @@ SELECT pg_temp.lr_assert(pg_temp.lr_refused($q$
 $q$), 'a line with a voided receipt must still not be deleted');
 
 ROLLBACK;
+
+-- R2-2 (V round 3 probe): the down refuses while a receipt exists. The down carries its own
+-- BEGIN/COMMIT, so the fixtures and one receipt go in an outer transaction and the down runs with
+-- ON_ERROR_STOP off: its refusal turns its COMMIT into a ROLLBACK of everything. Had it not refused,
+-- its COMMIT would have committed the drops, so the table still existing proves the refusal.
+\set ON_ERROR_STOP on
+BEGIN;
+-- 2. Fixtures.
+INSERT INTO public.jobs (id, org_id, status, type)
+VALUES ('9f000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'order_materials', 'patio'),
+       ('9f000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing');
+INSERT INTO public.users (id, org_id, name)
+VALUES ('9f400000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'Contract Person')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO public.suppliers (id, name) VALUES ('9f100000-0000-4000-8000-000000000001', 'Example Panels');
+INSERT INTO public.purchase_orders (id, job_id, po_number)
+VALUES ('9f200000-0000-4000-8000-000000000001', '9f000000-0000-4000-8000-000000000001', 'PO-S5-1'),
+       ('9f200000-0000-4000-8000-000000000002', '9f000000-0000-4000-8000-000000000001', 'PO-S5-2');
+INSERT INTO public.job_material_suppliers (org_id, job_id, supplier_id, supplier_name, position)
+VALUES ('00000000-0000-0000-0000-000000000001', '9f000000-0000-4000-8000-000000000001',
+        '9f100000-0000-4000-8000-000000000001', 'Example Panels', 1);
+INSERT INTO public.job_material_lines (id, org_id, job_id, supplier_id, description, quantity, status, position)
+VALUES ('9f300000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001',
+        '9f000000-0000-4000-8000-000000000001', '9f100000-0000-4000-8000-000000000001', 'Panels', 42, 'to_order', 1),
+       ('9f300000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001',
+        '9f000000-0000-4000-8000-000000000001', '9f100000-0000-4000-8000-000000000001', 'Rails', 10, 'to_order', 2);
+UPDATE public.job_material_lines SET purchase_order_id = '9f200000-0000-4000-8000-000000000001' WHERE id = '9f300000-0000-4000-8000-000000000001';
+INSERT INTO public.job_material_line_receipts (id, org_id, job_id, line_id, purchase_order_id, quantity, received_on,
+                                               note, created_by, created_by_email)
+VALUES ('9f500000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001',
+        '9f000000-0000-4000-8000-000000000001', '9f300000-0000-4000-8000-000000000001',
+        '9f200000-0000-4000-8000-000000000001', 18, (now() AT TIME ZONE 'Australia/Perth')::date, 'First part',
+        '9f400000-0000-4000-8000-000000000001', 'person@example.test');
+\set ON_ERROR_STOP off
+\ir ../../../rollbacks/20261020150000_dispatch_line_receipts_down.sql
+\set ON_ERROR_STOP on
+DO $$
+BEGIN
+ IF to_regclass('public.job_material_line_receipts') IS NULL
+    OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
+                    AND table_name = 'job_material_lines' AND column_name = 'purchase_order_attached_at') THEN
+  RAISE EXCEPTION 'dispatch line receipts contract: the down must refuse while a receipt exists';
+ END IF;
+ IF EXISTS (SELECT 1 FROM public.jobs WHERE id = '9f000000-0000-4000-8000-000000000001') THEN
+  RAISE EXCEPTION 'dispatch line receipts contract: the refused down must roll back the whole transaction';
+ END IF;
+END $$;
