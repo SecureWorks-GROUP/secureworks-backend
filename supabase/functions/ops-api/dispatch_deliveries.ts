@@ -186,6 +186,16 @@ export type DispatchDeliveryOrderRow = {
   status: string | null;
   updated_at: string | null;
   delivery: DispatchDelivery;
+  // S5, only when the caller read the receipts.
+  on_site?: boolean;
+  lines_part_delivered?: number;
+};
+
+// S5: which orders are on site and how many of each order's lines read Part
+// delivered (dispatchLineDeliveryView in dispatch_line_receipts.ts).
+export type DispatchOrderOnSite = {
+  onSiteOrderIds: ReadonlySet<string>;
+  partByOrder: ReadonlyMap<string, number>;
 };
 
 export type DispatchDeliveryRow =
@@ -196,8 +206,9 @@ function orderRow(
   order: any,
   names: DispatchPersonNames,
   supplierName?: string | null,
+  onSite?: DispatchOrderOnSite,
 ): DispatchDeliveryOrderRow {
-  return {
+  const row: DispatchDeliveryOrderRow = {
     kind: "order",
     purchase_order_id: String(order.id),
     po_number: order.po_number ?? null,
@@ -209,6 +220,11 @@ function orderRow(
     updated_at: order.updated_at ?? null,
     delivery: dispatchDelivery(order, names),
   };
+  if (onSite) {
+    row.on_site = onSite.onSiteOrderIds.has(String(order.id));
+    row.lines_part_delivered = onSite.partByOrder.get(String(order.id)) ?? 0;
+  }
+  return row;
 }
 
 // The table: per chosen supplier (in the order given, slice 4's position
@@ -220,6 +236,7 @@ export function dispatchDeliveryRows(
   suppliers: { supplier_id: unknown; name?: unknown }[],
   orders: any[],
   names: DispatchPersonNames = new Map(),
+  onSite?: DispatchOrderOnSite,
 ): DispatchDeliveryRow[] {
   const rows: DispatchDeliveryRow[] = [];
   const live = (orders || []).filter(isDispatchDeliveryCounted).sort(
@@ -243,26 +260,48 @@ export function dispatchDeliveryRows(
     }
     for (const order of own) {
       placed.add(String(order.id));
-      rows.push(orderRow(order, names, supplierName));
+      rows.push(orderRow(order, names, supplierName, onSite));
     }
   }
   for (const order of live) {
-    if (!placed.has(String(order.id))) rows.push(orderRow(order, names));
+    if (!placed.has(String(order.id))) {
+      rows.push(orderRow(order, names, undefined, onSite));
+    }
   }
   return rows;
 }
 
 // The rail line (slice 3's rail panel), only with a counted order. Stage
-// index 1 to 6 is the rail stop; 0 or null is not on the rail yet.
+// index 1 to 6 is the rail stop; 0 or null is not on the rail yet. It moves
+// nothing. S5 (docs/dispatch-partial-deliveries-v1.md): `sighted` is the
+// count of orders on site (sighted, or every line received). With any line part
+// delivered the line says how many; when `sightedOnly` (orders actually
+// sighted) is given and differs, the line says "on site", never "sighted".
+// With neither it reads as slice 6 did.
 export function dispatchDeliveryRailLine(
   total: number | null | undefined,
   sighted: number | null | undefined,
   stageIndex: number | null | undefined,
+  partLines?: number | null,
+  sightedOnly?: number | null,
 ): string | null {
   if (typeof total !== "number" || typeof sighted !== "number") return null;
   if (total <= 0) return null;
+  const orders = `order${total === 1 ? "" : "s"}`;
+  const atStop = typeof stageIndex === "number" && stageIndex >= 5;
+  if (typeof partLines === "number" && partLines > 0) {
+    return `${sighted} of ${total} ${orders} on site; ${partLines} line${
+      partLines === 1 ? "" : "s"
+    } part delivered.`;
+  }
+  if (typeof sightedOnly === "number" && sightedOnly !== sighted) {
+    if (sighted < total) return `${sighted} of ${total} ${orders} on site.`;
+    return atStop
+      ? "Every order on this job is on site."
+      : "Every order on this job is on site. Press Materials on site to move the job.";
+  }
   if (sighted < total) return `${sighted} of ${total} orders sighted on site.`;
-  return typeof stageIndex === "number" && stageIndex >= 5
+  return atStop
     ? "Every order on this job is sighted on site."
     : "Every order on this job is sighted on site. Press Materials on site to move the job.";
 }
@@ -291,12 +330,27 @@ export function dispatchSightedOrderIds(
 
 // The list's two per-row fields. Only called when the list's order read
 // worked: a failed read leaves both off (never 0).
+// S5: with the job's lines and receipts read, `onSite` adds the two S5 fields
+// (orders on site, lines part delivered); without, the two fields are as
+// slice 6 left them.
 export function dispatchDeliveryListFields(
   orders: any[] | undefined,
-): { deliveries_orders_total: number; deliveries_orders_sighted: number } {
+  onSite?: { on_site: number; lines_part_delivered: number },
+): {
+  deliveries_orders_total: number;
+  deliveries_orders_sighted: number;
+  deliveries_orders_on_site?: number;
+  deliveries_lines_part_delivered?: number;
+} {
   const summary = dispatchDeliverySummary(orders || []);
   return {
     deliveries_orders_total: summary.counted,
     deliveries_orders_sighted: summary.sighted,
+    ...(onSite
+      ? {
+        deliveries_orders_on_site: onSite.on_site,
+        deliveries_lines_part_delivered: onSite.lines_part_delivered,
+      }
+      : {}),
   };
 }

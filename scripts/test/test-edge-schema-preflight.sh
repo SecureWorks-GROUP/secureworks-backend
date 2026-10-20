@@ -931,7 +931,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261016160000", "job_dispatch_install_for_day_comment"),
                       # Paid close-out review switch: the per-job
                       # review_opt_out columns (job_closeout.ts).
-                      ("20261020093000", "job_review_opt_out")]:
+                      ("20261020093000", "job_review_opt_out"),
+                      # Dispatch S5: the line receipts table and the lines'
+                      # attach stamp dispatch_materials, pipeline dispatch=1 and
+                      # dispatch_delivery_*_receipt read and write.
+                      ("20261020150000", "dispatch_line_receipts")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
