@@ -1,3 +1,5 @@
+import { canonicalJsonAndHash } from './release_packet/canonicalize.ts'
+
 // Server-side quote pricing gate, shared by every quote send route:
 // send-quote `/send` and `/send-runs`, and ops-api `send_quick_quote_email`.
 //
@@ -51,4 +53,74 @@ export function quotePricingGateError(pricingJsonRaw: unknown): string | null {
     return 'Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.'
   }
   return null
+}
+
+// ── Frozen revision gate ─────────────────────────────────────────────────
+// A quote whose pricing carries a sealed scoping-tool revision
+// (`pricing_json.revision.sealed === true`, written by the fence and patio
+// tools) may be sent only when the job has a frozen `scope_revisions` row
+// whose `pricing_hash` equals the hash of the pricing being sent. That row is
+// what Dispatch and Job Profit read, so the customer can never receive a
+// price those readers do not hold.
+//
+// The hash is the one `freeze_scope` stores: `canonicalJsonAndHash` over the
+// raw `jobs.pricing_json` value. Pass the raw column value, not a re-parsed
+// copy, so the two hashes are taken over the same input.
+//
+// Fails closed: a read error, no frozen row, or a different hash all refuse.
+// Pricing with no sealed revision (legacy quotes, quick quotes, tools that do
+// not seal) is unaffected and returns null, exactly as before.
+
+
+export const FROZEN_REVISION_REQUIRED_ERROR =
+  'This quote has no frozen revision on the server. Send it again from the scoping tool so the revision is frozen first.'
+export const FROZEN_REVISION_MISMATCH_ERROR =
+  'This quote has changed since its revision was frozen. Send it again from the scoping tool so the new revision is frozen first.'
+export const FROZEN_REVISION_UNREADABLE_ERROR =
+  'The frozen revision for this quote could not be checked. Nothing was sent; try again shortly.'
+
+type FrozenRow = { pricing_hash?: string | null }
+// deno-lint-ignore no-explicit-any
+type FrozenRevisionReader = (jobId: string) => Promise<{ rows: FrozenRow[] | null; error: any }>
+
+export function quoteRequiresFrozenRevision(pricingJsonRaw: unknown): boolean {
+  // deno-lint-ignore no-explicit-any
+  let pj: any = null
+  try {
+    pj = typeof pricingJsonRaw === 'string' ? JSON.parse(pricingJsonRaw || '{}') : pricingJsonRaw
+  } catch {
+    return false
+  }
+  return !!(pj && typeof pj === 'object' && pj.revision && typeof pj.revision === 'object' && pj.revision.sealed === true)
+}
+
+export async function quoteFrozenRevisionGateError(
+  readFrozen: FrozenRevisionReader,
+  jobId: string | null | undefined,
+  pricingJsonRaw: unknown,
+): Promise<string | null> {
+  if (!quoteRequiresFrozenRevision(pricingJsonRaw)) return null
+  if (!jobId) return FROZEN_REVISION_REQUIRED_ERROR
+  let res
+  try {
+    res = await readFrozen(jobId)
+  } catch {
+    return FROZEN_REVISION_UNREADABLE_ERROR
+  }
+  if (!res || res.error || !Array.isArray(res.rows)) return FROZEN_REVISION_UNREADABLE_ERROR
+  if (res.rows.length === 0) return FROZEN_REVISION_REQUIRED_ERROR
+  const { hash } = await canonicalJsonAndHash(pricingJsonRaw)
+  return res.rows.some((r) => r && r.pricing_hash === hash) ? null : FROZEN_REVISION_MISMATCH_ERROR
+}
+
+// The production reader: the job's frozen rows (at most one by invariant).
+// deno-lint-ignore no-explicit-any
+export function frozenRevisionReader(client: any): FrozenRevisionReader {
+  return async (jobId: string) => {
+    const { data, error } = await client.from('scope_revisions')
+      .select('pricing_hash')
+      .eq('job_id', jobId)
+      .eq('status', 'frozen')
+    return { rows: data ?? null, error }
+  }
 }

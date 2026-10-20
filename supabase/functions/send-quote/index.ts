@@ -30,7 +30,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey, xeroRateLimitDetails, xeroRateLimitError } from '../_shared/xero_cooldown.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
-import { quotePricingGateError } from '../_shared/quote_pricing_gate.ts'
+import { frozenRevisionReader, quoteFrozenRevisionGateError, quotePricingGateError } from '../_shared/quote_pricing_gate.ts'
 import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
@@ -758,6 +758,9 @@ serve(async (req: Request) => {
       {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
+        // A sealed scoping-tool revision goes out only with its frozen row.
+        const frozenErr = await quoteFrozenRevisionGateError(frozenRevisionReader(sb), doc.job_id, doc.jobs?.pricing_json)
+        if (frozenErr) return jsonResponse({ error: frozenErr, code: 'frozen_revision_required' }, 409, corsHeaders)
       }
 
       // Resolve name: use provided, fall back to job_contact, then job-level
@@ -2470,6 +2473,8 @@ serve(async (req: Request) => {
       {
         const gateErr = quotePricingGateError(pj)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
+        const frozenErr = await quoteFrozenRevisionGateError(frozenRevisionReader(sb), job.id, job.pricing_json)
+        if (frozenErr) return jsonResponse({ error: frozenErr, code: 'frozen_revision_required' }, 409, corsHeaders)
       }
 
       const contacts = job.job_contacts || []

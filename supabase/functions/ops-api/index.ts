@@ -1,7 +1,7 @@
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
-import { quotePricingGateError } from '../_shared/quote_pricing_gate.ts'
+import { frozenRevisionReader, quoteFrozenRevisionGateError, quotePricingGateError } from '../_shared/quote_pricing_gate.ts'
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
 // ════════════════════════════════════════════════════════════
@@ -38867,6 +38867,8 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   // incomplete pricing, an unsealed revision, or a zero total.
   const pricingGateErr = quotePricingGateError(job.pricing_json)
   if (pricingGateErr) throw new Error(pricingGateErr)
+  const frozenRevisionErr = await quoteFrozenRevisionGateError(frozenRevisionReader(client), job_id, job.pricing_json)
+  if (frozenRevisionErr) throw new Error(frozenRevisionErr)
   const totalIncGST = Number(pricing.totalIncGST ?? pricing.total ?? pricing.grandTotal ?? 0)
   const paymentTerms = pricing.payment_terms || '50/50 split'
   const validDays = pricing.valid_days || 30
