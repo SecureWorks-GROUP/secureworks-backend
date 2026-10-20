@@ -7,8 +7,9 @@ Xero rule (`invoiced` -> `complete` once every linked sales invoice is PAID).
 
 Code: `supabase/functions/_shared/job_paid_closeout.ts` (the paid rule, pure),
 `supabase/functions/ops-api/job_closeout.ts` (reads, moves, sender, sweeps),
-`supabase/functions/xero-sync/index.ts` (calls in). Migration:
-`20261013150000_job_closeout_review_archive.sql`.
+`supabase/functions/xero-sync/index.ts` (calls in). Migrations:
+`20261013150000_job_closeout_review_archive.sql`, and the per-job review switch
+`20261020093000_job_review_opt_out.sql`.
 
 ## What "paid" means
 
@@ -49,6 +50,34 @@ and the sender answer `facts_unreadable`, the backlog list excludes it as
 
 Holds (never moved, texted or archived): status `rectification`, or
 `jobs.is_callback`.
+
+## Who gets the review text
+
+Captain, 20 Oct 2026: the review text is always sent, unless a person switches
+it off for that job. Every fully paid, unheld fencing or patio job entering
+`get_review` texts every paying owner (each skipped if sent any review text in
+the last 90 days), except a job whose `jobs.review_opt_out` is true. The switch
+is per job, on (sends) by default; the Ops card shows it from Complete onwards.
+Turn it off before the final payment lands: the text goes out within about 15
+minutes of the job showing fully paid.
+
+- **`set_review_opt_out`** (POST `{ job_id, opt_out: boolean }`, staff sessions
+  and the ops key only, never the routine key) sets it, stamps
+  `review_opt_out_at` and `review_opt_out_by` (the signed-in person's email,
+  else the operator email the screen stamps), writes one `job_events` row
+  `review_opt_out_changed` (`{ review_opt_out, review: 'off' | 'on', by, at }`)
+  and answers `{ success, changed, review_opt_out, review_opt_out_at,
+  review_opt_out_by }`. Asking for the value the job already has changes and
+  logs nothing. Once the job has a review claim (text sent or in flight) it is
+  refused 409 `{ error: 'review_already_sent', review_claim_status }`.
+- **Switched off**, the automatic sender (the Get Review hook and the sweep's
+  backstop) sends nothing and claims nothing, answers `opted_out` and logs one
+  `review_request_not_sent` row with status and reason `opted_out` (who and when
+  in `opted_out`); a dry run puts `skip_reason: 'opted_out'` on its one
+  `review_request_dry_run` row. The sweep counts `opted_out` as review done, so
+  the card still archives 24 hours after entering `get_review`.
+- **Send review** (`send_review_request`) is a deliberate staff action and still
+  sends on a switched-off job.
 
 ## The flow
 
@@ -91,7 +120,7 @@ Holds (never moved, texted or archived): status `rectification`, or
   gated on the `closeout` lane) posts `job_closeout_sweep`. A card archives when
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
   its review claim is finished, or the sender answered `no_contact`,
-  `paid_too_long_ago` or `refused` (no claim is kept, so the review can still be
+  `paid_too_long_ago`, `opted_out` or `refused` (no claim is kept, so the review can still be
   sent by hand once the cause is fixed), or the sender is not live. A live sweep
   that cannot read the switches archives nothing (`switches_unreadable`). A claim still `claimed` more than an hour
   after it was taken (the finish write failed or the worker died mid-send) is
@@ -117,7 +146,9 @@ closeout: {
   review: { status, reason } | null,
   get_review_entered_at: string | null,
   archive_due_at: string | null,
-  held: 'rectification' | 'callback' | null
+  held: 'rectification' | 'callback' | null,
+  review_opt_out: boolean,
+  review_claim_status: string | null
 }
 ```
 
@@ -135,6 +166,12 @@ closeout: {
   24 hours while the job is in `get_review`, else null. The sweep still decides:
   it archives only a paid, unheld card whose review is done.
 - `held` is the sweep's hold (`closeoutHold`).
+- `review_opt_out` is the job's review switch (false unless a person switched
+  it off) and `review_claim_status` the job's `job_review_claims` status, or
+  null with no claim. The same two ride each fencing and patio `pipeline` row
+  and the `job_detail` answer at the top level (null when the block's read
+  failed), for the card's switch. The backlog list carries them on each
+  listed job.
 
 Every other job type, and every non-staff caller, gets no `closeout` key. A
 draft fencing or patio row is never read (a draft cannot be paid, claimed or in

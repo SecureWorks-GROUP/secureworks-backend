@@ -18,6 +18,7 @@ import {
   requestJobReview,
   reviewRequestMessage,
   runJobCloseoutAction,
+  setReviewOptOut,
   type SmsSendResult,
 } from "./job_closeout.ts";
 
@@ -259,7 +260,7 @@ function setup(
   };
 }
 
-function addJob(db: FakeDb, over: Row = {}) {
+function addJob(db: FakeDb, over: Row = {}): Row {
   const job = {
     id: `job-${db.rows("jobs").length + 1}`,
     job_number: "SWF-1",
@@ -1516,5 +1517,251 @@ Deno.test("doors: only the server key moves, sweeps or catches up; the backlog l
       kind: "server",
     }, deps)).status,
     400,
+  );
+});
+
+// ── The per-job review switch (captain, 20 Oct 2026) ─────────────────────────
+
+function optedOut(job: Row, by = "shaun@secureworkswa.com.au") {
+  job.review_opt_out = true;
+  job.review_opt_out_at = hoursAgo(30);
+  job.review_opt_out_by = by;
+}
+
+Deno.test("review switch: by default the Get Review text still goes out", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = reviewJob(db, { review_opt_out: false });
+  assertEquals(
+    (await requestJobReview(deps, {
+      job_id: job.id,
+      trigger: "status_changed:x",
+    }))
+      .action,
+    "sent",
+  );
+  assertEquals(sms.length, 1);
+  // A job row that predates the column (no key at all) sends too.
+  const older = setup({ sender: "live" });
+  const legacy = reviewJob(older.db);
+  assertEquals("review_opt_out" in legacy, false);
+  assertEquals(
+    (await requestJobReview(older.deps, { job_id: legacy.id, trigger: "t" }))
+      .action,
+    "sent",
+  );
+});
+
+Deno.test("review switch: the Get Review hook skips an opted-out job: no text, no claim, one event", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = reviewJob(db);
+  optedOut(job);
+  for (let i = 0; i < 2; i++) {
+    assertEquals(
+      (await requestJobReview(deps, {
+        job_id: job.id,
+        trigger: "status_changed:xero_sync",
+      })).action,
+      "opted_out",
+    );
+  }
+  assertEquals(sms.length, 0);
+  assertEquals(db.rows("job_review_claims").length, 0);
+  const events = db.rows("job_events").filter((e) =>
+    e.event_type === "review_request_not_sent"
+  );
+  assertEquals(events.length, 1);
+  assertEquals(events[0].detail_json.status, "opted_out");
+  assertEquals(
+    events[0].detail_json.opted_out.by,
+    "shaun@secureworkswa.com.au",
+  );
+});
+
+Deno.test("review switch: a dry run logs the opt-out on its would-send row and sends nothing", async () => {
+  const { db, deps, sms } = setup({ sender: "dry_run" });
+  const job = reviewJob(db);
+  optedOut(job);
+  const out = await requestJobReview(deps, { job_id: job.id, trigger: "t" });
+  assertEquals([out.action, out.dry_run], ["opted_out", true]);
+  const logs = db.rows("job_events").filter((e) =>
+    e.event_type === "review_request_dry_run"
+  );
+  assertEquals(logs.length, 1);
+  assertEquals(logs[0].detail_json.skip_reason, "opted_out");
+  assertEquals(logs[0].detail_json.recipients, [{
+    label: "owner",
+    ghl_contact_id: "ghl-owner",
+    would: "skipped_opted_out",
+  }]);
+  assertEquals([sms.length, db.rows("job_review_claims").length], [0, 0]);
+});
+
+Deno.test("review switch: the sweep sends nothing for an opted-out card and still archives it after 24 hours", async () => {
+  const { db, deps, moves, sms } = setup({ sender: "live" });
+  const old = paidJob(db, { status: "get_review", job_number: "SWF-80" });
+  optedOut(old);
+  enteredGetReview(db, old.id, hoursAgo(25));
+  const young = paidJob(db, { status: "get_review", job_number: "SWF-81" });
+  optedOut(young);
+  enteredGetReview(db, young.id, hoursAgo(2));
+  const sends = paidJob(db, { status: "get_review", job_number: "SWF-82" });
+  enteredGetReview(db, sends.id, hoursAgo(25));
+  const out = await closeoutSweep(deps, { dry_run: false });
+  const byJob = Object.fromEntries(
+    (out.results ?? []).map((r: any) => [r.job_number, r.action]),
+  );
+  assertEquals(byJob, {
+    "SWF-80": "archived",
+    "SWF-81": "waiting_24h",
+    "SWF-82": "archived",
+  });
+  assertEquals(moves.map((m) => m.jobId), [old.id, sends.id]);
+  // Only the job left on is texted and claimed.
+  assertEquals(sms.length, 1);
+  assertEquals(db.rows("job_review_claims").map((c) => c.job_id), [sends.id]);
+  // A second sweep writes no second opt-out event for the waiting card.
+  await closeoutSweep(deps, { dry_run: false });
+  assertEquals(
+    db.rows("job_events").filter((e) =>
+      e.job_id === young.id && e.detail_json?.status === "opted_out"
+    ).length,
+    1,
+  );
+  assertEquals(sms.length, 1);
+});
+
+Deno.test("review switch: a manual Send review still sends on an opted-out job", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = reviewJob(db);
+  optedOut(job);
+  assertEquals(
+    (await requestJobReview(deps, {
+      job_id: job.id,
+      trigger: "manual:ops@secureworkswa.com.au",
+      manual: true,
+    })).action,
+    "sent",
+  );
+  assertEquals(sms.length, 1);
+  assertEquals(db.rows("job_review_claims").length, 1);
+});
+
+Deno.test("set_review_opt_out: off then on, stamping who and when, one event per change", async () => {
+  const { db, deps } = setup({ sender: "live" });
+  const job = addJob(db, { status: "complete", review_opt_out: false });
+  const off = await setReviewOptOut(
+    deps,
+    { job_id: job.id, opt_out: true },
+    "shaun@secureworkswa.com.au",
+  );
+  assertEquals(off.status, 200);
+  assertEquals(off.body, {
+    success: true,
+    changed: true,
+    review_opt_out: true,
+    review_opt_out_at: NOW.toISOString(),
+    review_opt_out_by: "shaun@secureworkswa.com.au",
+  });
+  assertEquals(
+    [job.review_opt_out, job.review_opt_out_at, job.review_opt_out_by],
+    [true, NOW.toISOString(), "shaun@secureworkswa.com.au"],
+  );
+  // The same value again changes nothing and logs nothing.
+  const again = await setReviewOptOut(
+    deps,
+    { job_id: job.id, opt_out: true },
+    "esther@secureworkswa.com.au",
+  );
+  assertEquals([again.status, again.body.changed], [200, false]);
+  assertEquals(job.review_opt_out_by, "shaun@secureworkswa.com.au");
+  const on = await setReviewOptOut(
+    deps,
+    { job_id: job.id, opt_out: false },
+    "esther@secureworkswa.com.au",
+  );
+  assertEquals([on.status, on.body.review_opt_out], [200, false]);
+  assertEquals(job.review_opt_out, false);
+  const events = db.rows("job_events").filter((e) =>
+    e.event_type === "review_opt_out_changed"
+  );
+  assertEquals(events.map((e) => e.detail_json), [
+    {
+      review_opt_out: true,
+      review: "off",
+      by: "shaun@secureworkswa.com.au",
+      at: NOW.toISOString(),
+    },
+    {
+      review_opt_out: false,
+      review: "on",
+      by: "esther@secureworkswa.com.au",
+      at: NOW.toISOString(),
+    },
+  ]);
+});
+
+Deno.test("set_review_opt_out: refused 409 review_already_sent once the job has a review claim", async () => {
+  const { db, deps } = setup({ sender: "live" });
+  const job = reviewJob(db, { review_opt_out: false });
+  for (const status of ["claimed", "sent"]) {
+    db.tables.job_review_claims = [{ job_id: job.id, status, trigger: "t" }];
+    const out = await setReviewOptOut(
+      deps,
+      { job_id: job.id, opt_out: true },
+      "shaun@secureworkswa.com.au",
+    );
+    assertEquals(out.status, 409);
+    assertEquals(out.body.error, "review_already_sent");
+    assertEquals(out.body.review_claim_status, status);
+    assertEquals(job.review_opt_out, false);
+  }
+  assertEquals(
+    db.rows("job_events").filter((e) =>
+      e.event_type === "review_opt_out_changed"
+    )
+      .length,
+    0,
+  );
+});
+
+Deno.test("set_review_opt_out: bad input, unknown job and an unreadable claim write nothing", async () => {
+  const { db, deps } = setup({ sender: "live" });
+  const job = addJob(db, { status: "complete", review_opt_out: false });
+  assertEquals(
+    (await setReviewOptOut(deps, { opt_out: true }, null)).status,
+    400,
+  );
+  assertEquals(
+    (await setReviewOptOut(deps, { job_id: job.id, opt_out: "yes" }, null))
+      .status,
+    400,
+  );
+  assertEquals(
+    (await setReviewOptOut(deps, { job_id: "nope", opt_out: true }, null))
+      .status,
+    404,
+  );
+  db.failures.job_review_claims = "boom";
+  assertEquals(
+    (await setReviewOptOut(deps, { job_id: job.id, opt_out: true }, null))
+      .status,
+    503,
+  );
+  assertEquals(job.review_opt_out, false);
+  assertEquals(db.rows("job_events").length, 0);
+});
+
+Deno.test("backlog: each listed job carries its review switch and claim status", async () => {
+  const { db, deps } = setup({ sender: "live" });
+  const a = paidJob(db, { status: "complete", job_number: "SWF-90" });
+  optedOut(a);
+  const b = paidJob(db, { status: "complete", job_number: "SWF-91" });
+  db.rows("job_review_claims").push({ job_id: b.id, status: "sent" });
+  const out = await closeoutBacklogPreview(deps);
+  assertEquals(
+    (out.would_archive as Row[]).map((
+      r,
+    ) => [r.job_number, r.review_opt_out, r.review_claim_status]),
+    [["SWF-90", true, null], ["SWF-91", false, "sent"]],
   );
 });

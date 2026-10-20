@@ -4690,7 +4690,8 @@ ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
 ## Paid Fencing And Patio Jobs Go To Get Review
 
 Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
-`complete`), gets one review text, and is archived 24 hours later. "Paid" is
+`complete`), gets one review text (none when staff switched it off for the job,
+`jobs.review_opt_out`), and is archived 24 hours later. "Paid" is
 the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
 invoice PAID and none DRAFT; every paying party, `job_contacts` with
 `removed_at` null, `status` not `removed`, and a share that is not an explicit

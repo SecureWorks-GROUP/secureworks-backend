@@ -835,3 +835,10 @@ ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purcha
 # rule ops-api's dispatch_install.ts follows (a mark stands while a booking is
 # on its day, past or ahead). Comment only; the marker is the same column.
 ops-api|supabase/migrations/20261016160000_job_dispatch_install_for_day_comment.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# Per-job review switch: the paid close-out sender and its card read select the
+# three columns, and set_review_opt_out writes them, so they must exist before
+# this ops-api ships.
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_at
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_by
