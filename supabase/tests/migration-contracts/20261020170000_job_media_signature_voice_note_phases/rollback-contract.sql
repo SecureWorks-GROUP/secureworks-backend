@@ -1,4 +1,4 @@
--- Rollback contract: 20261019120000_job_media_signature_voice_note_phases. The down narrows the
+-- Rollback contract: 20261020170000_job_media_signature_voice_note_phases. The down narrows the
 -- job_media phase check back to the 20261009120000 list (no row used either new phase) and nothing
 -- else: 'quote_builder' is still accepted and 'signature' is refused again.
 \set ON_ERROR_STOP on

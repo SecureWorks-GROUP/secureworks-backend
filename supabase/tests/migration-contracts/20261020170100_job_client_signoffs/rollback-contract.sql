@@ -1,4 +1,4 @@
--- Rollback contract: 20261019120100_job_client_signoffs. The down removes both tables, the trigger
+-- Rollback contract: 20261020170100_job_client_signoffs. The down removes both tables, the trigger
 -- function and the switch, and leaves jobs and job_media alone.
 \set ON_ERROR_STOP on
 DO $$
