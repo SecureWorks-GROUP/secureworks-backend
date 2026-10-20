@@ -28,6 +28,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { Webhook } from 'https://esm.sh/svix@1.15.0'
 import { parseEmailTag, parseSubjectForPO } from './po_email_tag.ts'
+import { decideSenderMatch, ilikeLiteral, mergeOrders, normaliseEmail, suppliersForSender, type OpenOrderRow, type SupplierRow } from './sender_match.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -230,27 +231,45 @@ serve(async (req: Request) => {
       }
     }
 
-    // Sender-to-supplier fallback: if no PO matched by tag/subject, try matching sender email to a supplier
+    // Sender-to-supplier fallback: if no PO matched by tag/subject, place the
+    // reply by its sender only when that is unambiguous (sender_match.ts):
+    // exactly one active supplier with that email (case aside) and exactly one
+    // open order for it. Otherwise it goes to unmatched_emails for a person.
     if (!poId && from_email) {
-      const { data: supplier } = await sb.from('suppliers')
-        .select('id, name')
-        .eq('email', from_email)
+      const sender = normaliseEmail(from_email)
+      const { data: supplierRows, error: supplierErr } = await sb.from('suppliers')
+        .select('id, name, email')
+        .ilike('email', ilikeLiteral(sender))
         .eq('is_active', true)
-        .maybeSingle()
-      if (supplier) {
-        const { data: activePOs } = await sb.from('purchase_orders')
+        .limit(10)
+      if (supplierErr) console.error(`[receive-po-email] Supplier read failed: ${supplierErr.message}`)
+      const candidates = suppliersForSender((supplierRows || []) as SupplierRow[], from_email)
+      let openOrders: OpenOrderRow[] | null = null
+      if (candidates.length === 1) {
+        const supplier = candidates[0]
+        const base = () => sb.from('purchase_orders')
           .select('id, job_id, po_number')
-          .eq('supplier_name', supplier.name)
           .eq('org_id', DEFAULT_ORG_ID)
-          .not('status', 'in', '("deleted","billed")')
-          .order('created_at', { ascending: false })
-          .limit(1)
-        if (activePOs && activePOs.length > 0) {
-          poId = activePOs[0].id
-          jobId = activePOs[0].job_id
-          poNumber = activePOs[0].po_number
-          console.log(`[receive-po-email] Sender-match: ${from_email} → ${supplier.name} → PO ${poNumber}`)
+          .not('status', 'in', '("deleted","billed","cancelled")')
+          .limit(10)
+        const [byId, byName] = await Promise.all([
+          base().eq('supplier_id', supplier.id),
+          base().eq('supplier_name', supplier.name),
+        ])
+        if (byId.error || byName.error) {
+          console.error(`[receive-po-email] Open order read failed: ${(byId.error || byName.error)?.message}`)
+        } else {
+          openOrders = mergeOrders((byId.data || []) as OpenOrderRow[], (byName.data || []) as OpenOrderRow[])
         }
+      }
+      const decision = decideSenderMatch(from_email, candidates, openOrders)
+      if (decision.kind === 'matched') {
+        poId = decision.order.id
+        jobId = decision.order.job_id
+        poNumber = decision.order.po_number
+        console.log(`[receive-po-email] Sender-match: ${decision.supplier.name} → PO ${poNumber}`)
+      } else {
+        console.log(`[receive-po-email] Sender not placed: ${decision.reason}`)
       }
     }
 
@@ -260,6 +279,7 @@ serve(async (req: Request) => {
         .from('jobs')
         .select('id')
         .eq('job_number', jobNumber)
+        .eq('org_id', DEFAULT_ORG_ID)
         .maybeSingle()
       if (job) jobId = job.id
     }
