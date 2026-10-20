@@ -1118,9 +1118,9 @@ export interface ReviewOptOutResult {
  * (review_opt_out_changed); asking for the value the job already has changes nothing.
  * Refused 409 review_already_sent once the job has a review claim (sent or in flight),
  * since the switch can no longer stop it; the claim is looked for again after the write,
- * so a sender that claimed in between is reported, never missed. Staff only (the caller
- * checks); `by` is the
- * verified person, else the operator email the screen stamps.
+ * so a sender that claimed in between is reported, never missed, and then (or when that
+ * look fails) the switch is put back as it was and no event is written. Staff only (the
+ * caller checks); `by` is the verified person, else the operator email the screen stamps.
  */
 export async function setReviewOptOut(
   deps: Pick<JobCloseoutDeps, "client" | "now">,
@@ -1174,6 +1174,11 @@ export async function setReviewOptOut(
       },
     };
   }
+  const prior = {
+    review_opt_out: current,
+    review_opt_out_at: job.review_opt_out_at ?? null,
+    review_opt_out_by: job.review_opt_out_by ?? null,
+  };
   const at = deps.now().toISOString();
   const { error: writeError } = await client.from("jobs").update({
     review_opt_out: optOut,
@@ -1184,6 +1189,25 @@ export async function setReviewOptOut(
     return {
       status: 500,
       body: { success: false, error: `write failed: ${writeError.message}` },
+    };
+  }
+  // A sender that claimed after the first look and before this write may not have seen it.
+  const { data: lateClaim, error: lateClaimError } = await client.from(
+    "job_review_claims",
+  ).select("status").eq("job_id", jobId).maybeSingle();
+  if (lateClaimError || lateClaim) {
+    const { error: restoreError } = await client.from("jobs").update(prior)
+      .eq("id", jobId);
+    if (restoreError) {
+      console.error(
+        "[job_closeout] review switch not put back:",
+        restoreError.message,
+      );
+    }
+    if (lateClaim) return alreadySent(lateClaim.status);
+    return {
+      status: 503,
+      body: { success: false, error: "review_claim_unreadable" },
     };
   }
   const { error: eventError } = await client.from("job_events").insert({
@@ -1202,17 +1226,6 @@ export async function setReviewOptOut(
       eventError.message,
     );
   }
-  // A sender that claimed after the first look and before this write may not have seen it.
-  const { data: lateClaim, error: lateClaimError } = await client.from(
-    "job_review_claims",
-  ).select("status").eq("job_id", jobId).maybeSingle();
-  if (lateClaimError) {
-    return {
-      status: 503,
-      body: { success: false, error: "review_claim_unreadable" },
-    };
-  }
-  if (lateClaim) return alreadySent(lateClaim.status);
   return {
     status: 200,
     body: {
@@ -1417,19 +1430,6 @@ export async function closeoutBacklogPreview(deps: JobCloseoutDeps) {
       "facts_unreadable",
     );
   }
-  const claims = await readByJob<{ job_id: string; status: string }>(
-    deps.client,
-    "job_review_claims",
-    "job_id, status",
-    all.map((j) => j.id),
-  );
-  if (!claims) {
-    throw new JobCloseoutError(
-      "review claim read failed",
-      503,
-      "facts_unreadable",
-    );
-  }
   const wouldArchive: unknown[] = [];
   const excluded: Record<string, string[]> = {};
   const exclude = (why: string, job: CloseoutJobRow) => {
@@ -1450,8 +1450,6 @@ export async function closeoutBacklogPreview(deps: JobCloseoutDeps) {
         last_paid_on: verdict.last_paid_on,
         paid_total_inc: verdict.paid_total_inc,
         expected_inc: verdict.expected_inc,
-        review_opt_out: job.review_opt_out === true,
-        review_claim_status: claims.get(job.id)?.[0]?.status ?? null,
       });
     } else if (verdict.outcome === "paid_less_than_quoted") {
       exclude("paid_less_than_quoted", job);

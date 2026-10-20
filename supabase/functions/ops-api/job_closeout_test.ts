@@ -1751,21 +1751,6 @@ Deno.test("set_review_opt_out: bad input, unknown job and an unreadable claim wr
   assertEquals(db.rows("job_events").length, 0);
 });
 
-Deno.test("backlog: each listed job carries its review switch and claim status", async () => {
-  const { db, deps } = setup({ sender: "live" });
-  const a = paidJob(db, { status: "complete", job_number: "SWF-90" });
-  optedOut(a);
-  const b = paidJob(db, { status: "complete", job_number: "SWF-91" });
-  db.rows("job_review_claims").push({ job_id: b.id, status: "sent" });
-  const out = await closeoutBacklogPreview(deps);
-  assertEquals(
-    (out.would_archive as Row[]).map((
-      r,
-    ) => [r.job_number, r.review_opt_out, r.review_claim_status]),
-    [["SWF-90", true, null], ["SWF-91", false, "sent"]],
-  );
-});
-
 /** The fake with a hook before each query of a table runs (the nth call, from 1). */
 function hookedClient(
   db: FakeDb,
@@ -1839,6 +1824,42 @@ Deno.test("review switch: a sender that claims after the switch first looks is r
   assertEquals(out.status, 409);
   assertEquals(out.body.error, "review_already_sent");
   assertEquals(out.body.review_claim_status, "sent");
+  // A refused press leaves no trace: the switch is as it was and nothing is logged.
+  assertEquals(
+    [job.review_opt_out, job.review_opt_out_at, job.review_opt_out_by],
+    [false, null, null],
+  );
+  assertEquals(
+    db.rows("job_events").filter((e) =>
+      e.event_type === "review_opt_out_changed"
+    ).length,
+    0,
+  );
+});
+
+Deno.test("review switch: a failed second claim look puts the switch back and logs nothing", async () => {
+  const { db, deps } = setup({ sender: "live" });
+  const job = addJob(db, {
+    status: "complete",
+    review_opt_out: true,
+    review_opt_out_at: hoursAgo(5),
+    review_opt_out_by: "esther@secureworkswa.com.au",
+  });
+  const client = hookedClient(db, "job_review_claims", (n) => {
+    if (n === 2) db.failures.job_review_claims = "boom";
+  });
+  const out = await setReviewOptOut(
+    { ...deps, client },
+    { job_id: job.id, opt_out: false },
+    "shaun@secureworkswa.com.au",
+  );
+  delete db.failures.job_review_claims;
+  assertEquals([out.status, out.body.error], [503, "review_claim_unreadable"]);
+  assertEquals(
+    [job.review_opt_out, job.review_opt_out_at, job.review_opt_out_by],
+    [true, hoursAgo(5), "esther@secureworkswa.com.au"],
+  );
+  assertEquals(db.rows("job_events").length, 0);
 });
 
 Deno.test("review switch: an unreadable switch after the claim sends nothing and keeps no claim", async () => {

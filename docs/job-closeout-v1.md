@@ -74,7 +74,10 @@ minutes of the job showing fully paid.
   the switch again after taking its claim and before sending (a switch it
   finds off releases the claim and sends nothing), so a press racing a send
   is either honoured or answered 409, never a 200 over a text that went out.
-  A claim that cannot be re-read answers 503 `review_claim_unreadable`.
+  When that second look finds a claim (409) or cannot be read (503
+  `review_claim_unreadable`), the switch and its stamps are put back as they
+  were and no event is written, so a refused press leaves no trace; a sender
+  holding the claim then reads the switch as it was.
 - **Switched off**, the automatic sender (the Get Review hook and the sweep's
   backstop) sends nothing and keeps no claim, answers `opted_out` and logs one
   `review_request_not_sent` row with status and reason `opted_out` (who and when
@@ -178,7 +181,7 @@ closeout: {
   on the `pipeline` row and the `job_detail` answer alike; neither is copied
   to the top level (a failed read nulls the whole block). `job_detail.job`
   still carries the raw `jobs` columns (`review_opt_out`, `review_opt_out_at`,
-  `review_opt_out_by`). The backlog list carries the two on each listed job.
+  `review_opt_out_by`).
 
 Every other job type, and every non-staff caller, gets no `closeout` key. A
 draft fencing or patio row is never read (a draft cannot be paid, claimed or in
