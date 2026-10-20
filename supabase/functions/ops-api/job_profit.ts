@@ -7,12 +7,19 @@
 // money figure here: every number on the response comes from v_job_profit,
 // v_job_cost_events or v_job_revenue_events, so Jarvis, the ops API and the
 // finance tab cannot disagree. view=rollup sums those same v_job_profit rows
-// in job_profit_rollup.ts. Read only. Field contract for the dashboard:
+// in job_profit_rollup.ts. The one exception is `patio_expected`
+// (job_profit_patio_expected.ts): the patio scoper's own expected figures for
+// its sealed revision, set beside the engine's actuals and never fed back
+// into them. Read only. Field contract for the dashboard:
 // docs/job-profit-read-contract.md (JOB_PROFIT_LABELS carries the same
 // meanings on every response). The admin/owner gate lives at the
 // dispatch in index.ts (privileged ops key or an admin/owner session).
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
+import {
+  PATIO_EXPECTED_SCOPE_PROJECTION,
+  patioExpectedVersusActual,
+} from "./job_profit_patio_expected.ts";
 
 export const JOB_PROFIT_LABELS = {
   profit:
@@ -357,7 +364,7 @@ export async function jobProfitAction(
   }
   const summary = rows[0];
 
-  const [costs, revenue] = await Promise.all([
+  const [costs, revenue, patioScope] = await Promise.all([
     client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq(
       "job_id",
       summary.job_id,
@@ -366,6 +373,11 @@ export async function jobProfitAction(
       "job_id",
       summary.job_id,
     ).order("invoice_date", { ascending: true }).limit(2000),
+    // Projected paths only: scope_json can be megabytes of media.
+    client.from("jobs").select(PATIO_EXPECTED_SCOPE_PROJECTION).eq(
+      "id",
+      summary.job_id,
+    ).limit(1),
   ]);
   if (costs.error) {
     return {
@@ -427,8 +439,27 @@ export async function jobProfitAction(
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       labels: JOB_PROFIT_LABELS,
+      ...patioExpectedPart(patioScope, summary),
     },
   };
+}
+
+// Present only for a patio scoper 2.0 job, or when its scope could not be
+// read; every other job's response is unchanged.
+function patioExpectedPart(
+  read: { data: any[] | null; error: { message: string } | null },
+  summary: Record<string, unknown>,
+): Record<string, unknown> {
+  if (read.error) {
+    return {
+      patio_expected: {
+        status: "unreadable",
+        error: `job scope read failed: ${read.error.message}`,
+      },
+    };
+  }
+  const result = patioExpectedVersusActual(read.data?.[0] ?? null, summary);
+  return result ? { patio_expected: result } : {};
 }
 
 /** ops-api `job_profit_list`: the engine's rows, filtered. */
