@@ -9,7 +9,7 @@
 // finance tab cannot disagree. view=rollup sums those same v_job_profit rows
 // in job_profit_rollup.ts. The one exception is `patio_expected`
 // (job_profit_patio_expected.ts): the patio scoper's own expected figures for
-// its sealed revision, set beside the engine's actuals and never fed back
+// its frozen revision, set beside the engine's actuals and never fed back
 // into them. Read only. Field contract for the dashboard:
 // docs/job-profit-read-contract.md (JOB_PROFIT_LABELS carries the same
 // meanings on every response). The admin/owner gate lives at the
@@ -18,6 +18,7 @@
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 import {
   PATIO_EXPECTED_SCOPE_PROJECTION,
+  PATIO_FROZEN_REVISION_COLUMNS,
   patioExpectedVersusActual,
 } from "./job_profit_patio_expected.ts";
 
@@ -364,7 +365,7 @@ export async function jobProfitAction(
   }
   const summary = rows[0];
 
-  const [costs, revenue, patioScope] = await Promise.all([
+  const [costs, revenue, patioScope, patioFrozen] = await Promise.all([
     client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq(
       "job_id",
       summary.job_id,
@@ -378,6 +379,12 @@ export async function jobProfitAction(
       "id",
       summary.job_id,
     ).limit(1),
+    // The job's frozen patio revision (earlier ones are superseded).
+    client.from("scope_revisions").select(PATIO_FROZEN_REVISION_COLUMNS).eq(
+      "job_id",
+      summary.job_id,
+    ).eq("status", "frozen").eq("tool_kind", "patio")
+      .order("revision_number", { ascending: false }).limit(1),
   ]);
   if (costs.error) {
     return {
@@ -439,7 +446,7 @@ export async function jobProfitAction(
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       labels: JOB_PROFIT_LABELS,
-      ...patioExpectedPart(patioScope, summary),
+      ...patioExpectedPart(patioScope, patioFrozen, summary),
     },
   };
 }
@@ -447,18 +454,23 @@ export async function jobProfitAction(
 // Present only for a patio scoper 2.0 job, or when its scope could not be
 // read; every other job's response is unchanged.
 function patioExpectedPart(
-  read: { data: any[] | null; error: { message: string } | null },
+  current: { data: any[] | null; error: { message: string } | null },
+  frozen: { data: any[] | null; error: { message: string } | null },
   summary: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (read.error) {
-    return {
-      patio_expected: {
-        status: "unreadable",
-        error: `job scope read failed: ${read.error.message}`,
-      },
-    };
+  const failed = current.error
+    ? `job scope read failed: ${current.error.message}`
+    : frozen.error
+    ? `frozen scope read failed: ${frozen.error.message}`
+    : null;
+  if (failed) {
+    return { patio_expected: { status: "unreadable", error: failed } };
   }
-  const result = patioExpectedVersusActual(read.data?.[0] ?? null, summary);
+  const result = patioExpectedVersusActual(
+    current.data?.[0] ?? null,
+    frozen.data?.[0] ?? null,
+    summary,
+  );
   return result ? { patio_expected: result } : {};
 }
 
