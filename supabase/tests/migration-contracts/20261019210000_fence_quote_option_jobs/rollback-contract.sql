@@ -20,6 +20,9 @@ BEGIN
  IF to_regclass('public.quote_option_event_seq') IS NOT NULL THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the event order sequence still exists';
  END IF;
+ IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname IN ('trg_job_events_quote_option_keep_delete', 'trg_job_events_quote_option_keep_update')) THEN
+  RAISE EXCEPTION 'fence quote option rollback contract: an event guard trigger still exists';
+ END IF;
  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_jobs_quote_option_supersede') THEN
   RAISE EXCEPTION 'fence quote option rollback contract: the trigger still exists';
  END IF;

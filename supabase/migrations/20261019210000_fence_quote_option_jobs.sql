@@ -76,10 +76,16 @@
 --     go and their seq values are skipped, never reused. Gaps mean nothing.
 --   - CACHE 1 and NO CYCLE: with a per-session cache, two sessions could
 --     hand out seq out of order. The contract checks both.
+--   - The events are kept: a guard trigger on job_events refuses to delete
+--     one while its job exists (ops-api delete_note deletes any row by id),
+--     and refuses an update that changes its event_type, job_id, created_at
+--     or seq (other detail may change). Deleting the job itself still
+--     cascades them away.
 -- Limits: a direct UPDATE of jobs.quote_option_group_id by an owner, outside
 -- link_fence_quote_option, would bypass this; an event written by anything
 -- other than these two helpers has no seq, and a reader must treat a seq-less
--- event as order unknown.
+-- event as order unknown (inserts are not guarded); an owner can disable the
+-- guard trigger.
 --
 -- Nothing here changes what a customer is sent or how they accept. Existing
 -- jobs are not grouped or changed: the 25 duplicate sets found on 19 Oct 2026
@@ -350,6 +356,51 @@ BEGIN
                                'seq', nextval('public.quote_option_event_seq')));
   END IF;
 END $$;
+
+-- Keep the supersede history: while its job exists, a quote_option_superseded
+-- or quote_option_unsuperseded event is not deleted, and an update may not
+-- change what orders or places it (event_type, job_id, created_at, seq).
+-- Runs as owner so the job read is not hidden by RLS. A job's own deletion
+-- cascades here after the job row is gone, so it is allowed.
+CREATE OR REPLACE FUNCTION public.fence_quote_option_event_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.jobs j WHERE j.id = OLD.job_id) THEN
+      RAISE EXCEPTION 'quote_option_event_immutable'
+        USING ERRCODE = '42501',
+              DETAIL = format('%s event %s is supersede history and is kept', OLD.event_type, OLD.id);
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF NEW.event_type IS DISTINCT FROM OLD.event_type
+     OR NEW.job_id IS DISTINCT FROM OLD.job_id
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR (NEW.detail_json -> 'seq') IS DISTINCT FROM (OLD.detail_json -> 'seq') THEN
+    RAISE EXCEPTION 'quote_option_event_immutable'
+      USING ERRCODE = '42501',
+            DETAIL = format('event %s: event_type, job_id, created_at and seq of supersede history do not change', OLD.id);
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION public.fence_quote_option_event_guard() FROM PUBLIC, anon, authenticated, service_role;
+DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_delete ON public.job_events;
+CREATE TRIGGER trg_job_events_quote_option_keep_delete
+  BEFORE DELETE ON public.job_events
+  FOR EACH ROW
+  WHEN (OLD.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded'))
+  EXECUTE FUNCTION public.fence_quote_option_event_guard();
+DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_update ON public.job_events;
+CREATE TRIGGER trg_job_events_quote_option_keep_update
+  BEFORE UPDATE ON public.job_events
+  FOR EACH ROW
+  WHEN (OLD.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
+        OR NEW.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded'))
+  EXECUTE FUNCTION public.fence_quote_option_event_guard();
 
 -- The helpers and the trigger function run as their owner (SECURITY DEFINER,
 -- fixed search_path): whoever changes a job's status, through any role, the

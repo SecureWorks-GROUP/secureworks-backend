@@ -530,6 +530,64 @@ SELECT pg_temp.qo_assert(NOT EXISTS (
      AND (last.event_type = 'quote_option_superseded') IS DISTINCT FROM (j.superseded_at IS NOT NULL)),
  'the last event by seq must agree with every job''s pointer');
 
+-- History is kept (checker finding on ops-api delete_note, 20 Oct 2026): while the job exists,
+-- a supersede or unsupersede event is not deleted, and its event_type, job_id, created_at and
+-- seq do not change. Other detail may change; other event types are untouched.
+CREATE FUNCTION pg_temp.qo_kept(p_sql text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+ EXECUTE p_sql;
+ RETURN false;
+EXCEPTION WHEN insufficient_privilege THEN
+ RETURN SQLERRM = 'quote_option_event_immutable';
+END $$;
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ DELETE FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_superseded'
+$q$), 'a superseded event must not be deleted while its job exists');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ DELETE FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'an unsuperseded event must not be deleted while its job exists');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('seq', 1)
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event''s seq must not change');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET detail_json = detail_json - 'seq'
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event''s seq must not be removed');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET event_type = 'note'
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event must not be retyped');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET job_id = '9c000000-0000-4000-8000-0000000009c1'
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event must not move to another job');
+SELECT pg_temp.qo_assert(pg_temp.qo_kept($q$
+ UPDATE public.job_events SET created_at = created_at - interval '1 second'
+  WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'
+$q$), 'a supersede event''s time must not change');
+SELECT pg_temp.qo_assert(pg_temp.qo_events('9c000000-0000-4000-8000-00000000000e', 'quote_option_review_needed', 'crewed') = 1
+ AND pg_temp.qo_kept($q$
+ UPDATE public.job_events SET event_type = 'quote_option_superseded'
+  WHERE job_id = '9c000000-0000-4000-8000-00000000000e' AND event_type = 'quote_option_review_needed'
+    AND detail_json->>'reason' = 'crewed'
+$q$), 'another event must not be retyped into supersede history');
+-- Allowed: other detail on a supersede event (the legacy variation path spreads detail and keeps
+-- seq), and any change to other event types.
+UPDATE public.job_events SET detail_json = detail_json || jsonb_build_object('qo_contract_note', true)
+ WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded';
+SELECT pg_temp.qo_assert((SELECT bool_and(detail_json ? 'qo_contract_note' AND detail_json ? 'seq')
+  FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1' AND event_type = 'quote_option_unsuperseded'),
+ 'other detail on a supersede event may change while seq is kept');
+SAVEPOINT qo_other_delete;
+DELETE FROM public.job_events WHERE job_id::text LIKE '9c000000-%' AND event_type = 'quote_option_linked';
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.job_events WHERE job_id::text LIKE '9c000000-%'
+  AND event_type = 'quote_option_linked') = 0, 'other event types must stay deletable');
+ROLLBACK TO SAVEPOINT qo_other_delete;
+SELECT pg_temp.qo_assert(pg_temp.qo_events('9c000000-0000-4000-8000-0000000009b1', 'quote_option_superseded') = 2
+ AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000009b1', 'quote_option_unsuperseded') = 1,
+ 'B9''s history must be intact after the refused writes');
+
 -- Message time: for every fixture job, superseded events minus unsuperseded events is 1 while
 -- the pointer is set and 0 otherwise, so the intervals can be rebuilt from events alone.
 SELECT pg_temp.qo_assert(NOT EXISTS (
