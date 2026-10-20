@@ -842,6 +842,11 @@ ops-api|supabase/migrations/20261016160000_job_dispatch_install_for_day_comment.
 ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out
 ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_at
 ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_by
+# The invoice mirror check: xero-sync writes a row every hour; ops-api reads the newest
+# for the Debt tab's "Matches Xero" line and the debt report.
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
+ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 
 # Reconciliation daily list: the recon_daily_list read and recon_record_decision
 # write call these, so the store and the list must exist before this ops-api ships.
