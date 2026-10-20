@@ -27,6 +27,7 @@ import {
   asString,
   deriveLineId,
 } from './_extract.ts'
+import { sealedCostEstimates, sealedMargin } from './sealed_costs.ts'
 
 export const buildQuickQuoteScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): AdapterOutput => {
   // Synchronous interface for the BuildScopeBlock type. This adapter calls
@@ -106,20 +107,24 @@ export const buildQuickQuoteScopeBlock: BuildScopeBlock = (inputs: AdapterInputs
     }
   })
 
-  const materialTotal = asNumber(
-    pricing.materialCostEstimate,
-    lineCosts
-      .filter((_, i) => lineItems[i].category === 'material')
-      .reduce((a, x) => a + x.line_cost_total_ex, 0),
-  )
-  const labourTotal = asNumber(
-    pricing.labourCostEstimate,
-    lineCosts
-      .filter((_, i) => lineItems[i].category === 'labour')
-      .reduce((a, x) => a + x.line_cost_total_ex, 0),
-  )
-  const commissionTotal = asNumber(pricing.commissionCostEstimate, 0)
-  const marginPct = asNumber(pricing.margin_pct, 0)
+  // Costs: the Quick Quote screen saves cost_price 0 when no cost was typed
+  // (createMiscJob coerces it), so a line at 0 or with no cost_price is a cost
+  // to confirm, never a real zero. Estimates the pricing states win. Quick
+  // Quote has no commission rule, so an absent commission is 0. Quick Quote
+  // saves no margin, so the floor check reads "not done", never passed.
+  const unpriced = lineItems
+    .filter((_, i) => !(asNumberOrNull(asObject(rawLines[i]).cost_price) ?? 0))
+    .map((li) => li.line_id)
+  const sumCategory = (cat: string): number =>
+    lineCosts.filter((_, i) => lineItems[i].category === cat).reduce((a, x) => a + x.line_cost_total_ex, 0)
+  const costs = sealedCostEstimates({
+    material: asNumberOrNull(pricing.materialCostEstimate) ?? sumCategory('material'),
+    labour: asNumberOrNull(pricing.labourCostEstimate) ?? sumCategory('labour'),
+    commission: asNumber(pricing.commissionCostEstimate, 0),
+    toolSaysIncomplete: asObject(pricing.internal).costs_complete === false ||
+      (asNumberOrNull(pricing.materialCostEstimate) == null && asNumberOrNull(pricing.labourCostEstimate) == null && unpriced.length > 0),
+    toolToConfirm: unpriced,
+  })
 
   const commissionRule: CommissionRule = 'other' // Quick Quote default
 
@@ -130,20 +135,11 @@ export const buildQuickQuoteScopeBlock: BuildScopeBlock = (inputs: AdapterInputs
     version: 1,
     captured_at: '',
     line_costs: lineCosts,
-    cost_estimates: {
-      material_total: materialTotal,
-      labour_total: labourTotal,
-      subcontract_commission_total: commissionTotal,
-    },
-    margin: {
-      pct: marginPct,
-      floor_breached: marginPct > 0 && marginPct < 0.2,
-      override_reason: null,
-      override_approver_user_id: null,
-    },
+    cost_estimates: costs.estimates,
+    margin: sealedMargin({ marginPercent: pricing.margin_pct, costsComplete: costs.complete }),
     commission: {
       rule: commissionRule,
-      amount: commissionTotal,
+      amount: costs.complete ? costs.estimates.subcontract_commission_total : null,
       salesperson_user_id: null,
     },
   }

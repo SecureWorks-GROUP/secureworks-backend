@@ -80,7 +80,8 @@ function buildPatioInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
         totalExGST: 10000,
         gst: 1000,
         totalIncGST: 11000,
-        margin_pct: 0.39,
+        // Percent, as every scoping tool saves it (sealed as the fraction 0.39).
+        margin_pct: 39,
         valid_days: 30,
         payment_terms: '50/50 split',
       },
@@ -208,8 +209,9 @@ function buildFenceInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
         // runs[].items[].
         line_items: [],
         neighbour_splits: {},
-        // Internal cost as flat scalars (pricing.internal shape).
-        internal: { commission: 210, cost: 1840, labour: 900, margin: 0.31 },
+        // Internal cost as flat scalars (pricing.internal shape). The fence
+        // tool's internal.margin is the material margin in DOLLARS.
+        internal: { commission: 210, cost: 1840, labour: 900, margin: 1260 },
         // Top-level cost-estimate fields ALSO present for back-compat.
         materialCostEstimate: 1840,
         labourCostEstimate: 900,
@@ -218,7 +220,8 @@ function buildFenceInputs(overrides: Partial<AdapterInputs> = {}): AdapterInputs
         subtotal: 4000,
         gst: 400,
         totalIncGST: 4400,
-        margin_pct: 0.31,
+        // Percent, as the fence tool saves it: (4000 - 2950) / 4000 = 26.3%.
+        margin_pct: 26.3,
       },
       notes: '',
     },
@@ -304,7 +307,7 @@ function buildQuickQuoteInputs(overrides: Partial<AdapterInputs> = {}): AdapterI
         totalExGST: 600,
         gst: 60,
         totalIncGST: 660,
-        margin_pct: 0.42,
+        margin_pct: 42,
         valid_days: 30,
         payment_terms: '50/50',
       },
@@ -544,7 +547,10 @@ Deno.test('FenceAdapter — internal cost reads pricing.internal.{cost,labour,co
     assertEquals(r.output.internal_cost.cost_estimates.material_total, 1840)
     assertEquals(r.output.internal_cost.cost_estimates.labour_total, 900)
     assertEquals(r.output.internal_cost.cost_estimates.subcontract_commission_total, 210)
-    assertEquals(r.output.internal_cost.margin.pct, 0.31)
+    // margin_pct 26.3 (percent) sealed as the fraction 0.263; the dollar
+    // internal.margin (1260) is never read as a margin.
+    assertEquals(r.output.internal_cost.margin.pct, 0.263)
+    assertEquals(r.output.internal_cost.margin.floor_breached, false)
   }
 })
 
@@ -570,6 +576,77 @@ Deno.test('FenceAdapter — costs_complete false seals the cost estimates as not
     assertEquals(ce.subcontract_commission_total, null)
     assertEquals(ce.costs_complete, false)
     assertEquals(ce.costs_to_confirm, ['delivery'])
+  }
+})
+
+// Sales, CFO note 1118-A: margin and commission are worked from the costs, so
+// with costs to confirm they are not known and the floor check never passes.
+function incompleteFenceInputs() {
+  const base = buildFenceInputs()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  return buildFenceInputs({
+    job: {
+      ...base.job,
+      pricing_json: {
+        ...pricing,
+        pricing_complete: false,
+        // An older save that still carries a margin worked on the short cost.
+        margin_pct: 62,
+        internal: { commission: 210, cost: 1200, labour: 900, margin: 1900, costs_complete: false, costs_to_confirm: ['delivery', 'skipBin'] },
+      },
+    },
+  })
+}
+
+Deno.test('FenceAdapter — costs to confirm: margin and commission are not known, floor check marked not done', () => {
+  const r = dispatchAdapter(incompleteFenceInputs())
+  assert(r.ok)
+  if (r.ok) {
+    const ic = r.output.internal_cost
+    assertEquals(ic.margin.pct, null)
+    assertEquals(ic.margin.floor_breached, false)
+    assertEquals(ic.margin.floor_check, 'costs_to_confirm')
+    assertEquals(ic.commission.amount, null)
+    // The draft pricing the customer sees is kept.
+    assert(r.output.pricing_public.line_items.length > 0)
+  }
+})
+
+Deno.test('Validator — costs to confirm never pass the margin floor check', () => {
+  const inputs = incompleteFenceInputs()
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    const preliminary = stitchManifestForValidation(r.output, inputs)
+    const enforce = validatePacketV2(preliminary.manifest, preliminary.internal_cost, {
+      mode: 'enforce',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    const err = enforce.errors.find((e) => e.rule === 'internal_cost.margin_override_required_when_breached')
+    assert(err, 'enforce mode must refuse the floor check')
+    assert(err.message.includes('2 cost lines with no price'))
+    const warn = validatePacketV2(preliminary.manifest, preliminary.internal_cost, {
+      mode: 'warn',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    assert(!warn.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+    assert(warn.warnings.some((w) => w.rule === 'internal_cost.margin_override_required_when_breached'))
+  }
+})
+
+Deno.test('Validator — complete fence costs still pass the margin floor check, keys unchanged', () => {
+  const inputs = buildFenceInputs()
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    assertEquals(Object.keys(r.output.internal_cost.margin).sort(), ['floor_breached', 'override_approver_user_id', 'override_reason', 'pct'])
+    assertEquals(r.output.internal_cost.commission.amount, 210)
+    const preliminary = stitchManifestForValidation(r.output, inputs)
+    const v = validatePacketV2(preliminary.manifest, preliminary.internal_cost, {
+      mode: 'warn',
+      override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST,
+    })
+    assert(v.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
   }
 })
 
@@ -760,6 +837,116 @@ Deno.test('FenceAdapter — empty scope.job.runs falls back to pricing.runs[]', 
     assertEquals(r.output.scope.runs[0].lineal_m, 0)
     assertEquals(r.output.scope.runs[0].height_mm, 0)
   }
+})
+
+// ── Margin units and unknown costs (money-gate check of #1123, cycle 1) ─────
+// Every tool saves margin_pct as a percent; the sealed pct is a fraction and
+// the floor is 0.2. A cost or margin the tool did not give never seals as 0
+// and never passes the floor.
+
+function withPricing(base: AdapterInputs, pricing: Record<string, unknown>): AdapterInputs {
+  return { ...base, job: { ...base.job, pricing_json: pricing } }
+}
+
+function floorRule(inputs: AdapterInputs, mode: 'enforce' | 'warn') {
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (!r.ok) throw new Error('adapter failed')
+  const p = stitchManifestForValidation(r.output, inputs)
+  const v = validatePacketV2(p.manifest, p.internal_cost, { mode, override_operator_allowlist: STUB_OVERRIDE_ALLOWLIST })
+  return { ic: r.output.internal_cost, v, err: v.errors.find((e) => e.rule === 'internal_cost.margin_override_required_when_breached') }
+}
+
+Deno.test('Margin units — a 12.5% fence margin breaches the 20% floor (was sealed as dollars and passed)', () => {
+  const base = buildFenceInputs()
+  const pricing = { ...(base.job.pricing_json as Record<string, unknown>), margin_pct: 12.5, internal: { commission: 210, cost: 2500, labour: 900, margin: 600 } }
+  const { ic, err } = floorRule(withPricing(base, pricing), 'enforce')
+  assertEquals(ic.margin.pct, 0.125)
+  assertEquals(ic.margin.floor_breached, true)
+  assert(err && err.message.includes('override_reason required'))
+})
+
+Deno.test('Margin units — a loss-making fence quote breaches the floor', () => {
+  const base = buildFenceInputs()
+  const pricing = { ...(base.job.pricing_json as Record<string, unknown>), margin_pct: -4.2, internal: { commission: 210, cost: 3300, labour: 900, margin: -200 } }
+  const { ic } = floorRule(withPricing(base, pricing), 'enforce')
+  assertEquals(ic.margin.pct, -0.042)
+  assertEquals(ic.margin.floor_breached, true)
+})
+
+Deno.test('Margin units — the dollar internal.margin is never read as a margin: no margin_pct, no pass', () => {
+  const base = buildFenceInputs()
+  const pricing = { ...(base.job.pricing_json as Record<string, unknown>) }
+  delete pricing.margin_pct
+  const { ic, v, err } = floorRule(withPricing(base, pricing), 'enforce')
+  assertEquals(ic.margin.pct, null)
+  assertEquals(ic.margin.floor_check, 'margin_not_given')
+  assert(err && err.message.includes('saved no margin'))
+  const warn = floorRule(withPricing(base, pricing), 'warn')
+  assert(!warn.v.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+  assertEquals(v.ok, false)
+})
+
+Deno.test('PatioAdapter — v2 scoper with a cost to confirm: no zero costs, no margin, floor not passed', () => {
+  const base = buildPatioInputs()
+  const legacy = base.job.pricing_json as Record<string, unknown>
+  const v2 = {
+    tool: 'patio-scoper', version: '2.0', supported: true, pricing_complete: false, sell_to_confirm: [],
+    line_items: legacy.line_items, totalExGST: null, gst: null, totalIncGST: null,
+    internal: { costs_complete: false, costs_to_confirm: ['Materials (1 row with no cost)'], materials: null, labour: 2500, cost: null },
+  }
+  const { ic, err } = floorRule(withPricing(base, v2), 'enforce')
+  assertEquals(ic.cost_estimates.material_total, null)
+  assertEquals(ic.cost_estimates.labour_total, null)
+  assertEquals(ic.cost_estimates.costs_complete, false)
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['Materials (1 row with no cost)'])
+  assertEquals(ic.margin.pct, null)
+  assertEquals(ic.margin.floor_check, 'costs_to_confirm')
+  assertEquals(ic.commission.amount, null)
+  assert(err && err.message.includes('costs still to confirm (1 cost line with no price)'))
+})
+
+Deno.test('PatioAdapter — v2 scoper with every cost priced but no commission or margin: still not passed', () => {
+  const base = buildPatioInputs()
+  const legacy = base.job.pricing_json as Record<string, unknown>
+  const v2 = {
+    tool: 'patio-scoper', version: '2.0', supported: true, pricing_complete: true, sell_to_confirm: [],
+    line_items: legacy.line_items, totalExGST: 10000, gst: 1000, totalIncGST: 11000,
+    internal: { costs_complete: true, costs_to_confirm: [], materials: 3600, labour: 2500, cost: 6100 },
+  }
+  const { ic, err } = floorRule(withPricing(base, v2), 'enforce')
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['commission'])
+  assertEquals(ic.margin.pct, null)
+  assert(err)
+})
+
+Deno.test('PatioAdapter — older patio tool: complete costs and margin_pct 39 seal as before, sealed pct 0.39', () => {
+  const { ic, v } = floorRule(buildPatioInputs(), 'warn')
+  assertEquals(ic.cost_estimates.material_total, 3600)
+  assertEquals(ic.commission.amount, 600)
+  assertEquals(ic.margin.pct, 0.39)
+  assertEquals(ic.margin.floor_breached, false)
+  assertEquals(Object.keys(ic.margin).sort(), ['floor_breached', 'override_approver_user_id', 'override_reason', 'pct'])
+  assert(v.hard_blockers_passed.includes('internal_cost.margin_override_required_when_breached'))
+})
+
+Deno.test('QuickQuoteAdapter — a line saved at cost 0 is a cost to confirm, never a zero cost or a passed floor', () => {
+  const base = buildQuickQuoteInputsProductionShape()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const lines = (pricing.line_items as Record<string, unknown>[]).map((l, i) => (i === 1 ? { ...l, cost_price: 0 } : l))
+  const { ic, err } = floorRule(withPricing(base, { ...pricing, line_items: lines }), 'enforce')
+  assertEquals(ic.cost_estimates.costs_complete, false)
+  assertEquals(ic.cost_estimates.costs_to_confirm, ['qq-L-1'])
+  assertEquals(ic.margin.pct, null)
+  assert(err && err.message.includes('costs still to confirm'))
+})
+
+Deno.test('QuickQuoteAdapter — every line priced but no margin saved: floor not passed', () => {
+  const { ic, err } = floorRule(buildQuickQuoteInputsProductionShape(), 'enforce')
+  assertEquals(ic.cost_estimates.costs_complete, undefined)
+  assertEquals(ic.margin.pct, null)
+  assertEquals(ic.margin.floor_check, 'margin_not_given')
+  assert(err && err.message.includes('saved no margin'))
 })
 
 // ── Quick Quote adapter tests ───────────────────────────────────────────────

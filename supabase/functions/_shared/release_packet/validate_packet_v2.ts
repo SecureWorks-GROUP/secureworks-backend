@@ -199,6 +199,16 @@ const envelopeRules: Rule[] = [
     id: 'internal_cost.margin_override_required_when_breached',
     severity: 'hard',
     check: (_p, ic) => {
+      // Costs still to confirm, or no margin saved: the margin is not known,
+      // so the floor check cannot pass. Not overridable. The rule id is unchanged, so a complete
+      // release seals the same hard_blockers_passed list as before.
+      if (ic.margin.floor_check === 'costs_to_confirm' || ic.cost_estimates.costs_complete === false) {
+        const n = (ic.cost_estimates.costs_to_confirm ?? []).length
+        return `margin floor not checked: costs still to confirm${n ? ` (${n} cost line${n === 1 ? '' : 's'} with no price)` : ''}, so internal_cost.margin.pct is not known`
+      }
+      if (ic.margin.pct == null) {
+        return 'margin floor not checked: the quote saved no margin, so internal_cost.margin.pct is not known'
+      }
       if (ic.margin.floor_breached) {
         const reason = (ic.margin.override_reason ?? '').trim()
         const approver = ic.margin.override_approver_user_id
