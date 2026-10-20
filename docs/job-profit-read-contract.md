@@ -75,8 +75,9 @@ reason and note that applies.
 | `invoice_emailed_bill_not_placed` | A supplier emailed an invoice for an order, and no bill is linked to that order (it may be on the job unlinked) | Shown |
 | `draft_revenue` | `draft_revenue_ex` is above zero | Shown |
 | `holding_job` | A holding job, not a customer's job | Shown |
+| `quote_costs_incomplete` | The quote the job stands on sealed its costs as still to confirm, so no expected cost is fixed (`expected_source` null). Not the same as a job with no costed quote. Column `quote_costs_incomplete` (20261020220000). | Shown |
 
-The last eight appear in `completeness` only.
+The last nine appear in `completeness` only.
 
 ## Xero Project rule
 
