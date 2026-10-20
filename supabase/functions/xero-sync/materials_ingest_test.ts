@@ -29,6 +29,7 @@ import {
   jobNumbersInText,
   newPlacementAllowed,
   findUniquePOMatch,
+  isInstallerBill,
   isOpenPO,
   matchBill,
   type POCandidate,
@@ -604,4 +605,32 @@ Deno.test("an existing sync fact whose bill amount is now unknown goes to staff"
     source: "po_deterministic", factJobId: "a", factJobNumber: "SWF-26535", factJobBlocked: false,
     refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, amountKnown: false,
   }), "remove");
+});
+
+// ── JP-12: installer bills are never placed automatically ────
+Deno.test("isInstallerBill — a money line on 306 or 301", () => {
+  assert(isInstallerBill([{ AccountCode: "306", LineAmount: 500 }]));
+  assert(isInstallerBill([{ AccountCode: "310", LineAmount: 50 }, { AccountCode: "301", LineAmount: 400 }]));
+  assert(!isInstallerBill([{ AccountCode: "306", LineAmount: 0 }, { AccountCode: "310", LineAmount: 50 }]));
+  assert(!isInstallerBill(null));
+});
+
+Deno.test("matchBill — an installer bill with a job reference waits for a person", () => {
+  const m = matchBill(bill({ reference: "SWF-26824" }), {
+    isMirror: false,
+    installer: true,
+    jobFromRef: { id: "J-1", job_number: "SWF-26824" },
+    pos: [po()],
+  });
+  assertEquals(m.outcome, "queue");
+  assertEquals(m.suggestionReason, "installer_confirm");
+  assertEquals(m.suggestedJobId, "J-1");
+  assert(HELD_QUEUE_REASONS.has("installer_confirm"));
+});
+
+Deno.test("matchBill — an installer bill is never placed by the PO fallback", () => {
+  const m = matchBill(bill(), { isMirror: false, installer: true, jobFromRef: null, pos: [po()] });
+  assertEquals(m.outcome, "queue");
+  assertEquals(m.suggestionReason, "installer_confirm");
+  assertEquals(m.suggestedJobId, null);
 });

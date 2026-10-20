@@ -57,6 +57,7 @@ import {
   type MatchConfig,
   type POCandidate,
   type SuggestionReason,
+  isInstallerBill,
 } from './materials_ingest.ts'
 import {
   sealedSesMoneyRefusal,
@@ -1453,6 +1454,9 @@ async function ingestMaterialsActuals(
       )
       if (!facts) throw new Error('materials facts unreadable')
       for (const f of facts) {
+        // A split bill has several rows (CFO-18): it is a person's placement,
+        // so its manual_split source wins over any other row of the bill.
+        if (factSourceById.get(f.xero_invoice_id) === 'manual_split') continue
         factSourceById.set(f.xero_invoice_id, f.automation_source)
         factJobById.set(f.xero_invoice_id, f.job_id)
       }
@@ -1502,7 +1506,8 @@ async function ingestMaterialsActuals(
 
       // Respect human resolutions: never clobber a manual fact or a queue row a
       // human has moved off 'open'.
-      if (factSourceById.get(bill.xero_invoice_id) === 'manual_queue') {
+      const manualSource = factSourceById.get(bill.xero_invoice_id)
+      if (manualSource === 'manual_queue' || manualSource === 'manual_split') {
         result.skipped_manual++
         continue
       }
@@ -1527,6 +1532,7 @@ async function ingestMaterialsActuals(
       }
 
       const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
+      const installer = isInstallerBill(b.line_items)
       if (existingQueueStatus && existingQueueStatus !== 'open') {
         result.skipped_manual++
         continue
@@ -1611,6 +1617,17 @@ async function ingestMaterialsActuals(
           .eq('automation_source', existingSource as string)
           .eq('job_id', factJobId as string)
         if (uErr) console.error(`[materials] fact refresh failed ${bill.xero_invoice_id}:`, uErr.message)
+        // An installer bill placed automatically before JP-12 reads as labour,
+        // not materials (its placement stays; a person can move it).
+        if (!uErr && installer) {
+          const { error: lErr } = await sb.from('job_materials_facts')
+            .update({ lane: 'labour' })
+            .eq('xero_invoice_id', bill.xero_invoice_id)
+            .eq('automation_source', existingSource as string)
+            .eq('job_id', factJobId as string)
+            .neq('lane', 'labour')
+          if (lErr) console.error(`[materials] installer lane fix failed ${bill.xero_invoice_id}:`, lErr.message)
+        }
         continue
       }
       // verdict 'remove': the fact is deleted only after the hold below is saved,
@@ -1645,7 +1662,9 @@ async function ingestMaterialsActuals(
         : []
       const m = matchBill(bill, {
         isMirror: false,
-        jobFromRef: allowed.reference ? jobFromRef : null,
+        installer,
+        // An installer bill is only ever a suggestion, so it may name the job.
+        jobFromRef: allowed.reference || installer ? jobFromRef : null,
         refToken: token ?? ([...refTokens, ...lineTokens][0] ?? null),
         pos,
         config,
@@ -1665,11 +1684,15 @@ async function ingestMaterialsActuals(
           }
         }
         const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)
-        const { error: fErr } = await sb
-          .from('job_materials_facts')
-          // Insert only: a fact written meanwhile (by a person or the agent) is
-          // never overwritten.
-          .upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true })
+        // Insert only: a fact written meanwhile (by a person, a split or the
+        // agent) is never overwritten. One whole-bill row per bill is enforced
+        // by a partial unique index (CFO-18), which PostgREST cannot name as an
+        // upsert target, so a duplicate comes back as 23505 and is left alone.
+        const { error: fErr } = await sb.from('job_materials_facts').insert(row)
+        if (fErr?.code === '23505' || /split_refused|placed_by_split/.test(String(fErr?.message ?? ''))) {
+          result.skipped_manual++
+          continue
+        }
         if (fErr) {
           // The bill has neither now; the next run sees no fact and no row and
           // decides it again from scratch.

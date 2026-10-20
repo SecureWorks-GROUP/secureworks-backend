@@ -7,6 +7,10 @@ BEGIN
   IF to_regclass('public.job_materials_facts_invoice_uidx') IS NULL THEN
     RAISE EXCEPTION 'cfo18 rollback: one-row-per-bill index not restored';
   END IF;
+  IF to_regclass('public.job_materials_facts_invoice_whole_uidx') IS NOT NULL
+     OR to_regprocedure('public.job_materials_facts_no_mix()') IS NOT NULL THEN
+    RAISE EXCEPTION 'cfo18 rollback: no-mix guard survived';
+  END IF;
   IF to_regclass('public.v_bill_allocation_balance') IS NOT NULL
      OR to_regprocedure('public.allocate_bill_split(text, jsonb, numeric, text, text)') IS NOT NULL THEN
     RAISE EXCEPTION 'cfo18 rollback: split surface survived';

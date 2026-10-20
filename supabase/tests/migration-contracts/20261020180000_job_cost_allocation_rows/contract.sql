@@ -1,4 +1,4 @@
--- Contract for 20261020140000_job_cost_allocation_rows (CFO-18, CFO-20).
+-- Contract for 20261020180000_job_cost_allocation_rows (CFO-18, CFO-20).
 --
 -- Synthetic jobs and bills, no customer data. Everything rolls back.
 --
@@ -15,6 +15,16 @@
 -- 200 - 20 = 180; the holding job carries nothing from B-SPLIT; J1 invoiced
 -- 900; the bill balances (600 + 300 + 100 = 1,000); a repeat is a no-op;
 -- every refusal names its reason.
+--
+-- Review cycle 1 cases:
+--   B-OWN    materials bill on J3 (its own Xero job): 500 ex. Split 400 to J3
+--            with 100 overhead: J3 carries 400, not 500.
+--   B-WHOLE  materials bill placed whole on J1 by the reference path: a split
+--            is refused, and a second whole row is refused.
+--   B-301    installer bill on account 301 placed whole on J3 by Xero: labour.
+--   CA-DEAD  a cancelled job: a split onto it is refused.
+--   Credit share counts credit notes applied, never prepayments.
+--   A voided bill with allocation rows is never balanced.
 
 \set ON_ERROR_STOP on
 
@@ -23,7 +33,9 @@ BEGIN;
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('ca000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-J1', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
   ('ca000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-J2', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
-  ('ca000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-HOLD', false, '{"do_not_schedule": "true"}', '{}', NULL, '2026-07-01T00:00:00Z');
+  ('ca000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-HOLD', false, '{"do_not_schedule": "true"}', '{}', NULL, '2026-07-01T00:00:00Z'),
+  ('ca000000-0000-4000-8000-000000000003', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-J3', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
+  ('ca000000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'cancelled', 'fencing', 'CA-DEAD', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z');
 
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id) VALUES
   ('00000000-0000-0000-0000-000000000001', 'B-SPLIT', 'CA-31', 'ACCPAY', 'PAID', 'CA Installer', 1000, 1100, '2026-08-27',
@@ -36,7 +48,16 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
   ('00000000-0000-0000-0000-000000000001', 'B-MIRROR', 'CA-42', 'ACCPAY', 'PAID', 'CA Trade', 80, 88, '2026-08-28', '[]', '{}', NULL),
   ('00000000-0000-0000-0000-000000000001', 'S-INV', 'INV-CA-1', 'ACCREC', 'AUTHORISED', 'CA Customer', 1000, 1100, '2026-08-20',
    '[{"Description": "Fence", "AccountCode": "200", "LineAmount": 1000, "TaxAmount": 100}]',
-   '{"LineAmountTypes": "Exclusive", "AmountCredited": 110}', 'ca000000-0000-4000-8000-000000000001');
+   '{"LineAmountTypes": "Exclusive", "AmountCredited": 110}', 'ca000000-0000-4000-8000-000000000001'),
+  ('00000000-0000-0000-0000-000000000001', 'B-OWN', 'CA-43', 'ACCPAY', 'AUTHORISED', 'CA Steel', 500, 550, '2026-08-28',
+   '[{"Description": "Rails", "AccountCode": "310", "LineAmount": 500, "TaxAmount": 50}]',
+   '{"LineAmountTypes": "Exclusive"}', 'ca000000-0000-4000-8000-000000000003'),
+  ('00000000-0000-0000-0000-000000000001', 'B-WHOLE', 'CA-44', 'ACCPAY', 'AUTHORISED', 'CA Steel', 70, 77, '2026-08-28',
+   '[{"Description": "Caps", "AccountCode": "310", "LineAmount": 70, "TaxAmount": 7}]',
+   '{"LineAmountTypes": "Exclusive"}', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'B-301', 'CA-45', 'ACCPAY', 'AUTHORISED', 'CA Installer', 100, 110, '2026-08-28',
+   '[{"Description": "Install", "AccountCode": "301", "LineAmount": 100, "TaxAmount": 10}]',
+   '{"LineAmountTypes": "Exclusive"}', 'ca000000-0000-4000-8000-000000000003');
 
 INSERT INTO public.users (id, org_id, name) VALUES
   ('ca200000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'CA Trade');
@@ -48,7 +69,9 @@ INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subt
 INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status) VALUES
   ('B-SPLIT', 'CA-31', 'CA Installer', 1000, 1100, '2026-08-27', 'open'),
   ('B-VOID', 'CA-41', 'CA Steel', 50, 55, '2026-08-28', 'open'),
-  ('B-MIRROR', 'CA-42', 'CA Trade', 80, 88, '2026-08-28', 'open');
+  ('B-MIRROR', 'CA-42', 'CA Trade', 80, 88, '2026-08-28', 'open'),
+  ('B-OWN', 'CA-43', 'CA Steel', 500, 550, '2026-08-28', 'open'),
+  ('B-WHOLE', 'CA-44', 'CA Steel', 70, 77, '2026-08-28', 'open');
 
 -- ── Refusals ────────────────────────────────────────────────────────────────
 CREATE TEMP TABLE ca_refusals (label text, expect text, got text);
@@ -65,6 +88,7 @@ BEGIN
     ('lane',     'B-SPLIT',  '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 1000, "lane": "fuel"}]'::jsonb, 0::numeric, 'not materials, labour or other'),
     ('voided',   'B-VOID',   '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 50}]'::jsonb, 0::numeric, 'VOIDED'),
     ('mirror',   'B-MIRROR', '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 80}]'::jsonb, 0::numeric, 'trade app'),
+    ('dead',     'B-SPLIT',  '[{"job_id": "ca000000-0000-4000-8000-000000000008", "amount_ex": 1000}]'::jsonb, 0::numeric, 'cancelled'),
     ('notqueue', 'B-CRED',   '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 200}]'::jsonb, 0::numeric, 'not in Bills to place')
   ) AS t(label, bill, parts, overhead, expect) LOOP
     v_msg := NULL;
@@ -104,7 +128,7 @@ DECLARE
 BEGIN
   v := public.allocate_bill_split('B-SPLIT',
     '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 600, "lane": "labour"},
-      {"job_id": "ca000000-0000-4000-8000-000000000002", "amount_ex": 300, "lane": "labour"}]',
+      {"job_id": "ca000000-0000-4000-8000-000000000002", "amount_ex": 300, "lane": "materials"}]',
     100, 'Yard tidy, no job', 'contract@test');
   IF (v ->> 'ok')::boolean IS NOT TRUE OR (v ->> 'idempotent')::boolean THEN
     RAISE EXCEPTION 'cfo18 split: %', v;
@@ -172,6 +196,70 @@ BEGIN
   END IF;
   IF r.invoice_count <> 1 THEN
     RAISE EXCEPTION 'cfo18 job J1: invoice_count %, a credit row counted as a second invoice', r.invoice_count;
+  END IF;
+END $$;
+
+-- ── Review cycle 1: no mix, overhead on own job, 301, credit, void ──────────
+DO $$
+DECLARE
+  r record;
+  v_msg text;
+BEGIN
+  -- A whole-bill row beside a split is refused (23505).
+  BEGIN
+    INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
+    VALUES ('B-SPLIT', 'ca000000-0000-4000-8000-000000000003', 'CA-J3', 'materials', 'actual', 1000, 'high', 'xero_ref_link', '2026-08-27');
+    RAISE EXCEPTION 'cfo18 mix: a whole-bill row was added to a split bill';
+  EXCEPTION WHEN unique_violation THEN NULL;
+  END;
+
+  -- A bill placed whole cannot then be split, and cannot get a second whole row.
+  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
+  VALUES ('B-WHOLE', 'ca000000-0000-4000-8000-000000000001', 'CA-J1', 'materials', 'actual', 70, 'high', 'xero_ref_link', '2026-08-28');
+  v_msg := NULL;
+  BEGIN
+    PERFORM public.allocate_bill_split('B-WHOLE',
+      '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 35}, {"job_id": "ca000000-0000-4000-8000-000000000002", "amount_ex": 35}]',
+      0, NULL, 'contract@test');
+  EXCEPTION WHEN OTHERS THEN v_msg := SQLERRM;
+  END;
+  IF v_msg IS NULL OR position('already placed by another route' IN v_msg) = 0 THEN
+    RAISE EXCEPTION 'cfo18 mix: split of a whole-placed bill not refused (%)', v_msg;
+  END IF;
+  BEGIN
+    INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
+    VALUES ('B-WHOLE', 'ca000000-0000-4000-8000-000000000002', 'CA-J2', 'materials', 'actual', 70, 'high', 'po_deterministic', '2026-08-28');
+    RAISE EXCEPTION 'cfo18 mix: a second whole-bill row was accepted';
+  EXCEPTION WHEN unique_violation THEN NULL;
+  END;
+
+  -- Split with overhead on the bill's own Xero job: the job carries the part.
+  PERFORM public.allocate_bill_split('B-OWN',
+    '[{"job_id": "ca000000-0000-4000-8000-000000000003", "amount_ex": 400}]', 100, 'Offcuts kept', 'contract@test');
+  SELECT sum(amount_ex) FILTER (WHERE is_actual AND document_id = 'B-OWN') AS own,
+         sum(amount_ex) FILTER (WHERE is_actual AND document_id = 'B-301' AND lane = 'labour') AS l301
+    INTO r FROM public.v_job_cost_events WHERE job_id = 'ca000000-0000-4000-8000-000000000003';
+  IF r.own IS DISTINCT FROM 400::numeric THEN
+    RAISE EXCEPTION 'cfo18 own job: J3 carries % from B-OWN; expected 400 (overhead ignored)', r.own;
+  END IF;
+  IF r.l301 IS DISTINCT FROM 100::numeric THEN
+    RAISE EXCEPTION 'cfo18 301: J3 labour from B-301 is %; expected 100', r.l301;
+  END IF;
+
+  -- Credit notes applied decide; prepayments and overpayments are not credit.
+  IF public.job_cost_credit_share('{"AmountCredited": 110, "Prepayments": [{"AppliedAmount": 110}]}', 1100) <> 0
+     OR public.job_cost_credit_share('{"AmountCredited": 44, "CreditNotes": [{"AppliedAmount": 22}], "Overpayments": [{"AppliedAmount": 22}]}', 220) <> 0.1
+     OR public.job_cost_credit_share('{"AmountCredited": 22}', 220) <> 0.1
+     OR public.job_cost_credit_share('{"CreditNotes": {}}', 220) <> 0 THEN
+    RAISE EXCEPTION 'cfo18 credit share: prepayments or overpayments read as credit';
+  END IF;
+
+  -- A voided bill with allocation rows is never balanced.
+  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
+  VALUES ('B-VOID', 'ca000000-0000-4000-8000-000000000001', 'CA-J1', 'materials', 'actual', 50, 'high_manual', 'manual_queue', '2026-08-28');
+  SELECT * INTO r FROM public.v_bill_allocation_balance WHERE xero_invoice_id = 'B-VOID';
+  IF r.balanced IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'cfo18 balance: a voided bill reads balanced (%)', r.balanced;
   END IF;
 END $$;
 

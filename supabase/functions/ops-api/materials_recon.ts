@@ -435,6 +435,10 @@ export async function assignReconRow(
   const now = args.nowIso || new Date().toISOString();
   const queue = await loadQueueRow(client, args);
   if (!queue) throw new Error("reconciliation queue row not found");
+  // A split bill changes only through a new split (CFO-18).
+  if (queue.status === "split") {
+    throw new Error(`bill ${queue.xero_invoice_id} is split across jobs; change it with Split, not a single placement`);
+  }
   // The agent only ever places a bill nobody has placed or filed.
   if (args.agent && queue.status !== "open") {
     throw new Error(`bill ${queue.xero_invoice_id} is ${queue.status}; the agent never moves a placed or filed bill`);
@@ -550,11 +554,18 @@ export async function assignReconRow(
     // Re-checked at the write: still open and still not held.
     flip = flip.eq("status", "open")
       .or(`suggestion_reason.is.null,suggestion_reason.not.in.(${[...HELD_QUEUE_REASONS].join(",")})`);
+  } else {
+    // A person's flip lands only on the row as it was read: if a split or the
+    // agent moved it meanwhile, this fact is taken back off and that stands.
+    flip = flip.eq("status", queue.status);
   }
   const { data: updatedQueue, error: qErr } = await flip.select().single();
   if (qErr) {
-    if (args.agent && fact?.id) {
+    if (fact?.id) {
       await client.from("job_materials_facts").delete().eq("id", fact.id);
+    }
+    if (qErr.code === "PGRST116") {
+      throw new Error(`bill ${queue.xero_invoice_id} changed while you were placing it; reload and try again`);
     }
     throw qErr;
   }
@@ -649,10 +660,13 @@ export async function splitReconRow(
   if (!Array.isArray(args.parts) || args.parts.length === 0) {
     throw new Error("parts are required: one job and amount per part");
   }
+  // The lane comes from the bill itself, never the screen: an installer bill
+  // (306/301) is labour on every part (the database derives it the same way).
+  const lane = laneOfBillLines(await loadBillLines(client, args.xeroInvoiceId));
   const parts = args.parts.map((p: any) => ({
     job_id: String(p?.job_id ?? ""),
     amount_ex: Number(p?.amount_ex),
-    lane: p?.lane ? String(p.lane) : "materials",
+    lane,
   }));
   const overhead = args.overheadEx == null || args.overheadEx === "" ? 0 : Number(args.overheadEx);
   if (!Number.isFinite(overhead)) throw new Error("overhead must be a number");
@@ -667,6 +681,8 @@ export async function splitReconRow(
     const why = splitRefusal(error.message);
     throw new Error(why ? `Split refused: ${why}` : String(error.message || error));
   }
+  // The same split again changed nothing: nothing to log.
+  if ((data as any)?.idempotent) return { ok: true, action: "split", result: data };
   for (const p of parts) {
     logJobEvent(client, {
       job_id: p.job_id,

@@ -29,28 +29,62 @@
 --    reduces invoiced revenue (kind credit_applied, negative, counts as
 --    invoiced).
 --
+-- Review cycle 1 fixes (20 Oct 2026):
+--   * A whole-bill row stays one per bill (partial unique index on bills not
+--     split), so the ingest's insert-only write is still refused on a second
+--     row; the ingest now inserts and treats 23505 as already placed.
+--   * A bill is either placed whole or split, never both: a trigger takes a
+--     per-bill advisory lock and refuses a mix (23505), and the split function
+--     takes the same lock.
+--   * A bill with any split row or an overhead part is read through its rows
+--     only, even when every row is on the bill's own Xero job.
+--   * Credit is credit notes applied (CreditNotes[].AppliedAmount), not
+--     prepayments or overpayments.
+--   * An installer bill (306 or 301) is labour on every split part, and 301
+--     reads as labour in the engine like 306.
+--   * A split refuses a cancelled or lost job; a voided or deleted bill is
+--     never balanced.
+--
 -- Both views keep their columns, names and types, so v_job_profit, its
 -- functions and every caller keep working. Not applied anywhere until
 -- released. Credit notes not applied to any invoice are not in our copy of
 -- Xero and stay unknown (named in the job profit read contract).
 --
--- Contract: supabase/tests/migration-contracts/20261020140000_job_cost_allocation_rows/.
--- Rollback: supabase/rollbacks/20261020140000_job_cost_allocation_rows_down.sql.
+-- Contract: supabase/tests/migration-contracts/20261020180000_job_cost_allocation_rows/.
+-- Rollback: supabase/rollbacks/20261020180000_job_cost_allocation_rows_down.sql.
 
 -- ─────────────────────────────────────────────────────────────
--- Credit share: AmountCredited / Total, 0 when unknown. Inc GST over inc GST,
--- so applying it to an ex-GST amount gives the ex-GST credit.
+-- Credit share: credit notes applied / Total, 0 when unknown. Inc GST over inc
+-- GST, so applying it to an ex-GST amount gives the ex-GST credit. Xero's
+-- AmountCredited also counts prepayments and overpayments applied, which are
+-- payments, not credits: the credit notes list decides when present; without
+-- it, AmountCredited less any prepayments and overpayments listed.
 -- ─────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.job_cost_credit_share(p_raw jsonb, p_total numeric)
 RETURNS numeric
 LANGUAGE sql
 IMMUTABLE
 AS $$
+  WITH applied AS (
+    SELECT
+      (SELECT sum(public.job_profit_num(c.value -> 'AppliedAmount'))
+         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw -> 'CreditNotes') = 'array' THEN p_raw -> 'CreditNotes' ELSE '[]'::jsonb END) c
+      ) AS credit_notes,
+      CASE WHEN jsonb_typeof(p_raw -> 'CreditNotes') = 'array'
+           THEN jsonb_array_length(p_raw -> 'CreditNotes') > 0 ELSE false END AS has_credit_notes,
+      (SELECT COALESCE(sum(public.job_profit_num(o.value -> 'AppliedAmount')), 0)
+         FROM jsonb_array_elements(
+           (CASE WHEN jsonb_typeof(p_raw -> 'Prepayments') = 'array' THEN p_raw -> 'Prepayments' ELSE '[]'::jsonb END)
+           || (CASE WHEN jsonb_typeof(p_raw -> 'Overpayments') = 'array' THEN p_raw -> 'Overpayments' ELSE '[]'::jsonb END)) o
+      ) AS other_applied
+  )
   SELECT CASE
-    WHEN COALESCE(p_total, 0) <= 0 THEN 0
-    WHEN p_raw IS NULL OR jsonb_typeof(p_raw -> 'AmountCredited') <> 'number' THEN 0
-    ELSE least(greatest((p_raw ->> 'AmountCredited')::numeric / p_total, 0), 1)
+    WHEN COALESCE(p_total, 0) <= 0 OR p_raw IS NULL THEN 0
+    WHEN a.has_credit_notes THEN least(greatest(COALESCE(a.credit_notes, 0) / p_total, 0), 1)
+    WHEN jsonb_typeof(p_raw -> 'AmountCredited') <> 'number' THEN 0
+    ELSE least(greatest(((p_raw ->> 'AmountCredited')::numeric - a.other_applied) / p_total, 0), 1)
   END
+  FROM applied a
 $$;
 REVOKE ALL ON FUNCTION public.job_cost_credit_share(jsonb, numeric) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_cost_credit_share(jsonb, numeric) TO service_role;
@@ -73,13 +107,50 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_materials_facts_invoice_job_uidx
   ON public.job_materials_facts (xero_invoice_id, job_id);
 CREATE INDEX IF NOT EXISTS job_materials_facts_invoice_idx
   ON public.job_materials_facts (xero_invoice_id);
+-- A bill placed whole has one row: two whole-bill rows for one bill are still
+-- refused, as the old index did. Only a split carries several rows.
+CREATE UNIQUE INDEX IF NOT EXISTS job_materials_facts_invoice_whole_uidx
+  ON public.job_materials_facts (xero_invoice_id)
+  WHERE automation_source IS DISTINCT FROM 'manual_split';
+
+-- A bill is placed whole or split, never both. The per-bill advisory lock
+-- serialises a split against a whole placement racing it (the split function
+-- takes the same lock), and each statement re-reads committed rows after it.
+CREATE OR REPLACE FUNCTION public.job_materials_facts_no_mix()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('job_materials_facts:' || NEW.xero_invoice_id, 0));
+  IF NEW.automation_source = 'manual_split' THEN
+    IF EXISTS (SELECT 1 FROM public.job_materials_facts f
+                WHERE f.xero_invoice_id = NEW.xero_invoice_id AND f.id IS DISTINCT FROM NEW.id
+                  AND f.automation_source IS DISTINCT FROM 'manual_split') THEN
+      RAISE EXCEPTION 'split_refused: bill % is already placed by another route; undo that first', NEW.xero_invoice_id
+        USING ERRCODE = '23505';
+    END IF;
+  ELSIF EXISTS (SELECT 1 FROM public.job_materials_facts f
+                 WHERE f.xero_invoice_id = NEW.xero_invoice_id AND f.id IS DISTINCT FROM NEW.id
+                   AND f.automation_source = 'manual_split') THEN
+    RAISE EXCEPTION 'placed_by_split: bill % is split across jobs; change it with Split', NEW.xero_invoice_id
+      USING ERRCODE = '23505';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.job_materials_facts_no_mix() FROM PUBLIC, anon, authenticated;
+DROP TRIGGER IF EXISTS job_materials_facts_no_mix ON public.job_materials_facts;
+CREATE TRIGGER job_materials_facts_no_mix
+  BEFORE INSERT OR UPDATE OF xero_invoice_id, automation_source ON public.job_materials_facts
+  FOR EACH ROW EXECUTE FUNCTION public.job_materials_facts_no_mix();
 
 ALTER TABLE public.job_materials_facts DROP CONSTRAINT IF EXISTS job_materials_facts_source_chk;
 ALTER TABLE public.job_materials_facts ADD CONSTRAINT job_materials_facts_source_chk
   CHECK (automation_source IN ('xero_ref_link', 'po_deterministic', 'manual_queue', 'agent_prematch', 'manual_split'));
 
 COMMENT ON TABLE public.job_materials_facts IS
-  'Allocation rows for supplier bills (M2/U3, CFO-18 20261020140000): one row per bill and job; a split bill has one row per job. A bill''s rows plus its overhead part (materials_reconciliation_queue.overhead_ex) equal the bill ex GST (v_bill_allocation_balance). A bill with a row on a job other than its own xero_invoices.job_id is read by the job profit engine through its rows only. Reversible by delete; xero_invoices is never mutated.';
+  'Allocation rows for supplier bills (M2/U3, CFO-18 20261020180000): one row per bill and job; a split bill has one row per job. A bill''s rows plus its overhead part (materials_reconciliation_queue.overhead_ex) equal the bill ex GST (v_bill_allocation_balance). A bill with a row on a job other than its own xero_invoices.job_id is read by the job profit engine through its rows only. Reversible by delete; xero_invoices is never mutated.';
 
 -- ─────────────────────────────────────────────────────────────
 -- 2. Queue: split status and overhead part
@@ -122,6 +193,7 @@ DECLARE
   v_jobs uuid[] := ARRAY[]::uuid[];
   v_existing int;
   v_same boolean;
+  v_bill_lane text;
 BEGIN
   IF p_actor IS NULL OR btrim(p_actor) = '' THEN
     RAISE EXCEPTION 'split_refused: actor required';
@@ -133,13 +205,17 @@ BEGIN
     RAISE EXCEPTION 'split_refused: overhead cannot be negative';
   END IF;
 
+  -- The same per-bill lock as the no-mix trigger: a whole placement racing
+  -- this split waits, then sees the split rows (and is refused).
+  PERFORM pg_advisory_xact_lock(hashtextextended('job_materials_facts:' || p_xero_invoice_id, 0));
+
   SELECT * INTO q FROM public.materials_reconciliation_queue
    WHERE xero_invoice_id = p_xero_invoice_id FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'split_refused: bill % is not in Bills to place', p_xero_invoice_id;
   END IF;
 
-  SELECT x.status, x.sub_total INTO b
+  SELECT x.status, x.sub_total, x.line_items INTO b
     FROM public.xero_invoices x
    WHERE x.xero_invoice_id = p_xero_invoice_id AND x.invoice_type = 'ACCPAY'
    ORDER BY (x.status IN ('AUTHORISED', 'PAID')) DESC
@@ -156,6 +232,13 @@ BEGIN
   IF EXISTS (SELECT 1 FROM public.trade_invoices t WHERE t.xero_bill_id = p_xero_invoice_id) THEN
     RAISE EXCEPTION 'split_refused: bill % is a trade app invoice, counted through the trade app', p_xero_invoice_id;
   END IF;
+  -- An installer bill (a money line on 306 or 301) is labour on every part,
+  -- whatever the screen sent.
+  v_bill_lane := CASE WHEN EXISTS (
+      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(b.line_items) = 'array' THEN b.line_items ELSE '[]'::jsonb END) li
+      WHERE li.value ->> 'AccountCode' IN ('306', '301')
+        AND COALESCE(public.job_profit_num(li.value -> 'LineAmount'), 0) <> 0)
+    THEN 'labour' END;
 
   FOR part IN SELECT value FROM jsonb_array_elements(p_parts) LOOP
     IF jsonb_typeof(part -> 'amount_ex') <> 'number' THEN
@@ -171,6 +254,9 @@ BEGIN
     END IF;
     IF lower(COALESCE(v_job.metadata ->> 'do_not_schedule', '')) = 'true' THEN
       RAISE EXCEPTION 'split_refused: % is a holding job', v_job.job_number;
+    END IF;
+    IF lower(COALESCE(v_job.status, '')) IN ('cancelled', 'lost') THEN
+      RAISE EXCEPTION 'split_refused: % is %', v_job.job_number, v_job.status;
     END IF;
     IF v_job.id = ANY (v_jobs) THEN
       RAISE EXCEPTION 'split_refused: % appears twice; give it one part', v_job.job_number;
@@ -204,7 +290,7 @@ BEGIN
               WHERE f.xero_invoice_id = p_xero_invoice_id
                 AND f.job_id = (p.value ->> 'job_id')::uuid
                 AND f.amount_ex_gst = round((p.value ->> 'amount_ex')::numeric, 2)
-                AND f.lane = COALESCE(p.value ->> 'lane', 'materials')))
+                AND f.lane = COALESCE(v_bill_lane, p.value ->> 'lane', 'materials')))
           AND (SELECT count(*) FROM public.job_materials_facts f
                 WHERE f.xero_invoice_id = p_xero_invoice_id) = jsonb_array_length(p_parts))
     INTO v_same;
@@ -221,7 +307,7 @@ BEGIN
     fact_date, assigned_by, updated_at)
   SELECT
     q.org_id, q.xero_invoice_id, q.invoice_number, q.xero_contact_id, q.contact_name, j.id, j.job_number,
-    COALESCE(p.value ->> 'lane', 'materials'), 'actual', round((p.value ->> 'amount_ex')::numeric, 2), NULL,
+    COALESCE(v_bill_lane, p.value ->> 'lane', 'materials'), 'actual', round((p.value ->> 'amount_ex')::numeric, 2), NULL,
     'high_manual', 'manual_split',
     'manual_split:' || jsonb_array_length(p_parts) || ' jobs' ||
       CASE WHEN v_overhead > 0 THEN ' + overhead ' || v_overhead ELSE '' END,
@@ -274,6 +360,7 @@ SELECT
   COALESCE(q.overhead_ex, 0) AS overhead_ex,
   round(b.sub_total, 2) - COALESCE(a.allocated_ex, 0) - COALESCE(q.overhead_ex, 0) AS remainder_ex,
   (b.sub_total IS NOT NULL
+   AND b.status IN ('AUTHORISED', 'PAID')
    AND abs(round(b.sub_total, 2) - COALESCE(a.allocated_ex, 0) - COALESCE(q.overhead_ex, 0)) <= 0.005) AS balanced,
   q.status AS queue_status
 FROM (SELECT xero_invoice_id FROM alloc
@@ -283,7 +370,7 @@ LEFT JOIN bills b ON b.xero_invoice_id = k.xero_invoice_id
 LEFT JOIN public.materials_reconciliation_queue q ON q.xero_invoice_id = k.xero_invoice_id;
 
 COMMENT ON VIEW public.v_bill_allocation_balance IS
-  'CFO-18: every supplier bill with allocation rows or an overhead part. remainder_ex = bill ex GST - allocated - overhead; balanced when 0 to the cent. A bill placed whole by one row is balanced only when that row carries the bill sub_total. Read only, service role only.';
+  'CFO-18: every supplier bill with allocation rows or an overhead part. remainder_ex = bill ex GST - allocated - overhead; balanced when 0 to the cent and the bill is live in Xero (a voided or deleted bill with rows is never balanced: undo its rows). A bill amended in Xero after a split shows the drift as a remainder. A bill placed whole by one row is balanced only when that row carries the bill sub_total. Read only, service role only.';
 REVOKE ALL ON public.v_bill_allocation_balance FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.v_bill_allocation_balance TO service_role;
 
@@ -372,13 +459,19 @@ bill_line AS (
     AND x.status IN ('AUTHORISED', 'PAID')
     AND x.job_id IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM trade_mirror_bill m WHERE m.xero_invoice_id = x.xero_invoice_id)
-    -- CFO-18: a bill with an allocation row on any other job (a split, or a
-    -- person moving it off the holding card) is read through its allocation
-    -- rows only, never also through xero_invoices.job_id. A bill whose only
-    -- rows are on its own job keeps its richer line detail (as before).
+    -- CFO-18: a bill with an allocation row on any other job (a person moving
+    -- it off the holding card), any split row, or an overhead part is read
+    -- through its allocation rows only, never also through xero_invoices.job_id
+    -- (so a split or overhead on the bill's own job is never ignored). A bill
+    -- placed whole on its own job keeps its richer line detail (as before).
     AND NOT EXISTS (
       SELECT 1 FROM public.job_materials_facts f
-      WHERE f.xero_invoice_id = x.xero_invoice_id AND f.job_id IS DISTINCT FROM x.job_id
+      WHERE f.xero_invoice_id = x.xero_invoice_id
+        AND (f.job_id IS DISTINCT FROM x.job_id OR f.automation_source = 'manual_split')
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM public.materials_reconciliation_queue q
+      WHERE q.xero_invoice_id = x.xero_invoice_id AND COALESCE(q.overhead_ex, 0) > 0
     )
 ),
 supplier AS (
@@ -387,7 +480,7 @@ supplier AS (
     b.invoice_date AS event_date,
     CASE
       WHEN COALESCE(b.line ->> 'Description', '') ~* 'commission' THEN 'commission'
-      WHEN b.line ->> 'AccountCode' = '306' THEN 'labour'
+      WHEN b.line ->> 'AccountCode' IN ('306', '301') THEN 'labour'
       WHEN b.line ->> 'AccountCode' ~ '^3[0-9]{2}$' THEN 'materials'
       ELSE 'other'
     END AS lane,
@@ -593,7 +686,7 @@ UNION ALL SELECT * FROM po;
 
 
 COMMENT ON VIEW public.v_job_cost_events IS
-  'Job profit engine (20261009130000, CFO-12 20261019120000, CFO-18/20 20261020140000): one row per job cost, lane labour/materials/commission/other, source trade_line/supplier_bill/materials_fact/supplier_credit/po_committed/po_ordered/po_invoice_emailed. A bill with an allocation row on another job is read through its rows only. supplier_credit is credit applied in Xero against a live bill, negative, in proportion. The three po_ sources are never actual. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, CFO-18/20 20261020180000): one row per job cost, lane labour/materials/commission/other, source trade_line/supplier_bill/materials_fact/supplier_credit/po_committed/po_ordered/po_invoice_emailed. A bill with an allocation row on another job is read through its rows only. supplier_credit is credit applied in Xero against a live bill, negative, in proportion. The three po_ sources are never actual. Read only, service role only.';
 
 -- ─────────────────────────────────────────────────────────────
 -- 6. v_job_revenue_events (from 20261009130000, credit rows added, CFO-20)
@@ -689,4 +782,4 @@ WHERE v.job_id IS NOT NULL;
 
 
 COMMENT ON VIEW public.v_job_revenue_events IS
-  'Job profit engine (20261009130000, CFO-20 20261020140000): sales invoice lines per job (VOIDED/DELETED excluded; counts_as_invoiced for AUTHORISED/PAID), credit applied in Xero against a live sales invoice (kind credit_applied, negative, counts as invoiced), and every variation (counts_as_invoiced false). Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-20 20261020180000): sales invoice lines per job (VOIDED/DELETED excluded; counts_as_invoiced for AUTHORISED/PAID), credit applied in Xero against a live sales invoice (kind credit_applied, negative, counts as invoiced), and every variation (counts_as_invoiced false). Read only, service role only.';

@@ -1,4 +1,4 @@
--- Down migration for 20261020140000_job_cost_allocation_rows (CFO-18, CFO-20).
+-- Down migration for 20261020180000_job_cost_allocation_rows (CFO-18, CFO-20).
 -- Restores the engine views to 20261019120000 (cost) and 20261009130000
 -- (revenue), the one-row-per-bill index, and the queue and source checks.
 -- Fails closed while any bill is split across jobs or a queue row is 'split':
@@ -333,6 +333,9 @@ ALTER TABLE public.materials_reconciliation_queue
 ALTER TABLE public.job_materials_facts DROP CONSTRAINT IF EXISTS job_materials_facts_source_chk;
 ALTER TABLE public.job_materials_facts ADD CONSTRAINT job_materials_facts_source_chk
   CHECK (automation_source IN ('xero_ref_link', 'po_deterministic', 'manual_queue', 'agent_prematch'));
+DROP TRIGGER IF EXISTS job_materials_facts_no_mix ON public.job_materials_facts;
+DROP FUNCTION IF EXISTS public.job_materials_facts_no_mix();
+DROP INDEX IF EXISTS public.job_materials_facts_invoice_whole_uidx;
 DROP INDEX IF EXISTS public.job_materials_facts_invoice_idx;
 DROP INDEX IF EXISTS public.job_materials_facts_invoice_job_uidx;
 CREATE UNIQUE INDEX IF NOT EXISTS job_materials_facts_invoice_uidx
