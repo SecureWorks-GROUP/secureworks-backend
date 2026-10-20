@@ -120,8 +120,8 @@ minutes of the job showing fully paid.
   `review_request_not_sent`). A real send keeps its claim. A text that
   does not answer within 15 seconds counts as unconfirmed, keeps its claim and
   is never retried. Manual `send_review_request` uses
-  the same sender and switch (it skips only the status, hold, paid and window
-  checks); only a fencing or patio job that passes the paid rule gets the
+  the same sender and switch (it skips only the status, hold, per-job review
+  switch, paid and window checks); only a fencing or patio job that passes the paid rule gets the
   "Payment is well received" wording, every other manual request gets a
   neutral text signed "SecureWorks", and a fencing or patio job whose quote
   could not be read is not texted (`facts_unreadable`).
