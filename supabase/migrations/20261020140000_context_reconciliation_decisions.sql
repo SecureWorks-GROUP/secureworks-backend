@@ -13,7 +13,8 @@
 --    that read business_events.job_id move to it slice by slice.
 -- 4. context_recon_hold_decided: while a decision's evidence still matches, a re-placement path
 --    (reopen, bucket re-run, misfile repair, re-decide triggers) that agrees with the person goes
---    through; one that would move the row away from the person's answer is held and stamped
+--    through; one that would move the row away from the person's answer (another job, or the
+--    same job with a status that turns it from linked to unlinked) is held and stamped
 --    metadata.recon_held, never silently. When the evidence changes the decision stops applying
 --    and the row is queued again. context_recon_health counts held rows.
 -- 5. context_recon_queue: what needs a person, with cause (ambiguity or a named defect).
@@ -230,9 +231,11 @@ COMMENT ON FUNCTION public.context_event_jobs(uuid) IS
  'Context reconciliation decisions (20261020140000): the one read of which jobs a captured row is on (placement certain, candidate or none; by person or ladder; reason). Consumers of business_events.job_id move to it.';
 
 -- While a decision's evidence still matches, a re-placement that agrees with the person goes
--- through (confirm or correct onto the decided job, a split onto one of its jobs, unrelated onto
--- no job), so existing readers of business_events.job_id follow the person's answer when the
--- ladder reaches it. A re-placement that disagrees is held: the placement columns keep their old
+-- through (confirm or correct onto the decided job, a split onto one of its jobs, each with a
+-- linked status; unrelated onto no job), so existing readers of business_events.job_id follow the person's answer when the
+-- ladder reaches it. An update that keeps the job and whether the status is linked passes as it
+-- is. A re-placement that disagrees, including one that keeps the job but turns a linked status
+-- unlinked, is held: the placement columns keep their old
 -- values and the row is stamped metadata.recon_held (decision id, when, the job and status the
 -- writer tried), never silently. context_recon_health counts held rows. Sorts before
 -- context_party_roles_business_event so the roles trigger stamps the placement that stands.
@@ -247,8 +250,12 @@ BEGIN
      public.context_recon_evidence_hash_of(NEW.channel, NEW.direction, NEW.occurred_at, NEW.contact_id, NEW.payload) THEN
     RETURN NEW;
   END IF;
-  IF NEW.job_id IS NOT DISTINCT FROM OLD.job_id THEN RETURN NEW; END IF;
-  IF (d.action = 'unrelated' AND NEW.job_id IS NULL) OR (d.action <> 'unrelated' AND NEW.job_id = ANY (d.job_ids)) THEN
+  IF NEW.job_id IS NOT DISTINCT FROM OLD.job_id
+     AND public.context_linked_status(NEW.attribution_status) = public.context_linked_status(OLD.attribution_status) THEN
+    RETURN NEW;
+  END IF;
+  IF (d.action = 'unrelated' AND NEW.job_id IS NULL)
+     OR (d.action <> 'unrelated' AND NEW.job_id = ANY (d.job_ids) AND public.context_linked_status(NEW.attribution_status)) THEN
     RETURN NEW;
   END IF;
   NEW.metadata := coalesce(NEW.metadata, '{}'::jsonb) || jsonb_build_object('recon_held', jsonb_build_object(
