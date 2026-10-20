@@ -25,14 +25,18 @@
 //   repeat job stays live.
 // - Anything that cannot be read or does not agree (events against the
 //   pointer, an unknown group) is shown, never hidden.
-// - A job's superseded and unsuperseded events are put in order by
-//   `detail_json.seq` when every one of them carries a distinct whole-number
-//   seq (the writer's per-job order, proposed in sq23/event-order 1696f83).
-//   Otherwise by created_at, and a newest instant holding both kinds (one
-//   transaction's now(), as when the trigger clears a mark and marks it
-//   again) has no knowable order: the job is shown, with reason
-//   `events_order_unknown`, never read as live or superseded from the tie.
-//   Events are never ordered by id.
+// - A job's superseded and unsuperseded events follow the writer's order
+//   contract (sq23/event-order 1696f83 + 9354f29 + 503cd6d, CIO c5db7b9
+//   conditions C1 and C2). Each carries detail_json.seq (a positive whole
+//   number) and detail_json.at (clock_timestamp() under the group lock).
+//   "As of t" keeps the events whose `at` is at or before t; an event with no
+//   usable `at` is kept when its created_at is (at is never before created_at,
+//   so nothing later is dropped). The kept event with the highest seq decides.
+//   If any kept event lacks a usable seq or at, two share a seq, or at falls
+//   as seq rises, the order is unknown: the job is shown, with reason
+//   `events_order_unknown`, never read as live or superseded. created_at and
+//   id never order these events, and seq and at are compared within one job
+//   only.
 //
 // Switch `quote_option_ops_reader_v1`, missing or unreadable is off. Off, the
 // reads that use this are unchanged apart from reading the switch.
@@ -161,16 +165,45 @@ function eventsAsOf(events: QuoteOptionEvent[], asOf: string) {
   });
 }
 
+// The writer's order stamp, or null when it is missing or not a positive
+// whole number (the writer's own check is '^[1-9][0-9]*$').
+function eventSeq(e: QuoteOptionEvent): number | null {
+  const raw = e.detail_json?.seq;
+  const n = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && /^[1-9][0-9]*$/.test(raw)
+    ? Number(raw)
+    : NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+// The writer's as-of stamp in milliseconds, or null when it is missing or
+// unreadable.
+function eventAt(e: QuoteOptionEvent): number | null {
+  const raw = e.detail_json?.at;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// When the event counts from: its `at`, else its created_at.
+function eventCutoff(e: QuoteOptionEvent): number {
+  return eventAt(e) ?? Date.parse(e.created_at);
+}
+
 function supersessionEventsByJob(
   events: QuoteOptionEvent[],
   asOf: string,
 ): Map<string, QuoteOptionEvent[]> {
+  const asOfMs = Date.parse(asOf);
   const byJob = new Map<string, QuoteOptionEvent[]>();
-  for (const e of eventsAsOf(events, asOf)) {
+  for (const e of events) {
     if (
       e.event_type !== QUOTE_OPTION_SUPERSEDED_EVENT &&
       e.event_type !== QUOTE_OPTION_UNSUPERSEDED_EVENT
     ) continue;
+    const cutoff = eventCutoff(e);
+    if (!Number.isFinite(cutoff) || cutoff > asOfMs) continue;
     const list = byJob.get(e.job_id) || [];
     list.push(e);
     byJob.set(e.job_id, list);
@@ -178,56 +211,33 @@ function supersessionEventsByJob(
   return byJob;
 }
 
-// The events of one job at its newest instant.
-function newestInstant(list: QuoteOptionEvent[]): QuoteOptionEvent[] {
-  const newest = Math.max(...list.map((e) => Date.parse(e.created_at)));
-  return list.filter((e) => Date.parse(e.created_at) === newest);
-}
-
-// The writer's order stamp, or null when it is missing or not a
-// non-negative whole number.
-function eventSeq(e: QuoteOptionEvent): number | null {
-  const raw = e.detail_json?.seq;
-  const n = typeof raw === "number"
-    ? raw
-    : typeof raw === "string" && /^\d+$/.test(raw)
-    ? Number(raw)
-    : NaN;
-  return Number.isSafeInteger(n) && n >= 0 ? n : null;
-}
-
-// The event that decides a job, or "unknown" when its order cannot be known.
-// Every event carrying a distinct seq: the highest seq. Otherwise the newest
-// created_at, unless that instant holds both kinds.
+// The event that decides a job, or "unknown" when its order cannot be known:
+// any event without a usable seq or at, a repeated seq, or at falling as seq
+// rises.
 function lastSupersessionEvent(
   list: QuoteOptionEvent[],
 ): QuoteOptionEvent | "unknown" {
-  const seqs = list.map(eventSeq);
-  if (
-    seqs.every((n) => n !== null) && new Set(seqs).size === seqs.length
-  ) {
-    let best = 0;
-    for (let i = 1; i < list.length; i++) {
-      if ((seqs[i] as number) > (seqs[best] as number)) best = i;
-    }
-    return list[best];
+  const stamped: Array<{ e: QuoteOptionEvent; seq: number; at: number }> = [];
+  for (const e of list) {
+    const seq = eventSeq(e);
+    const at = eventAt(e);
+    if (seq === null || at === null) return "unknown";
+    stamped.push({ e, seq, at });
   }
-  const last = newestInstant(list);
-  if (
-    last.some((e) => e.event_type === QUOTE_OPTION_SUPERSEDED_EVENT) &&
-    last.some((e) => e.event_type === QUOTE_OPTION_UNSUPERSEDED_EVENT)
-  ) return "unknown";
-  return last[last.length - 1];
+  stamped.sort((x, y) => x.seq - y.seq);
+  for (let i = 1; i < stamped.length; i++) {
+    if (stamped[i].seq === stamped[i - 1].seq) return "unknown";
+    if (stamped[i].at < stamped[i - 1].at) return "unknown";
+  }
+  return stamped[stamped.length - 1].e;
 }
 
 function orderUnknown(list: QuoteOptionEvent[]): boolean {
   return lastSupersessionEvent(list) === "unknown";
 }
 
-// The jobs whose newest superseded and unsuperseded events share one instant
-// and do not all carry a seq, as of `asOf`. Event ids are random and
-// created_at is the transaction's now(), so nothing else says which came
-// first.
+// The jobs whose superseded and unsuperseded events, as of `asOf`, cannot be
+// put in order by the writer's seq and at (see lastSupersessionEvent).
 export function supersessionOrderUnknown(
   events: QuoteOptionEvent[],
   asOf: string,
@@ -283,8 +293,10 @@ export function groupPendingReview(
       lastReview = Math.max(lastReview, at);
     }
   }
-  // Written in the same transaction as marks it sits beside (one now()), so
-  // a tie counts as pending.
+  // Review events carry no seq or at (the order contract covers only the two
+  // supersede types), so this check stays on created_at. A review written in
+  // the same transaction as the marks it sits beside shares their now(), so a
+  // tie counts as pending.
   return lastReview > -Infinity && lastReview >= lastSuperseded
     ? "review_needed"
     : null;

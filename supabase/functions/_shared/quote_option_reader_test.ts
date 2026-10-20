@@ -44,8 +44,16 @@ function sEvent(job: string, by: string, group: string, at = T0): Row {
       superseded_by_job_id: by,
       quote_option_group_id: group,
       accepted_status: "accepted",
+      ...stamp(at),
     },
   };
+}
+
+// The writer's order stamps (sq23/event-order 503cd6d): seq rises with time
+// here, and at is the event's own instant. Events at one instant share a seq,
+// which the reader treats as order unknown.
+function stamp(at: string) {
+  return { seq: Date.parse(at), at };
 }
 
 function uEvent(job: string, group: string, at: string): Row {
@@ -54,7 +62,7 @@ function uEvent(job: string, group: string, at: string): Row {
     job_id: job,
     event_type: "quote_option_unsuperseded",
     created_at: at,
-    detail_json: { quote_option_group_id: group },
+    detail_json: { quote_option_group_id: group, ...stamp(at) },
   };
 }
 
@@ -227,7 +235,7 @@ Deno.test("quote options: a superseded event stays open until a later unsupersed
     ev(sEvent(a, id(1), G1, "2026-10-19T03:00:00.000Z")),
   ];
   assertEquals(openSupersessions(again, NOW).has(a), true);
-  // On a tie the unsuperseded event counts as later, whatever the read order.
+  // Two events at one instant share a seq: order unknown, not open.
   const tie = [ev(uEvent(a, G1, T0)), ev(sEvent(a, id(1), G1, T0))];
   assertEquals(openSupersessions(tie, NOW).has(a), false);
   // An event after the reading instant does not count yet.

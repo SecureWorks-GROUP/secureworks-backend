@@ -3,8 +3,9 @@
 // knowable order (CIO finding, 20 Oct 2026). The trigger clears a mark and
 // marks the same job again inside one transaction when an accepted option
 // goes back to quoted while another option is still won, and both events
-// carry that transaction's now(). The reader shows such a job, flagged, and
-// never decides it from the tie.
+// carry that transaction's now(). These events carry no seq or at (legacy
+// shape), so the reader shows such a job, flagged, and never decides it from
+// the tie. Stamped events are in quote_option_reader_seq_test.ts.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   decideQuoteOptionGroups,
@@ -83,26 +84,23 @@ Deno.test("quote options tie: the summary names the order-unknown job", () => {
   assertEquals(summary.quote_options.order_unknown_job_ids, [C]);
 });
 
-Deno.test("quote options tie: distinct instants still decide, and a tie only at an older instant does not count", () => {
-  // Cleared, then marked again a moment later: superseded.
-  const later = [s(C, A, T0), u(C, T1), s(C, B, "2026-10-19T02:00:00.001Z")];
-  assertEquals(supersessionOrderUnknown(later, NOW).size, 0);
-  assertEquals(
-    openSupersessions(later, NOW).get(C)?.created_at,
-    "2026-10-19T02:00:00.001Z",
-  );
-  // Marked, then cleared a moment later: live, no flag.
-  const cleared = [s(C, A, T0), u(C, T1)];
-  assertEquals(supersessionOrderUnknown(cleared, NOW).size, 0);
-  assertEquals(openSupersessions(cleared, NOW).has(C), false);
-  // A tie at T0, then a lone mark at T1: the newest instant decides.
-  const olderTie = [u(C, T0), s(C, A, T0), s(C, B, T1)];
-  assertEquals(supersessionOrderUnknown(olderTie, NOW).size, 0);
-  assertEquals(openSupersessions(olderTie, NOW).has(C), true);
-  // Two marks at one instant are no ambiguity.
-  const twoMarks = [s(C, A, T1), s(C, B, T1)];
-  assertEquals(supersessionOrderUnknown(twoMarks, NOW).size, 0);
-  assertEquals(openSupersessions(twoMarks, NOW).has(C), true);
+Deno.test("quote options tie: without seq and at, distinct instants are order unknown too", () => {
+  // CIO C2: an event with no usable seq or at answers unknown for its job,
+  // tie or not. created_at never decides.
+  const shapes = [
+    [s(C, A, T0), u(C, T1), s(C, B, "2026-10-19T02:00:00.001Z")],
+    [s(C, A, T0), u(C, T1)],
+    [u(C, T0), s(C, A, T0), s(C, B, T1)],
+    [s(C, A, T1), s(C, B, T1)],
+    [s(C, A, T0)],
+  ];
+  for (const events of shapes) {
+    assertEquals([...supersessionOrderUnknown(events, NOW)], [C]);
+    assertEquals(openSupersessions(events, NOW).has(C), false);
+    const d = decideQuoteOptionGroups(new Map([[G, members]]), events, NOW)
+      .get(C);
+    assertEquals([d?.state, d?.reason], ["live", "events_order_unknown"]);
+  }
 });
 
 Deno.test("quote options tie: no flag when the job has moved on or the switch read failed", () => {

@@ -160,6 +160,8 @@ function rowsFor(flagOn: boolean): Rows {
           detail_json: {
             superseded_by_job_id: ACCEPTED_OPTION,
             quote_option_group_id: ACCEPTED_OPTION,
+            seq: 1,
+            at: daysAgo(1),
           },
         }]
         : [];
