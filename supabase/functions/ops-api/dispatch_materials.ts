@@ -408,6 +408,53 @@ export function cleanDispatchSketch(
 
 // ── The scope suggestion ────────────────────────────────────────────────────
 
+// The patio tool writes its quote's own material list into the scope
+// (`_pricing_json.line_items`), and a frozen revision carries it. That list is
+// the order: the config extractor sees only the roof, posts and one beam, so
+// it under-orders (SWP-261283: 4 lines against the quote's 23). Only the
+// description, quantity and unit are read; a price, cost or total is never
+// read into a line. Labour is not a material. Null when the scope carries no
+// such list, so the caller falls back to the extractor.
+//
+// The quote prices sheets and gutters by the metre, beams by the stock length
+// and posts by what is cut from stock, while its quantity counts pieces, so
+// those pricing units are dropped: "44" sheets must never read as 44 metres.
+// Staff set the unit when they review the line.
+const PATIO_QUOTE_PRICING_UNITS = new Set(["lm", "nested", "stock"]);
+
+export function patioQuoteMaterialItems(
+  scope: unknown,
+): { description: unknown; quantity: unknown; unit: unknown }[] | null {
+  if (!scope || typeof scope !== "object") return null;
+  let pricing: any = (scope as any)._pricing_json;
+  if (typeof pricing === "string") {
+    try {
+      pricing = JSON.parse(pricing);
+    } catch {
+      return null;
+    }
+  }
+  const items = pricing?.line_items;
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const out: { description: unknown; quantity: unknown; unit: unknown }[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const category = typeof item.category === "string"
+      ? item.category.trim().toLowerCase()
+      : "";
+    const unit = typeof item.unit === "string"
+      ? item.unit.trim().toLowerCase()
+      : "";
+    if (category === "labour" || unit === "hrs") continue;
+    out.push({
+      description: item.description,
+      quantity: item.quantity,
+      unit: PATIO_QUOTE_PRICING_UNITS.has(unit) ? null : item.unit,
+    });
+  }
+  return out;
+}
+
 // extractMaterialsFromScope writes its descriptions with a long dash and a
 // multiplication sign. A material line takes a comma and an `x` instead.
 export function cleanSuggestedDescription(value: unknown): string {

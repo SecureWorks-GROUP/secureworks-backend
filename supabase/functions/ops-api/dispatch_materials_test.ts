@@ -20,6 +20,7 @@ import {
   dispatchMaterialCountsByJob,
   dispatchMaterialDisplayStatus,
   flattenDispatchOrderLine,
+  patioQuoteMaterialItems,
 } from "./dispatch_materials.ts";
 import {
   DISPATCH_MATERIALS_ACTIONS,
@@ -1828,6 +1829,164 @@ Deno.test("suggest patio: no live scope, or a failed live read, says the change 
     assertEquals(answer.added, 4, mode);
     assertEquals(answer.held, [FENCE_SCOPE_CHANGE_UNCHECKED], mode);
   }
+});
+
+// A patio tool scope carries its quote under `_pricing_json`. Shaped like the
+// SWP-261283 frozen revision (made-up quantities): labour and every price are
+// left out, and a pricing basis unit (LM, nested, stock) is never a quantity's
+// unit, because 44 sheets priced by the metre is not 44 metres.
+const PATIO_QUOTE_SCOPE = {
+  ...PATIO_SCOPE,
+  _pricing_json: {
+    line_items: [
+      {
+        description: "Posts 90x90x2",
+        quantity: 4,
+        unit: "nested",
+        category: "steel",
+        cost_price: 40,
+        sell_price: 60,
+        total_cost: 160,
+        total_sell: 240,
+        supplier_name: null,
+      },
+      {
+        description: "SpanPlus 330 Sheets — last sheet cut",
+        quantity: 44,
+        unit: "LM",
+        category: "roofing",
+        cost_price: 22,
+        sell_price: 33,
+        total_cost: 4743.2,
+        total_sell: 7114.8,
+        supplier_name: "Bondor",
+      },
+      {
+        description: "Riser Beam 100×50×2",
+        quantity: 1,
+        unit: "stock",
+        category: "steel",
+        cost_price: 90,
+        total_cost: 90,
+      },
+      {
+        description: "Downpipe Clips 95x45mm",
+        quantity: 4,
+        unit: "",
+        category: "rainwater",
+        cost_price: 3,
+        total_cost: 12,
+      },
+      {
+        description: "Fixings (screws, anchors)",
+        quantity: 68.9,
+        unit: "sqm",
+        category: "fixings",
+        cost_price: 2,
+        total_cost: 137.8,
+      },
+      {
+        description: "Labour",
+        quantity: 64,
+        unit: "hrs",
+        category: "labour",
+        cost_price: 70,
+        total_cost: 4480,
+      },
+    ],
+  },
+};
+
+Deno.test("patio quote items: labour dropped, no price kept, pricing units cleared", () => {
+  assertEquals(patioQuoteMaterialItems(PATIO_QUOTE_SCOPE), [
+    { description: "Posts 90x90x2", quantity: 4, unit: null },
+    {
+      description: "SpanPlus 330 Sheets — last sheet cut",
+      quantity: 44,
+      unit: null,
+    },
+    { description: "Riser Beam 100×50×2", quantity: 1, unit: null },
+    { description: "Downpipe Clips 95x45mm", quantity: 4, unit: "" },
+    { description: "Fixings (screws, anchors)", quantity: 68.9, unit: "sqm" },
+  ]);
+  // A quote stored as a JSON string reads the same.
+  assertEquals(
+    patioQuoteMaterialItems({
+      _pricing_json: JSON.stringify(PATIO_QUOTE_SCOPE._pricing_json),
+    })?.length,
+    5,
+  );
+  // No quote list: null, so the caller falls back to the scope extractor.
+  assertEquals(patioQuoteMaterialItems(PATIO_SCOPE), null);
+  assertEquals(
+    patioQuoteMaterialItems({ _pricing_json: { line_items: [] } }),
+    null,
+  );
+  assertEquals(patioQuoteMaterialItems({ _pricing_json: "not json" }), null);
+  assertEquals(patioQuoteMaterialItems(null), null);
+});
+
+Deno.test("suggest patio: a frozen quote list gives every material line, with no price and no labour", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: PATIO_QUOTE_SCOPE } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_QUOTE_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 5);
+  assertEquals(
+    answer.lines.map((l: Row) => [l.description, l.quantity, l.unit, l.status]),
+    [
+      ["Posts 90x90x2", 4, null, "not_reviewed"],
+      ["SpanPlus 330 Sheets, last sheet cut", 44, null, "not_reviewed"],
+      ["Riser Beam 100x50x2", 1, null, "not_reviewed"],
+      ["Downpipe Clips 95x45mm", 4, null, "not_reviewed"],
+      ["Fixings (screws, anchors)", 68.9, "sqm", "not_reviewed"],
+    ],
+  );
+  assertEquals(answer.held, []);
+  for (const stored of db.tables.job_material_lines) {
+    assert(!("unit_price" in stored) && !("notes" in stored));
+    assert(!/Labour/.test(stored.description));
+  }
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("suggest patio: a live quote list edited after the freeze is warned on", async () => {
+  const initial = seed();
+  const edited = structuredClone(PATIO_QUOTE_SCOPE);
+  edited._pricing_json.line_items[1].quantity = 46;
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: edited } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_QUOTE_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 5);
+  assertEquals(
+    answer.lines.find((l: Row) => /SpanPlus/.test(l.description)).quantity,
+    44,
+  );
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
 });
 
 Deno.test("suggest patio: no frozen revision is 409 no_frozen_scope, even with a live scope; nothing written", async () => {

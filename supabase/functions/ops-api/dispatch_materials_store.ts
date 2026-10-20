@@ -38,6 +38,7 @@ import {
   dispatchMaterialCounts,
   dispatchSuggestedLines,
   isDispatchUuid,
+  patioQuoteMaterialItems,
   projectDispatchMaterialLine,
   projectDispatchMaterialLineOnOrder,
   projectDispatchMaterialSupplier,
@@ -1005,10 +1006,11 @@ async function readFrozenFenceOffer(
   };
 }
 
-// A patio's frozen revision holds the same scoper JSON as jobs.scope_json, so
-// the patio extractor runs on it unchanged. Its pricing is never passed: with
-// null pricing the extractor's quote-lines fallback cannot run, so a
-// customer's quote line and its price can never become a material line.
+// A patio's frozen revision holds the same scoper JSON as jobs.scope_json.
+// The lines come from the quote's own material list in it
+// (patioQuoteMaterialItems: description, quantity and unit, never a price),
+// and only a scope without that list falls back to the config extractor, run
+// with null pricing so jobs.pricing_json can never become a material line.
 async function readFrozenPatioOffer(
   client: any,
   jobId: string,
@@ -1025,7 +1027,8 @@ async function readFrozenPatioOffer(
   }
   let items: any[];
   try {
-    items = ctx.extractMaterialsFromScope(scope, null);
+    items = patioQuoteMaterialItems(scope) ??
+      ctx.extractMaterialsFromScope(scope, null);
   } catch (error) {
     console.error("[dispatch_materials] scope could not be read:", error);
     throw new DispatchMaterialsError(
@@ -1046,7 +1049,8 @@ async function readFrozenPatioOffer(
 // The patio twin of the fence warning: the live working copy can be edited
 // after the last freeze (a patio was re-frozen days later on 19 Oct 2026). The
 // lines still come from the frozen revision. One single-job read of the live
-// scope, run through the same extractor with null pricing, and compared as
+// scope, read the same way (its quote's material list, else the extractor
+// with null pricing), and compared as
 // lines: a changed photo or note is not a changed order. A failed read, no
 // live scope, or a live scope the extractor cannot read says it could not be
 // checked, never that nothing changed.
@@ -1073,7 +1077,8 @@ async function patioScopeChangeHeld(
   let liveLines: DispatchSuggestedLine[];
   try {
     liveLines = dispatchSuggestedLines(
-      ctx.extractMaterialsFromScope(liveScope, null),
+      patioQuoteMaterialItems(liveScope) ??
+        ctx.extractMaterialsFromScope(liveScope, null),
     );
   } catch {
     return [FENCE_SCOPE_CHANGE_UNCHECKED];
