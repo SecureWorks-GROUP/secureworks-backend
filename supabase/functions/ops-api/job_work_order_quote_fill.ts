@@ -15,7 +15,7 @@
 //   labour figure. When the quote has none, agreed_labour_ex stays empty for
 //   the approver to set.
 // - The same write names the frozen scope revision the lines came from
-//   (quote_filled_scope_revision_id, set once, 20261020120000).
+//   (quote_filled_scope_revision_id, 20261020120000).
 // - The same write stamps quote_filled_at, which marks the draft as the
 //   fill's own: only such a draft, never edited since (hand_edited_at, set by
 //   the database), is issued automatically (job_work_orders.ts,
@@ -428,8 +428,9 @@ export async function fillJobWorkOrderDraftFromQuote(
     patch.quote_filled_at = new Date().toISOString();
   }
   // The revision the lines came from, on the row itself (Dispatch S6, R7;
-  // 20261020120000): set once, also on a draft edited by hand, since its
-  // lines still come from this revision.
+  // 20261020120000): also on a draft edited by hand, since its lines still
+  // come from this revision. A refill of a cleared draft may name a newer
+  // revision; the database allows the change only from a cleared draft.
   if (quote.scope_revision_id && UUID_RE.test(quote.scope_revision_id)) {
     patch.quote_filled_scope_revision_id = quote.scope_revision_id;
   }

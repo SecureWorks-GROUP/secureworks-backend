@@ -9,10 +9,13 @@
 -- work_orders.quote_filled_scope_revision_id:
 --   - only on a job work order (kind 'job'); null on every other kind;
 --   - null on insert: a new draft is not the fill's;
---   - set once, from null, while the work order is a draft, to a frozen (or
+--   - set by the fill, while the work order is a draft, to a frozen (or
 --     since superseded) revision of the same job, never a draft revision;
---   - never changed or cleared afterwards (a draft a person rewrites still
---     names the revision it was filled from);
+--   - never cleared, and never changed while the draft holds lines or agreed
+--     labour (a draft a person rewrites still names the revision it was
+--     filled from). The one change allowed is a refill: a draft whose lines
+--     and agreed labour were both cleared is untouched again, and the quote
+--     fill may fill it from a newer revision (V, PR 1100 F1);
 --   - setting it is not a hand edit (hand_edited_at is unchanged), and it is
 --     not part of the sealed content hash (approval is unchanged); once the
 --     work order is approved the existing seal refuses any change to it.
@@ -31,7 +34,7 @@ ALTER TABLE public.work_orders
     REFERENCES public.scope_revisions(id) ON DELETE RESTRICT;
 
 COMMENT ON COLUMN public.work_orders.quote_filled_scope_revision_id IS
-  'Job work orders only: the frozen scope revision the quote fill copied the lines from. Set once while a draft, never changed. Null when not filled from a quote, or filled before 20261020120000 (then the fill event names it).';
+  'Job work orders only: the frozen scope revision the quote fill copied the lines from. Set by the fill while a draft; changes only when a cleared draft is refilled; never cleared. Null when not filled from a quote, or filled before 20261020120000 (then the fill event names it).';
 
 ALTER TABLE public.work_orders
   DROP CONSTRAINT IF EXISTS work_orders_fill_revision_job_kind;
@@ -61,8 +64,17 @@ BEGIN
   IF NEW.quote_filled_scope_revision_id IS NOT DISTINCT FROM OLD.quote_filled_scope_revision_id THEN
     RETURN NEW;
   END IF;
-  IF OLD.quote_filled_scope_revision_id IS NOT NULL THEN
-    RAISE EXCEPTION 'a job work order''s fill revision is set once and never changed'
+  IF NEW.quote_filled_scope_revision_id IS NULL THEN
+    RAISE EXCEPTION 'a job work order''s fill revision is never cleared'
+      USING ERRCODE = '23514';
+  END IF;
+  -- A change is a refill: only from a cleared draft (no lines, no agreed
+  -- labour), the state jobWorkOrderDraftIsUntouched treats as untouched.
+  IF OLD.quote_filled_scope_revision_id IS NOT NULL AND NOT (
+    OLD.agreed_labour_ex IS NULL
+    AND COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(OLD.scope_items) = 'array' THEN OLD.scope_items END), 0) = 0
+  ) THEN
+    RAISE EXCEPTION 'a job work order''s fill revision changes only when a cleared draft is refilled'
       USING ERRCODE = '23514';
   END IF;
   IF OLD.status IS DISTINCT FROM 'draft' OR NEW.status IS DISTINCT FROM 'draft' THEN

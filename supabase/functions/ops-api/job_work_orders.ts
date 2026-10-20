@@ -1410,8 +1410,10 @@ export type JobWorkOrderFilledFrom = {
   scope_revision_id: string | null;
   /** work_order: the row's own column (20261020120000); fill_event: the
    *  newest job_work_order_draft_filled_from_quote event for this work order
-   *  (fills before that migration); null: not filled from a quote, or the
-   *  event read failed (unreadable true). */
+   *  (fills before that migration); null: not filled from a quote, or not
+   *  known (unreadable true: the event read failed, or the draft carries
+   *  quote_filled_at but no fill event names it, since a fill stands even
+   *  when its event could not be written). */
   source: "work_order" | "fill_event" | null;
   unreadable: boolean;
 };
@@ -1421,7 +1423,11 @@ export type JobWorkOrderFilledFrom = {
  *  `events` null means the event read failed, which is unknown, never "not
  *  filled". */
 export function jobWorkOrderFilledFrom(
-  wo: { id?: string | null; quote_filled_scope_revision_id?: string | null } | null,
+  wo: {
+    id?: string | null;
+    quote_filled_scope_revision_id?: string | null;
+    quote_filled_at?: string | null;
+  } | null,
   events: Array<{ detail_json?: any; created_at?: string | null }> | null,
 ): JobWorkOrderFilledFrom {
   if (!wo) return { scope_revision_id: null, source: null, unreadable: false };
@@ -1445,7 +1451,11 @@ export function jobWorkOrderFilledFrom(
       String(b.created_at || "").localeCompare(String(a.created_at || ""))
     );
   if (!mine.length) {
-    return { scope_revision_id: null, source: null, unreadable: false };
+    return {
+      scope_revision_id: null,
+      source: null,
+      unreadable: !!wo.quote_filled_at,
+    };
   }
   return {
     scope_revision_id: mine[0].detail_json.scope_revision_id,
@@ -1454,17 +1464,21 @@ export function jobWorkOrderFilledFrom(
   };
 }
 
+// The newest fill event for this work order only, matched in the query, so
+// no count of other events can push it out.
 async function readFillEvents(
   client: any,
   jobId: string,
+  workOrderId: string,
 ): Promise<Array<{ detail_json?: any; created_at?: string | null }> | null> {
   const { data, error } = await client
     .from("job_events")
     .select("detail_json, created_at")
     .eq("job_id", jobId)
     .eq("event_type", "job_work_order_draft_filled_from_quote")
+    .eq("detail_json->>work_order_id", workOrderId)
     .order("created_at", { ascending: false })
-    .limit(50);
+    .limit(1);
   if (error) {
     console.error(
       "[ops-api] job work order: fill events not read:",
@@ -1530,7 +1544,7 @@ export async function readJobWorkOrder(
   const filledFrom = jobWorkOrderFilledFrom(
     shown,
     shown && !shown.quote_filled_scope_revision_id
-      ? await readFillEvents(client, job.id)
+      ? await readFillEvents(client, job.id, shown.id)
       : [],
   );
   const linked = lines.filter((l) => l.work_order_id);

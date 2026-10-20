@@ -1,8 +1,9 @@
 -- Contract for 20261020120000_job_work_order_fill_revision.sql: a job work
 -- order names, on its own row, the frozen scope revision it was filled from.
--- Set once while a draft, only to a non-draft revision of its own job, never
--- changed, not a hand edit, not part of the seal; null on insert and on
--- every other kind.
+-- Set by the fill while a draft, only to a non-draft revision of its own job;
+-- never cleared; changed only when a cleared draft is refilled (V, PR 1100
+-- F1); not a hand edit, not part of the seal; null on insert and on every
+-- other kind.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -59,7 +60,7 @@ BEGIN
     RAISE EXCEPTION 'fill revision contract: storing the revision read as a hand edit';
   END IF;
 
-  -- 4. Set once: changing or clearing it is refused, even to another valid revision.
+  -- 4. On a filled draft, changing or clearing it is refused, even to another valid revision.
   BEGIN
     UPDATE public.work_orders SET quote_filled_scope_revision_id = v_rev_old WHERE id = v_wo;
     RAISE EXCEPTION 'fill revision contract: the revision was changed';
@@ -75,6 +76,30 @@ BEGIN
   UPDATE public.work_orders SET special_instructions = 'Gate on the left' WHERE id = v_wo;
   IF (SELECT quote_filled_scope_revision_id FROM public.work_orders WHERE id = v_wo) IS DISTINCT FROM v_rev THEN
     RAISE EXCEPTION 'fill revision contract: a hand edit lost the revision';
+  END IF;
+
+  -- 5b. Lines cleared but agreed labour kept is not a cleared draft: no change.
+  UPDATE public.work_orders SET scope_items = '[]' WHERE id = v_wo;
+  BEGIN
+    UPDATE public.work_orders SET quote_filled_scope_revision_id = v_rev_old WHERE id = v_wo;
+    RAISE EXCEPTION 'fill revision contract: the revision changed on a draft that still holds agreed labour';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
+  -- 5c. A cleared draft (no lines, no agreed labour) is refilled from another
+  --     revision in one write; clearing the revision is still refused.
+  UPDATE public.work_orders SET agreed_labour_ex = NULL WHERE id = v_wo;
+  BEGIN
+    UPDATE public.work_orders SET quote_filled_scope_revision_id = NULL WHERE id = v_wo;
+    RAISE EXCEPTION 'fill revision contract: the revision was cleared on a cleared draft';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  UPDATE public.work_orders
+    SET scope_items = '[{"description":"Install","qty":18,"unit":"m","source":"quote"}]',
+        agreed_labour_ex = 720, quote_filled_scope_revision_id = v_rev_old
+    WHERE id = v_wo;
+  IF (SELECT quote_filled_scope_revision_id FROM public.work_orders WHERE id = v_wo) IS DISTINCT FROM v_rev_old THEN
+    RAISE EXCEPTION 'fill revision contract: a cleared draft could not be refilled from another revision';
   END IF;
 
   -- 6. The seal hash ignores it: the hash equals the hash built from the sealed content alone.

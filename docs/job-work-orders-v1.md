@@ -522,13 +522,17 @@ Rules, line shape and flags: `docs/quote-work-order-lines-v1.md`.
 
 The fill also stores the frozen scope revision the lines came from on the row,
 `work_orders.quote_filled_scope_revision_id` (`20261020120000`, Dispatch S6,
-R7), in the same write. A trigger sets it once, only while a draft, only to a
-frozen or superseded revision of the same job, never changes or clears it, and
-never counts it as a hand edit or part of the sealed content hash. It is null
+R7), in the same write. A trigger allows it only while a draft, only to a
+frozen or superseded revision of the same job, never clears it, and changes it
+only when a cleared draft (no lines, no agreed labour) is refilled, possibly
+from a newer revision. It is never a hand edit or part of the sealed content
+hash. It is null
 on crew work orders and on job work orders filled before that migration (no
 backfill: it would move a draft's `updated_at`, and approved rows are sealed).
 The staff read's `filled_from` answers from the column first, else the newest
-`job_work_order_draft_filled_from_quote` event for that work order.
+`job_work_order_draft_filled_from_quote` event for that work order; a draft
+stamped `quote_filled_at` with neither reads as unknown (`unreadable: true`),
+since a fill stands even when its event could not be written.
 
 ## API for the screens
 
