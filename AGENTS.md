@@ -4603,6 +4603,20 @@ by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
 - Apply `20261008170000_debt_workshop.sql` and `20261015170000_debt_ws_report.sql` before
   deploying the matching `ops-api`.
 
+## Our Xero Copy Says Deleted Only When Xero Does
+
+`xero_invoices` is a copy of Xero. Never write `status` VOIDED, DELETED or PAID, or an
+`amount_due` of 0, from a guess (the status asked for, a failed read, a 404 that was
+really a timeout). Until #797 (10 Sep 2026) the stale check marked any invoice whose
+read failed as DELETED with nothing owing, and five invoices open in Xero stayed that
+way until 20 Oct 2026 because nothing re-read them. Copy only a record Xero returned for
+that exact InvoiceID (`reconcileXeroInvoice`, `xero_void_mirror.ts`). The hourly mirror
+check (`xero-sync/xero_mirror_check.ts`, table `xero_mirror_checks`) compares the copy's
+open invoices with Xero's open list and heals only where Xero says money is owed; it never
+zeroes an amount, because `fn_payment_detected` turns any amount_due drop to 0 into an
+`invoice.paid` event that stops chasing and thanks the client. The Debt tab's "Total owed
+to us" and its "Matches Xero" line read it (`docs/debt-workshop/README.md`).
+
 ## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
 
 Since `20261012130000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
