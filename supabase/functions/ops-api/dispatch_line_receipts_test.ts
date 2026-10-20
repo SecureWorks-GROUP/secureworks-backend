@@ -3,7 +3,7 @@
 // the rules in dispatch_line_receipts.ts, the two receipt writes in
 // dispatch_deliveries_store.ts and the wider dispatch_materials read, against
 // an in-memory stand-in for PostgREST that keeps the migration's guards
-// (20261020150000_dispatch_line_receipts.sql). Job numbers, suppliers and
+// (20261020180000_dispatch_line_receipts.sql). Job numbers, suppliers and
 // people here are made up.
 import {
   assert,

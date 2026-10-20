@@ -1,4 +1,4 @@
--- Rollback contract: 20261020150000_dispatch_line_receipts. The down drops the receipts table, both
+-- Rollback contract: 20261020180000_dispatch_line_receipts. The down drops the receipts table, both
 -- trigger functions, the line stamp trigger and the stamp column, and leaves job_material_lines and
 -- every slice 4 to 6 column in place.
 \set ON_ERROR_STOP on

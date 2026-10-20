@@ -413,13 +413,11 @@ Deno.test("the review text makes no payment claim and signs SecureWorks for othe
   }
 });
 
-Deno.test("sender mode: live needs the env switch too, otherwise it is a dry run", () => {
-  assertEquals(effectiveSenderMode("live", "true"), "live");
-  assertEquals(effectiveSenderMode("live", undefined), "dry_run");
-  assertEquals(effectiveSenderMode("live", "TRUE"), "dry_run");
-  assertEquals(effectiveSenderMode("dry_run", "true"), "dry_run");
-  assertEquals(effectiveSenderMode("off", "true"), "off");
-  assertEquals(effectiveSenderMode("garbage", "true"), "off");
+Deno.test("sender mode: the settings row alone decides; live is live", () => {
+  assertEquals(effectiveSenderMode("live"), "live");
+  assertEquals(effectiveSenderMode("dry_run"), "dry_run");
+  assertEquals(effectiveSenderMode("off"), "off");
+  assertEquals(effectiveSenderMode("garbage"), "off");
 });
 
 Deno.test("quote side: whole-job total wins, then the headline; only agreed variations add, inc GST", () => {
@@ -707,8 +705,18 @@ Deno.test("dry run: one would-send log per job, no claim, no text", async () => 
   assertEquals(db.rows("job_review_claims").length, 0);
 });
 
-Deno.test("live in the settings row but not in the env is still a dry run", async () => {
+Deno.test("live in the settings row sends with the env unset: the database switch alone decides", async () => {
   const { db, deps, sms } = setup({ sender: "live", envLive: false });
+  const job = reviewJob(db);
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "sent",
+  );
+  assertEquals(sms.length, 1);
+});
+
+Deno.test("dry_run never sends, even with the old env set", async () => {
+  const { db, deps, sms } = setup({ sender: "dry_run", envLive: true });
   const job = reviewJob(db);
   assertEquals(
     (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,

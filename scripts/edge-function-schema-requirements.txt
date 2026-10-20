@@ -842,14 +842,19 @@ ops-api|supabase/migrations/20261016160000_job_dispatch_install_for_day_comment.
 ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out
 ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_at
 ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_by
+# The invoice mirror check: xero-sync writes a row every hour; ops-api reads the newest
+# for the Debt tab's "Matches Xero" line and the debt report.
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
+ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 
-# 20261020150000 is Dispatch S5's partial deliveries: dispatch_materials, the
+# 20261020180000 is Dispatch S5's partial deliveries: dispatch_materials, the
 # slice 6 delivery writes' answers and pipeline dispatch=1 read the receipts
 # table and the lines' attach stamp, and dispatch_delivery_record_receipt /
 # dispatch_delivery_void_receipt write the receipts, so ops-api must not deploy
 # ahead of it.
-ops-api|supabase/migrations/20261020150000_dispatch_line_receipts.sql|table|job_material_line_receipts
-ops-api|supabase/migrations/20261020150000_dispatch_line_receipts.sql|column|job_material_line_receipts.voided_at
-ops-api|supabase/migrations/20261020150000_dispatch_line_receipts.sql|column|job_material_lines.purchase_order_attached_at
-ops-api|supabase/migrations/20261020150000_dispatch_line_receipts.sql|trigger|job_material_lines.trg_job_material_lines_po_attached
-ops-api|supabase/migrations/20261020150000_dispatch_line_receipts.sql|trigger|job_material_line_receipts.trg_job_material_line_receipts_guard
+ops-api|supabase/migrations/20261020180000_dispatch_line_receipts.sql|table|job_material_line_receipts
+ops-api|supabase/migrations/20261020180000_dispatch_line_receipts.sql|column|job_material_line_receipts.voided_at
+ops-api|supabase/migrations/20261020180000_dispatch_line_receipts.sql|column|job_material_lines.purchase_order_attached_at
+ops-api|supabase/migrations/20261020180000_dispatch_line_receipts.sql|trigger|job_material_lines.trg_job_material_lines_po_attached
+ops-api|supabase/migrations/20261020180000_dispatch_line_receipts.sql|trigger|job_material_line_receipts.trg_job_material_line_receipts_guard

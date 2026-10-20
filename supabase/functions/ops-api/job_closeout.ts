@@ -38,7 +38,7 @@
 //
 // Switches, all off at deploy (migration 20261013150000_job_closeout_review_archive.sql):
 // job_closeout_settings.get_review_move_enabled, job_closeout_settings.review_sender_mode
-// (off | dry_run | live, and live needs env JOB_REVIEW_SENDING_ENABLED=true) and the
+// (off | dry_run | live; the database switch alone decides, Captain 20 Oct 2026) and the
 // closeout automation lane for the sweep. Builder, insurance, make-safe and repair jobs are
 // never touched here.
 
@@ -195,19 +195,16 @@ const text = (v: unknown): string => String(v ?? "").trim();
 
 // ── Switches ─────────────────────────────────────────────────────────────────
 
-export function effectiveSenderMode(
-  configured: unknown,
-  envValue: string | undefined,
-): ReviewSenderMode {
+export function effectiveSenderMode(configured: unknown): ReviewSenderMode {
   const mode = text(configured);
-  if (mode === "live") return envValue === "true" ? "live" : "dry_run";
+  if (mode === "live") return "live";
   if (mode === "dry_run") return "dry_run";
   return "off";
 }
 
 /** Fails closed: an unreadable row is every switch off. */
 export async function readCloseoutSwitches(
-  deps: Pick<JobCloseoutDeps, "client" | "env">,
+  deps: Pick<JobCloseoutDeps, "client">,
 ): Promise<CloseoutSwitches> {
   try {
     const { data, error } = await deps.client.from("job_closeout_settings")
@@ -229,10 +226,7 @@ export async function readCloseoutSwitches(
       : "off";
     return {
       move_enabled: data.get_review_move_enabled === true,
-      sender_mode: effectiveSenderMode(
-        configured,
-        deps.env("JOB_REVIEW_SENDING_ENABLED"),
-      ),
+      sender_mode: effectiveSenderMode(configured),
       sender_configured_mode: configured,
       read_ok: true,
     };

@@ -1,4 +1,4 @@
--- Contract: 20261020150000_dispatch_line_receipts. The receipts table sits where no browser role can
+-- Contract: 20261020180000_dispatch_line_receipts. The receipts table sits where no browser role can
 -- read or write it and the service role cannot delete from it; a receipt is positive, dated no later
 -- than today in Perth, on its line's job and its line's current order; rows are append-only (the one
 -- change is a void, once, naming a person; never a delete); a line with a receipt cannot be deleted;
@@ -212,7 +212,7 @@ VALUES ('9f500000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-0000000
         '9f200000-0000-4000-8000-000000000001', 18, (now() AT TIME ZONE 'Australia/Perth')::date, 'First part',
         '9f400000-0000-4000-8000-000000000001', 'person@example.test');
 \set ON_ERROR_STOP off
-\ir ../../../rollbacks/20261020150000_dispatch_line_receipts_down.sql
+\ir ../../../rollbacks/20261020180000_dispatch_line_receipts_down.sql
 \set ON_ERROR_STOP on
 DO $$
 BEGIN

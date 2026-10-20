@@ -21,7 +21,7 @@ import {
 } from "./dispatch_deliveries.ts";
 
 // The receipt columns the read and the writes take. Verified against this
-// slice's own migration (20261020150000_dispatch_line_receipts.sql).
+// slice's own migration (20261020180000_dispatch_line_receipts.sql).
 export const DISPATCH_LINE_RECEIPT_SELECT =
   "id, org_id, job_id, line_id, purchase_order_id, quantity, received_on, note, created_at, created_by, created_by_email, voided_at, voided_by, voided_by_email";
 

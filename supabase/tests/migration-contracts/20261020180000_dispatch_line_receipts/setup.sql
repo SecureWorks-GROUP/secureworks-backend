@@ -1,4 +1,4 @@
--- Prerequisites for 20261020150000_dispatch_line_receipts. Earlier registered cases create
+-- Prerequisites for 20261020180000_dispatch_line_receipts. Earlier registered cases create
 -- public.jobs, public.users, public.suppliers, public.purchase_orders, the three slice 4 Dispatch
 -- tables (job_material_lines among them) and the API roles. Nothing is added here.
 DO $$

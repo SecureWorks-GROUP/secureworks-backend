@@ -12,7 +12,7 @@ other 24 the next week. Slice 6 only knows "sighted" for a whole order. S5
 records what arrived per material line, in as many parts as it came.
 
 - One row per part delivery: `job_material_line_receipts` (migration
-  `20261020150000_dispatch_line_receipts.sql`). Append-only. Undo is a void,
+  `20261020180000_dispatch_line_receipts.sql`). Append-only. Undo is a void,
   never an edit or a delete.
 - A line's delivery state is worked out on read, never stored:
   `delivered`, `part_delivered`, or `on_po`.
@@ -154,8 +154,8 @@ read, so their summary also carries the three S5 fields.
     anon and authenticated; service_role gets SELECT, INSERT and UPDATE.
 - `job_material_lines.purchase_order_attached_at` and its trigger, as above.
 
-Contract case: `supabase/tests/migration-contracts/20261020150000_dispatch_line_receipts/`.
-Rollback: `supabase/rollbacks/20261020150000_dispatch_line_receipts_down.sql`.
+Contract case: `supabase/tests/migration-contracts/20261020180000_dispatch_line_receipts/`.
+Rollback: `supabase/rollbacks/20261020180000_dispatch_line_receipts_down.sql`.
 Apply the migration before the matching ops-api (it is in
 `scripts/edge-function-schema-requirements.txt`).
 

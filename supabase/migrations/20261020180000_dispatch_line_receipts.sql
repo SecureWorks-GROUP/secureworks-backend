@@ -25,7 +25,7 @@
 -- Row security on with no policy, revoked from the browser roles (TRUNCATE
 -- included), as the other Dispatch private tables are: only ops-api reaches it.
 --
--- Rollback: supabase/rollbacks/20261020150000_dispatch_line_receipts_down.sql.
+-- Rollback: supabase/rollbacks/20261020180000_dispatch_line_receipts_down.sql.
 
 -- 2. The stamp.
 ALTER TABLE public.job_material_lines
