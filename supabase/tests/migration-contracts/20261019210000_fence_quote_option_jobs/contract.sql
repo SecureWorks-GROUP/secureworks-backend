@@ -349,6 +349,14 @@ SELECT pg_temp.qo_assert((SELECT superseded_by_job_id = '9c000000-0000-4000-8000
 UPDATE public.jobs SET status = 'quoted' WHERE id = '9c000000-0000-4000-8000-0000000000a1';
 SELECT pg_temp.qo_assert((SELECT superseded_at IS NULL FROM public.jobs WHERE id = '9c000000-0000-4000-8000-0000000000a2'),
  'the reversal must clear H2 even with the run insert failing');
+-- Insert guard tradeoff, reversal side: with no run record, the helpers' events are still
+-- accepted (the guard does not require the run row), so the reversal is applied, not left half
+-- undone. H2 carries its unsuperseded event with a seq and an at.
+SELECT pg_temp.qo_assert((SELECT count(*) >= 1
+   AND count(*) FILTER (WHERE NOT (coalesce(detail_json->>'seq' ~ '^[1-9][0-9]*$', false) AND detail_json ? 'at')) = 0
+  FROM public.job_events
+  WHERE job_id = '9c000000-0000-4000-8000-0000000000a2' AND event_type = 'quote_option_unsuperseded'),
+ 'with the run insert failing, the reversal''s event must still be written, with its seq and at');
 -- b.
 CREATE FUNCTION public.qo_contract_fail_h2() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'contract forced mark failure'; END $$;
@@ -727,6 +735,52 @@ SELECT pg_temp.qo_assert(NOT EXISTS (SELECT 1 FROM public.jobs WHERE id = '9c000
  AND pg_temp.qo_events('9c000000-0000-4000-8000-0000000009c1', 'quote_option_superseded') = 1,
  'deleting a job must cascade its supersede events through the guard and leave other jobs'' events');
 ROLLBACK TO SAVEPOINT qo_cascade;
+-- Insert guard tradeoff, forgery side: only the supersede trigger's helpers write these events.
+CREATE FUNCTION pg_temp.qo_forged(p_sql text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+ EXECUTE p_sql;
+ RETURN false;
+EXCEPTION WHEN insufficient_privilege THEN
+ RETURN SQLERRM = 'quote_option_event_not_from_writer';
+END $$;
+CREATE TEMP TABLE qo_b9_event_count AS
+ SELECT count(*) AS n FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1';
+-- The strongest direct forgery: this session's current seq and a time inside the transaction.
+SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$
+ INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES ('9c000000-0000-4000-8000-0000000009b1',
+  'quote_option_unsuperseded', jsonb_build_object('reason', 'forged',
+  'seq', currval('public.quote_option_event_seq'), 'at', clock_timestamp()))
+$q$), 'a direct insert of supersede history must be refused, even with a current seq and a valid at');
+SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$
+ INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES ('9c000000-0000-4000-8000-0000000009b1',
+  'quote_option_superseded', '{}'::jsonb)
+$q$), 'a direct seq-less insert of supersede history must be refused');
+-- From inside some other trigger: a stale seq, and a fresh seq with a time from before this
+-- transaction, are each refused.
+CREATE TABLE public.qo_contract_forge (mode text);
+CREATE FUNCTION public.qo_contract_forge() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.mode = 'stale_seq' THEN
+  INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES ('9c000000-0000-4000-8000-0000000009b1',
+   'quote_option_unsuperseded', jsonb_build_object('reason', 'forged',
+   'seq', currval('public.quote_option_event_seq') - 1, 'at', clock_timestamp()));
+ ELSE
+  INSERT INTO public.job_events (job_id, event_type, detail_json) VALUES ('9c000000-0000-4000-8000-0000000009b1',
+   'quote_option_unsuperseded', jsonb_build_object('reason', 'forged',
+   'seq', nextval('public.quote_option_event_seq'), 'at', now() - interval '1 day'));
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER qo_contract_forge AFTER INSERT ON public.qo_contract_forge FOR EACH ROW
+ EXECUTE FUNCTION public.qo_contract_forge();
+SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$ INSERT INTO public.qo_contract_forge VALUES ('stale_seq') $q$),
+ 'an insert from another trigger with a seq this statement did not take must be refused');
+SELECT pg_temp.qo_assert(pg_temp.qo_forged($q$ INSERT INTO public.qo_contract_forge VALUES ('old_at') $q$),
+ 'an insert from another trigger with an at from before this transaction must be refused');
+DROP TABLE public.qo_contract_forge;
+DROP FUNCTION public.qo_contract_forge();
+SELECT pg_temp.qo_assert((SELECT count(*) FROM public.job_events WHERE job_id = '9c000000-0000-4000-8000-0000000009b1')
+  = (SELECT n FROM qo_b9_event_count), 'no forged event may land');
 
 -- Message time: for every fixture job, superseded events minus unsuperseded events is 1 while
 -- the pointer is set and 0 otherwise, so the intervals can be rebuilt from events alone.

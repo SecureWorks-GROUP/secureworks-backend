@@ -9,6 +9,7 @@
 --     FROM public.jobs WHERE quote_option_group_id IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_jobs_quote_option_supersede ON public.jobs;
 DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_delete ON public.job_events;
+DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_insert ON public.job_events;
 DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_update ON public.job_events;
 DROP FUNCTION IF EXISTS public.fence_quote_option_event_guard();
 DROP FUNCTION IF EXISTS public.jobs_quote_option_supersede();

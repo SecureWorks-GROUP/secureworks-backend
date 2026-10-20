@@ -106,11 +106,16 @@
 --     or any detail key it was written with (seq, at, superseded_by_job_id,
 --     quote_option_group_id, ...); new keys may be added. Deleting the job itself still
 --     cascades them away.
+--   - Inserts are guarded too: an event of these two types is accepted only
+--     from inside a trigger (depth 2), with seq equal to this session's
+--     currval of the sequence (only owner code can advance it) and an at
+--     inside this transaction. The run record is not required, so a run
+--     whose run record could not be written still applies its marks and
+--     clears (a reversal is never left half undone for want of a record).
 -- Limits: a direct UPDATE of jobs.quote_option_group_id by an owner, outside
--- link_fence_quote_option, would bypass this; an event written by anything
--- other than these two helpers has no seq, and a reader must treat a seq-less
--- event as order unknown (inserts are not guarded); an owner can disable the
--- guard trigger.
+-- link_fence_quote_option, would bypass this; an owner can disable the guard
+-- triggers or write from a trigger of their own that takes nextval itself;
+-- a reader must still treat a seq-less event as order unknown.
 --
 -- Nothing here changes what a customer is sent or how they accept. Existing
 -- jobs are not grouped or changed: the 25 duplicate sets found on 19 Oct 2026
@@ -399,7 +404,8 @@ BEGIN
   END IF;
 END $$;
 
--- Keep the supersede history: while its job exists, a quote_option_superseded
+-- Keep the supersede history: only the supersede trigger's helpers insert
+-- these events (see the INSERT branch), and while its job exists, a quote_option_superseded
 -- or quote_option_unsuperseded event is not deleted, and an update may not
 -- change what orders, places or means it (event_type, job_id, created_at,
 -- and any detail key it was written with; keys may be added).
@@ -411,7 +417,38 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+DECLARE
+  v_cur bigint;
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    -- Only the helpers write these events: from inside the supersede
+    -- trigger (so at trigger depth 2 here), with the seq the same statement
+    -- just took (API roles cannot advance the sequence), and an at inside
+    -- this transaction. A direct insert by any role, or a forged seq or at,
+    -- is refused. Nothing here can fail a genuine helper insert, so a run
+    -- whose run record could not be written still does its work (reversal
+    -- safety; see "Event order").
+    IF pg_trigger_depth() < 2
+       OR coalesce(NEW.detail_json->>'seq', '') !~ '^[1-9][0-9]*$'
+       OR NOT coalesce(pg_input_is_valid(NEW.detail_json->>'at', 'timestamptz'), false) THEN
+      RAISE EXCEPTION 'quote_option_event_not_from_writer'
+        USING ERRCODE = '42501',
+              DETAIL = 'supersede history is written only by the supersede trigger';
+    END IF;
+    BEGIN
+      v_cur := currval('public.quote_option_event_seq');
+    EXCEPTION WHEN object_not_in_prerequisite_state THEN
+      v_cur := NULL;
+    END;
+    IF v_cur IS DISTINCT FROM (NEW.detail_json->>'seq')::bigint
+       OR (NEW.detail_json->>'at')::timestamptz < now()
+       OR (NEW.detail_json->>'at')::timestamptz > clock_timestamp() THEN
+      RAISE EXCEPTION 'quote_option_event_not_from_writer'
+        USING ERRCODE = '42501',
+              DETAIL = 'supersede history is written only by the supersede trigger';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_OP = 'DELETE' THEN
     IF EXISTS (SELECT 1 FROM public.jobs j WHERE j.id = OLD.job_id) THEN
       RAISE EXCEPTION 'quote_option_event_immutable'
@@ -439,6 +476,12 @@ CREATE TRIGGER trg_job_events_quote_option_keep_delete
   BEFORE DELETE ON public.job_events
   FOR EACH ROW
   WHEN (OLD.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded'))
+  EXECUTE FUNCTION public.fence_quote_option_event_guard();
+DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_insert ON public.job_events;
+CREATE TRIGGER trg_job_events_quote_option_keep_insert
+  BEFORE INSERT ON public.job_events
+  FOR EACH ROW
+  WHEN (NEW.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded'))
   EXECUTE FUNCTION public.fence_quote_option_event_guard();
 DROP TRIGGER IF EXISTS trg_job_events_quote_option_keep_update ON public.job_events;
 CREATE TRIGGER trg_job_events_quote_option_keep_update
