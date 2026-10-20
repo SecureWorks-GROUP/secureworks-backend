@@ -123,20 +123,21 @@ AS $fn$
   ELSE (
    -- The events at the newest instant at or before p_at. None: live (false).
    -- Only superseded: true. Only unsuperseded: false. Both (S1-M1): null.
+   -- Every operator and aggregate is schema-qualified (no SET search_path).
    SELECT CASE
-           WHEN count(*) = 0 THEN false
-           WHEN bool_and(e.event_type = 'quote_option_superseded') THEN true
-           WHEN bool_and(e.event_type = 'quote_option_unsuperseded') THEN false
+           WHEN pg_catalog.count(*) OPERATOR(pg_catalog.=) 0 THEN false
+           WHEN pg_catalog.bool_and(e.event_type OPERATOR(pg_catalog.=) 'quote_option_superseded') THEN true
+           WHEN pg_catalog.bool_and(e.event_type OPERATOR(pg_catalog.=) 'quote_option_unsuperseded') THEN false
            ELSE NULL::boolean
           END
      FROM public.job_events e
-    WHERE e.job_id = p_job
-      AND e.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
-      AND e.created_at = (
-       SELECT max(m.created_at)
+    WHERE e.job_id OPERATOR(pg_catalog.=) p_job
+      AND e.event_type OPERATOR(pg_catalog.=) ANY (ARRAY['quote_option_superseded', 'quote_option_unsuperseded']::text[])
+      AND e.created_at OPERATOR(pg_catalog.=) (
+       SELECT pg_catalog.max(m.created_at)
          FROM public.job_events m
-        WHERE m.job_id = p_job
-          AND m.event_type IN ('quote_option_superseded', 'quote_option_unsuperseded')
+        WHERE m.job_id OPERATOR(pg_catalog.=) p_job
+          AND m.event_type OPERATOR(pg_catalog.=) ANY (ARRAY['quote_option_superseded', 'quote_option_unsuperseded']::text[])
           AND m.created_at OPERATOR(pg_catalog.<=) p_at))
  END
 $fn$;
