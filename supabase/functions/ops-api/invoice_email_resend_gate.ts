@@ -85,10 +85,16 @@ export function invoiceIdHoldPattern(xeroInvoiceId: string): string | null {
   return UUID_SHAPE.test(id) ? `*${id}*` : id
 }
 
+/** True for a stored id that names the same invoice: trimmed, without case. */
+function sameInvoiceId(xeroInvoiceId: string): (stored: unknown) => boolean {
+  const want = String(xeroInvoiceId ?? '').trim().toLowerCase()
+  return (stored) => typeof stored === 'string' && stored.trim().toLowerCase() === want
+}
+
 /**
  * The unknown-send hold recorded before the claim store: the newest
  * `invoice.email_outcome_unknown` in either store, unless a reconciled event
- * is at or after it. `invoice.emailed` is not read. Any read error is
+ * for this exact invoice is at or after it. `invoice.emailed` is not read. Any read error is
  * unreadable, never clear. The id is matched without case
  * (invoiceIdHoldPattern), so a resend finds a hold stored in any case.
  */
@@ -98,25 +104,33 @@ export async function readLegacyInvoiceEmailHold(client: any, xeroInvoiceId: str
   try {
     const [be, je] = await Promise.all([
       client.from('business_events')
-        .select('event_type, occurred_at')
+        .select('event_type, occurred_at, entity_id')
         .eq('entity_type', 'xero_invoice')
         .ilike('entity_id', pattern)
         .in('event_type', LEGACY_HOLD_EVENT_TYPES)
         .order('occurred_at', { ascending: false }),
       client.from('job_events')
-        .select('event_type, created_at')
+        .select('event_type, created_at, xero_invoice_id:detail_json->>xero_invoice_id')
         .ilike('detail_json->>xero_invoice_id', pattern)
         .in('event_type', LEGACY_HOLD_EVENT_TYPES)
         .order('created_at', { ascending: false }),
     ])
     if (!be || be.error || !Array.isArray(be.data) || !je || je.error || !Array.isArray(je.data)) return { state: 'unreadable' }
     const rows = [
-      ...be.data.map((r: any) => ({ event_type: String(r?.event_type ?? ''), at: r?.occurred_at })),
-      ...je.data.map((r: any) => ({ event_type: String(r?.event_type ?? ''), at: r?.created_at })),
+      ...be.data.map((r: any) => ({ event_type: String(r?.event_type ?? ''), at: r?.occurred_at, id: r?.entity_id })),
+      ...je.data.map((r: any) => ({
+        event_type: String(r?.event_type ?? ''), at: r?.created_at,
+        id: r?.xero_invoice_id ?? r?.detail_json?.xero_invoice_id,
+      })),
     ]
     const unknown = newestAt(rows, INVOICE_EMAIL_OUTCOME_UNKNOWN_EVENT)
     if (unknown === Number.NEGATIVE_INFINITY) return { state: 'clear' }
-    if (newestAt(rows, INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT) >= unknown) return { state: 'clear' }
+    // The wide match may only hold more. A reconciliation releases the hold
+    // only when it names this exact invoice (trimmed, without case): one
+    // stored under a longer id such as "<id>-old" is another invoice's.
+    const exact = sameInvoiceId(xeroInvoiceId)
+    const reconciled = rows.filter((row) => exact(row.id))
+    if (newestAt(reconciled, INVOICE_EMAIL_OUTCOME_RECONCILED_EVENT) >= unknown) return { state: 'clear' }
     return { state: 'held', unknown_since: new Date(unknown).toISOString() }
   } catch {
     return { state: 'unreadable' }
