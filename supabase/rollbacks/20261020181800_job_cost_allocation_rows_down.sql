@@ -1,4 +1,4 @@
--- Down migration for 20261020180000_job_cost_allocation_rows (CFO-18, CFO-20).
+-- Down migration for 20261020181800_job_cost_allocation_rows (CFO-18, CFO-20).
 -- Restores the engine views to 20261019120000 (cost) and 20261009130000
 -- (revenue), the one-row-per-bill index, and the queue and source checks.
 -- Fails closed while any bill is split across jobs or a queue row is 'split':

@@ -50,8 +50,8 @@
 -- released. Credit notes not applied to any invoice are not in our copy of
 -- Xero and stay unknown (named in the job profit read contract).
 --
--- Contract: supabase/tests/migration-contracts/20261020180000_job_cost_allocation_rows/.
--- Rollback: supabase/rollbacks/20261020180000_job_cost_allocation_rows_down.sql.
+-- Contract: supabase/tests/migration-contracts/20261020181800_job_cost_allocation_rows/.
+-- Rollback: supabase/rollbacks/20261020181800_job_cost_allocation_rows_down.sql.
 
 -- ─────────────────────────────────────────────────────────────
 -- Credit share: credit notes applied / Total, 0 when unknown. Inc GST over inc
@@ -154,7 +154,7 @@ ALTER TABLE public.job_materials_facts ADD CONSTRAINT job_materials_facts_source
   CHECK (automation_source IN ('xero_ref_link', 'po_deterministic', 'manual_queue', 'agent_prematch', 'manual_split'));
 
 COMMENT ON TABLE public.job_materials_facts IS
-  'Allocation rows for supplier bills (M2/U3, CFO-18 20261020180000): one row per bill and job; a split bill has one row per job. A bill''s rows plus its overhead part (materials_reconciliation_queue.overhead_ex) equal the bill ex GST (v_bill_allocation_balance). A bill with a row on a job other than its own xero_invoices.job_id is read by the job profit engine through its rows only. Reversible by delete; xero_invoices is never mutated.';
+  'Allocation rows for supplier bills (M2/U3, CFO-18 20261020181800): one row per bill and job; a split bill has one row per job. A bill''s rows plus its overhead part (materials_reconciliation_queue.overhead_ex) equal the bill ex GST (v_bill_allocation_balance). A bill with a row on a job other than its own xero_invoices.job_id is read by the job profit engine through its rows only. Reversible by delete; xero_invoices is never mutated.';
 
 -- ─────────────────────────────────────────────────────────────
 -- 2. Queue: split status and overhead part
@@ -693,7 +693,7 @@ UNION ALL SELECT * FROM po;
 
 
 COMMENT ON VIEW public.v_job_cost_events IS
-  'Job profit engine (20261009130000, CFO-12 20261019120000, CFO-18/20 20261020180000): one row per job cost, lane labour/materials/commission/other, source trade_line/supplier_bill/materials_fact/supplier_credit/po_committed/po_ordered/po_invoice_emailed. A bill with an allocation row on another job is read through its rows only. supplier_credit is credit applied in Xero against a live bill, negative, in proportion. The three po_ sources are never actual. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, CFO-18/20 20261020181800): one row per job cost, lane labour/materials/commission/other, source trade_line/supplier_bill/materials_fact/supplier_credit/po_committed/po_ordered/po_invoice_emailed. A bill with an allocation row on another job is read through its rows only. supplier_credit is credit applied in Xero against a live bill, negative, in proportion. The three po_ sources are never actual. Read only, service role only.';
 
 -- ─────────────────────────────────────────────────────────────
 -- 6. v_job_revenue_events (from 20261009130000, credit rows added, CFO-20)
@@ -789,4 +789,4 @@ WHERE v.job_id IS NOT NULL;
 
 
 COMMENT ON VIEW public.v_job_revenue_events IS
-  'Job profit engine (20261009130000, CFO-20 20261020180000): sales invoice lines per job (VOIDED/DELETED excluded; counts_as_invoiced for AUTHORISED/PAID), credit applied in Xero against a live sales invoice (kind credit_applied, negative, counts as invoiced), and every variation (counts_as_invoiced false). Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-20 20261020181800): sales invoice lines per job (VOIDED/DELETED excluded; counts_as_invoiced for AUTHORISED/PAID), credit applied in Xero against a live sales invoice (kind credit_applied, negative, counts as invoiced), and every variation (counts_as_invoiced false). Read only, service role only.';

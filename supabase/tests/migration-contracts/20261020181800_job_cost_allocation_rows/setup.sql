@@ -1,4 +1,4 @@
--- Prerequisites for 20261020180000_job_cost_allocation_rows (CFO-18, CFO-20).
+-- Prerequisites for 20261020181800_job_cost_allocation_rows (CFO-18, CFO-20).
 -- Earlier registered cases create the engine views, the facts table and the
 -- Bills to place queue. This adds only columns the split function reads or
 -- writes that a stub may lack, and the one-row-per-bill index the migration

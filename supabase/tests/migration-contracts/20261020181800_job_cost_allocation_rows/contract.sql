@@ -1,4 +1,4 @@
--- Contract for 20261020180000_job_cost_allocation_rows (CFO-18, CFO-20).
+-- Contract for 20261020181800_job_cost_allocation_rows (CFO-18, CFO-20).
 --
 -- Synthetic jobs and bills, no customer data. Everything rolls back.
 --
