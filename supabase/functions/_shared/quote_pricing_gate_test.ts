@@ -5,6 +5,8 @@ import {
   FROZEN_REVISION_REQUIRED_ERROR,
   FROZEN_REVISION_UNREADABLE_ERROR,
   quoteFrozenRevisionGateError,
+  SITE_PLAN_ARTIFACT_MISSING_ERROR,
+  frozenRevisionErrorCode,
   quotePricingGateError,
 } from './quote_pricing_gate.ts'
 
@@ -96,4 +98,50 @@ Deno.test('frozen gate: the matching frozen row passes, key order does not matte
   const frozen = await canonicalJsonAndHash({ revision: { sealed: true, code: 'ABC', n: 1 }, pricing_complete: true, totalIncGST: 1000 })
   const reader = () => Promise.resolve({ rows: [{ pricing_hash: frozen.hash }], error: null })
   assertEquals(await quoteFrozenRevisionGateError(reader, 'job-1', sealed), null)
+})
+
+// ── Site plan stored with the frozen revision ──
+
+const SHA = 'a'.repeat(64)
+const planRef = 'scope_artifact:render_site_plan:sha256:' + SHA
+
+async function frozenWithPlan(sitePlan: unknown) {
+  const { hash } = await canonicalJsonAndHash(sealed)
+  return () => Promise.resolve({ rows: [{ id: 'rev-1', pricing_hash: hash, site_plan: sitePlan }], error: null })
+}
+
+Deno.test('site plan gate: a referenced site plan with its stored artifact passes', async () => {
+  const seen: string[] = []
+  const artifacts = (rev: string, sha: string) => { seen.push(rev + ':' + sha); return Promise.resolve({ rows: [{ id: 'art-1' }], error: null }) }
+  assertEquals(await quoteFrozenRevisionGateError(await frozenWithPlan(planRef), 'job-1', sealed, artifacts), null)
+  assertEquals(seen, ['rev-1:' + SHA])
+})
+
+Deno.test('site plan gate: a referenced site plan with no stored artifact refuses', async () => {
+  const none = () => Promise.resolve({ rows: [], error: null })
+  const err = await quoteFrozenRevisionGateError(await frozenWithPlan(planRef), 'job-1', sealed, none)
+  assertEquals(err, SITE_PLAN_ARTIFACT_MISSING_ERROR)
+  assertEquals(frozenRevisionErrorCode(err!), 'site_plan_artifact_missing')
+})
+
+Deno.test('site plan gate: a malformed reference refuses', async () => {
+  const any = () => Promise.resolve({ rows: [{ id: 'art-1' }], error: null })
+  assertEquals(await quoteFrozenRevisionGateError(await frozenWithPlan('scope_artifact:render_site_plan:sha256:XYZ'), 'job-1', sealed, any), SITE_PLAN_ARTIFACT_MISSING_ERROR)
+})
+
+Deno.test('site plan gate: an unreadable artifact check fails closed', async () => {
+  const frozen = await frozenWithPlan(planRef)
+  assertEquals(await quoteFrozenRevisionGateError(frozen, 'job-1', sealed), FROZEN_REVISION_UNREADABLE_ERROR)
+  assertEquals(await quoteFrozenRevisionGateError(frozen, 'job-1', sealed, () => Promise.resolve({ rows: null, error: { message: 'x' } })), FROZEN_REVISION_UNREADABLE_ERROR)
+  assertEquals(await quoteFrozenRevisionGateError(frozen, 'job-1', sealed, () => Promise.reject(new Error('down'))), FROZEN_REVISION_UNREADABLE_ERROR)
+})
+
+Deno.test('site plan gate: an inline site plan or none needs no artifact read', async () => {
+  let reads = 0
+  const artifacts = () => { reads++; return Promise.resolve({ rows: [], error: null }) }
+  for (const plan of [null, undefined, '', 'data:image/png;base64,AAAA']) {
+    assertEquals(await quoteFrozenRevisionGateError(await frozenWithPlan(plan), 'job-1', sealed, artifacts), null)
+  }
+  assertEquals(reads, 0)
+  assertEquals(frozenRevisionErrorCode(FROZEN_REVISION_MISMATCH_ERROR), 'frozen_revision_required')
 })

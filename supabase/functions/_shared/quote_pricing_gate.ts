@@ -70,6 +70,13 @@ export function quotePricingGateError(pricingJsonRaw: unknown): string | null {
 // Fails closed: a read error, no frozen row, or a different hash all refuse.
 // Pricing with no sealed revision (legacy quotes, quick quotes, tools that do
 // not seal) is unaffected and returns null, exactly as before.
+//
+// The site plan travels with the revision. When the matching frozen scope names
+// its site plan by reference ('scope_artifact:render_site_plan:sha256:<hex>',
+// written by the fence tool at freeze), that revision must hold a stored
+// render_site_plan artifact with that sha256, or the send refuses. A send from
+// outside the tool otherwise delivers a quote whose drawing nobody stored. A
+// site plan kept inline in the scope, or no site plan, needs no artifact.
 
 
 export const FROZEN_REVISION_REQUIRED_ERROR =
@@ -78,10 +85,22 @@ export const FROZEN_REVISION_MISMATCH_ERROR =
   'This quote has changed since its revision was frozen. Send it again from the scoping tool so the new revision is frozen first.'
 export const FROZEN_REVISION_UNREADABLE_ERROR =
   'The frozen revision for this quote could not be checked. Nothing was sent; try again shortly.'
+export const SITE_PLAN_ARTIFACT_MISSING_ERROR =
+  'The site plan for this quote is not stored with its frozen revision. Send it again from the scoping tool so the site plan is stored first.'
 
-type FrozenRow = { pricing_hash?: string | null }
+type FrozenRow = { id?: string | null; pricing_hash?: string | null; site_plan?: unknown }
 // deno-lint-ignore no-explicit-any
 type FrozenRevisionReader = (jobId: string) => Promise<{ rows: FrozenRow[] | null; error: any }>
+// deno-lint-ignore no-explicit-any
+type SitePlanArtifactReader = (scopeRevisionId: string, sha256: string) => Promise<{ rows: unknown[] | null; error: any }>
+
+// The machine code a send refusal carries beside the message.
+export function frozenRevisionErrorCode(message: string): string {
+  return message === SITE_PLAN_ARTIFACT_MISSING_ERROR ? 'site_plan_artifact_missing' : 'frozen_revision_required'
+}
+
+const SITE_PLAN_REF_PREFIX = 'scope_artifact:'
+const SITE_PLAN_REF = /^scope_artifact:render_site_plan:sha256:([0-9a-f]{64})$/
 
 export function quoteRequiresFrozenRevision(pricingJsonRaw: unknown): boolean {
   // deno-lint-ignore no-explicit-any
@@ -98,6 +117,7 @@ export async function quoteFrozenRevisionGateError(
   readFrozen: FrozenRevisionReader,
   jobId: string | null | undefined,
   pricingJsonRaw: unknown,
+  readSitePlanArtifact?: SitePlanArtifactReader,
 ): Promise<string | null> {
   if (!quoteRequiresFrozenRevision(pricingJsonRaw)) return null
   if (!jobId) return FROZEN_REVISION_REQUIRED_ERROR
@@ -110,17 +130,51 @@ export async function quoteFrozenRevisionGateError(
   if (!res || res.error || !Array.isArray(res.rows)) return FROZEN_REVISION_UNREADABLE_ERROR
   if (res.rows.length === 0) return FROZEN_REVISION_REQUIRED_ERROR
   const { hash } = await canonicalJsonAndHash(pricingJsonRaw)
-  return res.rows.some((r) => r && r.pricing_hash === hash) ? null : FROZEN_REVISION_MISMATCH_ERROR
+  const matches = res.rows.filter((r) => r && r.pricing_hash === hash)
+  if (matches.length === 0) return FROZEN_REVISION_MISMATCH_ERROR
+  for (const row of matches) {
+    const plan = row.site_plan
+    if (typeof plan !== 'string' || !plan.startsWith(SITE_PLAN_REF_PREFIX)) continue
+    const m = SITE_PLAN_REF.exec(plan)
+    // A reference in a shape nothing writes cannot be checked against a stored file.
+    if (!m) return SITE_PLAN_ARTIFACT_MISSING_ERROR
+    if (!row.id || !readSitePlanArtifact) return FROZEN_REVISION_UNREADABLE_ERROR
+    let art
+    try {
+      art = await readSitePlanArtifact(String(row.id), m[1])
+    } catch {
+      return FROZEN_REVISION_UNREADABLE_ERROR
+    }
+    if (!art || art.error || !Array.isArray(art.rows)) return FROZEN_REVISION_UNREADABLE_ERROR
+    if (art.rows.length === 0) return SITE_PLAN_ARTIFACT_MISSING_ERROR
+  }
+  return null
 }
 
 // The production reader: the job's frozen rows (at most one by invariant).
 // deno-lint-ignore no-explicit-any
 export function frozenRevisionReader(client: any): FrozenRevisionReader {
   return async (jobId: string) => {
+    // Only the site plan's path is projected; scope_json can carry megabytes of images.
     const { data, error } = await client.from('scope_revisions')
-      .select('pricing_hash')
+      .select('id, pricing_hash, site_plan:scope_json->job->>sitePlanImage')
       .eq('job_id', jobId)
       .eq('status', 'frozen')
+    return { rows: data ?? null, error }
+  }
+}
+
+// The production site-plan reader: the stored render_site_plan artifact of one
+// revision with one sha256.
+// deno-lint-ignore no-explicit-any
+export function sitePlanArtifactReader(client: any): SitePlanArtifactReader {
+  return async (scopeRevisionId: string, sha256: string) => {
+    const { data, error } = await client.from('scope_artifacts')
+      .select('id')
+      .eq('scope_revision_id', scopeRevisionId)
+      .eq('artifact_type', 'render_site_plan')
+      .eq('sha256', sha256)
+      .limit(1)
     return { rows: data ?? null, error }
   }
 }
