@@ -1765,3 +1765,116 @@ Deno.test("backlog: each listed job carries its review switch and claim status",
     [["SWF-90", true, null], ["SWF-91", false, "sent"]],
   );
 });
+
+/** The fake with a hook before each query of a table runs (the nth call, from 1). */
+function hookedClient(
+  db: FakeDb,
+  table: string,
+  hook: (n: number) => Promise<unknown> | void,
+): FakeDb {
+  let n = 0;
+  return Object.assign(Object.create(db), {
+    from(t: string) {
+      const q: any = db.from(t);
+      if (t !== table) return q;
+      const call = ++n;
+      const run = q.then.bind(q);
+      q.then = (ok?: any, bad?: any) =>
+        Promise.resolve(hook(call)).then(() => run(ok, bad));
+      return q;
+    },
+  });
+}
+
+Deno.test("review switch: turned off while the sender is reading, the text does not go out", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = reviewJob(db, { review_opt_out: false });
+  let press: Awaited<ReturnType<typeof setReviewOptOut>> | null = null;
+  // Staff press the switch during the 90-day look-back, after the sender read the job.
+  const client = hookedClient(db, "business_events", async (n) => {
+    if (n === 1) {
+      press = await setReviewOptOut(
+        { client: db, now: () => NOW },
+        { job_id: job.id, opt_out: true },
+        "shaun@secureworkswa.com.au",
+      );
+    }
+  });
+  const out = await requestJobReview({ ...deps, client }, {
+    job_id: job.id,
+    trigger: "status_changed:xero_sync",
+  });
+  assertEquals(out.action, "opted_out");
+  assertEquals([press!.status, press!.body.changed], [200, true]);
+  assertEquals(sms.length, 0);
+  assertEquals(db.rows("job_review_claims").length, 0);
+  const notSent = db.rows("job_events").filter((e) =>
+    e.event_type === "review_request_not_sent"
+  );
+  assertEquals(notSent.map((e) => e.detail_json.status), ["opted_out"]);
+  assertEquals(
+    notSent[0].detail_json.opted_out.by,
+    "shaun@secureworkswa.com.au",
+  );
+});
+
+Deno.test("review switch: a sender that claims after the switch first looks is reported 409", async () => {
+  const { db, deps } = setup({ sender: "live" });
+  const job = reviewJob(db, { review_opt_out: false });
+  // The sender claims (and sends) between the switch's claim check and its write.
+  const client = hookedClient(db, "jobs", (n) => {
+    if (n === 2) {
+      db.rows("job_review_claims").push({
+        job_id: job.id,
+        status: "sent",
+        trigger: "status_changed:xero_sync",
+      });
+    }
+  });
+  const out = await setReviewOptOut(
+    { ...deps, client },
+    { job_id: job.id, opt_out: true },
+    "shaun@secureworkswa.com.au",
+  );
+  assertEquals(out.status, 409);
+  assertEquals(out.body.error, "review_already_sent");
+  assertEquals(out.body.review_claim_status, "sent");
+});
+
+Deno.test("review switch: an unreadable switch after the claim sends nothing and keeps no claim", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = reviewJob(db, { review_opt_out: false });
+  const client = hookedClient(db, "jobs", (n) => {
+    if (n === 2) db.failures.jobs = "boom";
+  });
+  const out = await requestJobReview({ ...deps, client }, {
+    job_id: job.id,
+    trigger: "t",
+  });
+  delete db.failures.jobs;
+  assertEquals(out.action, "opt_out_unreadable");
+  assertEquals([sms.length, db.rows("job_review_claims").length], [0, 0]);
+  // The next attempt, with the switch readable and still on, sends.
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "sent",
+  );
+});
+
+Deno.test("review switch: a sweep dry run reports an opted-out card would_archive, not would_send", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const off = paidJob(db, { status: "get_review", job_number: "SWF-83" });
+  optedOut(off);
+  enteredGetReview(db, off.id, hoursAgo(25));
+  const on = paidJob(db, { status: "get_review", job_number: "SWF-84" });
+  enteredGetReview(db, on.id, hoursAgo(25));
+  const out = await closeoutSweep(deps, { dry_run: true });
+  const byJob = Object.fromEntries(
+    (out.results ?? []).map((r: any) => [r.job_number, r.action]),
+  );
+  assertEquals(byJob, {
+    "SWF-83": "would_archive",
+    "SWF-84": "would_send_review_then_archive",
+  });
+  assertEquals([sms.length, db.rows("job_review_claims").length], [0, 0]);
+});

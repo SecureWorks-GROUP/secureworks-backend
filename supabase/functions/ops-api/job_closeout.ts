@@ -785,7 +785,8 @@ export interface ReviewRequestOptions {
 /**
  * The one review sender, automatic and manual alike, so neither ships on before its switch.
  * Order: switch -> job -> (automatic only) type, get_review, hold, the job's review
- * switch, paid rule, send window -> recipients -> 90-day look-back -> claim -> send. Nothing is
+ * switch, paid rule, send window -> recipients -> 90-day look-back -> claim -> (automatic
+ * only) the job's review switch again -> send. Nothing is
  * claimed until every read has answered, so a failed read is retried by the next sweep.
  * Nothing is kept claimed when nothing could go out (no linked contact, paid too long ago,
  * or every send refused by a guard before GHL), so fixing the cause and asking again sends;
@@ -931,6 +932,28 @@ export async function requestJobReview(
       return { ok: true, action: "already_claimed" };
     }
     return { ok: false, action: "claim_failed", error: claimError.message };
+  }
+  // The switch is read again only now, with the claim held: setReviewOptOut writes the
+  // switch before it looks for a claim, so a switch turned off while this run was reading
+  // is seen here (nothing sent, claim released) or the switch sees this claim (409).
+  if (!opts.manual) {
+    const { data: fresh, error: freshError } = await deps.client.from("jobs")
+      .select("review_opt_out, review_opt_out_at, review_opt_out_by")
+      .eq("id", job.id).maybeSingle();
+    if (freshError || fresh?.review_opt_out === true) {
+      const { error: releaseError } = await deps.client.from(
+        "job_review_claims",
+      ).delete().eq("job_id", job.id).eq("status", "claimed");
+      if (releaseError) {
+        console.error(
+          "[job_closeout] review claim release failed:",
+          releaseError.message,
+        );
+      }
+      if (freshError) return { ok: true, action: "opt_out_unreadable" };
+      await recordOptedOut(deps, { ...job, ...fresh }, f, opts.trigger, mode);
+      return { ok: true, action: "opted_out", dry_run: false };
+    }
   }
 
   for (const r of recipients) {
@@ -1094,7 +1117,9 @@ export interface ReviewOptOutResult {
  * or back on. Every change stamps who and when on the job and writes one job_events row
  * (review_opt_out_changed); asking for the value the job already has changes nothing.
  * Refused 409 review_already_sent once the job has a review claim (sent or in flight),
- * since the switch can no longer stop it. Staff only (the caller checks); `by` is the
+ * since the switch can no longer stop it; the claim is looked for again after the write,
+ * so a sender that claimed in between is reported, never missed. Staff only (the caller
+ * checks); `by` is the
  * verified person, else the operator email the screen stamps.
  */
 export async function setReviewOptOut(
@@ -1135,16 +1160,7 @@ export async function setReviewOptOut(
       body: { success: false, error: "review_claim_unreadable" },
     };
   }
-  if (claim) {
-    return {
-      status: 409,
-      body: {
-        success: false,
-        error: "review_already_sent",
-        review_claim_status: claim.status ?? null,
-      },
-    };
-  }
+  if (claim) return alreadySent(claim.status);
   const current = job.review_opt_out === true;
   if (current === optOut) {
     return {
@@ -1186,6 +1202,17 @@ export async function setReviewOptOut(
       eventError.message,
     );
   }
+  // A sender that claimed after the first look and before this write may not have seen it.
+  const { data: lateClaim, error: lateClaimError } = await client.from(
+    "job_review_claims",
+  ).select("status").eq("job_id", jobId).maybeSingle();
+  if (lateClaimError) {
+    return {
+      status: 503,
+      body: { success: false, error: "review_claim_unreadable" },
+    };
+  }
+  if (lateClaim) return alreadySent(lateClaim.status);
   return {
     status: 200,
     body: {
@@ -1194,6 +1221,17 @@ export async function setReviewOptOut(
       review_opt_out: optOut,
       review_opt_out_at: at,
       review_opt_out_by: by,
+    },
+  };
+}
+
+function alreadySent(status: string | null | undefined): ReviewOptOutResult {
+  return {
+    status: 409,
+    body: {
+      success: false,
+      error: "review_already_sent",
+      review_claim_status: status ?? null,
     },
   };
 }
@@ -1267,7 +1305,8 @@ export async function closeoutSweep(
       let claim = await readClaim(deps, job.id);
       let notClaimed = false;
       if (!claim && dryRun) {
-        reviewWouldSend = true;
+        if (job.review_opt_out === true) notClaimed = true;
+        else reviewWouldSend = true;
       } else if (!claim) {
         const review = await requestJobReview(deps, {
           job_id: job.id,

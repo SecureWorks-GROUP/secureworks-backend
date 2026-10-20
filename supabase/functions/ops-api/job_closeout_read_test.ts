@@ -393,11 +393,14 @@ Deno.test("pipeline: fencing and patio rows carry closeout for staff only", asyn
     reason: null,
   });
   assertEquals("closeout" in (byId.get(MAKESAFE) ?? {}), false);
-  // The review switch and the claim status ride the row itself.
-  assertEquals(byId.get(PAID_SHORT)?.review_opt_out, false);
-  assertEquals(byId.get(PAID_SHORT)?.review_claim_status, null);
-  assertEquals(byId.get(IN_REVIEW)?.review_claim_status, "sent");
-  assertEquals("review_opt_out" in (byId.get(MAKESAFE) ?? {}), false);
+  // The review switch and the claim status are read from the block only.
+  assertEquals(byId.get(PAID_SHORT)?.closeout.review_opt_out, false);
+  assertEquals(byId.get(PAID_SHORT)?.closeout.review_claim_status, null);
+  assertEquals(byId.get(IN_REVIEW)?.closeout.review_claim_status, "sent");
+  for (const id of [PAID_SHORT, IN_REVIEW, MAKESAFE]) {
+    assertEquals("review_opt_out" in (byId.get(id) ?? {}), false);
+    assertEquals("review_claim_status" in (byId.get(id) ?? {}), false);
+  }
 
   const notStaff = await _pipelineForTest(
     pipelineClient(),
@@ -410,7 +413,7 @@ Deno.test("pipeline: fencing and patio rows carry closeout for staff only", asyn
   }
 });
 
-Deno.test("pipeline: an opted-out card says so on the row", async () => {
+Deno.test("pipeline: an opted-out card says so in its closeout block", async () => {
   const tables = closeoutTables();
   tables.jobs.find((j) => j.id === PAID_SHORT)!.review_opt_out = true;
   const result = await _pipelineForTest(
@@ -421,8 +424,8 @@ Deno.test("pipeline: an opted-out card says so on the row", async () => {
     { includeCloseout: true },
   );
   const row = (Object.values(result.columns).flat() as Row[])[0];
-  assertEquals(row.review_opt_out, true);
   assertEquals(row.closeout.review_opt_out, true);
+  assertEquals("review_opt_out" in row, false);
 });
 
 Deno.test("pipeline: a failed closeout read nulls the block and says so", async () => {
@@ -433,7 +436,7 @@ Deno.test("pipeline: a failed closeout read nulls the block and says so", async 
   const rows = Object.values(result.columns).flat() as Row[];
   const fencing = rows.find((r) => r.id === PAID_SHORT);
   assertEquals(fencing?.closeout, null);
-  assertEquals(fencing?.review_opt_out, null);
-  assertEquals(fencing?.review_claim_status, null);
+  assertEquals("review_opt_out" in (fencing ?? {}), false);
+  assertEquals("review_claim_status" in (fencing ?? {}), false);
   assert(result.enrichment_errors.includes("pipeline.closeout"));
 });

@@ -69,13 +69,19 @@ minutes of the job showing fully paid.
   and answers `{ success, changed, review_opt_out, review_opt_out_at,
   review_opt_out_by }`. Asking for the value the job already has changes and
   logs nothing. Once the job has a review claim (text sent or in flight) it is
-  refused 409 `{ error: 'review_already_sent', review_claim_status }`.
+  refused 409 `{ error: 'review_already_sent', review_claim_status }`. The
+  claim is looked for again after the write, and the automatic sender reads
+  the switch again after taking its claim and before sending (a switch it
+  finds off releases the claim and sends nothing), so a press racing a send
+  is either honoured or answered 409, never a 200 over a text that went out.
+  A claim that cannot be re-read answers 503 `review_claim_unreadable`.
 - **Switched off**, the automatic sender (the Get Review hook and the sweep's
-  backstop) sends nothing and claims nothing, answers `opted_out` and logs one
+  backstop) sends nothing and keeps no claim, answers `opted_out` and logs one
   `review_request_not_sent` row with status and reason `opted_out` (who and when
   in `opted_out`); a dry run puts `skip_reason: 'opted_out'` on its one
   `review_request_dry_run` row. The sweep counts `opted_out` as review done, so
-  the card still archives 24 hours after entering `get_review`.
+  the card still archives 24 hours after entering `get_review`; a sweep dry run
+  reports such a card `would_archive`, never `would_send_review_then_archive`.
 - **Send review** (`send_review_request`) is a deliberate staff action and still
   sends on a switched-off job.
 
@@ -168,10 +174,11 @@ closeout: {
 - `held` is the sweep's hold (`closeoutHold`).
 - `review_opt_out` is the job's review switch (false unless a person switched
   it off) and `review_claim_status` the job's `job_review_claims` status, or
-  null with no claim. The same two ride each fencing and patio `pipeline` row
-  and the `job_detail` answer at the top level (null when the block's read
-  failed), for the card's switch. The backlog list carries them on each
-  listed job.
+  null with no claim. This block is the one place the card's switch is read,
+  on the `pipeline` row and the `job_detail` answer alike; neither is copied
+  to the top level (a failed read nulls the whole block). `job_detail.job`
+  still carries the raw `jobs` columns (`review_opt_out`, `review_opt_out_at`,
+  `review_opt_out_by`). The backlog list carries the two on each listed job.
 
 Every other job type, and every non-staff caller, gets no `closeout` key. A
 draft fencing or patio row is never read (a draft cannot be paid, claimed or in

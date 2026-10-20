@@ -26,9 +26,10 @@
 //                                          with no claim; once set, the switch is refused
 //   }
 //
-// The pipeline row and the job detail also carry review_opt_out and review_claim_status
-// at the top level for fencing and patio jobs, copied from this block (null when the
-// block's read failed).
+// This block is the one place the screen reads review_opt_out and review_claim_status,
+// on the pipeline row and the job detail alike; neither is copied to the top level. The
+// job detail's job (select '*') still carries the raw jobs columns review_opt_out,
+// review_opt_out_at and review_opt_out_by; the pipeline row selects none of them.
 //
 // Every read is batched over the whole job list (chunked .in() filters, one wave), never
 // one query per job; each table reads its chunks one after another, so a full board holds

@@ -16806,12 +16806,7 @@ async function pipeline(
         }
         : {}),
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
-        ? {
-          closeout: closeoutBlocks?.get(String(j.id)) ?? null,
-          // The review switch (set_review_opt_out), null when the block's read failed.
-          review_opt_out: closeoutBlocks?.get(String(j.id))?.review_opt_out ?? null,
-          review_claim_status: closeoutBlocks?.get(String(j.id))?.review_claim_status ?? null,
-        }
+        ? { closeout: closeoutBlocks?.get(String(j.id)) ?? null }
         : {}),
     }
     if (stageTruth && stageTruthRows) {
@@ -17179,14 +17174,7 @@ async function jobDetail(
     chase_logs: chaseLogs,
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
-    // The review switch (set_review_opt_out) beside the block, null when its read failed.
-    ...(closeoutBlock !== undefined
-      ? {
-        closeout: closeoutBlock,
-        review_opt_out: closeoutBlock?.review_opt_out ?? null,
-        review_claim_status: closeoutBlock?.review_claim_status ?? null,
-      }
-      : {}),
+    ...(closeoutBlock !== undefined ? { closeout: closeoutBlock } : {}),
   }
 }
 
