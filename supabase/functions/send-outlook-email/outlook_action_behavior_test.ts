@@ -72,7 +72,8 @@ Deno.test("Outlook route classification rejects group send fallthrough and prese
 Deno.test("signatures never invent Marnin as the sender", () => {
   const marnin = getSignature("marnin@secureworkswa.com.au");
   assertEquals(marnin.includes("Marnin Stobbe"), true);
-  assertEquals(marnin.includes("Operations Manager"), true);
+  assertEquals(marnin.includes("Director"), true);
+  assertEquals(marnin.includes("Operations Manager"), false);
   assertEquals(marnin.includes("Kind regards,"), true);
   assertEquals(
     marnin.includes(
@@ -183,9 +184,16 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
   );
   assertEquals(unknown.code, "invalid_signature");
   assertEquals(unknown.message.includes("captain"), false);
+  const asJan = composeSignedHtml("<p>Hi</p>", "jan@secureworkswa.com.au", "jan");
+  assertEquals(asJan.includes("Jan Cloete"), true);
+  assertEquals(asJan.includes("0417 976 471"), true);
+  assertEquals(asJan.includes("jan@secureworkswa.com.au"), true);
   const refused = [
     ["marnin@secureworkswa.com.au", "shaun", "Choose marnin, none."],
+    ["jan@secureworkswa.com.au", "marnin", "Choose jan, none."],
     ["shaun@secureworkswa.com.au", "maverick", "Choose shaun, none."],
+    ["fencing@secureworkswa.com.au", "patios", "Choose fencing, none."],
+    ["patios@secureworkswa.com.au", "fencing", "Choose patios, none."],
     ["hugo@secureworkswa.com.au", "marnin", "Choose none."],
     ["admin@secureworkswa.com.au", "secureworks", "Choose shaun, maverick, none."],
   ] as const;

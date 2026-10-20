@@ -1418,7 +1418,7 @@ export async function prepareAttachments(attachments: unknown, options: {
 //   is 400 invalid_signature. admin@ may choose shaun, maverick, or none.
 //   shaun chosen from admin@ is Shaun Lee at admin@ with 0489 267 771.
 //   marnin@, jan@, shaun@, fencing@ and patios@ may choose only their own
-//   block or none. Any other mailbox may choose only none.
+//   block or none. Any other mailbox may choose its own default or none.
 // - `signature`: none (or suppress) appends nothing.
 // - When `signature` is omitted, an HTML comment
 //   <!-- suppress-auto-appended-default-signature --> anywhere in the body
@@ -1470,7 +1470,7 @@ const SIGNATURE_PROFILES: Record<string, SignatureFields> = {
   }),
   marnin: signatureFields({
     name: 'Marnin Stobbe',
-    title: 'Operations Manager',
+    title: 'Director',
     phoneDisplay: '0404 777 984',
     phoneTel: '0404777984',
     email: 'marnin@secureworkswa.com.au',
@@ -1554,7 +1554,11 @@ function isAdminMailbox(mailbox: string): boolean {
 }
 
 function signatureChoices(mailbox: string): readonly string[] {
-  return MAILBOX_SIGNATURE_CHOICES[mailboxAddress(mailbox)] || ['none']
+  const address = mailboxAddress(mailbox)
+  const listed = MAILBOX_SIGNATURE_CHOICES[address]
+  if (listed) return listed
+  const fallback = MAILBOX_DEFAULT_SIGNATURE[address]
+  return fallback ? [fallback, 'none'] : ['none']
 }
 
 function profileForChoice(choice: string, mailbox: string): SignatureFields {
