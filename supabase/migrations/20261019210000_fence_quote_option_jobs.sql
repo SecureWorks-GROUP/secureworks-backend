@@ -524,9 +524,11 @@ BEGIN
     -- run of this transaction for this group (its run row, written by this
     -- trigger only) already took one under this lock: reuse it, so the
     -- transaction's events share one time. Otherwise read the clock. Nothing
-    -- a caller can set is read.
+    -- a caller can set is read. run_at >= now() (this transaction's start)
+    -- rules out an older row whose transaction id matches after wraparound.
     SELECT min(r.run_at) INTO v_at FROM public.quote_option_settle_runs r
-     WHERE r.quote_option_group_id = v_group AND r.xact_id = txid_current() AND r.run_at IS NOT NULL;
+     WHERE r.quote_option_group_id = v_group AND r.xact_id = txid_current() AND r.run_at IS NOT NULL
+       AND r.run_at >= now();
     v_at := coalesce(v_at, clock_timestamp());
     UPDATE public.quote_option_settle_runs SET run_at = v_at WHERE id = v_run;
     -- Lock every other member in id order without waiting. Each is then read

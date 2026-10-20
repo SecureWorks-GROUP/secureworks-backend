@@ -587,6 +587,27 @@ SELECT pg_temp.qo_assert((SELECT (e.detail_json->>'at')::timestamptz > (
   FROM public.job_events e WHERE e.job_id = '9c000000-0000-4000-8000-00000000a0b1'
    AND e.event_type = 'quote_option_superseded'),
  'a first run must stamp a time later than every event already written');
+-- Checker finding on 10de366: a leftover run row must never lend its time. Group 11 (customer
+-- c-11) gets two planted settled run rows before its first run: one from another transaction
+-- with a time inside this one (this transaction's start, so only the xact_id filter rules it
+-- out), and one carrying this
+-- transaction's id but a time before this transaction began, as after txid wraparound (only
+-- run_at >= now() rules it out). The first run must ignore both and read the clock, so its at
+-- is later than this transaction's start; dropping either filter makes it equal or earlier.
+INSERT INTO public.jobs (id, org_id, status, type, ghl_contact_id) VALUES
+ ('9c000000-0000-4000-8000-00000000b0a1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-11'),
+ ('9c000000-0000-4000-8000-00000000b0b1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'c-11');
+SELECT public.link_fence_quote_option('9c000000-0000-4000-8000-00000000b0b1', '9c000000-0000-4000-8000-00000000b0a1', NULL, NULL);
+INSERT INTO public.quote_option_settle_runs (job_id, quote_option_group_id, status, settled_at, xact_id, run_at) VALUES
+ ('9c000000-0000-4000-8000-00000000b0a1', '9c000000-0000-4000-8000-00000000b0a1', 'accepted', now(),
+  txid_current() + 1000, now()),
+ ('9c000000-0000-4000-8000-00000000b0a1', '9c000000-0000-4000-8000-00000000b0a1', 'accepted', now(),
+  txid_current(), now() - interval '1 second');
+UPDATE public.jobs SET status = 'accepted' WHERE id = '9c000000-0000-4000-8000-00000000b0a1';
+SELECT pg_temp.qo_assert((SELECT (e.detail_json->>'at')::timestamptz > now()
+  FROM public.job_events e WHERE e.job_id = '9c000000-0000-4000-8000-00000000b0b1'
+   AND e.event_type = 'quote_option_superseded'),
+ 'a leftover run row from another transaction, or older than this one, must not lend its time');
 SELECT pg_temp.qo_assert(NOT EXISTS (
   SELECT 1 FROM (SELECT e.job_id, (e.detail_json->>'at')::timestamptz AS at,
                         lag((e.detail_json->>'at')::timestamptz) OVER (PARTITION BY e.job_id
