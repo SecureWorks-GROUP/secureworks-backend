@@ -588,9 +588,10 @@ export async function assertOutlookSesDeliveryAllowed(
       throw new OutlookFenceError(409, {
         state: 'refused',
         code: 'source_not_ingested_yet',
-        fact: 'The reply source message is not in the inbox record yet.',
+        fact:
+          'The reply source message is not in the inbox record yet. A mailbox the intake poller does not ingest will never succeed on retry.',
         recovery_action:
-          'Wait about 10 minutes for mail intake, then retry with the same mailbox and message_id.',
+          'Wait about 10 minutes for mail intake, then retry with the same mailbox and message_id. If this mailbox is not one the intake poller ingests, retrying will not succeed.',
         evidence: {
           message_id: mailboxMessageId,
           requested_mailbox: requestedMailbox,
@@ -1106,6 +1107,26 @@ function readInlineAttachmentMeta(
   return meta
 }
 
+function assertCallerInlineAttachment(prepared: GraphFileAttachment): void {
+  if (
+    (prepared.contentId || '').toLowerCase() === SIGNATURE_LOGO_CID.toLowerCase()
+  ) {
+    throw new OutlookInputError(
+      'invalid_attachment',
+      `Attachment ${prepared.name} uses the reserved signature logo content id`,
+    )
+  }
+  if (
+    prepared.isInline === true &&
+    !prepared.contentType.toLowerCase().startsWith('image/')
+  ) {
+    throw new OutlookInputError(
+      'invalid_attachment',
+      `Attachment ${prepared.name} isInline is only allowed for an image`,
+    )
+  }
+}
+
 function allowedAttachmentHost(
   hostname: string,
   extraHosts: string[] = [],
@@ -1319,13 +1340,15 @@ export function validateInlineAttachment(
     ? att.contentType.trim()
     : 'application/octet-stream'
   const name = att.name.trim()
-  return {
+  const prepared: GraphFileAttachment = {
     '@odata.type': '#microsoft.graph.fileAttachment',
     name,
     contentType,
     contentBytes,
     ...readInlineAttachmentMeta(att, name),
   }
+  assertCallerInlineAttachment(prepared)
+  return prepared
 }
 
 export async function prepareAttachments(attachments: unknown, options: {
@@ -1365,6 +1388,7 @@ export async function prepareAttachments(attachments: unknown, options: {
         ...await fetchAttachment(att.url, att.name, options),
         ...readInlineAttachmentMeta(att, att.name.trim()),
       }
+      assertCallerInlineAttachment(prepared)
     } else {
       prepared = validateInlineAttachment(att)
     }
@@ -1383,77 +1407,121 @@ export async function prepareAttachments(attachments: unknown, options: {
 // ── Dynamic Signature Selection ──
 //
 // Send, reply and draft all append one signature through composeSignedHtml.
+// renderSignature is the one template: name, title, phone, email, web, logo.
 //
-// - Omit `signature` and the mailbox default is appended (admin@ is Maverick,
-//   shaun@ is Shaun Lee, and so on). An unmapped mailbox appends nothing.
-// - `signature`: shaun | maverick | marnin | jan | fencing | patios replaces
-//   that default. It is never appended after it.
+// - Omit `signature` and the mailbox default is appended. admin@ (and the
+//   literal mailbox "admin") is a neutral SecureWorks Group sign-off.
+//   shaun@ is Shaun Lee at shaun@ with no phone. An unmapped mailbox appends
+//   nothing.
+// - An explicit signature must be on that mailbox's allow-list, or the call
+//   is 400 invalid_signature. admin@ may choose shaun, maverick, or none.
+//   shaun chosen from admin@ is Shaun Lee at admin@ with the company phone.
+//   marnin@, jan@, shaun@, fencing@ and patios@ may choose only their own
+//   block or none. Any other mailbox may choose only none.
 // - `signature`: none (or suppress) appends nothing.
 // - When `signature` is omitted, an HTML comment
 //   <!-- suppress-auto-appended-default-signature --> anywhere in the body
 //   also appends nothing. That is the same rule on send, reply and draft.
 //   Use it, or signature:none, when the body already contains a signature.
+//   An explicit named signature still replaces the default if a stale marker
+//   is present.
 //
 // The logo is <img src="cid:SIGNATURE_LOGO_CID"> plus one inline attachment
-// (isInline, contentId) added by withSignatureLogo. Callers' own inline
-// images keep the isInline and contentId they send.
+// (isInline, contentId) added by withSignatureLogo. That content id is
+// reserved: a caller attachment that uses it is refused. Callers' own inline
+// images must be image/* and keep the isInline and contentId they send.
 
-type SignatureProfile = {
+type SignatureFields = {
   name: string
   title: string
+  phoneDisplay: string
+  phoneTel: string
+  email: string
+  website: string
+}
+
+function signatureFields(partial: {
+  name: string
+  title?: string
   phoneDisplay?: string
   phoneTel?: string
   email: string
   website?: string
+}): SignatureFields {
+  return {
+    name: partial.name,
+    title: partial.title || '',
+    phoneDisplay: partial.phoneDisplay || '',
+    phoneTel: partial.phoneTel || '',
+    email: partial.email,
+    website: partial.website || '',
+  }
 }
 
-const SIGNATURE_PROFILES: Record<string, SignatureProfile> = {
-  marnin: {
+const SIGNATURE_PROFILES: Record<string, SignatureFields> = {
+  secureworks: signatureFields({
+    name: 'SecureWorks Group',
+    phoneDisplay: '+61 489 267 771',
+    phoneTel: '+61489267771',
+    email: 'admin@secureworkswa.com.au',
+    website: 'secureworksgroup.com.au',
+  }),
+  marnin: signatureFields({
     name: 'Marnin Stobbe',
-    title: 'Operations Manager',
+    title: 'Director',
     phoneDisplay: '0404 777 984',
     phoneTel: '0404777984',
     email: 'marnin@secureworkswa.com.au',
-  },
-  maverick: {
+  }),
+  maverick: signatureFields({
     name: 'Maverick',
     title: 'Operations Assist',
     phoneDisplay: '+61 489 267 771',
     phoneTel: '+61489267771',
     email: 'admin@secureworkswa.com.au',
     website: 'secureworksgroup.com.au',
-  },
-  shaun: {
+  }),
+  // Shaun's own mailbox. No phone until one is configured on this profile.
+  shaun: signatureFields({
+    name: 'Shaun Lee',
+    title: 'Operations Coordinator',
+    email: 'shaun@secureworkswa.com.au',
+  }),
+  // The shaun choice from admin@ only. Not a mailbox default and not selectable
+  // by name; resolveRequestedSignature maps choice "shaun" on admin@ here.
+  shaun_admin: signatureFields({
     name: 'Shaun Lee',
     title: 'Operations Coordinator',
     phoneDisplay: '+61 489 267 771',
     phoneTel: '+61489267771',
     email: 'admin@secureworkswa.com.au',
-  },
-  jan: {
-    name: 'Jan Stobbe',
+  }),
+  jan: signatureFields({
+    name: 'Jan Cloete',
     title: 'Director',
+    phoneDisplay: '0417 976 471',
+    phoneTel: '0417976471',
     email: 'jan@secureworkswa.com.au',
-  },
-  fencing: {
+  }),
+  fencing: signatureFields({
     name: 'SecureWorks Fencing',
     title: 'Fencing Division',
     phoneDisplay: '08 6102 2796',
     phoneTel: '0861022796',
     email: 'fencing@secureworkswa.com.au',
-  },
-  patios: {
+  }),
+  patios: signatureFields({
     name: 'SecureWorks Patios',
     title: 'Patios Division',
     phoneDisplay: '08 6102 2796',
     phoneTel: '0861022796',
     email: 'patios@secureworkswa.com.au',
-  },
+  }),
 }
 
-const MAILBOX_SIGNATURE: Record<string, string> = {
-  'admin@secureworkswa.com.au': 'maverick',
-  'admin': 'maverick',
+const MAILBOX_DEFAULT_SIGNATURE: Record<string, string> = {
+  'admin@secureworkswa.com.au': 'secureworks',
+  'admin': 'secureworks',
   'shaun@secureworkswa.com.au': 'shaun',
   'jan@secureworkswa.com.au': 'jan',
   'fencing@secureworkswa.com.au': 'fencing',
@@ -1461,32 +1529,64 @@ const MAILBOX_SIGNATURE: Record<string, string> = {
   'marnin@secureworkswa.com.au': 'marnin',
 }
 
+const MAILBOX_SIGNATURE_CHOICES: Record<string, readonly string[]> = {
+  'admin@secureworkswa.com.au': ['shaun', 'maverick', 'none'],
+  'admin': ['shaun', 'maverick', 'none'],
+  'marnin@secureworkswa.com.au': ['marnin', 'none'],
+  'jan@secureworkswa.com.au': ['jan', 'none'],
+  'shaun@secureworkswa.com.au': ['shaun', 'none'],
+  'fencing@secureworkswa.com.au': ['fencing', 'none'],
+  'patios@secureworkswa.com.au': ['patios', 'none'],
+}
+
 const SIGNATURE_SUPPRESS_RE =
   /<!--\s*suppress-auto-appended-default-signature\s*-->/i
 
-function renderSignature(profile: SignatureProfile, id: string): string {
-  const phone = profile.phoneDisplay
-    ? `<b style="color:#293C46">P:</b> <a href="tel:${profile.phoneTel}" style="color:#4C6A7C;text-decoration:none">${profile.phoneDisplay}</a><br/>\n    `
+function mailboxAddress(mailbox: string): string {
+  return (mailbox || '').trim().toLowerCase()
+}
+
+function isAdminMailbox(mailbox: string): boolean {
+  const address = mailboxAddress(mailbox)
+  return address === 'admin@secureworkswa.com.au' || address === 'admin'
+}
+
+function signatureChoices(mailbox: string): readonly string[] {
+  return MAILBOX_SIGNATURE_CHOICES[mailboxAddress(mailbox)] || ['none']
+}
+
+function profileForChoice(choice: string, mailbox: string): SignatureFields {
+  if (choice === 'shaun' && isAdminMailbox(mailbox)) {
+    return SIGNATURE_PROFILES.shaun_admin
+  }
+  return SIGNATURE_PROFILES[choice]
+}
+
+function renderSignature(fields: SignatureFields, id: string): string {
+  const title = fields.title
+    ? `<p style="margin:0 0 10px;font-size:12px;color:#4C6A7C">${fields.title}</p>\n  `
     : ''
-  const website = profile.website
-    ? `<br/><b style="color:#293C46">W:</b> <a href="https://${profile.website}" style="color:#4C6A7C;text-decoration:none">${profile.website}</a>`
+  const phone = fields.phoneDisplay
+    ? `<b style="color:#293C46">P:</b> <a href="tel:${fields.phoneTel}" style="color:#4C6A7C;text-decoration:none">${fields.phoneDisplay}</a><br/>\n    `
+    : ''
+  const website = fields.website
+    ? `<br/><b style="color:#293C46">W:</b> <a href="https://${fields.website}" style="color:#4C6A7C;text-decoration:none">${fields.website}</a>`
     : ''
   return `
 <div data-secureworks-signature="${id}" style="margin-top:28px;padding-top:20px;border-top:2px solid #F15A29;font-family:Helvetica,Arial,sans-serif;max-width:400px">
   <img src="cid:${SIGNATURE_LOGO_CID}" width="180" alt="SecureWorks Group" style="display:block;margin-bottom:14px" />
-  <p style="margin:0 0 2px;font-size:14px;font-weight:bold;color:#293C46">${profile.name}</p>
-  <p style="margin:0 0 10px;font-size:12px;color:#4C6A7C">${profile.title}</p>
-  <p style="margin:0 0 10px;font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600">EXCELLENCE &nbsp;|&nbsp; INTEGRITY &nbsp;|&nbsp; SERVICE</p>
+  <p style="margin:0 0 2px;font-size:14px;font-weight:bold;color:#293C46">${fields.name}</p>
+  ${title}<p style="margin:0 0 10px;font-size:10px;color:#293C46;letter-spacing:1.5px;font-weight:600">EXCELLENCE &nbsp;|&nbsp; INTEGRITY &nbsp;|&nbsp; SERVICE</p>
   <p style="margin:0;font-size:12px;color:#4C6A7C;line-height:20px">
-    ${phone}<b style="color:#293C46">E:</b> <a href="mailto:${profile.email}" style="color:#F15A29;text-decoration:none">${profile.email}</a>${website}
+    ${phone}<b style="color:#293C46">E:</b> <a href="mailto:${fields.email}" style="color:#F15A29;text-decoration:none">${fields.email}</a>${website}
   </p>
 </div>`
 }
 
 export function getSignature(from: string): string {
-  const key = MAILBOX_SIGNATURE[(from || '').toLowerCase()]
+  const key = MAILBOX_DEFAULT_SIGNATURE[mailboxAddress(from)]
   if (!key) return ''
-  return renderSignature(SIGNATURE_PROFILES[key], key)
+  return renderSignature(profileForChoice(key, from), key)
 }
 
 export function resolveRequestedSignature(
@@ -1508,14 +1608,15 @@ export function resolveRequestedSignature(
   }
   const key = signature.trim().toLowerCase()
   if (key === 'none' || key === 'suppress') return ''
-  const profile = SIGNATURE_PROFILES[key]
-  if (!profile) {
+  const choices = signatureChoices(mailbox)
+  if (!choices.includes(key) || !profileForChoice(key, mailbox)) {
     throw new OutlookInputError(
       'invalid_signature',
-      'Unknown signature. Choose shaun, maverick, marnin, jan, fencing, patios, or none.',
+      `This mailbox cannot use that signature. Choose ${choices.join(', ')}.`,
     )
   }
-  return renderSignature(profile, key)
+  const renderedAs = key === 'shaun' && isAdminMailbox(mailbox) ? 'shaun' : key
+  return renderSignature(profileForChoice(key, mailbox), renderedAs)
 }
 
 export function composeSignedHtml(
@@ -1541,11 +1642,12 @@ export function withSignatureLogo(
   html: string,
   attachments: GraphFileAttachment[],
 ): GraphFileAttachment[] {
-  if (!html.includes(`cid:${SIGNATURE_LOGO_CID}`)) return attachments
-  if (attachments.some((item) => item.contentId === SIGNATURE_LOGO_CID)) {
-    return attachments
-  }
-  const merged = [signatureLogoAttachment(), ...attachments]
+  const reserved = SIGNATURE_LOGO_CID.toLowerCase()
+  const callerAttachments = attachments.filter(
+    (item) => (item.contentId || '').toLowerCase() !== reserved,
+  )
+  if (!html.includes(`cid:${SIGNATURE_LOGO_CID}`)) return callerAttachments
+  const merged = [signatureLogoAttachment(), ...callerAttachments]
   let encodedTotal = 0
   for (const item of merged) encodedTotal += item.contentBytes.length
   if (encodedTotal > MAX_MESSAGE_BYTES) {

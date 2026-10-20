@@ -72,24 +72,41 @@ Deno.test("Outlook route classification rejects group send fallthrough and prese
 Deno.test("signatures never invent Marnin as the sender", () => {
   const marnin = getSignature("marnin@secureworkswa.com.au");
   assertEquals(marnin.includes("Marnin Stobbe"), true);
-  assertEquals(marnin.includes("Operations Manager"), true);
+  assertEquals(marnin.includes("Director"), true);
+  assertEquals(marnin.includes("Operations Manager"), false);
   assertEquals(marnin.includes("0404 777 984"), true);
   assertEquals(getSignature("hugo@secureworkswa.com.au"), "");
-  const maverick = getSignature("admin@secureworkswa.com.au");
-  assertEquals(maverick.includes("Maverick"), true);
-  assertEquals(maverick.includes("Operations Assist"), true);
-  assertEquals(maverick.includes("admin@secureworkswa.com.au"), true);
-  assertEquals(maverick.includes("+61 489 267 771"), true);
-  assertEquals(maverick.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
-  assertEquals(maverick.includes("ses@secureworkswa.com.au"), false);
-  assertEquals(maverick.includes("data:image"), false);
+  const company = getSignature("admin@secureworkswa.com.au");
+  assertEquals(company.includes('data-secureworks-signature="secureworks"'), true);
+  assertEquals(company.includes(">SecureWorks Group</p>"), true);
+  assertEquals(company.includes("Maverick"), false);
+  assertEquals(company.includes("Shaun Lee"), false);
+  assertEquals(company.includes("admin@secureworkswa.com.au"), true);
+  assertEquals(company.includes("+61 489 267 771"), true);
+  assertEquals(company.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
+  assertEquals(company.includes("ses@secureworkswa.com.au"), false);
+  assertEquals(company.includes("data:image"), false);
   const shaun = getSignature("shaun@secureworkswa.com.au");
   assertEquals(shaun.includes("Shaun Lee"), true);
   assertEquals(shaun.includes("Operations Coordinator"), true);
-  assertEquals(shaun.includes("+61 489 267 771"), true);
-  assertEquals(shaun.includes("admin@secureworkswa.com.au"), true);
+  assertEquals(shaun.includes("mailto:shaun@secureworkswa.com.au"), true);
+  assertEquals(shaun.includes("+61 489 267 771"), false);
+  assertEquals(shaun.includes(">P:</b>"), false);
+  assertEquals(shaun.includes("admin@secureworkswa.com.au"), false);
   assertEquals(shaun.includes("Operations Manager"), false);
   assertEquals(shaun.includes("ses@"), false);
+  const jan = getSignature("jan@secureworkswa.com.au");
+  assertEquals(jan.includes("Jan Cloete"), true);
+  assertEquals(jan.includes("Jan Stobbe"), false);
+  assertEquals(jan.includes("Director"), true);
+  assertEquals(jan.includes("0417 976 471"), true);
+  assertEquals(jan.includes("tel:0417976471"), true);
+  assertEquals(jan.includes("jan@secureworkswa.com.au"), true);
+  for (const html of [marnin, company, shaun, jan]) {
+    assertEquals(html.includes("border-top:2px solid #F15A29"), true);
+    assertEquals(html.includes("EXCELLENCE"), true);
+    assertEquals(html.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
+  }
 });
 
 Deno.test("a chosen signature replaces the mailbox default and none suppresses it", () => {
@@ -97,10 +114,28 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
   const asShaun = composeSignedHtml("<p>Hi</p>", admin, "shaun");
   assertEquals(asShaun.includes("Shaun Lee"), true);
   assertEquals(asShaun.includes("Operations Coordinator"), true);
+  assertEquals(asShaun.includes("mailto:admin@secureworkswa.com.au"), true);
+  assertEquals(asShaun.includes("+61 489 267 771"), true);
   assertEquals(asShaun.includes("Maverick"), false);
+  assertEquals(asShaun.includes('data-secureworks-signature="shaun"'), true);
   assertEquals(
     (asShaun.match(/data-secureworks-signature=/g) || []).length,
     1,
+  );
+  const asMaverick = composeSignedHtml("<p>Hi</p>", admin, "maverick");
+  assertEquals(asMaverick.includes("Maverick"), true);
+  assertEquals(asMaverick.includes("Operations Assist"), true);
+  assertEquals(asMaverick.includes("Shaun Lee"), false);
+  const cased = composeSignedHtml(
+    "<p>Hi</p>",
+    "Admin@SecureWorksWA.com.au",
+    "Shaun",
+  );
+  assertEquals(cased.includes("Shaun Lee"), true);
+  assertEquals(cased.includes("mailto:admin@secureworkswa.com.au"), true);
+  assertEquals(
+    composeSignedHtml("<p>Hi</p>", "hugo@secureworkswa.com.au", "none"),
+    "<p>Hi</p>",
   );
   const marked = "<p>Hi</p><!-- suppress-auto-appended-default-signature -->";
   assertEquals(composeSignedHtml(marked, admin, undefined), marked);
@@ -116,19 +151,31 @@ Deno.test("a chosen signature replaces the mailbox default and none suppresses i
   const namedOverMarker = composeSignedHtml(marked, admin, "shaun");
   assertEquals(namedOverMarker.includes("Shaun Lee"), true);
   assertEquals(namedOverMarker.includes("Maverick"), false);
-  const jan = getSignature("jan@secureworkswa.com.au");
-  assertEquals(jan.includes("Jan Stobbe"), true);
-  assertEquals(jan.includes("Director"), true);
-  assertEquals(jan.includes('href="tel:"'), false);
-  assertEquals(jan.includes(">P:</b>"), false);
   const fencing = getSignature("fencing@secureworkswa.com.au");
   assertEquals(fencing.includes("08 6102 2796"), true);
   assertEquals(fencing.includes("fencing@secureworkswa.com.au"), true);
   const unknown = assertThrows(
     () => composeSignedHtml("<p>Hi</p>", admin, "captain"),
     OutlookInputError,
+    "Choose shaun, maverick, none.",
   );
   assertEquals(unknown.code, "invalid_signature");
+  assertEquals(unknown.message.includes("captain"), false);
+  const refused = [
+    ["marnin@secureworkswa.com.au", "shaun", "Choose marnin, none."],
+    ["shaun@secureworkswa.com.au", "maverick", "Choose shaun, none."],
+    ["hugo@secureworkswa.com.au", "marnin", "Choose none."],
+    ["admin@secureworkswa.com.au", "secureworks", "Choose shaun, maverick, none."],
+  ] as const;
+  for (const [mailbox, signature, hint] of refused) {
+    const error = assertThrows(
+      () => composeSignedHtml("<p>Hi</p>", mailbox, signature),
+      OutlookInputError,
+      hint,
+    );
+    assertEquals(error.code, "invalid_signature");
+    assertEquals(error.message.toLowerCase().includes(signature), false);
+  }
   const notString = assertThrows(
     () => composeSignedHtml("<p>Hi</p>", admin, 1),
     OutlookInputError,
@@ -149,6 +196,7 @@ Deno.test("inline attachment metadata is kept and normalised", async () => {
   assertEquals(inline.contentId, "logo@secureworkswa.com.au");
   const implied = validateInlineAttachment({
     name: "logo.png",
+    contentType: "image/png",
     contentBytes: "AA==",
     contentId: "logo@secureworkswa.com.au",
   });
@@ -209,6 +257,63 @@ Deno.test("inline attachment metadata is kept and normalised", async () => {
   assertEquals(fromUrl[0].isInline, true);
   assertEquals(fromUrl[0].contentId, "fetched@secureworkswa.com.au");
   assertEquals(fromUrl[0].contentBytes, "AQIDBA==");
+  const jpeg = validateInlineAttachment({
+    name: "photo.jpg",
+    contentType: "image/jpeg",
+    contentBytes: "AA==",
+    isInline: true,
+    contentId: "photo@secureworkswa.com.au",
+  });
+  assertEquals(jpeg.isInline, true);
+  assertThrows(
+    () =>
+      validateInlineAttachment({
+        name: "note.txt",
+        contentType: "text/plain",
+        contentBytes: "AA==",
+        isInline: true,
+        contentId: "note@secureworkswa.com.au",
+      }),
+    OutlookInputError,
+    "only allowed for an image",
+  );
+  assertThrows(
+    () =>
+      validateInlineAttachment({
+        name: "file.pdf",
+        contentType: "application/pdf",
+        contentBytes: "AA==",
+        isInline: true,
+        contentId: "file@secureworkswa.com.au",
+      }),
+    OutlookInputError,
+    "only allowed for an image",
+  );
+  const reserved = assertThrows(
+    () =>
+      validateInlineAttachment({
+        name: "logo.png",
+        contentType: "image/png",
+        contentBytes: "AA==",
+        isInline: true,
+        contentId: `cid:<${SIGNATURE_LOGO_CID}>`,
+      }),
+    OutlookInputError,
+    "reserved signature logo content id",
+  );
+  assertEquals(reserved.code, "invalid_attachment");
+  assertEquals(reserved.message.includes(SIGNATURE_LOGO_CID), false);
+  await assertRejects(
+    () =>
+      prepareAttachments([{
+        url: "https://fixtures.test/file.pdf",
+        name: "file.pdf",
+        isInline: true,
+        contentId: "file@secureworkswa.com.au",
+      }], { fetchImpl, allowedHosts: ["fixtures.test"] }),
+    OutlookInputError,
+    "only allowed for an image",
+  );
 });
 
 Deno.test("the signature logo is one CID attachment and only when the HTML asks for it", () => {
@@ -226,6 +331,18 @@ Deno.test("the signature logo is one CID attachment and only when the HTML asks 
   );
   assertEquals(again.length, 1);
   assertEquals(again[0].contentId, SIGNATURE_LOGO_CID);
+  const replaced = withSignatureLogo(`cid:${SIGNATURE_LOGO_CID}`, [{
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    name: "caller-logo.png",
+    contentType: "image/png",
+    contentBytes: "AAAA",
+    isInline: true,
+    contentId: SIGNATURE_LOGO_CID.toUpperCase(),
+  }]);
+  assertEquals(replaced.length, 1);
+  assertEquals(replaced[0].contentBytes, once[0].contentBytes);
+  assertEquals(replaced[0].contentBytes === "AAAA", false);
+  assertEquals(withSignatureLogo("<p>Hi</p>", replaced), []);
 });
 
 Deno.test("recipient and inline attachment inputs are strict and never silently dropped", async () => {
@@ -572,7 +689,9 @@ Deno.test("reply handler preserves native recipients and sends only after exact 
     assertEquals(createBody.message.toRecipients, undefined);
     assertEquals(createBody.message.ccRecipients, undefined);
     const html = createBody.message.body.content as string;
-    assertEquals(html.includes("Maverick"), true);
+    assertEquals(html.includes('data-secureworks-signature="secureworks"'), true);
+    assertEquals(html.includes("Maverick"), false);
+    assertEquals(html.includes("Shaun Lee"), false);
     assertEquals(html.includes("admin@secureworkswa.com.au"), true);
     assertEquals(html.includes("+61 489 267 771"), true);
     assertEquals(html.includes(`cid:${SIGNATURE_LOGO_CID}`), true);
@@ -677,6 +796,8 @@ Deno.test("reply signature shaun replaces Maverick and none sends no logo", asyn
       calls.find((call) => call.url.endsWith("/createReply"))!.body!,
     ).message.body.content as string;
     assertEquals(shaunHtml.includes("Shaun Lee"), true);
+    assertEquals(shaunHtml.includes("mailto:admin@secureworkswa.com.au"), true);
+    assertEquals(shaunHtml.includes("+61 489 267 771"), true);
     assertEquals(shaunHtml.includes("Maverick"), false);
     assertEquals(
       calls.filter((call) => call.url.endsWith("/attachments")).length,
@@ -729,7 +850,7 @@ Deno.test("an unknown reply signature refuses before any provider call", async (
           signature: "not-a-person",
         }),
       OutlookInputError,
-      "Unknown signature",
+      "Choose shaun, maverick, none.",
     );
     assertEquals((error as OutlookInputError).code, "invalid_signature");
     assertEquals(providerCalls, 0);
@@ -778,6 +899,8 @@ Deno.test("a draft from admin as shaun carries Shaun's block and the inline logo
     const html = message.body.content as string;
     assertEquals(html.includes("Shaun Lee"), true);
     assertEquals(html.includes("Operations Coordinator"), true);
+    assertEquals(html.includes("mailto:admin@secureworkswa.com.au"), true);
+    assertEquals(html.includes("+61 489 267 771"), true);
     assertEquals(html.includes("Maverick"), false);
     assertEquals(message.attachments.length, 1);
     assertEquals(message.attachments[0].isInline, true);

@@ -382,6 +382,9 @@ Deno.test("a reply refuses an unknown source message or a mailbox that did not r
     String(unknown.refusal.recovery_action).includes("10 minutes"),
     true,
   );
+  const notIngested = `${unknown.refusal.fact} ${unknown.refusal.recovery_action}`;
+  assertEquals(notIngested.includes("intake poller"), true);
+  assertEquals(notIngested.includes("never succeed"), true);
 
   const wrongMailbox = await refusal(
     clientFor({ inbox: inboxRow({ mailbox: "marnin@secureworkswa.com.au" }) }),
