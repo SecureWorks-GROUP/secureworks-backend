@@ -2,9 +2,10 @@
 // invoice" mark (DSP-11 follow-on, W2, 20 Oct 2026).
 //
 // Everything here is pure. `pipeline` (dispatch=1) owns the read through
-// loadClientSignoffByJob (trade_client_signoff.ts), the one sign-off rule,
-// which reads nothing while trade_invoice_requires_client_signoff_v1 is off;
-// this module only says what a card shows.
+// loadClientSignoffByJob (trade_client_signoff.ts), the one sign-off rule.
+// While trade_invoice_requires_client_signoff_v1 is off (or unreadable) it
+// reads only that flag: no settings and no sign-off rows. This module only
+// says what a card shows.
 //
 // Read only. Nothing here sends, books, chases or writes. The mark says the
 // office may raise the final invoice now; the office raises it as today, and
@@ -49,8 +50,10 @@ export function dispatchSignoffState(ev: ClientSignoff): DispatchSignoffState {
  * outside the sign-off rule (another job type, or completed before
  * applies_from) or the read returned nothing for it.
  *
- * `finalInvoiceRaised` is the card's own has_final_invoice; null when the
- * invoice read failed.
+ * `finalInvoiceRaised`: a final sales invoice on the job that is not a
+ * DRAFT (a DRAFT still waits on the office's approval, so the job stays
+ * ready to raise); null when the invoice read failed. It is not the card's
+ * has_final_invoice, which counts a DRAFT.
  */
 export function dispatchSignoffFields(
   ev: ClientSignoff | undefined,

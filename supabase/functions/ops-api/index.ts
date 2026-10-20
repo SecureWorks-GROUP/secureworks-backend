@@ -16768,9 +16768,9 @@ async function pipeline(
   }
 
   // Invoice status per job — track any invoice (for accepted) + deposit vs final split (for complete)
-  const invoiceMap: Record<string, { has_any: boolean; any_paid: boolean; has_deposit: boolean; deposit_paid: boolean; has_final: boolean; final_paid: boolean }> = {}
+  const invoiceMap: Record<string, { has_any: boolean; any_paid: boolean; has_deposit: boolean; deposit_paid: boolean; has_final: boolean; final_paid: boolean; final_raised: boolean }> = {}
   for (const inv of (invoiceRes.data || [])) {
-    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_any: false, any_paid: false, has_deposit: false, deposit_paid: false, has_final: false, final_paid: false }
+    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_any: false, any_paid: false, has_deposit: false, deposit_paid: false, has_final: false, final_paid: false, final_raised: false }
     const m = invoiceMap[inv.job_id]
     m.has_any = true
     if (inv.status === 'PAID') m.any_paid = true
@@ -16780,6 +16780,8 @@ async function pipeline(
       if (inv.status === 'PAID') m.deposit_paid = true
     } else {
       m.has_final = true
+      // Dispatch sign-off only (dispatch_signoff.ts): a DRAFT is not raised yet.
+      if (inv.status !== 'DRAFT') m.final_raised = true
       if (inv.status === 'PAID') m.final_paid = true
     }
   }
@@ -16854,7 +16856,7 @@ async function pipeline(
           ...(dispatchSignoffByJob
             ? dispatchSignoffFields(
               dispatchSignoffByJob.get(String(j.id)),
-              invoiceRes.error || j.status === 'draft' ? null : !!invoiceMap[j.id]?.has_final,
+              invoiceRes.error || j.status === 'draft' ? null : !!invoiceMap[j.id]?.final_raised,
             )
             : {}),
         }

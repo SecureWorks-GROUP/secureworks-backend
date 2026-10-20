@@ -182,7 +182,7 @@ writes.
   `client_signoff: {state, method, signed_at}` with `state` one of
   `signed_off`, `waived`, `not_signed`, `not_happy`, `unknown`; and
   `final_invoice_ready`: true when signed off or waived and the card's
-  `has_final_invoice` is false, false otherwise, null when either answer is
+  final sales invoice is not raised yet (a DRAFT does not count, though `has_final_invoice` does), false otherwise, null when either answer is
   unknown (a failed sign-off or invoice read). Other cards carry neither key.
 - The existing To do (`dispatch_todo`, `todo_total`) is unchanged. The screen
   shows `final_invoice_ready` as its own To do group.

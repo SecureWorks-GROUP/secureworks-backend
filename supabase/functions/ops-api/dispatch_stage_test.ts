@@ -1661,16 +1661,19 @@ function signoffBoard(flagOn: boolean): Record<string, Row[]> {
       job(93, { job_number: "SWX-S3", status: "complete", completed_at: "2026-10-18T02:00:00.000Z" }),
       job(94, { job_number: "SWX-S4", status: "invoiced", completed_at: "2026-10-18T02:00:00.000Z" }),
       job(95, { job_number: "SWX-S5", type: "repair", status: "complete" }),
+      job(96, { job_number: "SWX-S6", status: "complete", completed_at: "2026-10-18T02:00:00.000Z" }),
     ],
     feature_flags: [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: flagOn }],
     client_signoff_settings: [{ id: 1, min_happy_rating: 4, gated_job_types: ["fencing", "patio"], applies_from: null }],
     job_client_signoffs: [
       { id: "so-1", job_id: jobId(91), method: "trade_app", signed_name: "x", happy: true, satisfaction_rating: 5, created_at: "2026-10-18T03:00:00.000Z" },
       { id: "so-2", job_id: jobId(92), method: "trade_app", signed_name: "x", happy: false, satisfaction_rating: 2, created_at: "2026-10-18T03:00:00.000Z" },
+      { id: "so-6", job_id: jobId(96), method: "trade_app", signed_name: "x", happy: true, satisfaction_rating: 5, created_at: "2026-10-18T03:00:00.000Z" },
       { id: "so-4", job_id: jobId(94), method: "office_waiver", waiver_reason: "client away", created_at: "2026-10-18T03:00:00.000Z" },
     ],
     xero_invoices: [
       { job_id: jobId(94), status: "AUTHORISED", invoice_type: "ACCREC", reference: "SWX-S4 Final" },
+      { job_id: jobId(96), status: "DRAFT", invoice_type: "ACCREC", reference: "SWX-S6 Final" },
     ],
   };
 }
@@ -1704,7 +1707,11 @@ Deno.test("pipeline dispatch=1: with the switch on each fencing card shows its s
   assertEquals(by("SWX-S4").final_invoice_ready, false);
   // A repair job is outside the sign-off rule: no keys.
   assert(!("client_signoff" in by("SWX-S5")));
-  assertEquals(result.final_invoice_ready_total, 1);
+  // A DRAFT final invoice still waits on the office: the job stays ready,
+  // while the card's own has_final_invoice keeps counting the draft.
+  assertEquals(by("SWX-S6").final_invoice_ready, true);
+  assertEquals(by("SWX-S6").has_final_invoice, true);
+  assertEquals(result.final_invoice_ready_total, 2);
   // Payment is never an input, and the read writes nothing.
   assertEquals(writes().length, 0);
   // The existing To do is untouched by sign-off.
