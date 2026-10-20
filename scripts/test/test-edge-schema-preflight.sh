@@ -938,7 +938,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Reconciliation daily list: the recon_daily_list and
                       # recon_record_decision doors (recon_decisions.ts).
                       ("20261020140000", "context_reconciliation_decisions"),
-                      ("20261020160000", "context_recon_daily_list")]:
+                      ("20261020160000", "context_recon_daily_list"),
+                      # Context reconciliation from a job: the context_job_mail
+                      # and recon_job_items doors (context_job_reconciliation.ts).
+                      ("20261020165000", "context_job_reconciliation")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

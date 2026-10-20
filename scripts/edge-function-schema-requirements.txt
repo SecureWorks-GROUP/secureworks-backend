@@ -853,3 +853,8 @@ ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mir
 ops-api|supabase/migrations/20261020140000_context_reconciliation_decisions.sql|function|context_recon_record_decision
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_list
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
+
+# Context reconciliation from a job: the context_job_mail and recon_job_items
+# reads call these, so they must exist before this ops-api ships.
+ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_job_mail
+ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_recon_job_items
