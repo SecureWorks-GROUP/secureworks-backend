@@ -660,14 +660,21 @@ export async function splitReconRow(
   if (!Array.isArray(args.parts) || args.parts.length === 0) {
     throw new Error("parts are required: one job and amount per part");
   }
-  // The lane comes from the bill itself, never the screen: an installer bill
-  // (306/301) is labour on every part (the database derives it the same way).
-  const lane = laneOfBillLines(await loadBillLines(client, args.xeroInvoiceId));
-  const parts = args.parts.map((p: any) => ({
-    job_id: String(p?.job_id ?? ""),
-    amount_ex: Number(p?.amount_ex),
-    lane,
-  }));
+  // An installer bill (306/301) is labour on every part whatever the screen
+  // sent (the database enforces the same); any other bill takes the person's
+  // lane, materials when none was given.
+  const billLane = laneOfBillLines(await loadBillLines(client, args.xeroInvoiceId));
+  const parts = args.parts.map((p: any) => {
+    const asked = p?.lane == null || p.lane === "" ? "materials" : String(p.lane);
+    if (!["materials", "labour", "other"].includes(asked)) {
+      throw new Error(`lane ${asked} is not materials, labour or other`);
+    }
+    return {
+      job_id: String(p?.job_id ?? ""),
+      amount_ex: Number(p?.amount_ex),
+      lane: billLane === "labour" ? "labour" : asked,
+    };
+  });
   const overhead = args.overheadEx == null || args.overheadEx === "" ? 0 : Number(args.overheadEx);
   if (!Number.isFinite(overhead)) throw new Error("overhead must be a number");
   const { data, error } = await client.rpc("allocate_bill_split", {

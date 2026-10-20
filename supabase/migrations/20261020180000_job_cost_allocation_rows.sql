@@ -70,8 +70,12 @@ AS $$
       (SELECT sum(public.job_profit_num(c.value -> 'AppliedAmount'))
          FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw -> 'CreditNotes') = 'array' THEN p_raw -> 'CreditNotes' ELSE '[]'::jsonb END) c
       ) AS credit_notes,
-      CASE WHEN jsonb_typeof(p_raw -> 'CreditNotes') = 'array'
-           THEN jsonb_array_length(p_raw -> 'CreditNotes') > 0 ELSE false END AS has_credit_notes,
+      -- The list decides only when every credit note carries a readable
+      -- AppliedAmount; otherwise AmountCredited does, so an unreadable list
+      -- never reads as no credit.
+      (SELECT count(*) > 0 AND bool_and(public.job_profit_num(c.value -> 'AppliedAmount') IS NOT NULL)
+         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_raw -> 'CreditNotes') = 'array' THEN p_raw -> 'CreditNotes' ELSE '[]'::jsonb END) c
+      ) AS has_credit_notes,
       (SELECT COALESCE(sum(public.job_profit_num(o.value -> 'AppliedAmount')), 0)
          FROM jsonb_array_elements(
            (CASE WHEN jsonb_typeof(p_raw -> 'Prepayments') = 'array' THEN p_raw -> 'Prepayments' ELSE '[]'::jsonb END)
@@ -198,7 +202,7 @@ BEGIN
   IF p_actor IS NULL OR btrim(p_actor) = '' THEN
     RAISE EXCEPTION 'split_refused: actor required';
   END IF;
-  IF jsonb_typeof(p_parts) <> 'array' OR jsonb_array_length(p_parts) = 0 THEN
+  IF jsonb_typeof(p_parts) IS DISTINCT FROM 'array' OR jsonb_array_length(p_parts) = 0 THEN
     RAISE EXCEPTION 'split_refused: at least one job part is required';
   END IF;
   IF v_overhead < 0 THEN
@@ -241,12 +245,15 @@ BEGIN
     THEN 'labour' END;
 
   FOR part IN SELECT value FROM jsonb_array_elements(p_parts) LOOP
-    IF jsonb_typeof(part -> 'amount_ex') <> 'number' THEN
+    IF jsonb_typeof(part -> 'amount_ex') IS DISTINCT FROM 'number' THEN
       RAISE EXCEPTION 'split_refused: every part needs an amount';
     END IF;
     v_amount := round((part ->> 'amount_ex')::numeric, 2);
     IF v_amount <= 0 THEN
       RAISE EXCEPTION 'split_refused: every part must be more than 0';
+    END IF;
+    IF COALESCE(part ->> 'job_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+      RAISE EXCEPTION 'split_refused: every part needs a job';
     END IF;
     SELECT * INTO v_job FROM public.jobs WHERE id = (part ->> 'job_id')::uuid;
     IF NOT FOUND THEN

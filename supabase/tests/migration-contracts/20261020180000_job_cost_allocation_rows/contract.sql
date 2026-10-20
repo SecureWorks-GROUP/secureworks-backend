@@ -89,6 +89,8 @@ BEGIN
     ('voided',   'B-VOID',   '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 50}]'::jsonb, 0::numeric, 'VOIDED'),
     ('mirror',   'B-MIRROR', '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 80}]'::jsonb, 0::numeric, 'trade app'),
     ('dead',     'B-SPLIT',  '[{"job_id": "ca000000-0000-4000-8000-000000000008", "amount_ex": 1000}]'::jsonb, 0::numeric, 'cancelled'),
+    ('noamt',    'B-SPLIT',  '[{"job_id": "ca000000-0000-4000-8000-000000000001"}]'::jsonb, 0::numeric, 'needs an amount'),
+    ('nojob',    'B-SPLIT',  '[{"job_id": "", "amount_ex": 1000}]'::jsonb, 0::numeric, 'needs a job'),
     ('notqueue', 'B-CRED',   '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 200}]'::jsonb, 0::numeric, 'not in Bills to place')
   ) AS t(label, bill, parts, overhead, expect) LOOP
     v_msg := NULL;
@@ -250,7 +252,8 @@ BEGIN
   IF public.job_cost_credit_share('{"AmountCredited": 110, "Prepayments": [{"AppliedAmount": 110}]}', 1100) <> 0
      OR public.job_cost_credit_share('{"AmountCredited": 44, "CreditNotes": [{"AppliedAmount": 22}], "Overpayments": [{"AppliedAmount": 22}]}', 220) <> 0.1
      OR public.job_cost_credit_share('{"AmountCredited": 22}', 220) <> 0.1
-     OR public.job_cost_credit_share('{"CreditNotes": {}}', 220) <> 0 THEN
+     OR public.job_cost_credit_share('{"CreditNotes": {}}', 220) <> 0
+     OR public.job_cost_credit_share('{"AmountCredited": 220, "CreditNotes": [{"Total": 220}]}', 1100) <> 0.2 THEN
     RAISE EXCEPTION 'cfo18 credit share: prepayments or overpayments read as credit';
   END IF;
 
