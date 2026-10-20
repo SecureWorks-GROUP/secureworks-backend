@@ -27,6 +27,8 @@ Nothing is sent when this merges. Every switch below starts off.
 | `index.ts` | Wiring only: one `case` block that injects `sendChaseSms`, `getJobConversation`, `getToken`, `xeroReadGet`, `updateJobStatus`, the Outlook send, `getInvoicePdf`, `searchGHLContacts`, the staff SMS path and the job document reads. |
 | `supabase/migrations/20261008170000_debt_workshop.sql` | The seven tables, row-level security, and the two cron jobs. Rollback: `supabase/rollbacks/20261008170000_debt_workshop_down.sql`. |
 | `supabase/migrations/20261015170000_debt_ws_report.sql` | The debt report: three settings, `debt_ws_reports`, `debt_ws_payments_between` and the auto-send cron (first on Monday). Rollback: `supabase/rollbacks/20261015170000_debt_ws_report_down.sql`. |
+| `supabase/migrations/20261020150000_xero_mirror_checks.sql` | `xero_mirror_checks`: one row per hourly check of our Xero copy against Xero (see "Total owed to us and the check against Xero"). Rollback: `supabase/rollbacks/20261020150000_xero_mirror_checks_down.sql`. |
+| `debt_ws_xero_check.ts` | The newest check as one plain line: "Matches Xero", "Does not match Xero: N invoices differ (...)", or "Not checked against Xero yet". |
 | `supabase/migrations/20261016180000_debt_ws_report_wednesday.sql` | Moves the auto-send to Wednesday 12:00 Perth and adds the 11:55 Xero refresh (`trigger_debt_ws_report_refresh()`, cron `debt-ws-report-refresh`). Rollback: `supabase/rollbacks/20261016180000_debt_ws_report_wednesday_down.sql` (back to Monday 08:00). |
 
 ## The actions
@@ -38,7 +40,7 @@ Who may call each action:
 
 | Action | Method | Who | What it does |
 |---|---|---|---|
-| `debt_ws_overview` | GET | staff | Everything W1 needs: categories, rows, companies, not due, not chased, needs a look, paid this week, Jan's list. |
+| `debt_ws_overview` | GET | staff | Everything W1 needs: categories, rows, companies, not due, not chased, needs a look, paid this week, Jan's list, `total_owed` (every open invoice, broken down) and `xero_check` (whether our copy matched Xero). |
 | `debt_ws_job` | GET `xero_invoice_id` (optional `conversation=all`) | staff | Everything W2 needs: row, job (with `shares[]`), `payer_contact`, story, invoices, documents, conversation (the payer's own messages; `conversation=all` gives the whole job's thread with each message marked `party_name` / `is_payer`), notes, ladder, suggestion (a pending agent draft or move, else the template draft), flags, possible payments, the payer's contact candidates, `send_block`, `manual_text` (`{allowed, code, reason}`: whether Shaun may type his own text here, and why not in words) and the pay link. |
 | `debt_ws_document` | GET `job_id, document_id` (or `xero_invoice_id`) | staff | One job document as base64, or the invoice PDF. |
 | `debt_ws_note` | POST | staff | Add a note (`body`, `note` or `text`). An optional `promise_date` pauses the steps until that date and logs a promise. |
@@ -121,6 +123,16 @@ Otherwise the payer is not resolved (the Xero name only, nothing to link or text
 - **Sending:** the text goes to the payer's own GHL contact, never the job's, with `job_id` passed. `sendChaseSms` (`assertGhlContactMatchesResolvedJob`) and ghl-proxy's `send_sms` contact/job match accept a contact that is `jobs.ghl_contact_id` OR the `ghl_contact_id` of a live `job_contacts` row (status empty or `active`, no `removed_at`) on the SAME job (Captain ruling, 12 Oct 2026; `_shared/job_contact_membership.ts`). A contact on another job's list, a removed row, or a contact on no list is refused as before (`send_refused_by_guard`); a failed contact-list read fails closed. The SES fence, the 10-minute duplicate block and the 771 sender default are unchanged. `sendClientUpdate` with `job_contact_id` now names the job too, so that path runs the same guard.
 - **Jan's list:** the payer's label, the payer's phone and the site address. **The agent:** the payer's contact, messages and `send_block`. Statements are unchanged.
 
+## Total owed to us and the check against Xero
+
+Shaun approved both on 20 Oct 2026.
+
+- **Total owed to us** (`debt_ws_overview.total_owed`, `debt_ws_report.ts` `totalOwedFrom`) is every open invoice in our Xero copy (ACCREC, AUTHORISED, amount due above zero), so it equals Xero's open receivables once the copy matches Xero. Its lines add up to it to the cent (`adds_up`): **Debt** (the chart's figure, the five categories, not-chased left out), **Not due yet**, **Progress payments** (not due yet), **Companies on statements** (not due yet), **Deposits** (go-ahead payments), **Not chased**, **Needs a look**, and **Test invoices** and **Not placed** only when there are any. The lines are the debt report's own buckets (`placeOpenInvoices`), with not due yet shown in three parts by the kind the tab already gives each invoice; no new rule. Each line carries its `invoices[]`. It is display only: nothing in it is chased, and the chart, the chase rules, the texts and every gate are unchanged.
+- **The check against Xero** (`debt_ws_overview.xero_check`): xero-sync compares our copy with Xero's own open list at most once an hour (`xero-sync/xero_mirror_check.ts`, run at the end of `sync_invoices`, or now with `?action=check_invoice_mirror`) and records the result in `xero_mirror_checks`. `status` is `matches`, `differs` (with `differences[]` and the invoice numbers in `words`) or `not_checked`; `drafts` is Xero's DRAFT sales invoices (never in the total); `last_failed` says when a newer attempt did not finish. A check that cannot be read shows "Could not read the check against Xero", never "Matches Xero", and never stops the tab.
+- **What the check heals:** where Xero says money is owed and our copy disagrees (marked DELETED or VOIDED, or a different amount), it re-reads that invoice from Xero by its id and copies Xero's answer through `reconcileXeroInvoice`, at most 25 a run. It never writes to Xero, never marks an invoice deleted, voided or paid itself, never sets an amount due to zero (so it never fires the `invoice.paid` trigger), and never inserts an invoice our copy has never seen (that is reported for a person). An invoice our copy counts as owed that Xero does not list is only reported; the hourly stale check re-reads it by id.
+- **Why:** until 10 Sep 2026 (#797) the stale check marked an invoice DELETED with nothing owing whenever its read from Xero failed for any reason. Five invoices open in Xero stayed that way (INV-0034, INV-0177, INV-0352, INV-0704, INV-0938, $3,352.48 on 20 Oct 2026), because nothing re-read them. ops-api `void_invoice` likewise now copies only the status Xero's answer names (`xero_void_mirror.ts`).
+- **The debt report** shows the same Total owed to us as its headline figure, the check line under the tie, a key point when the copy does not match, and both in the email summary.
+
 ## The switches
 
 Every switch starts off. Turn one on only when Shaun says so.
@@ -170,7 +182,7 @@ pg_cron runs in UTC; Perth is UTC+8 with no daylight saving.
 - **Pay links** (Xero online-invoice URLs) are cached on `debt_ws_states.pay_link`. A request fetches at most 20 new ones.
 - **Invoice kinds:** final endings are FIN, FINBAL or BAL with up to three digits (FIN25, FINBAL50), FINAL and PRIVATE, with a description starting Balance, Remaining or Remainder. Not final: DEP, MAT and PROG with up to three digits, PLAN and VAR. An ending and description that disagree (FIN25 with "Deposit") still fall to "needs a look".
 - **Tests:** `deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_deps_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts supabase/functions/ops-api/debt_ws_payer_test.ts supabase/functions/ops-api/debt_ws_report_test.ts supabase/functions/ops-api/debt_ws_report_pdf_test.ts` (CI runs the same), plus `job_conversation_payer_threads_test.ts` for the conversation reader.
-- **Migration contracts:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/`, `20261015170000_debt_ws_report/` and `20261016180000_debt_ws_report_wednesday/`.
+- **Migration contracts:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/`, `20261015170000_debt_ws_report/`, `20261016180000_debt_ws_report_wednesday/` and `20261020150000_xero_mirror_checks/`. The check itself: `xero-sync/xero_mirror_check_test.ts`.
 
 ## The debt report
 

@@ -30,7 +30,7 @@ Deno.test("a keyed duplicate is the same fact, not a failure", () => {
 });
 
 Deno.test("void, delete and manual paid rows carry the invoice's own job", () => {
-  const voided = blocksAround("source: 'ops-api/void_invoice'", 3200, 400)[0];
+  const voided = blocksAround("source: 'ops-api/void_invoice'", 1200, 400)[0];
   assert(voided.includes(".select('invoice_number, total, status, job_id')"));
   assert(voided.includes("voidInvRecord?.job_id ? { job_id: voidInvRecord.job_id, match_method: 'direct_job_id' } : {}"));
   const paid = blocksAround("source: 'ops-api/mark_invoice_paid'", 1200, 400)[0];

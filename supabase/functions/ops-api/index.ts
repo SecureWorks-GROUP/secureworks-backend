@@ -1386,9 +1386,11 @@ import {
   requestJobReview,
   reviewRequestMessage as closeoutReviewRequestMessage,
   runJobCloseoutAction,
+  setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -9344,47 +9346,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { accessToken: vAt, tenantId: vTi } = await getToken(client)
         const newStatus = body.void ? 'VOIDED' : 'DELETED'
         const vRes = await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
-        // Store what Xero returned, never what was asked for: a reply without
-        // this invoice leaves the copy as it is (the daily mismatch re-read
-        // heals it), so an open invoice is never shown as deleted with $0 due
-        // (CFO-14, 19 Oct 2026).
-        const vInv = vRes?.Invoices?.[0]
-        // Verified only with this invoice's id, a status and both balances,
-        // as reconcileXeroInvoice requires.
-        const vVerified = !!vInv && vInv.InvoiceID === vid && typeof vInv.Status === 'string' &&
-          typeof vInv.AmountDue === 'number' && Number.isFinite(vInv.AmountDue) &&
-          typeof vInv.AmountPaid === 'number' && Number.isFinite(vInv.AmountPaid)
-        const vReturned = vVerified ? String(vInv.Status).toUpperCase() : null
-        if (!vVerified) {
-          console.error(`[ops-api] void_invoice: Xero did not confirm invoice ${vid}; local copy left unchanged`)
-          return json({
-            success: false,
-            provider_verified: false,
-            error: 'Xero did not confirm the change; nothing was recorded here. Check the invoice in Xero.',
-          }, 502)
-        }
-        await client.from('xero_invoices').update({
-          status: vReturned,
-          amount_due: vInv.AmountDue,
-          amount_paid: vInv.AmountPaid,
-          raw_json: vInv,
-          synced_at: new Date().toISOString(),
-        }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
-        // An event only for the change Xero actually made.
-        if (vReturned === newStatus) {
-          try {
-            await client.from('business_events').insert({
-              event_type: newStatus === 'DELETED' ? 'invoice.deleted' : 'invoice.voided',
-              source: 'ops-api/void_invoice',
-              entity_type: 'invoice',
-              entity_id: vid,
-              // The invoice's own job, so the row lands on it (no job: the Xero placement step).
-              ...(voidInvRecord?.job_id ? { job_id: voidInvRecord.job_id, match_method: 'direct_job_id' } : {}),
-              payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
-            })
-          } catch (_) { /* non-blocking */ }
-        }
-        return json({ success: vReturned === newStatus, status: vReturned, provider_verified: true })
+        // Our copy only says VOIDED or DELETED when Xero's answer does (xero_void_mirror.ts).
+        const vPatch = voidMirrorPatch(vRes, vid)
+        if (vPatch) await client.from('xero_invoices').update(vPatch).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        // Log business event (non-blocking)
+        try {
+          await client.from('business_events').insert({
+            event_type: newStatus === 'DELETED' ? 'invoice.deleted' : 'invoice.voided',
+            source: 'ops-api/void_invoice',
+            entity_type: 'invoice',
+            entity_id: vid,
+            // The invoice's own job, so the row lands on it (no job: the Xero placement step).
+            ...(voidInvRecord?.job_id ? { job_id: voidInvRecord.job_id, match_method: 'direct_job_id' } : {}),
+            payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
+          })
+        } catch (_) { /* non-blocking */ }
+        return json({ success: true, status: vPatch?.status ?? newStatus, mirror_updated: !!vPatch })
       }
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body
@@ -9928,6 +9905,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'send_payment_link': return json(await sendPaymentLink(client, body))
       case 'send_acceptance_invoice': return json(await sendAcceptanceInvoice(client, body))
       case 'send_review_request': return json(await sendReviewRequest(client, body))
+      // The per-job review switch (job_closeout.ts setReviewOptOut): staff sessions and
+      // the privileged ops key only, absent from ROUTINE_ALLOWED_ACTIONS. Refused 409
+      // review_already_sent once the job has a review claim.
+      case 'set_review_opt_out': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: set_review_opt_out requires the privileged ops key or a staff session' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError('set_review_opt_out requires POST', 405)
+        // A signed-in person is named by the verified session; the ops key has no user
+        // and is attributed by the operator email the screen stamps.
+        const optOutBy = authMode === 'jwt'
+          ? (authUser?.email || cleanReviewedString(body?.operator_email) || (authUser?.id ? `user:${authUser.id}` : null))
+          : (cleanReviewedString(body?.operator_email) || `ops-api:${authMode}`)
+        const optOut = await setReviewOptOut({ client, now: () => new Date() }, body || {}, optOutBy)
+        return json(optOut.body, optOut.status)
+      }
 
       // ── Quick Quote (Miscellaneous Jobs) ──
       case 'search_ghl_contacts': return json(await searchGHLContacts(client, url.searchParams))
