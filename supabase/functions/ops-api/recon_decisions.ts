@@ -136,6 +136,9 @@ export function reconRecordDecisionCall(
     "job_ids",
     "cause",
     "escalate_to",
+    // The ops screen's opsPost stamps the signed-in email on every body. It is
+    // read here only so it is not refused; the person is the session user.
+    "operator_email",
   ]);
   for (const key of Object.keys(b)) {
     if (!allowed.has(key)) bad(`unknown field ${key}`);

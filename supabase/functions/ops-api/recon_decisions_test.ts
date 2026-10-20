@@ -106,6 +106,12 @@ Deno.test("a body cannot name the person", () => {
   assertThrows(() => reconRecordDecisionCall({ ...body(), by: "person:" + OTHER }, STAFF), ReconDecisionError);
 });
 
+Deno.test("the ops screen's operator_email is ignored; the person stays the session user", () => {
+  const call = reconRecordDecisionCall({ ...body(), operator_email: "someone@example.test" }, STAFF);
+  assertEquals(call.args.p_user_id, STAFF);
+  assertEquals(Object.values(call.args).includes("someone@example.test"), false);
+});
+
 Deno.test("a server key or missing session has no person and is refused", async () => {
   for (const caller of [{ authMode: "api_key", userId: STAFF }, { authMode: "jwt", userId: null }, { authMode: "jwt", userId: "x" }]) {
     const e = assertThrows(() => reconDecisionUser(caller), ReconDecisionError);
