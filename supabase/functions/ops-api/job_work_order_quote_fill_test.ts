@@ -17,6 +17,7 @@ import {
   autoIssueJobWorkOrders,
   backfillJobWorkOrders,
   createJobWorkOrder,
+  jobWorkOrderFilledFrom,
   readJobWorkOrder,
   tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
@@ -339,8 +340,20 @@ Deno.test("an untouched draft is filled from the accepted quote on the staff rea
   ], [2, "hrs", 2, 80, 160, false, true]);
   assert(roots.flags.includes("outside_quote_labour"));
   assert(wo.scope_items.every((i: any) => i.source === "quote"));
+  // The revision the lines came from is stored on the row (R7), and the
+  // read says where it came from.
+  assertEquals(wo.quote_filled_scope_revision_id, REV_ACCEPTED);
+  assertEquals(r.filled_from, {
+    scope_revision_id: REV_ACCEPTED,
+    source: "work_order",
+    unreadable: false,
+  });
   // Stored, so the next read is a plain read.
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
+  assertEquals(
+    db.tables.work_orders[0].quote_filled_scope_revision_id,
+    REV_ACCEPTED,
+  );
   const again: any = await readJobWorkOrder(db, {
     jobId: JOB,
     fillFromQuote: true,
@@ -1464,4 +1477,52 @@ Deno.test("auto issue: a job moved past quoted with a frozen tool quote goes to 
       );
     }
   }
+});
+
+Deno.test("filled_from: a draft filled before the column existed reads its revision from the fill event", async () => {
+  const db = baseDb();
+  db.tables.work_orders[0].quote_filled_at = "2026-10-15T00:00:00Z";
+  db.tables.work_orders[0].hand_edited_at = "2026-10-15T01:00:00Z";
+  db.tables.job_events.push(
+    {
+      job_id: JOB,
+      event_type: "job_work_order_draft_filled_from_quote",
+      created_at: "2026-10-15T00:00:00Z",
+      detail_json: { work_order_id: DRAFT, scope_revision_id: REV_ACCEPTED },
+    },
+    {
+      job_id: JOB,
+      event_type: "job_work_order_draft_filled_from_quote",
+      created_at: "2026-10-16T00:00:00Z",
+      detail_json: {
+        work_order_id: "00000000-0000-4000-8000-0000000000ff",
+        scope_revision_id: "00000000-0000-4000-8000-0000000000fe",
+      },
+    },
+  );
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.filled_from, {
+    scope_revision_id: REV_ACCEPTED,
+    source: "fill_event",
+    unreadable: false,
+  });
+});
+
+Deno.test("filled_from: an unread fill event is unknown, never not filled", () => {
+  assertEquals(
+    jobWorkOrderFilledFrom({ id: DRAFT, quote_filled_scope_revision_id: null }, null),
+    { scope_revision_id: null, source: null, unreadable: true },
+  );
+  assertEquals(
+    jobWorkOrderFilledFrom({ id: DRAFT, quote_filled_scope_revision_id: null }, []),
+    { scope_revision_id: null, source: null, unreadable: false },
+  );
+  // The column wins over any event.
+  assertEquals(
+    jobWorkOrderFilledFrom(
+      { id: DRAFT, quote_filled_scope_revision_id: REV_ACCEPTED },
+      null,
+    ).source,
+    "work_order",
+  );
 });

@@ -835,3 +835,5 @@ ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purcha
 # rule ops-api's dispatch_install.ts follows (a mark stands while a booking is
 # on its day, past or ahead). Comment only; the marker is the same column.
 ops-api|supabase/migrations/20261016160000_job_dispatch_install_for_day_comment.sql|column|job_dispatch_state.install_confirmed_for_day
+ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|column|work_orders.quote_filled_scope_revision_id
+ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|trigger|work_orders.trg_work_orders_fill_revision_guard
