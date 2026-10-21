@@ -36,6 +36,13 @@
 
 BEGIN;
 
+-- 20261021173000: a person is a public.users row named as user:<uuid> (the
+-- form a signed-in ops-api session stores) or by email.
+INSERT INTO public.users (id, org_id, name, email) VALUES
+  ('c7000000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-000000000001', 'H7 Shaun (simulated)', 'h7-shaun@test'),
+  ('c7000000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-000000000001', 'H7 A (simulated)', 'h7-a@test'),
+  ('c7000000-0000-4000-8000-0000000000a3', '00000000-0000-0000-0000-000000000001', 'H7 B (simulated)', 'h7-b@test');
+
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('c7000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'H7-J1', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
   ('c7000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'H7-J2', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z');
@@ -75,15 +82,15 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
 
 INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status, assigned_by, assigned_at) VALUES
   ('H7-SPLIT', 'H7-1', 'H7 Steel', 1000, 1100, '2026-08-27', 'open', NULL, NULL),
-  ('H7-INSTP', 'H7-5', 'H7 Installer', 400, 440, '2026-08-27', 'assigned', 'person:h7-shaun', '2026-09-01T00:00:00Z'),
-  ('H7-NJR', 'H7-7', 'H7 Office', 90, 99, '2026-08-27', 'not_job_related', 'person:h7-shaun', '2026-09-02T00:00:00Z'),
+  ('H7-INSTP', 'H7-5', 'H7 Installer', 400, 440, '2026-08-27', 'assigned', 'user:c7000000-0000-4000-8000-0000000000a1', '2026-09-01T00:00:00Z'),
+  ('H7-NJR', 'H7-7', 'H7 Office', 90, 99, '2026-08-27', 'not_job_related', 'user:c7000000-0000-4000-8000-0000000000a1', '2026-09-02T00:00:00Z'),
   ('H7-OPEN', 'H7-8', 'H7 Steel', 60, 66, '2026-08-27', 'open', NULL, NULL),
   ('H7-GONE', 'H7-12', 'H7 Steel', 30, 33, '2026-08-27', 'open', NULL, NULL);
 
 INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, assigned_by) VALUES
   ('H7-REF', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'materials', 'actual', 70, 'high', 'xero_ref_link', '2026-08-27', NULL),
-  ('H7-INSTP', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'labour', 'actual', 400, 'high_manual', 'manual_queue', '2026-08-27', 'person:h7-shaun'),
-  ('H7-UNBAL', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 250, 'high_manual', 'manual_queue', '2026-08-27', 'person:h7-shaun');
+  ('H7-INSTP', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'labour', 'actual', 400, 'high_manual', 'manual_queue', '2026-08-27', 'user:c7000000-0000-4000-8000-0000000000a1'),
+  ('H7-UNBAL', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 250, 'high_manual', 'manual_queue', '2026-08-27', 'user:c7000000-0000-4000-8000-0000000000a1');
 
 DO $$
 DECLARE v jsonb;
@@ -91,7 +98,7 @@ BEGIN
   v := public.allocate_bill_split('H7-SPLIT',
     '[{"job_id": "c7000000-0000-4000-8000-000000000001", "amount_ex": 600, "lane": "materials"},
       {"job_id": "c7000000-0000-4000-8000-000000000002", "amount_ex": 300, "lane": "materials"}]',
-    100, 'Yard stock', 'person:h7-shaun');
+    100, 'Yard stock', 'user:c7000000-0000-4000-8000-0000000000a1');
   IF (v ->> 'ok')::boolean IS NOT TRUE THEN
     RAISE EXCEPTION 'h7 setup split: %', v;
   END IF;
@@ -153,7 +160,7 @@ DECLARE o record;
 BEGIN
   SELECT * INTO o FROM public.cfo_bill_reconciliation_outcomes WHERE xero_invoice_id = 'H7-SPLIT';
   IF o.overhead_ex <> 100 OR o.remainder_ex <> 0 OR o.bill_ex <> 1000 OR o.credit_applied_ex <> 0
-     OR o.decided_by <> 'person:h7-shaun' OR o.decided_at IS NULL THEN
+     OR o.decided_by <> 'user:c7000000-0000-4000-8000-0000000000a1' OR o.decided_at IS NULL THEN
     RAISE EXCEPTION 'h7 contract: split read overhead % remainder % credit % by % at %',
       o.overhead_ex, o.remainder_ex, o.credit_applied_ex, o.decided_by, o.decided_at;
   END IF;
@@ -178,7 +185,7 @@ BEGIN
   END IF;
 
   SELECT * INTO o FROM public.cfo_bill_reconciliation_outcomes WHERE xero_invoice_id = 'H7-NJR';
-  IF o.decided_by <> 'person:h7-shaun' OR o.decided_at <> '2026-09-02T00:00:00Z'::timestamptz THEN
+  IF o.decided_by <> 'user:c7000000-0000-4000-8000-0000000000a1' OR o.decided_at <> '2026-09-02T00:00:00Z'::timestamptz THEN
     RAISE EXCEPTION 'h7 contract: not-job-related decider % at %', o.decided_by, o.decided_at;
   END IF;
 
@@ -243,15 +250,15 @@ INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_numb
   ('H7-DASH', 'H7-22', 'H7 Steel', 120, 132, '2026-08-27', 'assigned', 'ops_dashboard', '2026-09-03T00:00:00Z'),
   ('H7-INSTNA', 'H7-23', 'H7 Installer', 350, 385, '2026-08-27', 'assigned', '  ', '2026-09-03T00:00:00Z'),
   ('H7-TWO', 'H7-24', 'H7 Steel', 200, 220, '2026-08-27', 'split', NULL, '2026-09-03T00:00:00Z'),
-  ('H7-NJRX', 'H7-25', 'H7 Installer', 310, 341, '2026-08-27', 'not_job_related', 'person:h7-shaun', '2026-09-04T00:00:00Z'),
+  ('H7-NJRX', 'H7-25', 'H7 Installer', 310, 341, '2026-08-27', 'not_job_related', 'user:c7000000-0000-4000-8000-0000000000a1', '2026-09-04T00:00:00Z'),
   ('H7-NJRNA', 'H7-26', 'H7 Office', 45, 49.5, '2026-08-27', 'not_job_related', NULL, '2026-09-04T00:00:00Z');
 
 INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, assigned_by) VALUES
   ('H7-NOACT', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 150, 'high_manual', 'manual_queue', '2026-08-27', NULL),
   ('H7-DASH', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 120, 'high_manual', 'manual_queue', '2026-08-27', 'ops_dashboard'),
   ('H7-INSTNA', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'labour', 'actual', 350, 'high_manual', 'manual_queue', '2026-08-27', ''),
-  ('H7-TWO', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 100, 'high_manual', 'manual_split', '2026-08-27', 'person:h7-a'),
-  ('H7-TWO', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'materials', 'actual', 100, 'high_manual', 'manual_split', '2026-08-27', 'person:h7-b');
+  ('H7-TWO', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 100, 'high_manual', 'manual_split', '2026-08-27', 'user:c7000000-0000-4000-8000-0000000000a2'),
+  ('H7-TWO', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'materials', 'actual', 100, 'high_manual', 'manual_split', '2026-08-27', 'user:c7000000-0000-4000-8000-0000000000a3');
 
 DO $$
 DECLARE r record;
@@ -273,7 +280,7 @@ BEGIN
     IF r.bill <> 'H7-NJRX' AND (r.got_confirmed OR r.decided_by IS NOT NULL) THEN
       RAISE EXCEPTION 'h7 contract: % with no recorded person read settled (by %)', r.bill, r.decided_by;
     END IF;
-    IF r.bill = 'H7-NJRX' AND (NOT r.got_confirmed OR r.decided_by IS DISTINCT FROM 'person:h7-shaun') THEN
+    IF r.bill = 'H7-NJRX' AND (NOT r.got_confirmed OR r.decided_by IS DISTINCT FROM 'user:c7000000-0000-4000-8000-0000000000a1') THEN
       RAISE EXCEPTION 'h7 contract: not-job-related mark lost to the Xero job link (by %)', r.decided_by;
     END IF;
   END LOOP;

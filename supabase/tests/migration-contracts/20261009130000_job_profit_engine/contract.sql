@@ -98,7 +98,8 @@ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata,
    '2026-08-01T00:00:00Z');
 
 INSERT INTO public.users (id, org_id, name) VALUES
-  ('a7100000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'Trade One');
+  ('a7100000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'Trade One'),
+  ('a7100000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'Office Person');
 
 -- Trade invoices carry the 2026-09-18 money split (gst off, 12% super,
 -- 6% withheld). T1 paid, T2 ops-rejected, T3 Xero bill deleted, T4 a QA test
@@ -217,12 +218,13 @@ INSERT INTO public.purchase_orders (job_id, po_number, supplier_name, status, su
 -- the PO itself was never stamped, and it is no longer open.
 -- BILL-S1 and BILL-S2 carry installer-account (306) lines, so under JP-12
 -- (20261020181800) they count only once a person placed them: both facts
--- are a person's placement from Bills to place (automation_source manual_queue).
+-- are a person's placement from Bills to place (automation_source manual_queue),
+-- made by a recorded person (20261021173000: a signed-in user's user:<uuid>).
 INSERT INTO public.purchase_orders (id, job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
   ('a7400000-0000-4000-8000-000000000001', 'a7000000-0000-4000-8000-000000000001', 'PO-BILLED', 'Fence Supplies', 'sent', 100, 110, '2026-08-01T00:00:00Z');
-INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, matched_po_id, automation_source) VALUES
-  ('a7000000-0000-4000-8000-000000000001', 'BILL-S1', 'S-1', 'Fence Supplies', 'materials', 'actual', 100, 'high', '2026-08-02', 'a7400000-0000-4000-8000-000000000001', 'manual_queue'),
-  ('a7000000-0000-4000-8000-000000000001', 'BILL-S2', 'S-2', 'Sales Agent', 'commission', 'actual', 20, 'high', '2026-08-12', NULL, 'manual_queue');
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, matched_po_id, automation_source, assigned_by) VALUES
+  ('a7000000-0000-4000-8000-000000000001', 'BILL-S1', 'S-1', 'Fence Supplies', 'materials', 'actual', 100, 'high', '2026-08-02', 'a7400000-0000-4000-8000-000000000001', 'manual_queue', 'user:a7100000-0000-4000-8000-000000000009'),
+  ('a7000000-0000-4000-8000-000000000001', 'BILL-S2', 'S-2', 'Sales Agent', 'commission', 'actual', 20, 'high', '2026-08-12', NULL, 'manual_queue', 'user:a7100000-0000-4000-8000-000000000009');
 
 -- JP-FENCE sent quote: the sealed revision total 1320 inc GST.
 INSERT INTO public.job_documents (id, job_id, type, sent_at, created_at) VALUES

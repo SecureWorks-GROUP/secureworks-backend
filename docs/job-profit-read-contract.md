@@ -102,6 +102,23 @@ marked not job related has source `installer_bill_not_job_related`, is never
 actual and flags nothing. In `v_bill_allocation_balance` such a bill whose
 rows no person made has `installer_unconfirmed` true and is never `balanced`.
 
+"A person" means a recorded person, one rule for every reader
+(`public.cfo_recorded_person(source, actor)`, migration `20261021173000`): a
+`manual_queue` or `manual_split` row whose actor is `user:<uuid>` of a
+`public.users` row, or that user's email (case-insensitive). Every other actor
+is no one: blank, `actor_missing`, `ops_dashboard`,
+`makesafe-reporting-routine`, `xero-sync` or any service name, free text, a bare
+uuid, an unknown email. A machine row is never a person's, whatever actor it
+carries. A "not job related" mark or an overhead part counts only when the
+queue row's actor is a recorded person. Older rows are read by the rule and
+never rewritten. Only a signed-in session can make the three Bills to place
+writes: ops-api refuses `materials_recon_assign`, `materials_recon_split` and
+`materials_recon_not_job_related` with 403 `recorded_person_required` for a
+server key, an `x-sw-actor` claim (even one naming a real user) or a routine,
+and `allocate_bill_split` refuses any actor that fails the rule. Known limit: a
+stored `user:<uuid>` written earlier from a header claim cannot be told from a
+session's, so it counts.
+
 ## Bill reconciliation outcome for Context (H7)
 
 `cfo_bill_reconciliation_outcomes` (migration `20261021161500`, service role
@@ -112,10 +129,11 @@ left out. Its `state` is `confirmed`, `confirmed_overhead`, `placed_unconfirmed`
 the first two are a confirmed reconciliation (`confirmed` true), and only when a
 person is recorded as deciding it (`decided_by` set). A part's `placed_by` is
 `person` only when a person source (`manual_queue`, `manual_split`) wrote it and
-named who; a person source with a blank actor or the `ops_dashboard` fallback is
+named a recorded person (the rule above); any other actor on a person source is
 `unrecorded`, and anything else is `machine`, including the bill's own Xero job
 link with no allocation row (`automation_source` `xero_job_link`). A decision
-with no single recorded person reads `placed_unconfirmed`. A person's "not job
+with no single recorded person reads `placed_unconfirmed`; a bill with an
+overhead part takes its decider from the queue row only. A person's "not job
 related" mark wins over the bill's Xero job link when no row places it.
 `evidence_hash` is md5 of a fixed jsonb array led by the contract version
 `cfo-recon-outcome-v1`. As a CFO proposal CIO may overturn, a payment does not
