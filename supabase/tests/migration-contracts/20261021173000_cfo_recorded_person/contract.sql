@@ -2,7 +2,8 @@
 --
 -- Synthetic people, jobs and bills, no customer data. Everything rolls back.
 --
---   RP person  public.users ce..a1, email rp-person@test; RP nomail has no email.
+--   RP person  public.users ce..a1, email rp-person@test; RP nomail has no email;
+--   RP mixed ce..a3 stores its email in mixed case with spaces.
 --   RP-J1, RP-J2  finished fencing jobs.
 --   RP-B1    installer bill (306) 1,000 ex in Bills to place: a split by any
 --            actor that is not a recorded person is refused and writes nothing;
@@ -23,7 +24,9 @@ BEGIN;
 
 INSERT INTO public.users (id, org_id, name, email) VALUES
   ('ce000000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-000000000001', 'RP person', 'rp-person@test'),
-  ('ce000000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-000000000001', 'RP nomail', NULL);
+  ('ce000000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-000000000001', 'RP nomail', NULL),
+  -- an email stored in mixed case with spaces: lower(btrim()) on both sides
+  ('ce000000-0000-4000-8000-0000000000a3', '00000000-0000-0000-0000-000000000001', 'RP mixed', ' RP.Mixed@Case.Test ');
 
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('ce000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'RP-J1', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
@@ -85,7 +88,9 @@ BEGIN
     (21, 'xero_ref_link', 'user:ce000000-0000-4000-8000-0000000000a1', false),
     (22, 'po_deterministic', 'rp-person@test', false),
     (23, 'agent_prematch', 'user:ce000000-0000-4000-8000-0000000000a1', false),
-    (24, NULL, 'user:ce000000-0000-4000-8000-0000000000a1', false)
+    (24, NULL, 'user:ce000000-0000-4000-8000-0000000000a1', false),
+    (25, 'manual_queue', 'rp.mixed@case.test', true),
+    (26, 'manual_split', 'RP.MIXED@CASE.TEST', true)
   ) AS t(n, src, act, want) ORDER BY n LOOP
     got := public.cfo_recorded_person(c.src, c.act);
     IF got IS DISTINCT FROM c.want THEN
