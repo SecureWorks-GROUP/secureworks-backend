@@ -186,9 +186,17 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
   attachments once each, uploads), `media` / `media_count` (photos),
   `scope {exists}`.
 - `story_text`: `context_job_story_text_get`, or null.
+- `matching`: `{waiting, more, left_off_daily_list}` from
+  `context_recon_job_items` (20261020165000): the queued rows that offer this
+  job and wait on a person, contact or not, at most 200 (`more` when cut), and
+  how many of them the daily list leaves out (no contact, or never asked), so
+  the card can link to Matching, Find by job. Null when the read failed, never 0.
+- `not_seen`: `[{key, text}]`, the sources Context cannot see for any job
+  (`material_orders`, `crew_tasks_and_crm_notes`), on every answer until the
+  change that starts capturing a source removes its line (`OVERVIEW_NOT_SEEN`).
 - `sources`: per part `{ok, state, count, code}`; a failed part is null with
-  a code, never empty; `story_text` reads `not_deployed` until the migration is
-  applied.
+  a code, never empty; `story_text` and `matching` read `not_deployed` until
+  their migrations are applied.
 
 `POST ops-api?action=request_job_story` `{jobId}`: staff only, POST only. The
 asker is the verified caller (`user:<id>`, or a server caller's actor), never a

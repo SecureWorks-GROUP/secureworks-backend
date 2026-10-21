@@ -19,6 +19,7 @@ BEGIN;
 INSERT INTO public.jobs (id, org_id, type, status, job_number, ghl_contact_id, created_at) VALUES
   ('7d000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-000000000001', 'patio', 'accepted', 'SWP-97101', 'jobrecon-1', '2026-09-01'),
   ('7d000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-000000000001', 'patio', 'accepted', 'SWP-97102', 'jobrecon-2', '2026-09-01');
+UPDATE public.jobs SET site_suburb = 'Contractville' WHERE id = '7d000000-0000-0000-0000-00000000000a';
 INSERT INTO public.users (id, org_id, name, role) VALUES
   ('7d100000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'Contract staff', 'ops_manager');
 INSERT INTO public.business_events (id, channel, direction, occurred_at, payload, event_type, source) VALUES
@@ -83,10 +84,25 @@ BEGIN
   SELECT * INTO it FROM public.context_recon_job_items(b) i WHERE i.event_id = ev;
   IF it.event_id IS NULL OR it.cause <> 'defect:no_identity'
      OR it.shown_hash IS DISTINCT FROM public.context_recon_evidence_hash(ev)
-     OR it.offered <> jsonb_build_array(jsonb_build_object('job_id', a, 'job_number', 'SWP-97101'),
-                                       jsonb_build_object('job_id', b, 'job_number', 'SWP-97102')) THEN
-    RAISE EXCEPTION 'job recon contract: per-job item wrong';
+     OR it.offered <> jsonb_build_array(
+          jsonb_build_object('job_id', a, 'job_number', 'SWP-97101', 'type', 'patio', 'suburb', 'Contractville',
+                             'status', 'accepted', 'reasons', '["candidate","job_number_in_message"]'::jsonb),
+          jsonb_build_object('job_id', b, 'job_number', 'SWP-97102', 'type', 'patio', 'suburb', NULL,
+                             'status', 'accepted', 'reasons', '["candidate","job_number_in_message"]'::jsonb)) THEN
+    RAISE EXCEPTION 'job recon contract: per-job item wrong: %', it.offered;
   END IF;
+  -- Why a job is offered is read off the row: the call names no job number and has no contact, so
+  -- it is only a candidate; a job number inside a longer one is not a match.
+  IF (SELECT i.offered -> 0 -> 'reasons' FROM public.context_recon_job_items(a) i WHERE i.event_id = callrow)
+       IS DISTINCT FROM '["candidate"]'::jsonb THEN
+    RAISE EXCEPTION 'job recon contract: the call row''s reasons are wrong';
+  END IF;
+  UPDATE public.business_events SET payload = payload || '{"subject":"Material Order Ref SWP-971019 & SWP-97102"}' WHERE id = ev;
+  IF (SELECT i.offered -> 0 -> 'reasons' FROM public.context_recon_job_items(a) i WHERE i.event_id = ev)
+       IS DISTINCT FROM '["candidate"]'::jsonb THEN
+    RAISE EXCEPTION 'job recon contract: a job number inside a longer number counted as named';
+  END IF;
+  UPDATE public.business_events SET payload = payload || '{"subject":"Material Order Ref SWP-97101 & SWP-97102"}' WHERE id = ev;
   IF it.cause IS DISTINCT FROM (SELECT q.cause FROM public.context_recon_queue('2026-10-20 05:00Z') q WHERE q.event_id = ev) THEN
     RAISE EXCEPTION 'job recon contract: per-job cause differs from the queue';
   END IF;
