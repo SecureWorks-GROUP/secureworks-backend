@@ -12,8 +12,8 @@ DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_job_record_messages(uuid[],timestamptz)', ARRAY['4be90ba0880f757464646a86bde76e1a', 'f170d0c3f9d2703b57b52df7f7238e96']),
-  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['184af6a89d7bc188878c545400f64e68', '4d35f497386ea7f161a9ee081d8f1426']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['209d903df7a8732b4773dee0f0741593', 'f7ed0abf8d5de65b161dd6f01fad44f4'])
+  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['184af6a89d7bc188878c545400f64e68', '8081ce3fad879ce86a321ed3bdc30e46']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['209d903df7a8732b4773dee0f0741593', 'db181308debc03dfd15b433f45abf573'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   IF live IS NULL OR NOT live = ANY (x.accepted) THEN
@@ -25,7 +25,7 @@ BEGIN
   problems := problems || format('public.context_job_card_events(uuid[]) md5 %s', live);
  END IF;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_job_card_decisions(uuid)');
- IF live IS NOT NULL AND live <> '4de24d2dfa0952722e15bf96893cb468' THEN
+ IF live IS NOT NULL AND live <> '6b2ba87035963db51bdefc8f47aef009' THEN
   problems := problems || format('public.context_job_card_decisions(uuid) md5 %s', live);
  END IF;
  IF cardinality(problems) > 0 THEN

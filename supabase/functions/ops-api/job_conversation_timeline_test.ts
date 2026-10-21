@@ -851,6 +851,7 @@ Deno.test("timeline: a person's split puts a row on this job, a correct takes on
         decided_by: "7e100000-0000-4000-8000-000000000001",
         decided_by_name: "Card contract staff",
         other_job_numbers: ["SWP-98102"],
+        evidence_hash: "0123456789abcdef0123456789abcdef",
       },
       {
         event_id: "own-moved",
@@ -891,6 +892,7 @@ Deno.test("timeline: a person's split puts a row on this job, a correct takes on
     decided_by: "7e100000-0000-4000-8000-000000000001",
     decided_by_name: "Card contract staff",
     other_job_numbers: ["SWP-98102"],
+    evidence_hash: "0123456789abcdef0123456789abcdef",
   });
   assertEquals(
     "placed_by_person" in

@@ -839,6 +839,63 @@ Deno.test("calls merge into one row with their length and no words; empty texts 
   );
 });
 
+Deno.test("CTX-T22: a row a person placed carries who, when, the other jobs and the evidence hash; a failed decisions read is named", async () => {
+  const placedRow = {
+    id: "bev:p1",
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-10-08T02:00:00Z",
+    subject: "Plans",
+    body: "Plans attached",
+    source_system: "business_events",
+    source_ref: "p1",
+    placed_by_person: {
+      action: "split",
+      decision_id: 7,
+      decided_at: "2026-10-09T01:00:00Z",
+      decided_by: "u0000000-0000-4000-8000-000000000001",
+      decided_by_name: "Staff Person",
+      other_job_numbers: ["SWP-98101"],
+      evidence_hash: "0123456789abcdef0123456789abcdef",
+    },
+  };
+  const out = overviewMessages([placedRow], new Map(), null);
+  assertEquals(out[0].placed_by_person, {
+    action: "split",
+    decision_id: 7,
+    decided_at: "2026-10-09T01:00:00Z",
+    decided_at_perth: "Fri 9 Oct, 9:00am",
+    decided_by_name: "Staff Person",
+    other_job_numbers: ["SWP-98101"],
+    evidence_hash: "0123456789abcdef0123456789abcdef",
+  });
+  // a row nobody placed carries no provenance key
+  const own = overviewMessages([{ ...placedRow, placed_by_person: undefined }], new Map(), null);
+  assertEquals("placed_by_person" in own[0], false);
+
+  const o: any = await jobOverviewAction(
+    fullClient(),
+    new URLSearchParams(`jobId=${JOB}`),
+    {
+      ...deps(),
+      getJobConversation: () =>
+        Promise.resolve({
+          messages: conversation(),
+          summary: {},
+          person_decisions_read_failed: "rpc failed",
+        }),
+    },
+  );
+  assert(Array.isArray(o.messages) && o.messages.length > 0);
+  assertEquals(o.sources.messages.decisions, "unread");
+  const fine: any = await jobOverviewAction(
+    fullClient(),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals("decisions" in fine.sources.messages, false);
+});
+
 Deno.test("the newest 80 messages, oldest first, at most 400 characters each", () => {
   const many = Array.from({ length: 120 }, (_, i) => ({
     id: `bev:m${String(i).padStart(3, "0")}`,
@@ -1544,4 +1601,27 @@ Deno.test("held notes: a note a held message holds up says job not certain; ever
   const plain = overviewNote(base, new Map());
   assert(!("job_certain" in plain) && !("certainty" in plain), "a certain note carries no new key");
   assertEquals(Object.keys(plain).sort(), Object.keys(overviewNote({ ...base, job_certain: true }, new Map())).sort());
+});
+
+Deno.test("CTX-T22, Finance's allocation contract: a bill counted on two jobs reaches the page as the card says it, never summed again", () => {
+  const card = {
+    version: "job-story-v1",
+    not_known: [{
+      what: "Supplier bill BILL-1 is counted as cost on this job and also on SWP-2.",
+      why: "A bill counts as cost once, on the job Xero's bill link puts it on; counted on two jobs it is a defect for Finance to correct, and until then the jobs' costs count it more than once.",
+    }],
+    money: { supplier_bills: [{ number: "BILL-1", total: 1100 }] },
+    meta: {
+      cost_check: {
+        read_from: "v_job_cost_events",
+        bills: 1,
+        counted_elsewhere: 1,
+        items: [{ document_id: "x1", document_number: "BILL-1", here_ex: 1000, elsewhere_ex: 1000, other_job_numbers: ["SWP-2"] }],
+      },
+    },
+  };
+  const shown = overviewStory(card);
+  assertEquals(shown.meta.cost_check, card.meta.cost_check);
+  assertEquals(shown.not_known, card.not_known);
+  assertEquals(shown.money, card.money);
 });

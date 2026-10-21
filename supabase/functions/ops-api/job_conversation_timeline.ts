@@ -222,6 +222,7 @@ export type CardDecision = {
   decided_by: string | null;
   decided_by_name: string | null;
   other_job_numbers: string[] | null;
+  evidence_hash?: string | null;
 };
 
 /** What a row carries when a person's decision put it on the job. */
@@ -235,6 +236,7 @@ export function personPlacement(d: CardDecision) {
     other_job_numbers: Array.isArray(d.other_job_numbers)
       ? d.other_job_numbers
       : [],
+    evidence_hash: d.evidence_hash ?? null,
   };
 }
 

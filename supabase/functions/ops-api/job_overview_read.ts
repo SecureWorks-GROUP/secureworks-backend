@@ -100,6 +100,8 @@ export interface OverviewPartStatus {
   count: number;
   code?: string;
   error?: string;
+  /** messages only: people's Matching decisions could not be read (CTX-T22). */
+  decisions?: "unread";
 }
 
 export interface JobOverviewDeps {
@@ -599,6 +601,27 @@ export function overviewMessages(
       if (r.subject) base.subject = r.subject;
       if (r.attachments_only) base.attachments_only = true;
     }
+    // (CTX-T22) a person's Matching decision put this row on the job: who,
+    // when, the action, any other jobs the split named, and the evidence hash
+    // the decision was recorded against.
+    const placed = m.placed_by_person;
+    if (placed && typeof placed === "object") {
+      base.placed_by_person = {
+        action: placed.action ?? null,
+        decision_id: placed.decision_id ?? null,
+        decided_at: placed.decided_at ?? null,
+        decided_at_perth: perthStamp(placed.decided_at ?? null),
+        decided_by_name: typeof placed.decided_by_name === "string"
+          ? placed.decided_by_name
+          : null,
+        other_job_numbers: Array.isArray(placed.other_job_numbers)
+          ? placed.other_job_numbers.map(String)
+          : [],
+        evidence_hash: typeof placed.evidence_hash === "string"
+          ? placed.evidence_hash
+          : null,
+      };
+    }
     return base;
   });
   const t = (x: any) => {
@@ -962,6 +985,7 @@ export async function jobOverviewAction(
     return { data: row, status: ok(1) };
   });
   const jobRow = header.data;
+  let personDecisionsUnread = false;
 
   const [
     storyRead,
@@ -1021,6 +1045,12 @@ export async function jobOverviewAction(
         ? conversation.messages
         : null;
       if (!messages) return { data: null, status: failed("invalid_shape") };
+      // (CTX-T22) a failed read of people's Matching decisions still lists the
+      // job's own rows; the status names it so the page never reads it as
+      // "no decisions".
+      if (conversation?.person_decisions_read_failed) {
+        personDecisionsUnread = true;
+      }
       return { data: messages, status: ok(messages.length) };
     }),
     part<JobQuotes>("quotes", async () => {
@@ -1240,6 +1270,7 @@ export async function jobOverviewAction(
     messagesStatus = {
       ...ok(messages.length),
       ...(facts.ok ? {} : { code: "call_facts_unread" }),
+      ...(personDecisionsUnread ? { decisions: "unread" } : {}),
     };
   }
 
