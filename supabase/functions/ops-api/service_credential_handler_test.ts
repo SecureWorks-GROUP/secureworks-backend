@@ -175,6 +175,7 @@ Deno.test("the service-role claim is not a server caller on any other action", a
       { action: "book_scope", method: "POST" },
       { action: "job_closeout_catch_up", method: "GET" },
       { action: "job_closeout_paid", method: "GET" },
+      { action: "makesafe_portal_recheck_queue", method: "GET" },
     ]
   ) {
     const r = await call(
@@ -204,10 +205,11 @@ Deno.test("the injected key still reaches the close-out actions xero-sync calls"
 });
 
 // The other timed jobs that post a service-role JWT that is not the injected
-// key, all `sw_service_key()` POSTs: trigger_job_work_order_auto_issue, and
-// the make-safe canaries and email reconcile jobs (trigger_makesafe_status_canary
+// key, all `sw_service_key()` POSTs: trigger_job_work_order_auto_issue, the
+// make-safe canaries and email reconcile jobs (trigger_makesafe_status_canary
 // and trigger_makesafe_reconcile: D1, D2 inventory, D3 as D1 with mode=D3, D4
-// canary). Each case compares the cron bearer with the injected key on the same
+// canary), and the make-safe portal recheck, sent mirror, story recompute and
+// status shadow refresh triggers. Each case compares the cron bearer with the injected key on the same
 // request: the same outcome means the cron is classified as the server caller.
 // auto_issue is sent as GET so it stops at 405 with nothing run; the make-safe
 // actions have no method gate and stop at the closed database port, which is
@@ -219,6 +221,10 @@ const CRON_ACTIONS = [
   { action: "makesafe_email_reconcile", method: "POST" },
   { action: "makesafe_email_reconcile_inventory", method: "POST" },
   { action: "makesafe_email_reconcile&mode=D3", method: "POST" },
+  { action: "makesafe_portal_recheck_enqueue", method: "POST" },
+  { action: "makesafe_sent_mirror", method: "POST" },
+  { action: "makesafe_story_recompute", method: "POST" },
+  { action: "makesafe_status_shadow_refresh", method: "POST" },
 ];
 
 Deno.test("the timed jobs' service-role bearer reaches each action as the server", async () => {

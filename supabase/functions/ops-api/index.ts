@@ -4794,6 +4794,10 @@ export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new 
   'makesafe_email_reconcile', // trigger_makesafe_reconcile, crons makesafe-reconcile-d1 and -d3 (&mode=D3) (sw_service_key())
   'makesafe_email_reconcile_inventory', // trigger_makesafe_reconcile, cron makesafe-reconcile-d2 (sw_service_key())
   'makesafe_status_canary', // trigger_makesafe_status_canary (sw_service_key())
+  'makesafe_portal_recheck_enqueue', // trigger_makesafe_portal_recheck (sw_service_key())
+  'makesafe_sent_mirror', // trigger_makesafe_sent_mirror (sw_service_key())
+  'makesafe_story_recompute', // trigger_makesafe_story_recompute (sw_service_key())
+  'makesafe_status_shadow_refresh', // trigger_makesafe_status_shadow_refresh (sw_service_key())
 ])
 
 export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
