@@ -1,6 +1,15 @@
 // deno-lint-ignore-file no-explicit-any
 // Crew invoices on the job work order. Pure rules only: no index.ts, no database.
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  makeQuoteBuilderWorkOrder,
+  QUOTE_BUILDER_ORDERS_FLAG,
+  QUOTE_BUILDER_ORG_ID,
+  QuoteBuilderError,
+} from "./quote_builder.ts";
 import {
   ACTIVE_JOB_WORK_ORDER_WINDOW_MS,
   decideOfficeWrite,
@@ -8,6 +17,7 @@ import {
   crewWorkOrderCreateRefusal,
   hideRetiredCrewWorkOrder,
   isActiveJobWorkOrderBackfillCandidate,
+  filledApprovedJobWorkOrder,
   jobTypeFillsFromQuote,
   jobTypeOpensWorkOrder,
   MARNIN_BACKUP_APPROVER_USER_ID,
@@ -43,6 +53,40 @@ Deno.test("rule widening: fencing and patio always open; other types only while 
   assertEquals(jobTypeOpensWorkOrder("   ", true), false);
   assertEquals(jobTypeOpensWorkOrder(null, true), false);
   assertEquals(jobTypeOpensWorkOrder(" fencing ", false), true);
+});
+
+Deno.test("readiness work order: only a filled approved job work order passes", () => {
+  assertEquals(filledApprovedJobWorkOrder(null), false);
+  assertEquals(filledApprovedJobWorkOrder({
+    kind: "job",
+    status: "draft",
+    agreed_labour_ex: null,
+  }), false);
+  assertEquals(filledApprovedJobWorkOrder({
+    kind: "job",
+    status: "draft",
+    agreed_labour_ex: 250,
+  }), false);
+  assertEquals(filledApprovedJobWorkOrder({
+    kind: "job",
+    status: "approved",
+    agreed_labour_ex: null,
+  }), false);
+  assertEquals(filledApprovedJobWorkOrder({
+    kind: "job",
+    status: "approved",
+    agreed_labour_ex: 0,
+  }), true);
+  assertEquals(filledApprovedJobWorkOrder({
+    kind: "job",
+    status: "approved",
+    agreed_labour_ex: 400,
+  }), true);
+  assertEquals(filledApprovedJobWorkOrder({
+    kind: "crew",
+    status: "approved",
+    agreed_labour_ex: 400,
+  }), false);
 });
 
 Deno.test("quote fill stays fencing and patio", () => {
@@ -440,4 +484,114 @@ Deno.test("retirement plan cancels legacy crew rows and leaves quote-builder row
   assertEquals(plan.open_jobs, 1);
   assertEquals(plan.closed_jobs, 1);
   assertEquals(plan.ids, ["s1", "s2", "done"]);
+});
+
+function quoteOrderDb(flags: Array<{ flag_name: string; enabled: boolean }>) {
+  const tables: Record<string, any[]> = {
+    feature_flags: flags,
+    jobs: [{
+      id: "11111111-1111-1111-1111-111111111111",
+      org_id: QUOTE_BUILDER_ORG_ID,
+      job_number: "SWM-1",
+      type: "miscellaneous",
+      status: "quoted",
+      site_address: "1 Private St",
+      site_suburb: "Subiaco",
+    }],
+    makesafe_job_details: [],
+    quote_builder_versions: [{
+      id: "22222222-2222-2222-2222-222222222222",
+      org_id: QUOTE_BUILDER_ORG_ID,
+      job_id: "11111111-1111-1111-1111-111111111111",
+      status: "issued",
+      narrative: "Paint the gate.",
+      cost_lines: [],
+    }],
+    work_orders: [],
+    purchase_orders: [],
+    job_events: [],
+  };
+  return {
+    tables,
+    from(table: string) {
+      const filters: Array<(row: any) => boolean> = [];
+      let op = "select";
+      let payload: any = null;
+      const run = async () => {
+        const rows = tables[table] ||= [];
+        if (op === "insert") {
+          const row = { id: crypto.randomUUID(), ...payload };
+          rows.push(row);
+          return { data: row, error: null };
+        }
+        const matched = rows.filter((row) => filters.every((f) => f(row)));
+        return { data: matched, error: null };
+      };
+      const q: any = {
+        select() {
+          return q;
+        },
+        eq(col: string, val: unknown) {
+          filters.push((row) => row[col] === val);
+          return q;
+        },
+        limit() {
+          return q;
+        },
+        order() {
+          return q;
+        },
+        insert(row: any) {
+          op = "insert";
+          payload = row;
+          return q;
+        },
+        maybeSingle() {
+          return run().then((result) => ({
+            data: Array.isArray(result.data) ? result.data[0] ?? null : result.data,
+            error: result.error,
+          }));
+        },
+        then(resolve: any, reject: any) {
+          return run().then(resolve, reject);
+        },
+      };
+      return q;
+    },
+  };
+}
+
+const QUOTE_ACTOR = { id: null, email: null, orgId: null };
+const QUOTE_BODY = { version_id: "22222222-2222-2222-2222-222222222222" };
+
+Deno.test("quote builder: retire flag stops a new crew work order and leaves an existing one", async () => {
+  const off = quoteOrderDb([
+    { flag_name: QUOTE_BUILDER_ORDERS_FLAG, enabled: true },
+  ]);
+  const made = await makeQuoteBuilderWorkOrder(off, QUOTE_BODY, QUOTE_ACTOR);
+  assertEquals(off.tables.work_orders.length, 1);
+  assertEquals(off.tables.work_orders[0].kind, "crew");
+  assertEquals(made.work_order?.id, off.tables.work_orders[0].id);
+
+  const on = quoteOrderDb([
+    { flag_name: QUOTE_BUILDER_ORDERS_FLAG, enabled: true },
+    { flag_name: "retire_crew_work_orders_v1", enabled: true },
+  ]);
+  const refused = await assertRejects(
+    () => makeQuoteBuilderWorkOrder(on, QUOTE_BODY, QUOTE_ACTOR),
+    QuoteBuilderError,
+  ) as QuoteBuilderError;
+  assertEquals(refused.code, "crew_work_order_retired");
+  assertEquals(on.tables.work_orders.length, 0);
+
+  on.tables.work_orders.push({
+    id: "33333333-3333-3333-3333-333333333333",
+    wo_number: "WO-OLD",
+    status: "draft",
+    kind: "crew",
+    quote_builder_version_id: QUOTE_BODY.version_id,
+  });
+  const kept = await makeQuoteBuilderWorkOrder(on, QUOTE_BODY, QUOTE_ACTOR);
+  assertEquals(kept.work_order?.id, "33333333-3333-3333-3333-333333333333");
+  assertEquals(on.tables.work_orders.length, 1);
 });

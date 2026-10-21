@@ -11,9 +11,12 @@
 
 import { isWorkOrderLockLine } from "./trade_invoice_assignment_lock.ts";
 import { JOB_WORK_ORDER_OPEN_STATUSES } from "./job_work_order_quote_fill.ts";
-import { readFlag } from "./job_work_orders.ts";
+import {
+  JOB_WORK_ORDER_ALL_TYPES_FLAG,
+  readFlag,
+} from "./job_work_orders.ts";
 
-export const JOB_WORK_ORDER_ALL_TYPES_FLAG = "job_work_order_all_types_v1";
+export { JOB_WORK_ORDER_ALL_TYPES_FLAG };
 export const JOB_WORK_ORDER_ACTIVE_BACKFILL_FLAG =
   "job_work_order_active_backfill_v1";
 export const JOB_WORK_ORDER_OFFICE_FILL_FLAG = "job_work_order_office_fill_v1";
@@ -27,7 +30,11 @@ export const RETIRE_CREW_WORK_ORDERS_FLAG = "retire_crew_work_orders_v1";
 
 /** Shaun. Primary approver, seeded in work_order_settings.approver_user_ids. */
 export const SHAUN_APPROVER_USER_ID = "9913309f-35ae-4a71-8e1f-f704ecc526ea";
-/** Marnin. Backup approver, seeded in backup_approver_user_ids. */
+/**
+ * One users id this repo already names for Marnin. Not a settings seed.
+ * Production has two rows on his email; backup_approver_user_ids stays empty
+ * until the owner writes the id he chooses.
+ */
 export const MARNIN_BACKUP_APPROVER_USER_ID =
   "706c5258-70dd-483a-b36c-af6864b24498";
 
@@ -50,6 +57,26 @@ export function jobTypeFillsFromQuote(
   type: string | null | undefined,
 ): boolean {
   return QUOTE_FILL_TYPES.has(String(type ?? "").trim());
+}
+
+/**
+ * Readiness "Work order exists" while job_work_order_all_types_v1 is on.
+ * A blank or unfilled draft does not pass. Only an approved job work order
+ * whose labour allowance is set does. 0 is an explicit fill. A crew work
+ * order never passes.
+ */
+export function filledApprovedJobWorkOrder(
+  workOrder: {
+    kind?: string | null;
+    status?: string | null;
+    agreed_labour_ex?: number | null;
+  } | null | undefined,
+): boolean {
+  if (!workOrder) return false;
+  if (workOrder.kind != null && workOrder.kind !== "job") return false;
+  if (workOrder.status !== "approved") return false;
+  return workOrder.agreed_labour_ex !== null &&
+    workOrder.agreed_labour_ex !== undefined;
 }
 
 export interface ActiveBackfillJob {

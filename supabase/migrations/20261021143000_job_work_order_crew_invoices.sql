@@ -25,7 +25,7 @@ VALUES
   ('crew_invoice_requires_job_work_order_v1', false,
    'Refuse a crew invoice line on a job that has no job work order. Off: a job with no work order can still be invoiced.'),
   ('retire_crew_work_orders_v1', false,
-   'Stop creating per-trade crew work orders and hide existing kind=crew rows that are not quote-builder work orders. Off: those rows stay as they are. Nothing is deleted.')
+   'Stop creating crew work orders, including a quote-builder crew work order, and hide existing kind=crew rows that are not quote-builder work orders. Off: those rows stay as they are. Nothing is deleted.')
 ON CONFLICT (flag_name) DO NOTHING;
 
 -- ── 2. backup approver (the seal ignores it until the office switch is on) ──
@@ -34,49 +34,7 @@ ALTER TABLE public.work_order_settings
   ADD COLUMN IF NOT EXISTS backup_approver_user_ids uuid[] NOT NULL DEFAULT '{}';
 
 COMMENT ON COLUMN public.work_order_settings.backup_approver_user_ids IS
-  'Users who may fill and approve a job work order only while job_work_order_office_fill_v1 is on. Empty until seeded. Does not widen approver_user_ids.';
-
--- Seed Marnin only while the list is still empty. More than one row with his
--- email leaves it empty. No email column: the known id, if that user exists.
-DO $seed_backup_approver$
-DECLARE
-  v_known uuid := '706c5258-70dd-483a-b36c-af6864b24498';
-  v_email_col boolean;
-  v_count int;
-  v_id uuid;
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM public.work_order_settings
-    WHERE id = 1 AND backup_approver_user_ids = '{}'::uuid[]
-  ) THEN
-    RETURN;
-  END IF;
-
-  SELECT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'email'
-  ) INTO v_email_col;
-
-  IF v_email_col THEN
-    SELECT count(*) INTO v_count FROM public.users
-    WHERE lower(btrim(email)) = 'marnin@secureworkswa.com.au';
-    IF v_count = 1 THEN
-      SELECT id INTO v_id FROM public.users
-      WHERE lower(btrim(email)) = 'marnin@secureworkswa.com.au';
-    ELSIF v_count = 0 AND EXISTS (SELECT 1 FROM public.users WHERE id = v_known) THEN
-      v_id := v_known;
-    END IF;
-  ELSIF EXISTS (SELECT 1 FROM public.users WHERE id = v_known) THEN
-    v_id := v_known;
-  END IF;
-
-  IF v_id IS NOT NULL THEN
-    UPDATE public.work_order_settings
-      SET backup_approver_user_ids = ARRAY[v_id]
-      WHERE id = 1 AND backup_approver_user_ids = '{}'::uuid[];
-  END IF;
-END
-$seed_backup_approver$;
+  'Users who may fill and approve a job work order only while job_work_order_office_fill_v1 is on. Ships empty. The owner writes the ids. Does not widen approver_user_ids.';
 
 -- ── 3. per-line office review ────────────────────────────────────────────────
 

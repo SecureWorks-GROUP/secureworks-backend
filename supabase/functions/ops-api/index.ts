@@ -678,6 +678,7 @@ import {
   JobWorkOrderError,
   listJobWorkOrders,
   readJobWorkOrder,
+  redactJobDetailWorkOrderForTrade,
   reportWorkOrderVariation,
   resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
@@ -690,7 +691,9 @@ import {
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
   crewWorkOrderCreateRefusal,
+  filledApprovedJobWorkOrder,
   hideRetiredCrewWorkOrder,
+  JOB_WORK_ORDER_ALL_TYPES_FLAG,
   loadCrewInvoiceJobWorkOrderRefusal,
   RETIRE_CREW_WORK_ORDERS_FLAG,
   xeroSyncRefusal,
@@ -3565,6 +3568,10 @@ function computeReadiness(
   scopeJson: any,
   pricingJson?: any,
   assignments?: any[] | null,
+  // Set only while job_work_order_all_types_v1 is on. A blank draft must not
+  // satisfy "Work order exists"; only a filled approved job work order does.
+  // Omitted keeps wo_count > 0.
+  workOrderMet?: boolean,
 ): JobReadiness {
   const rules = READINESS_RULES[jobType] || DEFAULT_RULES
 
@@ -3593,7 +3600,9 @@ function computeReadiness(
     }
 
     totalRules++
-    const met = evaluateCheck(rule.check, data)
+    const met = rule.key === 'work_order' && typeof workOrderMet === 'boolean'
+      ? workOrderMet
+      : evaluateCheck(rule.check, data)
     if (met) metCount++
 
     const item: ReadinessItem = {
@@ -6806,11 +6815,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
         // Only staff or the ops server key may fill the work order draft on
         // this read; the routine key reads it and writes nothing.
+        const staffCaller = _opsApiCallerIsStaffOperator(authMode, authUser)
         return json(await jobDetail(client, jid, {
           slim,
-          fillWorkOrderFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+          fillWorkOrderFromQuote: staffCaller,
           // The paid close-out block reads service-role close-out tables: staff only.
-          includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
+          includeCloseout: staffCaller,
+          // A trade JWT must not see the sealed labour allowance. Staff, the
+          // ops key and the routine key keep the figures they already get.
+          redactAgreedLabour: authMode === 'jwt' && !_opsApiStaffOperatorRole(authUser?.role),
         }))
       }
       // Staff-only by the front door's default (not on the trade or routine lists).
@@ -17246,7 +17259,12 @@ export const _jobNotesForTest = jobNotes
 async function jobDetail(
   client: any,
   jobId: string,
-  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean; includeCloseout?: boolean } = {},
+  opts: {
+    slim?: boolean
+    fillWorkOrderFromQuote?: boolean
+    includeCloseout?: boolean
+    redactAgreedLabour?: boolean
+  } = {},
 ) {
   if (!jobId) throw new Error('jobId required')
 
@@ -17328,6 +17346,46 @@ async function jobDetail(
   createJobAnnotations(client, jobId, jobRes.data, invoices, poRes.data || [], assignRes.data || [])
     .catch(e => console.log('[ops-api] annotation creation failed:', (e as Error).message))
 
+  // The job's own work order (kind = 'job'). Fencing and patio always.
+  // Every other type only while job_work_order_all_types_v1 is on, which is
+  // what the overview card reads. A failed read never fails the job detail.
+  const allJobWorkOrderTypes = await readFlag(client, JOB_WORK_ORDER_ALL_TYPES_FLAG)
+  const jobTypeName = String(job?.type || '').trim()
+  let jobWorkOrder: any = null
+  let jobWorkOrderRead: { live_work_order?: { kind?: string | null; status?: string | null; agreed_labour_ex?: number | null } | null } | null = null
+  if (
+    jobTypeName === 'fencing' || jobTypeName === 'patio' ||
+    (allJobWorkOrderTypes && jobTypeName !== '')
+  ) {
+    try {
+      const jwo = await readJobWorkOrder(client, {
+        jobId,
+        fillFromQuote: opts.fillWorkOrderFromQuote === true,
+      })
+      jobWorkOrderRead = jwo
+      jobWorkOrder = {
+        work_order: jwo.work_order,
+        live_work_order_id: jwo.live_work_order?.id ?? null,
+        draft_work_order_id: jwo.draft_work_order?.id ?? null,
+        figures: jwo.figures,
+        addenda: jwo.addenda,
+        invoice_count: jwo.invoices.length,
+        variation_count: jwo.variations.length,
+        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
+        quote_fill: jwo.quote_fill,
+        // Office only: lines the quote fill flagged (they never stop the work
+        // order going out) and why a draft has not gone to the trades.
+        needs_checking: jwo.needs_checking,
+      }
+      if (opts.redactAgreedLabour) {
+        jobWorkOrder = redactJobDetailWorkOrderForTrade(jobWorkOrder)
+      }
+    } catch (e) {
+      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
+      jobWorkOrder = { unreadable: true }
+    }
+  }
+
   // ── Readiness computation ──
   let jobReadiness: JobReadiness | null = null
   try {
@@ -17347,6 +17405,11 @@ async function jobDetail(
         // M4: pass the LIVE assignments[] (already fetched above) so crew_assigned
         // reflects real allocation, not the stale assignment_count MV column.
         assignRes.data || [],
+        // Flag off: omit, so wo_count > 0 is unchanged. Flag on: a blank draft
+        // does not pass, and a crew work order alone does not either.
+        allJobWorkOrderTypes
+          ? filledApprovedJobWorkOrder(jobWorkOrderRead?.live_work_order)
+          : undefined,
       )
     }
   } catch (e) {
@@ -17391,34 +17454,6 @@ async function jobDetail(
     return rest
   })
 
-  // The job's own work order (job_work_orders.ts): additive, fencing and
-  // patio only. A failed read never fails the job detail.
-  let jobWorkOrder: any = null
-  if (job?.type === 'fencing' || job?.type === 'patio') {
-    try {
-      const jwo = await readJobWorkOrder(client, {
-        jobId,
-        fillFromQuote: opts.fillWorkOrderFromQuote === true,
-      })
-      jobWorkOrder = {
-        work_order: jwo.work_order,
-        live_work_order_id: jwo.live_work_order?.id ?? null,
-        draft_work_order_id: jwo.draft_work_order?.id ?? null,
-        figures: jwo.figures,
-        addenda: jwo.addenda,
-        invoice_count: jwo.invoices.length,
-        variation_count: jwo.variations.length,
-        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
-        quote_fill: jwo.quote_fill,
-        // Office only: lines the quote fill flagged (they never stop the work
-        // order going out) and why a draft has not gone to the trades.
-        needs_checking: jwo.needs_checking,
-      }
-    } catch (e) {
-      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
-      jobWorkOrder = { unreadable: true }
-    }
-  }
   // Trade time entries stamped against this job: who, which day, start,
   // finish and hours, from submitted trade invoices (view
   // job_trade_time_entries, with which invoice) and from the times trades

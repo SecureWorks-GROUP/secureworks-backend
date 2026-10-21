@@ -1,4 +1,5 @@
--- Shaun and Marnin must exist before 20261021143000 seeds the backup approver.
+-- Shaun and Marnin exist so the contract can name them. The migration does
+-- not write backup_approver_user_ids; the contract sets that list itself.
 -- The contract users table sometimes has email (production: not null) and
 -- sometimes does not (the reduced 20261012130000 stub).
 

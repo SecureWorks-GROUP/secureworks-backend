@@ -52,16 +52,23 @@ Nothing is written. That covers Secure Suite `sw_create_work_order` and a
 cached old page, both of which omit `kind`. While the flag is off the old
 insert still runs.
 
-`makeQuoteBuilderWorkOrder` is not gated. A quote-builder crew row carries
-`quote_builder_version_id` and stays visible.
+`makeQuoteBuilderWorkOrder` creates `kind = 'crew'` with
+`quote_builder_version_id`. That is the same kind decision 10 retires, not a
+separate object. While `retire_crew_work_orders_v1` is on, a new one is
+refused 409 `crew_work_order_retired` and nothing is written. A version that
+already has a work order is still returned. Purchase orders are not refused.
+While the flag is off the insert is unchanged. Existing quote-builder rows
+stay visible and are not in the retirement script.
 
 ## Office queue
 
 Staff only (the ops-api staff set, including the server key for the read).
 Fill and approve also need a named approver and the office-fill flag. Shaun
-(`approver_user_ids`) is primary either way. Marnin is seeded into
-`work_order_settings.backup_approver_user_ids` and counts only while the
-office-fill flag is on. That seed does not change `approver_user_ids`, and
+(`approver_user_ids`) is primary either way.
+`work_order_settings.backup_approver_user_ids` ships empty. A user in that
+list counts only while the office-fill flag is on. The migration does not
+pick between the two `users` rows on Marnin's email. The owner writes the
+id. That list does not change `approver_user_ids`, and
 `work_order_customer_variations` is not widened. A server key with no user
 id cannot fill, approve or review. Office approve calls
 `approve_job_work_order` with `p_via: 'session'`.
@@ -74,8 +81,15 @@ id cannot fill, approve or review. Office approve calls
 | `review_crew_invoice_line` | POST | `line_id`, `decision` (`approve` / `query` / `reject`), optional `note` (cut at 2000). Needs the review flag. A backup approver still needs the office-fill flag. |
 
 The queue is the office list of blank and draft job work orders. The job
-overview reads the same work order through the existing job-work-order read
-(`job_detail.job_work_order`). This repo does not paint either screen.
+overview reads `job_detail.job_work_order`, then `job_work_order`. While
+`job_work_order_all_types_v1` is off those reads stay fencing and patio, and
+`list_work_orders` with a type other than those two is 400 `invalid_type`.
+While it is on, every job type is included and a type filter is accepted.
+Quote fill stays fencing and patio. A trade JWT on `job_detail` receives the
+work order with `agreed_labour_ex` removed and `figures` null. Staff, the
+ops key and the routine key keep the figures. The trade's own read remains
+`my_job_work_order`, which already omits the allowance. The group-work-order
+participant share is not this payload. This repo does not paint the screen.
 
 ## Crew invoice lines
 
@@ -201,6 +215,17 @@ Marnin okays each of these. None of them is this pull request.
 4. Turn `job_work_order_all_types_v1` and
    `job_work_order_office_fill_v1` on. Then
    `job_work_order_active_backfill_v1`, dry-run the backfill, then `--apply`.
+   Pick Marnin's user id and write it into
+   `work_order_settings.backup_approver_user_ids` before anyone relies on the
+   backup. The list ships empty. Do not guess between the two rows. The one
+   id this repo already names is `706c5258-70dd-483a-b36c-af6864b24498`. The
+   second id, both `created_at` values and both last sign-ins were not
+   observed from production on this change. Shaun still approves from
+   `approver_user_ids` with the list empty.
+   Once `job_work_order_all_types_v1` is on, readiness "Work order exists"
+   passes only for an approved job work order whose `agreed_labour_ex` is
+   set, including 0. A blank draft does not pass. While the flag is off the
+   check stays `wo_count > 0`.
 5. Leave `crew_invoice_requires_job_work_order_v1` off until the backfill
    has been read.
 6. Turn `retire_crew_work_orders_v1` on, dry-run
@@ -211,21 +236,15 @@ Marnin okays each of these. None of them is this pull request.
 - Job profit (`v_job_profit`) does not read `agreed_labour_ex`. Supplier
   bills stay unlinked. Patio quotes stay invisible to profit.
 - The office queue and the job-overview work order are not drawn in this
-  repo. `listJobWorkOrders` still rejects a type other than fencing or patio;
-  the office queue is the read for the other types.
-- `job_detail`, `pipeline` `wo_count`, the dossier, `trade_job_detail` and
-  `ops_summary` still leave `kind = 'job'` out. Readiness "Work order exists"
-  (`wo_count > 0`) will start passing once blank work orders exist. The
-  readiness engine is unchanged.
-- Quote-builder still creates `kind = 'crew'`, and those rows stay visible.
+  repo. `job_detail.job_work_order` is the overview read. `pipeline`
+  `wo_count` still excludes `kind = 'job'`, so a job-only card stays 0 there.
+- `trade_job_detail` does not carry the staff job-work-order object.
 - Customer variations are not widened to the backup approver.
 - The auto-issue cron is on. It does not select a blank make-safe draft.
 - An in-flight group-work-order agent (`bc-e920fe91`) also edits ops-api,
   keyed on `(job_id, work_order_id)` with the pot as `agreed_labour_ex` and
   a client sign-off. This change does not build groups. A blank unfilled
   draft has no pot, so a group cannot open on it.
-- Two `users` rows with Marnin's email leave `backup_approver_user_ids`
-  empty. Emptying that array and re-applying the migration seeds him again.
 - `my_work_orders` adds `kind` on the card. It is null while the retire flag
   is off, because the column is not selected. The mine-mode assignment read
   filters `is_ghost`, which is live drift and not in a repo migration; that

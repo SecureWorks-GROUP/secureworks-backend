@@ -4670,8 +4670,14 @@ never put a job work order in `source_work_order_id` or
 `trade_invoices.work_order_id` (those stay the crew-pay fence). Travel stays
 off that fence. `create_work_order` without `kind: 'job'` is refused 409
 `crew_work_order_retired` while `retire_crew_work_orders_v1` is on, which is
-how `sw_create_work_order` and a cached page are stopped. Quote-builder crew
-rows stay. The 30-day backfill is `scripts/backfill-job-work-orders-active.ts`
+how `sw_create_work_order` and a cached page are stopped. The same flag
+stops `makeQuoteBuilderWorkOrder` creating another `kind = 'crew'` row;
+existing quote-builder rows stay visible and out of the retirement script.
+`backup_approver_user_ids` ships empty. While `job_work_order_all_types_v1`
+is on, `job_detail.job_work_order` and `list_work_orders` accept every job
+type, and readiness "Work order exists" passes only for a filled approved
+job work order. Flag off keeps fencing and patio and `wo_count > 0`. The
+30-day backfill is `scripts/backfill-job-work-orders-active.ts`
 and the crew-row retirement is `scripts/retire-crew-work-orders.ts`: both
 dry-run by default, neither is a migration or a cron, and both are on Marnin's
 go-live checklist. Turn `crew_invoice_line_office_review_v1` on before or with

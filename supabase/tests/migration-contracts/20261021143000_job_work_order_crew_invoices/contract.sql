@@ -39,10 +39,10 @@ BEGIN
       RAISE EXCEPTION 'contract: % must exist and ship switched off', v_name;
     END IF;
   END LOOP;
-  IF NOT ('706c5258-70dd-483a-b36c-af6864b24498' = ANY (
+  IF (
     SELECT backup_approver_user_ids FROM public.work_order_settings WHERE id = 1
-  )) THEN
-    RAISE EXCEPTION 'contract: Marnin must be seeded as the backup approver';
+  ) IS DISTINCT FROM '{}'::uuid[] THEN
+    RAISE EXCEPTION 'contract: backup approvers must ship empty';
   END IF;
   IF NOT ('processing' = ANY (public.job_work_order_open_statuses())) THEN
     RAISE EXCEPTION 'contract: processing must stay an open work-order status';
@@ -242,6 +242,16 @@ BEGIN
   END;
 
   UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_office_fill_v1';
+  SELECT updated_at INTO v_seen FROM public.work_orders WHERE id = v_wo;
+  BEGIN
+    PERFORM public.approve_job_work_order(v_wo, v_marnin, 'session', v_seen);
+    RAISE EXCEPTION 'contract: an empty backup list must not let Marnin approve';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  UPDATE public.work_order_settings
+    SET backup_approver_user_ids = ARRAY[v_marnin]
+    WHERE id = 1;
   SELECT updated_at INTO v_seen FROM public.work_orders WHERE id = v_wo;
   PERFORM public.approve_job_work_order(v_wo, v_marnin, 'session', v_seen);
   IF (SELECT status FROM public.work_orders WHERE id = v_wo) <> 'approved'
