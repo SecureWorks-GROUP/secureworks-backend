@@ -61,6 +61,7 @@ reason and note that applies.
 |---|---|---|
 | `missing_client_invoice` | Nothing invoiced yet | Null |
 | `xero_project_exceeds_line_costs` | See the Xero Project rule | Null |
+| `installer_bill_unconfirmed` | An installer bill (account 306 or 301) is on the job but no person has confirmed it. See the installer bill rule | Null |
 | `no_cost_linked` | No cost is linked to the job | Null |
 | `incomplete_invoice_lines` | A trade invoice on the job has no lines, or lines that do not add up to its total | Null |
 | `unclassified_lines` | A trade line has no cost lane | Null |
@@ -87,6 +88,20 @@ linked to the job, the job is flagged `xero_project_exceeds_line_costs` and
 `profit_ex`, `margin_pct` and `profit_ex_unsuppressed` are null. Show the
 project total beside the job as "project expenses on record", never as the
 job's cost.
+
+## Installer bill rule
+
+A person confirms each installer bill before it is placed on a job (JP-12).
+An installer bill has a line on account 306 or 301. It counts as actual
+labour only once a person placed it on the job through Bills to place (a
+whole placement or a split). Until then its rows in `cost_events` have source
+`installer_bill_unconfirmed`, confidence `awaiting_confirmation` and
+`is_actual` false: the amount is shown, it is not in `actual_cost_ex`, and the
+job is flagged `installer_bill_unconfirmed` with no profit or margin. This
+holds even when Xero's reference links the bill to the job. A bill a person
+marked not job related has source `installer_bill_not_job_related`, is never
+actual and flags nothing. In `v_bill_allocation_balance` such a bill whose
+rows no person made has `installer_unconfirmed` true and is never `balanced`.
 
 ## Rollup fields
 

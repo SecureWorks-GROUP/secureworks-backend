@@ -26,6 +26,10 @@ BEGIN
   IF pg_get_viewdef('public.v_job_cost_events'::regclass) NOT LIKE '%po_invoice_emailed%' THEN
     RAISE EXCEPTION 'cfo18 rollback: cost events lost the CFO-12 states';
   END IF;
+  IF to_regprocedure('public.job_cost_installer_bill(jsonb)') IS NOT NULL
+     OR pg_get_viewdef('public.v_job_profit'::regclass) LIKE '%installer%' THEN
+    RAISE EXCEPTION 'jp12 rollback: installer confirmation survived';
+  END IF;
   PERFORM 1 FROM public.job_profit('00000000-0000-0000-0000-000000000000'::uuid);
   IF has_table_privilege('anon', 'public.v_job_cost_events', 'SELECT')
      OR NOT has_table_privilege('service_role', 'public.v_job_cost_events', 'SELECT') THEN
