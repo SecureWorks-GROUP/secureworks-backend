@@ -148,7 +148,6 @@ export function evaluateClientSignoff(args: {
   let missing: ClientSignoffMissing | null = null
   if (args.readFailed) missing = 'evidence_unavailable'
   else if (!current) missing = 'not_signed'
-  else if (current.method === 'revoked') missing = 'not_signed'
   else if (current.method !== 'office_waiver') {
     if (current.happy === false) missing = 'client_not_happy'
     else if (current.satisfaction_rating != null && current.satisfaction_rating < args.settings.min_happy_rating) {

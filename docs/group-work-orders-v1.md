@@ -16,11 +16,14 @@ is off. While it is off, every group action refuses 409
 switched off."): create, join, hours (submit and delete), my share, crew
 sign, client sign-off (on-site capture and the public page), the public
 read, public feedback, the client-link preview, freeze, and unfreeze.
-Trade invoicing does not read the group tables while the switch is off:
-`submit_trade_invoice`, `submit_work_order_invoice`, and
-`generate_trade_invoice` return after the `feature_flags` read. The
-invoice-line trigger still refuses a second payment if a group row
-already exists. Staff revoke, void, re-key, the office read, and the
+A normal invoice still returns after the `feature_flags` read:
+`submit_trade_invoice` and `submit_work_order_invoice` do not read the
+group tables while the switch is off. A share-shaped line on
+`generate_trade_invoice` or `save_trade_invoice_draft` is 409
+`group_work_order_disabled` before any group-table read and before any
+invoice write. The invoice-line trigger still refuses a second payment
+if a group row already exists, and it does not read the switch. Staff
+revoke, void, re-key, removing a participant, the office read, and the
 feedback read stay available so an already-open group can be cleaned up.
 
 The sender flag `group_work_order_client_link_send_v1` stays off. This
@@ -45,7 +48,15 @@ Revoke inserts a newer `revoked` row (append-only) and clears the group's
 collate C). There is no second client-signature store, so the two
 records cannot disagree: the group status is a cache of that newest
 counting row, and freeze reads `group_client_signoff_counts`, which
-reads the same table. `office_waiver` counts. A `revoked` row does not.
+reads the same table. For the ordinary invoice gate, `office_waiver`
+counts and a `revoked` row does not. For a group freeze, a counting
+sign-off is a drawn signature (`on_site` or `share_link`, with
+`signature_media_id`), not an office waiver and not revoked, and its
+`created_at` is after the latest hours entry on the group. That group
+rule lives in `group_client_signoff_counts`, not in
+`trade_client_signoff.ts`. PR #1110 should merge first:
+`trade_client_signoff.ts` and the two #1110 migrations on this branch
+are the #1110 copies.
 
 The Google URL is `group_work_order_settings.google_review_url`, seeded
 `https://share.google/AFyfkE7jLfCZcxanV`. The happy threshold is
@@ -70,8 +81,13 @@ and is not the authority.
 - Hours count only on a date the person is assigned to that job (live,
   non-ghost, non-observer, non-cancelled). An upsert on an unassigned
   date is `group_hours_not_assigned`. Freeze requires every participant
-  to have at least one such hour, not a hour on every assigned day
-  (owner to confirm). A participant with hours and no `trade_rates` row
+  and every installer currently assigned to the job to have at least one
+  such hour, not a hour on every assigned day. The office can remove a
+  participant before freeze (`remove_group_work_order_participant`);
+  that drops their hours and their participant row and writes
+  `remove_participant`. It does not cancel the assignment, so someone
+  still assigned is still named. After freeze the same action is
+  `group_split_frozen`. A participant with hours and no `trade_rates` row
   is `group_share_rate_missing` and names that user. A rate that rounds
   to 0 cents is `group_participant_needs_rate`. Neither is a silent drop,
   and neither writes share rows.
@@ -85,14 +101,24 @@ and is not the authority.
   read. A trade's my-share says `awaiting_rate` without naming anyone
   else. The office payload lists the user ids who still need hours or a
   rate.
-- A job is paid either as a normal hours or work-order claim, or as this
-  split, not both, while the switch is on. Travel, materials, equipment,
-  adjustments, and commission are not that claim (owner to confirm on
-  commission). Commission stays in `WORK_ORDER_LOCK_LINE_TYPES`. The
-  duplicate-share rule is stricter than the never-both fence: a draft
-  holds the share; only `ops-reject` releases it. `approved`,
-  `pushed_to_xero`, and `paid` block unfreeze (`group_split_has_live_invoice`).
-  The never-both TypeScript list is `draft` and `ops-reject` only. The
+- A job is paid either as normal pay or as this split, not both. Normal
+  pay is every trade time type (`TRADE_INVOICE_TIME_LINE_TYPES`: labour,
+  fencing, patio, make safe, general labour, decking), plus hours and a
+  work order. `group_work_order_line_is_normal_pay` is that set: case,
+  underscores and spaces do not make a second type, and an unknown type
+  with `source_work_order_id` still counts. Commission, travel, materials,
+  equipment, adjustments and a group share do not. Commission stays in
+  `WORK_ORDER_LOCK_LINE_TYPES` and outside this fence. The check runs
+  both ways and does not read the switch: a share line is refused when
+  normal pay already exists (`group_share_blocked_by_work_order_claim`),
+  and opening a group is refused when normal pay already exists
+  (`group_open_blocked_by_work_order_claim`). Both take an advisory lock
+  on the job before the row lock, so the two writes cannot pass each
+  other. The duplicate-share rule is stricter than the never-both fence:
+  a draft holds the share; only `ops-reject` releases it. Unfreeze is
+  refused once a share invoice is `acknowledged` or later, or carries any
+  Xero bill id or push stamp (`group_split_has_live_invoice`). The
+  never-both TypeScript list is `draft` and `ops-reject` only. The
   global `RELEASED_INVOICE_STATUSES` list is a different lock and still
   includes `failed`.
 - The share line matches the invoice owner. A second live line for the
@@ -111,14 +137,22 @@ and is not the authority.
 
 ## DEFAULT, owner to confirm
 
-- Freeze needs one counting hour per participant, not every assigned day.
+Pending Marnin's call. Built as the safe default.
+
+- Freeze needs one counting hour from every participant and from every
+  installer currently assigned to the job, not a hour on every assigned
+  day. The office can remove a participant, audited, only before freeze.
 - Commission sits outside the never-both fence.
 - The client signature reuses `job_client_signoffs` and its happy
-  threshold. Freeze applies that threshold to any job with a group, not
-  only fencing and patio.
-- Unfreeze of a mixed invoice ops-rejects the whole invoice and deletes
-  only the share lines. The trade is not paid a voided status: the legal
-  return is `ops-reject`.
+  threshold. A group freeze does not accept an office waiver: the
+  signature is drawn, not revoked, and dated after the latest hours on
+  the group. The ordinary invoice gate still accepts `office_waiver`.
+- Unfreeze removes only the share line and recalculates that invoice's
+  totals. It does not reject the trade's week. It is allowed only before
+  acknowledgement, and any Xero id or push stamp blocks it.
+- Voiding stays permanent. A void group cannot be opened again.
+- PR #1110 should merge first. This branch's `trade_client_signoff.ts`
+  and the two sign-off migrations match #1110.
 - Break minutes come off finish minus start, the same rule as a trade
   invoice time entry.
 
@@ -128,13 +162,13 @@ Trade JWT, while the switch is on. The caller is the signed-in user.
 
 | Action | Result |
 | --- | --- |
-| `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. No dollars. The public token is not on this card. |
+| `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. Refused when the job already has normal pay. No dollars. The public token is not on this card. |
 | `join_group_work_order` | The caller must be allocated, unless they are staff. After freeze, `group_split_frozen`. |
-| `sign_group_work_order` | Crew signature. PNG or SVG data URL, at most 150000 characters, or omitted. Not the invoice gate. |
+| `sign_group_work_order` | Crew signature. PNG or JPEG data URL whose decoded bytes are between 3 and 150000 and match that format, or omitted. SVG is refused. Not the invoice gate. |
 | `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, only on an assigned date. |
 | `group_work_order_my_share` | The closed object above. |
 | `capture_group_client_signoff` | On-site client drawing. Records the trade user id. |
-| `freeze_group_work_order` | Explicit freeze after every participant has counting hours and a counting sign-off. |
+| `freeze_group_work_order` | Explicit freeze after every participant and every currently assigned installer has counting hours, and a drawn client sign-off is newer than the latest hours. |
 | `group_work_order_preview_client_link` | Draft only. `send: true` is 409. |
 
 Public, no account, while the switch is on. The token is only for the
@@ -152,9 +186,10 @@ Office. A trade JWT is 403 before the handler.
 | --- | --- | --- |
 | `group_work_order_feedback` | open | The feedback row. |
 | `group_work_order_office` | open | Pot, every participant, who needs hours or a rate, feedback, `split_frozen`. |
-| `unfreeze_group_work_order` | gated | Clears the marker. Ops-rejects a draft or held share invoice and deletes its share lines. Does not recompute. |
+| `unfreeze_group_work_order` | gated | Clears the marker. Deletes only the share lines and recalculates those invoices. Refused at acknowledgement or when the invoice has a Xero id or push stamp. |
+| `remove_group_work_order_participant` | open | Before freeze only. Deletes that person's hours and participant row and writes `remove_participant`. Does not cancel the job assignment. |
 | `revoke_group_signoff` | open | Newest `revoked` row. Does not itself unfreeze. |
-| `void_group_work_order` | open | Unfreeze first, then status `void`. A paid share blocks it. |
+| `void_group_work_order` | open | Unfreeze first, then status `void`. A paid share blocks it. Leaving `void` is refused. |
 | `rekey_group_work_order` | open | Points at the current approved sealed `jobs.work_order_id`, only while not frozen and not void. |
 
 `generate_trade_invoice` is the only door for a share, and only while the
@@ -167,8 +202,11 @@ invoice cannot mix the share with hours or work-order pay for that job.
 
 Five ratings, each an integer 1–5, optional comment (2000), plus
 `free_text` (4000): `sales_process`, `communication`, `cleanliness`,
-`punctuality`, `crew`. Names are 1–120 characters. An SVG signature that
-contains `<script` is refused. The public page shows: "These ratings go
+`punctuality`, `crew`. Names are 1–120 characters. A signature is a
+PNG or JPEG data URL. SVG and any other payload are refused. The
+service-report email and the completion pack render a signature only
+through `signatureImageTag`, which accepts that data URL or an escaped
+https storage URL and omits anything else. The public page shows: "These ratings go
 to the office. They are not viewed by the installers." When every saved
 rating is at least `client_signoff_settings.min_happy_rating`, the
 response sets `prompt_google_review: true` and includes

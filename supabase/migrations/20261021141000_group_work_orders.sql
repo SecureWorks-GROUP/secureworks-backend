@@ -17,14 +17,17 @@
 -- not a foreign key, for the same embed reason as job_work_order_id.
 --
 -- Freeze is an explicit step (freeze_group_work_order_split) after every
--- participant has assignment-dated hours and a counting client sign-off
--- exists on job_client_signoffs. A share read and project_group_work_order_split
+-- participant and every installer currently assigned to the job has
+-- assignment-dated hours, and a drawn client sign-off (not an office
+-- waiver, not revoked, dated after the latest hours) exists on
+-- job_client_signoffs. A share read and project_group_work_order_split
 -- never set split_frozen_at and never persist share rows. The share-line
 -- trigger freezes in the SAME transaction as the line insert, so a failed
--- insert rolls the marker back. Office unfreeze is refused while a share
--- sits on an approved, pushed or paid invoice; a draft or held share
--- invoice is ops-rejected and its share lines are removed. No recompute
--- until the next explicit freeze. Owner to confirm.
+-- insert rolls the marker back. Office unfreeze is refused once a share
+-- invoice is acknowledged or later, or carries any Xero id. Before that
+-- it removes only the share line and recalculates that invoice. Nothing
+-- is recomputed until the next explicit freeze. Voiding stays permanent.
+-- Owner to confirm the freeze, unfreeze and sign-off defaults.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
@@ -78,6 +81,46 @@ COMMENT ON TABLE public.group_work_order_participants IS
   'Crew on a group. Names and whether they signed are visible to other participants. Hours and pay are not.';
 
 -- ── 3. signatures (service role only) ───────────────────────────────────────
+-- A crew drawing is a PNG or JPEG data URL. SVG and anything else are
+-- refused here; the same rule is applied before a signature is placed in HTML.
+
+CREATE OR REPLACE FUNCTION public.group_work_order_signature_ok(p_value text)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_payload text;
+  v_bytes bytea;
+BEGIN
+  IF p_value IS NULL THEN
+    RETURN true;
+  END IF;
+  IF p_value !~ '^data:image/(png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$' THEN
+    RETURN false;
+  END IF;
+  v_payload := substring(p_value FROM 'base64,(.+)$');
+  BEGIN
+    v_bytes := decode(v_payload, 'base64');
+  EXCEPTION WHEN OTHERS THEN
+    RETURN false;
+  END;
+  IF octet_length(v_bytes) < 3 OR octet_length(v_bytes) > 150000 THEN
+    RETURN false;
+  END IF;
+  IF p_value LIKE 'data:image/png;%' THEN
+    RETURN octet_length(v_bytes) >= 4
+      AND get_byte(v_bytes, 0) = 137
+      AND get_byte(v_bytes, 1) = 80
+      AND get_byte(v_bytes, 2) = 78
+      AND get_byte(v_bytes, 3) = 71;
+  END IF;
+  RETURN get_byte(v_bytes, 0) = 255
+    AND get_byte(v_bytes, 1) = 216
+    AND get_byte(v_bytes, 2) = 255;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS public.group_work_order_signatures (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -96,16 +139,7 @@ CREATE TABLE IF NOT EXISTS public.group_work_order_signatures (
   CONSTRAINT group_work_order_signatures_name_check
     CHECK (char_length(btrim(signer_name)) BETWEEN 1 AND 120),
   CONSTRAINT group_work_order_signatures_png_check
-    CHECK (
-      signature_png IS NULL
-      OR (
-        char_length(signature_png) <= 150000
-        AND (
-          signature_png LIKE 'data:image/png;base64,%'
-          OR signature_png LIKE 'data:image/svg+xml%'
-        )
-      )
-    )
+    CHECK (public.group_work_order_signature_ok(signature_png))
 );
 
 COMMENT ON TABLE public.group_work_order_signatures IS
@@ -381,7 +415,8 @@ GRANT ALL ON public.group_work_order_settings TO service_role;
 -- Client drawings live on job_client_signoffs (PR #1110), not in
 -- group_work_order_signatures. share_link is the public client page.
 -- on_site is a participant's phone. revoked is a newer row that stops
--- counting. office_waiver still counts. Owner to confirm.
+-- counting. office_waiver still counts for the ordinary invoice gate, not
+-- for a group freeze. Owner to confirm.
 
 ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_method_check;
 ALTER TABLE public.job_client_signoffs ADD CONSTRAINT job_client_signoffs_method_check
@@ -420,7 +455,8 @@ CREATE TABLE IF NOT EXISTS public.group_work_order_events (
   detail jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT group_work_order_events_action_check CHECK (action IN (
-    'freeze', 'unfreeze', 'revoke_signoff', 'void_group', 'rekey'
+    'freeze', 'unfreeze', 'revoke_signoff', 'void_group', 'rekey',
+    'remove_participant'
   ))
 );
 
@@ -488,9 +524,16 @@ DECLARE
   v_happy boolean;
   v_rating smallint;
   v_min smallint;
+  v_media uuid;
+  v_signed_at timestamptz;
+  v_latest_hours timestamptz;
 BEGIN
-  SELECT s.method, s.happy, s.satisfaction_rating
-    INTO v_method, v_happy, v_rating
+  -- A group needs a drawn signature. An office waiver does not count here
+  -- (it still counts for the ordinary client-signoff invoice gate). A
+  -- revoked row is the newest and counts as unsigned. The drawing has to
+  -- be dated after the latest hours on a non-void group for this job.
+  SELECT s.method, s.happy, s.satisfaction_rating, s.signature_media_id, s.created_at
+    INTO v_method, v_happy, v_rating, v_media, v_signed_at
   FROM public.job_client_signoffs s
   WHERE s.job_id = p_job
   ORDER BY s.created_at DESC, s.id::text COLLATE "C" DESC
@@ -498,11 +541,11 @@ BEGIN
   IF NOT FOUND THEN
     RETURN false;
   END IF;
-  IF v_method = 'revoked' THEN
+  IF v_method IN ('revoked', 'office_waiver') THEN
     RETURN false;
   END IF;
-  IF v_method = 'office_waiver' THEN
-    RETURN true;
+  IF v_method NOT IN ('on_site', 'share_link') OR v_media IS NULL THEN
+    RETURN false;
   END IF;
   SELECT c.min_happy_rating INTO v_min
   FROM public.client_signoff_settings c
@@ -514,6 +557,14 @@ BEGIN
     RETURN false;
   END IF;
   IF v_rating IS NOT NULL AND v_rating < v_min THEN
+    RETURN false;
+  END IF;
+  SELECT max(e.created_at) INTO v_latest_hours
+  FROM public.group_work_order_time_entries e
+  JOIN public.group_work_orders g ON g.id = e.group_id
+  WHERE g.job_id = p_job
+    AND g.status <> 'void';
+  IF v_latest_hours IS NOT NULL AND NOT (v_signed_at > v_latest_hours) THEN
     RETURN false;
   END IF;
   RETURN true;
@@ -545,6 +596,13 @@ DECLARE
   v_missing_rate text;
   v_needs_rate text;
 BEGIN
+  SELECT g.job_id INTO v_job
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  PERFORM public.group_work_order_lock_job(v_job);
   SELECT g.split_frozen_at, g.status, g.org_id, g.job_id, g.work_order_id
     INTO v_frozen, v_status, v_org, v_job, v_work_order
   FROM public.group_work_orders g
@@ -610,13 +668,29 @@ BEGIN
     AND e.hours > 0
     AND public.group_work_order_assignment_covers(v_job, e.user_id, e.work_date);
 
-  SELECT string_agg(p.user_id::text, ',' ORDER BY p.user_id::text COLLATE "C")
+  -- Every participant, and every installer currently assigned to the job,
+  -- needs a counting hour. An assigned person who has not joined is named
+  -- the same way. Office removes a participant only before the freeze.
+  SELECT string_agg(missing.user_id, ',' ORDER BY missing.user_id COLLATE "C")
     INTO v_needs_hours
-  FROM public.group_work_order_participants p
-  WHERE p.group_id = p_group_id
-    AND NOT EXISTS (
-      SELECT 1 FROM group_wo_entries e WHERE e.user_id = p.user_id
-    );
+  FROM (
+    SELECT p.user_id::text AS user_id
+    FROM public.group_work_order_participants p
+    WHERE p.group_id = p_group_id
+      AND NOT EXISTS (
+        SELECT 1 FROM group_wo_entries e WHERE e.user_id = p.user_id
+      )
+    UNION
+    SELECT DISTINCT a.user_id::text
+    FROM public.job_assignments a
+    WHERE a.job_id = v_job
+      AND COALESCE(to_jsonb(a)->>'status', '') IS DISTINCT FROM 'cancelled'
+      AND COALESCE(to_jsonb(a)->>'role', '') IS DISTINCT FROM 'observer'
+      AND COALESCE(to_jsonb(a)->>'is_ghost', 'false') IS DISTINCT FROM 'true'
+      AND NOT EXISTS (
+        SELECT 1 FROM group_wo_entries e WHERE e.user_id = a.user_id
+      )
+  ) missing;
   IF v_needs_hours IS NOT NULL THEN
     RAISE EXCEPTION 'group_split_needs_hours: %', v_needs_hours USING ERRCODE = '23514';
   END IF;
@@ -781,8 +855,9 @@ AS $$
   SELECT public.group_work_order_write_split(p_group_id, true);
 $$;
 
--- Held share invoices are ops-rejected and their share lines removed.
--- approved, pushed_to_xero and paid block. Nothing is recomputed.
+-- Before acknowledgement, remove only the share line and recalculate the
+-- invoice. Do not ops-reject the trade's week. Acknowledged or later, or
+-- any Xero id or push stamp, refuses. Nothing is recomputed.
 CREATE OR REPLACE FUNCTION public.unfreeze_group_work_order_split(
   p_group_id uuid,
   p_actor uuid DEFAULT NULL
@@ -793,8 +868,15 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_job uuid;
-  v_voided uuid[];
+  v_stripped uuid[];
 BEGIN
+  SELECT g.job_id INTO v_job
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  PERFORM public.group_work_order_lock_job(v_job);
   SELECT g.job_id INTO v_job
   FROM public.group_work_orders g
   WHERE g.id = p_group_id
@@ -809,32 +891,53 @@ BEGIN
     JOIN public.trade_invoice_lines l ON l.group_share_id = s.id
     JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
     WHERE s.group_id = p_group_id
-      AND i.status IN ('approved', 'pushed_to_xero', 'paid')
+      AND (
+        i.status IN (
+          'acknowledged', 'pending_ops_review', 'approved',
+          'pushed_to_xero', 'paid'
+        )
+        OR NULLIF(btrim(i.xero_bill_id), '') IS NOT NULL
+        OR i.xero_pushed_at IS NOT NULL
+      )
   ) THEN
     RAISE EXCEPTION 'group_split_has_live_invoice' USING ERRCODE = '23514';
   END IF;
 
-  SELECT COALESCE(array_agg(DISTINCT i.id), ARRAY[]::uuid[])
-    INTO v_voided
+  SELECT COALESCE(array_agg(DISTINCT l.trade_invoice_id), ARRAY[]::uuid[])
+    INTO v_stripped
   FROM public.group_work_order_shares s
   JOIN public.trade_invoice_lines l ON l.group_share_id = s.id
-  JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
-  WHERE s.group_id = p_group_id
-    AND i.status IN (
-      'draft', 'pending_acknowledgment', 'queried',
-      'acknowledged', 'pending_ops_review'
-    );
+  WHERE s.group_id = p_group_id;
 
   DELETE FROM public.trade_invoice_lines l
   USING public.group_work_order_shares s
   WHERE l.group_share_id = s.id
-    AND s.group_id = p_group_id
-    AND l.trade_invoice_id = ANY (v_voided);
+    AND s.group_id = p_group_id;
 
+  -- Same split as trade_invoice_money: super 12% of gross, worker withhold
+  -- 6%, net is gross minus that withhold, GST on the gross when gst_on.
+  -- An invoice whose money columns are all null (gst_on null) is left alone.
   UPDATE public.trade_invoices i
-  SET status = 'ops-reject',
-      query_note = 'Group split reopened. This share invoice was returned. Submit it again after the office freezes the split.'
-  WHERE i.id = ANY (v_voided);
+  SET subtotal_ex = m.gross,
+      gross_earned = m.gross,
+      super_rate = 0.12,
+      super_amount = round(m.gross * 0.12, 2),
+      net_pay = round(m.gross - round(m.gross * 0.06, 2), 2),
+      gst = CASE WHEN i.gst_on THEN round(m.gross * 0.10, 2) ELSE 0 END,
+      total_inc = round(
+        m.gross + CASE WHEN i.gst_on THEN round(m.gross * 0.10, 2) ELSE 0 END,
+        2
+      )
+  FROM (
+    SELECT i2.id,
+           COALESCE(round(sum(l.line_total_ex), 2), 0) AS gross
+    FROM public.trade_invoices i2
+    LEFT JOIN public.trade_invoice_lines l ON l.trade_invoice_id = i2.id
+    WHERE i2.id = ANY (v_stripped)
+      AND i2.gst_on IS NOT NULL
+    GROUP BY i2.id
+  ) m
+  WHERE i.id = m.id;
 
   UPDATE public.group_work_orders
   SET split_frozen_at = NULL, updated_at = now()
@@ -847,13 +950,13 @@ BEGIN
   INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
   VALUES (
     p_group_id, v_job, 'unfreeze', p_actor,
-    jsonb_build_object('voided_invoice_ids', to_jsonb(v_voided))
+    jsonb_build_object('stripped_invoice_ids', to_jsonb(v_stripped))
   );
 
   RETURN jsonb_build_object(
     'frozen', false,
     'shares', '[]'::jsonb,
-    'voided_invoice_ids', to_jsonb(v_voided)
+    'stripped_invoice_ids', to_jsonb(v_stripped)
   );
 END;
 $$;
@@ -991,7 +1094,7 @@ COMMENT ON FUNCTION public.freeze_group_work_order_split(uuid) IS
 COMMENT ON FUNCTION public.project_group_work_order_split(uuid) IS
   'Quote only. Never sets split_frozen_at and never writes share rows.';
 COMMENT ON FUNCTION public.unfreeze_group_work_order_split(uuid, uuid) IS
-  'Office. Refuses while a share is on an approved, pushed or paid invoice. Ops-rejects a draft or held share invoice and clears the snapshot. Does not recompute.';
+  'Office. Refuses once a share invoice is acknowledged or later, or has a Xero id or push stamp. Before that, deletes only the share line, recalculates the invoice, and clears the snapshot. Does not ops-reject the week and does not recompute.';
 
 REVOKE ALL ON FUNCTION public.group_work_order_assignment_covers(uuid, uuid, date) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_client_signoff_counts(uuid) FROM PUBLIC, anon, authenticated;
@@ -1108,11 +1211,155 @@ CREATE TRIGGER trg_group_work_order_shares_frozen_guard
   BEFORE INSERT OR UPDATE OR DELETE ON public.group_work_order_shares
   FOR EACH ROW EXECUTE FUNCTION public.group_work_order_shares_frozen_guard();
 
+-- One lock per job, taken before any row lock, so a share and a normal pay
+-- line cannot both land. Re-entrant in the same transaction.
+CREATE OR REPLACE FUNCTION public.group_work_order_lock_job(p_job uuid)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF p_job IS NULL THEN
+    RETURN;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext(p_job::text)::bigint);
+END;
+$$;
+
+-- Normal pay is every trade time type (labour, fencing, patio, make safe,
+-- general labour, decking — whitespace and case ignored), plus hours and a
+-- work order. Commission, travel, materials, equipment, adjustments and a
+-- group share are not pay. An unknown type with a source work order still is.
+-- Membership is this function; the trigger does not keep a second list.
+CREATE OR REPLACE FUNCTION public.group_work_order_line_is_normal_pay(
+  p_line_type text,
+  p_source_work_order_id uuid
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+  WITH norm AS (
+    SELECT replace(replace(lower(btrim(COALESCE(p_line_type, ''))), '_', ' '), ' ', '') AS key
+  )
+  SELECT CASE
+    WHEN (SELECT key FROM norm) IN (
+      'groupshare', 'commission', 'travel', 'materials', 'equipment',
+      'adjustment', 'finalpayoutdeduction'
+    ) THEN false
+    WHEN (SELECT key FROM norm) IN (
+      'labour', 'fencing', 'patio', 'makesafe', 'generallabour', 'decking',
+      'hours', 'workorder'
+    ) THEN true
+    WHEN p_source_work_order_id IS NOT NULL THEN true
+    ELSE false
+  END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.group_work_orders_refuse_existing_pay()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  PERFORM public.group_work_order_lock_job(NEW.job_id);
+  IF EXISTS (
+    SELECT 1
+    FROM public.trade_invoice_lines l
+    JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+    WHERE l.job_id = NEW.job_id
+      AND i.status IS DISTINCT FROM 'ops-reject'
+      AND public.group_work_order_line_is_normal_pay(l.line_type, l.source_work_order_id)
+  ) THEN
+    RAISE EXCEPTION 'group_open_blocked_by_work_order_claim' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_orders_refuse_existing_pay ON public.group_work_orders;
+CREATE TRIGGER trg_group_work_orders_refuse_existing_pay
+  BEFORE INSERT ON public.group_work_orders
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_orders_refuse_existing_pay();
+
+CREATE OR REPLACE FUNCTION public.group_work_orders_void_permanent()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF OLD.status = 'void' AND NEW.status IS DISTINCT FROM 'void' THEN
+    RAISE EXCEPTION 'group_work_order_void' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_orders_void_permanent ON public.group_work_orders;
+CREATE TRIGGER trg_group_work_orders_void_permanent
+  BEFORE UPDATE ON public.group_work_orders
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_orders_void_permanent();
+
+-- Office. Deletes this person's hours and participant row. Refused once
+-- frozen or void. Does not cancel their job assignment.
+CREATE OR REPLACE FUNCTION public.remove_group_work_order_participant(
+  p_group_id uuid,
+  p_user uuid,
+  p_actor uuid
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job uuid;
+  v_frozen timestamptz;
+  v_status text;
+BEGIN
+  IF p_actor IS NULL OR p_user IS NULL THEN
+    RAISE EXCEPTION 'group_actor_required' USING ERRCODE = '23514';
+  END IF;
+  SELECT g.job_id INTO v_job
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  PERFORM public.group_work_order_lock_job(v_job);
+  SELECT g.job_id, g.split_frozen_at, g.status
+    INTO v_job, v_frozen, v_status
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_status = 'void' THEN
+    RAISE EXCEPTION 'group_work_order_void' USING ERRCODE = '23514';
+  END IF;
+  IF v_frozen IS NOT NULL THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  DELETE FROM public.group_work_order_time_entries
+  WHERE group_id = p_group_id AND user_id = p_user;
+  DELETE FROM public.group_work_order_participants
+  WHERE group_id = p_group_id AND user_id = p_user;
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
+  VALUES (
+    p_group_id, v_job, 'remove_participant', p_actor,
+    jsonb_build_object('user_id', p_user)
+  );
+  RETURN jsonb_build_object('removed', true, 'user_id', p_user);
+END;
+$$;
+
 -- Share lines lock the group and, when the marker is still null, freeze in
 -- this same statement so a failed insert rolls the marker back. A second
 -- live line for the same share is refused, and the invoice owner must be
--- the share owner. A normal pay line on a job that has a group is refused.
--- Commission, travel, materials, equipment and adjustments are not pay.
+-- the share owner. A share is also refused when normal pay already exists
+-- on the job, and a normal pay line is refused when a group is open.
+-- The flag is not read: this holds with the switch off. Commission, travel,
+-- materials, equipment and adjustments are not pay.
 -- UPDATE is limited to the share pointer and the amount so a status stamp
 -- on the invoice does not re-enter this check.
 CREATE OR REPLACE FUNCTION public.trade_invoice_lines_group_share_snapshot()
@@ -1137,6 +1384,7 @@ BEGIN
     IF NEW.job_id IS NULL OR NEW.trade_invoice_id IS NULL THEN
       RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
     END IF;
+    PERFORM public.group_work_order_lock_job(NEW.job_id);
     SELECT count(*) INTO v_groups
     FROM public.group_work_orders g
     WHERE g.job_id = NEW.job_id AND g.status <> 'void';
@@ -1151,6 +1399,17 @@ BEGIN
     FROM public.group_work_orders g
     WHERE g.job_id = NEW.job_id AND g.status <> 'void'
     FOR UPDATE;
+    IF EXISTS (
+      SELECT 1
+      FROM public.trade_invoice_lines l
+      JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+      WHERE l.job_id = NEW.job_id
+        AND l.id IS DISTINCT FROM NEW.id
+        AND i.status IS DISTINCT FROM 'ops-reject'
+        AND public.group_work_order_line_is_normal_pay(l.line_type, l.source_work_order_id)
+    ) THEN
+      RAISE EXCEPTION 'group_share_blocked_by_work_order_claim' USING ERRCODE = '23514';
+    END IF;
     SELECT i.user_id INTO v_invoice_user
     FROM public.trade_invoices i
     WHERE i.id = NEW.trade_invoice_id;
@@ -1198,14 +1457,8 @@ BEGIN
   IF NEW.job_id IS NULL THEN
     RETURN NEW;
   END IF;
-  IF v_type IN (
-    'travel', 'materials', 'equipment', 'adjustment',
-    'final payout deduction', 'final_payout_deduction', 'commission'
-  ) THEN
-    RETURN NEW;
-  END IF;
-  IF v_type IN ('labour', 'hours', 'work order', 'work_order', 'patio')
-     OR NEW.source_work_order_id IS NOT NULL THEN
+  IF public.group_work_order_line_is_normal_pay(NEW.line_type, NEW.source_work_order_id) THEN
+    PERFORM public.group_work_order_lock_job(NEW.job_id);
     IF EXISTS (
       SELECT 1 FROM public.group_work_orders g
       WHERE g.job_id = NEW.job_id AND g.status <> 'void'
@@ -1228,7 +1481,18 @@ REVOKE ALL ON FUNCTION public.group_work_order_time_entries_guard() FROM PUBLIC,
 REVOKE ALL ON FUNCTION public.group_work_order_refuse_late_joiner() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_work_order_shares_frozen_guard() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trade_invoice_lines_group_share_snapshot() FROM PUBLIC, anon, authenticated;
+-- lock_job and line_is_normal_pay stay executable by the function owner.
+-- write_split and unfreeze are SECURITY DEFINER and call the lock, and the
+-- invoice trigger calls both. Revoking them makes those calls fail as the
+-- owner. They take a lock or return a boolean; they read no row.
+REVOKE ALL ON FUNCTION public.remove_group_work_order_participant(uuid, uuid, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.group_work_order_time_entries_guard() TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_refuse_late_joiner() TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_shares_frozen_guard() TO service_role;
 GRANT EXECUTE ON FUNCTION public.trade_invoice_lines_group_share_snapshot() TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_lock_job(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_line_is_normal_pay(text, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_orders_refuse_existing_pay() TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_orders_void_permanent() TO service_role;
+GRANT EXECUTE ON FUNCTION public.remove_group_work_order_participant(uuid, uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_signature_ok(text) TO service_role;

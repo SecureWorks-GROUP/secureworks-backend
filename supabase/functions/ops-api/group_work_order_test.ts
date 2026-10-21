@@ -16,6 +16,10 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import {
+  signatureDataUrl,
+  signatureImageTag,
+} from "../_shared/signature_image.ts";
+import {
   allocatePotCents,
   assertGroupWorkOrderInvoiceFence,
   centsToMoney,
@@ -31,6 +35,7 @@ import {
   groupHoursFromBody,
   GroupWorkOrderError,
   isGroupShareLine,
+  isNormalWorkOrderPayLine,
   joinGroupWorkOrder,
   moneyToCents,
   PARTICIPANT_SHARE_KEYS,
@@ -42,11 +47,13 @@ import {
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
   refuseClientLinkSend,
+  removeGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   submitGroupWorkOrderFeedback,
   unfreezeGroupWorkOrder,
   visibleShareRows,
 } from "./group_work_order.ts";
+import { TRADE_INVOICE_TIME_LINE_TYPES } from "./trade_invoice_time_entry.ts";
 
 const ORG = "00000000-0000-4000-8000-000000000001";
 const JOB = "10000000-0000-4000-8000-000000000001";
@@ -81,11 +88,11 @@ class Memory {
       from(table: string) {
         return new Query(memory, table);
       },
-      rpc(fn: string, args: { p_group_id?: string }) {
+      rpc(fn: string, args: Record<string, unknown> = {}) {
         memory.calls.push({ table: fn, op: "rpc" });
         try {
           return Promise.resolve({
-            data: memory.runRpc(fn, String(args?.p_group_id || "")),
+            data: memory.runRpc(fn, args || {}),
             error: null,
           });
         } catch (err) {
@@ -96,13 +103,21 @@ class Memory {
     };
   }
 
-  runRpc(fn: string, groupId: string) {
+  runRpc(fn: string, args: Record<string, unknown>) {
+    const groupId = String(args.p_group_id || "");
     const group = this.rows("group_work_orders").find((row) =>
       row.id === groupId
     );
     if (!group) throw new Error("group_work_order_not_found");
     if (fn === "unfreeze_group_work_order_split") {
       return this.unfreeze(group);
+    }
+    if (fn === "remove_group_work_order_participant") {
+      return this.removeParticipant(
+        group,
+        String(args.p_user || ""),
+        String(args.p_actor || ""),
+      );
     }
     if (
       fn !== "freeze_group_work_order_split" &&
@@ -113,14 +128,17 @@ class Memory {
     return this.writeSplit(group, fn === "freeze_group_work_order_split");
   }
 
+  round2(value: number): number {
+    return Math.round(value * 100) / 100;
+  }
+
   unfreeze(group: Row) {
-    const blocking = new Set(["approved", "pushed_to_xero", "paid"]);
-    const held = new Set([
-      "draft",
-      "pending_acknowledgment",
-      "queried",
+    const blocking = new Set([
       "acknowledged",
       "pending_ops_review",
+      "approved",
+      "pushed_to_xero",
+      "paid",
     ]);
     const shareIds = new Set(
       this.rows("group_work_order_shares").filter((row) =>
@@ -137,27 +155,94 @@ class Memory {
     const invoices = this.rows("trade_invoices").filter((row) =>
       invoiceIds.includes(String(row.id))
     );
-    if (invoices.some((row) => blocking.has(String(row.status || "")))) {
+    const blocked = (row: Row) =>
+      blocking.has(String(row.status || "")) ||
+      String(row.xero_bill_id || "").trim() !== "" ||
+      Boolean(row.xero_pushed_at);
+    if (invoices.some(blocked)) {
       throw new Error("group_split_has_live_invoice");
-    }
-    const voided: string[] = [];
-    for (const invoice of invoices) {
-      if (!held.has(String(invoice.status || ""))) continue;
-      invoice.status = "ops-reject";
-      invoice.query_note =
-        "Group split reopened. This share invoice was returned. Submit it again after the office freezes the split.";
-      voided.push(String(invoice.id));
     }
     const lineRows = this.rows("trade_invoice_lines");
     const keptLines = lineRows.filter((line) =>
       !shareIds.has(String(line.group_share_id || ""))
     );
     lineRows.splice(0, lineRows.length, ...keptLines);
+    const stripped: string[] = [];
+    for (const invoice of invoices) {
+      stripped.push(String(invoice.id));
+      if (invoice.gst_on == null) continue;
+      const remaining = lineRows.filter((line) =>
+        String(line.trade_invoice_id) === String(invoice.id)
+      );
+      const gross = this.round2(
+        remaining.reduce((sum, line) => sum + Number(line.line_total_ex || 0), 0),
+      );
+      const gstOn = invoice.gst_on === true || invoice.gst_on === "true";
+      const superAmount = this.round2(gross * 0.12);
+      const withhold = this.round2(gross * 0.06);
+      invoice.subtotal_ex = gross;
+      invoice.gross_earned = gross;
+      invoice.super_rate = 0.12;
+      invoice.super_amount = superAmount;
+      invoice.net_pay = this.round2(gross - withhold);
+      invoice.gst = gstOn ? this.round2(gross * 0.1) : 0;
+      invoice.total_inc = this.round2(gross + Number(invoice.gst));
+    }
     const shareRows = this.rows("group_work_order_shares");
     const keptShares = shareRows.filter((row) => row.group_id !== group.id);
     shareRows.splice(0, shareRows.length, ...keptShares);
     group.split_frozen_at = null;
-    return { frozen: false, shares: [], voided_invoice_ids: voided };
+    return { frozen: false, shares: [], stripped_invoice_ids: stripped };
+  }
+
+  removeParticipant(group: Row, userId: string, actor: string) {
+    if (!userId || !actor) throw new Error("group_actor_required");
+    if (group.status === "void") throw new Error("group_work_order_void");
+    if (group.split_frozen_at) throw new Error("group_split_frozen");
+    const hours = this.rows("group_work_order_time_entries");
+    hours.splice(
+      0,
+      hours.length,
+      ...hours.filter((row) =>
+        !(row.group_id === group.id && String(row.user_id) === userId)
+      ),
+    );
+    const people = this.rows("group_work_order_participants");
+    people.splice(
+      0,
+      people.length,
+      ...people.filter((row) =>
+        !(row.group_id === group.id && String(row.user_id) === userId)
+      ),
+    );
+    this.rows("group_work_order_events").push({
+      group_id: group.id,
+      action: "remove_participant",
+      actor,
+      user_id: userId,
+    });
+    return { ok: true };
+  }
+
+  latestHoursAt(jobId: string): string | null {
+    const live = new Set(
+      this.rows("group_work_orders").filter((row) =>
+        row.job_id === jobId && row.status !== "void"
+      ).map((row) => String(row.id)),
+    );
+    let latest: number | null = null;
+    let text: string | null = null;
+    for (const entry of this.rows("group_work_order_time_entries")) {
+      if (!live.has(String(entry.group_id))) continue;
+      if (entry.created_at == null || entry.created_at === "") continue;
+      const at = Date.parse(String(entry.created_at));
+      if (!Number.isFinite(at)) continue;
+      if (latest == null || at > latest) {
+        latest = at;
+        text = String(entry.created_at);
+      }
+    }
+    return text;
   }
 
   countingSignoff(jobId: string): boolean {
@@ -172,8 +257,9 @@ class Memory {
     })[0];
     if (!newest) return false;
     const method = String(newest.method || "");
-    if (method === "revoked") return false;
-    if (method === "office_waiver") return true;
+    if (method === "revoked" || method === "office_waiver") return false;
+    if (method !== "on_site" && method !== "share_link") return false;
+    if (!newest.signature_media_id) return false;
     if (newest.happy === false) return false;
     if (
       newest.satisfaction_rating != null &&
@@ -181,7 +267,12 @@ class Memory {
     ) {
       return false;
     }
-    return true;
+    const latest = this.latestHoursAt(jobId);
+    if (!latest) return true;
+    const signed = Date.parse(String(newest.created_at || ""));
+    const at = Date.parse(latest);
+    if (!Number.isFinite(signed) || !Number.isFinite(at)) return false;
+    return signed > at;
   }
 
   assignmentCovers(userId: string, jobId: string, workDate: string): boolean {
@@ -272,11 +363,17 @@ class Memory {
         (points.get(userId) || 0n) + entryPointsMicro(rate, worked),
       );
     }
-    const needsHours = this.rows("group_work_order_participants").filter((
+    const participantIds = this.rows("group_work_order_participants").filter((
       row,
-    ) => row.group_id === group.id).map((row) => String(row.user_id)).filter((
-      userId,
-    ) => (hours.get(userId) || 0) <= 0).sort();
+    ) => row.group_id === group.id).map((row) => String(row.user_id));
+    const assigneeIds = this.rows("job_assignments").filter((row) =>
+      String(row.job_id) === String(group.job_id) &&
+      row.is_ghost !== true &&
+      String(row.role || "").toLowerCase() !== "observer" &&
+      String(row.status || "").toLowerCase() !== "cancelled"
+    ).map((row) => String(row.user_id));
+    const needsHours = [...new Set([...participantIds, ...assigneeIds])]
+      .filter((userId) => (hours.get(userId) || 0) <= 0).sort();
     if (needsHours.length > 0) {
       throw new Error(`group_split_needs_hours: ${needsHours.join(",")}`);
     }
@@ -549,6 +646,7 @@ function seedSplit(memory: Memory, status = "client_signed") {
       happy: true,
       satisfaction_rating: 5,
       captured_by_actor: "client link",
+      signature_media_id: "media-1",
       created_at: "2026-10-21T01:00:00Z",
     });
   }
@@ -866,8 +964,9 @@ Deno.test("a freeze is an explicit snapshot, a held invoice is returned, and a p
   assertEquals(opened.split_frozen, false);
   assertEquals(memory.rows("group_work_orders")[0].split_frozen_at ?? null, null);
   assertEquals(memory.rows("group_work_order_shares").length, 0);
-  assertEquals(memory.rows("trade_invoices")[0].status, "ops-reject");
+  assertEquals(memory.rows("trade_invoices")[0].status, "pending_acknowledgment");
   assertEquals(memory.rows("trade_invoice_lines").length, 0);
+  assertEquals(opened.stripped_invoice_ids, [INV]);
 
   memory.rows("group_work_order_time_entries")[0].hours = 7.5;
   await freezeGroupWorkOrder(memory.client(), trade(USER_A, true), {
@@ -1119,6 +1218,378 @@ Deno.test("create_group_work_order is refused while the feature is off", async (
   );
 });
 
+Deno.test("normal pay is every trade time type, and the database list is that set", async () => {
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20261021141000_group_work_orders.sql",
+      import.meta.url,
+    ),
+  );
+  const start = sql.indexOf(
+    "CREATE OR REPLACE FUNCTION public.group_work_order_line_is_normal_pay",
+  );
+  const end = sql.indexOf(
+    "CREATE OR REPLACE FUNCTION public.group_work_orders_refuse_existing_pay",
+  );
+  const body = sql.slice(start, end);
+  const keyOf = (type: string) =>
+    type.toLowerCase().replace(/_/g, " ").replace(/\s+/g, "");
+  for (const type of TRADE_INVOICE_TIME_LINE_TYPES) {
+    const key = keyOf(type);
+    assert(body.includes(`'${key}'`), key);
+    assertEquals(
+      isNormalWorkOrderPayLine({ line_type: type, job_id: JOB }),
+      true,
+      type,
+    );
+    assertEquals(
+      isNormalWorkOrderPayLine({ line_type: type.toUpperCase(), job_id: JOB }),
+      true,
+      type,
+    );
+  }
+  for (const type of ["hours", "work order", "work_order", "make_safe"]) {
+    assertEquals(isNormalWorkOrderPayLine({ line_type: type }), true, type);
+    assert(body.includes(`'${keyOf(type)}'`), type);
+  }
+  assert(body.includes("'commission'"));
+  assertEquals(
+    isNormalWorkOrderPayLine({
+      line_type: "commission",
+      source_work_order_id: "crew-wo",
+    }),
+    false,
+  );
+  assertEquals(
+    isNormalWorkOrderPayLine({
+      line_type: "travel",
+      source_work_order_id: "crew-wo",
+    }),
+    false,
+  );
+  assertEquals(isNormalWorkOrderPayLine({ line_type: "group share" }), false);
+  assertEquals(
+    isNormalWorkOrderPayLine({
+      line_type: "mystery",
+      source_work_order_id: "crew-wo",
+    }),
+    true,
+  );
+  assertEquals(isNormalWorkOrderPayLine({ line_type: "mystery" }), false);
+  assertEquals(body.includes("feature_flags"), false);
+});
+
+Deno.test("opening a group on a job that already has normal pay is refused", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_orders").splice(0, memory.rows("group_work_orders").length);
+  memory.rows("trade_invoices").push({ id: INV, status: "draft", user_id: USER_B });
+  memory.rows("trade_invoice_lines").push({
+    job_id: JOB,
+    trade_invoice_id: INV,
+    line_type: "fencing",
+    group_share_id: null,
+    source_work_order_id: null,
+  });
+  const refused = await assertRejects(
+    () => createGroupWorkOrder(memory.client(), trade(USER_A, true), { job_id: JOB }),
+    GroupWorkOrderError,
+  );
+  assertEquals(refused.code, "group_open_blocked_by_work_order_claim");
+  assertEquals(refused.status, 409);
+  assert(refused.message.toLowerCase().includes("already has normal pay"));
+  assertEquals(memory.rows("group_work_orders").length, 0);
+
+  memory.rows("trade_invoices")[0].status = "ops-reject";
+  const opened = await createGroupWorkOrder(
+    memory.client(),
+    trade(USER_A, true),
+    { job_id: JOB },
+  );
+  assertEquals(opened.ok, true);
+  assertEquals(memory.rows("group_work_orders").length, 1);
+});
+
+Deno.test("a switch that is off never reads pay or group tables on create", async () => {
+  const memory = new Memory();
+  memory.rows("jobs").push({
+    id: JOB,
+    org_id: ORG,
+    job_number: "SWF-1",
+    work_order_id: WO,
+    status: "scheduled",
+  });
+  memory.rows("trade_invoices").push({ id: INV, status: "draft" });
+  memory.rows("trade_invoice_lines").push({
+    job_id: JOB,
+    trade_invoice_id: INV,
+    line_type: "decking",
+  });
+  const refused = await assertRejects(
+    () => createGroupWorkOrder(memory.client(), trade(USER_A), { job_id: JOB }),
+    GroupWorkOrderError,
+  );
+  assertEquals(refused.code, "group_work_order_disabled");
+  assertEquals(
+    memory.calls.some((call) =>
+      call.table.startsWith("group_") || call.table === "trade_invoice_lines"
+    ),
+    false,
+  );
+});
+
+Deno.test("unfreeze strips only the share, and an acknowledged or Xero invoice stays", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  await freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  const shareA = String(
+    memory.rows("group_work_order_shares").find((row) => row.user_id === USER_A)?.id,
+  );
+  memory.rows("trade_invoices").push({
+    id: INV,
+    status: "draft",
+    user_id: USER_A,
+    gst_on: false,
+    xero_bill_id: "BILL-1",
+  });
+  memory.rows("trade_invoice_lines").push({
+    job_id: JOB,
+    group_share_id: shareA,
+    trade_invoice_id: INV,
+    line_type: "group share",
+    line_total_ex: 321.43,
+  });
+  const xero = await assertRejects(
+    () => unfreezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(xero.code, "group_split_has_live_invoice");
+  assert(memory.rows("group_work_orders")[0].split_frozen_at != null);
+
+  memory.rows("trade_invoices")[0].xero_bill_id = null;
+  memory.rows("trade_invoices")[0].status = "acknowledged";
+  const acknowledged = await assertRejects(
+    () => unfreezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(acknowledged.code, "group_split_has_live_invoice");
+
+  memory.rows("trade_invoices")[0].status = "queried";
+  memory.rows("trade_invoice_lines").push({
+    job_id: JOB,
+    group_share_id: null,
+    trade_invoice_id: INV,
+    line_type: "travel",
+    line_total_ex: 10,
+  });
+  const opened = await unfreezeGroupWorkOrder(
+    memory.client(),
+    trade(USER_A, true),
+    { group_id: GROUP },
+  );
+  assertEquals(opened.stripped_invoice_ids, [INV]);
+  assertEquals(memory.rows("group_work_orders")[0].split_frozen_at ?? null, null);
+  assertEquals(memory.rows("trade_invoices")[0].status, "queried");
+  assertEquals(memory.rows("trade_invoice_lines").length, 1);
+  assertEquals(memory.rows("trade_invoice_lines")[0].line_type, "travel");
+  assertEquals(memory.rows("trade_invoices")[0].subtotal_ex, 10);
+  assertEquals(memory.rows("trade_invoices")[0].super_amount, 1.2);
+  assertEquals(memory.rows("trade_invoices")[0].net_pay, 9.4);
+  assertEquals(memory.rows("trade_invoices")[0].gst, 0);
+  assertEquals(memory.rows("trade_invoices")[0].total_inc, 10);
+});
+
+Deno.test("a signature is a PNG or JPEG, and markup never becomes an image source", async () => {
+  const png = "data:image/png;base64,iVBORw0KGgo=";
+  const jpeg = "data:image/jpeg;base64,/9j/";
+  const svg = "data:image/svg+xml;base64,PHN2Zy8+";
+  const injected = 'data:image/png;base64,iVBORw0KGgo=" onerror="alert(1)';
+  assertEquals(signatureDataUrl(png), png);
+  assertEquals(signatureDataUrl(jpeg), jpeg);
+  assertEquals(signatureDataUrl(svg), null);
+  assertEquals(signatureDataUrl(injected), null);
+  assertEquals(signatureDataUrl("<svg onload=alert(1)>"), null);
+  const tag = signatureImageTag(png, 'A "name" <script>');
+  assert(tag.startsWith(`<img src="${png}"`));
+  assert(tag.includes('alt="A &quot;name&quot; &lt;script&gt;"'));
+  assertEquals(tag.includes("onerror"), false);
+  assertEquals(signatureImageTag(svg, "Client signature"), "");
+  assertEquals(signatureImageTag(injected, "Client signature"), "");
+  const https = signatureImageTag(
+    "https://example.test/sign.png?a=1&b=2",
+    "Client signature",
+  );
+  assert(https.includes("https://example.test/sign.png?a=1&amp;b=2"));
+  assertEquals(
+    signatureImageTag('https://example.test/x.png" onerror="alert(1)', "x"),
+    "",
+  );
+
+  const memory = new Memory();
+  seedSplit(memory, "open");
+  const refused = await assertRejects(
+    () =>
+      clientSignGroupWorkOrder(memory.client(), {
+        share_token: "tok-secret",
+        signer_name: "Alex Client",
+        signature_png: svg,
+      }),
+    GroupWorkOrderError,
+  );
+  assertEquals(refused.code, "group_signature_invalid");
+  assertEquals(memory.rows("job_client_signoffs").length, 0);
+  assertEquals(memory.rows("job_media").length, 0);
+});
+
+Deno.test("freeze names an installer who has not joined, and removal is only before freeze", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  memory.rows("job_assignments").push({
+    job_id: JOB,
+    user_id: USER_C,
+    scheduled_date: "2026-10-20",
+    status: "scheduled",
+    role: "lead_installer",
+  });
+  const named = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(named.code, "group_split_needs_hours");
+  assert(named.message.includes(USER_C));
+  assertEquals(named.message.includes(USER_A), false);
+
+  const crew = await assertRejects(
+    () =>
+      removeGroupWorkOrderParticipant(memory.client(), trade(USER_A), {
+        group_id: GROUP,
+        user_id: USER_B,
+      }),
+    GroupWorkOrderError,
+  );
+  assertEquals(crew.status, 403);
+
+  await removeGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+    user_id: USER_B,
+  });
+  const stillAssigned = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(stillAssigned.code, "group_split_needs_hours");
+  assert(stillAssigned.message.includes(USER_B));
+  assert(stillAssigned.message.includes(USER_C));
+
+  for (const row of memory.rows("job_assignments")) {
+    if (row.user_id === USER_B || row.user_id === USER_C) row.status = "cancelled";
+  }
+  const frozen = await freezeGroupWorkOrder(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(frozen.awaiting, "frozen");
+  const held = await assertRejects(
+    () =>
+      removeGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), {
+        group_id: GROUP,
+        user_id: USER_A,
+      }),
+    GroupWorkOrderError,
+  );
+  assertEquals(held.code, "group_split_frozen");
+  assertEquals(
+    memory.rows("group_work_order_events").some((row) =>
+      row.action === "remove_participant" && row.user_id === USER_B
+    ),
+    true,
+  );
+  assert(
+    memory.rows("group_work_order_participants").some((row) => row.user_id === USER_A),
+  );
+});
+
+Deno.test("a group sign-off is a drawn signature after the latest hours, never a waiver", async () => {
+  const memory = new Memory();
+  seedSplit(memory, "open");
+  memory.rows("group_work_order_time_entries").push(
+    {
+      group_id: GROUP,
+      user_id: USER_A,
+      work_date: "2026-10-20",
+      hours: 2,
+      created_at: "2026-10-22T00:00:00Z",
+    },
+    {
+      group_id: GROUP,
+      user_id: USER_B,
+      work_date: "2026-10-20",
+      hours: 2,
+      created_at: "2026-10-22T00:00:00Z",
+    },
+  );
+  memory.rows("job_client_signoffs").push({
+    id: "early",
+    job_id: JOB,
+    method: "on_site",
+    signature_media_id: "media-early",
+    happy: true,
+    created_at: "2026-10-21T00:00:00Z",
+  });
+  const early = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(early.code, "group_client_signoff_required");
+
+  memory.rows("job_client_signoffs").push({
+    id: "waiver",
+    job_id: JOB,
+    method: "office_waiver",
+    signature_media_id: "media-waiver",
+    happy: true,
+    created_at: "2026-10-23T00:00:00Z",
+  });
+  const waiver = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(waiver.code, "group_client_signoff_required");
+
+  memory.rows("job_client_signoffs").push({
+    id: "revoked",
+    job_id: JOB,
+    method: "revoked",
+    created_at: "2026-10-24T00:00:00Z",
+  });
+  const revoked = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(revoked.code, "group_client_signoff_required");
+
+  memory.rows("job_client_signoffs").push({
+    id: "drawn",
+    job_id: JOB,
+    method: "share_link",
+    signature_media_id: "media-drawn",
+    happy: true,
+    satisfaction_rating: 5,
+    created_at: "2026-10-25T00:00:00Z",
+  });
+  const frozen = await freezeGroupWorkOrder(memory.client(), trade(USER_A), {
+    group_id: GROUP,
+  });
+  assertEquals(frozen.awaiting, "frozen");
+});
+
 Deno.test("ops-api wires the share, the fence, and the trade and public doors", async () => {
   const source = await Deno.readTextFile(
     new URL("./index.ts", import.meta.url),
@@ -1151,7 +1622,12 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   assertEquals(profile.includes("revoke_group_signoff"), false);
   assertEquals(profile.includes("void_group_work_order"), false);
   assertEquals(profile.includes("rekey_group_work_order"), false);
+  assertEquals(profile.includes("remove_group_work_order_participant"), false);
   assertEquals(source.split("case 'unfreeze_group_work_order':").length - 1, 1);
+  assertEquals(
+    source.split("case 'remove_group_work_order_participant':").length - 1,
+    1,
+  );
   assertEquals(source.split("case 'revoke_group_signoff':").length - 1, 1);
   assertEquals(source.split("case 'void_group_work_order':").length - 1, 1);
   assertEquals(source.split("case 'rekey_group_work_order':").length - 1, 1);
@@ -1190,4 +1666,11 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   assertEquals(moduleSource.includes("send_review_request"), false);
   assertEquals(moduleSource.includes("complete_my_job"), false);
   assertEquals(moduleSource.includes("send_sms"), false);
+  assertEquals(source.includes('src="${report.signature_data}"'), false);
+  assert(source.includes("signatureImageTag(report.signature_data, 'Signature')"));
+  const pack = await Deno.readTextFile(
+    new URL("../completion-pack/index.ts", import.meta.url),
+  );
+  assertEquals(pack.includes('src="${signature.signature_data}"'), false);
+  assert(pack.includes("signatureImageTag(signature.signature_data, 'Client signature')"));
 });

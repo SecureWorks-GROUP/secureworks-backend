@@ -21,6 +21,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { completionPackReviewPdfLine, completionPackReviewVisitHtml } from './review_cta.ts'
+import { signatureImageTag } from '../_shared/signature_image.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -381,7 +382,10 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#293C46;backg
 </div>`
 
   // Client signature
-  if (signature && signature.signature_data) {
+  const signatureTag = signature
+    ? signatureImageTag(signature.signature_data, 'Client signature')
+    : ''
+  if (signatureTag) {
     const sigDate = signature.signed_at || job.completed_at
     const sigDateFormatted = sigDate
       ? new Date(sigDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Australia/Perth' })
@@ -390,7 +394,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#293C46;backg
 <div class="section">
   <div class="section-title">Client Acceptance</div>
   <div class="sig-block">
-    <img src="${signature.signature_data}" alt="Client signature">
+    ${signatureTag}`
     <div class="sig-details">
       ${signature.signature_name ? `<div class="sig-name">${esc(signature.signature_name)}</div>` : ''}
       <div>Accepted: ${sigDateFormatted}</div>

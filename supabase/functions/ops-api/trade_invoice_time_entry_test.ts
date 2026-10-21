@@ -458,6 +458,8 @@ Deno.test("time entry flag: only an explicit true is on; missing, unreadable and
 
 type Stub = {
   flagOn: boolean;
+  // group_work_order_v1. Missing is off, and it does not follow flagOn.
+  groupWorkOrderOn?: boolean;
   cards?: any[];
   jobs?: any[];
   // the signed-in user's role; "admin" reaches the staff actions
@@ -660,11 +662,16 @@ async function callTradeAction(
       }]));
     }
     if (table === "feature_flags") {
-      const wanted = url.searchParams.get("flag_name") ===
-        `eq.${TRADE_INVOICE_TIME_ENTRY_FLAG}`;
-      return Promise.resolve(
-        reply(wanted ? [{ enabled: stub.flagOn }] : []),
-      );
+      const name = url.searchParams.get("flag_name") || "";
+      if (name === `eq.${TRADE_INVOICE_TIME_ENTRY_FLAG}`) {
+        return Promise.resolve(reply([{ enabled: stub.flagOn }]));
+      }
+      if (name === "eq.group_work_order_v1") {
+        return Promise.resolve(
+          reply(stub.groupWorkOrderOn ? [{ enabled: true }] : []),
+        );
+      }
+      return Promise.resolve(reply([]));
     }
     if (table === "trade_rates") {
       return Promise.resolve(
@@ -2530,4 +2537,70 @@ Deno.test("log_my_job_hours: with no card scheduled that day the usual card is u
     [cardOf(unreadable, CARD_MON).hours_worked, cardOf(unreadable, CARD_TUE).hours_worked],
     [8, 8],
   );
+});
+
+handlerTest("save_trade_invoice_draft: a group share is 409 while the switch is off and never a 500", async () => {
+  const share = {
+    type: "group share",
+    description: "Group share",
+    quantity: 1,
+    rate: 100,
+    job_id: JOB_A,
+    group_id: "30000000-0000-4000-8000-000000000001",
+  };
+  const off = await callTradeAction("save_trade_invoice_draft", {
+    gst_on: false,
+    labour_lines: [],
+    extra_items: [share],
+  }, { flagOn: false });
+  assertEquals(off.status, 409, JSON.stringify(off.body));
+  assertEquals(off.body.code, "group_work_order_disabled");
+  assertEquals(String(off.body.error || "").toLowerCase().includes("feature off"), true);
+  assertEquals(off.lineRows, []);
+  assertEquals(off.writes.some((write) => write.startsWith("POST ")), false);
+  assertEquals(off.writes.some((write) => write.includes("group_")), false);
+
+  const labour = await callTradeAction("save_trade_invoice_draft", {
+    gst_on: false,
+    labour_lines: [{
+      job_id: JOB_A,
+      line_type: "labour",
+      group_share_id: "50000000-0000-4000-8000-00000000000a",
+      line_total_ex: 40,
+    }],
+    extra_items: [],
+  }, { flagOn: false });
+  assertEquals(labour.status, 409, JSON.stringify(labour.body));
+  assertEquals(labour.body.code, "group_work_order_disabled");
+  assertEquals(labour.lineRows, []);
+
+  const missing = await callTradeAction("save_trade_invoice_draft", {
+    gst_on: false,
+    labour_lines: [],
+    extra_items: [share],
+  }, { flagOn: false, groupWorkOrderOn: true });
+  assertEquals(missing.status, 404, JSON.stringify(missing.body));
+  assertEquals(missing.body.code, "group_work_order_not_found");
+  assertEquals(missing.lineRows, []);
+  assertEquals(missing.writes.some((write) => write.startsWith("POST trade_invoices")), false);
+});
+
+handlerTest("generate_trade_invoice: a group share while the switch is off is 409 group_work_order_disabled", async () => {
+  const out = await callTradeAction("generate_trade_invoice", {
+    gst_on: false,
+    extra_items: [{
+      type: "group share",
+      description: "Group share",
+      quantity: 1,
+      rate: 100,
+      job_id: JOB_A,
+      group_id: "30000000-0000-4000-8000-000000000001",
+    }],
+  }, { flagOn: false });
+  assertEquals(out.status, 409, JSON.stringify(out.body));
+  assertEquals(out.body.code, "group_work_order_disabled");
+  assertEquals(String(out.body.error || "").toLowerCase().includes("feature off"), true);
+  assertEquals(out.lineRows, []);
+  assertEquals(out.writes.some((write) => write.startsWith("POST ")), false);
+  assertEquals(out.writes.some((write) => write.includes("group_")), false);
 });

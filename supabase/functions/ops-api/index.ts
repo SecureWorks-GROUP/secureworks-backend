@@ -705,6 +705,7 @@ import {
   readGroupWorkOrderOffice,
   readGroupWorkOrderPublic,
   rekeyGroupWorkOrder,
+  removeGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   revokeGroupSignoff,
   signGroupWorkOrderCrew,
@@ -714,6 +715,7 @@ import {
   voidGroupWorkOrder,
   type GroupCaller,
 } from './group_work_order.ts'
+import { signatureImageTag } from '../_shared/signature_image.ts'
 import {
   approveCustomerVariation,
   cancelCustomerVariation,
@@ -11070,7 +11072,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'unfreeze_group_work_order':
       case 'revoke_group_signoff':
       case 'void_group_work_order':
-      case 'rekey_group_work_order': {
+      case 'rekey_group_work_order':
+      case 'remove_group_work_order_participant': {
         const officeCaller: GroupCaller = {
           userId: authUser?.id || '',
           orgId: authUser?.orgId || null,
@@ -11093,6 +11096,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             ? voidGroupWorkOrder(client, officeCaller, officeBody)
             : action === 'rekey_group_work_order'
             ? rekeyGroupWorkOrder(client, officeCaller, officeBody)
+            : action === 'remove_group_work_order_participant'
+            ? removeGroupWorkOrderParticipant(client, officeCaller, officeBody)
             : readGroupWorkOrderOffice(client, officeCaller, officeBody),
         )
       }
@@ -11975,10 +11980,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               )
               : null
 
-            let labourTotal = 0
             const labourLines = weeklyInvoice ? [] : (Array.isArray(draftLabour) ? draftLabour : [])
-            for (const l of labourLines) labourTotal += roundMoney(Number(l.line_total_ex || 0))
-            let extraTotal = 0
             const extras = !weeklyInvoice && Array.isArray(draftExtras)
               ? draftExtras.filter((e: any) => {
                 if (e?.source === 'clock' || e?._source === 'clock' || e?.source === 'server_labour') return false
@@ -11986,15 +11988,48 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return true
               })
               : []
+            const draftShareShaped = (item: any) =>
+              isGroupShareInvoiceItem(item) || Boolean(item?.group_share_id)
+            const plainLabour = labourLines.filter((line: any) => !draftShareShaped(line))
+            const plainExtras = extras.filter((extra: any) => !draftShareShaped(extra))
+            const shareSources = [
+              ...labourLines.filter((line: any) => draftShareShaped(line)),
+              ...extras.filter((extra: any) => draftShareShaped(extra)),
+            ]
+            // Resolve before any invoice write. A share while the switch is
+            // off is 409. A share the server cannot price is 4xx, never a
+            // raw line the database trigger would turn into a 500.
+            const resolvedShares: Record<string, unknown>[] = []
+            for (const item of shareSources) {
+              try {
+                const shareLine = await resolveGroupShareInvoiceExtra(client, {
+                  userId: tradeUser.id,
+                  item,
+                })
+                if (!shareLine) {
+                  throw new ApiError('A group share has to be submitted as its own line.', 422)
+                }
+                resolvedShares.push(shareLine)
+              } catch (error) {
+                if (error instanceof ApiError) throw error
+                groupWorkOrderApiError(error)
+              }
+            }
+            let labourTotal = 0
+            for (const l of plainLabour) labourTotal += roundMoney(Number(l.line_total_ex || 0))
+            let extraTotal = 0
             const draftAssignmentIds = [...new Set(
-              labourLines.flatMap((line: any) =>
+              plainLabour.flatMap((line: any) =>
                 Array.isArray(line?.assignment_ids) ? line.assignment_ids : []
               ).filter(Boolean),
             )]
-            for (const e of extras) {
+            for (const e of plainExtras) {
               extraTotal += roundMoney(
                 roundMoney(Number(e.quantity || 1)) * roundMoney(Number(e.rate || 0)),
               )
+            }
+            for (const share of resolvedShares) {
+              extraTotal += roundMoney(Number(share.line_total_ex || 0))
             }
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
             // Recurring deduction: a dated draft shows what the submitted
@@ -12028,7 +12063,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // complete entry sets the line's hours; submit is where a missing
             // or wrong entry is refused.
             const hourlyDraftLineRows: Array<Record<string, unknown>> = [
-              ...labourLines.map((line: any) => {
+              ...plainLabour.map((line: any) => {
                 const draftTime = draftTradeInvoiceTimeEntry(line)
                 return {
                 job_id: line.job_id || null,
@@ -12060,7 +12095,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ...draftTime.columns,
                 }
               }),
-              ...extras.map((extra: any) => {
+              ...plainExtras.map((extra: any) => {
                 const quantity = roundMoney(Number(extra.quantity || 1))
                 const unitRate = roundMoney(Number(extra.rate || 0))
                 return {
@@ -12076,6 +12111,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     : tradeInvoiceTimeEntryColumns(null)),
                 }
               }),
+              ...resolvedShares.map((share) => ({
+                job_id: share.job_id || null,
+                job_number: share.job_number || null,
+                client_name: share.client_name || null,
+                site_address: share.site_address || null,
+                total_hours: 0,
+                hourly_rate: null,
+                line_total_ex: roundMoney(Number(share.line_total_ex || 0)),
+                line_type: 'group share',
+                description: share.description || 'Group work order share',
+                quantity: 1,
+                unit: 'ea',
+                unit_rate: share.unit_rate ?? null,
+                query_note: share.query_note || null,
+                division: share.division || null,
+                group_share_id: share.group_share_id || null,
+                source_work_order_id: null,
+                ...tradeInvoiceTimeEntryColumns(null),
+              })),
             ]
             const hourlyDraftPayload = {
               org_id: tradeUser.orgId,
@@ -45107,9 +45161,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;c
   }
 
   // Signature
-  if (report.signature_data) {
+  const signatureTag = signatureImageTag(report.signature_data, 'Signature')
+  if (signatureTag) {
     html += `<div class="section"><h3>Homeowner Sign-Off</h3>
-<div class="sig-block"><img src="${report.signature_data}" alt="Signature">`
+<div class="sig-block">${signatureTag}`
     if (report.signature_name) html += `<div class="sig-name">${esc(report.signature_name)}</div>`
     html += `</div></div>`
   }

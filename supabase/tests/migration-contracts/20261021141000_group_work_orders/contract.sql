@@ -502,12 +502,18 @@ BEGIN
   RESET ROLE;
   IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NOT NULL
      OR (SELECT count(*) FROM public.group_work_order_shares WHERE group_id = v_freeze) <> 0
-     OR (SELECT status FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 'ops-reject'
+     OR (SELECT status FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 'draft'
+     OR (SELECT subtotal_ex FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 0
+     OR (SELECT gross_earned FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 0
+     OR (SELECT super_amount FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 0
+     OR (SELECT net_pay FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 0
+     OR (SELECT gst FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 0
+     OR (SELECT total_inc FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 0
      OR EXISTS (
        SELECT 1 FROM public.trade_invoice_lines WHERE trade_invoice_id = v_draft
      )
   THEN
-    RAISE EXCEPTION 'group-wo: unfreeze did not return the draft and clear the snapshot';
+    RAISE EXCEPTION 'group-wo: unfreeze did not strip the share and recalculate the draft';
   END IF;
 
   UPDATE public.group_work_order_time_entries
@@ -618,6 +624,470 @@ BEGIN
      OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_group) IS NOT NULL
   THEN
     RAISE EXCEPTION 'group-wo: a missing rate wrote a share';
+  END IF;
+END $$;
+
+-- Every pay type is refused on an open group while the switch is off, and a
+-- share is refused when normal pay is already on the job. Commission and
+-- travel are not pay. SVG is not a signature.
+DO $$
+DECLARE
+  v_org uuid := '00000000-0000-0000-0000-000000000001';
+  v_shaun uuid := '9913309f-35ae-4a71-8e1f-f704ecc526ea';
+  v_a uuid := 'a2140000-0000-4000-8000-00000000000a';
+  v_b uuid := 'a2140000-0000-4000-8000-00000000000b';
+  v_extra uuid := 'd2140000-0000-4000-8000-00000000000d';
+  v_job uuid := 'd2140000-0000-4000-8000-000000000111';
+  v_group uuid := 'd2140000-0000-4000-8000-000000000211';
+  v_invoice uuid := 'd2140000-0000-4000-8000-000000000401';
+  v_pay_job uuid := 'd2140000-0000-4000-8000-000000000112';
+  v_pay_group uuid := 'd2140000-0000-4000-8000-000000000212';
+  v_pay_invoice uuid := 'd2140000-0000-4000-8000-000000000402';
+  v_open_job uuid := 'd2140000-0000-4000-8000-000000000113';
+  v_open_invoice uuid := 'd2140000-0000-4000-8000-000000000403';
+  v_hours_job uuid := 'd2140000-0000-4000-8000-000000000114';
+  v_hours_group uuid := 'd2140000-0000-4000-8000-000000000214';
+  v_sign_job uuid := 'd2140000-0000-4000-8000-000000000115';
+  v_sign_group uuid := 'd2140000-0000-4000-8000-000000000215';
+  v_strip_job uuid := 'd2140000-0000-4000-8000-000000000116';
+  v_strip_group uuid := 'd2140000-0000-4000-8000-000000000216';
+  v_strip_invoice uuid := 'd2140000-0000-4000-8000-000000000404';
+  v_void_job uuid := 'd2140000-0000-4000-8000-000000000117';
+  v_void_group uuid := 'd2140000-0000-4000-8000-000000000217';
+  v_wo uuid;
+  v_type text;
+  v_share numeric;
+  v_types text[] := ARRAY[
+    'labour', 'fencing', 'patio', 'make safe', 'MakeSafe',
+    'general labour', 'decking', 'hours', 'work order', 'work_order'
+  ];
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.feature_flags
+    WHERE flag_name = 'group_work_order_v1' AND enabled
+  ) THEN
+    RAISE EXCEPTION 'group-wo: the switch must stay off while the backstop runs';
+  END IF;
+
+  INSERT INTO public.users (id, org_id, name, role)
+  VALUES (v_extra, v_org, 'Extra Installer', 'crew')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_job, v_org, 'fencing', 'quoted', 'GWO-PAY');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_job, 'GWO-PAY-1', 'job', 'draft', 100, '[]', 'pay types'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-PAY-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_group, v_org, v_job, v_wo, 'token-pay-types');
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_invoice, v_org, v_a, 'draft', 0, 0, 0, false, 0.12, 0, 0, 0
+  );
+  FOREACH v_type IN ARRAY v_types LOOP
+    BEGIN
+      INSERT INTO public.trade_invoice_lines (
+        trade_invoice_id, job_id, line_type, line_total_ex
+      ) VALUES (v_invoice, v_job, v_type, 10);
+      RAISE EXCEPTION 'group-wo: % was stored beside an open group', v_type;
+    EXCEPTION WHEN check_violation THEN
+      IF SQLERRM IS DISTINCT FROM 'work_order_claim_blocked_by_group_share' THEN
+        RAISE EXCEPTION 'group-wo: % said %', v_type, SQLERRM;
+      END IF;
+    END;
+  END LOOP;
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES
+    (v_invoice, v_job, 'commission', 10),
+    (v_invoice, v_job, 'travel', 10);
+  IF (SELECT count(*) FROM public.trade_invoice_lines WHERE trade_invoice_id = v_invoice) <> 2 THEN
+    RAISE EXCEPTION 'group-wo: commission or travel was refused';
+  END IF;
+
+  BEGIN
+    INSERT INTO public.group_work_order_signatures (
+      group_id, signer_kind, user_id, signer_name, signature_png, signed_via
+    ) VALUES (
+      v_group, 'crew', v_a, 'Crew A',
+      'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+      'on_site'
+    );
+    RAISE EXCEPTION 'group-wo: an SVG signature was stored';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+  BEGIN
+    INSERT INTO public.group_work_order_signatures (
+      group_id, signer_kind, user_id, signer_name, signature_png, signed_via
+    ) VALUES (
+      v_group, 'crew', v_a, 'Crew A',
+      'data:image/png;base64,aaaa" onerror="alert(1)',
+      'on_site'
+    );
+    RAISE EXCEPTION 'group-wo: an injected signature was stored';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+  INSERT INTO public.group_work_order_signatures (
+    group_id, signer_kind, user_id, signer_name, signature_png, signed_via
+  ) VALUES (
+    v_group, 'crew', v_a, 'Crew A', 'data:image/png;base64,iVBORw0KGgo=', 'on_site'
+  );
+
+  -- Normal pay on ops-reject does not block opening a group. Moving that
+  -- invoice back to draft, without touching the line, blocks the share.
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_pay_job, v_org, 'fencing', 'quoted', 'GWO-PAY2');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_pay_job, 'GWO-PAY-2', 'job', 'draft', 100, '[]', 'pay then share'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-PAY-2';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_pay_invoice, v_org, v_a, 'ops-reject', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_pay_invoice, v_pay_job, 'fencing', 10);
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_pay_group, v_org, v_pay_job, v_wo, 'token-pay-then-share');
+  UPDATE public.trade_invoices SET status = 'draft' WHERE id = v_pay_invoice;
+  BEGIN
+    INSERT INTO public.trade_invoice_lines (
+      trade_invoice_id, job_id, line_type, line_total_ex
+    ) VALUES (v_pay_invoice, v_pay_job, 'group share', 10);
+    RAISE EXCEPTION 'group-wo: a share was stored over existing pay';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_share_blocked_by_work_order_claim' THEN
+      RAISE EXCEPTION 'group-wo: share over pay said %', SQLERRM;
+    END IF;
+  END;
+
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_open_job, v_org, 'fencing', 'quoted', 'GWO-OPEN');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_open_job, 'GWO-OPEN-1', 'job', 'draft', 100, '[]', 'open blocked'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-OPEN-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_open_invoice, v_org, v_a, 'draft', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_open_invoice, v_open_job, 'decking', 10);
+  BEGIN
+    INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
+    VALUES (v_org, v_open_job, v_wo, 'token-open-blocked');
+    RAISE EXCEPTION 'group-wo: a group opened over normal pay';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_open_blocked_by_work_order_claim' THEN
+      RAISE EXCEPTION 'group-wo: open over pay said %', SQLERRM;
+    END IF;
+  END;
+
+  -- Freeze names an installer who is assigned and has not joined.
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_hours_job, v_org, 'fencing', 'quoted', 'GWO-HOURS');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_hours_job, 'GWO-HOURS-1', 'job', 'draft', 482.15, '[]', 'assigned hours'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-HOURS-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  -- v_a and v_b already have a rate from the pot fixture (unique on org, user, effective_from).
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_hours_group, v_org, v_hours_job, v_wo, 'token-hours');
+  INSERT INTO public.group_work_order_participants (group_id, user_id) VALUES
+    (v_hours_group, v_a), (v_hours_group, v_b);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+    ('d2140000-0000-4000-8000-0000000000a5', v_hours_job, v_a, '2026-10-21', 'scheduled'),
+    ('d2140000-0000-4000-8000-0000000000b5', v_hours_job, v_b, '2026-10-21', 'scheduled'),
+    ('d2140000-0000-4000-8000-0000000000d5', v_hours_job, v_extra, '2026-10-21', 'scheduled');
+  INSERT INTO public.group_work_order_time_entries
+    (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
+  VALUES
+    (v_hours_group, v_a, '2026-10-21', '08:00', '10:00', 0, 2.00),
+    (v_hours_group, v_b, '2026-10-21', '08:00', '10:00', 0, 2.00);
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (
+    'd2140000-0000-4000-8000-000000000501', v_hours_job, 'signature', 'photo',
+    'data:image/png;base64,iVBORw0KGgo='
+  );
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor
+  ) VALUES (
+    v_hours_job, 'share_link', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000501', 'client link'
+  );
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_hours_group);
+    RAISE EXCEPTION 'group-wo: freeze ignored an assigned installer';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE 'group_split_needs_hours:%'
+       OR position(v_extra::text IN SQLERRM) = 0
+       OR position(v_a::text IN SQLERRM) > 0
+    THEN
+      RAISE EXCEPTION 'group-wo: assigned-hours freeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  UPDATE public.job_assignments SET status = 'cancelled'
+  WHERE id = 'd2140000-0000-4000-8000-0000000000d5';
+  SET LOCAL ROLE service_role;
+  PERFORM public.remove_group_work_order_participant(v_hours_group, v_b, v_shaun);
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_hours_group);
+    RAISE EXCEPTION 'group-wo: freeze ignored a removed participant who is still assigned';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE 'group_split_needs_hours:%'
+       OR position(v_b::text IN SQLERRM) = 0
+    THEN
+      RAISE EXCEPTION 'group-wo: removed-participant freeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  UPDATE public.job_assignments SET status = 'cancelled'
+  WHERE id = 'd2140000-0000-4000-8000-0000000000b5';
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_hours_group);
+  BEGIN
+    PERFORM public.remove_group_work_order_participant(v_hours_group, v_a, v_shaun);
+    RAISE EXCEPTION 'group-wo: a participant was removed after freeze';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_frozen' THEN
+      RAISE EXCEPTION 'group-wo: remove after freeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.group_work_order_events
+    WHERE group_id = v_hours_group AND action = 'remove_participant'
+  ) THEN
+    RAISE EXCEPTION 'group-wo: removing a participant was not audited';
+  END IF;
+
+  -- A drawn sign-off dated before the hours does not count, and neither
+  -- does an office waiver or a revocation.
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_sign_job, v_org, 'fencing', 'quoted', 'GWO-SIGN');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_sign_job, 'GWO-SIGN-1', 'job', 'draft', 482.15, '[]', 'signoff date'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-SIGN-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_sign_group, v_org, v_sign_job, v_wo, 'token-sign');
+  INSERT INTO public.group_work_order_participants (group_id, user_id)
+  VALUES (v_sign_group, v_a);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status)
+  VALUES ('d2140000-0000-4000-8000-0000000000a6', v_sign_job, v_a, '2026-10-21', 'scheduled');
+  INSERT INTO public.group_work_order_time_entries (
+    group_id, user_id, work_date, start_time, finish_time, break_minutes, hours, created_at
+  ) VALUES (
+    v_sign_group, v_a, '2026-10-21', '08:00', '10:00', 0, 2.00, '2026-10-22 00:00:00+00'
+  );
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (
+    'd2140000-0000-4000-8000-000000000502', v_sign_job, 'signature', 'photo',
+    'data:image/png;base64,iVBORw0KGgo='
+  );
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor, created_at
+  ) VALUES (
+    v_sign_job, 'on_site', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000502', 'user:' || v_a::text,
+    '2026-10-21 00:00:00+00'
+  );
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_sign_group);
+    RAISE EXCEPTION 'group-wo: a sign-off dated before the hours froze the split';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
+      RAISE EXCEPTION 'group-wo: early sign-off said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, waiver_reason, captured_by_actor, created_at
+  ) VALUES (
+    v_sign_job, 'office_waiver', 'office waived', 'user:' || v_shaun::text,
+    '2026-10-23 00:00:00+00'
+  );
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_sign_group);
+    RAISE EXCEPTION 'group-wo: an office waiver froze a group';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
+      RAISE EXCEPTION 'group-wo: waiver freeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, captured_by, captured_by_actor, created_at
+  ) VALUES (
+    v_sign_job, 'revoked', v_shaun, 'user:' || v_shaun::text,
+    '2026-10-24 00:00:00+00'
+  );
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_sign_group);
+    RAISE EXCEPTION 'group-wo: a revoked sign-off froze a group';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
+      RAISE EXCEPTION 'group-wo: revoked freeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+
+  -- Unfreeze strips only the share. Acknowledged, and any Xero id, refuse.
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_strip_job, v_org, 'fencing', 'quoted', 'GWO-STRIP');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_strip_job, 'GWO-STRIP-1', 'job', 'draft', 482.15, '[]', 'strip share'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-STRIP-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_strip_group, v_org, v_strip_job, v_wo, 'token-strip');
+  INSERT INTO public.group_work_order_participants (group_id, user_id)
+  VALUES (v_strip_group, v_a), (v_strip_group, v_b);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+    ('d2140000-0000-4000-8000-0000000000a7', v_strip_job, v_a, '2026-10-21', 'scheduled'),
+    ('d2140000-0000-4000-8000-0000000000b7', v_strip_job, v_b, '2026-10-21', 'scheduled');
+  INSERT INTO public.group_work_order_time_entries
+    (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
+  VALUES
+    (v_strip_group, v_a, '2026-10-21', '08:00', '10:00', 0, 2.00),
+    (v_strip_group, v_b, '2026-10-21', '08:00', '10:00', 0, 2.00);
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (
+    'd2140000-0000-4000-8000-000000000503', v_strip_job, 'signature', 'photo',
+    'data:image/png;base64,iVBORw0KGgo='
+  );
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor
+  ) VALUES (
+    v_strip_job, 'share_link', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000503', 'client link'
+  );
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_strip_group);
+  RESET ROLE;
+  SELECT share_ex INTO v_share FROM public.group_work_order_shares
+  WHERE group_id = v_strip_group AND user_id = v_a;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_strip_invoice, v_org, v_a, 'draft',
+    10, 0, 10, false, 0.12, 1.20, 10, 9.40
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_strip_invoice, v_strip_job, 'travel', 10);
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_strip_invoice, v_strip_job, 'group share', v_share);
+  UPDATE public.trade_invoices SET xero_bill_id = 'bill-strip' WHERE id = v_strip_invoice;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
+    RAISE EXCEPTION 'group-wo: unfreeze ran over a Xero id';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_has_live_invoice' THEN
+      RAISE EXCEPTION 'group-wo: xero unfreeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  UPDATE public.trade_invoices
+  SET xero_bill_id = NULL, status = 'acknowledged'
+  WHERE id = v_strip_invoice;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
+    RAISE EXCEPTION 'group-wo: unfreeze ran over an acknowledged invoice';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_has_live_invoice' THEN
+      RAISE EXCEPTION 'group-wo: acknowledged unfreeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_strip_group) IS NULL THEN
+    RAISE EXCEPTION 'group-wo: a refused unfreeze cleared the strip marker';
+  END IF;
+  UPDATE public.trade_invoices SET status = 'queried' WHERE id = v_strip_invoice;
+  SET LOCAL ROLE service_role;
+  PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
+  RESET ROLE;
+  IF (SELECT status FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 'queried'
+     OR (SELECT count(*) FROM public.trade_invoice_lines
+         WHERE trade_invoice_id = v_strip_invoice AND line_type = 'group share') <> 0
+     OR (SELECT count(*) FROM public.trade_invoice_lines
+         WHERE trade_invoice_id = v_strip_invoice AND line_type = 'travel') <> 1
+     OR (SELECT subtotal_ex FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 10
+     OR (SELECT super_amount FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 1.20
+     OR (SELECT net_pay FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 9.40
+     OR (SELECT total_inc FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 10
+     OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_strip_group) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: unfreeze did not leave the travel line and the queried status';
+  END IF;
+
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_void_job, v_org, 'fencing', 'quoted', 'GWO-VOID');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_void_job, 'GWO-VOID-1', 'job', 'draft', 100, '[]', 'void stays'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-VOID-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_void_group, v_org, v_void_job, v_wo, 'token-void');
+  SET LOCAL ROLE service_role;
+  PERFORM public.void_group_work_order(v_void_group, v_shaun, 'permanent');
+  RESET ROLE;
+  BEGIN
+    UPDATE public.group_work_orders SET status = 'open' WHERE id = v_void_group;
+    RAISE EXCEPTION 'group-wo: a void group was reopened';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_work_order_void' THEN
+      RAISE EXCEPTION 'group-wo: unvoid said %', SQLERRM;
+    END IF;
+  END;
+  UPDATE public.group_work_orders SET void_reason = 'still void' WHERE id = v_void_group;
+  IF (SELECT status FROM public.group_work_orders WHERE id = v_void_group) IS DISTINCT FROM 'void'
+     OR (SELECT void_reason FROM public.group_work_orders WHERE id = v_void_group) IS DISTINCT FROM 'still void'
+  THEN
+    RAISE EXCEPTION 'group-wo: void did not stay permanent';
   END IF;
 END $$;
 

@@ -28,12 +28,16 @@ b_pid=
 c_pid=
 d_pid=
 e_pid=
+p_pid=
+g_pid=
 cleanup() {
   if [ -n "${a_pid}" ]; then kill "$a_pid" 2>/dev/null || true; fi
   if [ -n "${b_pid}" ]; then kill "$b_pid" 2>/dev/null || true; fi
   if [ -n "${c_pid}" ]; then kill "$c_pid" 2>/dev/null || true; fi
   if [ -n "${d_pid}" ]; then kill "$d_pid" 2>/dev/null || true; fi
   if [ -n "${e_pid}" ]; then kill "$e_pid" 2>/dev/null || true; fi
+  if [ -n "${p_pid}" ]; then kill "$p_pid" 2>/dev/null || true; fi
+  if [ -n "${g_pid}" ]; then kill "$g_pid" 2>/dev/null || true; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -68,6 +72,11 @@ INSERT INTO public.group_work_order_participants (group_id, user_id) VALUES
 INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
   ('c2140000-0000-4000-8000-0000000000a2', '${JOB}', '${CREW_A}', '2026-10-21', 'scheduled'),
   ('c2140000-0000-4000-8000-0000000000b2', '${JOB}', '${CREW_B}', '2026-10-21', 'scheduled');
+INSERT INTO public.group_work_order_time_entries
+  (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
+VALUES
+  ('${GROUP}', '${CREW_A}', '2026-10-21', '08:00', '10:00', 0, 2.00),
+  ('${GROUP}', '${CREW_B}', '2026-10-21', '08:00', '10:00', 0, 2.00);
 INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
 VALUES (
   'c2140000-0000-4000-8000-000000000501', '${JOB}', 'signature', 'photo',
@@ -80,11 +89,6 @@ INSERT INTO public.job_client_signoffs (
   '${JOB}', 'share_link', 'Alex Client', true, 5,
   'c2140000-0000-4000-8000-000000000501', 'client link'
 );
-INSERT INTO public.group_work_order_time_entries
-  (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
-VALUES
-  ('${GROUP}', '${CREW_A}', '2026-10-21', '08:00', '10:00', 0, 2.00),
-  ('${GROUP}', '${CREW_B}', '2026-10-21', '08:00', '10:00', 0, 2.00);
 SQL
 
 # Line-buffered so the freeze result is visible while the row lock is held.
@@ -289,6 +293,93 @@ BEGIN
   WHERE s.group_id = '${GROUP}' AND s.user_id = '${CREW_A}';
   IF n IS DISTINCT FROM 1 THEN
     RAISE EXCEPTION 'group-wo race: % live lines stored one share', n;
+  END IF;
+END \$\$;
+SQL
+
+# A normal pay line and opening a group on the same job, at the same time,
+# with the switch off. Exactly one wins.
+PAY_JOB=e2140000-0000-4000-8000-000000000111
+PAY_INV=e2140000-0000-4000-8000-000000000401
+PAY_GROUP=e2140000-0000-4000-8000-000000000211
+psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO public.jobs (id, org_id, type, status, job_number)
+VALUES ('${PAY_JOB}', '${ORG}', 'fencing', 'quoted', 'GWO-PAYRACE');
+INSERT INTO public.work_orders (
+  org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+) VALUES (
+  '${ORG}', '${PAY_JOB}', 'GWO-PAYRACE-1', 'job', 'draft', 100, '[]', 'pay race'
+);
+UPDATE public.work_orders
+SET status = 'approved', approved_by = '${SHAUN}'
+WHERE wo_number = 'GWO-PAYRACE-1';
+INSERT INTO public.trade_invoices (
+  id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+  gst_on, super_rate, super_amount, gross_earned, net_pay
+) VALUES (
+  '${PAY_INV}', '${ORG}', '${CREW_A}', 'draft',
+  0, 0, 0, false, 0.12, 0, 0, 0
+);
+SQL
+stdbuf -oL -eL psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  >"$tmp/p.out" 2>"$tmp/p.err" <<SQL &
+INSERT INTO public.trade_invoice_lines (
+  trade_invoice_id, job_id, line_type, line_total_ex
+) VALUES (
+  '${PAY_INV}', '${PAY_JOB}', 'fencing', 10
+);
+SQL
+p_pid=$!
+stdbuf -oL -eL psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  >"$tmp/g.out" 2>"$tmp/g.err" <<SQL &
+INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+SELECT '${PAY_GROUP}', '${ORG}', '${PAY_JOB}', wo.id, 'token-pay-race'
+FROM public.work_orders wo
+WHERE wo.wo_number = 'GWO-PAYRACE-1';
+SQL
+g_pid=$!
+set +e
+wait "$p_pid"
+p_status=$?
+wait "$g_pid"
+g_status=$?
+set -e
+p_pid=
+g_pid=
+if [ "$p_status" -eq 0 ] && [ "$g_status" -eq 0 ]; then
+  echo 'pay and a group were both stored' >&2
+  cat "$tmp/p.out" "$tmp/p.err" "$tmp/g.out" "$tmp/g.err" >&2
+  exit 1
+fi
+if [ "$p_status" -ne 0 ] && [ "$g_status" -ne 0 ]; then
+  echo 'neither pay nor the group was stored' >&2
+  cat "$tmp/p.out" "$tmp/p.err" "$tmp/g.out" "$tmp/g.err" >&2
+  exit 1
+fi
+if ! grep -q -E 'work_order_claim_blocked_by_group_share|group_open_blocked_by_work_order_claim' \
+  "$tmp/p.err" "$tmp/g.err"; then
+  echo 'the losing pay-or-group session failed for a different reason' >&2
+  cat "$tmp/p.out" "$tmp/p.err" "$tmp/g.out" "$tmp/g.err" >&2
+  exit 1
+fi
+psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 <<SQL
+DO \$\$
+DECLARE
+  v_lines int;
+  v_groups int;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.feature_flags
+    WHERE flag_name = 'group_work_order_v1' AND enabled
+  ) THEN
+    RAISE EXCEPTION 'group-wo race: the switch must stay off';
+  END IF;
+  SELECT count(*) INTO v_lines FROM public.trade_invoice_lines
+  WHERE job_id = '${PAY_JOB}' AND lower(line_type) = 'fencing';
+  SELECT count(*) INTO v_groups FROM public.group_work_orders
+  WHERE job_id = '${PAY_JOB}' AND status <> 'void';
+  IF v_lines + v_groups IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'group-wo race: lines % groups %', v_lines, v_groups;
   END IF;
 END \$\$;
 SQL

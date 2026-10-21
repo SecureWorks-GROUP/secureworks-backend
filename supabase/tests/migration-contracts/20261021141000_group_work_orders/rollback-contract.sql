@@ -25,14 +25,30 @@ BEGIN
      OR to_regprocedure('public.group_work_order_time_entries_guard()') IS NOT NULL
      OR to_regprocedure('public.group_work_order_refuse_late_joiner()') IS NOT NULL
      OR to_regprocedure('public.group_work_order_shares_frozen_guard()') IS NOT NULL
-     OR to_regprocedure('public.trade_invoice_lines_group_share_snapshot()') IS NOT NULL THEN
+     OR to_regprocedure('public.trade_invoice_lines_group_share_snapshot()') IS NOT NULL
+     OR to_regprocedure('public.group_work_order_line_is_normal_pay(text, uuid)') IS NOT NULL
+     OR to_regprocedure('public.group_work_order_lock_job(uuid)') IS NOT NULL
+     OR to_regprocedure('public.remove_group_work_order_participant(uuid, uuid, uuid)') IS NOT NULL
+     OR to_regprocedure('public.group_work_orders_refuse_existing_pay()') IS NOT NULL
+     OR to_regprocedure('public.group_work_orders_void_permanent()') IS NOT NULL
+     OR to_regprocedure('public.group_work_order_signature_ok(text)') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback: group work order tables and functions must be removed';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_trigger
-    WHERE tgname = 'trg_trade_invoice_lines_group_share_snapshot'
+    WHERE tgname IN (
+      'trg_trade_invoice_lines_group_share_snapshot',
+      'trg_group_work_orders_refuse_existing_pay',
+      'trg_group_work_orders_void_permanent'
+    )
   ) THEN
     RAISE EXCEPTION 'rollback: the share snapshot trigger must be removed';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.job_client_signoffs
+    WHERE method IN ('share_link', 'revoked')
+  ) THEN
+    RAISE EXCEPTION 'rollback: share_link and revoked sign-offs must be removed before the old check';
   END IF;
   IF EXISTS (
     SELECT 1 FROM information_schema.columns

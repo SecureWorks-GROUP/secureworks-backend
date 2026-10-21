@@ -18,8 +18,9 @@
 // as the line, so a failed insert rolls the marker back.
 // group_work_order_write_split is the only writer and must match
 // allocatePotCents and entryPointsMicro. A person who joins after the
-// marker is refused. The office unfreeze ops-rejects a draft or held share
-// invoice and does not recompute. approved, pushed_to_xero and paid block.
+// marker is refused. The office unfreeze removes only the share line and
+// recalculates that invoice, and only before acknowledgement. An
+// acknowledged invoice, or any Xero id or push stamp, blocks.
 //
 // DEFAULT, owner to confirm: break minutes come off finish minus start,
 // the same formula as trade invoice time entries. This module does not
@@ -28,6 +29,7 @@
 // Nothing here sends a text, an email or a review request.
 
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
+import { signatureDataUrl } from "../_shared/signature_image.ts";
 import { WORK_ORDER_LOCK_LINE_TYPES } from "./trade_invoice_assignment_lock.ts";
 import {
   isTradeInvoiceTimeLineType,
@@ -312,6 +314,11 @@ export function isNormalWorkOrderPayLine(line: FenceLine): boolean {
   if (isGroupShareLine(line)) return false;
   const type = fenceLineType(line);
   if (NOT_A_CLAIM.has(type)) return false;
+  // hours and a work order are pay even when they are not a time-line type.
+  // The key matches group_work_order_line_is_normal_pay: lower case, "_" to
+  // space, then every space removed.
+  const key = type.replace(/\s+/g, "");
+  if (key === "hours" || key === "workorder") return true;
   if (WORK_ORDER_LOCK_LINE_TYPES.includes(type)) return true;
   if (isTradeInvoiceTimeLineType(type)) return true;
   return Boolean(line.source_work_order_id);
@@ -576,6 +583,19 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    needle: "group_share_blocked_by_work_order_claim",
+    code: "group_share_blocked_by_work_order_claim",
+    message:
+      "This job already has a live work-order or hours claim, so a group share cannot be invoiced.",
+    status: 409,
+  },
+  {
+    needle: "group_open_blocked_by_work_order_claim",
+    code: "group_open_blocked_by_work_order_claim",
+    message: "This job already has normal pay.",
+    status: 409,
+  },
+  {
     needle: "group_work_order_void",
     code: "group_work_order_void",
     message: "This group work order has been voided.",
@@ -584,7 +604,7 @@ const QUERY_FAULTS: {
   {
     needle: "group_signature_invalid",
     code: "group_signature_invalid",
-    message: "The signature has to be a PNG or SVG image.",
+    message: "The signature has to be a PNG or JPEG image.",
     status: 422,
   },
   {
@@ -774,8 +794,6 @@ function groupIsSigned(group: Record<string, unknown>): boolean {
   return group.status === "client_signed" || Boolean(group.client_signed_at);
 }
 
-const SIGNATURE_MAX = 150000;
-
 async function groupFeatureOn(client: any): Promise<boolean> {
   const { data, error } = await client.from("feature_flags").select("enabled")
     .eq("flag_name", GROUP_WORK_ORDER_FLAG).maybeSingle();
@@ -801,25 +819,11 @@ function parseSignature(value: unknown, required: boolean): string | null {
       400,
     );
   }
-  const png = String(value);
-  if (png.length > SIGNATURE_MAX) {
-    throw new GroupWorkOrderError(
-      "group_signature_too_large",
-      "That signature image is too large.",
-    );
-  }
-  const pngOk = png.startsWith("data:image/png;base64,");
-  const svgOk = png.startsWith("data:image/svg+xml");
-  if (!pngOk && !svgOk) {
+  const png = signatureDataUrl(value);
+  if (!png) {
     throw new GroupWorkOrderError(
       "group_signature_invalid",
-      "The signature has to be a PNG or SVG image.",
-    );
-  }
-  if (svgOk && /<script/i.test(png)) {
-    throw new GroupWorkOrderError(
-      "group_signature_invalid",
-      "The signature has to be a PNG or SVG image.",
+      "The signature has to be a PNG or JPEG image.",
     );
   }
   return png;
@@ -848,6 +852,40 @@ function deviceLabel(value: unknown): string | null {
   const device = String(value || "").trim();
   if (!device) return null;
   return device.slice(0, 200);
+}
+
+async function assertNoNormalPayOnJob(client: any, jobId: string): Promise<void> {
+  const lines = await rowsOf(
+    client.from("trade_invoice_lines").select(
+      "job_id, line_type, group_share_id, source_work_order_id, trade_invoice_id",
+    ).eq("job_id", jobId),
+    "load pay on the job",
+  );
+  if (lines.length === 0) return;
+  const invoiceIds = [
+    ...new Set(lines.map((line) => String(line.trade_invoice_id || "")).filter(
+      Boolean,
+    )),
+  ];
+  const invoices = invoiceIds.length === 0 ? [] : await rowsOf(
+    client.from("trade_invoices").select("id, status").in("id", invoiceIds),
+    "load invoices on the job",
+  );
+  const statusById = new Map(
+    invoices.map((row) => [String(row.id), row.status]),
+  );
+  for (const line of lines) {
+    const invoiceId = String(line.trade_invoice_id || "");
+    if (!statusById.has(invoiceId)) continue;
+    if (String(statusById.get(invoiceId) || "") === "ops-reject") continue;
+    if (isNormalWorkOrderPayLine(line)) {
+      throw new GroupWorkOrderError(
+        "group_open_blocked_by_work_order_claim",
+        "This job already has normal pay.",
+        409,
+      );
+    }
+  }
 }
 
 export async function createGroupWorkOrder(
@@ -915,6 +953,7 @@ export async function createGroupWorkOrder(
   // Read the pot only to refuse a group that can never be invoiced.
   // The amount is not returned.
   potFromWorkOrder(await loadWorkOrder(client, workOrderId));
+  await assertNoNormalPayOnJob(client, jobId);
   const token = newShareToken();
   const { data, error } = await client.from("group_work_orders").insert({
     org_id: job.org_id || caller.orgId,
@@ -1080,14 +1119,45 @@ type ShareView = {
   needsRate: string[];
 };
 
+function signedAfterHours(signedAt: unknown, latestHoursAt: string | null): boolean {
+  if (!latestHoursAt) return true;
+  const signed = Date.parse(String(signedAt || ""));
+  const latest = Date.parse(latestHoursAt);
+  if (!Number.isFinite(signed) || !Number.isFinite(latest)) return false;
+  return signed > latest;
+}
+
+function latestStamp(rows: readonly Record<string, unknown>[]): string | null {
+  let latest: number | null = null;
+  let text: string | null = null;
+  for (const row of rows) {
+    if (row.created_at == null || row.created_at === "") continue;
+    const at = Date.parse(String(row.created_at));
+    if (!Number.isFinite(at)) continue;
+    if (latest == null || at > latest) {
+      latest = at;
+      text = String(row.created_at);
+    }
+  }
+  return text;
+}
+
+/**
+ * A group freeze counts a drawn signature only. An office waiver still
+ * counts for the ordinary invoice gate in trade_client_signoff.ts. It does
+ * not count here. The drawing has to be dated after the latest hours on a
+ * non-void group for the job. DEFAULT, owner to confirm.
+ */
 function signoffCounts(
   row: Record<string, unknown> | null,
   minimum: number,
+  latestHoursAt: string | null,
 ): boolean {
   if (!row) return false;
   const method = String(row.method || "");
-  if (method === "revoked") return false;
-  if (method === "office_waiver") return true;
+  if (method === "revoked" || method === "office_waiver") return false;
+  if (method !== "on_site" && method !== "share_link") return false;
+  if (!row.signature_media_id) return false;
   if (row.happy === false) return false;
   if (
     row.satisfaction_rating != null &&
@@ -1095,7 +1165,7 @@ function signoffCounts(
   ) {
     return false;
   }
-  return true;
+  return signedAfterHours(row.created_at, latestHoursAt);
 }
 
 function newestSignoff(
@@ -1121,32 +1191,52 @@ async function happyMinimum(client: any): Promise<number> {
   return Number.isInteger(minimum) ? minimum : 4;
 }
 
+async function latestHoursOnJob(client: any, jobId: string): Promise<string | null> {
+  const groups = await rowsOf(
+    client.from("group_work_orders").select("id, status").eq("job_id", jobId),
+    "load groups on the job",
+  );
+  const liveIds = groups.filter((row) => String(row.status || "") !== "void")
+    .map((row) => String(row.id));
+  if (liveIds.length === 0) return null;
+  const stamps = await rowsOf(
+    client.from("group_work_order_time_entries").select("created_at").in(
+      "group_id",
+      liveIds,
+    ),
+    "load hours",
+  );
+  return latestStamp(stamps);
+}
+
 async function loadShareView(
   client: any,
   group: Record<string, unknown>,
   participants: readonly Record<string, unknown>[],
 ): Promise<ShareView> {
-  const [entries, assignments, signoffs, minimum] = await Promise.all([
-    rowsOf(
-      client.from("group_work_order_time_entries").select(
-        "user_id, work_date, hours",
-      ).eq("group_id", group.id),
-      "load hours",
-    ),
-    rowsOf(
-      client.from("job_assignments").select(
-        "user_id, scheduled_date, status, role",
-      ).eq("job_id", group.job_id),
-      "load allocations",
-    ),
-    rowsOf(
-      client.from("job_client_signoffs").select(
-        "id, method, happy, satisfaction_rating, created_at",
-      ).eq("job_id", group.job_id),
-      "load the client sign-off",
-    ),
-    happyMinimum(client),
-  ]);
+  const [entries, assignments, signoffs, minimum, latestHoursAt] = await Promise
+    .all([
+      rowsOf(
+        client.from("group_work_order_time_entries").select(
+          "user_id, work_date, hours, created_at",
+        ).eq("group_id", group.id),
+        "load hours",
+      ),
+      rowsOf(
+        client.from("job_assignments").select(
+          "user_id, scheduled_date, status, role, is_ghost",
+        ).eq("job_id", group.job_id),
+        "load allocations",
+      ),
+      rowsOf(
+        client.from("job_client_signoffs").select(
+          "id, method, happy, satisfaction_rating, created_at, signature_media_id",
+        ).eq("job_id", group.job_id),
+        "load the client sign-off",
+      ),
+      happyMinimum(client),
+      latestHoursOnJob(client, String(group.job_id)),
+    ]);
   const hoursByUser = new Map<string, number>();
   const counting: { userId: string; workDate: string }[] = [];
   for (const entry of entries) {
@@ -1162,10 +1252,12 @@ async function loadShareView(
     hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
     counting.push({ userId, workDate });
   }
-  const needsHours = participants
-    .map((row) => String(row.user_id))
-    .filter((userId) => (hoursByUser.get(userId) || 0) <= 0)
-    .sort();
+  const needsHours = [
+    ...new Set([
+      ...participants.map((row) => String(row.user_id)),
+      ...assignments.filter(liveAssignment).map((row) => String(row.user_id)),
+    ]),
+  ].filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
   const rateUsers = [...new Set(counting.map((row) => row.userId))];
   const rates = rateUsers.length === 0 ? [] : await rowsOf(
     client.from("trade_rates").select(
@@ -1188,7 +1280,11 @@ async function loadShareView(
     );
     return rate == null || Math.round(rate * 100) <= 0;
   }).map((entry) => entry.userId))].sort();
-  const signed = signoffCounts(newestSignoff(signoffs), minimum);
+  const signed = signoffCounts(
+    newestSignoff(signoffs),
+    minimum,
+    latestHoursAt,
+  );
   let awaiting: GroupAwaiting = "ready";
   if (!signed) awaiting = "awaiting_signoff";
   else if (group.split_frozen_at) awaiting = "frozen";
@@ -1366,16 +1462,17 @@ async function countingSignoff(
   client: any,
   jobId: string,
 ): Promise<boolean> {
-  const [rows, minimum] = await Promise.all([
+  const [rows, minimum, latestHoursAt] = await Promise.all([
     rowsOf(
       client.from("job_client_signoffs").select(
-        "id, method, happy, satisfaction_rating, created_at",
+        "id, method, happy, satisfaction_rating, created_at, signature_media_id",
       ).eq("job_id", jobId),
       "load the client sign-off",
     ),
     happyMinimum(client),
+    latestHoursOnJob(client, jobId),
   ]);
-  return signoffCounts(newestSignoff(rows), minimum);
+  return signoffCounts(newestSignoff(rows), minimum, latestHoursAt);
 }
 
 async function storeClientSignature(
@@ -1654,8 +1751,8 @@ export async function unfreezeGroupWorkOrder(
     group_id: group.id,
     split_frozen: false,
     shares: Array.isArray(payload.shares) ? payload.shares : [],
-    voided_invoice_ids: Array.isArray(payload.voided_invoice_ids)
-      ? payload.voided_invoice_ids
+    stripped_invoice_ids: Array.isArray(payload.stripped_invoice_ids)
+      ? payload.stripped_invoice_ids
       : [],
   };
 }
@@ -1712,6 +1809,30 @@ export async function voidGroupWorkOrder(
   return { ok: true, void: true, group_id: group.id };
 }
 
+export async function removeGroupWorkOrderParticipant(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const userId = String(body.user_id || body.userId || "").trim();
+  if (!userId) {
+    throw new GroupWorkOrderError(
+      "group_actor_required",
+      "Name the person to remove.",
+      400,
+    );
+  }
+  const { error } = await client.rpc("remove_group_work_order_participant", {
+    p_group_id: group.id,
+    p_user: userId,
+    p_actor: caller.userId,
+  });
+  throwQuery(error, "remove the participant");
+  return { ok: true, removed: true, group_id: group.id, user_id: userId };
+}
+
 export async function rekeyGroupWorkOrder(
   client: any,
   caller: GroupCaller,
@@ -1765,8 +1886,20 @@ export async function resolveGroupShareInvoiceExtra(
   client: any,
   input: { userId: string; item: Record<string, unknown> },
 ) {
-  // While the switch is off, invoicing does not read the group tables.
-  if (!(await groupFeatureOn(client))) return null;
+  const shareShaped = Boolean(input.item.group_share_id) ||
+    isGroupShareInvoiceItem(input.item);
+  // A share-shaped line is refused before any group-table read while the
+  // switch is off. A normal line still returns after the flag read.
+  if (!(await groupFeatureOn(client))) {
+    if (shareShaped) {
+      throw new GroupWorkOrderError(
+        "group_work_order_disabled",
+        "Feature off. Group work orders are switched off.",
+        409,
+      );
+    }
+    return null;
+  }
   if (input.item.group_share_id && !isGroupShareInvoiceItem(input.item)) {
     throw new GroupWorkOrderError(
       "group_share_line_type_required",
