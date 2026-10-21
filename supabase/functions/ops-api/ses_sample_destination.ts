@@ -23,6 +23,8 @@ export const SES_LIVE_BUILDER_MAILBOXES: readonly string[] = [
   "makesafes@mlbuilders.com.au",
   "bunbury@mlbuilders.com.au",
   "workorders@secureworkswa.com.au",
+  "builderwest.mailer@primeeco.tech",
+  "accounts@westernbuild.com.au",
 ];
 
 export type EnvGet = { get(key: string): string | undefined };
@@ -41,11 +43,17 @@ export function isSesSampleDocket(
   ) {
     return true;
   }
+  const identity = docket.identity || docket.envelope?.v2?.identity || {};
+  const lip = docket.local_invoice_proposal || {};
+  const xero = docket.xero_binding || {};
   const candidates = [
     docket.job_number,
-    docket.identity?.job_number,
-    docket.envelope?.v2?.identity?.job_number,
-    docket.local_invoice_proposal?.builder_reference,
+    identity.job_number,
+    identity.builder_reference,
+    identity.external_ref,
+    lip.builder_reference,
+    lip.reference,
+    xero.reference,
   ];
   return candidates.some(isSesSampleJobNumber);
 }
@@ -100,6 +108,30 @@ export function applySesSampleDestinationOverride<
     sample_destination_override: true,
     sample_destination_blocked: false,
   }));
+}
+
+/**
+ * True when every stored release route is already the SAMPLE rewrite:
+ * single personal-inbox To, blank cc. Used in tests and as a read of a
+ * frozen envelope. Execute must not treat this shape alone as licence to
+ * skip live AJS CC repair.
+ */
+export function sesReleaseUsesSampleDestinationOverride(
+  routes: Array<{ recipients?: unknown; cc?: unknown }>,
+  env: EnvGet = Deno.env,
+): boolean {
+  const dest = readSesSampleDestinationOverride(env).toLowerCase();
+  if (!isUsablePersonalInbox(dest)) return false;
+  if (!Array.isArray(routes) || routes.length === 0) return false;
+  return routes.every((route) => {
+    const recipients = (Array.isArray(route.recipients) ? route.recipients : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    const cc = (Array.isArray(route.cc) ? route.cc : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    return recipients.length === 1 && recipients[0] === dest && cc.length === 0;
+  });
 }
 
 export function assertSesSampleSendAllowed(route: Record<string, any>): void {
