@@ -5,6 +5,8 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildJobProfitTimeline,
+  costEventKind,
+  JOB_PROFIT_LABELS,
   jobProfitAction,
   jobProfitCallerAllowed,
   jobProfitListAction,
@@ -604,4 +606,79 @@ Deno.test("rollup: Xero Project expenses are in no total of cost or profit", asy
     assertEquals(bucket.published_cost_ex, 600);
     assertEquals(bucket.margin_pct, 40);
   }
+});
+
+// CFO-12: the three purchase order states reach the timeline as orders, never
+// as a bill, never as actual cost, and an unpriced order carries no $0.00.
+Deno.test("job profit timeline: ordered, invoice-emailed and committed orders (CFO-12)", () => {
+  const costs = [
+    {
+      source: "po_committed",
+      source_id: "po1",
+      document_id: "po1",
+      event_date: "2026-08-01",
+      lane: "materials",
+      party: "Supplier",
+      amount_ex: 200,
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+      confidence: "committed",
+    },
+    {
+      source: "po_ordered",
+      source_id: "po2",
+      document_id: "po2",
+      document_number: "PO-1000001",
+      event_date: "2026-08-02",
+      lane: "materials",
+      party: "Dispatch Supplier",
+      amount_ex: null,
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+      confidence: "ordered_not_billed",
+    },
+    {
+      source: "po_invoice_emailed",
+      source_id: "po3",
+      document_id: "po3",
+      event_date: "2026-09-02",
+      lane: "materials",
+      party: "Supplier",
+      amount_ex: 300,
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+      confidence: "invoice_emailed",
+    },
+  ];
+  const t = buildJobProfitTimeline(costs, []);
+  assertEquals(t.map((e) => [e.date, e.kind, e.amount_ex, e.counts]), [
+    ["2026-08-01", "purchase_order", 200, false],
+    ["2026-08-02", "purchase_order_ordered", null, false],
+    ["2026-09-02", "purchase_order_invoice_emailed", 300, false],
+  ]);
+  assert(!t.some((e) => e.kind === "cost_paid"), "no order is ever a paid cost");
+  assert(
+    !t.some((e) => e.kind === "supplier_bill"),
+    "no order state is shown as a supplier bill",
+  );
+});
+
+Deno.test("costEventKind: an unknown po_ state is a purchase order, other unknowns stay supplier bills", () => {
+  assertEquals(costEventKind("po_committed"), "purchase_order");
+  assertEquals(costEventKind("po_ordered"), "purchase_order_ordered");
+  assertEquals(costEventKind("po_invoice_emailed"), "purchase_order_invoice_emailed");
+  assertEquals(costEventKind("po_something_new"), "purchase_order");
+  assertEquals(costEventKind("supplier_bill"), "supplier_bill");
+  assertEquals(costEventKind("materials_fact"), "materials_fact");
+  assertEquals(costEventKind(undefined), "supplier_bill");
+});
+
+Deno.test("job profit labels name the CFO-12 commitment states", () => {
+  assert(JOB_PROFIT_LABELS.committed_open_ex.includes("never counted here as $0.00"));
+  assert(JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith("Ordered, not billed"));
+  assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, no bill matched to this order"));
+  assert(JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"));
 });
