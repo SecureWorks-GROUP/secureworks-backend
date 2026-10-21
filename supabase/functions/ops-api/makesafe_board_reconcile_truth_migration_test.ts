@@ -35,6 +35,12 @@ const decimalFactMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const caseAliasMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260729040000_makesafe_seed_case_alias_correction.sql",
+    import.meta.url,
+  ),
+);
 const decimalBoundaryContract = await Deno.readTextFile(
   new URL(
     "../../tests/makesafe_decimal_fact_boundary_contract.sql",
@@ -183,16 +189,14 @@ Deno.test("nullable row cardinality uses valid PL/pgSQL CASE expressions", () =>
 
 Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () => {
   assertStringIncludes(indexSource, "case 'makesafe_state_seed'");
-  assertStringIncludes(
-    indexSource,
-    "'seed_makesafe_state_authority_scoped_v2'",
-  );
+  assertStringIncludes(indexSource, "seed_makesafe_state_authority_atomic_v1");
   assertStringIncludes(indexSource, "job_number: 'SWMS-26980'");
   assertStringIncludes(indexSource, ".startsWith('spine_missing_')");
   assertStringIncludes(
     indexSource,
     "comparison.projection_health.projection_input_error_job_count",
   );
+  assertEquals(indexSource.includes("seed_partially_committed"), false);
   assert(
     indexSource.includes(
       "const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0",
@@ -364,5 +368,50 @@ Deno.test("fact identity accepts canonical decimals without widening readiness",
   assertEquals(
     indexSource.includes("canonicalJsonAndHash(row.state_facts)"),
     false,
+  );
+});
+
+Deno.test("seed counts the case_id exposed by case_candidates", () => {
+  assertStringIncludes(
+    caseAliasMigration,
+    "public.seed_makesafe_state_authority_v1(text,text,text,uuid[])",
+  );
+  assertStringIncludes(caseAliasMigration, "count(c.id) AS case_count");
+  assertStringIncludes(
+    caseAliasMigration,
+    "count(c.case_id) AS case_count",
+  );
+  assertStringIncludes(
+    caseAliasMigration,
+    "(array_agg(c.case_id ORDER BY c.case_id))[1] AS case_id",
+  );
+  assertStringIncludes(
+    caseAliasMigration,
+    "state seed case alias correction expected one legacy fragment",
+  );
+  assertEquals(
+    /UPDATE\s+public\.(jobs|makesafe_job_details)\b/i.test(
+      caseAliasMigration,
+    ),
+    false,
+  );
+});
+
+Deno.test("live seed chunks are committed atomically by one RPC", () => {
+  assertStringIncludes(
+    caseAliasMigration,
+    "CREATE OR REPLACE FUNCTION public.seed_makesafe_state_authority_atomic_v1",
+  );
+  assertStringIncludes(
+    caseAliasMigration,
+    "public.seed_makesafe_state_authority_scoped_v2",
+  );
+  assertStringIncludes(
+    caseAliasMigration,
+    "v_chunk := p_job_ids[v_offset:v_end]",
+  );
+  assertStringIncludes(
+    caseAliasMigration,
+    "REVOKE ALL ON FUNCTION public.seed_makesafe_state_authority_atomic_v1",
   );
 });
