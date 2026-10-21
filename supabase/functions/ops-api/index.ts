@@ -688,6 +688,7 @@ import {
 } from './job_work_orders.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
+  assertGroupJobDraftUsesShare,
   assertGroupWorkOrderInvoiceFence,
   assertLegacyInvoiceNotOnGroupJob,
   captureGroupClientSignoff,
@@ -713,6 +714,7 @@ import {
   submitGroupWorkOrderHours,
   unfreezeGroupWorkOrder,
   voidGroupWorkOrder,
+  withoutGroupJobAssignments,
   type GroupCaller,
 } from './group_work_order.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
@@ -1886,6 +1888,21 @@ function groupWorkOrderApiError(error: unknown): never {
   // Start and finish still come from the time-entry rule. A bad entry is a
   // 422 the trade app already knows, not a 500.
   if (error instanceof TradeInvoiceTimeEntryError) tradeInvoiceTimeEntryApiError(error)
+  throw error
+}
+
+// The line trigger refuses ordinary pay on a group job and does not read the
+// feature flag. A draft save has to say that as 409, not wrap it as a 500.
+function throwIfGroupJobDraftClaim(error: unknown): never {
+  const message = error instanceof Error
+    ? error.message
+    : error && typeof error === 'object' && 'message' in error
+      ? String((error as { message?: unknown }).message ?? '')
+      : String(error ?? '')
+  if (message.includes('work_order_claim_blocked_by_group_share')) {
+    const text = 'This job is on a group work order. Save your share, not ordinary hours.'
+    throw new ApiError(text, 409, { ok: false, code: 'group_job_uses_share', error: text })
+  }
   throw error
 }
 
@@ -11992,6 +12009,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               isGroupShareInvoiceItem(item) || Boolean(item?.group_share_id)
             const plainLabour = labourLines.filter((line: any) => !draftShareShaped(line))
             const plainExtras = extras.filter((extra: any) => !draftShareShaped(extra))
+            // Ordinary pay on a job that already has a group is 409 even while
+            // the switch is off. The line trigger does not read the flag.
+            await assertGroupJobDraftUsesShare(client, [
+              ...plainLabour,
+              ...plainExtras,
+              ...(weeklyInvoice?.lines || []),
+            ]).catch((error) => groupWorkOrderApiError(error))
             const shareSources = [
               ...labourLines.filter((line: any) => draftShareShaped(line)),
               ...extras.filter((extra: any) => draftShareShaped(extra)),
@@ -12198,7 +12222,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }))
                 if (draftLineRows.length === 0) return
                 const { error: draftLinesErr } = await client.from('trade_invoice_lines').insert(draftLineRows)
-                if (draftLinesErr) throw new Error('Failed to save replacement draft lines: ' + draftLinesErr.message)
+                if (draftLinesErr) {
+                  const draftLineMessage = String(draftLinesErr.message || '')
+                  if (draftLineMessage.includes('work_order_claim_blocked_by_group_share')) {
+                    throwIfGroupJobDraftClaim(draftLinesErr)
+                  }
+                  throw new Error('Failed to save replacement draft lines: ' + draftLineMessage)
+                }
               },
               deleteInvoice: async (invoiceId) => {
                 const { data: deletedDraft, error: deleteErr } = await client.from('trade_invoices')
@@ -15588,7 +15618,11 @@ export async function _persistTradeInvoiceWeekDraft(
   })
   const invoiceId = String(data || '')
   if (error || !invoiceId) {
-    throw new Error('Failed to persist weekly/hourly draft invoice: ' + (error?.message || 'no invoice id returned'))
+    const persistMessage = String(error?.message || 'no invoice id returned')
+    if (persistMessage.includes('work_order_claim_blocked_by_group_share')) {
+      throwIfGroupJobDraftClaim(error)
+    }
+    throw new Error('Failed to persist weekly/hourly draft invoice: ' + persistMessage)
   }
   return invoiceId
 }
@@ -53849,8 +53883,35 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
       .map((ti: any) => ti.id))
   }
-  const assignments = (rawAssignments || [])
+  let assignments = (rawAssignments || [])
     .filter((a: any) => !(a.invoiced_in && liveInvoiceIds.has(a.invoiced_in)))
+
+  // A group job is paid as a share. Leave it out of ordinary hours. A failed
+  // read fails closed: never show a group job as if it were a normal claim.
+  const groupHoursJobIds = [...new Set(assignments.map((a: any) => String(a.jobs?.id || '')).filter(Boolean))]
+  if (groupHoursJobIds.length > 0) {
+    const { data: groupHourRows, error: groupHourErr } = await client
+      .from('group_work_orders')
+      .select('job_id, status')
+      .in('job_id', groupHoursJobIds)
+    if (groupHourErr) {
+      throw new ApiError(
+        'Could not read group work orders for these hours.',
+        503,
+        {
+          ok: false,
+          code: 'group_work_order_unreadable',
+          error: 'Could not read group work orders for these hours.',
+        },
+      )
+    }
+    const groupJobIds = new Set<string>(
+      (groupHourRows || [])
+        .filter((row: any) => String(row.status || '') !== 'void' && row.job_id)
+        .map((row: any) => String(row.job_id)),
+    )
+    assignments = withoutGroupJobAssignments(assignments, groupJobIds)
+  }
 
   // Look up current rate
   const { data: rateRow } = await client

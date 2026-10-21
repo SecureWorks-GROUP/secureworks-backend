@@ -480,6 +480,12 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    needle: "group_split_busy",
+    code: "group_split_busy",
+    message: "The weekly invoice is busy, try again.",
+    status: 409,
+  },
+  {
     needle: "group_split_has_live_invoice",
     code: "group_split_has_live_invoice",
     message: "A share is already on a live invoice, so this split stays frozen.",
@@ -1152,13 +1158,27 @@ function latestStamp(rows: readonly Record<string, unknown>[]): string | null {
   return text;
 }
 
+/** Later of two stamps. A null stamp is ignored. Equal stamps return the first. */
+function laterInstant(left: string | null, right: string | null): string | null {
+  if (!left) return right;
+  if (!right) return left;
+  const a = Date.parse(left);
+  const b = Date.parse(right);
+  if (!Number.isFinite(a)) return Number.isFinite(b) ? right : left;
+  if (!Number.isFinite(b)) return left;
+  return b > a ? right : left;
+}
+
 /**
  * A group freeze counts a drawn signature only. This does not call #1110's
  * helper in trade_client_signoff.ts. A revoked row is not signed here even
  * if that helper still counts it. An office waiver still counts for the
  * ordinary invoice gate. It does not count here. The drawing has to be
- * dated after the later of each hours row's created_at and updated_at on a
- * non-void group for the job. DEFAULT, owner to confirm.
+ * dated after the later of each remaining hours row's created_at and
+ * updated_at and the group's hours_changed_at, on a non-void group for
+ * the job. hours_changed_at moves when hours are inserted, really
+ * changed, or deleted, and when a participant is removed. An identical
+ * re-save moves neither stamp. DEFAULT, owner to confirm.
  */
 function signoffCounts(
   row: Record<string, unknown> | null,
@@ -1205,11 +1225,14 @@ async function happyMinimum(client: any): Promise<number> {
 
 async function latestHoursOnJob(client: any, jobId: string): Promise<string | null> {
   const groups = await rowsOf(
-    client.from("group_work_orders").select("id, status").eq("job_id", jobId),
+    client.from("group_work_orders").select("id, status, hours_changed_at").eq(
+      "job_id",
+      jobId,
+    ),
     "load groups on the job",
   );
-  const liveIds = groups.filter((row) => String(row.status || "") !== "void")
-    .map((row) => String(row.id));
+  const live = groups.filter((row) => String(row.status || "") !== "void");
+  const liveIds = live.map((row) => String(row.id));
   if (liveIds.length === 0) return null;
   const stamps = await rowsOf(
     client.from("group_work_order_time_entries").select("created_at, updated_at").in(
@@ -1218,7 +1241,58 @@ async function latestHoursOnJob(client: any, jobId: string): Promise<string | nu
     ),
     "load hours",
   );
-  return latestStamp(stamps);
+  // max() over both, not a later-of that treats a missing side as unknown.
+  // Deleting the last hour row leaves hours_changed_at.
+  const changed = latestStamp(
+    live.map((row) => ({ created_at: row.hours_changed_at })),
+  );
+  return laterInstant(latestStamp(stamps), changed);
+}
+
+/**
+ * A job that already has a non-void group is paid as a share. Ordinary
+ * hours on a draft are 409 here, even while the switch is off: the line
+ * trigger does not read the flag and would otherwise come back as a 500.
+ * Travel, materials, equipment, an adjustment, a final-payout deduction,
+ * commission, and the share itself are not this check. A line with no
+ * job is not either.
+ */
+export async function assertGroupJobDraftUsesShare(
+  client: any,
+  lines: readonly FenceLine[],
+): Promise<void> {
+  const jobIds = [
+    ...new Set(
+      lines.filter((line) => isNormalWorkOrderPayLine(line) && line.job_id)
+        .map((line) => String(line.job_id)).filter(Boolean),
+    ),
+  ];
+  if (jobIds.length === 0) return;
+  const groups = await rowsOf(
+    client.from("group_work_orders").select("job_id, status").in(
+      "job_id",
+      jobIds,
+    ),
+    "check group work orders",
+  );
+  if (groups.some((row) => String(row.status || "") !== "void")) {
+    throw new GroupWorkOrderError(
+      "group_job_uses_share",
+      "This job is on a group work order. Save your share, not ordinary hours.",
+      409,
+    );
+  }
+}
+
+/** Drop assignments whose job has a non-void group. A row with no job stays. */
+export function withoutGroupJobAssignments<
+  T extends { jobs?: { id?: unknown } | null },
+>(assignments: readonly T[], groupJobIds: ReadonlySet<string>): T[] {
+  return assignments.filter((row) => {
+    const id = row.jobs?.id;
+    if (id == null || id === "") return true;
+    return !groupJobIds.has(String(id));
+  });
 }
 
 async function loadShareView(

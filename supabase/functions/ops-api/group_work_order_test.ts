@@ -21,10 +21,12 @@ import {
 } from "../_shared/signature_image.ts";
 import {
   allocatePotCents,
+  assertGroupJobDraftUsesShare,
   assertGroupWorkOrderInvoiceFence,
   centsToMoney,
   clientSignGroupWorkOrder,
   createGroupWorkOrder,
+  deleteGroupWorkOrderHours,
   draftClientLinkMessage,
   entryPointsMicro,
   findFenceProblem,
@@ -46,12 +48,15 @@ import {
   rateOnDay,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
+  readGroupWorkOrderOffice,
   refuseClientLinkSend,
   removeGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   submitGroupWorkOrderFeedback,
+  submitGroupWorkOrderHours,
   unfreezeGroupWorkOrder,
   visibleShareRows,
+  withoutGroupJobAssignments,
 } from "./group_work_order.ts";
 import { TRADE_INVOICE_TIME_LINE_TYPES } from "./trade_invoice_time_entry.ts";
 
@@ -72,6 +77,16 @@ type Row = Record<string, unknown>;
 class Memory {
   tables = new Map<string, Row[]>();
   calls: { table: string; op: string }[] = [];
+  hoursClock = Date.parse("2026-11-01T00:00:00.000Z");
+  weeklyLockHeld = false;
+
+  touchHours(groupId: string): string {
+    const stamp = new Date(this.hoursClock).toISOString();
+    this.hoursClock += 1000;
+    const group = this.rows("group_work_orders").find((row) => row.id === groupId);
+    if (group) group.hours_changed_at = stamp;
+    return stamp;
+  }
 
   rows(table: string): Row[] {
     let rows = this.tables.get(table);
@@ -133,6 +148,9 @@ class Memory {
   }
 
   unfreeze(group: Row) {
+    if (this.weeklyLockHeld) {
+      throw new Error("group_split_busy: busy, try again");
+    }
     const blocking = new Set([
       "pending_acknowledgment",
       "acknowledged",
@@ -199,6 +217,21 @@ class Memory {
         invoice.to_be_paid_ex = gross;
         invoice.job_grand_total_ex = this.round2(gross + deductions);
       }
+      const payable = this.round2(Number(invoice.net_pay) + Number(invoice.gst));
+      const rawAmount = invoice.recurring_deduction_amount;
+      if (rawAmount != null && rawAmount !== "") {
+        const amount = Number(rawAmount);
+        if (amount > payable) {
+          const label = String(invoice.recurring_deduction_label || "");
+          const week = String(invoice.week_start || "");
+          invoice.recurring_deduction_note = payable === 0
+            ? null
+            : `${label} $${amount.toFixed(2)} NOT taken for the week starting ${week}: the amount payable on this invoice ($${payable.toFixed(2)}) is less than the deduction. Nothing was taken off. The office to recover it another way.`;
+          invoice.recurring_deduction_id = null;
+          invoice.recurring_deduction_label = null;
+          invoice.recurring_deduction_amount = null;
+        }
+      }
     }
     const shareRows = this.rows("group_work_order_shares");
     const keptShares = shareRows.filter((row) => row.group_id !== group.id);
@@ -233,19 +266,28 @@ class Memory {
       actor,
       user_id: userId,
     });
+    this.touchHours(String(group.id));
     return { ok: true };
   }
 
   latestHoursAt(jobId: string): string | null {
-    const live = new Set(
-      this.rows("group_work_orders").filter((row) =>
-        row.job_id === jobId && row.status !== "void"
-      ).map((row) => String(row.id)),
+    const live = this.rows("group_work_orders").filter((row) =>
+      row.job_id === jobId && row.status !== "void"
     );
+    const liveIds = new Set(live.map((row) => String(row.id)));
     let latest: number | null = null;
     let text: string | null = null;
+    const consider = (instant: string | null) => {
+      if (!instant) return;
+      const at = Date.parse(instant);
+      if (!Number.isFinite(at)) return;
+      if (latest == null || at > latest) {
+        latest = at;
+        text = instant;
+      }
+    };
     for (const entry of this.rows("group_work_order_time_entries")) {
-      if (!live.has(String(entry.group_id))) continue;
+      if (!liveIds.has(String(entry.group_id))) continue;
       const created = entry.created_at == null || entry.created_at === ""
         ? null
         : String(entry.created_at);
@@ -259,13 +301,13 @@ class Memory {
         : Date.parse(updated) > Date.parse(created)
         ? updated
         : created;
-      if (!instant) continue;
-      const at = Date.parse(instant);
-      if (!Number.isFinite(at)) continue;
-      if (latest == null || at > latest) {
-        latest = at;
-        text = instant;
-      }
+      consider(instant);
+    }
+    for (const group of live) {
+      const changed = group.hours_changed_at == null || group.hours_changed_at === ""
+        ? null
+        : String(group.hours_changed_at);
+      consider(changed);
     }
     return text;
   }
@@ -544,10 +586,13 @@ class Query {
     this.memory.calls.push({ table: this.table, op: this.op });
     const rows = this.memory.rows(this.table);
     if (this.op === "insert") {
-      const created = {
+      const created: Row = {
         id: crypto.randomUUID(),
         ...(this.payload as Row),
       };
+      if (this.table === "group_work_order_time_entries") {
+        this.memory.touchHours(String(created.group_id || ""));
+      }
       rows.push(created);
       return { data: this.one === "none" ? [created] : created, error: null };
     }
@@ -555,12 +600,48 @@ class Query {
       const incomingRows = Array.isArray(this.payload)
         ? this.payload as Row[]
         : [this.payload as Row];
+      const same = (left: unknown, right: unknown) => {
+        if (left == null && right == null) return true;
+        if (left == null || right == null) return false;
+        if (typeof left === "number" || typeof right === "number") {
+          return Number(left) === Number(right);
+        }
+        return String(left) === String(right);
+      };
       for (const incoming of incomingRows) {
         const at = rows.findIndex((row) =>
-          row.group_id === incoming.group_id && row.user_id === incoming.user_id
+          row.group_id === incoming.group_id &&
+          row.user_id === incoming.user_id &&
+          String(row.work_date ?? "") === String(incoming.work_date ?? "")
         );
-        if (at >= 0) rows[at] = { ...rows[at], ...incoming };
-        else rows.push({ id: crypto.randomUUID(), ...incoming });
+        if (this.table !== "group_work_order_time_entries") {
+          if (at >= 0) rows[at] = { ...rows[at], ...incoming };
+          else rows.push({ id: crypto.randomUUID(), ...incoming });
+          continue;
+        }
+        if (at >= 0) {
+          const old = rows[at];
+          const identical = same(old.work_date, incoming.work_date) &&
+            same(old.start_time, incoming.start_time) &&
+            same(old.finish_time, incoming.finish_time) &&
+            same(old.break_minutes, incoming.break_minutes) &&
+            same(old.hours, incoming.hours) &&
+            same(old.user_id, incoming.user_id) &&
+            same(old.group_id, incoming.group_id);
+          if (identical) continue;
+          const stamp = this.memory.touchHours(String(incoming.group_id || ""));
+          const createdAt = old.created_at;
+          rows[at] = { ...old, ...incoming, updated_at: stamp };
+          if (createdAt != null) rows[at].created_at = createdAt;
+          continue;
+        }
+        const stamp = this.memory.touchHours(String(incoming.group_id || ""));
+        rows.push({
+          id: crypto.randomUUID(),
+          ...incoming,
+          created_at: stamp,
+          updated_at: stamp,
+        });
       }
       return { data: null, error: null };
     }
@@ -571,8 +652,14 @@ class Query {
       return { data: null, error: null };
     }
     if (this.op === "delete") {
+      const removed = rows.filter((row) => this.matches(row));
       const kept = rows.filter((row) => !this.matches(row));
       rows.splice(0, rows.length, ...kept);
+      if (this.table === "group_work_order_time_entries") {
+        for (const groupId of new Set(removed.map((row) => String(row.group_id || "")))) {
+          if (groupId) this.memory.touchHours(groupId);
+        }
+      }
       return { data: null, error: null };
     }
     const found = rows.filter((row) => this.matches(row));
@@ -1533,6 +1620,17 @@ Deno.test("freeze names an installer who has not joined, and removal is only bef
   for (const row of memory.rows("job_assignments")) {
     if (row.user_id === USER_B || row.user_id === USER_C) row.status = "cancelled";
   }
+  memory.rows("job_client_signoffs").push({
+    id: "after-removal",
+    job_id: JOB,
+    method: "share_link",
+    signed_name: "Alex Client",
+    happy: true,
+    satisfaction_rating: 5,
+    signature_media_id: "media-after",
+    captured_by_actor: "client link",
+    created_at: "2026-11-02T00:00:00.000Z",
+  });
   const frozen = await freezeGroupWorkOrder(memory.client(), trade(USER_A, true), {
     group_id: GROUP,
   });
@@ -1667,6 +1765,335 @@ Deno.test("an hour edited after the drawing is not signed", async () => {
   assertEquals(edited.code, "group_client_signoff_required");
 });
 
+function drawnSignoff(id: string, createdAt: string): Row {
+  return {
+    id,
+    job_id: JOB,
+    method: "share_link",
+    signed_name: "Alex Client",
+    happy: true,
+    satisfaction_rating: 5,
+    signature_media_id: `media-${id}`,
+    captured_by_actor: "client link",
+    created_at: createdAt,
+  };
+}
+
+Deno.test("deleting hours or removing a participant invalidates the client sign-off", async () => {
+  const memory = new Memory();
+  seedSplit(memory, "open");
+  await submitGroupWorkOrderHours(memory.client(), trade(USER_A), {
+    group_id: GROUP,
+    work_date: "2026-10-20",
+    start_time: "08:00",
+    finish_time: "10:00",
+    break_minutes: 0,
+    hours: 2,
+  });
+  const group = memory.rows("group_work_orders").find((row) => row.id === GROUP)!;
+  const afterInsert = Date.parse(String(group.hours_changed_at));
+  assert(Number.isFinite(afterInsert));
+  memory.rows("job_client_signoffs").push(
+    drawnSignoff("after-hours", new Date(afterInsert + 500).toISOString()),
+  );
+  const signed = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(signed.client_signed, true);
+
+  await deleteGroupWorkOrderHours(memory.client(), trade(USER_A), {
+    group_id: GROUP,
+    work_date: "2026-10-20",
+  });
+  const wiped = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(wiped.client_signed, false);
+  assertEquals(memory.rows("group_work_order_time_entries").length, 0);
+
+  memory.rows("group_work_order_participants").push({
+    id: "p-c",
+    group_id: GROUP,
+    user_id: USER_C,
+  });
+  const afterDelete = Date.parse(String(group.hours_changed_at));
+  memory.rows("job_client_signoffs").push(
+    drawnSignoff("after-delete", new Date(afterDelete + 500).toISOString()),
+  );
+  const again = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(again.client_signed, true);
+
+  await removeGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+    user_id: USER_C,
+  });
+  const removed = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(removed.client_signed, false);
+  assertEquals(
+    memory.rows("group_work_order_participants").some((row) => row.user_id === USER_C),
+    false,
+  );
+});
+
+Deno.test("ordinary hours on a group job are a draft 409, and the hours list drops that job", async () => {
+  const memory = new Memory();
+  memory.rows("group_work_orders").push({
+    id: GROUP,
+    job_id: JOB,
+    status: "open",
+  });
+  memory.rows("feature_flags").push({
+    flag_name: "group_work_order_v1",
+    enabled: false,
+  });
+  for (const line_type of ["labour", "Other", "mystery"]) {
+    const refused = await assertRejects(
+      () => assertGroupJobDraftUsesShare(memory.client(), [{ job_id: JOB, line_type }]),
+      GroupWorkOrderError,
+    );
+    assertEquals(refused.code, "group_job_uses_share");
+    assertEquals(refused.status, 409);
+    assertEquals(
+      refused.message,
+      "This job is on a group work order. Save your share, not ordinary hours.",
+    );
+  }
+  await assertGroupJobDraftUsesShare(memory.client(), [
+    { job_id: JOB, line_type: "travel" },
+    { job_id: JOB, line_type: "commission" },
+    { job_id: JOB, line_type: "group share" },
+    { line_type: "labour" },
+  ]);
+  await assertGroupJobDraftUsesShare(memory.client(), []);
+  memory.rows("group_work_orders")[0].status = "void";
+  await assertGroupJobDraftUsesShare(memory.client(), [{ job_id: JOB, line_type: "labour" }]);
+  assertEquals(memory.calls.some((call) => call.table === "feature_flags"), false);
+
+  const kept = withoutGroupJobAssignments([
+    { id: "group-job", jobs: { id: JOB } },
+    { id: "other-job", jobs: { id: OTHER_JOB } },
+    { id: "no-job", jobs: null },
+    { id: "blank-job", jobs: { id: "" } },
+    { id: "missing-jobs" },
+  ], new Set([JOB]));
+  assertEquals(kept.map((row) => row.id), [
+    "other-job",
+    "no-job",
+    "blank-job",
+    "missing-jobs",
+  ]);
+
+  const boom = {
+    from() {
+      const builder = {
+        select() {
+          return builder;
+        },
+        in() {
+          return builder;
+        },
+        then(
+          resolve: (value: { data: null; error: { message: string } }) => unknown,
+        ) {
+          return Promise.resolve({ data: null, error: { message: "boom" } }).then(resolve);
+        },
+      };
+      return builder;
+    },
+  };
+  const unread = await assertRejects(
+    () => assertGroupJobDraftUsesShare(boom, [{ job_id: JOB, line_type: "labour" }]),
+    GroupWorkOrderError,
+  );
+  assertEquals(unread.code, "group_work_order_unreadable");
+  assertEquals(unread.status, 503);
+});
+
+Deno.test("unfreeze clears a deduction the reduced payable cannot cover", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  await freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  const shareA = String(
+    memory.rows("group_work_order_shares").find((row) => row.user_id === USER_A)?.id,
+  );
+  memory.rows("trade_invoices").push(
+    {
+      id: "inv-over",
+      status: "queried",
+      gst_on: true,
+      week_start: "2026-10-12",
+      recurring_deduction_id: "ded-50",
+      recurring_deduction_label: "Ute hire",
+      recurring_deduction_amount: 50,
+      recurring_deduction_note: null,
+    },
+    {
+      id: "inv-zero",
+      status: "queried",
+      gst_on: true,
+      invoice_source: "hourly",
+      week_start: "2026-10-05",
+      recurring_deduction_id: "ded-zero",
+      recurring_deduction_label: "Ute hire",
+      recurring_deduction_amount: 50,
+    },
+    {
+      id: "inv-fit",
+      status: "queried",
+      gst_on: true,
+      week_start: "2026-09-28",
+      recurring_deduction_id: "ded-5",
+      recurring_deduction_label: "Ute hire",
+      recurring_deduction_amount: 5,
+      recurring_deduction_note: "kept",
+    },
+  );
+  memory.rows("trade_invoice_lines").push(
+    {
+      trade_invoice_id: "inv-over",
+      group_share_id: shareA,
+      line_type: "group share",
+      line_total_ex: 100,
+    },
+    { trade_invoice_id: "inv-over", line_type: "travel", line_total_ex: 10 },
+    {
+      trade_invoice_id: "inv-zero",
+      group_share_id: shareA,
+      line_type: "group share",
+      line_total_ex: 100,
+    },
+    {
+      trade_invoice_id: "inv-fit",
+      group_share_id: shareA,
+      line_type: "group share",
+      line_total_ex: 100,
+    },
+    { trade_invoice_id: "inv-fit", line_type: "travel", line_total_ex: 10 },
+  );
+  await unfreezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  const invoice = (id: string) =>
+    memory.rows("trade_invoices").find((row) => row.id === id)!;
+  const over = invoice("inv-over");
+  assertEquals(over.net_pay, 9.4);
+  assertEquals(over.gst, 1);
+  assertEquals(over.total_inc, 11);
+  assertEquals(over.recurring_deduction_id, null);
+  assertEquals(over.recurring_deduction_label, null);
+  assertEquals(over.recurring_deduction_amount, null);
+  assertEquals(
+    over.recurring_deduction_note,
+    "Ute hire $50.00 NOT taken for the week starting 2026-10-12: the amount payable on this invoice ($10.40) is less than the deduction. Nothing was taken off. The office to recover it another way.",
+  );
+  const zero = invoice("inv-zero");
+  assertEquals(zero.net_pay, 0);
+  assertEquals(zero.gst, 0);
+  assertEquals(zero.recurring_deduction_amount, null);
+  assertEquals(zero.recurring_deduction_note, null);
+  const fit = invoice("inv-fit");
+  assertEquals(fit.net_pay, 9.4);
+  assertEquals(fit.gst, 1);
+  assertEquals(fit.recurring_deduction_amount, 5);
+  assertEquals(fit.recurring_deduction_label, "Ute hire");
+  assertEquals(fit.recurring_deduction_note, "kept");
+});
+
+Deno.test("a busy weekly lock is try again, not a live invoice", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  await freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  const shareA = String(
+    memory.rows("group_work_order_shares").find((row) => row.user_id === USER_A)?.id,
+  );
+  memory.rows("trade_invoices").push({
+    id: INV,
+    status: "acknowledged",
+    gst_on: false,
+  });
+  memory.rows("trade_invoice_lines").push({
+    trade_invoice_id: INV,
+    group_share_id: shareA,
+    line_type: "group share",
+    line_total_ex: 321.43,
+  });
+  memory.weeklyLockHeld = true;
+  const busy = await assertRejects(
+    () => unfreezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(busy.code, "group_split_busy");
+  assertEquals(busy.status, 409);
+  assertEquals(busy.message, "The weekly invoice is busy, try again.");
+  assertEquals(busy.code === "group_split_has_live_invoice", false);
+  assert(memory.rows("group_work_orders")[0].split_frozen_at);
+  assert(
+    memory.rows("trade_invoice_lines").some((line) => line.line_type === "group share"),
+  );
+});
+
+Deno.test("saving the same hours again does not wipe the signature", async () => {
+  const memory = new Memory();
+  seedSplit(memory, "open");
+  const entry = groupHoursFromBody({
+    work_date: "2026-10-20",
+    start_time: "08:00",
+    finish_time: "10:00",
+    break_minutes: 0,
+    hours: 2,
+  });
+  memory.rows("group_work_order_time_entries").push({
+    group_id: GROUP,
+    user_id: USER_A,
+    ...entry,
+    created_at: "2026-10-20T00:00:00.000Z",
+    updated_at: "2026-10-20T00:00:00.000Z",
+  });
+  memory.rows("job_client_signoffs").push(
+    drawnSignoff("before-resave", "2026-10-25T00:00:00.000Z"),
+  );
+  await submitGroupWorkOrderHours(memory.client(), trade(USER_A), {
+    group_id: GROUP,
+    ...entry,
+  });
+  const row = memory.rows("group_work_order_time_entries")[0];
+  assertEquals(row.updated_at, "2026-10-20T00:00:00.000Z");
+  assertEquals(
+    memory.rows("group_work_orders").find((group) => group.id === GROUP)?.hours_changed_at,
+    undefined,
+  );
+  const still = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(still.client_signed, true);
+
+  await submitGroupWorkOrderHours(memory.client(), trade(USER_A), {
+    group_id: GROUP,
+    work_date: "2026-10-20",
+    start_time: "08:00",
+    finish_time: "11:00",
+    break_minutes: 0,
+    hours: 3,
+  });
+  const changed = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {
+    group_id: GROUP,
+  });
+  assertEquals(changed.client_signed, false);
+  assert(
+    memory.rows("group_work_orders").find((group) => group.id === GROUP)?.hours_changed_at,
+  );
+});
+
 Deno.test("ops-api wires the share, the fence, and the trade and public doors", async () => {
   const source = await Deno.readTextFile(
     new URL("./index.ts", import.meta.url),
@@ -1722,6 +2149,9 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   assert(source.includes("resolveGroupShareInvoiceExtra"));
   assert(source.includes("assertGroupWorkOrderInvoiceFence"));
   assert(source.includes("assertLegacyInvoiceNotOnGroupJob"));
+  assert(source.includes("assertGroupJobDraftUsesShare"));
+  assert(source.includes("withoutGroupJobAssignments"));
+  assert(source.includes("group_job_uses_share"));
   assert(source.includes("group_share_id: dbLine.group_share_id || null"));
   assert(
     source.includes(

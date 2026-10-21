@@ -19,19 +19,25 @@
 -- Freeze is an explicit step (freeze_group_work_order_split) after every
 -- participant and every installer currently assigned to the job has
 -- assignment-dated hours, and a drawn client sign-off (not an office
--- waiver, not revoked, dated after the later of each hour row's
--- created_at and updated_at) exists on job_client_signoffs. A share read
+-- waiver, not revoked, strictly newer than every remaining hour row and
+-- the group's hours_changed_at) exists on job_client_signoffs.
+-- hours_changed_at moves on an hour insert, a real hour change, an hour
+-- delete, and a participant removal. Saving the same hours again does
+-- not move it and does not move that row's updated_at. A share read
 -- and project_group_work_order_split never set split_frozen_at and never
 -- persist share rows. The share-line trigger freezes in the SAME
 -- transaction as a non-draft line insert, so a failed insert rolls the
 -- marker back. A draft save stores the line, does not freeze, and does
 -- not hold the share, so a later save or submit can replace it. Office
 -- unfreeze is refused while a submit or Xero push is in flight (the
--- weekly invoice lock, or status pending_acknowledgment or later, or any
--- Xero id). Before that it removes only the share line and recalculates
--- that invoice, including a weekly work order's header totals. A
--- recurring deduction stays off the payable. Nothing is recomputed until
--- the next explicit freeze. Voiding stays permanent.
+-- weekly invoice lock is group_split_busy, not a live invoice; status
+-- pending_acknowledgment or later, or any Xero id, is
+-- group_split_has_live_invoice). Before that it removes only the share
+-- line and recalculates that invoice, including a weekly work order's
+-- header totals. A recurring deduction that no longer fits the reduced
+-- payable is cleared in that same update so the invoice cannot go
+-- negative; one that still fits is left as it was. Nothing is recomputed
+-- until the next explicit freeze. Voiding stays permanent.
 -- Owner to confirm the freeze, unfreeze and sign-off defaults.
 
 SET LOCAL lock_timeout = '5s';
@@ -69,6 +75,11 @@ ALTER TABLE public.group_work_orders
   ADD COLUMN IF NOT EXISTS split_frozen_at timestamptz;
 COMMENT ON COLUMN public.group_work_orders.split_frozen_at IS
   'Set in the same transaction as the share snapshot, under a row lock on this group. Null means the split is still open. Every share line reads that one snapshot.';
+
+ALTER TABLE public.group_work_orders
+  ADD COLUMN IF NOT EXISTS hours_changed_at timestamptz;
+COMMENT ON COLUMN public.group_work_orders.hours_changed_at IS
+  'clock_timestamp() when hours are inserted, really changed, or deleted, or a participant is removed. A counting sign-off is strictly newer than this and every remaining hour row. An identical re-save does not move it.';
 
 -- ── 2. participants ─────────────────────────────────────────────────────────
 
@@ -549,9 +560,12 @@ BEGIN
   -- A group needs a drawn signature. This does not call #1110's helper:
   -- a revoked row is not signed here even if that helper still counts it.
   -- An office waiver does not count here (it still counts for the ordinary
-  -- client-signoff invoice gate). The drawing has to be dated after the
-  -- latest hours on a non-void group for this job. An edit moves
-  -- updated_at, so the latest instant is the later of created and updated.
+  -- client-signoff invoice gate). The drawing has to be strictly newer
+  -- than every remaining hour row (later of created_at and updated_at)
+  -- and the group's hours_changed_at. max() over both, not GREATEST:
+  -- GREATEST of a null hour stamp and a stamp is null. An identical
+  -- re-save moves neither stamp. Deleting the last hour row leaves
+  -- hours_changed_at, so the old drawing still does not count.
   SELECT s.method, s.happy, s.satisfaction_rating, s.signature_media_id, s.created_at
     INTO v_method, v_happy, v_rating, v_media, v_signed_at
   FROM public.job_client_signoffs s
@@ -579,12 +593,19 @@ BEGIN
   IF v_rating IS NOT NULL AND v_rating < v_min THEN
     RETURN false;
   END IF;
-  SELECT max(GREATEST(e.created_at, COALESCE(e.updated_at, e.created_at)))
-    INTO v_latest_hours
-  FROM public.group_work_order_time_entries e
-  JOIN public.group_work_orders g ON g.id = e.group_id
-  WHERE g.job_id = p_job
-    AND g.status <> 'void';
+  SELECT max(stamp) INTO v_latest_hours
+  FROM (
+    SELECT max(GREATEST(e.created_at, COALESCE(e.updated_at, e.created_at))) AS stamp
+    FROM public.group_work_order_time_entries e
+    JOIN public.group_work_orders g ON g.id = e.group_id
+    WHERE g.job_id = p_job
+      AND g.status <> 'void'
+    UNION ALL
+    SELECT max(g.hours_changed_at)
+    FROM public.group_work_orders g
+    WHERE g.job_id = p_job
+      AND g.status <> 'void'
+  ) stamps;
   IF v_latest_hours IS NOT NULL AND NOT (v_signed_at > v_latest_hours) THEN
     RETURN false;
   END IF;
@@ -895,7 +916,9 @@ DECLARE
 BEGIN
   -- Weekly persist locks 'weekly-trade-invoice:' || org before any job
   -- lock. Take that lock first and do not wait: a submit already holding
-  -- it is in flight. Then the job lock, then the row.
+  -- it is busy, try again (group_split_busy). A live invoice is a
+  -- different refusal, checked after the lock is held. Then the job
+  -- lock, then the row.
   SELECT g.job_id, g.org_id INTO v_job, v_org
   FROM public.group_work_orders g
   WHERE g.id = p_group_id;
@@ -905,7 +928,7 @@ BEGIN
   IF NOT pg_try_advisory_xact_lock(
     hashtextextended('weekly-trade-invoice:' || v_org::text, 0)
   ) THEN
-    RAISE EXCEPTION 'group_split_has_live_invoice' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'group_split_busy: busy, try again' USING ERRCODE = '23514';
   END IF;
   PERFORM public.group_work_order_lock_job(v_job);
   SELECT g.job_id INTO v_job
@@ -948,25 +971,25 @@ BEGIN
 
   -- Same split as trade_invoice_money: super 12% of the remaining line
   -- sum, worker withhold 6%, net is that sum minus the withhold, GST on
-  -- the sum when gst_on. A recurring deduction stays on the payable only
-  -- and is not written here. An invoice whose money columns are all null
-  -- (gst_on null) is left alone. A weekly work order also rewrites its
-  -- three headers from the lines that remain: final-payout deductions are
-  -- the negative lines, to_be_paid is the line sum, and the job grand is
-  -- that sum plus those deductions. A weekly invoice whose to_be_paid
-  -- would not stay positive fails its check and this unfreeze rolls back.
-  -- Any other source leaves those three columns as they are (null).
+  -- the sum when gst_on. A recurring deduction stays off gross. If it is
+  -- now more than the reduced payable (net + GST) it is cleared in this
+  -- same update, with the office note, unless that payable is 0, in which
+  -- case the note is cleared too. A deduction that still fits is left
+  -- unchanged. An invoice whose money columns are all null (gst_on null)
+  -- is left alone. A weekly work order also rewrites its three headers
+  -- from the lines that remain: final-payout deductions are the negative
+  -- lines, to_be_paid is the line sum, and the job grand is that sum plus
+  -- those deductions. A weekly invoice whose to_be_paid would not stay
+  -- positive fails its check and this unfreeze rolls back. Any other
+  -- source leaves those three columns as they are (null).
   UPDATE public.trade_invoices i
   SET subtotal_ex = m.line_sum,
       gross_earned = m.line_sum,
       super_rate = 0.12,
       super_amount = round(m.line_sum * 0.12, 2),
-      net_pay = round(m.line_sum - round(m.line_sum * 0.06, 2), 2),
-      gst = CASE WHEN i.gst_on THEN round(m.line_sum * 0.10, 2) ELSE 0 END,
-      total_inc = round(
-        m.line_sum + CASE WHEN i.gst_on THEN round(m.line_sum * 0.10, 2) ELSE 0 END,
-        2
-      ),
+      net_pay = m.new_net,
+      gst = m.new_gst,
+      total_inc = round(m.line_sum + m.new_gst, 2),
       job_grand_total_ex = CASE
         WHEN i.invoice_source = 'weekly_work_order'
           THEN round(m.line_sum + m.final_deductions, 2)
@@ -979,19 +1002,65 @@ BEGIN
       to_be_paid_ex = CASE
         WHEN i.invoice_source = 'weekly_work_order' THEN m.line_sum
         ELSE i.to_be_paid_ex
+      END,
+      recurring_deduction_id = CASE
+        WHEN i.recurring_deduction_amount IS NOT NULL
+         AND i.recurring_deduction_amount > m.payable
+        THEN NULL
+        ELSE i.recurring_deduction_id
+      END,
+      recurring_deduction_label = CASE
+        WHEN i.recurring_deduction_amount IS NOT NULL
+         AND i.recurring_deduction_amount > m.payable
+        THEN NULL
+        ELSE i.recurring_deduction_label
+      END,
+      recurring_deduction_amount = CASE
+        WHEN i.recurring_deduction_amount IS NOT NULL
+         AND i.recurring_deduction_amount > m.payable
+        THEN NULL
+        ELSE i.recurring_deduction_amount
+      END,
+      recurring_deduction_note = CASE
+        WHEN i.recurring_deduction_amount IS NOT NULL
+         AND i.recurring_deduction_amount > m.payable
+        THEN CASE
+          WHEN m.payable = 0 THEN NULL
+          ELSE i.recurring_deduction_label || ' $'
+            || to_char(i.recurring_deduction_amount, 'FM999999990.00')
+            || ' NOT taken for the week starting '
+            || to_char(i.week_start, 'YYYY-MM-DD')
+            || ': the amount payable on this invoice ($'
+            || to_char(m.payable, 'FM999999990.00')
+            || ') is less than the deduction. Nothing was taken off. The office to recover it another way.'
+        END
+        ELSE i.recurring_deduction_note
       END
   FROM (
-    SELECT i2.id,
-           COALESCE(round(sum(l.line_total_ex), 2), 0) AS line_sum,
-           COALESCE(round(-sum(l.line_total_ex) FILTER (
-             WHERE replace(replace(lower(btrim(COALESCE(l.line_type, ''))), '_', ' '), ' ', '')
-               = 'finalpayoutdeduction'
-           ), 2), 0) AS final_deductions
-    FROM public.trade_invoices i2
-    LEFT JOIN public.trade_invoice_lines l ON l.trade_invoice_id = i2.id
-    WHERE i2.id = ANY (v_stripped)
-      AND i2.gst_on IS NOT NULL
-    GROUP BY i2.id
+    SELECT raw.id,
+           raw.line_sum,
+           raw.final_deductions,
+           round(raw.line_sum - round(raw.line_sum * 0.06, 2), 2) AS new_net,
+           CASE WHEN raw.gst_on THEN round(raw.line_sum * 0.10, 2) ELSE 0 END AS new_gst,
+           round(
+             round(raw.line_sum - round(raw.line_sum * 0.06, 2), 2)
+             + CASE WHEN raw.gst_on THEN round(raw.line_sum * 0.10, 2) ELSE 0 END,
+             2
+           ) AS payable
+    FROM (
+      SELECT i2.id,
+             i2.gst_on,
+             COALESCE(round(sum(l.line_total_ex), 2), 0) AS line_sum,
+             COALESCE(round(-sum(l.line_total_ex) FILTER (
+               WHERE replace(replace(lower(btrim(COALESCE(l.line_type, ''))), '_', ' '), ' ', '')
+                 = 'finalpayoutdeduction'
+             ), 2), 0) AS final_deductions
+      FROM public.trade_invoices i2
+      LEFT JOIN public.trade_invoice_lines l ON l.trade_invoice_id = i2.id
+      WHERE i2.id = ANY (v_stripped)
+        AND i2.gst_on IS NOT NULL
+      GROUP BY i2.id
+    ) raw
   ) m
   WHERE i.id = m.id;
 
@@ -1151,7 +1220,7 @@ COMMENT ON FUNCTION public.freeze_group_work_order_split(uuid) IS
 COMMENT ON FUNCTION public.project_group_work_order_split(uuid) IS
   'Quote only. Never sets split_frozen_at and never writes share rows.';
 COMMENT ON FUNCTION public.unfreeze_group_work_order_split(uuid, uuid) IS
-  'Office. Refuses once a share invoice is acknowledged or later, or has a Xero id or push stamp. Before that, deletes only the share line, recalculates the invoice, and clears the snapshot. Does not ops-reject the week and does not recompute.';
+  'Office. A busy weekly lock is group_split_busy. A share invoice acknowledged or later, or with a Xero id or push stamp, is group_split_has_live_invoice. Before that, deletes only the share line, recalculates the invoice, clears a recurring deduction that no longer fits, and clears the snapshot. Does not ops-reject the week and does not recompute.';
 
 REVOKE ALL ON FUNCTION public.group_work_order_assignment_covers(uuid, uuid, date) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_client_signoff_counts(uuid) FROM PUBLIC, anon, authenticated;
@@ -1192,15 +1261,33 @@ BEGIN
   IF v_frozen IS NOT NULL THEN
     RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
   END IF;
-  -- now() is the transaction start. A sign-off inserted later in the same
-  -- transaction uses clock_timestamp(), so an edit has to move past it.
-  IF TG_OP = 'UPDATE' THEN
-    NEW.updated_at := clock_timestamp();
+  -- Saving the same day again must not move updated_at or hours_changed_at,
+  -- so a client drawing newer than the real hours stays valid. A frozen
+  -- group still refuses above, including an identical write.
+  IF TG_OP = 'UPDATE'
+     AND NEW.work_date IS NOT DISTINCT FROM OLD.work_date
+     AND NEW.start_time IS NOT DISTINCT FROM OLD.start_time
+     AND NEW.finish_time IS NOT DISTINCT FROM OLD.finish_time
+     AND NEW.break_minutes IS NOT DISTINCT FROM OLD.break_minutes
+     AND NEW.hours IS NOT DISTINCT FROM OLD.hours
+     AND NEW.user_id IS NOT DISTINCT FROM OLD.user_id
+     AND NEW.group_id IS NOT DISTINCT FROM OLD.group_id
+  THEN
+    NEW.updated_at := OLD.updated_at;
+    RETURN NEW;
   END IF;
   IF TG_OP <> 'DELETE' THEN
     IF NOT public.group_work_order_assignment_covers(v_job, NEW.user_id, NEW.work_date) THEN
       RAISE EXCEPTION 'group_hours_not_assigned' USING ERRCODE = '23514';
     END IF;
+  END IF;
+  -- now() is the transaction start. A sign-off inserted later in the same
+  -- transaction uses clock_timestamp(), so a real edit has to move past it.
+  UPDATE public.group_work_orders
+  SET hours_changed_at = clock_timestamp()
+  WHERE id = v_row.group_id;
+  IF TG_OP = 'UPDATE' THEN
+    NEW.updated_at := clock_timestamp();
   END IF;
   IF TG_OP = 'DELETE' THEN
     RETURN OLD;
@@ -1400,6 +1487,12 @@ BEGIN
   WHERE group_id = p_group_id AND user_id = p_user;
   DELETE FROM public.group_work_order_participants
   WHERE group_id = p_group_id AND user_id = p_user;
+  -- The hour delete already moves the stamp when this person had hours.
+  -- A person with none still invalidates a drawing that was signed while
+  -- they were on the group.
+  UPDATE public.group_work_orders
+  SET hours_changed_at = clock_timestamp()
+  WHERE id = p_group_id;
   INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
   VALUES (
     p_group_id, v_job, 'remove_participant', p_actor,

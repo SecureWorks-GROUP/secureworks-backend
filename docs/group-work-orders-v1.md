@@ -22,9 +22,19 @@ group tables while the switch is off. A share-shaped line on
 `generate_trade_invoice` or `save_trade_invoice_draft` is 409
 `group_work_order_disabled` before any group-table read and before any
 invoice write. The invoice-line trigger still refuses a second payment
-if a group row already exists, and it does not read the switch. Staff
-revoke, void, re-key, removing a participant, the office read, and the
-feedback read stay available so an already-open group can be cleaned up.
+if a group row already exists, and it does not read the switch. Ordinary
+pay on `save_trade_invoice_draft` for a job that already has a non-void
+group is 409 `group_job_uses_share` ("This job is on a group work
+order. Save your share, not ordinary hours.") even while the switch is
+off: the line trigger would otherwise raise
+`work_order_claim_blocked_by_group_share` and the draft save would
+return 500. `my_hours` leaves those jobs out. A failed read of the
+group rows is 503 `group_work_order_unreadable`, so a group job is
+never shown as ordinary hours. A share-shaped line on that draft is
+still 409 `group_work_order_disabled` before any group-table read.
+Staff revoke, void, re-key, removing a participant, the office read,
+and the feedback read stay available so an already-open group can be
+cleaned up.
 
 The sender flag `group_work_order_client_link_send_v1` stays off. This
 build has no sender: `send: true` returns 409 and does not call GHL.
@@ -52,7 +62,15 @@ reads the same table. For the ordinary invoice gate, `office_waiver`
 counts and a `revoked` row does not. For a group freeze, a counting
 sign-off is a drawn signature (`on_site` or `share_link`, with
 `signature_media_id`), not an office waiver and not revoked, and its
-`created_at` is after the latest hours entry on the group. That group
+`created_at` is strictly newer than the latest hours on the job. That
+instant is the later of every remaining hour row (later of `created_at`
+and `updated_at`) and `group_work_orders.hours_changed_at` on each
+non-void group. `hours_changed_at` is `clock_timestamp()` when hours are
+inserted, really changed, or deleted, and when a participant is removed.
+An identical re-save moves neither the hour row nor that stamp.
+Deleting the last hour still leaves the group stamp, so the old drawing
+does not count. The comparison is `max()` over both stamps:
+`GREATEST` of a null and a stamp is null. That group
 rule lives in `group_client_signoff_counts`, not in
 `trade_client_signoff.ts`. PR #1110 should merge first:
 `trade_client_signoff.ts` and the two #1110 migrations on this branch
@@ -118,11 +136,16 @@ and is not the authority.
   as invoiced. The database duplicate rule releases `draft` and
   `ops-reject`. The never-both TypeScript list is the same two statuses
   and stays its own check. Unfreeze is refused while a weekly submit
-  holds the invoice lock, once a share invoice is
+  holds the invoice lock (`group_split_busy`, "The weekly invoice is
+  busy, try again."). Once a share invoice is
   `pending_acknowledgment` or later, or when it carries any Xero bill id
-  or push stamp (`group_split_has_live_invoice`). Draft and queried can
-  still be stripped. The global `RELEASED_INVOICE_STATUSES` list is a
-  different lock and still includes `failed`.
+  or push stamp, the refusal is `group_split_has_live_invoice`. Draft and
+  queried can still be stripped. On the way through, a recurring deduction
+  that is larger than the reduced payable is cleared in that same money
+  update, with the office note; a payable of 0 clears the note too; a
+  deduction that still fits stays off gross. The global
+  `RELEASED_INVOICE_STATUSES` list is a different lock and still includes
+  `failed`.
 - The share line matches the invoice owner. A second live line for the
   same share is `group_share_already_invoiced`. A line whose
   `group_share_id` is another person's share is
@@ -150,9 +173,12 @@ Pending Marnin's call. Built as the safe default.
 - Commission sits outside the never-both fence.
 - The client signature reuses `job_client_signoffs` and its happy
   threshold. A group freeze does not accept an office waiver or a revoked
-  row: the signature is drawn, and its time is after the latest hours on
-  the group. That instant is the later of each hour row's `created_at`
-  and `updated_at`. The ordinary invoice gate still accepts
+  row: the signature is drawn, and its time is strictly after the latest
+  hours on the job. That instant is the later of each remaining hour
+  row's `created_at` and `updated_at`, and the group's
+  `hours_changed_at` (insert, a real update, delete, and removing a
+  participant). An identical re-save does not move it. The ordinary
+  invoice gate still accepts
   `office_waiver`. This check does not call #1110's helper. #1110 still
   needs the same rule (a revoked row is not signed) before either switch
   goes on.
@@ -161,10 +187,15 @@ Pending Marnin's call. Built as the safe default.
   A weekly work order also rewrites its three headers: final-payout
   deductions stay a positive magnitude, to-be-paid is the remaining line
   sum, and the job grand is that sum plus those deductions. A recurring
-  deduction stays on the payable and is not taken off gross. It does not
-  reject the trade's week. A weekly submit already holding the invoice
-  lock, a share on `pending_acknowledgment` or later, and any Xero id or
-  push stamp block it. Draft and queried can still be stripped.
+  deduction stays on the payable and is not taken off gross, unless the
+  reduced payable is below it. Then the deduction columns are cleared in
+  that same update and the invoice carries the office note. A payable of
+  0 clears the note. A deduction that still fits is left unchanged. It
+  does not reject the trade's week. A weekly submit already holding the
+  invoice lock is `group_split_busy` ("The weekly invoice is busy, try
+  again."), which is not a live invoice. A share on
+  `pending_acknowledgment` or later, and any Xero id or push stamp, are
+  `group_split_has_live_invoice`. Draft and queried can still be stripped.
 - Voiding stays permanent. A void group cannot be opened again. Void
   takes the weekly invoice lock, then the job lock, then the row, the
   same order as every other path. It does not lock the row before that.
@@ -187,10 +218,10 @@ Trade JWT, while the switch is on. The caller is the signed-in user.
 | `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. Refused when the job already has normal pay. No dollars. The public token is not on this card. |
 | `join_group_work_order` | The caller must be allocated, unless they are staff. After freeze, `group_split_frozen`. |
 | `sign_group_work_order` | Crew signature. PNG or JPEG data URL whose decoded bytes are between 3 and 150000 and match that format, or omitted. SVG is refused. Not the invoice gate. |
-| `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, only on an assigned date. |
+| `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, only on an assigned date. Saving the same day with the same times, break and hours does not move the row's `updated_at` or the group's `hours_changed_at`. |
 | `group_work_order_my_share` | The closed object above. |
 | `capture_group_client_signoff` | On-site client drawing. Records the trade user id. |
-| `freeze_group_work_order` | Explicit freeze after every participant and every currently assigned installer has counting hours, and a drawn client sign-off is newer than the latest hours. |
+| `freeze_group_work_order` | Explicit freeze after every participant and every currently assigned installer has counting hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. |
 | `group_work_order_preview_client_link` | Draft only. `send: true` is 409. |
 
 Public, no account, while the switch is on. The token is only for the
@@ -208,8 +239,8 @@ Office. A trade JWT is 403 before the handler.
 | --- | --- | --- |
 | `group_work_order_feedback` | open | The feedback row. |
 | `group_work_order_office` | open | Pot, every participant, who needs hours or a rate, feedback, `split_frozen`. |
-| `unfreeze_group_work_order` | gated | Clears the marker. Deletes only the share lines and recalculates those invoices, including weekly headers. A recurring deduction stays off gross. Refused while a submit holds the invoice lock, from `pending_acknowledgment`, or when the invoice has a Xero id or push stamp. |
-| `remove_group_work_order_participant` | open | Before freeze only. Deletes that person's hours and participant row and writes `remove_participant`. Does not cancel the job assignment. |
+| `unfreeze_group_work_order` | gated | Clears the marker. Deletes only the share lines and recalculates those invoices, including weekly headers. A recurring deduction stays off gross. If the reduced payable is below the deduction, those columns are cleared in the same update and the invoice carries the office note; a payable of 0 clears the note; a deduction that still fits stays. A weekly lock already held is 409 `group_split_busy` ("The weekly invoice is busy, try again."), which is not `group_split_has_live_invoice`. Also refused from `pending_acknowledgment`, or when the invoice has a Xero id or push stamp. |
+| `remove_group_work_order_participant` | open | Before freeze only. Deletes that person's hours and participant row, bumps `hours_changed_at`, and writes `remove_participant`. Does not cancel the job assignment. |
 | `revoke_group_signoff` | open | Newest `revoked` row. Does not itself unfreeze. |
 | `void_group_work_order` | open | Unfreeze first, then status `void`. A paid share blocks it. Leaving `void` is refused. |
 | `rekey_group_work_order` | open | Points at the current approved sealed `jobs.work_order_id`, only while not frozen and not void. |

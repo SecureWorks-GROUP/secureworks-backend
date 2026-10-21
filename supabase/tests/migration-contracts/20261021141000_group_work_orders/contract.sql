@@ -66,6 +66,14 @@ BEGIN
     RAISE EXCEPTION 'group-wo: hours updated_at is missing';
   END IF;
   IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'group_work_orders'
+      AND column_name = 'hours_changed_at'
+  ) THEN
+    RAISE EXCEPTION 'group-wo: hours_changed_at is missing';
+  END IF;
+  IF NOT EXISTS (
     SELECT 1 FROM public.group_work_order_settings
     WHERE id = 1
       AND google_review_url = 'https://share.google/AFyfkE7jLfCZcxanV'
@@ -1026,6 +1034,18 @@ BEGIN
   RESET ROLE;
   UPDATE public.job_assignments SET status = 'cancelled'
   WHERE id = 'd2140000-0000-4000-8000-0000000000b5';
+  -- Removing v_b bumped hours_changed_at past the drawing above.
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor, created_at
+  ) VALUES (
+    v_hours_job, 'share_link', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000501', 'client link',
+    COALESCE(
+      (SELECT hours_changed_at FROM public.group_work_orders WHERE id = v_hours_group),
+      clock_timestamp()
+    ) + interval '1 second'
+  );
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_hours_group);
   BEGIN
@@ -1345,6 +1365,299 @@ BEGIN
      AND position('FOR UPDATE;' IN v_def) < position('unfreeze_group_work_order_split' IN v_def)
   THEN
     RAISE EXCEPTION 'group-wo: void locks the row before unfreeze';
+  END IF;
+END $$;
+
+-- Deleting hours or removing a participant invalidates a drawing. An
+-- identical re-save does not. Unfreeze clears a deduction the reduced
+-- payable cannot cover, and a busy weekly lock is named before a live
+-- invoice.
+DO $$
+DECLARE
+  v_org uuid := '00000000-0000-0000-0000-000000000001';
+  v_shaun uuid := '9913309f-35ae-4a71-8e1f-f704ecc526ea';
+  v_a uuid := 'a2140000-0000-4000-8000-00000000000a';
+  v_b uuid := 'a2140000-0000-4000-8000-00000000000b';
+  v_job uuid := 'd2140000-0000-4000-8000-000000000119';
+  v_group uuid := 'd2140000-0000-4000-8000-000000000219';
+  v_ded_job uuid := 'd2140000-0000-4000-8000-000000000120';
+  v_ded_group uuid := 'd2140000-0000-4000-8000-000000000220';
+  v_over uuid := 'd2140000-0000-4000-8000-000000000408';
+  v_zero uuid := 'd2140000-0000-4000-8000-000000000409';
+  v_fit uuid := 'd2140000-0000-4000-8000-000000000410';
+  v_ded_over uuid := 'd2140000-0000-4000-8000-0000000000d2';
+  v_ded_zero uuid := 'd2140000-0000-4000-8000-0000000000d3';
+  v_ded_fit uuid := 'd2140000-0000-4000-8000-0000000000d4';
+  v_wo uuid;
+  v_share numeric;
+  v_stamp timestamptz;
+  v_updated timestamptz;
+  v_note text;
+  v_def text;
+  v_counts boolean;
+BEGIN
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_job, v_org, 'fencing', 'quoted', 'GWO-STAMP');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_job, 'GWO-STAMP-1', 'job', 'draft', 100, '[]', 'hours stamp'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-STAMP-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_group, v_org, v_job, v_wo, 'token-stamp');
+  INSERT INTO public.group_work_order_participants (group_id, user_id)
+  VALUES (v_group, v_a);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+    ('d2140000-0000-4000-8000-0000000000a9', v_job, v_a, '2026-10-21', 'scheduled'),
+    ('d2140000-0000-4000-8000-0000000000aa', v_job, v_b, '2026-10-21', 'scheduled');
+  INSERT INTO public.group_work_order_time_entries
+    (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
+  VALUES
+    (v_group, v_a, '2026-10-21', '08:00', '10:00', 0, 2.00);
+  SELECT hours_changed_at INTO v_stamp FROM public.group_work_orders WHERE id = v_group;
+  SELECT updated_at INTO v_updated
+  FROM public.group_work_order_time_entries
+  WHERE group_id = v_group AND user_id = v_a;
+  IF v_stamp IS NULL OR v_updated IS NULL THEN
+    RAISE EXCEPTION 'group-wo: inserting hours did not stamp the group';
+  END IF;
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (
+    'd2140000-0000-4000-8000-000000000504', v_job, 'signature', 'photo',
+    'data:image/png;base64,iVBORw0KGgo='
+  );
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor, created_at
+  ) VALUES (
+    v_job, 'share_link', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000504', 'client link',
+    v_stamp + interval '1 microsecond'
+  );
+  v_counts := public.group_client_signoff_counts(v_job);
+  IF v_counts IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'group-wo: a drawing after the hour insert did not count';
+  END IF;
+  UPDATE public.group_work_order_time_entries
+  SET work_date = '2026-10-21', start_time = '08:00', finish_time = '10:00',
+      break_minutes = 0, hours = 2.00
+  WHERE group_id = v_group AND user_id = v_a;
+  IF (SELECT hours_changed_at FROM public.group_work_orders WHERE id = v_group) IS DISTINCT FROM v_stamp
+     OR (SELECT updated_at FROM public.group_work_order_time_entries
+         WHERE group_id = v_group AND user_id = v_a) IS DISTINCT FROM v_updated
+     OR public.group_client_signoff_counts(v_job) IS DISTINCT FROM true
+  THEN
+    RAISE EXCEPTION 'group-wo: an identical hour save moved the signature';
+  END IF;
+  PERFORM pg_sleep(0.05);
+  UPDATE public.group_work_order_time_entries
+  SET finish_time = '11:00', hours = 3.00
+  WHERE group_id = v_group AND user_id = v_a;
+  SELECT hours_changed_at INTO v_stamp FROM public.group_work_orders WHERE id = v_group;
+  IF v_stamp IS NULL
+     OR v_stamp <= (SELECT created_at FROM public.job_client_signoffs
+                    WHERE job_id = v_job ORDER BY created_at DESC LIMIT 1)
+     OR public.group_client_signoff_counts(v_job) IS DISTINCT FROM false
+  THEN
+    RAISE EXCEPTION 'group-wo: a real hour change left the old drawing valid';
+  END IF;
+  DELETE FROM public.group_work_order_time_entries
+  WHERE group_id = v_group AND user_id = v_a;
+  IF (SELECT count(*) FROM public.group_work_order_time_entries WHERE group_id = v_group) <> 0
+     OR public.group_client_signoff_counts(v_job) IS DISTINCT FROM false
+     OR (SELECT hours_changed_at FROM public.group_work_orders WHERE id = v_group) <= v_stamp
+  THEN
+    RAISE EXCEPTION 'group-wo: deleting the last hour left the old drawing valid';
+  END IF;
+  SELECT hours_changed_at INTO v_stamp FROM public.group_work_orders WHERE id = v_group;
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (
+    'd2140000-0000-4000-8000-000000000505', v_job, 'signature', 'photo',
+    'data:image/png;base64,iVBORw0KGgo='
+  );
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor, created_at
+  ) VALUES (
+    v_job, 'share_link', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000505', 'client link',
+    v_stamp + interval '1 microsecond'
+  );
+  IF public.group_client_signoff_counts(v_job) IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'group-wo: a drawing after the hour delete did not count';
+  END IF;
+  INSERT INTO public.group_work_order_participants (group_id, user_id)
+  VALUES (v_group, v_b);
+  PERFORM pg_sleep(0.05);
+  SET LOCAL ROLE service_role;
+  PERFORM public.remove_group_work_order_participant(v_group, v_b, v_shaun);
+  RESET ROLE;
+  IF EXISTS (
+       SELECT 1 FROM public.group_work_order_participants
+       WHERE group_id = v_group AND user_id = v_b
+     )
+     OR public.group_client_signoff_counts(v_job) IS DISTINCT FROM false
+     OR (SELECT hours_changed_at FROM public.group_work_orders WHERE id = v_group) <= v_stamp
+  THEN
+    RAISE EXCEPTION 'group-wo: removing a participant left the drawing valid';
+  END IF;
+
+  v_def := pg_get_functiondef('public.unfreeze_group_work_order_split(uuid,uuid)'::regprocedure);
+  IF position('group_split_busy: busy, try again' IN v_def) = 0
+     OR position('group_split_has_live_invoice' IN v_def) = 0
+     OR position('group_split_busy' IN v_def) > position('group_split_has_live_invoice' IN v_def)
+  THEN
+    RAISE EXCEPTION 'group-wo: a busy weekly lock is not named before a live invoice';
+  END IF;
+
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_ded_job, v_org, 'fencing', 'quoted', 'GWO-DED');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_ded_job, 'GWO-DED-1', 'job', 'draft', 100, '[]', 'deduction refit'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-DED-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_ded_group, v_org, v_ded_job, v_wo, 'token-ded');
+  INSERT INTO public.group_work_order_participants (group_id, user_id)
+  VALUES (v_ded_group, v_a);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status)
+  VALUES ('d2140000-0000-4000-8000-0000000000ab', v_ded_job, v_a, '2026-10-21', 'scheduled');
+  INSERT INTO public.group_work_order_time_entries
+    (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
+  VALUES
+    (v_ded_group, v_a, '2026-10-21', '08:00', '10:00', 0, 2.00);
+  SELECT hours_changed_at INTO v_stamp FROM public.group_work_orders WHERE id = v_ded_group;
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (
+    'd2140000-0000-4000-8000-000000000506', v_ded_job, 'signature', 'photo',
+    'data:image/png;base64,iVBORw0KGgo='
+  );
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor, created_at
+  ) VALUES (
+    v_ded_job, 'share_link', 'Alex Client', true, 5,
+    'd2140000-0000-4000-8000-000000000506', 'client link',
+    v_stamp + interval '1 second'
+  );
+  INSERT INTO public.trade_recurring_deductions (id, user_id, label, amount, first_week_start)
+  VALUES
+    (v_ded_over, v_a, 'Ute hire', 50, DATE '2026-10-12'),
+    (v_ded_zero, v_a, 'Ute hire', 50, DATE '2026-10-05'),
+    (v_ded_fit, v_a, 'Ute hire', 5, DATE '2026-09-28');
+
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_ded_group);
+  RESET ROLE;
+  SELECT share_ex INTO v_share FROM public.group_work_order_shares
+  WHERE group_id = v_ded_group AND user_id = v_a;
+  IF v_share IS DISTINCT FROM 100 THEN
+    RAISE EXCEPTION 'group-wo: sole share was %', v_share;
+  END IF;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, invoice_source, week_start,
+    subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay,
+    recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount
+  ) VALUES (
+    v_over, v_org, v_a, 'queried', 'hourly', DATE '2026-10-12',
+    110, 11, 121,
+    true, 0.12, 13.20, 110, 103.40,
+    v_ded_over, 'Ute hire', 50
+  );
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_over, v_ded_job, 'travel', 10);
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_over, v_ded_job, 'group share', v_share);
+  SELECT hours_changed_at INTO v_stamp FROM public.group_work_orders WHERE id = v_ded_group;
+  SET LOCAL ROLE service_role;
+  PERFORM public.unfreeze_group_work_order_split(v_ded_group, v_shaun);
+  RESET ROLE;
+  v_note := 'Ute hire $50.00 NOT taken for the week starting 2026-10-12: the amount payable on this invoice ($10.40) is less than the deduction. Nothing was taken off. The office to recover it another way.';
+  IF (SELECT net_pay FROM public.trade_invoices WHERE id = v_over) IS DISTINCT FROM 9.40
+     OR (SELECT gst FROM public.trade_invoices WHERE id = v_over) IS DISTINCT FROM 1.00
+     OR (SELECT total_inc FROM public.trade_invoices WHERE id = v_over) IS DISTINCT FROM 11
+     OR (SELECT super_amount FROM public.trade_invoices WHERE id = v_over) IS DISTINCT FROM 1.20
+     OR (SELECT recurring_deduction_id FROM public.trade_invoices WHERE id = v_over) IS NOT NULL
+     OR (SELECT recurring_deduction_label FROM public.trade_invoices WHERE id = v_over) IS NOT NULL
+     OR (SELECT recurring_deduction_amount FROM public.trade_invoices WHERE id = v_over) IS NOT NULL
+     OR (SELECT recurring_deduction_note FROM public.trade_invoices WHERE id = v_over) IS DISTINCT FROM v_note
+     OR (SELECT hours_changed_at FROM public.group_work_orders WHERE id = v_ded_group) IS DISTINCT FROM v_stamp
+  THEN
+    RAISE EXCEPTION 'group-wo: unfreeze left a deduction the payable cannot cover';
+  END IF;
+
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_ded_group);
+  RESET ROLE;
+  SELECT share_ex INTO v_share FROM public.group_work_order_shares
+  WHERE group_id = v_ded_group AND user_id = v_a;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, invoice_source, week_start,
+    subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay,
+    recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount
+  ) VALUES (
+    v_zero, v_org, v_a, 'queried', 'hourly', DATE '2026-10-05',
+    100, 10, 110,
+    true, 0.12, 12.00, 100, 94.00,
+    v_ded_zero, 'Ute hire', 50
+  );
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_zero, v_ded_job, 'group share', v_share);
+  SET LOCAL ROLE service_role;
+  PERFORM public.unfreeze_group_work_order_split(v_ded_group, v_shaun);
+  RESET ROLE;
+  IF (SELECT net_pay FROM public.trade_invoices WHERE id = v_zero) IS DISTINCT FROM 0
+     OR (SELECT gst FROM public.trade_invoices WHERE id = v_zero) IS DISTINCT FROM 0
+     OR (SELECT total_inc FROM public.trade_invoices WHERE id = v_zero) IS DISTINCT FROM 0
+     OR (SELECT subtotal_ex FROM public.trade_invoices WHERE id = v_zero) IS DISTINCT FROM 0
+     OR (SELECT recurring_deduction_id FROM public.trade_invoices WHERE id = v_zero) IS NOT NULL
+     OR (SELECT recurring_deduction_label FROM public.trade_invoices WHERE id = v_zero) IS NOT NULL
+     OR (SELECT recurring_deduction_amount FROM public.trade_invoices WHERE id = v_zero) IS NOT NULL
+     OR (SELECT recurring_deduction_note FROM public.trade_invoices WHERE id = v_zero) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: a zero payable kept the deduction or its note';
+  END IF;
+
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_ded_group);
+  RESET ROLE;
+  SELECT share_ex INTO v_share FROM public.group_work_order_shares
+  WHERE group_id = v_ded_group AND user_id = v_a;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, invoice_source, week_start,
+    subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay,
+    recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount,
+    recurring_deduction_note
+  ) VALUES (
+    v_fit, v_org, v_a, 'queried', 'hourly', DATE '2026-09-28',
+    110, 11, 121,
+    true, 0.12, 13.20, 110, 103.40,
+    v_ded_fit, 'Ute hire', 5,
+    'kept'
+  );
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_fit, v_ded_job, 'travel', 10);
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_fit, v_ded_job, 'group share', v_share);
+  SET LOCAL ROLE service_role;
+  PERFORM public.unfreeze_group_work_order_split(v_ded_group, v_shaun);
+  RESET ROLE;
+  IF (SELECT net_pay FROM public.trade_invoices WHERE id = v_fit) IS DISTINCT FROM 9.40
+     OR (SELECT gst FROM public.trade_invoices WHERE id = v_fit) IS DISTINCT FROM 1.00
+     OR (SELECT recurring_deduction_amount FROM public.trade_invoices WHERE id = v_fit) IS DISTINCT FROM 5
+     OR (SELECT recurring_deduction_label FROM public.trade_invoices WHERE id = v_fit) IS DISTINCT FROM 'Ute hire'
+     OR (SELECT recurring_deduction_note FROM public.trade_invoices WHERE id = v_fit) IS DISTINCT FROM 'kept'
+     OR (SELECT recurring_deduction_id FROM public.trade_invoices WHERE id = v_fit) IS DISTINCT FROM v_ded_fit
+  THEN
+    RAISE EXCEPTION 'group-wo: unfreeze cleared a deduction the payable still covers';
   END IF;
 END $$;
 
