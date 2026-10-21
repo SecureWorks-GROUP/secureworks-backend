@@ -243,11 +243,12 @@ jobs:
       # (claim first, 90-day look-back, every paying owner), the 24-hour archive
       # sweep and the dry-run Complete backlog list; get_review is a real stage and a
       # GHL stage event can no longer pull a card out of Get Review or the archive.
-      - name: Test the paid close-out rule, review sender, sweeps and stage
+      - name: Test the paid close-out rule, review sender, receipt sender, sweeps and stage
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/_shared/job_paid_closeout_test.ts \
             supabase/functions/ops-api/job_closeout_test.ts \
+            supabase/functions/ops-api/job_receipt_test.ts \
             supabase/functions/_shared/stage-gate/job-state-machine_test.ts \
             supabase/functions/_shared/stage-gate/engine_test.ts \
             supabase/functions/ghl-webhook/stage_rank_test.ts
