@@ -21,6 +21,8 @@ import {
   noteGroup,
   noteOwner,
   OVERVIEW_MESSAGE_LIMIT,
+  OVERVIEW_NOT_SEEN,
+  overviewMatching,
   overviewInvoice,
   overviewMessages,
   overviewNote,
@@ -622,6 +624,10 @@ function fullClient(extra: Partial<Parameters<typeof fakeClient>[0]> = {}) {
       context_job_story_ledger: LEDGER,
       context_job_story_text_get: STORY_TEXT,
       job_quote_values: QUOTE_VALUES,
+      context_recon_job_items: [
+        { event_id: "ev-1", cause: "defect:no_identity" },
+        { event_id: "ev-2", cause: "ambiguity:one_candidate" },
+      ],
       ...(extra.rpc ?? {}),
     },
     ...extra,
@@ -680,6 +686,63 @@ Deno.test("GET job_overview: every part, read only, no network, the card passed 
   for (const [name, s] of Object.entries(o.sources) as [string, any][]) {
     assertEquals(s.ok, true, `${name} ${JSON.stringify(s)}`);
   }
+  assertEquals(
+    client.rpcs.find((r) => r.fn === "context_recon_job_items")!.args,
+    { p_job: JOB },
+  );
+  assertEquals(o.matching, { waiting: 2, more: false, left_off_daily_list: 1 });
+  assertEquals(o.not_seen.map((n: any) => n.key), [
+    "material_orders",
+    "crew_tasks_and_crm_notes",
+  ]);
+});
+
+Deno.test("Matching: rows waiting for this job are counted, a cut page says more, and an unread count is never zero", async () => {
+  const rows = Array.from({ length: 201 }, (_, i) => ({
+    event_id: `e${i}`,
+    cause: i < 3 ? "defect:backfill_never_asked" : "ambiguity:no_candidate",
+  }));
+  assertEquals(overviewMatching(rows), {
+    waiting: 200,
+    more: true,
+    left_off_daily_list: 3,
+  });
+  assertEquals(overviewMatching([]), {
+    waiting: 0,
+    more: false,
+    left_off_daily_list: 0,
+  });
+  for (const data of [null, {}, "x"]) {
+    const o: any = await jobOverviewAction(
+      fullClient({ rpc: { context_recon_job_items: data } }),
+      new URLSearchParams(`jobId=${JOB}`),
+      deps(),
+    );
+    assertEquals([o.matching, o.sources.matching.code], [null, "invalid_shape"]);
+  }
+  const failedRead: any = await jobOverviewAction(
+    fullClient({ rpcErrors: { context_recon_job_items: { code: "57014", message: "timeout" } } }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals([failedRead.matching, failedRead.sources.matching.code], [null, "rpc_failed"]);
+  assert(failedRead.story, "a failed Matching read leaves every other part");
+  const notDeployed: any = await jobOverviewAction(
+    fullClient({ rpcErrors: { context_recon_job_items: { code: "PGRST202", message: "missing" } } }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals(notDeployed.sources.matching.state, "not_deployed");
+});
+
+Deno.test("what Context cannot see stands on every card, even a failed one", async () => {
+  const o: any = await jobOverviewAction(
+    fullClient({ failTables: new Set(["xero_invoices", "job_media"]) }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals(o.not_seen, OVERVIEW_NOT_SEEN.map((n) => ({ ...n })));
+  for (const n of o.not_seen) assert(!/[\u2013\u2014]/.test(n.text), n.text);
 });
 
 Deno.test("no call transcript words anywhere in the answer", async () => {

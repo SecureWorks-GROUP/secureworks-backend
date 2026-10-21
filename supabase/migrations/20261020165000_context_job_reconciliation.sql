@@ -14,7 +14,11 @@
 --
 -- context_recon_job_items(job): the queued rows that offer this job (its candidates, or the
 -- ladder's job on a queued status), defects included, each with the evidence hash a decision must
--- echo, the cause and every job offered. This is the per-job door onto the queue: the daily list
+-- echo, the cause and every job offered. Each offered job carries its type, suburb and status, and
+-- why it is offered, as facts read off the row, never a guess: ladder_job (the ladder put the row
+-- there), candidate (the ladder listed it as a possible job), customer_job (the row's contact is
+-- the job's customer contact), job_number_in_message (the job number stands whole in the subject
+-- or the first 2,000 characters of the body; a call row is never read for it). Never empty. This is the per-job door onto the queue: the daily list
 -- ranks causes and leaves defect rows out, so a staff member who knows the job can still decide a
 -- row the list never shows. Its pool is the queue's, narrowed to this job: rows with this job
 -- as a candidate, every row on this job (the queue keeps a placed row while a decision on it is
@@ -89,7 +93,19 @@ LANGUAGE sql STABLE AS $$
               ELSE 'ambiguity:no_candidate' END,
          q.state, q.action,
          public.context_recon_evidence_hash_of(q.channel, q.direction, q.occurred_at, q.contact_id, q.payload),
-         coalesce((SELECT jsonb_agg(jsonb_build_object('job_id', j.id, 'job_number', j.job_number)
+         coalesce((SELECT jsonb_agg(jsonb_build_object('job_id', j.id, 'job_number', j.job_number,
+                                                       'type', j.type, 'suburb', j.site_suburb, 'status', j.status,
+                                                       'reasons', to_jsonb(array_remove(ARRAY[
+                                                         CASE WHEN j.id = q.job_id THEN 'ladder_job' END,
+                                                         CASE WHEN j.id = ANY (coalesce(q.candidate_job_ids, '{}'::uuid[]))
+                                                              THEN 'candidate' END,
+                                                         CASE WHEN q.contact_id IS NOT NULL AND j.ghl_contact_id = q.contact_id
+                                                              THEN 'customer_job' END,
+                                                         CASE WHEN j.job_number IS NOT NULL AND q.channel IS DISTINCT FROM 'call'
+                                                               AND (coalesce(q.payload ->> 'subject', '') || ' '
+                                                                    || left(coalesce(q.payload ->> 'body', q.payload ->> 'text', ''), 2000))
+                                                                   ~* ('(^|[^A-Za-z0-9])' || j.job_number || '($|[^A-Za-z0-9])')
+                                                              THEN 'job_number_in_message' END], NULL)))
                                     ORDER BY j.job_number COLLATE "C", j.id)
                    FROM public.jobs j
                    WHERE j.id = ANY (coalesce(q.candidate_job_ids, '{}'::uuid[])
@@ -100,7 +116,7 @@ LANGUAGE sql STABLE AS $$
   LIMIT 201
 $$;
 COMMENT ON FUNCTION public.context_recon_job_items(uuid) IS
- 'Context job reconciliation (20261020165000): the queued rows that offer a job, defects included, each with the evidence hash a decision echoes (context_recon_evidence_hash), the cause (context_recon_queue''s rule) and the jobs offered (candidates plus the ladder''s job, the set confirm accepts). Newest first, at most 201 (ops-api pages 200). Call rows carry no preview. Read only, service role only.';
+ 'Context job reconciliation (20261020165000): the queued rows that offer a job, defects included, each with the evidence hash a decision echoes (context_recon_evidence_hash), the cause (context_recon_queue''s rule) and the jobs offered (candidates plus the ladder''s job, the set confirm accepts), each with type, suburb, status and its reasons. Newest first, at most 201 (ops-api pages 200). Call rows carry no preview. Read only, service role only.';
 
 DO $$
 DECLARE f text;
