@@ -8,10 +8,12 @@ import {
   type LastSaveHashes,
   lastSaveHashes,
   MATERIALS_ACTUAL_OPEN,
+  NO_REVISION_BINDING,
   PATIO_EXPECTED_SCOPE_PROJECTION,
   PATIO_FROZEN_REVISION_COLUMNS,
   PATIO_LAST_SAVE_HASH_COLUMNS,
   patioExpectedVersusActual,
+  type RevisionAcceptance,
 } from "./job_profit_patio_expected.ts";
 import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
 import { jobProfitAction } from "./job_profit.ts";
@@ -71,6 +73,11 @@ const ACCEPTED: FrozenAcceptance = {
   source: "job_documents.accepted_at",
 };
 
+// A binding no record supplies today: the pure tests pass it only to keep the
+// lane arithmetic covered, as if a revision binding existed. The action never
+// passes it (NO_REVISION_BINDING).
+const BOUND: RevisionAcceptance = { accepted: true, basis: "test_binding" };
+
 // Stand-in hashes: the last save is the frozen revision unless a test says not.
 const SAME: LastSaveHashes = {
   scope_hash: "a".repeat(64),
@@ -85,6 +92,7 @@ function pe(
   // an engine with JP-12 (#1107)
   installerCheck: boolean | null = true,
   acceptance: FrozenAcceptance | null = ACCEPTED,
+  revisionAcceptance: RevisionAcceptance | null = BOUND,
 ) {
   return patioExpectedVersusActual(
     cur,
@@ -93,6 +101,7 @@ function pe(
     hashes,
     installerCheck,
     acceptance,
+    revisionAcceptance,
   );
 }
 
@@ -597,8 +606,15 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
     scope: "job",
   });
   assertEquals(pe.frozen_scope.last_save_matches_frozen, true);
-  assertEquals(pe.lanes.materials.variance_ex, 300);
-  assertEquals(pe.flags, []);
+  // The job's acceptance may be another revision's: no record binds it to
+  // this one, so the frozen figures are shown but compared with nothing.
+  assertEquals(pe.frozen_scope.revision_acceptance, NO_REVISION_BINDING);
+  assertEquals(pe.frozen_scope.expected.materials_ex, 4000);
+  assertEquals(pe.lanes.materials.expected_ex, null);
+  assertEquals(pe.lanes.materials.variance_ex, null);
+  assertEquals(pe.lanes.materials.actual_ex, 4300);
+  assertEquals(pe.flags, ["frozen_revision_acceptance_not_known"]);
+  assertEquals(pe.status, "incomplete");
   const jobsReads = c.calls.filter((x) => x.table === "jobs");
   assertEquals(jobsReads.map((x) => x.select), [
     PATIO_EXPECTED_SCOPE_PROJECTION,
@@ -659,7 +675,7 @@ Deno.test("job_profit: acceptance is read from quote documents and accepted runs
     run_acceptances: [{ id: "r1", job_id: JOB, status: "accepted" }],
   });
   assertEquals(run.p.frozen_scope.acceptance.source, "run_acceptances");
-  assertEquals(run.p.lanes.materials.variance_ex, 300);
+  assertEquals(run.p.lanes.materials.variance_ex, null);
   // a failed read with nothing found is not known, and holds the comparison
   for (const table of ["job_documents", "run_acceptances"]) {
     const failed = await read({}, { [table]: "timeout" });
@@ -673,7 +689,128 @@ Deno.test("job_profit: acceptance is read from quote documents and accepted runs
     { run_acceptances: "timeout" },
   );
   assertEquals(found.p.frozen_scope.acceptance.accepted, true);
-  assertEquals(found.p.lanes.materials.variance_ex, 300);
+  assertEquals(found.p.lanes.materials.variance_ex, null);
+  // every case: revision acceptance is unknown at the action
+  for (const x of [none, run, found]) {
+    assertEquals(x.p.frozen_scope.revision_acceptance, NO_REVISION_BINDING);
+    assert(x.p.flags.includes("frozen_revision_acceptance_not_known"));
+  }
+});
+
+Deno.test("job_profit: an accepted revision A never opens a later frozen revision B", async () => {
+  // A was sent and accepted; B was frozen later with the same sale and
+  // different costs and was never accepted. Only B is the frozen row.
+  const recB = record({
+    expected: { materials: 4500, labour: 2500, sale: 9000 },
+  });
+  const saved = { scope_json: recB, pricing_json: pricing() };
+  const h = await lastSaveHashes(saved);
+  const base = {
+    v_job_profit: [row()],
+    jobs: [{
+      id: JOB,
+      ...current(recB),
+      ...saved,
+      // the time-pinned baseline naming B exactly is not read as a binding
+      expected_costs: {
+        confidence: "frozen_revision",
+        scope_revision_id: "srv-row-9",
+        pricing_hash: h.pricing_hash,
+      },
+    }],
+    scope_revisions: [{ job_id: JOB, ...frozen(recB), ...h }],
+  };
+  const cases: Array<[string, Record<string, any[]>]> = [
+    ["quote A accepted", { job_documents: [QUOTE_ACCEPTED] }],
+    ["quote A accepted, then superseded", {
+      job_documents: [{
+        ...QUOTE_ACCEPTED,
+        superseded_at: "2026-10-20T10:00:00Z",
+      }],
+    }],
+    ["run A accepted", {
+      run_acceptances: [{ id: "r1", job_id: JOB, status: "accepted" }],
+    }],
+  ];
+  for (const [label, extra] of cases) {
+    const c = fake({ ...base, ...extra });
+    const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
+    const p = (out.body as any).patio_expected;
+    assertEquals(p.frozen_scope.acceptance.accepted, true, label);
+    assertEquals(
+      p.frozen_scope.revision_acceptance,
+      NO_REVISION_BINDING,
+      label,
+    );
+    assert(p.flags.includes("frozen_revision_acceptance_not_known"), label);
+    // B's figures are shown, never compared
+    assertEquals(p.frozen_scope.expected.materials_ex, 4500, label);
+    assertEquals(p.lanes.materials.expected_ex, null, label);
+    assertEquals(p.lanes.labour.expected_ex, null, label);
+    assertEquals(p.lanes.materials.variance_ex, null, label);
+    assertEquals(p.lanes.labour.variance_ex, null, label);
+    assertEquals(p.status, "incomplete", label);
+    // the time-pinned baseline is not read for this
+    for (const r of c.calls.filter((x) => x.table === "jobs")) {
+      assert(!String(r.select).includes("expected_costs"), label);
+    }
+  }
+});
+
+Deno.test("patio expected: revision acceptance only narrows job acceptance", () => {
+  // no seventh argument: unknown, closed
+  const bare = patioExpectedVersusActual(
+    current(),
+    frozen(),
+    row(),
+    SAME,
+    true,
+    ACCEPTED,
+  )!;
+  assertEquals(bare.frozen_scope!.revision_acceptance, {
+    accepted: null,
+    basis: null,
+  });
+  assert(bare.flags.includes("frozen_revision_acceptance_not_known"));
+  assertEquals(bare.lanes.materials.variance_ex, null);
+  assertEquals(bare.status, "incomplete");
+  // the action's value: unknown, closed
+  const none = pe(
+    current(),
+    frozen(),
+    row(),
+    SAME,
+    true,
+    ACCEPTED,
+    NO_REVISION_BINDING,
+  )!;
+  assertEquals(none.lanes.materials.expected_ex, null);
+  assertEquals(
+    none.frozen_scope!.revision_acceptance.basis,
+    "no_recorded_binding",
+  );
+  // a binding, if one existed, opens it only beside job acceptance
+  const bound = pe(current(), frozen(), row(), SAME, true, ACCEPTED, BOUND)!;
+  assertEquals(bound.lanes.materials.variance_ex, 300);
+  assertEquals(bound.status, "complete");
+  assert(!bound.flags.includes("frozen_revision_acceptance_not_known"));
+  for (
+    const job of [
+      { accepted: false, source: null },
+      { accepted: null, source: null },
+    ] as FrozenAcceptance[]
+  ) {
+    const out = pe(current(), frozen(), row(), SAME, true, job, BOUND)!;
+    assertEquals(out.lanes.materials.expected_ex, null, String(job.accepted));
+    assertEquals(out.status, "incomplete", String(job.accepted));
+  }
+  // anything but true is not a binding
+  const odd = pe(current(), frozen(), row(), SAME, true, ACCEPTED, {
+    accepted: false as unknown as true,
+    basis: "x",
+  })!;
+  assertEquals(odd.frozen_scope!.revision_acceptance.accepted, null);
+  assertEquals(odd.lanes.materials.expected_ex, null);
 });
 
 Deno.test("job_profit: a job with no frozen patio row reads no acceptance", async () => {

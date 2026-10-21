@@ -144,6 +144,10 @@ export interface PatioExpectedVersusActual {
     // with actuals. Job level, because no record links a frozen revision to
     // the quote that was accepted.
     acceptance: FrozenAcceptance & { scope: "job" };
+    // Whether this frozen revision is the one accepted. No record ties an
+    // acceptance to a revision (Sales G-7), so the action always passes null
+    // and the comparison stays closed; job acceptance alone never opens it.
+    revision_acceptance: RevisionAcceptance;
     expected: ExpectedFigures;
     // Compared by hash (scope_hash, pricing_hash), never by id. null: not
     // compared (the last save or a stored hash could not be read).
@@ -177,7 +181,7 @@ export interface PatioExpectedVersusActual {
 }
 
 const BASIS =
-  "Expected figures are the patio scoper's own sealed revision (ex GST). Only the frozen scope revision is compared with actuals, and only once the job has recorded acceptance (a quote's accepted_at or an accepted run): a freeze is not an acceptance; the last save is a draft estimate and the commercial baseline is the engine's own. Expected figures are never actuals and never enter Job Profit. null is not known, never 0. The expected profit is before commission.";
+  "Expected figures are the patio scoper's own sealed revision (ex GST). Only the frozen scope revision is compared with actuals, and only once that revision is bound to a recorded acceptance: a freeze is not an acceptance, and a job's acceptance may be another revision's. No such binding exists yet, so no frozen revision is compared; the last save is a draft estimate and the commercial baseline is the engine's own. Expected figures are never actuals and never enter Job Profit. null is not known, never 0. The expected profit is before commission.";
 
 function obj(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v)
@@ -303,6 +307,21 @@ export type FrozenAcceptance = {
 };
 
 /**
+ * Whether the frozen revision is the one the customer accepted. Only a
+ * source-backed binding may say true; none exists today, so `accepted` is null
+ * with `basis` saying why. It can only narrow job acceptance, never replace it.
+ */
+export type RevisionAcceptance = {
+  accepted: true | null;
+  basis: string | null;
+};
+
+export const NO_REVISION_BINDING: RevisionAcceptance = {
+  accepted: null,
+  basis: "no_recorded_binding",
+};
+
+/**
  * The patio record's expected figures beside the engine row's actuals, or null
  * when neither the last save nor the frozen revision is a patio scoper 2.0
  * record. `current` is the projected jobs read (PATIO_EXPECTED_SCOPE_PROJECTION),
@@ -318,6 +337,7 @@ export function patioExpectedVersusActual(
   lastSave: LastSaveHashes | null = null,
   installerCheck: boolean | null = null,
   acceptance: FrozenAcceptance | null = null,
+  revisionAcceptance: RevisionAcceptance | null = null,
 ): PatioExpectedVersusActual | null {
   const flags: string[] = [];
 
@@ -379,6 +399,12 @@ export function patioExpectedVersusActual(
     const accepted = acceptance?.accepted ?? null;
     if (accepted === false) flags.push("frozen_not_accepted");
     if (accepted === null) flags.push("frozen_acceptance_not_known");
+    const revisionAccepted = revisionAcceptance?.accepted === true
+      ? true
+      : null;
+    if (revisionAccepted !== true) {
+      flags.push("frozen_revision_acceptance_not_known");
+    }
     if (revision.outputs_agree !== true) flags.push("outputs_not_confirmed");
     if (revision.frozen_id === null || revision.n === null) {
       flags.push("revision_not_sealed");
@@ -428,6 +454,10 @@ export function patioExpectedVersusActual(
         source: accepted === true ? acceptance?.source ?? null : null,
         scope: "job",
       },
+      revision_acceptance: {
+        accepted: revisionAccepted,
+        basis: revisionAcceptance?.basis ?? null,
+      },
       expected,
       last_save_matches_frozen: scopeMatch === false || pricingMatch === false
         ? false
@@ -448,10 +478,12 @@ export function patioExpectedVersusActual(
   if (!frozenScope) flags.push("revision_not_frozen");
 
   // Expected lanes for the comparison come only from a frozen scope whose
-  // cost is fixed and whose job has recorded acceptance: no lane variance
-  // from a revision that fixes no cost or that nobody accepted.
+  // cost is fixed, whose job has recorded acceptance, and which is bound to
+  // that acceptance: no lane variance from a revision that fixes no cost, that
+  // nobody accepted, or whose acceptance may be another revision's.
   const fixed = frozenScope?.expected.cost_ex != null &&
-      frozenScope.acceptance.accepted === true
+      frozenScope.acceptance.accepted === true &&
+      frozenScope.revision_acceptance.accepted === true
     ? frozenScope.expected
     : null;
   // An unreadable completeness list holds both lanes open (fail closed).

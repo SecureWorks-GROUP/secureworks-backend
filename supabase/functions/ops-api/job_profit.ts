@@ -20,6 +20,7 @@ import {
   type FrozenAcceptance,
   INSTALLER_RULE_PROBE,
   lastSaveHashes,
+  NO_REVISION_BINDING,
   PATIO_EXPECTED_SCOPE_PROJECTION,
   PATIO_FROZEN_REVISION_COLUMNS,
   PATIO_LAST_SAVE_HASH_COLUMNS,
@@ -515,6 +516,9 @@ async function patioExpectedPart(
     hashes,
     installerCheck,
     acceptance,
+    // No record ties an acceptance to a frozen revision (Sales G-7; CFO check
+    // 20261021), so revision acceptance stays unknown and nothing is compared.
+    NO_REVISION_BINDING,
   );
   return result ? { patio_expected: result } : {};
 }
