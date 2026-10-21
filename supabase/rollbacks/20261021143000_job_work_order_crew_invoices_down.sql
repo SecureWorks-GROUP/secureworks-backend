@@ -288,6 +288,7 @@ $$;
 -- 4. helpers this migration added
 DROP FUNCTION IF EXISTS public.preview_active_job_work_orders();
 DROP FUNCTION IF EXISTS public.apply_active_job_work_orders();
+DROP FUNCTION IF EXISTS public.apply_active_job_work_orders(uuid[]);
 DROP FUNCTION IF EXISTS public.job_invoice_work_order_id(uuid);
 
 -- 5. columns

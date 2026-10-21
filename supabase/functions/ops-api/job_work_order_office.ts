@@ -12,6 +12,7 @@ import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
   decideOfficeQueue,
   decideOfficeWrite,
+  officeReviewLineIsHeld,
   JOB_WORK_ORDER_ALL_TYPES_FLAG,
   JOB_WORK_ORDER_OFFICE_FILL_FLAG,
   jobTypeOpensWorkOrder,
@@ -73,6 +74,7 @@ async function assertOfficeWrite(
   client: any,
   actor: OfficeActor,
   action: OfficeWriteAction,
+  lineAlreadyHeld = false,
 ): Promise<void> {
   const [officeFlagOn, reviewFlagOn, lists] = await Promise.all([
     readFlag(client, JOB_WORK_ORDER_OFFICE_FILL_FLAG),
@@ -87,6 +89,7 @@ async function assertOfficeWrite(
     reviewFlagOn,
     primaryIds: lists.primaryIds,
     backupIds: lists.backupIds,
+    lineAlreadyHeld,
   });
   if (!decision.ok) {
     throw new JobWorkOrderOfficeError(
@@ -289,7 +292,13 @@ export async function reviewCrewInvoiceLine(
   body: any,
   actor: OfficeActor,
 ): Promise<Record<string, unknown>> {
-  await assertOfficeWrite(client, actor, "review");
+  if (!actor.staff) {
+    throw new JobWorkOrderOfficeError(
+      403,
+      "operator_access_required",
+      "An authorised operator session is required.",
+    );
+  }
   const lineId = requireId(body?.line_id || body?.trade_invoice_line_id, "line_id_required", "line_id is required");
   const decision = REVIEW_DECISIONS[String(body?.decision || "").trim().toLowerCase()];
   if (!decision) {
@@ -301,7 +310,7 @@ export async function reviewCrewInvoiceLine(
   }
   const note = typeof body?.note === "string" ? body.note.trim().slice(0, 2000) : null;
   const { data: line, error: readErr } = await client.from("trade_invoice_lines")
-    .select("id, trade_invoice_id, trade_invoices:trade_invoice_id(id, status, xero_bill_id)")
+    .select("id, trade_invoice_id, office_review_status, trade_invoices:trade_invoice_id(id, status, xero_bill_id, query_note)")
     .eq("id", lineId)
     .maybeSingle();
   if (readErr) {
@@ -310,6 +319,12 @@ export async function reviewCrewInvoiceLine(
   if (!line) {
     throw new JobWorkOrderOfficeError(404, "line_not_found", "Invoice line not found.");
   }
+  await assertOfficeWrite(
+    client,
+    actor,
+    "review",
+    officeReviewLineIsHeld(line.office_review_status),
+  );
   const invoice = line.trade_invoices || {};
   if (invoice.xero_bill_id) {
     throw new JobWorkOrderOfficeError(
@@ -344,12 +359,34 @@ export async function reviewCrewInvoiceLine(
       "The invoice lines could not be re-read after the review.",
     );
   }
+  const rows = siblings || [];
   let invoiceStatus = invoice.status || null;
   let released = false;
-  if (
-    !xeroSyncRefusal(siblings || []) &&
-    invoice.status === "pending_acknowledgment"
-  ) {
+  let returnedToTrade = false;
+  if (rows.some((row: { office_review_status?: string | null }) => row.office_review_status === "rejected")) {
+    const rejectNote = [invoice.query_note, "A line was rejected. Fix it and send the invoice again."]
+      .filter(Boolean)
+      .join(" | ")
+      .slice(0, 2000);
+    const { data: moved, error: statusErr } = await client.from("trade_invoices")
+      .update({ status: "ops-reject", query_note: rejectNote })
+      .eq("id", line.trade_invoice_id)
+      .in("status", ["draft", "pending_acknowledgment", "approved", "acknowledged"])
+      .is("xero_bill_id", null)
+      .select("id, status")
+      .maybeSingle();
+    if (statusErr) {
+      throw new JobWorkOrderOfficeError(
+        503,
+        "invoice_status_failed",
+        "The line was rejected, but the invoice could not be returned to the trade.",
+      );
+    }
+    if (moved?.status) {
+      invoiceStatus = moved.status;
+      returnedToTrade = true;
+    }
+  } else if (!xeroSyncRefusal(rows) && invoice.status === "pending_acknowledgment") {
     const { data: moved, error: statusErr } = await client.from("trade_invoices")
       .update({ status: "approved" })
       .eq("id", line.trade_invoice_id)
@@ -368,6 +405,11 @@ export async function reviewCrewInvoiceLine(
       invoiceStatus = moved.status;
       released = true;
     }
+  } else if (
+    !xeroSyncRefusal(rows) &&
+    (invoice.status === "approved" || invoice.status === "acknowledged")
+  ) {
+    released = true;
   }
   return {
     line_id: updated.id,
@@ -376,6 +418,7 @@ export async function reviewCrewInvoiceLine(
     office_reviewed_at: updated.office_reviewed_at,
     invoice_status: invoiceStatus,
     ready_for_xero_push: released,
+    returned_to_trade: returnedToTrade,
   };
 }
 

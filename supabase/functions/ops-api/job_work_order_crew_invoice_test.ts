@@ -17,6 +17,10 @@ import {
   crewWorkOrderCreateRefusal,
   hideRetiredCrewWorkOrder,
   isActiveJobWorkOrderBackfillCandidate,
+  officeReviewLineIsHeld,
+  reviewedBackfillJobIds,
+  reviewStateFromOfficeStatus,
+  stripJobWorkOrderCardMoney,
   filledApprovedJobWorkOrder,
   jobTypeFillsFromQuote,
   jobTypeOpensWorkOrder,
@@ -97,45 +101,52 @@ Deno.test("quote fill stays fencing and patio", () => {
   assertEquals(jobTypeFillsFromQuote(null), false);
 });
 
-Deno.test("backfill selects jobs touched in 30 days and leaves a stale processing make-safe", () => {
+Deno.test("backfill selects jobs with activity in 30 days and ignores a recent updated_at", () => {
   const fresh = {
     status: "processing",
-    updated_at: at(10 * DAY),
+    activity_at: [at(10 * DAY)],
     has_job_work_order: false,
   };
   assertEquals(isActiveJobWorkOrderBackfillCandidate(fresh, AS_OF), true);
   assertEquals(
     isActiveJobWorkOrderBackfillCandidate(
-      { ...fresh, updated_at: at(ACTIVE_JOB_WORK_ORDER_WINDOW_MS) },
+      { ...fresh, activity_at: [at(ACTIVE_JOB_WORK_ORDER_WINDOW_MS)] },
       AS_OF,
     ),
     true,
   );
   assertEquals(
     isActiveJobWorkOrderBackfillCandidate(
-      { ...fresh, updated_at: at(ACTIVE_JOB_WORK_ORDER_WINDOW_MS + 1) },
+      { ...fresh, activity_at: [at(ACTIVE_JOB_WORK_ORDER_WINDOW_MS + 1)] },
       AS_OF,
     ),
     false,
   );
   assertEquals(
     isActiveJobWorkOrderBackfillCandidate(
-      { status: "processing", updated_at: at(40 * DAY), has_job_work_order: false },
+      { status: "processing", activity_at: [at(40 * DAY)], has_job_work_order: false },
       AS_OF,
     ),
     false,
   );
   assertEquals(
     isActiveJobWorkOrderBackfillCandidate(
-      { status: "scheduled", updated_at: at(1 * DAY), has_job_work_order: false },
+      { status: "scheduled", activity_at: [at(1 * DAY)], has_job_work_order: false },
       AS_OF,
     ),
     true,
+  );
+  assertEquals(
+    isActiveJobWorkOrderBackfillCandidate(
+      { status: "scheduled", activity_at: [], has_job_work_order: false },
+      AS_OF,
+    ),
+    false,
   );
   for (const status of ["complete", "draft", "quoted", "cancelled", "archived"]) {
     assertEquals(
       isActiveJobWorkOrderBackfillCandidate(
-        { status, updated_at: at(1 * DAY), has_job_work_order: false },
+        { status, activity_at: [at(1 * DAY)], has_job_work_order: false },
         AS_OF,
       ),
       false,
@@ -144,7 +155,7 @@ Deno.test("backfill selects jobs touched in 30 days and leaves a stale processin
   }
   assertEquals(
     isActiveJobWorkOrderBackfillCandidate(
-      { status: "processing", updated_at: at(1 * DAY), has_job_work_order: true },
+      { status: "processing", activity_at: [at(1 * DAY)], has_job_work_order: true },
       AS_OF,
     ),
     false,
@@ -156,6 +167,16 @@ Deno.test("backfill selects jobs touched in 30 days and leaves a stale processin
     ),
     false,
   );
+});
+
+Deno.test("apply accepts only the reviewed job ids", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  assertEquals(reviewedBackfillJobIds({ job_ids: [id] }), [id]);
+  assertEquals(reviewedBackfillJobIds([id]), [id]);
+  assertEquals(reviewedBackfillJobIds({ job_ids: [] }), null);
+  assertEquals(reviewedBackfillJobIds({ job_ids: ["not-a-uuid"] }), null);
+  assertEquals(reviewedBackfillJobIds(null), null);
+  assertEquals(reviewedBackfillJobIds({ rows: [{ job_id: id }] }), null);
 });
 
 Deno.test("held lines do not sync to Xero; a rejected line is reported first", () => {
@@ -283,11 +304,12 @@ Deno.test("office fill and approve are named approvers, and only while that swit
   );
 });
 
-Deno.test("line review needs the review switch; Marnin also needs the office switch", () => {
+Deno.test("line review is any office role, and a held line stays reviewable with the switch off", () => {
   const lists = {
     primaryIds: [SHAUN_APPROVER_USER_ID],
     backupIds: [MARNIN_BACKUP_APPROVER_USER_ID],
   };
+  const staffId = "11111111-1111-1111-1111-111111111111";
   assertEquals(
     refusalCode(decideOfficeWrite({
       staff: true,
@@ -305,6 +327,29 @@ Deno.test("line review needs the review switch; Marnin also needs the office swi
       userId: SHAUN_APPROVER_USER_ID,
       action: "review",
       officeFlagOn: false,
+      reviewFlagOn: false,
+      lineAlreadyHeld: true,
+      ...lists,
+    }),
+    { ok: true },
+  );
+  assertEquals(
+    decideOfficeWrite({
+      staff: true,
+      userId: staffId,
+      action: "review",
+      officeFlagOn: false,
+      reviewFlagOn: true,
+      ...lists,
+    }),
+    { ok: true },
+  );
+  assertEquals(
+    decideOfficeWrite({
+      staff: true,
+      userId: MARNIN_BACKUP_APPROVER_USER_ID,
+      action: "review",
+      officeFlagOn: false,
       reviewFlagOn: true,
       ...lists,
     }),
@@ -313,34 +358,47 @@ Deno.test("line review needs the review switch; Marnin also needs the office swi
   assertEquals(
     refusalCode(decideOfficeWrite({
       staff: true,
-      userId: MARNIN_BACKUP_APPROVER_USER_ID,
+      userId: null,
       action: "review",
-      officeFlagOn: false,
+      officeFlagOn: true,
       reviewFlagOn: true,
       ...lists,
     })),
     "not_approver",
   );
   assertEquals(
-    decideOfficeWrite({
-      staff: true,
-      userId: MARNIN_BACKUP_APPROVER_USER_ID,
+    refusalCode(decideOfficeWrite({
+      staff: false,
+      userId: staffId,
       action: "review",
       officeFlagOn: true,
       reviewFlagOn: true,
       ...lists,
-    }),
-    { ok: true },
+    })),
+    "operator_access_required",
   );
+  assertEquals(officeReviewLineIsHeld("awaiting"), true);
+  assertEquals(officeReviewLineIsHeld("approved"), false);
+  assertEquals(officeReviewLineIsHeld(null), false);
 });
 
-Deno.test("hard rule is off by default and, on, refuses a job line with no work order", () => {
+Deno.test("hard rule is off by default and, on, refuses an open job line with no work order", () => {
   const travel = [{ job_id: "job-1", line_type: "Travel" }];
+  const labour = [{ job_id: "job-1", line_type: "labour" }];
   const jobs = { "job-1": { hasWorkOrder: false } as const };
-  assertEquals(hardRuleRefusal({ flagOn: false, lines: travel, jobs }), null);
+  assertEquals(hardRuleRefusal({ flagOn: false, lines: labour, jobs }), null);
+  assertEquals(hardRuleRefusal({ flagOn: true, lines: travel, jobs }), null);
   assertEquals(
-    hardRuleRefusal({ flagOn: true, lines: travel, jobs })?.code,
+    hardRuleRefusal({ flagOn: true, lines: labour, jobs })?.code,
     "job_work_order_required",
+  );
+  assertEquals(
+    hardRuleRefusal({
+      flagOn: true,
+      lines: labour,
+      jobs: { "job-1": { hasWorkOrder: false, open: false } },
+    }),
+    null,
   );
   assertEquals(
     hardRuleRefusal({
@@ -353,7 +411,7 @@ Deno.test("hard rule is off by default and, on, refuses a job line with no work 
   assertEquals(
     hardRuleRefusal({
       flagOn: true,
-      lines: travel,
+      lines: labour,
       jobs: { "job-1": { hasWorkOrder: true } },
     }),
     null,
@@ -363,13 +421,62 @@ Deno.test("hard rule is off by default and, on, refuses a job line with no work 
       flagOn: true,
       lines: travel,
       jobs: { "job-1": "unreadable" },
+    }),
+    null,
+  );
+  assertEquals(
+    hardRuleRefusal({ flagOn: true, lines: travel, jobs: {} }),
+    null,
+  );
+  assertEquals(
+    hardRuleRefusal({
+      flagOn: true,
+      lines: labour,
+      jobs: { "job-1": "unreadable" },
     })?.code,
     "job_work_order_unreadable",
   );
-  assertEquals(
-    hardRuleRefusal({ flagOn: true, lines: travel, jobs: {} })?.code,
-    "job_work_order_unreadable",
-  );
+});
+
+Deno.test("review_state maps the office column, and a job work order card drops its money", () => {
+  assertEquals(reviewStateFromOfficeStatus("awaiting"), "held");
+  assertEquals(reviewStateFromOfficeStatus("approved"), "approved");
+  assertEquals(reviewStateFromOfficeStatus("queried"), "queried");
+  assertEquals(reviewStateFromOfficeStatus("rejected"), "rejected");
+  assertEquals(reviewStateFromOfficeStatus(null), null);
+  const card = stripJobWorkOrderCardMoney({
+    id: "wo-1",
+    kind: "job",
+    status: "approved",
+    description: "Replace the panel",
+    agreed_labour_ex: 400,
+    subtotal: 400,
+    gst: 40,
+    total: 440,
+    can_invoice: true,
+    can_add_to_weekly_invoice: true,
+    available_negative_charge_total_ex: 20,
+    scope_items: [{ description: "Panel", qty: 1, rate: 90, total: 90 }],
+    negative_charges: [{ description: "Credit", amount: 20 }],
+    addenda: [{ description: "Extra", price: 15, addendum: { amount: 15, note: "keep" } }],
+  });
+  assertEquals(card.description, "Replace the panel");
+  assertEquals("agreed_labour_ex" in card, false);
+  assertEquals(card.subtotal, null);
+  assertEquals(card.gst, null);
+  assertEquals(card.total, null);
+  assertEquals(card.can_invoice, false);
+  assertEquals(card.can_add_to_weekly_invoice, false);
+  assertEquals(card.available_negative_charge_total_ex, null);
+  assertEquals(card.scope_items as Array<Record<string, unknown>>, [
+    { description: "Panel", qty: 1 },
+  ]);
+  assertEquals(card.negative_charges as Array<Record<string, unknown>>, [
+    { description: "Credit" },
+  ]);
+  assertEquals(card.addenda as Array<Record<string, unknown>>, [
+    { description: "Extra", addendum: { note: "keep" } },
+  ]);
 });
 
 Deno.test("travel keeps no crew work order id and does not lock a day card", () => {

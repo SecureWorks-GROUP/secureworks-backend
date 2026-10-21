@@ -3,7 +3,7 @@
 -- Crew invoices move onto the job's work order. Every behaviour change is a
 -- feature flag seeded OFF, so applying this migration changes no live job,
 -- work order, or invoice. The 30-day backfill is preview_active_job_work_orders
--- / apply_active_job_work_orders, called by scripts/backfill-job-work-orders-active.ts.
+-- / apply_active_job_work_orders(uuid[]), called by scripts/backfill-job-work-orders-active.ts.
 -- This file does not call apply.
 --
 -- Contract: docs/job-work-order-crew-invoices-v1.md.
@@ -15,15 +15,15 @@ VALUES
   ('job_work_order_all_types_v1', false,
    'Open a blank job work order for every job type when the job enters an open status. Fencing and patio are unchanged either way. Off: other types still raise.'),
   ('job_work_order_active_backfill_v1', false,
-   'Allow apply_active_job_work_orders() to open blank work orders for jobs touched in the last 30 days. The dry-run preview does not need it. Also needs job_work_order_all_types_v1.'),
+   'Allow apply_active_job_work_orders(uuid[]) to open blank work orders for the reviewed job ids. Preview selects open jobs with real activity in the last 30 days (an assignment, a time entry, an invoice line, or a status change), not jobs.updated_at. The dry-run preview does not need it. Also needs job_work_order_all_types_v1.'),
   ('job_work_order_office_fill_v1', false,
    'Office queue, fill and approve for blank job work orders, and the backup approver list on the seal. Off: Shaun alone, through the existing approve door.'),
   ('crew_invoice_on_job_work_order_v1', false,
    'Stamp trade_invoice_lines.job_work_order_id from a draft or approved job work order. Off: only an approved job work order is stamped, as before.'),
   ('crew_invoice_line_office_review_v1', false,
-   'New crew invoice lines start awaiting office review and must not sync to Xero until approved. Off: lines are unchanged and still sync.'),
+   'New crew invoice lines start awaiting office review and must not sync to Xero until approved. While on, submit_trade_invoice is refused. Lines already awaiting stay held if this switch is later turned off. Off: new lines are unchanged and still sync.'),
   ('crew_invoice_requires_job_work_order_v1', false,
-   'Refuse a crew invoice line on a job that has no job work order. Off: a job with no work order can still be invoiced.'),
+   'Refuse a crew invoice line on an open job that has no job work order. Closed jobs and Travel are exempt. Off: a job with no work order can still be invoiced.'),
   ('retire_crew_work_orders_v1', false,
    'Stop creating crew work orders, including a quote-builder crew work order, and hide existing kind=crew rows that are not quote-builder work orders. Off: those rows stay as they are. Nothing is deleted.')
 ON CONFLICT (flag_name) DO NOTHING;
@@ -393,6 +393,13 @@ $$;
 
 -- ── 7. 30-day backfill, not run from here ───────────────────────────────────
 
+-- Production already has this column (20260325000003). The contract runner's
+-- stub table does not, and a SQL function is checked at CREATE time, so the
+-- column has to exist here before the preview names it. The rollback does not
+-- drop it: on production it is not this migration's column.
+ALTER TABLE public.trade_invoice_lines
+  ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+
 CREATE OR REPLACE FUNCTION public.preview_active_job_work_orders()
 RETURNS TABLE (
   job_id uuid,
@@ -409,25 +416,60 @@ AS $$
   SELECT j.id, j.job_number, j.type, j.status, j.updated_at
   FROM public.jobs j
   WHERE j.status = ANY (public.job_work_order_open_statuses())
-    AND j.updated_at >= now() - interval '30 days'
     AND NOT EXISTS (
       SELECT 1 FROM public.work_orders wo
       WHERE wo.job_id = j.id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
+    )
+    AND (
+      EXISTS (
+        SELECT 1 FROM public.job_assignments a
+        WHERE a.job_id = j.id
+          AND (
+            a.created_at >= now() - interval '30 days'
+            OR a.scheduled_date >= (now() - interval '30 days')::date
+          )
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.job_assignment_logged_times t
+        WHERE t.job_id = j.id
+          AND (
+            t.logged_at >= now() - interval '30 days'
+            OR t.work_date >= (now() - interval '30 days')::date
+          )
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.trade_invoice_lines l
+        WHERE l.job_id = j.id
+          AND (
+            l.created_at >= now() - interval '30 days'
+            OR l.line_date >= (now() - interval '30 days')::date
+          )
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.job_events e
+        WHERE e.job_id = j.id
+          AND e.event_type IN ('status_changed', 'status_change', 'job.status_changed')
+          AND e.created_at >= now() - interval '30 days'
+      )
     )
   ORDER BY j.type, j.job_number;
 $$;
 REVOKE ALL ON FUNCTION public.preview_active_job_work_orders() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.preview_active_job_work_orders() TO service_role;
 
-CREATE OR REPLACE FUNCTION public.apply_active_job_work_orders()
+-- The no-arg form is not created. Apply opens only the ids from a reviewed dry-run.
+DROP FUNCTION IF EXISTS public.apply_active_job_work_orders();
+CREATE FUNCTION public.apply_active_job_work_orders(p_job_ids uuid[])
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_job record;
+  v_id uuid;
   v_opened int := 0;
+  v_skipped int := 0;
+  v_opened_ids uuid[] := ARRAY[]::uuid[];
 BEGIN
   IF NOT COALESCE((SELECT f.enabled FROM public.feature_flags f
                    WHERE f.flag_name = 'job_work_order_all_types_v1' LIMIT 1), false)
@@ -436,12 +478,35 @@ BEGIN
     RAISE EXCEPTION 'active job work order backfill needs job_work_order_all_types_v1 and job_work_order_active_backfill_v1 on'
       USING ERRCODE = '42501';
   END IF;
-  FOR v_job IN SELECT * FROM public.preview_active_job_work_orders() LOOP
-    PERFORM public.ensure_job_work_order_draft(v_job.job_id, 'backfill');
-    v_opened := v_opened + 1;
+  IF p_job_ids IS NULL THEN
+    RETURN jsonb_build_object(
+      'opened', 0, 'opened_ids', '[]'::jsonb, 'skipped', 0, 'as_of', now()
+    );
+  END IF;
+  FOREACH v_id IN ARRAY p_job_ids LOOP
+    IF EXISTS (
+      SELECT 1 FROM public.jobs j
+      WHERE j.id = v_id
+        AND j.status = ANY (public.job_work_order_open_statuses())
+        AND NOT EXISTS (
+          SELECT 1 FROM public.work_orders wo
+          WHERE wo.job_id = j.id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
+        )
+    ) THEN
+      PERFORM public.ensure_job_work_order_draft(v_id, 'backfill');
+      v_opened := v_opened + 1;
+      v_opened_ids := v_opened_ids || v_id;
+    ELSE
+      v_skipped := v_skipped + 1;
+    END IF;
   END LOOP;
-  RETURN jsonb_build_object('opened', v_opened, 'as_of', now());
+  RETURN jsonb_build_object(
+    'opened', v_opened,
+    'opened_ids', to_jsonb(v_opened_ids),
+    'skipped', v_skipped,
+    'as_of', now()
+  );
 END;
 $$;
-REVOKE ALL ON FUNCTION public.apply_active_job_work_orders() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.apply_active_job_work_orders() TO service_role;
+REVOKE ALL ON FUNCTION public.apply_active_job_work_orders(uuid[]) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.apply_active_job_work_orders(uuid[]) TO service_role;

@@ -16,12 +16,12 @@ All seven are `feature_flags` rows, missing or unreadable meaning off.
 | Flag | Default | What it does |
 | --- | --- | --- |
 | `job_work_order_all_types_v1` | off | A job of any non-blank type gets a blank job work order when it enters an open status. Fencing and patio are unchanged either way. |
-| `job_work_order_active_backfill_v1` | off | Lets `apply_active_job_work_orders()` run. The dry-run preview does not need it. Apply also needs the all-types flag. |
+| `job_work_order_active_backfill_v1` | off | Lets `apply_active_job_work_orders(uuid[])` open the reviewed ids. The dry-run preview does not need it. Apply also needs the all-types flag. Preview is open jobs with real activity in 30 days, not `jobs.updated_at`. |
 | `job_work_order_office_fill_v1` | off | Office queue, fill and approve. Also lets the backup approver list seal a work order. Off: Shaun only, through the existing `approve_work_order` door, and the new writes refuse everyone including Shaun. |
 | `crew_invoice_on_job_work_order_v1` | off | The line trigger stamps `trade_invoice_lines.job_work_order_id` from a draft or an approved job work order. Off: only an approved one is stamped, as today. |
-| `crew_invoice_line_office_review_v1` | off | A new crew invoice line starts `office_review_status = awaiting`. Awaiting, queried and rejected hold the whole invoice out of Xero. A historical NULL still syncs. |
-| `crew_invoice_requires_job_work_order_v1` | off | Separate hard rule. A crew invoice line that names a job with no job work order is refused before the invoice is saved. Travel on a job is included. A line with no job is not. |
-| `retire_crew_work_orders_v1` | off | `create_work_order` refuses any call that is not `kind: 'job'`. Lists hide legacy `kind = 'crew'` rows that have no `quote_builder_version_id`. `my_work_orders` starts returning job work orders. Off: today's crew insert and today's lists. |
+| `crew_invoice_line_office_review_v1` | off | A new crew invoice line starts `office_review_status = awaiting`. Awaiting, queried and rejected hold the whole invoice out of Xero. A historical NULL still syncs. While on, `submit_trade_invoice` is 410. Lines already awaiting stay held if the switch is later turned off. |
+| `crew_invoice_requires_job_work_order_v1` | off | Separate hard rule. DEFAULT, owner to confirm: an open job's non-travel line with no job work order is refused before the invoice is saved. Closed jobs and Travel are exempt. A line with no job is not. |
+| `retire_crew_work_orders_v1` | off | `create_work_order` refuses any call that is not `kind: 'job'`. Lists hide legacy `kind = 'crew'` rows that have no `quote_builder_version_id`. `my_work_orders` returns approved job work orders with the money stripped and drafts left out. Off: today's crew insert and today's lists. |
 
 Turn the review flag on before, or in the same step as, the stamp flag. A
 blank work order with the stamp on and review off would sync straight away.
@@ -66,19 +66,21 @@ Staff only (the ops-api staff set, including the server key for the read).
 Fill and approve also need a named approver and the office-fill flag. Shaun
 (`approver_user_ids`) is primary either way.
 `work_order_settings.backup_approver_user_ids` ships empty. A user in that
-list counts only while the office-fill flag is on. The migration does not
-pick between the two `users` rows on Marnin's email. The owner writes the
-id. That list does not change `approver_user_ids`, and
-`work_order_customer_variations` is not widened. A server key with no user
-id cannot fill, approve or review. Office approve calls
-`approve_job_work_order` with `p_via: 'session'`.
+list counts only while the office-fill flag is on. There is one `users` row
+on `marnin@secureworkswa.com.au`: `706c5258-70dd-483a-b36c-af6864b24498`
+(admin). The migration does not write it. Go-live sets
+`backup_approver_user_ids` to that id. Shaun still approves from
+`approver_user_ids` while the list is empty. That list does not change
+`approver_user_ids`, and `work_order_customer_variations` is not widened.
+A server key with no user id cannot fill, approve or review. Office approve
+calls `approve_job_work_order` with `p_via: 'session'`.
 
 | Action | Method | Body |
 | --- | --- | --- |
 | `list_office_job_work_orders` | GET | none. Flag off returns `{ enabled: false, work_orders: [] }` and does not query. Flag on returns up to 200 drafts, oldest `updated_at` first, each with `needs_allowance` when `agreed_labour_ex` is null. |
 | `fill_job_work_order_allowance` | POST | `work_order_id`, `expected_updated_at`, `agreed_labour_ex` (0 allowed, null refused `allowance_required`). |
 | `approve_office_job_work_order` | POST | `work_order_id`, `expected_updated_at`. A non-fencing/patio draft may be approved with an allowance and empty scope while the office flag is on. |
-| `review_crew_invoice_line` | POST | `line_id`, `decision` (`approve` / `query` / `reject`), optional `note` (cut at 2000). Needs the review flag. A backup approver still needs the office-fill flag. |
+| `review_crew_invoice_line` | POST | `line_id`, `decision` (`approve` / `query` / `reject`), optional `note` (cut at 2000). DEFAULT, owner to confirm: any office role (admin, owner, ops_manager) with a user id. The review flag must be on, unless the line is already awaiting, queried or rejected. The office module does not call Xero. The action pushes when the last line is approved, and returns the invoice to the trade (`ops-reject`) when any line is rejected. |
 
 The queue is the office list of blank and draft job work orders. The job
 overview reads `job_detail.job_work_order`, then `job_work_order`. While
@@ -112,11 +114,13 @@ existing 422). Hours are invoiced on the job. `can_invoice` stays false for
 a draft or approved job work order, because those statuses are not
 `complete` / `sent` / `accepted`.
 
-While the hard-rule flag is on, `generate_trade_invoice` refuses before it
-saves when a line names a job with no job work order (409
-`job_work_order_required`). An unreadable check is 503
-`job_work_order_unreadable`. While the flag is off, travel and every other
-line work with no work order.
+While the hard-rule flag is on, `generate_trade_invoice` and
+`submit_trade_invoice` refuse before they save when a non-travel line names
+an open job with no job work order (409 `job_work_order_required`). A closed
+job is exempt. Travel is exempt. An unreadable job on a non-travel line is
+503 `job_work_order_unreadable`. While the flag is off, every line works
+with no work order. DEFAULT, owner to confirm: the open-job and Travel
+exemptions.
 
 ## Office review before Xero
 
@@ -132,12 +136,29 @@ old lines.
 One held or rejected line blocks the invoice; lines are not dropped from the
 total.
 
-`push_trade_invoice_to_xero` reads the same refusal before it asks Xero. An
-unreadable line read is 503 `office_review_unreadable`. When the last held
-line is cleared and none are rejected, `review_crew_invoice_line` moves the
-invoice from `pending_acknowledgment` to `approved` only while
-`xero_bill_id` is null, and it does not call Xero. An invoice already in
-Xero is 409 `invoice_already_in_xero`.
+`push_trade_invoice_to_xero`, `generate_trade_invoice` and
+`submit_work_order_invoice` read the saved line statuses before they ask
+Xero, whether or not the review flag can be read. An unreadable line read
+is 503 `office_review_unreadable`. NULL does not hold. A failed flag read
+does not treat the lines as clear.
+
+While the review flag is on, `submit_trade_invoice` is 410
+`submit_trade_invoice_retired` before it writes. A failed flag read does
+not 410; the saved-status check still holds a line the trigger stamped
+awaiting. `submit_work_order_invoice` saves the local invoice, then moves
+it from `draft` to `pending_acknowledgment` and returns
+`office_review: 'held'` without calling Xero.
+
+DEFAULT, owner to confirm. When the last held line is approved and none
+are rejected, `review_crew_invoice_line` releases the invoice
+(`pending_acknowledgment` becomes `approved`; an invoice already
+`approved` or `acknowledged` is left on that status) and the action then
+pushes it to Xero. The office module itself does not call Xero. A failed
+push leaves the invoice approved and retryable. Rejecting any line sets
+the invoice to `ops-reject` and does not push. An invoice already in Xero
+is 409 `invoice_already_in_xero`. Turning the review flag off later does
+not clear a line that is already awaiting, queried or rejected, and does
+not release it.
 
 ## What the trade list returns
 
@@ -149,16 +170,27 @@ While `retire_crew_work_orders_v1` is off, `my_work_orders` still excludes
 - a legacy `kind = 'crew'` row with no `quote_builder_version_id` is left
   out, including one not yet cancelled;
 - a quote-builder crew row stays;
-- a job work order is returned. `mode=all` sees it by dropping the kind
-  exclusion. `mode=mine` also reads job work orders on jobs where the viewer
-  has a genuine, non-ghost, non-cancelled assignment, because a job work
-  order has no `assigned_user_id`.
+- a job work order is returned only when it is not a draft. Rates, totals,
+  `quote_cost_ex`, `agreed_labour_ex`, figures and addendum prices are
+  removed. `can_invoice` and `can_add_to_weekly_invoice` are false.
+  `mode=all` sees an approved job work order by dropping the kind
+  exclusion. `mode=mine` also reads non-draft job work orders on jobs where
+  the viewer has a genuine, non-ghost, non-cancelled assignment, because a
+  job work order has no `assigned_user_id`.
 
 `list_work_orders` (the ops crew list) keeps excluding `kind = 'job'`. With
 the flag on it also drops retired crew rows. `submit_work_order_invoice`,
 the weekly resolver and `complete_my_job`'s work-order completion skip or
-refuse a retired crew row and do not complete a job work order. The
-completion reply still includes the job's work order, with no status write.
+refuse a retired crew row and do not complete a job work order.
+`complete_my_job` does not list the job work order in
+`invoice_queue.work_orders`.
+
+`list_trade_invoice_lines` adds `review_state` beside
+`office_review_status`: awaiting is `held`, and approved, queried and
+rejected keep those words. Null stays null. `job_detail` lists the same
+pair on `trade_invoice_lines` (id, line type, description, the two review
+fields) and does not put prices on that list. A failed line read leaves
+the detail up and sets `trade_invoice_lines_error`.
 
 ## Backfill
 
@@ -171,16 +203,21 @@ SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… \
   scripts/backfill-job-work-orders-active.ts
 ```
 
-Dry-run prints the preview count, then counts by type and by status, and
-whether the two flags are on. It writes nothing. A processing make-safe
-touched inside 30 days is in the preview. One last touched before that is
-not. Jobs that already have a draft or approved job work order are not.
+Dry-run prints JSON `{ job_ids, rows, by_type, by_status }`. It writes
+nothing. A job qualifies when it is open, has no draft or approved job
+work order, and has real activity inside 30 days: an assignment
+(`created_at` or `scheduled_date`), a time entry (`work_date` or
+`logged_at`), an invoice line (`created_at` or `line_date`), or a status
+change (`job_events` `status_changed`, `status_change` or
+`job.status_changed`). A recent `jobs.updated_at` with none of those does
+not qualify. A processing make-safe with that activity is in the preview.
 
-`--apply` exits 2 unless both `job_work_order_all_types_v1` and
-`job_work_order_active_backfill_v1` are on, then prints `{ opened, as_of }`.
-
-Audit expectation, not a live assertion: about 97 rows (makesafe 52, patio
-22, repair 16, fencing 7).
+`--apply` needs `--file`, the reviewed dry-run JSON. It does not select
+again. It exits 2 without that file, or when the file has no valid ids,
+or unless both `job_work_order_all_types_v1` and
+`job_work_order_active_backfill_v1` are on. It then posts those ids to
+`apply_active_job_work_orders(uuid[])`, which opens only the ones still
+open and still without a job work order and skips the rest.
 
 ## Retiring the old crew work orders
 
@@ -211,25 +248,35 @@ Marnin okays each of these. None of them is this pull request.
    ledger under another name is a collision; renumber, do not alias it.
 2. Deploy `ops-api` from `main` after the migration.
 3. Turn `crew_invoice_line_office_review_v1` on before or with
-   `crew_invoice_on_job_work_order_v1`.
+   `crew_invoice_on_job_work_order_v1`. Once review is on,
+   `submit_trade_invoice` is 410, and `submit_work_order_invoice` and
+   `generate_trade_invoice` hold lines until every line is approved. The
+   last approval pushes. A rejected line returns the invoice as
+   `ops-reject`. Any office staff can review lines. DEFAULT, owner to
+   confirm: the reviewer is any office role, the last approval pushes, and
+   a rejection returns the invoice. The trade-app toast that says a held
+   invoice was submitted to Xero needs a UX change before this switch is
+   turned on.
 4. Turn `job_work_order_all_types_v1` and
    `job_work_order_office_fill_v1` on. Then
-   `job_work_order_active_backfill_v1`, dry-run the backfill, then `--apply`.
-   Pick Marnin's user id and write it into
-   `work_order_settings.backup_approver_user_ids` before anyone relies on the
-   backup. The list ships empty. Do not guess between the two rows. The one
-   id this repo already names is `706c5258-70dd-483a-b36c-af6864b24498`. The
-   second id, both `created_at` values and both last sign-ins were not
-   observed from production on this change. Shaun still approves from
-   `approver_user_ids` with the list empty.
+   `job_work_order_active_backfill_v1`. Dry-run the backfill (activity in
+   30 days, not `jobs.updated_at`), review the printed ids, then
+   `--apply --file` with that file only. Set
+   `backup_approver_user_ids` to
+   `[706c5258-70dd-483a-b36c-af6864b24498]`, the only `users` row on
+   `marnin@secureworkswa.com.au`. The list ships empty. Shaun still
+   approves work orders from `approver_user_ids` until that write.
    Once `job_work_order_all_types_v1` is on, readiness "Work order exists"
    passes only for an approved job work order whose `agreed_labour_ex` is
    set, including 0. A blank draft does not pass. While the flag is off the
    check stays `wo_count > 0`.
 5. Leave `crew_invoice_requires_job_work_order_v1` off until the backfill
-   has been read.
+   has been read. DEFAULT, owner to confirm: it refuses only an open job,
+   and Travel is exempt.
 6. Turn `retire_crew_work_orders_v1` on, dry-run
-   `scripts/retire-crew-work-orders.ts`, then `--apply`.
+   `scripts/retire-crew-work-orders.ts`, then `--apply`. That also stops
+   quote-builder creating `kind = 'crew'`. `my_work_orders` then returns
+   approved job work orders with the money stripped, and leaves drafts out.
 
 ## Left open
 

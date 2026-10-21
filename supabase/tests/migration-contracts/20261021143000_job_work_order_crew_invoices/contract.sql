@@ -1,7 +1,8 @@
 -- Contract for 20261021143000_job_work_order_crew_invoices.sql.
 -- Every switch ships off. A make-safe job opens a blank work order only while
--- job_work_order_all_types_v1 is on. The 30-day preview selects by
--- jobs.updated_at and never by a processing label alone. Draft work orders
+-- job_work_order_all_types_v1 is on. The 30-day preview selects open jobs by
+-- real activity (an assignment, a time entry, an invoice line, or a status
+-- change), never by jobs.updated_at alone. Draft work orders
 -- stamp a crew line only while crew_invoice_on_job_work_order_v1 is on.
 -- Office review starts only on insert, and only while its switch is on.
 
@@ -86,12 +87,13 @@ BEGIN
   UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_all_types_v1';
 END $$;
 
--- 2. Preview: touched inside 30 days, no job work order, open status.
--- A processing row is inserted only when this database allows that status.
--- The Deno twin covers processing on every database.
+-- 2. Preview: real activity inside 30 days, no job work order, open status.
+-- jobs.updated_at alone does not qualify. A processing row is inserted only
+-- when this database allows that status.
 DO $$
 DECLARE
   v_org uuid := '00000000-0000-0000-0000-000000000001';
+  v_crew uuid := 'aaaaaaaa-0000-0000-0000-0000000000c1';
   v_now uuid := gen_random_uuid();
   v_edge uuid := gen_random_uuid();
   v_stale uuid := gen_random_uuid();
@@ -99,37 +101,74 @@ DECLARE
   v_draft uuid := gen_random_uuid();
   v_quoted uuid := gen_random_uuid();
   v_fence uuid := gen_random_uuid();
+  v_inv uuid := gen_random_uuid();
+  v_invoice uuid := gen_random_uuid();
   v_processing uuid := gen_random_uuid();
   v_processing_stale uuid := gen_random_uuid();
+  v_asg_proc uuid := gen_random_uuid();
+  v_asg_proc_stale uuid := gen_random_uuid();
   v_processing_ok boolean := false;
+  v_result jsonb;
 BEGIN
   INSERT INTO public.jobs (id, org_id, type, status, job_number, updated_at) VALUES
-    (v_now, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-NOW', now()),
-    (v_edge, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-EDGE', now() - interval '30 days'),
-    (v_stale, v_org, 'makesafe', 'scheduled', 'JWOCI-STALE', now() - interval '40 days'),
+    (v_now, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-NOW', now() - interval '40 days'),
+    (v_edge, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-EDGE', now() - interval '40 days'),
+    (v_stale, v_org, 'makesafe', 'scheduled', 'JWOCI-STALE', now()),
     (v_done, v_org, 'makesafe', 'complete', 'JWOCI-DONE', now()),
     (v_draft, v_org, 'makesafe', 'draft', 'JWOCI-DRAFT', now()),
     (v_quoted, v_org, 'makesafe', 'quoted', 'JWOCI-QUOTED', now()),
-    (v_fence, v_org, 'fencing', 'accepted', 'JWOCI-FENCE', now());
+    (v_fence, v_org, 'fencing', 'accepted', 'JWOCI-FENCE', now()),
+    (v_inv, v_org, 'makesafe', 'scheduled', 'JWOCI-INV', now() - interval '40 days');
+
+  -- Scheduled today, created long ago: the date is the only signal.
+  INSERT INTO public.job_assignments (id, job_id, user_id, role, scheduled_date, created_at) VALUES
+    (gen_random_uuid(), v_now, v_crew, 'lead_installer', current_date, now() - interval '40 days'),
+    (gen_random_uuid(), v_done, v_crew, 'lead_installer', current_date, now()),
+    (gen_random_uuid(), v_draft, v_crew, 'lead_installer', current_date, now()),
+    (gen_random_uuid(), v_quoted, v_crew, 'lead_installer', current_date, now()),
+    (gen_random_uuid(), v_fence, v_crew, 'lead_installer', current_date, now());
+
+  INSERT INTO public.job_events (job_id, event_type, detail_json, created_at)
+  VALUES (v_edge, 'status_changed', '{}'::jsonb, now() - interval '30 days');
+
+  INSERT INTO public.trade_invoices (id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay)
+  VALUES (v_invoice, v_org, v_crew, 'pending_acknowledgment', 10, 0, 10, false, 0.12, 1.2, 10, 9.4);
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_invoice, v_inv, 'labour', 10);
 
   BEGIN
     INSERT INTO public.jobs (id, org_id, type, status, job_number, updated_at) VALUES
-      (v_processing, v_org, 'makesafe', 'processing', 'JWOCI-PROC', now()),
+      (v_processing, v_org, 'makesafe', 'processing', 'JWOCI-PROC', now() - interval '40 days'),
       (v_processing_stale, v_org, 'makesafe', 'processing', 'JWOCI-PROC-STALE', now() - interval '40 days');
+    INSERT INTO public.job_assignments (id, job_id, user_id, role, scheduled_date, created_at) VALUES
+      (v_asg_proc, v_processing, v_crew, 'lead_installer', current_date - 40, now() - interval '40 days'),
+      (v_asg_proc_stale, v_processing_stale, v_crew, 'lead_installer', current_date - 40, now() - interval '40 days');
+    INSERT INTO public.job_assignment_logged_times (
+      assignment_id, job_id, user_id, work_date, start_time, finish_time, hours, logged_at
+    ) VALUES (
+      v_asg_proc, v_processing, v_crew, current_date, '07:00', '15:00', 8,
+      now() - interval '40 days'
+    );
     v_processing_ok := true;
   EXCEPTION WHEN check_violation THEN
     v_processing_ok := false;
   END;
 
+  IF to_regprocedure('public.apply_active_job_work_orders()') IS NOT NULL
+     OR to_regprocedure('public.apply_active_job_work_orders(uuid[])') IS NULL THEN
+    RAISE EXCEPTION 'contract: apply must take the reviewed job ids';
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-MS-NOW')
-     OR NOT EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-MS-EDGE') THEN
-    RAISE EXCEPTION 'contract: a make-safe job touched inside 30 days with no work order must be previewed';
+     OR NOT EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-MS-EDGE')
+     OR NOT EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-INV') THEN
+    RAISE EXCEPTION 'contract: an open job with recent activity and no work order must be previewed';
   END IF;
   IF EXISTS (
     SELECT 1 FROM public.preview_active_job_work_orders()
     WHERE job_number IN ('JWOCI-STALE', 'JWOCI-DONE', 'JWOCI-DRAFT', 'JWOCI-QUOTED', 'JWOCI-FENCE')
   ) THEN
-    RAISE EXCEPTION 'contract: stale, finished, unopened and already-covered jobs must stay out of the preview';
+    RAISE EXCEPTION 'contract: a recent updated_at, a closed job, an unopened job and an already-covered job must stay out of the preview';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM public.work_orders WHERE job_id = v_fence AND kind = 'job' AND origin = 'job_approved') THEN
     RAISE EXCEPTION 'contract: an accepted fencing job must still open its own draft';
@@ -137,12 +176,12 @@ BEGIN
   IF v_processing_ok THEN
     IF NOT EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-PROC')
        OR EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-PROC-STALE') THEN
-      RAISE EXCEPTION 'contract: a processing make-safe is previewed only when it was touched inside 30 days';
+      RAISE EXCEPTION 'contract: a processing make-safe is previewed only from activity inside 30 days';
     END IF;
   END IF;
 
   BEGIN
-    PERFORM public.apply_active_job_work_orders();
+    PERFORM public.apply_active_job_work_orders(ARRAY[v_now]);
     RAISE EXCEPTION 'contract: apply must refuse while either switch is off';
   EXCEPTION WHEN insufficient_privilege THEN
     IF SQLERRM NOT LIKE '%job_work_order_all_types_v1%'
@@ -153,19 +192,21 @@ BEGIN
 
   UPDATE public.feature_flags SET enabled = true
   WHERE flag_name IN ('job_work_order_all_types_v1', 'job_work_order_active_backfill_v1');
-  -- A blank type always raises inside ensure. An earlier setup can leave
-  -- such a job open and recent, with no job work order, and that one row
-  -- would fail this apply. Park it for this transaction only.
-  UPDATE public.jobs j
-  SET status = 'draft'
-  WHERE btrim(coalesce(j.type, '')) = ''
-    AND j.status = ANY (public.job_work_order_open_statuses())
-    AND j.updated_at >= now() - interval '30 days'
-    AND NOT EXISTS (
-      SELECT 1 FROM public.work_orders w
-      WHERE w.job_id = j.id AND w.kind = 'job'
-    );
-  PERFORM public.apply_active_job_work_orders();
+  v_result := public.apply_active_job_work_orders(NULL);
+  IF (v_result->>'opened')::int <> 0
+     OR jsonb_array_length(v_result->'opened_ids') <> 0
+     OR (v_result->>'skipped')::int <> 0 THEN
+    RAISE EXCEPTION 'contract: a null id list must open nothing (%)', v_result;
+  END IF;
+  -- Apply only the ids this case reviewed. The shared database holds other
+  -- contracts' open jobs, and apply must not open those.
+  v_result := public.apply_active_job_work_orders(
+    ARRAY[v_now, v_edge, v_inv] || v_done
+  );
+  IF (v_result->>'skipped')::int < 1
+     OR NOT (v_result->'opened_ids' ? v_now::text) THEN
+    RAISE EXCEPTION 'contract: apply must open the previewed ids and skip the closed one (%)', v_result;
+  END IF;
 
   IF NOT EXISTS (
     SELECT 1 FROM public.work_orders
@@ -174,6 +215,9 @@ BEGIN
   ) OR NOT EXISTS (
     SELECT 1 FROM public.work_orders
     WHERE job_id = v_edge AND kind = 'job' AND origin = 'backfill' AND agreed_labour_ex IS NULL
+  ) OR NOT EXISTS (
+    SELECT 1 FROM public.work_orders
+    WHERE job_id = v_inv AND kind = 'job' AND origin = 'backfill' AND agreed_labour_ex IS NULL
   ) THEN
     RAISE EXCEPTION 'contract: apply must open a blank backfill draft for each previewed job';
   END IF;

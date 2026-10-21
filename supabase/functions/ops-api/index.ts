@@ -695,7 +695,10 @@ import {
   hideRetiredCrewWorkOrder,
   JOB_WORK_ORDER_ALL_TYPES_FLAG,
   loadCrewInvoiceJobWorkOrderRefusal,
+  readInvoiceOfficeReview,
   RETIRE_CREW_WORK_ORDERS_FLAG,
+  reviewStateFromOfficeStatus,
+  stripJobWorkOrderCardMoney,
   xeroSyncRefusal,
 } from './crew_invoice_job_work_order.ts'
 import {
@@ -2204,6 +2207,240 @@ async function markTradeInvoiceRetryable(
         (error?.message || 'invoice state changed'),
     )
   }
+}
+
+async function pushTradeInvoiceToXeroAction(client: any, body: any) {
+  const { invoice_id } = body
+  if (!invoice_id) throw new ApiError('invoice_id required', 400)
+
+  // Get the invoice + lines + user
+  const { data: inv } = await client.from('trade_invoices')
+    .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
+    .eq('id', invoice_id)
+    .maybeSingle()
+  if (!inv) throw new ApiError('Invoice not found', 404)
+  if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
+    throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
+  }
+
+  const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
+    .select('*')
+    .eq('trade_invoice_id', invoice_id)
+  if (linesErr) {
+    throw new ApiError('The office review on this invoice could not be read.', 503, {
+      error: 'The office review on this invoice could not be read.',
+      code: 'office_review_unreadable',
+    })
+  }
+  // A line still awaiting, queried or rejected holds the whole bill.
+  // A null review status is a line from before the switch and may sync.
+  const retryHold = xeroSyncRefusal(lines || [])
+  if (retryHold) {
+    throw new ApiError(retryHold.error, 409, { error: retryHold.error, code: retryHold.code })
+  }
+
+  // Pure read-only setup. Nothing here touches Xero or mutates Supabase.
+  // (getToken() is intentionally deferred — it can upsert xero_tokens on
+  // refresh, which would be a side effect before the reconciliation guard.)
+  const tradeName = inv.user?.name || 'Unknown Trade'
+  const tradeEmail = inv.user?.email || ''
+  const cachedContactId: string | null = inv.user?.xero_contact_id || null
+
+  const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
+  const reference = [tradeName, inv.invoice_number || 'TRADE', distinctJobNums].filter(Boolean).join(' | ')
+
+  const paymentDays = inv.user?.payment_terms_days || 7
+  const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
+
+  // Reconciliation guard runs BEFORE getToken (which can upsert xero_tokens),
+  // before any Xero call, and before any users/trade_invoices mutation.
+  // Computes the per-line value directly from raw trade_invoice_lines rows
+  // using the labour-vs-extras detection — same algorithm the line builder
+  // below uses, just without the Tracking enrichment that needs accessToken.
+  // A malformed-line-shape invoice throws here with zero side effects.
+  const retryLineAmounts = (lines || []).map((line: any) =>
+    persistedTradeInvoiceLineAmount(line)
+  )
+  const computedSubtotal = retryLineAmounts.reduce(
+    (sum: number, line: { lineTotalEx: number }) => sum + line.lineTotalEx,
+    0,
+  )
+  const invMoney = persistedTradeInvoiceMoney(inv)
+  const expectedSubtotal = invMoney.gross_earned
+  if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
+    throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+  }
+  const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
+
+  // Past the guard. From here side effects are allowed.
+  const { accessToken, tenantId } = await getToken(client)
+
+  // Look up tracking categories (Xero read).
+  let tracking: any[] = []
+  try {
+    const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
+    const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
+    if (divisionCat) tracking = divisionCat
+  } catch (e) { /* skip tracking */ }
+
+  // trade_invoice_lines come in two shapes:
+  //   - "labour" (legacy): total_hours / hourly_rate populated; quantity/unit_rate may be 0
+  //   - "extras" (current): quantity / unit_rate / line_total_ex populated; total_hours/hourly_rate are 0
+  // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
+  // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
+  // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
+  const grossXeroLineItems = (lines || []).map((line: any, index: number) => {
+    const recovered = retryLineAmounts[index]
+    const isLabour = recovered.basis === 'hours_rate'
+    const desc = isLabour
+      ? ((line.job_number || '') + ' ' + (line.client_name || '') + ' — ' + recovered.quantity + 'h @ $' + recovered.unitAmount + '/hr')
+      : (line.description || ((line.line_type || 'Extra') + (line.division ? ' (' + line.division + ')' : '')))
+    let trackingOption = trackingCategoryForJob(line.job_number || '')
+    if (!trackingOption && line.division) {
+      const divMap: Record<string, string> = {
+        'Patio': 'SW - PATIOS', 'Fencing': 'SW - FENCING', 'Decking': 'SW - DECKING',
+        'Make Safe': 'SW - INSURANCE WORK', 'General Labour': 'SW - GROUP',
+      }
+      trackingOption = divMap[line.division] || ''
+    }
+    const lineTracking = tracking && trackingOption ? [{ Name: 'Business Unit', Option: trackingOption }] : []
+    return {
+      Description: desc,
+      Quantity: recovered.quantity,
+      UnitAmount: recovered.unitAmount,
+      AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
+      TaxType: xeroTax.taxType,
+      Tracking: lineTracking,
+    }
+  })
+  const xeroLineItems = splitTradeInvoiceXeroLines(
+    grossXeroLineItems,
+    invMoney,
+    {
+      tradeName,
+      superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+    },
+  )
+
+  if (inv.xero_bill_id) {
+    const existingResult = await xeroGet(
+      `/Invoices/${encodeURIComponent(inv.xero_bill_id)}`,
+      accessToken,
+      tenantId,
+    )
+    const existingBill = existingResult?.Invoices?.[0]
+    const existingIdentity = assertExistingTradeInvoiceXeroBill(
+      existingBill,
+      inv.xero_bill_id,
+      invMoney,
+    )
+    const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+      client,
+      invoice_id,
+      existingIdentity,
+      {
+        accessToken,
+        tenantId,
+        filename: inv.invoice_number || reference || 'trade-invoice',
+        clientPdfBase64: body.pdf_base64,
+        submittedLines: grossXeroLineItems,
+        money: invMoney,
+        tradeName,
+      },
+    )
+    return ({
+      success: true,
+      xero_bill_id: existingIdentity.xeroBillId,
+      reference,
+      reconciled_existing: true,
+      pdf_attached: pdfAttached,
+    })
+  }
+
+  if (mustReuseExistingXeroBillForPdfRetry(inv.status)) {
+    throw new ApiError(
+      'PDF attach must reuse the existing Xero bill; a second ACCPAY is not allowed',
+      409,
+    )
+  }
+
+  // Resolve Xero contact for the trade. Name fallback is important for
+  // Jean-style suppliers whose Supabase login email differs from the
+  // existing Xero supplier contact email.
+  const xeroContactId = await resolveTradeXeroSupplierContact(client, {
+    userId: inv.user_id,
+    name: tradeName,
+    email: tradeEmail,
+    cachedContactId,
+    accessToken,
+    tenantId,
+  })
+
+  if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
+
+  const xeroPayload = {
+    Invoices: [{
+      Type: 'ACCPAY',
+      Contact: { ContactID: xeroContactId },
+      Reference: reference,
+      InvoiceNumber: tradeBillInvoiceNumber(inv.invoice_number, reference),
+      DueDate: dueDate,
+      Status: 'DRAFT',
+      LineAmountTypes: xeroTax.lineAmountTypes,
+      LineItems: xeroLineItems,
+    }],
+  }
+
+  const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
+  const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
+  const bill = xeroResult?.Invoices?.[0]
+  const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
+    bill,
+    money: invMoney,
+    checkpointIdentity: (identity) =>
+      checkpointTradeInvoiceXeroIdentity(
+        client,
+        invoice_id,
+        identity,
+        'push_trade_invoice_to_xero',
+      ),
+  }).catch((error) => tradeInvoiceMoneyApiError(error))
+  const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+    client,
+    invoice_id,
+    billIdentity,
+    {
+      accessToken,
+      tenantId,
+      filename: inv.invoice_number || reference || 'trade-invoice',
+      clientPdfBase64: body.pdf_base64,
+      submittedLines: grossXeroLineItems,
+      money: invMoney,
+      tradeName,
+    },
+  )
+
+  // Cache in xero_invoices
+  try {
+    await client.from('xero_invoices').upsert({
+      org_id: DEFAULT_ORG_ID,
+      xero_invoice_id: billIdentity.xeroBillId,
+      invoice_number: billIdentity.xeroBillNumber,
+      invoice_type: 'ACCPAY',
+      status: bill.Status || 'DRAFT',
+      reference: reference,
+      sub_total: tradeInvoiceXeroBillSubtotal(invMoney),
+      total_tax: invMoney.gst_amount,
+      total: bill.Total || invMoney.trade_payable,
+      amount_due: bill.AmountDue || invMoney.trade_payable,
+      due_date: dueDate,
+      contact_name: tradeName,
+      xero_contact_id: xeroContactId,
+    }, { onConflict: 'org_id,xero_invoice_id' })
+  } catch (e) { /* non-blocking */ }
+
+  return ({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
+
 }
 
 function json(data: unknown, status = 200) {
@@ -9022,8 +9259,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
       }
       // Blank and draft job work orders for the office. The queue is a read.
-      // Fill, approve and line review are named-approver writes, and each
-      // refuses while its own switch is off.
+      // Fill and approve stay named-approver writes. Line review is any
+      // office role (DEFAULT, owner to confirm). The last approved line
+      // pushes the invoice. A rejected line returns it to the trade.
       case 'list_office_job_work_orders': {
         if (req.method !== 'GET') {
           return json({ error: 'list_office_job_work_orders is GET only', code: 'method_not_allowed' }, 405)
@@ -9046,7 +9284,29 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'review_crew_invoice_line is POST only', code: 'method_not_allowed' }, 405)
         }
-        return json(await runJobWorkOrder(() => reviewCrewInvoiceLine(client, body, officeJobWorkOrderActor(authMode, authUser))))
+        const reviewed = await runJobWorkOrder(() => reviewCrewInvoiceLine(client, body, officeJobWorkOrderActor(authMode, authUser)))
+        if (reviewed.ready_for_xero_push && reviewed.trade_invoice_id) {
+          try {
+            const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: reviewed.trade_invoice_id })
+            return json({ ...reviewed, xero_push: pushed })
+          } catch (pushErr) {
+            try {
+              await markTradeInvoiceRetryable(
+                client,
+                String(reviewed.trade_invoice_id),
+                'Line review released this invoice, but the Xero push failed. It can be retried.',
+              )
+            } catch (markErr) {
+              console.error('[ops-api] line review xero push retry mark failed:', (markErr as Error).message)
+            }
+            return json({
+              ...reviewed,
+              xero_push: 'failed',
+              xero_push_error: (pushErr as Error)?.message || 'Xero push failed',
+            })
+          }
+        }
+        return json(reviewed)
       }
       // Re-sends variation emails left failed or stuck in sending. Sends
       // nothing while feature flag work_order_variation_emails_v1 is off.
@@ -9739,236 +9999,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true, invoice_id: rejInvId, status: 'ops-reject' })
       }
       case 'push_trade_invoice_to_xero': {
-        const { invoice_id } = body
-        if (!invoice_id) throw new ApiError('invoice_id required', 400)
-
-        // Get the invoice + lines + user
-        const { data: inv } = await client.from('trade_invoices')
-          .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
-          .eq('id', invoice_id)
-          .maybeSingle()
-        if (!inv) throw new ApiError('Invoice not found', 404)
-        if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
-          throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
-        }
-
-        const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
-          .select('*')
-          .eq('trade_invoice_id', invoice_id)
-        if (linesErr) {
-          throw new ApiError('The office review on this invoice could not be read.', 503, {
-            error: 'The office review on this invoice could not be read.',
-            code: 'office_review_unreadable',
-          })
-        }
-        // A line still awaiting, queried or rejected holds the whole bill.
-        // A null review status is a line from before the switch and may sync.
-        const retryHold = xeroSyncRefusal(lines || [])
-        if (retryHold) {
-          throw new ApiError(retryHold.error, 409, { error: retryHold.error, code: retryHold.code })
-        }
-
-        // Pure read-only setup. Nothing here touches Xero or mutates Supabase.
-        // (getToken() is intentionally deferred — it can upsert xero_tokens on
-        // refresh, which would be a side effect before the reconciliation guard.)
-        const tradeName = inv.user?.name || 'Unknown Trade'
-        const tradeEmail = inv.user?.email || ''
-        const cachedContactId: string | null = inv.user?.xero_contact_id || null
-
-        const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
-        const reference = [tradeName, inv.invoice_number || 'TRADE', distinctJobNums].filter(Boolean).join(' | ')
-
-        const paymentDays = inv.user?.payment_terms_days || 7
-        const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
-
-        // Reconciliation guard runs BEFORE getToken (which can upsert xero_tokens),
-        // before any Xero call, and before any users/trade_invoices mutation.
-        // Computes the per-line value directly from raw trade_invoice_lines rows
-        // using the labour-vs-extras detection — same algorithm the line builder
-        // below uses, just without the Tracking enrichment that needs accessToken.
-        // A malformed-line-shape invoice throws here with zero side effects.
-        const retryLineAmounts = (lines || []).map((line: any) =>
-          persistedTradeInvoiceLineAmount(line)
-        )
-        const computedSubtotal = retryLineAmounts.reduce(
-          (sum: number, line: { lineTotalEx: number }) => sum + line.lineTotalEx,
-          0,
-        )
-        const invMoney = persistedTradeInvoiceMoney(inv)
-        const expectedSubtotal = invMoney.gross_earned
-        if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
-          throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
-        }
-        const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
-
-        // Past the guard. From here side effects are allowed.
-        const { accessToken, tenantId } = await getToken(client)
-
-        // Look up tracking categories (Xero read).
-        let tracking: any[] = []
-        try {
-          const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
-          const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
-          if (divisionCat) tracking = divisionCat
-        } catch (e) { /* skip tracking */ }
-
-        // trade_invoice_lines come in two shapes:
-        //   - "labour" (legacy): total_hours / hourly_rate populated; quantity/unit_rate may be 0
-        //   - "extras" (current): quantity / unit_rate / line_total_ex populated; total_hours/hourly_rate are 0
-        // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
-        // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
-        // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
-        const grossXeroLineItems = (lines || []).map((line: any, index: number) => {
-          const recovered = retryLineAmounts[index]
-          const isLabour = recovered.basis === 'hours_rate'
-          const desc = isLabour
-            ? ((line.job_number || '') + ' ' + (line.client_name || '') + ' — ' + recovered.quantity + 'h @ $' + recovered.unitAmount + '/hr')
-            : (line.description || ((line.line_type || 'Extra') + (line.division ? ' (' + line.division + ')' : '')))
-          let trackingOption = trackingCategoryForJob(line.job_number || '')
-          if (!trackingOption && line.division) {
-            const divMap: Record<string, string> = {
-              'Patio': 'SW - PATIOS', 'Fencing': 'SW - FENCING', 'Decking': 'SW - DECKING',
-              'Make Safe': 'SW - INSURANCE WORK', 'General Labour': 'SW - GROUP',
-            }
-            trackingOption = divMap[line.division] || ''
-          }
-          const lineTracking = tracking && trackingOption ? [{ Name: 'Business Unit', Option: trackingOption }] : []
-          return {
-            Description: desc,
-            Quantity: recovered.quantity,
-            UnitAmount: recovered.unitAmount,
-            AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
-            TaxType: xeroTax.taxType,
-            Tracking: lineTracking,
-          }
-        })
-        const xeroLineItems = splitTradeInvoiceXeroLines(
-          grossXeroLineItems,
-          invMoney,
-          {
-            tradeName,
-            superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
-          },
-        )
-
-        if (inv.xero_bill_id) {
-          const existingResult = await xeroGet(
-            `/Invoices/${encodeURIComponent(inv.xero_bill_id)}`,
-            accessToken,
-            tenantId,
-          )
-          const existingBill = existingResult?.Invoices?.[0]
-          const existingIdentity = assertExistingTradeInvoiceXeroBill(
-            existingBill,
-            inv.xero_bill_id,
-            invMoney,
-          )
-          const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
-            client,
-            invoice_id,
-            existingIdentity,
-            {
-              accessToken,
-              tenantId,
-              filename: inv.invoice_number || reference || 'trade-invoice',
-              clientPdfBase64: body.pdf_base64,
-              submittedLines: grossXeroLineItems,
-              money: invMoney,
-              tradeName,
-            },
-          )
-          return json({
-            success: true,
-            xero_bill_id: existingIdentity.xeroBillId,
-            reference,
-            reconciled_existing: true,
-            pdf_attached: pdfAttached,
-          })
-        }
-
-        if (mustReuseExistingXeroBillForPdfRetry(inv.status)) {
-          throw new ApiError(
-            'PDF attach must reuse the existing Xero bill; a second ACCPAY is not allowed',
-            409,
-          )
-        }
-
-        // Resolve Xero contact for the trade. Name fallback is important for
-        // Jean-style suppliers whose Supabase login email differs from the
-        // existing Xero supplier contact email.
-        const xeroContactId = await resolveTradeXeroSupplierContact(client, {
-          userId: inv.user_id,
-          name: tradeName,
-          email: tradeEmail,
-          cachedContactId,
-          accessToken,
-          tenantId,
-        })
-
-        if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
-
-        const xeroPayload = {
-          Invoices: [{
-            Type: 'ACCPAY',
-            Contact: { ContactID: xeroContactId },
-            Reference: reference,
-            InvoiceNumber: tradeBillInvoiceNumber(inv.invoice_number, reference),
-            DueDate: dueDate,
-            Status: 'DRAFT',
-            LineAmountTypes: xeroTax.lineAmountTypes,
-            LineItems: xeroLineItems,
-          }],
-        }
-
-        const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
-        const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
-        const bill = xeroResult?.Invoices?.[0]
-        const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
-          bill,
-          money: invMoney,
-          checkpointIdentity: (identity) =>
-            checkpointTradeInvoiceXeroIdentity(
-              client,
-              invoice_id,
-              identity,
-              'push_trade_invoice_to_xero',
-            ),
-        }).catch((error) => tradeInvoiceMoneyApiError(error))
-        const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
-          client,
-          invoice_id,
-          billIdentity,
-          {
-            accessToken,
-            tenantId,
-            filename: inv.invoice_number || reference || 'trade-invoice',
-            clientPdfBase64: body.pdf_base64,
-            submittedLines: grossXeroLineItems,
-            money: invMoney,
-            tradeName,
-          },
-        )
-
-        // Cache in xero_invoices
-        try {
-          await client.from('xero_invoices').upsert({
-            org_id: DEFAULT_ORG_ID,
-            xero_invoice_id: billIdentity.xeroBillId,
-            invoice_number: billIdentity.xeroBillNumber,
-            invoice_type: 'ACCPAY',
-            status: bill.Status || 'DRAFT',
-            reference: reference,
-            sub_total: tradeInvoiceXeroBillSubtotal(invMoney),
-            total_tax: invMoney.gst_amount,
-            total: bill.Total || invMoney.trade_payable,
-            amount_due: bill.AmountDue || invMoney.trade_payable,
-            due_date: dueDate,
-            contact_name: tradeName,
-            xero_contact_id: xeroContactId,
-          }, { onConflict: 'org_id,xero_invoice_id' })
-        } catch (e) { /* non-blocking */ }
-
-        return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
+        return json(await pushTradeInvoiceToXeroAction(client, body))
       }
 
       case 'list_trade_invoice_lines': {
@@ -9987,6 +10018,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ...line,
           trade_name: line.trade_invoices?.user?.name || 'Unknown',
           week_label: line.trade_invoices?.week_start ? new Date(line.trade_invoices.week_start).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }) : '',
+          review_state: reviewStateFromOfficeStatus(line.office_review_status),
         }))
 
         return json({ lines: enrichedLines })
@@ -11733,6 +11765,61 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               },
             )
             await noteTradeRecurringDeductionNotTaken(client, tradeInvoiceId, woRecurringDeduction)
+
+            // Saved line stamps hold the bill whether or not the review flag
+            // can be read. A work-order invoice is inserted as draft, so a
+            // hold moves it to pending_acknowledgment or the last approval
+            // can never release it. No Xero contact and no bill.
+            const woOfficeReview = await readInvoiceOfficeReview(client, tradeInvoiceId)
+            if (!woOfficeReview.ok) {
+              throw new ApiError(
+                'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+                503,
+                {
+                  error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+                  code: 'office_review_unreadable',
+                  invoice_id: tradeInvoiceId,
+                },
+              )
+            }
+            if (woOfficeReview.hold) {
+              const { data: woHoldInv, error: woHoldReadErr } = await client.from('trade_invoices')
+                .select('query_note').eq('id', tradeInvoiceId).maybeSingle()
+              if (woHoldReadErr) console.error('[ops-api] work order office review hold note read failed:', woHoldReadErr.message)
+              const woHoldNote = [woHoldInv?.query_note, woOfficeReview.hold.error].filter(Boolean).join(' | ').slice(0, 2000)
+              const { data: woHeld, error: woHoldStatusErr } = await client.from('trade_invoices')
+                .update({ status: 'pending_acknowledgment', query_note: woHoldNote })
+                .eq('id', tradeInvoiceId)
+                .eq('status', 'draft')
+                .is('xero_bill_id', null)
+                .select('id, status')
+                .maybeSingle()
+              if (woHoldStatusErr || !woHeld) {
+                throw new ApiError(
+                  'This invoice was saved, but it could not be held for office review. It was not sent to Xero.',
+                  503,
+                  {
+                    error: 'This invoice was saved, but it could not be held for office review. It was not sent to Xero.',
+                    code: 'office_review_unreadable',
+                    invoice_id: tradeInvoiceId,
+                  },
+                )
+              }
+              return json({
+                ok: false,
+                success: true,
+                office_review: 'held',
+                code: woOfficeReview.hold.code,
+                invoice_id: tradeInvoiceId,
+                xero_bill_id: null,
+                xero_bill_number: null,
+                total,
+                ...tradeInvoiceMoneyResponse(woMoney),
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+                pdf_attached: false,
+                error: woOfficeReview.hold.error,
+              })
+            }
 
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
@@ -13554,36 +13641,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             await recordWoLabourIssues(woLabourIssues)
 
             // Office review holds the whole invoice out of Xero. The invoice
-            // and its lines are already saved. A failed read of the review
-            // stamps fails closed: nothing is pushed. The switch off skips
-            // the extra read, and a null stamp (a line from before the
-            // switch) does not hold.
-            let officeReviewHold: { code: string; error: string } | null = null
-            if (await readFlag(client, CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG)) {
-              const { data: reviewLines, error: reviewErr } = await client.from('trade_invoice_lines')
-                .select('office_review_status')
-                .eq('trade_invoice_id', invoice.id)
-              if (reviewErr) {
-                throw new ApiError(
-                  'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-                  503,
-                  {
-                    error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-                    code: 'office_review_unreadable',
-                    invoice_id: invoice.id,
-                  },
-                )
-              }
-              officeReviewHold = xeroSyncRefusal(reviewLines || [])
-              if (officeReviewHold) {
-                const { data: holderInv, error: holderReadErr } = await client.from('trade_invoices')
-                  .select('query_note').eq('id', invoice.id).maybeSingle()
-                if (holderReadErr) console.error('[ops-api] office review hold note read failed:', holderReadErr.message)
-                const merged = [holderInv?.query_note, officeReviewHold.error].filter(Boolean).join(' | ').slice(0, 2000)
-                const { error: noteErr } = await client.from('trade_invoices')
-                  .update({ query_note: merged }).eq('id', invoice.id)
-                if (noteErr) console.error('[ops-api] office review hold note update failed:', noteErr.message)
-              }
+            // and its lines are already saved. The saved stamps are read
+            // whether or not the review flag can be read: a failed flag read
+            // must not push a line the database already stamped awaiting. A
+            // failed line read fails closed. A null stamp does not hold.
+            const officeReview = await readInvoiceOfficeReview(client, invoice.id)
+            if (!officeReview.ok) {
+              throw new ApiError(
+                'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+                503,
+                {
+                  error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+                  code: 'office_review_unreadable',
+                  invoice_id: invoice.id,
+                },
+              )
+            }
+            const officeReviewHold = officeReview.hold
+            if (officeReviewHold) {
+              const { data: holderInv, error: holderReadErr } = await client.from('trade_invoices')
+                .select('query_note').eq('id', invoice.id).maybeSingle()
+              if (holderReadErr) console.error('[ops-api] office review hold note read failed:', holderReadErr.message)
+              const merged = [holderInv?.query_note, officeReviewHold.error].filter(Boolean).join(' | ').slice(0, 2000)
+              const { error: noteErr } = await client.from('trade_invoices')
+                .update({ query_note: merged }).eq('id', invoice.id)
+              if (noteErr) console.error('[ops-api] office review hold note update failed:', noteErr.message)
             }
 
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
@@ -16124,6 +16206,7 @@ export async function tradeWorkOrders(
         .from('work_orders')
         .select(workOrderSelect)
         .eq('kind', 'job')
+        .neq('status', 'draft')
         .eq('org_id', viewer.orgId)
         .eq('jobs.org_id', viewer.orgId)
         .in('job_id', ids)
@@ -16163,7 +16246,10 @@ export async function tradeWorkOrders(
     ].some((value) => String(value || '').toLowerCase().includes(search)))
   }
   if (retireCrewWorkOrders) {
-    authorizedRows = authorizedRows.filter((row: any) => !hideRetiredCrewWorkOrder(row, true))
+    authorizedRows = authorizedRows.filter((row: any) =>
+      !hideRetiredCrewWorkOrder(row, true) &&
+      !(row.kind === 'job' && String(row.status || '') === 'draft')
+    )
   }
 
   const total = authorizedRows.length
@@ -16289,6 +16375,11 @@ export async function tradeWorkOrders(
       mapped[i].can_invoice = false
       mapped[i].can_add_to_weekly_invoice = false
       mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || COMPLETION_EVIDENCE_BLOCK_REASON
+    }
+  }
+  if (retireCrewWorkOrders) {
+    for (let i = 0; i < mapped.length; i++) {
+      if (mapped[i]?.kind === 'job') mapped[i] = stripJobWorkOrderCardMoney(mapped[i])
     }
   }
   const hasMore = requestedOffset + mapped.length < total
@@ -17461,6 +17552,29 @@ async function jobDetail(
   // invoice fields). Additive. A failed read never fails the job detail: the
   // list is then null with the reason, never an empty list.
   const tradeTimeEntries = await loadJobTradeTimeEntries(client, jobId)
+  // Crew invoice lines on this job, with the review state the trade app
+  // reads. No rates or totals. A failed read is null plus the reason.
+  let tradeInvoiceLines: Array<Record<string, unknown>> | null = null
+  let tradeInvoiceLinesError: string | null = null
+  try {
+    const { data: tilRows, error: tilErr } = await client.from('trade_invoice_lines')
+      .select('id, line_type, description, office_review_status')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false })
+    if (tilErr) {
+      tradeInvoiceLinesError = tilErr.message
+    } else {
+      tradeInvoiceLines = (tilRows || []).map((row: any) => ({
+        id: row.id,
+        line_type: row.line_type ?? null,
+        description: row.description ?? null,
+        office_review_status: row.office_review_status ?? null,
+        review_state: reviewStateFromOfficeStatus(row.office_review_status),
+      }))
+    }
+  } catch (e) {
+    tradeInvoiceLinesError = (e as Error).message
+  }
   // Paid close-out block (job_closeout_read.ts), fencing and patio only, staff only:
   // null when its read fails, absent for every other job type and caller.
   let closeoutBlock: CloseoutBlock | null | undefined
@@ -17477,6 +17591,8 @@ async function jobDetail(
     job: jobLite,
     trade_time_entries: tradeTimeEntries.entries,
     trade_time_entries_error: tradeTimeEntries.error,
+    trade_invoice_lines: tradeInvoiceLines,
+    trade_invoice_lines_error: tradeInvoiceLinesError,
     job_identity: _projectMakesafeJobIdentity({
       builder_claim_ref: job?.metadata?.builder_claim_ref,
       builder_work_order_number: job?.metadata?.builder_work_order_number,
@@ -53368,34 +53484,8 @@ async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthC
       already_complete: status === 'complete',
     })
   }
-  // The job's own work order is named on the queue and is not marked
-  // complete: an approved one is sealed, and this door does not invoice it.
-  if (retireCrewWorkOrders) {
-    const { data: jobWos, error: jobWoErr } = await client.from('work_orders')
-      .select('id, wo_number, status, scheduled_date, completed_at, scope_items, kind')
-      .eq('job_id', job.id).eq('org_id', tradeUser.orgId).eq('kind', 'job')
-      .not('status', 'in', '("cancelled","deleted")')
-    if (jobWoErr) throw jobWoErr
-    const seen = new Set(workOrders.map((row) => String(row.id)))
-    for (const wo of (jobWos || [])) {
-      if (seen.has(String(wo.id))) continue
-      const status = String(wo.status || '')
-      if (status === 'cancelled' || status === 'deleted') continue
-      seen.add(String(wo.id))
-      const anchor = wo.completed_at || (wo.scheduled_date ? wo.scheduled_date + 'T00:00:00Z' : nowIso)
-      const businessDate = getAWSTDate(new Date(anchor))
-      workOrders.push({
-        id: wo.id,
-        wo_number: wo.wo_number || null,
-        kind: 'job',
-        completed_at: wo.completed_at || null,
-        business_date: businessDate,
-        week_end: weekEndSundayFor(businessDate),
-        priced: Array.isArray(wo.scope_items) && wo.scope_items.length > 0,
-        already_complete: status === 'complete',
-      })
-    }
-  }
+  // The job's own work order is not listed. The weekly invoice path does
+  // not accept it, so naming it here would be a dead end for a per-metre trade.
   const { data: asns } = await client.from('job_assignments')
     .select(LOG_HOURS_ASSIGNMENT_COLUMNS).eq('job_id', job.id).eq('user_id', tradeUser.id)
   const myAssignment = pickHoursAssignment(asns || [])
@@ -54048,6 +54138,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 export async function submitTradeInvoice(client: any, userId: string, body: any) {
   const { week_ending, notes, items } = body
   if (!week_ending) throw new Error('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
+  // While line review is on, this door is retired. A failed flag read does
+  // not retire it: the saved-stamp check below still holds a line the
+  // trigger already stamped awaiting.
+  if (await readFlag(client, CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG)) {
+    throw new ApiError(
+      'This invoice door is switched off. Send the invoice from the work order.',
+      410,
+      {
+        error: 'This invoice door is switched off. Send the invoice from the work order.',
+        code: 'submit_trade_invoice_retired',
+      },
+    )
+  }
 
   const weekStart = weekStartFromEnd(week_ending)
 
@@ -54338,6 +54441,21 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       'Invoice rejected: persisted job lines do not match gross earned. Reload and ask the office to check the affected job assignment.',
     )
   }
+  const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
+    client,
+    Object.values(jobLines).map((line) => ({ job_id: line.job_id, line_type: 'labour' })),
+  )
+  if (jobWorkOrderRefusal) {
+    throw new ApiError(
+      jobWorkOrderRefusal.error,
+      jobWorkOrderRefusal.code === 'job_work_order_unreadable' ? 503 : 409,
+      {
+        error: jobWorkOrderRefusal.error,
+        code: jobWorkOrderRefusal.code,
+        ...(jobWorkOrderRefusal.job_id ? { job_id: jobWorkOrderRefusal.job_id } : {}),
+      },
+    )
+  }
 
   // Own the complete invoice and relational line truth before contacting Xero.
   // A contact/bill failure remains recoverable through the ops retry route; an
@@ -54455,6 +54573,43 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
         ? stStampErr.message
         : 'Only stamped ' + stStampedIds.length + ' of ' + stCoveredAssignmentIds.length +
           ' assignments (concurrent submission; claim rolled back)')
+    }
+  }
+
+  // Saved line stamps hold the bill whether or not the review flag can be
+  // read. Status stays approved. Nothing reaches Xero.
+  const stOfficeReview = await readInvoiceOfficeReview(client, insertedInvoice.id)
+  if (!stOfficeReview.ok) {
+    throw new ApiError(
+      'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+      503,
+      {
+        error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+        code: 'office_review_unreadable',
+        invoice_id: insertedInvoice.id,
+      },
+    )
+  }
+  if (stOfficeReview.hold) {
+    const { data: stHoldInv } = await client.from('trade_invoices')
+      .select('query_note').eq('id', insertedInvoice.id).maybeSingle()
+    const stHoldNote = [stHoldInv?.query_note, stOfficeReview.hold.error].filter(Boolean).join(' | ').slice(0, 2000)
+    await client.from('trade_invoices').update({ query_note: stHoldNote }).eq('id', insertedInvoice.id)
+    return {
+      ok: false,
+      success: true,
+      office_review: 'held',
+      code: stOfficeReview.hold.code,
+      invoice_id: insertedInvoice.id,
+      xero_bill_id: null,
+      xero_bill_number: null,
+      total,
+      ...tradeInvoiceMoneyResponse(stMoney),
+      ...tradeRecurringDeductionResponse(stRecurringDeduction),
+      invoice_type: serverInvoiceType,
+      invoice_type_source: 'user',
+      pdf_attached: false,
+      error: stOfficeReview.hold.error,
     }
   }
 

@@ -31,9 +31,12 @@ export const RETIRE_CREW_WORK_ORDERS_FLAG = "retire_crew_work_orders_v1";
 /** Shaun. Primary approver, seeded in work_order_settings.approver_user_ids. */
 export const SHAUN_APPROVER_USER_ID = "9913309f-35ae-4a71-8e1f-f704ecc526ea";
 /**
- * One users id this repo already names for Marnin. Not a settings seed.
- * Production has two rows on his email; backup_approver_user_ids stays empty
- * until the owner writes the id he chooses.
+ * The one live users row for Marnin, role admin. Measured 21 Oct 2026:
+ * public.users created 1 Mar 2026 5:17 PM AWST, auth created 1 Mar 2026
+ * 5:01 PM AWST, last sign-in 12 Oct 2026 11:19 AM AWST, email
+ * marnin@secureworkswa.com.au. Not a settings seed.
+ * backup_approver_user_ids ships empty until the owner writes
+ * backup_approver_user_ids = [this id].
  */
 export const MARNIN_BACKUP_APPROVER_USER_ID =
   "706c5258-70dd-483a-b36c-af6864b24498";
@@ -81,14 +84,16 @@ export function filledApprovedJobWorkOrder(
 
 export interface ActiveBackfillJob {
   status?: string | null;
-  updated_at?: string | null;
   has_job_work_order?: boolean;
+  /** Assignment, time entry, invoice line, or status-change instants. */
+  activity_at?: Array<string | null | undefined> | null;
 }
 
 /**
  * A job the 30-day backfill may open a blank work order for.
- * Activity is jobs.updated_at only. A processing make-safe touched inside
- * the window is included; one last touched before the window is not.
+ * Activity is a real assignment, time entry, invoice line or status change.
+ * jobs.updated_at does not qualify, even when it is recent. A processing
+ * make-safe with activity inside the window is included.
  */
 export function isActiveJobWorkOrderBackfillCandidate(
   job: ActiveBackfillJob,
@@ -96,10 +101,32 @@ export function isActiveJobWorkOrderBackfillCandidate(
 ): boolean {
   if (job.has_job_work_order) return false;
   if (!JOB_WORK_ORDER_OPEN_STATUSES.has(String(job.status || ""))) return false;
-  if (!job.updated_at) return false;
-  const updated = new Date(job.updated_at).getTime();
-  if (!Number.isFinite(updated)) return false;
-  return updated >= asOf.getTime() - ACTIVE_JOB_WORK_ORDER_WINDOW_MS;
+  const times = (job.activity_at || [])
+    .map((value) => new Date(String(value ?? "")).getTime())
+    .filter((time) => Number.isFinite(time));
+  if (times.length === 0) return false;
+  const newest = Math.max(...times);
+  return newest >= asOf.getTime() - ACTIVE_JOB_WORK_ORDER_WINDOW_MS;
+}
+
+const REVIEWED_BACKFILL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The ids --apply may open. A reviewed dry-run file is `{ job_ids: [...] }`
+ * or a raw uuid array. Missing, empty, or any non-uuid is null: apply refuses.
+ */
+export function reviewedBackfillJobIds(payload: unknown): string[] | null {
+  let raw: unknown[] | null = null;
+  if (Array.isArray(payload)) raw = payload;
+  else if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const jobIds = (payload as { job_ids?: unknown }).job_ids;
+    if (Array.isArray(jobIds)) raw = jobIds;
+  }
+  if (!raw || raw.length === 0) return null;
+  const ids = raw.map((id) => String(id).trim());
+  if (ids.some((id) => !REVIEWED_BACKFILL_UUID.test(id))) return null;
+  return ids;
 }
 
 export interface StampLine {
@@ -155,13 +182,21 @@ export interface HardRuleRefusal {
   job_id?: string;
 }
 
-export type JobWorkOrderPresence = { hasWorkOrder: boolean } | "unreadable";
+export type JobWorkOrderPresence =
+  | { hasWorkOrder: boolean; open?: boolean }
+  | "unreadable";
+
+function isTravelLine(line: HardRuleLine): boolean {
+  return String(line.line_type || "").trim().toLowerCase() === "travel";
+}
 
 /**
- * The later hard rule. Off: nothing is refused, including travel on a job
- * with no work order. On: a line that names a job with no draft or approved
- * job work order is refused. A line with no job (a deduction, an adjustment)
- * is not. An unreadable read refuses the whole submit.
+ * The later hard rule. Off: nothing is refused.
+ * On (DEFAULT, owner to confirm): only an open job's non-travel line needs
+ * a draft or approved job work order. A closed job is exempt. Travel is
+ * exempt, including when that job cannot be read, unless the same job also
+ * has a non-travel line. A missing `open` is treated as open. A line with
+ * no job is not refused. An unreadable job refuses a non-travel line.
  */
 export function hardRuleRefusal(input: {
   flagOn: boolean;
@@ -169,25 +204,25 @@ export function hardRuleRefusal(input: {
   jobs: Readonly<Record<string, JobWorkOrderPresence>>;
 }): HardRuleRefusal | null {
   if (!input.flagOn) return null;
-  const jobIds = [
-    ...new Set(
-      input.lines.map((line) => line.job_id).filter((id): id is string =>
-        Boolean(id)
-      ),
-    ),
-  ];
-  for (const jobId of jobIds) {
-    if (input.jobs[jobId] === "unreadable" || input.jobs[jobId] == null) {
+  const byJob = new Map<string, HardRuleLine[]>();
+  for (const line of input.lines) {
+    if (!line.job_id) continue;
+    const list = byJob.get(line.job_id) || [];
+    list.push(line);
+    byJob.set(line.job_id, list);
+  }
+  for (const [jobId, lines] of byJob) {
+    if (!lines.some((line) => !isTravelLine(line))) continue;
+    const presence = input.jobs[jobId];
+    if (presence === "unreadable" || presence == null) {
       return {
         code: "job_work_order_unreadable",
         error: "The job work order could not be read. Nothing was saved.",
         job_id: jobId,
       };
     }
-  }
-  for (const jobId of jobIds) {
-    const presence = input.jobs[jobId];
-    if (presence !== "unreadable" && !presence.hasWorkOrder) {
+    if (presence.open === false) continue;
+    if (!presence.hasWorkOrder) {
       return {
         code: "job_work_order_required",
         error: "This job has no work order, so it cannot be invoiced yet.",
@@ -215,29 +250,51 @@ export async function loadCrewInvoiceJobWorkOrderRefusal(
     ),
   ];
   if (jobIds.length === 0) return null;
+  const nonTravelJobIds = jobIds.filter((jobId) =>
+    lines.some((line) => line.job_id === jobId && !isTravelLine(line))
+  );
+  const unreadable = {
+    code: "job_work_order_unreadable" as const,
+    error: "The job work order could not be read. Nothing was saved.",
+  };
   try {
     const { data, error } = await client.from("work_orders")
       .select("job_id")
       .in("job_id", jobIds)
       .eq("kind", "job")
       .in("status", ["draft", "approved"]);
-    if (error) {
-      return {
-        code: "job_work_order_unreadable",
-        error: "The job work order could not be read. Nothing was saved.",
-      };
-    }
+    if (error) return nonTravelJobIds.length === 0 ? null : unreadable;
     const covered = new Set(
       (data || []).map((row: { job_id?: string | null }) => String(row.job_id)),
     );
+    const statusByJob = new Map<string, string>();
+    if (nonTravelJobIds.length > 0) {
+      const { data: jobRows, error: jobErr } = await client.from("jobs")
+        .select("id, status")
+        .in("id", nonTravelJobIds);
+      if (jobErr) return unreadable;
+      for (const row of jobRows || []) {
+        statusByJob.set(String(row.id), String(row.status || ""));
+      }
+    }
     const jobs: Record<string, JobWorkOrderPresence> = {};
-    for (const jobId of jobIds) jobs[jobId] = { hasWorkOrder: covered.has(jobId) };
+    for (const jobId of jobIds) {
+      if (!nonTravelJobIds.includes(jobId)) {
+        jobs[jobId] = { hasWorkOrder: covered.has(jobId), open: false };
+        continue;
+      }
+      if (!statusByJob.has(jobId)) {
+        jobs[jobId] = "unreadable";
+        continue;
+      }
+      jobs[jobId] = {
+        hasWorkOrder: covered.has(jobId),
+        open: JOB_WORK_ORDER_OPEN_STATUSES.has(statusByJob.get(jobId) || ""),
+      };
+    }
     return hardRuleRefusal({ flagOn: true, lines, jobs });
   } catch {
-    return {
-      code: "job_work_order_unreadable",
-      error: "The job work order could not be read. Nothing was saved.",
-    };
+    return nonTravelJobIds.length === 0 ? null : unreadable;
   }
 }
 
@@ -317,12 +374,25 @@ export type OfficeWriteDecision =
   | { ok: true }
   | { ok: false; status: number; code: string; error: string };
 
+/** A line the review door must still be able to move after the flag is turned off. */
+export function officeReviewLineIsHeld(
+  status: string | null | undefined,
+): boolean {
+  return status === "awaiting" || status === "queried" || status === "rejected";
+}
+
 /**
- * Fill and approve need the office-fill switch, including for Shaun: the
- * old approve door stays the one he uses while this switch is off.
- * Line review needs the review switch. Shaun is a primary approver either
- * way. Marnin is a backup only while the office-fill switch is on.
- * A server key with no user id is not an approver.
+ * Fill and approve need the office-fill switch and a named approver,
+ * including for Shaun: the old approve door stays the one he uses while
+ * this switch is off. Marnin is a backup only while the office-fill switch
+ * is on.
+ *
+ * Line review (DEFAULT, owner to confirm) is any office role
+ * (admin, owner, ops_manager) with a user id. It does not use the named
+ * approver list. The review switch must be on, unless the line is already
+ * awaiting, queried or rejected: turning the switch off later does not
+ * stick those lines or release them. A null stamp while the switch is off
+ * is still refused. A server key with no user id is not a reviewer.
  */
 export function decideOfficeWrite(input: {
   staff: boolean;
@@ -332,6 +402,7 @@ export function decideOfficeWrite(input: {
   reviewFlagOn: boolean;
   primaryIds: readonly string[];
   backupIds: readonly string[];
+  lineAlreadyHeld?: boolean;
 }): OfficeWriteDecision {
   if (!input.staff) {
     return {
@@ -342,15 +413,23 @@ export function decideOfficeWrite(input: {
     };
   }
   if (input.action === "review") {
-    if (!input.reviewFlagOn) {
+    if (!input.userId) {
       return {
         ok: false,
-        status: 409,
-        code: "crew_invoice_line_office_review_off",
-        error: "Line review is switched off.",
+        status: 403,
+        code: "not_approver",
+        error: "Line review needs an office session.",
       };
     }
-  } else if (!input.officeFlagOn) {
+    if (input.reviewFlagOn || input.lineAlreadyHeld) return { ok: true };
+    return {
+      ok: false,
+      status: 409,
+      code: "crew_invoice_line_office_review_off",
+      error: "Line review is switched off.",
+    };
+  }
+  if (!input.officeFlagOn) {
     return {
       ok: false,
       status: 409,
@@ -373,6 +452,116 @@ export function decideOfficeWrite(input: {
     };
   }
   return { ok: true };
+}
+
+/** What list_trade_invoice_lines and job_detail publish. The column stays office_review_status. */
+export function reviewStateFromOfficeStatus(
+  status: string | null | undefined,
+): "held" | "approved" | "queried" | "rejected" | null {
+  if (status === "awaiting") return "held";
+  if (status === "approved") return "approved";
+  if (status === "queried") return "queried";
+  if (status === "rejected") return "rejected";
+  return null;
+}
+
+export type InvoiceOfficeReview =
+  | { ok: true; hold: XeroSyncRefusal | null }
+  | { ok: false; code: "office_review_unreadable" };
+
+/**
+ * Saved line review, read whether or not the review flag can be read.
+ * A failed read fails closed. NULL stamps do not hold.
+ */
+export async function readInvoiceOfficeReview(
+  client: any,
+  invoiceId: string,
+): Promise<InvoiceOfficeReview> {
+  try {
+    const { data, error } = await client.from("trade_invoice_lines")
+      .select("office_review_status")
+      .eq("trade_invoice_id", invoiceId);
+    if (error) return { ok: false, code: "office_review_unreadable" };
+    return { ok: true, hold: xeroSyncRefusal(data || []) };
+  } catch {
+    return { ok: false, code: "office_review_unreadable" };
+  }
+}
+
+const JOB_WORK_ORDER_TRADE_MONEY_KEYS = [
+  "trade_allocation_ex",
+  "customer_price_ex",
+  "customer_variations_ex",
+  "customer_variations_price_ex",
+  "agreed_labour_ex",
+  "agreed_total_ex",
+  "agreed_ex",
+  "remaining_ex",
+  "billed_to_date_ex",
+  "figures",
+  "rate",
+  "total",
+  "price",
+  "quote_cost_ex",
+  "unit_price",
+  "amount",
+  "amount_ex",
+  "cost",
+  "sealed_content_hash",
+  "line_total_ex",
+  "unit_rate",
+  "hourly_rate",
+  "subtotal",
+  "gst",
+] as const;
+
+function withoutTradeMoney(value: Record<string, unknown>): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...value };
+  for (const key of JOB_WORK_ORDER_TRADE_MONEY_KEYS) delete copy[key];
+  if (copy.addendum && typeof copy.addendum === "object" && !Array.isArray(copy.addendum)) {
+    copy.addendum = withoutTradeMoney(copy.addendum as Record<string, unknown>);
+  }
+  return copy;
+}
+
+/**
+ * A job work order on my_work_orders once crew work orders are retired.
+ * Description, quantity and hours stay. Prices, rates, totals and addendum
+ * prices do not. The card cannot be invoiced from this list.
+ */
+export function stripJobWorkOrderCardMoney<T extends Record<string, unknown>>(
+  card: T,
+): T {
+  const next: Record<string, unknown> = { ...card };
+  if (Array.isArray(next.scope_items)) {
+    next.scope_items = next.scope_items.map((item) =>
+      item && typeof item === "object"
+        ? withoutTradeMoney(item as Record<string, unknown>)
+        : item
+    );
+  }
+  if (Array.isArray(next.negative_charges)) {
+    next.negative_charges = next.negative_charges.map((item) =>
+      item && typeof item === "object"
+        ? withoutTradeMoney(item as Record<string, unknown>)
+        : item
+    );
+  }
+  if (Array.isArray(next.addenda)) {
+    next.addenda = next.addenda.map((item) =>
+      item && typeof item === "object"
+        ? withoutTradeMoney(item as Record<string, unknown>)
+        : item
+    );
+  }
+  for (const key of JOB_WORK_ORDER_TRADE_MONEY_KEYS) delete next[key];
+  next.subtotal = null;
+  next.gst = null;
+  next.total = null;
+  next.available_negative_charge_total_ex = null;
+  next.can_invoice = false;
+  next.can_add_to_weekly_invoice = false;
+  return next as T;
 }
 
 const CREW_RETIRED_ERROR =

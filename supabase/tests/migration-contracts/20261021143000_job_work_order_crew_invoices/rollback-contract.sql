@@ -34,6 +34,7 @@ BEGIN
   END IF;
   IF to_regprocedure('public.preview_active_job_work_orders()') IS NOT NULL
      OR to_regprocedure('public.apply_active_job_work_orders()') IS NOT NULL
+     OR to_regprocedure('public.apply_active_job_work_orders(uuid[])') IS NOT NULL
      OR to_regprocedure('public.job_invoice_work_order_id(uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback: the backfill and stamp helpers must be removed';
   END IF;
