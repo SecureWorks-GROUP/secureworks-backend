@@ -31,3 +31,19 @@ export const MARGIN_HOLD_REASON: Record<MarginHold, string> = {
   selected_target: 'margin is the scoper\'s selected target, not a verified margin',
   commission_not_set: 'commission rate is not set, so the margin after costs is not known',
 }
+
+// Gross profit as a fraction of the sale, worked out from the quote's own
+// saved costs: (sale ex GST - materials and labour) / sale ex GST. A figure
+// only when the tool says every cost is known; otherwise null. This is a
+// result of the costs, not the selected target, so a reader may use it where
+// marginHoldOf says 'selected_target' (patio commission is a share of the
+// quote's gross profit, owner 21 Oct 2026).
+export function quotedCostsGpOf(pricingJson: unknown): number | null {
+  if (!isObject(pricingJson)) return null
+  const internal = pricingJson.internal
+  if (!isObject(internal) || internal.costs_complete !== true) return null
+  const sale = typeof pricingJson.totalExGST === 'number' ? pricingJson.totalExGST : NaN
+  const cost = typeof internal.cost === 'number' ? internal.cost : NaN
+  if (!Number.isFinite(sale) || !Number.isFinite(cost) || sale <= 0 || cost < 0 || cost > sale) return null
+  return (sale - cost) / sale
+}

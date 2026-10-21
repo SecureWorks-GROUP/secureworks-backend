@@ -6,7 +6,7 @@
 // the release adapter uses, and saved only when every line has a cost price
 // above 0. Otherwise no margin_pct is saved, never a margin from a short cost.
 // margin_basis 'from_line_costs' says it was worked out, not typed. Nothing
-// here sets a commission: Quick Quote has none (owner call C2 open).
+// here sets a commission: Quick Quote has none (owner, 21 Oct 2026).
 
 import { quickQuoteLineMargin } from '../_shared/release_packet/adapters/sealed_costs.ts'
 
