@@ -3,6 +3,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  type FrozenAcceptance,
   LABOUR_ACTUAL_OPEN,
   type LastSaveHashes,
   lastSaveHashes,
@@ -64,6 +65,12 @@ function pricing(over: Record<string, unknown> = {}) {
   };
 }
 
+// The job has a quote accepted, unless a test says not.
+const ACCEPTED: FrozenAcceptance = {
+  accepted: true,
+  source: "job_documents.accepted_at",
+};
+
 // Stand-in hashes: the last save is the frozen revision unless a test says not.
 const SAME: LastSaveHashes = {
   scope_hash: "a".repeat(64),
@@ -77,8 +84,16 @@ function pe(
   hashes: LastSaveHashes | null = SAME,
   // an engine with JP-12 (#1107)
   installerCheck: boolean | null = true,
+  acceptance: FrozenAcceptance | null = ACCEPTED,
 ) {
-  return patioExpectedVersusActual(cur, frz, r, hashes, installerCheck);
+  return patioExpectedVersusActual(
+    cur,
+    frz,
+    r,
+    hashes,
+    installerCheck,
+    acceptance,
+  );
 }
 
 // The job's frozen scope_revisions row: its id is the server's, never the
@@ -248,6 +263,9 @@ Deno.test("patio expected: incomplete frozen pricing fixes no cost, profit or ma
       "frozen_pricing_not_sealed",
     ],
     [{ sell_to_confirm: ["Gutter"] }, "frozen_sell_to_confirm"],
+    // a missing list is not known, never empty (Sales contract quote 2)
+    [{ sell_to_confirm: undefined }, "frozen_sell_to_confirm_not_stated"],
+    [{ sell_to_confirm: "none" }, "frozen_sell_to_confirm_not_stated"],
   ];
   for (const [over, flag] of cases) {
     const out = pe(
@@ -288,6 +306,56 @@ Deno.test("patio expected: incomplete frozen pricing fixes no cost, profit or ma
   assert(legacy.flags.includes("frozen_pricing_complete_not_stated"));
   assert(legacy.flags.includes("frozen_pricing_seal_not_stated"));
   assertEquals(legacy.lanes.materials.variance_ex, null);
+  assert(legacy.flags.includes("frozen_sell_to_confirm_not_stated"));
+  assertEquals(legacy.frozen_scope!.pricing.sell_to_confirm, null);
+});
+
+Deno.test("patio expected: an empty to-confirm list still passes, a missing one is null", () => {
+  const out = pe(null, frozen(), row())!;
+  assertEquals(out.frozen_scope!.pricing.sell_to_confirm, 0);
+  assert(!out.flags.includes("frozen_sell_to_confirm_not_stated"));
+  const missing = pe(
+    null,
+    frozen(record(), pricing({ sell_to_confirm: undefined })),
+    row(),
+  )!;
+  assertEquals(missing.frozen_scope!.pricing.sell_to_confirm, null);
+  assert(!missing.flags.includes("frozen_sell_to_confirm"));
+});
+
+Deno.test("patio expected: a frozen revision with no recorded acceptance is never compared", () => {
+  const cases: Array<[FrozenAcceptance | null, string]> = [
+    [{ accepted: false, source: null }, "frozen_not_accepted"],
+    [{ accepted: null, source: null }, "frozen_acceptance_not_known"],
+    [null, "frozen_acceptance_not_known"],
+  ];
+  for (const [acceptance, flag] of cases) {
+    const out = pe(current(), frozen(), row(), SAME, true, acceptance)!;
+    assert(out.flags.includes(flag), flag);
+    // the frozen figures are still shown, but compare with nothing
+    assertEquals(out.frozen_scope!.expected.materials_ex, 4000, flag);
+    assertEquals(out.frozen_scope!.expected.cost_ex, 6000, flag);
+    assertEquals(out.lanes.materials.expected_ex, null, flag);
+    assertEquals(out.lanes.labour.expected_ex, null, flag);
+    assertEquals(out.lanes.materials.variance_ex, null, flag);
+    assertEquals(out.lanes.labour.variance_ex, null, flag);
+    // actuals still pass through
+    assertEquals(out.lanes.materials.actual_ex, 4300, flag);
+    assertEquals(out.status, "incomplete", flag);
+    assertEquals(out.frozen_scope!.acceptance, {
+      accepted: acceptance?.accepted ?? null,
+      source: null,
+      scope: "job",
+    });
+  }
+  // an accepted run counts as acceptance
+  const run = pe(current(), frozen(), row(), SAME, true, {
+    accepted: true,
+    source: "run_acceptances",
+  })!;
+  assertEquals(run.lanes.materials.variance_ex, 300);
+  assertEquals(run.frozen_scope!.acceptance.source, "run_acceptances");
+  assertEquals(run.status, "complete");
 });
 
 Deno.test("patio expected: supported false gives no expected sale or profit", () => {
@@ -451,6 +519,13 @@ Deno.test("patio expected: anything but a patio scoper record is not read", () =
 });
 
 // job_profit action wiring
+const QUOTE_ACCEPTED = {
+  id: "doc-1",
+  job_id: JOB,
+  type: "quote",
+  accepted_at: "2026-10-20T09:00:00Z",
+};
+
 function fake(
   tables: Record<string, any[]>,
   errors: Record<string, string> = {},
@@ -475,6 +550,13 @@ function fake(
       let rows = [...(tables[table] ?? [])];
       const b: any = {};
       for (const op of ["order", "limit"]) b[op] = () => b;
+      b.not = (col: string, op: string, val: unknown) => {
+        call.eq.push([`not.${col}.${op}`, val]);
+        if (op === "is" && val === null) {
+          rows = rows.filter((r) => r[col] !== null && r[col] !== undefined);
+        }
+        return b;
+      };
       b.select = (cols: unknown) => {
         call.select = cols;
         return b;
@@ -503,11 +585,17 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
     v_job_profit: [row()],
     jobs: [{ id: JOB, ...current(), ...saved }],
     scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
+    job_documents: [QUOTE_ACCEPTED],
   });
   const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(out.status, 200);
   const pe = (out.body as any).patio_expected;
   assertEquals(pe.frozen_scope.server_revision.id, "srv-row-9");
+  assertEquals(pe.frozen_scope.acceptance, {
+    accepted: true,
+    source: "job_documents.accepted_at",
+    scope: "job",
+  });
   assertEquals(pe.frozen_scope.last_save_matches_frozen, true);
   assertEquals(pe.lanes.materials.variance_ex, 300);
   assertEquals(pe.flags, []);
@@ -529,6 +617,74 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
     "tool_kind",
     "patio",
   ]]);
+});
+
+Deno.test("job_profit: acceptance is read from quote documents and accepted runs only", async () => {
+  const saved = { scope_json: record(), pricing_json: pricing() };
+  const h = await lastSaveHashes(saved);
+  const base = {
+    v_job_profit: [row()],
+    jobs: [{ id: JOB, ...current(), ...saved }],
+    scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
+  };
+  const read = async (
+    extra: Record<string, any[]>,
+    errors: Record<string, string> = {},
+  ) => {
+    const c = fake({ ...base, ...extra }, errors);
+    const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
+    assertEquals(out.status, 200);
+    return { c, p: (out.body as any).patio_expected };
+  };
+  // nothing recorded: not accepted
+  const none = await read({
+    job_documents: [
+      { ...QUOTE_ACCEPTED, accepted_at: null },
+      { ...QUOTE_ACCEPTED, id: "doc-v", type: "variation" },
+    ],
+    run_acceptances: [{ id: "r1", job_id: JOB, status: "pending" }],
+  });
+  assertEquals(none.p.frozen_scope.acceptance.accepted, false);
+  assert(none.p.flags.includes("frozen_not_accepted"));
+  assertEquals(none.p.lanes.materials.variance_ex, null);
+  const docRead = none.c.calls.find((x) => x.table === "job_documents")!;
+  assertEquals(docRead.eq, [["job_id", JOB], ["type", "quote"], [
+    "not.accepted_at.is",
+    null,
+  ]]);
+  const runRead = none.c.calls.find((x) => x.table === "run_acceptances")!;
+  assertEquals(runRead.eq, [["job_id", JOB], ["status", "accepted"]]);
+  // an accepted run
+  const run = await read({
+    run_acceptances: [{ id: "r1", job_id: JOB, status: "accepted" }],
+  });
+  assertEquals(run.p.frozen_scope.acceptance.source, "run_acceptances");
+  assertEquals(run.p.lanes.materials.variance_ex, 300);
+  // a failed read with nothing found is not known, and holds the comparison
+  for (const table of ["job_documents", "run_acceptances"]) {
+    const failed = await read({}, { [table]: "timeout" });
+    assertEquals(failed.p.frozen_scope.acceptance.accepted, null, table);
+    assert(failed.p.flags.includes("frozen_acceptance_not_known"), table);
+    assertEquals(failed.p.lanes.materials.variance_ex, null, table);
+  }
+  // evidence found counts even when the other read failed
+  const found = await read(
+    { job_documents: [QUOTE_ACCEPTED] },
+    { run_acceptances: "timeout" },
+  );
+  assertEquals(found.p.frozen_scope.acceptance.accepted, true);
+  assertEquals(found.p.lanes.materials.variance_ex, 300);
+});
+
+Deno.test("job_profit: a job with no frozen patio row reads no acceptance", async () => {
+  const c = fake({ v_job_profit: [row()], jobs: [{ id: JOB, ...current() }] });
+  await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(
+    c.calls.filter((x) =>
+      x.table === "job_documents" || x.table === "run_acceptances"
+    ).length,
+    0,
+  );
 });
 
 Deno.test("job_profit: an unreadable scope never fails the profit read", async () => {

@@ -17,6 +17,7 @@
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 import {
+  type FrozenAcceptance,
   INSTALLER_RULE_PROBE,
   lastSaveHashes,
   PATIO_EXPECTED_SCOPE_PROJECTION,
@@ -488,12 +489,32 @@ async function patioExpectedPart(
     const probe = await client.rpc(INSTALLER_RULE_PROBE, { p_line_items: [] });
     installerCheck = !probe.error && probe.data === false ? true : null;
   }
+  // A freeze is not an acceptance: only recorded acceptance on the job lets
+  // the frozen revision be compared with actuals. Found evidence counts even
+  // if the other read failed; a failed read with none found is not known.
+  let acceptance: FrozenAcceptance | null = null;
+  if (frz) {
+    const [docs, runs] = await Promise.all([
+      client.from("job_documents").select("id").eq("job_id", summary.job_id)
+        .eq("type", "quote").not("accepted_at", "is", null).limit(1),
+      client.from("run_acceptances").select("id").eq("job_id", summary.job_id)
+        .eq("status", "accepted").limit(1),
+    ]);
+    acceptance = !docs.error && (docs.data?.length ?? 0) > 0
+      ? { accepted: true, source: "job_documents.accepted_at" }
+      : !runs.error && (runs.data?.length ?? 0) > 0
+      ? { accepted: true, source: "run_acceptances" }
+      : docs.error || runs.error
+      ? { accepted: null, source: null }
+      : { accepted: false, source: null };
+  }
   const result = patioExpectedVersusActual(
     cur,
     frz,
     summary,
     hashes,
     installerCheck,
+    acceptance,
   );
   return result ? { patio_expected: result } : {};
 }

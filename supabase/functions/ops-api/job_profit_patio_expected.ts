@@ -135,9 +135,15 @@ export interface PatioExpectedVersusActual {
       pricing_complete: boolean | null;
       costs_complete: boolean | null;
       sealed: boolean | null;
-      sell_to_confirm: number;
+      // null: the list is missing, so not known (never read as empty)
+      sell_to_confirm: number | null;
       costs_to_confirm: string[];
     };
+    // A frozen revision is not an accepted one (Sales contract, "What a
+    // freeze is not"): only recorded acceptance on the job lets it be compared
+    // with actuals. Job level, because no record links a frozen revision to
+    // the quote that was accepted.
+    acceptance: FrozenAcceptance & { scope: "job" };
     expected: ExpectedFigures;
     // Compared by hash (scope_hash, pricing_hash), never by id. null: not
     // compared (the last save or a stored hash could not be read).
@@ -171,7 +177,7 @@ export interface PatioExpectedVersusActual {
 }
 
 const BASIS =
-  "Expected figures are the patio scoper's own sealed revision (ex GST). Only the frozen scope revision is compared with actuals; the last save is a draft estimate and the commercial baseline is the engine's own. Expected figures are never actuals and never enter Job Profit. null is not known, never 0. The expected profit is before commission.";
+  "Expected figures are the patio scoper's own sealed revision (ex GST). Only the frozen scope revision is compared with actuals, and only once the job has recorded acceptance (a quote's accepted_at or an accepted run): a freeze is not an acceptance; the last save is a draft estimate and the commercial baseline is the engine's own. Expected figures are never actuals and never enter Job Profit. null is not known, never 0. The expected profit is before commission.";
 
 function obj(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v)
@@ -287,6 +293,16 @@ export const INSTALLER_RULE_PROBE = "job_cost_installer_bill";
 const ACCEPTED_SOURCES = ["frozen_at_acceptance", "accepted_quote_revision"];
 
 /**
+ * The job's recorded acceptance: a quote document's `accepted_at`, or a
+ * `run_acceptances` row with status `accepted`. `accepted` is null when the
+ * evidence could not be read; that holds the comparison like a no.
+ */
+export type FrozenAcceptance = {
+  accepted: boolean | null;
+  source: "job_documents.accepted_at" | "run_acceptances" | null;
+};
+
+/**
  * The patio record's expected figures beside the engine row's actuals, or null
  * when neither the last save nor the frozen revision is a patio scoper 2.0
  * record. `current` is the projected jobs read (PATIO_EXPECTED_SCOPE_PROJECTION),
@@ -301,6 +317,7 @@ export function patioExpectedVersusActual(
   row: Record<string, unknown>,
   lastSave: LastSaveHashes | null = null,
   installerCheck: boolean | null = null,
+  acceptance: FrozenAcceptance | null = null,
 ): PatioExpectedVersusActual | null {
   const flags: string[] = [];
 
@@ -332,9 +349,10 @@ export function patioExpectedVersusActual(
     const pricing = parseJson(frozen!.pricing_canonical_text) ?? {};
     const internal = obj(pricing.internal) ?? {};
     const pRev = obj(pricing.revision) ?? {};
+    // A missing list is not known, never empty (Sales contract quote 2).
     const sellToConfirm = Array.isArray(pricing.sell_to_confirm)
       ? pricing.sell_to_confirm.length
-      : 0;
+      : null;
     const costsToConfirm = Array.isArray(internal.costs_to_confirm)
       ? internal.costs_to_confirm.filter((x): x is string =>
         typeof x === "string"
@@ -355,7 +373,12 @@ export function patioExpectedVersusActual(
     if (costsComplete === false) flags.push("frozen_costs_incomplete");
     if (sealed === false) flags.push("frozen_pricing_not_sealed");
     if (sealed === null) flags.push("frozen_pricing_seal_not_stated");
-    if (sellToConfirm > 0) flags.push("frozen_sell_to_confirm");
+    if (sellToConfirm === null) {
+      flags.push("frozen_sell_to_confirm_not_stated");
+    } else if (sellToConfirm > 0) flags.push("frozen_sell_to_confirm");
+    const accepted = acceptance?.accepted ?? null;
+    if (accepted === false) flags.push("frozen_not_accepted");
+    if (accepted === null) flags.push("frozen_acceptance_not_known");
     if (revision.outputs_agree !== true) flags.push("outputs_not_confirmed");
     if (revision.frozen_id === null || revision.n === null) {
       flags.push("revision_not_sealed");
@@ -400,6 +423,11 @@ export function patioExpectedVersusActual(
         sell_to_confirm: sellToConfirm,
         costs_to_confirm: costsToConfirm,
       },
+      acceptance: {
+        accepted,
+        source: accepted === true ? acceptance?.source ?? null : null,
+        scope: "job",
+      },
       expected,
       last_save_matches_frozen: scopeMatch === false || pricingMatch === false
         ? false
@@ -420,8 +448,10 @@ export function patioExpectedVersusActual(
   if (!frozenScope) flags.push("revision_not_frozen");
 
   // Expected lanes for the comparison come only from a frozen scope whose
-  // cost is fixed: no lane variance from a revision that fixes no cost.
-  const fixed = frozenScope?.expected.cost_ex != null
+  // cost is fixed and whose job has recorded acceptance: no lane variance
+  // from a revision that fixes no cost or that nobody accepted.
+  const fixed = frozenScope?.expected.cost_ex != null &&
+      frozenScope.acceptance.accepted === true
     ? frozenScope.expected
     : null;
   // An unreadable completeness list holds both lanes open (fail closed).
