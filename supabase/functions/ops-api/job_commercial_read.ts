@@ -1037,12 +1037,19 @@ export interface ScopeRevisionAlignment {
   frozen_scope_json: Record<string, unknown> | null;
 }
 
+// Sales patio-scoper draft (SQ-29): the scoper's own { site, design, pricing }.
+export interface PatioScoperDraft {
+  site: Record<string, unknown> | null;
+  design: Record<string, unknown> | null;
+  pricing: Record<string, unknown> | null;
+}
+
 export interface PatioScoperRecord {
   tool: "patio-scoper";
   version: string | null;
   family: string | null;
   supported: boolean | null;
-  draft: boolean | null;
+  draft: PatioScoperDraft | null;
   revision_n: number | null;
   scope_revision_id: string | null;
   parent_revision_id: string | null;
@@ -1192,12 +1199,25 @@ function changedSinceLastQuote(
   return { changed: null, basis: "scope_update_time_not_recorded" };
 }
 
+// The Sales draft is { site, design, pricing }. A boolean, a missing draft,
+// or an object with none of those three is no draft.
+function patioScoperDraft(value: unknown): PatioScoperDraft | null {
+  const obj = parseJsonObject(value);
+  if (!obj) return null;
+  const site = parseJsonObject(obj.site);
+  const design = parseJsonObject(obj.design);
+  const pricing = parseJsonObject(obj.pricing);
+  if (!site && !design && !pricing) return null;
+  return { site, design, pricing };
+}
+
 /**
  * The patio-scoper v2 record (Sales SQ-29) is the scoper's own shape, not the
  * older patio tool's, so the shared release-packet adapter would read it as a
  * bare "patio" with no lines. Read it here, lines only: `expected` holds
- * figures and is never read. An unsupported family is a scope with no quote
- * or order behind it, and its lines say so.
+ * figures and is never read. `draft` is the Sales object (site, design,
+ * pricing). An unsupported family is a scope with no quote or order behind
+ * it, and its lines say so.
  */
 function patioScoperSummary(
   scopeJson: Record<string, unknown>,
@@ -1234,7 +1254,7 @@ function patioScoperSummary(
       version: str(scopeJson.version),
       family,
       supported,
-      draft: typeof scopeJson.draft === "boolean" ? scopeJson.draft : null,
+      draft: patioScoperDraft(scopeJson.draft),
       revision_n: num(rev.n),
       scope_revision_id: str(rev.scopeRevisionId),
       parent_revision_id: str(rev.parentRevisionId),

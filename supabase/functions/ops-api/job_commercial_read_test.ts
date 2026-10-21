@@ -1512,7 +1512,37 @@ Deno.test("D1 invoice read: a failed variation read leaves promised.variations n
   assertEquals(client.writes, []);
 });
 
+// Sales patio-scoper draft: site, design, pricing (scope-engine-v2 store.ts).
+function salesDraft() {
+  return {
+    site: {
+      customer: "Pat Example",
+      mobile: "0400000000",
+      email: "pat@example.com",
+      address: "1 Example St",
+      storeys: "single",
+      houseRoof: "tile",
+      fascia: "timber",
+    },
+    design: {
+      shape: "skillion",
+      widthMm: 6000,
+      projectionMm: 4000,
+      frontHeightMm: 2400,
+      pitchDeg: 5,
+    },
+    pricing: {
+      rates: {},
+      materialsTotal: null,
+      labour: null,
+      marginPct: 35,
+      commissionPct: 13,
+    },
+  };
+}
+
 Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and provenance, never its figures", () => {
+  const draft = salesDraft();
   const scope = summariseScope({
     id: "job-sq29",
     type: "patio",
@@ -1535,7 +1565,7 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
         { id: "l2", description: "Post", quantity: null, unit: "ea" },
       ],
       expected: { materials: 4321, labour: 1234, sale: 9876 },
-      draft: false,
+      draft,
       savedAt: "2026-10-20T01:01:00Z",
     },
     pricing_json: null,
@@ -1553,7 +1583,7 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
     version: "2.0",
     family: "skillion",
     supported: true,
-    draft: false,
+    draft,
     revision_n: 3,
     scope_revision_id: "rev-3",
     parent_revision_id: "rev-2",
@@ -1564,6 +1594,55 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
   for (const figure of ["4321", "1234", "9876"]) {
     assert(!text.includes(figure), `figure ${figure} leaked`);
   }
+});
+
+Deno.test("SQ-29 scope: a Sales draft object's site, design and pricing flow through", () => {
+  const draft = salesDraft();
+  const scope = summariseScope({
+    id: "job-sq29-draft",
+    type: "patio",
+    scope_json: {
+      tool: "patio-scoper",
+      version: "2.0",
+      revision: { n: 1, scopeRevisionId: "rev-1", parentRevisionId: null },
+      family: "skillion",
+      supported: true,
+      lines: [],
+      draft: { ...draft, width: 6000 },
+    },
+    pricing_json: null,
+  }, { newestQuoteSentAt: null, signedOff: null });
+  assertEquals(scope.scope_record?.draft, {
+    site: draft.site,
+    design: draft.design,
+    pricing: draft.pricing,
+  });
+  assertEquals(scope.scope_record?.draft?.site?.customer, "Pat Example");
+  assertEquals(scope.scope_record?.draft?.site?.address, "1 Example St");
+  assertEquals(scope.scope_record?.draft?.design?.widthMm, 6000);
+  assertEquals(scope.scope_record?.draft?.design?.projectionMm, 4000);
+  assertEquals(scope.scope_record?.draft?.pricing?.marginPct, 35);
+  assertEquals(scope.scope_record?.draft?.pricing?.commissionPct, 13);
+  assertEquals(
+    Object.prototype.hasOwnProperty.call(scope.scope_record?.draft, "width"),
+    false,
+  );
+
+  const booleanDraft = summariseScope({
+    id: "job-sq29-bool",
+    type: "patio",
+    scope_json: {
+      tool: "patio-scoper",
+      version: "2.0",
+      revision: { n: 1, scopeRevisionId: "rev-1", parentRevisionId: null },
+      family: "skillion",
+      supported: true,
+      lines: [],
+      draft: false,
+    },
+    pricing_json: null,
+  }, { newestQuoteSentAt: null, signedOff: null });
+  assertEquals(booleanDraft.scope_record?.draft, null);
 });
 
 Deno.test("SQ-29 scope: an unsupported family says no quote or order is implied", () => {
