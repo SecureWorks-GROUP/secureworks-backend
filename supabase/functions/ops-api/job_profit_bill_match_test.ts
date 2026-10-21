@@ -193,7 +193,7 @@ Deno.test("the audit-shaped cohort sends two-job bills to the split queue", () =
   assert(summary.apply_count <= summary.line_text_hits);
 });
 
-Deno.test("apply skips an installer bill and a materials fact and never calls them", () => {
+Deno.test("a reviewed list never plans a proposal write", () => {
   const jobs = known(["SWF-261111", "SWF-26698"]);
   const installer = classifySupplierBill({
     xero_invoice_id: "BILL-ALYX",
@@ -227,8 +227,8 @@ Deno.test("apply skips an installer bill and a materials fact and never calls th
   ], live);
   assert(planned.ok);
   if (!planned.ok) return;
-  assertEquals(planned.plan.map((step) => step.rpc), [false, false, true]);
-  assert(planned.plan.every((step) => step.outcome !== "installer_hold" || step.rpc === false));
+  assertEquals(planned.plan.map((step) => step.rpc), [false, false, false]);
+  assert(planned.plan.every((step) => step.rpc === false));
   assertEquals(planned.plan[2].proposal_kind, "job");
   assertEquals(planned.plan[2].job_number, "SWF-261111");
 });
@@ -240,6 +240,7 @@ Deno.test("ops-api does not dispatch a second bill queue and the script does not
   const script = await Deno.readTextFile(new URL("../../../scripts/job-profit-bill-match.ts", import.meta.url));
   assertEquals(script.includes('method: "PATCH"'), false);
   assertEquals(script.includes("xero_invoices?id="), false);
-  assert(script.includes("rpc/job_profit_link_bill"));
-  assert(script.includes("installer_hold"));
+  assertEquals(script.includes("job_profit_link_bill"), false);
+  assertEquals(script.includes("rpc/job_profit_link_bill"), false);
+  assert(script.includes("does not write proposals"));
 });

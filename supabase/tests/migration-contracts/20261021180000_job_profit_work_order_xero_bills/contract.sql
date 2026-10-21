@@ -35,16 +35,10 @@
 --   SWP-26100   frozen 1000 against live 2000: blank and flagged.
 --   JP-POK      one frozen 5000, no live price, nothing invoiced past it:
 --               published only while the patio switch is on.
---   Bills       installer bills, a bill that already has a materials fact, a
---               sales invoice, a voided bill, a deleted bill, a bill already
---               linked to a job, and a trade-app bill are refused. None of
---               them writes a proposal or sets xero_invoices.job_id.
---               SWF-261041,SWF-261042 is two tokens. Linking it as one job
---               is refused. An exact token and a spaced two-job bill write a
---               proposal and never set xero_invoices.job_id.
---               A proposal surviving xero-sync's bill prematch is not tested
---               here: that sync supersedes another writer's hash, and keeping
---               these rows needs a change in that sync.
+--   Tokens      this migration does not write bill proposals. Supplier bills
+--               are linked by job number through xero-sync bill prematch.
+--               job_profit_link_bill is absent. SWF-261041,SWF-261042 is two
+--               tokens on the read-only helper.
 
 \set ON_ERROR_STOP on
 
@@ -93,6 +87,11 @@ BEGIN
      );
   IF tail IS DISTINCT FROM 'margin_source,margin_cost_ex,expected_labour_quote_ex,work_order_agreed_labour_ex' THEN
     RAISE EXCEPTION 'columns after quote_costs_incomplete are %, not the four appended columns', tail;
+  END IF;
+
+  IF to_regprocedure('public.job_profit_link_bill(text,text,text,text,text,text,text)') IS NOT NULL
+     OR to_regprocedure('public.job_profit_bill_is_installer(jsonb)') IS NOT NULL THEN
+    RAISE EXCEPTION 'job_profit_link_bill must not exist';
   END IF;
 END $$;
 
@@ -157,8 +156,6 @@ INSERT INTO public.jobs (
    '{"totalExGST": 2000, "totalIncGST": 2200}', NULL, '2026-08-01T00:00:00Z'),
   ('a7610000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP-POK', false, '{}',
    '{}', NULL, '2026-08-01T00:00:00Z'),
-  ('a7610000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'archived', 'fencing', 'SWF-261111', false, '{}', '{}',
-   NULL, '2026-08-01T00:00:00Z'),
   ('a7610000-0000-4000-8000-000000000010', '00000000-0000-0000-0000-000000000001', 'in_progress', 'makesafe', 'JP-XZERO', false, '{}', '{}',
    NULL, '2026-08-01T00:00:00Z'),
   ('a7610000-0000-4000-8000-000000000011', '00000000-0000-0000-0000-000000000001', 'complete', 'makesafe', 'JP-IUN', false, '{}', '{}',
@@ -235,21 +232,6 @@ INSERT INTO public.xero_invoices (
   ('00000000-0000-0000-0000-000000000001', 'INV-JP-XHOLD', 'INV-JP-XHOLD', 'ACCREC', 'AUTHORISED', 'Client',
    10000, 11000, 0, '2026-08-08', 'a7610000-0000-4000-8000-000000000005', '{"LineAmountTypes": "Exclusive"}',
    '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Work"}]', NULL),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-INST', 'BILL-INST', 'ACCPAY', 'AUTHORISED', 'Alyx Smuts',
-   450, 450, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 450, "AccountCode": "306", "Description": "SWF-26698 Fence Installation"}]', 'SWF-26698'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-INST301', 'BILL-INST301', 'ACCPAY', 'AUTHORISED', 'Installer',
-   100, 100, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 100, "AccountCode": "301", "Description": "SWF-261111 labour"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-FACT', 'BILL-FACT', 'ACCPAY', 'AUTHORISED', 'Supplier',
-   40, 40, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 40, "AccountCode": "305", "Description": "SWF-261111 materials"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-EXACT', 'BILL-EXACT', 'ACCPAY', 'AUTHORISED', 'Supplier',
-   25, 25, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 25, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-SPLIT', 'BILL-SPLIT', 'ACCPAY', 'AUTHORISED', 'Supplier',
-   60, 60, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 60, "AccountCode": "305", "Description": "SWF-261111 and SWP-261247"}]', NULL),
   ('00000000-0000-0000-0000-000000000001', 'BILL-JP-XZERO', 'BILL-JP-XZERO', 'ACCPAY', 'AUTHORISED', 'Supplies',
    100, 100, 0, '2026-08-02', 'a7610000-0000-4000-8000-000000000010', '{"LineAmountTypes": "Exclusive"}',
    '[{"LineAmount": 100, "AccountCode": "310", "Description": "Sheets"}]', NULL),
@@ -264,28 +246,7 @@ INSERT INTO public.xero_invoices (
    '[{"LineAmount": 400, "AccountCode": "306", "Description": "Install"}]', NULL),
   ('00000000-0000-0000-0000-000000000001', 'INV-JP-IUN', 'INV-JP-IUN', 'ACCREC', 'AUTHORISED', 'Client',
    5000, 5500, 0, '2026-08-08', 'a7610000-0000-4000-8000-000000000011', '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 5000, "AccountCode": "200", "Description": "Work"}]', NULL),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-SALES', 'BILL-SALES', 'ACCREC', 'AUTHORISED', 'Client',
-   80, 88, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 80, "AccountCode": "200", "Description": "SWF-261111"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-VOID', 'BILL-VOID', 'ACCPAY', 'VOIDED', 'Supplier',
-   15, 15, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 15, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-GONE', 'BILL-GONE', 'ACCPAY', 'DELETED', 'Supplier',
-   15, 15, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 15, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-LINKED', 'BILL-LINKED', 'ACCPAY', 'AUTHORISED', 'Supplier',
-   15, 15, 0, '2026-08-02', 'a7610000-0000-4000-8000-000000000009', '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 15, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-TRADE', 'BILL-TRADE', 'ACCPAY', 'AUTHORISED', 'Trade',
-   40, 40, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 40, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-TLINE', 'BILL-TLINE', 'ACCPAY', 'AUTHORISED', 'Trade',
-   40, 40, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 40, "AccountCode": "305", "Description": "JOB | SW - FENCING"}]', 'SWF-261111'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-ADJ', 'BILL-ADJ', 'ACCPAY', 'AUTHORISED', 'Supplier',
-   30, 30, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 30, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261041,SWF-261042');
+   '[{"LineAmount": 5000, "AccountCode": "200", "Description": "Work"}]', NULL);
 
 INSERT INTO public.xero_projects (job_id, project_name, total_expenses, total_invoiced) VALUES
   ('a7610000-0000-4000-8000-000000000004', 'JP-XDONE site', 5000, 10000),
@@ -305,28 +266,12 @@ INSERT INTO public.scope_revisions (
 INSERT INTO public.job_materials_facts (
   xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date
 ) VALUES
-  ('BILL-FACT', 'a7610000-0000-4000-8000-000000000009', 'SWF-261111', 'materials', 'actual', 40, 'high_manual', 'manual_queue', '2026-08-02'),
   ('BILL-JP-XDONE', 'a7610000-0000-4000-8000-000000000004', 'JP-XDONE', 'labour', 'actual', 300, 'high_manual', 'manual_queue', '2026-08-02'),
   ('BILL-JP-XHOLD', 'a7610000-0000-4000-8000-000000000005', 'JP-XHOLD', 'labour', 'actual', 80, 'high_manual', 'manual_queue', '2026-08-02');
-
-INSERT INTO public.trade_invoices (
-  id, org_id, user_id, week_start, status, subtotal_ex, xero_bill_id, xero_bill_status, invoice_number,
-  gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay
-) VALUES (
-  'a7614000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001',
-  'a7611000-0000-4000-8000-000000000001', '2026-08-24', 'paid', 40, 'BILL-TRADE', 'PAID', 'TI-JP-1',
-  false, 0, 40, 0.12, 4.8, 40, 35.2
-);
 
 DO $$
 DECLARE
   r public.v_job_profit%ROWTYPE;
-  v_msg text;
-  v_job uuid;
-  n int;
-  v_kind text;
-  v_number text;
-  v_outcome text;
   v_tokens text[];
 BEGIN
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWF-261397';
@@ -504,75 +449,6 @@ BEGIN
       r.quoted_ex, r.quoted_source, r.completeness;
   END IF;
 
-  FOREACH v_msg IN ARRAY ARRAY['BILL-INST', 'BILL-INST301'] LOOP
-    BEGIN
-      PERFORM public.job_profit_link_bill(v_msg, 'job', 'SWF-261111', v_msg, 'job_profit_bill_match', 'contract', 'contract');
-      RAISE EXCEPTION 'installer bill % was not refused', v_msg;
-    EXCEPTION
-      WHEN OTHERS THEN
-        IF SQLERRM NOT LIKE '%link_refused: installer bill%' THEN
-          RAISE;
-        END IF;
-    END;
-    IF EXISTS (SELECT 1 FROM public.materials_bill_proposals p WHERE p.xero_invoice_id = v_msg) THEN
-      RAISE EXCEPTION 'installer bill % wrote a proposal', v_msg;
-    END IF;
-    SELECT i.job_id INTO v_job FROM public.xero_invoices i WHERE i.xero_invoice_id = v_msg;
-    IF v_job IS NOT NULL THEN
-      RAISE EXCEPTION 'installer bill % set xero_invoices.job_id', v_msg;
-    END IF;
-  END LOOP;
-
-  BEGIN
-    PERFORM public.job_profit_link_bill('BILL-FACT', 'job', 'SWF-261111', 'SWF-261111', 'job_profit_bill_match', 'contract', 'contract');
-    RAISE EXCEPTION 'a bill that already has a materials fact was not refused';
-  EXCEPTION
-    WHEN OTHERS THEN
-      IF SQLERRM NOT LIKE '%link_refused: bill already has a materials fact%' THEN
-        RAISE;
-      END IF;
-  END;
-  SELECT count(*) INTO n FROM public.materials_bill_proposals WHERE xero_invoice_id = 'BILL-FACT';
-  IF n <> 0 THEN
-    RAISE EXCEPTION 'a fact-backed bill wrote a proposal';
-  END IF;
-  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-FACT';
-  IF v_job IS NOT NULL THEN
-    RAISE EXCEPTION 'a fact-backed bill set xero_invoices.job_id';
-  END IF;
-
-  PERFORM public.job_profit_link_bill(
-    'BILL-EXACT', 'job', 'SWF-261111', 'SWF-261111', 'job_profit_bill_match', 'contract', 'contract'
-  );
-  SELECT proposal_kind, proposed_job_number, outcome
-    INTO v_kind, v_number, v_outcome
-  FROM public.materials_bill_proposals
-  WHERE xero_invoice_id = 'BILL-EXACT' AND outcome <> 'superseded';
-  IF v_kind IS DISTINCT FROM 'job' OR v_number IS DISTINCT FROM 'SWF-261111'
-     OR v_outcome IS DISTINCT FROM 'queued_for_review' THEN
-    RAISE EXCEPTION 'exact bill proposal was % % %', v_kind, v_number, v_outcome;
-  END IF;
-  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-EXACT';
-  IF v_job IS NOT NULL THEN
-    RAISE EXCEPTION 'exact bill set xero_invoices.job_id';
-  END IF;
-
-  PERFORM public.job_profit_link_bill(
-    'BILL-SPLIT', 'review', NULL, 'SWF-261111 SWP-261247', 'job_profit_bill_match', 'contract', 'contract'
-  );
-  SELECT proposal_kind, proposed_job_number, outcome
-    INTO v_kind, v_number, v_outcome
-  FROM public.materials_bill_proposals
-  WHERE xero_invoice_id = 'BILL-SPLIT' AND outcome <> 'superseded';
-  IF v_kind IS DISTINCT FROM 'review' OR v_number IS NOT NULL
-     OR v_outcome IS DISTINCT FROM 'queued_for_review' THEN
-    RAISE EXCEPTION 'two-job bill proposal was % % %', v_kind, v_number, v_outcome;
-  END IF;
-  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-SPLIT';
-  IF v_job IS NOT NULL THEN
-    RAISE EXCEPTION 'two-job bill set xero_invoices.job_id';
-  END IF;
-
   SELECT public.job_profit_bill_job_tokens('SWF-261041,SWF-261042', '[]'::jsonb) INTO v_tokens;
   IF v_tokens IS DISTINCT FROM ARRAY['SWF-261041', 'SWF-261042']::text[] THEN
     RAISE EXCEPTION 'adjacent job numbers were not both tokens: %', v_tokens;
@@ -580,53 +456,6 @@ BEGIN
   SELECT public.job_profit_bill_job_tokens('SWF-261111', '[]'::jsonb) INTO v_tokens;
   IF v_tokens IS DISTINCT FROM ARRAY['SWF-261111']::text[] THEN
     RAISE EXCEPTION 'a single six-digit job number was split or missed: %', v_tokens;
-  END IF;
-  BEGIN
-    PERFORM public.job_profit_link_bill(
-      'BILL-ADJ', 'job', 'SWF-261041', 'SWF-261041,SWF-261042', 'job_profit_bill_match', 'contract', 'contract'
-    );
-    RAISE EXCEPTION 'a bill naming two adjacent job numbers was linked as one job';
-  EXCEPTION
-    WHEN OTHERS THEN
-      IF SQLERRM NOT LIKE '%link_refused: job token set does not match the bill%' THEN
-        RAISE;
-      END IF;
-  END;
-  IF EXISTS (SELECT 1 FROM public.materials_bill_proposals p WHERE p.xero_invoice_id = 'BILL-ADJ') THEN
-    RAISE EXCEPTION 'adjacent job numbers wrote a proposal when linked as one job';
-  END IF;
-
-  FOREACH v_msg IN ARRAY ARRAY[
-    'BILL-SALES', 'BILL-VOID', 'BILL-GONE', 'BILL-LINKED', 'BILL-TRADE', 'BILL-TLINE'
-  ] LOOP
-    BEGIN
-      PERFORM public.job_profit_link_bill(v_msg, 'job', 'SWF-261111', 'SWF-261111', 'job_profit_bill_match', 'contract', 'contract');
-      RAISE EXCEPTION '% was not refused', v_msg;
-    EXCEPTION
-      WHEN OTHERS THEN
-        IF v_msg = 'BILL-SALES' AND SQLERRM NOT LIKE '%link_refused: sales invoice%' THEN
-          RAISE;
-        ELSIF v_msg IN ('BILL-VOID', 'BILL-GONE') AND SQLERRM NOT LIKE '%link_refused: voided or deleted bill%' THEN
-          RAISE;
-        ELSIF v_msg = 'BILL-LINKED' AND SQLERRM NOT LIKE '%link_refused: bill already linked%' THEN
-          RAISE;
-        ELSIF v_msg IN ('BILL-TRADE', 'BILL-TLINE') AND SQLERRM NOT LIKE '%link_refused: trade app bill%' THEN
-          RAISE;
-        ELSIF v_msg NOT IN ('BILL-SALES', 'BILL-VOID', 'BILL-GONE', 'BILL-LINKED', 'BILL-TRADE', 'BILL-TLINE') THEN
-          RAISE;
-        END IF;
-    END;
-    IF EXISTS (SELECT 1 FROM public.materials_bill_proposals p WHERE p.xero_invoice_id = v_msg) THEN
-      RAISE EXCEPTION '% wrote a proposal', v_msg;
-    END IF;
-  END LOOP;
-  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-SALES';
-  IF v_job IS NOT NULL THEN
-    RAISE EXCEPTION 'a sales invoice set xero_invoices.job_id';
-  END IF;
-  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-LINKED';
-  IF v_job IS DISTINCT FROM 'a7610000-0000-4000-8000-000000000009' THEN
-    RAISE EXCEPTION 'an already-linked bill changed xero_invoices.job_id to %', v_job;
   END IF;
 
   UPDATE public.feature_flags SET enabled = false

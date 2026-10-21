@@ -144,29 +144,19 @@ published from the project.
 
 ## Supplier bills
 
-Nothing in this read sets `xero_invoices.job_id`. A reviewed match is a row in
-`materials_bill_proposals` (Bills to place), outcome `queued_for_review`,
-written by `job_profit_link_bill`. The writer refuses a sales invoice, a
-voided or deleted bill, a bill already linked to a job, a trade-app bill, an
-installer bill (account 301 or 306), and a bill that already has a
-`job_materials_facts` row. A refusal writes nothing.
+Supplier bills are linked by job number through xero-sync bill prematch
+(`runBillPrematch`), which is the only writer of Bills to place
+(`materials_bill_proposals`). This read does not write a proposal and does
+not set `xero_invoices.job_id`. There is no second writer.
 
-`scripts/job-profit-bill-match.ts` is the dry-run. It prints every proposed
+`scripts/job-profit-bill-match.ts` is a dry-run. It prints every proposed
 bill: bill id, contact, amount, job number, the matched text, and the outcome.
 A match is a whole job-number token only (`SWP-`, `SWF-`, `SWMS-`, `SWB-`,
 5 or 6 digits) in the reference, a line description, or line tracking, so
 `SWF-2611` never matches inside `SWF-261111`, and `SWF-261041,SWF-261042` is
-two tokens. A bill that names more than one job number goes to review for a
-person to split. A subcontractor-account bill and a bill paid through the
-trade app are excluded and are never applied. `--apply` writes only a reviewed
-list, one audit row per proposal, and never touches an installer bill. It is
-manual and is not run by this migration.
-
-xero-sync's bill prematch (`runBillPrematch`) is the only writer whose rows
-its own sync keeps. A proposal from `job_profit_link_bill` has a different
-hash and no queue-row ownership, so the next sync supersedes it. Keeping it
-needs a change in that sync, described on the pull request. Until then this
-writer does not attach a proposal to an open Bills-to-place queue row.
+two tokens. A bill that names more than one job number is a split for a
+person. A subcontractor-account bill and a bill paid through the trade app
+are excluded. The script does not write.
 
 ## Installer bill rule
 

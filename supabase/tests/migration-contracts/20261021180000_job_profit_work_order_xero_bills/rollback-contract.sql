@@ -70,6 +70,10 @@ BEGIN
     RAISE EXCEPTION 'rollback did not restore quote_costs_incomplete as the last column';
   END IF;
 
+  IF position('installer_bill_unconfirmed' in pg_get_viewdef('public.v_job_profit'::regclass)) = 0 THEN
+    RAISE EXCEPTION 'rollback lost JP-12 installer_bill_unconfirmed from v_job_profit';
+  END IF;
+
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace

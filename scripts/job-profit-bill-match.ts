@@ -1,24 +1,15 @@
 // Dry-run matcher for supplier bills that name a job number.
 //
-// Default is read-only and prints every proposed match: bill id, contact,
-// amount, job number and the matched text. --apply writes nothing unless a
-// reviewed list is passed, and then only calls job_profit_link_bill. That
-// function writes a materials_bill_proposals row. This script never sets
-// xero_invoices.job_id and never calls the function for an installer bill
-// (accounts 301 and 306) or a trade-app payee bill.
+// Read only. Prints every proposed match: bill id, contact, amount, job
+// number and the matched text. It does not write a proposal and does not
+// set xero_invoices.job_id. Supplier bills are linked by job number through
+// xero-sync bill prematch (Bills to place). There is no second writer.
 //
 //   deno run --allow-env --allow-net scripts/job-profit-bill-match.ts
 //   deno run --allow-env scripts/job-profit-bill-match.ts --fixture
-//   deno run --allow-env --allow-net --allow-read scripts/job-profit-bill-match.ts \
-//     --apply --reviewed reviewed.json --actor owner@example.com
 //
 // --fixture prints the audit-shaped cohort and needs no credentials.
-// --fixture cannot be combined with --apply. Do not pass --apply against
-// production from this change.
-//
-// The reviewed file is a JSON array of
-// { xero_invoice_id, outcome, job_number, matched_text }.
-// A row that disagrees with a fresh classification aborts before any write.
+// --apply is refused. Do not run this against production as a writer.
 //
 // Needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for a live read.
 
@@ -26,12 +17,10 @@ import {
   auditShapedCohort,
   billJobNumberFields,
   classifySupplierBill,
-  planReviewedLinks,
   summariseSupplierBills,
   type BillClassification,
   type CohortBill,
   type KnownJob,
-  type ReviewedLink,
 } from "../supabase/functions/ops-api/job_profit_bill_match.ts";
 
 const PAGE = 1000;
@@ -56,7 +45,7 @@ function requireEnv(): { url: string; key: string } {
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   if (!url || !key) {
     console.error(
-      "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or pass --fixture for the audit-shaped cohort. This script writes a proposal only when --apply, --reviewed and --actor are all passed.",
+      "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or pass --fixture for the audit-shaped cohort. This script does not write proposals.",
     );
     Deno.exit(2);
   }
@@ -229,78 +218,6 @@ async function loadLive(days: number): Promise<{
   return { bills, jobsByNumber, factInvoiceIds, classified };
 }
 
-async function applyReviewed(
-  reviewedPath: string,
-  actor: string,
-  classified: ReadonlyMap<string, BillClassification>,
-) {
-  const text = await Deno.readTextFile(reviewedPath);
-  const parsed = JSON.parse(text);
-  if (!Array.isArray(parsed)) {
-    console.error("--reviewed must be a JSON array");
-    Deno.exit(2);
-  }
-  const reviewed = parsed as ReviewedLink[];
-  const planned = planReviewedLinks(reviewed, classified);
-  if (!planned.ok) {
-    for (const error of planned.errors) console.error(error);
-    console.error("Reviewed list disagrees with the live read. Nothing was written.");
-    Deno.exit(2);
-  }
-  const { url, key } = requireEnv();
-  let wrote = 0;
-  let skipped = 0;
-  for (const step of planned.plan) {
-    if (!step.rpc || step.outcome === "installer_hold" || step.outcome === "trade_app") {
-      skipped += 1;
-      console.log(JSON.stringify({
-        audit: {
-          xero_invoice_id: step.xero_invoice_id,
-          skipped: step.reason,
-          wrote: false,
-        },
-      }));
-      continue;
-    }
-    const response = await fetch(`${url}/rest/v1/rpc/job_profit_link_bill`, {
-      method: "POST",
-      headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        p_xero_invoice_id: step.xero_invoice_id,
-        p_proposal_kind: step.proposal_kind,
-        p_job_number: step.job_number,
-        p_matched_text: step.matched_text,
-        p_rule: "job_profit_bill_match",
-        p_reason: step.reason,
-        p_actor: actor,
-      }),
-    });
-    const bodyText = await response.text();
-    if (!response.ok) {
-      console.error(JSON.stringify({
-        audit: {
-          xero_invoice_id: step.xero_invoice_id,
-          error: bodyText.slice(0, 400),
-          wrote: false,
-        },
-      }));
-      Deno.exit(1);
-    }
-    wrote += 1;
-    console.log(JSON.stringify({
-      audit: {
-        xero_invoice_id: step.xero_invoice_id,
-        proposal: JSON.parse(bodyText),
-      },
-    }));
-  }
-  console.log(JSON.stringify({ apply: true, wrote, skipped }));
-}
-
 async function main() {
   const fixture = Deno.args.includes("--fixture");
   const apply = Deno.args.includes("--apply");
@@ -310,8 +227,10 @@ async function main() {
     console.error("--days must be an integer from 1 to 3650");
     Deno.exit(2);
   }
-  if (fixture && apply) {
-    console.error("--fixture cannot be combined with --apply");
+  if (apply) {
+    console.error(
+      "This script does not write proposals. Supplier bills are linked by job number through xero-sync bill prematch (Bills to place). There is no second writer.",
+    );
     Deno.exit(2);
   }
   if (fixture) {
@@ -332,23 +251,10 @@ async function main() {
     }
     return;
   }
-  if (apply) {
-    const reviewed = argValue("--reviewed");
-    const actor = argValue("--actor");
-    if (!reviewed || !actor) {
-      console.error("--apply requires --reviewed <file> and --actor <email>");
-      Deno.exit(2);
-    }
-    const live = await loadLive(days);
-    const summary = summariseSupplierBills(live.bills, live.jobsByNumber, live.factInvoiceIds);
-    printSummary(summary, `ACCPAY AUTHORISED/PAID last ${days} days`);
-    await applyReviewed(reviewed, actor, live.classified);
-    return;
-  }
   const live = await loadLive(days);
   const summary = summariseSupplierBills(live.bills, live.jobsByNumber, live.factInvoiceIds);
   printSummary(summary, `ACCPAY AUTHORISED/PAID last ${days} days, read only`);
-  console.log("Dry run. No proposal was written. --apply uses only a reviewed list.");
+  console.log("Dry run. No proposal was written. Supplier bills are linked by job number through the Bills to place sync.");
 }
 
 if (import.meta.main) {

@@ -1,12 +1,12 @@
 -- Job profit: append four columns onto the CFO view (20261020220000).
 --
 -- Stacked on 20261020220000_job_profit_quote_costs_incomplete (PR #1121,
--- fm/cfo-quote-costs-incomplete-20261020 @ 6c62aa98). That migration is the
--- single writer of v_job_profit. This file does not replace its body. It
--- appends margin_source, margin_cost_ex, expected_labour_quote_ex and
--- work_order_agreed_labour_ex, and adds the switches below. Apply only after
--- 20261020220000. The live migration ledger was not read when 20261021180000
--- was chosen (not observed).
+-- fm/cfo-quote-costs-incomplete-20261020, including its JP-12 restore).
+-- This file replaces v_job_profit: JP-12 installer-bill blanking and every
+-- #1121 column stay, then margin_source, margin_cost_ex,
+-- expected_labour_quote_ex and work_order_agreed_labour_ex are appended.
+-- It adds the switches below. Apply only after 20261020220000. The live
+-- migration ledger was not read when 20261021180000 was chosen (not observed).
 --
 -- DEFAULT, owner to confirm. Three switches, all seeded OFF. While one of
 -- those switches is off, missing or unreadable, the columns that switch owns
@@ -41,15 +41,14 @@
 --     been invoiced. A conflict is blank and flagged. The live price is never
 --     published. jobs.quoted_value is never read.
 --
--- Bill linking writes a materials_bill_proposals row (Bills to place). It
--- never writes xero_invoices.job_id. It refuses a sales invoice, a voided or
--- deleted bill, a bill already linked to a job, a trade-app bill, an
--- installer bill (accounts 301 and 306), and a bill that already has a
--- job_materials_facts row. Two job numbers separated only by punctuation are
--- both tokens, so that bill is not one job. There is no second queue table.
--- xero-sync bill prematch does not keep a proposal this writer inserts.
+-- This migration does not write bill proposals. Supplier bills are linked
+-- by job number through xero-sync bill prematch, which is the only writer
+-- of Bills to place (materials_bill_proposals). job_profit_bill_job_tokens
+-- is a read-only whole-token helper: two job numbers separated only by
+-- punctuation are both tokens. There is no second writer and no second
+-- queue table.
 --
--- Nothing here updates a job, a quote or a work order.
+-- Nothing here updates a job, a quote, a work order, or a bill.
 
 CREATE OR REPLACE FUNCTION public.job_profit_flag_on(p_name text)
 RETURNS boolean
@@ -303,219 +302,18 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) IS
-  'Whole job-number tokens (SWMS, SWP, SWF, SWB, 5 or 6 digits) from a bill reference, line description and tracking. A second number immediately after the first, with only punctuation between them, is a second token. Not the contact name and not the invoice number.';
-
-CREATE OR REPLACE FUNCTION public.job_profit_bill_is_installer(p_line_items jsonb)
-RETURNS boolean
-LANGUAGE sql
-STABLE
-SET search_path = public, pg_temp
-AS $fn$
-  SELECT EXISTS (
-    SELECT 1
-    FROM jsonb_array_elements(
-      CASE
-        WHEN jsonb_typeof(p_line_items) = 'array' THEN p_line_items
-        WHEN jsonb_typeof(p_line_items -> 'LineItems') = 'array' THEN p_line_items -> 'LineItems'
-        WHEN jsonb_typeof(p_line_items -> 'lineItems') = 'array' THEN p_line_items -> 'lineItems'
-        ELSE '[]'::jsonb
-      END
-    ) AS item
-    WHERE COALESCE(item ->> 'AccountCode', item ->> 'account_code', item ->> 'accountCode') IN ('301', '306')
-      AND (
-        COALESCE(item ->> 'LineAmount', item ->> 'line_amount', item ->> 'lineAmount') IS NULL
-        OR COALESCE(item ->> 'LineAmount', item ->> 'line_amount', item ->> 'lineAmount')
-             !~ '^-?[0-9]+(\.[0-9]+)?$'
-        OR (COALESCE(item ->> 'LineAmount', item ->> 'line_amount', item ->> 'lineAmount'))::numeric <> 0
-      )
-  )
-$fn$;
-
-COMMENT ON FUNCTION public.job_profit_bill_is_installer(jsonb) IS
-  'True when a bill line uses installer account 301 or 306 and the amount is missing, unreadable, or not an explicit zero.';
-
-CREATE OR REPLACE FUNCTION public.job_profit_link_bill(
-  p_xero_invoice_id text,
-  p_proposal_kind text,
-  p_job_number text,
-  p_matched_text text,
-  p_rule text,
-  p_reason text,
-  p_actor text
-)
-RETURNS jsonb
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $fn$
-DECLARE
-  v_invoice_number text;
-  v_invoice_type text;
-  v_status text;
-  v_reference text;
-  v_lines jsonb;
-  v_existing_job uuid;
-  v_tokens text[];
-  v_hash text;
-  v_live_id uuid;
-  v_live_outcome text;
-  v_live_hash text;
-  v_job_id uuid;
-  v_job_count int;
-  v_new_id uuid;
-  v_number text;
-BEGIN
-  IF p_xero_invoice_id IS NULL OR btrim(p_xero_invoice_id) = '' THEN
-    RAISE EXCEPTION 'link_refused: bill not found';
-  END IF;
-  PERFORM pg_advisory_xact_lock(hashtextextended(p_xero_invoice_id, 0));
-
-  SELECT invoice_number, invoice_type, status, reference, line_items, job_id
-    INTO v_invoice_number, v_invoice_type, v_status, v_reference, v_lines, v_existing_job
-  FROM public.xero_invoices
-  WHERE xero_invoice_id = p_xero_invoice_id
-  LIMIT 1
-  FOR UPDATE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'link_refused: bill not found';
-  END IF;
-
-  IF upper(COALESCE(v_invoice_type, '')) IS DISTINCT FROM 'ACCPAY' THEN
-    RAISE EXCEPTION 'link_refused: sales invoice';
-  END IF;
-  IF upper(COALESCE(v_status, '')) IN ('VOIDED', 'DELETED') THEN
-    RAISE EXCEPTION 'link_refused: voided or deleted bill';
-  END IF;
-  IF v_existing_job IS NOT NULL THEN
-    RAISE EXCEPTION 'link_refused: bill already linked';
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM public.trade_invoices ti
-    WHERE ti.xero_bill_id = p_xero_invoice_id
-  ) OR EXISTS (
-    SELECT 1
-    FROM jsonb_array_elements(
-      CASE
-        WHEN jsonb_typeof(v_lines) = 'array' THEN v_lines
-        WHEN jsonb_typeof(v_lines -> 'LineItems') = 'array' THEN v_lines -> 'LineItems'
-        WHEN jsonb_typeof(v_lines -> 'lineItems') = 'array' THEN v_lines -> 'lineItems'
-        ELSE '[]'::jsonb
-      END
-    ) AS item
-    WHERE COALESCE(item ->> 'Description', item ->> 'description', '') ~ '\| SW - [A-Z]'
-  ) THEN
-    RAISE EXCEPTION 'link_refused: trade app bill';
-  END IF;
-
-  IF public.job_profit_bill_is_installer(v_lines) THEN
-    RAISE EXCEPTION 'link_refused: installer bill';
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM public.job_materials_facts f
-    WHERE f.xero_invoice_id = p_xero_invoice_id
-  ) THEN
-    RAISE EXCEPTION 'link_refused: bill already has a materials fact';
-  END IF;
-
-  v_tokens := public.job_profit_bill_job_tokens(v_reference, v_lines);
-  IF p_proposal_kind = 'job' THEN
-    v_number := upper(btrim(COALESCE(p_job_number, '')));
-    IF v_tokens IS DISTINCT FROM ARRAY[v_number]::text[] OR v_number = '' THEN
-      RAISE EXCEPTION 'link_refused: job token set does not match the bill';
-    END IF;
-    SELECT count(*) INTO v_job_count FROM public.jobs j WHERE upper(j.job_number) = v_number;
-    IF v_job_count = 1 THEN
-      SELECT j.id INTO v_job_id FROM public.jobs j WHERE upper(j.job_number) = v_number;
-    END IF;
-  ELSIF p_proposal_kind = 'review' THEN
-    v_number := NULL;
-    v_job_id := NULL;
-  ELSE
-    RAISE EXCEPTION 'link_refused: proposal kind';
-  END IF;
-
-  v_hash := md5(concat_ws(
-    '|',
-    p_proposal_kind,
-    COALESCE(v_number, ''),
-    COALESCE(p_matched_text, ''),
-    COALESCE(p_rule, ''),
-    COALESCE(p_reason, ''),
-    array_to_string(v_tokens, ',')
-  ));
-
-  SELECT id, outcome, input_hash
-    INTO v_live_id, v_live_outcome, v_live_hash
-  FROM public.materials_bill_proposals
-  WHERE xero_invoice_id = p_xero_invoice_id
-    AND outcome <> 'superseded'
-  FOR UPDATE;
-
-  IF v_live_outcome = 'assigned' THEN
-    RETURN jsonb_build_object('ok', true, 'skipped', 'assigned', 'proposal_id', v_live_id, 'wrote', false);
-  END IF;
-  IF v_live_id IS NOT NULL AND v_live_hash = v_hash AND v_live_outcome = 'queued_for_review' THEN
-    RETURN jsonb_build_object('ok', true, 'skipped', 'idempotent', 'proposal_id', v_live_id, 'wrote', false);
-  END IF;
-  IF v_live_id IS NOT NULL THEN
-    UPDATE public.materials_bill_proposals
-       SET outcome = 'superseded', updated_at = now()
-     WHERE id = v_live_id;
-  END IF;
-
-  INSERT INTO public.materials_bill_proposals (
-    org_id, xero_invoice_id, invoice_number, proposal_kind, proposed_job_id,
-    proposed_job_number, confidence, rule, reason, candidates, signals,
-    input_hash, outcome
-  ) VALUES (
-    '00000000-0000-0000-0000-000000000001',
-    p_xero_invoice_id,
-    v_invoice_number,
-    p_proposal_kind,
-    v_job_id,
-    v_number,
-    CASE WHEN p_proposal_kind = 'job' THEN 'high' ELSE 'low' END,
-    COALESCE(NULLIF(btrim(COALESCE(p_rule, '')), ''), 'job_profit_bill_match'),
-    COALESCE(p_reason, ''),
-    '[]'::jsonb,
-    jsonb_build_object(
-      'actor', p_actor,
-      'matched_text', p_matched_text,
-      'tokens', to_jsonb(v_tokens)
-    ),
-    v_hash,
-    'queued_for_review'
-  )
-  RETURNING id INTO v_new_id;
-
-  RETURN jsonb_build_object(
-    'ok', true,
-    'proposal_id', v_new_id,
-    'outcome', 'queued_for_review',
-    'proposal_kind', p_proposal_kind,
-    'proposed_job_number', v_number,
-    'wrote', true
-  );
-END;
-$fn$;
-
-COMMENT ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) IS
-  'Writes one Bills to place proposal (materials_bill_proposals). Never sets xero_invoices.job_id. Refuses a sales invoice, a voided or deleted bill, a bill already linked to a job, a trade-app bill, an installer bill (accounts 301/306), and a bill that already has a job_materials_facts row. A bill whose tokens are not exactly the one named job is not written as that job.';
+  'Read only. Whole job-number tokens (SWMS, SWP, SWF, SWB, 5 or 6 digits) from a bill reference, line description and tracking. A second number immediately after the first, with only punctuation between them, is a second token. Not the contact name and not the invoice number. Does not write a proposal.';
 
 REVOKE ALL ON FUNCTION public.job_profit_flag_on(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_rule3_statuses() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_ex(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.job_profit_bill_is_installer(jsonb) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit_flag_on(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_rule3_statuses() TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_ex(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) TO service_role;
-GRANT EXECUTE ON FUNCTION public.job_profit_bill_is_installer(jsonb) TO service_role;
-GRANT EXECUTE ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) TO service_role;
 
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT

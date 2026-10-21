@@ -7,9 +7,8 @@
 // 301 and 306, trade-app payee bills, and bills that already have a materials
 // fact are never proposed as a job link.
 //
-// This module does not write. scripts/job-profit-bill-match.ts is the dry-run
-// and the reviewed-list apply. Apply calls job_profit_link_bill, which writes
-// a materials_bill_proposals row and never sets xero_invoices.job_id.
+// This module does not write. scripts/job-profit-bill-match.ts is a dry-run.
+// Supplier-bill proposals are written only by xero-sync bill prematch.
 
 export const JOB_NUMBER_RE =
   /(?<![A-Za-z0-9])(SWMS|SWP|SWF|SWB)-(\d{5,6})(?![A-Za-z0-9])/gi;
@@ -442,10 +441,9 @@ const SKIP_OUTCOMES = new Set<BillOutcome>([
 ]);
 
 /**
- * Builds the apply plan from a reviewed list. A row whose outcome or job
- * number disagrees with a fresh classification is an error, and no step is
- * returned. Installer and trade-app rows are skips: the plan never asks for
- * an RPC on them.
+ * Checks a reviewed list against a fresh classification. A row whose outcome
+ * or job number disagrees is an error, and no step is returned. rpc is always
+ * false: this plan does not write a proposal.
  */
 export function planReviewedLinks(
   reviewed: readonly ReviewedLink[],
@@ -485,7 +483,7 @@ export function planReviewedLinks(
     plan.push({
       xero_invoice_id: row.xero_invoice_id,
       outcome: live.outcome,
-      rpc: true,
+      rpc: false,
       proposal_kind: proposalKind,
       job_number: proposalKind === "job" ? live.job_number : null,
       matched_text: row.matched_text ?? live.matched_text ?? "",
