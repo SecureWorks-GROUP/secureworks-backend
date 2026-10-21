@@ -722,6 +722,14 @@ ROLLBACK;
 
 -- 6. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (person review, 20261018120000) replaced the item check, the write, the assembler and the
+-- story's ledger read since: its down goes first, inside this transaction only, while those
+-- bodies are still its own (a later down of the item check would no longer match its guard).
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(person review, 20261018120000)%' AS person_review_live \gset
+\if :person_review_live
+\ir ../../../rollbacks/20261019120000_context_ledger_person_review_down.sql
+\endif
 -- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
 -- so the bodies snapshotted and re-applied below are this migration's own)
 SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset

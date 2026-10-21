@@ -271,6 +271,14 @@ ROLLBACK;
 
 -- 4. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (person review, 20261018120000) replaced the item check, the write, the assembler and the
+-- story's ledger read since: its down goes first, inside this transaction only, while those
+-- bodies are still its own (a later down of the item check would no longer match its guard).
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(person review, 20261018120000)%' AS person_review_live \gset
+\if :person_review_live
+\ir ../../../rollbacks/20261019120000_context_ledger_person_review_down.sql
+\endif
 CREATE TEMP TABLE hn_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_held_notes_on', 'context_ledger_held_placed_copy',
