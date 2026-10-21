@@ -204,16 +204,21 @@ Deno.test("the injected key still reaches the close-out actions xero-sync calls"
 });
 
 // The other timed jobs that post a service-role JWT that is not the injected
-// key: trigger_job_work_order_auto_issue (`sw_service_key()`, POST) and the
-// two make-safe canaries (Vault `service_role_key`, POST). Each case compares
-// the cron bearer with the injected key on the same request: the same outcome
-// means the cron is classified as the server caller. auto_issue is sent as GET
-// so it stops at 405 with nothing run; the canaries have no method gate and
-// stop at the closed database port, which is never the front door's 401.
+// key, all `sw_service_key()` POSTs: trigger_job_work_order_auto_issue, and
+// the make-safe canaries and email reconcile jobs (trigger_makesafe_status_canary
+// and trigger_makesafe_reconcile: D1, D2 inventory, D3 as D1 with mode=D3, D4
+// canary). Each case compares the cron bearer with the injected key on the same
+// request: the same outcome means the cron is classified as the server caller.
+// auto_issue is sent as GET so it stops at 405 with nothing run; the make-safe
+// actions have no method gate and stop at the closed database port, which is
+// never the front door's 401 nor their own admin gate's 403.
 const CRON_ACTIONS = [
   { action: "auto_issue_job_work_orders", method: "GET" },
   { action: "makesafe_email_canary", method: "POST" },
   { action: "makesafe_status_canary", method: "POST" },
+  { action: "makesafe_email_reconcile", method: "POST" },
+  { action: "makesafe_email_reconcile_inventory", method: "POST" },
+  { action: "makesafe_email_reconcile&mode=D3", method: "POST" },
 ];
 
 Deno.test("the timed jobs' service-role bearer reaches each action as the server", async () => {
@@ -234,6 +239,7 @@ Deno.test("the timed jobs' service-role bearer reaches each action as the server
       assertEquals(cron.status, 405);
     } else {
       assertEquals(cron.status === 401, false, opts.action);
+      assertEquals(cron.status === 403, false, opts.action);
     }
   }
 });
