@@ -4,7 +4,8 @@
 -- quote_costs_incomplete is the last column). Drops the four appended
 -- columns. Deletes the three switches. Does not change a job, a bill, a
 -- quote or a work order. Drops job_profit_link_bill if an earlier apply
--- created it.
+-- created it. DROP VIEW drops every column comment, so the comments that
+-- 20261020220000 left on v_job_profit are written again below.
 
 DROP FUNCTION IF EXISTS public.job_profit(uuid);
 DROP VIEW IF EXISTS public.v_job_profit;
@@ -434,6 +435,26 @@ FROM flagged f;
 COMMENT ON VIEW public.v_job_profit IS
   'Job profit engine (20261009130000, CFO-12 20261019120000, JP-12 20261020181800, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). An installer bill on the job that no person has confirmed (JP-12) flags installer_bill_unconfirmed and gives no profit or margin; its amount is not in actual cost. quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted. Read only, service role only.';
 
+-- DROP VIEW above removed these. They are the comments 20261020220000 left
+-- in place (20261009130000, 20261019120000, and its own new column).
+COMMENT ON COLUMN public.v_job_profit.committed_open_ex IS
+  'Priced open purchase orders with no invoice emailed and no bill placed, ex GST. Committed, not actual: never in actual_cost_ex. An order with no price is never here as $0: see ordered_not_billed_count.';
+COMMENT ON COLUMN public.v_job_profit.ordered_not_billed_count IS
+  'Sent purchase orders with no price (every Dispatch order) and no invoice or bill yet. A count, never a dollar figure.';
+COMMENT ON COLUMN public.v_job_profit.ordered_not_billed_over_30_count IS
+  'Of ordered_not_billed_count, those first sent 30 or more Perth days ago (flag ordered_not_billed_over_30_days).';
+COMMENT ON COLUMN public.v_job_profit.invoice_emailed_count IS
+  'Purchase orders whose supplier invoice was emailed (invoice_received_at) with no bill linked to the order (the bill may be on the job without that link). Never nothing owed.';
+COMMENT ON COLUMN public.v_job_profit.invoice_emailed_ex IS
+  'Ex-GST amount of the priced orders in invoice_emailed_count. Null when none carries a price. Not in committed_open_ex or actual_cost_ex.';
+COMMENT ON COLUMN public.v_job_profit.xero_project_expenses_ex IS
+  'Expenses on record against the job''s Xero Project (name-linked only). Evidence only: not the job''s full cost, never part of actual_cost_ex, profit_ex or any total. Trade app labour may sit outside it.';
+COMMENT ON COLUMN public.v_job_profit.actual_cost_ex IS
+  'Line-level actual cost ex GST (trade charges, supplier bills, materials facts). Never a Xero Project total.';
+COMMENT ON COLUMN public.v_job_profit.quoted_ex IS
+  'Sent or accepted quote value ex GST (job_quote_values). Null with no sent quote; never the live price.';
+COMMENT ON COLUMN public.v_job_profit.expected_cost_ex IS
+  'Expected cost fixed at the quote (expected_source frozen_at_acceptance, accepted_quote_revision or sent_quote_revision). Null with none; never the live pricing estimate.';
 COMMENT ON COLUMN public.v_job_profit.quote_costs_incomplete IS
   'True when no expected cost is fixed because the revision the quote stands on (newest accepted, else newest sent) sealed its costs as still to confirm (cost_estimates.costs_complete false). Not the same as a job with no costed quote. Never a figure.';
 
@@ -456,7 +477,6 @@ GRANT EXECUTE ON FUNCTION public.job_profit(uuid) TO service_role;
 
 DROP FUNCTION IF EXISTS public.job_profit_link_bill(text, text, text, text, text, text, text);
 DROP FUNCTION IF EXISTS public.job_profit_bill_is_installer(jsonb);
-DROP FUNCTION IF EXISTS public.job_profit_bill_job_tokens(text, jsonb);
 DROP FUNCTION IF EXISTS public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean);
 DROP FUNCTION IF EXISTS public.job_profit_patio_ex(text);
 DROP FUNCTION IF EXISTS public.job_profit_patio_rule3_statuses();

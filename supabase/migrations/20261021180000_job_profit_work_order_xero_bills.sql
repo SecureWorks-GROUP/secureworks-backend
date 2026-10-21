@@ -41,11 +41,10 @@
 --     been invoiced. A conflict is blank and flagged. The live price is never
 --     published. jobs.quoted_value is never read.
 --
--- This migration does not write bill proposals. Supplier bills are linked
--- by job number through xero-sync bill prematch, which is the only writer
--- of Bills to place (materials_bill_proposals). job_profit_bill_job_tokens
--- is a read-only whole-token helper: two job numbers separated only by
--- punctuation are both tokens. There is no second writer and no second
+-- This migration does not write bill proposals and does not install a
+-- token function. Supplier bills are linked by job number through xero-sync
+-- bill prematch, which is the only writer of Bills to place
+-- (materials_bill_proposals). There is no second writer and no second
 -- queue table.
 --
 -- Nothing here updates a job, a quote, a work order, or a bill.
@@ -255,65 +254,14 @@ $fn$;
 COMMENT ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) IS
   'Patio sales price (20261021180000). Off, or not a patio, returns no row so the sent quote stands. One agreeing frozen quote is published only when it is consistent with the live price and with invoiced-to-date. A conflict returns no figure. Never reads jobs.quoted_value.';
 
-CREATE OR REPLACE FUNCTION public.job_profit_bill_job_tokens(p_reference text, p_line_items jsonb)
-RETURNS text[]
-LANGUAGE sql
-STABLE
-SET search_path = public, pg_temp
-AS $fn$
-  WITH items AS (
-    SELECT item
-    FROM jsonb_array_elements(
-      CASE
-        WHEN jsonb_typeof(p_line_items) = 'array' THEN p_line_items
-        WHEN jsonb_typeof(p_line_items -> 'LineItems') = 'array' THEN p_line_items -> 'LineItems'
-        WHEN jsonb_typeof(p_line_items -> 'lineItems') = 'array' THEN p_line_items -> 'lineItems'
-        ELSE '[]'::jsonb
-      END
-    ) AS item
-  ),
-  sources AS (
-    SELECT COALESCE(p_reference, '') AS src
-    UNION ALL
-    SELECT COALESCE(item ->> 'Description', item ->> 'description', '') FROM items
-    UNION ALL
-    SELECT concat_ws(' ', trk ->> 'Name', trk ->> 'name', trk ->> 'Option', trk ->> 'option')
-    FROM items
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE
-        WHEN jsonb_typeof(COALESCE(item -> 'Tracking', item -> 'tracking')) = 'array'
-          THEN COALESCE(item -> 'Tracking', item -> 'tracking')
-        ELSE '[]'::jsonb
-      END
-    ) AS trk
-  ),
-  hits AS (
-    SELECT upper(m[1]) AS token
-    FROM sources
-    CROSS JOIN LATERAL regexp_matches(
-      ' ' || src || ' ',
-      '[^A-Za-z0-9]((?:SWMS|SWP|SWF|SWB)-[0-9]{5,6})(?![A-Za-z0-9])',
-      'gi'
-    ) AS m
-  )
-  SELECT COALESCE(array_agg(DISTINCT token ORDER BY token), ARRAY[]::text[])
-  FROM hits
-  WHERE token IS NOT NULL
-$fn$;
-
-COMMENT ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) IS
-  'Read only. Whole job-number tokens (SWMS, SWP, SWF, SWB, 5 or 6 digits) from a bill reference, line description and tracking. A second number immediately after the first, with only punctuation between them, is a second token. Not the contact name and not the invoice number. Does not write a proposal.';
-
 REVOKE ALL ON FUNCTION public.job_profit_flag_on(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_rule3_statuses() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_ex(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit_flag_on(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_rule3_statuses() TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_ex(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) TO service_role;
-GRANT EXECUTE ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) TO service_role;
 
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT

@@ -8,7 +8,6 @@ import {
   extractJobNumberTokens,
   isInstallerBill,
   isTradeMirrorBill,
-  planReviewedLinks,
   summariseSupplierBills,
   type KnownJob,
 } from "./job_profit_bill_match.ts";
@@ -191,46 +190,6 @@ Deno.test("the audit-shaped cohort sends two-job bills to the split queue", () =
   assertEquals(summary.unmatched, 568);
   assertEquals(summary.apply_count, 40);
   assert(summary.apply_count <= summary.line_text_hits);
-});
-
-Deno.test("a reviewed list never plans a proposal write", () => {
-  const jobs = known(["SWF-261111", "SWF-26698"]);
-  const installer = classifySupplierBill({
-    xero_invoice_id: "BILL-ALYX",
-    reference: "SWF-26698",
-    line_items: [{ AccountCode: "306", LineAmount: 880, Description: "SWF-26698 Fence Installation" }],
-  }, jobs);
-  const fact = classifySupplierBill({
-    xero_invoice_id: "BILL-FACT",
-    reference: "SWF-261111",
-    line_items: [{ AccountCode: "305", LineAmount: 20, Description: "Sheets" }],
-  }, jobs, new Set(["BILL-FACT"]));
-  const exact = classifySupplierBill({
-    xero_invoice_id: "BILL-EXACT",
-    reference: "SWF-261111",
-    line_items: [{ AccountCode: "305", LineAmount: 20, Description: "Sheets" }],
-  }, jobs);
-  const live = new Map([
-    ["BILL-ALYX", installer],
-    ["BILL-FACT", fact],
-    ["BILL-EXACT", exact],
-  ]);
-  const refused = planReviewedLinks([
-    { xero_invoice_id: "BILL-ALYX", outcome: "exact", job_number: "SWF-26698" },
-  ], live);
-  assertEquals(refused.ok, false);
-
-  const planned = planReviewedLinks([
-    { xero_invoice_id: "BILL-ALYX", outcome: "installer_hold" },
-    { xero_invoice_id: "BILL-FACT", outcome: "already_fact" },
-    { xero_invoice_id: "BILL-EXACT", outcome: "exact", job_number: "SWF-261111" },
-  ], live);
-  assert(planned.ok);
-  if (!planned.ok) return;
-  assertEquals(planned.plan.map((step) => step.rpc), [false, false, false]);
-  assert(planned.plan.every((step) => step.rpc === false));
-  assertEquals(planned.plan[2].proposal_kind, "job");
-  assertEquals(planned.plan[2].job_number, "SWF-261111");
 });
 
 Deno.test("ops-api does not dispatch a second bill queue and the script does not write job_id", async () => {

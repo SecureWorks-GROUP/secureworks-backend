@@ -35,10 +35,10 @@
 --   SWP-26100   frozen 1000 against live 2000: blank and flagged.
 --   JP-POK      one frozen 5000, no live price, nothing invoiced past it:
 --               published only while the patio switch is on.
---   Tokens      this migration does not write bill proposals. Supplier bills
---               are linked by job number through xero-sync bill prematch.
---               job_profit_link_bill is absent. SWF-261041,SWF-261042 is two
---               tokens on the read-only helper.
+--   Tokens      this migration does not write bill proposals and does not
+--               install job_profit_bill_job_tokens. Supplier bills are linked
+--               by job number through xero-sync bill prematch.
+--               job_profit_link_bill is absent.
 
 \set ON_ERROR_STOP on
 
@@ -90,8 +90,9 @@ BEGIN
   END IF;
 
   IF to_regprocedure('public.job_profit_link_bill(text,text,text,text,text,text,text)') IS NOT NULL
-     OR to_regprocedure('public.job_profit_bill_is_installer(jsonb)') IS NOT NULL THEN
-    RAISE EXCEPTION 'job_profit_link_bill must not exist';
+     OR to_regprocedure('public.job_profit_bill_is_installer(jsonb)') IS NOT NULL
+     OR to_regprocedure('public.job_profit_bill_job_tokens(text,jsonb)') IS NOT NULL THEN
+    RAISE EXCEPTION 'job_profit_link_bill and job_profit_bill_job_tokens must not exist';
   END IF;
 END $$;
 
@@ -272,7 +273,6 @@ INSERT INTO public.job_materials_facts (
 DO $$
 DECLARE
   r public.v_job_profit%ROWTYPE;
-  v_tokens text[];
 BEGIN
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWF-261397';
   IF r.expected_labour_ex IS DISTINCT FROM 160
@@ -447,15 +447,6 @@ BEGIN
      OR 'patio_sales_price_conflict' = ANY (r.completeness) THEN
     RAISE EXCEPTION 'sole frozen patio quote was not published: quoted % source % completeness %',
       r.quoted_ex, r.quoted_source, r.completeness;
-  END IF;
-
-  SELECT public.job_profit_bill_job_tokens('SWF-261041,SWF-261042', '[]'::jsonb) INTO v_tokens;
-  IF v_tokens IS DISTINCT FROM ARRAY['SWF-261041', 'SWF-261042']::text[] THEN
-    RAISE EXCEPTION 'adjacent job numbers were not both tokens: %', v_tokens;
-  END IF;
-  SELECT public.job_profit_bill_job_tokens('SWF-261111', '[]'::jsonb) INTO v_tokens;
-  IF v_tokens IS DISTINCT FROM ARRAY['SWF-261111']::text[] THEN
-    RAISE EXCEPTION 'a single six-digit job number was split or missed: %', v_tokens;
   END IF;
 
   UPDATE public.feature_flags SET enabled = false
