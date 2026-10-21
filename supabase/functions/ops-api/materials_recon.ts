@@ -292,6 +292,92 @@ export async function loadLiveProposals(
   return out;
 }
 
+// The bill's own Xero job link, for display on the worklist (W1). It is the
+// same xero_invoices.job_id the job profit engine reads as the link, named by
+// jobs.job_number. Display only: it changes no placement, suggestion or figure.
+// "unknown" (no mirror row for this org, or the read failed) never reads as
+// "none". Reads check `error` (PostgREST returns it, it does not throw) and go
+// in chunks of 100 ids.
+export type XeroJobLink = {
+  state: "linked" | "none" | "unknown";
+  job_id: string | null;
+  job_number: string | null;
+};
+const XERO_JOB_UNKNOWN: XeroJobLink = { state: "unknown", job_id: null, job_number: null };
+
+export async function loadXeroJobLinks(
+  client: any,
+  orgId: string,
+  xeroInvoiceIds: string[],
+): Promise<Map<string, XeroJobLink>> {
+  const ids = [...new Set(xeroInvoiceIds.filter(Boolean))];
+  const jobOf = new Map<string, string | null>();
+  const disagree = new Set<string>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await client
+      .from("xero_invoices")
+      .select("xero_invoice_id, job_id")
+      .eq("org_id", orgId)
+      .in("xero_invoice_id", ids.slice(i, i + 100));
+    if (error) throw error;
+    for (const x of (data || []) as Array<{ xero_invoice_id: string; job_id: string | null }>) {
+      const job = x.job_id || null;
+      if (jobOf.has(x.xero_invoice_id) && jobOf.get(x.xero_invoice_id) !== job) disagree.add(x.xero_invoice_id);
+      jobOf.set(x.xero_invoice_id, job);
+    }
+  }
+  const jobIds = [...new Set([...jobOf.values()].filter((j): j is string => !!j))];
+  const numberOf = new Map<string, string | null>();
+  for (let i = 0; i < jobIds.length; i += 100) {
+    const { data, error } = await client
+      .from("jobs")
+      .select("id, job_number")
+      .in("id", jobIds.slice(i, i + 100));
+    if (error) throw error;
+    for (const j of (data || []) as Array<{ id: string; job_number: string | null }>) {
+      numberOf.set(j.id, j.job_number ?? null);
+    }
+  }
+  const out = new Map<string, XeroJobLink>();
+  for (const id of ids) {
+    if (!jobOf.has(id) || disagree.has(id)) out.set(id, { ...XERO_JOB_UNKNOWN });
+    else {
+      const job = jobOf.get(id) || null;
+      out.set(id, job
+        ? { state: "linked", job_id: job, job_number: numberOf.get(job) ?? null }
+        : { state: "none", job_id: null, job_number: null });
+    }
+  }
+  return out;
+}
+
+// Who placed a worklist row, for its identity wording (W7). A recorded person
+// only: the queue row's assigned_by on a placed row (assigned, split,
+// not_job_related) that the database's own rule, cfo_recorded_person
+// (20261021173000), accepts. That rule is called, never restated here. Null
+// means "no recorded person", never "a person placed it". One rpc per distinct
+// actor; an error is thrown so the caller reports the read as failed.
+const QUEUE_PLACED_STATUSES = new Set(["assigned", "split", "not_job_related"]);
+
+export async function loadRecordedPlacers(
+  client: any,
+  actors: string[],
+): Promise<Set<string>> {
+  const distinct = [...new Set(actors.map((a) => (a || "").trim()).filter(Boolean))];
+  const people = new Set<string>();
+  if (!distinct.length) return people;
+  if (typeof client.rpc !== "function") throw new Error("cfo_recorded_person is not reachable from this client");
+  for (const actor of distinct) {
+    const { data, error } = await client.rpc("cfo_recorded_person", {
+      p_source: "manual_queue",
+      p_actor: actor,
+    });
+    if (error) throw error;
+    if (data === true) people.add(actor);
+  }
+  return people;
+}
+
 // The proposal as the worklist shows it. The queue's suggestion columns only
 // allow low|medium, so a high-confidence proposal reads as medium there, with
 // its reason saying why it is strong.
@@ -414,7 +500,35 @@ export async function listReconQueue(
     proposals = "failed";
     console.error("[materials_recon] proposal read failed:", (e as Error).message);
   }
-  return { ok: true, status, rows, stats, proposals };
+  // The bill's own Xero job link (display only). A failed read makes every row
+  // unknown and says so; it never fails the list.
+  let xeroJobs: "ok" | "failed" = "ok";
+  let links = new Map<string, XeroJobLink>();
+  try {
+    links = await loadXeroJobLinks(client, args.orgId, rows.map((r) => r.xero_invoice_id));
+  } catch (e) {
+    xeroJobs = "failed";
+    links = new Map();
+    console.error("[materials_recon] xero job link read failed:", (e as Error).message);
+  }
+  for (const r of rows) r.xero_job = links.get(r.xero_invoice_id) || { ...XERO_JOB_UNKNOWN };
+  // Who placed it, as a recorded person or null. A failed read leaves every
+  // row null and says so, so a reader claims neither a person nor a machine.
+  let placedByRead: "ok" | "failed" = "ok";
+  let people = new Set<string>();
+  const placed = (r: Record<string, any>) => QUEUE_PLACED_STATUSES.has(r.status);
+  try {
+    people = await loadRecordedPlacers(client, rows.filter(placed).map((r) => r.assigned_by));
+  } catch (e) {
+    placedByRead = "failed";
+    people = new Set();
+    console.error("[materials_recon] placed-by read failed:", (e as Error).message);
+  }
+  for (const r of rows) {
+    const actor = typeof r.assigned_by === "string" ? r.assigned_by.trim() : "";
+    r.placed_by = placed(r) && actor && people.has(actor) ? actor : null;
+  }
+  return { ok: true, status, rows, stats, proposals, xero_jobs: xeroJobs, placed_by_read: placedByRead };
 }
 
 // (b1) accept-suggestion / assign-to-job — land a manual FACT, flip queue → assigned.
