@@ -12,7 +12,8 @@
  * `Bearer <sw_service_key()>`, a service-role JWT that is not the injected key.
  * Those cases send GET: a server caller gets 405 method_not_allowed from
  * runJobCloseoutAction (proof it was classified server, with nothing run), and
- * anyone else 401 at the front door.
+ * anyone else 401 at the front door. The same holds for the other timed jobs
+ * in OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS (cases at the end of this file).
  */
 // deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -199,5 +200,67 @@ Deno.test("the injected key still reaches the close-out actions xero-sync calls"
       method: "GET",
     });
     assertEquals(r.status, 405);
+  }
+});
+
+// The other timed jobs that post a service-role JWT that is not the injected
+// key: trigger_job_work_order_auto_issue (`sw_service_key()`, POST) and the
+// two make-safe canaries (Vault `service_role_key`, POST). Each case compares
+// the cron bearer with the injected key on the same request: the same outcome
+// means the cron is classified as the server caller. auto_issue is sent as GET
+// so it stops at 405 with nothing run; the canaries have no method gate and
+// stop at the closed database port, which is never the front door's 401.
+const CRON_ACTIONS = [
+  { action: "auto_issue_job_work_orders", method: "GET" },
+  { action: "makesafe_email_canary", method: "POST" },
+  { action: "makesafe_status_canary", method: "POST" },
+];
+
+Deno.test("the timed jobs' service-role bearer reaches each action as the server", async () => {
+  for (const opts of CRON_ACTIONS) {
+    const server = await call(
+      { authorization: `Bearer ${LEGACY}` },
+      "accepted",
+      opts,
+    );
+    const cron = await call(
+      { authorization: `Bearer ${CRON_KEY}` },
+      "accepted",
+      opts,
+    );
+    assertEquals(cron.status, server.status, opts.action);
+    assertEquals(cron.probed, [CRON_KEY], opts.action);
+    if (opts.action === "auto_issue_job_work_orders") {
+      assertEquals(cron.status, 405);
+    } else {
+      assertEquals(cron.status === 401, false, opts.action);
+    }
+  }
+});
+
+Deno.test("a service-role claim Supabase does not accept is refused at the timed jobs", async () => {
+  for (const opts of CRON_ACTIONS) {
+    for (const verdict of ["rejected", "unknown"] as const) {
+      assertEquals(
+        (await call({ authorization: `Bearer ${CRON_KEY}` }, verdict, opts))
+          .status,
+        401,
+        `${opts.action} ${verdict}`,
+      );
+    }
+  }
+});
+
+Deno.test("a non-service-role JWT is still refused at the timed jobs", async () => {
+  for (const opts of CRON_ACTIONS) {
+    for (const role of ["authenticated", "anon", "service_role "]) {
+      const r = await call(
+        { authorization: `Bearer ${jwt({ role })}` },
+        "accepted",
+        opts,
+      );
+      assertEquals(r.status, 401, `${opts.action} ${role}`);
+      assertEquals(r.probed, [], `${opts.action} ${role}`);
+    }
   }
 });
