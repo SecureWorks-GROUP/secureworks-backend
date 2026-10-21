@@ -10,8 +10,21 @@ BEGIN
      OR to_regclass('public.group_work_order_shares') IS NOT NULL
      OR to_regclass('public.group_work_order_settings') IS NOT NULL
      OR to_regprocedure('public.group_work_order_caller_is_staff()') IS NOT NULL
-     OR to_regprocedure('public.group_work_order_caller_is_participant(uuid)') IS NOT NULL THEN
+     OR to_regprocedure('public.group_work_order_caller_is_participant(uuid)') IS NOT NULL
+     OR to_regprocedure('public.group_work_order_write_split(uuid, boolean)') IS NOT NULL
+     OR to_regprocedure('public.freeze_group_work_order_split(uuid)') IS NOT NULL
+     OR to_regprocedure('public.project_group_work_order_split(uuid)') IS NOT NULL
+     OR to_regprocedure('public.unfreeze_group_work_order_split(uuid)') IS NOT NULL
+     OR to_regprocedure('public.group_work_order_refuse_late_joiner()') IS NOT NULL
+     OR to_regprocedure('public.group_work_order_shares_frozen_guard()') IS NOT NULL
+     OR to_regprocedure('public.trade_invoice_lines_group_share_snapshot()') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback: group work order tables and functions must be removed';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'trg_trade_invoice_lines_group_share_snapshot'
+  ) THEN
+    RAISE EXCEPTION 'rollback: the share snapshot trigger must be removed';
   END IF;
   IF EXISTS (
     SELECT 1 FROM information_schema.columns

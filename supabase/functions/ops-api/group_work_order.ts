@@ -10,6 +10,14 @@
 // split, never both. Share lines are quantity 1 at the share, with
 // source_work_order_id left null.
 //
+// The invoice path freezes one snapshot under a row lock
+// (freeze_group_work_order_split). Every later share line reads that
+// snapshot. Preview uses project_group_work_order_split and does not freeze.
+// group_work_order_write_split is the only writer and must match
+// allocatePotCents and entryPointsMicro. A person who joins after the
+// marker is refused. The office unfreeze recomputes only while no share
+// sits on a live invoice.
+//
 // DEFAULT, owner to confirm: break minutes come off finish minus start,
 // the same formula as trade invoice time entries. This module does not
 // invent a second hours rule; it calls resolveTradeInvoiceTimeEntry.
@@ -435,14 +443,77 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+const QUERY_FAULTS: {
+  needle: string;
+  code: string;
+  message: string;
+  status: number;
+}[] = [
+  {
+    needle: "group_split_frozen",
+    code: "group_split_frozen",
+    message:
+      "This group's pay is frozen. The office has to reopen it before anyone else can join.",
+    status: 409,
+  },
+  {
+    needle: "group_split_has_live_invoice",
+    code: "group_split_has_live_invoice",
+    message: "A share is already on a live invoice, so this split stays frozen.",
+    status: 409,
+  },
+  {
+    needle: "group_pot_missing",
+    code: "group_pot_missing",
+    message: "This job's work order has no agreed labour price to split.",
+    status: 422,
+  },
+  {
+    needle: "group_share_hours_missing",
+    code: "group_share_hours_missing",
+    message: "Submit your hours on this group before invoicing your share.",
+    status: 422,
+  },
+  {
+    needle: "group_work_order_not_found",
+    code: "group_work_order_not_found",
+    message: "That group work order was not found.",
+    status: 404,
+  },
+  {
+    needle: "group_split_not_frozen",
+    code: "group_split_not_frozen",
+    message: "This group's pay is not frozen yet, so a share line cannot be stored.",
+    status: 409,
+  },
+  {
+    needle: "group_share_amount_mismatch",
+    code: "group_share_amount_mismatch",
+    message:
+      "The amount on the group share does not match your share. Reload and submit again.",
+    status: 409,
+  },
+  {
+    needle: "group_share_not_in_split",
+    code: "group_share_not_in_split",
+    message:
+      "You have no share of this group. Check that your rate and hours are on the job.",
+    status: 422,
+  },
+];
+
 function throwQuery(error: { message?: string } | null, what: string): void {
-  if (error) {
-    throw new GroupWorkOrderError(
-      "group_work_order_unreadable",
-      `Could not ${what}.`,
-      503,
-    );
+  if (!error) return;
+  const text = String(error.message || "");
+  const fault = QUERY_FAULTS.find((row) => text.includes(row.needle));
+  if (fault) {
+    throw new GroupWorkOrderError(fault.code, fault.message, fault.status);
   }
+  throw new GroupWorkOrderError(
+    "group_work_order_unreadable",
+    `Could not ${what}.`,
+    503,
+  );
 }
 
 async function rowsOf(
@@ -510,9 +581,12 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
   return centsToMoney(cents);
 }
 
+const GROUP_COLUMNS =
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at";
+
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(
-    "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by",
+    GROUP_COLUMNS,
   ).eq("id", groupId).maybeSingle();
   throwQuery(error, "load the group");
   return data as Record<string, unknown> | null;
@@ -520,9 +594,7 @@ async function loadGroupById(client: any, groupId: string) {
 
 async function loadGroupByJob(client: any, jobId: string) {
   const rows = await rowsOf(
-    client.from("group_work_orders").select(
-      "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by",
-    ).eq("job_id", jobId),
+    client.from("group_work_orders").select(GROUP_COLUMNS).eq("job_id", jobId),
     "load the group",
   );
   return rows[0] || null;
@@ -530,7 +602,7 @@ async function loadGroupByJob(client: any, jobId: string) {
 
 async function loadGroupByToken(client: any, token: string) {
   const { data, error } = await client.from("group_work_orders").select(
-    "id, org_id, job_id, work_order_id, status, share_token, client_signed_at",
+    GROUP_COLUMNS,
   ).eq("share_token", token).maybeSingle();
   throwQuery(error, "load the sign-off link");
   return data as Record<string, unknown> | null;
@@ -664,6 +736,14 @@ export async function createGroupWorkOrder(
 }
 
 async function insertParticipant(client: any, groupId: string, userId: string) {
+  const group = await loadGroupById(client, groupId);
+  if (group?.split_frozen_at) {
+    throw new GroupWorkOrderError(
+      "group_split_frozen",
+      "This group's pay is frozen. The office has to reopen it before anyone else can join.",
+      409,
+    );
+  }
   const { error } = await client.from("group_work_order_participants").insert({
     group_id: groupId,
     user_id: userId,
@@ -805,8 +885,8 @@ export async function readGroupWorkOrderMyShare(
       myShareEx: null,
     });
   }
-  const split = await computeShares(client, group, entries);
-  const mine = split.find((row) => row.user_id === caller.userId);
+  const split = await readSplit(client, String(group.id), false);
+  const mine = split.find((row) => String(row.user_id) === caller.userId);
   return participantShareResponse({
     groupId: String(group.id),
     clientSigned: groupIsSigned(group),
@@ -816,120 +896,18 @@ export async function readGroupWorkOrderMyShare(
   });
 }
 
-async function computeShares(
+async function readSplit(
   client: any,
-  group: Record<string, unknown>,
-  entries: readonly Record<string, unknown>[],
-) {
-  const existing = await rowsOf(
-    client.from("group_work_order_shares").select(
-      "id, group_id, user_id, hours, points, share_ex, pot_ex",
-    ).eq("group_id", group.id),
-    "load shares",
-  );
-  if (await sharesAreFrozen(client, existing)) return existing;
-  const potEx = potFromWorkOrder(
-    await loadWorkOrder(client, String(group.work_order_id)),
-  );
-  const userIds = [...new Set(entries.map((row) => String(row.user_id)))];
-  const rates = userIds.length === 0 ? [] : await rowsOf(
-    client.from("trade_rates").select(
-      "user_id, hourly_rate, effective_from, effective_to",
-    ).eq("org_id", group.org_id).in("user_id", userIds),
-    "load rates",
-  );
-  const pointsByUser = new Map<string, bigint>();
-  const hoursByUser = new Map<string, number>();
-  for (const entry of entries) {
-    const userId = String(entry.user_id);
-    const hours = Number(entry.hours || 0);
-    const mine = rates.filter((rate) => String(rate.user_id) === userId);
-    const rate = rateOnDay(
-      mine.map((row) => ({
-        hourly_rate: row.hourly_rate,
-        effective_from: row.effective_from == null
-          ? null
-          : String(row.effective_from),
-        effective_to: row.effective_to == null
-          ? null
-          : String(row.effective_to),
-      })),
-      String(entry.work_date),
-    );
-    if (rate == null || hours <= 0) continue;
-    pointsByUser.set(
-      userId,
-      (pointsByUser.get(userId) || 0n) + entryPointsMicro(rate, hours),
-    );
-    hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
-  }
-  const people = [...pointsByUser.entries()].map(([userId, pointsMicro]) => ({
-    userId,
-    pointsMicro,
-  }));
-  const potCents = moneyToCents(potEx) || 0;
-  const allocated = allocatePotCents(potCents, people);
-  const now = new Date().toISOString();
-  const nextIds = new Set(allocated.map((row) => row.userId));
-  for (const old of existing) {
-    if (!nextIds.has(String(old.user_id))) {
-      const { error } = await client.from("group_work_order_shares").delete()
-        .eq("id", old.id);
-      throwQuery(error, "update the split");
-    }
-  }
-  if (allocated.length > 0) {
-    const { error } = await client.from("group_work_order_shares").upsert(
-      allocated.map((row) => ({
-        group_id: group.id,
-        user_id: row.userId,
-        hours: Number((hoursByUser.get(row.userId) || 0).toFixed(2)),
-        points: pointsDollars(
-          pointsByUser.get(row.userId) || 0n,
-        ),
-        share_ex: centsToMoney(row.shareCents),
-        pot_ex: potEx,
-        computed_at: now,
-      })),
-      { onConflict: "group_id,user_id" },
-    );
-    throwQuery(error, "save the split");
-  }
-  return await rowsOf(
-    client.from("group_work_order_shares").select(
-      "id, group_id, user_id, hours, points, share_ex, pot_ex",
-    ).eq("group_id", group.id),
-    "load shares",
-  );
-}
-
-async function sharesAreFrozen(
-  client: any,
-  shares: readonly Record<string, unknown>[],
-): Promise<boolean> {
-  const ids = shares.map((row) => String(row.id)).filter(Boolean);
-  if (ids.length === 0) return false;
-  const lines = await rowsOf(
-    client.from("trade_invoice_lines").select(
-      "group_share_id, trade_invoice_id",
-    ).in("group_share_id", ids),
-    "check invoiced shares",
-  );
-  const invoiceIds = [
-    ...new Set(lines.map((row) => String(row.trade_invoice_id || ""))),
-  ]
-    .filter(Boolean);
-  if (invoiceIds.length === 0) return false;
-  const invoices = await rowsOf(
-    client.from("trade_invoices").select("id, status").in("id", invoiceIds),
-    "check invoiced shares",
-  );
-  const live = new Set(
-    invoices.filter((row) => !releasedStatus(row.status)).map((row) =>
-      String(row.id)
-    ),
-  );
-  return lines.some((row) => live.has(String(row.trade_invoice_id || "")));
+  groupId: string,
+  freeze: boolean,
+): Promise<Record<string, unknown>[]> {
+  const name = freeze
+    ? "freeze_group_work_order_split"
+    : "project_group_work_order_split";
+  const { data, error } = await client.rpc(name, { p_group_id: groupId });
+  throwQuery(error, freeze ? "freeze the split" : "price the split");
+  const shares = asRecord(data).shares;
+  return Array.isArray(shares) ? shares as Record<string, unknown>[] : [];
 }
 
 function releasedStatus(status: unknown): boolean {
@@ -1171,6 +1149,7 @@ export async function readGroupWorkOrderOffice(
     job_id: group.job_id,
     status: group.status,
     client_signed: groupIsSigned(group),
+    split_frozen: Boolean(group.split_frozen_at),
     pot_total: workOrder
       ? moneyToCents(workOrder.agreed_labour_ex) == null
         ? null
@@ -1184,6 +1163,26 @@ export async function readGroupWorkOrderOffice(
     hours: entries,
     shares,
     feedback: feedback[0] || null,
+  };
+}
+
+export async function unfreezeGroupWorkOrder(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const { data, error } = await client.rpc("unfreeze_group_work_order_split", {
+    p_group_id: group.id,
+  });
+  throwQuery(error, "reopen the split");
+  const shares = asRecord(data).shares;
+  return {
+    ok: true,
+    group_id: group.id,
+    split_frozen: false,
+    shares: Array.isArray(shares) ? shares : [],
   };
 }
 
@@ -1253,7 +1252,7 @@ export async function resolveGroupShareInvoiceExtra(
       "Submit your hours on this group before invoicing your share.",
     );
   }
-  const shares = await computeShares(client, group, entries);
+  const shares = await readSplit(client, String(group.id), true);
   const mine = shares.find((row) => String(row.user_id) === input.userId);
   if (!mine) {
     throw new GroupWorkOrderError(

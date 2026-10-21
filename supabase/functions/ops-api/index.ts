@@ -704,6 +704,7 @@ import {
   signGroupWorkOrderCrew,
   submitGroupWorkOrderFeedback,
   submitGroupWorkOrderHours,
+  unfreezeGroupWorkOrder,
   type GroupCaller,
 } from './group_work_order.ts'
 import {
@@ -11055,7 +11056,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })))
       // Office only. Not on the trade profile-scoped list, so a trade JWT is 403.
       case 'group_work_order_feedback':
-      case 'group_work_order_office': {
+      case 'group_work_order_office':
+      case 'unfreeze_group_work_order': {
         const officeCaller: GroupCaller = {
           userId: authUser?.id || '',
           orgId: authUser?.orgId || null,
@@ -11070,6 +11072,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await groupWorkOrderJson(
           action === 'group_work_order_feedback'
             ? readGroupWorkOrderFeedback(client, officeCaller, officeBody)
+            : action === 'unfreeze_group_work_order'
+            ? unfreezeGroupWorkOrder(client, officeCaller, officeBody)
             : readGroupWorkOrderOffice(client, officeCaller, officeBody),
         )
       }

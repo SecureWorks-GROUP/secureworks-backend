@@ -15,6 +15,14 @@
 --
 -- Apply before the matching ops-api. trade_invoice_lines.group_share_id is
 -- not a foreign key, for the same embed reason as job_work_order_id.
+--
+-- The first time a share is priced for an invoice, group_work_order_write_split
+-- locks the group row and writes one snapshot. A second caller waits, then
+-- reads that snapshot and does not write its own. split_frozen_at is the
+-- marker. A share line is refused unless that marker is set and the line
+-- amount is the snapshot's share_ex. A person who arrives after the marker
+-- is refused. The office unfreeze clears the marker and recomputes in the
+-- same locked transaction, and only while no share sits on a live invoice.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
@@ -46,6 +54,11 @@ COMMENT ON COLUMN public.group_work_orders.work_order_id IS
   'jobs.work_order_id / work_orders.kind = job. Not a foreign key, so PostgREST embeds of work_orders stay unambiguous.';
 COMMENT ON COLUMN public.group_work_orders.share_token IS
   'Unguessable secret for the public client sign-off page. Knowing it is the client''s credential.';
+
+ALTER TABLE public.group_work_orders
+  ADD COLUMN IF NOT EXISTS split_frozen_at timestamptz;
+COMMENT ON COLUMN public.group_work_orders.split_frozen_at IS
+  'Set in the same transaction as the share snapshot, under a row lock on this group. Null means the split is still open. Every share line reads that one snapshot.';
 
 -- ── 2. participants ─────────────────────────────────────────────────────────
 
@@ -323,3 +336,374 @@ GRANT ALL ON public.group_work_order_time_entries TO service_role;
 GRANT ALL ON public.group_work_order_feedback TO service_role;
 GRANT ALL ON public.group_work_order_shares TO service_role;
 GRANT ALL ON public.group_work_order_settings TO service_role;
+
+-- ── 11. one frozen snapshot ─────────────────────────────────────────────────
+--
+-- group_work_order_write_split is the only writer of share rows that invoice
+-- lines may follow. It locks the group, and if split_frozen_at is already
+-- set it returns those rows and writes nothing. Otherwise it computes the
+-- pot here (the same floor-and-remainder rule as allocatePotCents) and
+-- upserts the snapshot. p_freeze sets the marker after the rows are written.
+-- Preview passes false and leaves the marker null.
+--
+-- Points are rate cents times hour hundredths, summed per person. Rates are
+-- numeric(8,2), so times 100 is an integer. Postgres round() on those
+-- positives matches the TypeScript Math.round used by entryPointsMicro.
+-- Leftover cents go to the largest remainder, and an equal remainder goes
+-- to the smaller user id (COLLATE "C").
+
+CREATE OR REPLACE FUNCTION public.group_work_order_write_split(
+  p_group_id uuid,
+  p_freeze boolean
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_frozen timestamptz;
+  v_org uuid;
+  v_work_order uuid;
+  v_pot numeric;
+  v_pot_cents bigint;
+  v_total bigint;
+  v_count int;
+  v_sum_floor bigint;
+  v_leftover bigint;
+  v_shares jsonb;
+BEGIN
+  SELECT g.split_frozen_at, g.org_id, g.work_order_id
+    INTO v_frozen, v_org, v_work_order
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF v_frozen IS NOT NULL THEN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id', s.id,
+      'user_id', s.user_id,
+      'hours', s.hours,
+      'points', s.points,
+      'share_ex', s.share_ex,
+      'pot_ex', s.pot_ex
+    ) ORDER BY s.user_id::text COLLATE "C"), '[]'::jsonb)
+      INTO v_shares
+    FROM public.group_work_order_shares s
+    WHERE s.group_id = p_group_id;
+    RETURN jsonb_build_object('frozen', true, 'shares', v_shares);
+  END IF;
+
+  SELECT wo.agreed_labour_ex INTO v_pot
+  FROM public.work_orders wo
+  WHERE wo.id = v_work_order
+    AND wo.kind = 'job'
+    AND wo.status = 'approved'
+    AND wo.sealed_content_hash IS NOT NULL
+    AND wo.agreed_labour_ex > 0;
+  IF NOT FOUND OR v_pot IS NULL THEN
+    RAISE EXCEPTION 'group_pot_missing' USING ERRCODE = '23514';
+  END IF;
+  v_pot_cents := round(v_pot * 100)::bigint;
+
+  CREATE TEMP TABLE IF NOT EXISTS group_wo_split_points (
+    user_id uuid,
+    hours numeric,
+    points_micro bigint,
+    floor_cents bigint,
+    remainder bigint,
+    share_cents bigint
+  ) ON COMMIT DROP;
+  TRUNCATE group_wo_split_points;
+
+  INSERT INTO group_wo_split_points (user_id, hours, points_micro)
+  SELECT e.user_id,
+         sum(e.hours),
+         sum(
+           (round(r.hourly_rate * 100))::bigint
+           * (round(e.hours * 100))::bigint
+         )
+  FROM public.group_work_order_time_entries e
+  JOIN LATERAL (
+    SELECT tr.hourly_rate
+    FROM public.trade_rates tr
+    WHERE tr.user_id = e.user_id
+      AND tr.org_id = v_org
+      AND tr.effective_from <= e.work_date
+      AND (tr.effective_to IS NULL OR tr.effective_to >= e.work_date)
+      AND tr.hourly_rate > 0
+    ORDER BY tr.effective_from DESC
+    LIMIT 1
+  ) r ON true
+  WHERE e.group_id = p_group_id
+    AND e.hours > 0
+  GROUP BY e.user_id
+  HAVING sum(
+    (round(r.hourly_rate * 100))::bigint
+    * (round(e.hours * 100))::bigint
+  ) > 0;
+
+  SELECT COALESCE(sum(points_micro), 0), count(*)
+    INTO v_total, v_count
+  FROM group_wo_split_points;
+  IF v_count = 0 OR v_total <= 0 THEN
+    RAISE EXCEPTION 'group_share_hours_missing' USING ERRCODE = '23514';
+  END IF;
+
+  UPDATE group_wo_split_points
+  SET floor_cents = (v_pot_cents * points_micro) / v_total,
+      remainder = (v_pot_cents * points_micro) % v_total;
+
+  SELECT COALESCE(sum(floor_cents), 0) INTO v_sum_floor FROM group_wo_split_points;
+  v_leftover := v_pot_cents - v_sum_floor;
+  IF v_leftover < 0 OR v_leftover >= v_count THEN
+    RAISE EXCEPTION 'group_share_rounding_failed' USING ERRCODE = '23514';
+  END IF;
+
+  UPDATE group_wo_split_points p
+  SET share_cents = p.floor_cents + CASE WHEN ranked.rn <= v_leftover THEN 1 ELSE 0 END
+  FROM (
+    SELECT user_id,
+           row_number() OVER (
+             ORDER BY remainder DESC, user_id::text COLLATE "C" ASC
+           ) AS rn
+    FROM group_wo_split_points
+  ) ranked
+  WHERE ranked.user_id = p.user_id;
+
+  -- Lets the share guard allow this rewrite. The marker is still null here,
+  -- and unfreeze clears it before calling this function. The guard is what
+  -- stops any other writer once the marker is set.
+  PERFORM set_config('group_wo.rewriting', 'on', true);
+
+  DELETE FROM public.group_work_order_shares s
+  WHERE s.group_id = p_group_id
+    AND NOT EXISTS (
+      SELECT 1 FROM group_wo_split_points p WHERE p.user_id = s.user_id
+    );
+
+  INSERT INTO public.group_work_order_shares (
+    group_id, user_id, hours, points, share_ex, pot_ex, computed_at
+  )
+  SELECT p_group_id,
+         p.user_id,
+         round(p.hours, 2),
+         round(p.points_micro::numeric / 10000, 4),
+         round(p.share_cents::numeric / 100, 2),
+         round(v_pot, 2),
+         now()
+  FROM group_wo_split_points p
+  ON CONFLICT (group_id, user_id) DO UPDATE SET
+    hours = EXCLUDED.hours,
+    points = EXCLUDED.points,
+    share_ex = EXCLUDED.share_ex,
+    pot_ex = EXCLUDED.pot_ex,
+    computed_at = EXCLUDED.computed_at;
+
+  IF p_freeze THEN
+    UPDATE public.group_work_orders
+    SET split_frozen_at = now(), updated_at = now()
+    WHERE id = p_group_id;
+  END IF;
+
+  -- The bypass is only for the writes above. Leaving it set would let the
+  -- caller rewrite the snapshot later in the same transaction.
+  PERFORM set_config('group_wo.rewriting', 'off', true);
+
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'id', s.id,
+    'user_id', s.user_id,
+    'hours', s.hours,
+    'points', s.points,
+    'share_ex', s.share_ex,
+    'pot_ex', s.pot_ex
+  ) ORDER BY s.user_id::text COLLATE "C"), '[]'::jsonb)
+    INTO v_shares
+  FROM public.group_work_order_shares s
+  WHERE s.group_id = p_group_id;
+  RETURN jsonb_build_object('frozen', p_freeze, 'shares', v_shares);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.project_group_work_order_split(p_group_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT public.group_work_order_write_split(p_group_id, false);
+$$;
+
+CREATE OR REPLACE FUNCTION public.freeze_group_work_order_split(p_group_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT public.group_work_order_write_split(p_group_id, true);
+$$;
+
+-- Live means the invoice is not a draft, a void, a rejection, or a failed
+-- attempt. ops-reject is this database's rejected status. failed is the
+-- invoice fence's released status. void and rejected are named so a later
+-- status of either name does not pin the split.
+CREATE OR REPLACE FUNCTION public.unfreeze_group_work_order_split(p_group_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  PERFORM 1
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.group_work_order_shares s
+    JOIN public.trade_invoice_lines l ON l.group_share_id = s.id
+    JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+    WHERE s.group_id = p_group_id
+      AND i.status NOT IN ('draft', 'void', 'rejected', 'failed', 'ops-reject')
+  ) THEN
+    RAISE EXCEPTION 'group_split_has_live_invoice' USING ERRCODE = '23514';
+  END IF;
+
+  UPDATE public.group_work_orders
+  SET split_frozen_at = NULL, updated_at = now()
+  WHERE id = p_group_id;
+
+  RETURN public.group_work_order_write_split(p_group_id, false);
+END;
+$$;
+
+COMMENT ON FUNCTION public.group_work_order_write_split(uuid, boolean) IS
+  'Locks the group and writes one share snapshot, or returns the frozen snapshot. Service role only.';
+COMMENT ON FUNCTION public.freeze_group_work_order_split(uuid) IS
+  'The invoice path. Freezes the split on the first call and returns that snapshot on every later call.';
+COMMENT ON FUNCTION public.project_group_work_order_split(uuid) IS
+  'Preview. Recomputes only while the split is unfrozen, and does not set the marker.';
+COMMENT ON FUNCTION public.unfreeze_group_work_order_split(uuid) IS
+  'Office. Refuses while a share is on a live invoice, then clears the marker and recomputes under the same lock.';
+
+REVOKE ALL ON FUNCTION public.group_work_order_write_split(uuid, boolean) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.project_group_work_order_split(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.freeze_group_work_order_split(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.unfreeze_group_work_order_split(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.group_work_order_write_split(uuid, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION public.project_group_work_order_split(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.freeze_group_work_order_split(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.unfreeze_group_work_order_split(uuid) TO service_role;
+
+-- A joiner who commits before the freeze lock is in the snapshot if they
+-- have hours. A joiner who waits sees the marker and is refused.
+CREATE OR REPLACE FUNCTION public.group_work_order_refuse_late_joiner()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_frozen timestamptz;
+BEGIN
+  SELECT g.split_frozen_at INTO v_frozen
+  FROM public.group_work_orders g
+  WHERE g.id = NEW.group_id
+  FOR UPDATE;
+  IF v_frozen IS NOT NULL THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_order_refuse_late_joiner
+  ON public.group_work_order_participants;
+CREATE TRIGGER trg_group_work_order_refuse_late_joiner
+  BEFORE INSERT ON public.group_work_order_participants
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_refuse_late_joiner();
+
+CREATE OR REPLACE FUNCTION public.group_work_order_shares_frozen_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_group uuid;
+  v_frozen timestamptz;
+BEGIN
+  v_group := CASE WHEN TG_OP = 'DELETE' THEN OLD.group_id ELSE NEW.group_id END;
+  SELECT g.split_frozen_at INTO v_frozen
+  FROM public.group_work_orders g
+  WHERE g.id = v_group
+  FOR UPDATE;
+  IF v_frozen IS NOT NULL
+     AND current_setting('group_wo.rewriting', true) IS DISTINCT FROM 'on' THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_order_shares_frozen_guard
+  ON public.group_work_order_shares;
+CREATE TRIGGER trg_group_work_order_shares_frozen_guard
+  BEFORE INSERT OR UPDATE OR DELETE ON public.group_work_order_shares
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_shares_frozen_guard();
+
+-- Every other invoice line returns immediately. A share line must name a
+-- frozen snapshot row and match its share_ex.
+CREATE OR REPLACE FUNCTION public.trade_invoice_lines_group_share_snapshot()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_share_ex numeric;
+  v_group uuid;
+  v_frozen timestamptz;
+BEGIN
+  IF NEW.group_share_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT s.share_ex, s.group_id INTO v_share_ex, v_group
+  FROM public.group_work_order_shares s
+  WHERE s.id = NEW.group_share_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_share_not_in_split' USING ERRCODE = '23514';
+  END IF;
+  SELECT g.split_frozen_at INTO v_frozen
+  FROM public.group_work_orders g
+  WHERE g.id = v_group;
+  IF v_frozen IS NULL THEN
+    RAISE EXCEPTION 'group_split_not_frozen' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.line_total_ex IS NULL OR abs(NEW.line_total_ex - v_share_ex) > 0.01 THEN
+    RAISE EXCEPTION 'group_share_amount_mismatch' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_trade_invoice_lines_group_share_snapshot
+  ON public.trade_invoice_lines;
+CREATE TRIGGER trg_trade_invoice_lines_group_share_snapshot
+  BEFORE INSERT OR UPDATE ON public.trade_invoice_lines
+  FOR EACH ROW EXECUTE FUNCTION public.trade_invoice_lines_group_share_snapshot();
+
+REVOKE ALL ON FUNCTION public.group_work_order_refuse_late_joiner() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_work_order_shares_frozen_guard() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trade_invoice_lines_group_share_snapshot() FROM PUBLIC, anon, authenticated;
+-- ops-api writes as service_role. A trigger runs as that role, so the
+-- function has to be executable by it or every invoice line insert fails.
+GRANT EXECUTE ON FUNCTION public.group_work_order_refuse_late_joiner() TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_shares_frozen_guard() TO service_role;
+GRANT EXECUTE ON FUNCTION public.trade_invoice_lines_group_share_snapshot() TO service_role;

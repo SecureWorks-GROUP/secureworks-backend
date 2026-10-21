@@ -18,6 +18,7 @@ import { GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import {
   allocatePotCents,
   assertGroupWorkOrderInvoiceFence,
+  centsToMoney,
   clientSignGroupWorkOrder,
   draftClientLinkMessage,
   entryPointsMicro,
@@ -28,15 +29,20 @@ import {
   groupHoursFromBody,
   GroupWorkOrderError,
   isGroupShareLine,
+  joinGroupWorkOrder,
+  moneyToCents,
   PARTICIPANT_SHARE_KEYS,
   participantShareResponse,
   participantShareResponseIsClosed,
+  pointsDollars,
   promptGoogleReview,
+  rateOnDay,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
   refuseClientLinkSend,
   resolveGroupShareInvoiceExtra,
   submitGroupWorkOrderFeedback,
+  unfreezeGroupWorkOrder,
   visibleShareRows,
 } from "./group_work_order.ts";
 
@@ -73,6 +79,165 @@ class Memory {
       from(table: string) {
         return new Query(memory, table);
       },
+      rpc(fn: string, args: { p_group_id?: string }) {
+        memory.calls.push({ table: fn, op: "rpc" });
+        try {
+          return Promise.resolve({
+            data: memory.runRpc(fn, String(args?.p_group_id || "")),
+            error: null,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return Promise.resolve({ data: null, error: { message } });
+        }
+      },
+    };
+  }
+
+  runRpc(fn: string, groupId: string) {
+    const group = this.rows("group_work_orders").find((row) =>
+      row.id === groupId
+    );
+    if (!group) throw new Error("group_work_order_not_found");
+    if (fn === "unfreeze_group_work_order_split") {
+      if (this.splitHasLiveInvoice(groupId)) {
+        throw new Error("group_split_has_live_invoice");
+      }
+      group.split_frozen_at = null;
+      return this.writeSplit(group, false);
+    }
+    if (
+      fn !== "freeze_group_work_order_split" &&
+      fn !== "project_group_work_order_split"
+    ) {
+      throw new Error(`unknown rpc ${fn}`);
+    }
+    return this.writeSplit(group, fn === "freeze_group_work_order_split");
+  }
+
+  splitHasLiveInvoice(groupId: string): boolean {
+    const released = new Set([
+      "draft",
+      "void",
+      "rejected",
+      "failed",
+      "ops-reject",
+    ]);
+    const shareIds = new Set(
+      this.rows("group_work_order_shares").filter((row) =>
+        row.group_id === groupId
+      ).map((row) => String(row.id)),
+    );
+    return this.rows("trade_invoice_lines").some((line) => {
+      if (!shareIds.has(String(line.group_share_id || ""))) return false;
+      const invoice = this.rows("trade_invoices").find((row) =>
+        row.id === line.trade_invoice_id
+      );
+      return Boolean(invoice) && !released.has(String(invoice?.status || ""));
+    });
+  }
+
+  sharePayload(groupId: string): Row[] {
+    return this.rows("group_work_order_shares").filter((row) =>
+      row.group_id === groupId
+    ).map((row) => ({
+      id: row.id,
+      user_id: row.user_id,
+      hours: row.hours,
+      points: row.points,
+      share_ex: row.share_ex,
+      pot_ex: row.pot_ex,
+    })).sort((a, b) => String(a.user_id) < String(b.user_id) ? -1 : 1);
+  }
+
+  writeSplit(group: Row, freeze: boolean) {
+    if (group.split_frozen_at) {
+      return { frozen: true, shares: this.sharePayload(String(group.id)) };
+    }
+    const workOrder = this.rows("work_orders").find((row) =>
+      row.id === group.work_order_id
+    );
+    const potCents = workOrder && workOrder.kind === "job" &&
+        workOrder.status === "approved" && workOrder.sealed_content_hash
+      ? moneyToCents(workOrder.agreed_labour_ex)
+      : null;
+    if (potCents == null || potCents <= 0) throw new Error("group_pot_missing");
+    const points = new Map<string, bigint>();
+    const hours = new Map<string, number>();
+    for (
+      const entry of this.rows("group_work_order_time_entries").filter((row) =>
+        row.group_id === group.id
+      )
+    ) {
+      const userId = String(entry.user_id);
+      const worked = Number(entry.hours || 0);
+      const rate = rateOnDay(
+        this.rows("trade_rates").filter((row) =>
+          row.user_id === userId && row.org_id === group.org_id
+        ).map((row) => ({
+          hourly_rate: row.hourly_rate,
+          effective_from: row.effective_from == null
+            ? null
+            : String(row.effective_from),
+          effective_to: row.effective_to == null
+            ? null
+            : String(row.effective_to),
+        })),
+        String(entry.work_date),
+      );
+      if (rate == null || worked <= 0) continue;
+      points.set(
+        userId,
+        (points.get(userId) || 0n) + entryPointsMicro(rate, worked),
+      );
+      hours.set(userId, (hours.get(userId) || 0) + worked);
+    }
+    let allocated: { userId: string; shareCents: number }[];
+    try {
+      allocated = allocatePotCents(
+        potCents,
+        [...points.entries()].map(([userId, pointsMicro]) => ({
+          userId,
+          pointsMicro,
+        })),
+      );
+    } catch (err) {
+      if (err instanceof GroupWorkOrderError) throw new Error(err.code);
+      throw err;
+    }
+    const potEx = centsToMoney(potCents);
+    const shareRows = this.rows("group_work_order_shares");
+    const keep = new Set(allocated.map((row) => row.userId));
+    const kept = shareRows.filter((row) =>
+      row.group_id !== group.id || keep.has(String(row.user_id))
+    );
+    shareRows.splice(0, shareRows.length, ...kept);
+    const now = new Date().toISOString();
+    for (const row of allocated) {
+      const existing = shareRows.find((share) =>
+        share.group_id === group.id && share.user_id === row.userId
+      );
+      const next = {
+        hours: Number((hours.get(row.userId) || 0).toFixed(2)),
+        points: pointsDollars(points.get(row.userId) || 0n),
+        share_ex: centsToMoney(row.shareCents),
+        pot_ex: potEx,
+        computed_at: now,
+      };
+      if (existing) Object.assign(existing, next);
+      else {
+        shareRows.push({
+          id: crypto.randomUUID(),
+          group_id: group.id,
+          user_id: row.userId,
+          ...next,
+        });
+      }
+    }
+    if (freeze) group.split_frozen_at = now;
+    return {
+      frozen: Boolean(group.split_frozen_at),
+      shares: this.sharePayload(String(group.id)),
     };
   }
 }
@@ -378,6 +543,7 @@ Deno.test("non-participant cannot read the sealed price, and a participant sees 
     hidden.calls.some((call) => call.table === "work_orders"),
     false,
   );
+  assertEquals(hidden.calls.some((call) => call.op === "rpc"), false);
 
   const waiting = new Memory();
   seedSplit(waiting);
@@ -393,6 +559,7 @@ Deno.test("non-participant cannot read the sealed price, and a participant sees 
     waiting.calls.some((call) => call.table === "work_orders"),
     false,
   );
+  assertEquals(waiting.calls.some((call) => call.op === "rpc"), false);
 
   const shown = new Memory();
   seedSplit(shown);
@@ -411,8 +578,15 @@ Deno.test("non-participant cannot read the sealed price, and a participant sees 
   assertEquals(text.includes("160.72"), false);
   assertEquals(text.includes("9999.99"), false);
   assertEquals(text.includes("points"), false);
-  const readOrders = shown.calls.filter((call) => call.table === "work_orders");
-  assertEquals(readOrders.length, 1);
+  const priced = shown.calls.filter((call) =>
+    call.op === "rpc" && call.table === "project_group_work_order_split"
+  );
+  assertEquals(priced.length, 1);
+  assertEquals(
+    shown.calls.filter((call) => call.table === "work_orders").length,
+    0,
+  );
+  assertEquals(shown.rows("group_work_orders")[0].split_frozen_at ?? null, null);
 });
 
 Deno.test("client sign-off gates the share, and the line is quantity 1 at the server share", async () => {
@@ -443,6 +617,7 @@ Deno.test("client sign-off gates the share, and the line is quantity 1 at the se
     work_date: "2026-10-20",
     hours: 2,
   });
+  billed.rows("group_work_orders")[0].split_frozen_at = "2026-10-21T02:00:00Z";
   billed.rows("group_work_order_shares").push({
     id: SHARE_A,
     group_id: GROUP,
@@ -482,6 +657,105 @@ Deno.test("client sign-off gates the share, and the line is quantity 1 at the se
   assertEquals(line?.total_hours, 0);
   assertEquals(line?.source_work_order_id, null);
   assertEquals(line?.group_share_id, SHARE_A);
+});
+
+Deno.test("a freeze is one snapshot, a late joiner is refused, and unfreeze recomputes only off a live invoice", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  const first = await resolveGroupShareInvoiceExtra(memory.client(), {
+    userId: USER_A,
+    item: { type: "group share", group_id: GROUP },
+  });
+  assertEquals(first?.unit_rate, 321.43);
+  assertEquals(memory.rows("group_work_orders")[0].split_frozen_at != null, true);
+  const shareA = String(first?.group_share_id);
+  memory.rows("group_work_order_time_entries")[0].hours = 7.5;
+  memory.rows("trade_rates")[0].hourly_rate = 99;
+  const again = await resolveGroupShareInvoiceExtra(memory.client(), {
+    userId: USER_A,
+    item: { type: "group share", group_id: GROUP },
+  });
+  const other = await resolveGroupShareInvoiceExtra(memory.client(), {
+    userId: USER_B,
+    item: { type: "group share", group_id: GROUP },
+  });
+  assertEquals(again?.unit_rate, 321.43);
+  assertEquals(again?.group_share_id, shareA);
+  assertEquals(other?.unit_rate, 160.72);
+  assertEquals(
+    Math.round((Number(again?.unit_rate) + Number(other?.unit_rate)) * 100),
+    48215,
+  );
+  const shares = memory.rows("group_work_order_shares");
+  assertEquals(
+    Math.round(shares.reduce((sum, row) => sum + Number(row.share_ex), 0) * 100),
+    48215,
+  );
+
+  const joined = await assertRejects(
+    () => joinGroupWorkOrder(memory.client(), trade(USER_C, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(joined.code, "group_split_frozen");
+  assertEquals(joined.status, 409);
+  assertEquals(joined.message.includes("frozen"), true);
+  assertEquals(
+    memory.rows("group_work_order_participants").some((row) =>
+      row.user_id === USER_C
+    ),
+    false,
+  );
+
+  memory.rows("trade_invoice_lines").push({
+    job_id: JOB,
+    group_share_id: shareA,
+    trade_invoice_id: INV,
+    line_type: "group share",
+  });
+  memory.rows("trade_invoices").push({
+    id: INV,
+    status: "pending_acknowledgment",
+    user_id: USER_A,
+  });
+  const held = await assertRejects(
+    () => unfreezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(held.code, "group_split_has_live_invoice");
+  assertEquals(held.status, 409);
+  assertEquals(memory.rows("group_work_orders")[0].split_frozen_at != null, true);
+
+  memory.rows("trade_rates")[0].hourly_rate = 40;
+  memory.rows("trade_invoices")[0].status = "draft";
+  const opened = await unfreezeGroupWorkOrder(
+    memory.client(),
+    trade(USER_A, true),
+    { group_id: GROUP },
+  );
+  assertEquals(opened.split_frozen, false);
+  assertEquals(memory.rows("group_work_orders")[0].split_frozen_at ?? null, null);
+  const recomputed = new Map(
+    memory.rows("group_work_order_shares").map((row) => [
+      String(row.user_id),
+      Number(row.share_ex),
+    ]),
+  );
+  assertEquals(recomputed.get(USER_A), 425.43);
+  assertEquals(recomputed.get(USER_B), 56.72);
+  assertEquals(
+    Math.round(((recomputed.get(USER_A) || 0) + (recomputed.get(USER_B) || 0)) * 100),
+    48215,
+  );
+
+  const crew = await assertRejects(
+    () => unfreezeGroupWorkOrder(memory.client(), trade(USER_A), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(crew.status, 403);
 });
 
 Deno.test("the claim fence is mutual, travel is not a claim, and another person's share is not mine", () => {
@@ -667,7 +941,10 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   }
   assertEquals(profile.includes("group_work_order_feedback"), false);
   assertEquals(profile.includes("group_work_order_office"), false);
+  assertEquals(profile.includes("unfreeze_group_work_order"), false);
+  assertEquals(source.split("case 'unfreeze_group_work_order':").length - 1, 1);
   const pub = setBody("OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS");
+  assertEquals(pub.includes("unfreeze_group_work_order"), false);
   for (
     const action of [
       "group_work_order_public",
@@ -694,6 +971,10 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
     new URL("./group_work_order.ts", import.meta.url),
   );
   assert(moduleSource.includes("DEFAULT, owner to confirm"));
+  assert(moduleSource.includes("freeze_group_work_order_split"));
+  assert(moduleSource.includes("project_group_work_order_split"));
+  assert(moduleSource.includes("unfreeze_group_work_order_split"));
+  assertEquals(moduleSource.includes("sharesAreFrozen"), false);
   assertEquals(moduleSource.includes("send_review_request"), false);
   assertEquals(moduleSource.includes("complete_my_job"), false);
   assertEquals(moduleSource.includes("send_sms"), false);

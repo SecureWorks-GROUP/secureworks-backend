@@ -82,7 +82,7 @@ Trade JWT (profile-scoped). The caller is the signed-in user.
 | Action | Body | Result |
 | --- | --- | --- |
 | `create_group_work_order` | `job_id` | Opens the group on `jobs.work_order_id`, or joins the caller to the one that exists. Returns `group_id`, `job_id`, `share_token`, `status`, `client_signed`. No dollars. |
-| `join_group_work_order` | `group_id` or `job_id` | Same card. The caller must be allocated, unless they are staff. |
+| `join_group_work_order` | `group_id` or `job_id` | Same card. The caller must be allocated, unless they are staff. Once the split is frozen, a new participant is 409 `group_split_frozen`. |
 | `sign_group_work_order` | `group_id`, `signer_name`, optional `signature_png` | Crew signature. Not the invoice gate. |
 | `submit_group_work_order_hours` | `group_id`, `work_date`, `start_time`, `finish_time`, `break_minutes` | Saves that person's day, then returns my-share. |
 | `group_work_order_my_share` | `group_id` or `job_id` | The closed object above. 403 for a non-participant, with no amount in the body. |
@@ -104,16 +104,46 @@ trade allow-list.
 | Action | Result |
 | --- | --- |
 | `group_work_order_feedback` | The feedback row. |
-| `group_work_order_office` | Pot, every participant's hours, points, and shares, and the feedback. |
+| `group_work_order_office` | Pot, every participant's hours, points, and shares, the feedback, and `split_frozen`. |
+| `unfreeze_group_work_order` | Reopens a frozen split and recomputes. Staff only. 409 `group_split_has_live_invoice` while any share is on a live invoice. |
 
 Invoice: `generate_trade_invoice` accepts an extra item
-`type: "group share"` with `group_id` (or `job_id`). The server sets
-quantity 1, rate = that person's share, `total_hours` 0,
+`type: "group share"` with `group_id` (or `job_id`). The server freezes
+the split on that call (see Frozen split) and sets quantity 1, rate = that
+person's share from the frozen snapshot, `total_hours` 0,
 `source_work_order_id` null, `group_share_id` set. A client amount that
 differs by more than one cent is 409 `group_share_amount_mismatch`. The
 client must have signed (409 `group_client_signoff_required`). A zero share
 is refused. The same invoice cannot mix the share with hours or work-order
 pay for that job.
+
+## Frozen split
+
+The first invoice freeze locks the group row and writes one share snapshot
+in that same transaction (`freeze_group_work_order_split`). Every later
+freeze waits for that lock, then returns the stored snapshot and does not
+compute its own. Share lines are refused unless the marker
+`split_frozen_at` is set and the line amount is that snapshot's `share_ex`.
+Two submits therefore cannot store shares that differ, or that do not sum
+to the pot.
+
+My-share and the hour submit call `project_group_work_order_split`. That
+recomputes only while the marker is null, and it does not set the marker.
+An hour edit after the freeze is stored and does not change pay until the
+office reopens the split.
+
+A person who joins after the marker is set is refused, in the API and in
+the database, with `group_split_frozen`. The message is: "This group's pay
+is frozen. The office has to reopen it before anyone else can join."
+
+`unfreeze_group_work_order` is the office action. It locks the group,
+refuses while any share id is on an invoice whose status is not `draft`,
+`void`, `rejected`, `failed`, or `ops-reject` (`group_split_has_live_invoice`:
+"A share is already on a live invoice, so this split stays frozen."), then
+clears the marker and recomputes in that same transaction. A freeze that
+landed and whose invoice line was never stored can be reopened, because
+no live line exists. A person who joins after the reopen, and before the
+next invoice freeze, is in the new snapshot.
 
 ## Feedback
 
@@ -138,11 +168,6 @@ later turned on. Draft, for the owner to approve before any sender exists:
 
 ## Open
 
-- Two people invoicing the same unfrozen split at the same moment can each
-  compute shares before either line is stored. The second invoice then
-  freezes whatever it read. There is no cross-call transaction.
-- A person who joins after a share is on a live invoice is not added to the
-  frozen split (`group_share_not_in_split`).
 - The sender is not built. Turning the flag on does not send anything.
 - Withheld quote PDFs and the trade app's price-free extract are a different
   fence. This slice does not change them.
