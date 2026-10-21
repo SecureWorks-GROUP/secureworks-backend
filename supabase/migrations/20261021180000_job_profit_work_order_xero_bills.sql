@@ -8,10 +8,14 @@
 -- 20261020220000. The live migration ledger was not read when 20261021180000
 -- was chosen (not observed).
 --
--- DEFAULT, owner to confirm. Three switches, all seeded OFF. While a switch
--- is off, missing or unreadable, every column 20261020220000 published and
--- its completeness list stay what that view published. The four new columns
--- are evidence only until their switch is on.
+-- DEFAULT, owner to confirm. Three switches, all seeded OFF. While one of
+-- those switches is off, missing or unreadable, the columns that switch owns
+-- stay what 20261020220000 published. An unconfirmed installer bill is not
+-- behind a switch: JP-12 always flags installer_bill_unconfirmed, blanks
+-- profit and margin, and keeps that amount out of actual cost, so a flags-off
+-- completeness list is 20261020220000's list plus that flag when such a bill
+-- is on the job. The four new columns are evidence only until their switch
+-- is on.
 --
 --   job_profit_work_order_labour_v1
 --     expected labour is an APPROVED job work order only (status approved
@@ -21,14 +25,16 @@
 --   job_profit_xero_project_cost_v1
 --     the Xero Project figure replaces the linked cost only when the job is
 --     finished (complete, completed, invoiced, archived, get_review,
---     final_payment) or billed labour has reached the approved work order's
---     agreed labour, and a client invoice exists, and lines are complete and
---     classified. margin_source is exactly 'from Xero Project, may exclude
---     unlinked labour'. Otherwise the margin stays blank and
---     xero_project_exceeds_line_costs stays set, with
+--     final_payment) or billed labour has reached an approved work order
+--     whose agreed labour is above zero, and a client invoice exists, and
+--     lines are complete and classified, and no installer bill is still
+--     unconfirmed. A stored agreed labour of 0 is a real expected-labour
+--     figure and does not publish this margin. margin_source is exactly
+--     'from Xero Project, may exclude unlinked labour'. Otherwise the margin
+--     stays blank and xero_project_exceeds_line_costs stays set, with
 --     xero_project_margin_held. When the project margin publishes, that
 --     suppressor is not set and cost_flag is ok. actual_cost_ex stays the
---     linked lines.
+--     linked lines. An unconfirmed installer bill still blanks the margin.
 --   job_profit_patio_quote_v1
 --     a patio sales price is one frozen quote, and only when that figure is
 --     the only candidate and it agrees with the live price and with what has
@@ -36,9 +42,12 @@
 --     published. jobs.quoted_value is never read.
 --
 -- Bill linking writes a materials_bill_proposals row (Bills to place). It
--- never writes xero_invoices.job_id. Installer bills (accounts 301 and 306)
--- and bills that already have a job_materials_facts row are refused. There
--- is no second queue table.
+-- never writes xero_invoices.job_id. It refuses a sales invoice, a voided or
+-- deleted bill, a bill already linked to a job, a trade-app bill, an
+-- installer bill (accounts 301 and 306), and a bill that already has a
+-- job_materials_facts row. Two job numbers separated only by punctuation are
+-- both tokens, so that bill is not one job. There is no second queue table.
+-- xero-sync bill prematch does not keep a proposal this writer inserts.
 --
 -- Nothing here updates a job, a quote or a work order.
 
@@ -284,7 +293,7 @@ AS $fn$
     FROM sources
     CROSS JOIN LATERAL regexp_matches(
       ' ' || src || ' ',
-      '[^A-Za-z0-9]((?:SWMS|SWP|SWF|SWB)-[0-9]{5,6})[^A-Za-z0-9]',
+      '[^A-Za-z0-9]((?:SWMS|SWP|SWF|SWB)-[0-9]{5,6})(?![A-Za-z0-9])',
       'gi'
     ) AS m
   )
@@ -294,7 +303,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) IS
-  'Whole job-number tokens (SWMS, SWP, SWF, SWB, 5 or 6 digits) from a bill reference, line description and tracking. Not the contact name and not the invoice number.';
+  'Whole job-number tokens (SWMS, SWP, SWF, SWB, 5 or 6 digits) from a bill reference, line description and tracking. A second number immediately after the first, with only punctuation between them, is a second token. Not the contact name and not the invoice number.';
 
 CREATE OR REPLACE FUNCTION public.job_profit_bill_is_installer(p_line_items jsonb)
 RETURNS boolean
@@ -341,8 +350,11 @@ SET search_path = public, pg_temp
 AS $fn$
 DECLARE
   v_invoice_number text;
+  v_invoice_type text;
+  v_status text;
   v_reference text;
   v_lines jsonb;
+  v_existing_job uuid;
   v_tokens text[];
   v_hash text;
   v_live_id uuid;
@@ -358,14 +370,41 @@ BEGIN
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended(p_xero_invoice_id, 0));
 
-  SELECT invoice_number, reference, line_items
-    INTO v_invoice_number, v_reference, v_lines
+  SELECT invoice_number, invoice_type, status, reference, line_items, job_id
+    INTO v_invoice_number, v_invoice_type, v_status, v_reference, v_lines, v_existing_job
   FROM public.xero_invoices
   WHERE xero_invoice_id = p_xero_invoice_id
   LIMIT 1
   FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'link_refused: bill not found';
+  END IF;
+
+  IF upper(COALESCE(v_invoice_type, '')) IS DISTINCT FROM 'ACCPAY' THEN
+    RAISE EXCEPTION 'link_refused: sales invoice';
+  END IF;
+  IF upper(COALESCE(v_status, '')) IN ('VOIDED', 'DELETED') THEN
+    RAISE EXCEPTION 'link_refused: voided or deleted bill';
+  END IF;
+  IF v_existing_job IS NOT NULL THEN
+    RAISE EXCEPTION 'link_refused: bill already linked';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.trade_invoices ti
+    WHERE ti.xero_bill_id = p_xero_invoice_id
+  ) OR EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(v_lines) = 'array' THEN v_lines
+        WHEN jsonb_typeof(v_lines -> 'LineItems') = 'array' THEN v_lines -> 'LineItems'
+        WHEN jsonb_typeof(v_lines -> 'lineItems') = 'array' THEN v_lines -> 'lineItems'
+        ELSE '[]'::jsonb
+      END
+    ) AS item
+    WHERE COALESCE(item ->> 'Description', item ->> 'description', '') ~ '\| SW - [A-Z]'
+  ) THEN
+    RAISE EXCEPTION 'link_refused: trade app bill';
   END IF;
 
   IF public.job_profit_bill_is_installer(v_lines) THEN
@@ -461,7 +500,7 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) IS
-  'Writes one Bills to place proposal (materials_bill_proposals). Never sets xero_invoices.job_id. Refuses an installer bill (accounts 301/306) and a bill that already has a job_materials_facts row.';
+  'Writes one Bills to place proposal (materials_bill_proposals). Never sets xero_invoices.job_id. Refuses a sales invoice, a voided or deleted bill, a bill already linked to a job, a trade-app bill, an installer bill (accounts 301/306), and a bill that already has a job_materials_facts row. A bill whose tokens are not exactly the one named job is not written as that job.';
 
 REVOKE ALL ON FUNCTION public.job_profit_flag_on(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_rule3_statuses() FROM PUBLIC, anon, authenticated;
@@ -491,7 +530,7 @@ INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT
   'job_profit_xero_project_cost_v1',
   false,
-  $d$DEFAULT, owner to confirm. Job profit Xero Project cost. When on, the project figure is the published cost only when the job is finished or billed labour has reached the approved work order, and margin_source is exactly "from Xero Project, may exclude unlinked labour". Otherwise the margin stays blank. Off, missing or unreadable: a project that exceeds the linked lines still nulls profit. Do not turn on before the profit page shows that label. Turn on only on the owner's word.$d$
+  $d$DEFAULT, owner to confirm. Job profit Xero Project cost. When on, the project figure is the published cost only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero, and margin_source is exactly "from Xero Project, may exclude unlinked labour". A stored agreed labour of 0 does not publish it. Otherwise the margin stays blank. Off, missing or unreadable: a project that exceeds the linked lines still nulls profit. Do not turn on before the profit page shows that label. Turn on only on the owner's word.$d$
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags WHERE flag_name = 'job_profit_xero_project_cost_v1'
 );
@@ -548,6 +587,7 @@ cost AS (
     bool_or(e.lane_detail = 'unclassified') AS has_unclassified,
     bool_or(e.source = 'trade_line' AND e.match_method <> 'job_id') AS has_text_matched,
     bool_or(e.incomplete_invoice) AS has_incomplete_invoice,
+    bool_or(e.source = 'installer_bill_unconfirmed') AS has_installer_unconfirmed,
     bool_or(e.source = 'trade_line' AND e.amount_ex <> 0
             AND e.document_status NOT IN ('approved', 'pushed_to_xero', 'paid')) AS has_unapproved_trade,
     min(e.event_date) FILTER (WHERE e.is_actual) AS first_cost_date,
@@ -771,6 +811,7 @@ base AS (
     COALESCE(cost.has_unclassified, false) AS has_unclassified,
     COALESCE(cost.has_text_matched, false) AS has_text_matched,
     COALESCE(cost.has_incomplete_invoice, false) AS has_incomplete_invoice,
+    COALESCE(cost.has_installer_unconfirmed, false) AS has_installer_unconfirmed,
     COALESCE(cost.has_unapproved_trade, false) AS has_unapproved_trade,
     cost.first_cost_date,
     cost.last_cost_date,
@@ -854,6 +895,7 @@ flagged AS (
     CASE WHEN c.invoiced_ex > 0 THEN 'ok' ELSE 'missing_client_invoice' END AS revenue_flag,
     CASE
       WHEN c.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs'
+      WHEN c.has_installer_unconfirmed THEN 'installer_bill_unconfirmed'
       WHEN NOT c.has_cost THEN 'no_cost_linked'
       WHEN c.has_incomplete_invoice THEN 'incomplete_invoice_lines'
       WHEN c.has_unclassified THEN 'unclassified_lines'
@@ -864,6 +906,7 @@ flagged AS (
     END AS cost_flag,
     (c.invoiced_ex > 0 AND c.has_cost AND NOT c.has_incomplete_invoice AND NOT c.has_unclassified
       AND NOT c.project_exceeds_line_costs
+      AND NOT c.has_installer_unconfirmed
       AND NOT c.materials_missing AND NOT c.labour_missing) AS margin_ok
   FROM costed c
 ),
@@ -914,12 +957,14 @@ gated AS (
         )
         OR (
           s.work_order_agreed_labour_ex IS NOT NULL
+          AND s.work_order_agreed_labour_ex > 0
           AND s.line_labour_ex >= s.work_order_agreed_labour_ex
         )
       )
       AND s.invoiced_ex > 0
       AND NOT s.has_incomplete_invoice
       AND NOT s.has_unclassified
+      AND NOT s.has_installer_unconfirmed
     ) AS project_publish
   FROM shown s
 )
@@ -991,6 +1036,7 @@ SELECT
     CASE WHEN s.has_unclassified THEN 'unclassified_lines' END,
     CASE WHEN s.has_text_matched THEN 'text_matched_lines' END,
     CASE WHEN s.project_exceeds_line_costs AND NOT s.project_publish THEN 'xero_project_exceeds_line_costs' END,
+    CASE WHEN s.has_installer_unconfirmed THEN 'installer_bill_unconfirmed' END,
     CASE WHEN s.project_publish THEN 'margin_from_xero_project' END,
     CASE WHEN s.xero_project AND s.project_exceeds_line_costs AND NOT s.project_publish THEN 'xero_project_margin_held' END,
     CASE WHEN s.has_cost AND s.actual_labour_ex = 0 THEN 'no_labour_linked' END,
@@ -1022,7 +1068,7 @@ SELECT
 FROM gated s;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted.  20261021180000 appends margin_source, margin_cost_ex, expected_labour_quote_ex and work_order_agreed_labour_ex. Three switches default off (job_profit_work_order_labour_v1, job_profit_xero_project_cost_v1, job_profit_patio_quote_v1). While a switch is off, every column 20261020220000 published and its completeness list stay what that view published. While the project switch is on, the Xero Project figure is the published cost only when the job is finished or billed labour has reached the approved work order, and margin_source is exactly ''from Xero Project, may exclude unlinked labour''; otherwise the margin stays blank and xero_project_exceeds_line_costs stays set. When that margin publishes, the suppressor is not set and cost_flag is ok. While the labour switch is on, expected labour is an approved job work order only (approved_at is not null); a draft is ignored. While the patio switch is on, a patio sales price is one frozen quote that agrees with the live price and with what has been invoiced; a conflict is blank and flagged. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted.  20261021180000 appends margin_source, margin_cost_ex, expected_labour_quote_ex and work_order_agreed_labour_ex. Three switches default off (job_profit_work_order_labour_v1, job_profit_xero_project_cost_v1, job_profit_patio_quote_v1). An unconfirmed installer bill always flags installer_bill_unconfirmed and blanks profit and margin, and its amount is not in actual cost; that blanking is not behind a switch, so a flags-off completeness list is what 20261020220000 published plus installer_bill_unconfirmed when such a bill is on the job. While the project switch is on, the Xero Project figure is the published cost only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero, and no installer bill is unconfirmed, and margin_source is exactly ''from Xero Project, may exclude unlinked labour''; a stored agreed labour of 0 does not publish that margin; otherwise the margin stays blank and xero_project_exceeds_line_costs stays set. When that margin publishes, the suppressor is not set and cost_flag is ok. While the labour switch is on, expected labour is an approved job work order only (approved_at is not null); a draft is ignored. While the patio switch is on, a patio sales price is one frozen quote that agrees with the live price and with what has been invoiced; a conflict is blank and flagged. Read only, service role only.';
 
 COMMENT ON COLUMN public.v_job_profit.quote_costs_incomplete IS
   'True when no expected cost is fixed because the revision the quote stands on (newest accepted, else newest sent) sealed its costs as still to confirm (cost_estimates.costs_complete false). Not the same as a job with no costed quote. Never a figure.';

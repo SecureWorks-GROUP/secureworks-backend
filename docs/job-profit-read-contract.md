@@ -65,10 +65,10 @@ reason and note that applies.
 | Value | Meaning | Profit and margin |
 |---|---|---|
 | `missing_client_invoice` | Nothing invoiced yet | Null |
-| `xero_project_exceeds_line_costs` | See the Xero Project rule. While the project switch is off this is also `cost_flag` and profit is null. While it is on, this stays set and profit stays null unless the job is finished or billed labour has reached the approved work order. When that margin publishes, this suppressor is not set and `cost_flag` is `ok` | Null until the project margin publishes |
-| `installer_bill_unconfirmed` | An installer bill (account 306 or 301) is on the job but no person has confirmed it. See the installer bill rule | Null |
-| `xero_project_margin_held` | The project figure is higher than the linked lines, the switch is on, and the job is not finished and billed labour has not reached the approved work order. The margin stays blank | Null |
-| `margin_from_xero_project` | The published margin used the Xero Project figure. Only while `job_profit_xero_project_cost_v1` is on and the job is finished or billed labour has reached the approved work order | Shown, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour` |
+| `xero_project_exceeds_line_costs` | See the Xero Project rule. While the project switch is off this is also `cost_flag` and profit is null. While it is on, this stays set and profit stays null unless the job is finished or billed labour has reached an approved work order whose agreed labour is above zero. When that margin publishes, this suppressor is not set and `cost_flag` is `ok`. An unconfirmed installer bill still blanks the margin | Null until the project margin publishes |
+| `installer_bill_unconfirmed` | An installer bill (account 306 or 301) is on the job but no person has confirmed it. See the installer bill rule. Always on, not behind a switch | Null |
+| `xero_project_margin_held` | The project figure is higher than the linked lines, the switch is on, and the job is not finished and billed labour has not reached an approved work order whose agreed labour is above zero. The margin stays blank | Null |
+| `margin_from_xero_project` | The published margin used the Xero Project figure. Only while `job_profit_xero_project_cost_v1` is on, no installer bill is unconfirmed, and the job is finished or billed labour has reached an approved work order whose agreed labour is above zero | Shown, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour` |
 | `patio_sales_price_conflict` | The one frozen patio tool quote disagrees with the live price, with what has been invoiced, or with the sent quote, by more than $1. The published price is blank. Only while `job_profit_patio_quote_v1` is on | Not guessed |
 | `patio_sales_price_unreadable` | The frozen patio tool quote could not be read. A sent quote, when there is one, is kept. Only while the patio switch is on | The sent quote, or null |
 | `patio_sales_price_live_only` | A patio job has a readable live price and no frozen tool quote. A sent quote, when there is one, is kept. Only while the patio switch is on | The sent quote, or null. The live price is not published |
@@ -94,7 +94,9 @@ From `text_matched_lines` through `holding_job`, and `quote_costs_incomplete`, t
 
 Three rows in `feature_flags`, seeded off. Missing or unreadable is off.
 Turning one on is the owner's word, after this migration is applied. While a
-switch is off, every field this contract already described keeps that meaning.
+switch is off, the fields that switch owns keep the meaning they had before
+it. Installer-bill blanking is not one of those switches: an unconfirmed
+installer bill blanks profit and margin with every switch off.
 The four columns added in `20261021180000` (`margin_source`, `margin_cost_ex`,
 `expected_labour_quote_ex`, `work_order_agreed_labour_ex`) are present either
 way.
@@ -102,7 +104,7 @@ way.
 | Flag | While off | While on |
 |---|---|---|
 | `job_profit_work_order_labour_v1` | Expected labour is the quote snapshot. `work_order_agreed_labour_ex` is still shown | Expected labour is an approved job work order's agreed labour (`approved_at` is not null) when that figure is present, ahead of the quote. Approved customer-variation trade allocation is included. A draft work order and a draft variation are not. Crew work orders are not read. A stored 0 is a real figure |
-| `job_profit_xero_project_cost_v1` | A Xero Project above the linked lines nulls profit and margin | That margin uses the project figure as its cost only when the job is finished or billed labour has reached the approved work order's agreed labour, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour`. Otherwise the margin stays blank and `xero_project_exceeds_line_costs` stays set. When the margin publishes, that suppressor is not set and `cost_flag` is `ok`. `actual_cost_ex` stays the linked lines. A missing client invoice, incomplete lines or unclassified lines still hide the margin. `materials_not_linked` and `no_labour_linked` do not |
+| `job_profit_xero_project_cost_v1` | A Xero Project above the linked lines nulls profit and margin | That margin uses the project figure as its cost only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour`. A stored 0 does not publish it. Otherwise the margin stays blank and `xero_project_exceeds_line_costs` stays set. When the margin publishes, that suppressor is not set and `cost_flag` is `ok`. `actual_cost_ex` stays the linked lines. A missing client invoice, incomplete lines, unclassified lines, or an unconfirmed installer bill still hide the margin. `materials_not_linked` and `no_labour_linked` do not |
 | `job_profit_patio_quote_v1` | `quoted_ex` is a sent quote document only | A patio job's sales price is the one frozen tool quote when it is the only candidate and it agrees with the live price and with what has been invoiced. A conflict is blank and flagged. The live price is never published. `quoted_source` is `patio_quote:sole_frozen_revision` |
 
 ## Xero Project rule
@@ -117,15 +119,19 @@ While `job_profit_xero_project_cost_v1` is off, that excess also nulls
 
 While the switch is on, the published margin is invoiced minus the project
 figure only when the job is finished (`complete`, `completed`, `invoiced`,
-`archived`, `get_review`, `final_payment`) or billed labour has reached the
-approved work order's agreed labour. Then `margin_source` is exactly
+`archived`, `get_review`, `final_payment`) or billed labour has reached an
+approved work order whose agreed labour is above zero. A stored agreed labour
+of 0 is still a real expected-labour figure, and it does not publish this
+margin. Then `margin_source` is exactly
 `from Xero Project, may exclude unlinked labour`, `margin_cost_ex` is the
 project figure, `cost_flag` is `ok`, and `completeness` names
 `margin_from_xero_project` and not `xero_project_exceeds_line_costs`. The line
-costs are not added on top: trade labour that never hit the project can be
-missing from that margin. Otherwise the margin stays blank, `cost_flag` stays
-`xero_project_exceeds_line_costs`, and `completeness` also names
-`xero_project_margin_held`.
+costs are not added on top. When that margin publishes, linked trade labour
+that is not booked to the Xero Project is dropped from it. That drop is the
+current behaviour and is pending Marnin. Otherwise the margin stays blank,
+`cost_flag` stays `xero_project_exceeds_line_costs`, and `completeness` also
+names `xero_project_margin_held`. An unconfirmed installer bill blanks the
+margin either way.
 
 These three rules are DEFAULT, owner to confirm: publish the project margin
 only when the job is finished or labour is fully billed; stop the suppressor
@@ -140,18 +146,27 @@ published from the project.
 
 Nothing in this read sets `xero_invoices.job_id`. A reviewed match is a row in
 `materials_bill_proposals` (Bills to place), outcome `queued_for_review`,
-written by `job_profit_link_bill`. An installer bill (account 301 or 306) and a
-bill that already has a `job_materials_facts` row are refused and write nothing.
+written by `job_profit_link_bill`. The writer refuses a sales invoice, a
+voided or deleted bill, a bill already linked to a job, a trade-app bill, an
+installer bill (account 301 or 306), and a bill that already has a
+`job_materials_facts` row. A refusal writes nothing.
 
 `scripts/job-profit-bill-match.ts` is the dry-run. It prints every proposed
 bill: bill id, contact, amount, job number, the matched text, and the outcome.
 A match is a whole job-number token only (`SWP-`, `SWF-`, `SWMS-`, `SWB-`,
 5 or 6 digits) in the reference, a line description, or line tracking, so
-`SWF-2611` never matches inside `SWF-261111`. A bill that names more than one
-job number goes to review for a person to split. A subcontractor-account bill
-and a bill paid through the trade app are excluded and are never applied.
-`--apply` writes only a reviewed list, one audit row per proposal, and never
-touches an installer bill. It is manual and is not run by this migration.
+`SWF-2611` never matches inside `SWF-261111`, and `SWF-261041,SWF-261042` is
+two tokens. A bill that names more than one job number goes to review for a
+person to split. A subcontractor-account bill and a bill paid through the
+trade app are excluded and are never applied. `--apply` writes only a reviewed
+list, one audit row per proposal, and never touches an installer bill. It is
+manual and is not run by this migration.
+
+xero-sync's bill prematch (`runBillPrematch`) is the only writer whose rows
+its own sync keeps. A proposal from `job_profit_link_bill` has a different
+hash and no queue-row ownership, so the next sync supersedes it. Keeping it
+needs a change in that sync, described on the pull request. Until then this
+writer does not attach a proposal to an open Bills-to-place queue row.
 
 ## Installer bill rule
 

@@ -30,6 +30,7 @@ Deno.test("job numbers match only the whole token", () => {
   assertEquals(extractJobNumberTokens("ref swf-261308"), ["SWF-261308"]);
   assertEquals(extractJobNumberTokens("SWMS-261114 roof"), ["SWMS-261114"]);
   assertEquals(extractJobNumberTokens("SWP-261247 and SWF-261305"), ["SWP-261247", "SWF-261305"]);
+  assertEquals(extractJobNumberTokens("SWF-261041,SWF-261042"), ["SWF-261041", "SWF-261042"]);
   assertEquals(extractJobNumberTokens("SWB-99999"), ["SWB-99999"]);
   assertEquals(extractJobNumberTokens("SWF-26111"), ["SWF-26111"]);
   assertEquals(extractJobNumberTokens("SWF-261111"), ["SWF-261111"]);
