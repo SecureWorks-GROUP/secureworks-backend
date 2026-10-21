@@ -66,6 +66,7 @@ reason and note that applies.
 |---|---|---|
 | `missing_client_invoice` | Nothing invoiced yet | Null |
 | `xero_project_exceeds_line_costs` | See the Xero Project rule. While the project switch is off this is also `cost_flag` and profit is null. While it is on, this stays set and profit stays null unless the job is finished or billed labour has reached the approved work order. When that margin publishes, this suppressor is not set and `cost_flag` is `ok` | Null until the project margin publishes |
+| `installer_bill_unconfirmed` | An installer bill (account 306 or 301) is on the job but no person has confirmed it. See the installer bill rule | Null |
 | `xero_project_margin_held` | The project figure is higher than the linked lines, the switch is on, and the job is not finished and billed labour has not reached the approved work order. The margin stays blank | Null |
 | `margin_from_xero_project` | The published margin used the Xero Project figure. Only while `job_profit_xero_project_cost_v1` is on and the job is finished or billed labour has reached the approved work order | Shown, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour` |
 | `patio_sales_price_conflict` | The one frozen patio tool quote disagrees with the live price, with what has been invoiced, or with the sent quote, by more than $1. The published price is blank. Only while `job_profit_patio_quote_v1` is on | Not guessed |
@@ -151,6 +152,20 @@ job number goes to review for a person to split. A subcontractor-account bill
 and a bill paid through the trade app are excluded and are never applied.
 `--apply` writes only a reviewed list, one audit row per proposal, and never
 touches an installer bill. It is manual and is not run by this migration.
+
+## Installer bill rule
+
+A person confirms each installer bill before it is placed on a job (JP-12).
+An installer bill has a line on account 306 or 301. It counts as actual
+labour only once a person placed it on the job through Bills to place (a
+whole placement or a split). Until then its rows in `cost_events` have source
+`installer_bill_unconfirmed`, confidence `awaiting_confirmation` and
+`is_actual` false: the amount is shown, it is not in `actual_cost_ex`, and the
+job is flagged `installer_bill_unconfirmed` with no profit or margin. This
+holds even when Xero's reference links the bill to the job. A bill a person
+marked not job related has source `installer_bill_not_job_related`, is never
+actual and flags nothing. In `v_bill_allocation_balance` such a bill whose
+rows no person made has `installer_unconfirmed` true and is never `balanced`.
 
 ## Rollup fields
 
