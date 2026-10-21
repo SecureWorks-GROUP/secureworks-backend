@@ -1380,7 +1380,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
-import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { type ServiceCredentialOptions, verifyServiceCredential } from '../_shared/service_credential.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
 import {
   type JobCloseoutCaller,
@@ -1393,6 +1393,7 @@ import {
   setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
@@ -4781,6 +4782,25 @@ export function _authorizeOpsApiAction(input: {
   return { ok: true }
 }
 
+// Actions a pg_cron job calls with `Bearer <sw_service_key()>` (the Vault key).
+// That key is a signature-valid legacy service-role JWT that need not equal the
+// injected SUPABASE_SERVICE_ROLE_KEY, so the default exact-key check sends it to
+// the user-session path and it 401s (AGENTS.md "A pg_cron Bearer Is Not The
+// Function's Service Key"). For these actions only, a JWT whose role claim is
+// exactly service_role is also the server caller, and only while the platform
+// still accepts it (the shared helper's gateway probe: ops-api runs with
+// --no-verify-jwt, so the claim alone proves nothing). Closed list: add an
+// action only with its cron caller and a test in service_credential_handler_test.ts.
+export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new Set([
+  'job_closeout_sweep',
+])
+
+export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
+  return OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS.has(url.searchParams.get('action') || '')
+    ? { legacy: 'service_role_claim' }
+    : {}
+}
+
 export function _preferBearerForOpsApiAction(url: URL): boolean {
   // Browser wrappers may still send the legacy shared key alongside the real
   // signed-in session during cutover. The JWT must be the caller identity for
@@ -5292,7 +5312,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const validKey = Deno.env.get('SW_API_KEY')
   // The service credential this request presented, if Supabase-issued and live
   // (a new secret key, or the legacy key only while Supabase still accepts it).
-  const serviceKey = (await verifyServiceCredential(req.headers))?.token ?? null
+  const serviceKey = (await verifyServiceCredential(req.headers, _opsApiServiceCredentialOptions(_preAuthUrl)))?.token ?? null
   const serviceKeyEnv = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || null
   const apiKeyHeader = req.headers.get('apikey')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
@@ -8294,6 +8314,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : { kind: 'none' }
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
+      }
+      // ── Paid-invoice receipt for fencing and patio (job_receipt.ts; docs/job-receipt-v1.md).
+      // Server key only: xero-sync posts these, and both can have Xero email a customer.
+      case 'job_receipt_paid':
+      case 'job_receipt_catch_up': {
+        const receiptCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' as const }
+          : { kind: 'none' as const }
+        const receipt = await runJobReceiptAction(action, req.method, body || {}, receiptCaller, jobReceiptDeps(client))
+        return json(receipt.body, receipt.status)
       }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
@@ -55179,6 +55209,27 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
     sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
     laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
+
+// The paid-invoice receipt: Xero emails the paid invoice (POST /Invoices/{id}/Email) with the
+// receipt claim id as the Idempotency-Key, through the shared Xero cooldown, never retried.
+const xeroReceiptFetch = lazyXeroAccountingFetch(RECEIPT_EMAIL_TIMEOUT_MS)
+function jobReceiptDeps(client: any): JobReceiptDeps {
+  return {
+    client,
+    now: () => new Date(),
+    emailInvoice: xeroReceiptEmailer({ getToken: () => getToken(client), fetch: xeroReceiptFetch, baseUrl: XERO_API_BASE }),
+    // The sealed SES money fence and the synthetic live-fire gate, as every Xero invoice
+    // email path runs them; a refusal is recorded by its code and nothing is sent.
+    preSendGuard: async ({ xeroInvoiceId, jobId }) => {
+      try {
+        await assertLegacySesInvoiceActionAllowed(client, xeroInvoiceId, 'job_receipt', jobId)
+        return null
+      } catch (e: any) {
+        return String(e?.refusal?.code || (e instanceof ApiError ? 'refused' : 'check_failed'))
+      }
+    },
   }
 }
 

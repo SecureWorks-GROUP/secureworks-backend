@@ -938,7 +938,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch S5: the line receipts table and the lines'
                       # attach stamp dispatch_materials, pipeline dispatch=1 and
                       # dispatch_delivery_*_receipt read and write.
-                      ("20261020180000", "dispatch_line_receipts")]:
+                      ("20261020180000", "dispatch_line_receipts"),
+                      # Paid-invoice receipt: the receipt switch and the
+                      # job_receipt_claims table (job_receipt.ts).
+                      ("20261021100000", "job_receipt_sender")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
