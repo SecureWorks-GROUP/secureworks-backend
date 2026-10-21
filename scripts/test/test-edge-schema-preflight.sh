@@ -937,7 +937,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261020150000", "xero_mirror_checks"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
-                      ("20261021100000", "job_receipt_sender")]:
+                      ("20261021100000", "job_receipt_sender"),
+                      # Open the original (CTX-T23): the email file list read
+                      # from the reader's attachment ledger.
+                      ("20261002150000", "context_email_reader"),
+                      ("20261006050000", "context_lanes_health")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

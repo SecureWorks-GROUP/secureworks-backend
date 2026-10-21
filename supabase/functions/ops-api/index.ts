@@ -463,6 +463,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { MessageOriginalError, contextMessageOriginal } from './context_message_original.ts'
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
@@ -7904,6 +7905,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : await contextUnlinkedRows(client, url.searchParams, actor))
         } catch (error) {
           if (error instanceof ContextUnlinkedError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Open the original (CTX-T23, design AC-M6): one captured message,
+      // read-only, staff front door, GET only. Serves no file bytes; call
+      // words are never returned. Contract: docs/context/message-original.md.
+      case 'context_message_original': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(await contextMessageOriginal(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof MessageOriginalError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }

@@ -855,3 +855,12 @@ xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_c
 xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
+# Open the original (CTX-T23): ops-api lists an email's files from the
+# reader's attachment ledger, read only, keyed by the email's provider id.
+ops-api|supabase/migrations/20261002150000_context_email_reader.sql|table|context_email_attachments
+ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.provider_message_id
+ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.file_name
+ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.content_type
+ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.size_bytes
+ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.status
+ops-api|supabase/migrations/20261006050000_context_lanes_health.sql|column|context_email_attachments.error_code
