@@ -1281,10 +1281,6 @@ import {
   splitReconRow as _splitReconRow,
 } from './materials_recon.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
-import {
-  jobProfitBillQueueCallerAllowed,
-  jobProfitBillQueueDispatch,
-} from './job_profit_bill_match.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
 import {
   MAKESAFE_COST_REPORT_ACTION,
@@ -8493,23 +8489,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const out = action === 'job_profit'
           ? await jobProfitAction(client, url.searchParams)
           : await jobProfitListAction(client, url.searchParams)
-        return json(out.body, out.status)
-      }
-      // Office supplier-bill matching. ops_manager may link a bill. The
-      // routine and the read-only agent never reach this case.
-      case 'job_profit_unmatched_bills':
-      case 'job_profit_link_bill': {
-        if (!jobProfitBillQueueCallerAllowed(authMode, authUser?.role)) {
-          return json({
-            ok: false,
-            code: 'operator_access_required',
-            error: 'supplier bill matching requires the privileged ops key or an office session (admin, owner, or ops_manager)',
-          }, 403)
-        }
-        const out = await jobProfitBillQueueDispatch(action, client, url, body, {
-          user_id: authUser?.id ?? null,
-          email: authUser?.email ?? null,
-        })
         return json(out.body, out.status)
       }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))

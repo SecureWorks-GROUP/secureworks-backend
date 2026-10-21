@@ -1,33 +1,44 @@
 // Dry-run matcher for supplier bills that name a job number.
 //
-// Default is read-only. --apply writes xero_invoices.job_id for an exact
-// unique match only, and still skips an ambiguous bill and a sealed
-// make-safe job. It is not run by a migration, a cron or CI.
+// Default is read-only and prints every proposed match: bill id, contact,
+// amount, job number and the matched text. --apply writes nothing unless a
+// reviewed list is passed, and then only calls job_profit_link_bill. That
+// function writes a materials_bill_proposals row. This script never sets
+// xero_invoices.job_id and never calls the function for an installer bill
+// (accounts 301 and 306) or a trade-app payee bill.
 //
 //   deno run --allow-env --allow-net scripts/job-profit-bill-match.ts
-//   deno run --allow-env --allow-net scripts/job-profit-bill-match.ts --days 90
 //   deno run --allow-env scripts/job-profit-bill-match.ts --fixture
+//   deno run --allow-env --allow-net --allow-read scripts/job-profit-bill-match.ts \
+//     --apply --reviewed reviewed.json --actor owner@example.com
 //
 // --fixture prints the audit-shaped cohort and needs no credentials.
-// --apply is refused together with --fixture. Do not pass --apply until
-// a dry-run has been read.
+// --fixture cannot be combined with --apply. Do not pass --apply against
+// production from this change.
+//
+// The reviewed file is a JSON array of
+// { xero_invoice_id, outcome, job_number, matched_text }.
+// A row that disagrees with a fresh classification aborts before any write.
 //
 // Needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for a live read.
 
 import {
   auditShapedCohort,
   billJobNumberFields,
-  classifyJobNumberMatch,
-  isTradeMirrorBill,
+  classifySupplierBill,
+  planReviewedLinks,
   summariseSupplierBills,
+  type BillClassification,
   type CohortBill,
+  type KnownJob,
+  type ReviewedLink,
 } from "../supabase/functions/ops-api/job_profit_bill_match.ts";
 
 const PAGE = 1000;
 
 type LiveBill = CohortBill & {
-  invoice_id: string;
-  status: string | null;
+  contact_name: string | null;
+  amount_ex: number | null;
 };
 
 function argValue(name: string): string | null {
@@ -45,7 +56,7 @@ function requireEnv(): { url: string; key: string } {
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   if (!url || !key) {
     console.error(
-      "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or pass --fixture for the audit-shaped cohort. This script does not write unless --apply is passed.",
+      "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or pass --fixture for the audit-shaped cohort. This script writes a proposal only when --apply, --reviewed and --actor are all passed.",
     );
     Deno.exit(2);
   }
@@ -94,11 +105,35 @@ function sinceDate(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+function holdingOf(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const value = (metadata as Record<string, unknown>).do_not_schedule;
+  return value === true || String(value).toLowerCase() === "true";
+}
+
+function printMatch(bill: LiveBill, classified: BillClassification) {
+  if (
+    classified.outcome === "unmatched" &&
+    (classified.tokens.length === 0)
+  ) {
+    return;
+  }
+  if (classified.outcome === "already_linked" || classified.outcome === "already_fact") return;
+  console.log(JSON.stringify({
+    xero_invoice_id: bill.xero_invoice_id,
+    contact: bill.contact_name,
+    amount: bill.amount_ex,
+    job_number: classified.job_number,
+    matched_text: classified.matched_text,
+    outcome: classified.outcome,
+  }));
+}
+
 async function loadLive(days: number): Promise<{
-  bills: CohortBill[];
-  jobsByNumber: Map<string, readonly string[]>;
-  sealedJobIds: Set<string>;
-  live: LiveBill[];
+  bills: LiveBill[];
+  jobsByNumber: Map<string, KnownJob[]>;
+  factInvoiceIds: Set<string>;
+  classified: Map<string, BillClassification>;
 }> {
   const { url, key } = requireEnv();
   const since = sinceDate(days);
@@ -106,6 +141,8 @@ async function loadLive(days: number): Promise<{
     "id",
     "xero_invoice_id",
     "reference",
+    "contact_name",
+    "sub_total",
     "status",
     "job_id",
     "line_items",
@@ -127,29 +164,39 @@ async function loadLive(days: number): Promise<{
       .map((row) => row.xero_bill_id)
       .filter((id): id is string => typeof id === "string"),
   );
+  const facts = await restAll(
+    url,
+    key,
+    "job_materials_facts?select=xero_invoice_id&xero_invoice_id=not.is.null",
+  );
+  const factInvoiceIds = new Set(
+    facts
+      .map((row) => row.xero_invoice_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
 
-  const bills: CohortBill[] = [];
-  const live: LiveBill[] = [];
+  const bills: LiveBill[] = [];
   const tokens = new Set<string>();
   for (const row of raw) {
     const xeroId = typeof row.xero_invoice_id === "string" ? row.xero_invoice_id : "";
-    const mirror = isTradeMirrorBill(xeroId, row.line_items, tradeIds);
-    const bill: CohortBill = {
+    const mirror = tradeIds.has(xeroId);
+    const bill: LiveBill = {
       id: String(row.id),
       job_id: typeof row.job_id === "string" ? row.job_id : null,
       xero_invoice_id: xeroId,
       reference: typeof row.reference === "string" ? row.reference : null,
       line_items: row.line_items,
       trade_mirror: mirror,
+      contact_name: typeof row.contact_name === "string" ? row.contact_name : null,
+      amount_ex: typeof row.sub_total === "number" ? row.sub_total : null,
     };
     bills.push(bill);
-    if (!mirror && !bill.job_id) {
+    if (!bill.job_id && !factInvoiceIds.has(xeroId)) {
       for (const token of billJobNumberFields(bill).all) tokens.add(token);
     }
-    live.push({ ...bill, invoice_id: bill.id, status: typeof row.status === "string" ? row.status : null });
   }
 
-  const jobsByNumber = new Map<string, string[]>();
+  const jobsByNumber = new Map<string, KnownJob[]>();
   const tokenList = [...tokens];
   for (let i = 0; i < tokenList.length; i += 100) {
     const slice = tokenList.slice(i, i + 100);
@@ -157,75 +204,99 @@ async function loadLive(days: number): Promise<{
     const jobs = await restAll(
       url,
       key,
-      `jobs?select=id,job_number,ses_money_sealed_at&job_number=in.(${filter})`,
+      `jobs?select=id,job_number,status,metadata&job_number=in.(${filter})`,
     );
     for (const job of jobs) {
       const number = typeof job.job_number === "string" ? job.job_number.toUpperCase() : "";
       const id = typeof job.id === "string" ? job.id : "";
       if (!number || !id) continue;
       const list = jobsByNumber.get(number) ?? [];
-      list.push(id);
+      list.push({
+        id,
+        status: typeof job.status === "string" ? job.status : null,
+        holding: holdingOf(job.metadata),
+      });
       jobsByNumber.set(number, list);
     }
   }
 
-  const sealedJobIds = new Set<string>();
-  const candidateIds = [...jobsByNumber.values()].flat();
-  for (let i = 0; i < candidateIds.length; i += 100) {
-    const slice = candidateIds.slice(i, i + 100);
-    const filter = slice.map((id) => `"${id}"`).join(",");
-    const jobs = await restAll(
-      url,
-      key,
-      `jobs?select=id,ses_money_sealed_at&id=in.(${filter})`,
-    );
-    for (const job of jobs) {
-      if (typeof job.id === "string" && job.ses_money_sealed_at) sealedJobIds.add(job.id);
-    }
+  const classified = new Map<string, BillClassification>();
+  for (const bill of bills) {
+    const row = classifySupplierBill(bill, jobsByNumber, factInvoiceIds, tradeIds);
+    classified.set(bill.xero_invoice_id, row);
+    printMatch(bill, row);
   }
-
-  return { bills, jobsByNumber, sealedJobIds, live };
+  return { bills, jobsByNumber, factInvoiceIds, classified };
 }
 
-async function applyExact(
-  bills: LiveBill[],
-  jobsByNumber: ReadonlyMap<string, readonly string[]>,
-  sealedJobIds: ReadonlySet<string>,
+async function applyReviewed(
+  reviewedPath: string,
+  actor: string,
+  classified: ReadonlyMap<string, BillClassification>,
 ) {
+  const text = await Deno.readTextFile(reviewedPath);
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed)) {
+    console.error("--reviewed must be a JSON array");
+    Deno.exit(2);
+  }
+  const reviewed = parsed as ReviewedLink[];
+  const planned = planReviewedLinks(reviewed, classified);
+  if (!planned.ok) {
+    for (const error of planned.errors) console.error(error);
+    console.error("Reviewed list disagrees with the live read. Nothing was written.");
+    Deno.exit(2);
+  }
   const { url, key } = requireEnv();
   let wrote = 0;
   let skipped = 0;
-  for (const bill of bills) {
-    if (bill.trade_mirror || bill.job_id) continue;
-    const match = classifyJobNumberMatch(billJobNumberFields(bill).all, jobsByNumber);
-    if (match.outcome !== "exact" || !match.job_id) {
+  for (const step of planned.plan) {
+    if (!step.rpc || step.outcome === "installer_hold" || step.outcome === "trade_app") {
       skipped += 1;
-      continue;
-    }
-    if (sealedJobIds.has(match.job_id)) {
-      skipped += 1;
-      continue;
-    }
-    const response = await fetch(
-      `${url}/rest/v1/xero_invoices?id=eq.${bill.invoice_id}&job_id=is.null`,
-      {
-        method: "PATCH",
-        headers: {
-          apikey: key,
-          Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json",
-          Prefer: "return=representation",
+      console.log(JSON.stringify({
+        audit: {
+          xero_invoice_id: step.xero_invoice_id,
+          skipped: step.reason,
+          wrote: false,
         },
-        body: JSON.stringify({ job_id: match.job_id }),
-      },
-    );
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`link ${bill.invoice_id} failed ${response.status}: ${text.slice(0, 300)}`);
+      }));
+      continue;
     }
-    const body = await response.json();
-    if (Array.isArray(body) && body.length === 1) wrote += 1;
-    else skipped += 1;
+    const response = await fetch(`${url}/rest/v1/rpc/job_profit_link_bill`, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        p_xero_invoice_id: step.xero_invoice_id,
+        p_proposal_kind: step.proposal_kind,
+        p_job_number: step.job_number,
+        p_matched_text: step.matched_text,
+        p_rule: "job_profit_bill_match",
+        p_reason: step.reason,
+        p_actor: actor,
+      }),
+    });
+    const bodyText = await response.text();
+    if (!response.ok) {
+      console.error(JSON.stringify({
+        audit: {
+          xero_invoice_id: step.xero_invoice_id,
+          error: bodyText.slice(0, 400),
+          wrote: false,
+        },
+      }));
+      Deno.exit(1);
+    }
+    wrote += 1;
+    console.log(JSON.stringify({
+      audit: {
+        xero_invoice_id: step.xero_invoice_id,
+        proposal: JSON.parse(bodyText),
+      },
+    }));
   }
   console.log(JSON.stringify({ apply: true, wrote, skipped }));
 }
@@ -246,16 +317,38 @@ async function main() {
   if (fixture) {
     const cohort = auditShapedCohort();
     printSummary(summariseSupplierBills(cohort.bills, cohort.jobsByNumber), "audit-shaped fixture, not a production count");
+    for (const bill of cohort.bills) {
+      const classified = classifySupplierBill(bill, cohort.jobsByNumber);
+      if (classified.outcome === "exact" || classified.outcome === "split" || classified.outcome === "ambiguous") {
+        console.log(JSON.stringify({
+          xero_invoice_id: bill.xero_invoice_id,
+          contact: null,
+          amount: null,
+          job_number: classified.job_number,
+          matched_text: classified.matched_text,
+          outcome: classified.outcome,
+        }));
+      }
+    }
+    return;
+  }
+  if (apply) {
+    const reviewed = argValue("--reviewed");
+    const actor = argValue("--actor");
+    if (!reviewed || !actor) {
+      console.error("--apply requires --reviewed <file> and --actor <email>");
+      Deno.exit(2);
+    }
+    const live = await loadLive(days);
+    const summary = summariseSupplierBills(live.bills, live.jobsByNumber, live.factInvoiceIds);
+    printSummary(summary, `ACCPAY AUTHORISED/PAID last ${days} days`);
+    await applyReviewed(reviewed, actor, live.classified);
     return;
   }
   const live = await loadLive(days);
-  const summary = summariseSupplierBills(live.bills, live.jobsByNumber, live.sealedJobIds);
+  const summary = summariseSupplierBills(live.bills, live.jobsByNumber, live.factInvoiceIds);
   printSummary(summary, `ACCPAY AUTHORISED/PAID last ${days} days, read only`);
-  if (!apply) {
-    console.log("Dry run. No bill was linked. Pass --apply only after this count has been read.");
-    return;
-  }
-  await applyExact(live.live, live.jobsByNumber, live.sealedJobIds);
+  console.log("Dry run. No proposal was written. --apply uses only a reviewed list.");
 }
 
 if (import.meta.main) {

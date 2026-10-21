@@ -28,7 +28,12 @@ ALTER TABLE public.scope_revisions
   ADD COLUMN IF NOT EXISTS renderer_version text,
   ADD COLUMN IF NOT EXISTS tool_version text,
   ADD COLUMN IF NOT EXISTS status text,
-  ADD COLUMN IF NOT EXISTS frozen_at timestamptz;
+  ADD COLUMN IF NOT EXISTS frozen_at timestamptz,
+  ADD COLUMN IF NOT EXISTS superseded_at timestamptz;
+
+-- The link function reads xero_invoices.reference. Earlier stubs omit it.
+ALTER TABLE public.xero_invoices
+  ADD COLUMN IF NOT EXISTS reference text;
 
 -- quote_revisions in this database is the reduced table from earlier cases.
 -- These columns are what a sent patio quote row in this contract carries.

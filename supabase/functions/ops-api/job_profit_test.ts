@@ -722,4 +722,8 @@ Deno.test("job profit labels name the CFO-12 commitment states", () => {
   assert(JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith("Ordered, not billed"));
   assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, no bill matched to this order"));
   assert(JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"));
+  assert(JOB_PROFIT_LABELS.margin_source.includes("from Xero Project, may exclude unlinked labour"));
+  assert(JOB_PROFIT_LABELS.work_order_agreed_labour_ex.includes("A draft is not included"));
+  assert(JOB_PROFIT_LABELS.expected_cost_ex.includes("approved job work order"));
+  assert(JOB_PROFIT_LABELS.xero_project_exceeds_line_costs.includes("this suppressor is not set"));
 });

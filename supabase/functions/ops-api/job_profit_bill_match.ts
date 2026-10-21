@@ -1,37 +1,37 @@
 // deno-lint-ignore-file no-explicit-any
-// Supplier-bill to job matching for job profit.
+// Supplier-bill classification for job profit.
 //
-// Exact job-number tokens only (SWF-261308, SWP-261247, SWMS-261114, ...).
-// A bill that names two real jobs, or one job number that is stored twice,
-// is ambiguous and is never written. A token that is not a real job number
-// does not block the one real job named beside it. Nothing here guesses.
+// Whole job-number tokens only: SWMS, SWP, SWF, SWB, then 5 or 6 digits.
+// SWF-2611 does not match inside SWF-261111. A bill that names more than one
+// token goes to the split queue and is never auto-linked. Installer accounts
+// 301 and 306, trade-app payee bills, and bills that already have a materials
+// fact are never proposed as a job link.
 //
-// job_profit_unmatched_bills is a read. job_profit_link_bill is the office
-// write. The dry-run script is scripts/job-profit-bill-match.ts. Neither
-// the read nor a migration links a bill.
+// This module does not write. scripts/job-profit-bill-match.ts is the dry-run
+// and the reviewed-list apply. Apply calls job_profit_link_bill, which writes
+// a materials_bill_proposals row and never sets xero_invoices.job_id.
 
 export const JOB_NUMBER_RE =
-  /(?<![A-Za-z0-9])(SWMS|SWP|SWF|SWD|SWI|SWR|SWM|SWG|SW)-(\d{4,6})(?!\d)/gi;
+  /(?<![A-Za-z0-9])(SWMS|SWP|SWF|SWB)-(\d{5,6})(?![A-Za-z0-9])/gi;
 
 const TRADE_MIRROR_LINE_RE = /\| SW - [A-Z]/;
+const INSTALLER_ACCOUNTS = new Set(["301", "306"]);
+const UNPLACEABLE_STATUSES = new Set(["cancelled", "lost", "draft", "quoted"]);
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export type BillOutcome =
+  | "exact"
+  | "split"
+  | "unmatched"
+  | "ambiguous"
+  | "installer_hold"
+  | "trade_app"
+  | "already_linked"
+  | "already_fact";
 
-const LINKABLE_STATUSES = new Set(["AUTHORISED", "PAID"]);
-const DEFAULT_DAYS = 90;
-const MAX_DAYS = 3650;
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
-
-export type MatchOutcome = "exact" | "ambiguous" | "unmatched";
-
-export type JobNumberMatch = {
-  outcome: MatchOutcome;
-  job_number: string | null;
-  job_id: string | null;
-  tokens: string[];
-  real_job_numbers: string[];
+export type KnownJob = {
+  id: string;
+  status: string | null;
+  holding: boolean;
 };
 
 export type BillJobNumberFields = {
@@ -39,24 +39,25 @@ export type BillJobNumberFields = {
   lines: string[];
   tracking: string[];
   all: string[];
+  matched_text: string | null;
 };
 
-export type QueueResult = { status: number; body: Record<string, unknown> };
+export type BillClassification = {
+  outcome: BillOutcome;
+  job_number: string | null;
+  job_id: string | null;
+  tokens: string[];
+  real_job_numbers: string[];
+  matched_text: string | null;
+};
 
-/**
- * Office queue: privileged ops key, or an admin, owner or ops_manager
- * session. Trades, the routine and a read-only agent are refused even
- * when the role string is an office role.
- */
-export function jobProfitBillQueueCallerAllowed(
-  authMode: string,
-  role: string | null | undefined,
-): boolean {
-  if (authMode === "api_key") return true;
-  if (authMode !== "jwt") return false;
-  const r = String(role || "").toLowerCase();
-  return r === "admin" || r === "owner" || r === "ops_manager";
-}
+export type SupplierBill = {
+  xero_invoice_id: string;
+  job_id?: string | null;
+  reference?: string | null;
+  line_items?: unknown;
+  trade_mirror?: boolean;
+};
 
 export function extractJobNumberTokens(text: string | null | undefined): string[] {
   if (!text) return [];
@@ -86,80 +87,65 @@ function textOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function accountCode(item: Record<string, unknown>): string {
+  const raw = item.AccountCode ?? item.account_code ?? item.accountCode;
+  if (raw === null || raw === undefined) return "";
+  return String(raw).trim();
+}
+
+/**
+ * True when a line uses installer account 301 or 306 and the amount is
+ * missing, unreadable, or not an explicit zero. An explicit 0 is not an
+ * installer charge.
+ */
+export function isInstallerBill(lineItems: unknown): boolean {
+  for (const item of lineItemsOf(lineItems)) {
+    if (!INSTALLER_ACCOUNTS.has(accountCode(item))) continue;
+    const raw = item.LineAmount ?? item.line_amount ?? item.lineAmount;
+    if (raw === null || raw === undefined || raw === "") return true;
+    const amount = typeof raw === "number" ? raw : Number(String(raw).trim());
+    if (!Number.isFinite(amount) || amount !== 0) return true;
+  }
+  return false;
+}
+
 export function billJobNumberFields(bill: {
   reference?: string | null;
   line_items?: unknown;
 }): BillJobNumberFields {
-  const reference = extractJobNumberTokens(bill.reference ?? "");
+  const referenceText = bill.reference ?? "";
+  const reference = extractJobNumberTokens(referenceText);
   const lines: string[] = [];
   const tracking: string[] = [];
+  let matched = reference.length > 0 ? referenceText : "";
   for (const item of lineItemsOf(bill.line_items)) {
-    lines.push(...extractJobNumberTokens(
-      textOf(item.Description) || textOf(item.description),
-    ));
+    const description = textOf(item.Description) || textOf(item.description);
+    const lineTokens = extractJobNumberTokens(description);
+    lines.push(...lineTokens);
+    if (!matched && lineTokens.length > 0) matched = description;
     const track = item.Tracking ?? item.tracking;
     if (!Array.isArray(track)) continue;
     for (const entry of track) {
       const row = asRecord(entry);
       if (!row) continue;
-      tracking.push(...extractJobNumberTokens(
-        [
-          textOf(row.Name),
-          textOf(row.name),
-          textOf(row.Option),
-          textOf(row.option),
-        ].filter(Boolean).join(" "),
-      ));
+      const trackingText = [
+        textOf(row.Name),
+        textOf(row.name),
+        textOf(row.Option),
+        textOf(row.option),
+      ].filter(Boolean).join(" ");
+      const trackingTokens = extractJobNumberTokens(trackingText);
+      tracking.push(...trackingTokens);
+      if (!matched && trackingTokens.length > 0) matched = trackingText;
     }
   }
   const all = [...new Set([...reference, ...lines, ...tracking])].sort();
-  return { reference, lines, tracking, all };
-}
-
-/**
- * jobsByNumber maps an uppercase job number to the job ids stored under it.
- * One id is a real job. Two ids for one number is ambiguous. A token with
- * no id is not a job.
- */
-export function classifyJobNumberMatch(
-  tokens: readonly string[],
-  jobsByNumber: ReadonlyMap<string, readonly string[]>,
-): JobNumberMatch {
-  const unique = [...new Set(tokens.map((token) => token.toUpperCase()))].sort();
-  const real: string[] = [];
-  let multi = false;
-  for (const token of unique) {
-    const ids = [...new Set(jobsByNumber.get(token) ?? [])];
-    if (ids.length === 0) continue;
-    real.push(token);
-    if (ids.length !== 1) multi = true;
-  }
-  real.sort();
-  if (multi || real.length > 1) {
-    return {
-      outcome: "ambiguous",
-      job_number: null,
-      job_id: null,
-      tokens: unique,
-      real_job_numbers: real,
-    };
-  }
-  if (real.length === 1) {
-    const jobNumber = real[0];
-    return {
-      outcome: "exact",
-      job_number: jobNumber,
-      job_id: (jobsByNumber.get(jobNumber) ?? [])[0] ?? null,
-      tokens: unique,
-      real_job_numbers: real,
-    };
-  }
   return {
-    outcome: "unmatched",
-    job_number: null,
-    job_id: null,
-    tokens: unique,
-    real_job_numbers: [],
+    reference,
+    lines,
+    tracking,
+    all,
+    matched_text: matched || null,
   };
 }
 
@@ -176,12 +162,96 @@ export function isTradeMirrorBill(
   return false;
 }
 
-export type CohortBill = {
+function placeable(job: KnownJob): boolean {
+  if (job.holding) return false;
+  const status = (job.status ?? "").toLowerCase();
+  return !UNPLACEABLE_STATUSES.has(status);
+}
+
+/**
+ * Token rules only. Two or more tokens are split, including one real job
+ * beside an unknown token. One token stored on two jobs is ambiguous.
+ * A single token on a cancelled, lost, draft, quoted or holding job is
+ * unmatched.
+ */
+export function classifyJobNumberMatch(
+  tokens: readonly string[],
+  jobsByNumber: ReadonlyMap<string, readonly KnownJob[]>,
+): BillClassification {
+  const unique = [...new Set(tokens.map((token) => token.toUpperCase()))].sort();
+  const real: string[] = [];
+  let multi = false;
+  for (const token of unique) {
+    const ids = [...new Set((jobsByNumber.get(token) ?? []).map((job) => job.id))];
+    if (ids.length === 0) continue;
+    real.push(token);
+    if (ids.length !== 1) multi = true;
+  }
+  real.sort();
+  const base = {
+    tokens: unique,
+    real_job_numbers: real,
+    matched_text: null as string | null,
+  };
+  if (unique.length > 1) {
+    return { ...base, outcome: "split", job_number: null, job_id: null };
+  }
+  if (multi) {
+    return { ...base, outcome: "ambiguous", job_number: null, job_id: null };
+  }
+  if (real.length === 1) {
+    const jobNumber = real[0];
+    const jobs = jobsByNumber.get(jobNumber) ?? [];
+    const job = jobs[0];
+    if (!job || !placeable(job)) {
+      return { ...base, outcome: "unmatched", job_number: null, job_id: null };
+    }
+    return {
+      ...base,
+      outcome: "exact",
+      job_number: jobNumber,
+      job_id: job.id,
+    };
+  }
+  return { ...base, outcome: "unmatched", job_number: null, job_id: null, real_job_numbers: [] };
+}
+
+export function classifySupplierBill(
+  bill: SupplierBill,
+  jobsByNumber: ReadonlyMap<string, readonly KnownJob[]>,
+  factInvoiceIds: ReadonlySet<string> = new Set(),
+  tradeBillIds: ReadonlySet<string> = new Set(),
+): BillClassification {
+  const fields = billJobNumberFields(bill);
+  const empty: BillClassification = {
+    outcome: "unmatched",
+    job_number: null,
+    job_id: null,
+    tokens: fields.all,
+    real_job_numbers: [],
+    matched_text: fields.matched_text,
+  };
+  if (bill.job_id) {
+    return { ...empty, outcome: "already_linked" };
+  }
+  if (bill.xero_invoice_id && factInvoiceIds.has(bill.xero_invoice_id)) {
+    return { ...empty, outcome: "already_fact" };
+  }
+  if (
+    bill.trade_mirror ||
+    isTradeMirrorBill(bill.xero_invoice_id, bill.line_items, tradeBillIds)
+  ) {
+    return { ...empty, outcome: "trade_app" };
+  }
+  if (isInstallerBill(bill.line_items)) {
+    return { ...empty, outcome: "installer_hold" };
+  }
+  const match = classifyJobNumberMatch(fields.all, jobsByNumber);
+  return { ...match, matched_text: fields.matched_text };
+}
+
+export type CohortBill = SupplierBill & {
   id: string;
-  job_id: string | null;
-  xero_invoice_id: string;
-  reference: string | null;
-  line_items: unknown;
   trade_mirror: boolean;
 };
 
@@ -189,7 +259,10 @@ export type CohortSummary = {
   scanned: number;
   trade_mirrors_excluded: number;
   already_linked: number;
+  already_fact: number;
+  installer_hold: number;
   exact_unique: number;
+  split: number;
   ambiguous: number;
   unmatched: number;
   line_text_hits: number;
@@ -202,21 +275,19 @@ function hasToken(tokens: string[]): boolean {
   return tokens.length > 0;
 }
 
-/**
- * Counts for one scanned set. Already-linked and trade-mirror bills are
- * not classified. apply_count is the exact unique matches a later --apply
- * would be allowed to write; ambiguous bills are not in it.
- */
 export function summariseSupplierBills(
   bills: readonly CohortBill[],
-  jobsByNumber: ReadonlyMap<string, readonly string[]>,
-  sealedJobIds: ReadonlySet<string> = new Set(),
+  jobsByNumber: ReadonlyMap<string, readonly KnownJob[]>,
+  factInvoiceIds: ReadonlySet<string> = new Set(),
 ): CohortSummary {
   const summary: CohortSummary = {
     scanned: bills.length,
     trade_mirrors_excluded: 0,
     already_linked: 0,
+    already_fact: 0,
+    installer_hold: 0,
     exact_unique: 0,
+    split: 0,
     ambiguous: 0,
     unmatched: 0,
     line_text_hits: 0,
@@ -225,11 +296,12 @@ export function summariseSupplierBills(
     apply_count: 0,
   };
   for (const bill of bills) {
-    if (bill.trade_mirror || isTradeMirrorBill(bill.xero_invoice_id, bill.line_items, new Set())) {
+    const classified = classifySupplierBill(bill, jobsByNumber, factInvoiceIds);
+    if (classified.outcome === "trade_app") {
       summary.trade_mirrors_excluded += 1;
       continue;
     }
-    if (bill.job_id) {
+    if (classified.outcome === "already_linked") {
       summary.already_linked += 1;
       continue;
     }
@@ -237,15 +309,14 @@ export function summariseSupplierBills(
     if (hasToken(fields.lines)) summary.line_text_hits += 1;
     if (hasToken(fields.reference)) summary.reference_hits += 1;
     if (hasToken(fields.tracking)) summary.tracking_hits += 1;
-    const match = classifyJobNumberMatch(fields.all, jobsByNumber);
-    if (match.outcome === "exact") {
+    if (classified.outcome === "already_fact") summary.already_fact += 1;
+    else if (classified.outcome === "installer_hold") summary.installer_hold += 1;
+    else if (classified.outcome === "exact") {
       summary.exact_unique += 1;
-      if (match.job_id && !sealedJobIds.has(match.job_id)) summary.apply_count += 1;
-    } else if (match.outcome === "ambiguous") {
-      summary.ambiguous += 1;
-    } else {
-      summary.unmatched += 1;
-    }
+      summary.apply_count += 1;
+    } else if (classified.outcome === "split") summary.split += 1;
+    else if (classified.outcome === "ambiguous") summary.ambiguous += 1;
+    else summary.unmatched += 1;
   }
   return summary;
 }
@@ -253,17 +324,21 @@ export function summariseSupplierBills(
 /**
  * The audit's shape, not a production count: 649 recent non-trade supplier
  * bills (33 already linked, 616 not), 53 of the unlinked ones naming a job
- * number in line text, none in the reference or the tracking category, and
- * 4 trade-mirror bills excluded from that 649.
+ * number in line text, and 4 trade-mirror bills excluded from that 649.
+ * The eight two-job bills are split, not a write.
  */
 export function auditShapedCohort(): {
   bills: CohortBill[];
-  jobsByNumber: Map<string, string[]>;
+  jobsByNumber: Map<string, KnownJob[]>;
 } {
-  const jobsByNumber = new Map<string, string[]>();
+  const jobsByNumber = new Map<string, KnownJob[]>();
   for (let n = 1; n <= 42; n++) {
     const suffix = String(261000 + n);
-    jobsByNumber.set(`SWF-${suffix}`, [`00000000-0000-4000-8000-${String(n).padStart(12, "0")}`]);
+    jobsByNumber.set(`SWF-${suffix}`, [{
+      id: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+      status: null,
+      holding: false,
+    }]);
   }
   const bills: CohortBill[] = [];
   for (let n = 1; n <= 33; n++) {
@@ -292,9 +367,9 @@ export function auditShapedCohort(): {
   }
   for (let n = 1; n <= 8; n++) {
     bills.push({
-      id: `ambig-${n}`,
+      id: `split-${n}`,
       job_id: null,
-      xero_invoice_id: `AMBIG-${n}`,
+      xero_invoice_id: `SPLIT-${n}`,
       reference: "PO-54000",
       line_items: [{
         Description: "Split delivery SWF-261041 and SWF-261042",
@@ -342,264 +417,84 @@ export function auditShapedCohort(): {
   return { bills, jobsByNumber };
 }
 
-type BillRow = {
-  id: string;
-  xero_invoice_id: string | null;
-  invoice_number: string | null;
-  reference: string | null;
-  contact_name: string | null;
-  sub_total: number | null;
-  status: string | null;
-  invoice_type: string | null;
-  invoice_date: string | null;
-  job_id: string | null;
-  line_items: unknown;
+export type ReviewedLink = {
+  xero_invoice_id: string;
+  outcome: string;
+  job_number?: string | null;
+  matched_text?: string | null;
 };
 
-function fail(status: number, code: string, error: string): QueueResult {
-  return { status, body: { ok: false, code, error } };
-}
+export type ApplyStep = {
+  xero_invoice_id: string;
+  outcome: BillOutcome;
+  rpc: boolean;
+  proposal_kind: "job" | "review" | null;
+  job_number: string | null;
+  matched_text: string;
+  reason: string;
+};
 
-function intParam(
-  raw: string | null,
-  fallback: number,
-  min: number,
-  max: number,
-): number | null {
-  if (raw === null || raw === "") return fallback;
-  if (!/^\d+$/.test(raw)) return null;
-  const n = Number(raw);
-  if (n < min || n > max) return null;
-  return n;
-}
+const SKIP_OUTCOMES = new Set<BillOutcome>([
+  "installer_hold",
+  "trade_app",
+  "already_linked",
+  "already_fact",
+]);
 
-function sinceDate(days: number, now: Date): string {
-  const ms = now.getTime() - days * 24 * 60 * 60 * 1000;
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
-export async function jobProfitUnmatchedBillsAction(
-  client: any,
-  params: URLSearchParams,
-  now: Date = new Date(),
-): Promise<QueueResult> {
-  const days = intParam(params.get("days"), DEFAULT_DAYS, 1, MAX_DAYS);
-  const limit = intParam(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
-  const offset = intParam(params.get("offset"), 0, 0, 1_000_000);
-  if (days === null || limit === null || offset === null) {
-    return fail(400, "bad_window", "days is 1 to 3650, limit is 1 to 200, offset is 0 or more");
-  }
-
-  const { data, error } = await client
-    .from("xero_invoices")
-    .select("id, xero_invoice_id, invoice_number, reference, contact_name, sub_total, status, invoice_type, invoice_date, job_id, line_items")
-    .eq("invoice_type", "ACCPAY")
-    .in("status", ["AUTHORISED", "PAID"])
-    .is("job_id", null)
-    .gte("invoice_date", sinceDate(days, now))
-    .order("invoice_date", { ascending: false })
-    .order("id", { ascending: false })
-    .range(offset, offset + limit);
-  if (error) return fail(500, "bills_unreadable", "supplier bills could not be read");
-
-  const rows = (Array.isArray(data) ? data : []) as BillRow[];
-  const hasMore = rows.length > limit;
-  const page = rows.slice(0, limit);
-  const xeroIds = page
-    .map((row) => row.xero_invoice_id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
-
-  let tradeBillIds = new Set<string>();
-  if (xeroIds.length > 0) {
-    const trade = await client
-      .from("trade_invoices")
-      .select("xero_bill_id")
-      .in("xero_bill_id", xeroIds);
-    if (trade.error) return fail(500, "bills_unreadable", "trade bill ids could not be read");
-    const tradeRows = (Array.isArray(trade.data) ? trade.data : []) as { xero_bill_id?: string | null }[];
-    tradeBillIds = new Set<string>(
-      tradeRows
-        .map((row) => row.xero_bill_id)
-        .filter((id): id is string => typeof id === "string" && id.length > 0),
-    );
-  }
-
-  const kept = page.filter((row) =>
-    !isTradeMirrorBill(row.xero_invoice_id, row.line_items, tradeBillIds)
-  );
-  const tokens = [...new Set(kept.flatMap((row) => billJobNumberFields(row).all))];
-  const jobsByNumber = new Map<string, string[]>();
-  if (tokens.length > 0) {
-    const jobs = await client
-      .from("jobs")
-      .select("id, job_number")
-      .in("job_number", tokens);
-    if (jobs.error) return fail(500, "bills_unreadable", "job numbers could not be read");
-    for (const job of Array.isArray(jobs.data) ? jobs.data : []) {
-      const number = typeof job.job_number === "string" ? job.job_number.toUpperCase() : "";
-      const id = typeof job.id === "string" ? job.id : "";
-      if (!number || !id) continue;
-      const list = jobsByNumber.get(number) ?? [];
-      list.push(id);
-      jobsByNumber.set(number, list);
+/**
+ * Builds the apply plan from a reviewed list. A row whose outcome or job
+ * number disagrees with a fresh classification is an error, and no step is
+ * returned. Installer and trade-app rows are skips: the plan never asks for
+ * an RPC on them.
+ */
+export function planReviewedLinks(
+  reviewed: readonly ReviewedLink[],
+  liveByInvoice: ReadonlyMap<string, BillClassification>,
+): { ok: true; plan: ApplyStep[] } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const plan: ApplyStep[] = [];
+  for (const row of reviewed) {
+    const live = liveByInvoice.get(row.xero_invoice_id);
+    if (!live) {
+      errors.push(`${row.xero_invoice_id}: not in the live read`);
+      continue;
     }
-  }
-
-  const bills = kept.map((row) => {
-    const fields = billJobNumberFields(row);
-    const match = classifyJobNumberMatch(fields.all, jobsByNumber);
-    return {
-      invoice_id: row.id,
+    if (row.outcome !== live.outcome) {
+      errors.push(`${row.xero_invoice_id}: reviewed ${row.outcome}, live ${live.outcome}`);
+      continue;
+    }
+    const reviewedJob = (row.job_number ?? "").toUpperCase();
+    const liveJob = (live.job_number ?? "").toUpperCase();
+    if (live.outcome === "exact" && reviewedJob !== liveJob) {
+      errors.push(`${row.xero_invoice_id}: reviewed job ${reviewedJob || "(none)"}, live ${liveJob}`);
+      continue;
+    }
+    if (SKIP_OUTCOMES.has(live.outcome)) {
+      plan.push({
+        xero_invoice_id: row.xero_invoice_id,
+        outcome: live.outcome,
+        rpc: false,
+        proposal_kind: null,
+        job_number: null,
+        matched_text: live.matched_text ?? "",
+        reason: `skipped ${live.outcome}`,
+      });
+      continue;
+    }
+    const proposalKind = live.outcome === "exact" ? "job" : "review";
+    plan.push({
       xero_invoice_id: row.xero_invoice_id,
-      invoice_number: row.invoice_number,
-      reference: row.reference,
-      contact_name: row.contact_name,
-      sub_total: row.sub_total,
-      status: row.status,
-      invoice_date: row.invoice_date,
-      outcome: match.outcome,
-      suggested_job_number: match.job_number,
-      suggested_job_id: match.job_id,
-      tokens: match.tokens,
-      real_job_numbers: match.real_job_numbers,
-    };
-  });
-
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      days,
-      limit,
-      offset,
-      has_more: hasMore,
-      bills,
-    },
-  };
-}
-
-async function readInvoice(client: any, invoiceId: string): Promise<
-  { row: BillRow | null; error: boolean }
-> {
-  const { data, error } = await client
-    .from("xero_invoices")
-    .select("id, xero_invoice_id, invoice_number, reference, contact_name, sub_total, status, invoice_type, invoice_date, job_id, line_items")
-    .eq("id", invoiceId)
-    .limit(1);
-  if (error) return { row: null, error: true };
-  const rows = Array.isArray(data) ? data : [];
-  return { row: (rows[0] as BillRow | undefined) ?? null, error: false };
-}
-
-export async function jobProfitLinkBillAction(
-  client: any,
-  body: Record<string, unknown> | null | undefined,
-  actor: { user_id: string | null; email: string | null },
-): Promise<QueueResult> {
-  const invoiceId = typeof body?.invoice_id === "string" ? body.invoice_id : "";
-  const jobId = typeof body?.job_id === "string" ? body.job_id : "";
-  if (!UUID_RE.test(invoiceId) || !UUID_RE.test(jobId)) {
-    return fail(400, "bad_link", "invoice_id and job_id are both required uuids");
+      outcome: live.outcome,
+      rpc: true,
+      proposal_kind: proposalKind,
+      job_number: proposalKind === "job" ? live.job_number : null,
+      matched_text: row.matched_text ?? live.matched_text ?? "",
+      reason: `reviewed ${live.outcome}`,
+    });
   }
-
-  const invoice = await readInvoice(client, invoiceId);
-  if (invoice.error) return fail(500, "bill_unreadable", "the supplier bill could not be read");
-  if (!invoice.row) return fail(404, "bill_not_found", "no supplier bill with that id");
-  if (invoice.row.job_id === jobId) {
-    return {
-      status: 200,
-      body: { ok: true, invoice_id: invoiceId, job_id: jobId, audit_written: false, already_linked: true },
-    };
+  if (errors.length > 0) return { ok: false, errors };
+  if (plan.some((step) => step.rpc && (step.outcome === "installer_hold" || step.outcome === "trade_app"))) {
+    return { ok: false, errors: ["apply plan included an installer or trade-app bill"] };
   }
-  if (invoice.row.job_id) {
-    return fail(409, "bill_already_linked", "this bill is already linked to a different job");
-  }
-  if (invoice.row.invoice_type !== "ACCPAY" || !LINKABLE_STATUSES.has(String(invoice.row.status || ""))) {
-    return fail(409, "bill_not_linkable", "only an authorised or paid supplier bill can be linked");
-  }
-
-  const trade = await client
-    .from("trade_invoices")
-    .select("xero_bill_id")
-    .eq("xero_bill_id", invoice.row.xero_invoice_id)
-    .limit(1);
-  if (trade.error) return fail(500, "bill_unreadable", "trade bill ids could not be read");
-  const tradeRows = (Array.isArray(trade.data) ? trade.data : []) as { xero_bill_id?: string | null }[];
-  const tradeIds = new Set<string>(
-    tradeRows
-      .map((row) => row.xero_bill_id)
-      .filter((id): id is string => typeof id === "string"),
-  );
-  if (isTradeMirrorBill(invoice.row.xero_invoice_id, invoice.row.line_items, tradeIds)) {
-    return fail(409, "trade_mirror_bill", "a trade invoice mirror is not a supplier bill");
-  }
-
-  const jobRead = await client
-    .from("jobs")
-    .select("id, job_number, ses_money_sealed_at")
-    .eq("id", jobId)
-    .limit(1);
-  if (jobRead.error) return fail(500, "job_unreadable", "the job could not be read");
-  const job = (Array.isArray(jobRead.data) ? jobRead.data : [])[0] as
-    | { id: string; ses_money_sealed_at?: string | null }
-    | undefined;
-  if (!job) return fail(404, "job_not_found", "no job with that id");
-  if (job.ses_money_sealed_at) {
-    return fail(409, "sealed_ses_release_required", "a sealed make-safe job is not linked from this queue");
-  }
-
-  const updated = await client
-    .from("xero_invoices")
-    .update({ job_id: jobId })
-    .eq("id", invoiceId)
-    .is("job_id", null)
-    .select("id");
-  if (updated.error) return fail(500, "link_failed", "the bill could not be linked");
-  const wrote = Array.isArray(updated.data) ? updated.data.length : 0;
-  if (wrote === 0) {
-    const again = await readInvoice(client, invoiceId);
-    if (again.error) return fail(500, "bill_unreadable", "the supplier bill could not be re-read");
-    if (again.row?.job_id === jobId) {
-      return {
-        status: 200,
-        body: { ok: true, invoice_id: invoiceId, job_id: jobId, audit_written: false, already_linked: true },
-      };
-    }
-    return fail(409, "bill_already_linked", "this bill is already linked to a different job");
-  }
-
-  const event = await client.from("job_events").insert({
-    job_id: jobId,
-    user_id: actor.user_id,
-    event_type: "job_profit_bill_linked",
-    detail_json: {
-      invoice_id: invoiceId,
-      xero_invoice_id: invoice.row.xero_invoice_id,
-      actor_email: actor.email,
-    },
-  });
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      invoice_id: invoiceId,
-      job_id: jobId,
-      audit_written: !event.error,
-      already_linked: false,
-    },
-  };
-}
-
-/** One dispatch so index.ts names each action once, in its case label. */
-export async function jobProfitBillQueueDispatch(
-  action: string,
-  client: any,
-  url: { searchParams: URLSearchParams },
-  body: Record<string, unknown> | null | undefined,
-  actor: { user_id: string | null; email: string | null },
-): Promise<QueueResult> {
-  if (action === "job_profit_unmatched_bills") {
-    return await jobProfitUnmatchedBillsAction(client, url.searchParams);
-  }
-  return await jobProfitLinkBillAction(client, body, actor);
+  return { ok: true, plan };
 }

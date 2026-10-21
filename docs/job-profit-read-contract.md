@@ -8,8 +8,7 @@ What the finance tab reads from `ops-api?action=job_profit` and
 `labels`.
 
 Access for `job_profit` and `job_profit_list`: a server key or an admin/owner
-session. Everyone else gets 403. The supplier-bill queue below is a separate
-door: a server key, or an admin, owner or ops_manager session.
+session. Everyone else gets 403. These actions never link a supplier bill.
 
 All money is ex GST. Profit is gross profit on direct costs, no overhead.
 
@@ -20,8 +19,6 @@ All money is ex GST. Profit is gross profit on direct costs, no overhead.
 | `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `cost_events`, `revenue_events`, `timeline`, `labels` |
 | `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
-| `job_profit_unmatched_bills` (`days`, `limit`, `offset`) | Unlinked supplier bills, classified. Read only. Office session or server key |
-| `job_profit_link_bill` (POST `invoice_id`, `job_id`) | Links that bill to that job. Office session or server key. No automatic link |
 
 `job_profit_list` returns no row count. `has_more` is true when another page
 follows: ask again with `offset` raised by `limit`. An offset past the last job
@@ -36,15 +33,15 @@ Legacy jobs have no row.
 
 | Field | Meaning | Null means |
 |---|---|---|
-| `quoted_ex` | Sent or accepted quote. While `job_profit_patio_quote_v1` is on, an unambiguous accepted patio tool quote | No quote, or the patio figure conflicts or cannot be read. Never the live price |
-| `quoted_source` | `sent_quote:...`, or `patio_quote:accepted_revision` / `revision_at_acceptance` / `latest_frozen_revision` | No figure was published |
-| `expected_cost_ex`, `expected_labour_ex`, `expected_materials_ex`, `expected_commission_ex` | Quote-fixed cost. While `job_profit_work_order_labour_v1` is on, labour is the job work order's agreed labour (draft or approved, plus approved customer variations) when that figure is present | No quote cost and no agreed labour. A stored 0 is a real figure. Never a live estimate |
+| `quoted_ex` | Sent or accepted quote. While `job_profit_patio_quote_v1` is on, the one frozen patio tool quote when it is the only candidate and it agrees with the live price and with what has been invoiced. A conflict is blank and flagged | No quote, or the patio figure conflicts or cannot be read. Never the live price |
+| `quoted_source` | `sent_quote:...`, or `patio_quote:sole_frozen_revision` when that frozen quote is the one published | No figure was published |
+| `expected_cost_ex`, `expected_labour_ex`, `expected_materials_ex`, `expected_commission_ex` | Quote-fixed cost. While `job_profit_work_order_labour_v1` is on, labour is an approved job work order's agreed labour (`approved_at` is not null), plus approved customer variations, when that figure is present. A draft work order is ignored | No quote cost and no approved agreed labour. A stored 0 on an approved work order is a real figure. Never a live estimate |
 | `expected_source` | `job_work_order`, `frozen_at_acceptance`, `accepted_quote_revision` or `sent_quote_revision` | No expected cost |
-| `expected_labour_quote_ex` | The quote's labour, even when `expected_labour_ex` is the work order | No quote labour |
-| `work_order_agreed_labour_ex` | Job work order agreed labour, including approved customer variations. Evidence even while the labour switch is off | No agreed figure |
+| `expected_labour_quote_ex` | The quote's labour, even when `expected_labour_ex` is the approved work order | No quote labour |
+| `work_order_agreed_labour_ex` | Approved job work order agreed labour, plus approved customer variations. A draft is not included. Evidence even while the labour switch is off. A stored 0 is a real figure | No approved agreed figure |
 | `actual_cost_ex`, `actual_labour_ex`, `actual_materials_ex`, `actual_commission_ex`, `actual_other_ex` | Costs linked to the job line by line. Stays line-level when a margin is published from the Xero Project | Never null |
 | `cost_basis`, `line_level_cost_ex` | Always `line_level`; the same figure as `actual_cost_ex` | Never null |
-| `margin_source` | `line_level`, or `from Xero Project` when that switch published the margin from the project | No margin published |
+| `margin_source` | Exactly `from Xero Project, may exclude unlinked labour` when that switch published the margin from the project | No margin published |
 | `margin_cost_ex` | The cost the published margin subtracted | No margin published |
 | `xero_project_expenses_ex` | Expenses on record against the job's Xero Project. Evidence. Trade labour may sit outside it | No project is named after the job |
 | `invoiced_ex`, `collected_ex`, `draft_revenue_ex`, `variations_listed_ex` | Sales invoiced, paid, in draft, and agreed variations | Never null |
@@ -68,11 +65,12 @@ reason and note that applies.
 | Value | Meaning | Profit and margin |
 |---|---|---|
 | `missing_client_invoice` | Nothing invoiced yet | Null |
-| `xero_project_exceeds_line_costs` | See the Xero Project rule. While the project switch is off this is also `cost_flag` and profit is null. While it is on, profit may still be published and this stays in `completeness` | Null while the switch is off. While on, published from the project unless invoice, incomplete lines or unclassified lines still stop it |
-| `margin_from_xero_project` | The published margin used the Xero Project figure. Only while `job_profit_xero_project_cost_v1` is on | Shown, and `margin_source` is `from Xero Project` |
-| `patio_sales_price_conflict` | The patio tool quote disagrees with itself, or with the sent quote by more than $1. The published price is null. Only while `job_profit_patio_quote_v1` is on | Not guessed |
-| `patio_sales_price_unreadable` | The patio tool quote could not be read. A sent quote, when there is one, is kept. Only while the patio switch is on | The sent quote, or null |
-| `patio_sales_price_live_only` | A patio job has a live price and no unambiguous accepted quote. Only while the patio switch is on | Null. The live price is not published |
+| `xero_project_exceeds_line_costs` | See the Xero Project rule. While the project switch is off this is also `cost_flag` and profit is null. While it is on, this stays set and profit stays null unless the job is finished or billed labour has reached the approved work order. When that margin publishes, this suppressor is not set and `cost_flag` is `ok` | Null until the project margin publishes |
+| `xero_project_margin_held` | The project figure is higher than the linked lines, the switch is on, and the job is not finished and billed labour has not reached the approved work order. The margin stays blank | Null |
+| `margin_from_xero_project` | The published margin used the Xero Project figure. Only while `job_profit_xero_project_cost_v1` is on and the job is finished or billed labour has reached the approved work order | Shown, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour` |
+| `patio_sales_price_conflict` | The one frozen patio tool quote disagrees with the live price, with what has been invoiced, or with the sent quote, by more than $1. The published price is blank. Only while `job_profit_patio_quote_v1` is on | Not guessed |
+| `patio_sales_price_unreadable` | The frozen patio tool quote could not be read. A sent quote, when there is one, is kept. Only while the patio switch is on | The sent quote, or null |
+| `patio_sales_price_live_only` | A patio job has a readable live price and no frozen tool quote. A sent quote, when there is one, is kept. Only while the patio switch is on | The sent quote, or null. The live price is not published |
 | `no_cost_linked` | No cost is linked to the job | Null |
 | `incomplete_invoice_lines` | A trade invoice on the job has no lines, or lines that do not add up to its total | Null |
 | `unclassified_lines` | A trade line has no cost lane | Null |
@@ -89,7 +87,7 @@ reason and note that applies.
 | `holding_job` | A holding job, not a customer's job | Shown |
 | `quote_costs_incomplete` | The quote the job stands on sealed its costs as still to confirm, so no expected cost is fixed (`expected_source` null). Not the same as a job with no costed quote. Column `quote_costs_incomplete` (20261020220000). | Shown |
 
-The last nine appear in `completeness` only.
+From `text_matched_lines` through `holding_job`, and `quote_costs_incomplete`, these appear in `completeness` only.
 
 ## Switches
 
@@ -102,9 +100,9 @@ way.
 
 | Flag | While off | While on |
 |---|---|---|
-| `job_profit_work_order_labour_v1` | Expected labour is the quote snapshot. `work_order_agreed_labour_ex` is still shown | Expected labour is the job work order's agreed labour when that figure is present, ahead of the quote. Approved customer-variation trade allocation is included. A draft variation is not. Crew work orders are not read |
-| `job_profit_xero_project_cost_v1` | A Xero Project above the linked lines nulls profit and margin | That margin uses the project figure as its cost and `margin_source` is `from Xero Project`. `actual_cost_ex` stays the linked lines. A missing client invoice, incomplete lines or unclassified lines still hide the margin. `materials_not_linked` and `no_labour_linked` do not |
-| `job_profit_patio_quote_v1` | `quoted_ex` is a sent quote document only | A patio job's sales price is the accepted frozen patio tool quote when that figure is unambiguous. A conflict or an unreadable quote is flagged and is not guessed. The live price is never published |
+| `job_profit_work_order_labour_v1` | Expected labour is the quote snapshot. `work_order_agreed_labour_ex` is still shown | Expected labour is an approved job work order's agreed labour (`approved_at` is not null) when that figure is present, ahead of the quote. Approved customer-variation trade allocation is included. A draft work order and a draft variation are not. Crew work orders are not read. A stored 0 is a real figure |
+| `job_profit_xero_project_cost_v1` | A Xero Project above the linked lines nulls profit and margin | That margin uses the project figure as its cost only when the job is finished or billed labour has reached the approved work order's agreed labour, and `margin_source` is exactly `from Xero Project, may exclude unlinked labour`. Otherwise the margin stays blank and `xero_project_exceeds_line_costs` stays set. When the margin publishes, that suppressor is not set and `cost_flag` is `ok`. `actual_cost_ex` stays the linked lines. A missing client invoice, incomplete lines or unclassified lines still hide the margin. `materials_not_linked` and `no_labour_linked` do not |
+| `job_profit_patio_quote_v1` | `quoted_ex` is a sent quote document only | A patio job's sales price is the one frozen tool quote when it is the only candidate and it agrees with the live price and with what has been invoiced. A conflict is blank and flagged. The live price is never published. `quoted_source` is `patio_quote:sole_frozen_revision` |
 
 ## Xero Project rule
 
@@ -117,30 +115,42 @@ While `job_profit_xero_project_cost_v1` is off, that excess also nulls
 "project expenses on record".
 
 While the switch is on, the published margin is invoiced minus the project
-figure, `margin_source` is `from Xero Project`, and `margin_cost_ex` is the
-project figure. The line costs are not added on top: trade labour that never
-hit the project can be missing from that margin. `completeness` still names
-`xero_project_exceeds_line_costs` and `margin_from_xero_project`.
+figure only when the job is finished (`complete`, `completed`, `invoiced`,
+`archived`, `get_review`, `final_payment`) or billed labour has reached the
+approved work order's agreed labour. Then `margin_source` is exactly
+`from Xero Project, may exclude unlinked labour`, `margin_cost_ex` is the
+project figure, `cost_flag` is `ok`, and `completeness` names
+`margin_from_xero_project` and not `xero_project_exceeds_line_costs`. The line
+costs are not added on top: trade labour that never hit the project can be
+missing from that margin. Otherwise the margin stays blank, `cost_flag` stays
+`xero_project_exceeds_line_costs`, and `completeness` also names
+`xero_project_margin_held`.
+
+These three rules are DEFAULT, owner to confirm: publish the project margin
+only when the job is finished or labour is fully billed; stop the suppressor
+when that margin publishes; blank and flag a patio quote that disagrees. Approved-only
+work-order labour is the same kind of default.
 
 Company, work-type and month `actual_cost_ex` totals never include the project
 figure. `published_cost_ex` includes it only for a job whose margin was
 published from the project.
 
-## Supplier bill queue
+## Supplier bills
 
-`job_profit_unmatched_bills` reads ACCPAY bills that are AUTHORISED or PAID,
-have no job, and are not a trade-app mirror. Default window is 90 days
-(`days` 1 to 3650, `limit` 1 to 200). Each bill is `exact`, `ambiguous` or
-`unmatched`. A match is an exact job number (`SWF-261308`, `SWMS-261114`, and
-the other issued prefixes) in the reference, a line description, or line
-tracking. Two real jobs, or one job number stored on two jobs, is ambiguous.
-The read never writes.
+Nothing in this read sets `xero_invoices.job_id`. A reviewed match is a row in
+`materials_bill_proposals` (Bills to place), outcome `queued_for_review`,
+written by `job_profit_link_bill`. An installer bill (account 301 or 306) and a
+bill that already has a `job_materials_facts` row are refused and write nothing.
 
-`job_profit_link_bill` sets `xero_invoices.job_id` for the bill the office
-named. Linking the same job again is a no-op. A different job, a draft, a
-sales invoice, a trade-mirror bill, or a make-safe job whose money is sealed
-is refused. The script `scripts/job-profit-bill-match.ts` is the dry-run for a
-batch; `--apply` is manual and is not run by this migration.
+`scripts/job-profit-bill-match.ts` is the dry-run. It prints every proposed
+bill: bill id, contact, amount, job number, the matched text, and the outcome.
+A match is a whole job-number token only (`SWP-`, `SWF-`, `SWMS-`, `SWB-`,
+5 or 6 digits) in the reference, a line description, or line tracking, so
+`SWF-2611` never matches inside `SWF-261111`. A bill that names more than one
+job number goes to review for a person to split. A subcontractor-account bill
+and a bill paid through the trade app are excluded and are never applied.
+`--apply` writes only a reviewed list, one audit row per proposal, and never
+touches an installer bill. It is manual and is not run by this migration.
 
 ## Rollup fields
 

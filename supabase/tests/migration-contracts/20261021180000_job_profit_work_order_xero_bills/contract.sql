@@ -4,29 +4,26 @@
 -- seeded off. This transaction turns them on, proves the new behaviour, and
 -- rolls back, so a committed database stays off.
 --
---   JP2-WO     draft job work order agreed 250.50; a draft variation of 999
---              is not added. Flag off: expected labour stays the quote's 100.
---              Flag on: expected labour is 250.50.
---   JP2-WO0    agreed labour 0 is a real figure, not "no work order".
---   JP2-XERO   project expenses 5000 above a 300 labour bill and a 10000
---              invoice. Flag off: margin null. Flag on: margin uses 5000 and
---              is marked from Xero Project. actual cost stays 300.
---   JP2-XERO0  project above the lines, nothing invoiced: margin stays null.
---              The project name must not also match JP2-XERO.
---   JP2-PATIO  newest frozen patio quote 8500, no sent quote.
---   JP2-PQUOT  still quoted: the frozen quote is not the sales price.
---   JP2-PLIVE  live pricing only: flagged, not published.
---   JP2-PCONF  frozen ex and inc disagree: flagged, and the live price is
---              not also called live-only.
---   JP2-PDIFF  sent quote and frozen quote differ by more than $1: published
---              price is null.
---   JP2-PNEAR  they agree within $1: the frozen figure is published.
---   JP2-PBAD   frozen quote cannot be read: the sent quote is kept, and the
---              row is flagged.
---   JP2-R1     a named scope revision that is missing is not replaced by a
---              later frozen revision.
---   JP2-R2     accepted_at uses the revision frozen at or before that time.
---   JP2-R2X    accepted_at with only a later revision does not fall through.
+--   SWF-261397  draft job work order agreed 250.50. Ignored. Expected labour
+--               stays the quote's 160 with the labour switch on or off.
+--   JP-WOOK     approved job work order 800 plus an approved variation of 50.
+--               A draft variation of 999 is not added. Flag off: expected
+--               labour stays 160, and the agreed figure is still shown.
+--               Flag on: expected labour is 850, source job_work_order.
+--   JP-WO0      approved agreed labour 0 is a real figure.
+--   JP-XDONE    finished makesafe. Project 5000 above labour 300, invoiced
+--               10000. Flag off: margin null and the suppressor stays.
+--               Flag on: margin uses 5000, the exact project label, cost_flag
+--               ok, and the suppressor is not set.
+--   JP-XHOLD    in progress, billed labour 80 under agreed 8530. Flag on:
+--               the project margin stays blank and the suppressor stays.
+--   SWP-261247  frozen 5000 against live 9382: blank and flagged.
+--   SWP-26100   frozen 1000 against live 2000: blank and flagged.
+--   JP-POK      one frozen 5000, no live price, nothing invoiced past it:
+--               published only while the patio switch is on.
+--   Bills       an installer bill and a bill that already has a materials
+--               fact are refused. An exact token and a two-job bill write a
+--               proposal and never set xero_invoices.job_id.
 
 \set ON_ERROR_STOP on
 
@@ -34,6 +31,7 @@ DO $$
 DECLARE
   name text;
   n int;
+  tail text;
 BEGIN
   FOREACH name IN ARRAY ARRAY[
     'job_profit_work_order_labour_v1',
@@ -49,16 +47,31 @@ BEGIN
     END IF;
   END LOOP;
 
-  IF EXISTS (
-    SELECT 1 FROM unnest(ARRAY[
-      'margin_source', 'margin_cost_ex', 'expected_labour_quote_ex', 'work_order_agreed_labour_ex'
-    ]) AS c(name)
-    WHERE NOT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = 'v_job_profit' AND column_name = c.name
-    )
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'v_job_profit'
+      AND column_name = 'quote_costs_incomplete'
   ) THEN
-    RAISE EXCEPTION 'v_job_profit is missing one of the four new columns';
+    RAISE EXCEPTION '1121 column quote_costs_incomplete is missing';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'v_job_profit'
+      AND column_name = 'invoice_emailed_ex'
+  ) THEN
+    RAISE EXCEPTION '1121 column invoice_emailed_ex is missing';
+  END IF;
+
+  SELECT string_agg(c.column_name, ',' ORDER BY c.ordinal_position) INTO tail
+    FROM information_schema.columns c
+   WHERE c.table_schema = 'public' AND c.table_name = 'v_job_profit'
+     AND c.ordinal_position > (
+       SELECT ordinal_position FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'v_job_profit'
+          AND column_name = 'quote_costs_incomplete'
+     );
+  IF tail IS DISTINCT FROM 'margin_source,margin_cost_ex,expected_labour_quote_ex,work_order_agreed_labour_ex' THEN
+    RAISE EXCEPTION 'columns after quote_costs_incomplete are %, not the four appended columns', tail;
   END IF;
 END $$;
 
@@ -100,289 +113,346 @@ ROLLBACK;
 
 BEGIN;
 
+INSERT INTO public.users (id, org_id, name) VALUES
+  ('a7611000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'Contract approver');
+
 INSERT INTO public.jobs (
-  id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, accepted_at, created_at
+  id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at
 ) VALUES
-  ('a7600000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP2-WO', false, '{}', '{}',
-   '{"lanes": {"labour": {"amount_ex_gst": 100}, "materials": {"amount_ex_gst": 40}, "commission": {"amount_ex_gst": 10}}}',
+  ('a7610000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'archived', 'fencing', 'SWF-261397', false, '{}', '{}',
+   '{"lanes": {"labour": {"amount_ex_gst": 160}}}', '2026-08-01T00:00:00Z'),
+  ('a7610000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'archived', 'fencing', 'JP-WOOK', false, '{}', '{}',
+   '{"lanes": {"labour": {"amount_ex_gst": 160}, "materials": {"amount_ex_gst": 40}, "commission": {"amount_ex_gst": 10}}}',
+   '2026-08-01T00:00:00Z'),
+  ('a7610000-0000-4000-8000-000000000003', '00000000-0000-0000-0000-000000000001', 'archived', 'fencing', 'JP-WO0', false, '{}', '{}',
+   '{"lanes": {"labour": {"amount_ex_gst": 100}}}', '2026-08-01T00:00:00Z'),
+  ('a7610000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-000000000001', 'complete', 'makesafe', 'JP-XDONE', false, '{}', '{}',
    NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-00000000000e', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP2-WO0', false, '{}', '{}',
-   '{"lanes": {"labour": {"amount_ex_gst": 100}, "materials": {"amount_ex_gst": 40}, "commission": {"amount_ex_gst": 10}}}',
+  ('a7610000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'in_progress', 'makesafe', 'JP-XHOLD', false, '{}', '{}',
    NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP2-XERO', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000003', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP2-XERO0', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-PATIO', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'quoted', 'patio', 'JP2-PQUOT', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-PLIVE', false, '{}',
-   '{"totalExGST": 4200, "totalIncGST": 4620}', NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-PCONF', false, '{}',
-   '{"totalExGST": 9000, "totalIncGST": 9900}', NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-PDIFF', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-PNEAR', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-PBAD', false, '{}', '{}',
-   NULL, NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-00000000000b', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-R1', false, '{}', '{}',
-   '{"scope_revision_id": "a7640000-0000-4000-8000-000000000099"}', NULL, '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-00000000000c', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-R2', false, '{}', '{}',
-   NULL, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
-  ('a7600000-0000-4000-8000-00000000000d', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP2-R2X', false, '{}', '{}',
-   NULL, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+  ('a7610000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'SWP-261247', false, '{}',
+   '{"totalExGST": 9382, "totalIncGST": 10320.2}', NULL, '2026-08-01T00:00:00Z'),
+  ('a7610000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'SWP-26100', false, '{}',
+   '{"totalExGST": 2000, "totalIncGST": 2200}', NULL, '2026-08-01T00:00:00Z'),
+  ('a7610000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP-POK', false, '{}',
+   '{}', NULL, '2026-08-01T00:00:00Z'),
+  ('a7610000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'archived', 'fencing', 'SWF-261111', false, '{}', '{}',
+   NULL, '2026-08-01T00:00:00Z');
 
-INSERT INTO public.work_orders (org_id, job_id, wo_number, kind, status, origin, agreed_labour_ex) VALUES
-  ('00000000-0000-0000-0000-000000000001', 'a7600000-0000-4000-8000-000000000001', 'JP2-WO-1', 'job', 'draft', 'manual', 250.50),
-  ('00000000-0000-0000-0000-000000000001', 'a7600000-0000-4000-8000-00000000000e', 'JP2-WO0-1', 'job', 'draft', 'manual', 0);
+INSERT INTO public.work_orders (
+  id, org_id, job_id, wo_number, kind, status, origin, agreed_labour_ex
+) VALUES (
+  'a7612000-0000-4000-8000-000000000001',
+  '00000000-0000-0000-0000-000000000001',
+  'a7610000-0000-4000-8000-000000000001',
+  'SWF-261397-DRAFT', 'job', 'draft', 'manual', 250.50
+);
 
-INSERT INTO public.work_order_customer_variations (org_id, job_id, description, trade_allocation_ex, created_by) VALUES
-  ('00000000-0000-0000-0000-000000000001', 'a7600000-0000-4000-8000-000000000001', 'Draft variation that must not count', 999, 'contract');
+-- An approved job work order cannot be inserted while the seal trigger is on.
+ALTER TABLE public.work_orders DISABLE TRIGGER trg_work_orders_job_kind_guard;
+INSERT INTO public.work_orders (
+  id, org_id, job_id, wo_number, kind, status, origin,
+  agreed_labour_ex, approved_at, approved_by, sealed_content_hash
+) VALUES
+  ('a7612000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001',
+   'a7610000-0000-4000-8000-000000000002', 'JP-WOOK-1', 'job', 'approved', 'manual',
+   800, '2026-09-01T00:00:00Z', 'a7611000-0000-4000-8000-000000000001', repeat('a', 64)),
+  ('a7612000-0000-4000-8000-000000000003', '00000000-0000-0000-0000-000000000001',
+   'a7610000-0000-4000-8000-000000000003', 'JP-WO0-1', 'job', 'approved', 'manual',
+   0, '2026-09-01T00:00:00Z', 'a7611000-0000-4000-8000-000000000001', repeat('b', 64)),
+  ('a7612000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-000000000001',
+   'a7610000-0000-4000-8000-000000000005', 'JP-XHOLD-1', 'job', 'approved', 'manual',
+   8530, '2026-09-01T00:00:00Z', 'a7611000-0000-4000-8000-000000000001', repeat('c', 64));
+ALTER TABLE public.work_orders ENABLE TRIGGER trg_work_orders_job_kind_guard;
+
+INSERT INTO public.work_order_customer_variations (
+  org_id, job_id, description, trade_allocation_ex, created_by
+) VALUES (
+  '00000000-0000-0000-0000-000000000001',
+  'a7610000-0000-4000-8000-000000000002',
+  'Draft variation that must not count', 999, 'contract'
+);
+
+ALTER TABLE public.work_order_customer_variations DISABLE TRIGGER trg_work_order_customer_variations_guard;
+INSERT INTO public.work_order_customer_variations (
+  id, org_id, job_id, work_order_id, variation_number, status, description,
+  trade_allocation_ex, customer_price_ex, created_by, approved_at, approved_by, sealed_content_hash
+) VALUES (
+  'a7613000-0000-4000-8000-000000000001',
+  '00000000-0000-0000-0000-000000000001',
+  'a7610000-0000-4000-8000-000000000002',
+  'a7612000-0000-4000-8000-000000000002',
+  1, 'approved', 'Approved variation that counts',
+  50, 80, 'contract', '2026-09-02T00:00:00Z',
+  'a7611000-0000-4000-8000-000000000001', repeat('d', 64)
+);
+ALTER TABLE public.work_order_customer_variations ENABLE TRIGGER trg_work_order_customer_variations_guard;
 
 INSERT INTO public.xero_invoices (
   org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name,
-  sub_total, total, amount_paid, invoice_date, job_id, raw_json, line_items
+  sub_total, total, amount_paid, invoice_date, job_id, raw_json, line_items, reference
 ) VALUES
-  ('00000000-0000-0000-0000-000000000001', 'BILL-JP2-XERO', 'BILL-JP2-XERO', 'ACCPAY', 'PAID', 'Supplies',
-   300, 300, 300, '2026-08-02', 'a7600000-0000-4000-8000-000000000002', '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 300, "AccountCode": "306", "Description": "Install hand"}]'),
-  ('00000000-0000-0000-0000-000000000001', 'INV-JP2-XERO', 'INV-JP2-XERO', 'ACCREC', 'AUTHORISED', 'Client',
-   10000, 11000, 0, '2026-08-08', 'a7600000-0000-4000-8000-000000000002', '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Fence"}]'),
-  ('00000000-0000-0000-0000-000000000001', 'BILL-JP2-XERO0', 'BILL-JP2-XERO0', 'ACCPAY', 'AUTHORISED', 'Supplies',
-   100, 100, 0, '2026-08-02', 'a7600000-0000-4000-8000-000000000003', '{"LineAmountTypes": "Exclusive"}',
-   '[{"LineAmount": 100, "AccountCode": "306", "Description": "Install hand"}]');
+  ('00000000-0000-0000-0000-000000000001', 'BILL-JP-XDONE', 'BILL-JP-XDONE', 'ACCPAY', 'PAID', 'Supplies',
+   300, 300, 300, '2026-08-02', 'a7610000-0000-4000-8000-000000000004', '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 300, "AccountCode": "306", "Description": "Install hand"}]', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'INV-JP-XDONE', 'INV-JP-XDONE', 'ACCREC', 'AUTHORISED', 'Client',
+   10000, 11000, 0, '2026-08-08', 'a7610000-0000-4000-8000-000000000004', '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Work"}]', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-JP-XHOLD', 'BILL-JP-XHOLD', 'ACCPAY', 'AUTHORISED', 'Supplies',
+   80, 80, 0, '2026-08-02', 'a7610000-0000-4000-8000-000000000005', '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 80, "AccountCode": "306", "Description": "Install hand"}]', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'INV-JP-XHOLD', 'INV-JP-XHOLD', 'ACCREC', 'AUTHORISED', 'Client',
+   10000, 11000, 0, '2026-08-08', 'a7610000-0000-4000-8000-000000000005', '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Work"}]', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-INST', 'BILL-INST', 'ACCPAY', 'AUTHORISED', 'Alyx Smuts',
+   450, 450, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 450, "AccountCode": "306", "Description": "SWF-26698 Fence Installation"}]', 'SWF-26698'),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-INST301', 'BILL-INST301', 'ACCPAY', 'AUTHORISED', 'Installer',
+   100, 100, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 100, "AccountCode": "301", "Description": "SWF-261111 labour"}]', 'SWF-261111'),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-FACT', 'BILL-FACT', 'ACCPAY', 'AUTHORISED', 'Supplier',
+   40, 40, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 40, "AccountCode": "305", "Description": "SWF-261111 materials"}]', 'SWF-261111'),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-EXACT', 'BILL-EXACT', 'ACCPAY', 'AUTHORISED', 'Supplier',
+   25, 25, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 25, "AccountCode": "305", "Description": "Posts"}]', 'SWF-261111'),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-SPLIT', 'BILL-SPLIT', 'ACCPAY', 'AUTHORISED', 'Supplier',
+   60, 60, 0, '2026-08-02', NULL, '{"LineAmountTypes": "Exclusive"}',
+   '[{"LineAmount": 60, "AccountCode": "305", "Description": "SWF-261111 and SWP-261247"}]', NULL);
 
 INSERT INTO public.xero_projects (job_id, project_name, total_expenses, total_invoiced) VALUES
-  ('a7600000-0000-4000-8000-000000000002', 'JP2-XERO 1 Site', 5000, 10000),
-  ('a7600000-0000-4000-8000-000000000003', 'JP2-XERO0 2 Site', 2000, 0);
+  ('a7610000-0000-4000-8000-000000000004', 'JP-XDONE site', 5000, 10000),
+  ('a7610000-0000-4000-8000-000000000005', 'JP-XHOLD site', 5000, 10000);
 
 INSERT INTO public.scope_revisions (
-  id, job_id, revision_number, tool_kind, scope_canonical_text, scope_hash,
-  pricing_canonical_text, pricing_hash, renderer_version, tool_version, status, frozen_at
+  id, job_id, revision_number, status, pricing_canonical_text, frozen_at
 ) VALUES
-  ('a7640000-0000-4000-8000-000000000001', 'a7600000-0000-4000-8000-000000000004', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 8500}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000002', 'a7600000-0000-4000-8000-000000000005', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 8500}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000003', 'a7600000-0000-4000-8000-000000000007', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 100, "totalIncGST": 200}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000004', 'a7600000-0000-4000-8000-000000000008', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 8500}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000005', 'a7600000-0000-4000-8000-000000000009', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 1500.40}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000006', 'a7600000-0000-4000-8000-00000000000a', 1, 'patio', '{}', repeat('a', 64),
-   'not-json', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000007', 'a7600000-0000-4000-8000-00000000000b', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 8500}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000008', 'a7600000-0000-4000-8000-00000000000c', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 4200}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-07-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-000000000009', 'a7600000-0000-4000-8000-00000000000c', 2, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 9999}', repeat('c', 64), 'contract', 'contract', 'frozen', '2026-09-01T00:00:00Z'),
-  ('a7640000-0000-4000-8000-00000000000a', 'a7600000-0000-4000-8000-00000000000d', 1, 'patio', '{}', repeat('a', 64),
-   '{"totalExGST": 7777}', repeat('b', 64), 'contract', 'contract', 'frozen', '2026-09-01T00:00:00Z');
+  ('a7640000-0000-4000-8000-000000000001', 'a7610000-0000-4000-8000-000000000006', 1, 'frozen',
+   '{"totalExGST": 5000}', '2026-07-01T00:00:00Z'),
+  ('a7640000-0000-4000-8000-000000000002', 'a7610000-0000-4000-8000-000000000007', 1, 'frozen',
+   '{"totalExGST": 1000}', '2026-07-01T00:00:00Z'),
+  ('a7640000-0000-4000-8000-000000000003', 'a7610000-0000-4000-8000-000000000008', 1, 'frozen',
+   '{"totalExGST": 5000}', '2026-07-01T00:00:00Z');
 
-INSERT INTO public.job_documents (id, job_id, type, sent_at, created_at) VALUES
-  ('a7630000-0000-4000-8000-000000000001', 'a7600000-0000-4000-8000-000000000008', 'quote', '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z'),
-  ('a7630000-0000-4000-8000-000000000002', 'a7600000-0000-4000-8000-000000000009', 'quote', '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z'),
-  ('a7630000-0000-4000-8000-000000000003', 'a7600000-0000-4000-8000-00000000000a', 'quote', '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z');
-
-INSERT INTO public.quote_revisions (
-  job_id, job_document_id, version, recipient_email, scope_snapshot_json, pricing_snapshot_json,
-  totals_snapshot_json, manifest_url, manifest_hash, pdf_url, released_via, build_kind, sent_at,
-  internal_cost_snapshot_json
-) VALUES
-  ('a7600000-0000-4000-8000-000000000008', 'a7630000-0000-4000-8000-000000000001', 1, 'client@example.com', '{}', '{}',
-   '{"total_inc_gst": 1650}', 'https://example.invalid/m', repeat('d', 64), 'https://example.invalid/p',
-   'send-quote/send', 'patio', '2026-07-20T00:00:00Z', '{}'),
-  ('a7600000-0000-4000-8000-000000000009', 'a7630000-0000-4000-8000-000000000002', 1, 'client@example.com', '{}', '{}',
-   '{"total_inc_gst": 1650}', 'https://example.invalid/m', repeat('d', 64), 'https://example.invalid/p',
-   'send-quote/send', 'patio', '2026-07-20T00:00:00Z', '{}'),
-  ('a7600000-0000-4000-8000-00000000000a', 'a7630000-0000-4000-8000-000000000003', 1, 'client@example.com', '{}', '{}',
-   '{"total_inc_gst": 1650}', 'https://example.invalid/m', repeat('d', 64), 'https://example.invalid/p',
-   'send-quote/send', 'patio', '2026-07-20T00:00:00Z', '{}');
-
-CREATE FUNCTION pg_temp.num(p_label text, p_got numeric, p_want numeric) RETURNS void
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF p_got IS DISTINCT FROM p_want THEN
-    RAISE EXCEPTION '%: got % want %', p_label, p_got, p_want;
-  END IF;
-END $$;
-
-CREATE FUNCTION pg_temp.txt(p_label text, p_got text, p_want text) RETURNS void
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF p_got IS DISTINCT FROM p_want THEN
-    RAISE EXCEPTION '%: got [%] want [%]', p_label, p_got, p_want;
-  END IF;
-END $$;
-
-CREATE FUNCTION pg_temp.has_item(p_label text, p_arr text[], p_item text, p_want boolean) RETURNS void
-LANGUAGE plpgsql AS $$
-DECLARE
-  v_has boolean;
-BEGIN
-  v_has := p_item = ANY (COALESCE(p_arr, ARRAY[]::text[]));
-  IF v_has IS DISTINCT FROM p_want THEN
-    RAISE EXCEPTION '%: % in % wanted %', p_label, p_item, p_arr, p_want;
-  END IF;
-END $$;
-
--- Flags off: existing columns stay on the quote / line-level rules.
-DO $$
-DECLARE
-  r public.v_job_profit;
-  one public.v_job_profit;
-BEGIN
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-WO';
-  PERFORM pg_temp.num('WO off labour', r.expected_labour_ex, 100);
-  PERFORM pg_temp.txt('WO off source', r.expected_source, 'frozen_at_acceptance');
-  PERFORM pg_temp.num('WO off quote labour', r.expected_labour_quote_ex, 100);
-  PERFORM pg_temp.num('WO off agreed', r.work_order_agreed_labour_ex, 250.50);
-  PERFORM pg_temp.num('WO off expected', r.expected_cost_ex, 150);
-  PERFORM pg_temp.txt('WO off margin source', r.margin_source, NULL);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-WO0';
-  PERFORM pg_temp.num('WO0 off labour', r.expected_labour_ex, 100);
-  PERFORM pg_temp.num('WO0 off agreed', r.work_order_agreed_labour_ex, 0);
-  PERFORM pg_temp.num('WO0 off expected', r.expected_cost_ex, 150);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-XERO';
-  PERFORM pg_temp.num('XERO off profit', r.profit_ex, NULL);
-  PERFORM pg_temp.num('XERO off margin', r.margin_pct, NULL);
-  PERFORM pg_temp.txt('XERO off flag', r.cost_flag, 'xero_project_exceeds_line_costs');
-  PERFORM pg_temp.num('XERO off actual', r.actual_cost_ex, 300);
-  PERFORM pg_temp.txt('XERO off basis', r.cost_basis, 'line_level');
-  PERFORM pg_temp.txt('XERO off margin source', r.margin_source, NULL);
-  PERFORM pg_temp.num('XERO off margin cost', r.margin_cost_ex, NULL);
-  PERFORM pg_temp.num('XERO off unsuppressed', r.profit_ex_unsuppressed, NULL);
-  PERFORM pg_temp.has_item('XERO off note', r.completeness, 'margin_from_xero_project', false);
-  PERFORM pg_temp.has_item('XERO off exceeds', r.completeness, 'xero_project_exceeds_line_costs', true);
-
-  SELECT * INTO one FROM public.job_profit('a7600000-0000-4000-8000-000000000002');
-  IF one.profit_ex IS DISTINCT FROM r.profit_ex OR one.actual_cost_ex IS DISTINCT FROM r.actual_cost_ex THEN
-    RAISE EXCEPTION 'job_profit(uuid) disagreed with the view while flags are off';
-  END IF;
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-XERO0';
-  PERFORM pg_temp.num('XERO0 off profit', r.profit_ex, NULL);
-  PERFORM pg_temp.txt('XERO0 off flag', r.cost_flag, 'xero_project_exceeds_line_costs');
-  PERFORM pg_temp.num('XERO0 off project', r.xero_project_expenses_ex, 2000);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PATIO';
-  PERFORM pg_temp.num('PATIO off quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.has_item('PATIO off live', r.completeness, 'patio_sales_price_live_only', false);
-  PERFORM pg_temp.has_item('PATIO off conflict', r.completeness, 'patio_sales_price_conflict', false);
-  PERFORM pg_temp.has_item('PATIO off unread', r.completeness, 'patio_sales_price_unreadable', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PLIVE';
-  PERFORM pg_temp.num('PLIVE off quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.has_item('PLIVE off live', r.completeness, 'patio_sales_price_live_only', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PDIFF';
-  PERFORM pg_temp.num('PDIFF off quoted', r.quoted_ex, 1500);
-  PERFORM pg_temp.has_item('PDIFF off conflict', r.completeness, 'patio_sales_price_conflict', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PBAD';
-  PERFORM pg_temp.num('PBAD off quoted', r.quoted_ex, 1500);
-  PERFORM pg_temp.has_item('PBAD off unread', r.completeness, 'patio_sales_price_unreadable', false);
-END $$;
-
-UPDATE public.feature_flags SET enabled = true
-WHERE flag_name IN (
-  'job_profit_work_order_labour_v1',
-  'job_profit_xero_project_cost_v1',
-  'job_profit_patio_quote_v1'
+INSERT INTO public.job_materials_facts (
+  xero_invoice_id, job_id, lane, amount_ex_gst, automation_source
+) VALUES (
+  'BILL-FACT', 'a7610000-0000-4000-8000-000000000009', 'materials', 40, 'manual_queue'
 );
 
 DO $$
 DECLARE
-  r public.v_job_profit;
+  r public.v_job_profit%ROWTYPE;
+  v_msg text;
+  v_job uuid;
+  n int;
+  v_kind text;
+  v_number text;
+  v_outcome text;
 BEGIN
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-WO';
-  PERFORM pg_temp.num('WO on labour', r.expected_labour_ex, 250.50);
-  PERFORM pg_temp.txt('WO on source', r.expected_source, 'job_work_order');
-  PERFORM pg_temp.num('WO on quote labour', r.expected_labour_quote_ex, 100);
-  PERFORM pg_temp.num('WO on agreed', r.work_order_agreed_labour_ex, 250.50);
-  PERFORM pg_temp.num('WO on expected', r.expected_cost_ex, 300.50);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-WO0';
-  PERFORM pg_temp.num('WO0 on labour', r.expected_labour_ex, 0);
-  PERFORM pg_temp.txt('WO0 on source', r.expected_source, 'job_work_order');
-  PERFORM pg_temp.num('WO0 on quote labour', r.expected_labour_quote_ex, 100);
-  PERFORM pg_temp.num('WO0 on expected', r.expected_cost_ex, 50);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-XERO';
-  PERFORM pg_temp.num('XERO on profit', r.profit_ex, 5000);
-  PERFORM pg_temp.num('XERO on margin', r.margin_pct, 50);
-  PERFORM pg_temp.txt('XERO on source', r.margin_source, 'from Xero Project');
-  PERFORM pg_temp.num('XERO on margin cost', r.margin_cost_ex, 5000);
-  PERFORM pg_temp.num('XERO on actual', r.actual_cost_ex, 300);
-  PERFORM pg_temp.txt('XERO on basis', r.cost_basis, 'line_level');
-  PERFORM pg_temp.txt('XERO on flag', r.cost_flag, 'ok');
-  PERFORM pg_temp.num('XERO on unsuppressed', r.profit_ex_unsuppressed, NULL);
-  PERFORM pg_temp.has_item('XERO on exceeds', r.completeness, 'xero_project_exceeds_line_costs', true);
-  PERFORM pg_temp.has_item('XERO on materials', r.completeness, 'materials_not_linked', true);
-  PERFORM pg_temp.has_item('XERO on from project', r.completeness, 'margin_from_xero_project', true);
-  PERFORM pg_temp.has_item('XERO on no labour', r.completeness, 'no_labour_linked', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-XERO0';
-  PERFORM pg_temp.num('XERO0 on profit', r.profit_ex, NULL);
-  PERFORM pg_temp.txt('XERO0 on flag', r.cost_flag, 'ok');
-  PERFORM pg_temp.txt('XERO0 on revenue', r.revenue_flag, 'missing_client_invoice');
-  PERFORM pg_temp.num('XERO0 on project', r.xero_project_expenses_ex, 2000);
-  PERFORM pg_temp.has_item('XERO0 on from project', r.completeness, 'margin_from_xero_project', false);
-  PERFORM pg_temp.txt('XERO0 on margin source', r.margin_source, NULL);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PATIO';
-  PERFORM pg_temp.num('PATIO on quoted', r.quoted_ex, 8500);
-  PERFORM pg_temp.txt('PATIO on source', r.quoted_source, 'patio_quote:latest_frozen_revision');
-  PERFORM pg_temp.num('PATIO on expected', r.expected_cost_ex, NULL);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PQUOT';
-  PERFORM pg_temp.num('PQUOT on quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.has_item('PQUOT on live', r.completeness, 'patio_sales_price_live_only', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PLIVE';
-  PERFORM pg_temp.num('PLIVE on quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.has_item('PLIVE on live', r.completeness, 'patio_sales_price_live_only', true);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PCONF';
-  PERFORM pg_temp.num('PCONF on quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.has_item('PCONF on conflict', r.completeness, 'patio_sales_price_conflict', true);
-  PERFORM pg_temp.has_item('PCONF on live', r.completeness, 'patio_sales_price_live_only', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PDIFF';
-  PERFORM pg_temp.num('PDIFF on quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.txt('PDIFF on source', r.quoted_source, NULL);
-  PERFORM pg_temp.has_item('PDIFF on conflict', r.completeness, 'patio_sales_price_conflict', true);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PNEAR';
-  PERFORM pg_temp.num('PNEAR on quoted', r.quoted_ex, 1500.40);
-  PERFORM pg_temp.txt('PNEAR on source', r.quoted_source, 'patio_quote:latest_frozen_revision');
-  PERFORM pg_temp.has_item('PNEAR on conflict', r.completeness, 'patio_sales_price_conflict', false);
-
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-PBAD';
-  PERFORM pg_temp.num('PBAD on quoted', r.quoted_ex, 1500);
-  PERFORM pg_temp.has_item('PBAD on unread', r.completeness, 'patio_sales_price_unreadable', true);
-  IF r.quoted_source NOT LIKE 'sent_quote:%' THEN
-    RAISE EXCEPTION 'PBAD on source: got [%]', r.quoted_source;
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWF-261397';
+  IF r.expected_labour_ex IS DISTINCT FROM 160
+     OR r.expected_source IS DISTINCT FROM 'frozen_at_acceptance'
+     OR r.work_order_agreed_labour_ex IS NOT NULL
+     OR r.expected_labour_quote_ex IS DISTINCT FROM 160 THEN
+    RAISE EXCEPTION 'draft WO counted while flags off: labour % source % agreed % quote %',
+      r.expected_labour_ex, r.expected_source, r.work_order_agreed_labour_ex, r.expected_labour_quote_ex;
   END IF;
 
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-R1';
-  PERFORM pg_temp.num('R1 on quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.num('R1 on labour', r.expected_labour_ex, NULL);
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-WOOK';
+  IF r.expected_labour_ex IS DISTINCT FROM 160
+     OR r.work_order_agreed_labour_ex IS DISTINCT FROM 850
+     OR r.expected_source IS DISTINCT FROM 'frozen_at_acceptance' THEN
+    RAISE EXCEPTION 'approved WO changed expected labour while the switch is off: labour % agreed % source %',
+      r.expected_labour_ex, r.work_order_agreed_labour_ex, r.expected_source;
+  END IF;
 
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-R2';
-  PERFORM pg_temp.num('R2 on quoted', r.quoted_ex, 4200);
-  PERFORM pg_temp.txt('R2 on source', r.quoted_source, 'patio_quote:revision_at_acceptance');
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-WO0';
+  IF r.work_order_agreed_labour_ex IS DISTINCT FROM 0 OR r.expected_labour_ex IS DISTINCT FROM 100 THEN
+    RAISE EXCEPTION 'approved zero was not kept as evidence while the switch is off: agreed % labour %',
+      r.work_order_agreed_labour_ex, r.expected_labour_ex;
+  END IF;
 
-  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP2-R2X';
-  PERFORM pg_temp.num('R2X on quoted', r.quoted_ex, NULL);
-  PERFORM pg_temp.txt('R2X on source', r.quoted_source, NULL);
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-XDONE';
+  IF r.profit_ex IS NOT NULL OR r.margin_source IS NOT NULL OR r.margin_cost_ex IS NOT NULL
+     OR r.cost_flag IS DISTINCT FROM 'xero_project_exceeds_line_costs'
+     OR r.actual_cost_ex IS DISTINCT FROM 300
+     OR 'margin_from_xero_project' = ANY (r.completeness)
+     OR 'xero_project_margin_held' = ANY (r.completeness)
+     OR NOT ('xero_project_exceeds_line_costs' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'project margin published while the switch is off: profit % flag % completeness %',
+      r.profit_ex, r.cost_flag, r.completeness;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWP-261247';
+  IF r.quoted_ex IS NOT NULL OR 'patio_sales_price_conflict' = ANY (r.completeness) THEN
+    RAISE EXCEPTION 'patio conflict published while the switch is off: quoted % completeness %',
+      r.quoted_ex, r.completeness;
+  END IF;
+
+  UPDATE public.feature_flags SET enabled = true
+  WHERE flag_name IN (
+    'job_profit_work_order_labour_v1',
+    'job_profit_xero_project_cost_v1',
+    'job_profit_patio_quote_v1'
+  );
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWF-261397';
+  IF r.expected_labour_ex IS DISTINCT FROM 160
+     OR r.expected_labour_ex IS NOT DISTINCT FROM 250.50
+     OR r.work_order_agreed_labour_ex IS NOT NULL
+     OR r.expected_source IS DISTINCT FROM 'frozen_at_acceptance'
+     OR r.expected_labour_quote_ex IS DISTINCT FROM 160 THEN
+    RAISE EXCEPTION 'draft WO with agreed 250.50 was not ignored: labour % agreed % source % quote %',
+      r.expected_labour_ex, r.work_order_agreed_labour_ex, r.expected_source, r.expected_labour_quote_ex;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-WOOK';
+  IF r.expected_labour_ex IS DISTINCT FROM 850
+     OR r.expected_source IS DISTINCT FROM 'job_work_order'
+     OR r.expected_labour_quote_ex IS DISTINCT FROM 160
+     OR r.work_order_agreed_labour_ex IS DISTINCT FROM 850
+     OR r.expected_cost_ex IS DISTINCT FROM 900 THEN
+    RAISE EXCEPTION 'approved WO plus variation did not become expected labour: labour % source % quote % agreed % cost %',
+      r.expected_labour_ex, r.expected_source, r.expected_labour_quote_ex,
+      r.work_order_agreed_labour_ex, r.expected_cost_ex;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-WO0';
+  IF r.expected_labour_ex IS DISTINCT FROM 0
+     OR r.expected_source IS DISTINCT FROM 'job_work_order'
+     OR r.work_order_agreed_labour_ex IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'approved zero was not a real expected labour figure: labour % source % agreed %',
+      r.expected_labour_ex, r.expected_source, r.work_order_agreed_labour_ex;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-XDONE';
+  IF r.profit_ex IS DISTINCT FROM 5000
+     OR r.margin_pct IS DISTINCT FROM 50.0
+     OR r.margin_source IS DISTINCT FROM 'from Xero Project, may exclude unlinked labour'
+     OR r.margin_cost_ex IS DISTINCT FROM 5000
+     OR r.cost_flag IS DISTINCT FROM 'ok'
+     OR r.actual_cost_ex IS DISTINCT FROM 300
+     OR r.profit_ex_unsuppressed IS NOT NULL
+     OR r.margin_ok IS DISTINCT FROM true
+     OR NOT ('margin_from_xero_project' = ANY (r.completeness))
+     OR 'xero_project_exceeds_line_costs' = ANY (r.completeness)
+     OR 'xero_project_margin_held' = ANY (r.completeness) THEN
+    RAISE EXCEPTION 'finished project margin did not publish cleanly: profit % source % flag % cost % completeness % unsuppressed %',
+      r.profit_ex, r.margin_source, r.cost_flag, r.actual_cost_ex, r.completeness, r.profit_ex_unsuppressed;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-XHOLD';
+  IF r.profit_ex IS NOT NULL
+     OR r.margin_source IS NOT NULL
+     OR r.cost_flag IS DISTINCT FROM 'xero_project_exceeds_line_costs'
+     OR r.work_order_agreed_labour_ex IS DISTINCT FROM 8530
+     OR r.actual_labour_ex IS DISTINCT FROM 80
+     OR NOT ('xero_project_exceeds_line_costs' = ANY (r.completeness))
+     OR NOT ('xero_project_margin_held' = ANY (r.completeness))
+     OR 'margin_from_xero_project' = ANY (r.completeness) THEN
+    RAISE EXCEPTION 'in-progress project margin was not held: profit % source % flag % labour % agreed % completeness %',
+      r.profit_ex, r.margin_source, r.cost_flag, r.actual_labour_ex,
+      r.work_order_agreed_labour_ex, r.completeness;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWP-261247';
+  IF r.quoted_ex IS NOT NULL OR r.quoted_source IS NOT NULL
+     OR NOT ('patio_sales_price_conflict' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'SWP-261247 was not blank and flagged: quoted % source % completeness %',
+      r.quoted_ex, r.quoted_source, r.completeness;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'SWP-26100';
+  IF r.quoted_ex IS NOT NULL OR r.quoted_source IS NOT NULL
+     OR NOT ('patio_sales_price_conflict' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'SWP-26100 was not blank and flagged: quoted % source % completeness %',
+      r.quoted_ex, r.quoted_source, r.completeness;
+  END IF;
+
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-POK';
+  IF r.quoted_ex IS DISTINCT FROM 5000
+     OR r.quoted_source IS DISTINCT FROM 'patio_quote:sole_frozen_revision'
+     OR 'patio_sales_price_conflict' = ANY (r.completeness) THEN
+    RAISE EXCEPTION 'sole frozen patio quote was not published: quoted % source % completeness %',
+      r.quoted_ex, r.quoted_source, r.completeness;
+  END IF;
+
+  FOREACH v_msg IN ARRAY ARRAY['BILL-INST', 'BILL-INST301'] LOOP
+    BEGIN
+      PERFORM public.job_profit_link_bill(v_msg, 'job', 'SWF-261111', v_msg, 'job_profit_bill_match', 'contract', 'contract');
+      RAISE EXCEPTION 'installer bill % was not refused', v_msg;
+    EXCEPTION
+      WHEN OTHERS THEN
+        IF SQLERRM NOT LIKE '%link_refused: installer bill%' THEN
+          RAISE;
+        END IF;
+    END;
+    IF EXISTS (SELECT 1 FROM public.materials_bill_proposals p WHERE p.xero_invoice_id = v_msg) THEN
+      RAISE EXCEPTION 'installer bill % wrote a proposal', v_msg;
+    END IF;
+    SELECT i.job_id INTO v_job FROM public.xero_invoices i WHERE i.xero_invoice_id = v_msg;
+    IF v_job IS NOT NULL THEN
+      RAISE EXCEPTION 'installer bill % set xero_invoices.job_id', v_msg;
+    END IF;
+  END LOOP;
+
+  BEGIN
+    PERFORM public.job_profit_link_bill('BILL-FACT', 'job', 'SWF-261111', 'SWF-261111', 'job_profit_bill_match', 'contract', 'contract');
+    RAISE EXCEPTION 'a bill that already has a materials fact was not refused';
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF SQLERRM NOT LIKE '%link_refused: bill already has a materials fact%' THEN
+        RAISE;
+      END IF;
+  END;
+  SELECT count(*) INTO n FROM public.materials_bill_proposals WHERE xero_invoice_id = 'BILL-FACT';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'a fact-backed bill wrote a proposal';
+  END IF;
+  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-FACT';
+  IF v_job IS NOT NULL THEN
+    RAISE EXCEPTION 'a fact-backed bill set xero_invoices.job_id';
+  END IF;
+
+  PERFORM public.job_profit_link_bill(
+    'BILL-EXACT', 'job', 'SWF-261111', 'SWF-261111', 'job_profit_bill_match', 'contract', 'contract'
+  );
+  SELECT proposal_kind, proposed_job_number, outcome
+    INTO v_kind, v_number, v_outcome
+  FROM public.materials_bill_proposals
+  WHERE xero_invoice_id = 'BILL-EXACT' AND outcome <> 'superseded';
+  IF v_kind IS DISTINCT FROM 'job' OR v_number IS DISTINCT FROM 'SWF-261111'
+     OR v_outcome IS DISTINCT FROM 'queued_for_review' THEN
+    RAISE EXCEPTION 'exact bill proposal was % % %', v_kind, v_number, v_outcome;
+  END IF;
+  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-EXACT';
+  IF v_job IS NOT NULL THEN
+    RAISE EXCEPTION 'exact bill set xero_invoices.job_id';
+  END IF;
+
+  PERFORM public.job_profit_link_bill(
+    'BILL-SPLIT', 'review', NULL, 'SWF-261111 SWP-261247', 'job_profit_bill_match', 'contract', 'contract'
+  );
+  SELECT proposal_kind, proposed_job_number, outcome
+    INTO v_kind, v_number, v_outcome
+  FROM public.materials_bill_proposals
+  WHERE xero_invoice_id = 'BILL-SPLIT' AND outcome <> 'superseded';
+  IF v_kind IS DISTINCT FROM 'review' OR v_number IS NOT NULL
+     OR v_outcome IS DISTINCT FROM 'queued_for_review' THEN
+    RAISE EXCEPTION 'two-job bill proposal was % % %', v_kind, v_number, v_outcome;
+  END IF;
+  SELECT job_id INTO v_job FROM public.xero_invoices WHERE xero_invoice_id = 'BILL-SPLIT';
+  IF v_job IS NOT NULL THEN
+    RAISE EXCEPTION 'two-job bill set xero_invoices.job_id';
+  END IF;
+
+  UPDATE public.feature_flags SET enabled = false
+  WHERE flag_name IN (
+    'job_profit_work_order_labour_v1',
+    'job_profit_xero_project_cost_v1',
+    'job_profit_patio_quote_v1'
+  );
 END $$;
 
 ROLLBACK;

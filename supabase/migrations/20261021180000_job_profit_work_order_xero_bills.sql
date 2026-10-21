@@ -1,30 +1,46 @@
--- Job profit: work-order labour, Xero Project cost, patio quote price.
+-- Job profit: append four columns onto the CFO view (20261020220000).
 --
--- Owner's word, 21 Oct 2026. Three switches, all seeded OFF. While a switch
--- is off, missing or unreadable, every existing v_job_profit column and the
--- completeness list stay what 20261009130000 published. The four new columns
+-- Stacked on 20261020220000_job_profit_quote_costs_incomplete (PR #1121,
+-- fm/cfo-quote-costs-incomplete-20261020 @ 6c62aa98). That migration is the
+-- single writer of v_job_profit. This file does not replace its body. It
+-- appends margin_source, margin_cost_ex, expected_labour_quote_ex and
+-- work_order_agreed_labour_ex, and adds the switches below. Apply only after
+-- 20261020220000. The live migration ledger was not read when 20261021180000
+-- was chosen (not observed).
+--
+-- DEFAULT, owner to confirm. Three switches, all seeded OFF. While a switch
+-- is off, missing or unreadable, every column 20261020220000 published and
+-- its completeness list stay what that view published. The four new columns
 -- are evidence only until their switch is on.
 --
 --   job_profit_work_order_labour_v1
---     expected labour is the job work order's agreed_labour_ex (draft or
---     approved, plus approved customer-variation trade allocation) ahead of
---     the quote snapshot. Crew work orders are not read.
+--     expected labour is an APPROVED job work order only (status approved
+--     and approved_at is not null), plus approved customer-variation trade
+--     allocation, ahead of the quote snapshot. A draft is ignored. Crew
+--     work orders are not read. A stored 0 is a real figure.
 --   job_profit_xero_project_cost_v1
---     when the Xero Project's expenses are higher than the linked line costs,
---     profit and margin use that project figure as the cost and margin_source
---     is 'from Xero Project'. actual_cost_ex stays the linked lines. A missing
---     client invoice, incomplete lines or unclassified lines still hide the
---     margin. materials_not_linked and no_labour_linked do not.
+--     the Xero Project figure replaces the linked cost only when the job is
+--     finished (complete, completed, invoiced, archived, get_review,
+--     final_payment) or billed labour has reached the approved work order's
+--     agreed labour, and a client invoice exists, and lines are complete and
+--     classified. margin_source is exactly 'from Xero Project, may exclude
+--     unlinked labour'. Otherwise the margin stays blank and
+--     xero_project_exceeds_line_costs stays set, with
+--     xero_project_margin_held. When the project margin publishes, that
+--     suppressor is not set and cost_flag is ok. actual_cost_ex stays the
+--     linked lines.
 --   job_profit_patio_quote_v1
---     a patio job's sales price is the accepted frozen patio tool quote when
---     that figure is unambiguous. A conflict or an unreadable quote is flagged
---     and is not guessed. The live pricing blob is never the published price.
+--     a patio sales price is one frozen quote, and only when that figure is
+--     the only candidate and it agrees with the live price and with what has
+--     been invoiced. A conflict is blank and flagged. The live price is never
+--     published. jobs.quoted_value is never read.
 --
--- Nothing here updates a job, a bill, a quote or a work order. Linking a
--- supplier bill is a later office action, not this migration. The live
--- migration ledger was not read when this version was chosen.
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '60s';
+-- Bill linking writes a materials_bill_proposals row (Bills to place). It
+-- never writes xero_invoices.job_id. Installer bills (accounts 301 and 306)
+-- and bills that already have a job_materials_facts row are refused. There
+-- is no second queue table.
+--
+-- Nothing here updates a job, a quote or a work order.
 
 CREATE OR REPLACE FUNCTION public.job_profit_flag_on(p_name text)
 RETURNS boolean
@@ -37,12 +53,10 @@ DECLARE
   v boolean;
 BEGIN
   SELECT bool_and(enabled) INTO v
-  FROM public.feature_flags
-  WHERE flag_name = p_name;
+    FROM public.feature_flags
+   WHERE flag_name = p_name;
   RETURN COALESCE(v, false);
 EXCEPTION
-  WHEN undefined_table THEN
-    RETURN false;
   WHEN OTHERS THEN
     RETURN false;
 END;
@@ -66,7 +80,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_patio_rule3_statuses() IS
-  'Statuses in which a patio job with no named scope revision and no accepted_at may use its newest frozen tool quote. Quoted and draft are not in this list.';
+  'Statuses in which a patio job may use its frozen tool quote. Quoted and draft are not in this list.';
 
 CREATE OR REPLACE FUNCTION public.job_profit_patio_ex(p_text text)
 RETURNS TABLE (quoted_ex numeric, note text)
@@ -90,7 +104,7 @@ BEGIN
       RETURN QUERY SELECT NULL::numeric, 'unreadable'::text;
       RETURN;
   END;
-  IF jsonb_typeof(j) IS DISTINCT FROM 'object' THEN
+  IF jsonb_typeof(j) IS DISTINCT FROM 'object' OR j = '{}'::jsonb THEN
     RETURN QUERY SELECT NULL::numeric, 'unreadable'::text;
     RETURN;
   END IF;
@@ -114,20 +128,361 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_patio_ex(text) IS
-  'Patio tool quote ex GST from pricing_canonical_text. unreadable or ex_inc_conflict returns no figure. Inc GST alone is divided by 1.1.';
+  'Patio tool quote ex GST from pricing text (totalExGST, else totalIncGST / 1.1). unreadable or ex_inc_conflict returns no figure. Never reads jobs.quoted_value.';
+
+CREATE OR REPLACE FUNCTION public.job_profit_patio_quote(
+  p_job_id uuid,
+  p_work_type text,
+  p_status text,
+  p_sent_quoted_ex numeric,
+  p_invoiced_ex numeric,
+  p_pricing_json jsonb,
+  p_enabled boolean
+)
+RETURNS TABLE (quoted_ex numeric, note text, source text)
+LANGUAGE plpgsql
+STABLE
+SET search_path = public, pg_temp
+AS $fn$
+DECLARE
+  v_n int;
+  v_bad int;
+  v_good int;
+  v_lo numeric;
+  v_hi numeric;
+  v_frozen numeric;
+  v_live_ex numeric;
+  v_live_inc numeric;
+  v_live numeric;
+  v_live_bad boolean;
+  v_live_present boolean;
+BEGIN
+  IF NOT COALESCE(p_enabled, false) THEN
+    RETURN;
+  END IF;
+  IF p_work_type IS DISTINCT FROM 'patio' THEN
+    RETURN;
+  END IF;
+  IF NOT (lower(COALESCE(p_status, '')) = ANY (public.job_profit_patio_rule3_statuses())) THEN
+    RETURN;
+  END IF;
+
+  v_live_ex := public.job_profit_num(p_pricing_json -> 'totalExGST');
+  v_live_inc := public.job_profit_num(p_pricing_json -> 'totalIncGST');
+  v_live_bad := v_live_ex IS NOT NULL AND v_live_inc IS NOT NULL
+    AND abs(v_live_ex - round(v_live_inc / 1.1, 2)) > 0.05;
+  v_live_present := v_live_ex IS NOT NULL OR v_live_inc IS NOT NULL;
+  IF v_live_bad THEN
+    v_live := NULL;
+  ELSIF v_live_ex IS NOT NULL THEN
+    v_live := round(v_live_ex, 2);
+  ELSIF v_live_inc IS NOT NULL THEN
+    v_live := round(v_live_inc / 1.1, 2);
+  END IF;
+
+  SELECT count(*),
+         count(*) FILTER (WHERE px.note IS DISTINCT FROM NULL AND px.quoted_ex IS NULL),
+         count(*) FILTER (WHERE px.note IS NULL AND px.quoted_ex IS NOT NULL),
+         min(px.quoted_ex) FILTER (WHERE px.note IS NULL),
+         max(px.quoted_ex) FILTER (WHERE px.note IS NULL)
+    INTO v_n, v_bad, v_good, v_lo, v_hi
+  FROM public.scope_revisions sr
+  CROSS JOIN LATERAL public.job_profit_patio_ex(sr.pricing_canonical_text) px
+  WHERE sr.job_id = p_job_id
+    AND sr.status = 'frozen'
+    AND sr.superseded_at IS NULL;
+
+  IF COALESCE(v_n, 0) = 0 THEN
+    IF v_live_present AND NOT v_live_bad THEN
+      RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_live_only'::text, NULL::text;
+    END IF;
+    RETURN;
+  END IF;
+
+  IF COALESCE(v_bad, 0) > 0 AND COALESCE(v_good, 0) > 0 THEN
+    RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_conflict'::text, NULL::text;
+    RETURN;
+  END IF;
+  IF COALESCE(v_good, 0) = 0 THEN
+    RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_unreadable'::text, NULL::text;
+    RETURN;
+  END IF;
+  IF v_hi - v_lo > 1 THEN
+    RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_conflict'::text, NULL::text;
+    RETURN;
+  END IF;
+
+  SELECT px.quoted_ex INTO v_frozen
+  FROM public.scope_revisions sr
+  CROSS JOIN LATERAL public.job_profit_patio_ex(sr.pricing_canonical_text) px
+  WHERE sr.job_id = p_job_id
+    AND sr.status = 'frozen'
+    AND sr.superseded_at IS NULL
+    AND px.note IS NULL
+    AND px.quoted_ex IS NOT NULL
+  ORDER BY sr.frozen_at DESC NULLS LAST, sr.revision_number DESC
+  LIMIT 1;
+
+  IF v_live_bad THEN
+    RETURN QUERY SELECT NULL::numeric, 'ex_inc_conflict'::text, NULL::text;
+    RETURN;
+  END IF;
+  IF v_live_present AND abs(v_live - v_frozen) > 1 THEN
+    RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_conflict'::text, NULL::text;
+    RETURN;
+  END IF;
+  IF COALESCE(p_invoiced_ex, 0) > v_frozen + 1 THEN
+    RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_conflict'::text, NULL::text;
+    RETURN;
+  END IF;
+  IF p_sent_quoted_ex IS NOT NULL AND abs(p_sent_quoted_ex - v_frozen) > 1 THEN
+    RETURN QUERY SELECT NULL::numeric, 'patio_sales_price_conflict'::text, NULL::text;
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT v_frozen, NULL::text, 'sole_frozen_revision'::text;
+END;
+$fn$;
+
+COMMENT ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) IS
+  'Patio sales price (20261021180000). Off, or not a patio, returns no row so the sent quote stands. One agreeing frozen quote is published only when it is consistent with the live price and with invoiced-to-date. A conflict returns no figure. Never reads jobs.quoted_value.';
+
+CREATE OR REPLACE FUNCTION public.job_profit_bill_job_tokens(p_reference text, p_line_items jsonb)
+RETURNS text[]
+LANGUAGE sql
+STABLE
+SET search_path = public, pg_temp
+AS $fn$
+  WITH items AS (
+    SELECT item
+    FROM jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(p_line_items) = 'array' THEN p_line_items
+        WHEN jsonb_typeof(p_line_items -> 'LineItems') = 'array' THEN p_line_items -> 'LineItems'
+        WHEN jsonb_typeof(p_line_items -> 'lineItems') = 'array' THEN p_line_items -> 'lineItems'
+        ELSE '[]'::jsonb
+      END
+    ) AS item
+  ),
+  sources AS (
+    SELECT COALESCE(p_reference, '') AS src
+    UNION ALL
+    SELECT COALESCE(item ->> 'Description', item ->> 'description', '') FROM items
+    UNION ALL
+    SELECT concat_ws(' ', trk ->> 'Name', trk ->> 'name', trk ->> 'Option', trk ->> 'option')
+    FROM items
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(COALESCE(item -> 'Tracking', item -> 'tracking')) = 'array'
+          THEN COALESCE(item -> 'Tracking', item -> 'tracking')
+        ELSE '[]'::jsonb
+      END
+    ) AS trk
+  ),
+  hits AS (
+    SELECT upper(m[1]) AS token
+    FROM sources
+    CROSS JOIN LATERAL regexp_matches(
+      ' ' || src || ' ',
+      '[^A-Za-z0-9]((?:SWMS|SWP|SWF|SWB)-[0-9]{5,6})[^A-Za-z0-9]',
+      'gi'
+    ) AS m
+  )
+  SELECT COALESCE(array_agg(DISTINCT token ORDER BY token), ARRAY[]::text[])
+  FROM hits
+  WHERE token IS NOT NULL
+$fn$;
+
+COMMENT ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) IS
+  'Whole job-number tokens (SWMS, SWP, SWF, SWB, 5 or 6 digits) from a bill reference, line description and tracking. Not the contact name and not the invoice number.';
+
+CREATE OR REPLACE FUNCTION public.job_profit_bill_is_installer(p_line_items jsonb)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = public, pg_temp
+AS $fn$
+  SELECT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(p_line_items) = 'array' THEN p_line_items
+        WHEN jsonb_typeof(p_line_items -> 'LineItems') = 'array' THEN p_line_items -> 'LineItems'
+        WHEN jsonb_typeof(p_line_items -> 'lineItems') = 'array' THEN p_line_items -> 'lineItems'
+        ELSE '[]'::jsonb
+      END
+    ) AS item
+    WHERE COALESCE(item ->> 'AccountCode', item ->> 'account_code', item ->> 'accountCode') IN ('301', '306')
+      AND (
+        COALESCE(item ->> 'LineAmount', item ->> 'line_amount', item ->> 'lineAmount') IS NULL
+        OR COALESCE(item ->> 'LineAmount', item ->> 'line_amount', item ->> 'lineAmount')
+             !~ '^-?[0-9]+(\.[0-9]+)?$'
+        OR (COALESCE(item ->> 'LineAmount', item ->> 'line_amount', item ->> 'lineAmount'))::numeric <> 0
+      )
+  )
+$fn$;
+
+COMMENT ON FUNCTION public.job_profit_bill_is_installer(jsonb) IS
+  'True when a bill line uses installer account 301 or 306 and the amount is missing, unreadable, or not an explicit zero.';
+
+CREATE OR REPLACE FUNCTION public.job_profit_link_bill(
+  p_xero_invoice_id text,
+  p_proposal_kind text,
+  p_job_number text,
+  p_matched_text text,
+  p_rule text,
+  p_reason text,
+  p_actor text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $fn$
+DECLARE
+  v_invoice_number text;
+  v_reference text;
+  v_lines jsonb;
+  v_tokens text[];
+  v_hash text;
+  v_live_id uuid;
+  v_live_outcome text;
+  v_live_hash text;
+  v_job_id uuid;
+  v_job_count int;
+  v_new_id uuid;
+  v_number text;
+BEGIN
+  IF p_xero_invoice_id IS NULL OR btrim(p_xero_invoice_id) = '' THEN
+    RAISE EXCEPTION 'link_refused: bill not found';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_xero_invoice_id, 0));
+
+  SELECT invoice_number, reference, line_items
+    INTO v_invoice_number, v_reference, v_lines
+  FROM public.xero_invoices
+  WHERE xero_invoice_id = p_xero_invoice_id
+  LIMIT 1
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'link_refused: bill not found';
+  END IF;
+
+  IF public.job_profit_bill_is_installer(v_lines) THEN
+    RAISE EXCEPTION 'link_refused: installer bill';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.job_materials_facts f
+    WHERE f.xero_invoice_id = p_xero_invoice_id
+  ) THEN
+    RAISE EXCEPTION 'link_refused: bill already has a materials fact';
+  END IF;
+
+  v_tokens := public.job_profit_bill_job_tokens(v_reference, v_lines);
+  IF p_proposal_kind = 'job' THEN
+    v_number := upper(btrim(COALESCE(p_job_number, '')));
+    IF v_tokens IS DISTINCT FROM ARRAY[v_number]::text[] OR v_number = '' THEN
+      RAISE EXCEPTION 'link_refused: job token set does not match the bill';
+    END IF;
+    SELECT count(*) INTO v_job_count FROM public.jobs j WHERE upper(j.job_number) = v_number;
+    IF v_job_count = 1 THEN
+      SELECT j.id INTO v_job_id FROM public.jobs j WHERE upper(j.job_number) = v_number;
+    END IF;
+  ELSIF p_proposal_kind = 'review' THEN
+    v_number := NULL;
+    v_job_id := NULL;
+  ELSE
+    RAISE EXCEPTION 'link_refused: proposal kind';
+  END IF;
+
+  v_hash := md5(concat_ws(
+    '|',
+    p_proposal_kind,
+    COALESCE(v_number, ''),
+    COALESCE(p_matched_text, ''),
+    COALESCE(p_rule, ''),
+    COALESCE(p_reason, ''),
+    array_to_string(v_tokens, ',')
+  ));
+
+  SELECT id, outcome, input_hash
+    INTO v_live_id, v_live_outcome, v_live_hash
+  FROM public.materials_bill_proposals
+  WHERE xero_invoice_id = p_xero_invoice_id
+    AND outcome <> 'superseded'
+  FOR UPDATE;
+
+  IF v_live_outcome = 'assigned' THEN
+    RETURN jsonb_build_object('ok', true, 'skipped', 'assigned', 'proposal_id', v_live_id, 'wrote', false);
+  END IF;
+  IF v_live_id IS NOT NULL AND v_live_hash = v_hash AND v_live_outcome = 'queued_for_review' THEN
+    RETURN jsonb_build_object('ok', true, 'skipped', 'idempotent', 'proposal_id', v_live_id, 'wrote', false);
+  END IF;
+  IF v_live_id IS NOT NULL THEN
+    UPDATE public.materials_bill_proposals
+       SET outcome = 'superseded', updated_at = now()
+     WHERE id = v_live_id;
+  END IF;
+
+  INSERT INTO public.materials_bill_proposals (
+    org_id, xero_invoice_id, invoice_number, proposal_kind, proposed_job_id,
+    proposed_job_number, confidence, rule, reason, candidates, signals,
+    input_hash, outcome
+  ) VALUES (
+    '00000000-0000-0000-0000-000000000001',
+    p_xero_invoice_id,
+    v_invoice_number,
+    p_proposal_kind,
+    v_job_id,
+    v_number,
+    CASE WHEN p_proposal_kind = 'job' THEN 'high' ELSE 'low' END,
+    COALESCE(NULLIF(btrim(COALESCE(p_rule, '')), ''), 'job_profit_bill_match'),
+    COALESCE(p_reason, ''),
+    '[]'::jsonb,
+    jsonb_build_object(
+      'actor', p_actor,
+      'matched_text', p_matched_text,
+      'tokens', to_jsonb(v_tokens)
+    ),
+    v_hash,
+    'queued_for_review'
+  )
+  RETURNING id INTO v_new_id;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'proposal_id', v_new_id,
+    'outcome', 'queued_for_review',
+    'proposal_kind', p_proposal_kind,
+    'proposed_job_number', v_number,
+    'wrote', true
+  );
+END;
+$fn$;
+
+COMMENT ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) IS
+  'Writes one Bills to place proposal (materials_bill_proposals). Never sets xero_invoices.job_id. Refuses an installer bill (accounts 301/306) and a bill that already has a job_materials_facts row.';
 
 REVOKE ALL ON FUNCTION public.job_profit_flag_on(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_rule3_statuses() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_ex(text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.job_profit_bill_is_installer(jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit_flag_on(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_rule3_statuses() TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_profit_patio_ex(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION public.job_profit_bill_job_tokens(text, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.job_profit_bill_is_installer(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.job_profit_link_bill(text, text, text, text, text, text, text) TO service_role;
 
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT
   'job_profit_work_order_labour_v1',
   false,
-  $d$Job profit expected labour. When on, a job work order's agreed_labour_ex (draft or approved, plus approved customer-variation trade allocation) is expected labour, ahead of the quote snapshot. Off, missing or unreadable: expected labour stays the quote snapshot. Turn on only on the owner's word.$d$
+  $d$DEFAULT, owner to confirm. Job profit expected labour. When on, only an approved job work order (approved_at not null, plus approved customer-variation trade allocation) is expected labour, ahead of the quote snapshot. A draft is ignored. Off, missing or unreadable: expected labour stays the quote snapshot. Turn on only on the owner's word.$d$
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags WHERE flag_name = 'job_profit_work_order_labour_v1'
 );
@@ -136,7 +491,7 @@ INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT
   'job_profit_xero_project_cost_v1',
   false,
-  $d$Job profit Xero Project cost. When on, a margin whose Xero Project expenses exceed the linked line costs uses the project figure as the cost and is marked from Xero Project. actual_cost_ex stays the linked lines. Off, missing or unreadable: that margin stays null. Turn on only on the owner's word.$d$
+  $d$DEFAULT, owner to confirm. Job profit Xero Project cost. When on, the project figure is the published cost only when the job is finished or billed labour has reached the approved work order, and margin_source is exactly "from Xero Project, may exclude unlinked labour". Otherwise the margin stays blank. Off, missing or unreadable: a project that exceeds the linked lines still nulls profit. Do not turn on before the profit page shows that label. Turn on only on the owner's word.$d$
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags WHERE flag_name = 'job_profit_xero_project_cost_v1'
 );
@@ -145,14 +500,10 @@ INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT
   'job_profit_patio_quote_v1',
   false,
-  $d$Job profit patio sales price. When on, a patio job's quoted figure is its accepted frozen patio tool quote when that figure is unambiguous. A conflict or an unreadable quote is flagged and not guessed. The live price is never published. Off, missing or unreadable: quoted_ex stays the sent quote only. Turn on only on the owner's word.$d$
+  $d$DEFAULT, owner to confirm. Job profit patio sales price. When on, a patio job's quoted figure is its one frozen tool quote when that figure agrees with the live price and with invoiced-to-date. A conflict is blank and flagged. The live price is never published. Off, missing or unreadable: quoted_ex stays the sent quote only. Turn on only on the owner's word.$d$
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags WHERE flag_name = 'job_profit_patio_quote_v1'
 );
-
--- The function returns the view's row type. Drop it before the view gains
--- columns, then recreate it after.
-DROP FUNCTION IF EXISTS public.job_profit(uuid);
 
 CREATE OR REPLACE VIEW public.v_job_profit AS
 WITH rev AS (
@@ -186,7 +537,12 @@ cost AS (
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.lane = 'commission') AS commission_ex,
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.lane = 'other') AS other_ex,
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.source = 'trade_line') AS trade_lines_ex,
-    sum(e.amount_ex) FILTER (WHERE NOT e.is_actual) AS committed_open_ex,
+    sum(e.amount_ex) FILTER (WHERE e.source = 'po_committed') AS committed_open_ex,
+    count(*) FILTER (WHERE e.source = 'po_ordered') AS ordered_not_billed_count,
+    count(*) FILTER (WHERE e.source = 'po_ordered'
+                     AND e.event_date <= (now() AT TIME ZONE 'Australia/Perth')::date - 30) AS ordered_not_billed_over_30_count,
+    count(*) FILTER (WHERE e.source = 'po_invoice_emailed') AS invoice_emailed_count,
+    sum(e.amount_ex) FILTER (WHERE e.source = 'po_invoice_emailed') AS invoice_emailed_ex,
     count(*) FILTER (WHERE e.is_actual) AS actual_events,
     bool_and(e.paid) FILTER (WHERE e.is_actual AND e.amount_ex <> 0) AS all_paid,
     bool_or(e.lane_detail = 'unclassified') AS has_unclassified,
@@ -249,6 +605,32 @@ sent_rev AS (
           COALESCE(public.job_profit_num(n.ce -> 'material_total'), 0),
           COALESCE(public.job_profit_num(n.ce -> 'subcontract_commission_total'), 0)
         ) > 0
+),
+quote_costs_open AS (
+  -- The revision the job's quote stands on, picked exactly as accepted_rev and
+  -- sent_rev pick theirs (same filters, same order) but before their costed
+  -- filter: the newest accepted revision if the job has one, else the newest
+  -- sent. The job is named incomplete when that revision's sealed cost
+  -- estimates say a cost is still to confirm (costs_complete false, sealed
+  -- since 20 Oct 2026 by the fence seal). Read only to name the job
+  -- incomplete; it never supplies a figure.
+  SELECT COALESCE(a.job_id, s.job_id) AS job_id
+  FROM (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    JOIN public.job_documents d ON d.id = r.job_document_id
+    WHERE d.accepted_at IS NOT NULL
+    ORDER BY r.job_id, d.accepted_at DESC, r.version DESC
+  ) a
+  FULL JOIN (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    WHERE r.sent_at IS NOT NULL
+    ORDER BY r.job_id, r.sent_at DESC, r.version DESC
+  ) s ON s.job_id = a.job_id
+  WHERE (CASE WHEN a.job_id IS NOT NULL THEN a.ce ELSE s.ce END) ->> 'costs_complete' = 'false'
 ),
 quote_docs AS (
   SELECT DISTINCT d.job_id
@@ -358,6 +740,12 @@ base AS (
     END AS expected_commission_ex,
     -- read only to decide whether materials are owed; never returned
     public.job_profit_num(j.pricing_json -> 'materialCostEstimate') AS live_materials_estimate_ex,
+    -- no expected cost is fixed because the quote's costs are not all known
+    (jsonb_typeof(j.expected_costs -> 'lanes') IS DISTINCT FROM 'object'
+      AND ar.job_id IS NULL AND sr.job_id IS NULL
+      AND qco.job_id IS NOT NULL) AS quote_costs_incomplete,
+    j.pricing_json AS pricing_json,
+    wo_agreed.agreed_labour_ex AS work_order_agreed_labour_ex,
     -- revenue
     COALESCE(rev.invoiced_ex, 0) AS invoiced_ex,
     COALESCE(rev.draft_revenue_ex, 0) AS draft_revenue_ex,
@@ -374,6 +762,10 @@ base AS (
     COALESCE(cost.other_ex, 0) AS line_other_ex,
     COALESCE(cost.trade_lines_ex, 0) AS trade_lines_ex,
     COALESCE(cost.committed_open_ex, 0) AS committed_open_ex,
+    COALESCE(cost.ordered_not_billed_count, 0) AS ordered_not_billed_count,
+    COALESCE(cost.ordered_not_billed_over_30_count, 0) AS ordered_not_billed_over_30_count,
+    COALESCE(cost.invoice_emailed_count, 0) AS invoice_emailed_count,
+    cost.invoice_emailed_ex,
     COALESCE(cost.actual_events, 0) AS actual_cost_events,
     cost.all_paid AS cost_all_paid,
     COALESCE(cost.has_unclassified, false) AS has_unclassified,
@@ -386,21 +778,7 @@ base AS (
     pr.project_expenses_ex AS xero_project_expenses_ex,
     pr.project_invoiced_ex AS xero_project_invoiced_ex,
     COALESCE(pr.project_count, 0) AS xero_project_count,
-    COALESCE(pr.contact_only, false) AS project_contact_only,
-    -- Job work order agreed labour (draft or approved). Evidence even while
-    -- job_profit_work_order_labour_v1 is off; it replaces expected labour only
-    -- when that flag is on. Approved customer-variation trade allocation is
-    -- included. A draft variation is not. Crew work orders are not.
-    wol.agreed_labour_ex AS work_order_agreed_labour_ex,
-    -- Accepted patio tool quote. Used only when job_profit_patio_quote_v1 is
-    -- on and work_type is patio. Null note means the figure is usable.
-    patio.quoted_ex AS patio_quoted_ex,
-    patio.note AS patio_note,
-    patio.source AS patio_source,
-    (j.type = 'patio' AND (
-       public.job_profit_num(j.pricing_json -> 'totalExGST') IS NOT NULL
-       OR public.job_profit_num(j.pricing_json -> 'totalIncGST') IS NOT NULL
-    )) AS patio_live_price
+    COALESCE(pr.contact_only, false) AS project_contact_only
   FROM public.jobs j
   LEFT JOIN public.makesafe_job_details md ON md.job_id = j.id
   CROSS JOIN LATERAL (
@@ -414,101 +792,30 @@ base AS (
   LEFT JOIN quoted qd ON qd.job_id = j.id
   LEFT JOIN accepted_rev ar ON ar.job_id = j.id
   LEFT JOIN sent_rev sr ON sr.job_id = j.id
+  LEFT JOIN quote_costs_open qco ON qco.job_id = j.id
+  LEFT JOIN LATERAL (
+    SELECT
+      wo.agreed_labour_ex
+        + COALESCE((
+            SELECT sum(v.trade_allocation_ex)
+              FROM public.work_order_customer_variations v
+             WHERE v.work_order_id = wo.id
+               AND v.status = 'approved'
+               AND v.approved_at IS NOT NULL
+          ), 0) AS agreed_labour_ex
+    FROM public.work_orders wo
+    WHERE wo.job_id = j.id
+      AND wo.kind = 'job'
+      AND wo.status = 'approved'
+      AND wo.approved_at IS NOT NULL
+      AND wo.agreed_labour_ex IS NOT NULL
+    ORDER BY wo.approved_at DESC NULLS LAST, wo.id
+    LIMIT 1
+  ) wo_agreed ON true
   LEFT JOIN rev ON rev.job_id = j.id
   LEFT JOIN collected col ON col.job_id = j.id
   LEFT JOIN cost ON cost.job_id = j.id
   LEFT JOIN project pr ON pr.job_id = j.id
-  LEFT JOIN LATERAL (
-    SELECT wo.agreed_labour_ex + COALESCE(var.trade_ex, 0) AS agreed_labour_ex
-    FROM public.work_orders wo
-    LEFT JOIN LATERAL (
-      SELECT sum(v.trade_allocation_ex) AS trade_ex
-      FROM public.work_order_customer_variations v
-      WHERE v.work_order_id = wo.id
-        AND v.status = 'approved'
-    ) var ON true
-    WHERE wo.job_id = j.id
-      AND wo.kind = 'job'
-      AND wo.agreed_labour_ex IS NOT NULL
-    ORDER BY wo.created_at DESC NULLS LAST, wo.id
-    LIMIT 1
-  ) wol ON true
-  LEFT JOIN LATERAL (
-    SELECT
-      CASE
-        WHEN r1.id IS NOT NULL THEN px1.quoted_ex
-        WHEN j.accepted_at IS NOT NULL THEN px2.quoted_ex
-        WHEN scope_id.present IS NOT TRUE
-             AND j.status = ANY (public.job_profit_patio_rule3_statuses())
-          THEN px3.quoted_ex
-      END AS quoted_ex,
-      CASE
-        WHEN r1.id IS NOT NULL THEN px1.note
-        WHEN j.accepted_at IS NOT NULL THEN px2.note
-        WHEN scope_id.present IS NOT TRUE
-             AND j.status = ANY (public.job_profit_patio_rule3_statuses())
-          THEN px3.note
-      END AS note,
-      CASE
-        WHEN r1.id IS NOT NULL AND px1.note IS NULL THEN 'accepted_revision'
-        WHEN j.accepted_at IS NOT NULL AND r2.id IS NOT NULL AND px2.note IS NULL THEN 'revision_at_acceptance'
-        WHEN scope_id.present IS NOT TRUE
-             AND j.status = ANY (public.job_profit_patio_rule3_statuses())
-             AND r3.id IS NOT NULL AND px3.note IS NULL
-          THEN 'latest_frozen_revision'
-      END AS source
-    FROM (SELECT NULLIF(btrim(j.expected_costs ->> 'scope_revision_id'), '') IS NOT NULL AS present) scope_id
-    LEFT JOIN LATERAL (
-      SELECT sr.id, sr.pricing_canonical_text
-      FROM public.scope_revisions sr
-      WHERE j.type = 'patio'
-        AND sr.job_id = j.id
-        AND sr.id::text = NULLIF(btrim(j.expected_costs ->> 'scope_revision_id'), '')
-        AND sr.status IN ('frozen', 'superseded')
-      LIMIT 1
-    ) r1 ON true
-    LEFT JOIN LATERAL (
-      SELECT p.quoted_ex, p.note
-      FROM public.job_profit_patio_ex(r1.pricing_canonical_text) p
-      WHERE r1.id IS NOT NULL
-    ) px1 ON true
-    LEFT JOIN LATERAL (
-      SELECT sr.id, sr.pricing_canonical_text
-      FROM public.scope_revisions sr
-      WHERE j.type = 'patio'
-        AND r1.id IS NULL
-        AND j.accepted_at IS NOT NULL
-        AND sr.job_id = j.id
-        AND sr.status IN ('frozen', 'superseded')
-        AND sr.frozen_at <= j.accepted_at
-      ORDER BY sr.frozen_at DESC
-      LIMIT 1
-    ) r2 ON true
-    LEFT JOIN LATERAL (
-      SELECT p.quoted_ex, p.note
-      FROM public.job_profit_patio_ex(r2.pricing_canonical_text) p
-      WHERE r2.id IS NOT NULL
-    ) px2 ON true
-    LEFT JOIN LATERAL (
-      SELECT sr.id, sr.pricing_canonical_text
-      FROM public.scope_revisions sr
-      WHERE j.type = 'patio'
-        AND r1.id IS NULL
-        AND j.accepted_at IS NULL
-        AND NULLIF(btrim(j.expected_costs ->> 'scope_revision_id'), '') IS NULL
-        AND j.status = ANY (public.job_profit_patio_rule3_statuses())
-        AND sr.job_id = j.id
-        AND sr.status = 'frozen'
-      ORDER BY sr.frozen_at DESC NULLS LAST, sr.revision_number DESC
-      LIMIT 1
-    ) r3 ON true
-    LEFT JOIN LATERAL (
-      SELECT p.quoted_ex, p.note
-      FROM public.job_profit_patio_ex(r3.pricing_canonical_text) p
-      WHERE r3.id IS NOT NULL
-    ) px3 ON true
-    WHERE j.type = 'patio'
-  ) patio ON true
   WHERE j.legacy IS NOT TRUE
 ),
 basis AS (
@@ -560,65 +867,61 @@ flagged AS (
       AND NOT c.materials_missing AND NOT c.labour_missing) AS margin_ok
   FROM costed c
 ),
--- Read once per query, not once per job. Missing or unreadable is off.
 flags AS MATERIALIZED (
   SELECT
-    public.job_profit_flag_on('job_profit_work_order_labour_v1') AS wo_on,
-    public.job_profit_flag_on('job_profit_xero_project_cost_v1') AS proj_on,
-    public.job_profit_flag_on('job_profit_patio_quote_v1') AS patio_on
+    public.job_profit_flag_on('job_profit_work_order_labour_v1') AS wo_labour,
+    public.job_profit_flag_on('job_profit_xero_project_cost_v1') AS xero_project,
+    public.job_profit_flag_on('job_profit_patio_quote_v1') AS patio
 ),
 shown AS (
   SELECT
     f.*,
-    fl.wo_on,
-    fl.proj_on,
-    fl.patio_on,
+    fl.wo_labour,
+    fl.xero_project,
+    fl.patio,
     CASE
-      WHEN fl.wo_on AND f.work_order_agreed_labour_ex IS NOT NULL THEN f.work_order_agreed_labour_ex
+      WHEN fl.wo_labour AND f.work_order_agreed_labour_ex IS NOT NULL THEN f.work_order_agreed_labour_ex
       ELSE f.expected_labour_ex
-    END AS shown_labour,
+    END AS shown_labour_ex,
     CASE
-      WHEN fl.wo_on AND f.work_order_agreed_labour_ex IS NOT NULL THEN 'job_work_order'
+      WHEN fl.wo_labour AND f.work_order_agreed_labour_ex IS NOT NULL THEN 'job_work_order'
       ELSE f.expected_source
     END AS shown_expected_source,
-    CASE
-      WHEN NOT fl.patio_on OR f.work_type <> 'patio' THEN f.quoted_ex
-      WHEN f.patio_note IN ('ex_inc_conflict', 'unreadable') THEN f.quoted_ex
-      WHEN f.patio_quoted_ex IS NOT NULL AND f.quoted_ex IS NOT NULL
-           AND abs(f.patio_quoted_ex - f.quoted_ex) > 1 THEN NULL
-      WHEN f.patio_quoted_ex IS NOT NULL AND f.patio_note IS NULL THEN f.patio_quoted_ex
-      ELSE f.quoted_ex
-    END AS shown_quoted_ex,
-    CASE
-      WHEN NOT fl.patio_on OR f.work_type <> 'patio' THEN f.quoted_source
-      WHEN f.patio_note IN ('ex_inc_conflict', 'unreadable') THEN f.quoted_source
-      WHEN f.patio_quoted_ex IS NOT NULL AND f.quoted_ex IS NOT NULL
-           AND abs(f.patio_quoted_ex - f.quoted_ex) > 1 THEN NULL
-      WHEN f.patio_quoted_ex IS NOT NULL AND f.patio_note IS NULL AND f.patio_source IS NOT NULL
-        THEN 'patio_quote:' || f.patio_source
-      ELSE f.quoted_source
-    END AS shown_quoted_source,
-    -- Project flag on and the project exceeds linked costs: the margin may
-    -- use the project figure, so materials_not_linked and no_labour_linked
-    -- are no longer the cost flag. Incomplete lines, unclassified lines and
-    -- a job with no cost and no publishable margin still are. Flag off keeps
-    -- the original cost_flag, including xero_project_exceeds_line_costs.
-    CASE
-      WHEN NOT (fl.proj_on AND f.project_exceeds_line_costs) THEN f.cost_flag
-      WHEN f.has_incomplete_invoice THEN 'incomplete_invoice_lines'
-      WHEN f.has_unclassified THEN 'unclassified_lines'
-      WHEN NOT f.has_cost
-           AND NOT (f.invoiced_ex > 0 AND NOT f.has_incomplete_invoice AND NOT f.has_unclassified)
-        THEN 'no_cost_linked'
-      ELSE 'ok'
-    END AS shown_cost_flag,
-    CASE
-      WHEN fl.proj_on AND f.project_exceeds_line_costs
-        THEN (f.invoiced_ex > 0 AND NOT f.has_incomplete_invoice AND NOT f.has_unclassified)
-      ELSE f.margin_ok
-    END AS shown_margin_ok
+    pq.quoted_ex AS patio_quoted_ex,
+    pq.note AS patio_note,
+    pq.source AS patio_source
   FROM flagged f
   CROSS JOIN flags fl
+  LEFT JOIN LATERAL public.job_profit_patio_quote(
+    f.job_id,
+    f.work_type,
+    f.status,
+    f.quoted_ex,
+    f.invoiced_ex,
+    f.pricing_json,
+    fl.patio AND f.work_type = 'patio'
+  ) pq ON true
+),
+gated AS (
+  SELECT
+    s.*,
+    (
+      s.xero_project
+      AND s.project_exceeds_line_costs
+      AND (
+        lower(COALESCE(s.status, '')) IN (
+          'complete', 'completed', 'invoiced', 'archived', 'get_review', 'final_payment'
+        )
+        OR (
+          s.work_order_agreed_labour_ex IS NOT NULL
+          AND s.line_labour_ex >= s.work_order_agreed_labour_ex
+        )
+      )
+      AND s.invoiced_ex > 0
+      AND NOT s.has_incomplete_invoice
+      AND NOT s.has_unclassified
+    ) AS project_publish
+  FROM shown s
 )
 SELECT
   s.job_id,
@@ -629,14 +932,22 @@ SELECT
   s.work_subtype,
   s.status,
   s.created_at,
-  s.shown_quoted_ex AS quoted_ex,
-  s.shown_quoted_source AS quoted_source,
+  CASE
+    WHEN s.patio AND s.patio_note IN ('patio_sales_price_conflict', 'ex_inc_conflict') THEN NULL
+    WHEN s.patio AND s.patio_note IS NULL AND s.patio_quoted_ex IS NOT NULL THEN s.patio_quoted_ex
+    ELSE s.quoted_ex
+  END AS quoted_ex,
+  CASE
+    WHEN s.patio AND s.patio_note IN ('patio_sales_price_conflict', 'ex_inc_conflict') THEN NULL
+    WHEN s.patio AND s.patio_note IS NULL AND s.patio_source IS NOT NULL THEN 'patio_quote:' || s.patio_source
+    ELSE s.quoted_source
+  END AS quoted_source,
   s.shown_expected_source AS expected_source,
-  s.shown_labour AS expected_labour_ex,
+  s.shown_labour_ex AS expected_labour_ex,
   s.expected_materials_ex,
   s.expected_commission_ex,
   CASE WHEN s.shown_expected_source IS NOT NULL
-       THEN COALESCE(s.shown_labour, 0) + COALESCE(s.expected_materials_ex, 0) + COALESCE(s.expected_commission_ex, 0)
+       THEN COALESCE(s.shown_labour_ex, 0) + COALESCE(s.expected_materials_ex, 0) + COALESCE(s.expected_commission_ex, 0)
   END AS expected_cost_ex,
   'line_level'::text AS cost_basis,
   s.actual_labour_ex,
@@ -657,18 +968,13 @@ SELECT
   s.collected_ex,
   s.invoice_count,
   CASE
-    WHEN s.shown_margin_ok AND s.proj_on AND s.project_exceeds_line_costs
-      THEN s.invoiced_ex - s.xero_project_expenses_ex
-    WHEN s.shown_margin_ok THEN s.invoiced_ex - s.actual_cost_ex
+    WHEN s.project_publish THEN s.invoiced_ex - s.xero_project_expenses_ex
+    WHEN s.margin_ok THEN s.invoiced_ex - s.actual_cost_ex
   END AS profit_ex,
   CASE
-    WHEN s.shown_margin_ok AND s.proj_on AND s.project_exceeds_line_costs
-      THEN round((s.invoiced_ex - s.xero_project_expenses_ex) / s.invoiced_ex * 100, 1)
-    WHEN s.shown_margin_ok
-      THEN round((s.invoiced_ex - s.actual_cost_ex) / s.invoiced_ex * 100, 1)
+    WHEN s.project_publish THEN round((s.invoiced_ex - s.xero_project_expenses_ex) / s.invoiced_ex * 100, 1)
+    WHEN s.margin_ok THEN round((s.invoiced_ex - s.actual_cost_ex) / s.invoiced_ex * 100, 1)
   END AS margin_pct,
-  -- Linked-so-far figure. Stays null when the project exceeds, even when the
-  -- published profit uses the project figure.
   CASE WHEN NOT s.project_exceeds_line_costs THEN s.invoiced_ex - s.actual_cost_ex END AS profit_ex_unsuppressed,
   (s.invoice_count > 0 AND COALESCE(s.revenue_all_paid, false)) AS revenue_verified_paid,
   (NOT s.project_exceeds_line_costs AND s.actual_cost_events > 0 AND COALESCE(s.cost_all_paid, false)) AS costs_verified_paid,
@@ -677,85 +983,55 @@ SELECT
   s.first_cost_date,
   s.last_cost_date,
   s.revenue_flag,
-  s.shown_cost_flag AS cost_flag,
+  CASE WHEN s.project_publish THEN 'ok' ELSE s.cost_flag END AS cost_flag,
   array_remove(ARRAY[
     CASE WHEN s.revenue_flag <> 'ok' THEN s.revenue_flag END,
     CASE WHEN NOT s.has_cost THEN 'no_cost_linked' END,
     CASE WHEN s.has_incomplete_invoice THEN 'incomplete_invoice_lines' END,
     CASE WHEN s.has_unclassified THEN 'unclassified_lines' END,
     CASE WHEN s.has_text_matched THEN 'text_matched_lines' END,
-    CASE WHEN s.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs' END,
+    CASE WHEN s.project_exceeds_line_costs AND NOT s.project_publish THEN 'xero_project_exceeds_line_costs' END,
+    CASE WHEN s.project_publish THEN 'margin_from_xero_project' END,
+    CASE WHEN s.xero_project AND s.project_exceeds_line_costs AND NOT s.project_publish THEN 'xero_project_margin_held' END,
     CASE WHEN s.has_cost AND s.actual_labour_ex = 0 THEN 'no_labour_linked' END,
     CASE WHEN s.project_contact_only THEN 'xero_project_linked_by_contact_only' END,
     CASE WHEN s.has_cost AND s.materials_missing THEN 'materials_not_linked' END,
     CASE WHEN s.has_unapproved_trade THEN 'unapproved_trade_charges' END,
     CASE WHEN s.committed_open_ex > 0 THEN 'open_purchase_orders' END,
+    CASE WHEN s.ordered_not_billed_count > 0 THEN 'ordered_not_billed' END,
+    CASE WHEN s.ordered_not_billed_over_30_count > 0 THEN 'ordered_not_billed_over_30_days' END,
+    CASE WHEN s.invoice_emailed_count > 0 THEN 'invoice_emailed_bill_not_placed' END,
     CASE WHEN s.draft_revenue_ex > 0 THEN 'draft_revenue' END,
     CASE WHEN s.holding_job THEN 'holding_job' END,
-    -- Null while the flag is off, so array_remove leaves the old list.
-    CASE WHEN s.proj_on AND s.shown_margin_ok AND s.project_exceeds_line_costs THEN 'margin_from_xero_project' END,
-    CASE WHEN s.patio_on AND s.work_type = 'patio' AND (
-           s.patio_note = 'ex_inc_conflict'
-           OR (s.patio_quoted_ex IS NOT NULL AND s.patio_note IS NULL
-               AND s.quoted_ex IS NOT NULL AND abs(s.patio_quoted_ex - s.quoted_ex) > 1)
-         ) THEN 'patio_sales_price_conflict' END,
-    CASE WHEN s.patio_on AND s.work_type = 'patio' AND s.patio_note = 'unreadable' THEN 'patio_sales_price_unreadable' END,
-    CASE WHEN s.patio_on AND s.work_type = 'patio'
-              AND s.shown_quoted_ex IS NULL
-              AND s.patio_quoted_ex IS NULL
-              AND s.patio_live_price
-              AND s.patio_note IS DISTINCT FROM 'ex_inc_conflict'
-              AND s.patio_note IS DISTINCT FROM 'unreadable'
-         THEN 'patio_sales_price_live_only' END
+    CASE WHEN s.quote_costs_incomplete THEN 'quote_costs_incomplete' END,
+    CASE WHEN s.patio AND s.patio_note IS NOT NULL THEN s.patio_note END
   ], NULL) AS completeness,
-  s.shown_margin_ok AS margin_ok,
+  (s.margin_ok OR s.project_publish) AS margin_ok,
   s.holding_job,
-  CASE
-    WHEN NOT s.shown_margin_ok THEN NULL
-    WHEN s.proj_on AND s.project_exceeds_line_costs THEN 'from Xero Project'
-    ELSE 'line_level'
+  s.ordered_not_billed_count,
+  s.ordered_not_billed_over_30_count,
+  s.invoice_emailed_count,
+  s.invoice_emailed_ex,
+  s.quote_costs_incomplete,
+  CASE WHEN s.project_publish
+       THEN 'from Xero Project, may exclude unlinked labour'
   END AS margin_source,
-  CASE
-    WHEN NOT s.shown_margin_ok THEN NULL
-    WHEN s.proj_on AND s.project_exceeds_line_costs THEN s.xero_project_expenses_ex
-    ELSE s.actual_cost_ex
-  END AS margin_cost_ex,
+  CASE WHEN s.project_publish THEN s.xero_project_expenses_ex END AS margin_cost_ex,
   s.expected_labour_ex AS expected_labour_quote_ex,
   s.work_order_agreed_labour_ex
-FROM shown s;
+FROM gated s;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000, flags 20261021180000). One row per non-legacy job. Gross profit on direct costs, no overhead. Actual cost is line-level only. While job_profit_xero_project_cost_v1 is off, a Xero Project total above the linked lines nulls profit and margin. While it is on, that margin uses the project figure and margin_source is from Xero Project; actual_cost_ex stays the linked lines. While job_profit_work_order_labour_v1 is off, expected labour is the quote snapshot. While it is on, a job work order agreed labour figure replaces it. While job_profit_patio_quote_v1 is off, quoted_ex is a sent quote only. While it is on, an unambiguous accepted patio tool quote is the patio sales price. The live price is never quoted_ex. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted.  20261021180000 appends margin_source, margin_cost_ex, expected_labour_quote_ex and work_order_agreed_labour_ex. Three switches default off (job_profit_work_order_labour_v1, job_profit_xero_project_cost_v1, job_profit_patio_quote_v1). While a switch is off, every column 20261020220000 published and its completeness list stay what that view published. While the project switch is on, the Xero Project figure is the published cost only when the job is finished or billed labour has reached the approved work order, and margin_source is exactly ''from Xero Project, may exclude unlinked labour''; otherwise the margin stays blank and xero_project_exceeds_line_costs stays set. When that margin publishes, the suppressor is not set and cost_flag is ok. While the labour switch is on, expected labour is an approved job work order only (approved_at is not null); a draft is ignored. While the patio switch is on, a patio sales price is one frozen quote that agrees with the live price and with what has been invoiced; a conflict is blank and flagged. Read only, service role only.';
 
-COMMENT ON COLUMN public.v_job_profit.xero_project_expenses_ex IS
-  'Expenses on record against the job''s Xero Project (name-linked only). Not part of actual_cost_ex. While job_profit_xero_project_cost_v1 is on and this exceeds the linked lines, margin_cost_ex uses it and margin_source is from Xero Project. Trade app labour may sit outside it.';
-COMMENT ON COLUMN public.v_job_profit.actual_cost_ex IS
-  'Line-level actual cost ex GST (trade charges, supplier bills, materials facts). Never a Xero Project total, even when the published margin uses the project figure.';
-COMMENT ON COLUMN public.v_job_profit.quoted_ex IS
-  'Sent or accepted quote value ex GST, or, while job_profit_patio_quote_v1 is on, an unambiguous accepted patio tool quote. Null when none, or when the patio figure conflicts with the sent quote. Never the live price.';
-COMMENT ON COLUMN public.v_job_profit.expected_cost_ex IS
-  'Expected cost. Labour is the quote snapshot, or, while job_profit_work_order_labour_v1 is on, the job work order agreed labour. Materials and commission stay the quote''s. Never the live pricing estimate.';
+COMMENT ON COLUMN public.v_job_profit.quote_costs_incomplete IS
+  'True when no expected cost is fixed because the revision the quote stands on (newest accepted, else newest sent) sealed its costs as still to confirm (cost_estimates.costs_complete false). Not the same as a job with no costed quote. Never a figure.';
+
 COMMENT ON COLUMN public.v_job_profit.margin_source IS
-  'line_level when the published margin uses linked costs. from Xero Project when job_profit_xero_project_cost_v1 is on and the margin uses the project figure. Null when no margin is published.';
+  'Exactly ''from Xero Project, may exclude unlinked labour'' when that margin is published. Null otherwise. actual_cost_ex stays the linked lines.';
 COMMENT ON COLUMN public.v_job_profit.margin_cost_ex IS
-  'The cost the published margin subtracted. The Xero Project figure or actual_cost_ex. Null when no margin is published. actual_cost_ex is unchanged.';
+  'The Xero Project figure the published margin subtracted. Null when that margin is not published.';
 COMMENT ON COLUMN public.v_job_profit.expected_labour_quote_ex IS
-  'Expected labour from the quote snapshot, even when expected_labour_ex is the job work order figure.';
+  'Expected labour from the quote snapshot, even when expected_labour_ex is an approved job work order.';
 COMMENT ON COLUMN public.v_job_profit.work_order_agreed_labour_ex IS
-  'Job work order agreed labour ex GST, including approved customer-variation trade allocation. Evidence even while the labour switch is off. Null when the job work order has no agreed figure.';
-
-CREATE OR REPLACE FUNCTION public.job_profit(p_job_id uuid)
-RETURNS SETOF public.v_job_profit
-LANGUAGE sql
-STABLE
-SET search_path = public, pg_temp
-AS $fn$
-  SELECT * FROM public.v_job_profit WHERE job_id = p_job_id
-$fn$;
-
-COMMENT ON FUNCTION public.job_profit(uuid) IS
-  'Job profit engine (20261021180000): v_job_profit for one job. Read only, service role only.';
-
-REVOKE ALL ON FUNCTION public.job_profit(uuid) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.job_profit(uuid) TO service_role;
-GRANT SELECT ON public.v_job_profit TO service_role;
+  'Approved job work order agreed labour ex GST, plus approved customer-variation trade allocation. A draft is not included. Shown even while the labour switch is off. Null when no approved job work order has an agreed figure. A stored 0 is a real figure.';

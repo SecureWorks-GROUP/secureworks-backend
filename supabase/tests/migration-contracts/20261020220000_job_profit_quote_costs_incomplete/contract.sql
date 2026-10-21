@@ -88,7 +88,24 @@ BEGIN
   SELECT column_name INTO last_col FROM information_schema.columns
    WHERE table_schema = 'public' AND table_name = 'v_job_profit'
    ORDER BY ordinal_position DESC LIMIT 1;
-  IF last_col IS DISTINCT FROM 'quote_costs_incomplete' THEN
+  -- This migration alone ends on quote_costs_incomplete. 20261021180000
+  -- appends four columns after it and does not rewrite this view.
+  IF last_col = 'quote_costs_incomplete' THEN
+    NULL;
+  ELSIF last_col = 'work_order_agreed_labour_ex' THEN
+    IF (
+      SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+        FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'v_job_profit'
+         AND ordinal_position > (
+           SELECT ordinal_position FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'v_job_profit'
+              AND column_name = 'quote_costs_incomplete'
+         )
+    ) IS DISTINCT FROM 'margin_source,margin_cost_ex,expected_labour_quote_ex,work_order_agreed_labour_ex' THEN
+      RAISE EXCEPTION 'columns after quote_costs_incomplete are not the four appended job-profit columns';
+    END IF;
+  ELSE
     RAISE EXCEPTION 'quote_costs_incomplete is not the appended last column (last is %)', last_col;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'

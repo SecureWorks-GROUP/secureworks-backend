@@ -1,9 +1,7 @@
 -- Rollback for 20261021180000_job_profit_work_order_xero_bills.sql.
--- Restores the 20261009130000 profit view. Deletes the three switches.
--- Does not change a job, a bill, a quote or a work order, and does not drop
--- xero_invoices.reference.
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '60s';
+-- Restores v_job_profit exactly as 20261020220000 left it, including
+-- quote_costs_incomplete, and drops the four appended columns. Deletes the
+-- three switches. Does not change a job, a bill, a quote or a work order.
 
 DROP FUNCTION IF EXISTS public.job_profit(uuid);
 DROP VIEW IF EXISTS public.v_job_profit;
@@ -40,7 +38,12 @@ cost AS (
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.lane = 'commission') AS commission_ex,
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.lane = 'other') AS other_ex,
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.source = 'trade_line') AS trade_lines_ex,
-    sum(e.amount_ex) FILTER (WHERE NOT e.is_actual) AS committed_open_ex,
+    sum(e.amount_ex) FILTER (WHERE e.source = 'po_committed') AS committed_open_ex,
+    count(*) FILTER (WHERE e.source = 'po_ordered') AS ordered_not_billed_count,
+    count(*) FILTER (WHERE e.source = 'po_ordered'
+                     AND e.event_date <= (now() AT TIME ZONE 'Australia/Perth')::date - 30) AS ordered_not_billed_over_30_count,
+    count(*) FILTER (WHERE e.source = 'po_invoice_emailed') AS invoice_emailed_count,
+    sum(e.amount_ex) FILTER (WHERE e.source = 'po_invoice_emailed') AS invoice_emailed_ex,
     count(*) FILTER (WHERE e.is_actual) AS actual_events,
     bool_and(e.paid) FILTER (WHERE e.is_actual AND e.amount_ex <> 0) AS all_paid,
     bool_or(e.lane_detail = 'unclassified') AS has_unclassified,
@@ -103,6 +106,32 @@ sent_rev AS (
           COALESCE(public.job_profit_num(n.ce -> 'material_total'), 0),
           COALESCE(public.job_profit_num(n.ce -> 'subcontract_commission_total'), 0)
         ) > 0
+),
+quote_costs_open AS (
+  -- The revision the job's quote stands on, picked exactly as accepted_rev and
+  -- sent_rev pick theirs (same filters, same order) but before their costed
+  -- filter: the newest accepted revision if the job has one, else the newest
+  -- sent. The job is named incomplete when that revision's sealed cost
+  -- estimates say a cost is still to confirm (costs_complete false, sealed
+  -- since 20 Oct 2026 by the fence seal). Read only to name the job
+  -- incomplete; it never supplies a figure.
+  SELECT COALESCE(a.job_id, s.job_id) AS job_id
+  FROM (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    JOIN public.job_documents d ON d.id = r.job_document_id
+    WHERE d.accepted_at IS NOT NULL
+    ORDER BY r.job_id, d.accepted_at DESC, r.version DESC
+  ) a
+  FULL JOIN (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    WHERE r.sent_at IS NOT NULL
+    ORDER BY r.job_id, r.sent_at DESC, r.version DESC
+  ) s ON s.job_id = a.job_id
+  WHERE (CASE WHEN a.job_id IS NOT NULL THEN a.ce ELSE s.ce END) ->> 'costs_complete' = 'false'
 ),
 quote_docs AS (
   SELECT DISTINCT d.job_id
@@ -212,6 +241,10 @@ base AS (
     END AS expected_commission_ex,
     -- read only to decide whether materials are owed; never returned
     public.job_profit_num(j.pricing_json -> 'materialCostEstimate') AS live_materials_estimate_ex,
+    -- no expected cost is fixed because the quote's costs are not all known
+    (jsonb_typeof(j.expected_costs -> 'lanes') IS DISTINCT FROM 'object'
+      AND ar.job_id IS NULL AND sr.job_id IS NULL
+      AND qco.job_id IS NOT NULL) AS quote_costs_incomplete,
     -- revenue
     COALESCE(rev.invoiced_ex, 0) AS invoiced_ex,
     COALESCE(rev.draft_revenue_ex, 0) AS draft_revenue_ex,
@@ -228,6 +261,10 @@ base AS (
     COALESCE(cost.other_ex, 0) AS line_other_ex,
     COALESCE(cost.trade_lines_ex, 0) AS trade_lines_ex,
     COALESCE(cost.committed_open_ex, 0) AS committed_open_ex,
+    COALESCE(cost.ordered_not_billed_count, 0) AS ordered_not_billed_count,
+    COALESCE(cost.ordered_not_billed_over_30_count, 0) AS ordered_not_billed_over_30_count,
+    COALESCE(cost.invoice_emailed_count, 0) AS invoice_emailed_count,
+    cost.invoice_emailed_ex,
     COALESCE(cost.actual_events, 0) AS actual_cost_events,
     cost.all_paid AS cost_all_paid,
     COALESCE(cost.has_unclassified, false) AS has_unclassified,
@@ -254,6 +291,7 @@ base AS (
   LEFT JOIN quoted qd ON qd.job_id = j.id
   LEFT JOIN accepted_rev ar ON ar.job_id = j.id
   LEFT JOIN sent_rev sr ON sr.job_id = j.id
+  LEFT JOIN quote_costs_open qco ON qco.job_id = j.id
   LEFT JOIN rev ON rev.job_id = j.id
   LEFT JOIN collected col ON col.job_id = j.id
   LEFT JOIN cost ON cost.job_id = j.id
@@ -368,48 +406,58 @@ SELECT
     CASE WHEN f.has_cost AND f.materials_missing THEN 'materials_not_linked' END,
     CASE WHEN f.has_unapproved_trade THEN 'unapproved_trade_charges' END,
     CASE WHEN f.committed_open_ex > 0 THEN 'open_purchase_orders' END,
+    CASE WHEN f.ordered_not_billed_count > 0 THEN 'ordered_not_billed' END,
+    CASE WHEN f.ordered_not_billed_over_30_count > 0 THEN 'ordered_not_billed_over_30_days' END,
+    CASE WHEN f.invoice_emailed_count > 0 THEN 'invoice_emailed_bill_not_placed' END,
     CASE WHEN f.draft_revenue_ex > 0 THEN 'draft_revenue' END,
-    CASE WHEN f.holding_job THEN 'holding_job' END
+    CASE WHEN f.holding_job THEN 'holding_job' END,
+    CASE WHEN f.quote_costs_incomplete THEN 'quote_costs_incomplete' END
   ], NULL) AS completeness,
   f.margin_ok,
-  f.holding_job
+  f.holding_job,
+  -- CFO-12, appended so every earlier column keeps its place
+  f.ordered_not_billed_count,
+  f.ordered_not_billed_over_30_count,
+  f.invoice_emailed_count,
+  f.invoice_emailed_ex,
+  -- 20261020220000, appended so every earlier column keeps its place
+  f.quote_costs_incomplete
 FROM flagged f;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted. Read only, service role only.';
 
-COMMENT ON COLUMN public.v_job_profit.xero_project_expenses_ex IS
-  'Expenses on record against the job''s Xero Project (name-linked only). Evidence only: not the job''s full cost, never part of actual_cost_ex, profit_ex or any total. Trade app labour may sit outside it.';
-COMMENT ON COLUMN public.v_job_profit.actual_cost_ex IS
-  'Line-level actual cost ex GST (trade charges, supplier bills, materials facts). Never a Xero Project total.';
-COMMENT ON COLUMN public.v_job_profit.quoted_ex IS
-  'Sent or accepted quote value ex GST (job_quote_values). Null with no sent quote; never the live price.';
-COMMENT ON COLUMN public.v_job_profit.expected_cost_ex IS
-  'Expected cost fixed at the quote (expected_source frozen_at_acceptance, accepted_quote_revision or sent_quote_revision). Null with none; never the live pricing estimate.';
+COMMENT ON COLUMN public.v_job_profit.quote_costs_incomplete IS
+  'True when no expected cost is fixed because the revision the quote stands on (newest accepted, else newest sent) sealed its costs as still to confirm (cost_estimates.costs_complete false). Not the same as a job with no costed quote. Never a figure.';
 
 CREATE OR REPLACE FUNCTION public.job_profit(p_job_id uuid)
 RETURNS SETOF public.v_job_profit
 LANGUAGE sql
 STABLE
 SET search_path = public, pg_temp
-AS $fn$
+AS $$
   SELECT * FROM public.v_job_profit WHERE job_id = p_job_id
-$fn$;
+$$;
 
 COMMENT ON FUNCTION public.job_profit(uuid) IS
   'Job profit engine (20261009130000): v_job_profit for one job. Read only, service role only.';
 
+REVOKE ALL ON public.v_job_profit FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.v_job_profit TO service_role;
 REVOKE ALL ON FUNCTION public.job_profit(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit(uuid) TO service_role;
-GRANT SELECT ON public.v_job_profit TO service_role;
 
-DROP FUNCTION IF EXISTS public.job_profit_flag_on(text);
+DROP FUNCTION IF EXISTS public.job_profit_link_bill(text, text, text, text, text, text, text);
+DROP FUNCTION IF EXISTS public.job_profit_bill_is_installer(jsonb);
+DROP FUNCTION IF EXISTS public.job_profit_bill_job_tokens(text, jsonb);
+DROP FUNCTION IF EXISTS public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean);
 DROP FUNCTION IF EXISTS public.job_profit_patio_ex(text);
 DROP FUNCTION IF EXISTS public.job_profit_patio_rule3_statuses();
+DROP FUNCTION IF EXISTS public.job_profit_flag_on(text);
 
 DELETE FROM public.feature_flags
-WHERE flag_name IN (
-  'job_profit_work_order_labour_v1',
-  'job_profit_xero_project_cost_v1',
-  'job_profit_patio_quote_v1'
-);
+ WHERE flag_name IN (
+   'job_profit_work_order_labour_v1',
+   'job_profit_xero_project_cost_v1',
+   'job_profit_patio_quote_v1'
+ );
