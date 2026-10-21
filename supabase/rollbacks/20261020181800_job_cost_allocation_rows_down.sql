@@ -707,9 +707,8 @@ FROM flagged f;
 COMMENT ON VIEW public.v_job_profit IS
   'Job profit engine (20261009130000, CFO-12 20261019120000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). Read only, service role only.';
 
-DROP FUNCTION IF EXISTS public.job_cost_installer_bill(jsonb);
-
 DROP VIEW IF EXISTS public.v_bill_allocation_balance;
+DROP FUNCTION IF EXISTS public.job_cost_installer_bill(jsonb);
 DROP FUNCTION IF EXISTS public.allocate_bill_split(text, jsonb, numeric, text, text);
 DROP FUNCTION IF EXISTS public.job_cost_credit_share(jsonb, numeric);
 
