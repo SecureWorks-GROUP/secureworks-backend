@@ -135,6 +135,19 @@ link with no allocation row (`automation_source` `xero_job_link`). A decision
 with no single recorded person reads `placed_unconfirmed`; a bill with an
 overhead part takes its decider from the queue row only. A person's "not job
 related" mark wins over the bill's Xero job link when no row places it.
+The outcome never claims a placement the profit engine (`v_job_cost_events`)
+does not count (migration `20261021213000`). Where the two disagree, the bill
+reads `unknown`, and the last column `held_reason` says why. It picks neither
+answer:
+- `labour_part_unconfirmed`: a labour part no recorded person placed, on a bill
+  the engine reads through its allocation rows. The engine holds that part.
+- `overhead_on_xero_linked_bill`: an overhead part on a still Xero-linked bill
+  with no rows. The engine counts that bill nowhere.
+- `xero_link_not_counted`: any other Xero-linked bill the engine does not read
+  through its link.
+
+`held_reason` is null on every other row. `parts` and `evidence_hash` are
+unchanged by it. The not-job-related mark (F1, JP-21) is not touched.
 `evidence_hash` is md5 of a fixed jsonb array led by the contract version
 `cfo-recon-outcome-v1`. As a CFO proposal CIO may overturn, a payment does not
 move it; a changed total, line, credit, status class, part or overhead does. There
