@@ -33,14 +33,20 @@ export const JOB_PROFIT_LABELS = {
     "Null when there is no client invoice, incomplete invoice lines, or unclassified lines. While job_profit_xero_project_cost_v1 is off, also null when no cost is linked, no labour is linked, materials are owed but unlinked, or the Xero Project exceeds the linked costs. While it is on and the project exceeds, the margin is invoiced minus the project expenses unless the invoice, incomplete-line or unclassified-line stop still applies.",
   profit_ex_unsuppressed:
     "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
+  committed_open_ex:
+    "Priced open purchase orders with no supplier invoice emailed and no bill placed, ex GST. Committed, not actual. An order with no price is never counted here as $0.00.",
+  ordered_not_billed_count:
+    "Ordered, not billed: sent purchase orders with no price (every Dispatch order) and no invoice or bill yet. A count, never a dollar figure. ordered_not_billed_over_30_count is those first sent 30 or more days ago.",
+  invoice_emailed_count:
+    "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
   margin_source:
-    "line_level when the published margin uses linked costs. from Xero Project when job_profit_xero_project_cost_v1 is on and the margin uses the project figure. Null when no margin is published.",
+    "from Xero Project, may exclude unlinked labour, when that margin is published. Null otherwise. actual_cost_ex stays the linked lines.",
   margin_cost_ex:
-    "The cost the published margin subtracted: the Xero Project figure, or actual_cost_ex. Null when no margin is published. actual_cost_ex is unchanged.",
+    "The Xero Project figure the published margin subtracted. Null when that margin is not published. actual_cost_ex is unchanged.",
   expected_labour_quote_ex:
-    "Expected labour from the quote snapshot, even when expected_labour_ex is the job work order figure.",
+    "Expected labour from the quote snapshot, even when expected_labour_ex is an approved job work order.",
   work_order_agreed_labour_ex:
-    "Job work order agreed labour ex GST, including approved customer-variation trade allocation. Shown even while the labour switch is off. Null when the job work order has no agreed figure.",
+    "Approved job work order agreed labour ex GST, plus approved customer-variation trade allocation. A draft is not included. Shown even while the labour switch is off. Null when no approved job work order has an agreed figure.",
 } as const;
 
 /**
@@ -78,6 +84,8 @@ export type TimelineEntry = {
     | "supplier_bill"
     | "materials_fact"
     | "purchase_order"
+    | "purchase_order_ordered"
+    | "purchase_order_invoice_emailed"
     | "sales_invoice"
     | "variation"
     | "sales_invoice_paid"
@@ -102,7 +110,15 @@ const COST_KIND: Record<string, TimelineEntry["kind"]> = {
   supplier_bill: "supplier_bill",
   materials_fact: "materials_fact",
   po_committed: "purchase_order",
+  po_ordered: "purchase_order_ordered",
+  po_invoice_emailed: "purchase_order_invoice_emailed",
 };
+
+/** Timeline kind of a cost event. An unknown purchase order state is still a purchase order, never a supplier bill. */
+export function costEventKind(source: unknown): TimelineEntry["kind"] {
+  const s = String(source ?? "");
+  return COST_KIND[s] ?? (s.startsWith("po_") ? "purchase_order" : "supplier_bill");
+}
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
@@ -126,7 +142,7 @@ export function buildJobProfitTimeline(
   for (const e of costEvents) {
     out.push({
       date: e.event_date ?? null,
-      kind: COST_KIND[e.source] ?? "supplier_bill",
+      kind: costEventKind(e.source),
       lane: e.lane ?? null,
       party: e.party ?? null,
       amount_ex: num(e.amount_ex),

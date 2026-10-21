@@ -1278,6 +1278,7 @@ import {
   listReconQueue as _listReconQueue,
   assignReconRow as _assignReconRow,
   markReconNotJobRelated as _markReconNotJobRelated,
+  splitReconRow as _splitReconRow,
 } from './materials_recon.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import {
@@ -8546,6 +8547,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           useSuggestion: body.use_suggestion === true || body.useSuggestion === true,
           actor: receiptActor(requestActor, authMode),
           orgId: DEFAULT_ORG_ID,
+        }))
+      case 'materials_recon_split':
+        return json(await _splitReconRow(client, {
+          xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
+          parts: body.parts,
+          overheadEx: body.overhead_ex ?? null,
+          overheadNote: body.overhead_note ?? null,
+          actor: receiptActor(requestActor, authMode),
         }))
       case 'materials_recon_not_job_related':
         return json(await _markReconNotJobRelated(client, {

@@ -832,6 +832,25 @@ ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|co
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# 20261015190000 is the bill pre-match (JP-06): xero-sync's materials step writes
+# materials_bill_proposals, lands confident matches as agent_prematch facts and
+# closes voided bills as void_in_xero; ops-api materials_recon_queue reads the
+# proposals. Neither function may deploy ahead of it (the widened checks would
+# refuse every agent placement and void close).
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|table|materials_bill_proposals
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.proposal_kind
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.outcome
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|policy|materials_bill_proposals.service_role_all
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|table|materials_bill_proposals
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.proposal_kind
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.outcome
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|policy|materials_bill_proposals.service_role_all
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.auto_assigned_at
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_reconciliation_queue.closed_reason
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|index|materials_bill_proposals_live_uidx
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|constraint|job_materials_facts_source_chk
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|constraint|materials_recon_status_chk
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_at
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by_email
