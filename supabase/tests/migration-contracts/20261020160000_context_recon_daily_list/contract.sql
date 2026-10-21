@@ -61,7 +61,8 @@ BEGIN
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
   IF r.band IS DISTINCT FROM 1 OR r.amount IS DISTINCT FROM 1500::numeric OR r.summary ->> 'invoice_number' IS DISTINCT FROM 'INV-98001'
      OR r.offered_jobs -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001'
-     OR r.decision_state IS DISTINCT FROM 'none' OR r.owner IS DISTINCT FROM 'context_resolver' THEN
+     OR r.decision_state IS DISTINCT FROM 'none' OR r.owner IS DISTINCT FROM 'context_resolver'
+     OR r.summary ? 'counterpart_role' THEN
     RAISE EXCEPTION 'recon list contract: the owed invoice is not band 1 with its contact''s job offered';
   END IF;
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000001';
@@ -77,6 +78,35 @@ BEGIN
   IF r.band IS DISTINCT FROM 3 OR r.summary ->> 'channel' IS DISTINCT FROM 'call' OR r.summary ->> 'preview' IS NOT NULL
      OR r.summary::text LIKE '%RECONCALLWORD%' THEN
     RAISE EXCEPTION 'recon list contract: a call transcript is not band 3, or its words reached the list';
+  END IF;
+  -- Message summary shape: the party-roles stamp rides every message row, and a
+  -- customer stamp is the word customer, so the screen says Customer and never
+  -- "Sender not known". Invoice summaries stay money fields (asserted above).
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof) WHERE subject_kind = 'event';
+  IF n <> 3 THEN RAISE EXCEPTION 'recon list contract: expected 3 message rows, got %', n; END IF;
+  FOR r IN SELECT * FROM public.context_recon_daily_list(asof) WHERE subject_kind = 'event' LOOP
+    IF (SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(r.summary) k)
+       IS DISTINCT FROM ARRAY['channel','counterpart_role','direction','from','occurred_at','preview','subject']::text[] THEN
+      RAISE EXCEPTION 'recon list contract: message summary keys for % are %', r.subject_id, r.summary;
+    END IF;
+    IF r.summary ->> 'counterpart_role' IS DISTINCT FROM 'customer'
+       OR r.summary::text LIKE '%Sender not known%'
+       OR r.summary ->> 'counterpart_role' IS DISTINCT FROM (
+            SELECT e.metadata -> 'party_roles' ->> 'counterpart_role'
+            FROM public.business_events e WHERE e.id = r.subject_id) THEN
+      RAISE EXCEPTION 'recon list contract: customer message % is not labelled customer (role %)',
+        r.subject_id, r.summary ->> 'counterpart_role';
+    END IF;
+  END LOOP;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000002';
+  IF r.summary ->> 'occurred_at' IS DISTINCT FROM '2026-10-17T01:00:00Z'
+     OR r.summary -> 'from' IS DISTINCT FROM 'null'::jsonb
+     OR r.summary -> 'subject' IS DISTINCT FROM 'null'::jsonb
+     OR r.summary ->> 'preview' IS DISTINCT FROM 'Patio start date?'
+     OR r.summary ->> 'channel' IS DISTINCT FROM 'sms'
+     OR r.summary ->> 'direction' IS DISTINCT FROM 'inbound'
+     OR r.summary ->> 'counterpart_role' IS DISTINCT FROM 'customer' THEN
+    RAISE EXCEPTION 'recon list contract: band 3 message summary shape is %', r.summary;
   END IF;
   -- The list is cut at the asked limit, so ops-api can ask one more and say more.
   SELECT count(*) INTO n FROM public.context_recon_daily_list(asof, 2);

@@ -14,6 +14,7 @@ import {
 import {
   reconDailyList,
   reconDailyListArgs,
+  reconDailySenderWords,
   ReconDecisionError,
   reconDecisionUser,
   reconRecordDecision,
@@ -196,6 +197,38 @@ Deno.test("the daily list asks one more than its page and says more only when it
   assertEquals([top.calls[0].args.p_limit, big.count, big.more], [201, 200, true]);
   const none = await reconDailyList(fakeRpc([]), new URLSearchParams(""), now);
   assertEquals([none.count, none.more], [0, false]);
+});
+
+Deno.test("a customer message is labelled by role and never reads Sender not known", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  const summary = {
+    channel: "sms",
+    counterpart_role: "customer",
+    direction: "inbound",
+    from: null,
+    occurred_at: "2026-10-17T01:00:00Z",
+    preview: "Patio start date?",
+    subject: null,
+  };
+  for (const role of ["customer", "job_customer", "any_job_customer", "Customer"]) {
+    const words = reconDailySenderWords(role);
+    assertEquals(words, "Customer");
+    assertEquals(words.includes("Sender not known"), false);
+    const out = await reconDailyList(
+      fakeRpc([{ band: 3, subject_kind: "event", subject_id: EVENT, summary: { ...summary, counterpart_role: role } }]),
+      new URLSearchParams(""),
+      now,
+    );
+    const item = (out.items as { summary: { counterpart_role: string } }[])[0];
+    assertEquals(item.summary.counterpart_role, role);
+    const labelled = reconDailySenderWords(item.summary.counterpart_role);
+    assertEquals(labelled, "Customer");
+    assertEquals(labelled.includes("Sender not known"), false);
+    assertEquals(JSON.stringify(item).includes("Sender not known"), false);
+  }
+  for (const role of [null, undefined, "", "unknown", "unstamped", "lead"]) {
+    assertEquals(reconDailySenderWords(role), "Sender not known");
+  }
 });
 
 Deno.test("a daily list answer that is not a list is a failed read, never an empty list", async () => {

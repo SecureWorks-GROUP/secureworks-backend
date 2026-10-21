@@ -106,6 +106,19 @@ export function reconDecisionUser(caller: ReconCaller): string {
   return caller.userId;
 }
 
+// The ops screen labels a daily-list message from summary.counterpart_role
+// (secureworks-ux modules/ops-recon.js senderWords). A stamp containing
+// "customer" (customer, job_customer, any_job_customer) reads "Customer".
+// A missing stamp, and unknown or unstamped, reads "Sender not known".
+export function reconDailySenderWords(role: unknown): string {
+  const r = String(role ?? "").toLowerCase();
+  if (/customer/.test(r)) return "Customer";
+  if (/supplier/.test(r)) return "Supplier";
+  if (/builder/.test(r)) return "Builder";
+  if (/^(staff|crew|ours|us|our_staff|internal)$/.test(r)) return "Us";
+  return "Sender not known";
+}
+
 export function reconDailyListArgs(
   params: URLSearchParams,
   now: Date = new Date(),
