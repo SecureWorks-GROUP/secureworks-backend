@@ -481,6 +481,7 @@ import {
   sendApprovedAction,
 } from './approved_send_actions.ts'
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
+import { billPlacementPerson, billPlacementRefusal } from './materials_recon_person.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
@@ -8472,37 +8473,49 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // and flip the queue row to 'assigned'; not-job-related closes it and writes
       // NO fact. Every write is keyed by xero_invoice_id → reversible by delete;
       // xero_invoices / trade_invoices are never mutated (CP1 Option A).
+      // JP-12 (20261021173000): each write records a person's decision, so
+      // only a signed-in session makes one (materials_recon_person.ts). A
+      // server key, an x-sw-actor claim or a routine is refused, nothing written.
       case 'materials_recon_queue':
         return json(await _listReconQueue(client, {
           status: url.searchParams.get('status') || 'open',
           limit: Number(url.searchParams.get('limit')) || 200,
           orgId: DEFAULT_ORG_ID,
         }))
-      case 'materials_recon_assign':
+      case 'materials_recon_assign': {
+        const person = billPlacementPerson(requestActor, authMode)
+        if (!person) return json(billPlacementRefusal('materials_recon_assign'), 403)
         return json(await _assignReconRow(client, {
           queueId: body.queue_id ?? body.queueId ?? null,
           xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
           jobId: body.job_id ?? body.jobId ?? null,
           jobNumber: body.job_number ?? body.jobNumber ?? null,
           useSuggestion: body.use_suggestion === true || body.useSuggestion === true,
-          actor: receiptActor(requestActor, authMode),
+          actor: person,
           orgId: DEFAULT_ORG_ID,
         }))
-      case 'materials_recon_split':
+      }
+      case 'materials_recon_split': {
+        const person = billPlacementPerson(requestActor, authMode)
+        if (!person) return json(billPlacementRefusal('materials_recon_split'), 403)
         return json(await _splitReconRow(client, {
           xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
           parts: body.parts,
           overheadEx: body.overhead_ex ?? null,
           overheadNote: body.overhead_note ?? null,
-          actor: receiptActor(requestActor, authMode),
+          actor: person,
         }))
-      case 'materials_recon_not_job_related':
+      }
+      case 'materials_recon_not_job_related': {
+        const person = billPlacementPerson(requestActor, authMode)
+        if (!person) return json(billPlacementRefusal('materials_recon_not_job_related'), 403)
         return json(await _markReconNotJobRelated(client, {
           queueId: body.queue_id ?? body.queueId ?? null,
           xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
-          actor: receiptActor(requestActor, authMode),
+          actor: person,
           orgId: DEFAULT_ORG_ID,
         }))
+      }
 
       case 'list_work_orders':
         if (url.searchParams.get('kind') === 'job') {

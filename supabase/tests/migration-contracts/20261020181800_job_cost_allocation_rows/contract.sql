@@ -43,6 +43,12 @@
 
 BEGIN;
 
+-- 20261021173000: an actor counts as a person only when it is a public.users
+-- row's user:<uuid> or email (cfo_recorded_person), so the contract's person
+-- is a user and every person-placed row names them.
+INSERT INTO public.users (id, org_id, name, email) VALUES
+  ('ca000000-0000-4000-8000-0000000000ab', '00000000-0000-0000-0000-000000000001', 'Contract person', 'contract@test');
+
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('ca000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-J1', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
   ('ca000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'CA-J2', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
@@ -126,12 +132,13 @@ BEGIN
   IF EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id LIKE 'B-%') THEN
     RAISE EXCEPTION 'cfo18 refusal: a refused split wrote a row';
   END IF;
-  -- An actor is required.
+  -- A recorded person is required (20261021173000: blank and placeholder
+  -- actors alike).
   BEGIN
     PERFORM public.allocate_bill_split('B-SPLIT', '[{"job_id": "ca000000-0000-4000-8000-000000000001", "amount_ex": 1000}]', 0, NULL, ' ');
     RAISE EXCEPTION 'cfo18 refusal: split without an actor was accepted';
   EXCEPTION WHEN OTHERS THEN
-    IF position('actor required' IN SQLERRM) = 0 THEN RAISE; END IF;
+    IF position('recorded person is required' IN SQLERRM) = 0 THEN RAISE; END IF;
   END;
 END $$;
 
@@ -272,8 +279,8 @@ BEGIN
     RAISE EXCEPTION 'cfo18 301: J3 margin_ok %, completeness %', r.margin_ok, r.completeness;
   END IF;
   -- A person places it on J3: labour.
-  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
-  VALUES ('B-301', 'ca000000-0000-4000-8000-000000000003', 'CA-J3', 'labour', 'actual', 100, 'high_manual', 'manual_queue', '2026-08-28');
+  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, assigned_by)
+  VALUES ('B-301', 'ca000000-0000-4000-8000-000000000003', 'CA-J3', 'labour', 'actual', 100, 'high_manual', 'manual_queue', '2026-08-28', 'contract@test');
   SELECT sum(amount_ex) FILTER (WHERE is_actual AND document_id = 'B-301' AND lane = 'labour') AS l301,
          count(*) FILTER (WHERE source = 'installer_bill_unconfirmed') AS held
     INTO r FROM public.v_job_cost_events WHERE job_id = 'ca000000-0000-4000-8000-000000000003';
@@ -336,14 +343,14 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
    '[{"Description": "Install", "AccountCode": "306", "LineAmount": 300, "TaxAmount": 30}]',
    '{"LineAmountTypes": "Exclusive"}', NULL);
 
-INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status) VALUES
-  ('B-PMAT', 'CA-50', 'CA Steel', 2000, 2200, '2026-08-21', 'assigned'),
-  ('B-PINST', 'CA-51', 'CA Installer', 600, 660, '2026-08-22', 'open'),
-  ('B-PNJR', 'CA-52', 'CA Installer', 250, 275, '2026-08-22', 'not_job_related');
+INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status, assigned_by) VALUES
+  ('B-PMAT', 'CA-50', 'CA Steel', 2000, 2200, '2026-08-21', 'assigned', 'contract@test'),
+  ('B-PINST', 'CA-51', 'CA Installer', 600, 660, '2026-08-22', 'open', NULL),
+  ('B-PNJR', 'CA-52', 'CA Installer', 250, 275, '2026-08-22', 'not_job_related', 'contract@test');
 
-INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date) VALUES
-  ('B-PMAT', 'ca000000-0000-4000-8000-000000000011', 'CA-P1', 'materials', 'actual', 2000, 'high_manual', 'manual_queue', '2026-08-21'),
-  ('B-PAUTO', 'ca000000-0000-4000-8000-000000000012', 'CA-P2', 'labour', 'actual', 300, 'high', 'xero_ref_link', '2026-08-22');
+INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, assigned_by) VALUES
+  ('B-PMAT', 'ca000000-0000-4000-8000-000000000011', 'CA-P1', 'materials', 'actual', 2000, 'high_manual', 'manual_queue', '2026-08-21', 'contract@test'),
+  ('B-PAUTO', 'ca000000-0000-4000-8000-000000000012', 'CA-P2', 'labour', 'actual', 300, 'high', 'xero_ref_link', '2026-08-22', NULL);
 
 DO $$
 DECLARE r record;
@@ -391,9 +398,9 @@ BEGIN
   END IF;
 
   -- A person places B-PINST on CA-P1: labour 600, profit 4,400, margin published.
-  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
-  VALUES ('B-PINST', 'ca000000-0000-4000-8000-000000000011', 'CA-P1', 'labour', 'actual', 600, 'high_manual', 'manual_queue', '2026-08-22');
-  UPDATE public.materials_reconciliation_queue SET status = 'assigned' WHERE xero_invoice_id = 'B-PINST';
+  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, assigned_by)
+  VALUES ('B-PINST', 'ca000000-0000-4000-8000-000000000011', 'CA-P1', 'labour', 'actual', 600, 'high_manual', 'manual_queue', '2026-08-22', 'contract@test');
+  UPDATE public.materials_reconciliation_queue SET status = 'assigned', assigned_by = 'contract@test' WHERE xero_invoice_id = 'B-PINST';
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CA-P1';
   IF NOT r.margin_ok OR r.profit_ex <> 4400 OR r.actual_labour_ex <> 600 OR r.cost_flag <> 'ok'
      OR 'installer_bill_unconfirmed' = ANY (COALESCE(r.completeness, '{}'::text[])) THEN
