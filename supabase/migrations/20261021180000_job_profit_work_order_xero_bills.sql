@@ -49,7 +49,7 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_flag_on(text) IS
-  'Job profit switches (20261021140000). True only when that feature_flags row exists and is enabled. Missing, unreadable or any error is off.';
+  'Job profit switches (20261021180000). True only when that feature_flags row exists and is enabled. Missing, unreadable or any error is off.';
 
 CREATE OR REPLACE FUNCTION public.job_profit_patio_rule3_statuses()
 RETURNS text[]
@@ -725,7 +725,7 @@ SELECT
 FROM shown s;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000, flags 20261021140000). One row per non-legacy job. Gross profit on direct costs, no overhead. Actual cost is line-level only. While job_profit_xero_project_cost_v1 is off, a Xero Project total above the linked lines nulls profit and margin. While it is on, that margin uses the project figure and margin_source is from Xero Project; actual_cost_ex stays the linked lines. While job_profit_work_order_labour_v1 is off, expected labour is the quote snapshot. While it is on, a job work order agreed labour figure replaces it. While job_profit_patio_quote_v1 is off, quoted_ex is a sent quote only. While it is on, an unambiguous accepted patio tool quote is the patio sales price. The live price is never quoted_ex. Read only, service role only.';
+  'Job profit engine (20261009130000, flags 20261021180000). One row per non-legacy job. Gross profit on direct costs, no overhead. Actual cost is line-level only. While job_profit_xero_project_cost_v1 is off, a Xero Project total above the linked lines nulls profit and margin. While it is on, that margin uses the project figure and margin_source is from Xero Project; actual_cost_ex stays the linked lines. While job_profit_work_order_labour_v1 is off, expected labour is the quote snapshot. While it is on, a job work order agreed labour figure replaces it. While job_profit_patio_quote_v1 is off, quoted_ex is a sent quote only. While it is on, an unambiguous accepted patio tool quote is the patio sales price. The live price is never quoted_ex. Read only, service role only.';
 
 COMMENT ON COLUMN public.v_job_profit.xero_project_expenses_ex IS
   'Expenses on record against the job''s Xero Project (name-linked only). Not part of actual_cost_ex. While job_profit_xero_project_cost_v1 is on and this exceeds the linked lines, margin_cost_ex uses it and margin_source is from Xero Project. Trade app labour may sit outside it.';
@@ -754,7 +754,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit(uuid) IS
-  'Job profit engine (20261021140000): v_job_profit for one job. Read only, service role only.';
+  'Job profit engine (20261021180000): v_job_profit for one job. Read only, service role only.';
 
 REVOKE ALL ON FUNCTION public.job_profit(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit(uuid) TO service_role;

@@ -1,4 +1,4 @@
--- Contract fixture for 20261021140000_job_profit_work_order_xero_bills.sql.
+-- Contract fixture for 20261021180000_job_profit_work_order_xero_bills.sql.
 -- Only feature_flags is restated, in its live shape, in case no earlier case
 -- made it. Test infrastructure, not a replacement for the production schema.
 CREATE TABLE IF NOT EXISTS public.feature_flags (

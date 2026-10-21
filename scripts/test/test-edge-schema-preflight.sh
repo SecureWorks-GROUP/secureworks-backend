@@ -937,7 +937,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261020150000", "xero_mirror_checks"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
-                      ("20261021100000", "job_receipt_sender")]:
+                      ("20261021100000", "job_receipt_sender"),
+                      # Job profit switches: the four v_job_profit columns and
+                      # job_profit_flag_on ops-api reads (job_profit.ts).
+                      ("20261021180000", "job_profit_work_order_xero_bills")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

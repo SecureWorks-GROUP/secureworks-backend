@@ -1,4 +1,4 @@
--- Rollback for 20261021140000_job_profit_work_order_xero_bills.sql.
+-- Rollback for 20261021180000_job_profit_work_order_xero_bills.sql.
 -- Restores the 20261009130000 profit view. Deletes the three switches.
 -- Does not change a job, a bill, a quote or a work order, and does not drop
 -- xero_invoices.reference.

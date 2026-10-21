@@ -90,7 +90,7 @@ The last five appear in `completeness` only.
 Three rows in `feature_flags`, seeded off. Missing or unreadable is off.
 Turning one on is the owner's word, after this migration is applied. While a
 switch is off, every field this contract already described keeps that meaning.
-The four columns added in `20261021140000` (`margin_source`, `margin_cost_ex`,
+The four columns added in `20261021180000` (`margin_source`, `margin_cost_ex`,
 `expected_labour_quote_ex`, `work_order_agreed_labour_ex`) are present either
 way.
 
