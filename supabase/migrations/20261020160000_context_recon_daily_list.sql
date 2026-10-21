@@ -14,7 +14,9 @@
 --    consequence (section 14.3): owed invoices with no job first, then queued messages from a
 --    contact who owes money, then recent customer messages from a contact with a live job. Each
 --    row carries the evidence hash the screen sends back, a short summary and the jobs to choose
---    from. Defect causes stay on the engineering list (section 8), never here.
+--    from. A message summary carries counterpart_role, the party-roles stamp (empty is null),
+--    so a customer is labelled by that role. Defect causes stay on the engineering list
+--    (section 8), never here.
 -- Service role only, as in 20261020140000. Writes no business row.
 
 DO $$
@@ -171,7 +173,8 @@ LANGUAGE sql STABLE AS $$
   q AS (
     SELECT q.*, e.contact_id, e.direction, e.candidate_job_ids, e.job_id, e.payload, e.occurred_at,
            coalesce(e.context_captured_at, e.occurred_at) AS captured,
-           coalesce(nullif(e.metadata -> 'party_roles' ->> 'counterpart_role', ''), 'unstamped') AS role
+           coalesce(nullif(e.metadata -> 'party_roles' ->> 'counterpart_role', ''), 'unstamped') AS role,
+           nullif(e.metadata -> 'party_roles' ->> 'counterpart_role', '') AS counterpart_role
     FROM public.context_recon_queue(p_as_of) q JOIN public.business_events e ON e.id = q.event_id
     WHERE q.cause LIKE 'ambiguity:%' AND e.contact_id IS NOT NULL AND q.lane = 'live'),
   owed AS (SELECT * FROM public.context_recon_contact_owed((SELECT array_agg(DISTINCT contact_id) FROM q))),
@@ -184,12 +187,15 @@ LANGUAGE sql STABLE AS $$
            CASE WHEN owed.owed > 0 THEN 'owing_contact' ELSE 'recent_customer_live_job' END AS band_label,
            'event'::text AS subject_kind, q.event_id AS subject_id, owed.owed AS amount, q.waiting_days,
            q.cause, q.decision_state, q.last_action, q.owner,
-           jsonb_build_object('channel', q.channel, 'direction', q.direction,
+           jsonb_build_object('channel', q.channel,
+                              'counterpart_role', q.counterpart_role,
+                              'direction', q.direction,
                               'occurred_at', to_char(q.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                               'from', coalesce(q.payload ->> 'from', q.payload ->> 'email', q.payload ->> 'line'),
                               'subject', left(q.payload ->> 'subject', 200),
-                              'preview', left(coalesce(q.payload ->> 'body_preview', q.payload ->> 'body', q.payload ->> 'text',
-                                                       q.payload ->> 'message'), 280)) AS summary,
+                              'preview', CASE WHEN q.channel IS DISTINCT FROM 'call' THEN
+                                left(coalesce(q.payload ->> 'body_preview', q.payload ->> 'body', q.payload ->> 'text',
+                                              q.payload ->> 'message'), 280) END) AS summary,
            coalesce(q.candidate_job_ids, '{}') || CASE WHEN q.job_id IS NULL THEN '{}'::uuid[] ELSE ARRAY[q.job_id] END AS offered,
            cj.job_ids AS others
     FROM q
@@ -205,7 +211,7 @@ LANGUAGE sql STABLE AS $$
     SELECT band, band_label, subject_kind, subject_id, amount, waiting_days, cause, decision_state, last_action, owner,
            summary, offered, others FROM msgs
     ORDER BY 1, 5 DESC NULLS LAST, 6 DESC NULLS LAST, 4
-    LIMIT greatest(1, least(coalesce(p_limit, 50), 200)))
+    LIMIT greatest(1, least(coalesce(p_limit, 50), 201)))
   SELECT r.band, r.band_label, r.subject_kind, r.subject_id,
          CASE WHEN r.subject_kind = 'invoice' THEN public.context_recon_invoice_evidence_hash(r.subject_id)
               ELSE public.context_recon_evidence_hash(r.subject_id) END,
@@ -217,7 +223,7 @@ LANGUAGE sql STABLE AS $$
   ORDER BY r.band, r.amount DESC NULLS LAST, r.waiting_days DESC NULLS LAST, r.subject_id
 $$;
 COMMENT ON FUNCTION public.context_recon_daily_list(timestamptz, int) IS
- 'Context reconciliation daily list (20261020160000): the resolver''s list, ranked by consequence (owed invoices with no job, then messages from a contact who owes, then recent customer messages on a live job). Read only. Service role only.';
+ 'Context reconciliation daily list (20261020160000): the resolver''s list, ranked by consequence (owed invoices with no job, then messages from a contact who owes, then recent customer messages on a live job). At most 201 rows (ops-api pages 200 and says more). A message summary carries counterpart_role, the party-roles stamp (empty is null), so a customer is labelled by role. Call rows carry no preview, so transcript words never reach the list. Read only. Service role only.';
 
 DO $$
 DECLARE f text;

@@ -40,7 +40,11 @@ INSERT INTO public.business_events (id, channel, direction, occurred_at, contact
   ('7d300000-0000-0000-0000-000000000001', 'sms', 'inbound', '2026-10-18 01:00Z', 'recon-list-1', '{"body":"About my fence"}', 'sms.inbound', 'recon-list'),
   ('7d300000-0000-0000-0000-000000000002', 'sms', 'inbound', '2026-10-17 01:00Z', 'recon-list-2', '{"body":"Patio start date?"}', 'sms.inbound', 'recon-list'),
   ('7d300000-0000-0000-0000-000000000003', 'sms', 'inbound', '2026-10-17 01:00Z', 'recon-list-3', '{"body":"Old job"}', 'sms.inbound', 'recon-list'),
-  ('7d300000-0000-0000-0000-000000000004', 'sms', 'inbound', '2026-10-17 01:00Z', NULL, '{"body":"Who is this"}', 'sms.inbound', 'recon-list');
+  ('7d300000-0000-0000-0000-000000000004', 'sms', 'inbound', '2026-10-17 01:00Z', NULL, '{"body":"Who is this"}', 'sms.inbound', 'recon-list'),
+  -- a call transcript from the live-job customer: listed, but its words must never reach the list
+  ('7d300000-0000-0000-0000-000000000005', 'call', 'inbound', '2026-10-16 01:00Z', 'recon-list-2',
+   '{"body":"RECONCALLWORD body","body_preview":"RECONCALLWORD preview","text":"RECONCALLWORD text","transcript":"RECONCALLWORD"}',
+   'call.transcript_completed', 'recon-list');
 UPDATE public.business_events SET job_id = NULL, attribution_status = 'unplaced', attribution_checked_at = '2026-10-19 00:00Z',
   context_captured_at = occurred_at
 WHERE source = 'recon-list';
@@ -57,7 +61,8 @@ BEGIN
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = inv;
   IF r.band IS DISTINCT FROM 1 OR r.amount IS DISTINCT FROM 1500::numeric OR r.summary ->> 'invoice_number' IS DISTINCT FROM 'INV-98001'
      OR r.offered_jobs -> 0 ->> 'job_number' IS DISTINCT FROM 'SWF-98001'
-     OR r.decision_state IS DISTINCT FROM 'none' OR r.owner IS DISTINCT FROM 'context_resolver' THEN
+     OR r.decision_state IS DISTINCT FROM 'none' OR r.owner IS DISTINCT FROM 'context_resolver'
+     OR r.summary ? 'counterpart_role' THEN
     RAISE EXCEPTION 'recon list contract: the owed invoice is not band 1 with its contact''s job offered';
   END IF;
   SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000001';
@@ -69,6 +74,45 @@ BEGIN
      OR r.evidence_hash IS DISTINCT FROM public.context_recon_evidence_hash('7d300000-0000-0000-0000-000000000002') THEN
     RAISE EXCEPTION 'recon list contract: the live-job customer message is not band 3 with its hash';
   END IF;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000005';
+  IF r.band IS DISTINCT FROM 3 OR r.summary ->> 'channel' IS DISTINCT FROM 'call' OR r.summary ->> 'preview' IS NOT NULL
+     OR r.summary::text LIKE '%RECONCALLWORD%' THEN
+    RAISE EXCEPTION 'recon list contract: a call transcript is not band 3, or its words reached the list';
+  END IF;
+  -- Message summary shape: the party-roles stamp rides every message row, and a
+  -- customer stamp is the word customer, so the screen says Customer and never
+  -- "Sender not known". Invoice summaries stay money fields (asserted above).
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof) WHERE subject_kind = 'event';
+  IF n <> 3 THEN RAISE EXCEPTION 'recon list contract: expected 3 message rows, got %', n; END IF;
+  FOR r IN SELECT * FROM public.context_recon_daily_list(asof) WHERE subject_kind = 'event' LOOP
+    IF (SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(r.summary) k)
+       IS DISTINCT FROM ARRAY['channel','counterpart_role','direction','from','occurred_at','preview','subject']::text[] THEN
+      RAISE EXCEPTION 'recon list contract: message summary keys for % are %', r.subject_id, r.summary;
+    END IF;
+    IF r.summary ->> 'counterpart_role' IS DISTINCT FROM 'customer'
+       OR r.summary::text LIKE '%Sender not known%'
+       OR r.summary ->> 'counterpart_role' IS DISTINCT FROM (
+            SELECT e.metadata -> 'party_roles' ->> 'counterpart_role'
+            FROM public.business_events e WHERE e.id = r.subject_id) THEN
+      RAISE EXCEPTION 'recon list contract: customer message % is not labelled customer (role %)',
+        r.subject_id, r.summary ->> 'counterpart_role';
+    END IF;
+  END LOOP;
+  SELECT * INTO r FROM public.context_recon_daily_list(asof) WHERE subject_id = '7d300000-0000-0000-0000-000000000002';
+  IF r.summary ->> 'occurred_at' IS DISTINCT FROM '2026-10-17T01:00:00Z'
+     OR r.summary -> 'from' IS DISTINCT FROM 'null'::jsonb
+     OR r.summary -> 'subject' IS DISTINCT FROM 'null'::jsonb
+     OR r.summary ->> 'preview' IS DISTINCT FROM 'Patio start date?'
+     OR r.summary ->> 'channel' IS DISTINCT FROM 'sms'
+     OR r.summary ->> 'direction' IS DISTINCT FROM 'inbound'
+     OR r.summary ->> 'counterpart_role' IS DISTINCT FROM 'customer' THEN
+    RAISE EXCEPTION 'recon list contract: band 3 message summary shape is %', r.summary;
+  END IF;
+  -- The list is cut at the asked limit, so ops-api can ask one more and say more.
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof, 2);
+  IF n <> 2 THEN RAISE EXCEPTION 'recon list contract: p_limit 2 returned % rows', n; END IF;
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof, 500);
+  IF n < 4 OR n > 201 THEN RAISE EXCEPTION 'recon list contract: p_limit 500 returned % rows', n; END IF;
 
   -- 3. The invoice writer refuses a non-staff person, a stale hash, confirm and split.
   h := public.context_recon_invoice_evidence_hash(inv);
@@ -154,5 +198,16 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
     RAISE EXCEPTION 'recon list contract: go-live took the owed invoice off the list';
   END IF;
+
+  -- 8. The list stops at 201 rows, so ops-api's 200 plus one can tell a full page from a cut one.
+  INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, invoice_number, invoice_type, status, total, amount_due,
+                                    amount_paid, invoice_date, job_id, xero_contact_id, reference, contact_name)
+  SELECT gen_random_uuid(), '00000000-0000-0000-0000-000000000001', 'recon-cap-' || g, 'INV-97' || lpad(g::text, 3, '0'),
+         'ACCREC', 'AUTHORISED', 10, 10, 0, '2026-10-05', NULL, NULL, 'Cap', 'Cap client'
+  FROM generate_series(1, 205) g;
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof, 500);
+  IF n <> 201 THEN RAISE EXCEPTION 'recon list contract: the list cap is % rows, not 201', n; END IF;
+  SELECT count(*) INTO n FROM public.context_recon_daily_list(asof, 200);
+  IF n <> 200 THEN RAISE EXCEPTION 'recon list contract: p_limit 200 returned % rows', n; END IF;
 END $$;
 ROLLBACK;

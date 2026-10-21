@@ -658,6 +658,13 @@ jobs:
             supabase/functions/ops-api/service_credential_handler_test.ts \
             supabase/functions/ops-api/makesafe_cost_report_test.ts
 
+      # Recon daily list: a customer message is labelled from counterpart_role
+      # and never reads "Sender not known". Imports index.ts, so --no-check.
+      - name: Test the recon daily list sender label
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/recon_decisions_test.ts
+
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live
   # baseline drift, so the contract registry supplies the narrow prerequisites
