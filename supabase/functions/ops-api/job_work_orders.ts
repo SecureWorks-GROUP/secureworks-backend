@@ -417,6 +417,7 @@ export type JobWorkOrderHeldReason =
   | "not_filled"
   | "agreed_labour_missing"
   | "filled_before_auto_issue"
+  | "quote_has_no_lines"
   | "auto_issue_switched_off"
   | "awaiting_auto_issue";
 
@@ -445,6 +446,8 @@ const HELD_MESSAGES: Record<JobWorkOrderHeldReason, string> = {
     "The quote has no labour figure. Set the agreed labour and approve it to send it to the trades.",
   filled_before_auto_issue:
     "Filled before automatic issue, and it cannot be shown untouched since. Approve it to send it to the trades.",
+  quote_has_no_lines:
+    "The accepted quote has no labour or work lines to copy. Enter the work and the agreed labour by hand and approve it to send it to the trades.",
   auto_issue_switched_off:
     "Goes to the trades automatically once automatic issue is switched on.",
   awaiting_auto_issue: "Goes to the trades automatically within a few minutes.",
@@ -456,6 +459,7 @@ const HELD_FOR_THE_OFFICE: ReadonlySet<JobWorkOrderHeldReason> = new Set([
   "not_filled",
   "agreed_labour_missing",
   "filled_before_auto_issue",
+  "quote_has_no_lines",
 ]);
 
 /**
@@ -467,6 +471,8 @@ const HELD_FOR_THE_OFFICE: ReadonlySet<JobWorkOrderHeldReason> = new Set([
 export function jobWorkOrderNeedsChecking(
   wo: any,
   autoIssueOn: boolean | null,
+  /** The quote fill this read made, when it made one. */
+  quoteFill: { reason?: string | null } | null = null,
 ): JobWorkOrderNeedsChecking | null {
   if (!wo || wo.kind !== "job") return null;
   const items = Array.isArray(wo.scope_items) ? wo.scope_items : [];
@@ -484,7 +490,9 @@ export function jobWorkOrderNeedsChecking(
     const reason: JobWorkOrderHeldReason = wo.hand_edited_at
       ? "hand_edited"
       : !hasScope
-      ? "not_filled"
+      ? quoteFill?.reason === "no_quote_lines"
+        ? "quote_has_no_lines"
+        : "not_filled"
       : wo.agreed_labour_ex === null || wo.agreed_labour_ex === undefined
       ? "agreed_labour_missing"
       : !wo.quote_filled_at
@@ -1484,7 +1492,11 @@ export async function readJobWorkOrder(
     ),
     customer_variations: customerVariations.map(shapeCustomerVariation),
     quote_fill: quoteFill,
-    needs_checking: jobWorkOrderNeedsChecking(live || draft, autoIssueOn),
+    needs_checking: jobWorkOrderNeedsChecking(
+      live || draft,
+      autoIssueOn,
+      quoteFill,
+    ),
   };
 }
 
