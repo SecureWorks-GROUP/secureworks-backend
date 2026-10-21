@@ -44,3 +44,17 @@ BEGIN
     ON CONFLICT (id) DO NOTHING;
   END IF;
 END $$;
+
+-- Staff rows in production see every job (20260925040000). Keep that true for
+-- the two staff rows added here, so the users_trade_sees_all_jobs contract,
+-- which runs after every setup, does not count them as having lost it.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'trade_sees_all_jobs'
+  ) THEN
+    EXECUTE $q$UPDATE public.users SET trade_sees_all_jobs = true
+      WHERE id IN ('9913309f-35ae-4a71-8e1f-f704ecc526ea', '706c5258-70dd-483a-b36c-af6864b24498')$q$;
+  END IF;
+END $$;
