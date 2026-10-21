@@ -356,14 +356,20 @@ export async function loadXeroJobLinks(
 // not_job_related) that the database's own rule, cfo_recorded_person
 // (20261021173000), accepts. That rule is called, never restated here. Null
 // means "no recorded person", never "a person placed it". One rpc per distinct
-// actor; an error is thrown so the caller reports the read as failed.
+// stored actor, sent exactly as stored so the rule normalises it itself; an
+// error is thrown so the caller reports the read as failed.
 const QUEUE_PLACED_STATUSES = new Set(["assigned", "split", "not_job_related"]);
+
+// PostgreSQL's default btrim, which removes spaces only (never a tab or a
+// no-break space). Used only to skip a blank actor and to print an accepted
+// one the way the outcome view's queue_by does; it decides nothing.
+const sqlBtrim = (s: string) => s.replace(/^ +| +$/g, "");
 
 export async function loadRecordedPlacers(
   client: any,
   actors: string[],
 ): Promise<Set<string>> {
-  const distinct = [...new Set(actors.map((a) => (a || "").trim()).filter(Boolean))];
+  const distinct = [...new Set(actors.filter((a): a is string => typeof a === "string" && sqlBtrim(a) !== ""))];
   const people = new Set<string>();
   if (!distinct.length) return people;
   if (typeof client.rpc !== "function") throw new Error("cfo_recorded_person is not reachable from this client");
@@ -525,8 +531,8 @@ export async function listReconQueue(
     console.error("[materials_recon] placed-by read failed:", (e as Error).message);
   }
   for (const r of rows) {
-    const actor = typeof r.assigned_by === "string" ? r.assigned_by.trim() : "";
-    r.placed_by = placed(r) && actor && people.has(actor) ? actor : null;
+    const actor = typeof r.assigned_by === "string" ? r.assigned_by : "";
+    r.placed_by = placed(r) && people.has(actor) ? sqlBtrim(actor) : null;
   }
   return { ok: true, status, rows, stats, proposals, xero_jobs: xeroJobs, placed_by_read: placedByRead };
 }

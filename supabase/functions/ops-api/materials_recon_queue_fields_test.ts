@@ -25,7 +25,8 @@ const qrow = (over: Record<string, unknown> = {}) => ({
 });
 
 // Test stand-in for the SQL rule: user:<uuid of a users row>, or a users row's
-// email (case-insensitive, trimmed). Counts its calls.
+// email (case-insensitive), after PostgreSQL's default btrim, which strips
+// spaces only. Counts its calls.
 function withRecordedPerson(
   client: any,
   users: Array<{ id: string; email: string }>,
@@ -40,11 +41,11 @@ function withRecordedPerson(
         calls.push(args.p_actor);
         if (fail) return { data: null, error: { message: "stand-in read error" } };
         if (fn !== "cfo_recorded_person") return { data: null, error: { message: "unknown fn" } };
-        const a = (args.p_actor || "").trim();
+        const a = (args.p_actor || "").replace(/^ +| +$/g, "");
         const person = ["manual_queue", "manual_split"].includes(args.p_source) &&
           (/^user:[0-9a-f-]{36}$/i.test(a)
             ? users.some((u) => u.id === a.slice(5).toLowerCase())
-            : a.indexOf("@") > 0 && users.some((u) => u.email.trim().toLowerCase() === a.toLowerCase()));
+            : a.indexOf("@") > 0 && users.some((u) => u.email.toLowerCase() === a.toLowerCase()));
         return { data: person, error: null };
       },
     },
@@ -128,6 +129,34 @@ Deno.test("queue fields: placed_by is a recorded person on a placed row, otherwi
   assertEquals(new Set(w.calls).size, w.calls.length);
   assertEquals(w.calls.includes(""), false);
   assertEquals(w.calls.length, 6);
+});
+
+Deno.test("queue fields: placed_by sends each stored actor unchanged, so a tab or no-break space is never trimmed into a person", async () => {
+  const TAB = `\tuser:${U}\t`;
+  const NBSP = `\u00a0user:${U}\u00a0`;
+  const SPACED = `  user:${U} `;
+  const { client } = makeFakeClient({
+    materials_reconciliation_queue: [
+      qrow({ xero_invoice_id: "t1", status: "assigned", assigned_by: TAB }),
+      qrow({ xero_invoice_id: "t2", status: "assigned", assigned_by: NBSP }),
+      qrow({ xero_invoice_id: "t3", status: "assigned", assigned_by: SPACED }),
+      qrow({ xero_invoice_id: "t4a", status: "assigned", assigned_by: `user:${U}` }),
+      qrow({ xero_invoice_id: "t5t", status: "assigned", assigned_by: "\tstaff.one@example.test" }),
+      qrow({ xero_invoice_id: "t5s", status: "assigned", assigned_by: " staff.one@example.test " }),
+    ],
+  });
+  const w = withRecordedPerson(client, USERS);
+  const res: any = await listReconQueue(w.client, { orgId: ORG, status: "all" });
+  const by = (id: string) => res.rows.find((r: any) => r.xero_invoice_id === id).placed_by;
+  assertEquals(res.placed_by_read, "ok");
+  assertEquals(by("t1"), null);
+  assertEquals(by("t2"), null);
+  assertEquals(by("t3"), `user:${U}`);
+  // A valid actor and a tab-wrapped one stay two calls and two answers.
+  assertEquals(by("t4a"), `user:${U}`);
+  assertEquals(by("t5t"), null);
+  assertEquals(by("t5s"), "staff.one@example.test");
+  assertEquals(w.calls.sort(), [TAB, NBSP, SPACED, `user:${U}`, "\tstaff.one@example.test", " staff.one@example.test "].sort());
 });
 
 Deno.test("queue fields: a failed placed-by read leaves every row null and says so", async () => {
