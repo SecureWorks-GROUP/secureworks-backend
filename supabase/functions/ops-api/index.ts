@@ -1389,6 +1389,7 @@ import {
   setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
@@ -8306,6 +8307,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : { kind: 'none' }
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
+      }
+      // ── Paid-invoice receipt for fencing and patio (job_receipt.ts; docs/job-receipt-v1.md).
+      // Server key only: xero-sync posts these, and both can have Xero email a customer.
+      case 'job_receipt_paid':
+      case 'job_receipt_catch_up': {
+        const receiptCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' as const }
+          : { kind: 'none' as const }
+        const receipt = await runJobReceiptAction(action, req.method, body || {}, receiptCaller, jobReceiptDeps(client))
+        return json(receipt.body, receipt.status)
       }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
@@ -55161,6 +55172,27 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
     sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
     laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
+
+// The paid-invoice receipt: Xero emails the paid invoice (POST /Invoices/{id}/Email) with the
+// receipt claim id as the Idempotency-Key, through the shared Xero cooldown, never retried.
+const xeroReceiptFetch = lazyXeroAccountingFetch(RECEIPT_EMAIL_TIMEOUT_MS)
+function jobReceiptDeps(client: any): JobReceiptDeps {
+  return {
+    client,
+    now: () => new Date(),
+    emailInvoice: xeroReceiptEmailer({ getToken: () => getToken(client), fetch: xeroReceiptFetch, baseUrl: XERO_API_BASE }),
+    // The sealed SES money fence and the synthetic live-fire gate, as every Xero invoice
+    // email path runs them; a refusal is recorded by its code and nothing is sent.
+    preSendGuard: async ({ xeroInvoiceId, jobId }) => {
+      try {
+        await assertLegacySesInvoiceActionAllowed(client, xeroInvoiceId, 'job_receipt', jobId)
+        return null
+      } catch (e: any) {
+        return String(e?.refusal?.code || (e instanceof ApiError ? 'refused' : 'check_failed'))
+      }
+    },
   }
 }
 

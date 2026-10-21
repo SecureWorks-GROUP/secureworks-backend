@@ -34,7 +34,9 @@ Invariants (do not regress):
   client, just without a payment link).
 - The `daily-digest` "Unpaid Deposits" section only annotates `AUTHORISED`
   deposits (positive filter) and sends nothing: automated money messages,
-  including the acceptance Pay Now SMS, are off (`ops-api/debt_autotexts_off.ts`).
+  including the acceptance Pay Now SMS, are off (`ops-api/debt_autotexts_off.ts`;
+  one exception, receipts only: Xero emails each paid fencing or patio invoice,
+  `docs/job-receipt-v1.md`).
   `sendPaymentLink` (ops-api `send_payment_link`) throws a 409 for any
   non-AUTHORISED invoice.
 
