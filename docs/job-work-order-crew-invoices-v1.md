@@ -11,7 +11,7 @@ Office door: `supabase/functions/ops-api/job_work_order_office.ts`.
 
 ## Switches
 
-All seven are `feature_flags` rows, missing or unreadable meaning off.
+All seven are `feature_flags` rows. A missing row means off. An unreadable read means off, except the review stamp: if that switch cannot be read when a line is saved, the line is held `awaiting`.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ All seven are `feature_flags` rows, missing or unreadable meaning off.
 | `job_work_order_active_backfill_v1` | off | Lets `apply_active_job_work_orders(uuid[])` open the reviewed ids. The dry-run preview does not need it. Apply also needs the all-types flag. Preview is open jobs with real activity in 30 days, not `jobs.updated_at`. |
 | `job_work_order_office_fill_v1` | off | Office queue, fill and approve. Also lets the backup approver list seal a work order. Off: Shaun only, through the existing `approve_work_order` door, and the new writes refuse everyone including Shaun. |
 | `crew_invoice_on_job_work_order_v1` | off | The line trigger stamps `trade_invoice_lines.job_work_order_id` from a draft or an approved job work order. Off: only an approved one is stamped, as today. |
-| `crew_invoice_line_office_review_v1` | off | A new crew invoice line starts `office_review_status = awaiting`. Awaiting, queried and rejected hold the whole invoice out of Xero. A historical NULL still syncs. While on, `submit_trade_invoice` is 410. Lines already awaiting stay held if the switch is later turned off. |
+| `crew_invoice_line_office_review_v1` | off | A new crew invoice line starts `office_review_status = awaiting`. Awaiting, queried and rejected hold the whole invoice out of Xero. A historical NULL still syncs. While on, `submit_trade_invoice` is 410. Lines already awaiting stay held if the switch is later turned off. A missing flag row leaves the line unmarked. If the switch cannot be read when the line is saved, the line is held `awaiting`. |
 | `crew_invoice_requires_job_work_order_v1` | off | Separate hard rule. DEFAULT, owner to confirm: an open job's non-travel line with no job work order is refused before the invoice is saved. Closed jobs and Travel are exempt. A line with no job is not. |
 | `retire_crew_work_orders_v1` | off | `create_work_order` refuses any call that is not `kind: 'job'`, except a per-metre assignee's crew work order. Lists hide legacy `kind = 'crew'` rows that have no `quote_builder_version_id`, except that per-metre weekly row. `my_work_orders` returns approved job work orders with the money stripped and drafts left out. Off: today's crew insert and today's lists. |
 
