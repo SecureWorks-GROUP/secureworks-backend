@@ -44,11 +44,16 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'rollback: the share snapshot trigger must be removed';
   END IF;
-  IF EXISTS (
+  IF NOT EXISTS (
     SELECT 1 FROM public.job_client_signoffs
-    WHERE method IN ('share_link', 'revoked')
+    WHERE id = 'd2140000-0000-4000-8000-0000000000e3'
+      AND method = 'share_link'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM public.job_client_signoffs
+    WHERE id = 'd2140000-0000-4000-8000-0000000000e4'
+      AND method = 'revoked'
   ) THEN
-    RAISE EXCEPTION 'rollback: share_link and revoked sign-offs must be removed before the old check';
+    RAISE EXCEPTION 'rollback: share_link and revoked sign-offs must remain';
   END IF;
   IF EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -61,7 +66,8 @@ BEGIN
     SELECT 1 FROM public.feature_flags
     WHERE flag_name IN (
       'group_work_order_client_link_send_v1',
-      'group_work_order_v1'
+      'group_work_order_v1',
+      'completion_pack_client_email_v1'
     )
   ) THEN
     RAISE EXCEPTION 'rollback: the group flags must be removed';
@@ -93,7 +99,20 @@ BEGIN
     FROM pg_constraint
     WHERE conname = 'job_client_signoffs_method_check'
       AND conrelid = 'public.job_client_signoffs'::regclass
-  ) LIKE '%share_link%' THEN
-    RAISE EXCEPTION 'rollback: the sign-off method check must be on_site and office_waiver';
+  ) NOT LIKE '%share_link%'
+     OR (
+    SELECT pg_get_constraintdef(oid)
+    FROM pg_constraint
+    WHERE conname = 'job_client_signoffs_method_check'
+      AND conrelid = 'public.job_client_signoffs'::regclass
+  ) NOT LIKE '%revoked%' THEN
+    RAISE EXCEPTION 'rollback: the widened sign-off method check must stay';
+  END IF;
+  IF (
+    SELECT tgenabled FROM pg_trigger
+    WHERE tgname = 'trg_job_client_signoffs_append_only'
+      AND tgrelid = 'public.job_client_signoffs'::regclass
+  ) IS DISTINCT FROM 'O' THEN
+    RAISE EXCEPTION 'rollback: the sign-off append-only trigger must stay enabled';
   END IF;
 END $$;

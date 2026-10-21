@@ -7,8 +7,9 @@
 //   Page 3: Warranty, maintenance tips, client signature
 //   Page 4: Google review CTA, refer-a-friend, branded footer
 //
-// Stores the HTML in Supabase Storage and optionally emails
-// the client via GHL.
+// Stores the HTML in Supabase Storage. The client email stays off until
+// feature_flags.completion_pack_client_email_v1 is on. The email text
+// still needs the owner's okay.
 //
 // Deploy:
 //   /Users/marninstobbe/.local/bin/supabase functions deploy completion-pack --no-verify-jwt
@@ -22,6 +23,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { completionPackReviewPdfLine, completionPackReviewVisitHtml } from './review_cta.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
+import {
+  COMPLETION_PACK_CLIENT_EMAIL_FLAG,
+  completionPackEmailPlan,
+} from './email_plan.ts'
+import { completionPackClientSignature } from './client_signature.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -570,33 +576,34 @@ serve(async (req: Request) => {
       .eq('phase', 'completion')
       .order('uploaded_at', { ascending: false })
 
-    // Fetch signature (from job_media where phase='signature')
-    const { data: sigMedia } = await client
-      .from('job_media')
-      .select('storage_url, label')
-      .eq('job_id', jId)
-      .eq('phase', 'signature')
-      .order('uploaded_at', { ascending: false })
-      .limit(1)
-
-    // Also check service report for signature data
-    const { data: report } = await client
-      .from('job_service_reports')
-      .select('signature_data, signature_name, signed_at, status')
+    // Newest client sign-off only. A revoked or waived row hides the block.
+    // A service-report drawing or a crew-phone capture that was not recorded
+    // as on_site or share_link is not a client signature.
+    const { data: signoff, error: signoffErr } = await client
+      .from('job_client_signoffs')
+      .select('id, method, signature_media_id, signed_name, created_at')
       .eq('job_id', jId)
       .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .limit(1)
       .maybeSingle()
 
-    // Build signature object — prefer service report (has inline data), fallback to media
-    let signature: any = null
-    if (report?.signature_data) {
-      signature = report
-    } else if (sigMedia && sigMedia.length > 0) {
-      signature = {
-        signature_data: sigMedia[0].storage_url,
-        signature_name: job.client_name,
-        signed_at: job.completed_at,
+    let signature: {
+      signature_data: string
+      signature_name: string
+      signed_at: string | null
+    } | null = null
+    if (!signoffErr && signoff?.signature_media_id) {
+      const { data: signMedia, error: mediaErr } = await client
+        .from('job_media')
+        .select('storage_url')
+        .eq('id', signoff.signature_media_id)
+        .maybeSingle()
+      if (!mediaErr) {
+        signature = completionPackClientSignature({
+          signoff,
+          mediaUrl: signMedia?.storage_url,
+        })
       }
     }
 
@@ -780,9 +787,21 @@ serve(async (req: Request) => {
       },
     })
 
-    // Optionally email via GHL
+    // The pack is already stored. The client email stays off until the
+    // owner has okayed the exact text (completion_pack_client_email_v1).
+    const { data: emailFlag, error: emailFlagErr } = await client
+      .from('feature_flags')
+      .select('enabled')
+      .eq('flag_name', COMPLETION_PACK_CLIENT_EMAIL_FLAG)
+      .maybeSingle()
+    const plan = completionPackEmailPlan({
+      sendRequested: body.send_email === true,
+      flagEnabled: emailFlagErr ? false : emailFlag?.enabled,
+      hasContact: !!job.ghl_contact_id,
+    })
     let emailSent = false
-    if (body.send_email && job.ghl_contact_id) {
+    let emailStatus: string = plan.result
+    if (plan.send) {
       try {
         const clientFirst = (job.client_name || '').split(' ')[0] || 'there'
         const jobType = (job.type || 'patio').charAt(0).toUpperCase() + (job.type || 'patio').slice(1)
@@ -815,6 +834,7 @@ serve(async (req: Request) => {
         })
         const emailResult = await emailResp.json()
         emailSent = emailResult.success || false
+        emailStatus = emailSent ? 'sent' : 'send failed'
 
         if (emailSent) {
           await client.from('job_events').insert({
@@ -824,6 +844,7 @@ serve(async (req: Request) => {
           })
         }
       } catch (e) {
+        emailStatus = 'send failed'
         console.log('[completion-pack] Email send failed (non-blocking):', e)
       }
     }
@@ -832,6 +853,7 @@ serve(async (req: Request) => {
       success: true,
       url: publicUrl,
       email_sent: emailSent,
+      email_status: emailStatus,
       photos_count: (photos || []).length,
       has_signature: !!signature?.signature_data,
       has_scope: (job.scope_json != null),

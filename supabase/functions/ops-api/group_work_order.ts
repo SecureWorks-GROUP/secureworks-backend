@@ -14,13 +14,15 @@
 // participant has hours on a day they are assigned and a counting client
 // sign-off exists. A share read never freezes and never calls
 // project_group_work_order_split. project_group_work_order_split quotes and
-// stores nothing. The invoice-line trigger freezes in the same transaction
-// as the line, so a failed insert rolls the marker back.
+// stores nothing. A non-draft share line freezes in the same statement
+// when the marker is still null, so a failed insert rolls the marker back.
+// A draft stores the line and does not freeze or hold the share.
 // group_work_order_write_split is the only writer and must match
 // allocatePotCents and entryPointsMicro. A person who joins after the
 // marker is refused. The office unfreeze removes only the share line and
-// recalculates that invoice, and only before acknowledgement. An
-// acknowledged invoice, or any Xero id or push stamp, blocks.
+// recalculates that invoice. It refuses while a submit or Xero push is in
+// flight, from pending_acknowledgment onward, or when any Xero id or push
+// stamp is set. Draft and queried can still be stripped.
 //
 // DEFAULT, owner to confirm: break minutes come off finish minus start,
 // the same formula as trade invoice time entries. This module does not
@@ -30,11 +32,7 @@
 
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
-import { WORK_ORDER_LOCK_LINE_TYPES } from "./trade_invoice_assignment_lock.ts";
-import {
-  isTradeInvoiceTimeLineType,
-  resolveTradeInvoiceTimeEntry,
-} from "./trade_invoice_time_entry.ts";
+import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 
 export const GROUP_WORK_ORDER_FLAG = "group_work_order_v1";
 
@@ -46,10 +44,11 @@ export const GROUP_SHARE_LINE_TYPE = "group share";
 
 /**
  * Invoice statuses that hold nothing for the never-both fence.
- * draft and ops-reject are the legal subset. failed is not a real
- * trade_invoices status, so it is not in this list. The duplicate-share
- * rule is stricter: any status other than ops-reject, including draft,
- * holds the share. That check is the database trigger.
+ * draft and ops-reject are that list. failed is not a real
+ * trade_invoices status, so it is not here. The database duplicate-share
+ * rule releases the same two statuses and stays its own check: a draft
+ * does not freeze and does not hold the share. A non-draft line other
+ * than ops-reject does.
  */
 export const GROUP_FENCE_RELEASED_INVOICE_STATUSES = [
   "draft",
@@ -89,17 +88,19 @@ export type GroupAwaiting =
   | "frozen";
 
 const STAFF_ROLES = new Set(["admin", "owner", "ops_manager"]);
-const NOT_A_CLAIM = new Set([
+// DEFAULT, owner to confirm: on a group job every other line is pay,
+// including Other (live Other lines are labour) and a type this list has
+// not named. Commission stays in WORK_ORDER_LOCK_LINE_TYPES, a different
+// lock, and outside this fence. Keys are lower case with "_" and spaces
+// removed, matching group_work_order_line_is_normal_pay.
+const NOT_PAY_KEYS = new Set([
+  "groupshare",
+  "commission",
   "travel",
   "materials",
   "equipment",
   "adjustment",
-  "final_payout_deduction",
-  "final payout deduction",
-  // DEFAULT, owner to confirm: commission is not hours or a normal work
-  // order claim, so it does not trip the never-both fence. It stays in
-  // WORK_ORDER_LOCK_LINE_TYPES, which is a different lock.
-  "commission",
+  "finalpayoutdeduction",
 ]);
 
 export class GroupWorkOrderError extends Error {
@@ -312,16 +313,8 @@ export function isGroupShareInvoiceItem(
 
 export function isNormalWorkOrderPayLine(line: FenceLine): boolean {
   if (isGroupShareLine(line)) return false;
-  const type = fenceLineType(line);
-  if (NOT_A_CLAIM.has(type)) return false;
-  // hours and a work order are pay even when they are not a time-line type.
-  // The key matches group_work_order_line_is_normal_pay: lower case, "_" to
-  // space, then every space removed.
-  const key = type.replace(/\s+/g, "");
-  if (key === "hours" || key === "workorder") return true;
-  if (WORK_ORDER_LOCK_LINE_TYPES.includes(type)) return true;
-  if (isTradeInvoiceTimeLineType(type)) return true;
-  return Boolean(line.source_work_order_id);
+  const key = fenceLineType(line).replace(/ /g, "");
+  return !NOT_PAY_KEYS.has(key);
 }
 
 export function findFenceProblem(
@@ -1127,25 +1120,44 @@ function signedAfterHours(signedAt: unknown, latestHoursAt: string | null): bool
   return signed > latest;
 }
 
+function rowInstant(row: Record<string, unknown>): string | null {
+  const created = row.created_at == null || row.created_at === ""
+    ? null
+    : String(row.created_at);
+  const updated = row.updated_at == null || row.updated_at === ""
+    ? null
+    : String(row.updated_at);
+  if (!created) return updated;
+  if (!updated) return created;
+  const createdAt = Date.parse(created);
+  const updatedAt = Date.parse(updated);
+  if (!Number.isFinite(createdAt)) return Number.isFinite(updatedAt) ? updated : null;
+  if (!Number.isFinite(updatedAt)) return created;
+  return updatedAt > createdAt ? updated : created;
+}
+
 function latestStamp(rows: readonly Record<string, unknown>[]): string | null {
   let latest: number | null = null;
   let text: string | null = null;
   for (const row of rows) {
-    if (row.created_at == null || row.created_at === "") continue;
-    const at = Date.parse(String(row.created_at));
+    const instant = rowInstant(row);
+    if (!instant) continue;
+    const at = Date.parse(instant);
     if (!Number.isFinite(at)) continue;
     if (latest == null || at > latest) {
       latest = at;
-      text = String(row.created_at);
+      text = instant;
     }
   }
   return text;
 }
 
 /**
- * A group freeze counts a drawn signature only. An office waiver still
- * counts for the ordinary invoice gate in trade_client_signoff.ts. It does
- * not count here. The drawing has to be dated after the latest hours on a
+ * A group freeze counts a drawn signature only. This does not call #1110's
+ * helper in trade_client_signoff.ts. A revoked row is not signed here even
+ * if that helper still counts it. An office waiver still counts for the
+ * ordinary invoice gate. It does not count here. The drawing has to be
+ * dated after the later of each hours row's created_at and updated_at on a
  * non-void group for the job. DEFAULT, owner to confirm.
  */
 function signoffCounts(
@@ -1200,7 +1212,7 @@ async function latestHoursOnJob(client: any, jobId: string): Promise<string | nu
     .map((row) => String(row.id));
   if (liveIds.length === 0) return null;
   const stamps = await rowsOf(
-    client.from("group_work_order_time_entries").select("created_at").in(
+    client.from("group_work_order_time_entries").select("created_at, updated_at").in(
       "group_id",
       liveIds,
     ),

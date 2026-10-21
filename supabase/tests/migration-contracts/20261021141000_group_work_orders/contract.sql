@@ -52,6 +52,20 @@ BEGIN
     RAISE EXCEPTION 'group-wo: the master switch must exist and be off';
   END IF;
   IF NOT EXISTS (
+    SELECT 1 FROM public.feature_flags
+    WHERE flag_name = 'completion_pack_client_email_v1' AND enabled = false
+  ) THEN
+    RAISE EXCEPTION 'group-wo: the completion-pack email flag must exist and be off';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'group_work_order_time_entries'
+      AND column_name = 'updated_at'
+  ) THEN
+    RAISE EXCEPTION 'group-wo: hours updated_at is missing';
+  END IF;
+  IF NOT EXISTS (
     SELECT 1 FROM public.group_work_order_settings
     WHERE id = 1
       AND google_review_url = 'https://share.google/AFyfkE7jLfCZcxanV'
@@ -261,6 +275,9 @@ DECLARE
   v_live uuid := 'a2140000-0000-4000-8000-000000000402';
   v_dup uuid := 'a2140000-0000-4000-8000-000000000403';
   v_wrong uuid := 'a2140000-0000-4000-8000-000000000404';
+  v_submit uuid := 'a2140000-0000-4000-8000-000000000405';
+  v_submit2 uuid := 'a2140000-0000-4000-8000-000000000406';
+  v_save uuid := 'a2140000-0000-4000-8000-000000000407';
   v_media uuid := 'a2140000-0000-4000-8000-000000000501';
 BEGIN
   IF NOT EXISTS (
@@ -283,6 +300,28 @@ BEGIN
      OR NOT has_function_privilege('service_role', 'public.trade_invoice_lines_group_share_snapshot()', 'EXECUTE')
   THEN
     RAISE EXCEPTION 'group-wo: service_role must execute the freeze and the line snapshot';
+  END IF;
+  IF has_function_privilege('authenticated', 'public.group_work_order_lock_job(uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.group_work_order_lock_job(uuid)', 'EXECUTE')
+     OR NOT has_function_privilege('service_role', 'public.group_work_order_lock_job(uuid)', 'EXECUTE')
+  THEN
+    RAISE EXCEPTION 'group-wo: the job lock must be service_role only';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public'
+      AND p.proname = 'group_work_order_lock_job'
+      AND (
+        p.proacl IS NULL
+        OR EXISTS (
+          SELECT 1 FROM aclexplode(p.proacl) a
+          WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'group-wo: PUBLIC must not execute the job lock';
   END IF;
 
   INSERT INTO public.trade_invoices (
@@ -379,6 +418,27 @@ BEGIN
     RAISE EXCEPTION 'group-wo: project wrote or misquoted %', v_quote;
   END IF;
 
+  -- A draft save before freeze stores the line, writes no share, and
+  -- leaves the marker null.
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_save, v_org, v_a, 'draft',
+    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_save, v_pot_job, 'group share', 321.43);
+  IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NOT NULL
+     OR (SELECT count(*) FROM public.group_work_order_shares WHERE group_id = v_freeze) <> 0
+     OR (SELECT group_share_id FROM public.trade_invoice_lines WHERE trade_invoice_id = v_save) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: a draft save froze or held the share';
+  END IF;
+  DELETE FROM public.trade_invoice_lines WHERE trade_invoice_id = v_save;
+  DELETE FROM public.trade_invoices WHERE id = v_save;
+
   SET LOCAL ROLE service_role;
   v_first := public.freeze_group_work_order_split(v_freeze);
   RESET ROLE;
@@ -467,16 +527,14 @@ BEGIN
     v_dup, v_org, v_a, 'draft',
     321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14
   );
-  BEGIN
-    INSERT INTO public.trade_invoice_lines (
-      trade_invoice_id, job_id, line_type, line_total_ex, group_share_id
-    ) VALUES (v_dup, v_pot_job, 'group share', 321.43, v_share_a);
-    RAISE EXCEPTION 'group-wo: a second live share line was stored';
-  EXCEPTION WHEN check_violation THEN
-    IF SQLERRM IS DISTINCT FROM 'group_share_already_invoiced' THEN
-      RAISE EXCEPTION 'group-wo: duplicate share said %', SQLERRM;
-    END IF;
-  END;
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex, group_share_id
+  ) VALUES (v_dup, v_pot_job, 'group share', 321.43, v_share_a);
+  IF (SELECT group_share_id FROM public.trade_invoice_lines WHERE trade_invoice_id = v_dup) IS DISTINCT FROM v_share_a
+     OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: a second draft did not keep the frozen share';
+  END IF;
 
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -495,6 +553,55 @@ BEGIN
       RAISE EXCEPTION 'group-wo: owner guard said %', SQLERRM;
     END IF;
   END;
+
+  -- Save then submit: a pending line replaces the drafts' hold. A second
+  -- pending line is the duplicate. Unfreeze refuses until that submit is
+  -- back to draft, which is what the strip below needs.
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_submit, v_org, v_a, 'pending_acknowledgment',
+    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_submit, v_pot_job, 'group share', 321.43);
+  IF (SELECT group_share_id FROM public.trade_invoice_lines WHERE trade_invoice_id = v_submit) IS DISTINCT FROM v_share_a
+  THEN
+    RAISE EXCEPTION 'group-wo: submitting over a draft did not stamp the share';
+  END IF;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_submit2, v_org, v_a, 'pending_acknowledgment',
+    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14
+  );
+  BEGIN
+    INSERT INTO public.trade_invoice_lines (
+      trade_invoice_id, job_id, line_type, line_total_ex
+    ) VALUES (v_submit2, v_pot_job, 'group share', 321.43);
+    RAISE EXCEPTION 'group-wo: a second live share line was stored';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_share_already_invoiced' THEN
+      RAISE EXCEPTION 'group-wo: duplicate share said %', SQLERRM;
+    END IF;
+  END;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.unfreeze_group_work_order_split(v_freeze, v_shaun);
+    RAISE EXCEPTION 'group-wo: unfreeze ran over a submitted invoice';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_has_live_invoice' THEN
+      RAISE EXCEPTION 'group-wo: submitted unfreeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NULL THEN
+    RAISE EXCEPTION 'group-wo: a refused unfreeze cleared the marker';
+  END IF;
+  UPDATE public.trade_invoices SET status = 'draft' WHERE id = v_submit;
 
   -- A draft share invoice is returned. The snapshot is cleared, not recomputed.
   SET LOCAL ROLE service_role;
@@ -519,6 +626,22 @@ BEGIN
   UPDATE public.group_work_order_time_entries
   SET hours = 7.50
   WHERE group_id = v_freeze AND user_id = v_a;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_freeze);
+    RAISE EXCEPTION 'group-wo: an edited hour was covered by the older drawing';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
+      RAISE EXCEPTION 'group-wo: edited hours said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor
+  ) VALUES (
+    v_pot_job, 'on_site', 'Alex Client', true, 5, v_media, 'user:' || v_a::text
+  );
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_freeze);
   RESET ROLE;
@@ -654,12 +777,18 @@ DECLARE
   v_strip_invoice uuid := 'd2140000-0000-4000-8000-000000000404';
   v_void_job uuid := 'd2140000-0000-4000-8000-000000000117';
   v_void_group uuid := 'd2140000-0000-4000-8000-000000000217';
+  v_other_job uuid := 'd2140000-0000-4000-8000-000000000118';
+  v_other_invoice uuid := 'd2140000-0000-4000-8000-000000000406';
+  v_week_invoice uuid := 'd2140000-0000-4000-8000-000000000405';
+  v_deduction uuid := 'd2140000-0000-4000-8000-0000000000d1';
   v_wo uuid;
   v_type text;
   v_share numeric;
+  v_def text;
   v_types text[] := ARRAY[
     'labour', 'fencing', 'patio', 'make safe', 'MakeSafe',
-    'general labour', 'decking', 'hours', 'work order', 'work_order'
+    'general labour', 'decking', 'hours', 'work order', 'work_order',
+    'Other', 'mystery'
   ];
 BEGIN
   IF EXISTS (
@@ -799,6 +928,35 @@ BEGIN
   EXCEPTION WHEN check_violation THEN
     IF SQLERRM IS DISTINCT FROM 'group_open_blocked_by_work_order_claim' THEN
       RAISE EXCEPTION 'group-wo: open over pay said %', SQLERRM;
+    END IF;
+  END;
+
+  -- 'Other' is pay on a group job. Pending Marnin.
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_other_job, v_org, 'fencing', 'quoted', 'GWO-OTHER');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_other_job, 'GWO-OTHER-1', 'job', 'draft', 100, '[]', 'other blocks open'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-OTHER-1';
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_other_invoice, v_org, v_a, 'draft', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_other_invoice, v_other_job, 'Other', 10);
+  BEGIN
+    INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
+    VALUES (v_org, v_other_job, v_wo, 'token-other-blocked');
+    RAISE EXCEPTION 'group-wo: a group opened over an Other line';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_open_blocked_by_work_order_claim' THEN
+      RAISE EXCEPTION 'group-wo: open over Other said %', SQLERRM;
     END IF;
   END;
 
@@ -964,7 +1122,8 @@ BEGIN
   END;
   RESET ROLE;
 
-  -- Unfreeze strips only the share. Acknowledged, and any Xero id, refuse.
+  -- Unfreeze strips only the share. Pending acknowledgement, acknowledged,
+  -- and any Xero id, refuse.
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
   VALUES (v_strip_job, v_org, 'fencing', 'quoted', 'GWO-STRIP');
   INSERT INTO public.work_orders (
@@ -1043,6 +1202,20 @@ BEGIN
   IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_strip_group) IS NULL THEN
     RAISE EXCEPTION 'group-wo: a refused unfreeze cleared the strip marker';
   END IF;
+  UPDATE public.trade_invoices SET status = 'pending_acknowledgment' WHERE id = v_strip_invoice;
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
+    RAISE EXCEPTION 'group-wo: unfreeze ran over a submit in flight';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_has_live_invoice' THEN
+      RAISE EXCEPTION 'group-wo: pending unfreeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_strip_group) IS NULL THEN
+    RAISE EXCEPTION 'group-wo: a pending invoice unfroze the split';
+  END IF;
   UPDATE public.trade_invoices SET status = 'queried' WHERE id = v_strip_invoice;
   SET LOCAL ROLE service_role;
   PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
@@ -1056,9 +1229,87 @@ BEGIN
      OR (SELECT super_amount FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 1.20
      OR (SELECT net_pay FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 9.40
      OR (SELECT total_inc FROM public.trade_invoices WHERE id = v_strip_invoice) IS DISTINCT FROM 10
+     OR (SELECT job_grand_total_ex FROM public.trade_invoices WHERE id = v_strip_invoice) IS NOT NULL
+     OR (SELECT final_deductions_total_ex FROM public.trade_invoices WHERE id = v_strip_invoice) IS NOT NULL
+     OR (SELECT to_be_paid_ex FROM public.trade_invoices WHERE id = v_strip_invoice) IS NOT NULL
      OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_strip_group) IS NOT NULL
   THEN
     RAISE EXCEPTION 'group-wo: unfreeze did not leave the travel line and the queried status';
+  END IF;
+
+  -- Hours were not edited, so the same sign-off still counts. A weekly
+  -- invoice keeps its final-payout header and does not take the recurring
+  -- deduction off gross.
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_strip_group);
+  RESET ROLE;
+  SELECT share_ex INTO v_share FROM public.group_work_order_shares
+  WHERE group_id = v_strip_group AND user_id = v_a;
+  IF v_share IS DISTINCT FROM 321.43 THEN
+    RAISE EXCEPTION 'group-wo: weekly re-freeze share was %', v_share;
+  END IF;
+  INSERT INTO public.trade_recurring_deductions (
+    id, user_id, label, amount, first_week_start
+  ) VALUES (
+    v_deduction, v_a, 'Ute hire', 5, DATE '2026-10-19'
+  );
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, invoice_source,
+    week_start, week_end,
+    subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay,
+    job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex,
+    recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount
+  ) VALUES (
+    v_week_invoice, v_org, v_a, 'pending_acknowledgment', 'weekly_work_order',
+    DATE '2026-10-19', DATE '2026-10-25',
+    411.43, 0, 411.43,
+    false, 0.12, 49.37, 411.43, 386.74,
+    421.43, 10, 411.43,
+    v_deduction, 'Ute hire', 5
+  );
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_week_invoice, v_strip_job, 'travel', 100);
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, line_type, line_total_ex
+  ) VALUES (v_week_invoice, 'final_payout_deduction', -10);
+  INSERT INTO public.trade_invoice_lines (
+    trade_invoice_id, job_id, line_type, line_total_ex
+  ) VALUES (v_week_invoice, v_strip_job, 'group share', v_share);
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
+    RAISE EXCEPTION 'group-wo: unfreeze ran over a weekly submit';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_has_live_invoice' THEN
+      RAISE EXCEPTION 'group-wo: weekly pending unfreeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  UPDATE public.trade_invoices SET status = 'queried' WHERE id = v_week_invoice;
+  SET LOCAL ROLE service_role;
+  PERFORM public.unfreeze_group_work_order_split(v_strip_group, v_shaun);
+  RESET ROLE;
+  IF (SELECT subtotal_ex FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 90
+     OR (SELECT gross_earned FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 90
+     OR (SELECT super_amount FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 10.80
+     OR (SELECT net_pay FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 84.60
+     OR (SELECT gst FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 0
+     OR (SELECT total_inc FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 90
+     OR (SELECT job_grand_total_ex FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 100
+     OR (SELECT final_deductions_total_ex FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 10
+     OR (SELECT to_be_paid_ex FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 90
+     OR (SELECT recurring_deduction_amount FROM public.trade_invoices WHERE id = v_week_invoice) IS DISTINCT FROM 5
+     OR (SELECT count(*) FROM public.trade_invoice_lines
+         WHERE trade_invoice_id = v_week_invoice AND line_type = 'group share') <> 0
+     OR (SELECT count(*) FROM public.trade_invoice_lines
+         WHERE trade_invoice_id = v_week_invoice AND line_type = 'travel') <> 1
+     OR (SELECT count(*) FROM public.trade_invoice_lines
+         WHERE trade_invoice_id = v_week_invoice AND line_type = 'final_payout_deduction') <> 1
+     OR (SELECT job_grand_total_ex FROM public.trade_invoices WHERE id = v_strip_invoice) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: weekly unfreeze did not keep the deduction off gross';
   END IF;
 
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
@@ -1088,6 +1339,12 @@ BEGIN
      OR (SELECT void_reason FROM public.group_work_orders WHERE id = v_void_group) IS DISTINCT FROM 'still void'
   THEN
     RAISE EXCEPTION 'group-wo: void did not stay permanent';
+  END IF;
+  v_def := pg_get_functiondef('public.void_group_work_order(uuid,uuid,text)'::regprocedure);
+  IF position('FOR UPDATE;' IN v_def) > 0
+     AND position('FOR UPDATE;' IN v_def) < position('unfreeze_group_work_order_split' IN v_def)
+  THEN
+    RAISE EXCEPTION 'group-wo: void locks the row before unfreeze';
   END IF;
 END $$;
 

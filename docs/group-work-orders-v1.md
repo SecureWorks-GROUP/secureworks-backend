@@ -101,36 +101,41 @@ and is not the authority.
   read. A trade's my-share says `awaiting_rate` without naming anyone
   else. The office payload lists the user ids who still need hours or a
   rate.
-- A job is paid either as normal pay or as this split, not both. Normal
-  pay is every trade time type (`TRADE_INVOICE_TIME_LINE_TYPES`: labour,
-  fencing, patio, make safe, general labour, decking), plus hours and a
-  work order. `group_work_order_line_is_normal_pay` is that set: case,
-  underscores and spaces do not make a second type, and an unknown type
-  with `source_work_order_id` still counts. Commission, travel, materials,
-  equipment, adjustments and a group share do not. Commission stays in
-  `WORK_ORDER_LOCK_LINE_TYPES` and outside this fence. The check runs
-  both ways and does not read the switch: a share line is refused when
-  normal pay already exists (`group_share_blocked_by_work_order_claim`),
-  and opening a group is refused when normal pay already exists
+- A job is paid either as normal pay or as this split, not both. On a
+  group job every invoice line counts as pay unless it is travel,
+  materials, equipment, an adjustment, a final-payout deduction,
+  commission, or the share itself. That includes `Other` and any unknown
+  type, with or without `source_work_order_id`. Live `Other` lines are
+  labour. Pending Marnin. Case, underscores and spaces do not make a
+  second type. Commission stays in `WORK_ORDER_LOCK_LINE_TYPES` and
+  outside this fence. The check runs both ways and does not read the
+  switch: a share line is refused when normal pay already exists
+  (`group_share_blocked_by_work_order_claim`), and opening a group is
+  refused when normal pay already exists
   (`group_open_blocked_by_work_order_claim`). Both take an advisory lock
   on the job before the row lock, so the two writes cannot pass each
-  other. The duplicate-share rule is stricter than the never-both fence:
-  a draft holds the share; only `ops-reject` releases it. Unfreeze is
-  refused once a share invoice is `acknowledged` or later, or carries any
-  Xero bill id or push stamp (`group_split_has_live_invoice`). The
-  never-both TypeScript list is `draft` and `ops-reject` only. The
-  global `RELEASED_INVOICE_STATUSES` list is a different lock and still
-  includes `failed`.
+  other. A draft share line does not freeze the split and does not count
+  as invoiced. The database duplicate rule releases `draft` and
+  `ops-reject`. The never-both TypeScript list is the same two statuses
+  and stays its own check. Unfreeze is refused while a weekly submit
+  holds the invoice lock, once a share invoice is
+  `pending_acknowledgment` or later, or when it carries any Xero bill id
+  or push stamp (`group_split_has_live_invoice`). Draft and queried can
+  still be stripped. The global `RELEASED_INVOICE_STATUSES` list is a
+  different lock and still includes `failed`.
 - The share line matches the invoice owner. A second live line for the
   same share is `group_share_already_invoiced`. A line whose
   `group_share_id` is another person's share is
   `group_share_owner_mismatch`. Amounts match to the cent.
 - The invoice-line trigger watches `INSERT OR UPDATE OF group_share_id,
   line_total_ex`. A job-work-order stamp that updates another column does
-  not re-enter it. The trigger locks the group row, requires a counting
-  sign-off, and calls `write_split(true)` when the marker is null, in the
-  same statement as the line. A failed insert rolls the freeze back. An
-  explicit freeze that then fails its invoice stays frozen.
+  not re-enter it. A non-draft share line locks the group row, requires a
+  counting sign-off, and calls `write_split(true)` when the marker is
+  null, in the same statement as the line. A failed insert rolls the
+  freeze back. A draft line stores the share text and leaves the marker
+  and the share id empty. An explicit freeze that then fails its invoice
+  stays frozen. A later save or a submit replaces that draft's own lines
+  in one transaction.
 - Crew-charges lists show a group share only to its owner and to staff.
   The lead cannot acknowledge or override someone else's share. Group
   shares are excluded from negative-charge selectors.
@@ -144,15 +149,32 @@ Pending Marnin's call. Built as the safe default.
   day. The office can remove a participant, audited, only before freeze.
 - Commission sits outside the never-both fence.
 - The client signature reuses `job_client_signoffs` and its happy
-  threshold. A group freeze does not accept an office waiver: the
-  signature is drawn, not revoked, and dated after the latest hours on
-  the group. The ordinary invoice gate still accepts `office_waiver`.
+  threshold. A group freeze does not accept an office waiver or a revoked
+  row: the signature is drawn, and its time is after the latest hours on
+  the group. That instant is the later of each hour row's `created_at`
+  and `updated_at`. The ordinary invoice gate still accepts
+  `office_waiver`. This check does not call #1110's helper. #1110 still
+  needs the same rule (a revoked row is not signed) before either switch
+  goes on.
 - Unfreeze removes only the share line and recalculates that invoice's
-  totals. It does not reject the trade's week. It is allowed only before
-  acknowledgement, and any Xero id or push stamp blocks it.
-- Voiding stays permanent. A void group cannot be opened again.
+  totals from the lines that remain, the same split as a trade invoice.
+  A weekly work order also rewrites its three headers: final-payout
+  deductions stay a positive magnitude, to-be-paid is the remaining line
+  sum, and the job grand is that sum plus those deductions. A recurring
+  deduction stays on the payable and is not taken off gross. It does not
+  reject the trade's week. A weekly submit already holding the invoice
+  lock, a share on `pending_acknowledgment` or later, and any Xero id or
+  push stamp block it. Draft and queried can still be stripped.
+- Voiding stays permanent. A void group cannot be opened again. Void
+  takes the weekly invoice lock, then the job lock, then the row, the
+  same order as every other path. It does not lock the row before that.
+- The down migration does not delete sign-off rows and does not disable
+  the append-only trigger. The widened method check
+  (`on_site`, `office_waiver`, `share_link`, `revoked`) stays.
 - PR #1110 should merge first. This branch's `trade_client_signoff.ts`
-  and the two sign-off migrations match #1110.
+  and the two sign-off migrations match #1110. #1110's helper still
+  counts a revoked row as signed; that has to be fixed before either
+  switch goes on.
 - Break minutes come off finish minus start, the same rule as a trade
   invoice time entry.
 
@@ -186,17 +208,21 @@ Office. A trade JWT is 403 before the handler.
 | --- | --- | --- |
 | `group_work_order_feedback` | open | The feedback row. |
 | `group_work_order_office` | open | Pot, every participant, who needs hours or a rate, feedback, `split_frozen`. |
-| `unfreeze_group_work_order` | gated | Clears the marker. Deletes only the share lines and recalculates those invoices. Refused at acknowledgement or when the invoice has a Xero id or push stamp. |
+| `unfreeze_group_work_order` | gated | Clears the marker. Deletes only the share lines and recalculates those invoices, including weekly headers. A recurring deduction stays off gross. Refused while a submit holds the invoice lock, from `pending_acknowledgment`, or when the invoice has a Xero id or push stamp. |
 | `remove_group_work_order_participant` | open | Before freeze only. Deletes that person's hours and participant row and writes `remove_participant`. Does not cancel the job assignment. |
 | `revoke_group_signoff` | open | Newest `revoked` row. Does not itself unfreeze. |
 | `void_group_work_order` | open | Unfreeze first, then status `void`. A paid share blocks it. Leaving `void` is refused. |
 | `rekey_group_work_order` | open | Points at the current approved sealed `jobs.work_order_id`, only while not frozen and not void. |
 
 `generate_trade_invoice` is the only door for a share, and only while the
-switch is on. The server sets quantity 1, rate = that person's frozen
-share, `source_work_order_id` null, `group_share_id` set. A client amount
-that is not the snapshot is `group_share_amount_mismatch`. The same
-invoice cannot mix the share with hours or work-order pay for that job.
+switch is on. A draft save stores the share line and does not freeze.
+Once the split is frozen the server sets quantity 1, rate = that
+person's frozen share, `source_work_order_id` null, `group_share_id`
+set. A client amount that is not the snapshot is
+`group_share_amount_mismatch`. The same invoice cannot mix the share
+with pay for that job. Pay is every line except travel, materials,
+equipment, an adjustment, a final-payout deduction, commission, and the
+share.
 
 ## Feedback
 
@@ -219,6 +245,10 @@ response sets `prompt_google_review: true` and includes
 ## Open
 
 - The sender is not built. Turning the sender flag on does not send anything.
+- The completion-pack client email (`completion_pack_client_email_v1`)
+  stays off. While it is off the pack is generated and nothing is emailed.
+  The email text needs Marnin's okay before that flag is turned on.
+- `Other` counting as pay on a group job is the safe default, pending Marnin.
 - The master switch stays off until the owner turns it on.
 - Withheld quote PDFs and the trade app's price-free extract are a different
   fence. This slice does not change them.

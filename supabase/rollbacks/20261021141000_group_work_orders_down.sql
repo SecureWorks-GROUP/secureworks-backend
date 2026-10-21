@@ -1,6 +1,13 @@
 -- Reverse 20261021141000_group_work_orders.sql. Drops the group tables
--- and the invoice pointer. Restores job_client_signoffs to the #1110
--- method list. Does not drop job_client_signoffs or client_signoff_settings.
+-- and the invoice pointer. Does not drop job_client_signoffs or
+-- client_signoff_settings, and does not delete any sign-off row.
+--
+-- The widened method check (on_site, office_waiver, share_link, revoked)
+-- stays in place. Restoring the narrower #1110 check would require
+-- deleting share_link and revoked rows, and that delete only runs if the
+-- append-only trigger is switched off. Neither happens here. The extra
+-- share_link, revoked and device checks are this migration's and are
+-- dropped; the no-delete trigger stays enabled.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
@@ -56,20 +63,12 @@ ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_sign
 ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_revoked_check;
 ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_device_check;
 ALTER TABLE public.job_client_signoffs DROP COLUMN IF EXISTS captured_device;
--- share_link and revoked exist only because this migration added them.
--- The sign-off table refuses DELETE while its append-only trigger is on, so
--- the trigger is off for this statement only. Then the #1110 check is restored.
-ALTER TABLE public.job_client_signoffs DISABLE TRIGGER trg_job_client_signoffs_append_only;
-DELETE FROM public.job_client_signoffs
-WHERE method IN ('share_link', 'revoked');
-ALTER TABLE public.job_client_signoffs ENABLE TRIGGER trg_job_client_signoffs_append_only;
-
-ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_method_check;
-ALTER TABLE public.job_client_signoffs ADD CONSTRAINT job_client_signoffs_method_check
-  CHECK (method IN ('on_site', 'office_waiver'));
+-- job_client_signoffs_method_check stays widened. Rows of method
+-- share_link and revoked stay. trg_job_client_signoffs_append_only stays on.
 
 DELETE FROM public.feature_flags
 WHERE flag_name IN (
   'group_work_order_client_link_send_v1',
-  'group_work_order_v1'
+  'group_work_order_v1',
+  'completion_pack_client_email_v1'
 );

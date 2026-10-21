@@ -1,6 +1,6 @@
 -- Proof copy only. share_link and revoked rows exist when the down
--- migration runs, so the append-only trigger has to be disabled around
--- that delete or the #1110 method check cannot be restored.
+-- migration runs. The down leaves those rows, leaves the widened method
+-- check, and does not disable the append-only trigger.
 INSERT INTO public.jobs (id, org_id, type, status, job_number)
 VALUES (
   'd2140000-0000-4000-8000-0000000000e1',

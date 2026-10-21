@@ -5,8 +5,10 @@
 # commits. Session B's hour edit waits on that lock, then is refused
 # group_split_frozen, and B's freeze returns the stored 321.43 / 160.72
 # snapshot. Session C is refused group_split_frozen. Hours stay 2.00.
-# After that, two sessions insert the same share onto two invoices: one
-# stores the line and the other is refused group_share_already_invoiced.
+# After that, two sessions insert the same share onto two submitted
+# invoices (pending_acknowledgment). A draft does not hold the share, so
+# the race is a real submit: one stores the line and the other is refused
+# group_share_already_invoiced.
 set -euo pipefail
 : "${CONTRACT_DATABASE_URL:?local contract database required}"
 case "$CONTRACT_DATABASE_URL" in
@@ -234,9 +236,9 @@ INSERT INTO public.trade_invoices (
   id, org_id, user_id, status, subtotal_ex, gst, total_inc,
   gst_on, super_rate, super_amount, gross_earned, net_pay
 ) VALUES
-  ('c2140000-0000-4000-8000-000000000401', '${ORG}', '${CREW_A}', 'draft',
+  ('c2140000-0000-4000-8000-000000000401', '${ORG}', '${CREW_A}', 'pending_acknowledgment',
    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14),
-  ('c2140000-0000-4000-8000-000000000402', '${ORG}', '${CREW_A}', 'draft',
+  ('c2140000-0000-4000-8000-000000000402', '${ORG}', '${CREW_A}', 'pending_acknowledgment',
    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14);
 SQL
 

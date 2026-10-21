@@ -134,6 +134,7 @@ class Memory {
 
   unfreeze(group: Row) {
     const blocking = new Set([
+      "pending_acknowledgment",
       "acknowledged",
       "pending_ops_review",
       "approved",
@@ -187,6 +188,17 @@ class Memory {
       invoice.net_pay = this.round2(gross - withhold);
       invoice.gst = gstOn ? this.round2(gross * 0.1) : 0;
       invoice.total_inc = this.round2(gross + Number(invoice.gst));
+      if (String(invoice.invoice_source || "") === "weekly_work_order") {
+        const deductions = this.round2(
+          -remaining.filter((line) =>
+            String(line.line_type || "").toLowerCase().replace(/_/g, " ")
+              .replace(/\s+/g, "") === "finalpayoutdeduction"
+          ).reduce((sum, line) => sum + Number(line.line_total_ex || 0), 0),
+        );
+        invoice.final_deductions_total_ex = deductions;
+        invoice.to_be_paid_ex = gross;
+        invoice.job_grand_total_ex = this.round2(gross + deductions);
+      }
     }
     const shareRows = this.rows("group_work_order_shares");
     const keptShares = shareRows.filter((row) => row.group_id !== group.id);
@@ -234,12 +246,25 @@ class Memory {
     let text: string | null = null;
     for (const entry of this.rows("group_work_order_time_entries")) {
       if (!live.has(String(entry.group_id))) continue;
-      if (entry.created_at == null || entry.created_at === "") continue;
-      const at = Date.parse(String(entry.created_at));
+      const created = entry.created_at == null || entry.created_at === ""
+        ? null
+        : String(entry.created_at);
+      const updated = entry.updated_at == null || entry.updated_at === ""
+        ? null
+        : String(entry.updated_at);
+      const instant = !created
+        ? updated
+        : !updated
+        ? created
+        : Date.parse(updated) > Date.parse(created)
+        ? updated
+        : created;
+      if (!instant) continue;
+      const at = Date.parse(instant);
       if (!Number.isFinite(at)) continue;
       if (latest == null || at > latest) {
         latest = at;
-        text = String(entry.created_at);
+        text = instant;
       }
     }
     return text;
@@ -956,6 +981,16 @@ Deno.test("a freeze is an explicit snapshot, a held invoice is returned, and a p
     status: "pending_acknowledgment",
     user_id: USER_A,
   });
+  const submitted = await assertRejects(
+    () =>
+      unfreezeGroupWorkOrder(memory.client(), trade(USER_A, true), {
+        group_id: GROUP,
+      }),
+    GroupWorkOrderError,
+  );
+  assertEquals(submitted.code, "group_split_has_live_invoice");
+  assertEquals(memory.rows("group_work_orders")[0].split_frozen_at != null, true);
+  memory.rows("trade_invoices")[0].status = "draft";
   const opened = await unfreezeGroupWorkOrder(
     memory.client(),
     trade(USER_A, true),
@@ -964,7 +999,7 @@ Deno.test("a freeze is an explicit snapshot, a held invoice is returned, and a p
   assertEquals(opened.split_frozen, false);
   assertEquals(memory.rows("group_work_orders")[0].split_frozen_at ?? null, null);
   assertEquals(memory.rows("group_work_order_shares").length, 0);
-  assertEquals(memory.rows("trade_invoices")[0].status, "pending_acknowledgment");
+  assertEquals(memory.rows("trade_invoices")[0].status, "draft");
   assertEquals(memory.rows("trade_invoice_lines").length, 0);
   assertEquals(opened.stripped_invoice_ids, [INV]);
 
@@ -1042,6 +1077,14 @@ Deno.test("the claim fence is mutual, travel is not a claim, and another person'
     "group_share_already_invoiced",
   );
   assertEquals(findFenceProblem(USER_A, [share], [travel]), null);
+  assertEquals(
+    findFenceProblem(USER_A, [share], [{
+      job_id: JOB,
+      line_type: "Other",
+      user_id: USER_B,
+    }])?.code,
+    "group_share_blocked_by_work_order_claim",
+  );
   assertEquals(
     isGroupShareLine({
       job_id: JOB,
@@ -1218,7 +1261,7 @@ Deno.test("create_group_work_order is refused while the feature is off", async (
   );
 });
 
-Deno.test("normal pay is every trade time type, and the database list is that set", async () => {
+Deno.test("normal pay is every line that is not on the exclusion list", async () => {
   const sql = await Deno.readTextFile(
     new URL(
       "../../migrations/20261021141000_group_work_orders.sql",
@@ -1232,50 +1275,48 @@ Deno.test("normal pay is every trade time type, and the database list is that se
     "CREATE OR REPLACE FUNCTION public.group_work_orders_refuse_existing_pay",
   );
   const body = sql.slice(start, end);
-  const keyOf = (type: string) =>
-    type.toLowerCase().replace(/_/g, " ").replace(/\s+/g, "");
-  for (const type of TRADE_INVOICE_TIME_LINE_TYPES) {
-    const key = keyOf(type);
-    assert(body.includes(`'${key}'`), key);
+  for (const type of [
+    ...TRADE_INVOICE_TIME_LINE_TYPES,
+    "hours",
+    "work order",
+    "work_order",
+    "make_safe",
+    "Other",
+    "mystery",
+  ]) {
     assertEquals(
       isNormalWorkOrderPayLine({ line_type: type, job_id: JOB }),
       true,
       type,
     );
+  }
+  assertEquals(isNormalWorkOrderPayLine({ line_type: "mystery" }), true);
+  for (const type of [
+    "commission",
+    "travel",
+    "materials",
+    "equipment",
+    "adjustment",
+    "final_payout_deduction",
+    "FinalPayoutDeduction",
+    "group share",
+  ]) {
+    assert(body.includes(
+      type.toLowerCase().replace(/_/g, "").replace(/ /g, "") === "groupshare"
+        ? "'groupshare'"
+        : `'${type.toLowerCase().replace(/_/g, "").replace(/ /g, "")}'`,
+    ));
     assertEquals(
-      isNormalWorkOrderPayLine({ line_type: type.toUpperCase(), job_id: JOB }),
-      true,
+      isNormalWorkOrderPayLine({
+        line_type: type,
+        source_work_order_id: "crew-wo",
+      }),
+      false,
       type,
     );
   }
-  for (const type of ["hours", "work order", "work_order", "make_safe"]) {
-    assertEquals(isNormalWorkOrderPayLine({ line_type: type }), true, type);
-    assert(body.includes(`'${keyOf(type)}'`), type);
-  }
-  assert(body.includes("'commission'"));
-  assertEquals(
-    isNormalWorkOrderPayLine({
-      line_type: "commission",
-      source_work_order_id: "crew-wo",
-    }),
-    false,
-  );
-  assertEquals(
-    isNormalWorkOrderPayLine({
-      line_type: "travel",
-      source_work_order_id: "crew-wo",
-    }),
-    false,
-  );
-  assertEquals(isNormalWorkOrderPayLine({ line_type: "group share" }), false);
-  assertEquals(
-    isNormalWorkOrderPayLine({
-      line_type: "mystery",
-      source_work_order_id: "crew-wo",
-    }),
-    true,
-  );
-  assertEquals(isNormalWorkOrderPayLine({ line_type: "mystery" }), false);
+  assertEquals(body.includes("'labour'"), false);
+  assertEquals(body.includes("'other'"), false);
   assertEquals(body.includes("feature_flags"), false);
 });
 
@@ -1590,6 +1631,42 @@ Deno.test("a group sign-off is a drawn signature after the latest hours, never a
   assertEquals(frozen.awaiting, "frozen");
 });
 
+Deno.test("an hour edited after the drawing is not signed", async () => {
+  const memory = new Memory();
+  seedSplit(memory, "open");
+  memory.rows("group_work_order_time_entries").push(
+    {
+      group_id: GROUP,
+      user_id: USER_A,
+      work_date: "2026-10-20",
+      hours: 2,
+      created_at: "2026-10-20T00:00:00Z",
+      updated_at: "2026-10-26T00:00:00Z",
+    },
+    {
+      group_id: GROUP,
+      user_id: USER_B,
+      work_date: "2026-10-20",
+      hours: 2,
+      created_at: "2026-10-20T00:00:00Z",
+      updated_at: "2026-10-20T00:00:00Z",
+    },
+  );
+  memory.rows("job_client_signoffs").push({
+    id: "drawn",
+    job_id: JOB,
+    method: "on_site",
+    signature_media_id: "media-drawn",
+    happy: true,
+    created_at: "2026-10-25T00:00:00Z",
+  });
+  const edited = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(edited.code, "group_client_signoff_required");
+});
+
 Deno.test("ops-api wires the share, the fence, and the trade and public doors", async () => {
   const source = await Deno.readTextFile(
     new URL("./index.ts", import.meta.url),
@@ -1673,4 +1750,9 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   );
   assertEquals(pack.includes('src="${signature.signature_data}"'), false);
   assert(pack.includes("signatureImageTag(signature.signature_data, 'Client signature')"));
+  assert(pack.includes("completionPackEmailPlan"));
+  assert(pack.includes("completion_pack_client_email_v1"));
+  assert(pack.includes("plan.send"));
+  assert(pack.includes("completionPackClientSignature"));
+  assertEquals(pack.includes("job_service_reports"), false);
 });

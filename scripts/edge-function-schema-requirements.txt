@@ -875,6 +875,7 @@ ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_wor
 ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|group_work_orders.split_frozen_at
 ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|trade_invoice_lines.group_share_id
 ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|job_client_signoffs.captured_device
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|group_work_order_time_entries.updated_at
 ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|group_work_order_write_split
 ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|freeze_group_work_order_split
 ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|project_group_work_order_split

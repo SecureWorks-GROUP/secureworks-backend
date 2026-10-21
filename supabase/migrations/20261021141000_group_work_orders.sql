@@ -19,14 +19,19 @@
 -- Freeze is an explicit step (freeze_group_work_order_split) after every
 -- participant and every installer currently assigned to the job has
 -- assignment-dated hours, and a drawn client sign-off (not an office
--- waiver, not revoked, dated after the latest hours) exists on
--- job_client_signoffs. A share read and project_group_work_order_split
--- never set split_frozen_at and never persist share rows. The share-line
--- trigger freezes in the SAME transaction as the line insert, so a failed
--- insert rolls the marker back. Office unfreeze is refused once a share
--- invoice is acknowledged or later, or carries any Xero id. Before that
--- it removes only the share line and recalculates that invoice. Nothing
--- is recomputed until the next explicit freeze. Voiding stays permanent.
+-- waiver, not revoked, dated after the later of each hour row's
+-- created_at and updated_at) exists on job_client_signoffs. A share read
+-- and project_group_work_order_split never set split_frozen_at and never
+-- persist share rows. The share-line trigger freezes in the SAME
+-- transaction as a non-draft line insert, so a failed insert rolls the
+-- marker back. A draft save stores the line, does not freeze, and does
+-- not hold the share, so a later save or submit can replace it. Office
+-- unfreeze is refused while a submit or Xero push is in flight (the
+-- weekly invoice lock, or status pending_acknowledgment or later, or any
+-- Xero id). Before that it removes only the share line and recalculates
+-- that invoice, including a weekly work order's header totals. A
+-- recurring deduction stays off the payable. Nothing is recomputed until
+-- the next explicit freeze. Voiding stays permanent.
 -- Owner to confirm the freeze, unfreeze and sign-off defaults.
 
 SET LOCAL lock_timeout = '5s';
@@ -157,6 +162,7 @@ CREATE TABLE IF NOT EXISTS public.group_work_order_time_entries (
   break_minutes integer NOT NULL DEFAULT 0,
   hours numeric(8,2) NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_group_work_order_time_entries UNIQUE (group_id, user_id, work_date),
   CONSTRAINT group_work_order_time_entries_break_check
     CHECK (break_minutes >= 0),
@@ -296,6 +302,18 @@ SELECT
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags
   WHERE flag_name = 'group_work_order_client_link_send_v1'
+);
+
+-- Completion-pack client email. Off until the owner accepts the exact
+-- text. While off, the pack is still generated and nothing is emailed.
+INSERT INTO public.feature_flags (flag_name, enabled, description)
+SELECT
+  'completion_pack_client_email_v1',
+  false,
+  'When on, the completion pack may email the client. Off, missing or unreadable: the pack is stored and no email is sent. The email text still needs the owner''s okay before this is turned on.'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.feature_flags
+  WHERE flag_name = 'completion_pack_client_email_v1'
 );
 
 -- ── 10. who can read ────────────────────────────────────────────────────────
@@ -528,10 +546,12 @@ DECLARE
   v_signed_at timestamptz;
   v_latest_hours timestamptz;
 BEGIN
-  -- A group needs a drawn signature. An office waiver does not count here
-  -- (it still counts for the ordinary client-signoff invoice gate). A
-  -- revoked row is the newest and counts as unsigned. The drawing has to
-  -- be dated after the latest hours on a non-void group for this job.
+  -- A group needs a drawn signature. This does not call #1110's helper:
+  -- a revoked row is not signed here even if that helper still counts it.
+  -- An office waiver does not count here (it still counts for the ordinary
+  -- client-signoff invoice gate). The drawing has to be dated after the
+  -- latest hours on a non-void group for this job. An edit moves
+  -- updated_at, so the latest instant is the later of created and updated.
   SELECT s.method, s.happy, s.satisfaction_rating, s.signature_media_id, s.created_at
     INTO v_method, v_happy, v_rating, v_media, v_signed_at
   FROM public.job_client_signoffs s
@@ -559,7 +579,8 @@ BEGIN
   IF v_rating IS NOT NULL AND v_rating < v_min THEN
     RETURN false;
   END IF;
-  SELECT max(e.created_at) INTO v_latest_hours
+  SELECT max(GREATEST(e.created_at, COALESCE(e.updated_at, e.created_at)))
+    INTO v_latest_hours
   FROM public.group_work_order_time_entries e
   JOIN public.group_work_orders g ON g.id = e.group_id
   WHERE g.job_id = p_job
@@ -855,9 +876,10 @@ AS $$
   SELECT public.group_work_order_write_split(p_group_id, true);
 $$;
 
--- Before acknowledgement, remove only the share line and recalculate the
--- invoice. Do not ops-reject the trade's week. Acknowledged or later, or
--- any Xero id or push stamp, refuses. Nothing is recomputed.
+-- Remove only the share line and recalculate the invoice. Do not
+-- ops-reject the trade's week. Refuses while a weekly submit holds the
+-- invoice lock, or the share sits on pending_acknowledgment or later, or
+-- any Xero id or push stamp. Draft and queried can still be stripped.
 CREATE OR REPLACE FUNCTION public.unfreeze_group_work_order_split(
   p_group_id uuid,
   p_actor uuid DEFAULT NULL
@@ -868,13 +890,22 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_job uuid;
+  v_org uuid;
   v_stripped uuid[];
 BEGIN
-  SELECT g.job_id INTO v_job
+  -- Weekly persist locks 'weekly-trade-invoice:' || org before any job
+  -- lock. Take that lock first and do not wait: a submit already holding
+  -- it is in flight. Then the job lock, then the row.
+  SELECT g.job_id, g.org_id INTO v_job, v_org
   FROM public.group_work_orders g
   WHERE g.id = p_group_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  IF NOT pg_try_advisory_xact_lock(
+    hashtextextended('weekly-trade-invoice:' || v_org::text, 0)
+  ) THEN
+    RAISE EXCEPTION 'group_split_has_live_invoice' USING ERRCODE = '23514';
   END IF;
   PERFORM public.group_work_order_lock_job(v_job);
   SELECT g.job_id INTO v_job
@@ -893,6 +924,7 @@ BEGIN
     WHERE s.group_id = p_group_id
       AND (
         i.status IN (
+          'pending_acknowledgment',
           'acknowledged', 'pending_ops_review', 'approved',
           'pushed_to_xero', 'paid'
         )
@@ -914,23 +946,47 @@ BEGIN
   WHERE l.group_share_id = s.id
     AND s.group_id = p_group_id;
 
-  -- Same split as trade_invoice_money: super 12% of gross, worker withhold
-  -- 6%, net is gross minus that withhold, GST on the gross when gst_on.
-  -- An invoice whose money columns are all null (gst_on null) is left alone.
+  -- Same split as trade_invoice_money: super 12% of the remaining line
+  -- sum, worker withhold 6%, net is that sum minus the withhold, GST on
+  -- the sum when gst_on. A recurring deduction stays on the payable only
+  -- and is not written here. An invoice whose money columns are all null
+  -- (gst_on null) is left alone. A weekly work order also rewrites its
+  -- three headers from the lines that remain: final-payout deductions are
+  -- the negative lines, to_be_paid is the line sum, and the job grand is
+  -- that sum plus those deductions. A weekly invoice whose to_be_paid
+  -- would not stay positive fails its check and this unfreeze rolls back.
+  -- Any other source leaves those three columns as they are (null).
   UPDATE public.trade_invoices i
-  SET subtotal_ex = m.gross,
-      gross_earned = m.gross,
+  SET subtotal_ex = m.line_sum,
+      gross_earned = m.line_sum,
       super_rate = 0.12,
-      super_amount = round(m.gross * 0.12, 2),
-      net_pay = round(m.gross - round(m.gross * 0.06, 2), 2),
-      gst = CASE WHEN i.gst_on THEN round(m.gross * 0.10, 2) ELSE 0 END,
+      super_amount = round(m.line_sum * 0.12, 2),
+      net_pay = round(m.line_sum - round(m.line_sum * 0.06, 2), 2),
+      gst = CASE WHEN i.gst_on THEN round(m.line_sum * 0.10, 2) ELSE 0 END,
       total_inc = round(
-        m.gross + CASE WHEN i.gst_on THEN round(m.gross * 0.10, 2) ELSE 0 END,
+        m.line_sum + CASE WHEN i.gst_on THEN round(m.line_sum * 0.10, 2) ELSE 0 END,
         2
-      )
+      ),
+      job_grand_total_ex = CASE
+        WHEN i.invoice_source = 'weekly_work_order'
+          THEN round(m.line_sum + m.final_deductions, 2)
+        ELSE i.job_grand_total_ex
+      END,
+      final_deductions_total_ex = CASE
+        WHEN i.invoice_source = 'weekly_work_order' THEN m.final_deductions
+        ELSE i.final_deductions_total_ex
+      END,
+      to_be_paid_ex = CASE
+        WHEN i.invoice_source = 'weekly_work_order' THEN m.line_sum
+        ELSE i.to_be_paid_ex
+      END
   FROM (
     SELECT i2.id,
-           COALESCE(round(sum(l.line_total_ex), 2), 0) AS gross
+           COALESCE(round(sum(l.line_total_ex), 2), 0) AS line_sum,
+           COALESCE(round(-sum(l.line_total_ex) FILTER (
+             WHERE replace(replace(lower(btrim(COALESCE(l.line_type, ''))), '_', ' '), ' ', '')
+               = 'finalpayoutdeduction'
+           ), 2), 0) AS final_deductions
     FROM public.trade_invoices i2
     LEFT JOIN public.trade_invoice_lines l ON l.trade_invoice_id = i2.id
     WHERE i2.id = ANY (v_stripped)
@@ -974,10 +1030,11 @@ DECLARE
   v_job uuid;
   v_status text;
 BEGIN
+  -- No row lock before unfreeze. unfreeze takes the weekly invoice lock,
+  -- then the job lock, then FOR UPDATE: the same order as persist.
   SELECT g.job_id, g.status INTO v_job, v_status
   FROM public.group_work_orders g
-  WHERE g.id = p_group_id
-  FOR UPDATE;
+  WHERE g.id = p_group_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
   END IF;
@@ -1135,6 +1192,11 @@ BEGIN
   IF v_frozen IS NOT NULL THEN
     RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
   END IF;
+  -- now() is the transaction start. A sign-off inserted later in the same
+  -- transaction uses clock_timestamp(), so an edit has to move past it.
+  IF TG_OP = 'UPDATE' THEN
+    NEW.updated_at := clock_timestamp();
+  END IF;
   IF TG_OP <> 'DELETE' THEN
     IF NOT public.group_work_order_assignment_covers(v_job, NEW.user_id, NEW.work_date) THEN
       RAISE EXCEPTION 'group_hours_not_assigned' USING ERRCODE = '23514';
@@ -1226,10 +1288,10 @@ BEGIN
 END;
 $$;
 
--- Normal pay is every trade time type (labour, fencing, patio, make safe,
--- general labour, decking — whitespace and case ignored), plus hours and a
--- work order. Commission, travel, materials, equipment, adjustments and a
--- group share are not pay. An unknown type with a source work order still is.
+-- On a group job every invoice line counts as pay except travel, materials,
+-- equipment, an adjustment, a final-payout deduction, commission, and the
+-- share itself. 'Other' counts: live Other lines are labour. An unknown
+-- type counts too, with or without a source work order. Pending Marnin.
 -- Membership is this function; the trigger does not keep a second list.
 CREATE OR REPLACE FUNCTION public.group_work_order_line_is_normal_pay(
   p_line_type text,
@@ -1239,21 +1301,15 @@ LANGUAGE sql
 IMMUTABLE
 SET search_path = public, pg_temp
 AS $$
-  WITH norm AS (
-    SELECT replace(replace(lower(btrim(COALESCE(p_line_type, ''))), '_', ' '), ' ', '') AS key
-  )
-  SELECT CASE
-    WHEN (SELECT key FROM norm) IN (
-      'groupshare', 'commission', 'travel', 'materials', 'equipment',
-      'adjustment', 'finalpayoutdeduction'
-    ) THEN false
-    WHEN (SELECT key FROM norm) IN (
-      'labour', 'fencing', 'patio', 'makesafe', 'generallabour', 'decking',
-      'hours', 'workorder'
-    ) THEN true
-    WHEN p_source_work_order_id IS NOT NULL THEN true
-    ELSE false
-  END;
+  SELECT
+    (p_source_work_order_id IS NULL OR p_source_work_order_id IS NOT NULL)
+    AND NOT (
+      replace(replace(lower(btrim(COALESCE(p_line_type, ''))), '_', ' '), ' ', '')
+      IN (
+        'groupshare', 'commission', 'travel', 'materials', 'equipment',
+        'adjustment', 'finalpayoutdeduction'
+      )
+    );
 $$;
 
 CREATE OR REPLACE FUNCTION public.group_work_orders_refuse_existing_pay()
@@ -1353,13 +1409,15 @@ BEGIN
 END;
 $$;
 
--- Share lines lock the group and, when the marker is still null, freeze in
--- this same statement so a failed insert rolls the marker back. A second
--- live line for the same share is refused, and the invoice owner must be
--- the share owner. A share is also refused when normal pay already exists
--- on the job, and a normal pay line is refused when a group is open.
--- The flag is not read: this holds with the switch off. Commission, travel,
--- materials, equipment and adjustments are not pay.
+-- A non-draft share line locks the group and, when the marker is still
+-- null, freezes in this same statement so a failed insert rolls the marker
+-- back. A draft save stores the line, leaves the marker alone, and does
+-- not hold the share: a later save or a submit can replace it. A draft
+-- does not count as invoiced. A second live non-draft line for the same
+-- share is refused, and the invoice owner must be the share owner. A
+-- share is also refused when normal pay already exists on the job, and a
+-- normal pay line is refused when a group is open. The flag is not read:
+-- this holds with the switch off.
 -- UPDATE is limited to the share pointer and the amount so a status stamp
 -- on the invoice does not re-enter this check.
 CREATE OR REPLACE FUNCTION public.trade_invoice_lines_group_share_snapshot()
@@ -1372,6 +1430,7 @@ DECLARE
   v_group uuid;
   v_job uuid;
   v_invoice_user uuid;
+  v_invoice_status text;
   v_share_id uuid;
   v_share_user uuid;
   v_share_ex numeric;
@@ -1410,7 +1469,7 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'group_share_blocked_by_work_order_claim' USING ERRCODE = '23514';
     END IF;
-    SELECT i.user_id INTO v_invoice_user
+    SELECT i.user_id, i.status INTO v_invoice_user, v_invoice_status
     FROM public.trade_invoices i
     WHERE i.id = NEW.trade_invoice_id;
     IF NOT FOUND THEN
@@ -1419,7 +1478,15 @@ BEGIN
     IF NOT public.group_client_signoff_counts(v_job) THEN
       RAISE EXCEPTION 'group_client_signoff_required' USING ERRCODE = '23514';
     END IF;
-    IF v_frozen IS NULL THEN
+    -- A draft does not freeze and does not hold the share. A non-draft
+    -- line freezes in this statement when the marker is still null.
+    IF v_invoice_status = 'draft' AND v_frozen IS NULL THEN
+      NEW.group_share_id := NULL;
+      NEW.line_type := 'group share';
+      NEW.source_work_order_id := NULL;
+      RETURN NEW;
+    END IF;
+    IF v_invoice_status IS DISTINCT FROM 'draft' AND v_frozen IS NULL THEN
       PERFORM public.group_work_order_write_split(v_group, true);
     END IF;
     SELECT s.id, s.user_id, s.share_ex
@@ -1442,6 +1509,7 @@ BEGIN
       WHERE l.group_share_id = v_share_id
         AND l.id IS DISTINCT FROM NEW.id
         AND i.status IS DISTINCT FROM 'ops-reject'
+        AND i.status IS DISTINCT FROM 'draft'
     ) THEN
       RAISE EXCEPTION 'group_share_already_invoiced' USING ERRCODE = '23514';
     END IF;
@@ -1481,10 +1549,11 @@ REVOKE ALL ON FUNCTION public.group_work_order_time_entries_guard() FROM PUBLIC,
 REVOKE ALL ON FUNCTION public.group_work_order_refuse_late_joiner() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_work_order_shares_frozen_guard() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trade_invoice_lines_group_share_snapshot() FROM PUBLIC, anon, authenticated;
--- lock_job and line_is_normal_pay stay executable by the function owner.
--- write_split and unfreeze are SECURITY DEFINER and call the lock, and the
--- invoice trigger calls both. Revoking them makes those calls fail as the
--- owner. They take a lock or return a boolean; they read no row.
+-- SECURITY DEFINER writers run as the owner, who keeps EXECUTE after a
+-- revoke from PUBLIC. The invoice trigger is not security definer: it
+-- runs as service_role, which is granted below. anon, authenticated and
+-- PUBLIC must not call the job lock directly.
+REVOKE ALL ON FUNCTION public.group_work_order_lock_job(uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.remove_group_work_order_participant(uuid, uuid, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.group_work_order_time_entries_guard() TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_refuse_late_joiner() TO service_role;
