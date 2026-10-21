@@ -19,7 +19,8 @@
 --                        or voided (draft, submitted), or no readable total
 --   voided               VOIDED or DELETED in Xero; rows left on it must go
 --   confirmed_overhead   a person marked it not job related, or put the whole
---                        bill to overhead
+--                        bill to overhead. A not-job-related mark wins over the
+--                        bill's own Xero job link when no row places it.
 --   unplaced             no row and no Xero job link (waiting in the queue)
 --   installer_unconfirmed  installer bill (306/301) with a part no person made
 --                        (JP-12)
@@ -28,7 +29,10 @@
 --                        (xero_ref_link, po_deterministic, agent_prematch, or
 --                        the bill's own Xero job link with no row)
 --   confirmed            balanced, every part placed by a person
--- Only confirmed and confirmed_overhead are a confirmed reconciliation.
+-- Only confirmed and confirmed_overhead are a confirmed reconciliation, and only
+-- with a recorded person: a person source with a blank actor (or the
+-- 'ops_dashboard' fallback) is placed_by 'unrecorded', and any decision with no
+-- single recorded decider reads placed_unconfirmed, never confirmed.
 -- unplaced is an addition to the H7 proposal's states: a bill nobody has placed
 -- is not unreadable, so it is named instead of being called unknown.
 --
@@ -69,23 +73,36 @@ mirror AS (
        WHERE li.value ->> 'Description' ~ '\| SW - [A-Z]'
      )
 ),
+fact_row AS (
+  -- A row is a person's only when a person source wrote it AND it names who.
+  -- A blank actor, or the assign handler's 'ops_dashboard' fallback (written
+  -- when no operator email arrives), is unrecorded and never counts as a person.
+  SELECT f.*,
+         CASE
+           WHEN f.automation_source NOT IN ('manual_queue', 'manual_split') THEN 'machine'
+           WHEN NULLIF(btrim(f.assigned_by), '') IS NULL OR btrim(f.assigned_by) = 'ops_dashboard' THEN 'unrecorded'
+           ELSE 'person'
+         END AS placed_by,
+         NULLIF(btrim(f.assigned_by), '') AS actor
+  FROM public.job_materials_facts f
+  WHERE f.kind = 'actual' AND f.job_id IS NOT NULL
+),
 fact AS (
   SELECT f.xero_invoice_id,
          jsonb_agg(jsonb_build_object(
            'job_id', f.job_id,
            'amount_ex_gst', round(f.amount_ex_gst, 2),
            'lane', f.lane,
-           'placed_by', CASE WHEN f.automation_source IN ('manual_queue', 'manual_split') THEN 'person' ELSE 'machine' END,
+           'placed_by', f.placed_by,
            'automation_source', f.automation_source)
            ORDER BY f.job_id::text COLLATE "C", f.automation_source COLLATE "C") AS parts,
          sum(round(f.amount_ex_gst, 2)) AS parts_ex,
-         bool_and(f.automation_source IN ('manual_queue', 'manual_split')) AS all_person,
+         bool_and(f.placed_by = 'person') AS all_person,
          bool_or(f.amount_ex_gst IS NULL) AS amount_unreadable,
-         min(f.assigned_by) FILTER (WHERE f.automation_source IN ('manual_queue', 'manual_split')) AS fact_by_min,
-         max(f.assigned_by) FILTER (WHERE f.automation_source IN ('manual_queue', 'manual_split')) AS fact_by_max,
+         min(f.actor) FILTER (WHERE f.placed_by = 'person') AS fact_by_min,
+         max(f.actor) FILTER (WHERE f.placed_by = 'person') AS fact_by_max,
          max(f.updated_at) AS fact_at
-  FROM public.job_materials_facts f
-  WHERE f.kind = 'actual' AND f.job_id IS NOT NULL
+  FROM fact_row f
   GROUP BY f.xero_invoice_id
 ),
 universe AS (
@@ -120,7 +137,8 @@ base AS (
     END AS credit_applied_ex,
     CASE
       WHEN f.xero_invoice_id IS NOT NULL THEN f.parts
-      WHEN b.job_id IS NOT NULL AND b.status IN ('AUTHORISED', 'PAID') THEN
+      WHEN b.job_id IS NOT NULL AND b.status IN ('AUTHORISED', 'PAID')
+           AND q.status IS DISTINCT FROM 'not_job_related' THEN
         jsonb_build_array(jsonb_build_object(
           'job_id', b.job_id,
           'amount_ex_gst', round(b.sub_total, 2),
@@ -131,17 +149,20 @@ base AS (
     END AS parts,
     CASE
       WHEN f.xero_invoice_id IS NOT NULL THEN f.parts_ex
-      WHEN b.job_id IS NOT NULL AND b.status IN ('AUTHORISED', 'PAID') THEN round(b.sub_total, 2)
+      WHEN b.job_id IS NOT NULL AND b.status IN ('AUTHORISED', 'PAID')
+           AND q.status IS DISTINCT FROM 'not_job_related' THEN round(b.sub_total, 2)
       ELSE 0
     END AS parts_ex,
     CASE
       WHEN f.xero_invoice_id IS NOT NULL THEN f.all_person
-      WHEN b.job_id IS NOT NULL AND b.status IN ('AUTHORISED', 'PAID') THEN false
+      WHEN b.job_id IS NOT NULL AND b.status IN ('AUTHORISED', 'PAID')
+           AND q.status IS DISTINCT FROM 'not_job_related' THEN false
     END AS all_person,
     COALESCE(f.amount_unreadable, false) AS amount_unreadable,
     round(COALESCE(q.overhead_ex, 0), 2) AS overhead_ex,
     q.status AS queue_status,
-    q.assigned_by AS queue_by,
+    CASE WHEN NULLIF(btrim(q.assigned_by), '') IS NOT NULL AND btrim(q.assigned_by) <> 'ops_dashboard'
+         THEN btrim(q.assigned_by) END AS queue_by,
     q.assigned_at AS queue_at,
     f.fact_by_min, f.fact_by_max, f.fact_at
   FROM universe u
@@ -150,10 +171,12 @@ base AS (
   LEFT JOIN public.materials_reconciliation_queue q ON q.xero_invoice_id = u.xero_invoice_id
   WHERE NOT EXISTS (SELECT 1 FROM mirror m WHERE m.xero_invoice_id = u.xero_invoice_id)
 ),
-judged AS (
+judged0 AS (
   SELECT
     b.*,
-    b.bill_ex - b.parts_ex - b.overhead_ex AS remainder_ex,
+    CASE WHEN b.amount_unreadable THEN NULL ELSE b.bill_ex - b.parts_ex - b.overhead_ex END AS remainder_ex,
+    COALESCE(CASE WHEN b.queue_status IN ('assigned', 'split', 'not_job_related') THEN b.queue_by END,
+             CASE WHEN b.fact_by_min = b.fact_by_max THEN b.fact_by_min END) AS decider,
     CASE
       WHEN NOT b.bill_known THEN 'unknown'
       WHEN b.status_class = 'void' THEN 'voided'
@@ -167,8 +190,17 @@ judged AS (
       WHEN abs(b.bill_ex - b.parts_ex - b.overhead_ex) > 0.005 THEN 'unbalanced'
       WHEN NOT COALESCE(b.all_person, false) THEN 'placed_unconfirmed'
       ELSE 'confirmed'
-    END AS state
+    END AS state0
   FROM base b
+),
+judged AS (
+  -- A decision nobody is recorded as making is not settled: it reads
+  -- placed_unconfirmed, never confirmed or confirmed_overhead with a blank
+  -- decided_by.
+  SELECT j.*,
+         CASE WHEN j.state0 IN ('confirmed', 'confirmed_overhead') AND j.decider IS NULL
+              THEN 'placed_unconfirmed' ELSE j.state0 END AS state
+  FROM judged0 j
 )
 SELECT
   'cfo-recon-outcome-v1'::text AS contract_version,
@@ -184,10 +216,7 @@ SELECT
   j.bill_ex,
   j.credit_applied_ex,
   -- Who made the deciding rows, as their writer stored it. Null unless confirmed.
-  CASE WHEN j.state IN ('confirmed', 'confirmed_overhead') THEN
-    COALESCE(CASE WHEN j.queue_status IN ('assigned', 'split', 'not_job_related') THEN j.queue_by END,
-             CASE WHEN j.fact_by_min = j.fact_by_max THEN j.fact_by_min END)
-  END AS decided_by,
+  CASE WHEN j.state IN ('confirmed', 'confirmed_overhead') THEN j.decider END AS decided_by,
   CASE WHEN j.state IN ('confirmed', 'confirmed_overhead') THEN
     COALESCE(CASE WHEN j.queue_status IN ('assigned', 'split', 'not_job_related') THEN j.queue_at END, j.fact_at)
   END AS decided_at,
@@ -205,6 +234,6 @@ SELECT
 FROM judged j;
 
 COMMENT ON VIEW public.cfo_bill_reconciliation_outcomes IS
-  'Job profit H7 (20261021161500): one row per non-mirror supplier bill (Xero ACCPAY) linked to a job, with allocation rows, or in Bills to place, for Context to read. state unknown, voided, confirmed_overhead, unplaced, installer_unconfirmed, unbalanced, placed_unconfirmed or confirmed; only confirmed and confirmed_overhead are a confirmed reconciliation. parts lists each job part with placed_by person or machine (the bill''s own Xero job link with no row is machine, source xero_job_link). evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-recon-outcome-v1; a payment does not move it (CFO proposal, CIO may overturn), a changed total, line, credit, status class, part or overhead does. credit_applied_ex is null when the stored copy does not show credit. No history. Read only, service role only.';
+  'Job profit H7 (20261021161500): one row per non-mirror supplier bill (Xero ACCPAY) linked to a job, with allocation rows, or in Bills to place, for Context to read. state unknown, voided, confirmed_overhead, unplaced, installer_unconfirmed, unbalanced, placed_unconfirmed or confirmed; only confirmed and confirmed_overhead are a confirmed reconciliation. parts lists each job part with placed_by person, machine (the bill''s own Xero job link with no row is machine, source xero_job_link) or unrecorded (a person source with no recorded actor); a decision with no single recorded person reads placed_unconfirmed, and a not-job-related mark wins over a Xero job link with no row. evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-recon-outcome-v1; a payment does not move it (CFO proposal, CIO may overturn), a changed total, line, credit, status class, part or overhead does. credit_applied_ex is null when the stored copy does not show credit. No history. Read only, service role only.';
 REVOKE ALL ON public.cfo_bill_reconciliation_outcomes FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.cfo_bill_reconciliation_outcomes TO service_role;

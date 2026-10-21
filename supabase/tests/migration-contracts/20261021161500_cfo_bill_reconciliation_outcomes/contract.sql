@@ -20,6 +20,17 @@
 --   H7-DRAFT  a draft bill linked to a job: unknown.
 --   H7-GONE   a queue row with no stored bill: unknown.
 --   H7-MIRROR a trade-app mirror bill on J1: not in the view.
+--   No recorded person (verifier A1-A3) and not job related over a Xero link (C8):
+--   H7-NOACT  a person-source placement and queue row with no actor:
+--             placed_unconfirmed, the part unrecorded.
+--   H7-DASH   the same with the 'ops_dashboard' fallback actor: placed_unconfirmed.
+--   H7-INSTNA an installer bill placed by a person source with no actor:
+--             installer_unconfirmed.
+--   H7-TWO    a split whose two parts name different people and whose queue row
+--             names nobody: no single decider, so placed_unconfirmed.
+--   H7-NJRX   an installer bill Xero-linked to J2, no rows, a person marked it not
+--             job related: confirmed_overhead, no parts.
+--   H7-NJRNA  marked not job related with no actor: placed_unconfirmed.
 
 \set ON_ERROR_STOP on
 
@@ -208,6 +219,66 @@ BEGIN
   SELECT evidence_hash, state INTO h1, s FROM public.cfo_bill_reconciliation_outcomes WHERE xero_invoice_id = 'H7-UNBAL';
   IF h1 = h0 OR s <> 'confirmed' THEN
     RAISE EXCEPTION 'h7 contract: a corrected part kept the hash or read % not confirmed', s;
+  END IF;
+END $$;
+
+-- No recorded person never settles a bill; a not-job-related mark wins over a
+-- Xero job link with no row.
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, amount_due, invoice_date, line_items, raw_json, job_id) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'H7-NOACT', 'H7-21', 'ACCPAY', 'AUTHORISED', 'H7 Steel', 150, 165, 165, '2026-08-27',
+   '[{"Description": "Sleepers", "AccountCode": "310", "LineAmount": 150, "TaxAmount": 15}]', '{"LineAmountTypes": "Exclusive"}', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'H7-DASH', 'H7-22', 'ACCPAY', 'AUTHORISED', 'H7 Steel', 120, 132, 132, '2026-08-27',
+   '[{"Description": "Plinths", "AccountCode": "310", "LineAmount": 120, "TaxAmount": 12}]', '{"LineAmountTypes": "Exclusive"}', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'H7-INSTNA', 'H7-23', 'ACCPAY', 'AUTHORISED', 'H7 Installer', 350, 385, 385, '2026-08-27',
+   '[{"Description": "Install", "AccountCode": "306", "LineAmount": 350, "TaxAmount": 35}]', '{"LineAmountTypes": "Exclusive"}', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'H7-TWO', 'H7-24', 'ACCPAY', 'AUTHORISED', 'H7 Steel', 200, 220, 220, '2026-08-27',
+   '[{"Description": "Rails", "AccountCode": "310", "LineAmount": 200, "TaxAmount": 20}]', '{"LineAmountTypes": "Exclusive"}', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'H7-NJRX', 'H7-25', 'ACCPAY', 'AUTHORISED', 'H7 Installer', 310, 341, 341, '2026-08-27',
+   '[{"Description": "Install", "AccountCode": "306", "LineAmount": 310, "TaxAmount": 31}]', '{"LineAmountTypes": "Exclusive"}', 'c7000000-0000-4000-8000-000000000002'),
+  ('00000000-0000-0000-0000-000000000001', 'H7-NJRNA', 'H7-26', 'ACCPAY', 'AUTHORISED', 'H7 Office', 45, 49.5, 49.5, '2026-08-27',
+   '[{"Description": "Paper", "AccountCode": "400", "LineAmount": 45, "TaxAmount": 4.5}]', '{"LineAmountTypes": "Exclusive"}', NULL);
+
+INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status, assigned_by, assigned_at) VALUES
+  ('H7-NOACT', 'H7-21', 'H7 Steel', 150, 165, '2026-08-27', 'assigned', NULL, '2026-09-03T00:00:00Z'),
+  ('H7-DASH', 'H7-22', 'H7 Steel', 120, 132, '2026-08-27', 'assigned', 'ops_dashboard', '2026-09-03T00:00:00Z'),
+  ('H7-INSTNA', 'H7-23', 'H7 Installer', 350, 385, '2026-08-27', 'assigned', '  ', '2026-09-03T00:00:00Z'),
+  ('H7-TWO', 'H7-24', 'H7 Steel', 200, 220, '2026-08-27', 'split', NULL, '2026-09-03T00:00:00Z'),
+  ('H7-NJRX', 'H7-25', 'H7 Installer', 310, 341, '2026-08-27', 'not_job_related', 'person:h7-shaun', '2026-09-04T00:00:00Z'),
+  ('H7-NJRNA', 'H7-26', 'H7 Office', 45, 49.5, '2026-08-27', 'not_job_related', NULL, '2026-09-04T00:00:00Z');
+
+INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, assigned_by) VALUES
+  ('H7-NOACT', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 150, 'high_manual', 'manual_queue', '2026-08-27', NULL),
+  ('H7-DASH', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 120, 'high_manual', 'manual_queue', '2026-08-27', 'ops_dashboard'),
+  ('H7-INSTNA', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'labour', 'actual', 350, 'high_manual', 'manual_queue', '2026-08-27', ''),
+  ('H7-TWO', 'c7000000-0000-4000-8000-000000000001', 'H7-J1', 'materials', 'actual', 100, 'high_manual', 'manual_split', '2026-08-27', 'person:h7-a'),
+  ('H7-TWO', 'c7000000-0000-4000-8000-000000000002', 'H7-J2', 'materials', 'actual', 100, 'high_manual', 'manual_split', '2026-08-27', 'person:h7-b');
+
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT e.bill, e.state, e.parts, e.unrecorded, o.state AS got_state, o.confirmed AS got_confirmed,
+           o.decided_by, jsonb_array_length(o.parts) AS got_parts,
+           (SELECT count(*) FROM jsonb_array_elements(o.parts) p WHERE p.value ->> 'placed_by' = 'unrecorded') AS got_unrecorded
+    FROM (VALUES ('H7-NOACT', 'placed_unconfirmed', 1, 1), ('H7-DASH', 'placed_unconfirmed', 1, 1),
+                 ('H7-INSTNA', 'installer_unconfirmed', 1, 1), ('H7-TWO', 'placed_unconfirmed', 2, 0),
+                 ('H7-NJRX', 'confirmed_overhead', 0, 0), ('H7-NJRNA', 'placed_unconfirmed', 0, 0))
+         AS e(bill, state, parts, unrecorded)
+    LEFT JOIN public.cfo_bill_reconciliation_outcomes o ON o.xero_invoice_id = e.bill
+  LOOP
+    IF r.got_state IS DISTINCT FROM r.state OR r.got_parts <> r.parts OR r.got_unrecorded <> r.unrecorded THEN
+      RAISE EXCEPTION 'h7 contract: % read % (% parts, % unrecorded), expected % (%, %)',
+        r.bill, r.got_state, r.got_parts, r.got_unrecorded, r.state, r.parts, r.unrecorded;
+    END IF;
+    IF r.bill <> 'H7-NJRX' AND (r.got_confirmed OR r.decided_by IS NOT NULL) THEN
+      RAISE EXCEPTION 'h7 contract: % with no recorded person read settled (by %)', r.bill, r.decided_by;
+    END IF;
+    IF r.bill = 'H7-NJRX' AND (NOT r.got_confirmed OR r.decided_by IS DISTINCT FROM 'person:h7-shaun') THEN
+      RAISE EXCEPTION 'h7 contract: not-job-related mark lost to the Xero job link (by %)', r.decided_by;
+    END IF;
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM public.cfo_bill_reconciliation_outcomes WHERE confirmed AND decided_by IS NULL) THEN
+    RAISE EXCEPTION 'h7 contract: a bill reads confirmed with no recorded decider';
   END IF;
 END $$;
 
