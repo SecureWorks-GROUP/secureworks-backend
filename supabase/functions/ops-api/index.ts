@@ -682,10 +682,28 @@ import {
   resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
   sendOutlookVariationEmail,
+  readFlag,
   tradeJobWorkOrderRead,
   type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
+import {
+  CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
+  crewWorkOrderCreateRefusal,
+  hideRetiredCrewWorkOrder,
+  loadCrewInvoiceJobWorkOrderRefusal,
+  RETIRE_CREW_WORK_ORDERS_FLAG,
+  xeroSyncRefusal,
+} from './crew_invoice_job_work_order.ts'
+import {
+  approveOfficeJobWorkOrder,
+  fillJobWorkOrderAllowance,
+  JobWorkOrderOfficeError,
+  listOfficeJobWorkOrderQueue,
+  openBlankJobWorkOrder,
+  reviewCrewInvoiceLine,
+  shouldOpenBlankJobWorkOrder,
+} from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
   approveCustomerVariation,
@@ -8927,9 +8945,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
       case 'email_po': return json(await emailPO(client, body))
-      case 'create_work_order':
-        if (body?.kind === 'job') return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+      case 'create_work_order': {
+        // kind 'job' opens the job's work order. Anything else, including a
+        // missing kind from sw_create_work_order or a cached old page, is a
+        // crew work order. While retire_crew_work_orders_v1 is on that is
+        // refused and nothing is written. The switch off keeps today's insert.
+        if (body?.kind === 'job') {
+          if (await shouldOpenBlankJobWorkOrder(client, body)) {
+            return json(await runJobWorkOrder(() => openBlankJobWorkOrder(client, body)))
+          }
+          return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+        }
+        const crewRefusal = crewWorkOrderCreateRefusal(
+          body?.kind,
+          await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG),
+        )
+        if (crewRefusal) {
+          throw new ApiError(crewRefusal.error, 409, { error: crewRefusal.error, code: crewRefusal.code })
+        }
         return json(await createWorkOrder(client, body))
+      }
       case 'update_work_order':
         if (await workOrderIsJobKind(client, body?.id)) {
           return json(await runJobWorkOrder(() => updateJobWorkOrderDraft(client, body)))
@@ -8972,6 +9007,33 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
         }
         return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+      }
+      // Blank and draft job work orders for the office. The queue is a read.
+      // Fill, approve and line review are named-approver writes, and each
+      // refuses while its own switch is off.
+      case 'list_office_job_work_orders': {
+        if (req.method !== 'GET') {
+          return json({ error: 'list_office_job_work_orders is GET only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => listOfficeJobWorkOrderQueue(client, officeJobWorkOrderActor(authMode, authUser))))
+      }
+      case 'fill_job_work_order_allowance': {
+        if (req.method !== 'POST') {
+          return json({ error: 'fill_job_work_order_allowance is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => fillJobWorkOrderAllowance(client, body, officeJobWorkOrderActor(authMode, authUser))))
+      }
+      case 'approve_office_job_work_order': {
+        if (req.method !== 'POST') {
+          return json({ error: 'approve_office_job_work_order is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => approveOfficeJobWorkOrder(client, body, officeJobWorkOrderActor(authMode, authUser))))
+      }
+      case 'review_crew_invoice_line': {
+        if (req.method !== 'POST') {
+          return json({ error: 'review_crew_invoice_line is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => reviewCrewInvoiceLine(client, body, officeJobWorkOrderActor(authMode, authUser))))
       }
       // Re-sends variation emails left failed or stuck in sending. Sends
       // nothing while feature flag work_order_variation_emails_v1 is off.
@@ -9677,9 +9739,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
         }
 
-        const { data: lines } = await client.from('trade_invoice_lines')
+        const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
           .select('*')
           .eq('trade_invoice_id', invoice_id)
+        if (linesErr) {
+          throw new ApiError('The office review on this invoice could not be read.', 503, {
+            error: 'The office review on this invoice could not be read.',
+            code: 'office_review_unreadable',
+          })
+        }
+        // A line still awaiting, queried or rejected holds the whole bill.
+        // A null review status is a line from before the switch and may sync.
+        const retryHold = xeroSyncRefusal(lines || [])
+        if (retryHold) {
+          throw new ApiError(retryHold.error, 409, { error: retryHold.error, code: retryHold.code })
+        }
 
         // Pure read-only setup. Nothing here touches Xero or mutates Supabase.
         // (getToken() is intentionally deferred — it can upsert xero_tokens on
@@ -11386,14 +11460,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // The selector may widen a fencing manager past their own work
             // orders, but tenant and canonical job vertical remain hard server
             // boundaries at submission time too.
-            const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+            // While crew work orders are retired, a kind=job row is a clear
+            // refusal (hours invoice on the job, never this door) and a
+            // retired crew row is refused. The switch off keeps the kind
+            // exclusion, so a job work order still reads as not found.
+            const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+            // `kind` is not a token the typed select parser accepts, so this
+            // query is untyped. The two strings stay distinct: the switch off
+            // does not ask for kind or quote_builder_version_id.
+            const woColumns = retireCrewWorkOrders
+              ? 'id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, kind, quote_builder_version_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+              : 'id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+            let woQuery = (client as any).from('work_orders')
+              .select(woColumns)
               .eq('id', work_order_id)
-              .neq('kind', 'job')
+            if (!retireCrewWorkOrders) woQuery = woQuery.neq('kind', 'job')
+            const { data: wo, error: woFetchErr } = await woQuery
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
               .single()
             if (woFetchErr || !wo) throw new ApiError('Work order not found', 404)
+            if (retireCrewWorkOrders && wo.kind === 'job') {
+              throw new ApiError("This is the job's work order. Invoice your hours on the job; this door does not invoice it.", 409, {
+                error: "This is the job's work order. Invoice your hours on the job; this door does not invoice it.",
+                code: 'job_work_order_not_crew_invoice',
+              })
+            }
+            if (hideRetiredCrewWorkOrder(wo, retireCrewWorkOrders)) {
+              throw new ApiError('Crew work orders are retired. Invoice your hours on the job.', 409, {
+                error: 'Crew work orders are retired. Invoice your hours on the job.',
+                code: 'crew_work_order_retired',
+              })
+            }
             const woJob = Array.isArray(wo.jobs) ? wo.jobs[0] : wo.jobs
             if (!_canSubmitWorkOrderInvoice(
               tradeUser,
@@ -13125,6 +13223,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ),
               ...woLineAssignmentIds,
             ].filter(Boolean).map(String))]
+            // "No work order, no invoice" is its own switch, off by default.
+            // It runs before any invoice row is written. A line with no job
+            // is not refused. An unreadable read refuses rather than invoicing.
+            const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
+              client,
+              [...lineItems, ...extraLineItems],
+            )
+            if (jobWorkOrderRefusal) {
+              throw new ApiError(
+                jobWorkOrderRefusal.error,
+                jobWorkOrderRefusal.code === 'job_work_order_unreadable' ? 503 : 409,
+                {
+                  error: jobWorkOrderRefusal.error,
+                  code: jobWorkOrderRefusal.code,
+                  ...(jobWorkOrderRefusal.job_id ? { job_id: jobWorkOrderRefusal.job_id } : {}),
+                },
+              )
+            }
             const invoiceId = weeklyInvoice
               ? await _persistWeeklyTradeInvoice(
                 client,
@@ -13424,6 +13540,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             await recordWoLabourIssues(woLabourIssues)
 
+            // Office review holds the whole invoice out of Xero. The invoice
+            // and its lines are already saved. A failed read of the review
+            // stamps fails closed: nothing is pushed. The switch off skips
+            // the extra read, and a null stamp (a line from before the
+            // switch) does not hold.
+            let officeReviewHold: { code: string; error: string } | null = null
+            if (await readFlag(client, CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG)) {
+              const { data: reviewLines, error: reviewErr } = await client.from('trade_invoice_lines')
+                .select('office_review_status')
+                .eq('trade_invoice_id', invoice.id)
+              if (reviewErr) {
+                throw new ApiError(
+                  'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+                  503,
+                  {
+                    error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
+                    code: 'office_review_unreadable',
+                    invoice_id: invoice.id,
+                  },
+                )
+              }
+              officeReviewHold = xeroSyncRefusal(reviewLines || [])
+              if (officeReviewHold) {
+                const { data: holderInv, error: holderReadErr } = await client.from('trade_invoices')
+                  .select('query_note').eq('id', invoice.id).maybeSingle()
+                if (holderReadErr) console.error('[ops-api] office review hold note read failed:', holderReadErr.message)
+                const merged = [holderInv?.query_note, officeReviewHold.error].filter(Boolean).join(' | ').slice(0, 2000)
+                const { error: noteErr } = await client.from('trade_invoices')
+                  .update({ query_note: merged }).eq('id', invoice.id)
+                if (noteErr) console.error('[ops-api] office review hold note update failed:', noteErr.message)
+              }
+            }
+
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
             // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
@@ -13434,7 +13583,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let xeroContactId: string | null = null
             let createdXeroBillId = ''
             let pdfAttached = false
-            try {
+            if (!officeReviewHold) try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -13687,6 +13836,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 tradeName: userProfile?.name || null,
                 flaggedLines: flaggedReviewLines,
                 xeroBillId,
+              })
+            }
+
+            if (officeReviewHold) {
+              return json({
+                success: true,
+                code: officeReviewHold.code,
+                office_review: 'held',
+                invoice_id: invoice.id,
+                invoice_number: invoiceNumber,
+                total_hours: totalHours,
+                ...tradeInvoiceMoneyResponse(money),
+                ...tradeRecurringDeductionResponse(recurringDeduction),
+                ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
+                line_count: lineItems.length + extraLineItems.length,
+                xero_bill_id: null,
+                xero_bill_number: null,
+                pdf_attached: false,
               })
             }
 
@@ -15435,7 +15602,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, kind, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+    .select('id, org_id, job_id, wo_number, kind, quote_builder_version_id, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)
@@ -15443,6 +15610,15 @@ export async function _resolveWeeklyWorkOrderInvoice(
   // A job work order (job_work_orders.ts) is never a crew-pay invoice source.
   if ((workOrders || []).some((row: any) => row.kind === 'job')) {
     throw new ApiError('A job work order cannot be invoiced as a weekly job block', 422)
+  }
+  if (
+    await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG) &&
+    (workOrders || []).some((row: any) => hideRetiredCrewWorkOrder(row, true))
+  ) {
+    throw new ApiError('Crew work orders are retired. Invoice your hours on the job.', 409, {
+      error: 'Crew work orders are retired. Invoice your hours on the job.',
+      code: 'crew_work_order_retired',
+    })
   }
   if ((workOrders || []).length !== workOrderIds.length) {
     throw new ApiError('One or more weekly work orders were not found in your business', 404)
@@ -15704,10 +15880,26 @@ async function readWorkOrderChargeRows(
 
 // ── Job work orders (job_work_orders.ts) ──
 // The module throws JobWorkOrderError; the serve() handler answers ApiError.
+function officeJobWorkOrderActor(
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'id' | 'role'> | null,
+): {
+  staff: boolean
+  userId: string | null
+} {
+  return {
+    staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+    userId: authMode === 'jwt' ? authUser?.id || null : null,
+  }
+}
+
 async function runJobWorkOrder<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn()
   } catch (e) {
+    if (e instanceof JobWorkOrderOfficeError) {
+      throw new ApiError(e.message, e.status, e.body)
+    }
     if (e instanceof JobWorkOrderError || e instanceof QuoteFillError) {
       throw new ApiError(e.message, e.status, { error: e.message, code: e.code })
     }
@@ -15776,6 +15968,31 @@ export async function handleTradeWorkOrdersAction(req: Request, client: any): Pr
   return json(await tradeWorkOrders(client, url.searchParams, viewer, isDispatcher))
 }
 
+// Jobs this person is on as crew, not as a ghost watcher. A null assignment
+// status is live. Paged past the 1000-row cap. A failed read is a failed
+// list: an empty assignment read would hide every job work order.
+async function viewerGenuineAssignmentJobIds(client: any, viewer: TradeAuthContext): Promise<string[]> {
+  const ids: string[] = []
+  let offset = 0
+  while (true) {
+    const { data, error } = await client.from('job_assignments')
+      .select('job_id')
+      .eq('user_id', viewer.id)
+      .eq('is_ghost', false)
+      .or('status.is.null,status.neq.cancelled')
+      .order('job_id', { ascending: true })
+      .range(offset, offset + WORK_ORDER_READ_PAGE - 1)
+    if (error) throw new ApiError('Failed to load the jobs you are assigned to: ' + error.message, 500)
+    const page = data || []
+    for (const row of page) {
+      if (row?.job_id) ids.push(String(row.job_id))
+    }
+    if (page.length < WORK_ORDER_READ_PAGE) break
+    offset += WORK_ORDER_READ_PAGE
+  }
+  return [...new Set(ids)]
+}
+
 export async function tradeWorkOrders(
   client: any,
   params: URLSearchParams,
@@ -15835,20 +16052,16 @@ export async function tradeWorkOrders(
       : [`type.eq.${vertical}`]
   ).join(',')
 
-  const allRows: any[] = []
-  let readOffset = 0
-  while (true) {
-    let query = client
-      .from('work_orders')
-      .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
-      .neq('kind', 'job')
-      .eq('org_id', viewer.orgId)
-      .eq('jobs.org_id', viewer.orgId)
-      .not('status', 'in', '("cancelled","deleted")')
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: true })
-      .range(readOffset, readOffset + WORK_ORDER_READ_PAGE - 1)
-    if (mode === 'mine') query = query.eq('assigned_user_id', viewer.id)
+  // The trade app does not filter by kind. While crew work orders are
+  // retired, this list is the filter: retired crew rows drop out, and the
+  // job's own work order stays. The switch off keeps the old select and the
+  // kind exclusion, so the list is unchanged.
+  const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+  const workOrderSelect = retireCrewWorkOrders
+    ? 'id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, kind, quote_builder_version_id, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+    : 'id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+
+  const applyWorkOrderListFilters = (query: any) => {
     if (status === 'complete') {
       // UX 287 asks status=complete. Live crew-pay WOs stay sent after the job
       // finishes, so the complete filter also returns sent/accepted rows and
@@ -15860,12 +16073,56 @@ export async function tradeWorkOrders(
     if (verticals.length > 0) {
       query = query.or(workOrderVerticalFilter, { referencedTable: 'jobs' })
     }
+    return query
+  }
+
+  const allRows: any[] = []
+  let readOffset = 0
+  while (true) {
+    let query = client
+      .from('work_orders')
+      .select(workOrderSelect)
+    if (!retireCrewWorkOrders) query = query.neq('kind', 'job')
+    query = query
+      .eq('org_id', viewer.orgId)
+      .eq('jobs.org_id', viewer.orgId)
+      .not('status', 'in', '("cancelled","deleted")')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(readOffset, readOffset + WORK_ORDER_READ_PAGE - 1)
+    if (mode === 'mine') query = query.eq('assigned_user_id', viewer.id)
+    query = applyWorkOrderListFilters(query)
     const { data, error } = await query
     if (error) throw new ApiError('Failed to load work orders: ' + error.message, 500)
     const page = data || []
     allRows.push(...page)
     if (page.length < WORK_ORDER_READ_PAGE) break
     readOffset += WORK_ORDER_READ_PAGE
+  }
+
+  // A job work order has no assignee, so mode=mine cannot see it on
+  // assigned_user_id. While the retirement switch is on, add the job work
+  // orders on jobs this person is genuinely assigned to.
+  if (retireCrewWorkOrders && mode === 'mine') {
+    const assignedJobIds = await viewerGenuineAssignmentJobIds(client, viewer)
+    for (let i = 0; i < assignedJobIds.length; i += WORK_ORDER_ID_CHUNK) {
+      const ids = assignedJobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
+      let query = client
+        .from('work_orders')
+        .select(workOrderSelect)
+        .eq('kind', 'job')
+        .eq('org_id', viewer.orgId)
+        .eq('jobs.org_id', viewer.orgId)
+        .in('job_id', ids)
+        .not('status', 'in', '("cancelled","deleted")')
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(0, WORK_ORDER_READ_PAGE - 1)
+      query = applyWorkOrderListFilters(query)
+      const { data, error } = await query
+      if (error) throw new ApiError('Failed to load job work orders: ' + error.message, 500)
+      allRows.push(...(data || []))
+    }
   }
 
   // Defensive de-duplication protects external offset paging if a database view
@@ -15891,6 +16148,9 @@ export async function tradeWorkOrders(
       row.jobs?.site_address,
       row.jobs?.site_suburb,
     ].some((value) => String(value || '').toLowerCase().includes(search)))
+  }
+  if (retireCrewWorkOrders) {
+    authorizedRows = authorizedRows.filter((row: any) => !hideRetiredCrewWorkOrder(row, true))
   }
 
   const total = authorizedRows.length
@@ -15962,6 +16222,7 @@ export async function tradeWorkOrders(
     return {
       id: workOrder.id,
       wo_number: workOrder.wo_number,
+      kind: workOrder.kind || null,
       job_id: workOrder.job_id,
       job_number: workOrder.jobs?.job_number || '',
       client_name: workOrder.jobs?.client_name || '',
@@ -17507,7 +17768,14 @@ export async function listWorkOrders(client: any, params: URLSearchParams) {
 
   const { data, error } = await query
   if (error) throw error
-  return { work_orders: data || [] }
+  const rows = data || []
+  // The ops crew list stays crew-only (kind=job is excluded above). Once
+  // crew work orders are retired, the leftover per-trade rows drop out too.
+  // A quote-builder crew row stays.
+  if (!(await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG))) {
+    return { work_orders: rows }
+  }
+  return { work_orders: rows.filter((row: any) => !hideRetiredCrewWorkOrder(row, true)) }
 }
 
 async function listSuppliers(client: any) {
@@ -53028,12 +53296,16 @@ async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthC
   const nowIso = new Date().toISOString()
   const { data: userRow } = await client.from('users').select('invoice_type').eq('id', tradeUser.id).maybeSingle()
   const lane = userRow?.invoice_type === 'per_metre' ? 'weekly_work_order' : 'hours'
+  const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
   const { data: mine, error: woErr } = await client.from('work_orders')
-    .select('id, wo_number, status, scheduled_date, completed_at, scope_items')
+    .select(retireCrewWorkOrders
+      ? 'id, wo_number, status, scheduled_date, completed_at, scope_items, kind, quote_builder_version_id'
+      : 'id, wo_number, status, scheduled_date, completed_at, scope_items')
     .eq('job_id', job.id).eq('org_id', tradeUser.orgId).eq('assigned_user_id', tradeUser.id)
   if (woErr) throw woErr
   const workOrders: any[] = []
   for (const wo of (mine || [])) {
+    if (retireCrewWorkOrders && (wo.kind === 'job' || hideRetiredCrewWorkOrder(wo, true))) continue
     const status = String(wo.status || '')
     if (status === 'cancelled' || status === 'draft') continue
     let completedAt = wo.completed_at || null
@@ -53060,6 +53332,34 @@ async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthC
       priced: Array.isArray(wo.scope_items) && wo.scope_items.length > 0,
       already_complete: status === 'complete',
     })
+  }
+  // The job's own work order is named on the queue and is not marked
+  // complete: an approved one is sealed, and this door does not invoice it.
+  if (retireCrewWorkOrders) {
+    const { data: jobWos, error: jobWoErr } = await client.from('work_orders')
+      .select('id, wo_number, status, scheduled_date, completed_at, scope_items, kind')
+      .eq('job_id', job.id).eq('org_id', tradeUser.orgId).eq('kind', 'job')
+      .not('status', 'in', '("cancelled","deleted")')
+    if (jobWoErr) throw jobWoErr
+    const seen = new Set(workOrders.map((row) => String(row.id)))
+    for (const wo of (jobWos || [])) {
+      if (seen.has(String(wo.id))) continue
+      const status = String(wo.status || '')
+      if (status === 'cancelled' || status === 'deleted') continue
+      seen.add(String(wo.id))
+      const anchor = wo.completed_at || (wo.scheduled_date ? wo.scheduled_date + 'T00:00:00Z' : nowIso)
+      const businessDate = getAWSTDate(new Date(anchor))
+      workOrders.push({
+        id: wo.id,
+        wo_number: wo.wo_number || null,
+        kind: 'job',
+        completed_at: wo.completed_at || null,
+        business_date: businessDate,
+        week_end: weekEndSundayFor(businessDate),
+        priced: Array.isArray(wo.scope_items) && wo.scope_items.length > 0,
+        already_complete: status === 'complete',
+      })
+    }
   }
   const { data: asns } = await client.from('job_assignments')
     .select(LOG_HOURS_ASSIGNMENT_COLUMNS).eq('job_id', job.id).eq('user_id', tradeUser.id)

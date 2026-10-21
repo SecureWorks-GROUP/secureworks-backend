@@ -444,6 +444,7 @@ jobs:
             supabase/functions/ops-api/xero_reports_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
             supabase/functions/ops-api/job_work_orders_test.ts \
+            supabase/functions/ops-api/job_work_order_crew_invoice_test.ts \
             supabase/functions/ops-api/quote_work_order_lines_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_handler_test.ts \

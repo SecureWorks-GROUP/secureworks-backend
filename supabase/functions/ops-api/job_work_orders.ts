@@ -1903,6 +1903,8 @@ const AUTO_ISSUE_ERRORS: Record<string, [JobWorkOrderAutoIssueReason, string]> =
  * fill flagged for review never stop it: they stay on the work order for the
  * office (jobWorkOrderNeedsChecking). A draft edited by hand, a quote with no
  * labour figure, and a job with no accepted quote wait for the approver.
+ * A blank work order opened for another job type is never selected here, and
+ * filling its labour allowance stamps hand_edited_at, which this issue refuses.
  * Never throws: every outcome is a reason.
  */
 export async function autoIssueJobWorkOrderForJob(
