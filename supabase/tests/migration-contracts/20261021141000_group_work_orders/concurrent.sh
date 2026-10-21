@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Two invoice freezes and a late joiner, in separate sessions.
+# A freeze under a row lock, a late joiner, and two submits of one share.
 #
-# Session A freezes the 2h/2h split and holds the group row lock (the
-# freeze's SELECT ... FOR UPDATE lasts until A commits). The parent waits
-# until A's client has the 321.43 snapshot and A is still inside that
-# transaction. Session B then changes A's hours and freezes: it blocks on
-# the same row, then must return A's snapshot, not a split of the new
-# hours. Session C inserts a participant: it blocks on the joiner trigger's
-# lock, then is refused group_split_frozen. The stored shares stay
-# 321.43 and 160.72 and sum to the pot.
+# Session A freezes the 2h/2h split and holds the group row lock until it
+# commits. Session B's hour edit waits on that lock, then is refused
+# group_split_frozen, and B's freeze returns the stored 321.43 / 160.72
+# snapshot. Session C is refused group_split_frozen. Hours stay 2.00.
+# After that, two sessions insert the same share onto two invoices: one
+# stores the line and the other is refused group_share_already_invoiced.
 set -euo pipefail
 : "${CONTRACT_DATABASE_URL:?local contract database required}"
 case "$CONTRACT_DATABASE_URL" in
@@ -28,10 +26,14 @@ tmp=$(mktemp -d)
 a_pid=
 b_pid=
 c_pid=
+d_pid=
+e_pid=
 cleanup() {
   if [ -n "${a_pid}" ]; then kill "$a_pid" 2>/dev/null || true; fi
   if [ -n "${b_pid}" ]; then kill "$b_pid" 2>/dev/null || true; fi
   if [ -n "${c_pid}" ]; then kill "$c_pid" 2>/dev/null || true; fi
+  if [ -n "${d_pid}" ]; then kill "$d_pid" 2>/dev/null || true; fi
+  if [ -n "${e_pid}" ]; then kill "$e_pid" 2>/dev/null || true; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -63,6 +65,21 @@ WHERE wo.wo_number = 'GWO-RACE-1';
 INSERT INTO public.group_work_order_participants (group_id, user_id) VALUES
   ('${GROUP}', '${CREW_A}'),
   ('${GROUP}', '${CREW_B}');
+INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+  ('c2140000-0000-4000-8000-0000000000a2', '${JOB}', '${CREW_A}', '2026-10-21', 'scheduled'),
+  ('c2140000-0000-4000-8000-0000000000b2', '${JOB}', '${CREW_B}', '2026-10-21', 'scheduled');
+INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+VALUES (
+  'c2140000-0000-4000-8000-000000000501', '${JOB}', 'signature', 'photo',
+  'data:image/png;base64,iVBORw0KGgo='
+);
+INSERT INTO public.job_client_signoffs (
+  job_id, method, signed_name, happy, satisfaction_rating,
+  signature_media_id, captured_by_actor
+) VALUES (
+  '${JOB}', 'share_link', 'Alex Client', true, 5,
+  'c2140000-0000-4000-8000-000000000501', 'client link'
+);
 INSERT INTO public.group_work_order_time_entries
   (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
 VALUES
@@ -103,9 +120,11 @@ fi
 
 stdbuf -oL -eL psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
   >"$tmp/b.out" 2>"$tmp/b.err" <<SQL &
+\set ON_ERROR_STOP off
 UPDATE public.group_work_order_time_entries
 SET hours = 7.50
 WHERE group_id = '${GROUP}' AND user_id = '${CREW_A}';
+\set ON_ERROR_STOP on
 BEGIN;
 SET LOCAL ROLE service_role;
 SELECT public.freeze_group_work_order_split('${GROUP}'::uuid);
@@ -151,6 +170,11 @@ if ! grep -q 'group_split_frozen' "$tmp/c.err"; then
   exit 1
 fi
 
+if ! grep -q 'group_split_frozen' "$tmp/b.err"; then
+  echo 'session B edited hours on a frozen split' >&2
+  cat "$tmp/b.out" "$tmp/b.err" >&2
+  exit 1
+fi
 if ! grep -q '321.43' "$tmp/b.out" || ! grep -q '160.72' "$tmp/b.out"; then
   echo 'session B did not return the frozen snapshot' >&2
   cat "$tmp/b.out" "$tmp/b.err" >&2
@@ -183,8 +207,8 @@ BEGIN
   THEN
     RAISE EXCEPTION 'group-wo race: shares are % and % (sum %)', v_a, v_b, v_sum;
   END IF;
-  IF v_hours IS DISTINCT FROM 7.50 THEN
-    RAISE EXCEPTION 'group-wo race: the hour edit did not land (% )', v_hours;
+  IF v_hours IS DISTINCT FROM 2.00 THEN
+    RAISE EXCEPTION 'group-wo race: frozen hours moved (%)', v_hours;
   END IF;
   IF (SELECT count(*) FROM public.group_work_order_participants WHERE group_id = '${GROUP}') <> 2
      OR EXISTS (
@@ -199,6 +223,72 @@ BEGIN
   END IF;
   IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = '${GROUP}') IS NULL THEN
     RAISE EXCEPTION 'group-wo race: the split was not frozen';
+  END IF;
+END \$\$;
+
+INSERT INTO public.trade_invoices (
+  id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+  gst_on, super_rate, super_amount, gross_earned, net_pay
+) VALUES
+  ('c2140000-0000-4000-8000-000000000401', '${ORG}', '${CREW_A}', 'draft',
+   321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14),
+  ('c2140000-0000-4000-8000-000000000402', '${ORG}', '${CREW_A}', 'draft',
+   321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14);
+SQL
+
+stdbuf -oL -eL psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  >"$tmp/d.out" 2>"$tmp/d.err" <<SQL &
+INSERT INTO public.trade_invoice_lines (
+  trade_invoice_id, job_id, line_type, line_total_ex
+) VALUES (
+  'c2140000-0000-4000-8000-000000000401', '${JOB}', 'group share', 321.43
+);
+SQL
+d_pid=$!
+stdbuf -oL -eL psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  >"$tmp/e.out" 2>"$tmp/e.err" <<SQL &
+INSERT INTO public.trade_invoice_lines (
+  trade_invoice_id, job_id, line_type, line_total_ex
+) VALUES (
+  'c2140000-0000-4000-8000-000000000402', '${JOB}', 'group share', 321.43
+);
+SQL
+e_pid=$!
+set +e
+wait "$d_pid"
+d_status=$?
+wait "$e_pid"
+e_status=$?
+set -e
+d_pid=
+e_pid=
+if [ "$d_status" -eq 0 ] && [ "$e_status" -eq 0 ]; then
+  echo 'both share submits stored a line' >&2
+  cat "$tmp/d.out" "$tmp/d.err" "$tmp/e.out" "$tmp/e.err" >&2
+  exit 1
+fi
+if [ "$d_status" -ne 0 ] && [ "$e_status" -ne 0 ]; then
+  echo 'neither share submit stored a line' >&2
+  cat "$tmp/d.out" "$tmp/d.err" "$tmp/e.out" "$tmp/e.err" >&2
+  exit 1
+fi
+if ! grep -q 'group_share_already_invoiced' "$tmp/d.err" "$tmp/e.err"; then
+  echo 'the losing share submit failed for a different reason' >&2
+  cat "$tmp/d.out" "$tmp/d.err" "$tmp/e.out" "$tmp/e.err" >&2
+  exit 1
+fi
+
+psql "$CONTRACT_DATABASE_URL" -X -v ON_ERROR_STOP=1 <<SQL
+DO \$\$
+DECLARE
+  n int;
+BEGIN
+  SELECT count(*) INTO n
+  FROM public.trade_invoice_lines l
+  JOIN public.group_work_order_shares s ON s.id = l.group_share_id
+  WHERE s.group_id = '${GROUP}' AND s.user_id = '${CREW_A}';
+  IF n IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'group-wo race: % live lines stored one share', n;
   END IF;
 END \$\$;
 SQL

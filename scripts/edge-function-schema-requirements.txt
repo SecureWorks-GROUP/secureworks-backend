@@ -855,3 +855,28 @@ xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_c
 xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
+# Group work orders reuse the client sign-off store. ops-api writes
+# job_media phase signature and job_client_signoffs, so those migrations
+# must be applied before this ops-api ships. The phase constraint is
+# #1110's; captured_device is added by the group migration.
+ops-api|supabase/migrations/20261020170000_job_media_signature_voice_note_phases.sql|constraint|job_media_phase_check
+ops-api|supabase/migrations/20261020170100_job_client_signoffs.sql|table|job_client_signoffs
+ops-api|supabase/migrations/20261020170100_job_client_signoffs.sql|table|client_signoff_settings
+# Group work orders: the flag, the split writer, the invoice-line trigger
+# and the share pointer. ops-api reads and writes these.
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_orders
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_participants
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_time_entries
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_shares
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_signatures
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_feedback
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_settings
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|table|group_work_order_events
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|group_work_orders.split_frozen_at
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|trade_invoice_lines.group_share_id
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|column|job_client_signoffs.captured_device
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|group_work_order_write_split
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|freeze_group_work_order_split
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|project_group_work_order_split
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|function|unfreeze_group_work_order_split
+ops-api|supabase/migrations/20261021141000_group_work_orders.sql|trigger|trade_invoice_lines.trg_trade_invoice_lines_group_share_snapshot

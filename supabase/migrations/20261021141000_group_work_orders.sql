@@ -1,0 +1,1234 @@
+-- Group work orders and client job sign-off.
+--
+-- One group per (job, job work order). The pot is the sealed
+-- work_orders.agreed_labour_ex on that job work order (owner, confirmed).
+-- It is not stored on the group row. A trade reads it only through ops-api,
+-- and only after they have joined the group and submitted their own hours,
+-- as pot_total beside their own share. That is a deliberate narrow exception
+-- to "trades cannot read agreed_labour_ex": PostgREST still hides kind = 'job'
+-- work orders, and a non-participant has no share row to read.
+--
+-- Share rows are the caller's own. source_work_order_id on a share invoice
+-- line stays null: the parent job work order is not a crew-pay claim.
+-- Client sign-off is the invoice gate. Crew signatures are not.
+-- The client-link sender flag ships off. This migration sends nothing.
+--
+-- Apply before the matching ops-api. trade_invoice_lines.group_share_id is
+-- not a foreign key, for the same embed reason as job_work_order_id.
+--
+-- Freeze is an explicit step (freeze_group_work_order_split) after every
+-- participant has assignment-dated hours and a counting client sign-off
+-- exists on job_client_signoffs. A share read and project_group_work_order_split
+-- never set split_frozen_at and never persist share rows. The share-line
+-- trigger freezes in the SAME transaction as the line insert, so a failed
+-- insert rolls the marker back. Office unfreeze is refused while a share
+-- sits on an approved, pushed or paid invoice; a draft or held share
+-- invoice is ops-rejected and its share lines are removed. No recompute
+-- until the next explicit freeze. Owner to confirm.
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+-- ── 1. group ────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_orders (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL,
+  job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE CASCADE,
+  work_order_id uuid NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  share_token text NOT NULL,
+  created_by uuid,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  client_signed_at timestamptz,
+  voided_at timestamptz,
+  void_reason text,
+  CONSTRAINT group_work_orders_status_check
+    CHECK (status IN ('open', 'client_signed', 'void')),
+  CONSTRAINT uq_group_work_orders_job_work_order UNIQUE (job_id, work_order_id),
+  CONSTRAINT uq_group_work_orders_share_token UNIQUE (share_token)
+);
+
+COMMENT ON TABLE public.group_work_orders IS
+  'One group split for a job''s sealed job work order. No dollar column: the pot is work_orders.agreed_labour_ex, read by ops-api.';
+COMMENT ON COLUMN public.group_work_orders.work_order_id IS
+  'jobs.work_order_id / work_orders.kind = job. Not a foreign key, so PostgREST embeds of work_orders stay unambiguous.';
+COMMENT ON COLUMN public.group_work_orders.share_token IS
+  'Unguessable secret for the public client sign-off page. Knowing it is the client''s credential.';
+
+ALTER TABLE public.group_work_orders
+  ADD COLUMN IF NOT EXISTS split_frozen_at timestamptz;
+COMMENT ON COLUMN public.group_work_orders.split_frozen_at IS
+  'Set in the same transaction as the share snapshot, under a row lock on this group. Null means the split is still open. Every share line reads that one snapshot.';
+
+-- ── 2. participants ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_participants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL REFERENCES public.group_work_orders(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL,
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  crew_signed_at timestamptz,
+  signature_name text,
+  CONSTRAINT uq_group_work_order_participants UNIQUE (group_id, user_id)
+);
+
+COMMENT ON TABLE public.group_work_order_participants IS
+  'Crew on a group. Names and whether they signed are visible to other participants. Hours and pay are not.';
+
+-- ── 3. signatures (service role only) ───────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_signatures (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL REFERENCES public.group_work_orders(id) ON DELETE CASCADE,
+  signer_kind text NOT NULL,
+  user_id uuid,
+  signer_name text NOT NULL,
+  signature_png text,
+  signed_via text NOT NULL,
+  captured_by_user_id uuid,
+  signed_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT group_work_order_signatures_kind_check
+    CHECK (signer_kind = 'crew'),
+  CONSTRAINT group_work_order_signatures_via_check
+    CHECK (signed_via IN ('on_site', 'share_link')),
+  CONSTRAINT group_work_order_signatures_name_check
+    CHECK (char_length(btrim(signer_name)) BETWEEN 1 AND 120),
+  CONSTRAINT group_work_order_signatures_png_check
+    CHECK (
+      signature_png IS NULL
+      OR (
+        char_length(signature_png) <= 150000
+        AND (
+          signature_png LIKE 'data:image/png;base64,%'
+          OR signature_png LIKE 'data:image/svg+xml%'
+        )
+      )
+    )
+);
+
+COMMENT ON TABLE public.group_work_order_signatures IS
+  'Crew signature images only. A client drawing is a job_media row of phase signature pointed at by job_client_signoffs. Browser roles cannot read this table.';
+
+-- ── 4. hours (own row) ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_time_entries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL REFERENCES public.group_work_orders(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL,
+  work_date date NOT NULL,
+  start_time text NOT NULL,
+  finish_time text NOT NULL,
+  break_minutes integer NOT NULL DEFAULT 0,
+  hours numeric(8,2) NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_group_work_order_time_entries UNIQUE (group_id, user_id, work_date),
+  CONSTRAINT group_work_order_time_entries_break_check
+    CHECK (break_minutes >= 0),
+  CONSTRAINT group_work_order_time_entries_hours_check
+    CHECK (hours > 0)
+);
+
+COMMENT ON TABLE public.group_work_order_time_entries IS
+  'Each crew member''s own start, finish and break on this group. Points use these hours. Clock rows are not copied here. A participant cannot read another participant''s row.';
+
+-- ── 5. feedback (office only) ───────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_feedback (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL REFERENCES public.group_work_orders(id) ON DELETE CASCADE,
+  sales_process_rating smallint NOT NULL,
+  sales_process_comment text,
+  communication_rating smallint NOT NULL,
+  communication_comment text,
+  cleanliness_rating smallint NOT NULL,
+  cleanliness_comment text,
+  punctuality_rating smallint NOT NULL,
+  punctuality_comment text,
+  crew_rating smallint NOT NULL,
+  crew_comment text,
+  free_text text,
+  submitted_at timestamptz NOT NULL DEFAULT now(),
+  submitted_via text NOT NULL,
+  CONSTRAINT uq_group_work_order_feedback_group UNIQUE (group_id),
+  CONSTRAINT group_work_order_feedback_via_check
+    CHECK (submitted_via IN ('on_site', 'share_link')),
+  CONSTRAINT group_work_order_feedback_sales_check
+    CHECK (sales_process_rating BETWEEN 1 AND 5),
+  CONSTRAINT group_work_order_feedback_communication_check
+    CHECK (communication_rating BETWEEN 1 AND 5),
+  CONSTRAINT group_work_order_feedback_cleanliness_check
+    CHECK (cleanliness_rating BETWEEN 1 AND 5),
+  CONSTRAINT group_work_order_feedback_punctuality_check
+    CHECK (punctuality_rating BETWEEN 1 AND 5),
+  CONSTRAINT group_work_order_feedback_crew_check
+    CHECK (crew_rating BETWEEN 1 AND 5)
+);
+
+COMMENT ON TABLE public.group_work_order_feedback IS
+  'Client ratings for the office. Installers and other trades cannot read this table. The client is told that when they submit. A second post does not change the first ratings.';
+
+ALTER TABLE public.group_work_order_feedback
+  DROP CONSTRAINT IF EXISTS group_work_order_feedback_comment_len_check;
+ALTER TABLE public.group_work_order_feedback
+  ADD CONSTRAINT group_work_order_feedback_comment_len_check CHECK (
+    (sales_process_comment IS NULL OR char_length(sales_process_comment) <= 2000)
+    AND (communication_comment IS NULL OR char_length(communication_comment) <= 2000)
+    AND (cleanliness_comment IS NULL OR char_length(cleanliness_comment) <= 2000)
+    AND (punctuality_comment IS NULL OR char_length(punctuality_comment) <= 2000)
+    AND (crew_comment IS NULL OR char_length(crew_comment) <= 2000)
+    AND (free_text IS NULL OR char_length(free_text) <= 4000)
+  );
+
+-- ── 6. shares (own row; pot_ex is the narrow exception) ─────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_shares (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL REFERENCES public.group_work_orders(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL,
+  hours numeric(8,2) NOT NULL,
+  points numeric(14,4) NOT NULL,
+  share_ex numeric(12,2) NOT NULL,
+  pot_ex numeric(12,2) NOT NULL,
+  computed_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_group_work_order_shares UNIQUE (group_id, user_id),
+  CONSTRAINT group_work_order_shares_money_check
+    CHECK (share_ex >= 0 AND pot_ex >= 0 AND hours >= 0 AND points >= 0)
+);
+
+COMMENT ON TABLE public.group_work_order_shares IS
+  'One row per participant. A trade may read only their own row (user_id = auth.uid()). pot_ex on that row is the sealed agreed labour, the one place a participating trade can see it. Other participants'' shares, hours and points are not on this row.';
+COMMENT ON COLUMN public.group_work_order_shares.pot_ex IS
+  'Snapshot of work_orders.agreed_labour_ex when this share was computed. Visible to this participant only. Not a second pot.';
+
+-- ── 7. settings ─────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_settings (
+  id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  google_review_url text NOT NULL,
+  review_prompt_min_rating smallint NOT NULL DEFAULT 4,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT group_work_order_settings_min_check
+    CHECK (review_prompt_min_rating BETWEEN 1 AND 5)
+);
+
+INSERT INTO public.group_work_order_settings (id, google_review_url, review_prompt_min_rating)
+VALUES (
+  1,
+  -- Seed only, copied from supabase/functions/_shared/google_review_link.ts.
+  -- The trade app's g.page TODO URL is not this value. Change the row, not code.
+  'https://share.google/AFyfkE7jLfCZcxanV',
+  4
+)
+ON CONFLICT (id) DO NOTHING;
+
+COMMENT ON TABLE public.group_work_order_settings IS
+  'The Google review link is config. review_prompt_min_rating is kept so older readers still see a number; the prompt threshold is client_signoff_settings.min_happy_rating. Owner to confirm.';
+
+-- ── 8. invoice line pointer ─────────────────────────────────────────────────
+
+ALTER TABLE public.trade_invoice_lines
+  ADD COLUMN IF NOT EXISTS group_share_id uuid;
+CREATE INDEX IF NOT EXISTS idx_trade_invoice_lines_group_share
+  ON public.trade_invoice_lines (group_share_id) WHERE group_share_id IS NOT NULL;
+COMMENT ON COLUMN public.trade_invoice_lines.group_share_id IS
+  'The signer''s group_work_order_shares row. Not a foreign key. A share line leaves source_work_order_id null; this is not a full work-order claim.';
+
+-- ── 9. flags, off ───────────────────────────────────────────────────────────
+-- group_work_order_v1 gates every group action (create, join, hours, my
+-- share, sign-off, the public page, freeze and unfreeze). Missing or
+-- unreadable is off. While it is off, trade invoicing does not read the
+-- group tables. The database trigger below still refuses a second payment
+-- if a group row already exists.
+
+INSERT INTO public.feature_flags (flag_name, enabled, description)
+SELECT
+  'group_work_order_v1',
+  false,
+  'Group work-order hours, client sign-off and share invoices. Off until the owner turns it on. The invoice-line trigger still refuses a normal pay claim on a job that already has a group.'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.feature_flags
+  WHERE flag_name = 'group_work_order_v1'
+);
+
+-- ── 9b. sender flag, off ────────────────────────────────────────────────────
+
+INSERT INTO public.feature_flags (flag_name, enabled, description)
+SELECT
+  'group_work_order_client_link_send_v1',
+  false,
+  'When on, a later change may text the client their group sign-off link. This build has no sender: preview returns the draft and send is refused even if the flag is on. Off, missing or unreadable: nothing is sent.'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.feature_flags
+  WHERE flag_name = 'group_work_order_client_link_send_v1'
+);
+
+-- ── 10. who can read ────────────────────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.group_work_order_caller_is_staff()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.users u
+    WHERE u.id = auth.uid()
+      AND lower(u.role::text) IN ('admin', 'owner', 'ops_manager')
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.group_work_order_caller_is_participant(p_group uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.group_work_order_participants p
+    WHERE p.group_id = p_group
+      AND p.user_id = auth.uid()
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.group_work_order_caller_is_staff() FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.group_work_order_caller_is_participant(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.group_work_order_caller_is_staff() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_caller_is_participant(uuid) TO authenticated, service_role;
+
+ALTER TABLE public.group_work_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_work_order_participants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_work_order_signatures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_work_order_time_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_work_order_feedback ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_work_order_shares ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_work_order_settings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS group_work_orders_select ON public.group_work_orders;
+CREATE POLICY group_work_orders_select ON public.group_work_orders
+  FOR SELECT TO authenticated
+  USING (
+    public.group_work_order_caller_is_staff()
+    OR public.group_work_order_caller_is_participant(id)
+  );
+
+DROP POLICY IF EXISTS group_work_order_participants_select ON public.group_work_order_participants;
+CREATE POLICY group_work_order_participants_select ON public.group_work_order_participants
+  FOR SELECT TO authenticated
+  USING (
+    public.group_work_order_caller_is_staff()
+    OR user_id = auth.uid()
+    OR public.group_work_order_caller_is_participant(group_id)
+  );
+
+DROP POLICY IF EXISTS group_work_order_time_entries_select ON public.group_work_order_time_entries;
+CREATE POLICY group_work_order_time_entries_select ON public.group_work_order_time_entries
+  FOR SELECT TO authenticated
+  USING (
+    public.group_work_order_caller_is_staff()
+    OR user_id = auth.uid()
+  );
+
+DROP POLICY IF EXISTS group_work_order_shares_select ON public.group_work_order_shares;
+CREATE POLICY group_work_order_shares_select ON public.group_work_order_shares
+  FOR SELECT TO authenticated
+  USING (
+    public.group_work_order_caller_is_staff()
+    OR user_id = auth.uid()
+  );
+
+DROP POLICY IF EXISTS group_work_order_feedback_select ON public.group_work_order_feedback;
+CREATE POLICY group_work_order_feedback_select ON public.group_work_order_feedback
+  FOR SELECT TO authenticated
+  USING (public.group_work_order_caller_is_staff());
+
+DROP POLICY IF EXISTS group_work_order_settings_select ON public.group_work_order_settings;
+CREATE POLICY group_work_order_settings_select ON public.group_work_order_settings
+  FOR SELECT TO authenticated
+  USING (public.group_work_order_caller_is_staff());
+
+-- No SELECT policy on signatures: authenticated reads nothing.
+
+REVOKE ALL ON public.group_work_orders FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.group_work_order_participants FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.group_work_order_signatures FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.group_work_order_time_entries FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.group_work_order_feedback FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.group_work_order_shares FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.group_work_order_settings FROM PUBLIC, anon, authenticated;
+
+GRANT SELECT ON public.group_work_orders TO authenticated;
+GRANT SELECT ON public.group_work_order_participants TO authenticated;
+GRANT SELECT ON public.group_work_order_time_entries TO authenticated;
+GRANT SELECT ON public.group_work_order_feedback TO authenticated;
+GRANT SELECT ON public.group_work_order_shares TO authenticated;
+GRANT SELECT ON public.group_work_order_settings TO authenticated;
+
+GRANT ALL ON public.group_work_orders TO service_role;
+GRANT ALL ON public.group_work_order_participants TO service_role;
+GRANT ALL ON public.group_work_order_signatures TO service_role;
+GRANT ALL ON public.group_work_order_time_entries TO service_role;
+GRANT ALL ON public.group_work_order_feedback TO service_role;
+GRANT ALL ON public.group_work_order_shares TO service_role;
+GRANT ALL ON public.group_work_order_settings TO service_role;
+
+-- ── 11. client sign-off reuse and the audit row ─────────────────────────────
+-- Client drawings live on job_client_signoffs (PR #1110), not in
+-- group_work_order_signatures. share_link is the public client page.
+-- on_site is a participant's phone. revoked is a newer row that stops
+-- counting. office_waiver still counts. Owner to confirm.
+
+ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_method_check;
+ALTER TABLE public.job_client_signoffs ADD CONSTRAINT job_client_signoffs_method_check
+  CHECK (method IN ('on_site', 'office_waiver', 'share_link', 'revoked'));
+
+ALTER TABLE public.job_client_signoffs
+  ADD COLUMN IF NOT EXISTS captured_device text;
+
+ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_device_check;
+ALTER TABLE public.job_client_signoffs ADD CONSTRAINT job_client_signoffs_device_check
+  CHECK (captured_device IS NULL OR char_length(captured_device) <= 200);
+
+ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_share_link_check;
+ALTER TABLE public.job_client_signoffs ADD CONSTRAINT job_client_signoffs_share_link_check
+  CHECK (
+    method <> 'share_link'
+    OR (
+      signature_media_id IS NOT NULL
+      AND char_length(btrim(COALESCE(signed_name, ''))) BETWEEN 1 AND 120
+    )
+  );
+
+ALTER TABLE public.job_client_signoffs DROP CONSTRAINT IF EXISTS job_client_signoffs_revoked_check;
+ALTER TABLE public.job_client_signoffs ADD CONSTRAINT job_client_signoffs_revoked_check
+  CHECK (method <> 'revoked' OR signature_media_id IS NULL);
+
+COMMENT ON COLUMN public.job_client_signoffs.captured_device IS
+  'Phone or browser label supplied with a group sign-off. Null on older rows.';
+
+CREATE TABLE IF NOT EXISTS public.group_work_order_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL REFERENCES public.group_work_orders(id) ON DELETE CASCADE,
+  job_id uuid NOT NULL,
+  action text NOT NULL,
+  actor_user_id uuid,
+  detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT group_work_order_events_action_check CHECK (action IN (
+    'freeze', 'unfreeze', 'revoke_signoff', 'void_group', 'rekey'
+  ))
+);
+
+COMMENT ON TABLE public.group_work_order_events IS
+  'Append-only office audit for a group split. Trades cannot read it.';
+
+CREATE OR REPLACE FUNCTION public.group_work_order_events_append_only()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RAISE EXCEPTION 'group_work_order_events is append-only' USING ERRCODE = '23514';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_order_events_append_only ON public.group_work_order_events;
+CREATE TRIGGER trg_group_work_order_events_append_only
+  BEFORE UPDATE OR DELETE ON public.group_work_order_events
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_events_append_only();
+
+ALTER TABLE public.group_work_order_events ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.group_work_order_events FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, INSERT ON TABLE public.group_work_order_events TO service_role;
+REVOKE ALL ON FUNCTION public.group_work_order_events_append_only() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.group_work_order_events_append_only() TO service_role;
+
+-- ── 12. one split, written only by an explicit freeze ───────────────────────
+--
+-- group_work_order_write_split locks the group. If the marker is already
+-- set it returns those rows. Otherwise it checks every participant, the
+-- rate and the client sign-off, then either returns the figures (p_freeze
+-- false: nothing is stored) or writes them and sets the marker. Preview
+-- never sets split_frozen_at. A failed check writes nothing.
+
+CREATE OR REPLACE FUNCTION public.group_work_order_assignment_covers(
+  p_job uuid,
+  p_user uuid,
+  p_day date
+) RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = public, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.job_assignments a
+    WHERE a.job_id = p_job
+      AND a.user_id = p_user
+      AND a.scheduled_date = p_day
+      AND COALESCE(to_jsonb(a)->>'status', '') IS DISTINCT FROM 'cancelled'
+      AND COALESCE(to_jsonb(a)->>'role', '') IS DISTINCT FROM 'observer'
+      AND COALESCE(to_jsonb(a)->>'is_ghost', 'false') IS DISTINCT FROM 'true'
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.group_client_signoff_counts(p_job uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_method text;
+  v_happy boolean;
+  v_rating smallint;
+  v_min smallint;
+BEGIN
+  SELECT s.method, s.happy, s.satisfaction_rating
+    INTO v_method, v_happy, v_rating
+  FROM public.job_client_signoffs s
+  WHERE s.job_id = p_job
+  ORDER BY s.created_at DESC, s.id::text COLLATE "C" DESC
+  LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  IF v_method = 'revoked' THEN
+    RETURN false;
+  END IF;
+  IF v_method = 'office_waiver' THEN
+    RETURN true;
+  END IF;
+  SELECT c.min_happy_rating INTO v_min
+  FROM public.client_signoff_settings c
+  WHERE c.id = 1;
+  IF v_min IS NULL THEN
+    v_min := 4;
+  END IF;
+  IF v_happy IS FALSE THEN
+    RETURN false;
+  END IF;
+  IF v_rating IS NOT NULL AND v_rating < v_min THEN
+    RETURN false;
+  END IF;
+  RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.group_work_order_write_split(
+  p_group_id uuid,
+  p_freeze boolean
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_frozen timestamptz;
+  v_status text;
+  v_org uuid;
+  v_job uuid;
+  v_work_order uuid;
+  v_pot numeric;
+  v_pot_cents bigint;
+  v_total bigint;
+  v_count int;
+  v_sum_floor bigint;
+  v_leftover bigint;
+  v_shares jsonb;
+  v_needs_hours text;
+  v_missing_rate text;
+  v_needs_rate text;
+BEGIN
+  SELECT g.split_frozen_at, g.status, g.org_id, g.job_id, g.work_order_id
+    INTO v_frozen, v_status, v_org, v_job, v_work_order
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_status = 'void' THEN
+    RAISE EXCEPTION 'group_work_order_void' USING ERRCODE = '23514';
+  END IF;
+
+  IF v_frozen IS NOT NULL THEN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id', s.id,
+      'user_id', s.user_id,
+      'hours', s.hours,
+      'points', s.points,
+      'share_ex', s.share_ex,
+      'pot_ex', s.pot_ex
+    ) ORDER BY s.user_id::text COLLATE "C"), '[]'::jsonb)
+      INTO v_shares
+    FROM public.group_work_order_shares s
+    WHERE s.group_id = p_group_id;
+    RETURN jsonb_build_object('frozen', true, 'shares', v_shares);
+  END IF;
+
+  SELECT wo.agreed_labour_ex INTO v_pot
+  FROM public.work_orders wo
+  WHERE wo.id = v_work_order
+    AND wo.kind = 'job'
+    AND wo.status = 'approved'
+    AND wo.sealed_content_hash IS NOT NULL
+    AND wo.agreed_labour_ex > 0;
+  IF NOT FOUND OR v_pot IS NULL THEN
+    RAISE EXCEPTION 'group_pot_missing' USING ERRCODE = '23514';
+  END IF;
+  v_pot_cents := round(v_pot * 100)::bigint;
+
+  CREATE TEMP TABLE IF NOT EXISTS group_wo_entries (
+    user_id uuid,
+    hours numeric,
+    rate numeric
+  ) ON COMMIT DROP;
+  TRUNCATE group_wo_entries;
+
+  INSERT INTO group_wo_entries (user_id, hours, rate)
+  SELECT e.user_id, e.hours, r.hourly_rate
+  FROM public.group_work_order_time_entries e
+  JOIN public.group_work_order_participants p
+    ON p.group_id = e.group_id AND p.user_id = e.user_id
+  LEFT JOIN LATERAL (
+    SELECT tr.hourly_rate
+    FROM public.trade_rates tr
+    WHERE tr.user_id = e.user_id
+      AND tr.org_id = v_org
+      AND tr.effective_from <= e.work_date
+      AND (tr.effective_to IS NULL OR tr.effective_to >= e.work_date)
+    ORDER BY tr.effective_from DESC
+    LIMIT 1
+  ) r ON true
+  WHERE e.group_id = p_group_id
+    AND e.hours > 0
+    AND public.group_work_order_assignment_covers(v_job, e.user_id, e.work_date);
+
+  SELECT string_agg(p.user_id::text, ',' ORDER BY p.user_id::text COLLATE "C")
+    INTO v_needs_hours
+  FROM public.group_work_order_participants p
+  WHERE p.group_id = p_group_id
+    AND NOT EXISTS (
+      SELECT 1 FROM group_wo_entries e WHERE e.user_id = p.user_id
+    );
+  IF v_needs_hours IS NOT NULL THEN
+    RAISE EXCEPTION 'group_split_needs_hours: %', v_needs_hours USING ERRCODE = '23514';
+  END IF;
+
+  -- A missing rate row is not the same as a zero rate. The person has hours
+  -- and no trade_rates row, so the freeze and the projection both refuse
+  -- and name them. A rate that rounds to 0 cents stays needs_rate below.
+  SELECT string_agg(missing.user_id, ',' ORDER BY missing.user_id COLLATE "C")
+    INTO v_missing_rate
+  FROM (
+    SELECT DISTINCT e.user_id::text AS user_id
+    FROM group_wo_entries e
+    WHERE e.rate IS NULL
+  ) missing;
+  IF v_missing_rate IS NOT NULL THEN
+    RAISE EXCEPTION 'group_share_rate_missing: %', v_missing_rate USING ERRCODE = '23514';
+  END IF;
+
+  SELECT string_agg(missing.user_id, ',' ORDER BY missing.user_id COLLATE "C")
+    INTO v_needs_rate
+  FROM (
+    SELECT DISTINCT e.user_id::text AS user_id
+    FROM group_wo_entries e
+    WHERE e.rate <= 0 OR round(e.rate * 100) <= 0
+  ) missing;
+  IF v_needs_rate IS NOT NULL THEN
+    RAISE EXCEPTION 'group_participant_needs_rate: %', v_needs_rate USING ERRCODE = '23514';
+  END IF;
+
+  IF NOT public.group_client_signoff_counts(v_job) THEN
+    RAISE EXCEPTION 'group_client_signoff_required' USING ERRCODE = '23514';
+  END IF;
+
+  CREATE TEMP TABLE IF NOT EXISTS group_wo_split_points (
+    user_id uuid,
+    hours numeric,
+    points_micro bigint,
+    floor_cents bigint,
+    remainder bigint,
+    share_cents bigint
+  ) ON COMMIT DROP;
+  TRUNCATE group_wo_split_points;
+
+  INSERT INTO group_wo_split_points (user_id, hours, points_micro)
+  SELECT e.user_id,
+         sum(e.hours),
+         sum((round(e.rate * 100))::bigint * (round(e.hours * 100))::bigint)
+  FROM group_wo_entries e
+  GROUP BY e.user_id
+  HAVING sum((round(e.rate * 100))::bigint * (round(e.hours * 100))::bigint) > 0;
+
+  SELECT COALESCE(sum(points_micro), 0), count(*)
+    INTO v_total, v_count
+  FROM group_wo_split_points;
+  IF v_count = 0 OR v_total <= 0 THEN
+    RAISE EXCEPTION 'group_share_hours_missing' USING ERRCODE = '23514';
+  END IF;
+
+  UPDATE group_wo_split_points
+  SET floor_cents = (v_pot_cents * points_micro) / v_total,
+      remainder = (v_pot_cents * points_micro) % v_total;
+
+  SELECT COALESCE(sum(floor_cents), 0) INTO v_sum_floor FROM group_wo_split_points;
+  v_leftover := v_pot_cents - v_sum_floor;
+  IF v_leftover < 0 OR v_leftover >= v_count THEN
+    RAISE EXCEPTION 'group_share_rounding_failed' USING ERRCODE = '23514';
+  END IF;
+
+  UPDATE group_wo_split_points p
+  SET share_cents = p.floor_cents + CASE WHEN ranked.rn <= v_leftover THEN 1 ELSE 0 END
+  FROM (
+    SELECT user_id,
+           row_number() OVER (
+             ORDER BY remainder DESC, user_id::text COLLATE "C" ASC
+           ) AS rn
+    FROM group_wo_split_points
+  ) ranked
+  WHERE ranked.user_id = p.user_id;
+
+  IF NOT p_freeze THEN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id', NULL,
+      'user_id', p.user_id,
+      'hours', round(p.hours, 2),
+      'points', round(p.points_micro::numeric / 10000, 4),
+      'share_ex', round(p.share_cents::numeric / 100, 2),
+      'pot_ex', round(v_pot, 2)
+    ) ORDER BY p.user_id::text COLLATE "C"), '[]'::jsonb)
+      INTO v_shares
+    FROM group_wo_split_points p;
+    RETURN jsonb_build_object('frozen', false, 'shares', v_shares);
+  END IF;
+
+  PERFORM set_config('group_wo.rewriting', 'on', true);
+
+  DELETE FROM public.group_work_order_shares s
+  WHERE s.group_id = p_group_id
+    AND NOT EXISTS (
+      SELECT 1 FROM group_wo_split_points p WHERE p.user_id = s.user_id
+    );
+
+  INSERT INTO public.group_work_order_shares (
+    group_id, user_id, hours, points, share_ex, pot_ex, computed_at
+  )
+  SELECT p_group_id,
+         p.user_id,
+         round(p.hours, 2),
+         round(p.points_micro::numeric / 10000, 4),
+         round(p.share_cents::numeric / 100, 2),
+         round(v_pot, 2),
+         now()
+  FROM group_wo_split_points p
+  ON CONFLICT (group_id, user_id) DO UPDATE SET
+    hours = EXCLUDED.hours,
+    points = EXCLUDED.points,
+    share_ex = EXCLUDED.share_ex,
+    pot_ex = EXCLUDED.pot_ex,
+    computed_at = EXCLUDED.computed_at;
+
+  UPDATE public.group_work_orders
+  SET split_frozen_at = now(), updated_at = now()
+  WHERE id = p_group_id;
+
+  PERFORM set_config('group_wo.rewriting', 'off', true);
+
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, detail)
+  VALUES (
+    p_group_id, v_job, 'freeze',
+    jsonb_build_object('pot_ex', round(v_pot, 2))
+  );
+
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'id', s.id,
+    'user_id', s.user_id,
+    'hours', s.hours,
+    'points', s.points,
+    'share_ex', s.share_ex,
+    'pot_ex', s.pot_ex
+  ) ORDER BY s.user_id::text COLLATE "C"), '[]'::jsonb)
+    INTO v_shares
+  FROM public.group_work_order_shares s
+  WHERE s.group_id = p_group_id;
+  RETURN jsonb_build_object('frozen', true, 'shares', v_shares);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.project_group_work_order_split(p_group_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT public.group_work_order_write_split(p_group_id, false);
+$$;
+
+CREATE OR REPLACE FUNCTION public.freeze_group_work_order_split(p_group_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT public.group_work_order_write_split(p_group_id, true);
+$$;
+
+-- Held share invoices are ops-rejected and their share lines removed.
+-- approved, pushed_to_xero and paid block. Nothing is recomputed.
+CREATE OR REPLACE FUNCTION public.unfreeze_group_work_order_split(
+  p_group_id uuid,
+  p_actor uuid DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job uuid;
+  v_voided uuid[];
+BEGIN
+  SELECT g.job_id INTO v_job
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.group_work_order_shares s
+    JOIN public.trade_invoice_lines l ON l.group_share_id = s.id
+    JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+    WHERE s.group_id = p_group_id
+      AND i.status IN ('approved', 'pushed_to_xero', 'paid')
+  ) THEN
+    RAISE EXCEPTION 'group_split_has_live_invoice' USING ERRCODE = '23514';
+  END IF;
+
+  SELECT COALESCE(array_agg(DISTINCT i.id), ARRAY[]::uuid[])
+    INTO v_voided
+  FROM public.group_work_order_shares s
+  JOIN public.trade_invoice_lines l ON l.group_share_id = s.id
+  JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+  WHERE s.group_id = p_group_id
+    AND i.status IN (
+      'draft', 'pending_acknowledgment', 'queried',
+      'acknowledged', 'pending_ops_review'
+    );
+
+  DELETE FROM public.trade_invoice_lines l
+  USING public.group_work_order_shares s
+  WHERE l.group_share_id = s.id
+    AND s.group_id = p_group_id
+    AND l.trade_invoice_id = ANY (v_voided);
+
+  UPDATE public.trade_invoices i
+  SET status = 'ops-reject',
+      query_note = 'Group split reopened. This share invoice was returned. Submit it again after the office freezes the split.'
+  WHERE i.id = ANY (v_voided);
+
+  UPDATE public.group_work_orders
+  SET split_frozen_at = NULL, updated_at = now()
+  WHERE id = p_group_id;
+
+  PERFORM set_config('group_wo.rewriting', 'on', true);
+  DELETE FROM public.group_work_order_shares s WHERE s.group_id = p_group_id;
+  PERFORM set_config('group_wo.rewriting', 'off', true);
+
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
+  VALUES (
+    p_group_id, v_job, 'unfreeze', p_actor,
+    jsonb_build_object('voided_invoice_ids', to_jsonb(v_voided))
+  );
+
+  RETURN jsonb_build_object(
+    'frozen', false,
+    'shares', '[]'::jsonb,
+    'voided_invoice_ids', to_jsonb(v_voided)
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.void_group_work_order(
+  p_group_id uuid,
+  p_actor uuid,
+  p_reason text
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job uuid;
+  v_status text;
+BEGIN
+  SELECT g.job_id, g.status INTO v_job, v_status
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_status = 'void' THEN
+    RETURN jsonb_build_object('void', true, 'already', true);
+  END IF;
+  PERFORM public.unfreeze_group_work_order_split(p_group_id, p_actor);
+  UPDATE public.group_work_orders
+  SET status = 'void',
+      voided_at = now(),
+      void_reason = left(COALESCE(NULLIF(btrim(p_reason), ''), 'voided'), 500),
+      updated_at = now()
+  WHERE id = p_group_id;
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
+  VALUES (p_group_id, v_job, 'void_group', p_actor, jsonb_build_object('reason', left(COALESCE(p_reason, ''), 500)));
+  RETURN jsonb_build_object('void', true);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.rekey_group_work_order(
+  p_group_id uuid,
+  p_actor uuid
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job uuid;
+  v_frozen timestamptz;
+  v_status text;
+  v_current uuid;
+  v_wo uuid;
+BEGIN
+  SELECT g.job_id, g.split_frozen_at, g.status, g.work_order_id
+    INTO v_job, v_frozen, v_status, v_current
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_status = 'void' THEN
+    RAISE EXCEPTION 'group_work_order_void' USING ERRCODE = '23514';
+  END IF;
+  IF v_frozen IS NOT NULL THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  SELECT j.work_order_id INTO v_wo FROM public.jobs j WHERE j.id = v_job;
+  IF v_wo IS NULL OR NOT EXISTS (
+    SELECT 1 FROM public.work_orders wo
+    WHERE wo.id = v_wo
+      AND wo.kind = 'job'
+      AND wo.status = 'approved'
+      AND wo.sealed_content_hash IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'group_pot_missing' USING ERRCODE = '23514';
+  END IF;
+  UPDATE public.group_work_orders
+  SET work_order_id = v_wo, updated_at = now()
+  WHERE id = p_group_id;
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
+  VALUES (
+    p_group_id, v_job, 'rekey', p_actor,
+    jsonb_build_object('from_work_order_id', v_current, 'work_order_id', v_wo)
+  );
+  RETURN jsonb_build_object('work_order_id', v_wo);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.revoke_group_client_signoff(
+  p_group_id uuid,
+  p_actor uuid
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job uuid;
+  v_org uuid;
+  v_status text;
+BEGIN
+  IF p_actor IS NULL THEN
+    RAISE EXCEPTION 'group_actor_required' USING ERRCODE = '23514';
+  END IF;
+  SELECT g.job_id, g.org_id, g.status INTO v_job, v_org, v_status
+  FROM public.group_work_orders g
+  WHERE g.id = p_group_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+  END IF;
+  INSERT INTO public.job_client_signoffs (
+    org_id, job_id, method, captured_by, captured_by_actor
+  ) VALUES (
+    v_org, v_job, 'revoked', p_actor, 'user:' || p_actor::text
+  );
+  UPDATE public.group_work_orders
+  SET client_signed_at = NULL,
+      status = CASE WHEN status = 'client_signed' THEN 'open' ELSE status END,
+      updated_at = now()
+  WHERE id = p_group_id;
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
+  VALUES (p_group_id, v_job, 'revoke_signoff', p_actor, '{}'::jsonb);
+  RETURN jsonb_build_object('revoked', true);
+END;
+$$;
+
+COMMENT ON FUNCTION public.group_work_order_write_split(uuid, boolean) IS
+  'Locks the group. p_freeze false returns figures and stores nothing. p_freeze true writes one snapshot after hours, rates and a counting client sign-off. Service role only.';
+COMMENT ON FUNCTION public.freeze_group_work_order_split(uuid) IS
+  'Explicit freeze. Does not run from a share read. A later failed invoice does not clear a freeze this call already committed.';
+COMMENT ON FUNCTION public.project_group_work_order_split(uuid) IS
+  'Quote only. Never sets split_frozen_at and never writes share rows.';
+COMMENT ON FUNCTION public.unfreeze_group_work_order_split(uuid, uuid) IS
+  'Office. Refuses while a share is on an approved, pushed or paid invoice. Ops-rejects a draft or held share invoice and clears the snapshot. Does not recompute.';
+
+REVOKE ALL ON FUNCTION public.group_work_order_assignment_covers(uuid, uuid, date) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_client_signoff_counts(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_work_order_write_split(uuid, boolean) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.project_group_work_order_split(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.freeze_group_work_order_split(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.unfreeze_group_work_order_split(uuid, uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.void_group_work_order(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.rekey_group_work_order(uuid, uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.revoke_group_client_signoff(uuid, uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.group_work_order_assignment_covers(uuid, uuid, date) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_client_signoff_counts(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_write_split(uuid, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION public.project_group_work_order_split(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.freeze_group_work_order_split(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.unfreeze_group_work_order_split(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.void_group_work_order(uuid, uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.rekey_group_work_order(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.revoke_group_client_signoff(uuid, uuid) TO service_role;
+
+-- ── 13. hours only on an assignment day, and only before the freeze ────────
+
+CREATE OR REPLACE FUNCTION public.group_work_order_time_entries_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job uuid;
+  v_frozen timestamptz;
+  v_row public.group_work_order_time_entries;
+BEGIN
+  v_row := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  SELECT g.job_id, g.split_frozen_at INTO v_job, v_frozen
+  FROM public.group_work_orders g
+  WHERE g.id = v_row.group_id
+  FOR UPDATE;
+  IF v_frozen IS NOT NULL THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    IF NOT public.group_work_order_assignment_covers(v_job, NEW.user_id, NEW.work_date) THEN
+      RAISE EXCEPTION 'group_hours_not_assigned' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_order_time_entries_guard
+  ON public.group_work_order_time_entries;
+CREATE TRIGGER trg_group_work_order_time_entries_guard
+  BEFORE INSERT OR UPDATE OR DELETE ON public.group_work_order_time_entries
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_time_entries_guard();
+
+-- A joiner who commits before the freeze lock is in the snapshot if they
+-- have hours. A joiner who waits sees the marker and is refused.
+CREATE OR REPLACE FUNCTION public.group_work_order_refuse_late_joiner()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_frozen timestamptz;
+BEGIN
+  SELECT g.split_frozen_at INTO v_frozen
+  FROM public.group_work_orders g
+  WHERE g.id = NEW.group_id
+  FOR UPDATE;
+  IF v_frozen IS NOT NULL THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_order_refuse_late_joiner
+  ON public.group_work_order_participants;
+CREATE TRIGGER trg_group_work_order_refuse_late_joiner
+  BEFORE INSERT ON public.group_work_order_participants
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_refuse_late_joiner();
+
+CREATE OR REPLACE FUNCTION public.group_work_order_shares_frozen_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_group uuid;
+  v_frozen timestamptz;
+BEGIN
+  v_group := CASE WHEN TG_OP = 'DELETE' THEN OLD.group_id ELSE NEW.group_id END;
+  SELECT g.split_frozen_at INTO v_frozen
+  FROM public.group_work_orders g
+  WHERE g.id = v_group
+  FOR UPDATE;
+  IF v_frozen IS NOT NULL
+     AND current_setting('group_wo.rewriting', true) IS DISTINCT FROM 'on' THEN
+    RAISE EXCEPTION 'group_split_frozen' USING ERRCODE = '23514';
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_group_work_order_shares_frozen_guard
+  ON public.group_work_order_shares;
+CREATE TRIGGER trg_group_work_order_shares_frozen_guard
+  BEFORE INSERT OR UPDATE OR DELETE ON public.group_work_order_shares
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_shares_frozen_guard();
+
+-- Share lines lock the group and, when the marker is still null, freeze in
+-- this same statement so a failed insert rolls the marker back. A second
+-- live line for the same share is refused, and the invoice owner must be
+-- the share owner. A normal pay line on a job that has a group is refused.
+-- Commission, travel, materials, equipment and adjustments are not pay.
+-- UPDATE is limited to the share pointer and the amount so a status stamp
+-- on the invoice does not re-enter this check.
+CREATE OR REPLACE FUNCTION public.trade_invoice_lines_group_share_snapshot()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_type text;
+  v_group uuid;
+  v_job uuid;
+  v_invoice_user uuid;
+  v_share_id uuid;
+  v_share_user uuid;
+  v_share_ex numeric;
+  v_frozen timestamptz;
+  v_groups int;
+BEGIN
+  v_type := lower(btrim(COALESCE(NEW.line_type, '')));
+
+  IF v_type = 'group share' OR NEW.group_share_id IS NOT NULL THEN
+    IF NEW.job_id IS NULL OR NEW.trade_invoice_id IS NULL THEN
+      RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+    END IF;
+    SELECT count(*) INTO v_groups
+    FROM public.group_work_orders g
+    WHERE g.job_id = NEW.job_id AND g.status <> 'void';
+    IF v_groups = 0 THEN
+      RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002';
+    END IF;
+    IF v_groups > 1 THEN
+      RAISE EXCEPTION 'group_work_order_ambiguous' USING ERRCODE = '23514';
+    END IF;
+    SELECT g.id, g.job_id, g.split_frozen_at
+      INTO v_group, v_job, v_frozen
+    FROM public.group_work_orders g
+    WHERE g.job_id = NEW.job_id AND g.status <> 'void'
+    FOR UPDATE;
+    SELECT i.user_id INTO v_invoice_user
+    FROM public.trade_invoices i
+    WHERE i.id = NEW.trade_invoice_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'group_share_owner_mismatch' USING ERRCODE = '23514';
+    END IF;
+    IF NOT public.group_client_signoff_counts(v_job) THEN
+      RAISE EXCEPTION 'group_client_signoff_required' USING ERRCODE = '23514';
+    END IF;
+    IF v_frozen IS NULL THEN
+      PERFORM public.group_work_order_write_split(v_group, true);
+    END IF;
+    SELECT s.id, s.user_id, s.share_ex
+      INTO v_share_id, v_share_user, v_share_ex
+    FROM public.group_work_order_shares s
+    WHERE s.group_id = v_group AND s.user_id = v_invoice_user;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'group_share_not_in_split' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.group_share_id IS NOT NULL AND NEW.group_share_id IS DISTINCT FROM v_share_id THEN
+      RAISE EXCEPTION 'group_share_owner_mismatch' USING ERRCODE = '23514';
+    END IF;
+    IF v_invoice_user IS DISTINCT FROM v_share_user THEN
+      RAISE EXCEPTION 'group_share_owner_mismatch' USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM public.trade_invoice_lines l
+      JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+      WHERE l.group_share_id = v_share_id
+        AND l.id IS DISTINCT FROM NEW.id
+        AND i.status IS DISTINCT FROM 'ops-reject'
+    ) THEN
+      RAISE EXCEPTION 'group_share_already_invoiced' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.line_total_ex IS DISTINCT FROM v_share_ex THEN
+      RAISE EXCEPTION 'group_share_amount_mismatch' USING ERRCODE = '23514';
+    END IF;
+    NEW.group_share_id := v_share_id;
+    NEW.line_type := 'group share';
+    NEW.source_work_order_id := NULL;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.job_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF v_type IN (
+    'travel', 'materials', 'equipment', 'adjustment',
+    'final payout deduction', 'final_payout_deduction', 'commission'
+  ) THEN
+    RETURN NEW;
+  END IF;
+  IF v_type IN ('labour', 'hours', 'work order', 'work_order', 'patio')
+     OR NEW.source_work_order_id IS NOT NULL THEN
+    IF EXISTS (
+      SELECT 1 FROM public.group_work_orders g
+      WHERE g.job_id = NEW.job_id AND g.status <> 'void'
+    ) THEN
+      RAISE EXCEPTION 'work_order_claim_blocked_by_group_share' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_trade_invoice_lines_group_share_snapshot
+  ON public.trade_invoice_lines;
+CREATE TRIGGER trg_trade_invoice_lines_group_share_snapshot
+  BEFORE INSERT OR UPDATE OF group_share_id, line_total_ex
+  ON public.trade_invoice_lines
+  FOR EACH ROW EXECUTE FUNCTION public.trade_invoice_lines_group_share_snapshot();
+
+REVOKE ALL ON FUNCTION public.group_work_order_time_entries_guard() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_work_order_refuse_late_joiner() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_work_order_shares_frozen_guard() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trade_invoice_lines_group_share_snapshot() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.group_work_order_time_entries_guard() TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_refuse_late_joiner() TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_shares_frozen_guard() TO service_role;
+GRANT EXECUTE ON FUNCTION public.trade_invoice_lines_group_share_snapshot() TO service_role;

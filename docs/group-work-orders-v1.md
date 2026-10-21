@@ -1,173 +1,186 @@
 # Group work orders and client job sign-off
 
 Backend contract for the trade app and the office. Schema:
-`supabase/migrations/20261021140000_group_work_orders.sql`. Rules:
-`supabase/functions/ops-api/group_work_order.ts`. Nothing in this slice sends
-a text, an email, or a review request.
+`supabase/migrations/20261021141000_group_work_orders.sql`. It depends on
+the client sign-off migrations from PR #1110
+(`20261020170000_job_media_signature_voice_note_phases.sql` and
+`20261020170100_job_client_signoffs.sql`), which this branch includes.
+Rules: `supabase/functions/ops-api/group_work_order.ts`. Nothing in this
+slice sends a text, an email, or a review request.
+
+## Master switch
+
+`feature_flags.group_work_order_v1` is seeded off. Missing or unreadable
+is off. While it is off, every group action refuses 409
+`group_work_order_disabled` ("Feature off. Group work orders are
+switched off."): create, join, hours (submit and delete), my share, crew
+sign, client sign-off (on-site capture and the public page), the public
+read, public feedback, the client-link preview, freeze, and unfreeze.
+Trade invoicing does not read the group tables while the switch is off:
+`submit_trade_invoice`, `submit_work_order_invoice`, and
+`generate_trade_invoice` return after the `feature_flags` read. The
+invoice-line trigger still refuses a second payment if a group row
+already exists. Staff revoke, void, re-key, the office read, and the
+feedback read stay available so an already-open group can be cleaned up.
+
+The sender flag `group_work_order_client_link_send_v1` stays off. This
+build has no sender: `send: true` returns 409 and does not call GHL.
 
 ## What already existed, and what this reuses
 
 The trade app already has a completion wizard (`trade.html`): the client
-signs on the trade's phone (name plus a drawn PNG) and gives one 1–5
-satisfaction score. `complete_my_job` then marks the job complete, stores
-that one score, and can send a client update. "Client not on site" sends an
-SMS that the invoice is coming and skips the signature. A later "Request
-Review" step uses a hardcoded Google URL. Separately, a paid fencing or
-patio job can get a Google review text from `send_review_request`.
+signs on the trade's phone and gives one 1–5 satisfaction score. This
+slice does not call `complete_my_job` or `send_review_request`, and it
+does not change `jobs.status`.
 
-There is no store for the five office-only ratings, and no public link the
-client opens to sign the job off.
+The client drawing is one store, `job_client_signoffs` (PR #1110). A
+group sign-off inserts a `job_media` row with `phase = 'signature'` and
+points `job_client_signoffs.signature_media_id` at it. The public page
+writes method `share_link`, `captured_by` null, `captured_by_actor`
+`'client link'`. A participant's phone writes method `on_site`,
+`captured_by` that trade's user id, actor `user:<id>`. Crew signatures
+stay in `group_work_order_signatures` and are not the invoice gate.
+Revoke inserts a newer `revoked` row (append-only) and clears the group's
+`client_signed` status. The newest row wins (`created_at`, then `id`
+collate C). There is no second client-signature store, so the two
+records cannot disagree: the group status is a cache of that newest
+counting row, and freeze reads `group_client_signoff_counts`, which
+reads the same table. `office_waiver` counts. A `revoked` row does not.
 
-This slice reuses the signature shape (name plus PNG), the public
-`share_token` pattern (`view_shared_report`), and the idea that a rating of
-4 or more may ask for a Google review. It does not call `complete_my_job`
-or `send_review_request`, and it does not change `jobs.status`. The review
-URL is the row in `group_work_order_settings`, seeded from
-`supabase/functions/_shared/google_review_link.ts`
-(`https://share.google/AFyfkE7jLfCZcxanV`). The trade app's `g.page` TODO
-URL is not that seed. Change the row to change the link.
+The Google URL is `group_work_order_settings.google_review_url`, seeded
+`https://share.google/AFyfkE7jLfCZcxanV`. The happy threshold is
+`client_signoff_settings.min_happy_rating` (default 4).
+`group_work_order_settings.review_prompt_min_rating` stays seeded at 4
+and is not the authority.
 
 ## Confirmed rulings
 
 - The pot is `work_orders.agreed_labour_ex` on the job's sealed job work
   order (`kind = 'job'`, `status = 'approved'`, `sealed_content_hash` set,
   amount above zero). The group row stores no dollar amount. A null,
-  unsealed, or zero pot is `group_pot_missing`. The browser never sends the
-  pot.
-- After a crew member submits their own hours, the my-share response is
-  exactly `{ pot_total, my_share, needs_hours, client_signed, group_id }`.
-  Before those hours, `pot_total` and `my_share` are null and the work order
-  is not read. Other participants' shares, hours, and points are not in the
-  response. Only a participant of that group gets it.
-- That read is a deliberate narrow exception to "trades cannot read
-  `agreed_labour_ex`". PostgREST still hides `kind = 'job'` work orders
-  (`work_orders_job_kind_hidden_from_clients`). A non-participant has no
-  share row and is refused before any price is read. Another job's price is
-  not on this response. Share and time-entry rows are own-row or staff under
-  RLS. Feedback and settings are staff-only. Signatures have no authenticated
-  SELECT.
-- A job is paid either as a normal full work-order or hours claim, or as
-  this split, not both. The fence is mutual and job-wide. Travel, materials,
-  equipment, and adjustments are not a full claim. Another person's live
-  share does not block this person's share. This person's second live share
-  does (`group_share_already_invoiced`). A draft, failed, or ops-reject
-  invoice holds nothing. `job_work_order_id` on an invoice line is not a
-  full claim. A share line leaves `source_work_order_id` null.
-- Points are each person's own `trade_rates` rate times their billed hours
-  on this group, per day, summed. Share = pot × points / total points.
-  Floor to cents. Leftover cents go to the largest remainders, and an equal
-  remainder goes to the smaller `user_id`. Shares sum to the pot. A person
-  with no rate or no hours is not in the split. Super runs on each person's
-  own invoice gross (their share plus their own travel), unchanged in
-  `trade_invoice_money.ts`.
-- The share can be invoiced only after the client has signed. Crew
-  signatures are stored and are not the gate.
-- Travel stays each person's own travel extra (quantity 1, rate = the
-  amount, no work order id), outside the points.
+  unsealed, or zero pot is `group_pot_missing`. The browser never sends
+  the pot.
+- `group_work_order_write_split` is the only writer of the split. TypeScript
+  `allocatePotCents` / `entryPointsMicro` are the test oracle and must
+  match it. Floor to cents. Leftover cents go to the largest remainders,
+  and an equal remainder goes to the smaller `user_id` (collate C). Shares
+  sum to the pot. Worked case: 2h at $40 and 2h at $20 on pot 482.15 is
+  321.43 and 160.72. After the first person's hours become 7.5 the same
+  pot is 425.43 and 56.72.
+- Hours count only on a date the person is assigned to that job (live,
+  non-ghost, non-observer, non-cancelled). An upsert on an unassigned
+  date is `group_hours_not_assigned`. Freeze requires every participant
+  to have at least one such hour, not a hour on every assigned day
+  (owner to confirm). A participant with hours and no `trade_rates` row
+  is `group_share_rate_missing` and names that user. A rate that rounds
+  to 0 cents is `group_participant_needs_rate`. Neither is a silent drop,
+  and neither writes share rows.
+- My-share keys are `{ pot_total, my_share, needs_hours, client_signed,
+  group_id, awaiting }`. `awaiting` is `needs_hours`, `awaiting_signoff`,
+  `awaiting_others`, `awaiting_rate`, `ready`, or `frozen`. `pot_total`
+  is null only while `awaiting` is `needs_hours`. `my_share` is set only
+  when `awaiting` is `frozen`. A share read never freezes and never calls
+  `project_group_work_order_split`. `project_group_work_order_split` quotes
+  and stores nothing. A non-participant is refused before any price is
+  read. A trade's my-share says `awaiting_rate` without naming anyone
+  else. The office payload lists the user ids who still need hours or a
+  rate.
+- A job is paid either as a normal hours or work-order claim, or as this
+  split, not both, while the switch is on. Travel, materials, equipment,
+  adjustments, and commission are not that claim (owner to confirm on
+  commission). Commission stays in `WORK_ORDER_LOCK_LINE_TYPES`. The
+  duplicate-share rule is stricter than the never-both fence: a draft
+  holds the share; only `ops-reject` releases it. `approved`,
+  `pushed_to_xero`, and `paid` block unfreeze (`group_split_has_live_invoice`).
+  The never-both TypeScript list is `draft` and `ops-reject` only. The
+  global `RELEASED_INVOICE_STATUSES` list is a different lock and still
+  includes `failed`.
+- The share line matches the invoice owner. A second live line for the
+  same share is `group_share_already_invoiced`. A line whose
+  `group_share_id` is another person's share is
+  `group_share_owner_mismatch`. Amounts match to the cent.
+- The invoice-line trigger watches `INSERT OR UPDATE OF group_share_id,
+  line_total_ex`. A job-work-order stamp that updates another column does
+  not re-enter it. The trigger locks the group row, requires a counting
+  sign-off, and calls `write_split(true)` when the marker is null, in the
+  same statement as the line. A failed insert rolls the freeze back. An
+  explicit freeze that then fails its invoice stays frozen.
+- Crew-charges lists show a group share only to its owner and to staff.
+  The lead cannot acknowledge or override someone else's share. Group
+  shares are excluded from negative-charge selectors.
 
 ## DEFAULT, owner to confirm
 
-Break minutes come off finish minus start, the same rule as a trade invoice
-time entry (`resolveTradeInvoiceTimeEntry`). Start and finish stay required.
-This slice does not copy clock rows or `job_assignment_logged_times`.
-
-The Google prompt minimum is config, not a default in dispute:
-`group_work_order_settings.review_prompt_min_rating`, seeded at 4. Every
-rating must be at least that number. Change the row to change it.
+- Freeze needs one counting hour per participant, not every assigned day.
+- Commission sits outside the never-both fence.
+- The client signature reuses `job_client_signoffs` and its happy
+  threshold. Freeze applies that threshold to any job with a group, not
+  only fencing and patio.
+- Unfreeze of a mixed invoice ops-rejects the whole invoice and deletes
+  only the share lines. The trade is not paid a voided status: the legal
+  return is `ops-reject`.
+- Break minutes come off finish minus start, the same rule as a trade
+  invoice time entry.
 
 ## Actions
 
-Trade JWT (profile-scoped). The caller is the signed-in user.
-
-| Action | Body | Result |
-| --- | --- | --- |
-| `create_group_work_order` | `job_id` | Opens the group on `jobs.work_order_id`, or joins the caller to the one that exists. Returns `group_id`, `job_id`, `share_token`, `status`, `client_signed`. No dollars. |
-| `join_group_work_order` | `group_id` or `job_id` | Same card. The caller must be allocated, unless they are staff. Once the split is frozen, a new participant is 409 `group_split_frozen`. |
-| `sign_group_work_order` | `group_id`, `signer_name`, optional `signature_png` | Crew signature. Not the invoice gate. |
-| `submit_group_work_order_hours` | `group_id`, `work_date`, `start_time`, `finish_time`, `break_minutes` | Saves that person's day, then returns my-share. |
-| `group_work_order_my_share` | `group_id` or `job_id` | The closed object above. 403 for a non-participant, with no amount in the body. |
-| `group_work_order_preview_client_link` | `group_id`, optional `first_name`, `site`, `link`. `send: true` is 409 `client_message_disabled`. | `sent: false`, `send_implemented: false`, the draft, the token. |
-
-Public, no account. The token is the secret. Same static-key door as
-`view_shared_report`.
-
-| Action | Body | Result |
-| --- | --- | --- |
-| `group_work_order_public` | `token` or `share_token` | Job number, suburb, type, whether the client has signed, whether feedback exists, and the office notice. No prices, no token echoed back. |
-| `group_work_order_client_sign` | `share_token`, `signer_name`, optional `signature_png`, `signed_via` `on_site` or `share_link` | Signs the job. Idempotent. Does not complete the job. |
-| `group_work_order_submit_feedback` | `share_token` plus the five ratings | One row. See feedback. |
-
-Office only (staff JWT or the server key). A trade JWT is 403
-`operator_access_required` before the handler. These names are not on the
-trade allow-list.
+Trade JWT, while the switch is on. The caller is the signed-in user.
 
 | Action | Result |
 | --- | --- |
-| `group_work_order_feedback` | The feedback row. |
-| `group_work_order_office` | Pot, every participant's hours, points, and shares, the feedback, and `split_frozen`. |
-| `unfreeze_group_work_order` | Reopens a frozen split and recomputes. Staff only. 409 `group_split_has_live_invoice` while any share is on a live invoice. |
+| `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. No dollars. The public token is not on this card. |
+| `join_group_work_order` | The caller must be allocated, unless they are staff. After freeze, `group_split_frozen`. |
+| `sign_group_work_order` | Crew signature. PNG or SVG data URL, at most 150000 characters, or omitted. Not the invoice gate. |
+| `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, only on an assigned date. |
+| `group_work_order_my_share` | The closed object above. |
+| `capture_group_client_signoff` | On-site client drawing. Records the trade user id. |
+| `freeze_group_work_order` | Explicit freeze after every participant has counting hours and a counting sign-off. |
+| `group_work_order_preview_client_link` | Draft only. `send: true` is 409. |
 
-Invoice: `generate_trade_invoice` accepts an extra item
-`type: "group share"` with `group_id` (or `job_id`). The server freezes
-the split on that call (see Frozen split) and sets quantity 1, rate = that
-person's share from the frozen snapshot, `total_hours` 0,
-`source_work_order_id` null, `group_share_id` set. A client amount that
-differs by more than one cent is 409 `group_share_amount_mismatch`. The
-client must have signed (409 `group_client_signoff_required`). A zero share
-is refused. The same invoice cannot mix the share with hours or work-order
-pay for that job.
+Public, no account, while the switch is on. The token is only for the
+link sent to the client.
 
-## Frozen split
+| Action | Result |
+| --- | --- |
+| `group_work_order_public` | Job number, suburb, type, whether the client has signed. No prices. |
+| `group_work_order_client_sign` | Requires a drawn signature. Method is `share_link`. Idempotent once a counting row exists. |
+| `group_work_order_submit_feedback` | Five integer ratings, 1–5. A second post cannot change the first ratings. |
 
-The first invoice freeze locks the group row and writes one share snapshot
-in that same transaction (`freeze_group_work_order_split`). Every later
-freeze waits for that lock, then returns the stored snapshot and does not
-compute its own. Share lines are refused unless the marker
-`split_frozen_at` is set and the line amount is that snapshot's `share_ex`.
-Two submits therefore cannot store shares that differ, or that do not sum
-to the pot.
+Office. A trade JWT is 403 before the handler.
 
-My-share and the hour submit call `project_group_work_order_split`. That
-recomputes only while the marker is null, and it does not set the marker.
-An hour edit after the freeze is stored and does not change pay until the
-office reopens the split.
+| Action | Switch | Result |
+| --- | --- | --- |
+| `group_work_order_feedback` | open | The feedback row. |
+| `group_work_order_office` | open | Pot, every participant, who needs hours or a rate, feedback, `split_frozen`. |
+| `unfreeze_group_work_order` | gated | Clears the marker. Ops-rejects a draft or held share invoice and deletes its share lines. Does not recompute. |
+| `revoke_group_signoff` | open | Newest `revoked` row. Does not itself unfreeze. |
+| `void_group_work_order` | open | Unfreeze first, then status `void`. A paid share blocks it. |
+| `rekey_group_work_order` | open | Points at the current approved sealed `jobs.work_order_id`, only while not frozen and not void. |
 
-A person who joins after the marker is set is refused, in the API and in
-the database, with `group_split_frozen`. The message is: "This group's pay
-is frozen. The office has to reopen it before anyone else can join."
-
-`unfreeze_group_work_order` is the office action. It locks the group,
-refuses while any share id is on an invoice whose status is not `draft`,
-`void`, `rejected`, `failed`, or `ops-reject` (`group_split_has_live_invoice`:
-"A share is already on a live invoice, so this split stays frozen."), then
-clears the marker and recomputes in that same transaction. A freeze that
-landed and whose invoice line was never stored can be reopened, because
-no live line exists. A person who joins after the reopen, and before the
-next invoice freeze, is in the new snapshot.
+`generate_trade_invoice` is the only door for a share, and only while the
+switch is on. The server sets quantity 1, rate = that person's frozen
+share, `source_work_order_id` null, `group_share_id` set. A client amount
+that is not the snapshot is `group_share_amount_mismatch`. The same
+invoice cannot mix the share with hours or work-order pay for that job.
 
 ## Feedback
 
-Five ratings, each 1–5, optional comment, plus `free_text`:
-
-`sales_process`, `communication`, `cleanliness`, `punctuality`, `crew`.
-
-The public page shows: "These ratings go to the office. They are not viewed
-by the installers." Installer and trade roles cannot read the row (RLS and
-the office action). When every rating is at least the configured minimum,
-the response sets `prompt_google_review: true` and includes
-`google_review_url` from the settings row only. A missing URL omits the
-key. The handler does not fall back to the seed constant.
+Five ratings, each an integer 1–5, optional comment (2000), plus
+`free_text` (4000): `sales_process`, `communication`, `cleanliness`,
+`punctuality`, `crew`. Names are 1–120 characters. An SVG signature that
+contains `<script` is refused. The public page shows: "These ratings go
+to the office. They are not viewed by the installers." When every saved
+rating is at least `client_signoff_settings.min_happy_rating`, the
+response sets `prompt_google_review: true` and includes
+`google_review_url` from the group settings row only.
 
 ## Draft the client would be sent
-
-Flag `group_work_order_client_link_send_v1` is off. This build has no
-sender: `send: true` returns 409 and does not call GHL, even if the flag is
-later turned on. Draft, for the owner to approve before any sender exists:
 
 `Hi {first}, your work at {site} is finished. Please open this link to sign the job off and tell the office how it went. The installers do not see what you write. {link} Thanks, Shaun`
 
 ## Open
 
-- The sender is not built. Turning the flag on does not send anything.
+- The sender is not built. Turning the sender flag on does not send anything.
+- The master switch stays off until the owner turns it on.
 - Withheld quote PDFs and the trade app's price-free extract are a different
   fence. This slice does not change them.

@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS public.trade_invoices (id uuid PRIMARY KEY DEFAULT ge
 ALTER TABLE public.trade_invoices
   ADD COLUMN IF NOT EXISTS org_id uuid,
   ADD COLUMN IF NOT EXISTS user_id uuid,
-  ADD COLUMN IF NOT EXISTS status text;
+  ADD COLUMN IF NOT EXISTS status text,
+  ADD COLUMN IF NOT EXISTS query_note text;
 
 CREATE TABLE IF NOT EXISTS public.trade_invoice_lines (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

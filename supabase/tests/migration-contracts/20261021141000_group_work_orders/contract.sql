@@ -46,6 +46,12 @@ BEGIN
     RAISE EXCEPTION 'group-wo: the client-link flag must exist and be off';
   END IF;
   IF NOT EXISTS (
+    SELECT 1 FROM public.feature_flags
+    WHERE flag_name = 'group_work_order_v1' AND enabled = false
+  ) THEN
+    RAISE EXCEPTION 'group-wo: the master switch must exist and be off';
+  END IF;
+  IF NOT EXISTS (
     SELECT 1 FROM public.group_work_order_settings
     WHERE id = 1
       AND google_review_url = 'https://share.google/AFyfkE7jLfCZcxanV'
@@ -107,6 +113,10 @@ BEGIN
     (v_group, v_a),
     (v_group, v_b);
 
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+    ('a2140000-0000-4000-8000-0000000000a2', v_job, v_a, '2026-10-21', 'scheduled'),
+    ('a2140000-0000-4000-8000-0000000000b2', v_job, v_b, '2026-10-21', 'scheduled');
+
   INSERT INTO public.group_work_order_time_entries
     (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
   VALUES
@@ -127,7 +137,7 @@ BEGIN
 
   INSERT INTO public.group_work_order_signatures
     (group_id, signer_kind, signer_name, signed_via)
-  VALUES (v_group, 'client', 'Alex Client', 'share_link');
+  VALUES (v_group, 'crew', 'Alex Client', 'share_link');
 
   -- Participant A sees their own pot and share, not B's share or the other job.
   PERFORM set_config('request.jwt.claim.sub', v_a::text, true);
@@ -243,10 +253,15 @@ DECLARE
   v_share_a uuid;
   v_first jsonb;
   v_again jsonb;
+  v_quote jsonb;
   v_a_share numeric;
   v_b_share numeric;
+  v_hours numeric;
   v_draft uuid := 'a2140000-0000-4000-8000-000000000401';
   v_live uuid := 'a2140000-0000-4000-8000-000000000402';
+  v_dup uuid := 'a2140000-0000-4000-8000-000000000403';
+  v_wrong uuid := 'a2140000-0000-4000-8000-000000000404';
+  v_media uuid := 'a2140000-0000-4000-8000-000000000501';
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -257,14 +272,14 @@ BEGIN
   END IF;
   IF has_function_privilege('authenticated', 'public.freeze_group_work_order_split(uuid)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.project_group_work_order_split(uuid)', 'EXECUTE')
-     OR has_function_privilege('authenticated', 'public.unfreeze_group_work_order_split(uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.unfreeze_group_work_order_split(uuid, uuid)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.group_work_order_write_split(uuid, boolean)', 'EXECUTE')
   THEN
     RAISE EXCEPTION 'group-wo: a trade must not execute the split functions';
   END IF;
   IF NOT has_function_privilege('service_role', 'public.freeze_group_work_order_split(uuid)', 'EXECUTE')
      OR NOT has_function_privilege('service_role', 'public.project_group_work_order_split(uuid)', 'EXECUTE')
-     OR NOT has_function_privilege('service_role', 'public.unfreeze_group_work_order_split(uuid)', 'EXECUTE')
+     OR NOT has_function_privilege('service_role', 'public.unfreeze_group_work_order_split(uuid, uuid)', 'EXECUTE')
      OR NOT has_function_privilege('service_role', 'public.trade_invoice_lines_group_share_snapshot()', 'EXECUTE')
   THEN
     RAISE EXCEPTION 'group-wo: service_role must execute the freeze and the line snapshot';
@@ -286,7 +301,7 @@ BEGIN
     WHERE s.group_id = v_group AND s.user_id = v_a;
     RAISE EXCEPTION 'group-wo: an unfrozen share line was stored';
   EXCEPTION WHEN check_violation THEN
-    IF SQLERRM IS DISTINCT FROM 'group_split_not_frozen' THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
       RAISE EXCEPTION 'group-wo: unfrozen line said %', SQLERRM;
     END IF;
   END;
@@ -317,11 +332,52 @@ BEGIN
   INSERT INTO public.group_work_order_participants (group_id, user_id) VALUES
     (v_freeze, v_a),
     (v_freeze, v_b);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+    ('a2140000-0000-4000-8000-0000000000a3', v_pot_job, v_a, '2026-10-21', 'scheduled'),
+    ('a2140000-0000-4000-8000-0000000000b3', v_pot_job, v_b, '2026-10-21', 'scheduled');
   INSERT INTO public.group_work_order_time_entries
     (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
   VALUES
     (v_freeze, v_a, '2026-10-21', '08:00', '10:00', 0, 2.00),
     (v_freeze, v_b, '2026-10-21', '08:00', '10:00', 0, 2.00);
+
+  -- A quote before the client has signed writes nothing.
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.project_group_work_order_split(v_freeze);
+    RAISE EXCEPTION 'group-wo: a quote without a sign-off was returned';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
+      RAISE EXCEPTION 'group-wo: unsigned project said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  IF (SELECT count(*) FROM public.group_work_order_shares WHERE group_id = v_freeze) <> 0
+     OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: an unsigned project wrote a share';
+  END IF;
+
+  INSERT INTO public.job_media (id, job_id, phase, type, storage_url)
+  VALUES (v_media, v_pot_job, 'signature', 'photo', 'data:image/png;base64,iVBORw0KGgo=');
+  INSERT INTO public.job_client_signoffs (
+    job_id, method, signed_name, happy, satisfaction_rating,
+    signature_media_id, captured_by_actor
+  ) VALUES (
+    v_pot_job, 'share_link', 'Alex Client', true, 5, v_media, 'client link'
+  );
+
+  SET LOCAL ROLE service_role;
+  v_quote := public.project_group_work_order_split(v_freeze);
+  RESET ROLE;
+  IF (SELECT count(*) FROM public.group_work_order_shares WHERE group_id = v_freeze) <> 0
+     OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NOT NULL
+     OR v_quote->>'frozen' IS DISTINCT FROM 'false'
+     OR position('321.43' IN v_quote::text) = 0
+     OR position('160.72' IN v_quote::text) = 0
+  THEN
+    RAISE EXCEPTION 'group-wo: project wrote or misquoted %', v_quote;
+  END IF;
 
   SET LOCAL ROLE service_role;
   v_first := public.freeze_group_work_order_split(v_freeze);
@@ -337,9 +393,21 @@ BEGIN
     RAISE EXCEPTION 'group-wo: freeze priced % and %', v_a_share, v_b_share;
   END IF;
 
-  UPDATE public.group_work_order_time_entries
-  SET hours = 7.50
+  BEGIN
+    UPDATE public.group_work_order_time_entries
+    SET hours = 7.50
+    WHERE group_id = v_freeze AND user_id = v_a;
+    RAISE EXCEPTION 'group-wo: frozen hours were edited';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_split_frozen' THEN
+      RAISE EXCEPTION 'group-wo: hour edit said %', SQLERRM;
+    END IF;
+  END;
+  SELECT hours INTO v_hours FROM public.group_work_order_time_entries
   WHERE group_id = v_freeze AND user_id = v_a;
+  IF v_hours IS DISTINCT FROM 2.00 THEN
+    RAISE EXCEPTION 'group-wo: frozen hours moved to %', v_hours;
+  END IF;
   SET LOCAL ROLE service_role;
   v_again := public.freeze_group_work_order_split(v_freeze);
   RESET ROLE;
@@ -392,12 +460,62 @@ BEGIN
     trade_invoice_id, job_id, line_type, line_total_ex, group_share_id
   ) VALUES (v_draft, v_pot_job, 'group share', 321.43, v_share_a);
 
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_dup, v_org, v_a, 'draft',
+    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14
+  );
+  BEGIN
+    INSERT INTO public.trade_invoice_lines (
+      trade_invoice_id, job_id, line_type, line_total_ex, group_share_id
+    ) VALUES (v_dup, v_pot_job, 'group share', 321.43, v_share_a);
+    RAISE EXCEPTION 'group-wo: a second live share line was stored';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_share_already_invoiced' THEN
+      RAISE EXCEPTION 'group-wo: duplicate share said %', SQLERRM;
+    END IF;
+  END;
+
+  INSERT INTO public.trade_invoices (
+    id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay
+  ) VALUES (
+    v_wrong, v_org, v_b, 'draft',
+    321.43, 0, 321.43, false, 0.12, 38.57, 321.43, 302.14
+  );
+  BEGIN
+    INSERT INTO public.trade_invoice_lines (
+      trade_invoice_id, job_id, line_type, line_total_ex, group_share_id
+    ) VALUES (v_wrong, v_pot_job, 'group share', 321.43, v_share_a);
+    RAISE EXCEPTION 'group-wo: another trade invoiced this share';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM IS DISTINCT FROM 'group_share_owner_mismatch' THEN
+      RAISE EXCEPTION 'group-wo: owner guard said %', SQLERRM;
+    END IF;
+  END;
+
+  -- A draft share invoice is returned. The snapshot is cleared, not recomputed.
   SET LOCAL ROLE service_role;
-  PERFORM public.unfreeze_group_work_order_split(v_freeze);
+  PERFORM public.unfreeze_group_work_order_split(v_freeze, v_shaun);
   RESET ROLE;
-  IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NOT NULL THEN
-    RAISE EXCEPTION 'group-wo: unfreeze left the marker set';
+  IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NOT NULL
+     OR (SELECT count(*) FROM public.group_work_order_shares WHERE group_id = v_freeze) <> 0
+     OR (SELECT status FROM public.trade_invoices WHERE id = v_draft) IS DISTINCT FROM 'ops-reject'
+     OR EXISTS (
+       SELECT 1 FROM public.trade_invoice_lines WHERE trade_invoice_id = v_draft
+     )
+  THEN
+    RAISE EXCEPTION 'group-wo: unfreeze did not return the draft and clear the snapshot';
   END IF;
+
+  UPDATE public.group_work_order_time_entries
+  SET hours = 7.50
+  WHERE group_id = v_freeze AND user_id = v_a;
+  SET LOCAL ROLE service_role;
+  PERFORM public.freeze_group_work_order_split(v_freeze);
+  RESET ROLE;
   SELECT share_ex INTO v_a_share FROM public.group_work_order_shares
   WHERE group_id = v_freeze AND user_id = v_a;
   SELECT share_ex INTO v_b_share FROM public.group_work_order_shares
@@ -405,18 +523,15 @@ BEGIN
   IF v_a_share IS DISTINCT FROM 425.43 OR v_b_share IS DISTINCT FROM 56.72
      OR (SELECT round(sum(share_ex), 2) FROM public.group_work_order_shares WHERE group_id = v_freeze) IS DISTINCT FROM 482.15
   THEN
-    RAISE EXCEPTION 'group-wo: unfreeze recomputed % and %', v_a_share, v_b_share;
+    RAISE EXCEPTION 'group-wo: the second freeze priced % and %', v_a_share, v_b_share;
   END IF;
 
-  SET LOCAL ROLE service_role;
-  PERFORM public.freeze_group_work_order_split(v_freeze);
-  RESET ROLE;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
     gst_on, super_rate, super_amount, gross_earned, net_pay
   ) VALUES (
-    v_live, v_org, v_b, 'pending_acknowledgment',
-    400, 0, 400, false, 0.12, 48, 400, 376
+    v_live, v_org, v_b, 'approved',
+    56.72, 0, 56.72, false, 0.12, 6.81, 56.72, 53.32
   );
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex, group_share_id
@@ -426,8 +541,8 @@ BEGIN
   ));
   SET LOCAL ROLE service_role;
   BEGIN
-    PERFORM public.unfreeze_group_work_order_split(v_freeze);
-    RAISE EXCEPTION 'group-wo: unfreeze ran over a live invoice';
+    PERFORM public.unfreeze_group_work_order_split(v_freeze, v_shaun);
+    RAISE EXCEPTION 'group-wo: unfreeze ran over an approved invoice';
   EXCEPTION WHEN check_violation THEN
     IF SQLERRM IS DISTINCT FROM 'group_split_has_live_invoice' THEN
       RAISE EXCEPTION 'group-wo: live unfreeze said %', SQLERRM;
@@ -436,6 +551,73 @@ BEGIN
   RESET ROLE;
   IF (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_freeze) IS NULL THEN
     RAISE EXCEPTION 'group-wo: a refused unfreeze cleared the marker';
+  END IF;
+END $$;
+
+-- One of two participants has hours and no trade_rates row. Freeze and the
+-- quote both refuse and name that person. No share row is written.
+DO $$
+DECLARE
+  v_org uuid := '00000000-0000-0000-0000-000000000001';
+  v_shaun uuid := '9913309f-35ae-4a71-8e1f-f704ecc526ea';
+  v_rated uuid := 'a2140000-0000-4000-8000-00000000000a';
+  v_missing uuid := 'a2140000-0000-4000-8000-00000000000c';
+  v_job uuid := 'a2140000-0000-4000-8000-000000000121';
+  v_group uuid := 'a2140000-0000-4000-8000-000000000221';
+  v_wo uuid;
+BEGIN
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_job, v_org, 'fencing', 'quoted', 'GWO-NORATE');
+  INSERT INTO public.work_orders (
+    org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items, special_instructions
+  ) VALUES (
+    v_org, v_job, 'GWO-NORATE-1', 'job', 'draft', 482.15, '[]', 'missing rate'
+  );
+  SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-NORATE-1';
+  UPDATE public.work_orders
+  SET status = 'approved', approved_by = v_shaun
+  WHERE id = v_wo;
+  INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
+  VALUES (v_group, v_org, v_job, v_wo, 'token-norate');
+  INSERT INTO public.group_work_order_participants (group_id, user_id) VALUES
+    (v_group, v_rated),
+    (v_group, v_missing);
+  INSERT INTO public.job_assignments (id, job_id, user_id, scheduled_date, status) VALUES
+    ('a2140000-0000-4000-8000-0000000000a4', v_job, v_rated, '2026-10-21', 'scheduled'),
+    ('a2140000-0000-4000-8000-0000000000c4', v_job, v_missing, '2026-10-21', 'scheduled');
+  INSERT INTO public.group_work_order_time_entries
+    (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours)
+  VALUES
+    (v_group, v_rated, '2026-10-21', '08:00', '10:00', 0, 2.00),
+    (v_group, v_missing, '2026-10-21', '08:00', '10:00', 0, 2.00);
+
+  SET LOCAL ROLE service_role;
+  BEGIN
+    PERFORM public.project_group_work_order_split(v_group);
+    RAISE EXCEPTION 'group-wo: a missing rate was quoted';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE 'group_share_rate_missing:%'
+       OR position(v_missing::text IN SQLERRM) = 0
+       OR position(v_rated::text IN SQLERRM) > 0
+    THEN
+      RAISE EXCEPTION 'group-wo: missing-rate project said %', SQLERRM;
+    END IF;
+  END;
+  BEGIN
+    PERFORM public.freeze_group_work_order_split(v_group);
+    RAISE EXCEPTION 'group-wo: a missing rate was frozen';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE 'group_share_rate_missing:%'
+       OR position(v_missing::text IN SQLERRM) = 0
+    THEN
+      RAISE EXCEPTION 'group-wo: missing-rate freeze said %', SQLERRM;
+    END IF;
+  END;
+  RESET ROLE;
+  IF (SELECT count(*) FROM public.group_work_order_shares WHERE group_id = v_group) <> 0
+     OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = v_group) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'group-wo: a missing rate wrote a share';
   END IF;
 END $$;
 

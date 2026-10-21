@@ -937,7 +937,14 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261020150000", "xero_mirror_checks"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
-                      ("20261021100000", "job_receipt_sender")]:
+                      ("20261021100000", "job_receipt_sender"),
+                      # Client sign-off: job_media phase signature and
+                      # job_client_signoffs, reused by group work orders.
+                      ("20261020170000", "job_media_signature_voice_note_phases"),
+                      ("20261020170100", "job_client_signoffs"),
+                      # Group work orders: the split, the flag and the
+                      # invoice-line trigger (group_work_order.ts).
+                      ("20261021141000", "group_work_orders")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

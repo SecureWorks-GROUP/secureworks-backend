@@ -10,13 +10,16 @@
 // split, never both. Share lines are quantity 1 at the share, with
 // source_work_order_id left null.
 //
-// The invoice path freezes one snapshot under a row lock
-// (freeze_group_work_order_split). Every later share line reads that
-// snapshot. Preview uses project_group_work_order_split and does not freeze.
+// Freeze is an explicit step (freeze_group_work_order_split) after every
+// participant has hours on a day they are assigned and a counting client
+// sign-off exists. A share read never freezes and never calls
+// project_group_work_order_split. project_group_work_order_split quotes and
+// stores nothing. The invoice-line trigger freezes in the same transaction
+// as the line, so a failed insert rolls the marker back.
 // group_work_order_write_split is the only writer and must match
 // allocatePotCents and entryPointsMicro. A person who joins after the
-// marker is refused. The office unfreeze recomputes only while no share
-// sits on a live invoice.
+// marker is refused. The office unfreeze ops-rejects a draft or held share
+// invoice and does not recompute. approved, pushed_to_xero and paid block.
 //
 // DEFAULT, owner to confirm: break minutes come off finish minus start,
 // the same formula as trade invoice time entries. This module does not
@@ -31,6 +34,8 @@ import {
   resolveTradeInvoiceTimeEntry,
 } from "./trade_invoice_time_entry.ts";
 
+export const GROUP_WORK_ORDER_FLAG = "group_work_order_v1";
+
 export const GROUP_WORK_ORDER_CLIENT_LINK_FLAG =
   "group_work_order_client_link_send_v1";
 
@@ -38,12 +43,14 @@ export const GROUP_WORK_ORDER_CLIENT_LINK_FLAG =
 export const GROUP_SHARE_LINE_TYPE = "group share";
 
 /**
- * Invoice statuses that hold nothing. Same set as RELEASED_INVOICE_STATUSES
- * in index.ts (draft, failed, ops-reject). A test pins the two literals.
+ * Invoice statuses that hold nothing for the never-both fence.
+ * draft and ops-reject are the legal subset. failed is not a real
+ * trade_invoices status, so it is not in this list. The duplicate-share
+ * rule is stricter: any status other than ops-reject, including draft,
+ * holds the share. That check is the database trigger.
  */
 export const GROUP_FENCE_RELEASED_INVOICE_STATUSES = [
   "draft",
-  "failed",
   "ops-reject",
 ] as const;
 
@@ -67,7 +74,17 @@ export const PARTICIPANT_SHARE_KEYS = [
   "needs_hours",
   "client_signed",
   "group_id",
+  "awaiting",
 ] as const;
+
+/** What my-share is waiting on. A trade is not told another person's name. */
+export type GroupAwaiting =
+  | "needs_hours"
+  | "awaiting_signoff"
+  | "awaiting_others"
+  | "awaiting_rate"
+  | "ready"
+  | "frozen";
 
 const STAFF_ROLES = new Set(["admin", "owner", "ops_manager"]);
 const NOT_A_CLAIM = new Set([
@@ -77,6 +94,10 @@ const NOT_A_CLAIM = new Set([
   "adjustment",
   "final_payout_deduction",
   "final payout deduction",
+  // DEFAULT, owner to confirm: commission is not hours or a normal work
+  // order claim, so it does not trip the never-both fence. It stays in
+  // WORK_ORDER_LOCK_LINE_TYPES, which is a different lock.
+  "commission",
 ]);
 
 export class GroupWorkOrderError extends Error {
@@ -212,14 +233,15 @@ export function participantShareResponse(input: {
   ownHours: number;
   potEx: number | null;
   myShareEx: number | null;
+  awaiting: GroupAwaiting;
 }): Record<string, unknown> {
-  const submitted = input.ownHours > 0;
   const response: Record<string, unknown> = {
-    pot_total: submitted ? input.potEx : null,
-    my_share: submitted ? input.myShareEx : null,
-    needs_hours: !submitted,
+    pot_total: input.awaiting === "needs_hours" ? null : input.potEx,
+    my_share: input.awaiting === "frozen" ? input.myShareEx : null,
+    needs_hours: input.awaiting === "needs_hours",
     client_signed: input.clientSigned,
     group_id: input.groupId,
+    awaiting: input.awaiting,
   };
   return response;
 }
@@ -448,6 +470,7 @@ const QUERY_FAULTS: {
   code: string;
   message: string;
   status: number;
+  keepDetail?: boolean;
 }[] = [
   {
     needle: "group_split_frozen",
@@ -500,6 +523,82 @@ const QUERY_FAULTS: {
       "You have no share of this group. Check that your rate and hours are on the job.",
     status: 422,
   },
+  {
+    needle: "group_split_needs_hours",
+    code: "group_split_needs_hours",
+    message: "Every person on the group needs hours before the split can freeze.",
+    status: 422,
+    keepDetail: true,
+  },
+  {
+    needle: "group_share_rate_missing",
+    code: "group_share_rate_missing",
+    message: "Someone on this group has hours and no rate on file. The office has their name.",
+    status: 422,
+    keepDetail: true,
+  },
+  {
+    needle: "group_participant_needs_rate",
+    code: "group_participant_needs_rate",
+    message: "Someone on this group has hours and no rate. The office has their name.",
+    status: 422,
+    keepDetail: true,
+  },
+  {
+    needle: "group_client_signoff_required",
+    code: "group_client_signoff_required",
+    message: "The client has to sign this job before the split can freeze.",
+    status: 409,
+  },
+  {
+    needle: "group_share_already_invoiced",
+    code: "group_share_already_invoiced",
+    message: "Your share of this job is already on an invoice.",
+    status: 409,
+  },
+  {
+    needle: "group_share_owner_mismatch",
+    code: "group_share_owner_mismatch",
+    message: "A group share can only be invoiced by the person it belongs to.",
+    status: 409,
+  },
+  {
+    needle: "group_hours_not_assigned",
+    code: "group_hours_not_assigned",
+    message: "Those hours are on a day you are not allocated to this job.",
+    status: 409,
+  },
+  {
+    needle: "work_order_claim_blocked_by_group_share",
+    code: "work_order_claim_blocked_by_group_share",
+    message:
+      "This job has a group work order, so it is paid as a share, not as hours or a normal work order.",
+    status: 409,
+  },
+  {
+    needle: "group_work_order_void",
+    code: "group_work_order_void",
+    message: "This group work order has been voided.",
+    status: 409,
+  },
+  {
+    needle: "group_signature_invalid",
+    code: "group_signature_invalid",
+    message: "The signature has to be a PNG or SVG image.",
+    status: 422,
+  },
+  {
+    needle: "group_work_order_ambiguous",
+    code: "group_work_order_ambiguous",
+    message: "This job has more than one group work order.",
+    status: 409,
+  },
+  {
+    needle: "group_actor_required",
+    code: "group_actor_required",
+    message: "Say who is doing this.",
+    status: 400,
+  },
 ];
 
 function throwQuery(error: { message?: string } | null, what: string): void {
@@ -507,7 +606,10 @@ function throwQuery(error: { message?: string } | null, what: string): void {
   const text = String(error.message || "");
   const fault = QUERY_FAULTS.find((row) => text.includes(row.needle));
   if (fault) {
-    throw new GroupWorkOrderError(fault.code, fault.message, fault.status);
+    const detail = fault.keepDetail && /[0-9a-f]{8}-[0-9a-f]{4}-/i.test(text)
+      ? text
+      : fault.message;
+    throw new GroupWorkOrderError(fault.code, detail, fault.status);
   }
   throw new GroupWorkOrderError(
     "group_work_order_unreadable",
@@ -527,7 +629,18 @@ async function rowsOf(
 
 function liveAssignment(row: Record<string, unknown>): boolean {
   if (row.is_ghost === true) return false;
+  if (String(row.role || "").toLowerCase() === "observer") return false;
   return String(row.status || "").toLowerCase() !== "cancelled";
+}
+
+function assignmentCoversDay(
+  row: Record<string, unknown>,
+  userId: string,
+  workDate: string,
+): boolean {
+  return String(row.user_id) === userId &&
+    String(row.scheduled_date || "") === workDate &&
+    liveAssignment(row);
 }
 
 async function callerAssigned(
@@ -536,10 +649,9 @@ async function callerAssigned(
   userId: string,
 ): Promise<boolean> {
   const rows = await rowsOf(
-    client.from("job_assignments").select("id, status, is_ghost").eq(
-      "job_id",
-      jobId,
-    ).eq("user_id", userId),
+    client.from("job_assignments").select(
+      "user_id, scheduled_date, status, role",
+    ).eq("job_id", jobId).eq("user_id", userId),
     "check the crew assignment",
   );
   return rows.some(liveAssignment);
@@ -662,11 +774,88 @@ function groupIsSigned(group: Record<string, unknown>): boolean {
   return group.status === "client_signed" || Boolean(group.client_signed_at);
 }
 
+const SIGNATURE_MAX = 150000;
+
+async function groupFeatureOn(client: any): Promise<boolean> {
+  const { data, error } = await client.from("feature_flags").select("enabled")
+    .eq("flag_name", GROUP_WORK_ORDER_FLAG).maybeSingle();
+  if (error || data?.enabled !== true) return false;
+  return true;
+}
+
+async function assertGroupEnabled(client: any): Promise<void> {
+  if (await groupFeatureOn(client)) return;
+  throw new GroupWorkOrderError(
+    "group_work_order_disabled",
+    "Feature off. Group work orders are switched off.",
+    409,
+  );
+}
+
+function parseSignature(value: unknown, required: boolean): string | null {
+  if (value == null || value === "") {
+    if (!required) return null;
+    throw new GroupWorkOrderError(
+      "group_signature_required",
+      "The client has to draw a signature.",
+      400,
+    );
+  }
+  const png = String(value);
+  if (png.length > SIGNATURE_MAX) {
+    throw new GroupWorkOrderError(
+      "group_signature_too_large",
+      "That signature image is too large.",
+    );
+  }
+  const pngOk = png.startsWith("data:image/png;base64,");
+  const svgOk = png.startsWith("data:image/svg+xml");
+  if (!pngOk && !svgOk) {
+    throw new GroupWorkOrderError(
+      "group_signature_invalid",
+      "The signature has to be a PNG or SVG image.",
+    );
+  }
+  if (svgOk && /<script/i.test(png)) {
+    throw new GroupWorkOrderError(
+      "group_signature_invalid",
+      "The signature has to be a PNG or SVG image.",
+    );
+  }
+  return png;
+}
+
+function signerName(value: unknown): string {
+  const name = String(value || "").trim();
+  if (!name) {
+    throw new GroupWorkOrderError(
+      "group_signature_name_required",
+      "Enter the name with the signature.",
+      400,
+    );
+  }
+  if (name.length > 120) {
+    throw new GroupWorkOrderError(
+      "group_signature_name_required",
+      "That name is too long.",
+      400,
+    );
+  }
+  return name;
+}
+
+function deviceLabel(value: unknown): string | null {
+  const device = String(value || "").trim();
+  if (!device) return null;
+  return device.slice(0, 200);
+}
+
 export async function createGroupWorkOrder(
   client: any,
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   const jobId = String(body.job_id || body.jobId || "").trim();
   if (!jobId) {
     throw new GroupWorkOrderError("group_job_required", "Name the job.", 400);
@@ -696,6 +885,13 @@ export async function createGroupWorkOrder(
   }
   const existing = await loadGroupByJob(client, jobId);
   if (existing) {
+    if (existing.status === "void") {
+      throw new GroupWorkOrderError(
+        "group_work_order_void",
+        "This group work order has been voided.",
+        409,
+      );
+    }
     if (String(existing.work_order_id) !== workOrderId) {
       throw new GroupWorkOrderError(
         "group_work_order_exists",
@@ -756,7 +952,6 @@ function publicGroupCard(group: Record<string, unknown>) {
     ok: true,
     group_id: group.id,
     job_id: group.job_id,
-    share_token: group.share_token,
     status: group.status,
     client_signed: groupIsSigned(group),
   };
@@ -767,6 +962,7 @@ export async function joinGroupWorkOrder(
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   const group = await resolveGroup(client, body);
   const jobId = String(group.job_id);
   const assigned = await callerAssigned(client, jobId, caller.userId);
@@ -775,6 +971,13 @@ export async function joinGroupWorkOrder(
       "group_work_order_not_assigned",
       "You are not allocated to this job.",
       403,
+    );
+  }
+  if (group.split_frozen_at) {
+    throw new GroupWorkOrderError(
+      "group_split_frozen",
+      "This group's pay is frozen. The office has to reopen it before anyone else can join.",
+      409,
     );
   }
   const participants = await loadParticipants(client, String(group.id));
@@ -789,18 +992,12 @@ export async function signGroupWorkOrderCrew(
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   requireParticipant(participants, caller.userId);
-  const name = String(body.signer_name || body.signature_name || "").trim();
-  if (!name) {
-    throw new GroupWorkOrderError(
-      "group_signature_name_required",
-      "Enter your name with your signature.",
-      400,
-    );
-  }
-  const png = signaturePng(body.signature_png);
+  const name = signerName(body.signer_name || body.signature_name);
+  const png = parseSignature(body.signature_png, false);
   const signedAt = new Date().toISOString();
   const { error: sigError } = await client.from("group_work_order_signatures")
     .insert({
@@ -822,23 +1019,12 @@ export async function signGroupWorkOrderCrew(
   return { ok: true, crew_signed: true, client_signed: groupIsSigned(group) };
 }
 
-function signaturePng(value: unknown): string | null {
-  if (value == null || value === "") return null;
-  const png = String(value);
-  if (png.length > 200000) {
-    throw new GroupWorkOrderError(
-      "group_signature_too_large",
-      "That signature image is too large.",
-    );
-  }
-  return png;
-}
-
 export async function submitGroupWorkOrderHours(
   client: any,
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   requireParticipant(participants, caller.userId);
@@ -858,41 +1044,208 @@ export async function submitGroupWorkOrderHours(
   });
 }
 
+export async function deleteGroupWorkOrderHours(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  await assertGroupEnabled(client);
+  const group = await resolveGroup(client, body);
+  const participants = await loadParticipants(client, String(group.id));
+  requireParticipant(participants, caller.userId);
+  const workDate = String(body.work_date || "").trim();
+  if (!workDate) {
+    throw new GroupWorkOrderError(
+      "time_entry_required",
+      "Name the day to remove.",
+      400,
+    );
+  }
+  const { error } = await client.from("group_work_order_time_entries").delete()
+    .eq("group_id", group.id).eq("user_id", caller.userId).eq(
+      "work_date",
+      workDate,
+    );
+  throwQuery(error, "remove your hours");
+  return await readGroupWorkOrderMyShare(client, caller, {
+    group_id: group.id,
+  });
+}
+
+type ShareView = {
+  hoursByUser: Map<string, number>;
+  awaiting: GroupAwaiting;
+  signed: boolean;
+  needsHours: string[];
+  needsRate: string[];
+};
+
+function signoffCounts(
+  row: Record<string, unknown> | null,
+  minimum: number,
+): boolean {
+  if (!row) return false;
+  const method = String(row.method || "");
+  if (method === "revoked") return false;
+  if (method === "office_waiver") return true;
+  if (row.happy === false) return false;
+  if (
+    row.satisfaction_rating != null &&
+    Number(row.satisfaction_rating) < minimum
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function newestSignoff(
+  rows: readonly Record<string, unknown>[],
+): Record<string, unknown> | null {
+  const sorted = [...rows].sort((a, b) => {
+    const at = String(a.created_at || "");
+    const bt = String(b.created_at || "");
+    if (at !== bt) return at < bt ? 1 : -1;
+    const aid = String(a.id || "");
+    const bid = String(b.id || "");
+    return aid < bid ? 1 : aid > bid ? -1 : 0;
+  });
+  return sorted[0] || null;
+}
+
+async function happyMinimum(client: any): Promise<number> {
+  const { data, error } = await client.from("client_signoff_settings").select(
+    "min_happy_rating",
+  ).eq("id", 1).maybeSingle();
+  if (error || data?.min_happy_rating == null) return 4;
+  const minimum = Number(data.min_happy_rating);
+  return Number.isInteger(minimum) ? minimum : 4;
+}
+
+async function loadShareView(
+  client: any,
+  group: Record<string, unknown>,
+  participants: readonly Record<string, unknown>[],
+): Promise<ShareView> {
+  const [entries, assignments, signoffs, minimum] = await Promise.all([
+    rowsOf(
+      client.from("group_work_order_time_entries").select(
+        "user_id, work_date, hours",
+      ).eq("group_id", group.id),
+      "load hours",
+    ),
+    rowsOf(
+      client.from("job_assignments").select(
+        "user_id, scheduled_date, status, role",
+      ).eq("job_id", group.job_id),
+      "load allocations",
+    ),
+    rowsOf(
+      client.from("job_client_signoffs").select(
+        "id, method, happy, satisfaction_rating, created_at",
+      ).eq("job_id", group.job_id),
+      "load the client sign-off",
+    ),
+    happyMinimum(client),
+  ]);
+  const hoursByUser = new Map<string, number>();
+  const counting: { userId: string; workDate: string }[] = [];
+  for (const entry of entries) {
+    const hours = Number(entry.hours || 0);
+    if (!(hours > 0)) continue;
+    const userId = String(entry.user_id);
+    const workDate = String(entry.work_date || "");
+    if (
+      !assignments.some((row) => assignmentCoversDay(row, userId, workDate))
+    ) {
+      continue;
+    }
+    hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
+    counting.push({ userId, workDate });
+  }
+  const needsHours = participants
+    .map((row) => String(row.user_id))
+    .filter((userId) => (hoursByUser.get(userId) || 0) <= 0)
+    .sort();
+  const rateUsers = [...new Set(counting.map((row) => row.userId))];
+  const rates = rateUsers.length === 0 ? [] : await rowsOf(
+    client.from("trade_rates").select(
+      "user_id, hourly_rate, effective_from, effective_to",
+    ).eq("org_id", group.org_id).in("user_id", rateUsers),
+    "load rates",
+  );
+  const needsRate = [...new Set(counting.filter((entry) => {
+    const rate = rateOnDay(
+      rates.filter((row) => String(row.user_id) === entry.userId).map((
+        row,
+      ) => ({
+        hourly_rate: row.hourly_rate,
+        effective_from: row.effective_from == null
+          ? null
+          : String(row.effective_from),
+        effective_to: row.effective_to == null ? null : String(row.effective_to),
+      })),
+      entry.workDate,
+    );
+    return rate == null || Math.round(rate * 100) <= 0;
+  }).map((entry) => entry.userId))].sort();
+  const signed = signoffCounts(newestSignoff(signoffs), minimum);
+  let awaiting: GroupAwaiting = "ready";
+  if (!signed) awaiting = "awaiting_signoff";
+  else if (group.split_frozen_at) awaiting = "frozen";
+  else if (needsHours.length > 0) awaiting = "awaiting_others";
+  else if (needsRate.length > 0) awaiting = "awaiting_rate";
+  return { hoursByUser, awaiting, signed, needsHours, needsRate };
+}
+
 export async function readGroupWorkOrderMyShare(
   client: any,
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   // Before any price is read. A non-participant gets no number.
   requireParticipant(participants, caller.userId);
-  const entries = await rowsOf(
-    client.from("group_work_order_time_entries").select(
-      "user_id, work_date, hours",
-    ).eq("group_id", group.id),
-    "load hours",
-  );
-  const ownHours = entries
-    .filter((row) => String(row.user_id) === caller.userId)
-    .reduce((sum, row) => sum + Number(row.hours || 0), 0);
-  if (ownHours <= 0) {
-    return participantShareResponse({
-      groupId: String(group.id),
-      clientSigned: groupIsSigned(group),
-      ownHours: 0,
-      potEx: null,
-      myShareEx: null,
-    });
+  const view = await loadShareView(client, group, participants);
+  const ownHours = view.hoursByUser.get(caller.userId) || 0;
+  const awaiting: GroupAwaiting = view.awaiting === "frozen"
+    ? "frozen"
+    : ownHours > 0
+    ? view.awaiting
+    : "needs_hours";
+  let pot: number | null = null;
+  if (awaiting !== "needs_hours") {
+    const workOrder = await loadWorkOrder(client, String(group.work_order_id));
+    try {
+      pot = potFromWorkOrder(workOrder);
+    } catch (error) {
+      if (
+        !(error instanceof GroupWorkOrderError) ||
+        error.code !== "group_pot_missing"
+      ) {
+        throw error;
+      }
+    }
   }
-  const split = await readSplit(client, String(group.id), false);
-  const mine = split.find((row) => String(row.user_id) === caller.userId);
+  let myShare: number | null = null;
+  if (awaiting === "frozen") {
+    const shares = await rowsOf(
+      client.from("group_work_order_shares").select("user_id, share_ex").eq(
+        "group_id",
+        group.id,
+      ).eq("user_id", caller.userId),
+      "load your share",
+    );
+    myShare = shares[0] ? Number(shares[0].share_ex) : null;
+  }
   return participantShareResponse({
     groupId: String(group.id),
-    clientSigned: groupIsSigned(group),
+    clientSigned: view.signed,
     ownHours,
-    potEx: mine ? Number(mine.pot_ex) : null,
-    myShareEx: mine ? Number(mine.share_ex) : null,
+    potEx: pot,
+    myShareEx: myShare,
+    awaiting,
   });
 }
 
@@ -923,6 +1276,7 @@ export async function previewGroupClientLink(
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   refuseClientLinkSend(body);
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
@@ -931,21 +1285,25 @@ export async function previewGroupClientLink(
   const { data: flag } = await client.from("feature_flags").select("enabled")
     .eq("flag_name", GROUP_WORK_ORDER_CLIENT_LINK_FLAG).maybeSingle();
   const sendingEnabled = flag?.enabled === true;
-  return {
+  // The token is for the office to send to the client. A trade captures
+  // the signature on their own phone and never receives the public token.
+  const preview: Record<string, unknown> = {
     ok: true,
     sent: false,
     sending_enabled: sendingEnabled,
     send_implemented: false,
-    share_token: group.share_token,
     draft_message: draftClientLinkMessage({
       firstName: body.first_name as string | undefined,
       site: String(job?.site_suburb || job?.site_address || ""),
-      link: body.link as string | undefined,
+      link: caller.isStaff ? body.link as string | undefined : undefined,
     }),
   };
+  if (caller.isStaff) preview.share_token = group.share_token;
+  return preview;
 }
 
 export async function readGroupWorkOrderPublic(client: any, token: string) {
+  await assertGroupEnabled(client);
   const group = await requireTokenGroup(client, token);
   const job = await loadJob(client, String(group.job_id));
   const feedback = await rowsOf(
@@ -986,69 +1344,170 @@ async function requireTokenGroup(client: any, token: string) {
   return group;
 }
 
+function optionalRating(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const rating = Number(value);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    throw new GroupWorkOrderError(
+      "group_feedback_rating_invalid",
+      "Rate the job from 1 to 5.",
+    );
+  }
+  return rating;
+}
+
+function happyFlag(value: unknown): boolean | null {
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
+  return null;
+}
+
+async function countingSignoff(
+  client: any,
+  jobId: string,
+): Promise<boolean> {
+  const [rows, minimum] = await Promise.all([
+    rowsOf(
+      client.from("job_client_signoffs").select(
+        "id, method, happy, satisfaction_rating, created_at",
+      ).eq("job_id", jobId),
+      "load the client sign-off",
+    ),
+    happyMinimum(client),
+  ]);
+  return signoffCounts(newestSignoff(rows), minimum);
+}
+
+async function storeClientSignature(
+  client: any,
+  group: Record<string, unknown>,
+  input: {
+    name: string;
+    png: string;
+    method: "share_link" | "on_site";
+    capturedBy: string | null;
+    actor: string;
+    device: string | null;
+    happy: boolean | null;
+    rating: number | null;
+  },
+) {
+  if (await countingSignoff(client, String(group.job_id))) {
+    return { ok: true, client_signed: true, already_signed: true };
+  }
+  const { data: media, error: mediaError } = await client.from("job_media")
+    .insert({
+      job_id: group.job_id,
+      type: "photo",
+      storage_url: input.png,
+      label: "Client signature",
+      phase: "signature",
+      uploaded_by: input.capturedBy,
+    }).select("id").single();
+  throwQuery(mediaError, "store the signature");
+  const mediaId = (media as { id?: string } | null)?.id;
+  if (!mediaId) {
+    throw new GroupWorkOrderError(
+      "group_work_order_unreadable",
+      "Could not store the signature.",
+      503,
+    );
+  }
+  const { error } = await client.from("job_client_signoffs").insert({
+    org_id: group.org_id,
+    job_id: group.job_id,
+    method: input.method,
+    signed_name: input.name,
+    happy: input.happy,
+    satisfaction_rating: input.rating,
+    signature_media_id: mediaId,
+    captured_by: input.capturedBy,
+    captured_by_actor: input.actor,
+    captured_device: input.device,
+  });
+  throwQuery(error, "record the client's signature");
+  const counts = await countingSignoff(client, String(group.job_id));
+  if (counts && group.status === "open") {
+    const signedAt = new Date().toISOString();
+    const { error: stampError } = await client.from("group_work_orders")
+      .update({
+        status: "client_signed",
+        client_signed_at: signedAt,
+        updated_at: signedAt,
+      }).eq("id", group.id).eq("status", "open");
+    throwQuery(stampError, "record the client's signature");
+  }
+  return { ok: true, client_signed: counts, already_signed: false };
+}
+
 export async function clientSignGroupWorkOrder(
   client: any,
   body: Record<string, unknown>,
 ) {
-  const group = await requireTokenGroup(client, String(body.share_token || ""));
-  const name = String(body.signer_name || body.signature_name || "").trim();
-  if (!name) {
-    throw new GroupWorkOrderError(
-      "group_signature_name_required",
-      "Enter the client's name with their signature.",
-      400,
-    );
-  }
-  if (groupIsSigned(group)) {
-    return { ok: true, client_signed: true, already_signed: true };
-  }
-  const png = signaturePng(body.signature_png);
-  const via = body.signed_via === "on_site" ? "on_site" : "share_link";
-  const signedAt = new Date().toISOString();
-  const { error: sigError } = await client.from("group_work_order_signatures")
-    .insert({
-      group_id: group.id,
-      signer_kind: "client",
-      user_id: null,
-      signer_name: name,
-      signature_png: png,
-      signed_via: via,
-      captured_by_user_id: null,
-      signed_at: signedAt,
-    });
-  throwQuery(sigError, "store the client's signature");
-  const { error } = await client.from("group_work_orders").update({
-    status: "client_signed",
-    client_signed_at: signedAt,
-    updated_at: signedAt,
-  }).eq("id", group.id).eq("status", "open");
-  throwQuery(error, "record the client's signature");
-  return { ok: true, client_signed: true, already_signed: false };
+  await assertGroupEnabled(client);
+  const group = await requireTokenGroup(
+    client,
+    String(body.share_token || ""),
+  );
+  // The public link cannot choose the on-site method. That capture is the
+  // participant's signed-in phone.
+  return await storeClientSignature(client, group, {
+    name: signerName(body.signer_name || body.signature_name),
+    png: parseSignature(body.signature_png, true) || "",
+    method: "share_link",
+    capturedBy: null,
+    actor: "client link",
+    device: deviceLabel(body.device || body.captured_device),
+    happy: happyFlag(body.happy),
+    rating: optionalRating(body.satisfaction_rating),
+  });
+}
+
+export async function captureGroupClientSignoff(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  await assertGroupEnabled(client);
+  const group = await resolveGroup(client, body);
+  const participants = await loadParticipants(client, String(group.id));
+  requireParticipant(participants, caller.userId);
+  return await storeClientSignature(client, group, {
+    name: signerName(body.signer_name || body.signature_name),
+    png: parseSignature(body.signature_png, true) || "",
+    method: "on_site",
+    capturedBy: caller.userId,
+    actor: `user:${caller.userId}`,
+    device: deviceLabel(body.device || body.captured_device),
+    happy: happyFlag(body.happy),
+    rating: optionalRating(body.satisfaction_rating),
+  });
 }
 
 export async function submitGroupWorkOrderFeedback(
   client: any,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   const group = await requireTokenGroup(client, String(body.share_token || ""));
-  if (!groupIsSigned(group)) {
+  if (!(await countingSignoff(client, String(group.job_id)))) {
     throw new GroupWorkOrderError(
       "group_client_signoff_required",
       "The client signs the job before leaving feedback.",
       409,
     );
   }
-  const parsed = feedbackRatings(body);
   const freeText = String(body.free_text || "").trim().slice(0, 4000) || null;
   const via = body.submitted_via === "on_site" ? "on_site" : "share_link";
   const existing = await rowsOf(
-    client.from("group_work_order_feedback").select("id").eq(
-      "group_id",
-      group.id,
-    ),
+    client.from("group_work_order_feedback").select(
+      "sales_process_rating, communication_rating, cleanliness_rating, punctuality_rating, crew_rating",
+    ).eq("group_id", group.id),
     "load feedback",
   );
+  let ratings: number[];
   if (existing.length === 0) {
+    const parsed = feedbackRatings(body);
     const { error } = await client.from("group_work_order_feedback").insert({
       group_id: group.id,
       sales_process_rating: parsed.ratings.sales_process,
@@ -1065,32 +1524,37 @@ export async function submitGroupWorkOrderFeedback(
       submitted_via: via,
     });
     throwQuery(error, "save the feedback");
+    ratings = FEEDBACK_DIMENSIONS.map((dimension) => parsed.ratings[dimension]);
+  } else {
+    // A second post cannot change the ratings the Google prompt uses.
+    const saved = existing[0];
+    ratings = [
+      Number(saved.sales_process_rating),
+      Number(saved.communication_rating),
+      Number(saved.cleanliness_rating),
+      Number(saved.punctuality_rating),
+      Number(saved.crew_rating),
+    ];
   }
-  const settings = await loadSettings(client);
-  const ratings = FEEDBACK_DIMENSIONS.map((dimension) =>
-    parsed.ratings[dimension]
-  );
-  const prompt = promptGoogleReview(ratings, settings.minimum);
+  const [url, minimum] = await Promise.all([
+    reviewUrl(client),
+    happyMinimum(client),
+  ]);
+  const prompt = promptGoogleReview(ratings, minimum);
   return {
     ok: true,
     office_only_notice: OFFICE_FEEDBACK_NOTICE,
     prompt_google_review: prompt,
-    ...(prompt && settings.url ? { google_review_url: settings.url } : {}),
+    ...(prompt && url ? { google_review_url: url } : {}),
   };
 }
 
-async function loadSettings(
-  client: any,
-): Promise<{ url: string | null; minimum: number }> {
+async function reviewUrl(client: any): Promise<string | null> {
   const { data, error } = await client.from("group_work_order_settings").select(
-    "google_review_url, review_prompt_min_rating",
+    "google_review_url",
   ).eq("id", 1).maybeSingle();
   throwQuery(error, "load review settings");
-  const minimum = Number(data?.review_prompt_min_rating);
-  return {
-    url: data?.google_review_url ? String(data.google_review_url) : null,
-    minimum: Number.isInteger(minimum) ? minimum : 4,
-  };
+  return data?.google_review_url ? String(data.google_review_url) : null;
 }
 
 export async function readGroupWorkOrderFeedback(
@@ -1142,19 +1606,24 @@ export async function readGroupWorkOrderOffice(
       "load feedback",
     ),
   ]);
-  const workOrder = await loadWorkOrder(client, String(group.work_order_id));
+  const [workOrder, view] = await Promise.all([
+    loadWorkOrder(client, String(group.work_order_id)),
+    loadShareView(client, group, participants),
+  ]);
   return {
     ok: true,
     group_id: group.id,
     job_id: group.job_id,
     status: group.status,
-    client_signed: groupIsSigned(group),
+    client_signed: view.signed,
     split_frozen: Boolean(group.split_frozen_at),
     pot_total: workOrder
       ? moneyToCents(workOrder.agreed_labour_ex) == null
         ? null
         : centsToMoney(moneyToCents(workOrder.agreed_labour_ex) || 0)
       : null,
+    needs_hours: view.needsHours,
+    needs_rate: view.needsRate,
     participants: participants.map((row) => ({
       user_id: row.user_id,
       signature_name: row.signature_name || null,
@@ -1171,18 +1640,94 @@ export async function unfreezeGroupWorkOrder(
   caller: GroupCaller,
   body: Record<string, unknown>,
 ) {
+  await assertGroupEnabled(client);
   assertOffice(caller);
   const group = await resolveGroup(client, body);
   const { data, error } = await client.rpc("unfreeze_group_work_order_split", {
     p_group_id: group.id,
+    p_actor: caller.userId,
   });
   throwQuery(error, "reopen the split");
-  const shares = asRecord(data).shares;
+  const payload = asRecord(data);
   return {
     ok: true,
     group_id: group.id,
     split_frozen: false,
-    shares: Array.isArray(shares) ? shares : [],
+    shares: Array.isArray(payload.shares) ? payload.shares : [],
+    voided_invoice_ids: Array.isArray(payload.voided_invoice_ids)
+      ? payload.voided_invoice_ids
+      : [],
+  };
+}
+
+export async function freezeGroupWorkOrder(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  await assertGroupEnabled(client);
+  const group = await resolveGroup(client, body);
+  const participants = await loadParticipants(client, String(group.id));
+  if (!caller.isStaff) requireParticipant(participants, caller.userId);
+  const { error } = await client.rpc("freeze_group_work_order_split", {
+    p_group_id: group.id,
+  });
+  throwQuery(error, "freeze the split");
+  if (participants.some((row) => String(row.user_id) === caller.userId)) {
+    return await readGroupWorkOrderMyShare(client, caller, {
+      group_id: group.id,
+    });
+  }
+  return { ok: true, group_id: group.id, split_frozen: true };
+}
+
+export async function revokeGroupSignoff(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const { error } = await client.rpc("revoke_group_client_signoff", {
+    p_group_id: group.id,
+    p_actor: caller.userId,
+  });
+  throwQuery(error, "revoke the sign-off");
+  return { ok: true, revoked: true, group_id: group.id };
+}
+
+export async function voidGroupWorkOrder(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const { error } = await client.rpc("void_group_work_order", {
+    p_group_id: group.id,
+    p_actor: caller.userId,
+    p_reason: String(body.reason || "").slice(0, 500),
+  });
+  throwQuery(error, "void the group");
+  return { ok: true, void: true, group_id: group.id };
+}
+
+export async function rekeyGroupWorkOrder(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const { data, error } = await client.rpc("rekey_group_work_order", {
+    p_group_id: group.id,
+    p_actor: caller.userId,
+  });
+  throwQuery(error, "re-key the group");
+  return {
+    ok: true,
+    group_id: group.id,
+    work_order_id: asRecord(data).work_order_id || null,
   };
 }
 
@@ -1220,6 +1765,8 @@ export async function resolveGroupShareInvoiceExtra(
   client: any,
   input: { userId: string; item: Record<string, unknown> },
 ) {
+  // While the switch is off, invoicing does not read the group tables.
+  if (!(await groupFeatureOn(client))) return null;
   if (input.item.group_share_id && !isGroupShareInvoiceItem(input.item)) {
     throw new GroupWorkOrderError(
       "group_share_line_type_required",
@@ -1230,29 +1777,41 @@ export async function resolveGroupShareInvoiceExtra(
   const group = await resolveGroup(client, input.item);
   const participants = await loadParticipants(client, String(group.id));
   requireParticipant(participants, input.userId);
-  if (!groupIsSigned(group)) {
-    throw new GroupWorkOrderError(
-      "group_client_signoff_required",
-      "The client has to sign this job before a group share can be invoiced.",
-      409,
-    );
-  }
   const entries = await rowsOf(
     client.from("group_work_order_time_entries").select(
       "user_id, work_date, hours",
-    ).eq("group_id", group.id),
+    ).eq("group_id", group.id).eq("user_id", input.userId),
     "load hours",
   );
-  const ownHours = entries
-    .filter((row) => String(row.user_id) === input.userId)
-    .reduce((sum, row) => sum + Number(row.hours || 0), 0);
+  const assignments = await rowsOf(
+    client.from("job_assignments").select(
+      "user_id, scheduled_date, status, role",
+    ).eq("job_id", group.job_id).eq("user_id", input.userId),
+    "load allocations",
+  );
+  const ownHours = entries.filter((row) =>
+    assignmentCoversDay(row, input.userId, String(row.work_date || "")) ||
+    assignments.some((assignment) =>
+      assignmentCoversDay(
+        assignment,
+        input.userId,
+        String(row.work_date || ""),
+      )
+    )
+  ).reduce((sum, row) => {
+    const covered = assignments.some((assignment) =>
+      assignmentCoversDay(assignment, input.userId, String(row.work_date || ""))
+    );
+    return covered ? sum + Number(row.hours || 0) : sum;
+  }, 0);
   if (ownHours <= 0) {
     throw new GroupWorkOrderError(
       "group_share_hours_missing",
       "Submit your hours on this group before invoicing your share.",
     );
   }
-  const shares = await readSplit(client, String(group.id), true);
+  // Quote only. The line trigger freezes in the same statement as the insert.
+  const shares = await readSplit(client, String(group.id), false);
   const mine = shares.find((row) => String(row.user_id) === input.userId);
   if (!mine) {
     throw new GroupWorkOrderError(
@@ -1268,7 +1827,9 @@ export async function resolveGroupShareInvoiceExtra(
     );
   }
   const claimed = clientMoney(input.item);
-  if (claimed != null && Math.abs(claimed - shareEx) > 0.01) {
+  if (
+    claimed != null && moneyToCents(claimed) !== moneyToCents(shareEx)
+  ) {
     throw new GroupWorkOrderError(
       "group_share_amount_mismatch",
       "The amount on the group share does not match your share. Reload and submit again.",
@@ -1309,16 +1870,55 @@ export async function resolveGroupShareInvoiceExtra(
     wo_allocated: null,
     wo_labour_deduction: null,
     wo_labour_lines: null,
-    group_share_id: mine.id,
+    group_share_id: group.split_frozen_at ? mine.id : null,
     _hoursFlag: null,
     _woProblems: null,
   };
+}
+
+/**
+ * The two older invoice doors. While group_work_order_v1 is off this returns
+ * before any group-table read: the invoice-line trigger is the safety net.
+ * While it is on, a job with a group work order is paid as a share, and a
+ * group share cannot be submitted through either door.
+ */
+export async function assertLegacyInvoiceNotOnGroupJob(
+  client: any,
+  input: { jobIds: readonly string[]; lines?: readonly FenceLine[] },
+): Promise<void> {
+  if (!(await groupFeatureOn(client))) return;
+  for (const line of input.lines || []) {
+    if (isGroupShareLine(line)) {
+      throw new GroupWorkOrderError(
+        "group_share_wrong_door",
+        "A group share is invoiced on the weekly invoice, not this path.",
+        409,
+      );
+    }
+  }
+  const jobIds = [...new Set(input.jobIds.map((id) => String(id)).filter(Boolean))];
+  if (jobIds.length === 0) return;
+  const groups = await rowsOf(
+    client.from("group_work_orders").select("id, job_id, status").in(
+      "job_id",
+      jobIds,
+    ),
+    "check group work orders",
+  );
+  if (groups.some((row) => row.status !== "void")) {
+    throw new GroupWorkOrderError(
+      "group_work_order_use_share_path",
+      "This job has a group work order. Invoice your share on the weekly invoice.",
+      409,
+    );
+  }
 }
 
 export async function assertGroupWorkOrderInvoiceFence(
   client: any,
   input: { userId: string; lines: readonly FenceLine[] },
 ): Promise<void> {
+  if (!(await groupFeatureOn(client))) return;
   const submitting = input.lines.map((line) => ({
     ...line,
     user_id: input.userId,

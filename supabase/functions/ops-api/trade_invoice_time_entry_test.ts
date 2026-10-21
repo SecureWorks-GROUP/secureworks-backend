@@ -1594,6 +1594,33 @@ Deno.test("submit_trade_invoice (flag on): every card is refused by name before 
   assertEquals(on.writes, []);
 });
 
+Deno.test("submit_trade_invoice (group switch off): no group table is read", async () => {
+  const tables: string[] = [];
+  const { client, writes } = legacyClient({
+    flagOn: false,
+    assignments: [completedCard(CARD_A)],
+  });
+  const wrapped = {
+    from(table: string) {
+      tables.push(table);
+      return client.from(table);
+    },
+  };
+  await assertRejects(() =>
+    submitTradeInvoice(wrapped, TRADE_ID, {
+      week_ending: WEEK_END,
+      gst_on: false,
+    })
+  );
+  assertEquals(tables.some((table) => table.startsWith("group_")), false);
+  assertEquals(
+    writes.some((row) =>
+      row.table === "trade_invoice_lines" && row.op === "insert"
+    ),
+    true,
+  );
+});
+
 // ── 3. A job's list ─────────────────────────────────────────────────────────
 
 const billedEntry = (extra: Record<string, unknown> = {}) => ({
