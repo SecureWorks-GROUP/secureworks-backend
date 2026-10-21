@@ -605,3 +605,44 @@ Deno.test("rollup: Xero Project expenses are in no total of cost or profit", asy
     assertEquals(bucket.margin_pct, 40);
   }
 });
+
+Deno.test("rollup: a published Xero Project margin counts the project figure once", async () => {
+  const base = {
+    work_type: "fencing",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: "2026-08-08",
+    collected_ex: 0,
+    quoted_ex: null,
+    expected_cost_ex: null,
+    revenue_verified_paid: false,
+  };
+  const c = fakeClient({
+    v_job_profit: [
+      {
+        ...base,
+        job_id: "project",
+        invoiced_ex: 10000,
+        actual_cost_ex: 3000,
+        margin_cost_ex: 5000,
+        profit_ex: 5000,
+      },
+      {
+        ...base,
+        job_id: "plain",
+        invoiced_ex: 1000,
+        actual_cost_ex: 600,
+        profit_ex: 400,
+      },
+    ],
+  });
+  const body = (await jobProfitListAction(
+    c,
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  assertEquals(body.totals.jobs_with_margin, 2);
+  assertEquals(body.totals.actual_cost_ex, 3600);
+  assertEquals(body.totals.published_cost_ex, 5600);
+  assertEquals(body.totals.published_revenue_ex, 11000);
+  assertEquals(body.totals.profit_ex, 5400);
+});

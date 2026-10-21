@@ -677,6 +677,14 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cos
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
 
+# Job profit switches (20261021140000). Flags default off. The view appends
+# these columns; ops-api reads them once the migration has landed.
+ops-api|supabase/migrations/20261021140000_job_profit_work_order_xero_bills.sql|column|v_job_profit.margin_source
+ops-api|supabase/migrations/20261021140000_job_profit_work_order_xero_bills.sql|column|v_job_profit.margin_cost_ex
+ops-api|supabase/migrations/20261021140000_job_profit_work_order_xero_bills.sql|column|v_job_profit.expected_labour_quote_ex
+ops-api|supabase/migrations/20261021140000_job_profit_work_order_xero_bills.sql|column|v_job_profit.work_order_agreed_labour_ex
+ops-api|supabase/migrations/20261021140000_job_profit_work_order_xero_bills.sql|function|job_profit_flag_on
+
 # The deterministic intake stamps each case with its adapter id; the Ambrose
 # adapter is refused on every case insert until this migration admits it. The
 # constraint name is unchanged, so the ledger version is what proves it landed.
