@@ -152,6 +152,7 @@ import {
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
+import { buildQuickQuotePricingJson } from './quick_quote_pricing.ts'
 import {
   allocatedPaymentTerms,
   allocatedTradePackIdentity,
@@ -38754,34 +38755,9 @@ async function createMiscJob(client: any, body: any) {
     }))
   }
 
-  // Calculate totals
-  const totalExGST = line_items.reduce((sum: number, li: any) => sum + (Number(li.total) || 0), 0)
-  const gst = Math.round(totalExGST * 0.1 * 100) / 100
-  const totalIncGST = Math.round((totalExGST + gst) * 100) / 100
-
-  // Build pricing_json
-  const pricing_json = {
-    source: 'quick_quote',
-    version: '1.0',
-    totalExGST,
-    totalIncGST,
-    gst,
-    job_description: description || '',
-    job_type_label: job_type_label || 'Miscellaneous',
-    payment_terms: payment_terms || '50% deposit + 50% on completion',
-    valid_days: valid_days || 30,
-    client_notes: client_notes || '',
-    internal_notes: internal_notes || '',
-    reference: reference || '',
-    line_items: line_items.map((li: any) => ({
-      description: li.description || '',
-      quantity: Number(li.quantity) || 1,
-      unit: li.unit || 'ea',
-      unit_price: Number(li.unit_price) || 0,
-      cost_price: Number(li.cost_price) || 0,
-      total: Number(li.total) || 0,
-    })),
-  }
+  // Totals, lines and the worked-out margin: quick_quote_pricing.ts.
+  const pricing_json = buildQuickQuotePricingJson(body)
+  const totalIncGST = pricing_json.totalIncGST as number
 
   // Always 'draft' at creation per Cap 0 release-truth contract (see top of function).
   const finalStatus = 'draft'

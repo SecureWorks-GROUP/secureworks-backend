@@ -21,6 +21,7 @@ import {
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
 import { decideReportingStaffAuth } from './reporting_staff_gate.ts'
+import { MARGIN_HOLD_REASON, marginHoldOf, quotedCostsGpOf } from './margin_hold.ts'
 import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
@@ -2972,7 +2973,13 @@ async function problemJobs(sb: any) {
 
   return worst5.map((p: any) => {
     const job = jobLookup[p.job_id] || {}
-    const quotedMarginPct = job.pricing_json?.margin_pct ?? job.pricing_json?.marginPercent ?? job.pricing_json?.margin_percent ?? null
+    const savedMarginPct = job.pricing_json?.margin_pct ?? job.pricing_json?.marginPercent ?? job.pricing_json?.margin_percent ?? null
+    // A held quote has no verified quoted margin, so no slippage is worked out
+    // against it. A selected target is kept as a target, in its own field
+    // (margin_hold.ts).
+    const quotedMarginHold = marginHoldOf(job.pricing_json)
+    const quotedMarginPct = quotedMarginHold ? null : savedMarginPct
+    const targetMarginPct = quotedMarginHold === 'selected_target' && savedMarginPct != null ? Math.round(parseFloat(savedMarginPct)) : null
     const actualMarginPct = p.margin_pct
     const slippage = quotedMarginPct != null ? Math.round(actualMarginPct - parseFloat(quotedMarginPct)) : null
     return {
@@ -2983,6 +2990,8 @@ async function problemJobs(sb: any) {
       costs: p.costs,
       margin_pct: actualMarginPct,
       quoted_margin_pct: quotedMarginPct != null ? Math.round(parseFloat(quotedMarginPct)) : null,
+      ...(quotedMarginHold ? { quoted_margin_basis: quotedMarginHold } : {}),
+      ...(targetMarginPct != null ? { target_margin_pct: targetMarginPct } : {}),
       slippage,
       status: p.status,
     }
@@ -5113,14 +5122,51 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
   }
 
   const breakdown: any[] = []
+  // A job whose saved margin is a selected target, or whose commission is not
+  // set, earns nothing here until it is known: listed as held, never priced on
+  // the target or on a baseline (margin_hold.ts).
+  const held: any[] = []
+  // Quick Quote earns no commission (owner, 21 Oct 2026). Listed, never priced.
+  const notCommissioned: any[] = []
   let earnedTotal = 0
   for (const j of mine) {
     const earnedOn = paidInPeriod[j.id]
     if (!earnedOn) continue
     const value = qvOf(j)
     if (value <= 0) continue
-    const marginPct = marginPctDecimal(j.pricing_json && j.pricing_json.margin_pct)
-    const marginSource = marginPct != null ? 'pricing_json.margin_pct' : 'type_baseline'
+    if (j.pricing_json && j.pricing_json.source === 'quick_quote') {
+      notCommissioned.push({
+        job_id: j.id,
+        job_number: j.job_number,
+        client_name: j.client_name,
+        type: j.type,
+        value: Math.round(value * 100) / 100,
+        commission: 0,
+        reason: 'quick_quote',
+        earned_on: earnedOn,
+      })
+      continue
+    }
+    const hold = marginHoldOf(j.pricing_json)
+    // A selected target is never read as profit, but the quote's own costs are:
+    // with every cost known, gross profit comes from the sale less those costs.
+    const costsGp = hold === 'selected_target' ? quotedCostsGpOf(j.pricing_json) : null
+    if (hold && costsGp == null) {
+      held.push({
+        job_id: j.id,
+        job_number: j.job_number,
+        client_name: j.client_name,
+        type: j.type,
+        value: Math.round(value * 100) / 100,
+        commission: null,
+        held_reason: hold,
+        held_detail: MARGIN_HOLD_REASON[hold],
+        earned_on: earnedOn,
+      })
+      continue
+    }
+    const marginPct = costsGp != null ? costsGp : marginPctDecimal(j.pricing_json && j.pricing_json.margin_pct)
+    const marginSource = costsGp != null ? 'quoted_costs' : marginPct != null ? 'pricing_json.margin_pct' : 'type_baseline'
     const gpPct = marginPct != null ? marginPct : (j.type === 'fencing' ? fencingBaseline : patioBaseline)
     const gpAmount = value * gpPct
     const commission = Math.round(gpAmount * repRate * 100) / 100
@@ -5148,6 +5194,8 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
     earned_total: Math.round(earnedTotal * 100) / 100,
     jobs_count: breakdown.length,
     breakdown,
+    ...(held.length > 0 ? { held_count: held.length, held } : {}),
+    ...(notCommissioned.length > 0 ? { not_commissioned_count: notCommissioned.length, not_commissioned: notCommissioned } : {}),
     formula_snapshot: {
       rep_rate: repRate,
       fencing_baseline_gp: fencingBaseline,

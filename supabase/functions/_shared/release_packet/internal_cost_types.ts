@@ -52,6 +52,13 @@ export type InternalMargin = {
   // costs_to_confirm: some cost lines have no price. margin_not_given: the
   // tool saved no margin. pct is a FRACTION (0.495), never a percent.
   floor_check?: 'costs_to_confirm' | 'margin_not_given'
+  // The margin the scoper SELECTED as a plan (the patio slider), as a
+  // fraction. Present only when the tool marks its margin_pct as a selected
+  // target. It is never a floor verdict and never profit: the floor and any
+  // profit read `pct`, which is worked out from complete sealed costs and the
+  // sell price, and stays null while any cost (commission included) is
+  // still to confirm.
+  target_pct?: number
   // When floor_breached is true, override_reason is required (validator
   // enforces). The approver UUID + role must match the project's configured
   // override-operator allowlist (Marnin or Shaun per §9 default).
@@ -73,6 +80,12 @@ export type InternalCommission = {
   // salesperson. Captured by scoping tools at scope time once they expose
   // the salesperson selector. Nullable until that capture lands.
   salesperson_user_id: string | null
+  // Why the amount is what it is, when it is not a confirmed rate.
+  // not_set: no commission rate is set yet (owner call C1), so the amount is
+  // null and commission is listed as a cost to confirm. none_declared: the
+  // tool has no commission rule and declares 0 (Quick Quote, owner call C2);
+  // a declared limit, not a confirmed policy.
+  basis?: 'not_set' | 'none_declared'
 }
 
 export type InternalCostSnapshot = {
