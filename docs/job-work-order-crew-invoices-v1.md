@@ -21,7 +21,7 @@ All seven are `feature_flags` rows, missing or unreadable meaning off.
 | `crew_invoice_on_job_work_order_v1` | off | The line trigger stamps `trade_invoice_lines.job_work_order_id` from a draft or an approved job work order. Off: only an approved one is stamped, as today. |
 | `crew_invoice_line_office_review_v1` | off | A new crew invoice line starts `office_review_status = awaiting`. Awaiting, queried and rejected hold the whole invoice out of Xero. A historical NULL still syncs. While on, `submit_trade_invoice` is 410. Lines already awaiting stay held if the switch is later turned off. |
 | `crew_invoice_requires_job_work_order_v1` | off | Separate hard rule. DEFAULT, owner to confirm: an open job's non-travel line with no job work order is refused before the invoice is saved. Closed jobs and Travel are exempt. A line with no job is not. |
-| `retire_crew_work_orders_v1` | off | `create_work_order` refuses any call that is not `kind: 'job'`. Lists hide legacy `kind = 'crew'` rows that have no `quote_builder_version_id`. `my_work_orders` returns approved job work orders with the money stripped and drafts left out. Off: today's crew insert and today's lists. |
+| `retire_crew_work_orders_v1` | off | `create_work_order` refuses any call that is not `kind: 'job'`, except a per-metre assignee's crew work order. Lists hide legacy `kind = 'crew'` rows that have no `quote_builder_version_id`, except that per-metre weekly row. `my_work_orders` returns approved job work orders with the money stripped and drafts left out. Off: today's crew insert and today's lists. |
 
 Turn the review flag on before, or in the same step as, the stamp flag. A
 blank work order with the stamp on and review off would sync straight away.
@@ -44,7 +44,10 @@ allowance. `0` is an explicit none. Null is not a fill.
 blank door when the all-types flag is on and the job is not fencing or
 patio; otherwise the existing fencing/patio door). Any other kind, and a
 missing kind, is a crew work order. While `retire_crew_work_orders_v1` is
-on that call returns 409 `crew_work_order_retired`:
+on that call returns 409 `crew_work_order_retired`, except when the
+assignee's `users.invoice_type` is `per_metre`: that weekly crew work
+order is still written, including when `kind` is omitted. A missing
+invoice type is still refused:
 
 > Crew work orders are retired. Send kind: 'job' to open the job's work order.
 
@@ -136,11 +139,21 @@ old lines.
 One held or rejected line blocks the invoice; lines are not dropped from the
 total.
 
-`push_trade_invoice_to_xero`, `generate_trade_invoice` and
-`submit_work_order_invoice` read the saved line statuses before they ask
-Xero, whether or not the review flag can be read. An unreadable line read
-is 503 `office_review_unreadable`. NULL does not hold. A failed flag read
-does not treat the lines as clear.
+`push_trade_invoice_to_xero`, `generate_trade_invoice`,
+`submit_work_order_invoice` and `submit_trade_invoice` read the saved line
+statuses before they ask Xero, whether or not the review flag can be read.
+NULL does not hold. A failed flag read does not treat the lines as clear.
+When the line read itself fails after the invoice is already saved,
+`generate_trade_invoice`, `submit_work_order_invoice` and
+`submit_trade_invoice` call `markTradeInvoiceRetryable` and return the
+existing `XERO_PUSH_FAILED` shape (`ok: false`, `success: true`, status
+`approved`, query note "The office review on this invoice could not be
+read. It was saved and was not sent to Xero."). They do not throw 503.
+`push_trade_invoice_to_xero` still answers 503 `office_review_unreadable`
+on that read, because that invoice is already past save and the push door
+is the retry. `submit_work_order_invoice` still throws 503
+`office_review_unreadable` only when a held invoice cannot be moved from
+`draft` to `pending_acknowledgment`.
 
 While the review flag is on, `submit_trade_invoice` is 410
 `submit_trade_invoice_retired` before it writes. A failed flag read does
@@ -159,6 +172,12 @@ the invoice to `ops-reject` and does not push. An invoice already in Xero
 is 409 `invoice_already_in_xero`. Turning the review flag off later does
 not clear a line that is already awaiting, queried or rejected, and does
 not release it.
+
+DEFAULT, pending Marnin: the person who submitted the invoice
+(`trade_invoices.user_id`) cannot approve, query or reject its crew lines.
+That includes a line already held after the review switch is turned off.
+The refusal is 403 `self_approval_forbidden`. A null submitter does not
+block. Another office reviewer still can.
 
 ## What the trade list returns
 
@@ -184,6 +203,18 @@ the weekly resolver and `complete_my_job`'s work-order completion skip or
 refuse a retired crew row and do not complete a job work order.
 `complete_my_job` does not list the job work order in
 `invoice_queue.work_orders`.
+
+DEFAULT, pending Marnin: a per-metre trade's weekly crew work order stays
+on that path while the retire switch is on. The row is `kind = 'crew'`,
+has no `quote_builder_version_id`, and its assignee's `users.invoice_type`
+is `per_metre`. It stays on `my_work_orders` and `list_work_orders`, the
+weekly resolver still invoices it, `submit_work_order_invoice` still
+accepts it, and `complete_my_job` still completes it onto the weekly
+queue. `create_work_order` still writes one for that assignee, including
+when `kind` is omitted. Quote-builder create does not pass an invoice
+type, so it stays refused. An unreadable assignee read is 503
+`assignee_invoice_type_unreadable` and does not treat the row as retired.
+A missing invoice type is still retired.
 
 `list_trade_invoice_lines` adds `review_state` beside
 `office_review_status`: awaiting is `held`, and approved, queried and
@@ -216,8 +247,12 @@ not qualify. A processing make-safe with that activity is in the preview.
 again. It exits 2 without that file, or when the file has no valid ids,
 or unless both `job_work_order_all_types_v1` and
 `job_work_order_active_backfill_v1` are on. It then posts those ids to
-`apply_active_job_work_orders(uuid[])`, which opens only the ones still
-open and still without a job work order and skips the rest.
+`apply_active_job_work_orders(uuid[])`. Apply re-checks every id and
+opens a draft only when the job is still open, still has activity inside
+30 days, has a non-blank type, and still has no draft or approved job
+work order. Anything else is skipped and named in `skipped_jobs`:
+`not_found`, `blank_type`, `not_open`, `already_has_work_order`,
+`no_recent_activity`.
 
 ## Retiring the old crew work orders
 
@@ -232,12 +267,26 @@ SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… \
 ```
 
 Dry-run prints eligible, already cancelled, to retire, sent, with `sent_at`,
-open jobs, closed jobs, and whether `retire_crew_work_orders_v1` is on.
-Audit expectation, printed and not checked: 34 eligible, 9 sent, 4 open
-jobs.
+open jobs, closed jobs, `kept_per_metre`, and whether
+`retire_crew_work_orders_v1` is on. A per-metre assignee's weekly crew
+row is counted in `kept_per_metre` and is not cancelled. A failed read of
+`users.invoice_type` exits 1 and writes nothing. Audit expectation,
+printed and not checked: 34 eligible, 9 sent, 4 open jobs.
 
 `--apply` exits 2 unless that flag is on, then sets `status = 'cancelled'`
-in chunks of 25 and re-reads the same ids.
+in chunks of 25 and re-reads the same ids. The ids it patches are the
+plan's `ids` only, so a kept per-metre row is not in that write.
+
+## Rollback
+
+`supabase/rollbacks/20261021143000_job_work_order_crew_invoices_down.sql`
+calls `job_work_order_crew_invoice_rollback_guard()` before it restores
+anything. The guard raises SQLSTATE `55000`
+(`object_not_in_prerequisite_state`) and changes nothing when
+`crew_invoice_line_office_review_v1` is on, or when any
+`trade_invoice_lines.office_review_status` is `awaiting`, `queried` or
+`rejected`. Turn the switch off and move those lines off the hold before
+rolling this migration back.
 
 ## Go-live
 
@@ -254,7 +303,9 @@ Marnin okays each of these. None of them is this pull request.
    last approval pushes. A rejected line returns the invoice as
    `ops-reject`. Any office staff can review lines. DEFAULT, owner to
    confirm: the reviewer is any office role, the last approval pushes, and
-   a rejection returns the invoice. The trade-app toast that says a held
+   a rejection returns the invoice. DEFAULT, pending Marnin: the person
+   who submitted the invoice cannot review its crew lines (403
+   `self_approval_forbidden`). The trade-app toast that says a held
    invoice was submitted to Xero needs a UX change before this switch is
    turned on.
 4. Turn `job_work_order_all_types_v1` and
@@ -277,6 +328,9 @@ Marnin okays each of these. None of them is this pull request.
    `scripts/retire-crew-work-orders.ts`, then `--apply`. That also stops
    quote-builder creating `kind = 'crew'`. `my_work_orders` then returns
    approved job work orders with the money stripped, and leaves drafts out.
+   DEFAULT, pending Marnin: a per-metre trade's weekly crew work order
+   stays. The dry-run prints `kept_per_metre` and `--apply` does not
+   cancel those rows.
 
 ## Left open
 

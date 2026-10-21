@@ -75,6 +75,7 @@ async function assertOfficeWrite(
   actor: OfficeActor,
   action: OfficeWriteAction,
   lineAlreadyHeld = false,
+  invoiceSubmitterId: string | null = null,
 ): Promise<void> {
   const [officeFlagOn, reviewFlagOn, lists] = await Promise.all([
     readFlag(client, JOB_WORK_ORDER_OFFICE_FILL_FLAG),
@@ -90,6 +91,7 @@ async function assertOfficeWrite(
     primaryIds: lists.primaryIds,
     backupIds: lists.backupIds,
     lineAlreadyHeld,
+    invoiceSubmitterId,
   });
   if (!decision.ok) {
     throw new JobWorkOrderOfficeError(
@@ -310,7 +312,7 @@ export async function reviewCrewInvoiceLine(
   }
   const note = typeof body?.note === "string" ? body.note.trim().slice(0, 2000) : null;
   const { data: line, error: readErr } = await client.from("trade_invoice_lines")
-    .select("id, trade_invoice_id, office_review_status, trade_invoices:trade_invoice_id(id, status, xero_bill_id, query_note)")
+    .select("id, trade_invoice_id, office_review_status, trade_invoices:trade_invoice_id(id, status, user_id, xero_bill_id, query_note)")
     .eq("id", lineId)
     .maybeSingle();
   if (readErr) {
@@ -319,13 +321,15 @@ export async function reviewCrewInvoiceLine(
   if (!line) {
     throw new JobWorkOrderOfficeError(404, "line_not_found", "Invoice line not found.");
   }
+  const invoiceEmbed = line.trade_invoices;
+  const invoice = (Array.isArray(invoiceEmbed) ? invoiceEmbed[0] : invoiceEmbed) || {};
   await assertOfficeWrite(
     client,
     actor,
     "review",
     officeReviewLineIsHeld(line.office_review_status),
+    invoice.user_id ?? null,
   );
-  const invoice = line.trade_invoices || {};
   if (invoice.xero_bill_id) {
     throw new JobWorkOrderOfficeError(
       409,

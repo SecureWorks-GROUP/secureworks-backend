@@ -335,21 +335,43 @@ export function xeroSyncRefusal(
 }
 
 /**
+ * A per-metre trade's weekly crew work order. DEFAULT, pending Marnin:
+ * retirement must not hide, cancel, or refuse this path. A quote-builder
+ * crew row is not this, even when its assignee is per-metre.
+ */
+export function perMetreWeeklyCrewWorkOrder(row: {
+  kind?: string | null;
+  quote_builder_version_id?: string | null;
+  assignee_invoice_type?: string | null;
+}): boolean {
+  return row.kind === "crew" &&
+    !row.quote_builder_version_id &&
+    row.assignee_invoice_type === "per_metre";
+}
+
+/**
  * Hide a legacy per-trade crew work order once retire_crew_work_orders_v1
  * is on. A quote-builder crew row (it carries quote_builder_version_id)
- * stays. A null kind stays. A job work order stays: my_work_orders returns
- * it while this switch is on, and the trade app does not filter by kind.
+ * stays. A per-metre weekly crew row stays. A null kind stays. A job work
+ * order stays: my_work_orders returns it while this switch is on, and the
+ * trade app does not filter by kind.
  */
 export function hideRetiredCrewWorkOrder(
-  row: { kind?: string | null; quote_builder_version_id?: string | null },
+  row: {
+    kind?: string | null;
+    quote_builder_version_id?: string | null;
+    assignee_invoice_type?: string | null;
+  },
   flagOn: boolean,
 ): boolean {
+  if (perMetreWeeklyCrewWorkOrder(row)) return false;
   return flagOn && row.kind === "crew" && !row.quote_builder_version_id;
 }
 
 export function visibleCrewPayWorkOrders<T extends {
   kind?: string | null;
   quote_builder_version_id?: string | null;
+  assignee_invoice_type?: string | null;
 }>(rows: readonly T[], flagOn: boolean): T[] {
   if (!flagOn) return [...rows];
   return rows.filter((row) => !hideRetiredCrewWorkOrder(row, true));
@@ -393,6 +415,10 @@ export function officeReviewLineIsHeld(
  * awaiting, queried or rejected: turning the switch off later does not
  * stick those lines or release them. A null stamp while the switch is off
  * is still refused. A server key with no user id is not a reviewer.
+ *
+ * DEFAULT, pending Marnin: the person who submitted the invoice cannot
+ * review its crew lines, including a line already held after the switch
+ * is turned off. A null submitter does not block.
  */
 export function decideOfficeWrite(input: {
   staff: boolean;
@@ -403,6 +429,7 @@ export function decideOfficeWrite(input: {
   primaryIds: readonly string[];
   backupIds: readonly string[];
   lineAlreadyHeld?: boolean;
+  invoiceSubmitterId?: string | null;
 }): OfficeWriteDecision {
   if (!input.staff) {
     return {
@@ -419,6 +446,14 @@ export function decideOfficeWrite(input: {
         status: 403,
         code: "not_approver",
         error: "Line review needs an office session.",
+      };
+    }
+    if (input.invoiceSubmitterId && input.userId === input.invoiceSubmitterId) {
+      return {
+        ok: false,
+        status: 403,
+        code: "self_approval_forbidden",
+        error: "An approver cannot review crew lines on an invoice they submitted.",
       };
     }
     if (input.reviewFlagOn || input.lineAlreadyHeld) return { ok: true };
@@ -572,12 +607,18 @@ const CREW_RETIRED_ERROR =
  * retire_crew_work_orders_v1 is on. A missing kind is the same as a crew
  * kind: cached pages and sw_create_work_order both omit it. The switch off
  * leaves today's crew insert alone.
+ *
+ * DEFAULT, pending Marnin: a per-metre assignee may still open a crew work
+ * order, including when kind is omitted. A missing invoice type still
+ * refuses. Quote-builder create does not pass a type, so it stays refused.
  */
 export function crewWorkOrderCreateRefusal(
   kind: unknown,
   flagOn: boolean,
+  assigneeInvoiceType?: string | null,
 ): { code: "crew_work_order_retired"; error: string } | null {
   if (!flagOn || kind === "job") return null;
+  if (assigneeInvoiceType === "per_metre") return null;
   return { code: "crew_work_order_retired", error: CREW_RETIRED_ERROR };
 }
 
@@ -601,13 +642,15 @@ export interface CrewRetirementRow {
   sent_at?: string | null;
   job_id?: string | null;
   job_status?: string | null;
+  assignee_invoice_type?: string | null;
 }
 
 /**
- * What the manual retirement script would cancel. Quote-builder crew rows
- * and job work orders are not in the set. Already-cancelled rows are
- * counted and not cancelled again. The live 34 / 9 / 4 audit is a comment
- * on the script, not a number this function checks.
+ * What the manual retirement script would cancel. Quote-builder crew rows,
+ * job work orders, and a per-metre trade's weekly crew rows are not in the
+ * set. Already-cancelled rows are counted and not cancelled again. The live
+ * 34 / 9 / 4 audit is a comment on the script, not a number this function
+ * checks.
  */
 export function planCrewWorkOrderRetirement(rows: readonly CrewRetirementRow[]): {
   eligible: number;
@@ -618,10 +661,14 @@ export function planCrewWorkOrderRetirement(rows: readonly CrewRetirementRow[]):
   open_jobs: number;
   closed_jobs: number;
   unknown_job_status: number;
+  kept_per_metre: number;
   ids: string[];
 } {
+  const keptPerMetre = rows.filter((row) => perMetreWeeklyCrewWorkOrder(row));
   const eligible = rows.filter((row) =>
-    row.kind === "crew" && !row.quote_builder_version_id
+    row.kind === "crew" &&
+    !row.quote_builder_version_id &&
+    !perMetreWeeklyCrewWorkOrder(row)
   );
   const alreadyCancelled = eligible.filter((row) => row.status === "cancelled");
   const toRetire = eligible.filter((row) => row.status !== "cancelled");
@@ -645,9 +692,14 @@ export function planCrewWorkOrderRetirement(rows: readonly CrewRetirementRow[]):
     open_jobs: openJobs.size,
     closed_jobs: closedJobs.size,
     unknown_job_status: unknownJobs.size,
+    kept_per_metre: keptPerMetre.length,
     ids: toRetire.map((row) => row.id),
   };
 }
+
+/** Saved on the invoice when the line review could not be read after save. */
+export const OFFICE_REVIEW_UNREADABLE_RETRY_NOTE =
+  "The office review on this invoice could not be read. It was saved and was not sent to Xero.";
 
 export function decideOfficeQueue(input: {
   staff: boolean;

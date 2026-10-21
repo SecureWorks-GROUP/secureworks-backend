@@ -10,6 +10,9 @@
  * this script checks: 34 kind='crew' rows, 9 of them status sent, sitting on
  * 4 open jobs. None since June, none invoiced. Quote-builder crew rows
  * (quote_builder_version_id set) are not in that 34 and are not selected.
+ * A per-metre trade's weekly crew work order (users.invoice_type =
+ * per_metre) is kept and printed as kept_per_metre. A failed read of that
+ * type exits 1 and writes nothing.
  *
  * Dry-run prints the live plan and whether the flag is on. It writes nothing.
  * --apply refuses (exit 2) unless retire_crew_work_orders_v1 is enabled, then
@@ -39,7 +42,7 @@ function usage(): void {
     "Dry-run is the default. --apply sets status=cancelled only when retire_crew_work_orders_v1 is on.",
   );
   console.log(
-    "Audit expectation (not checked): 34 kind=crew rows, 9 sent, 4 open jobs. Quote-builder rows are left.",
+    "Audit expectation (not checked): 34 kind=crew rows, 9 sent, 4 open jobs. Quote-builder rows and per-metre weekly crew rows are left.",
   );
 }
 
@@ -87,12 +90,43 @@ function jobStatusOf(row: any): string | null {
   return job.status ?? null;
 }
 
-async function loadCrewRows(base: string, key: string): Promise<CrewRetirementRow[]> {
-  const rows: CrewRetirementRow[] = [];
+type LoadedCrewRow = CrewRetirementRow & { assigned_user_id?: string | null };
+
+async function stampAssigneeInvoiceTypes(
+  base: string,
+  key: string,
+  rows: LoadedCrewRow[],
+): Promise<void> {
+  const ids = [...new Set(
+    rows.map((row) => row.assigned_user_id).filter((id): id is string => Boolean(id)),
+  )];
+  const types = new Map<string, string | null>();
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const { status, body } = await rest(
+      base,
+      key,
+      `users?id=in.(${chunk.join(",")})&select=id,invoice_type`,
+    );
+    if (status < 200 || status >= 300 || !Array.isArray(body)) {
+      console.error("assignee invoice type read failed", status, body);
+      Deno.exit(1);
+    }
+    for (const user of body) types.set(String(user.id), user.invoice_type ?? null);
+  }
+  for (const row of rows) {
+    row.assignee_invoice_type = row.assigned_user_id
+      ? (types.get(row.assigned_user_id) ?? null)
+      : null;
+  }
+}
+
+async function loadCrewRows(base: string, key: string): Promise<LoadedCrewRow[]> {
+  const rows: LoadedCrewRow[] = [];
   for (let offset = 0; ; offset += PAGE) {
     const path =
       "work_orders?kind=eq.crew&quote_builder_version_id=is.null" +
-      "&select=id,kind,status,sent_at,job_id,quote_builder_version_id,jobs!work_orders_job_id_fkey(status)" +
+      "&select=id,kind,status,sent_at,job_id,assigned_user_id,quote_builder_version_id,jobs!work_orders_job_id_fkey(status)" +
       `&order=id.asc&limit=${PAGE}&offset=${offset}`;
     const { status, body } = await rest(base, key, path);
     if (status < 200 || status >= 300 || !Array.isArray(body)) {
@@ -108,10 +142,12 @@ async function loadCrewRows(base: string, key: string): Promise<CrewRetirementRo
         sent_at: row.sent_at,
         job_id: row.job_id,
         job_status: jobStatusOf(row),
+        assigned_user_id: row.assigned_user_id ? String(row.assigned_user_id) : null,
       });
     }
     if (body.length < PAGE) break;
   }
+  await stampAssigneeInvoiceTypes(base, key, rows);
   return rows;
 }
 
@@ -138,6 +174,7 @@ function printPlan(plan: ReturnType<typeof planCrewWorkOrderRetirement>, flag: b
   console.log(`open jobs: ${plan.open_jobs}`);
   console.log(`closed jobs: ${plan.closed_jobs}`);
   console.log(`unknown job status: ${plan.unknown_job_status}`);
+  console.log(`kept per-metre weekly crew rows: ${plan.kept_per_metre}`);
   console.log(
     "audit expectation, not checked: 34 eligible, 9 sent, 4 open jobs",
   );

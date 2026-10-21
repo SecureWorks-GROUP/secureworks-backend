@@ -12,7 +12,11 @@
  * need a flag. Save that JSON and review the ids.
  *
  * --apply --file <that json> calls apply_active_job_work_orders(uuid[])
- * with those ids only. It does not preview again. It runs only when BOTH
+ * with those ids only. It does not preview again. Apply re-checks every
+ * id for 30-day activity, an open status, a non-blank type, and no
+ * existing job work order, and reports skipped_jobs with the reason
+ * (not_found, blank_type, not_open, already_has_work_order,
+ * no_recent_activity). It runs only when BOTH
  * job_work_order_all_types_v1 and job_work_order_active_backfill_v1 are on.
  * The database refuses the same call (42501) if either is off. A missing
  * file, or a file with no valid ids, exits 2.

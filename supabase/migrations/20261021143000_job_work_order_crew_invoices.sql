@@ -21,11 +21,11 @@ VALUES
   ('crew_invoice_on_job_work_order_v1', false,
    'Stamp trade_invoice_lines.job_work_order_id from a draft or approved job work order. Off: only an approved job work order is stamped, as before.'),
   ('crew_invoice_line_office_review_v1', false,
-   'New crew invoice lines start awaiting office review and must not sync to Xero until approved. While on, submit_trade_invoice is refused. Lines already awaiting stay held if this switch is later turned off. Off: new lines are unchanged and still sync.'),
+   'New crew invoice lines start awaiting office review and must not sync to Xero until approved. While on, submit_trade_invoice is refused. Lines already awaiting stay held if this switch is later turned off. Off: new lines are unchanged and still sync, unless the switch itself cannot be read, in which case the line is held.'),
   ('crew_invoice_requires_job_work_order_v1', false,
    'Refuse a crew invoice line on an open job that has no job work order. Closed jobs and Travel are exempt. Off: a job with no work order can still be invoiced.'),
   ('retire_crew_work_orders_v1', false,
-   'Stop creating crew work orders, including a quote-builder crew work order, and hide existing kind=crew rows that are not quote-builder work orders. Off: those rows stay as they are. Nothing is deleted.')
+   'Stop creating crew work orders, including a quote-builder crew work order, and hide existing kind=crew rows that are not quote-builder work orders. A per-metre trade''s own weekly crew work order stays, so that path is not stranded. Off: those rows stay as they are. Nothing is deleted.')
 ON CONFLICT (flag_name) DO NOTHING;
 
 -- ── 2. backup approver (the seal ignores it until the office switch is on) ──
@@ -330,7 +330,8 @@ GRANT EXECUTE ON FUNCTION public.job_invoice_work_order_id(uuid) TO service_role
 
 -- Review is its own exception block, before the job-id return, so a travel
 -- line or a deduction with no job still starts awaiting. A failure there
--- does not skip the work-order stamp.
+-- does not skip the work-order stamp. An unreadable review switch fails
+-- closed: the line is held (awaiting), not left unmarked.
 CREATE OR REPLACE FUNCTION public.trade_invoice_lines_link_job_work_order()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -347,7 +348,8 @@ BEGIN
         NEW.office_review_status := 'awaiting';
       END IF;
     EXCEPTION WHEN OTHERS THEN
-      RAISE WARNING 'office review stamp skipped for trade invoice line %: SQLSTATE %', NEW.id, SQLSTATE;
+      NEW.office_review_status := 'awaiting';
+      RAISE WARNING 'office review switch unreadable; trade invoice line % held awaiting: SQLSTATE %', NEW.id, SQLSTATE;
     END;
   END IF;
 
@@ -400,6 +402,50 @@ $$;
 ALTER TABLE public.trade_invoice_lines
   ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
 
+-- The same 30-day activity the preview uses. Apply re-checks it per id.
+-- jobs.updated_at does not qualify.
+CREATE OR REPLACE FUNCTION public.job_work_order_recent_activity(p_job_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT
+    EXISTS (
+      SELECT 1 FROM public.job_assignments a
+      WHERE a.job_id = p_job_id
+        AND (
+          a.created_at >= now() - interval '30 days'
+          OR a.scheduled_date >= (now() - interval '30 days')::date
+        )
+    )
+    OR EXISTS (
+      SELECT 1 FROM public.job_assignment_logged_times t
+      WHERE t.job_id = p_job_id
+        AND (
+          t.logged_at >= now() - interval '30 days'
+          OR t.work_date >= (now() - interval '30 days')::date
+        )
+    )
+    OR EXISTS (
+      SELECT 1 FROM public.trade_invoice_lines l
+      WHERE l.job_id = p_job_id
+        AND (
+          l.created_at >= now() - interval '30 days'
+          OR l.line_date >= (now() - interval '30 days')::date
+        )
+    )
+    OR EXISTS (
+      SELECT 1 FROM public.job_events e
+      WHERE e.job_id = p_job_id
+        AND e.event_type IN ('status_changed', 'status_change', 'job.status_changed')
+        AND e.created_at >= now() - interval '30 days'
+    );
+$$;
+REVOKE ALL ON FUNCTION public.job_work_order_recent_activity(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.job_work_order_recent_activity(uuid) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.preview_active_job_work_orders()
 RETURNS TABLE (
   job_id uuid,
@@ -420,38 +466,7 @@ AS $$
       SELECT 1 FROM public.work_orders wo
       WHERE wo.job_id = j.id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
     )
-    AND (
-      EXISTS (
-        SELECT 1 FROM public.job_assignments a
-        WHERE a.job_id = j.id
-          AND (
-            a.created_at >= now() - interval '30 days'
-            OR a.scheduled_date >= (now() - interval '30 days')::date
-          )
-      )
-      OR EXISTS (
-        SELECT 1 FROM public.job_assignment_logged_times t
-        WHERE t.job_id = j.id
-          AND (
-            t.logged_at >= now() - interval '30 days'
-            OR t.work_date >= (now() - interval '30 days')::date
-          )
-      )
-      OR EXISTS (
-        SELECT 1 FROM public.trade_invoice_lines l
-        WHERE l.job_id = j.id
-          AND (
-            l.created_at >= now() - interval '30 days'
-            OR l.line_date >= (now() - interval '30 days')::date
-          )
-      )
-      OR EXISTS (
-        SELECT 1 FROM public.job_events e
-        WHERE e.job_id = j.id
-          AND e.event_type IN ('status_changed', 'status_change', 'job.status_changed')
-          AND e.created_at >= now() - interval '30 days'
-      )
-    )
+    AND public.job_work_order_recent_activity(j.id)
   ORDER BY j.type, j.job_number;
 $$;
 REVOKE ALL ON FUNCTION public.preview_active_job_work_orders() FROM PUBLIC, anon, authenticated;
@@ -467,9 +482,12 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_id uuid;
+  v_job record;
+  v_reason text;
   v_opened int := 0;
   v_skipped int := 0;
   v_opened_ids uuid[] := ARRAY[]::uuid[];
+  v_skipped_jobs jsonb := '[]'::jsonb;
 BEGIN
   IF NOT COALESCE((SELECT f.enabled FROM public.feature_flags f
                    WHERE f.flag_name = 'job_work_order_all_types_v1' LIMIT 1), false)
@@ -480,33 +498,81 @@ BEGIN
   END IF;
   IF p_job_ids IS NULL THEN
     RETURN jsonb_build_object(
-      'opened', 0, 'opened_ids', '[]'::jsonb, 'skipped', 0, 'as_of', now()
+      'opened', 0, 'opened_ids', '[]'::jsonb, 'skipped', 0,
+      'skipped_jobs', '[]'::jsonb, 'as_of', now()
     );
   END IF;
+  -- Re-check every reviewed id. A job that lost its 30-day activity, closed,
+  -- or has a blank type is skipped and named. It does not open a blank draft.
   FOREACH v_id IN ARRAY p_job_ids LOOP
-    IF EXISTS (
-      SELECT 1 FROM public.jobs j
-      WHERE j.id = v_id
-        AND j.status = ANY (public.job_work_order_open_statuses())
-        AND NOT EXISTS (
-          SELECT 1 FROM public.work_orders wo
-          WHERE wo.job_id = j.id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
-        )
+    SELECT j.id, j.status, j.type INTO v_job FROM public.jobs j WHERE j.id = v_id;
+    IF NOT FOUND THEN
+      v_reason := 'not_found';
+    ELSIF COALESCE(btrim(v_job.type), '') = '' THEN
+      v_reason := 'blank_type';
+    ELSIF NOT (v_job.status = ANY (public.job_work_order_open_statuses())) THEN
+      v_reason := 'not_open';
+    ELSIF EXISTS (
+      SELECT 1 FROM public.work_orders wo
+      WHERE wo.job_id = v_id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
     ) THEN
+      v_reason := 'already_has_work_order';
+    ELSIF NOT public.job_work_order_recent_activity(v_id) THEN
+      v_reason := 'no_recent_activity';
+    ELSE
+      v_reason := NULL;
+    END IF;
+    IF v_reason IS NULL THEN
       PERFORM public.ensure_job_work_order_draft(v_id, 'backfill');
       v_opened := v_opened + 1;
       v_opened_ids := v_opened_ids || v_id;
     ELSE
       v_skipped := v_skipped + 1;
+      v_skipped_jobs := v_skipped_jobs || jsonb_build_array(
+        jsonb_build_object('job_id', v_id, 'reason', v_reason)
+      );
     END IF;
   END LOOP;
   RETURN jsonb_build_object(
     'opened', v_opened,
     'opened_ids', to_jsonb(v_opened_ids),
     'skipped', v_skipped,
+    'skipped_jobs', v_skipped_jobs,
     'as_of', now()
   );
 END;
 $$;
 REVOKE ALL ON FUNCTION public.apply_active_job_work_orders(uuid[]) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_active_job_work_orders(uuid[]) TO service_role;
+
+-- The down migration calls this first and stops if it raises. Review on, or
+-- a line still awaiting, queried or rejected, would drop the hold.
+CREATE OR REPLACE FUNCTION public.job_work_order_crew_invoice_rollback_guard()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF COALESCE((SELECT enabled FROM public.feature_flags
+               WHERE flag_name = 'crew_invoice_line_office_review_v1'), false) THEN
+    RAISE EXCEPTION 'refusing rollback: crew_invoice_line_office_review_v1 is on. Turn it off before rolling this migration back.'
+      USING ERRCODE = '55000';
+  END IF;
+  IF to_regclass('public.trade_invoice_lines') IS NOT NULL
+     AND EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'trade_invoice_lines'
+         AND column_name = 'office_review_status'
+     )
+     AND EXISTS (
+       SELECT 1 FROM public.trade_invoice_lines
+       WHERE office_review_status IN ('awaiting', 'queried', 'rejected')
+     ) THEN
+    RAISE EXCEPTION 'refusing rollback: a crew invoice line is still held for office review (awaiting, queried or rejected). Clear those lines before rolling this migration back.'
+      USING ERRCODE = '55000';
+  END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.job_work_order_crew_invoice_rollback_guard() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.job_work_order_crew_invoice_rollback_guard() TO service_role;

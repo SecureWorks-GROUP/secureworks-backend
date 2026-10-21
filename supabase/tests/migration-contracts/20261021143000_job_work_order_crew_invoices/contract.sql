@@ -109,6 +109,9 @@ DECLARE
   v_asg_proc_stale uuid := gen_random_uuid();
   v_processing_ok boolean := false;
   v_result jsonb;
+  v_missing uuid := gen_random_uuid();
+  v_blank uuid := gen_random_uuid();
+  v_type_check text;
 BEGIN
   INSERT INTO public.jobs (id, org_id, type, status, job_number, updated_at) VALUES
     (v_now, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-NOW', now() - interval '40 days'),
@@ -195,17 +198,55 @@ BEGIN
   v_result := public.apply_active_job_work_orders(NULL);
   IF (v_result->>'opened')::int <> 0
      OR jsonb_array_length(v_result->'opened_ids') <> 0
-     OR (v_result->>'skipped')::int <> 0 THEN
+     OR (v_result->>'skipped')::int <> 0
+     OR jsonb_array_length(v_result->'skipped_jobs') <> 0 THEN
     RAISE EXCEPTION 'contract: a null id list must open nothing (%)', v_result;
   END IF;
+  -- A blank type cannot be stored while jobs_type_check is on. Drop it only
+  -- for this insert, put the type back, then restore the same check.
+  SELECT pg_get_constraintdef(oid) INTO v_type_check
+  FROM pg_constraint
+  WHERE conrelid = 'public.jobs'::regclass AND conname = 'jobs_type_check';
+  IF v_type_check IS NULL THEN
+    RAISE EXCEPTION 'contract: jobs_type_check must exist so a blank type can be forced';
+  END IF;
+  ALTER TABLE public.jobs DROP CONSTRAINT jobs_type_check;
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_blank, v_org, '   ', 'scheduled', 'JWOCI-BLANK');
   -- Apply only the ids this case reviewed. The shared database holds other
-  -- contracts' open jobs, and apply must not open those.
-  v_result := public.apply_active_job_work_orders(
-    ARRAY[v_now, v_edge, v_inv] || v_done
-  );
+  -- contracts' open jobs, and apply must not open those. Every id is
+  -- re-checked: activity, open status, a real type, and no job work order.
+  v_result := public.apply_active_job_work_orders(ARRAY[
+    v_now, v_edge, v_inv, v_done, v_stale, v_fence, v_missing, v_blank
+  ]);
   IF (v_result->>'skipped')::int < 1
      OR NOT (v_result->'opened_ids' ? v_now::text) THEN
     RAISE EXCEPTION 'contract: apply must open the previewed ids and skip the closed one (%)', v_result;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v_result->'skipped_jobs') elem
+    WHERE elem->>'job_id' = v_done::text AND elem->>'reason' = 'not_open'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v_result->'skipped_jobs') elem
+    WHERE elem->>'job_id' = v_stale::text AND elem->>'reason' = 'no_recent_activity'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v_result->'skipped_jobs') elem
+    WHERE elem->>'job_id' = v_missing::text AND elem->>'reason' = 'not_found'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v_result->'skipped_jobs') elem
+    WHERE elem->>'job_id' = v_blank::text AND elem->>'reason' = 'blank_type'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v_result->'skipped_jobs') elem
+    WHERE elem->>'job_id' = v_fence::text AND elem->>'reason' = 'already_has_work_order'
+  ) THEN
+    RAISE EXCEPTION 'contract: apply must name why each reviewed id was skipped (%)', v_result;
+  END IF;
+  IF v_result->'opened_ids' ? v_done::text
+     OR v_result->'opened_ids' ? v_stale::text
+     OR v_result->'opened_ids' ? v_missing::text
+     OR v_result->'opened_ids' ? v_blank::text
+     OR v_result->'opened_ids' ? v_fence::text THEN
+    RAISE EXCEPTION 'contract: a skipped id must not be opened (%)', v_result;
   END IF;
 
   IF NOT EXISTS (
@@ -221,7 +262,7 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'contract: apply must open a blank backfill draft for each previewed job';
   END IF;
-  IF EXISTS (SELECT 1 FROM public.work_orders WHERE job_id IN (v_stale, v_done, v_draft, v_quoted) AND kind = 'job') THEN
+  IF EXISTS (SELECT 1 FROM public.work_orders WHERE job_id IN (v_stale, v_done, v_draft, v_quoted, v_blank) AND kind = 'job') THEN
     RAISE EXCEPTION 'contract: apply must not open a work order the preview excluded';
   END IF;
   IF (SELECT count(*) FROM public.work_orders WHERE job_id = v_fence AND kind = 'job') <> 1
@@ -231,6 +272,10 @@ BEGIN
 
   UPDATE public.feature_flags SET enabled = false
   WHERE flag_name IN ('job_work_order_all_types_v1', 'job_work_order_active_backfill_v1');
+  -- The type goes back only after the all-types switch is off. Restoring it
+  -- while that switch is on would open a work order for this blank row.
+  UPDATE public.jobs SET type = 'makesafe' WHERE id = v_blank;
+  EXECUTE 'ALTER TABLE public.jobs ADD CONSTRAINT jobs_type_check ' || v_type_check;
 END $$;
 
 -- 3. Fencing still needs a scope. Another type may be approved on the
@@ -386,6 +431,76 @@ BEGIN
 
   UPDATE public.feature_flags SET enabled = false
   WHERE flag_name IN ('crew_invoice_on_job_work_order_v1', 'crew_invoice_line_office_review_v1');
+END $$;
+
+-- An unreadable review switch holds the line. Renaming the flag table is
+-- the failure; the handler must set awaiting, and the rename is put back
+-- before this block can fail the rest of the contract.
+DO $$
+DECLARE
+  v_org uuid := '00000000-0000-0000-0000-000000000001';
+  v_trade uuid := 'aaaaaaaa-0000-0000-0000-0000000000c1';
+  v_inv uuid := gen_random_uuid();
+  v_status text;
+BEGIN
+  UPDATE public.feature_flags SET enabled = false
+  WHERE flag_name = 'crew_invoice_line_office_review_v1';
+  INSERT INTO public.trade_invoices (id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay) VALUES
+    (v_inv, v_org, v_trade, 'pending_acknowledgment', 10, 0, 10, false, 0.12, 1.2, 10, 9.4);
+  ALTER TABLE public.feature_flags RENAME TO feature_flags_review_hidden;
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_inv, NULL, 'Travel', 10);
+  SELECT office_review_status INTO v_status
+  FROM public.trade_invoice_lines WHERE trade_invoice_id = v_inv;
+  ALTER TABLE public.feature_flags_review_hidden RENAME TO feature_flags;
+  IF v_status IS DISTINCT FROM 'awaiting' THEN
+    RAISE EXCEPTION 'contract: an unreadable review switch must hold the line awaiting, not leave it unmarked (%)', v_status;
+  END IF;
+  UPDATE public.trade_invoice_lines
+  SET office_review_status = 'approved'
+  WHERE trade_invoice_id = v_inv;
+END $$;
+
+-- The down migration refuses while review is on or any line is held, and
+-- proceeds once both are clear. Clear the fixture holds before this
+-- transaction ends so a later down is not blocked by them.
+DO $$
+BEGIN
+  UPDATE public.feature_flags SET enabled = false
+  WHERE flag_name = 'crew_invoice_line_office_review_v1';
+  IF NOT EXISTS (
+    SELECT 1 FROM public.trade_invoice_lines
+    WHERE office_review_status IN ('awaiting', 'queried', 'rejected')
+  ) THEN
+    RAISE EXCEPTION 'contract: the review fixture must leave a held line for the rollback guard';
+  END IF;
+  BEGIN
+    PERFORM public.job_work_order_crew_invoice_rollback_guard();
+    RAISE EXCEPTION 'contract: rollback must refuse while a line is held';
+  EXCEPTION WHEN object_not_in_prerequisite_state THEN
+    IF SQLERRM NOT LIKE '%held%' THEN
+      RAISE EXCEPTION 'contract: the held-line refusal must say so (%)', SQLERRM;
+    END IF;
+  END;
+
+  UPDATE public.feature_flags SET enabled = true
+  WHERE flag_name = 'crew_invoice_line_office_review_v1';
+  BEGIN
+    PERFORM public.job_work_order_crew_invoice_rollback_guard();
+    RAISE EXCEPTION 'contract: rollback must refuse while review is on';
+  EXCEPTION WHEN object_not_in_prerequisite_state THEN
+    IF SQLERRM NOT LIKE '%crew_invoice_line_office_review_v1%' THEN
+      RAISE EXCEPTION 'contract: the review-on refusal must name the switch (%)', SQLERRM;
+    END IF;
+  END;
+
+  UPDATE public.feature_flags SET enabled = false
+  WHERE flag_name = 'crew_invoice_line_office_review_v1';
+  UPDATE public.trade_invoice_lines
+  SET office_review_status = 'approved'
+  WHERE office_review_status IN ('awaiting', 'queried', 'rejected');
+  PERFORM public.job_work_order_crew_invoice_rollback_guard();
 END $$;
 
 ROLLBACK;

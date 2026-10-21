@@ -695,6 +695,7 @@ import {
   hideRetiredCrewWorkOrder,
   JOB_WORK_ORDER_ALL_TYPES_FLAG,
   loadCrewInvoiceJobWorkOrderRefusal,
+  OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
   readInvoiceOfficeReview,
   RETIRE_CREW_WORK_ORDERS_FLAG,
   reviewStateFromOfficeStatus,
@@ -9206,9 +9207,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
           return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
         }
+        const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+        let assigneeInvoiceType: string | null = null
+        if (retireCrewWorkOrders) {
+          const assigneeId = String(body?.assigned_user_id || body?.user_id || '').trim()
+          if (assigneeId) {
+            const { data: assignee, error: assigneeErr } = await client.from('users')
+              .select('id, invoice_type')
+              .eq('id', assigneeId)
+              .maybeSingle()
+            if (assigneeErr) {
+              throw new ApiError('The work order assignee could not be read.', 503, {
+                error: 'The work order assignee could not be read.',
+                code: 'assignee_invoice_type_unreadable',
+              })
+            }
+            assigneeInvoiceType = assignee?.invoice_type ?? null
+          }
+        }
         const crewRefusal = crewWorkOrderCreateRefusal(
           body?.kind,
-          await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG),
+          retireCrewWorkOrders,
+          assigneeInvoiceType,
         )
         if (crewRefusal) {
           throw new ApiError(crewRefusal.error, 409, { error: crewRefusal.error, code: crewRefusal.code })
@@ -11531,6 +11551,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 code: 'job_work_order_not_crew_invoice',
               })
             }
+            if (retireCrewWorkOrders) await stampCrewAssigneeInvoiceType(client, [wo])
             if (hideRetiredCrewWorkOrder(wo, retireCrewWorkOrders)) {
               throw new ApiError('Crew work orders are retired. Invoice your hours on the job.', 409, {
                 error: 'Crew work orders are retired. Invoice your hours on the job.',
@@ -11772,15 +11793,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // can never release it. No Xero contact and no bill.
             const woOfficeReview = await readInvoiceOfficeReview(client, tradeInvoiceId)
             if (!woOfficeReview.ok) {
-              throw new ApiError(
-                'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-                503,
-                {
-                  error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-                  code: 'office_review_unreadable',
-                  invoice_id: tradeInvoiceId,
-                },
+              // Switches off, the line read still failed. Land the saved draft
+              // in the same retryable state a Xero miss uses. Do not 503.
+              await markTradeInvoiceRetryable(
+                client,
+                tradeInvoiceId,
+                OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
               )
+              return json({
+                ok: false,
+                code: 'XERO_PUSH_FAILED',
+                userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
+                success: true,
+                xero_bill_number: null,
+                total,
+                ...tradeInvoiceMoneyResponse(woMoney),
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+                error: 'Xero push failed — contact admin',
+                pdf_attached: false,
+              })
             }
             if (woOfficeReview.hold) {
               const { data: woHoldInv, error: woHoldReadErr } = await client.from('trade_invoices')
@@ -13646,18 +13677,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // must not push a line the database already stamped awaiting. A
             // failed line read fails closed. A null stamp does not hold.
             const officeReview = await readInvoiceOfficeReview(client, invoice.id)
+            let officeReviewHold: ReturnType<typeof xeroSyncRefusal> = null
+            let officeReviewUnreadable = false
             if (!officeReview.ok) {
-              throw new ApiError(
-                'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-                503,
-                {
-                  error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-                  code: 'office_review_unreadable',
-                  invoice_id: invoice.id,
-                },
+              // Switches off, the line read still failed. Mark the saved
+              // invoice retryable and skip Xero. The existing
+              // XERO_PUSH_FAILED return below is that state.
+              await markTradeInvoiceRetryable(
+                client,
+                invoice.id,
+                OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
               )
+              officeReviewUnreadable = true
+            } else {
+              officeReviewHold = officeReview.hold
             }
-            const officeReviewHold = officeReview.hold
             if (officeReviewHold) {
               const { data: holderInv, error: holderReadErr } = await client.from('trade_invoices')
                 .select('query_note').eq('id', invoice.id).maybeSingle()
@@ -13678,7 +13712,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let xeroContactId: string | null = null
             let createdXeroBillId = ''
             let pdfAttached = false
-            if (!officeReviewHold) try {
+            if (!officeReviewHold && !officeReviewUnreadable) try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -15341,6 +15375,29 @@ const WORK_ORDER_PAGE_MAX = 500
 const WORK_ORDER_READ_PAGE = 1000
 const WORK_ORDER_ID_CHUNK = 25
 
+// Per-metre weekly crew work orders stay when retirement is on. The type is
+// the assignee's users.invoice_type, read only while that switch is on. An
+// unreadable read refuses rather than treating the row as retired.
+async function stampCrewAssigneeInvoiceType(client: any, rows: any[]): Promise<void> {
+  const ids = [...new Set(rows.map((row) => String(row?.assigned_user_id || '')).filter(Boolean))]
+  const types = new Map<string, string | null>()
+  for (let i = 0; i < ids.length; i += WORK_ORDER_ID_CHUNK) {
+    const chunk = ids.slice(i, i + WORK_ORDER_ID_CHUNK)
+    const { data, error } = await client.from('users').select('id, invoice_type').in('id', chunk)
+    if (error) {
+      throw new ApiError('The work order assignee could not be read.', 503, {
+        error: 'The work order assignee could not be read.',
+        code: 'assignee_invoice_type_unreadable',
+      })
+    }
+    for (const user of data || []) types.set(String(user.id), user.invoice_type ?? null)
+  }
+  for (const row of rows) {
+    const id = String(row?.assigned_user_id || '')
+    row.assignee_invoice_type = id ? (types.get(id) ?? null) : null
+  }
+}
+
 function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100
 }
@@ -15706,8 +15763,10 @@ export async function _resolveWeeklyWorkOrderInvoice(
   if ((workOrders || []).some((row: any) => row.kind === 'job')) {
     throw new ApiError('A job work order cannot be invoiced as a weekly job block', 422)
   }
+  const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+  if (retireCrewWorkOrders) await stampCrewAssigneeInvoiceType(client, workOrders || [])
   if (
-    await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG) &&
+    retireCrewWorkOrders &&
     (workOrders || []).some((row: any) => hideRetiredCrewWorkOrder(row, true))
   ) {
     throw new ApiError('Crew work orders are retired. Invoice your hours on the job.', 409, {
@@ -16246,6 +16305,7 @@ export async function tradeWorkOrders(
     ].some((value) => String(value || '').toLowerCase().includes(search)))
   }
   if (retireCrewWorkOrders) {
+    await stampCrewAssigneeInvoiceType(client, authorizedRows)
     authorizedRows = authorizedRows.filter((row: any) =>
       !hideRetiredCrewWorkOrder(row, true) &&
       !(row.kind === 'job' && String(row.status || '') === 'draft')
@@ -17922,10 +17982,11 @@ export async function listWorkOrders(client: any, params: URLSearchParams) {
   const rows = data || []
   // The ops crew list stays crew-only (kind=job is excluded above). Once
   // crew work orders are retired, the leftover per-trade rows drop out too.
-  // A quote-builder crew row stays.
+  // A quote-builder crew row stays. A per-metre trade's weekly crew row stays.
   if (!(await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG))) {
     return { work_orders: rows }
   }
+  await stampCrewAssigneeInvoiceType(client, rows)
   return { work_orders: rows.filter((row: any) => !hideRetiredCrewWorkOrder(row, true)) }
 }
 
@@ -53445,9 +53506,16 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
 // save_trade_invoice_draft path with all its guards.
 async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthContext, job: any) {
   const nowIso = new Date().toISOString()
-  const { data: userRow } = await client.from('users').select('invoice_type').eq('id', tradeUser.id).maybeSingle()
-  const lane = userRow?.invoice_type === 'per_metre' ? 'weekly_work_order' : 'hours'
   const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+  const { data: userRow, error: userErr } = await client.from('users')
+    .select('invoice_type').eq('id', tradeUser.id).maybeSingle()
+  if (userErr && retireCrewWorkOrders) {
+    throw new ApiError('The work order assignee could not be read.', 503, {
+      error: 'The work order assignee could not be read.',
+      code: 'assignee_invoice_type_unreadable',
+    })
+  }
+  const lane = userRow?.invoice_type === 'per_metre' ? 'weekly_work_order' : 'hours'
   const { data: mine, error: woErr } = await client.from('work_orders')
     .select(retireCrewWorkOrders
       ? 'id, wo_number, status, scheduled_date, completed_at, scope_items, kind, quote_builder_version_id'
@@ -53456,6 +53524,7 @@ async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthC
   if (woErr) throw woErr
   const workOrders: any[] = []
   for (const wo of (mine || [])) {
+    if (retireCrewWorkOrders) wo.assignee_invoice_type = userRow?.invoice_type ?? null
     if (retireCrewWorkOrders && (wo.kind === 'job' || hideRetiredCrewWorkOrder(wo, true))) continue
     const status = String(wo.status || '')
     if (status === 'cancelled' || status === 'draft') continue
@@ -54580,15 +54649,26 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   // read. Status stays approved. Nothing reaches Xero.
   const stOfficeReview = await readInvoiceOfficeReview(client, insertedInvoice.id)
   if (!stOfficeReview.ok) {
-    throw new ApiError(
-      'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-      503,
-      {
-        error: 'The office review on this invoice could not be read. It was saved and was not sent to Xero.',
-        code: 'office_review_unreadable',
-        invoice_id: insertedInvoice.id,
-      },
+    await markTradeInvoiceRetryable(
+      client,
+      insertedInvoice.id,
+      OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
     )
+    return {
+      ok: false,
+      success: true,
+      code: 'XERO_PUSH_FAILED',
+      userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
+      invoice_id: insertedInvoice.id,
+      xero_bill_id: null,
+      xero_bill_number: null,
+      total,
+      ...tradeInvoiceMoneyResponse(stMoney),
+      ...tradeRecurringDeductionResponse(stRecurringDeduction),
+      invoice_type: serverInvoiceType,
+      invoice_type_source: 'user',
+      pdf_attached: false,
+    }
   }
   if (stOfficeReview.hold) {
     const { data: stHoldInv } = await client.from('trade_invoices')

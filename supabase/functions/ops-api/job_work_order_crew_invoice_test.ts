@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
-// Crew invoices on the job work order. Pure rules only: no index.ts, no database.
+// Crew invoices on the job work order. Pure rules, plus one source pin of
+// the invoice-save retry in index.ts. No database.
 import {
   assertEquals,
   assertRejects,
@@ -382,6 +383,77 @@ Deno.test("line review is any office role, and a held line stays reviewable with
   assertEquals(officeReviewLineIsHeld(null), false);
 });
 
+Deno.test("an approver cannot review crew lines on an invoice they submitted", () => {
+  const lists = {
+    primaryIds: [SHAUN_APPROVER_USER_ID],
+    backupIds: [MARNIN_BACKUP_APPROVER_USER_ID],
+  };
+  const self = decideOfficeWrite({
+    staff: true,
+    userId: SHAUN_APPROVER_USER_ID,
+    action: "review",
+    officeFlagOn: true,
+    reviewFlagOn: true,
+    invoiceSubmitterId: SHAUN_APPROVER_USER_ID,
+    ...lists,
+  });
+  if (self.ok) throw new Error("expected a self-approval refusal");
+  assertEquals(self.code, "self_approval_forbidden");
+  assertEquals(self.status, 403);
+
+  // Already held, and the review switch later off: still refused.
+  const heldOff = decideOfficeWrite({
+    staff: true,
+    userId: SHAUN_APPROVER_USER_ID,
+    action: "review",
+    officeFlagOn: false,
+    reviewFlagOn: false,
+    lineAlreadyHeld: true,
+    invoiceSubmitterId: SHAUN_APPROVER_USER_ID,
+    ...lists,
+  });
+  if (heldOff.ok) throw new Error("expected a self-approval refusal on a held line");
+  assertEquals(heldOff.code, "self_approval_forbidden");
+
+  // The submitter check is before the switch check.
+  const switchOff = decideOfficeWrite({
+    staff: true,
+    userId: SHAUN_APPROVER_USER_ID,
+    action: "review",
+    officeFlagOn: false,
+    reviewFlagOn: false,
+    invoiceSubmitterId: SHAUN_APPROVER_USER_ID,
+    ...lists,
+  });
+  if (switchOff.ok) throw new Error("expected a self-approval refusal");
+  assertEquals(switchOff.code, "self_approval_forbidden");
+
+  assertEquals(
+    decideOfficeWrite({
+      staff: true,
+      userId: SHAUN_APPROVER_USER_ID,
+      action: "review",
+      officeFlagOn: false,
+      reviewFlagOn: true,
+      invoiceSubmitterId: MARNIN_BACKUP_APPROVER_USER_ID,
+      ...lists,
+    }),
+    { ok: true },
+  );
+  assertEquals(
+    decideOfficeWrite({
+      staff: true,
+      userId: SHAUN_APPROVER_USER_ID,
+      action: "review",
+      officeFlagOn: false,
+      reviewFlagOn: true,
+      invoiceSubmitterId: null,
+      ...lists,
+    }),
+    { ok: true },
+  );
+});
+
 Deno.test("hard rule is off by default and, on, refuses an open job line with no work order", () => {
   const travel = [{ job_id: "job-1", line_type: "Travel" }];
   const labour = [{ job_id: "job-1", line_type: "labour" }];
@@ -548,6 +620,24 @@ Deno.test("retiring crew work orders hides kind crew and keeps quote-builder row
     visibleCrewPayWorkOrders([crew, quoted, job, unkind], true).map((row) => row.id),
     ["q", "j", "u"],
   );
+  const perMetre = {
+    id: "pm",
+    kind: "crew",
+    quote_builder_version_id: null,
+    assignee_invoice_type: "per_metre",
+  };
+  const hourly = {
+    id: "hr",
+    kind: "crew",
+    quote_builder_version_id: null,
+    assignee_invoice_type: "hourly",
+  };
+  assertEquals(hideRetiredCrewWorkOrder(perMetre, true), false);
+  assertEquals(hideRetiredCrewWorkOrder(hourly, true), true);
+  assertEquals(
+    visibleCrewPayWorkOrders([crew, perMetre, hourly, quoted], true).map((row) => row.id),
+    ["pm", "q"],
+  );
 });
 
 Deno.test("create_work_order refuses a missing kind only while crew retirement is on", () => {
@@ -559,6 +649,11 @@ Deno.test("create_work_order refuses a missing kind only while crew retirement i
   assertEquals(missing?.code, "crew_work_order_retired");
   assertEquals(crew?.code, "crew_work_order_retired");
   assertEquals(missing?.error.includes("kind: 'job'"), true);
+  assertEquals(crewWorkOrderCreateRefusal(undefined, true, "per_metre"), null);
+  assertEquals(crewWorkOrderCreateRefusal("crew", true, "per_metre"), null);
+  assertEquals(crewWorkOrderCreateRefusal("crew", true, null)?.code, "crew_work_order_retired");
+  assertEquals(crewWorkOrderCreateRefusal("crew", true, "hourly")?.code, "crew_work_order_retired");
+  assertEquals(crewWorkOrderCreateRefusal("job", true, "hourly"), null);
 });
 
 Deno.test("a retired crew row leaves the authorising list and a job work order stays", () => {
@@ -590,7 +685,61 @@ Deno.test("retirement plan cancels legacy crew rows and leaves quote-builder row
   assertEquals(plan.with_sent_at, 1);
   assertEquals(plan.open_jobs, 1);
   assertEquals(plan.closed_jobs, 1);
+  assertEquals(plan.kept_per_metre, 0);
   assertEquals(plan.ids, ["s1", "s2", "done"]);
+
+  const withPerMetre = planCrewWorkOrderRetirement([
+    { id: "s1", kind: "crew", status: "sent", job_id: "open-1", job_status: "scheduled" },
+    {
+      id: "henry",
+      kind: "crew",
+      status: "sent",
+      job_id: "open-henry",
+      job_status: "scheduled",
+      assignee_invoice_type: "per_metre",
+    },
+    {
+      id: "quoted-metre",
+      kind: "crew",
+      quote_builder_version_id: "ver-1",
+      status: "sent",
+      assignee_invoice_type: "per_metre",
+    },
+  ]);
+  assertEquals(withPerMetre.kept_per_metre, 1);
+  assertEquals(withPerMetre.eligible, 1);
+  assertEquals(withPerMetre.ids, ["s1"]);
+  assertEquals(withPerMetre.open_jobs, 1);
+});
+
+Deno.test("an unreadable office review after invoice save is marked retryable", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const needle = "OFFICE_REVIEW_UNREADABLE_RETRY_NOTE";
+  const spots: number[] = [];
+  for (let from = 0; ; ) {
+    const at = source.indexOf(needle, from);
+    if (at < 0) break;
+    spots.push(at);
+    from = at + needle.length;
+  }
+  assertEquals(spots.length, 4);
+  const callSites = spots.filter((at) =>
+    source.slice(Math.max(0, at - 280), at).includes("markTradeInvoiceRetryable")
+  );
+  assertEquals(callSites.length, 3);
+  for (const at of callSites) {
+    const before = source.slice(Math.max(0, at - 280), at);
+    const after = source.slice(at, at + 220);
+    if (!before.includes("markTradeInvoiceRetryable")) {
+      throw new Error("the unreadable-review note is not passed to markTradeInvoiceRetryable");
+    }
+    if (after.includes("throw new ApiError")) {
+      throw new Error("an unreadable review after save throws instead of staying retryable");
+    }
+  }
+  if (!source.includes("code: 'office_review_unreadable'")) {
+    throw new Error("the hold-status failure must still throw office_review_unreadable");
+  }
 });
 
 function quoteOrderDb(flags: Array<{ flag_name: string; enabled: boolean }>) {

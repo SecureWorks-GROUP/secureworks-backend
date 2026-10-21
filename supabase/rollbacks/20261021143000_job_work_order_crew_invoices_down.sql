@@ -2,6 +2,13 @@
 -- open/link functions of 20261012130000. Functions are restored before the
 -- new columns are dropped. Does not drop auto_issue_job_work_order,
 -- quote_filled_at or hand_edited_at, and deletes no work order or invoice.
+--
+-- Refuses before any restore when crew_invoice_line_office_review_v1 is on,
+-- or any trade_invoice_lines.office_review_status is awaiting, queried or
+-- rejected. Turn the switch off and clear those lines first. A refusal
+-- changes nothing.
+
+SELECT public.job_work_order_crew_invoice_rollback_guard();
 
 -- 1. invoice link functions, as they were before a draft could stamp
 CREATE OR REPLACE FUNCTION public.trade_invoice_lines_link_job_work_order()
@@ -290,6 +297,8 @@ DROP FUNCTION IF EXISTS public.preview_active_job_work_orders();
 DROP FUNCTION IF EXISTS public.apply_active_job_work_orders();
 DROP FUNCTION IF EXISTS public.apply_active_job_work_orders(uuid[]);
 DROP FUNCTION IF EXISTS public.job_invoice_work_order_id(uuid);
+DROP FUNCTION IF EXISTS public.job_work_order_recent_activity(uuid);
+DROP FUNCTION IF EXISTS public.job_work_order_crew_invoice_rollback_guard();
 
 -- 5. columns
 ALTER TABLE public.trade_invoice_lines
