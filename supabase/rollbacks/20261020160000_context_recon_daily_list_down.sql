@@ -13,7 +13,9 @@ BEGIN
   END IF;
 END $$;
 
+DROP FUNCTION IF EXISTS public.context_recon_daily_left_out(timestamptz);
 DROP FUNCTION IF EXISTS public.context_recon_daily_list(timestamptz, int);
+DROP FUNCTION IF EXISTS public.context_recon_daily_rows(timestamptz);
 DROP FUNCTION IF EXISTS public.context_recon_job_choices(uuid[]);
 DROP FUNCTION IF EXISTS public.context_recon_job_is_live(text);
 DROP FUNCTION IF EXISTS public.context_recon_contact_owed(text[]);

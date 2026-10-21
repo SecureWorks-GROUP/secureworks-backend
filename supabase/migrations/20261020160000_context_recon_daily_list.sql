@@ -15,6 +15,10 @@
 --    contact who owes money, then recent customer messages from a contact with a live job. Each
 --    row carries the evidence hash the screen sends back, a short summary and the jobs to choose
 --    from. Defect causes stay on the engineering list (section 8), never here.
+-- 4. context_recon_daily_left_out: what the list leaves out, by cause (defect rows with no contact
+--    or never asked, ambiguity rows that fit no band, and the backlog lane), so an empty list is
+--    never read as nothing to do (design review AC-M1). The list and the counts read the one row
+--    set, context_recon_daily_rows, so they cannot disagree about what was listed.
 -- Service role only, as in 20261020140000. Writes no business row.
 
 DO $$
@@ -135,10 +139,12 @@ $$;
 -- amount and then the longer wait come first. Each row: the subject, its evidence hash, the
 -- amount at stake, the wait, a short summary, the offered jobs (the ladder's candidates and job,
 -- or the invoice contact's jobs) and the contact's other jobs.
-CREATE OR REPLACE FUNCTION public.context_recon_daily_list(p_as_of timestamptz DEFAULT now(), p_limit int DEFAULT 50)
-RETURNS TABLE (band int, band_label text, subject_kind text, subject_id uuid, evidence_hash text,
-               amount numeric, waiting_days numeric, cause text, decision_state text, last_action text,
-               owner text, summary jsonb, offered_jobs jsonb, other_jobs jsonb)
+-- context_recon_daily_rows is every row the list would show, uncut and unranked; offered and
+-- others are job ids. The list ranks and cuts it; context_recon_daily_left_out counts against it.
+CREATE OR REPLACE FUNCTION public.context_recon_daily_rows(p_as_of timestamptz DEFAULT now())
+RETURNS TABLE (band int, band_label text, subject_kind text, subject_id uuid, amount numeric,
+               waiting_days numeric, cause text, decision_state text, last_action text, owner text,
+               summary jsonb, offered uuid[], others uuid[])
 LANGUAGE sql STABLE AS $$
   WITH inv AS (
     SELECT i.id, i.amount_due, i.invoice_date, i.xero_contact_id,
@@ -199,18 +205,28 @@ LANGUAGE sql STABLE AS $$
     WHERE owed.owed > 0
        OR (cj.has_live AND q.direction = 'inbound'
            AND q.role IN ('job_customer', 'any_job_customer', 'customer', 'unstamped', 'unknown')
-           AND q.captured >= p_as_of - interval '30 days')),
-  ranked AS (
-    SELECT * FROM band1
-    UNION ALL
-    SELECT band, band_label, subject_kind, subject_id, amount, waiting_days, cause, decision_state, last_action, owner,
-           summary, offered, others FROM msgs
+           AND q.captured >= p_as_of - interval '30 days'))
+  SELECT * FROM band1
+  UNION ALL
+  SELECT band, band_label, subject_kind, subject_id, amount, waiting_days, cause, decision_state, last_action, owner,
+         summary, offered, others FROM msgs
+$$;
+COMMENT ON FUNCTION public.context_recon_daily_rows(timestamptz) IS
+ 'Context reconciliation daily list (20261020160000): every row the daily list would show, uncut and unranked, with offered and other jobs as ids. Read by context_recon_daily_list and context_recon_daily_left_out only. Read only. Service role only.';
+
+CREATE OR REPLACE FUNCTION public.context_recon_daily_list(p_as_of timestamptz DEFAULT now(), p_limit int DEFAULT 50)
+RETURNS TABLE (band int, band_label text, subject_kind text, subject_id uuid, evidence_hash text,
+               amount numeric, waiting_days numeric, cause text, decision_state text, last_action text,
+               owner text, summary jsonb, offered_jobs jsonb, other_jobs jsonb)
+LANGUAGE sql STABLE AS $$
+  WITH ranked AS (
+    SELECT * FROM public.context_recon_daily_rows(p_as_of)
     ORDER BY 1, 5 DESC NULLS LAST, 6 DESC NULLS LAST, 4
     LIMIT greatest(1, least(coalesce(p_limit, 50), 201)))
   SELECT r.band, r.band_label, r.subject_kind, r.subject_id,
          CASE WHEN r.subject_kind = 'invoice' THEN public.context_recon_invoice_evidence_hash(r.subject_id)
               ELSE public.context_recon_evidence_hash(r.subject_id) END,
-         r.amount, r.waiting_days, r.cause, r.state, r.action, r.owner, r.summary,
+         r.amount, r.waiting_days, r.cause, r.decision_state, r.last_action, r.owner, r.summary,
          public.context_recon_job_choices(coalesce(r.offered, '{}')),
          public.context_recon_job_choices(ARRAY(SELECT x FROM unnest(coalesce(r.others, '{}')) x
                                                 EXCEPT SELECT y FROM unnest(coalesce(r.offered, '{}')) y))
@@ -219,6 +235,26 @@ LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION public.context_recon_daily_list(timestamptz, int) IS
  'Context reconciliation daily list (20261020160000): the resolver''s list, ranked by consequence (owed invoices with no job, then messages from a contact who owes, then recent customer messages on a live job). At most 201 rows (ops-api pages 200 and says more). Call rows carry no preview, so transcript words never reach the list. Read only. Service role only.';
+
+-- What the daily list leaves out, live lane by cause, and the whole backlog lane. no_identity and
+-- never_asked are the two defect causes (section 8); not_ranked is a queued ambiguity row with a
+-- contact that fits no band (no money owed, no live job, or older than 30 days); backlog is every
+-- queued row captured before live_from. Each count is of queued rows, so a decided confirm,
+-- correct, split or unrelated row is never counted.
+CREATE OR REPLACE FUNCTION public.context_recon_daily_left_out(p_as_of timestamptz DEFAULT now())
+RETURNS jsonb LANGUAGE sql STABLE AS $$
+  WITH q AS (SELECT * FROM public.context_recon_queue(p_as_of)),
+  listed AS (SELECT r.subject_id FROM public.context_recon_daily_rows(p_as_of) r WHERE r.subject_kind = 'event')
+  SELECT jsonb_build_object(
+    'no_identity', count(*) FILTER (WHERE q.lane = 'live' AND q.cause = 'defect:no_identity'),
+    'never_asked', count(*) FILTER (WHERE q.lane = 'live' AND q.cause = 'defect:backfill_never_asked'),
+    'not_ranked', count(*) FILTER (WHERE q.lane = 'live' AND q.cause LIKE 'ambiguity:%'
+                                   AND NOT EXISTS (SELECT 1 FROM listed l WHERE l.subject_id = q.event_id)),
+    'backlog', count(*) FILTER (WHERE q.lane = 'backlog'))
+  FROM q
+$$;
+COMMENT ON FUNCTION public.context_recon_daily_left_out(timestamptz) IS
+ 'Context reconciliation daily list (20261020160000): queued rows the daily list leaves out, as counts: no_identity and never_asked (live-lane defects), not_ranked (live-lane ambiguity rows that fit no band) and backlog (the backlog lane). Read only. Service role only.';
 
 DO $$
 DECLARE f text;
@@ -230,7 +266,9 @@ BEGIN
     'public.context_recon_contact_owed(text[])',
     'public.context_recon_job_is_live(text)',
     'public.context_recon_job_choices(uuid[])',
-    'public.context_recon_daily_list(timestamptz,int)'] LOOP
+    'public.context_recon_daily_rows(timestamptz)',
+    'public.context_recon_daily_list(timestamptz,int)',
+    'public.context_recon_daily_left_out(timestamptz)'] LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %s FROM anon, authenticated', f);
