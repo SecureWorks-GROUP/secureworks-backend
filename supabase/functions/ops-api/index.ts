@@ -688,6 +688,25 @@ import {
 } from './job_work_orders.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
+  assertGroupWorkOrderInvoiceFence,
+  clientSignGroupWorkOrder,
+  createGroupWorkOrder,
+  groupBody,
+  GroupWorkOrderError,
+  isGroupShareInvoiceItem,
+  joinGroupWorkOrder,
+  previewGroupClientLink,
+  readGroupWorkOrderFeedback,
+  readGroupWorkOrderMyShare,
+  readGroupWorkOrderOffice,
+  readGroupWorkOrderPublic,
+  resolveGroupShareInvoiceExtra,
+  signGroupWorkOrderCrew,
+  submitGroupWorkOrderFeedback,
+  submitGroupWorkOrderHours,
+  type GroupCaller,
+} from './group_work_order.ts'
+import {
   approveCustomerVariation,
   cancelCustomerVariation,
   createCustomerVariation,
@@ -1846,6 +1865,28 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
 
 // A time line that does not say when it was worked (or says it wrongly) is a
 // 422 the trade app can show as it stands. Rule: trade_invoice_time_entry.ts.
+function groupWorkOrderApiError(error: unknown): never {
+  if (error instanceof GroupWorkOrderError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      code: error.code,
+      error: error.message,
+    })
+  }
+  // Start and finish still come from the time-entry rule. A bad entry is a
+  // 422 the trade app already knows, not a 500.
+  if (error instanceof TradeInvoiceTimeEntryError) tradeInvoiceTimeEntryApiError(error)
+  throw error
+}
+
+async function groupWorkOrderJson(work: Promise<unknown>): Promise<Response> {
+  try {
+    return json(await work)
+  } catch (error) {
+    groupWorkOrderApiError(error)
+  }
+}
+
 function tradeInvoiceTimeEntryApiError(error: unknown): never {
   if (error instanceof TradeInvoiceTimeEntryError) {
     throw new ApiError(error.message, error.status, {
@@ -4505,6 +4546,10 @@ const OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS = new Set([
   'ops_api_version',
   'ses_synthetic_livefire_capabilities',
   'view_shared_report',
+  // Public client sign-off. The share token is the secret; there is no account.
+  'group_work_order_public',
+  'group_work_order_client_sign',
+  'group_work_order_submit_feedback',
 ])
 
 const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
@@ -4523,6 +4568,14 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'complete_my_job',
   'waive_neighbour_signoff',
   'log_my_job_hours',
+  // Group work orders (group_work_order.ts). A participant sees the pot and
+  // their own share only. Feedback and the office split are not on this list.
+  'create_group_work_order',
+  'join_group_work_order',
+  'sign_group_work_order',
+  'submit_group_work_order_hours',
+  'group_work_order_my_share',
+  'group_work_order_preview_client_link',
   'my_money',
   'unlock_makesafe_report',
   'upload_photo',
@@ -10984,6 +11037,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
       // ── Public (no auth) ──
       case 'view_shared_report': return viewSharedReport(client, url.searchParams)
+      // Client job sign-off. Token is the credential. Sends nothing.
+      case 'group_work_order_public':
+        return await groupWorkOrderJson(readGroupWorkOrderPublic(
+          client,
+          String(url.searchParams.get('token') || url.searchParams.get('share_token') || body.share_token || ''),
+        ))
+      case 'group_work_order_client_sign':
+        return await groupWorkOrderJson(clientSignGroupWorkOrder(client, groupBody({
+          ...body,
+          share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
+        })))
+      case 'group_work_order_submit_feedback':
+        return await groupWorkOrderJson(submitGroupWorkOrderFeedback(client, groupBody({
+          ...body,
+          share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
+        })))
+      // Office only. Not on the trade profile-scoped list, so a trade JWT is 403.
+      case 'group_work_order_feedback':
+      case 'group_work_order_office': {
+        const officeCaller: GroupCaller = {
+          userId: authUser?.id || '',
+          orgId: authUser?.orgId || null,
+          role: authUser?.role || '',
+          isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
+        }
+        const officeBody = groupBody({
+          ...body,
+          group_id: body.group_id || url.searchParams.get('group_id'),
+          job_id: body.job_id || url.searchParams.get('job_id'),
+        })
+        return await groupWorkOrderJson(
+          action === 'group_work_order_feedback'
+            ? readGroupWorkOrderFeedback(client, officeCaller, officeBody)
+            : readGroupWorkOrderOffice(client, officeCaller, officeBody),
+        )
+      }
 
       // ── Assignment Requests (trade calendar) ──
       case 'request_assistance': {
@@ -11124,6 +11213,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'complete_my_job':
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
+      case 'create_group_work_order':
+      case 'join_group_work_order':
+      case 'sign_group_work_order':
+      case 'submit_group_work_order_hours':
+      case 'group_work_order_my_share':
+      case 'group_work_order_preview_client_link':
       case 'my_money':
       case 'unlock_makesafe_report':
       case 'upload_photo':
@@ -11258,6 +11353,36 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
           case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
           case 'log_my_job_hours': return json(await tradeLogMyJobHours(client, body, tradeUser, tradeJobAccess))
+          case 'create_group_work_order':
+          case 'join_group_work_order':
+          case 'sign_group_work_order':
+          case 'submit_group_work_order_hours':
+          case 'group_work_order_my_share':
+          case 'group_work_order_preview_client_link': {
+            const groupCaller: GroupCaller = {
+              userId: tradeUser.id,
+              orgId: tradeUser.orgId,
+              role: tradeUser.role,
+              isStaff: _opsApiCallerIsStaffOperator('jwt', tradeUser),
+            }
+            const groupPayload = groupBody(body)
+            if (action === 'create_group_work_order') {
+              return await groupWorkOrderJson(createGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            if (action === 'join_group_work_order') {
+              return await groupWorkOrderJson(joinGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            if (action === 'sign_group_work_order') {
+              return await groupWorkOrderJson(signGroupWorkOrderCrew(client, groupCaller, groupPayload))
+            }
+            if (action === 'submit_group_work_order_hours') {
+              return await groupWorkOrderJson(submitGroupWorkOrderHours(client, groupCaller, groupPayload))
+            }
+            if (action === 'group_work_order_my_share') {
+              return await groupWorkOrderJson(readGroupWorkOrderMyShare(client, groupCaller, groupPayload))
+            }
+            return await groupWorkOrderJson(previewGroupClientLink(client, groupCaller, groupPayload))
+          }
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
           case 'unlock_makesafe_report': return json(await unlockMakesafeReport(client, body, tradeUser, tradeJobAccess, isDispatcher))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
@@ -12672,6 +12797,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
                 if (rawItem?.source === 'clock' || rawItem?._source === 'clock' || rawItem?.source === 'server_labour') continue
+                // Group share: quantity 1 at the server's share. Not hours × rate.
+                // Client sign-off is the gate. source_work_order_id stays null.
+                if (isGroupShareInvoiceItem(rawItem) || rawItem?.group_share_id) {
+                  const shareLine = await resolveGroupShareInvoiceExtra(client, {
+                    userId: tradeUser.id,
+                    item: rawItem,
+                  }).catch((error) => groupWorkOrderApiError(error))
+                  if (!shareLine) {
+                    throw new ApiError('A group share has to be submitted as its own line.', 422)
+                  }
+                  extraSubtotal += Number(shareLine.line_total_ex)
+                  extraLineItems.push(shareLine)
+                  continue
+                }
                 const serverResolvedWeeklyLine = _resolveWeeklyInvoiceLineTrust(
                   weeklyInvoice,
                   rawItem,
@@ -12805,6 +12944,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 })
               }
             }
+
+            // A job is either a normal work-order / hours claim or a group
+            // share, never both. Travel and other extras are not a claim.
+            await assertGroupWorkOrderInvoiceFence(client, {
+              userId: tradeUser.id,
+              lines: [
+                ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+                ...extraLineItems,
+              ],
+            }).catch((error) => groupWorkOrderApiError(error))
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
@@ -13028,7 +13177,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 line_date: dbLine.line_date || null,
                 division: dbLine.division || null,
                 site_address: dbLine.site_address || null,
-                source_work_order_id: dbLine.source_work_order_id || null,
+                source_work_order_id: String(dbLine.line_type || '').toLowerCase() === 'group share'
+                  ? null
+                  : (dbLine.source_work_order_id || null),
+                group_share_id: dbLine.group_share_id || null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,
