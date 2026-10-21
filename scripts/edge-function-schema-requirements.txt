@@ -853,6 +853,8 @@ ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mir
 ops-api|supabase/migrations/20261020140000_context_reconciliation_decisions.sql|function|context_recon_record_decision
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_list
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_rows
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_left_out
 
 # Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
 # invoice; ops-api job_receipt.ts reads the switch and writes the claims.

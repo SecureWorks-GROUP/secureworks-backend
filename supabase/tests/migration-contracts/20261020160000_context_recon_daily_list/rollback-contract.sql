@@ -4,6 +4,8 @@
 DO $$
 BEGIN
   IF to_regprocedure('public.context_recon_daily_list(timestamptz,int)') IS NOT NULL
+     OR to_regprocedure('public.context_recon_daily_left_out(timestamptz)') IS NOT NULL
+     OR to_regprocedure('public.context_recon_daily_rows(timestamptz)') IS NOT NULL
      OR to_regprocedure('public.context_recon_record_invoice_decision(uuid,text,text,uuid[],text,uuid,text)') IS NOT NULL
      OR to_regprocedure('public.context_recon_invoice_evidence_hash(uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'recon list rollback: functions remain';
