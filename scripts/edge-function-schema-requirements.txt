@@ -861,3 +861,5 @@ xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_c
 xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
+ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_decisions
+ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_events

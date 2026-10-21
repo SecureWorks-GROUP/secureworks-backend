@@ -799,3 +799,143 @@ Deno.test("timeline: a message carries its GoHighLevel contact and every email a
     "admin@secureworkswa.com.au",
   ]);
 });
+
+// ── a person's decisions (CTX-T22) ───────────────────────────────────────────
+
+function withDecisions(tables: Tables, answer: { data: any; error: any }) {
+  const base = fakeClient(tables);
+  const calls: { fn: string; args: any }[] = [];
+  return {
+    ...base,
+    calls,
+    rpc(fn: string, args: any) {
+      calls.push({ fn, args });
+      return Promise.resolve(answer);
+    },
+  };
+}
+
+Deno.test("timeline: a person's split puts a row on this job, a correct takes one off, and each says who decided", async () => {
+  const A = "a0000000-0000-4000-8000-0000000000a1";
+  const B = "a0000000-0000-4000-8000-0000000000b1";
+  const rows = [
+    bev("own-kept", A, {
+      event_type: "email.inbound",
+      channel: "email",
+      occurred_at: "2026-10-03T00:00:00Z",
+    }),
+    bev("own-moved", A, {
+      event_type: "email.inbound",
+      channel: "email",
+      occurred_at: "2026-10-04T00:00:00Z",
+    }),
+    bev("split-in", B, {
+      event_type: "email.inbound",
+      channel: "email",
+      occurred_at: "2026-10-05T00:00:00Z",
+    }),
+    bev("other-job", B, {
+      event_type: "email.inbound",
+      channel: "email",
+      occurred_at: "2026-10-06T00:00:00Z",
+    }),
+  ];
+  const client = withDecisions({ business_events: rows }, {
+    data: [
+      {
+        event_id: "split-in",
+        placement: "on",
+        action: "split",
+        decision_id: 11,
+        decided_at: "2026-10-21T01:00:00Z",
+        decided_by: "7e100000-0000-4000-8000-000000000001",
+        decided_by_name: "Card contract staff",
+        other_job_numbers: ["SWP-98102"],
+      },
+      {
+        event_id: "own-moved",
+        placement: "off",
+        action: "correct",
+        decision_id: 12,
+        decided_at: "2026-10-21T02:00:00Z",
+        decided_by: "7e100000-0000-4000-8000-000000000001",
+        decided_by_name: "Card contract staff",
+        other_job_numbers: ["SWP-98102"],
+      },
+    ],
+    error: null,
+  });
+  const got = await readBusinessEventsBySourceTime(client, {
+    jobId: A,
+    select: "*",
+    limit: 10,
+    messagesOnly: true,
+    personDecisions: true,
+  });
+  assertEquals(got.error, null);
+  assertEquals(got.decisionsError, undefined);
+  assertEquals(client.calls, [{
+    fn: "context_job_card_decisions",
+    args: { p_job: A },
+  }]);
+  assertEquals(got.rows.map((r) => r.id), ["split-in", "own-kept"]);
+  const msg = businessEventTimelineMessage(
+    got.rows[0],
+    A,
+    new Set([CLIENT_MAIL]),
+  );
+  assertEquals(msg.placed_by_person, {
+    action: "split",
+    decision_id: 11,
+    decided_at: "2026-10-21T01:00:00Z",
+    decided_by: "7e100000-0000-4000-8000-000000000001",
+    decided_by_name: "Card contract staff",
+    other_job_numbers: ["SWP-98102"],
+  });
+  assertEquals(
+    "placed_by_person" in
+      businessEventTimelineMessage(got.rows[1], A, new Set([CLIENT_MAIL])),
+    false,
+  );
+  // A row taken off still leaves the newest N of the rest.
+  const one = await readBusinessEventsBySourceTime(client, {
+    jobId: A,
+    select: "*",
+    limit: 1,
+    personDecisions: true,
+  });
+  assertEquals(one.rows.map((r) => r.id), ["split-in"]);
+  const two = await readBusinessEventsBySourceTime(client, {
+    jobId: A,
+    select: "*",
+    limit: 2,
+    since: "2026-10-04T12:00:00Z",
+    personDecisions: true,
+  });
+  assertEquals(two.rows.map((r) => r.id), ["split-in"]);
+});
+
+Deno.test("timeline: a failed decisions read names the error and keeps the job's own rows, never reads as no decisions", async () => {
+  const A = "a0000000-0000-4000-8000-0000000000a2";
+  const rows = [
+    bev("own", A, {
+      event_type: "email.inbound",
+      channel: "email",
+      occurred_at: "2026-10-03T00:00:00Z",
+    }),
+  ];
+  for (
+    const answer of [
+      { data: null, error: { message: "function missing" } },
+      { data: null, error: null },
+    ]
+  ) {
+    const got = await readBusinessEventsBySourceTime(
+      withDecisions({ business_events: rows }, answer),
+      { jobId: A, select: "*", limit: 5, personDecisions: true },
+    );
+    assertEquals(got.rows.map((r) => r.id), ["own"]);
+    assert(got.decisionsError);
+    assertStringIncludes(got.error ?? "", "person decisions read failed");
+  }
+});

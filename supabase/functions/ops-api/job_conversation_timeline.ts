@@ -111,7 +111,9 @@ export function conversationWindow(
 ): { since: string | null; until: string | null; error: string | null } {
   const read = (name: "since" | "until") => {
     const v = body?.[name];
-    if (v === undefined || v === null || v === "") return { at: null, bad: false };
+    if (v === undefined || v === null || v === "") {
+      return { at: null, bad: false };
+    }
     if (typeof v !== "string" || !Number.isFinite(Date.parse(v))) {
       return { at: null, bad: true };
     }
@@ -120,10 +122,18 @@ export function conversationWindow(
   const since = read("since");
   const until = read("until");
   if (since.bad) {
-    return { since: null, until: null, error: "since must be an ISO date-time" };
+    return {
+      since: null,
+      until: null,
+      error: "since must be an ISO date-time",
+    };
   }
   if (until.bad) {
-    return { since: null, until: null, error: "until must be an ISO date-time" };
+    return {
+      since: null,
+      until: null,
+      error: "until must be an ISO date-time",
+    };
   }
   if (
     since.at && until.at && Date.parse(until.at) < Date.parse(since.at)
@@ -157,8 +167,11 @@ export async function readBusinessEventsBySourceTime(
     since?: string | null;
     until?: string | null;
     messagesOnly?: boolean;
+    /** Follow a person's reconciliation decisions, as the job card does (CTX-T22). */
+    personDecisions?: boolean;
   },
-): Promise<{ rows: any[]; error: string | null }> {
+): Promise<{ rows: any[]; error: string | null; decisionsError?: string }> {
+  if (opts.personDecisions) return readJobCardEvents(client, opts);
   const build = (stamped: boolean) => {
     let q = client.from("business_events").select(opts.select).eq(
       "job_id",
@@ -193,6 +206,136 @@ export async function readBusinessEventsBySourceTime(
     .sort(bySourceTimeDesc)
     .slice(0, opts.limit);
   return { rows, error: errors.length ? errors.join("; ") : null };
+}
+
+/**
+ * A person's current reconciliation decision about a row, as the job card reads it
+ * (context_job_card_decisions, 20261021150000): placement on (a confirm, correct or
+ * split put the row on this job) or off (it took one of the job's own rows off it).
+ */
+export type CardDecision = {
+  event_id: string;
+  placement: "on" | "off";
+  action: string;
+  decision_id: number;
+  decided_at: string | null;
+  decided_by: string | null;
+  decided_by_name: string | null;
+  other_job_numbers: string[] | null;
+};
+
+/** What a row carries when a person's decision put it on the job. */
+export function personPlacement(d: CardDecision) {
+  return {
+    action: d.action,
+    decision_id: d.decision_id,
+    decided_at: d.decided_at ?? null,
+    decided_by: d.decided_by ?? null,
+    decided_by_name: d.decided_by_name ?? null,
+    other_job_numbers: Array.isArray(d.other_job_numbers)
+      ? d.other_job_numbers
+      : [],
+  };
+}
+
+/**
+ * The job card's rows (CTX-T22): the job's own rows less the ones a person's
+ * current decision took off it, plus the rows a person's decision put on it,
+ * each of those carrying person_placed. The same rule as the story's
+ * context_job_card_events. A failed decisions read is an error, never "no
+ * decisions": the rows read by job_id still come back, with the error named.
+ */
+async function readJobCardEvents(
+  client: any,
+  opts: {
+    jobId: string;
+    select: string;
+    limit: number;
+    since?: string | null;
+    until?: string | null;
+    messagesOnly?: boolean;
+  },
+): Promise<{ rows: any[]; error: string | null; decisionsError?: string }> {
+  // A read that throws is a failed read like an error answer: the job's own rows still come back.
+  let dec: any;
+  try {
+    dec = await client.rpc("context_job_card_decisions", { p_job: opts.jobId });
+  } catch (e) {
+    dec = {
+      data: null,
+      error: { message: (e as Error)?.message ?? String(e) },
+    };
+  }
+  if (dec?.error || !Array.isArray(dec?.data)) {
+    const own = await readBusinessEventsBySourceTime(client, {
+      ...opts,
+      personDecisions: false,
+    });
+    const why = dec?.error
+      ? String(dec.error?.message ?? dec.error)
+      : "context_job_card_decisions answered no list";
+    const msg = `person decisions read failed: ${why}`;
+    return {
+      rows: own.rows,
+      error: own.error ? `${own.error}; ${msg}` : msg,
+      decisionsError: msg,
+    };
+  }
+  const decisions = dec.data as CardDecision[];
+  const off = new Set(
+    decisions.filter((d) => d.placement === "off").map((d) =>
+      String(d.event_id)
+    ),
+  );
+  const onBy = new Map(
+    decisions.filter((d) => d.placement === "on").map((
+      d,
+    ) => [String(d.event_id), d]),
+  );
+  // Read enough of the job's own rows that the ones taken off still leave the newest N.
+  const own = await readBusinessEventsBySourceTime(client, {
+    ...opts,
+    limit: opts.limit + off.size,
+    personDecisions: false,
+  });
+  const errors: string[] = own.error ? [own.error] : [];
+  let decisionsError: string | undefined;
+  const rows = own.rows.filter((r: any) => !off.has(String(r?.id ?? "")));
+  const have = new Set(rows.map((r: any) => String(r?.id ?? "")));
+  const want = [...onBy.keys()].filter((id) => !have.has(id));
+  for (let i = 0; i < want.length; i += 100) {
+    let q = client.from("business_events").select(opts.select).in(
+      "id",
+      want.slice(i, i + 100),
+    );
+    if (opts.messagesOnly) q = q.or(MESSAGE_ROW_FILTER);
+    const got = await q;
+    if (got?.error) {
+      decisionsError = `person-placed rows read failed: ${
+        String(got.error?.message ?? got.error)
+      }`;
+      errors.push(decisionsError);
+      continue;
+    }
+    for (const r of got?.data ?? []) {
+      const at = timeMs(eventSourceTime(r));
+      if (opts.since && !(at > Date.parse(opts.since))) continue;
+      if (opts.until && !(at <= Date.parse(opts.until))) continue;
+      rows.push(r);
+    }
+  }
+  const out = rows
+    .map((r: any) => {
+      const d = onBy.get(String(r?.id ?? ""));
+      return d ? { ...r, person_placed: personPlacement(d) } : r;
+    })
+    .sort(bySourceTimeDesc)
+    .slice(0, opts.limit);
+  return {
+    rows: out,
+    error: errors.length ? errors.join("; ") : null,
+    ...(decisionsError ? { decisionsError } : {}),
+  };
 }
 
 /** The message channel: the row's channel column, else from its event type. */
@@ -477,6 +620,8 @@ export function businessEventTimelineMessage(
     attribution_status: r.attribution_status ?? null,
     attribution_step: r.attribution_step ?? null,
     placement_rule: r.placement_rule ?? null,
+    // (CTX-T22) a person's current decision put the row on this job: who, when, and the other jobs
+    ...(r.person_placed ? { placed_by_person: r.person_placed } : {}),
     sender_role: roles.sender_role,
     recipient_role: roles.recipient_role,
     counterpart_role: roles.counterpart_role,

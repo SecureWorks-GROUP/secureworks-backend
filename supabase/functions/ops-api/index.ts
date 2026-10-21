@@ -17872,16 +17872,23 @@ async function getJobConversation(client: any, body: any) {
   //    R0): how the ladder placed the row, so a reader can see why it is on
   //    this job. placement_rule is metadata.placement_rule (null until the
   //    placement rules that write it ship).
+  //    (CTX-T22) The rows follow a person's reconciliation decisions as the job
+  //    card does (context_job_card_decisions): a row a split, correct or confirm
+  //    put on the job is listed with placed_by_person, one a decision took off
+  //    is not. A failed decisions read is named in person_decisions_read_failed.
   const eventMessages: any[] = []
+  let personDecisionsReadFailed: string | null = null
   try {
-    const { rows: bev, error: bevErr } = await readBusinessEventsBySourceTime(client, {
+    const { rows: bev, error: bevErr, decisionsError } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: TIMELINE_MESSAGE_COLUMNS,
       limit,
       since: sinceFilter,
       until,
       messagesOnly: true,
+      personDecisions: true,
     })
+    if (decisionsError) personDecisionsReadFailed = decisionsError
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
     for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
@@ -17980,7 +17987,12 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
+  return {
+    messages: sliced,
+    summary,
+    ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}),
+    ...(personDecisionsReadFailed ? { person_decisions_read_failed: personDecisionsReadFailed } : {}),
+  }
 }
 
 // ════════════════════════════════════════════════════════════
