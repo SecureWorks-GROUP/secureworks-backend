@@ -1,8 +1,11 @@
 -- Job profit: name a job whose quote costs are not all known.
 --
--- Stacked on 20261019120000_job_profit_commitments_truthful (PR #1087, carried
--- in PR #1107) and replaces v_job_profit as that migration leaves it. PR #1082
--- adds no migration. Apply only after 20261019120000.
+-- Stacked on 20261020181800_job_cost_allocation_rows (PR #1107, with JP-12)
+-- and replaces v_job_profit as that migration leaves it, which itself builds on
+-- 20261019120000_job_profit_commitments_truthful (PR #1087, carried in #1107).
+-- JP-12 is kept: an installer bill no person has confirmed still flags
+-- installer_bill_unconfirmed and blanks profit and margin. PR #1082 adds no
+-- migration. Apply only after 20261020181800.
 --
 -- Since PR #1118 the fence seal writes a quote revision whose costs are still
 -- to confirm (pricing_json.internal.costs_complete false) with null cost
@@ -69,6 +72,7 @@ cost AS (
     bool_or(e.lane_detail = 'unclassified') AS has_unclassified,
     bool_or(e.source = 'trade_line' AND e.match_method <> 'job_id') AS has_text_matched,
     bool_or(e.incomplete_invoice) AS has_incomplete_invoice,
+    bool_or(e.source = 'installer_bill_unconfirmed') AS has_installer_unconfirmed,
     bool_or(e.source = 'trade_line' AND e.amount_ex <> 0
             AND e.document_status NOT IN ('approved', 'pushed_to_xero', 'paid')) AS has_unapproved_trade,
     min(e.event_date) FILTER (WHERE e.is_actual) AS first_cost_date,
@@ -291,6 +295,7 @@ base AS (
     COALESCE(cost.has_text_matched, false) AS has_text_matched,
     COALESCE(cost.has_incomplete_invoice, false) AS has_incomplete_invoice,
     COALESCE(cost.has_unapproved_trade, false) AS has_unapproved_trade,
+    COALESCE(cost.has_installer_unconfirmed, false) AS has_installer_unconfirmed,
     cost.first_cost_date,
     cost.last_cost_date,
     -- Xero Projects: expenses on record, evidence only, never a cost
@@ -354,6 +359,7 @@ flagged AS (
     CASE WHEN c.invoiced_ex > 0 THEN 'ok' ELSE 'missing_client_invoice' END AS revenue_flag,
     CASE
       WHEN c.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs'
+      WHEN c.has_installer_unconfirmed THEN 'installer_bill_unconfirmed'
       WHEN NOT c.has_cost THEN 'no_cost_linked'
       WHEN c.has_incomplete_invoice THEN 'incomplete_invoice_lines'
       WHEN c.has_unclassified THEN 'unclassified_lines'
@@ -363,7 +369,7 @@ flagged AS (
       ELSE 'ok'
     END AS cost_flag,
     (c.invoiced_ex > 0 AND c.has_cost AND NOT c.has_incomplete_invoice AND NOT c.has_unclassified
-      AND NOT c.project_exceeds_line_costs
+      AND NOT c.project_exceeds_line_costs AND NOT c.has_installer_unconfirmed
       AND NOT c.materials_missing AND NOT c.labour_missing) AS margin_ok
   FROM costed c
 )
@@ -421,6 +427,7 @@ SELECT
     CASE WHEN f.has_unclassified THEN 'unclassified_lines' END,
     CASE WHEN f.has_text_matched THEN 'text_matched_lines' END,
     CASE WHEN f.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs' END,
+    CASE WHEN f.has_installer_unconfirmed THEN 'installer_bill_unconfirmed' END,
     CASE WHEN f.has_cost AND f.actual_labour_ex = 0 THEN 'no_labour_linked' END,
     CASE WHEN f.project_contact_only THEN 'xero_project_linked_by_contact_only' END,
     CASE WHEN f.has_cost AND f.materials_missing THEN 'materials_not_linked' END,
@@ -445,7 +452,7 @@ SELECT
 FROM flagged f;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, JP-12 20261020181800, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). An installer bill on the job that no person has confirmed (JP-12) flags installer_bill_unconfirmed and gives no profit or margin; its amount is not in actual cost. quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted. Read only, service role only.';
 
 COMMENT ON COLUMN public.v_job_profit.quote_costs_incomplete IS
   'True when no expected cost is fixed because the revision the quote stands on (newest accepted, else newest sent) sealed its costs as still to confirm (cost_estimates.costs_complete false). Not the same as a job with no costed quote. Never a figure.';

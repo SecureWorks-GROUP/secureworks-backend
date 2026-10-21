@@ -21,6 +21,9 @@
 --   QC-I  one accepted document, v2 with costs to confirm sent first, v1 with
 --         no costs (zero) sent later -> v2 stands, by version as accepted_rev
 --         orders, so incomplete (an order by send time would pick v1 and miss it)
+--   QC-J  JP-12 survives this view: an invoiced patio job whose only labour is
+--         an installer bill (306) placed by Xero's reference, not a person ->
+--         flagged installer_bill_unconfirmed, no profit, no margin, labour 0
 
 \set ON_ERROR_STOP on
 
@@ -80,6 +83,21 @@ INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, r
   ('a7d00000-0000-4000-8000-000000000009', 'a7d30000-0000-4000-8000-000000000009', 1, '2026-07-25T00:00:00Z', 'send-quote/send', '{"total_inc_gst": 440, "total_ex_gst": 400}',
    '{"cost_estimates": {"labour_total": 0, "material_total": 0, "subcontract_commission_total": 0}}');
 
+
+-- QC-J (JP-12, 20261020181800): this migration replaces v_job_profit after
+-- JP-12, so it must keep an unconfirmed installer bill flagged and blank.
+INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
+  ('a7d00000-0000-4000-8000-000000000010', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'QC-J', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z');
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'QC-J-S', 'INV-QC-J', 'ACCREC', 'AUTHORISED', 'QC Customer', 7000, 7700, '2026-08-20',
+   '[{"Description": "Patio", "AccountCode": "200", "LineAmount": 7000, "TaxAmount": 700}]',
+   '{"LineAmountTypes": "Exclusive"}', 'a7d00000-0000-4000-8000-000000000010'),
+  ('00000000-0000-0000-0000-000000000001', 'QC-J-B', 'QC-J-51', 'ACCPAY', 'AUTHORISED', 'QC Installer', 600, 660, '2026-08-22',
+   '[{"Description": "Patio install", "AccountCode": "306", "LineAmount": 600, "TaxAmount": 60}]',
+   '{"LineAmountTypes": "Exclusive"}', NULL);
+INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date) VALUES
+  ('QC-J-B', 'a7d00000-0000-4000-8000-000000000010', 'QC-J', 'labour', 'actual', 600, 'high', 'xero_ref_link', '2026-08-22');
+
 DO $$
 DECLARE
   r record;
@@ -128,7 +146,17 @@ BEGIN
       RAISE EXCEPTION 'QC-E must read the frozen costs: % %', r.src, r.exp;
     END IF;
   END LOOP;
-  IF (SELECT count(*) FROM public.v_job_profit WHERE job_number LIKE 'QC-_') <> 9 THEN
+
+  -- QC-J: JP-12 kept by this view.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'QC-J';
+  IF r.margin_ok OR r.profit_ex IS NOT NULL OR r.margin_pct IS NOT NULL
+     OR r.actual_labour_ex <> 0
+     OR r.cost_flag IS DISTINCT FROM 'installer_bill_unconfirmed'
+     OR NOT ('installer_bill_unconfirmed' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'QC-J: JP-12 lost (margin_ok %, profit %, margin %, labour %, flag %, completeness %)',
+      r.margin_ok, r.profit_ex, r.margin_pct, r.actual_labour_ex, r.cost_flag, r.completeness;
+  END IF;
+  IF (SELECT count(*) FROM public.v_job_profit WHERE job_number LIKE 'QC-_') <> 10 THEN
     RAISE EXCEPTION 'not every QC job has a row';
   END IF;
   IF has_table_privilege('anon', 'public.v_job_profit', 'SELECT')
