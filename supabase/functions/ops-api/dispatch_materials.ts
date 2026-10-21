@@ -70,10 +70,19 @@ export function isDispatchUuid(value: unknown): value is string {
 
 // ── Status and counts: the one rule ─────────────────────────────────────────
 
+// Slice 6 (docs/dispatch-slice-6-contract.md): `sightedOrderIds` holds the
+// ids of the job's orders whose delivery is sighted on site; a line on one of
+// them is Delivered. Callers that read no orders pass none, and a line on an
+// order stays On PO.
 export function dispatchMaterialDisplayStatus(
   line: { status?: unknown; purchase_order_id?: unknown } | null | undefined,
+  sightedOrderIds?: ReadonlySet<string>,
 ): DispatchMaterialDisplayStatus {
-  if (line?.purchase_order_id) return "on_po";
+  if (line?.purchase_order_id) {
+    return sightedOrderIds?.has(String(line.purchase_order_id))
+      ? "delivered"
+      : "on_po";
+  }
   const stored = String(line?.status ?? "");
   return (DISPATCH_MATERIAL_STORED_STATUSES as readonly string[]).includes(
       stored,
@@ -82,8 +91,13 @@ export function dispatchMaterialDisplayStatus(
     : "not_reviewed";
 }
 
-export function isDispatchMaterialReady(line: any): boolean {
-  return READY_DISPLAY_STATUSES.has(dispatchMaterialDisplayStatus(line));
+export function isDispatchMaterialReady(
+  line: any,
+  sightedOrderIds?: ReadonlySet<string>,
+): boolean {
+  return READY_DISPLAY_STATUSES.has(
+    dispatchMaterialDisplayStatus(line, sightedOrderIds),
+  );
 }
 
 export type DispatchMaterialCounts = { total: number; ready: number };
@@ -92,11 +106,13 @@ export type DispatchMaterialCounts = { total: number; ready: number };
 // stock or Delivered.
 export function dispatchMaterialCounts(
   lines: any[] | null | undefined,
+  sightedOrderIds?: ReadonlySet<string>,
 ): DispatchMaterialCounts {
   const all = Array.isArray(lines) ? lines : [];
   return {
     total: all.length,
-    ready: all.filter(isDispatchMaterialReady).length,
+    ready: all.filter((line) => isDispatchMaterialReady(line, sightedOrderIds))
+      .length,
   };
 }
 
@@ -104,6 +120,7 @@ export function dispatchMaterialCounts(
 // from the map; the list reads it as 0 and 0.
 export function dispatchMaterialCountsByJob(
   lines: any[] | null | undefined,
+  sightedOrderIds?: ReadonlySet<string>,
 ): Map<string, DispatchMaterialCounts> {
   const grouped = new Map<string, any[]>();
   for (const line of Array.isArray(lines) ? lines : []) {
@@ -115,7 +132,7 @@ export function dispatchMaterialCountsByJob(
   }
   const counts = new Map<string, DispatchMaterialCounts>();
   for (const [jobId, jobLines] of grouped) {
-    counts.set(jobId, dispatchMaterialCounts(jobLines));
+    counts.set(jobId, dispatchMaterialCounts(jobLines, sightedOrderIds));
   }
   return counts;
 }
@@ -147,7 +164,10 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function projectDispatchMaterialLine(row: any) {
+export function projectDispatchMaterialLine(
+  row: any,
+  sightedOrderIds?: ReadonlySet<string>,
+) {
   return {
     id: row?.id,
     supplier_id: row?.supplier_id,
@@ -156,7 +176,7 @@ export function projectDispatchMaterialLine(row: any) {
     quantity: numberOrNull(row?.quantity),
     unit: row?.unit ?? null,
     status: row?.status,
-    display_status: dispatchMaterialDisplayStatus(row),
+    display_status: dispatchMaterialDisplayStatus(row, sightedOrderIds),
     purchase_order_id: row?.purchase_order_id ?? null,
     source: row?.source,
     position: row?.position,
@@ -169,8 +189,9 @@ export function projectDispatchMaterialLine(row: any) {
 export function projectDispatchMaterialLineOnOrder(
   row: any,
   poNumbers: Map<string, string | null>,
+  sightedOrderIds?: ReadonlySet<string>,
 ) {
-  const line = projectDispatchMaterialLine(row);
+  const line = projectDispatchMaterialLine(row, sightedOrderIds);
   return row?.purchase_order_id
     ? {
       ...line,

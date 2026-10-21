@@ -369,10 +369,16 @@ debt_ws_jan_list_lock # probe=jwt-fail-closed
 debt_ws_jan_list_send # probe=jwt-fail-closed
 debt_ws_agent_queue # probe=jwt-fail-closed
 debt_ws_agent_submit # probe=jwt-fail-closed
+# The debt report (15 Oct 2026): the view and PDF (staff), the send (owner), the Wednesday 12:00 cron.
+debt_ws_report # probe=jwt-fail-closed
+debt_ws_report_pdf # probe=jwt-fail-closed
+debt_ws_report_send # probe=jwt-fail-closed
+debt_ws_report_auto # probe=jwt-fail-closed
 # Job work orders (job_work_orders.ts): one sealed work order per fencing and patio job
 job_work_order # probe=bounded-refusal probe-args=job_id=__deploy_probe__
 approve_work_order # probe=source-only
 backfill_job_work_orders # probe=source-only
+auto_issue_job_work_orders # probe=source-only
 resend_work_order_variation_emails # probe=source-only
 correct_work_order_variation # probe=source-only
 # Work order lines from the accepted quote (docs/quote-work-order-lines-v1.md).
@@ -388,8 +394,12 @@ approve_customer_variation # probe=source-only
 cancel_customer_variation # probe=source-only
 prepare_customer_variation_invoice_line # probe=source-only
 create_customer_variation_xero_draft # probe=source-only
+reconcile_customer_variation_xero_draft # probe=source-only
 # Paid close-out for fencing and patio (job_closeout.ts): paid -> Get Review, one review text, 24h archive
 job_closeout_paid # probe=source-only
 job_closeout_catch_up # probe=source-only
 job_closeout_sweep # probe=source-only
 job_closeout_backlog_preview # probe=source-only
+# Paid-invoice receipt for fencing and patio (job_receipt.ts): Xero emails each newly paid client invoice once
+job_receipt_paid # probe=source-only
+job_receipt_catch_up # probe=source-only

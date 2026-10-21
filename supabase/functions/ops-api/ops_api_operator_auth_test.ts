@@ -99,6 +99,10 @@ Deno.test("direct Xero evidence reads retain staff/server auth and refuse public
       "read_xero_settlement_record",
       "list_xero_bank_transactions",
       "read_xero_bank_summary",
+      "read_xero_profit_and_loss",
+      "read_xero_balance_sheet",
+      "read_xero_trial_balance",
+      "read_xero_aged_payables",
     ]
   ) {
     for (const authMode of ["none", "api_key"] as const) {
@@ -1115,6 +1119,10 @@ Deno.test("debt workshop actions are staff JWT or server secret only; trades and
       "debt_ws_jan_list_send",
       "debt_ws_agent_queue",
       "debt_ws_agent_submit",
+      "debt_ws_report",
+      "debt_ws_report_pdf",
+      "debt_ws_report_send",
+      "debt_ws_report_auto",
     ]
   ) {
     assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true, action);

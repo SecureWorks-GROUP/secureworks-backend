@@ -183,6 +183,12 @@ const SCHEMA: Record<string, string[]> = {
     "pdf_rendered_at",
     "last_sent_pdf_version",
     "last_sent_at",
+    "confirmed_delivery_set_at",
+    "confirmed_delivery_set_by",
+    "confirmed_delivery_set_by_email",
+    "delivery_sighted_at",
+    "delivery_sighted_by",
+    "delivery_sighted_by_email",
   ],
   job_order_emails: [
     "id",

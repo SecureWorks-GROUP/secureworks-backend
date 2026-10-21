@@ -316,11 +316,11 @@ Deno.test("commercial override accepts Captain labour_rate_override for this car
       authorised_at: "2026-08-06T00:00:00.000Z",
       decision_key: "mosman-park-remint-v1",
       reason:
-        "Captain after-hours rate $100 and commercial materials/glass for Mosman Park only; sealed MLB $85 unchanged globally.",
+        "Captain after-hours rate $100 and commercial materials/glass for Mosman Park only; sealed MLB $90 unchanged globally.",
       trade_reported_hours_per_trade: 5,
       sealed_billable_hours_floor: 3,
       labour_rate_override: {
-        sealed_unit_price_ex_gst: 85,
+        sealed_unit_price_ex_gst: 90,
         authorised_unit_price_ex_gst: 100,
         reason: "after hours",
       },
@@ -349,7 +349,7 @@ Deno.test("commercial override accepts Captain labour_rate_override for this car
     },
     docket_revision_id: "docket-mosman",
     attendance_cycle_ids: ["cycle-mosman"],
-    sealed_labour_unit_price_ex_gst: 85,
+    sealed_labour_unit_price_ex_gst: 90,
     builder_reference: "MLB-27482",
   });
   assertEquals(lines.length, 3);
@@ -368,7 +368,7 @@ Deno.test("commercial override accepts Captain labour_rate_override for this car
   );
   assertEquals(
     (lines[0].evidence as any).labour_rate_override.sealed_unit_price_ex_gst,
-    85,
+    90,
   );
   assertEquals(provenance.override_kind, "commercial_rate_override");
   const ex = Math.round(
@@ -404,7 +404,7 @@ Deno.test("commercial rate override refuses when sealed stamp mismatches U4 seal
         },
         docket_revision_id: "d",
         attendance_cycle_ids: ["c"],
-        sealed_labour_unit_price_ex_gst: 85,
+        sealed_labour_unit_price_ex_gst: 90,
         builder_reference: "MLB-1",
       });
     },

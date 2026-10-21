@@ -3,17 +3,24 @@
 import type { BankTransaction, WsInvoice, WsJob } from "./debt_ws_rules.ts";
 import {
   DEBT_WS_SETTINGS_OFF,
+  type DebtWsReportSettings,
   type DebtWsSettings,
   type DebtWsStore,
   type WsEvidence,
   type WsJanListRow,
   type WsLogRow,
+  type WsPayment,
+  type WsReportClaim,
+  type WsReportRow,
+  type WsReportSettle,
   type WsSendRow,
   type WsState,
   type WsStatementRow,
   type WsSuggestion,
 } from "./debt_ws_store.ts";
 import type { DebtWsCaller, DebtWsDeps } from "./debt_ws_actions.ts";
+import type { BankAccountBalance } from "./debt_ws_report.ts";
+import type { MirrorCheckRow } from "./debt_ws_xero_check.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
 
 export const SHAUN_ID = "30000000-0000-4000-8000-0000000000aa";
@@ -283,6 +290,55 @@ export class FakeStore implements DebtWsStore {
   staff = [{ id: "s1", name: "Jan Visitor", phone: "0411 222 333" }];
   /** Set to make the next claim lose a race. */
   loseNextClaim = false;
+  // ── The debt report ──
+  reportSettingsRow: DebtWsReportSettings = {
+    recipients: ["marnin@secureworkswa.com.au"],
+    cc: ["shaun@secureworkswa.com.au"],
+    auto_send: false,
+  };
+  /** Payments applied in Xero (debt_ws_payments_between). */
+  paymentRows: WsPayment[] = [
+    // Tuesday this week: a fencing final (job SWF-90001) and a patio deposit.
+    {
+      xero_invoice_id: IDS.paidThisWeek,
+      invoice_number: "INV-1999",
+      contact_name: "Morgan Paid",
+      reference: "SWF-90006-FINBAL",
+      first_description: "Balance",
+      job_id: JOBS.fence,
+      paid_on: "2026-10-06",
+      amount: 900,
+    },
+    {
+      xero_invoice_id: IDS.paidDeposit,
+      invoice_number: "INV-1990",
+      contact_name: "Casey Example",
+      reference: "SWP-90002-DEP20",
+      first_description: "Deposit (20%)",
+      job_id: JOBS.patio,
+      paid_on: "2026-10-07",
+      amount: 800,
+    },
+    // Three weeks ago: a make-safe payment (not homeowner work).
+    {
+      xero_invoice_id: "10000000-0000-4000-8000-0000000000aa",
+      invoice_number: "INV-1900",
+      contact_name: "Major Loss Builders",
+      reference: "WO-0",
+      first_description: "Make safe",
+      job_id: JOBS.makesafe,
+      paid_on: "2026-09-17",
+      amount: 330,
+    },
+  ];
+  syncedAt: string | null = "2026-10-08T01:45:00Z";
+  reportRows: Array<WsReportRow & Record<string, unknown>> = [];
+  /** Set to make the report store reads fail (the migration not applied yet). */
+  reportReadsFail = false;
+  /** xero_mirror_checks rows (the hourly check against Xero). None by default. */
+  mirrorCheckRows: MirrorCheckRow[] = [];
+  /** Set to make the check read fail (its migration not applied yet). */
+  mirrorReadFails = false;
 
   settings() {
     return Promise.resolve({ ...this.settingsRow });
@@ -545,14 +601,78 @@ export class FakeStore implements DebtWsStore {
   janStaff() {
     return Promise.resolve(this.staff);
   }
+  // ── The debt report ──
+  reportSettings() {
+    if (this.reportReadsFail) return Promise.reject(new Error("no columns"));
+    return Promise.resolve({
+      ...this.reportSettingsRow,
+      recipients: [...this.reportSettingsRow.recipients],
+      cc: [...this.reportSettingsRow.cc],
+    });
+  }
+  paymentsBetween(from: string, to: string) {
+    if (this.reportReadsFail) return Promise.reject(new Error("no function"));
+    return Promise.resolve(
+      this.paymentRows.filter((p) => p.paid_on >= from && p.paid_on <= to),
+    );
+  }
+  lastInvoiceSync() {
+    return Promise.resolve(this.syncedAt);
+  }
+  mirrorChecks() {
+    if (this.mirrorReadFails) return Promise.reject(new Error("no table"));
+    const newest = [...this.mirrorCheckRows].sort((a, b) =>
+      String(b.checked_at).localeCompare(String(a.checked_at))
+    );
+    return Promise.resolve({
+      latest: newest[0] ?? null,
+      latestComplete: newest.find((r) => r.complete) ?? null,
+    });
+  }
+  reportSends(limit: number) {
+    if (this.reportReadsFail) return Promise.reject(new Error("no table"));
+    return Promise.resolve(
+      [...this.reportRows].sort((a, b) =>
+        String(b.created_at).localeCompare(String(a.created_at))
+      ).slice(0, limit),
+    );
+  }
+  claimReport(row: WsReportClaim) {
+    if (
+      row.kind === "auto" &&
+      this.reportRows.some((r) =>
+        r.kind === "auto" && r.week_start === row.week_start &&
+        (r.status === "sending" || r.status === "sent")
+      )
+    ) return Promise.resolve(null);
+    const full = {
+      ...row,
+      id: nextId(),
+      status: "sending" as const,
+      subject: null,
+      error: null,
+      created_at: this.clock().toISOString(),
+      sent_at: null,
+    };
+    this.reportRows.push(full);
+    return Promise.resolve(full);
+  }
+  settleReport(id: string, patch: WsReportSettle) {
+    const row = this.reportRows.find((r) => r.id === id);
+    if (!row) throw new Error("no report row");
+    Object.assign(row, patch);
+    return Promise.resolve();
+  }
+  /** The time new report rows are stamped with (tests move it on). */
+  clock: () => Date = () => NOW;
 }
 
 export interface Recorder {
   sms: Record<string, unknown>[];
   staffSms: Array<{ phone: string; message: string }>;
-  emails: Array<
-    { from: string; to: string; subject: string; htmlBody: string }
-  >;
+  emails: Array<Parameters<DebtWsDeps["sendEmail"]>[0]>;
+  /** One entry per report PDF drawn. */
+  pdfs: number;
   statusMoves: Record<string, unknown>[];
   liveReads: string[];
   /** One entry per bank-feed page call: the date_from asked for. */
@@ -582,6 +702,13 @@ export function fakeDeps(
     /** The conversation every read returns, instead of the job's two default messages. */
     conversation?: Record<string, unknown>[];
     now?: Date;
+    /** Xero's bank balances for the report, or an error to make the read fail. */
+    bankSummary?: BankAccountBalance[] | Error;
+    /** Drawing the report PDF fails with this. */
+    pdfError?: Error;
+    /** The email send answers with this (default: accepted), or throws this error. */
+    emailResult?: { ok: boolean; status: number; error: string | null };
+    emailError?: Error;
   } = {},
 ): { deps: DebtWsDeps; rec: Recorder } {
   const rec: Recorder = {
@@ -589,6 +716,7 @@ export function fakeDeps(
     staffSms: [],
     emails: [],
     statusMoves: [],
+    pdfs: 0,
     liveReads: [],
     bankReads: [],
     bankPages: [],
@@ -654,7 +782,33 @@ export function fakeDeps(
     },
     sendEmail: (payload) => {
       rec.emails.push(payload);
-      return Promise.resolve({ ok: true, status: 200, error: null });
+      if (options.emailError) return Promise.reject(options.emailError);
+      return Promise.resolve(
+        options.emailResult ?? { ok: true, status: 200, error: null },
+      );
+    },
+    bankSummary: () => {
+      if (options.bankSummary instanceof Error) {
+        return Promise.reject(options.bankSummary);
+      }
+      return Promise.resolve(
+        options.bankSummary ?? [
+          { name: "Operations", account_id: "b1", closing: 60444.05 },
+          { name: "GST Provision", account_id: "b2", closing: 34782.14 },
+          { name: "PAYGO", account_id: "b3", closing: 8808 },
+          { name: "Cash Reserve", account_id: "b4", closing: 4232.32 },
+          { name: "Old Account", account_id: "b5", closing: null },
+        ],
+      );
+    },
+    renderReportPdf: (report) => {
+      rec.pdfs += 1;
+      if (options.pdfError) return Promise.reject(options.pdfError);
+      // A tiny stand-in: the real PDF is tested in debt_ws_report_pdf_test.ts.
+      return Promise.resolve({
+        bytes: new TextEncoder().encode(`%PDF-1.3 fake ${report.today}`),
+        pageCount: 3,
+      });
     },
     updateJobStatus: (body) => {
       rec.statusMoves.push(body);

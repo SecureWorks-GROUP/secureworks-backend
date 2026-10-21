@@ -182,7 +182,7 @@ jobs:
       - name: Shell syntax check on deploy scripts
         run: |
           # Verify shell scripts are syntactically valid
-          for script in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh; do
+          for script in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh scripts/check-makesafe-intake-health.sh; do
             if [ -f "$script" ]; then
               if bash -n "$script"; then
                 echo "✓ ${script}"
@@ -205,6 +205,10 @@ jobs:
         run: |
           bash scripts/test/test-edge-schema-preflight.sh
 
+      - name: Test make-safe intake watchdog check
+        run: |
+          bash scripts/test/test-check-makesafe-intake-health.sh
+
       - name: Test migration auto-apply
         run: |
           bash scripts/test/test-apply-pending-migrations.sh
@@ -223,25 +227,28 @@ jobs:
       # closed; server-key denial on staff actions; the agent queue blocked without the
       # feed; the template amount bar; company aliases; numbered reference endings.
       # Shared fences (12 Oct): the invoice's payer owns the contact, conversation and link.
-      - name: Test the Debt Workshop rules, store, dependencies and actions
+      - name: Test the Debt Workshop rules, store, dependencies, actions and the debt report
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ops-api/debt_ws_rules_test.ts \
             supabase/functions/ops-api/debt_ws_store_test.ts \
             supabase/functions/ops-api/debt_ws_deps_test.ts \
             supabase/functions/ops-api/debt_ws_actions_test.ts \
-            supabase/functions/ops-api/debt_ws_payer_test.ts
+            supabase/functions/ops-api/debt_ws_payer_test.ts \
+            supabase/functions/ops-api/debt_ws_report_test.ts \
+            supabase/functions/ops-api/debt_ws_report_pdf_test.ts
 
       # Paid close-out (13 Oct 2026): a paid fencing or patio job goes to Get Review
       # (the strict paid rule, the holds, compare and set), one review text per job
       # (claim first, 90-day look-back, every paying owner), the 24-hour archive
       # sweep and the dry-run Complete backlog list; get_review is a real stage and a
       # GHL stage event can no longer pull a card out of Get Review or the archive.
-      - name: Test the paid close-out rule, review sender, sweeps and stage
+      - name: Test the paid close-out rule, review sender, receipt sender, sweeps and stage
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/_shared/job_paid_closeout_test.ts \
             supabase/functions/ops-api/job_closeout_test.ts \
+            supabase/functions/ops-api/job_receipt_test.ts \
             supabase/functions/_shared/stage-gate/job-state-machine_test.ts \
             supabase/functions/_shared/stage-gate/engine_test.ts \
             supabase/functions/ghl-webhook/stage_rank_test.ts
@@ -419,6 +426,8 @@ jobs:
             supabase/functions/ghl-proxy/calendar_appointment_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_release_test.ts \
             supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts \
+            supabase/functions/xero-sync/xero_mirror_check_test.ts \
+            supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/project_job_link_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
@@ -432,6 +441,7 @@ jobs:
             supabase/functions/ops-api/read_job_record_test.ts \
             supabase/functions/ops-api/ses_report_trigger_test.ts \
             supabase/functions/ops-api/xero_bank_read_test.ts \
+            supabase/functions/ops-api/xero_reports_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
             supabase/functions/ops-api/job_work_orders_test.ts \
             supabase/functions/ops-api/quote_work_order_lines_test.ts \
@@ -655,7 +665,7 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    # 40, not 20: each registered contract case can replay the whole stack
+    # 40, not 20: each registered contract case could replay the whole stack
     # (fail-closed, rollback and break proofs). Passing suites were cancelled at
     # the limit of 5, then of 10, then of 20: on 5 Oct 2026 main ran 12 to 19
     # minutes, and job story v1 (four cases) was cancelled at 20 with every
@@ -664,6 +674,10 @@ jobs:
     # 90, not 40: the replays grow with every registered case. On 7 Oct 2026 a
     # PR adding one case to main took 37 min 51 s here (PR 986), and the
     # scorecard v2 PR carries eight more (the seven 7 Oct data sources and v2).
+    # On 16 Oct 2026 (144 cases, about 320 replays) runs took 35 to 80 min and
+    # slower runners were cancelled here. Proofs now start from a copy of a
+    # database built once (run.sh), not a replay, so the job no longer grows
+    # with the square of the case count.
     timeout-minutes: 90
 
     services:

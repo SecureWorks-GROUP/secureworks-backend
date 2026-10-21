@@ -8,6 +8,7 @@
 
 import type { WsInvoice, WsJob } from "./debt_ws_rules.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
+import type { MirrorCheckRow } from "./debt_ws_xero_check.ts";
 
 export const DEBT_WS_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const IN_CHUNK = 50;
@@ -255,6 +256,119 @@ export interface DebtWsStore {
   janStaff(): Promise<
     Array<{ id: string; name: string | null; phone: string | null }>
   >;
+
+  // ── The debt report (20261015170000_debt_ws_report.sql) ──
+  // Kept apart from settings() on purpose: the Debt tab itself never reads these columns,
+  // so the tab keeps working even before the report migration is applied.
+  /** Who the report goes to, who is copied, and the Wednesday 12pm auto-send switch. */
+  reportSettings(): Promise<DebtWsReportSettings>;
+  /** Customer payments applied in Xero between two dates (inclusive), one per payment. */
+  paymentsBetween(from: string, to: string): Promise<WsPayment[]>;
+  /**
+   * When our Xero copy of invoices was last brought up to date, or null when unknown: the
+   * start of the last invoice sync that read every page (xero_sync_state 'sync_invoices'
+   * cursor_at), so every change made in Xero before that moment is in the copy. Falls back
+   * to the newest xero_invoices.synced_at when the cursor row is missing.
+   */
+  lastInvoiceSync(): Promise<string | null>;
+  /** The newest report sends, newest first (without the HTML and PDF copies). */
+  reportSends(limit: number): Promise<WsReportRow[]>;
+  /** The claim: inserts a 'sending' report row. Null when this week's auto report is taken. */
+  claimReport(row: WsReportClaim): Promise<WsReportRow | null>;
+  settleReport(id: string, patch: WsReportSettle): Promise<void>;
+
+  // ── The check against Xero (20261020150000_xero_mirror_checks.sql) ──
+  /**
+   * The newest invoice mirror check xero-sync recorded (complete or not) and the newest
+   * complete one; null when there is none. Throws when the table cannot be read, so the
+   * caller can say "could not read" rather than "matches".
+   */
+  mirrorChecks(): Promise<
+    { latest: MirrorCheckRow | null; latestComplete: MirrorCheckRow | null }
+  >;
+}
+
+/** debt_ws_settings report columns (20261015170000_debt_ws_report.sql). */
+export interface DebtWsReportSettings {
+  recipients: string[];
+  cc: string[];
+  auto_send: boolean;
+}
+
+/** One customer payment applied in Xero (debt_ws_payments_between). */
+export interface WsPayment {
+  xero_invoice_id: string;
+  invoice_number: string | null;
+  contact_name: string | null;
+  reference: string | null;
+  first_description: string | null;
+  job_id: string | null;
+  paid_on: string;
+  amount: number;
+}
+
+/** One debt report email (debt_ws_reports), without its HTML and PDF copies. */
+export interface WsReportRow {
+  id: string;
+  kind: "manual" | "auto";
+  week_start: string;
+  status: "sending" | "sent" | "failed" | "refused";
+  to_emails: string[];
+  cc_emails: string[];
+  subject: string | null;
+  sent_by_name: string | null;
+  error: string | null;
+  created_at: string;
+  sent_at: string | null;
+}
+
+export interface WsReportClaim {
+  kind: "manual" | "auto";
+  week_start: string;
+  to_emails: string[];
+  cc_emails: string[];
+  sent_by: string | null;
+  sent_by_name: string;
+}
+
+export interface WsReportSettle {
+  status?: WsReportRow["status"];
+  error?: string | null;
+  sent_at?: string | null;
+  subject?: string | null;
+  summary?: string | null;
+  totals?: Record<string, unknown>;
+  html?: string;
+  pdf_base64?: string;
+  pdf_sha256?: string;
+}
+
+const REPORT_ROW_SELECT =
+  "id, kind, week_start, status, to_emails, cc_emails, subject, sent_by_name, error, created_at, sent_at";
+
+const MIRROR_CHECK_SELECT =
+  "checked_at, complete, matches, xero_count, xero_total, copy_count, copy_total, differ_count, differences, drafts_count, drafts_total, error";
+
+/** A xero_mirror_checks row with its numbers as numbers (numeric reads come back as text). */
+// deno-lint-ignore no-explicit-any
+function toMirrorCheck(r: any): MirrorCheckRow {
+  const n = (v: unknown) => v === null || v === undefined ? null : Number(v);
+  return {
+    checked_at: String(r.checked_at),
+    complete: r.complete === true,
+    matches: r.matches === null || r.matches === undefined
+      ? null
+      : r.matches === true,
+    xero_count: n(r.xero_count),
+    xero_total: n(r.xero_total),
+    copy_count: n(r.copy_count),
+    copy_total: n(r.copy_total),
+    differ_count: Number(r.differ_count ?? 0),
+    differences: Array.isArray(r.differences) ? r.differences : [],
+    drafts_count: n(r.drafts_count),
+    drafts_total: n(r.drafts_total),
+    error: r.error ? String(r.error) : null,
+  };
 }
 
 // ── The Supabase store ──
@@ -773,6 +887,99 @@ export function createSupabaseDebtWsStore(
       ).eq("org_id", orgId).ilike("name", "jan%");
       if (error) readFailed("the staff records", error);
       return data || [];
+    },
+
+    // ── The debt report ──
+    async reportSettings() {
+      const { data, error } = await client.from("debt_ws_settings").select(
+        "report_recipients, report_cc, report_auto_send",
+      ).eq("id", 1).maybeSingle();
+      if (error) readFailed("the report settings", error);
+      const list = (v: unknown) =>
+        Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : [];
+      return {
+        recipients: list(data?.report_recipients),
+        cc: list(data?.report_cc),
+        auto_send: data?.report_auto_send === true,
+      };
+    },
+    async paymentsBetween(from, to) {
+      const { data, error } = await client.rpc("debt_ws_payments_between", {
+        p_org_id: orgId,
+        p_from: from,
+        p_to: to,
+      });
+      if (error) readFailed("the payments received", error);
+      // deno-lint-ignore no-explicit-any
+      return (data || []).map((r: any): WsPayment => ({
+        xero_invoice_id: String(r.xero_invoice_id).toLowerCase(),
+        invoice_number: r.invoice_number ?? null,
+        contact_name: r.contact_name ?? null,
+        reference: r.reference ?? null,
+        first_description: r.first_description ?? null,
+        job_id: r.job_id ?? null,
+        paid_on: String(r.paid_on).slice(0, 10),
+        amount: Number(r.amount),
+      }));
+    },
+    async lastInvoiceSync() {
+      // xero-sync advances this cursor only after a run fetched every type and page
+      // (20260910100000_xero_sync_state_and_pdf_attempts.sql), so it is the honest
+      // "complete as of" time. A row written only now and then (synced_at) is not.
+      const cursor = await client.from("xero_sync_state").select("cursor_at").eq(
+        "key",
+        "sync_invoices",
+      ).maybeSingle();
+      if (cursor.error) readFailed("the invoice sync time", cursor.error);
+      if (cursor.data?.cursor_at) return String(cursor.data.cursor_at);
+      const { data, error } = await client.from("xero_invoices").select(
+        "synced_at",
+      ).eq("org_id", orgId).not("synced_at", "is", null).order("synced_at", {
+        ascending: false,
+      }).limit(1);
+      if (error) readFailed("the invoice sync time", error);
+      return data?.[0]?.synced_at ? String(data[0].synced_at) : null;
+    },
+    async mirrorChecks() {
+      const read = (complete: boolean) => {
+        let q = client.from("xero_mirror_checks").select(MIRROR_CHECK_SELECT)
+          .eq("org_id", orgId);
+        if (complete) q = q.eq("complete", true);
+        return q.order("checked_at", { ascending: false }).limit(1);
+      };
+      const [latest, done] = await Promise.all([read(false), read(true)]);
+      if (latest.error) readFailed("the check against Xero", latest.error);
+      if (done.error) readFailed("the check against Xero", done.error);
+      const one = (data: unknown) =>
+        Array.isArray(data) && data[0] ? toMirrorCheck(data[0]) : null;
+      return { latest: one(latest.data), latestComplete: one(done.data) };
+    },
+    async reportSends(limit) {
+      const { data, error } = await client.from("debt_ws_reports").select(
+        REPORT_ROW_SELECT,
+      ).eq("org_id", orgId).order("created_at", { ascending: false }).limit(
+        limit,
+      );
+      if (error) readFailed("the report sends", error);
+      return (data || []) as WsReportRow[];
+    },
+    async claimReport(row) {
+      const { data, error } = await client.from("debt_ws_reports").insert({
+        ...row,
+        org_id: orgId,
+        status: "sending",
+      }).select(REPORT_ROW_SELECT).single();
+      if (!error) return data as WsReportRow;
+      if (String(error?.code ?? "") === "23505") return null;
+      writeFailed("the report claim", error);
+    },
+    async settleReport(id, patch) {
+      const { data, error } = await client.from("debt_ws_reports").update(patch)
+        .eq("id", id).select("id");
+      if (error) writeFailed("the report send", error);
+      if ((data || []).length !== 1) {
+        writeFailed("the report send", { message: "claim row not found" });
+      }
     },
   };
 }

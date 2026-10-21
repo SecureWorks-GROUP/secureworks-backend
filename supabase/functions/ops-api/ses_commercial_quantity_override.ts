@@ -56,7 +56,7 @@ export interface SesCommercialQuantityOverrideLineInput {
  * Never changes the sealed schedule matrix; stamps sealed vs authorised rates.
  */
 export interface SesCommercialLabourRateOverride {
-  /** Sealed schedule rate that would apply without this override (e.g. MLB 85). */
+  /** Sealed schedule rate that would apply without this override (e.g. MLB 90). */
   sealed_unit_price_ex_gst: number;
   /** Staff-authorised rate for this card (e.g. 100 after hours). */
   authorised_unit_price_ex_gst: number;

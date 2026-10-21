@@ -34,7 +34,9 @@ Invariants (do not regress):
   client, just without a payment link).
 - The `daily-digest` "Unpaid Deposits" section only annotates `AUTHORISED`
   deposits (positive filter) and sends nothing: automated money messages,
-  including the acceptance Pay Now SMS, are off (`ops-api/debt_autotexts_off.ts`).
+  including the acceptance Pay Now SMS, are off (`ops-api/debt_autotexts_off.ts`;
+  one exception, receipts only: Xero emails each paid fencing or patio invoice,
+  `docs/job-receipt-v1.md`).
   `sendPaymentLink` (ops-api `send_payment_link`) throws a 409 for any
   non-AUTHORISED invoice.
 
@@ -526,6 +528,17 @@ only on a real move into Accepted: a re-save (accepted -> accepted) pushes
 nothing, a move from another status (scheduled -> accepted) still pushes
 non-Dispatch draft orders. Contract:
 `docs/dispatch-slice-5-contract.md`.
+Slice 6's Deliveries rules (rows, counted, the three cells, `step`, the rail
+line) live only in `dispatch_deliveries.ts`; a hand-set confirmed date
+(`confirmed_delivery_set_*`) and a sighting (`delivery_sighted_*`) are six
+`purchase_orders` columns written only by the three `dispatch_delivery_*`
+actions, never `delivery_confirmed_at`. Contract:
+`docs/dispatch-slice-6-contract.md`.
+Slice 7's install step and its To do rule at Trade scheduled live only in
+`dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
+columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
+by `set_dispatch_install_confirmed`, never the calendar's booking lock.
+Contract: `docs/dispatch-slice-7-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
@@ -4119,7 +4132,7 @@ Default path: `prepare_ses_invoice_obligation` copies lines VERBATIM from
 `hoursPerTrade = Math.max(reportedHoursPerTrade, minimum)`
 (`ses_prepare_docket_revision.ts`) raises short attendances to the sealed
 builder floor and **never lowers a longer one**. AJS/AJBR floor is **2h** at
-$80; MLB is **3h** at $85. Do **not** change those floors for a one-off card.
+$80; MLB is **3h** at $90. Do **not** change those floors for a one-off card.
 
 `hours_per_trade` resolves from four aliases nested inside the one
 `job_service_reports.checklist_json` row (`ses_assembler_input_adapter.ts`).
@@ -4147,7 +4160,7 @@ shared sealed schedule matrix is never changed; a sealed stamp that does not
 match the U4 sealed rate refuses. Without `labour_rate_override`, a non-sealed
 labour unit price still refuses (no quiet rate fakery to force a total).
 MLB after-hours labour bills **$110/h** (Captain standing rule 2026-08-06),
-applied through this per-card instrument — the sealed $85 schedule matrix stays
+applied through this per-card instrument — the sealed $90 schedule matrix stays
 unchanged. Worked example: Mosman Park SWMS-261147 / INV-1152 DRAFT
 `data/mosman-doc-integrity-f01-f02-v1/report.md` (supersedes the $100 remint in
 `data/mosman-park-remint-v1/report.md`).
@@ -4580,10 +4593,31 @@ by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
   - then the injected `sendChaseSms` only.
   Never add a second text path.
 - An unconfirmed send keeps its claim. Only a guard refusal releases it.
-- Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons
-  and the agent queue and submit.
+- Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons,
+  the Wednesday 12:00 report cron and the agent queue and submit.
 - The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
-- Apply `20261008170000_debt_workshop.sql` before deploying the matching `ops-api`.
+- The debt report (`debt_ws_report*`, `debt_ws_report.ts`, `debt_ws_report_pdf.ts`) reads the
+  tab's own book, so it always matches the tab; its buckets must tie to Xero's open total to the
+  cent. It is internal: it emails only `@secureworkswa.com.au` (database CHECK, ops-api and
+  send-outlook-email all refuse anything else). send-outlook-email lets its unanchored PDF past
+  the PDF fence only on `internal_report: "debt_report"` with every address ours; never widen
+  that mark to another email.
+- Apply `20261008170000_debt_workshop.sql` and `20261015170000_debt_ws_report.sql` before
+  deploying the matching `ops-api`.
+
+## Our Xero Copy Says Deleted Only When Xero Does
+
+`xero_invoices` is a copy of Xero. Never write `status` VOIDED, DELETED or PAID, or an
+`amount_due` of 0, from a guess (the status asked for, a failed read, a 404 that was
+really a timeout). Until #797 (10 Sep 2026) the stale check marked any invoice whose
+read failed as DELETED with nothing owing, and five invoices open in Xero stayed that
+way until 20 Oct 2026 because nothing re-read them. Copy only a record Xero returned for
+that exact InvoiceID (`reconcileXeroInvoice`, `xero_void_mirror.ts`). The hourly mirror
+check (`xero-sync/xero_mirror_check.ts`, table `xero_mirror_checks`) compares the copy's
+open invoices with Xero's open list and heals only where Xero says money is owed; it never
+zeroes an amount, because `fn_payment_detected` turns any amount_due drop to 0 into an
+`invoice.paid` event that stops chasing and thanks the client. The Debt tab's "Total owed
+to us" and its "Matches Xero" line read it (`docs/debt-workshop/README.md`).
 
 ## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
 
@@ -4594,7 +4628,9 @@ by trigger: any update or delete raises, so a crew-path writer that touches it
 fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
 `kind = 'crew'`; a new one must too. Only the users in
-`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role (the one
+other seal is the system's own `approved_via 'auto'` issue of an unedited
+quote-filled draft, behind `job_work_order_auto_issue_v1`), and an
 approval seals only the draft that was read: `approve_work_order` requires
 `expected_updated_at`, compared under the row lock in `approve_job_work_order`.
 A recorded variation changes only through the staff door
@@ -4603,10 +4639,8 @@ line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
 by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
 before the approval; never set it from code. Only the labour lane of
 `v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
-restate that lane list. One temporary exception lives in
-`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
-line (`work order` / `work_order`) counts as labour until that view classifies
-it; remove the exception then. This migration inserts one call,
+restate that lane list (the trade app's `work order` / `work_order` pay
+lines are in it since `20261015093000`). This migration inserts one call,
 `carry_work_order_variations`, into the deployed bodies of the three
 draft-replacing functions (`replace_trade_invoice_draft_v1`,
 `persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
@@ -4617,7 +4651,7 @@ seeded off. Contract and API: `docs/job-work-orders-v1.md`.
 An untouched job draft is filled from the accepted quote revision only (never
 one frozen after acceptance, never live pricing; no accepted revision, no fill) by
 `job_work_order_quote_fill.ts` (pure rules in `quote_work_order_lines.ts`), on
-the staff open and read and in the backfill: never a sealed work order, never a
+the staff open and read, in the backfill and in the automatic issue: never a sealed work order, never a
 draft someone wrote into, and the rates come only from the quote itself and
 the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
 carry a rate, amount, percent or money word. Rules:
@@ -4672,7 +4706,8 @@ ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
 ## Paid Fencing And Patio Jobs Go To Get Review
 
 Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
-`complete`), gets one review text, and is archived 24 hours later. "Paid" is
+`complete`), gets one review text (none when staff switched it off for the job,
+`jobs.review_opt_out`), and is archived 24 hours later. "Paid" is
 the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
 invoice PAID and none DRAFT; every paying party, `job_contacts` with
 `removed_at` null, `status` not `removed`, and a share that is not an explicit
@@ -4703,9 +4738,9 @@ archive.
 Switches (migration `20261013150000`), all off; turn on in this order:
 `job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
 `dry_run` (read the `review_request_dry_run` job events); then someone must
-switch the old GoHighLevel review workflow OFF in GHL Automation; then env
-`JOB_REVIEW_SENDING_ENABLED=true` on ops-api and `review_sender_mode` `live`
-(live without the env reads as dry run); last, `automation_switches.closeout`
+switch the old GoHighLevel review workflow OFF in GHL Automation; then
+`review_sender_mode` `live` (the database switch alone decides; the env
+`JOB_REVIEW_SENDING_ENABLED` is retired and ignored); last, `automation_switches.closeout`
 for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
 moves the md5 four earlier migrations' guards pin: their contracts stand the old
 body back up from

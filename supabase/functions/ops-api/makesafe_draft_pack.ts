@@ -146,7 +146,7 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
           {
             description: "line description",
             quantity: 1,
-            unit_price: 85,
+            unit_price: 90,
             account_code: "210",
           },
         ],
@@ -157,22 +157,22 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
         "specific human feedback/rules satisfied by this draft, e.g. 'removed temp fencing wording from report'",
       ],
       applied_rule_ids: [
-        "pricing/reporting rule identifiers applied, e.g. MLB_ROUTINE_MIN_3H_85 or AJS_LABOUR_80",
+        "pricing/reporting rule identifiers applied, e.g. MLB_ROUTINE_MIN_3H_90 or AJS_LABOUR_80",
       ],
     },
     rules: [
       "Invoice lines must be DRAFT-only and exclude GST in unit_price.",
       "Every invoice line must have quantity > 0 and unit_price > 0. Never output a $0 placeholder line.",
       "Use account_code 210 unless the context clearly specifies another make-safe account.",
-      "For Major Loss Builders / MLB routine make-safe work, use a minimum/default of 1 trade x 3 hours at $85 ex GST per hour. Do not reduce below 3 labour hours just because a checklist records fewer hours unless human Ops feedback explicitly says to discount/reduce it.",
+      "For Major Loss Builders / MLB routine make-safe work, use a minimum/default of 1 trade x 3 hours at $90 ex GST per hour. Do not reduce below 3 labour hours just because a checklist records fewer hours unless human Ops feedback explicitly says to discount/reduce it.",
       "The report.billing_note must be terse and must match the invoice labour basis. Use wording like '1 trade x 3 hours' or '2 trades x 2 hours (4 labour hours total)'.",
       "Do not put travel/material/pricing uncertainty in report.billing_note. Put materials in report.materials and unresolved review items in change_summary.",
       "If costing is uncertain, use the best available SecureWorks/ops pricing from the context and say it needs pricing review in change_summary.",
       "If the latest Ops feedback says the invoice should read specific labour/trade/hour/rate wording and says 'that's it', 'thats it', 'that is it', 'labour only', or 'no materials', output ONLY those requested invoice line(s). Do not add placeholder materials or best-estimate lines.",
       "Treat feedback_notes as chronological cumulative human instructions. Later human notes refine earlier human notes; do not forget an earlier requested labour basis when the latest note only says retry/remove a placeholder.",
       "If Ops feedback says there should be no mention of a topic, no report field may contain that topic after revision. If you cannot satisfy a feedback instruction, say so in change_summary and do not pretend it was done.",
-      "For MLB / Major Loss Builders temporary-fence hire, use the SecureWorks hire card when the evidence gives quantities: labour $85 ex/hr weekday with 3-hour minimum (4 hours for solo temp-fence), retrieval allowance 2 hours x $90, panel hire $5 per panel per week for 12 weeks minimum, star pickets $13.50 each, cable ties/small consumables $25 flat. Do not price MLB panels as a sale.",
-      "For AJS / AJ Building & Restoration / AJBR, normal labour is $80 ex/hr per trade unless the source evidence explicitly says public-holiday/after-hours/special rate. Do not use the generic $85 builder rate for AJBR/AJS.",
+      "For MLB / Major Loss Builders temporary-fence hire, use the SecureWorks hire card when the evidence gives quantities: labour $90 ex/hr weekday with 3-hour minimum (4 hours for solo temp-fence), retrieval allowance 2 hours x $90, panel hire $5 per panel per week for 12 weeks minimum, star pickets $13.50 each, cable ties/small consumables $25 flat. Do not price MLB panels as a sale.",
+      "For AJS / AJ Building & Restoration / AJBR, normal labour is $80 ex/hr per trade unless the source evidence explicitly says public-holiday/after-hours/special rate. Do not use the MLB $90 weekday rate for AJBR/AJS.",
       "For AJS/AJBR temporary fencing, default to labour/travel only because AJS normally supplies/uses its own panels/blocks. Sell panels to AJS at $59 ex GST each and cement bases/blocks at $28 ex GST each only when source evidence explicitly says SecureWorks supplied/sold those materials to AJS. Counts alone are not sale evidence. Never charge AJS cable ties/clips/fixings/small consumables. The only picket carve-out is star pickets at $13.50 ex each when the trade materials_used gives one positive quantity and the scope/works narrative says they prop/support/brace/stabilise/secure an existing fence; any panel, block/base, tie/clip, fixing/consumable, hire, retrieval-material or temporary-fence signal keeps the refusal.",
       "Only use selected_photo_urls as the approved photo set for this draft refresh.",
       "Never include MAKESAFE_PACK_SENT or any wording that says the pack was sent/authorised/closed.",
@@ -558,7 +558,7 @@ function defaultLabourRate(
     ref.startsWith("AJBR") || company.includes("aj building") ||
     company.includes("ajs")
   ) return 80;
-  return 85;
+  return 90;
 }
 
 function feedbackRequestsPlaceholderRemoval(text: string): boolean {
@@ -835,7 +835,7 @@ export function verifyDraftPackOutput(
   }
 
   if (!fixedReportPricing && isMlbDraft(ctx, output)) {
-    applied.add("MLB_ROUTINE_MIN_3H_85");
+    applied.add("MLB_ROUTINE_MIN_3H_90");
     const removedTempFence = removalTerms.some((term) =>
       /temp(?:orary)?\s+fenc/.test(term)
     );
@@ -855,13 +855,13 @@ export function verifyDraftPackOutput(
     const wrongMlbRates = labourLines.filter((line) => {
       const unit = Number(line.unit_price);
       if (!Number.isFinite(unit)) return true;
-      if (Math.abs(unit - 85) <= 0.005) return false;
+      if (Math.abs(unit - 90) <= 0.005) return false;
       if (specialRate && unit >= 100) return false;
       return !humanOverride;
     });
     if (wrongMlbRates.length) {
       blockers.push(
-        "MLB/Major Loss labour must use $85 ex/hr unless source evidence or human feedback explicitly sets a different rate",
+        "MLB/Major Loss labour must use $90 ex/hr unless source evidence or human feedback explicitly sets a different rate",
       );
     }
     if (tempFence) {
@@ -1316,7 +1316,7 @@ function shouldUseAjsDefaultLabourRate(
 ): boolean {
   if (!isLabourLine(line)) return false;
   const unit = Number(line.unit_price);
-  if (Math.abs(unit - 85) > 0.005) return false;
+  if (Math.abs(unit - 90) > 0.005 && Math.abs(unit - 85) > 0.005) return false;
   const lower = String(feedbackText || "").toLowerCase();
   return !/\b(?:after[-\s]?hours?|public\s+holiday|saturday|weekend|special\s+rate)\b/
     .test(lower);
@@ -1502,7 +1502,7 @@ function applyAjsPricingFeedbackOverrides(
   const summaryParts = [];
   if (labourRateChanged) {
     summaryParts.push(
-      "applied AJS/AJBR normal labour at $80 ex/hr where the draft had the generic $85 rate",
+      "applied AJS/AJBR normal labour at $80 ex/hr where the draft had the MLB weekday rate",
     );
   }
   if (removedAjsTempFenceMaterials) {
@@ -1730,6 +1730,48 @@ function sanitizeAndValidateDraftPackOutput(
   return next;
 }
 
+/** Retired MLB weekday seal. A draft still carrying it is rewritten to $90. */
+const RETIRED_MLB_WEEKDAY_LABOUR_EX_GST = 85;
+
+function feedbackNamesSpecialLabourRate(feedbackText: string): boolean {
+  return /\b(?:after[-\s]?hours?|public\s+holiday|saturday|weekend|special\s+rate)\b/i
+    .test(feedbackText);
+}
+
+/**
+ * MLB weekday labour is $90 (Shaun 2026-09-22). A draft that still carries the
+ * retired $85 seal is moved to $90 unless the operator named a special rate.
+ */
+function applyMlbSealedWeekdayLabour(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+  feedbackText: string,
+): DraftPackOutput {
+  if (!isMlbDraft(ctx, output)) return output;
+  if (feedbackNamesSpecialLabourRate(feedbackText)) return output;
+  let changed = false;
+  const line_items = output.invoice.line_items.map((line) => {
+    if (!isLabourLine(line)) return line;
+    const unit = Number(line.unit_price);
+    if (
+      !Number.isFinite(unit) ||
+      Math.abs(unit - RETIRED_MLB_WEEKDAY_LABOUR_EX_GST) > 0.005
+    ) {
+      return line;
+    }
+    changed = true;
+    return { ...line, unit_price: defaultLabourRate(ctx, output) };
+  });
+  if (!changed) return output;
+  return {
+    ...output,
+    invoice: { ...output.invoice, line_items },
+    change_summary: cleanDraftReviewSummary(
+      `${output.change_summary} Applied the sealed MLB weekday labour rate of $90 ex GST.`,
+    ),
+  };
+}
+
 export function applyDraftPackFeedbackOverrides(
   output: DraftPackOutput,
   ctx: DraftPackContext,
@@ -1760,6 +1802,7 @@ export function applyDraftPackFeedbackOverrides(
     }
   }
 
+  next = applyMlbSealedWeekdayLabour(next, ctx, feedbackText);
   next = applyMlbTempFenceHireFeedback(next, ctx, feedbackText);
   next = applyAjsPricingFeedbackOverrides(next, ctx, feedbackText);
   next = applyPlaceholderRemoval(next, feedbackText);

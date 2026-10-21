@@ -19,8 +19,10 @@ import {
   cancelCustomerVariation,
   createCustomerVariation,
   createCustomerVariationXeroDraft,
+  CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS,
   listCustomerVariations,
   prepareCustomerVariationInvoiceLine,
+  reconcileCustomerVariationXeroDraft,
   updateCustomerVariation,
   validateCustomerVariationFields,
 } from "./work_order_customer_variations.ts";
@@ -1365,6 +1367,421 @@ Deno.test("Xero draft: a confirmed draft whose outcome is not saved fails naming
   }
 });
 
+// ── Answering for a stuck Xero draft record ──────────────────────────────────
+
+const XERO_INVOICE = "77777777-7777-4777-8777-777777777777";
+const REQUESTED_AT = "2026-10-13T04:00:00.000Z";
+const REQUESTED_MS = Date.parse(REQUESTED_AT);
+const STALE_NOW = () =>
+  REQUESTED_MS + CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS + 1000;
+const SHAUN_SESSION = { userId: SHAUN, via: "session" as const };
+
+/** An approved variation whose Xero draft record is stuck in `status`. */
+function stuckDb(status: "unknown" | "creating", patch: any = {}) {
+  const d = approvedDb();
+  d.tables.feature_flags = [...flagOn];
+  d.tables.work_order_customer_variation_invoices = [{
+    id: "88888888-8888-4888-8888-888888888888",
+    variation_id: VAR,
+    job_id: JOB,
+    line: {
+      description: "Variation 1",
+      quantity: 1,
+      unit_price: 921.6,
+      account_code: "207",
+    },
+    status,
+    prepared_by: `user:${ESTHER}`,
+    prepared_at: STAMP,
+    xero_contact_id: XERO_CONTACT,
+    job_contact_id: null,
+    xero_requested_by: `user:${ESTHER}`,
+    xero_requested_at: REQUESTED_AT,
+    xero_invoice_id: null,
+    invoice_number: null,
+    xero_created_at: null,
+    failure: status === "unknown" ? "socket closed" : null,
+    updated_at: STAMP,
+    ...patch,
+  }];
+  return d;
+}
+
+const invoiceRow = (d: FakeDb) =>
+  d.tables.work_order_customer_variation_invoices[0];
+
+Deno.test("reconcile: an approver who found no draft in Xero releases an unknown record, and the line can go again", async () => {
+  const d = stuckDb("unknown");
+  const r = await reconcileCustomerVariationXeroDraft(
+    d,
+    {
+      variation_id: VAR,
+      expected_updated_at: STAMP,
+      outcome: "no_draft",
+    },
+    SHAUN_SESSION,
+    { now: STALE_NOW },
+  );
+  assertEquals(r.duplicate, false);
+  assertEquals(r.invoice?.status, "prepared");
+  const row = invoiceRow(d);
+  assertEquals(row.status, "prepared");
+  assertEquals(row.xero_invoice_id, null);
+  assertEquals(row.failure, "socket closed");
+  const event = d.tables.job_events.find((e: any) =>
+    e.event_type === "customer_variation_xero_draft_reconciled"
+  );
+  assertEquals(event?.user_id, SHAUN);
+  assertEquals(event?.detail_json, {
+    customer_variation_id: VAR,
+    outcome: "no_draft",
+    from_status: "unknown",
+    xero_invoice_id: null,
+    reconciled_by: SHAUN,
+    via: "session",
+  });
+  assertEquals(d.rpcCalls, []);
+
+  // Released: the next request makes the draft.
+  let calls = 0;
+  const again = await createCustomerVariationXeroDraft(
+    d,
+    { variation_id: VAR, xero_contact_id: XERO_CONTACT },
+    ESTHER_ACTOR,
+    {
+      ...accounts,
+      createDraft: async () => {
+        calls++;
+        return {
+          ok: true,
+          xero_invoice_id: XERO_INVOICE,
+          invoice_number: "INV-2010",
+        };
+      },
+    },
+  );
+  assertEquals(calls, 1);
+  assertEquals(again.invoice?.status, "xero_draft_created");
+});
+
+Deno.test("reconcile: an approver records the draft found in Xero; nothing is sent to Xero again", async () => {
+  const d = stuckDb("unknown");
+  d.tables.feature_flags.push({
+    flag_name: "work_order_terminal_approval_v1",
+    enabled: true,
+  });
+  const body = {
+    variation_id: VAR,
+    expected_updated_at: STAMP,
+    outcome: "draft_exists",
+    xero_invoice_id: XERO_INVOICE.toUpperCase(),
+    invoice_number: " INV-2011 ",
+  };
+  const terminal = { userId: SHAUN, via: "terminal" as const };
+  const r = await reconcileCustomerVariationXeroDraft(d, body, terminal, {
+    now: STALE_NOW,
+  });
+  assertEquals(r.duplicate, false);
+  const row = invoiceRow(d);
+  assertEquals(
+    [row.status, row.xero_invoice_id, row.invoice_number],
+    ["xero_draft_created", XERO_INVOICE, "INV-2011"],
+  );
+  assertEquals(row.xero_created_at, new Date(STALE_NOW()).toISOString());
+  assertEquals(
+    d.tables.job_events.find((e: any) =>
+      e.event_type === "customer_variation_xero_draft_reconciled"
+    )?.detail_json,
+    {
+      customer_variation_id: VAR,
+      outcome: "draft_exists",
+      from_status: "unknown",
+      xero_invoice_id: XERO_INVOICE,
+      reconciled_by: SHAUN,
+      via: "terminal",
+    },
+  );
+
+  // The same answer again is a duplicate; a different invoice is refused.
+  const same = await reconcileCustomerVariationXeroDraft(
+    d,
+    { ...body, expected_updated_at: row.updated_at },
+    terminal,
+    { now: STALE_NOW },
+  );
+  assertEquals(same.duplicate, true);
+  await refused(
+    () =>
+      reconcileCustomerVariationXeroDraft(
+        d,
+        {
+          ...body,
+          expected_updated_at: row.updated_at,
+          xero_invoice_id: "99999999-9999-4999-8999-999999999999",
+        },
+        terminal,
+        { now: STALE_NOW },
+      ),
+    409,
+    "xero_draft_already_recorded",
+  );
+
+  // The variation now holds its draft: a create call is a duplicate, not a
+  // second draft.
+  let calls = 0;
+  const create = await createCustomerVariationXeroDraft(
+    d,
+    { variation_id: VAR, xero_contact_id: XERO_CONTACT },
+    ESTHER_ACTOR,
+    {
+      ...accounts,
+      createDraft: async () => {
+        calls++;
+        return { ok: true, xero_invoice_id: XERO_INVOICE };
+      },
+    },
+  );
+  assertEquals([create.duplicate, calls], [true, 0]);
+});
+
+Deno.test("reconcile: a creating claim is answered for only once it is too old to be in flight", async () => {
+  const fresh = stuckDb("creating");
+  const body = {
+    variation_id: VAR,
+    expected_updated_at: STAMP,
+    outcome: "no_draft",
+  };
+  await refused(
+    () =>
+      reconcileCustomerVariationXeroDraft(fresh, body, SHAUN_SESSION, {
+        now: () =>
+          REQUESTED_MS + CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS - 1000,
+      }),
+    409,
+    "xero_draft_in_progress",
+  );
+  assertEquals(invoiceRow(fresh).status, "creating");
+  assertEquals(fresh.tables.job_events, []);
+
+  const stale = stuckDb("creating");
+  const r = await reconcileCustomerVariationXeroDraft(
+    stale,
+    body,
+    SHAUN_SESSION,
+    { now: STALE_NOW },
+  );
+  assertEquals(r.invoice?.status, "prepared");
+
+  // A new claim made after the read (its own xero_requested_at) is left alone.
+  const reclaimed = stuckDb("creating");
+  const original = reclaimed.from.bind(reclaimed);
+  (reclaimed as any).from = (table: string) => {
+    const q = original(table);
+    const update = q.update.bind(q);
+    (q as any).update = (payload: any) => {
+      // Released and claimed again by someone else between read and write;
+      // the record's updated_at is left as read so only the claim differs.
+      invoiceRow(reclaimed).xero_requested_at = new Date(STALE_NOW())
+        .toISOString();
+      return update(payload);
+    };
+    return q;
+  };
+  await refused(
+    () =>
+      reconcileCustomerVariationXeroDraft(reclaimed, body, SHAUN_SESSION, {
+        now: STALE_NOW,
+      }),
+    409,
+    "stale_review",
+  );
+  assertEquals(invoiceRow(reclaimed).status, "creating");
+});
+
+Deno.test("reconcile: a confirmed draft whose outcome was not saved is recorded once its claim is stale", async () => {
+  const d = approvedDb();
+  d.tables.feature_flags = [...flagOn];
+  await assertRejects(
+    () =>
+      createCustomerVariationXeroDraft(
+        d,
+        { variation_id: VAR, xero_contact_id: XERO_CONTACT },
+        ESTHER_ACTOR,
+        {
+          ...accounts,
+          createDraft: async () => {
+            d.failOn.add("update:work_order_customer_variation_invoices");
+            return {
+              ok: true,
+              xero_invoice_id: XERO_INVOICE,
+              invoice_number: "INV-2003",
+            };
+          },
+        },
+      ),
+    JobWorkOrderError,
+  );
+  d.failOn.clear();
+  const row = invoiceRow(d);
+  assertEquals(row.status, "creating");
+  const requested = Date.parse(row.xero_requested_at);
+  const r = await reconcileCustomerVariationXeroDraft(
+    d,
+    {
+      variation_id: VAR,
+      expected_updated_at: row.updated_at,
+      outcome: "draft_exists",
+      xero_invoice_id: XERO_INVOICE,
+      invoice_number: "INV-2003",
+    },
+    SHAUN_SESSION,
+    {
+      now: () => requested + CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS,
+    },
+  );
+  assertEquals(r.invoice?.status, "xero_draft_created");
+  assertEquals(r.invoice?.invoice_number, "INV-2003");
+});
+
+Deno.test("reconcile: only a work order approver answers, and nothing changes when refused", async () => {
+  const body = {
+    variation_id: VAR,
+    expected_updated_at: STAMP,
+    outcome: "no_draft",
+  };
+  const cases: Array<[string, any, number, string]> = [
+    ["no identity", null, 403, "approver_identity_missing"],
+    [
+      "not the approver",
+      { userId: ESTHER, via: "session" },
+      403,
+      "approver_required",
+    ],
+    [
+      "terminal switched off",
+      { userId: SHAUN, via: "terminal" },
+      403,
+      "terminal_approval_switched_off",
+    ],
+  ];
+  for (const [name, approver, status, code] of cases) {
+    const d = stuckDb("unknown");
+    await refused(
+      () =>
+        reconcileCustomerVariationXeroDraft(d, body, approver, {
+          now: STALE_NOW,
+        }),
+      status,
+      code,
+    );
+    assertEquals(invoiceRow(d).status, "unknown", name);
+    assertEquals(d.tables.job_events, [], name);
+  }
+  const unnamed = stuckDb("unknown");
+  unnamed.tables.work_order_settings = [{ id: 1, approver_user_ids: [] }];
+  await refused(
+    () =>
+      reconcileCustomerVariationXeroDraft(unnamed, body, SHAUN_SESSION, {
+        now: STALE_NOW,
+      }),
+    403,
+    "approver_not_set",
+  );
+});
+
+Deno.test("reconcile: the answer and the record are checked before anything is written", async () => {
+  const base = {
+    variation_id: VAR,
+    expected_updated_at: STAMP,
+  };
+  const run = (d: FakeDb, body: any) => () =>
+    reconcileCustomerVariationXeroDraft(d, body, SHAUN_SESSION, {
+      now: STALE_NOW,
+    });
+  const d = stuckDb("unknown");
+  await refused(run(d, { ...base, outcome: "maybe" }), 400, "invalid_outcome");
+  await refused(
+    run(d, { ...base, outcome: "draft_exists" }),
+    400,
+    "invalid_request",
+  );
+  await refused(
+    run(d, { ...base, outcome: "draft_exists", xero_invoice_id: "INV-2001" }),
+    400,
+    "invalid_request",
+  );
+  await refused(
+    run(d, {
+      ...base,
+      outcome: "draft_exists",
+      xero_invoice_id: XERO_INVOICE,
+      invoice_number: "",
+    }),
+    400,
+    "invalid_invoice_number",
+  );
+  await refused(
+    run(d, { ...base, outcome: "no_draft", xero_invoice_id: XERO_INVOICE }),
+    400,
+    "invalid_request",
+  );
+  const missing = await assertRejects(
+    run(d, { variation_id: VAR, outcome: "no_draft" }),
+    JobWorkOrderError,
+  );
+  assertEquals(
+    [missing.status, missing.code],
+    [400, "expected_updated_at_required"],
+  );
+  assert(missing.message.includes("invoice.updated_at"), missing.message);
+  const stale = await assertRejects(
+    run(d, {
+      ...base,
+      expected_updated_at: "2026-10-13T01:00:00+00:00",
+      outcome: "no_draft",
+    }),
+    JobWorkOrderError,
+  );
+  assertEquals([stale.status, stale.code], [409, "stale_review"]);
+  assert(stale.message.includes("invoice.updated_at"), stale.message);
+  assertEquals(invoiceRow(d).status, "unknown");
+
+  const prepared = stuckDb("unknown", { status: "prepared" });
+  await refused(
+    run(prepared, { ...base, outcome: "no_draft" }),
+    409,
+    "nothing_to_reconcile",
+  );
+  const none = approvedDb();
+  await refused(
+    run(none, { ...base, outcome: "no_draft" }),
+    404,
+    "invoice_line_not_found",
+  );
+
+  // One Xero invoice belongs to one variation.
+  const taken = stuckDb("unknown");
+  taken.tables.work_order_customer_variation_invoices.push({
+    id: "99999999-0000-4000-8000-000000000009",
+    variation_id: "55555555-5555-4555-8555-000000000002",
+    job_id: JOB,
+    status: "xero_draft_created",
+    xero_invoice_id: XERO_INVOICE,
+    updated_at: STAMP,
+  });
+  await refused(
+    run(taken, {
+      ...base,
+      outcome: "draft_exists",
+      xero_invoice_id: XERO_INVOICE,
+    }),
+    409,
+    "xero_invoice_already_recorded",
+  );
+  assertEquals(invoiceRow(taken).status, "unknown");
+  assertEquals(taken.tables.job_events, []);
+});
+
 // ── The front door ───────────────────────────────────────────────────────────
 
 const STAFF_ACTIONS = [
@@ -1375,6 +1792,7 @@ const STAFF_ACTIONS = [
   "cancel_customer_variation",
   "prepare_customer_variation_invoice_line",
   "create_customer_variation_xero_draft",
+  "reconcile_customer_variation_xero_draft",
 ];
 
 Deno.test("front door: customer variation actions are staff only, never a trade or routine door", async () => {

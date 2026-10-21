@@ -295,6 +295,8 @@ import {
   stripDispatchListAliases,
 } from './dispatch_job_list.ts'
 import { DISPATCH_STATE_SELECT, dispatchRowFields } from './dispatch_stage.ts'
+import { DISPATCH_INSTALL_BOOKING_COLUMNS, dispatchInstallBookingsByJob } from './dispatch_install.ts'
+import { setDispatchInstallConfirmed } from './dispatch_install_write.ts'
 import {
   DispatchStageWriteError,
   setDispatchNextStep,
@@ -315,6 +317,12 @@ import {
   runDispatchOrdersAction,
 } from './dispatch_orders_store.ts'
 import { resendDispatchTransport } from './dispatch_order_send.ts'
+import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
+import {
+  DISPATCH_DELIVERY_LIST_SELECT,
+  dispatchDeliveryListFields,
+  dispatchSightedOrderIds,
+} from './dispatch_deliveries.ts'
 import {
   purchaseOrderCreatedBy,
   supplierReplyMayMoveOrder,
@@ -482,7 +490,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -596,7 +604,11 @@ import {
 import {
   getXeroReceivable,
   listXeroBankTransactions,
+  readXeroAgedPayables,
+  readXeroBalanceSheet,
   readXeroBankSummary,
+  readXeroProfitAndLoss,
+  readXeroTrialBalance,
   listXeroReceivables,
   listXeroSettlementRecords,
   readXeroOrganisation,
@@ -657,7 +669,10 @@ import {
 } from './trade_invoice_time_entry.ts'
 import {
   approveJobWorkOrder,
+  autoIssueJobWorkOrderForJob,
+  autoIssueJobWorkOrders,
   backfillJobWorkOrders,
+  JOB_WORK_ORDER_OPEN_STATUSES,
   correctWorkOrderVariation,
   createJobWorkOrder,
   JobWorkOrderError,
@@ -679,6 +694,7 @@ import {
   createCustomerVariationXeroDraft,
   listCustomerVariations,
   prepareCustomerVariationInvoiceLine,
+  reconcileCustomerVariationXeroDraft,
   updateCustomerVariation,
 } from './work_order_customer_variations.ts'
 
@@ -1360,7 +1376,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
-import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { type ServiceCredentialOptions, verifyServiceCredential } from '../_shared/service_credential.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
 import {
   type JobCloseoutCaller,
@@ -1370,9 +1386,12 @@ import {
   requestJobReview,
   reviewRequestMessage as closeoutReviewRequestMessage,
   runJobCloseoutAction,
+  setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -4759,6 +4778,34 @@ export function _authorizeOpsApiAction(input: {
   return { ok: true }
 }
 
+// Actions a pg_cron job calls with `Bearer <sw_service_key()>` (each noted
+// below), a signature-valid legacy service-role JWT that need not equal the
+// injected SUPABASE_SERVICE_ROLE_KEY, so the default exact-key check sends it to
+// the user-session path and it 401s (AGENTS.md "A pg_cron Bearer Is Not The
+// Function's Service Key"). For these actions only, a JWT whose role claim is
+// exactly service_role is also the server caller, and only while the platform
+// still accepts it (the shared helper's gateway probe: ops-api runs with
+// --no-verify-jwt, so the claim alone proves nothing). Closed list: add an
+// action only with its cron caller and a test in service_credential_handler_test.ts.
+export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new Set([
+  'job_closeout_sweep', // trigger_job_closeout_sweep (sw_service_key())
+  'auto_issue_job_work_orders', // trigger_job_work_order_auto_issue (sw_service_key())
+  'makesafe_email_canary', // trigger_makesafe_reconcile, cron makesafe-canary-d4 (sw_service_key())
+  'makesafe_email_reconcile', // trigger_makesafe_reconcile, crons makesafe-reconcile-d1 and -d3 (&mode=D3) (sw_service_key())
+  'makesafe_email_reconcile_inventory', // trigger_makesafe_reconcile, cron makesafe-reconcile-d2 (sw_service_key())
+  'makesafe_status_canary', // trigger_makesafe_status_canary (sw_service_key())
+  'makesafe_portal_recheck_enqueue', // trigger_makesafe_portal_recheck (sw_service_key())
+  'makesafe_sent_mirror', // trigger_makesafe_sent_mirror (sw_service_key())
+  'makesafe_story_recompute', // trigger_makesafe_story_recompute (sw_service_key())
+  'makesafe_status_shadow_refresh', // trigger_makesafe_status_shadow_refresh (sw_service_key())
+])
+
+export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
+  return OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS.has(url.searchParams.get('action') || '')
+    ? { legacy: 'service_role_claim' }
+    : {}
+}
+
 export function _preferBearerForOpsApiAction(url: URL): boolean {
   // Browser wrappers may still send the legacy shared key alongside the real
   // signed-in session during cutover. The JWT must be the caller identity for
@@ -5270,7 +5317,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const validKey = Deno.env.get('SW_API_KEY')
   // The service credential this request presented, if Supabase-issued and live
   // (a new secret key, or the legacy key only while Supabase still accepts it).
-  const serviceKey = (await verifyServiceCredential(req.headers))?.token ?? null
+  const serviceKey = (await verifyServiceCredential(req.headers, _opsApiServiceCredentialOptions(_preAuthUrl)))?.token ?? null
   const serviceKeyEnv = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || null
   const apiKeyHeader = req.headers.get('apikey')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
@@ -6833,6 +6880,37 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw e
         }
       }
+      // Dispatch slice 6, Deliveries (docs/dispatch-slice-6-contract.md): three
+      // writes, gated exactly as slices 4 and 5. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Each updates one purchase_orders row (its own
+      // columns only) and adds one job_events row: no send, no Xero, no job or
+      // Dispatch stage write, no order status change.
+      case 'dispatch_delivery_set_expected':
+      case 'dispatch_delivery_set_confirmed':
+      case 'dispatch_delivery_mark_sighted': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const deliveriesActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchDeliveriesAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: deliveriesActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -8191,9 +8269,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'list_xero_settlement_records':
       case 'read_xero_settlement_record':
       case 'list_xero_bank_transactions':
-      case 'read_xero_bank_summary': {
+      case 'read_xero_bank_summary':
+      case 'read_xero_profit_and_loss':
+      case 'read_xero_balance_sheet':
+      case 'read_xero_trial_balance':
+      case 'read_xero_aged_payables': {
         if (req.method !== 'GET') {
-          return json({ ok: false, error: 'Xero receivables reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+          return json({ ok: false, error: 'Xero accounting reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
         }
         try {
           const reads = {
@@ -8205,6 +8287,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             read_xero_settlement_record: readXeroSettlementRecord,
             list_xero_bank_transactions: listXeroBankTransactions,
             read_xero_bank_summary: readXeroBankSummary,
+            read_xero_profit_and_loss: readXeroProfitAndLoss,
+            read_xero_balance_sheet: readXeroBalanceSheet,
+            read_xero_trial_balance: readXeroTrialBalance,
+            read_xero_aged_payables: readXeroAgedPayables,
           }
           return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
         } catch (error) {
@@ -8231,6 +8317,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
       }
+      // ── Paid-invoice receipt for fencing and patio (job_receipt.ts; docs/job-receipt-v1.md).
+      // Server key only: xero-sync posts these, and both can have Xero email a customer.
+      case 'job_receipt_paid':
+      case 'job_receipt_catch_up': {
+        const receiptCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' as const }
+          : { kind: 'none' as const }
+        const receipt = await runJobReceiptAction(action, req.method, body || {}, receiptCaller, jobReceiptDeps(client))
+        return json(receipt.body, receipt.status)
+      }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
       // (runDebtWsAction checks the method, then staff / owner / server key per action).
@@ -8250,7 +8346,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'debt_ws_jan_list_lock':
       case 'debt_ws_jan_list_send':
       case 'debt_ws_agent_queue':
-      case 'debt_ws_agent_submit': {
+      case 'debt_ws_agent_submit':
+      // The debt report (docs/debt-workshop/README.md "The debt report"): the live view and
+      // its PDF for staff, the owner's send to Marnin, and the Wednesday 12:00 cron (off by default).
+      case 'debt_ws_report':
+      case 'debt_ws_report_pdf':
+      case 'debt_ws_report_send':
+      case 'debt_ws_report_auto': {
         const debtWsCaller: DebtWsCaller = authMode === 'jwt' && authUser
           ? { kind: 'user', user_id: authUser.id, email: authUser.email || null, staff: _opsApiCallerIsStaffOperator(authMode, authUser) }
           : authMode === 'api_key' && serverSecretPresented
@@ -8277,6 +8379,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           updateJobStatus: (statusBody: Record<string, unknown>) => updateJobStatus(client, statusBody),
           // Company statements: HTML only through send-outlook-email (same auth as the
           // invoice email above). No job_id, invoice id or attachment, so no PDF fence applies.
+          // The debt report also passes cc, its one PDF and internal_report: "debt_report";
+          // send-outlook-email accepts that unanchored PDF only when every address is ours.
           sendEmail: async (payload) => {
             const resp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
               method: 'POST',
@@ -8764,8 +8868,29 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : { userId: null, email: cleanReviewedString(body?.operator_email) || null }
         try {
           return json(action === 'set_dispatch_stage'
-            ? await setDispatchStage(client, body, dispatchActor, DEFAULT_ORG_ID)
+            ? await setDispatchStage(client, body, dispatchActor, DEFAULT_ORG_ID, _perthTodayYmd())
             : await setDispatchNextStep(client, body, dispatchActor, DEFAULT_ORG_ID))
+        } catch (e) {
+          if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch slice 7 (docs/dispatch-slice-7-contract.md): Mark confirmed on
+      // the install, and clearing it. Gated exactly as update_repair_stage:
+      // staff sessions and the privileged ops key only, and absent from
+      // ROUTINE_ALLOWED_ACTIONS and AGENT_READ_ALLOWED_ACTIONS. Writes the four
+      // install_confirmed_* columns of job_dispatch_state and one job_events
+      // row; never a booking, the job status, the stage or a message.
+      case 'set_dispatch_install_confirmed': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const installActor = authMode === 'jwt'
+          ? { mode: 'jwt' as const, userId: authUser?.id || null, email: authUser?.email || null }
+          : { mode: 'api_key' as const, userId: null, email: null }
+        try {
+          return json(await setDispatchInstallConfirmed(client, body, installActor, DEFAULT_ORG_ID, _perthTodayYmd()))
         } catch (e) {
           if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
           throw e
@@ -8836,6 +8961,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
+      // The automatic issue sweep (pg_cron job-work-order-auto-issue, every 2
+      // minutes): fills and issues job work orders with no human approval.
+      // Writes nothing while feature flag job_work_order_auto_issue_v1 is off.
+      case 'auto_issue_job_work_orders': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: auto_issue_job_work_orders requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+      }
       // Re-sends variation emails left failed or stuck in sending. Sends
       // nothing while feature flag work_order_variation_emails_v1 is off.
       case 'resend_work_order_variation_emails':
@@ -8880,6 +9017,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           accountCodeForJob: (jobType) => accountCodeForJob(jobType),
           createDraft: (payload) => createInvoiceDraftAction(client, payload, authMode, authUser, serverSecretPresented),
         })))
+      // A work order approver, after checking Xero by hand, answers for a
+      // variation's Xero draft record left `unknown` or stuck `creating`:
+      // records the draft that exists, or releases the line to `prepared`.
+      // Never calls Xero.
+      case 'reconcile_customer_variation_xero_draft':
+        return json(await runJobWorkOrder(() => reconcileCustomerVariationXeroDraft(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
@@ -9237,8 +9385,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { accessToken: vAt, tenantId: vTi } = await getToken(client)
         const newStatus = body.void ? 'VOIDED' : 'DELETED'
         const vRes = await xeroPost(`/Invoices/${vid}`, vAt, vTi, { Invoices: [{ InvoiceID: vid, Status: newStatus }] }, 'POST')
-        const vReturned = String(vRes?.Invoices?.[0]?.Status || newStatus).toUpperCase()
-        await client.from('xero_invoices').update({ status: vReturned, amount_due: 0 }).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
+        // Our copy only says VOIDED or DELETED when Xero's answer does (xero_void_mirror.ts).
+        const vPatch = voidMirrorPatch(vRes, vid)
+        if (vPatch) await client.from('xero_invoices').update(vPatch).eq('xero_invoice_id', vid).eq('org_id', DEFAULT_ORG_ID)
         // Log business event (non-blocking)
         try {
           await client.from('business_events').insert({
@@ -9251,7 +9400,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
           })
         } catch (_) { /* non-blocking */ }
-        return json({ success: true, status: newStatus })
+        return json({ success: true, status: vPatch?.status ?? newStatus, mirror_updated: !!vPatch })
       }
       case 'update_job_field': {
         const { job_id: ujfJobId, field: ujfField, value: ujfValue } = body
@@ -9795,6 +9944,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'send_payment_link': return json(await sendPaymentLink(client, body))
       case 'send_acceptance_invoice': return json(await sendAcceptanceInvoice(client, body))
       case 'send_review_request': return json(await sendReviewRequest(client, body))
+      // The per-job review switch (job_closeout.ts setReviewOptOut): staff sessions and
+      // the privileged ops key only, absent from ROUTINE_ALLOWED_ACTIONS. Refused 409
+      // review_already_sent once the job has a review claim.
+      case 'set_review_opt_out': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: set_review_opt_out requires the privileged ops key or a staff session' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError('set_review_opt_out requires POST', 405)
+        // A signed-in person is named by the verified session; the ops key has no user
+        // and is attributed by the operator email the screen stamps.
+        const optOutBy = authMode === 'jwt'
+          ? (authUser?.email || cleanReviewedString(body?.operator_email) || (authUser?.id ? `user:${authUser.id}` : null))
+          : (cleanReviewedString(body?.operator_email) || `ops-api:${authMode}`)
+        const optOut = await setReviewOptOut({ client, now: () => new Date() }, body || {}, optOutBy)
+        return json(optOut.body, optOut.status)
+      }
 
       // ── Quick Quote (Miscellaneous Jobs) ──
       case 'search_ghl_contacts': return json(await searchGHLContacts(client, url.searchParams))
@@ -16196,7 +16361,7 @@ async function pipeline(
   // nothing to fail on, so a search with no match never reads as a failed
   // load (docs/dispatch-slice-3-contract.md, docs/dispatch-slice-4-contract.md).
   const dispatchEmpty = dispatchList
-    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok' }
+    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok', dispatch_deliveries: 'ok' }
     : {}
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
@@ -16371,10 +16536,15 @@ async function pipeline(
       // next_scheduled_date. Exclude cancelled rows with an explicit OR that
       // keeps NULL, and re-apply the old exclusion in code for the two legacy
       // fields so their values stay exactly what they were.
+      // Dispatch slice 7: under dispatch=1 only, the same read also carries the
+      // install step's columns (dispatch_install.ts); the plain read is as it was.
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
-        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status').in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
+        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status' +
+          (dispatchList ? ', ' + DISPATCH_INSTALL_BOOKING_COLUMNS : '')).in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
+      // Dispatch slice 6: under dispatch=1 only, the same read also takes what
+      // the delivery counts and Delivered lines need. po_count is unchanged.
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
-        client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
+        client.from('purchase_orders').select(dispatchList ? DISPATCH_DELIVERY_LIST_SELECT : 'job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
         client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
@@ -16443,13 +16613,32 @@ async function pipeline(
   // A failed materials read leaves both fields off every row and says
   // `dispatch_materials: 'failed'`: never 0, and never the whole list marked
   // degraded for it (docs/dispatch-slice-4-contract.md).
-  const dispatchMaterialsOk = dispatchList && !materialsRes.error
+  // Dispatch slice 6 (docs/dispatch-slice-6-contract.md): the order read feeds
+  // the delivery counts and Delivered lines, so a failed order read leaves the
+  // delivery fields AND the materials fields off every row (never 0).
+  const dispatchDeliveriesOk = dispatchList && !poRes.error
+  const dispatchMaterialsOk = dispatchList && !materialsRes.error && !poRes.error
   if (dispatchList && materialsRes.error) {
     console.error('[pipeline] pipeline.job_material_lines failed:', materialsRes.error)
   }
+  if (dispatchList && poRes.error) {
+    console.error('[pipeline] pipeline.purchase_orders failed: dispatch deliveries and materials marked failed')
+  }
   const materialCountsByJob = dispatchMaterialsOk
-    ? dispatchMaterialCountsByJob(materialsRes.data)
+    ? dispatchMaterialCountsByJob(materialsRes.data, dispatchSightedOrderIds(poRes.data || []))
     : new Map()
+  // Orders per job, only for the jobs the order read covered (a draft row is
+  // not read, so it gets no delivery fields rather than a made-up 0).
+  const deliveryReadJobIds = new Set(jobIds.map((id: any) => String(id)))
+  const deliveryOrdersByJob = new Map<string, any[]>()
+  if (dispatchDeliveriesOk) {
+    for (const po of poRes.data || []) {
+      const key = String(po.job_id)
+      const bucket = deliveryOrdersByJob.get(key)
+      if (bucket) bucket.push(po)
+      else deliveryOrdersByJob.set(key, [po])
+    }
+  }
 
   const enrichmentResults: Array<[string, PipelineEnrichmentResult]> = [
     ['pipeline.job_assignments', assignRes],
@@ -16504,7 +16693,18 @@ async function pipeline(
   // A failed stage read leaves every dispatch_ field and todo_total off the
   // answer: a wrong column name or a missing table must never put every job
   // back on its job status. The error is logged by logQueryErrors above.
-  const dispatchStagesOk = dispatchList && !dispatchStateRes.error
+  // Slice 7: To do at Trade scheduled turns on the install bookings, so a
+  // failed bookings read fails both (never drawn as "not booked"), and a failed
+  // stage read fails the install step too.
+  const dispatchInstallsOk = dispatchList && !dispatchStateRes.error && !assignRes.error
+  if (dispatchList && assignRes.error) {
+    console.error('[pipeline] dispatch install bookings read failed:', assignRes.error)
+  }
+  const dispatchStagesOk = dispatchInstallsOk
+  const dispatchInstallBookings = dispatchInstallsOk
+    ? dispatchInstallBookingsByJob(assignRes.data)
+    : new Map()
+  const dispatchToday = _perthTodayYmd()
   const dispatchStateMap = new Map<string, any>()
   if (dispatchStagesOk) {
     for (const row of dispatchStateRes.data || []) dispatchStateMap.set(String(row.job_id), row)
@@ -16634,8 +16834,16 @@ async function pipeline(
           description: dispatchJobDescription(j),
           value_inc_gst: dispatchValueIncGst(j),
           work_type: dispatchWorkType(j),
-          ...(dispatchStagesOk ? dispatchRowFields(j, dispatchStateMap.get(String(j.id))) : {}),
+          ...(dispatchStagesOk
+            ? dispatchRowFields(j, dispatchStateMap.get(String(j.id)), {
+              bookings: dispatchInstallBookings.get(String(j.id)) || [],
+              today: dispatchToday,
+            })
+            : {}),
           ...(dispatchMaterialsOk ? dispatchMaterialListFields(materialCountsByJob.get(String(j.id))) : {}),
+          ...(dispatchDeliveriesOk && deliveryReadJobIds.has(String(j.id))
+            ? dispatchDeliveryListFields(deliveryOrdersByJob.get(String(j.id)))
+            : {}),
         }
         : {}),
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
@@ -16716,6 +16924,8 @@ async function pipeline(
         : { dispatch_stages: 'failed' }
       : {}),
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchList ? { dispatch_deliveries: dispatchDeliveriesOk ? 'ok' : 'failed' } : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
@@ -16939,6 +17149,9 @@ async function jobDetail(
         variation_count: jwo.variations.length,
         customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
         quote_fill: jwo.quote_fill,
+        // Office only: lines the quote fill flagged (they never stop the work
+        // order going out) and why a draft has not gone to the trades.
+        needs_checking: jwo.needs_checking,
       }
     } catch (e) {
       console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
@@ -17667,13 +17880,18 @@ async function getJobConversation(client: any, body: any) {
   //     (unplaced or pending_luna, context PR #1013) whose candidate_job_ids
   //     contain this job and whose GoHighLevel contact is one asked for (the
   //     payer's). Each is marked unplaced: true. Placement is not changed. A
-  //     message already shown above (same provider message id) shows once.
+  //     message already shown above as a placed row shows once, as that row; one
+  //     shown only as a GoHighLevel cache copy shows once, as the held row, so
+  //     its unplaced marking reaches the reader (debt review, 15 Oct 2026).
   //     Read with the same limit and merged before the newest-first cut, so the
-  //     newest messages are kept. Only callers that ask get these rows.
+  //     newest messages are kept. Only callers that ask get these rows, and only
+  //     they get held_read_failed (true when this read failed: the Debt Workshop
+  //     then refuses a move rather than read the gap as nothing held).
   const heldIds: string[] = Array.isArray(body?.held_contact_ids)
     ? Array.from(new Set<string>(body.held_contact_ids.map((v: unknown) => String(v || '').trim())
       .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v)))).slice(0, 5)
     : []
+  let heldReadFailed = false
   if (heldIds.length) {
     try {
       const { rows: held, error: heldErr } = await readHeldBusinessEventsBySourceTime(client, {
@@ -17683,9 +17901,15 @@ async function getJobConversation(client: any, body: any) {
         since: sinceFilter,
         until,
       })
-      if (heldErr) console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
-      messages.push(...heldConversationMessages(held, jobId, heldIds, customerAddresses, messages))
+      if (heldErr) {
+        heldReadFailed = true
+        console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
+      }
+      const heldMessages = heldConversationMessages(held, jobId, heldIds, customerAddresses, messages)
+      dropCacheCopiesOfHeld(messages, heldMessages)
+      messages.push(...heldMessages)
     } catch (e) {
+      heldReadFailed = true
       console.log('[ops-api] get_job_conversation held messages read failed:', (e as Error).message)
     }
   }
@@ -17716,12 +17940,9 @@ async function getJobConversation(client: any, body: any) {
   // response keys do not change. Do not re-add it here.
 
   // Newest first by when each message happened (parsed, so mixed timestamp
-  // formats such as Z and +00:00 compare correctly).
-  const at = (m: any) => {
-    const t = Date.parse(String(m.occurred_at || ''))
-    return Number.isFinite(t) ? t : -Infinity
-  }
-  messages.sort((a, b) => at(b) - at(a))
+  // formats such as Z and +00:00 compare correctly); at the same instant a held
+  // message comes first (only held_contact_ids callers have any).
+  messages.sort(compareConversationNewestFirst)
   const sliced = messages.filter((m) => happenedBy(m.occurred_at, until)).slice(0, limit)
 
   const channels: Record<string, number> = {}
@@ -17739,7 +17960,7 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary }
+  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -35477,6 +35698,23 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
+  // ── The job work order (job_work_orders.ts): a fencing or patio job moving
+  // into an open approved status had its draft opened by the database trigger
+  // in this same update; fill it from the accepted quote and issue it to the
+  // trades now, rather than on the next 2-minute sweep. A no-op while
+  // job_work_order_auto_issue_v1 is off, and it never throws: the status
+  // change stands whatever happens here.
+  if (
+    (data?.type === 'fencing' || data?.type === 'patio') &&
+    JOB_WORK_ORDER_OPEN_STATUSES.has(String(status)) &&
+    oldStatus !== status
+  ) {
+    const issue = await autoIssueJobWorkOrderForJob(client, jId)
+    if (!issue.issued && issue.reason !== 'switched_off') {
+      console.log('[ops-api] job work order not issued on status change:', jId, issue.reason, issue.code || '')
+    }
+  }
+
   // ── Acceptance trigger: auto-approve draft WOs + push labour POs to Xero (non-blocking) ──
   if (status === 'accepted') {
     (async () => {
@@ -35486,8 +35724,9 @@ async function updateJobStatus(client: any, body: any) {
         // not mention quote_builder_version_id (the column may not exist yet).
         const ordersOn = await quoteBuilderOrdersEnabled(client)
         // 1. Approve draft work orders for this job
-        // Crew work orders only: a job work order is approved by Shaun alone
-        // (job_work_orders.ts), never by job acceptance.
+        // Crew work orders only: a job work order is issued by its own rule
+        // (job_work_orders.ts: automatically while job_work_order_auto_issue_v1
+        // is on, else by Shaun), never by this acceptance step.
         let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
@@ -54945,6 +55184,27 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
   }
 }
 
+// The paid-invoice receipt: Xero emails the paid invoice (POST /Invoices/{id}/Email) with the
+// receipt claim id as the Idempotency-Key, through the shared Xero cooldown, never retried.
+const xeroReceiptFetch = lazyXeroAccountingFetch(RECEIPT_EMAIL_TIMEOUT_MS)
+function jobReceiptDeps(client: any): JobReceiptDeps {
+  return {
+    client,
+    now: () => new Date(),
+    emailInvoice: xeroReceiptEmailer({ getToken: () => getToken(client), fetch: xeroReceiptFetch, baseUrl: XERO_API_BASE }),
+    // The sealed SES money fence and the synthetic live-fire gate, as every Xero invoice
+    // email path runs them; a refusal is recorded by its code and nothing is sent.
+    preSendGuard: async ({ xeroInvoiceId, jobId }) => {
+      try {
+        await assertLegacySesInvoiceActionAllowed(client, xeroInvoiceId, 'job_receipt', jobId)
+        return null
+      } catch (e: any) {
+        return String(e?.refusal?.code || (e instanceof ApiError ? 'refused' : 'check_failed'))
+      }
+    },
+  }
+}
+
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -55807,11 +56067,14 @@ async function analyseSupplierQuote(client: any, body: any) {
 
   // Get the PO with its line items (what we ordered)
   const { data: po, error: poErr } = await client.from('purchase_orders')
-    .select('id, po_number, supplier_name, job_id, line_items, total, reference, status, source')
+    .select('id, po_number, supplier_name, job_id, line_items, total, reference, status, source, confirmed_delivery_set_at')
     .eq('id', pId)
     .single()
 
   if (poErr || !po) throw new Error('PO not found')
+  // Dispatch slice 6 (docs/dispatch-slice-6-contract.md): a confirmed date a
+  // person set by hand is never replaced by this reader's reading of an email.
+  const replyMayWriteConfirmedDate = !po.confirmed_delivery_set_at
 
   // Get the job's pricing_json (what was quoted to client)
   let jobPricing: any = null
@@ -56004,9 +56267,13 @@ Return ONLY valid JSON in this exact format:
 
   // Update PO status if this is a HIGH-CONFIDENCE confirmation
   if (replyMayMoveOrder && isConfirmation && confidence >= HIGH_CONFIDENCE && po.status !== 'delivered' && po.status !== 'billed') {
-    const poUpdate: any = { status: 'authorised' }
-    if (confirmedDeliveryDate) poUpdate.confirmed_delivery_date = confirmedDeliveryDate
-    await client.from('purchase_orders').update(poUpdate).eq('id', po.id)
+    await client.from('purchase_orders').update({ status: 'authorised' }).eq('id', po.id)
+    if (confirmedDeliveryDate && replyMayWriteConfirmedDate) {
+      await client.from('purchase_orders')
+        .update({ confirmed_delivery_date: confirmedDeliveryDate })
+        .eq('id', po.id)
+        .is('confirmed_delivery_set_at', null)
+    }
     console.log(`[ops-api] PO ${po.po_number} confirmed by supplier (${Math.round(confidence * 100)}% confidence)${confirmedDeliveryDate ? ', delivery ' + confirmedDeliveryDate : ''}`)
 
     // Create job_event for confirmation
@@ -56035,8 +56302,8 @@ Return ONLY valid JSON in this exact format:
   } else if (isConfirmation && confidence < HIGH_CONFIDENCE) {
     // Low confidence confirmation — flag for manual review, DON'T change PO status
     console.log(`[ops-api] PO ${po.po_number} classified as confirmation but low confidence (${Math.round(confidence * 100)}%) — flagging for review`)
-    if (replyMayMoveOrder && confirmedDeliveryDate) {
-      await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id)
+    if (replyMayMoveOrder && confirmedDeliveryDate && replyMayWriteConfirmedDate) {
+      await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id).is('confirmed_delivery_set_at', null)
     }
     try {
       await client.from('ai_annotations').insert({
@@ -56052,11 +56319,12 @@ Return ONLY valid JSON in this exact format:
         source: 'ai/analyse_supplier_quote',
       })
     } catch (e) { /* non-blocking */ }
-  } else if (replyMayMoveOrder && confirmedDeliveryDate && !isConfirmation) {
+  } else if (replyMayMoveOrder && confirmedDeliveryDate && !isConfirmation && replyMayWriteConfirmedDate) {
     // Delivery date mentioned but not a full confirmation — still save it
     await client.from('purchase_orders')
       .update({ confirmed_delivery_date: confirmedDeliveryDate })
       .eq('id', po.id)
+      .is('confirmed_delivery_set_at', null)
   }
 
   // Handle invoice classification — mark PO as invoice received

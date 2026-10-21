@@ -23,6 +23,12 @@
 //   - Automatic sending (stage 5) stays two-key: on top of sending being on, it also needs
 //     env DEBT_WS_AUTO_SEND_ENABLED === "true" and debt_ws_settings.auto_send_steps[step]
 //     === true. Off by default.
+//   - A manual text (Shaun's own words from the job screen's reply box, step "manual") goes
+//     through the same guarded send and every check above. It is logged as a manual text,
+//     never as a step, so it never moves the day ladder. It may go while chasing is paused
+//     (says paid, rectification, a promise to pay, day 21: Shaun decided 16 Oct 2026), so he
+//     can reply; the planned steps stay paused. Its claim is keyed on a client_ref the
+//     screen makes once per message, so a double tap never texts twice.
 
 import {
   addDays,
@@ -42,6 +48,7 @@ import {
   longDate,
   looksLikeCompanyName,
   mondayOf,
+  money,
   nextMonday,
   perthDate,
   perthDateOf,
@@ -77,17 +84,44 @@ import {
 } from "./debt_ws_payer.ts";
 import {
   DebtWsError,
+  type DebtWsReportSettings,
   type DebtWsSettings,
   type DebtWsStore,
   type WsLogRow,
+  type WsReportRow,
   type WsSuggestion,
 } from "./debt_ws_store.ts";
+import {
+  type BankAccountBalance,
+  buildDebtReport,
+  type DebtReport,
+  debtReportEmail,
+  debtReportFileName,
+  debtReportHtml,
+  debtReportTotals,
+  perthClock,
+  placeOpenInvoices,
+  totalOwedFrom,
+} from "./debt_ws_report.ts";
+import {
+  xeroCheckUnread,
+  xeroCheckView,
+  type XeroCheckView,
+} from "./debt_ws_xero_check.ts";
 
 export { DebtWsError } from "./debt_ws_store.ts";
 
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
+/** Statements are signed by Shaun on admin@ (send-outlook-email signature "shaun"). */
+export const DEBT_WS_STATEMENT_SIGNATURE = "shaun";
+/**
+ * The step a manual text is sent and logged under (Shaun's own words, not a planned step).
+ * Its claim row's step is "manual:<client_ref>", which is never a ladder step, so the
+ * ladder never counts it as done.
+ */
+export const DEBT_WS_MANUAL_STEP = "manual";
 /** Bank feed: one read, re-read at most every 15 minutes within a Perth day (spec section 6). */
 export const DEBT_WS_BANK_CACHE_MS = 15 * 60_000;
 /** Pages of 100 per bank-feed read at most: 10 Xero calls, well inside 60 a minute. */
@@ -152,13 +186,31 @@ export interface DebtWsDeps {
       failureReason: string | null;
     }
   >;
-  /** The send-outlook-email edge function. HTML only, never an attachment. */
+  /**
+   * The send-outlook-email edge function. Statements are HTML only, never an attachment.
+   * The debt report alone carries cc and one PDF attachment, and marks itself
+   * internal_report: "debt_report"; send-outlook-email accepts an unanchored PDF only on
+   * that mark and only when every address is on our own domain (secureworkswa.com.au).
+   */
   sendEmail: (payload: {
     from: string;
     to: string;
     subject: string;
     htmlBody: string;
+    cc?: string[];
+    attachments?: Array<
+      { name: string; contentType: string; contentBytes: string }
+    >;
+    internal_report?: "debt_report";
+    /** send-outlook-email signature choice for this mailbox, e.g. "shaun". */
+    signature?: string;
   }) => Promise<{ ok: boolean; status: number; error: string | null }>;
+  /** Xero's Bank Summary read live: one closing balance per bank account. */
+  bankSummary: () => Promise<BankAccountBalance[]>;
+  /** Draws the debt report as a PDF (debt_ws_report_pdf.ts). */
+  renderReportPdf: (
+    report: DebtReport,
+  ) => Promise<{ bytes: Uint8Array; pageCount: number }>;
   /** The existing updateJobStatus (job_events, business_events, the GHL stage move). */
   updateJobStatus: (body: Record<string, unknown>) => Promise<unknown>;
   /**
@@ -168,13 +220,18 @@ export interface DebtWsDeps {
    * (a neighbour payer's own thread on a shared job). heldContactIds: the payer's
    * contact, whose messages held on NO job with this job among their candidates are
    * read too, each marked unplaced: true (getJobConversation held_contact_ids).
+   * held_read_failed is true when heldContactIds were asked for and that read failed.
    */
   conversation: (
     jobId: string,
     limit: number,
     contactIds?: string[],
     heldContactIds?: string[],
-  ) => Promise<{ messages: Record<string, unknown>[]; summary?: unknown }>;
+  ) => Promise<{
+    messages: Record<string, unknown>[];
+    summary?: unknown;
+    held_read_failed?: boolean;
+  }>;
   /** readJobStory: job-story-v1 or null, with its status. */
   story: (jobId: string) => Promise<{ story: unknown; status: unknown }>;
   listDocuments: (jobId: string) => Promise<Record<string, unknown>[]>;
@@ -519,6 +576,42 @@ export function payerSendBlock(
   return null;
 }
 
+/**
+ * Why a manual text (Shaun's own words, not a planned step) cannot go to this invoice's
+ * payer, or null when it can. The job screen shows the reason in place of its reply box;
+ * the guarded send refuses the same cases with the same code (not_chased_by_text):
+ *   a company invoice (the Monday statement), a contact we never chase, or an invoice that
+ *   is no longer open (paid, nothing owing).
+ * Paused chasing does NOT block a manual text (Shaun decided 16 Oct 2026): says paid,
+ * rectification, a promise to pay still ahead and day 21 (Jan's visit list) pause the
+ * planned steps only, so Shaun can still reply in his own words. The rest of the checks
+ * (sending on, the payer's contact, live Xero, the bank feed) run at the send itself,
+ * exactly as for a planned step.
+ */
+export function manualTextBlock(
+  entry: Pick<BookEntry, "kind" | "notChased" | "open">,
+): { code: string; message: string } | null {
+  if (entry.kind === "account") {
+    return {
+      code: "not_chased_by_text",
+      message: "Company invoices go on the Monday statement, not a text",
+    };
+  }
+  if (entry.notChased) {
+    return {
+      code: "not_chased_by_text",
+      message: "This contact is never chased",
+    };
+  }
+  if (!entry.open) {
+    return {
+      code: "not_chased_by_text",
+      message: "This invoice is no longer open in our Xero copy",
+    };
+  }
+  return null;
+}
+
 /** A neighbour payer's own GoHighLevel thread is read as well as the job's. */
 function extraContactIds(entry: BookEntry): string[] {
   const id = entry.payer.ghl_contact_id;
@@ -729,13 +822,37 @@ function notChasedGroups(open: BookEntry[]) {
   return [...groups.values()].sort((a, b) => b.amount - a.amount);
 }
 
+/**
+ * The newest check of our Xero copy against Xero, as the tab and the report show it. A
+ * check that cannot be read (its migration not applied yet, say) never stops the tab: it
+ * reads "Could not read the check against Xero", never "Matches Xero".
+ */
+async function xeroCheckFor(deps: DebtWsDeps, now: Date): Promise<XeroCheckView> {
+  try {
+    const { latest, latestComplete } = await deps.store.mirrorChecks();
+    return xeroCheckView(latest, latestComplete, now);
+  } catch (error) {
+    console.error("[debt_ws] the check against Xero is unavailable", (error as Error)?.name);
+    return xeroCheckUnread();
+  }
+}
+
+/** The not-chased names from the settings, without the contact ids. */
+function notChasedNamesOf(settings: DebtWsSettings): string[] {
+  return settings.not_chased_contacts.filter((x) => !UUID.test(x));
+}
+
 export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
   const now = deps.now();
-  const book = await loadBook(deps.store, { now });
+  // One read of the open invoices, shared by the book and "Total owed to us", so the
+  // breakdown always adds up to the same invoices the chart is drawn from.
+  const openInvoices = await deps.store.openInvoices();
+  const book = await loadBook(deps.store, { now, openInvoices });
   const weekStart = mondayOf(book.today);
-  const [statements, paid] = await Promise.all([
+  const [statements, paid, xeroCheck] = await Promise.all([
     deps.store.statementsForWeek(weekStart),
     paidThisWeek(deps.store, book.today),
+    xeroCheckFor(deps, now),
   ]);
   const open = book.entries.filter((e) => e.open);
   const notDue = open.filter((e) => e.category === null);
@@ -764,6 +881,13 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
     },
     not_chased: notChasedGroups(open),
     needs_a_look: book.needsALook,
+    // Every open invoice, broken down (debt_ws_report.ts totalOwedFrom), and whether our
+    // Xero copy matched Xero at the last hourly check. Display only: nothing here is chased.
+    total_owed: totalOwedFrom(
+      placeOpenInvoices(book, openInvoices),
+      notChasedNamesOf(book.settings),
+    ),
+    xero_check: xeroCheck,
     paid_this_week: paid,
     jan_list: {
       visit_date: book.janVisitDate,
@@ -1014,6 +1138,13 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
     },
     // Why Send is off for this payer (null: it can be texted once sending is on).
     send_block: entry.kind === "account" ? null : payerSendBlock(entry),
+    // Whether Shaun may type his own text here (step "manual"), and why not in words.
+    manual_text: (() => {
+      const block = manualTextBlock(entry);
+      return block
+        ? { allowed: false, code: block.code, reason: block.message }
+        : { allowed: true, code: null, reason: null };
+    })(),
     pay_link: payLink,
   };
 }
@@ -1155,6 +1286,11 @@ interface SendInput {
   override: boolean;
   /** The amount the draft was written against. */
   draftAmount: number;
+  /**
+   * Set for a manual text (step DEBT_WS_MANUAL_STEP): the screen's one-off reference for
+   * this message, which keys the claim so the same message is never texted twice.
+   */
+  manual?: { client_ref: string };
 }
 
 function liveCheck(
@@ -1240,11 +1376,18 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         : "Company invoices go on the Monday statement, not a text",
     );
   }
+  // (A manual text is blocked by exactly the cases above, as manualTextBlock tells the
+  // screen; paused chasing does not stop it: Shaun decided 16 Oct 2026.)
   // The text goes to the PAYER's own contact, never the job's: on a shared fence the
   // job's contact is the primary client, who may not owe this invoice.
   const block = payerSendBlock(entry);
   if (block) await refuse(deps, input, block.code, block.message);
   const contact = entry.payer.ghl_contact_id as string;
+  // The claim's step: the step itself, or "manual:<client_ref>" for a manual text, which
+  // is unique to that one message and is never a ladder step.
+  const claimStep = input.manual
+    ? `${DEBT_WS_MANUAL_STEP}:${input.manual.client_ref}`
+    : step;
   if (isLadderStep(step) && entry.row.step_due?.step !== step) {
     await refuse(
       deps,
@@ -1258,7 +1401,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     );
   }
   const already = entry.sends.find((s) =>
-    s.cycle_start === entry.dayZero && s.step === step &&
+    s.cycle_start === entry.dayZero && s.step === claimStep &&
     (s.status === "sending" || s.status === "sent")
   );
   if (already) {
@@ -1266,7 +1409,9 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
       deps,
       input,
       "already_sent",
-      "That step was already sent (or a send of it is not confirmed), so it is not sent twice",
+      input.manual
+        ? "That text was already sent (or a send of it is not confirmed), so it is not sent twice"
+        : "That step was already sent (or a send of it is not confirmed), so it is not sent twice",
     );
   }
 
@@ -1324,7 +1469,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
   const claim = await deps.store.claimSend({
     share_key: entry.row.share_key,
     cycle_start: entry.dayZero,
-    step,
+    step: claimStep,
     suggestion_id: input.suggestion?.id ?? null,
     actor: actor.label,
   });
@@ -1406,6 +1551,10 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         ...(input.override && payments.length
           ? { possible_payments: payments }
           : {}),
+        // A manual text is marked as one, so it never reads as a planned step.
+        ...(input.manual
+          ? { manual: true, client_ref: input.manual.client_ref }
+          : {}),
       },
     });
   } catch (error) {
@@ -1421,6 +1570,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
     version: DEBT_WS_VERSION,
     sent: true,
     step,
+    manual: !!input.manual,
     send_id: claim!.id,
     provider_message_id: messageId,
     override_possible_payment: input.override && payments.length > 0,
@@ -1445,6 +1595,7 @@ export async function debtWsDecide(
     "override_possible_payment",
     "amount",
     "channel",
+    "client_ref",
   ]);
   // Texts only in v1: the screen may name the channel, and it must be sms.
   if (
@@ -1507,8 +1658,50 @@ export async function debtWsDecide(
 
   const id = uuidOf(body.xero_invoice_id, "xero_invoice_id");
   const step = body.step;
+
+  // A manual text: Shaun's own words, not a planned step. Sent only (never skipped), with
+  // no suggestion, the amount owing it was written against, and the screen's client_ref.
+  if (step === DEBT_WS_MANUAL_STEP) {
+    if (action !== "send") bad("A manual text can only be sent");
+    if (suggestion) bad("A manual text has no suggestion_id");
+    const clientRef = uuidOf(body.client_ref, "client_ref");
+    if (typeof body.text !== "string") bad("text is required to send");
+    if (
+      body.override_possible_payment !== undefined &&
+      typeof body.override_possible_payment !== "boolean"
+    ) bad("override_possible_payment must be true or false");
+    const owed = body.amount === undefined || body.amount === null
+      ? null
+      : Number(body.amount);
+    if (owed === null) {
+      bad(
+        "amount is required: send the amount owing the text was written for",
+        "amount_required",
+      );
+    }
+    if (!Number.isFinite(owed) || owed <= 0) {
+      bad("amount must be the positive amount the text was written for");
+    }
+    const { book, entry } = await oneEntry(deps, id);
+    return await guardedSend(deps, {
+      book,
+      entry,
+      step: DEBT_WS_MANUAL_STEP,
+      text: (body.text as string).trim(),
+      suggestion: null,
+      actor,
+      operatorEmail: caller.email ?? null,
+      override: body.override_possible_payment === true,
+      draftAmount: owed,
+      manual: { client_ref: clientRef },
+    });
+  }
+  if (body.client_ref !== undefined) {
+    bad("client_ref is only for a manual text");
+  }
+
   if (!isLadderStep(step) && !isReplyStep(step)) {
-    bad("step must be d1, d3, d7, d12, d17, d21 or a reply step");
+    bad("step must be d1, d3, d7, d12, d17, d21, a reply step or manual");
   }
   if (suggestion && suggestion.share_key !== id) {
     throw new DebtWsError(
@@ -2135,6 +2328,7 @@ export async function debtWsStatementSend(
       to: company.to_email!,
       subject: view.subject,
       htmlBody: view.html,
+      signature: DEBT_WS_STATEMENT_SIGNATURE,
     });
   } catch (error) {
     // The email may have gone: the claim stays (status sending) so it never sends twice.
@@ -2619,6 +2813,33 @@ function trimStory(story: unknown): unknown {
   return out;
 }
 
+/**
+ * What the agent is told about held messages (14 Oct 2026 review). A held message with
+ * several candidate jobs is one customer's text that could be about any of their jobs
+ * (SWF-26337: 51 held against 1 placed), and the same text shows on every candidate's
+ * debt card. Enforced in debtWsAgentSubmit, not only said here.
+ */
+export const DEBT_WS_HELD_MESSAGE_RULE =
+  "A message marked unplaced is held on no job. When its candidate_job_count is more " +
+  "than 1 it is marked context_only: it may be about another of this customer's jobs, " +
+  "so use it as context only. Never base a move (says_paid or rectification) on it; " +
+  "flag it to Shaun instead. A move resting on one is turned into a flag.";
+
+/** The number of jobs a held message could belong to, or null when not given. */
+function heldCandidateCount(m: Record<string, unknown>): number | null {
+  const n = m.candidate_job_count;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Held on no job and not known to be this job's alone: any held message whose
+ * candidate count is not exactly 1. A single-candidate held message (SWF-261098) is
+ * treated like a placed one.
+ */
+function heldOnSeveralJobs(m: Record<string, unknown>): boolean {
+  return m.unplaced === true && heldCandidateCount(m) !== 1;
+}
+
 function agentMessage(m: Record<string, unknown>) {
   const channel = String(m.channel ?? "");
   return {
@@ -2629,8 +2850,100 @@ function agentMessage(m: Record<string, unknown>) {
     from: m.author ?? m.who ?? null,
     body: m.body ?? m.preview ?? "",
     transcript: channel === "call" ? m.body ?? null : null,
-    // Held on no job by the placement ladder (this job one of its candidates).
-    ...(m.unplaced === true ? { unplaced: true } : {}),
+    // Held on no job by the placement ladder (this job one of its candidates), with
+    // how many jobs it could belong to. More than one: context only.
+    ...(m.unplaced === true
+      ? {
+        unplaced: true,
+        candidate_job_count: heldCandidateCount(m),
+        ...(heldOnSeveralJobs(m) ? { context_only: true } : {}),
+      }
+      : {}),
+  };
+}
+
+/** A message's time in ms, or -Infinity when it has none that parses. */
+function agentMessageTime(m: { at: unknown }): number {
+  const t = Date.parse(String(m.at ?? ""));
+  return Number.isFinite(t) ? t : -Infinity;
+}
+
+/**
+ * Oldest first by parsed time (a "...Z" and a "...+00:00" stamp of one instant are
+ * equal; comparing the strings put the Z copy later). At the same instant a held
+ * message (unplaced) goes after an unmarked one, so the newest-inbound pick
+ * (moveHeldProblem) takes the held copy: SWF-261423, a call held on 2 jobs whose
+ * call log and transcript share one instant. Otherwise the read's order is kept.
+ */
+export function compareAgentMessagesOldestFirst(
+  a: { at: unknown; unplaced?: unknown },
+  b: { at: unknown; unplaced?: unknown },
+): number {
+  const ta = agentMessageTime(a);
+  const tb = agentMessageTime(b);
+  if (ta !== tb) return ta === -Infinity ? -1 : tb === -Infinity ? 1 : ta - tb;
+  return (a.unplaced === true ? 1 : 0) - (b.unplaced === true ? 1 : 0);
+}
+
+/**
+ * The payer's own messages as the agent sees them, oldest first: read wider than kept,
+ * only the payer's messages handed over. The queue builds the bundle from this and
+ * the submit checks a move against the same read. With onFail "throw" a failed read
+ * of the held messages throws too (held_read_failed), so a move is never checked
+ * against a read missing them.
+ */
+async function payerAgentMessages(
+  deps: DebtWsDeps,
+  book: Awaited<ReturnType<typeof loadBook>>,
+  entry: BookEntry,
+  onFail: "empty" | "throw",
+) {
+  const conversation = await deps.conversation(
+    entry.job!.id,
+    DEBT_WS_AGENT_MESSAGES * 2,
+    extraContactIds(entry),
+    heldContactIds(entry),
+  ).catch((error) => {
+    if (onFail === "throw") throw error;
+    return {
+      messages: [] as Record<string, unknown>[],
+      held_read_failed: undefined as boolean | undefined,
+    };
+  });
+  if (onFail === "throw" && conversation.held_read_failed === true) {
+    throw new Error("The payer's held messages could not be read");
+  }
+  const split = splitConversation(
+    conversation.messages ?? [],
+    entry.payer,
+    partiesOf(entry.job, book.contacts.get(String(entry.job!.id)) ?? []),
+  );
+  const messages = [...split.payer_messages].slice(
+    0,
+    DEBT_WS_AGENT_MESSAGES,
+  ).map(agentMessage).sort(compareAgentMessagesOldestFirst);
+  return { messages, reason: split.reason };
+}
+
+/**
+ * Why a move may not stand, or null. The agent cites no message ids, so which message
+ * backs a move is not recorded. The rule used: a move answers what the payer said last,
+ * so it may not stand while the payer's NEWEST inbound message is held with more than
+ * one candidate job (nothing the payer said since the last message known to be this
+ * job's). The move is kept as a flag to Shaun instead.
+ */
+function moveHeldProblem(
+  messages: ReturnType<typeof agentMessage>[],
+): { message_id: unknown; candidate_job_count: number | null } | null {
+  const newest = messages.filter((m) =>
+    String(m.direction ?? "").toLowerCase() === "inbound"
+  ).at(-1);
+  if (!newest || !heldOnSeveralJobs(newest as Record<string, unknown>)) {
+    return null;
+  }
+  return {
+    message_id: newest.id,
+    candidate_job_count: heldCandidateCount(newest as Record<string, unknown>),
   };
 }
 
@@ -2709,33 +3022,15 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
   const budget = { left: DEBT_WS_PAY_LINK_FETCH_LIMIT };
   const items = [];
   for (const { entry, why } of take) {
-    const [story, conversation] = await Promise.all([
+    const [story, split] = await Promise.all([
       deps.story(entry.job!.id).catch(() => ({
         story: null,
         status: { ok: false, state: "failed" },
       })),
-      // Read wider than the bundle keeps: only the payer's own messages are handed over.
-      deps.conversation(
-        entry.job!.id,
-        DEBT_WS_AGENT_MESSAGES * 2,
-        extraContactIds(entry),
-        heldContactIds(entry),
-      ).catch(() => ({
-        messages: [] as Record<string, unknown>[],
-      })),
+      payerAgentMessages(deps, book, entry, "empty"),
     ]);
     const payLink = await payLinkFor(deps, entry, budget);
-    const split = splitConversation(
-      conversation.messages ?? [],
-      entry.payer,
-      partiesOf(entry.job, book.contacts.get(String(entry.job!.id)) ?? []),
-    );
-    const messages = [...split.payer_messages].slice(
-      0,
-      DEBT_WS_AGENT_MESSAGES,
-    ).map(agentMessage).sort((a, b) =>
-      String(a.at ?? "").localeCompare(String(b.at ?? ""))
-    );
+    const messages = split.messages;
     const greeting = await greetingNameFor(deps, entry);
     const draft = templateDraftFor(entry, payLink, greeting.name);
     items.push({
@@ -2758,6 +3053,7 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
       story: trimStory(story.story),
       story_status: story.status ?? null,
       messages,
+      held_message_rule: DEBT_WS_HELD_MESSAGE_RULE,
       notes: entry.logs.map(noteView),
       possible_payments: bankCheck(bank, entry.inv, payerNames(entry)) ?? [],
       possible_payments_status: "ok",
@@ -2882,24 +3178,63 @@ export async function debtWsAgentSubmit(
     if (proposed !== null) bad("A flag has no proposed_category");
   }
 
+  // A move may not rest on a message held with several candidate jobs: it may be about
+  // another of the customer's jobs (14 Oct 2026 review). Checked against the same read
+  // the agent's bundle comes from; the move is kept as a flag to Shaun.
+  let finalKind = kind as "draft" | "move" | "flag";
+  let finalText = text;
+  let finalProposed = proposed as "says_paid" | "rectification" | null;
+  let moveRefused: Record<string, unknown> | null = null;
+  if (kind === "move" && entry.job) {
+    const read = await payerAgentMessages(deps, book, entry, "throw")
+      .catch(() => {
+        throw new DebtWsError(
+          "The payer's messages could not be read to check this move. Try again.",
+          503,
+          "conversation_unreadable",
+        );
+      });
+    const problem = moveHeldProblem(read.messages);
+    if (problem) {
+      const count = problem.candidate_job_count;
+      const label = proposed === "says_paid" ? "Says paid" : "Rectification";
+      moveRefused = {
+        reason: "held_message_several_jobs",
+        proposed_category: proposed,
+        message_id: problem.message_id,
+        candidate_job_count: count,
+      };
+      finalKind = "flag";
+      finalProposed = null;
+      finalText =
+        `The agent suggested moving this to ${label}, but the payer's ` +
+        `newest message is held on no job and could belong to ` +
+        `${
+          count !== null ? `any of ${count} jobs` : "another job"
+        }, so it may be ` +
+        `about another job. Check it before moving.\n\nThe agent's draft reply was:` +
+        `\n\n${text}`;
+    }
+  }
+
   const suggestion = await deps.store.insertSuggestion({
     share_key: entry.row.share_key,
     xero_invoice_ids: ids,
     job_id: entry.job?.id ?? null,
     cycle_start: entry.dayZero,
     step: step as string | null,
-    kind: kind as "draft" | "move" | "flag",
-    channel: kind === "flag" ? null : "sms",
-    text,
+    kind: finalKind,
+    channel: finalKind === "flag" ? null : "sms",
+    text: finalText,
     why,
-    proposed_category: proposed as "says_paid" | "rectification" | null,
+    proposed_category: finalProposed,
     amount: Math.round(
       entries.reduce((s, e) => s + e!.row.amount_due * 100, 0),
     ) / 100,
     source: "agent",
     agent_version: agentVersion,
   });
-  if (kind === "flag") {
+  if (finalKind === "flag") {
     await log(
       deps,
       {
@@ -2911,8 +3246,12 @@ export async function debtWsAgentSubmit(
       "agent_flag",
       {
         step: step as string | null,
-        body: text,
-        meta: { suggestion_id: suggestion.id, why },
+        body: finalText,
+        meta: {
+          suggestion_id: suggestion.id,
+          why,
+          ...(moveRefused ? { move_refused: moveRefused } : {}),
+        },
       },
     );
   } else {
@@ -2968,10 +3307,549 @@ export async function debtWsAgentSubmit(
   return {
     ok: true,
     version: DEBT_WS_VERSION,
-    kind,
+    kind: finalKind,
+    ...(moveRefused ? { move_refused: moveRefused } : {}),
     suggestion: suggestionView(suggestion),
     auto_send: autoSend,
   };
+}
+
+// ── The debt report (Shaun approved 15 Oct 2026; README "The debt report") ──
+//
+// debt_ws_report      GET, staff:  the live report, built fresh on every read, with the
+//                                  HTML view, who it goes to and when it last went.
+// debt_ws_report_pdf  GET, staff:  the same report as a PDF (Download PDF).
+// debt_ws_report_send POST, owner: emails the PDF to the report recipients (Marnin, cc
+//                                  Shaun), built fresh at the moment of sending.
+// debt_ws_report_auto POST, server key: the Wednesday 12:00 Perth cron. Does nothing
+//                                  unless report_auto_send is on; one auto report per week.
+//
+// Consolidate first (Shaun, 16 Oct 2026: "it goes Wednesday at 12pm after consolidating the
+// debt for that day"). Every report is built fresh from the tab's own book at the moment it
+// is made, with the bank balances read live from Xero. The invoices come from our Xero copy,
+// which xero-sync brings up to date every 15 minutes, and on a Wednesday the cron
+// debt-ws-report-refresh runs one extra sync at 11:55 Perth so the copy is about five minutes
+// old at 12:00 (20261016180000_debt_ws_report_wednesday.sql). A send, automatic or by hand,
+// refuses when the copy is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS or its age is unknown,
+// so Marnin never gets a report built on stale debt.
+//
+// The report is internal: it holds every client's name and balance, so it only ever goes to
+// our own domain. The recipients are checked here before every send (and the database
+// refuses an outside address in the settings, and send-outlook-email refuses one too).
+
+/** The one domain the debt report may be emailed to. */
+export const DEBT_WS_REPORT_DOMAIN = "secureworkswa.com.au";
+/** A second manual send within this long is refused as a double click. */
+export const DEBT_WS_REPORT_RESEND_MS = 2 * 60_000;
+/** The share_key the report's debt_ws_log rows sit on. */
+export const DEBT_WS_REPORT_LOG_KEY = "debt-report";
+/**
+ * The oldest our Xero copy of invoices may be when a report is sent. The sync runs every
+ * 15 minutes, so 20 minutes allows one run in flight; past that a run was missed.
+ */
+export const DEBT_WS_REPORT_MAX_COPY_AGE_MS = 20 * 60_000;
+/** Who the automatic report says it came from (the email and the record). */
+export const DEBT_WS_REPORT_AUTO_LABEL = "the Wednesday 12pm auto-send";
+
+/**
+ * Why a report must not be sent on this copy of the debt, or null when the copy is fresh:
+ * its sync time is unknown, or it is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS.
+ */
+export function reportCopyProblem(
+  syncedAt: string | null,
+  now: Date,
+): string | null {
+  const ms = syncedAt ? Date.parse(syncedAt) : NaN;
+  if (!syncedAt || !Number.isFinite(ms)) {
+    return "When our Xero copy of invoices was last synced is unknown, so the report cannot be sent";
+  }
+  if (now.getTime() - ms > DEBT_WS_REPORT_MAX_COPY_AGE_MS) {
+    const syncedDay = perthDate(new Date(ms));
+    const day = syncedDay === perthDate(now) ? "" : ` on ${longDate(syncedDay)}`;
+    return `Our Xero copy of invoices was last synced at ${
+      perthClock(syncedAt)
+    } Perth time${day}, more than ${
+      DEBT_WS_REPORT_MAX_COPY_AGE_MS / 60_000
+    } minutes ago, so the report would not show today's debt. Wait for the next sync (every 15 minutes) and try again`;
+  }
+  return null;
+}
+
+const OWN_ADDRESS = /^[a-z0-9._%+-]+@secureworkswa\.com\.au$/;
+
+/** True when every address is one of ours (lower case, @secureworkswa.com.au). */
+export function reportAddressesInternal(addresses: string[]): boolean {
+  return addresses.every((a) => OWN_ADDRESS.test(a));
+}
+
+/** "Marnin" from marnin@secureworkswa.com.au; "all" for more than one recipient. */
+function reportGreeting(to: string[]): string {
+  if (to.length !== 1) return "all";
+  const local = to[0].split("@")[0].split(/[._-]/)[0] || "there";
+  return local.charAt(0).toUpperCase() + local.slice(1);
+}
+
+/** The report, built fresh from the same reads the Debt tab makes, plus the extras. */
+async function loadDebtReport(
+  deps: DebtWsDeps,
+  preparedBy: string,
+): Promise<DebtReport> {
+  const now = deps.now();
+  // One read of the open invoices, shared by the book and the tie to Xero's total.
+  const open = await deps.store.openInvoices();
+  const book = await loadBook(deps.store, { now, openInvoices: open });
+  const today = book.today;
+  const [statements, payments, syncedAt, bank, feed, xeroCheck] = await Promise.all([
+    deps.store.statementsForWeek(mondayOf(today)),
+    // The extras never stop the report: a read that fails shows as "not read".
+    deps.store.paymentsBetween(addDays(today, -29), today).catch((error) => {
+      console.error("[debt_ws_report] payments unavailable", error?.name);
+      return null;
+    }),
+    deps.store.lastInvoiceSync().catch(() => null),
+    deps.bankSummary().then((accounts) => ({
+      accounts,
+      read_at: deps.now().toISOString(),
+    })).catch((error) => {
+      console.error("[debt_ws_report] bank summary unavailable", error?.name);
+      return null;
+    }),
+    bankFeedSafe(
+      deps,
+      book.entries.filter((e) => e.open).map((e) => bankFromOf(e.inv)),
+    ),
+    xeroCheckFor(deps, now),
+  ]);
+  const paidJobIds = [
+    ...new Set(
+      (payments ?? []).map((p) => p.job_id).filter((id): id is string =>
+        !!id && !book.jobs.has(String(id))
+      ),
+    ),
+  ];
+  const paymentJobs = new Map(book.jobs);
+  if (paidJobIds.length) {
+    for (const job of await deps.store.jobs(paidJobIds).catch(() => [])) {
+      paymentJobs.set(String(job.id), job);
+    }
+  }
+  const coversAll = !!feed &&
+    book.entries.every((e) => bankCovers(feed, bankFromOf(e.inv)));
+  return buildDebtReport({
+    now,
+    book,
+    openInvoices: open,
+    statements,
+    payments,
+    paymentJobs,
+    bank,
+    feed: feed ? { txs: feed.txs, truncated: feed.truncated || !coversAll } : null,
+    syncedAt,
+    preparedBy,
+    xeroCheck,
+  });
+}
+
+/** Who the report goes to, checked: our own domain only, at least one recipient. */
+function reportAddresses(rs: DebtWsReportSettings | null): {
+  to: string[];
+  cc: string[];
+  problem: { code: string; message: string } | null;
+} {
+  if (!rs) {
+    return {
+      to: [],
+      cc: [],
+      problem: {
+        code: "debt_ws_read_failed",
+        message: "The report settings could not be read",
+      },
+    };
+  }
+  const clean = (xs: string[]) =>
+    [...new Set(xs.map((x) => x.trim().toLowerCase()).filter(Boolean))];
+  const to = clean(rs.recipients);
+  const cc = clean(rs.cc).filter((x) => !to.includes(x));
+  if (!to.length) {
+    return {
+      to,
+      cc,
+      problem: {
+        code: "no_recipients",
+        message: "No one is set to receive the report",
+      },
+    };
+  }
+  if (!reportAddressesInternal([...to, ...cc])) {
+    return {
+      to,
+      cc,
+      problem: {
+        code: "recipient_not_internal",
+        message:
+          "The report only goes to SecureWorks Group addresses (@secureworkswa.com.au)",
+      },
+    };
+  }
+  return { to, cc, problem: null };
+}
+
+function reportSendView(row: WsReportRow | undefined | null) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    at: row.sent_at ?? row.created_at,
+    to: row.to_emails ?? [],
+    cc: row.cc_emails ?? [],
+    by: row.sent_by_name,
+    subject: row.subject,
+    error: row.error,
+  };
+}
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+};
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export async function debtWsReport(deps: DebtWsDeps, caller: DebtWsCaller) {
+  const actor = await actorOf(deps, caller);
+  const report = await loadDebtReport(deps, actor.label);
+  const [settings, rs, sends] = await Promise.all([
+    deps.store.settings(),
+    deps.store.reportSettings().catch(() => null),
+    deps.store.reportSends(20).catch(() => [] as WsReportRow[]),
+  ]);
+  const addresses = reportAddresses(rs);
+  const owner = isOwner(caller, deps.env, settings);
+  const sendingOn = debtWsSendingOn(settings);
+  const whyNot = !owner
+    ? "Only the workshop owner (Shaun) can send the report"
+    : !sendingOn
+    ? "Sending is off until you switch it on"
+    : addresses.problem?.message ??
+      reportCopyProblem(report.synced_at, deps.now());
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    perth_date: report.today,
+    read_at: report.read_at,
+    report,
+    html: debtReportHtml(report),
+    delivery: {
+      from: DEBT_WS_STATEMENT_FROM,
+      to: addresses.to,
+      cc: addresses.cc,
+      auto_send: rs?.auto_send === true,
+      sending_on: sendingOn,
+      viewer_is_owner: owner,
+      can_send: !whyNot,
+      why_not: whyNot,
+    },
+    last_sent: reportSendView(sends.find((r) => r.status === "sent")),
+    last_attempt: reportSendView(sends[0]),
+  };
+}
+
+export async function debtWsReportPdf(deps: DebtWsDeps, caller: DebtWsCaller) {
+  const actor = await actorOf(deps, caller);
+  const report = await loadDebtReport(deps, actor.label);
+  const pdf = await deps.renderReportPdf(report).catch((error) => {
+    console.error("[debt_ws_report] pdf failed", error?.name);
+    throw new DebtWsError(
+      "The PDF could not be made just now. Try again shortly",
+      502,
+      "report_pdf_failed",
+    );
+  });
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    filename: debtReportFileName(report),
+    content_type: "application/pdf",
+    pdf_base64: bytesToBase64(pdf.bytes),
+    page_count: pdf.pageCount,
+    read_at: report.read_at,
+  };
+}
+
+/**
+ * One report email: claim the send, build the report fresh, check our Xero copy is fresh,
+ * draw the PDF, email it, then keep the copy and log it. The claim is written first, so an
+ * auto report can never go twice in a week, and an email that may have gone is never
+ * retried by itself. A stale copy settles the claim as 'refused' (it does not hold the
+ * week's auto slot) and sends nothing.
+ */
+async function sendDebtReport(
+  deps: DebtWsDeps,
+  actor: Actor,
+  kind: "manual" | "auto",
+  addresses: { to: string[]; cc: string[] },
+  weekStart: string,
+) {
+  const sentBy = kind === "auto" ? DEBT_WS_REPORT_AUTO_LABEL : actor.label;
+  const claim = await deps.store.claimReport({
+    kind,
+    week_start: weekStart,
+    to_emails: addresses.to,
+    cc_emails: addresses.cc,
+    sent_by: actor.user_id,
+    sent_by_name: sentBy,
+  });
+  if (!claim) return null;
+  let report: DebtReport;
+  let pdf: { bytes: Uint8Array; pageCount: number } | null = null;
+  let stale: string | null = null;
+  try {
+    report = await loadDebtReport(deps, sentBy);
+    // Consolidate first: no PDF is drawn on a stale copy of the debt.
+    stale = reportCopyProblem(report.synced_at, deps.now());
+    if (!stale) pdf = await deps.renderReportPdf(report);
+  } catch (error) {
+    // Nothing was sent: release the claim with the reason.
+    await deps.store.settleReport(claim.id, {
+      status: "failed",
+      error: `not built: ${String((error as Error)?.name ?? error).slice(0, 200)}`,
+    }).catch(() => {});
+    if (error instanceof DebtWsError) throw error;
+    throw new DebtWsError(
+      "The report could not be built just now, so nothing was sent. Try again shortly",
+      502,
+      "report_pdf_failed",
+    );
+  }
+  if (stale !== null || pdf === null) {
+    // Our Xero copy is too old (or its age is unknown): nothing is sent. The claim settles
+    // as 'refused' with the reason, which frees this week's auto slot, and the refusal is
+    // logged where the Debt tab shows the report's history.
+    const reason = stale ?? "The report could not be built just now";
+    await deps.store.settleReport(claim.id, {
+      status: "refused",
+      error: `xero copy not fresh: ${reason}`.slice(0, 500),
+    }).catch(() => {});
+    await log(
+      deps,
+      { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+      actor,
+      "send_refused",
+      {
+        body: reason,
+        meta: {
+          code: "xero_copy_stale",
+          report: true,
+          report_id: claim.id,
+          kind,
+          synced_at: report.synced_at,
+        },
+      },
+    ).catch(() => {});
+    throw new DebtWsError(reason, 409, "xero_copy_stale", {
+      synced_at: report.synced_at,
+    });
+  }
+  const email = debtReportEmail(report, {
+    greeting: reportGreeting(addresses.to),
+    sentBy,
+  });
+  const pdfBase64 = bytesToBase64(pdf.bytes);
+  const copy = {
+    subject: email.subject,
+    summary: email.text,
+    totals: debtReportTotals(report),
+    html: debtReportHtml(report),
+    pdf_base64: pdfBase64,
+    pdf_sha256: await sha256Hex(pdf.bytes),
+  };
+  let result: Awaited<ReturnType<DebtWsDeps["sendEmail"]>>;
+  try {
+    result = await deps.sendEmail({
+      from: DEBT_WS_STATEMENT_FROM,
+      to: addresses.to.join(", "),
+      cc: addresses.cc,
+      subject: email.subject,
+      htmlBody: email.html,
+      attachments: [{
+        name: debtReportFileName(report),
+        contentType: "application/pdf",
+        contentBytes: pdfBase64,
+      }],
+      internal_report: "debt_report",
+    });
+  } catch (error) {
+    // The email may have gone: the row stays 'sending' with the reason, never resent by itself.
+    await deps.store.settleReport(claim.id, {
+      ...copy,
+      error: `not confirmed: ${
+        String((error as Error)?.message ?? error).slice(0, 300)
+      }`,
+    }).catch(() => {});
+    throw new DebtWsError(
+      "The email could not be confirmed. Check the admin mailbox's Sent Items before sending again",
+      502,
+      "send_not_confirmed",
+    );
+  }
+  if (!result.ok) {
+    await deps.store.settleReport(claim.id, {
+      ...copy,
+      status: "failed",
+      error: String(result.error ?? `email ${result.status}`).slice(0, 500),
+    }).catch(() => {});
+    throw new DebtWsError(
+      `The email was refused (${result.status}). Nothing was sent`,
+      502,
+      "email_failed",
+      { email_status: result.status },
+    );
+  }
+  const sentAt = deps.now().toISOString();
+  await deps.store.settleReport(claim.id, {
+    ...copy,
+    status: "sent",
+    sent_at: sentAt,
+  });
+  await log(
+    deps,
+    { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+    actor,
+    "email_sent",
+    {
+      body: `Debt report emailed to ${addresses.to.join(", ")}${
+        addresses.cc.length ? `, cc ${addresses.cc.join(", ")}` : ""
+      }: debt ${money(report.debt.amount)} across ${report.debt.count} invoice(s)`,
+      meta: {
+        report_id: claim.id,
+        kind,
+        week_start: weekStart,
+        to: addresses.to,
+        cc: addresses.cc,
+        totals: copy.totals,
+      },
+    },
+  ).catch((error) => {
+    // The send and its copy are recorded already; a missing log line never fails it.
+    console.error("[debt_ws_report] log failed", error?.name);
+  });
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    sent: true,
+    report_id: claim.id,
+    kind,
+    to: addresses.to,
+    cc: addresses.cc,
+    subject: email.subject,
+    sent_at: sentAt,
+    page_count: pdf.pageCount,
+  };
+}
+
+export async function debtWsReportSend(
+  deps: DebtWsDeps,
+  caller: DebtWsCaller,
+  rawBody: unknown,
+) {
+  const body = asBody(rawBody);
+  onlyKeys(body, []);
+  const actor = await actorOf(deps, caller);
+  const settings = await deps.store.settings();
+  const today = perthDate(deps.now());
+  const refuseReport = async (
+    code: string,
+    message: string,
+    status = 409,
+  ): Promise<never> => {
+    await log(
+      deps,
+      { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+      actor,
+      "send_refused",
+      { body: message, meta: { code, report: true } },
+    ).catch(() => {});
+    throw new DebtWsError(message, status, code);
+  };
+  if (!debtWsSendingOn(settings)) {
+    await refuseReport("sending_off", "Sending is off until you switch it on");
+  }
+  const rs = await deps.store.reportSettings();
+  const addresses = reportAddresses(rs);
+  if (addresses.problem) {
+    await refuseReport(addresses.problem.code, addresses.problem.message);
+  }
+  // A double click: a manual report already went (or is going) in the last two minutes.
+  const recent = (await deps.store.reportSends(5)).find((r) =>
+    r.kind === "manual" && (r.status === "sent" || r.status === "sending") &&
+    deps.now().getTime() - Date.parse(r.created_at) < DEBT_WS_REPORT_RESEND_MS
+  );
+  if (recent) {
+    await refuseReport(
+      "recently_sent",
+      "The report was just sent. Wait two minutes before sending it again",
+    );
+  }
+  const sent = await sendDebtReport(
+    deps,
+    actor,
+    "manual",
+    addresses,
+    mondayOf(today),
+  );
+  if (!sent) {
+    throw new DebtWsError(
+      "The report could not be claimed for sending. Try again shortly",
+      409,
+      "already_sent",
+    );
+  }
+  return sent;
+}
+
+/**
+ * The Wednesday 12:00 Perth cron. Off unless report_auto_send and sending are both on; once
+ * a week (the week is Monday to Sunday, Perth, so week_start is still that Monday). Refuses
+ * (xero_copy_stale) when our Xero copy is not fresh, like a manual send.
+ */
+export async function debtWsReportAuto(deps: DebtWsDeps) {
+  const settings = await deps.store.settings();
+  const rs = await deps.store.reportSettings();
+  const today = perthDate(deps.now());
+  const weekStart = mondayOf(today);
+  const skipped = (reason: string) => ({
+    ok: true,
+    version: DEBT_WS_VERSION,
+    sent: false,
+    reason,
+    week_start: weekStart,
+  });
+  if (!rs.auto_send) return skipped("auto_send_off");
+  if (!debtWsSendingOn(settings)) return skipped("sending_off");
+  const addresses = reportAddresses(rs);
+  if (addresses.problem) {
+    throw new DebtWsError(
+      addresses.problem.message,
+      409,
+      addresses.problem.code,
+    );
+  }
+  const sent = await sendDebtReport(
+    deps,
+    { user_id: null, label: "Wednesday 12pm auto-send" },
+    "auto",
+    addresses,
+    weekStart,
+  );
+  return sent ?? skipped("already_sent");
 }
 
 // ── The dispatcher (index.ts wiring) ──
@@ -2997,6 +3875,10 @@ export const DEBT_WS_ACTIONS: Record<
   debt_ws_jan_list_send: { method: "POST", who: "server" },
   debt_ws_agent_queue: { method: "GET", who: "server_or_owner" },
   debt_ws_agent_submit: { method: "POST", who: "server_or_owner" },
+  debt_ws_report: { method: "GET", who: "staff" },
+  debt_ws_report_pdf: { method: "GET", who: "staff" },
+  debt_ws_report_send: { method: "POST", who: "owner" },
+  debt_ws_report_auto: { method: "POST", who: "server" },
 };
 
 export function isDebtWsAction(action: unknown): boolean {
@@ -3114,6 +3996,14 @@ export async function runDebtWsAction(
         return ok(await debtWsJanListSend(deps));
       case "debt_ws_agent_queue":
         return ok(await debtWsAgentQueue(deps));
+      case "debt_ws_report":
+        return ok(await debtWsReport(deps, caller));
+      case "debt_ws_report_pdf":
+        return ok(await debtWsReportPdf(deps, caller));
+      case "debt_ws_report_send":
+        return ok(await debtWsReportSend(deps, caller, body));
+      case "debt_ws_report_auto":
+        return ok(await debtWsReportAuto(deps));
       default:
         return ok(await debtWsAgentSubmit(deps, caller, body));
     }

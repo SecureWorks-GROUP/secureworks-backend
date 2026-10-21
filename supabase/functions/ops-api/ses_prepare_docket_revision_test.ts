@@ -91,7 +91,7 @@ function fixtureInput(
   const canonicalRate = row.builder_key === "AJS" ||
       row.builder_key === "AJBR"
     ? 80
-    : 85;
+    : 90;
   const input: SesAssemblerInputV1 = {
     contract_version: SES_INPUT_CONTRACT_VERSION,
     identity: {
@@ -271,7 +271,7 @@ function request(
         line_items: [{
           description: "Make-safe labour",
           quantity: hours,
-          unit_price: ajs ? 80 : 85,
+          unit_price: ajs ? 80 : 90,
         }],
       },
       change_summary: "Fixture Maverick draft for review.",
@@ -2389,7 +2389,7 @@ Deno.test("MLB temporary fencing parks missing quantities for Captain review", a
   const result = await labourProposal("MLB", "temporary_fencing", {
     trades: 1,
     hours_per_trade: 4,
-    rate_ex_gst: 85,
+    rate_ex_gst: 90,
   });
 
   assertEquals(
@@ -2507,7 +2507,7 @@ Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor ins
   const result = await labourProposal("MLB", "physical_makesafe", {
     trades: 2,
     hours_per_trade: 2,
-    rate_ex_gst: 85,
+    rate_ex_gst: 90,
     materials: [],
   });
   assertEquals(
@@ -2527,8 +2527,8 @@ Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor ins
   // The line the money guard parses must state the BILLABLE hours and quantity: 2 x 3 = 6.
   assertStringIncludes(String(lines[0].description), "2 trades x 3 hours");
   assertEquals(lines[0].quantity, 6);
-  assertEquals(lines[0].unit_price_ex_gst ?? lines[0].unit_price, 85);
-  assertEquals(proposal.subtotal_ex_gst, 510);
+  assertEquals(lines[0].unit_price_ex_gst ?? lines[0].unit_price, 90);
+  assertEquals(proposal.subtotal_ex_gst, 540);
 });
 
 // The defect that survived every prior suite: trade materials_used is printed on
@@ -2540,7 +2540,7 @@ Deno.test(
     const silent = await labourProposal("MLB", "physical_makesafe", {
       trades: 2,
       hours_per_trade: 2,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: [
         "Polycarb disposal / tipping",
@@ -2553,7 +2553,7 @@ Deno.test(
     );
     const silentProposal = silent.invoice_proposal as Record<string, unknown>;
     assert(silentProposal, "unquantified materials must not refuse the DRAFT");
-    assertEquals(silentProposal.subtotal_ex_gst, 510);
+    assertEquals(silentProposal.subtotal_ex_gst, 540);
     assert(
       (reviewCard(silent).review_assumption_codes as string[]).includes(
         "materials_quantity_review_required",
@@ -2570,7 +2570,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 2,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         materials_used: [
           "Polycarb disposal / tipping",
@@ -2585,7 +2585,7 @@ Deno.test(
     const lines = proposal.line_items as Array<Record<string, unknown>>;
     assertEquals(lines.length, 2);
     assertEquals(lines[0].quantity, 6);
-    assertEquals(lines[0].unit_price_ex_gst, 85);
+    assertEquals(lines[0].unit_price_ex_gst, 90);
     assertStringIncludes(String(lines[1].description), "Materials used");
     assertStringIncludes(
       String(lines[1].description),
@@ -2601,7 +2601,7 @@ Deno.test(
       false,
       "internal jargon must not reach the builder-facing invoice line",
     );
-    assertEquals(proposal.subtotal_ex_gst, 575);
+    assertEquals(proposal.subtotal_ex_gst, 605);
     const charge = proposal.materials_charge as Record<string, unknown>;
     assertEquals(charge.estimate, false);
     assertEquals(charge.source, "operator_materials_charge_figure");
@@ -2615,12 +2615,12 @@ Deno.test(
 );
 
 Deno.test(
-  "F29 nails and timber mint a priced review DRAFT without Captain input",
+  "nails and a short timber length bill the settled card, not a review proposal",
   async () => {
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 2,
       hours_per_trade: 2,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Nails x 5", "Timber x 0.2m"],
     });
@@ -2629,35 +2629,40 @@ Deno.test(
       blockerCodes(result).includes("materials_charge_figure_required"),
       false,
     );
-    assertEquals(
-      blockerCodes(result).includes("pricing_evidence_missing"),
-      false,
-    );
     const proposal = result.invoice_proposal as Record<string, unknown>;
-    assert(proposal, "quantified report materials must reach a DRAFT proposal");
+    assert(proposal, "settled materials must reach a DRAFT");
     const lines = proposal.line_items as Array<Record<string, unknown>>;
-    assertEquals(lines.length, 2);
-    assertStringIncludes(String(lines[1].description), "Nails x 5");
-    assertStringIncludes(String(lines[1].description), "Timber x 0.2m");
-    assertEquals(lines[1].quantity, 1);
-    assertEquals(lines[1].unit_price_ex_gst, 71);
-    assertEquals(proposal.subtotal_ex_gst, 581);
-    assert(
+    assertEquals(lines.length, 3);
+    assertStringIncludes(
+      String(lines[1].description),
+      "Cable ties and small consumables",
+    );
+    assertEquals(lines[1].unit_price_ex_gst, 25);
+    assertStringIncludes(String(lines[2].description), "1 length");
+    assertEquals(lines[2].unit_price_ex_gst, 17);
+    assertEquals(proposal.subtotal_ex_gst, 582);
+    assertEquals(
       (reviewCard(result).review_assumption_codes as string[]).includes(
         "materials_rate_card_proposal_review_required",
       ),
+      false,
     );
-    assertEquals(result.envelope.client_send_approved, false);
+    assertEquals(
+      String(lines.map((line) => line.description).join(" ")).includes(
+        "Proposed materials for Captain review",
+      ),
+      false,
+    );
   },
 );
 
 Deno.test(
-  "settled silicone and flashing tape price at $25 per whole unit without a Captain ask",
+  "settled Sikaflex and flashing tape price at the styled $36 whole unit",
   async () => {
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 2,
       hours_per_trade: 2,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Silicone x 1", "Flashing Tape x 0.4m"],
     });
@@ -2679,23 +2684,26 @@ Deno.test(
         amount_ex_gst: line.amount_ex_gst,
       })),
       [
-        { quantity: 1, unit_price_ex_gst: 25, amount_ex_gst: 25 },
-        { quantity: 1, unit_price_ex_gst: 25, amount_ex_gst: 25 },
+        { quantity: 1, unit_price_ex_gst: 36, amount_ex_gst: 36 },
+        { quantity: 1, unit_price_ex_gst: 36, amount_ex_gst: 36 },
       ],
     );
+    assertStringIncludes(String(lines[1].description), "Sikaflex");
     assertStringIncludes(String(lines[1].description), "whole cartridge");
+    assertEquals(String(lines[1].description).includes("Silicone"), false);
+    assertStringIncludes(String(lines[2].description), "Flashing tape");
     assertStringIncludes(String(lines[2].description), "whole roll");
-    assertEquals(proposal.subtotal_ex_gst, 560);
+    assertEquals(proposal.subtotal_ex_gst, 612);
   },
 );
 
 Deno.test(
-  "part-use of one silicone cartridge bills one whole $25 unit",
+  "part-use of one silicone cartridge bills one whole Sikaflex unit at $36",
   async () => {
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 1,
       hours_per_trade: 3,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Silicone x 0.4 cartridge"],
     });
@@ -2711,8 +2719,10 @@ Deno.test(
     const lines = proposal.line_items as Array<Record<string, unknown>>;
     assertEquals(lines.length, 2);
     assertEquals(lines[1].quantity, 1);
-    assertEquals(lines[1].unit_price_ex_gst, 25);
-    assertEquals(lines[1].amount_ex_gst, 25);
+    assertEquals(lines[1].unit_price_ex_gst, 36);
+    assertEquals(lines[1].amount_ex_gst, 36);
+    assertStringIncludes(String(lines[1].description), "Sikaflex");
+    assertEquals(String(lines[1].description).includes("Silicone"), false);
   },
 );
 
@@ -2722,7 +2732,7 @@ Deno.test(
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 1,
       hours_per_trade: 3,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Silicone spray", "Roof flashing"],
     });
@@ -2734,7 +2744,7 @@ Deno.test(
     const proposal = result.invoice_proposal as Record<string, unknown>;
     assert(proposal, "a review DRAFT must still be assembled");
     assertEquals((proposal.line_items as unknown[]).length, 1);
-    assertEquals(proposal.subtotal_ex_gst, 255);
+    assertEquals(proposal.subtotal_ex_gst, 270);
     assert(
       (reviewCard(result).review_assumption_codes as string[]).includes(
         "materials_quantity_review_required",
@@ -2755,7 +2765,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 3,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         materials_used: ["Other / none"],
       },
@@ -2781,7 +2791,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 3,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials_used: ["Weatherproof sheet x 1"],
         materials: [{
           description: "Weatherproof sheet and fixings",
@@ -2832,7 +2842,7 @@ Deno.test(
     const materials = {
       trades: 2,
       hours_per_trade: 2,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Polycarb disposal / tipping", "Screws and fixings"],
     };
@@ -2865,7 +2875,7 @@ Deno.test(
     const inherited = reprepared.invoice_proposal as Record<string, unknown>;
     assert(inherited, "expected the inherited proposal");
     assertEquals(inherited.line_items, answeredProposal.line_items);
-    assertEquals(inherited.subtotal_ex_gst, 575);
+    assertEquals(inherited.subtotal_ex_gst, 605);
     assertEquals(inherited.materials_charge, answeredProposal.materials_charge);
     // Inheriting reproduces the same revision identity, so the card's Docs
     // Ready signoff is not re-keyed by a routine re-prepare.
@@ -2889,7 +2899,7 @@ Deno.test(
     const materials = {
       trades: 2,
       hours_per_trade: 2,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Polycarb disposal / tipping"],
     };
@@ -2941,14 +2951,14 @@ Deno.test(
     assertEquals(set.blockers.map((item) => item.reason_code), []);
     assertEquals(
       (set.invoice_proposal as Record<string, unknown>).subtotal_ex_gst,
-      575,
+      605,
     );
     commit(set);
     const inheritedSet = await prepare();
     assertEquals(
       (inheritedSet.invoice_proposal as Record<string, unknown>)
         .subtotal_ex_gst,
-      575,
+      605,
     );
     commit(inheritedSet);
 
@@ -2958,7 +2968,7 @@ Deno.test(
     const none = await prepare("cleared");
     assertEquals(none.blockers.map((item) => item.reason_code), []);
     const nonePlan = none.invoice_proposal as Record<string, unknown>;
-    assertEquals(nonePlan.subtotal_ex_gst, 510);
+    assertEquals(nonePlan.subtotal_ex_gst, 540);
     assertEquals(
       (nonePlan.line_items as Array<Record<string, unknown>>).length,
       1,
@@ -2978,7 +2988,7 @@ Deno.test(
       string,
       unknown
     >;
-    assertEquals(standing.subtotal_ex_gst, 510);
+    assertEquals(standing.subtotal_ex_gst, 540);
     assertEquals(
       (standing.materials_charge as Record<string, unknown>).decision,
       "none",
@@ -2993,13 +3003,13 @@ Deno.test(
     const reset = await prepare(materialsChargeAuthorisation(80));
     assertEquals(
       (reset.invoice_proposal as Record<string, unknown>).subtotal_ex_gst,
-      590,
+      620,
     );
     commit(reset);
     assertEquals(
       ((await prepare()).invoice_proposal as Record<string, unknown>)
         .subtotal_ex_gst,
-      590,
+      620,
     );
 
     // A card on another pricing basis inherits nothing, so a stale decision can
@@ -3011,7 +3021,7 @@ Deno.test(
       {
         trades: 1,
         hours_per_trade: 4,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         panel_count: 8,
         base_count: 8,
@@ -3045,7 +3055,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 2,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         materials_used: materials,
       },
@@ -3054,7 +3064,7 @@ Deno.test(
     const blockedClear = await labourProposal(
       "MLB",
       "physical_makesafe",
-      { trades: 2, rate_ex_gst: 85, materials: [], materials_used: materials },
+      { trades: 2, rate_ex_gst: 90, materials: [], materials_used: materials },
       "cleared",
     );
     // Missing hours soft-flags a priced proposal; the clear still stamps as the
@@ -3093,7 +3103,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 2,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         materials_used: materials,
       },
@@ -3103,7 +3113,7 @@ Deno.test(
     assertEquals(
       (afterHoursRecovered.invoice_proposal as Record<string, unknown>)
         .subtotal_ex_gst,
-      510,
+      540,
     );
   },
 );
@@ -3117,7 +3127,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 2,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         materials_used: ["Polycarb disposal / tipping"],
       },
@@ -3135,7 +3145,7 @@ Deno.test(
       {
         trades: 2,
         hours_per_trade: 2,
-        rate_ex_gst: 85,
+        rate_ex_gst: 90,
         materials: [],
         materials_used: ["Structural propping timber", "Tarps"],
       },
@@ -3191,7 +3201,7 @@ Deno.test(
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 2,
       hours_per_trade: 3,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials_used: ["Weatherproof sheet x 1"],
       materials: [{
         description: "Weatherproof sheet and fixings",
@@ -3204,7 +3214,7 @@ Deno.test(
     const lines = proposal.line_items as Array<Record<string, unknown>>;
     assertEquals(lines.length, 2);
     assertEquals(lines[1].unit_price_ex_gst, 95);
-    assertEquals(proposal.subtotal_ex_gst, 510 + 95);
+    assertEquals(proposal.subtotal_ex_gst, 540 + 95);
   },
 );
 
@@ -3214,7 +3224,7 @@ Deno.test(
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 2,
       hours_per_trade: 3,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
       materials_used: ["Other / none", "None"],
     });
@@ -3224,7 +3234,7 @@ Deno.test(
       (proposal.line_items as Array<Record<string, unknown>>).length,
       1,
     );
-    assertEquals(proposal.subtotal_ex_gst, 510);
+    assertEquals(proposal.subtotal_ex_gst, 540);
   },
 );
 
@@ -3279,7 +3289,7 @@ Deno.test("sealed repair and restoration invoice lines name their own family", a
     const result = await labourProposal("MLB", family, {
       trades: 2,
       hours_per_trade: 3,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
     });
     const proposal = result.invoice_proposal as Record<string, unknown>;
@@ -3420,7 +3430,7 @@ Deno.test("a longer attendance is never reduced to the floor", async () => {
   const result = await labourProposal("MLB", "physical_makesafe", {
     trades: 1,
     hours_per_trade: 5.5,
-    rate_ex_gst: 85,
+    rate_ex_gst: 90,
     materials: [],
   });
   const proposal = result.invoice_proposal as Record<string, unknown>;
@@ -3474,12 +3484,12 @@ Deno.test("the sealed floor still binds: no proposal can leave below its company
 Deno.test("absent attended hours soft-flag a sealed-floor proposal for Captain review", async () => {
   const result = await labourProposal("MLB", "physical_makesafe", {
     trades: 2,
-    rate_ex_gst: 85,
+    rate_ex_gst: 90,
     materials: [],
   });
   const proposal = assertCommercialReviewProposal(result, "attended hours");
   assertEquals(proposal.billable_hours_per_trade, 3);
-  assertEquals(proposal.subtotal_ex_gst, 510);
+  assertEquals(proposal.subtotal_ex_gst, 540);
   const labourDescription = String(
     (proposal.line_items as Array<Record<string, unknown>>)[0].description,
   );
@@ -3499,7 +3509,7 @@ Deno.test("a non-positive attended-hours fact soft-flags rather than silently mi
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 1,
       hours_per_trade: bad,
-      rate_ex_gst: 85,
+      rate_ex_gst: 90,
       materials: [],
     });
     assertCommercialReviewProposal(result, "attended hours");
@@ -3513,8 +3523,8 @@ Deno.test("raising cost hours to the floor soft-flags an off-schedule rate", asy
     rate_ex_gst: 70,
     materials: [],
   });
-  const proposal = assertCommercialReviewProposal(result, "85");
-  assertEquals(proposal.subtotal_ex_gst, 255);
+  const proposal = assertCommercialReviewProposal(result, "90");
+  assertEquals(proposal.subtotal_ex_gst, 270);
 });
 
 Deno.test("hire-card pricing parks a missing star-picket quantity for review", async () => {
@@ -5231,7 +5241,7 @@ Deno.test(
 const SETTLED_MATERIALS = {
   trades: 2,
   hours_per_trade: 2,
-  rate_ex_gst: 85,
+  rate_ex_gst: 90,
   materials: [],
   materials_used: [
     "Star picket x 2",
@@ -5313,7 +5323,7 @@ Deno.test(
     // Labour only on the proposal, because the materials money is committed on
     // the invoice — a second line here is what a later mint would double-bill.
     assertEquals(lines.length, 1);
-    assertEquals(proposal.subtotal_ex_gst, 510);
+    assertEquals(proposal.subtotal_ex_gst, 540);
     const marker = proposal.materials_charge as Record<string, unknown>;
     assertEquals(marker.decision, "already_invoiced");
     assertEquals(marker.already_invoiced_materials_ex_gst, 172);
@@ -5444,7 +5454,7 @@ Deno.test(
       false,
       "the refused figure must never reach a line on an already billed cycle",
     );
-    assertEquals(proposal.subtotal_ex_gst, 510);
+    assertEquals(proposal.subtotal_ex_gst, 540);
   },
 );
 
@@ -5896,7 +5906,7 @@ Deno.test("Phase One keeps business findings visible under the named-card gate p
   unpricedMaterials.cycle_facts.hours_and_materials = {
     trades: 1,
     hours_per_trade: 3,
-    rate_ex_gst: 85,
+    rate_ex_gst: 90,
     materials: [],
     materials_used: ["Recorded material pending price"],
   };

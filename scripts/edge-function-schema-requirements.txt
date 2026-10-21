@@ -650,6 +650,13 @@ ops-api|supabase/migrations/20261008170000_debt_workshop.sql|column|debt_ws_jan_
 ops-api|supabase/migrations/20261008170000_debt_workshop.sql|column|debt_ws_sends.actor
 ops-api|supabase/migrations/20261008170000_debt_workshop.sql|index|idx_debt_ws_sends_claim
 ops-api|supabase/migrations/20261008170000_debt_workshop.sql|index|idx_debt_ws_statements_week
+ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|column|debt_ws_settings.report_recipients
+ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|column|debt_ws_settings.report_cc
+ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|column|debt_ws_settings.report_auto_send
+ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|table|debt_ws_reports
+ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|policy|debt_ws_reports.debt_ws_reports_service_role_all
+ops-api|supabase/migrations/20261015170000_debt_ws_report.sql|function|debt_ws_payments_between
+ops-api|supabase/migrations/20260910100000_xero_sync_state_and_pdf_attempts.sql|column|xero_sync_state.cursor_at
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|table|quote_builder_versions
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.chain_id
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.cost_lines
@@ -740,6 +747,14 @@ ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|colum
 xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|table|job_closeout_settings
 xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_closeout_settings.get_review_move_enabled
 
+# Automatic issue of job work orders: every job work order read selects the
+# two stamps, and the quote fill writes quote_filled_at, so they must exist
+# before this ops-api ships.
+ops-api|supabase/migrations/20261016120000_job_work_order_auto_issue.sql|column|work_orders.quote_filled_at
+ops-api|supabase/migrations/20261016120000_job_work_order_auto_issue.sql|column|work_orders.hand_edited_at
+ops-api|supabase/migrations/20261016120000_job_work_order_auto_issue.sql|constraint|work_orders_auto_issue_check
+ops-api|supabase/migrations/20261016120000_job_work_order_auto_issue.sql|function|auto_issue_job_work_order
+
 # Quote builder pricing settings and the filed scope of works:
 # quote_builder_get_job reads the settings table on every open, so ops-api must
 # not deploy ahead of this migration.
@@ -800,3 +815,43 @@ ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order_update
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_release_unknown_send
+
+# 20261014190000 is Dispatch slice 7's install confirmation mark: pipeline
+# dispatch=1 reads the four columns (and embeds the confirmer's name through
+# install_confirmed_by), and set_dispatch_install_confirmed writes them, so
+# ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_at
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day
+ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_at
+ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by
+ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by_email
+ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_at
+ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_by
+ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_by_email
+
+# 20261016160000 restates the install_confirmed_for_day column comment for the
+# rule ops-api's dispatch_install.ts follows (a mark stands while a booking is
+# on its day, past or ahead). Comment only; the marker is the same column.
+ops-api|supabase/migrations/20261016160000_job_dispatch_install_for_day_comment.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# Per-job review switch: the paid close-out sender and its card read select the
+# three columns, and set_review_opt_out writes them, so they must exist before
+# this ops-api ships.
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_at
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_by
+# The invoice mirror check: xero-sync writes a row every hour; ops-api reads the newest
+# for the Debt tab's "Matches Xero" line and the debt report.
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
+ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+# Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
+# invoice; ops-api job_receipt.ts reads the switch and writes the claims.
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all

@@ -908,7 +908,36 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261014125951", "xero_settlement_evidence"),
                       # Dispatch slice 5: purchase orders, their held drafts
                       # and the commit functions (dispatch_orders_store.ts).
-                      ("20261014150000", "dispatch_purchase_orders")]:
+                      ("20261014150000", "dispatch_purchase_orders"),
+                      # Dispatch slice 7: the install confirmation columns
+                      # pipeline dispatch=1 reads and
+                      # set_dispatch_install_confirmed writes.
+                      ("20261014190000", "job_dispatch_install_confirmed"),
+                      # Debt report: the report settings, debt_ws_reports and
+                      # the payments read (debt_ws_report_* actions).
+                      ("20261015170000", "debt_ws_report"),
+                      # Debt report freshness: the invoice sync cursor the
+                      # report's "last synced" time and its send check read.
+                      ("20260910100000", "xero_sync_state_and_pdf_attempts"),
+                      # Automatic issue of job work orders: the fill and edit
+                      # stamps every job work order read selects
+                      # (job_work_orders.ts).
+                      ("20261016120000", "job_work_order_auto_issue"),
+                      # Dispatch slice 6: the delivery columns dispatch_materials
+                      # and pipeline dispatch=1 read and dispatch_delivery_* write.
+                      ("20261016150000", "dispatch_deliveries"),
+                      # Dispatch slice 7, F2: the install_confirmed_for_day
+                      # column comment states the mark rule.
+                      ("20261016160000", "job_dispatch_install_for_day_comment"),
+                      # Paid close-out review switch: the per-job
+                      # review_opt_out columns (job_closeout.ts).
+                      ("20261020093000", "job_review_opt_out"),
+                      # The invoice mirror check: debt_ws_overview and the debt
+                      # report read the newest xero_mirror_checks row.
+                      ("20261020150000", "xero_mirror_checks"),
+                      # Paid-invoice receipt: the receipt switch and the
+                      # job_receipt_claims table (job_receipt.ts).
+                      ("20261021100000", "job_receipt_sender")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

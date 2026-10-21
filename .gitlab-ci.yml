@@ -1,5 +1,5 @@
 # Replaces .github/workflows/{pr-check,deploy-edge-functions,makesafe-intake-watchdog}.yml on GitLab.
-# Variables (masked, protected): SUPABASE_ACCESS_TOKEN, SW_API_KEY; optional OPS_API_BASE_URL.
+# Variables (masked, protected): SUPABASE_ACCESS_TOKEN (deploy and make-safe intake watchdog), SW_API_KEY (deploy smoke checks).
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -33,7 +33,7 @@ deno-check:
   image: denoland/deno:debian
   rules: *mr_changes
   before_script:
-    - apt-get update -qq && apt-get install -y -qq git curl jq nodejs python3 >/dev/null
+    - apt-get update -qq && apt-get install -y -qq git curl jq nodejs python3 python3-yaml >/dev/null
   script:
     - |
       BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"; HEAD_SHA="$CI_COMMIT_SHA"
@@ -43,10 +43,11 @@ deno-check:
         while IFS= read -r f; do deno check "$f" || echo "advisory: $f failed deno check"; done < /tmp/changed_function_files.txt
         while IFS= read -r f; do deno cache --no-check "$f"; done < /tmp/changed_function_files.txt
       fi
-    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh scripts/install-supabase-cli.sh scripts/check-supabase-cli.sh scripts/edge-catchup-deploy-set.sh; do [ ! -f "$s" ] || bash -n "$s"; done
+    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh scripts/install-supabase-cli.sh scripts/check-supabase-cli.sh scripts/edge-catchup-deploy-set.sh scripts/check-makesafe-intake-health.sh; do [ ! -f "$s" ] || bash -n "$s"; done
     - bash scripts/test/test-smoke-ops-api-action-surface.sh
     - bash scripts/test/test-stamp-ops-api-build-metadata.sh
     - bash scripts/test/test-edge-schema-preflight.sh
+    - bash scripts/test/test-check-makesafe-intake-health.sh
     - bash scripts/test/test-apply-pending-migrations.sh
     - deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
     # Ported from GitHub pr-check: Debt Workshop (8 Oct; replaced the 30 Sep debt
@@ -59,7 +60,7 @@ deno-check:
     - deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
     - deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/repair_intake_routing_test.ts supabase/functions/ops-api/repair_classifier_routing_test.ts supabase/functions/ops-api/repair_stage_write_test.ts supabase/functions/ops-api/insurance_repairs_board_test.ts supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
     - bash scripts/test/test-deploy-edge-functions-workflow.sh
-    - deno test --allow-read --allow-env supabase/functions/send-outlook-email/outlook_action_behavior_test.ts supabase/functions/send-outlook-email/outlook_authorization_test.ts supabase/functions/send-outlook-email/ses_delivery_fence_test.ts supabase/functions/send-quote/xero_quote_outcome_test.ts supabase/functions/send-quote/send_runs_request_test.ts supabase/functions/send-quote/quote_party_view_test.ts supabase/functions/ghl-proxy/hardening_helpers_test.ts supabase/functions/ghl-proxy/provider_reads_test.ts supabase/functions/ghl-proxy/lead_search_test.ts supabase/functions/ghl-proxy/sms_sender_default_test.ts supabase/functions/ghl-proxy/calendar_events_test.ts supabase/functions/ghl-proxy/calendar_appointment_test.ts supabase/functions/ghl-proxy/calendar_appointment_release_test.ts supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts supabase/functions/xero-sync/xero_age_test.ts supabase/functions/_shared/xero_cooldown_test.ts supabase/functions/ops-api/invoice_create_contract_test.ts supabase/functions/ops-api/ops_api_operator_auth_test.ts supabase/functions/ops-api/xero_accpay_books_test.ts supabase/functions/ops-api/xero_receivables_read_test.ts supabase/functions/ops-api/xero_attachment_test.ts supabase/functions/ops-api/xero_post_rate_limit_retry_test.ts supabase/functions/ops-api/read_job_record_test.ts supabase/functions/ops-api/ses_report_trigger_test.ts supabase/functions/ops-api/xero_bank_read_test.ts supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts supabase/functions/ops-api/sales_booking_read_test.ts supabase/functions/ops-api/sales_booking_outlook_test.ts supabase/functions/ops-api/sales_booking_pack_test.ts supabase/functions/ops-api/sales_booking_confirmation_test.ts supabase/functions/ops-api/sales_booking_execute_test.ts supabase/functions/ops-api/sales_booking_owner_approval_test.ts supabase/functions/ops-api/sales_booking_availability_test.ts supabase/functions/ops-api/sales_booking_lead_owner_test.ts supabase/functions/ops-api/sales_booking_execution_read_test.ts supabase/functions/ops-api/sales_booking_routes_test.ts supabase/functions/reporting-api/reporting_staff_gate_test.ts supabase/functions/ops-api/sales_booking_lead_drafts_test.ts
+    - deno test --allow-read --allow-env supabase/functions/send-outlook-email/outlook_action_behavior_test.ts supabase/functions/send-outlook-email/outlook_authorization_test.ts supabase/functions/send-outlook-email/ses_delivery_fence_test.ts supabase/functions/send-quote/xero_quote_outcome_test.ts supabase/functions/send-quote/send_runs_request_test.ts supabase/functions/send-quote/quote_party_view_test.ts supabase/functions/ghl-proxy/hardening_helpers_test.ts supabase/functions/ghl-proxy/provider_reads_test.ts supabase/functions/ghl-proxy/lead_search_test.ts supabase/functions/ghl-proxy/sms_sender_default_test.ts supabase/functions/ghl-proxy/calendar_events_test.ts supabase/functions/ghl-proxy/calendar_appointment_test.ts supabase/functions/ghl-proxy/calendar_appointment_release_test.ts supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts supabase/functions/xero-sync/xero_age_test.ts supabase/functions/_shared/xero_cooldown_test.ts supabase/functions/ops-api/invoice_create_contract_test.ts supabase/functions/ops-api/ops_api_operator_auth_test.ts supabase/functions/ops-api/xero_accpay_books_test.ts supabase/functions/ops-api/xero_receivables_read_test.ts supabase/functions/ops-api/xero_attachment_test.ts supabase/functions/ops-api/xero_post_rate_limit_retry_test.ts supabase/functions/ops-api/read_job_record_test.ts supabase/functions/ops-api/ses_report_trigger_test.ts supabase/functions/ops-api/xero_bank_read_test.ts supabase/functions/ops-api/xero_reports_read_test.ts supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts supabase/functions/ops-api/sales_booking_read_test.ts supabase/functions/ops-api/sales_booking_outlook_test.ts supabase/functions/ops-api/sales_booking_pack_test.ts supabase/functions/ops-api/sales_booking_confirmation_test.ts supabase/functions/ops-api/sales_booking_execute_test.ts supabase/functions/ops-api/sales_booking_owner_approval_test.ts supabase/functions/ops-api/sales_booking_availability_test.ts supabase/functions/ops-api/sales_booking_lead_owner_test.ts supabase/functions/ops-api/sales_booking_execution_read_test.ts supabase/functions/ops-api/sales_booking_routes_test.ts supabase/functions/reporting-api/reporting_staff_gate_test.ts supabase/functions/ops-api/sales_booking_lead_drafts_test.ts
     - deno test --no-check --allow-read --allow-env supabase/functions/ops-api/context_visibility_test.ts supabase/functions/ops-api/proposed_sms_receipt_test.ts supabase/functions/ops-api/retired_booking_actions_test.ts supabase/functions/ops-api/invoice_context_test.ts supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts supabase/functions/ops-api/job_commercial_read_test.ts supabase/functions/ops-api/job_freshness_test.ts supabase/functions/ops-api/trade_variation_request_test.ts supabase/functions/ops-api/context_unlinked_test.ts supabase/functions/ops-api/actor_calls_test.ts supabase/functions/ops-api/actor_calls_handler_test.ts supabase/functions/ops-api/monitored_mailboxes_test.ts
     - deno test --allow-read --allow-env supabase/functions/ghl-webhook-receiver/receiver_auth_test.ts supabase/functions/ghl-webhook-receiver/receiver_c1b_test.ts supabase/functions/ghl-webhook-receiver/receiver_c1c_test.ts supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts supabase/functions/ghl-webhook-receiver/receiver_customer_replied_test.ts supabase/functions/ghl-webhook-receiver/receiver_user_replied_test.ts supabase/functions/ghl-webhook/message_webhook_test.ts
     - deno test --allow-read --allow-env supabase/functions/_shared/evidence/record_evidence_test.ts supabase/functions/_shared/evidence/retired_v1_queue_writes_test.ts
@@ -240,17 +241,8 @@ makesafe-intake-watchdog:
   variables:
     STALE_MINUTES: "30"
   before_script:
-    - apk add --no-cache curl jq coreutils >/dev/null
+    - apk add --no-cache bash curl python3 >/dev/null
   script:
-    - |
-      test -n "$SW_API_KEY" || { echo "FAIL: SW_API_KEY not set"; exit 1; }
-    - URL="${OPS_API_BASE_URL:-https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api}?action=intake_health"
-    - |
-      HTTP_CODE=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 -H "x-api-key: $SW_API_KEY" "$URL" || echo 000)
-    - |
-      test "$HTTP_CODE" = 200 || { echo "FAIL: intake_health HTTP $HTTP_CODE"; head -c 2000 /tmp/health.json; exit 1; }
-    - |
-      LAST_SCAN=$(jq -r '.extraction.last_scan_at // empty' /tmp/health.json); test -n "$LAST_SCAN" || { echo "FAIL: no last_scan_at"; exit 1; }
-    - AGE_MIN=$(( ( $(date -u +%s) - $(date -u -d "$LAST_SCAN" +%s) ) / 60 )); echo "last scan ${AGE_MIN} min ago"
-    - |
-      test "$AGE_MIN" -le "$STALE_MINUTES" || { echo "FAIL: make-safe intake scan STALE (${AGE_MIN} min)"; exit 1; }
+    # Reads makesafe_intake_health through the Supabase Management API with
+    # read_only true; ops-api intake_health refuses SW_API_KEY since #667.
+    - bash scripts/check-makesafe-intake-health.sh

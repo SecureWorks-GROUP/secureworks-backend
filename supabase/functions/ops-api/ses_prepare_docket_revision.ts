@@ -1269,7 +1269,7 @@ function localInvoiceProposal(
   const canonicalRate = row.invoice_basis === "ajs_labour_materials" ||
       row.invoice_basis === "ajs_temporary_fence_labour_only"
     ? 80
-    : 85;
+    : 90;
   // Soft commercial path: when trade count / hours are missing, propose the
   // sealed attendance floor with a caveat rather than hiding the pack behind a
   // 409. The invoice LINE must say the floor is assumed — never invent bare
@@ -1695,6 +1695,25 @@ function localInvoiceProposal(
             `${ref} - ${settled.description}`,
             settled.quantity,
             settled.unit_price_ex_gst,
+          ),
+        );
+      }
+      if (materialsDecision.omitted.length) {
+        materialsReviewAssumptions.push(
+          blocked(
+            "materials_quantity_review_required",
+            `Trade ticks with no settled rate were left off the invoice: ${
+              materialsDecision.omitted.join("; ")
+            }.`,
+            "Leave those ticks off the invoice. Do not add a proposed-materials line.",
+            [
+              "canonical-input-envelope",
+              "trade-materials-used",
+              "materials-rate-card.md",
+            ],
+            [],
+            { omitted: materialsDecision.omitted },
+            "review_assumption",
           ),
         );
       }

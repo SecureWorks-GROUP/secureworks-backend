@@ -229,8 +229,10 @@ function proofJobs(): Proof[] {
       from: "awaiting_deposit",
       out: "council_to_come",
     }),
+    // Slice 7 (ruling I7): a Trade scheduled job with no install booked and no
+    // install mark is back in To do.
     p(1, "P1", { status: "scheduled" }, {
-      todo: false,
+      todo: true,
       stage: "trade_scheduled",
       index: 6,
       source: "job_status",
@@ -319,7 +321,10 @@ Deno.test("rules: the nineteen proof jobs read the stage, source and To do of bu
   const proofs = proofJobs();
   assertEquals(proofs.length, 19);
   for (const proof of proofs) {
-    const fields = dispatchRowFields(proof.row, null);
+    const fields = dispatchRowFields(proof.row, null, {
+      bookings: [],
+      today: "2026-10-14",
+    });
     assertEquals(
       {
         todo: fields.dispatch_todo,

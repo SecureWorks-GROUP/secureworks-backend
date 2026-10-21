@@ -116,6 +116,8 @@ A repair-family job stored as `type = makesafe` is a repair (work type by
   dispatch_stage_source: "set", dispatch_stage_set_at, dispatch_stage_set_by,
   previous_stage, previous_source, dispatch_todo, dispatch_todo_out, audit_logged }`
   (plus `unchanged: true` on a repeat).
+  Since slice 7 it also reads the job's bookings (read only) to answer
+  `dispatch_todo`; see `docs/dispatch-slice-7-contract.md`, section 3.
 
 ### `set_dispatch_next_step`, body `{ job_id, text }`
 
@@ -178,7 +180,8 @@ A listed job is in To do when all of these hold:
    `schedule_install`, `scheduled`; and, for repair, its Repairs board stage is
    `approved`, `materials` or `scheduled`.
 3. The patio council rule does not hold it (below).
-4. Its place on the rail (set, else read) is 1 to 5.
+4. Its place on the rail (set, else read) is 1 to 5, or 6 under slice 7's
+   install rule (`docs/dispatch-slice-7-contract.md`, section 3).
 
 So a job set at a stop stays there whatever the Jobs board does next, but a job
 whose work has started, or that is cancelled or lost, is out of To do whatever

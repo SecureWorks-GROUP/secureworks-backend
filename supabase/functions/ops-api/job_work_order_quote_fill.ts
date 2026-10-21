@@ -14,6 +14,11 @@
 // - scope_items gets the builder's lines and agreed_labour_ex the quote's own
 //   labour figure. When the quote has none, agreed_labour_ex stays empty for
 //   the approver to set.
+// - The same write stamps quote_filled_at, which marks the draft as the
+//   fill's own: only such a draft, never edited since (hand_edited_at, set by
+//   the database), is issued automatically (job_work_orders.ts,
+//   20261016120000_job_work_order_auto_issue.sql). A draft someone already
+//   edited by hand is filled without the stamp and waits for the approver.
 
 import {
   buildQuoteWorkOrderLines,
@@ -30,7 +35,7 @@ const UUID_RE =
 const MAX_FILLED_SCOPE_ITEMS = 200;
 
 const FILL_WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, hand_edited_at, created_at, updated_at";
 
 export class QuoteFillError extends Error {
   constructor(
@@ -44,7 +49,29 @@ export class QuoteFillError extends Error {
 
 export type QuoteSource =
   | "accepted_revision"
-  | "revision_at_acceptance";
+  | "revision_at_acceptance"
+  | "latest_frozen_revision";
+
+/** Open, approved job statuses. Mirrors the database's
+ *  job_work_order_open_statuses() (20261012130000): the jobs a draft is opened
+ *  for, and the only jobs whose work order is issued automatically
+ *  (job_work_orders.ts re-exports it). A job in one of them has moved past
+ *  quoted. */
+export const JOB_WORK_ORDER_OPEN_STATUSES: ReadonlySet<string> = new Set([
+  "accepted",
+  "partially_accepted",
+  "approvals",
+  "deposit",
+  "awaiting_deposit",
+  "processing",
+  "order_materials",
+  "awaiting_supplier",
+  "order_confirmed",
+  "schedule_install",
+  "scheduled",
+  "in_progress",
+  "rectification",
+]);
 
 export type JobQuoteWorkOrderLines = {
   job: {
@@ -158,8 +185,15 @@ async function readRevisions(
 // the revision recorded at acceptance (jobs.expected_costs.scope_revision_id),
 // read whether it is still frozen or was superseded since; without one, the
 // latest revision frozen at or before jobs.accepted_at, frozen or superseded.
-// With neither there is no accepted quote, flagged no_accepted_quote, and the
-// draft is not filled.
+// With neither, and only then: a job that has moved past quoted (it is in an
+// open status, JOB_WORK_ORDER_OPEN_STATUSES) counts as accepted at its latest
+// frozen tool quote, the newest revision still in status 'frozen', whenever it
+// was frozen (captain, 16 Oct 2026). A superseded revision never counts under
+// this rule. A status change on the Ops screen to 'accepted' stamps
+// jobs.accepted_at; one straight to another open status (deposit, scheduled,
+// ...) does not, so this is how those jobs' tool quote counts. With no frozen
+// revision there is no accepted quote, flagged no_accepted_quote, and the
+// draft is not filled: the office fills it by hand.
 async function readAcceptedQuote(client: any, job: any): Promise<{
   pricing: Record<string, any> | null;
   quote: JobQuoteWorkOrderLines["quote"];
@@ -215,7 +249,21 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
           .limit(1),
     );
     if (atAcceptance) return use(atAcceptance, "revision_at_acceptance");
+    return none();
   }
+  if (acceptedId) return none();
+  if (!JOB_WORK_ORDER_OPEN_STATUSES.has(String(job?.status || ""))) {
+    return none();
+  }
+  const [latestFrozen] = await readRevisions(
+    client,
+    (q) =>
+      q.eq("job_id", job.id)
+        .eq("status", "frozen")
+        .order("frozen_at", { ascending: false, nullsFirst: false })
+        .limit(1),
+  );
+  if (latestFrozen) return use(latestFrozen, "latest_frozen_revision");
   return none();
 }
 
@@ -370,6 +418,11 @@ export async function fillJobWorkOrderDraftFromQuote(
   };
   if (result.agreed_labour_ex !== null) {
     patch.agreed_labour_ex = result.agreed_labour_ex;
+  }
+  // The database refuses this stamp on a draft edited by hand (its
+  // special instructions, say), so such a draft is filled without it.
+  if (!draft.hand_edited_at) {
+    patch.quote_filled_at = new Date().toISOString();
   }
   let update = client.from("work_orders").update(patch)
     .eq("id", draft.id)

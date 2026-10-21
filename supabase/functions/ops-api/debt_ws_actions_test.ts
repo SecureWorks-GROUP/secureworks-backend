@@ -1419,6 +1419,217 @@ Deno.test("job and agent queue: the payer's unplaced messages are asked for, sho
   assertEquals("unplaced" in item.messages[0], false);
 });
 
+Deno.test("agent queue: a held message's candidate_job_count reaches the bundle, and several candidates mark it context only", async () => {
+  // 14 Oct 2026 review: one customer with several jobs (SWF-26337) has the same held
+  // text shown on every candidate job's card. The agent must see how many jobs it could
+  // belong to, and the bundle says such a message is context only.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const contact = "ghlcontact0000000001";
+  const { deps } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "bev:held-many",
+        channel: "sms",
+        direction: "inbound",
+        occurred_at: "2026-10-09T03:00:00Z",
+        author: "Client",
+        body: "Paid it yesterday",
+        contact_id: contact,
+        unplaced: true,
+        candidate_job_count: 3,
+      },
+      {
+        id: "bev:held-one",
+        channel: "sms",
+        direction: "inbound",
+        occurred_at: "2026-10-08T03:00:00Z",
+        author: "Client",
+        body: "Will sort it this week",
+        contact_id: contact,
+        unplaced: true,
+        candidate_job_count: 1,
+      },
+      {
+        id: "ghl:1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-01T03:00:00Z",
+        author: "Shaun",
+        body: "Hi there",
+        contact_id: contact,
+      },
+    ],
+  });
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  assertEquals(item.messages.map((m: any) => m.id), [
+    "ghl:1",
+    "bev:held-one",
+    "bev:held-many",
+  ]);
+  assertEquals("candidate_job_count" in item.messages[0], false);
+  assertEquals(item.messages[1].candidate_job_count, 1);
+  assertEquals(item.messages[1].context_only, undefined);
+  assertEquals(item.messages[2].candidate_job_count, 3);
+  assertEquals(item.messages[2].context_only, true);
+  assert(String(item.held_message_rule).includes("context only"));
+});
+
+const SAYS_PAID_MOVE = {
+  xero_invoice_id: IDS.final,
+  step: "reply_says_paid",
+  kind: "move",
+  channel: "sms",
+  text: "Thanks Alex! It hasn't shown up our end yet.\n\nCheers,\nShaun",
+  why: 'Client wrote "paid it yesterday".',
+  proposed_category: "says_paid",
+  agent_version: "debt-ws-playbook/v1",
+};
+
+function heldPaidText(candidates: number) {
+  return [
+    {
+      id: "bev:held-paid",
+      channel: "sms",
+      direction: "inbound",
+      occurred_at: "2026-10-09T03:00:00Z",
+      author: "Client",
+      body: "Paid it yesterday",
+      contact_id: "ghlcontact0000000001",
+      unplaced: true,
+      candidate_job_count: candidates,
+    },
+    {
+      id: "ghl:2",
+      channel: "sms",
+      direction: "inbound",
+      occurred_at: "2026-10-05T03:00:00Z",
+      author: "Client",
+      body: "Ok thanks",
+      contact_id: "ghlcontact0000000001",
+    },
+  ];
+}
+
+Deno.test("agent submit: a says-paid move resting on a text held on several jobs becomes a flag to Shaun", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps, rec } = fakeDeps(store, { conversation: heldPaidText(3) });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 200);
+  const body = res.body as any;
+  assertEquals(body.kind, "flag");
+  assertEquals(body.move_refused, {
+    reason: "held_message_several_jobs",
+    proposed_category: "says_paid",
+    message_id: "bev:held-paid",
+    candidate_job_count: 3,
+  });
+  assertEquals(store.suggestionRows.length, 1);
+  const row = store.suggestionRows[0];
+  assertEquals(row.kind, "flag");
+  assertEquals(row.proposed_category, null);
+  assertEquals(row.channel, null);
+  assert(String(row.text).includes("any of 3 jobs"));
+  assert(String(row.text).includes("It hasn't shown up our end yet"));
+  const flag = store.logRows.find((l) => l.kind === "agent_flag")!;
+  assertEquals(
+    (flag.meta as any).move_refused.reason,
+    "held_message_several_jobs",
+  );
+  // Nothing moved: no category state, no status change, nothing sent.
+  assertEquals(
+    store.stateRows.find((s) => s.share_key === IDS.final)?.says_paid_since ??
+      null,
+    null,
+  );
+  assertEquals(rec.statusMoves.length, 0);
+  assertEquals(rec.sms.length, 0);
+
+  // Rectification is held the same way.
+  const rect = await call(deps, "debt_ws_agent_submit", SERVER, {
+    ...SAYS_PAID_MOVE,
+    step: "reply_problem",
+    proposed_category: "rectification",
+    why: "Client says the gate is broken.",
+  });
+  assertEquals((rect.body as any).kind, "flag");
+  assertEquals(
+    (rect.body as any).move_refused.proposed_category,
+    "rectification",
+  );
+});
+
+Deno.test("agent submit: a says-paid move on a text held on this job alone still stands", async () => {
+  // PR 1039's live case (SWF-261098): a held message whose only candidate is this job.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store, { conversation: heldPaidText(1) });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 200);
+  assertEquals((res.body as any).kind, "move");
+  assertEquals((res.body as any).move_refused, undefined);
+  assertEquals(store.suggestionRows[0].kind, "move");
+  assertEquals(store.suggestionRows[0].proposed_category, "says_paid");
+});
+
+Deno.test("agent submit: at one instant stamped Z and +00:00, the held message is the newest", async () => {
+  // SWF-261423 (15 Oct 2026 review): compared as strings, "...Z" sorted after
+  // "...+00:00", so the unmarked copy was taken as newest and the move stood.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "ghl:call-log",
+        channel: "call",
+        direction: "inbound",
+        occurred_at: "2026-10-05T09:49:46.859Z",
+        body: "",
+        contact_id: "ghlcontact0000000001",
+      },
+      {
+        id: "bev:call-tx",
+        channel: "call",
+        direction: "inbound",
+        occurred_at: "2026-10-05T09:49:46.859+00:00",
+        body: "I paid it yesterday",
+        contact_id: "ghlcontact0000000001",
+        unplaced: true,
+        candidate_job_count: 2,
+      },
+    ],
+  });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 200);
+  assertEquals((res.body as any).kind, "flag");
+  assertEquals((res.body as any).move_refused.message_id, "bev:call-tx");
+});
+
+Deno.test("agent submit: a move is refused when the reader says the held read failed", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store);
+  deps.conversation = () =>
+    Promise.resolve({ messages: [], held_read_failed: true });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 503);
+  assertEquals((res.body as any).code, "conversation_unreadable");
+  assertEquals(store.suggestionRows.length, 0);
+});
+
+Deno.test("agent submit: a move is refused while the payer's messages cannot be read to check it", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store);
+  deps.conversation = () => Promise.reject(new Error("read failed"));
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 503);
+  assertEquals((res.body as any).code, "conversation_unreadable");
+  assertEquals(store.suggestionRows.length, 0);
+});
+
 Deno.test("agent submit: draft supersedes drafts and moves, a flag is logged and supersedes nothing, no_action only stamps", async () => {
   const store = new FakeStore();
   store.settingsRow.agent_enabled = true;
@@ -1970,6 +2181,8 @@ Deno.test("auth: the server key reaches only the Jan list cron and the agent; st
     "debt_ws_job",
     "debt_ws_note",
     "debt_ws_overview",
+    "debt_ws_report",
+    "debt_ws_report_pdf",
     "debt_ws_statement_preview",
   ]);
   const inputs: Record<string, Record<string, unknown>> = {
@@ -2005,6 +2218,7 @@ Deno.test("auth: the server key reaches only the Jan list cron and the agent; st
       "debt_ws_jan_list_lock",
       "debt_ws_jan_list_send",
       "debt_ws_agent_queue",
+      "debt_ws_report_auto",
     ]
   ) {
     assertEquals((await call(deps, action, SERVER)).status, 200, action);
@@ -2223,4 +2437,309 @@ Deno.test("set_category: manual says paid, rectification and clear work with no 
   });
   assertEquals(rec.statusMoves.length, 1);
   assertEquals(move.status, "pending");
+});
+
+// ── Manual texts (Shaun's own words from the chat window, approved 16 Oct 2026) ──
+
+const MANUAL_REF = "70000000-0000-4000-8000-000000000001";
+const MANUAL_SEND = {
+  xero_invoice_id: IDS.final,
+  step: "manual",
+  action: "send",
+  text: "Thanks Alex, Friday is fine.\n\nCheers,\nShaun",
+  channel: "sms",
+  // The amount owing the text was written against (the live check's bar).
+  amount: 1000,
+  client_ref: MANUAL_REF,
+};
+
+Deno.test("manual text: sends through the guarded path, is logged as manual, and never moves the ladder", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const res = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(res.status, 200);
+  assertEquals(res.body.sent, true);
+  assertEquals(res.body.manual, true);
+  assertEquals(res.body.step, "manual");
+  // One text, through sendChaseSms, after the live Xero read and the bank check.
+  assertEquals(rec.sms.length, 1);
+  assertEquals(rec.sms[0].message, MANUAL_SEND.text);
+  assertEquals(rec.sms[0].ghl_contact_id, "ghlcontact0000000001");
+  assertEquals(rec.liveReads, [IDS.final]);
+  // The claim is keyed on the message's client_ref, never a ladder step.
+  assertEquals(store.sendRows.length, 1);
+  assertEquals(store.sendRows[0].step, "manual:" + MANUAL_REF);
+  assertEquals(store.sendRows[0].status, "sent");
+  // Logged as a manual text, not a step.
+  const log = store.logRows.find((l) => l.kind === "text_sent")!;
+  assertEquals(log.step, "manual");
+  assertEquals(log.body, MANUAL_SEND.text);
+  assertEquals(log.meta.manual, true);
+  assertEquals(log.meta.client_ref, MANUAL_REF);
+  // The day 7 step is still due, and still sends as itself.
+  const row = ((await call(deps, "debt_ws_overview", SHAUN)).body as any).rows
+    .find((r: any) => r.xero_invoice_id === IDS.final);
+  assertEquals(row.step_due.step, "d7");
+  const job = (await call(deps, "debt_ws_job", SHAUN, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(job.ladder.find((s: any) => s.step === "d7").status, "due");
+  assertEquals(job.suggestion.step, "d7");
+  assertEquals((await call(deps, "debt_ws_decide", SHAUN, D7_SEND)).status, 200);
+  assertEquals(rec.sms.length, 2);
+});
+
+Deno.test("manual text: the same client_ref never texts twice; a new message has its own", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND)).status,
+    200,
+  );
+  const twice = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(twice.body.code, "already_sent");
+  assertEquals(rec.sms.length, 1);
+  const next = await call(deps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    client_ref: "70000000-0000-4000-8000-000000000002",
+  });
+  assertEquals(next.status, 200);
+  assertEquals(rec.sms.length, 2);
+  // An unconfirmed send keeps its claim, so a retry of that message is refused.
+  const store2 = new FakeStore();
+  const { deps: deps2, rec: rec2 } = fakeDeps(store2, {
+    env: sendingOn(store2),
+    smsError: new Error("timeout"),
+  });
+  assertEquals(
+    (await call(deps2, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "send_not_confirmed",
+  );
+  assertEquals(store2.sendRows[0].status, "sending");
+  assertEquals(
+    (await call(deps2, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "already_sent",
+  );
+  assertEquals(rec2.sms.length, 1);
+});
+
+Deno.test("manual text: every send gate still applies (sending, owner, text, live Xero, bank feed, contact)", async () => {
+  // Sending off.
+  const off = new FakeStore();
+  const { deps: offDeps, rec: offRec } = fakeDeps(off);
+  const refused = await call(offDeps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(refused.body.code, "sending_off");
+  assertEquals(off.logRows.at(-1)!.kind, "send_refused");
+  assertEquals(off.logRows.at(-1)!.step, "manual");
+  assertEquals(offRec.sms.length, 0);
+  // Not the owner.
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  assertEquals(
+    (await call(deps, "debt_ws_decide", STAFF, MANUAL_SEND)).body.code,
+    "not_owner",
+  );
+  // The words the guard forbids, and an empty text.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      text: "Hi — pay now",
+    })).body.code,
+    "text_not_allowed",
+  );
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, { ...MANUAL_SEND, text: " " }))
+      .body.code,
+    "text_not_allowed",
+  );
+  // A company invoice goes on the statement, never a text.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      xero_invoice_id: IDS.account,
+    })).body.code,
+    "not_chased_by_text",
+  );
+  assertEquals(rec.sms.length, 0);
+  // Part paid since the screen was read: the live check refuses.
+  const part = new FakeStore();
+  const { deps: partDeps, rec: partRec } = fakeDeps(part, {
+    env: sendingOn(part),
+    live: {
+      [IDS.final]: {
+        InvoiceID: IDS.final,
+        Status: "AUTHORISED",
+        AmountDue: 400,
+      },
+    },
+  });
+  assertEquals(
+    (await call(partDeps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "part_paid",
+  );
+  assertEquals(partRec.sms.length, 0);
+  // A possible payment in the bank feed refuses; Send anyway overrides, logged.
+  const bankStore = new FakeStore();
+  const bank = [{
+    bank_transaction_id: "b0000000-0000-4000-8000-000000000001",
+    type: "RECEIVE",
+    date: "2026-10-06T00:00:00",
+    total: 1000,
+    reference: "Transfer",
+    contact_name: null,
+    line_item_descriptions: [],
+  }];
+  const { deps: bankDeps, rec: bankRec } = fakeDeps(bankStore, {
+    env: sendingOn(bankStore),
+    bank,
+  });
+  assertEquals(
+    (await call(bankDeps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "possible_payment",
+  );
+  assertEquals(bankRec.sms.length, 0);
+  const anyway = await call(bankDeps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    override_possible_payment: true,
+  });
+  assertEquals(anyway.status, 200);
+  assertEquals(anyway.body.override_possible_payment, true);
+  const log = bankStore.logRows.find((l) => l.kind === "text_sent")!;
+  assertEquals([log.meta.manual, log.meta.override_possible_payment], [
+    true,
+    true,
+  ]);
+  // No contact to text.
+  store.jobRows.find((j) => j.id === JOBS.fence)!.ghl_contact_id = null;
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND)).body.code,
+    "payer_not_linked",
+  );
+  assertEquals(rec.sms.length, 0);
+});
+
+Deno.test("manual text: allowed while chasing is paused (Shaun, 16 Oct 2026); the planned step stays paused", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const view = async (id: string) =>
+    ((await call(deps, "debt_ws_job", SHAUN, { xero_invoice_id: id }))
+      .body as any).manual_text;
+  const allowed = { allowed: true, code: null, reason: null };
+  assertEquals(await view(IDS.final), allowed);
+  // Still blocked: a company invoice (the Monday statement) and a contact we never chase.
+  assertEquals(await view(IDS.account), {
+    allowed: false,
+    code: "not_chased_by_text",
+    reason: "Company invoices go on the Monday statement, not a text",
+  });
+  assertEquals((await view(IDS.notChased)).code, "not_chased_by_text");
+  // Day 21, Jan's visit list: Shaun may still reply in his own words.
+  assertEquals(await view(IDS.janFinal), allowed);
+  // A promise to pay pauses the steps, not a manual text.
+  await call(deps, "debt_ws_note", SHAUN, {
+    xero_invoice_id: IDS.final,
+    promise_date: "2026-10-12",
+  });
+  assertEquals(await view(IDS.final), allowed);
+  // The planned day 7 step is not due while paused, and is refused as before.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, D7_SEND)).body.code,
+    "step_not_due",
+  );
+  const promised = await call(deps, "debt_ws_decide", SHAUN, MANUAL_SEND);
+  assertEquals(promised.status, 200);
+  assertEquals(promised.body.manual, true);
+  assertEquals(rec.sms.length, 1);
+  // Says paid: a manual text still goes (its own reference), logged as manual.
+  store.stateRows.find((s) => s.share_key === IDS.final)!.paused_until = null;
+  await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "says_paid",
+  });
+  assertEquals(await view(IDS.final), allowed);
+  const saysPaid = await call(deps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    client_ref: "70000000-0000-4000-8000-000000000003",
+  });
+  assertEquals(saysPaid.status, 200);
+  assertEquals(rec.sms.length, 2);
+  // Rectification too.
+  await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "rectification",
+  });
+  const rect = await call(deps, "debt_ws_decide", SHAUN, {
+    ...MANUAL_SEND,
+    client_ref: "70000000-0000-4000-8000-000000000004",
+  });
+  assertEquals(rect.status, 200);
+  assertEquals(rec.sms.length, 3);
+  // None of them moved the ladder: every claim is a manual one, every log is step manual.
+  assert(store.sendRows.every((r) => r.step.startsWith("manual:")));
+  assertEquals(
+    store.logRows.filter((l) => l.kind === "text_sent").map((l) => l.step),
+    ["manual", "manual", "manual"],
+  );
+  // A company invoice is still refused at the send.
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      xero_invoice_id: IDS.account,
+      client_ref: "70000000-0000-4000-8000-000000000005",
+    })).body.code,
+    "not_chased_by_text",
+  );
+  assertEquals(rec.sms.length, 3);
+});
+
+Deno.test("manual text: refuses bad shapes before anything is read", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const { client_ref: _ref, ...noRef } = MANUAL_SEND;
+  const { amount: _amount, ...noAmount } = MANUAL_SEND;
+  for (
+    const body of [
+      noRef,
+      { ...MANUAL_SEND, client_ref: "not-a-uuid" },
+      { ...MANUAL_SEND, action: "skip" },
+      { ...MANUAL_SEND, amount: 0 },
+      // A planned step never carries a client_ref.
+      { ...D7_SEND, client_ref: MANUAL_REF },
+    ]
+  ) {
+    assertEquals(
+      (await call(deps, "debt_ws_decide", SHAUN, body)).status,
+      400,
+      JSON.stringify(body),
+    );
+  }
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, noAmount)).body.code,
+    "amount_required",
+  );
+  // A manual text has no suggestion.
+  const draft = await store.insertSuggestion({
+    share_key: IDS.final,
+    xero_invoice_ids: [IDS.final],
+    job_id: JOBS.fence,
+    cycle_start: "2026-10-01",
+    step: "d7",
+    kind: "draft",
+    channel: "sms",
+    text: "draft",
+    why: "Day 7",
+    proposed_category: null,
+    amount: 1000,
+    source: "agent",
+    agent_version: "debt-ws-playbook/v1",
+  });
+  assertEquals(
+    (await call(deps, "debt_ws_decide", SHAUN, {
+      ...MANUAL_SEND,
+      suggestion_id: draft.id,
+    })).status,
+    400,
+  );
+  assertEquals(draft.status, "pending");
+  assertEquals(rec.sms.length + rec.liveReads.length, 0);
 });

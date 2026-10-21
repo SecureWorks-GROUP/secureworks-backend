@@ -376,7 +376,15 @@ Deno.test("a jobless reply refuses an unusable or group stored sender", async ()
 Deno.test("a reply refuses an unknown source message or a mailbox that did not receive it", async () => {
   const unknown = await refusal(clientFor({ inbox: null }), senderOnlyReply());
   assertEquals(unknown.status, 409);
-  assertEquals(unknown.refusal.code, "pdf_provenance_required");
+  assertEquals(unknown.refusal.code, "source_not_ingested_yet");
+  assertEquals(unknown.refusal.evidence.retry_after_seconds, 600);
+  assertEquals(
+    String(unknown.refusal.recovery_action).includes("10 minutes"),
+    true,
+  );
+  const notIngested = `${unknown.refusal.fact} ${unknown.refusal.recovery_action}`;
+  assertEquals(notIngested.includes("intake poller"), true);
+  assertEquals(notIngested.includes("never succeed"), true);
 
   const wrongMailbox = await refusal(
     clientFor({ inbox: inboxRow({ mailbox: "marnin@secureworkswa.com.au" }) }),
@@ -497,4 +505,65 @@ Deno.test("a Group mailbox is still refused before the reply fence runs", async 
       value === undefined ? Deno.env.delete(key) : Deno.env.set(key, value);
     }
   }
+});
+
+// ── The internal debt report (ops-api debt_ws_report_send; Shaun approved 15 Oct 2026) ──
+
+const REPORT_PDF = {
+  name: "Debt position 2026-10-15.pdf",
+  contentType: "application/pdf",
+  contentBytes: "JVBERi0xLjM=",
+};
+
+function internalReport(overrides: Record<string, unknown> = {}) {
+  return {
+    from: "admin@secureworkswa.com.au",
+    to: "marnin@secureworkswa.com.au",
+    cc: ["shaun@secureworkswa.com.au"],
+    subject: "Debt position",
+    htmlBody: "<p>Hi Marnin,</p>",
+    attachments: [REPORT_PDF],
+    internal_report: "debt_report",
+    ...overrides,
+  };
+}
+
+Deno.test("the internal debt report's unanchored PDF passes only from and to our own domain", async () => {
+  await assertOutlookSesDeliveryAllowed(clientFor({}) as any, internalReport());
+  // Capital letters in an address are still our domain.
+  await assertOutlookSesDeliveryAllowed(
+    clientFor({}) as any,
+    internalReport({ to: "Marnin@SecureWorksWA.com.au", cc: [] }),
+  );
+});
+
+Deno.test("the internal report allow-list refuses anything outside its rules", async () => {
+  for (
+    const [name, overrides] of [
+      ["an outside To", { to: "marnin@gmail.com" }],
+      ["a look-alike domain", { to: "marnin@secureworkswa.com.au.evil.test" }],
+      ["an outside Cc", { cc: ["accounts@example.com"] }],
+      ["an outside Bcc", { bcc: "someone@example.com" }],
+      ["an outside sender", { from: "someone@example.com" }],
+      ["an unknown report", { internal_report: "client_statement" }],
+      ["a forward", { action: "forward" }],
+      ["a job", { job_id: JOB_ID }],
+      ["an invoice", { xero_invoice_id: "inv-1" }],
+      ["a URL attachment", {
+        attachments: [{ name: "x.pdf", url: "https://example.com/x.pdf" }],
+      }],
+    ] as Array<[string, Record<string, unknown>]>
+  ) {
+    const error = await refusal(clientFor({}), internalReport(overrides));
+    assertEquals(error.status, 409, name);
+    assertEquals(error.refusal.code, "internal_report_not_allowed", name);
+  }
+});
+
+Deno.test("without the internal_report mark the same email to our own domain still needs a PDF owner", async () => {
+  const body: Record<string, unknown> = internalReport();
+  delete body.internal_report;
+  const error = await refusal(clientFor({}), body);
+  assertEquals(error.status, 409);
+  assertEquals(error.refusal.code, "pdf_provenance_required");
 });

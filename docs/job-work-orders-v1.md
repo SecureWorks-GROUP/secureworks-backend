@@ -1,7 +1,11 @@
 # Job work orders v1
 
 Captain, 6 Oct 2026: every fencing and patio job has one work order, draft then
-approved by Shaun. Approved is sealed like an invoice. Trade labour billed on the
+approved by Shaun. Approved is sealed like an invoice. Captain, 14 Oct 2026: the
+work order fills itself from the accepted quote and goes straight to the trades
+on the job with no approval; only a customer variation waits for approval (see
+"Automatic issue", behind a switch that is off until the captain says make it
+live). Trade labour billed on the
 job shows against it live, and a trade can report a variation on their invoice,
 which emails finance and, separately, admin.
 
@@ -66,6 +70,126 @@ secret, so it does not prove the caller is Shaun. Whether that is enough for
 While the flag is off, a terminal approval is refused 403
 `terminal_approval_switched_off` and Shaun approves from his signed-in session.
 
+## Automatic issue (switch `job_work_order_auto_issue_v1`, OFF)
+
+Captain, 14 Oct 2026: "those work orders should be able to be seen every single
+job. The only time where it needs approval is when there's a variation
+involved." While feature flag `job_work_order_auto_issue_v1` is on, the system
+issues the base work order itself: filled from the accepted quote, then
+approved and sealed with `approved_via: 'auto'` and no approver
+(`approved_by` null), exactly as an approval seals it (content hash, labour and
+trade variations already on the job linked). Allocated trades then read it
+through `my_job_work_order` with no human step. Code:
+`autoIssueJobWorkOrderForJob` and `autoIssueJobWorkOrders` in
+`job_work_orders.ts`; schema, door and sweep:
+`supabase/migrations/20261016120000_job_work_order_auto_issue.sql` (contract
+`supabase/tests/migration-contracts/20261016120000_job_work_order_auto_issue/`).
+
+What is issued, and what waits for the approver:
+
+- Only the draft the quote fill wrote that nobody has edited since. The fill
+  stamps `work_orders.quote_filled_at` in the same write that fills an
+  untouched draft; any other change to a draft's content (scope, special
+  instructions, agreed labour, date, address) stamps `hand_edited_at`. Both are
+  set by the database trigger only: a caller can neither write nor clear them.
+  A draft edited by hand is never issued automatically; it waits for Shaun's
+  approval as before. Drafts written into before the migration are stamped
+  once by it: a draft with no fill stamp that carries special instructions, a
+  date, or an address other than the job's (the open path,
+  `ensure_job_work_order_draft`, writes none of those but the job's address)
+  gets `hand_edited_at`, so the fill leaves it unstamped and it waits for the
+  approver. An untouched opened draft and a draft only the earlier fill wrote
+  are not stamped.
+- Only an open fencing or patio job (`job_work_order_open_statuses()`, mirrored
+  as `JOB_WORK_ORDER_OPEN_STATUSES`). An approved work order is never touched.
+- Lines the fill flags for review (`needs_review`, for example an old extra
+  saved with no hours, `labour_or_material_unknown`) do NOT hold the work
+  order: it goes out as it is, and the flags stay on the sealed lines for the
+  office as the "needs checking" note below. Trades never see a flag.
+- A job moved past quoted with no recorded acceptance but with a frozen
+  fence-tool or patio-tool quote counts as accepted at its latest frozen quote,
+  the newest revision still in status `frozen`, whenever it was frozen; a
+  superseded revision never counts (captain, 16 Oct 2026;
+  `latest_frozen_revision`, docs/quote-work-order-lines-v1.md "Which quote"),
+  so its work order fills and goes out like any other: 29 of the 81 open jobs
+  on 16 Oct 2026 (5 fencing, 24 patio), most of them patio jobs moved straight
+  to an open status other than accepted by an Ops status change.
+- Held for the office to fill by hand, with the reason on the note, as the
+  captain accepted on 16 Oct 2026: a quote with no labour figure
+  (`agreed_labour_missing`: lines are filled, the agreed labour is the
+  approver's to set), a job with nothing to fill from (`not_filled`: older
+  quotes from before the tools froze quotes, or no quote in the system; 26 of
+  the 81 open jobs on 16 Oct 2026), and a draft filled before this switch that
+  cannot be shown untouched since (`filled_before_auto_issue`).
+- Customer variations still need the work order approver, exactly as before
+  ("Customer variations" below). They join an automatically issued work order
+  the same way.
+
+The one door is `auto_issue_job_work_order(work_order_id, expected_updated_at)`
+(service role only). It refuses 42501 while the flag is off, WO409 when the
+draft moved since the system read it (a save always wins), and WO423 for a draft
+the fill did not write or someone edited. The seal trigger accepts
+`approved_via 'auto'` only from inside that door, only while the flag is on and
+only with no approver; a human approval still needs an approver from
+`work_order_settings`. Drafts the fill wrote before the migration (it shipped
+13 Oct 2026) are stamped by the migration only when no write landed after the
+fill's own `job_work_order_draft_filled_from_quote` event and they hold quote
+lines only.
+
+When it runs:
+
+1. pg_cron `job-work-order-auto-issue`, every 2 minutes, posts ops-api
+   `auto_issue_job_work_orders` while the flag is on (a no-op otherwise; ops-api
+   checks the flag again). This is the catch-all: a job becomes approved through
+   send-quote's acceptance page, an ops status change, or a CRM stage move, and
+   the draft itself is opened by a database trigger (20261012130000), which
+   cannot call the TypeScript fill. A sweep picks up every way in, at most 2
+   minutes later. Candidates: every filled, unedited draft with an agreed labour
+   figure on an open job, then untouched drafts opened in the last 3 days,
+   newest first (a job with no accepted quote is not retried forever ahead of
+   new ones), at most 25 per call (`limit`, at most 100).
+2. ops-api `update_job_status`: a fencing or patio job moving into an open
+   status is filled and issued in the same call, so the ops screen's own status
+   change does not wait for the sweep. It never fails the status change.
+3. `backfill_job_work_orders` with `apply: true` (still behind
+   `job_work_order_backfill_v1`): each draft it fills is issued straight away
+   while this switch is on; its dry run reports `auto_issue.switched_on`.
+
+Every automatic issue writes one `job_work_order_auto_issued` job event (ids and
+counts only, no user).
+
+### The "needs checking" note (office only)
+
+`job_work_order` and `job_detail.job_work_order` carry `needs_checking`:
+
+`{needs_checking, lines:[{line_key, description, flags[]}], issued_automatically, held:{reason, message} | null, message}`
+
+`lines` are the work order's lines the fill flagged (`needs_review`).
+`held` is set only on a draft: `hand_edited`, `not_filled`,
+`agreed_labour_missing`, `filled_before_auto_issue` (each needs the office:
+`needs_checking` true), or `auto_issue_switched_off` / `awaiting_auto_issue`
+(nothing to do). Computed at read time from the work order, stored nowhere.
+The trade read is an allowlist and never carries it.
+
+### Turning it on (the captain's "make it live")
+
+In this order, each on the captain's word:
+
+1. Deploy (migration first, then ops-api, by the usual lane). Nothing changes:
+   the flag is seeded off and the sweep is a no-op.
+2. Turn on `job_work_order_auto_issue_v1`. From then on newly approved fencing
+   and patio jobs get their work order issued within 2 minutes (at once on an
+   ops status change), and already filled, unedited drafts go out on the next
+   sweep.
+3. Run `backfill_job_work_orders` as a dry run, then turn on
+   `job_work_order_backfill_v1` and run it with `apply: true` to open, fill and
+   issue the work orders of the jobs that were already open.
+4. Make the trade screens live (secureworks-ux, behind their preview): only
+   then do trades see the issued work orders.
+
+To stop: turn the flag off. Work orders already issued stay sealed (a change
+is a variation); drafts wait for the approver again.
+
 ## Labour billed against it
 
 Trigger `trg_trade_invoice_lines_link_job_work_order` stamps
@@ -84,14 +208,13 @@ other lines stay in the work order's `lines[]` with their `cost_lane` and
 `counted: false`. Example: agreed 2,000, billed 1,900 labour and 400 materials
 reads billed 1,900, remaining 100, not over.
 
-Temporary exception, in one place (`workOrderLineIsLabour` in
-`job_work_orders.ts`): the trade app's "Work Order" pay line (`line_type`
-`work order` or `work_order`) is labour and counts, although the shared view
-does not classify it yet and gives it `cost_lane: unclassified`. A job billed
-as one 2,000 Work Order line against an agreed 2,000 reads billed 2,000,
-remaining 0. The shared view is left alone in this change because it also
-feeds the job costing reports; that is the finance desk's change. When the
-view puts those two types in its labour lane, remove the line-type test.
+The trade app's "Work Order" pay line (`line_type` `work order` or
+`work_order`) is labour. The shared view puts both types in its labour lane
+since `20261015093000_trade_charge_work_order_labour.sql` (owner call JP-04).
+`workOrderLineIsLabour` in `job_work_orders.ts` still carries a redundant
+line-type test from before that migration; it agrees with the view and is to
+be removed separately. A job billed as one 2,000 Work Order line against an
+agreed 2,000 reads billed 2,000, remaining 0.
 
 Lines invoiced before the work order is approved (a backfilled job already mid
 install, or a trade who invoices before Shaun approves) are linked by
@@ -111,7 +234,7 @@ and shown as `labour_before_approval`.
 | `customer_variations_price_ex` | what those approved customer variations charge the customer, ex GST |
 | `customer_variation_count` | how many approved customer variations are counted |
 | `agreed_total_ex` | `agreed_ex` plus `customer_variations_ex`: what billed is measured against |
-| `billed_to_date_ex` | labour lines (labour lane, plus Work Order pay lines for now) on billed invoices, stamped against this job's approved work order (variation work included) |
+| `billed_to_date_ex` | labour-lane lines on billed invoices, stamped against this job's approved work order (variation work included) |
 | `variations_ex` | the part of billed the trades marked as variations. A variation counts only while its trade invoice is billed (not draft, not `ops-reject`), the same rule as labour lines |
 | `variation_count` | how many variations are counted in `variations_ex` |
 | `billed_within_agreed_scope_ex` | billed minus variations |
@@ -141,7 +264,7 @@ trade invoice per job, against the approved work order (or none: kept, and
 linked when the work order is approved). A variation is part of the labour its
 invoice bills, so `amount_ex` may not be more than the labour that invoice
 bills on that job, ex GST, by the same labour rule the work order totals use
-(labour lane, plus Work Order pay lines for now; materials, travel and other
+(the labour lane; materials, travel and other
 lines never count). A larger amount is refused 422 `variation_over_invoice`:
 300 labour plus 400 materials refuses 650. It writes two rows in `work_order_variation_emails`: one to
 finance@secureworkswa.com.au and a separate one to admin@secureworkswa.com.au,
@@ -327,14 +450,45 @@ gives before Xero is called releases it back to `prepared` (422
 synthetic live-fire refusal, the preflight refusal and a Xero token it could not
 get (`customerVariationDraftRefusedBeforeXero`). Any other outcome Xero did not
 confirm is kept as `unknown` (502 `xero_outcome_unknown`) and every later call is
-refused 409 `xero_outcome_unknown`, because the draft may exist: check Xero by
-hand. There is no action yet that releases an `unknown` line; one is needed
-before the flag is turned on. When Xero confirms the draft but its outcome
-cannot be saved, the call fails 502 `xero_draft_outcome_not_saved` naming the
-Xero invoice id and number, and the line stays `creating` (later calls 409
-`xero_draft_in_progress`). A
+refused 409 `xero_outcome_unknown`, because the draft may exist. When Xero
+confirms the draft but its outcome cannot be saved, the call fails 502
+`xero_draft_outcome_not_saved` naming the Xero invoice id and number, and the
+line stays `creating` (later calls 409 `xero_draft_in_progress`). A
 variation split across several payers (one owner each, as on SWF-26904) is out
 of this slice: one line, one contact.
+
+### A stuck Xero draft record
+
+Nothing retries an `unknown` record or a stuck `creating` one by itself. A work
+order approver (the same people, and the same session or terminal rule, as
+`approve_customer_variation`) checks Xero by hand and then answers with
+`reconcile_customer_variation_xero_draft`, which never calls Xero:
+
+- `outcome: "draft_exists"` with the `xero_invoice_id` they found (and its
+  `invoice_number` when they have it): the record becomes `xero_draft_created`
+  holding that invoice and is sealed like any other created draft. Its
+  `xero_created_at` is when it was recorded here, not when Xero made it. A Xero
+  invoice already recorded for another variation is refused 409
+  `xero_invoice_already_recorded`.
+- `outcome: "no_draft"`: they found none, and the record goes back to
+  `prepared` so `create_customer_variation_xero_draft` can send the line again.
+  The earlier `failure` text is kept.
+
+A `creating` record is answered for only once its claim (`xero_requested_at`)
+is 15 minutes old (`CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS`); before that a
+request may still be making the draft, and the answer is refused 409
+`xero_draft_in_progress`. An ops-api request cannot run that long, so an older
+claim has nothing left that could finish it. The answer names the record's
+`updated_at` as read (`expected_updated_at`, `invoice.updated_at` on the reads)
+and is written in one compare-and-set on that, the status read and, for
+`creating`, the same claim instant: a record that changed or was claimed again
+since the read is refused 409 `stale_review`.
+
+The record of an answer is its `customer_variation_xero_draft_reconciled` job
+event, which carries ids only: the variation, the `outcome`, the status it came
+from, the Xero invoice id recorded (null for `no_draft`), who answered
+(`reconciled_by`, a user id) and how (`via`, `session` or `terminal`); when is
+the event's own time. The invoice record keeps no copy of the answer.
 
 ## Backfill (OFF)
 
@@ -364,25 +518,27 @@ Errors are `{error, code}`.
 
 | action | method | who | input | output |
 | --- | --- | --- | --- | --- |
-| `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[], quote_fill}`; `quote_fill` is `{filled, reason, scope_revision_id, needs_review, code?}` (`code` only when the fill failed) when this read tried to fill an untouched draft from the quote, else null |
+| `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[], quote_fill, needs_checking}`; `needs_checking` is the office note (see "Automatic issue"); `quote_fill` is `{filled, reason, scope_revision_id, needs_review, code?}` (`code` only when the fill failed) when this read tried to fill an untouched draft from the quote, else null |
 | `list_work_orders` | GET | staff | `kind=job`, optional `status` (draft, approved), `type` (fencing, patio), `job_id` | `{schema:"job-work-orders.v1", kind:"job", work_orders[] (row + job_number, client_name, job_type, job_status, site_suburb, figures for approved ones), total}`. Without `kind=job` the old list, crew work orders only: a job work order is never in it. |
 | `create_work_order` | POST | staff | `{kind:"job", job_id, ...draft fields}` | `{created, work_order, quote_fill}`: the open draft, else a new draft, filled from the quote unless the call sent `scope_items` or `agreed_labour_ex`; 409 `work_order_sealed` once the job's work order is approved |
 | `update_work_order` | POST | staff | `{id, scope_items?, special_instructions?, agreed_labour_ex?, scheduled_date?, site_address?}` | `{work_order}`; approved returns 409 `work_order_sealed`; a `status` other than `draft` returns 400 `invalid_status` |
 | `approve_work_order` | POST | Shaun (session; terminal only while its flag is on) | `{work_order_id, expected_updated_at}`: both required; `expected_updated_at` is the draft's `updated_at` exactly as it was read | `{work_order}`; 400 `expected_updated_at_required` (missing: read the draft again), 409 `stale_review` (the draft changed after it was read: read it again), 403 `approver_required` / `approver_identity_missing` / `terminal_approval_switched_off`, 422 `work_order_not_ready`, 409 `not_a_draft` |
-| `backfill_job_work_orders` | POST | ops server key | `{apply?: true, fill_limit?}` | `{dry_run, candidates, by_type_status, job_ids, opened, quote_fill}`; `quote_fill` counts untouched drafts, and on apply fills up to `fill_limit` (default 100, at most 200) and says how many remain |
+| `backfill_job_work_orders` | POST | ops server key | `{apply?: true, fill_limit?}` | `{dry_run, candidates, by_type_status, job_ids, opened, quote_fill, auto_issue}`; `quote_fill` counts untouched drafts, and on apply fills up to `fill_limit` (default 100, at most 200) and says how many remain; `auto_issue` is `{dry_run:true, switched_on}` on a dry run, else `{switched_on, issued, not_issued:{reason:n}}` for the drafts this run filled |
+| `auto_issue_job_work_orders` | POST | ops server key (the pg_cron sweep) | `{limit?}` | `{schema:"job-work-order-auto-issue.v1", switched_on, candidates, issued, not_issued:{reason:n}, results:[{job_id, work_order_id, issued, reason, quote_fill, needs_checking_lines, code?}]}`; writes nothing while `job_work_order_auto_issue_v1` is off |
 | `quote_work_order_lines` | GET | staff | `job_id` (a job id; anything else is 400 `job_id_required`) | the lines the accepted quote gives the job, writing nothing (`docs/quote-work-order-lines-v1.md`) |
 | `resend_work_order_variation_emails` | POST | staff | none | `{sending_on, emails:[{id, variation_id, recipient_role, status}]}`; `sending_on:false` and no sends while the email flag is off |
 | `correct_work_order_variation` | POST | staff only, never a trade session | `{variation_id, description?, amount_ex?}` (at least one, and different from what is recorded; `amount_ex: null` clears the amount) | `{variation, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice`, 400 `nothing_to_correct`, 404 `variation_not_found`, 403 `corrector_identity_missing` |
 | `send_work_order` | POST | staff | job work order id | 409 `job_work_order_not_sendable` |
-| `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, addenda, invoice_count, variation_count, customer_variations_open_count, quote_fill}` on fencing and patio jobs (null on other types); `customer_variations_open_count` counts drafts and approved ones, not cancelled (`figures.customer_variation_count` counts only the approved addenda on the work order); `{unreadable: true}` when that read fails, which never fails the job detail |
+| `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, addenda, invoice_count, variation_count, customer_variations_open_count, quote_fill, needs_checking}` on fencing and patio jobs (null on other types); `customer_variations_open_count` counts drafts and approved ones, not cancelled (`figures.customer_variation_count` counts only the approved addenda on the work order); `{unreadable: true}` when that read fails, which never fails the job detail |
 | `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions, addenda[]} or null, reason, can_report_variation, my_variations[]}`. Each scope item is `{description, qty, unit, hours}` (plus `is_variation`, `variation_number` on an addendum line); each addendum `{variation_number, label, approved_at, description, scope_items}`. No price, allowance, agreed amount or figure, ever, for any trade, the lead trade included. |
-| `customer_variations` | GET | staff | `job_id` (a job id) | `{schema:"customer-variations.v1", job:{id, job_number, type}, customer_variations[]}`; each is the customer variation row below plus `invoice` (the invoice record, or null) |
+| `customer_variations` | GET | staff | `job_id` (a job id) | `{schema:"customer-variations.v1", job:{id, job_number, type}, customer_variations[]}`; each is the customer variation row below plus `invoice` (the invoice record, or null: `status, line, prepared_by, prepared_at, xero_contact_id, job_contact_id, xero_requested_by, xero_requested_at, xero_invoice_id, invoice_number, xero_created_at, failure, updated_at`) |
 | `create_customer_variation` | POST | staff, a named caller | `{job_id, description, tasks?, trade_allocation_ex?, customer_price_ex?}` | `{customer_variation}` (a draft); 422 `job_type_not_eligible`, 400 `invalid_tasks` / `money_in_text` / `invalid_description`, 403 `actor_identity_missing` |
 | `update_customer_variation` | POST | staff, a named caller | `{variation_id, expected_updated_at, description?, tasks?, trade_allocation_ex?, customer_price_ex?}` (amounts may be null to clear) | `{customer_variation}`; 409 `stale_review` (read it again), 409 `variation_sealed`, 400 `nothing_to_update` / `expected_updated_at_required` |
 | `approve_customer_variation` | POST | work order approver (session; terminal only while its flag is on) | `{variation_id, expected_updated_at}` | `{customer_variation}` now `approved`, with `work_order_id`, `variation_number` and `label`; 409 `work_order_not_approved`, 409 `stale_review`, 409 `not_a_draft`, 422 `variation_not_ready` (a task without hours, or no allocation or price), 403 `approver_required` / `approver_identity_missing` / `approver_not_set` / `terminal_approval_switched_off` |
 | `cancel_customer_variation` | POST | staff, a named caller | `{variation_id, expected_updated_at, reason?}` | `{customer_variation}` now `cancelled`; 409 `variation_sealed` for an approved one, 409 `stale_review` |
 | `prepare_customer_variation_invoice_line` | POST | staff, a named caller | `{variation_id}` | `{customer_variation_id, line, invoice, create_invoice_draft:{job_id, line_items, reference}, xero_draft_switched_on}`; 409 `variation_not_approved`, 422 `no_customer_charge`. No Xero write |
 | `create_customer_variation_xero_draft` | POST | staff, a named caller | `{variation_id, xero_contact_id, job_contact_id?}` | the prepare response plus `duplicate`, with `invoice.status` `xero_draft_created` and `invoice.xero_invoice_id` / `invoice_number`; 403 `xero_draft_switched_off` while the flag is off; 422 `xero_draft_refused`; 502 then 409 `xero_outcome_unknown`; 502 `xero_draft_outcome_not_saved`; 409 `xero_draft_in_progress` |
+| `reconcile_customer_variation_xero_draft` | POST | work order approver (session; terminal only while its flag is on) | `{variation_id, expected_updated_at, outcome: "draft_exists" \| "no_draft", xero_invoice_id?, invoice_number?}`: `xero_invoice_id` (the Xero InvoiceID) is required for `draft_exists` and refused for `no_draft` | `{customer_variation_id, invoice, duplicate}`; `duplicate` is true when the same draft was already recorded. 409 `nothing_to_reconcile` (`prepared`), 409 `xero_draft_already_recorded`, 409 `xero_draft_in_progress` (a `creating` claim under 15 minutes old), 409 `xero_invoice_already_recorded`, 409 `stale_review`, 404 `invoice_line_not_found`, 400 `invalid_outcome` / `invalid_request` / `invalid_invoice_number` / `expected_updated_at_required` (send the record's `invoice.updated_at`), 403 `approver_required` / `approver_identity_missing` / `approver_not_set` / `terminal_approval_switched_off`. Never calls Xero |
 | `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the labour the invoice bills on the job |
 
 Each `variations[]` row on the staff read: `id, work_order_id,
@@ -395,7 +551,8 @@ labour its invoice bills on the job).
 Work order row fields: `id, job_id, wo_number, kind, status, scope_items,
 special_instructions, scheduled_date, site_address, agreed_labour_ex,
 approved_at, approved_by, approved_via, sealed_content_hash, origin,
-created_at, updated_at`.
+quote_filled_at, hand_edited_at, created_at, updated_at`. `approved_via` is
+`session`, `terminal` or `auto` (issued by the system, `approved_by` null).
 
 Each customer variation row (the `customer_variation` of a write,
 `customer_variations[]` on the reads): `id, job_id, status, work_order_id,

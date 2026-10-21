@@ -11,6 +11,7 @@ import {
   correctWorkOrderVariation,
   createJobWorkOrder,
   JobWorkOrderError,
+  jobWorkOrderNeedsChecking,
   listJobWorkOrders,
   projectTradeJobWorkOrder,
   readJobWorkOrder,
@@ -1022,6 +1023,108 @@ Deno.test("trade read: scope and agreed details only, never agreed labour or pri
     unit: "m",
   }]);
   assertEquals((r.work_order as any).special_instructions, "Rear gate first");
+});
+
+Deno.test("trade read: a work order issued automatically shows no amount, rate, allocation or review note either", async () => {
+  const db = baseDb();
+  Object.assign(db.tables.work_orders[0], {
+    approved_by: null,
+    approved_via: "auto",
+    quote_filled_at: "2026-10-06T00:00:00Z",
+    scope_items: [{
+      line_key: "extra:3",
+      source: "quote",
+      basis: "custom",
+      description: "Root removal",
+      qty: 1,
+      unit: "each",
+      hours: null,
+      rate: null,
+      total: null,
+      counted: false,
+      flags: ["labour_or_material_unknown"],
+      needs_review: true,
+      quote_cost_ex: 120,
+    }],
+  });
+  const r = await tradeJobWorkOrderRead(db, JOB, TRADE, redact);
+  const text = JSON.stringify(r);
+  for (
+    const leak of [
+      "agreed_labour_ex",
+      "1000",
+      "120",
+      "quote_cost_ex",
+      "needs_review",
+      "labour_or_material_unknown",
+      "flags",
+      "counted",
+      "approved_via",
+      "auto",
+      "figures",
+    ]
+  ) {
+    assert(!text.includes(leak), `trade read leaked ${leak}: ${text}`);
+  }
+  assertEquals((r.work_order as any).scope_items, [{
+    description: "Root removal",
+    qty: 1,
+    unit: "each",
+  }]);
+});
+
+Deno.test("needs checking: why a draft has not gone to the trades, and which lines to check", () => {
+  const filled = {
+    kind: "job",
+    status: "draft",
+    scope_items: [{ description: "Install", needs_review: false }],
+    agreed_labour_ex: 500,
+    quote_filled_at: "2026-10-14T00:00:00Z",
+    hand_edited_at: null,
+  };
+  const held = (wo: any, on: boolean | null) =>
+    jobWorkOrderNeedsChecking(wo, on)?.held?.reason;
+  assertEquals(held(filled, true), "awaiting_auto_issue");
+  assertEquals(held(filled, false), "auto_issue_switched_off");
+  assertEquals(
+    held({ ...filled, quote_filled_at: null }, true),
+    "filled_before_auto_issue",
+  );
+  assertEquals(
+    held({ ...filled, hand_edited_at: "2026-10-14T01:00:00Z" }, true),
+    "hand_edited",
+  );
+  assertEquals(
+    held({ ...filled, agreed_labour_ex: null }, true),
+    "agreed_labour_missing",
+  );
+  assertEquals(held({ ...filled, scope_items: [] }, true), "not_filled");
+  // Waiting on the switch or the next sweep is not the office's to do.
+  assertEquals(jobWorkOrderNeedsChecking(filled, true)?.needs_checking, false);
+
+  const issued = jobWorkOrderNeedsChecking({
+    ...filled,
+    status: "approved",
+    approved_via: "auto",
+    scope_items: [
+      { line_key: "install:0", description: "Install", needs_review: false },
+      {
+        line_key: "extra:3",
+        description: "Root removal",
+        needs_review: true,
+        flags: ["labour_or_material_unknown"],
+      },
+    ],
+  }, true)!;
+  assertEquals(issued.held, null);
+  assertEquals(issued.issued_automatically, true);
+  assertEquals(issued.needs_checking, true);
+  assertEquals(issued.lines, [{
+    line_key: "extra:3",
+    description: "Root removal",
+    flags: ["labour_or_material_unknown"],
+  }]);
+  assertEquals(jobWorkOrderNeedsChecking(null, true), null);
 });
 
 Deno.test("trade read: a draft is never shown", async () => {

@@ -89,7 +89,53 @@ function matches(row: any, url: URL): boolean {
 }
 
 async function jobDetailAs(headers: Record<string, string>) {
+  return await requestAs(
+    `https://example.invalid/ops-api?action=job_detail&jobId=${JOB}`,
+    { method: "GET", headers },
+  );
+}
+
+// The automatic issue door as the database answers it: only while the flag
+// row is on, only the draft as read, sealed with no approver.
+function autoIssueRpc(db: Record<string, any[]>, args: any) {
+  const on = (db.feature_flags || []).some((f) =>
+    f.flag_name === "job_work_order_auto_issue_v1" && f.enabled === true
+  );
+  if (!on) {
+    return Response.json({ code: "42501", message: "switched off" }, {
+      status: 403,
+    });
+  }
+  const wo = db.work_orders.find((w) => w.id === args.p_work_order_id);
+  if (
+    !wo || wo.status !== "draft" ||
+    wo.updated_at !== args.p_expected_updated_at
+  ) {
+    return Response.json({ code: "WO409", message: "changed" }, {
+      status: 409,
+    });
+  }
+  if (!wo.quote_filled_at || wo.hand_edited_at) {
+    return Response.json({ code: "WO423", message: "not issuable" }, {
+      status: 409,
+    });
+  }
+  Object.assign(wo, {
+    status: "approved",
+    approved_by: null,
+    approved_via: "auto",
+    approved_at: "2026-10-14T00:00:00Z",
+  });
+  return Response.json({ ...wo });
+}
+
+async function requestAs(
+  href: string,
+  init: { method: string; headers: Record<string, string>; body?: unknown },
+  setup: (db: Record<string, any[]>) => void = () => {},
+) {
   const db = tables();
+  setup(db);
   const writes: string[] = [];
   const saved = new Map(
     ["MAKESAFE_ROUTINE_KEY"].map((n) => [n, Deno.env.get(n)]),
@@ -114,6 +160,14 @@ async function jobDetailAs(headers: Record<string, string>) {
         status: 406,
       });
     };
+    const rpc = url.pathname.match(/^\/rest\/v1\/rpc\/([^/]+)$/)?.[1];
+    if (rpc) {
+      writes.push(`RPC ${rpc}`);
+      const raw = init?.body;
+      const args = typeof raw === "string" && raw ? JSON.parse(raw) : {};
+      if (rpc === "auto_issue_job_work_order") return autoIssueRpc(db, args);
+      return Response.json(null);
+    }
     const table = url.pathname.match(/^\/rest\/v1\/([^/]+)$/)?.[1] || "";
     if (method !== "GET" && method !== "HEAD") {
       writes.push(`${method} ${table}`);
@@ -137,10 +191,11 @@ async function jobDetailAs(headers: Record<string, string>) {
   }) as typeof fetch;
   try {
     const res = await _opsApiRequestHandlerForTest(
-      new Request(
-        `https://example.invalid/ops-api?action=job_detail&jobId=${JOB}`,
-        { method: "GET", headers },
-      ),
+      new Request(href, {
+        method: init.method,
+        headers: { "content-type": "application/json", ...init.headers },
+        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      }),
     );
     const body = await res.json();
     return { status: res.status, body, writes, db };
@@ -182,5 +237,101 @@ handlerTest(
     assertEquals(r.body.job_work_order.quote_fill.filled, true);
     assert(r.writes.includes("PATCH work_orders"));
     assertEquals(r.db.work_orders[0].agreed_labour_ex, 350);
+  },
+);
+
+const SERVER = () => ({
+  authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+});
+const autoIssueOn = (db: Record<string, any[]>) => {
+  db.feature_flags = [{
+    flag_name: "job_work_order_auto_issue_v1",
+    enabled: true,
+  }];
+};
+
+handlerTest(
+  "job_detail tells the office why a filled draft has not gone to the trades: automatic issue is off",
+  async () => {
+    const r = await jobDetailAs(SERVER());
+    assertEquals(r.status, 200, JSON.stringify(r.body));
+    const note = r.body.job_work_order.needs_checking;
+    assertEquals(note.issued_automatically, false);
+    assertEquals(note.held.reason, "auto_issue_switched_off");
+    assertEquals(note.needs_checking, false);
+    // The read filled the draft as the quote fill's own.
+    assert(r.db.work_orders[0].quote_filled_at);
+  },
+);
+
+handlerTest(
+  "auto_issue_job_work_orders: the ops server key only; the routine key is refused",
+  async () => {
+    const r = await requestAs(
+      "https://example.invalid/ops-api?action=auto_issue_job_work_orders",
+      { method: "POST", headers: { "x-api-key": ROUTINE_KEY }, body: {} },
+      autoIssueOn,
+    );
+    assertEquals(r.status, 403, JSON.stringify(r.body));
+    assertEquals(r.writes, []);
+  },
+);
+
+handlerTest(
+  "auto_issue_job_work_orders: switched off, nothing is filled or issued",
+  async () => {
+    const r = await requestAs(
+      "https://example.invalid/ops-api?action=auto_issue_job_work_orders",
+      { method: "POST", headers: SERVER(), body: {} },
+    );
+    assertEquals(r.status, 200, JSON.stringify(r.body));
+    assertEquals(r.body.switched_on, false);
+    assertEquals(r.writes, []);
+    assertEquals(r.db.work_orders[0].status, "draft");
+  },
+);
+
+handlerTest(
+  "a status change into an approved status fills the draft and issues it to the trades while automatic issue is on",
+  async () => {
+    const r = await requestAs(
+      "https://example.invalid/ops-api?action=update_job_status",
+      {
+        method: "POST",
+        headers: SERVER(),
+        body: { job_id: JOB, status: "scheduled" },
+      },
+      autoIssueOn,
+    );
+    assertEquals(r.status, 200, JSON.stringify(r.body));
+    const wo = r.db.work_orders[0];
+    assertEquals(wo.status, "approved");
+    assertEquals(wo.approved_via, "auto");
+    assertEquals(wo.approved_by, null);
+    assertEquals(wo.agreed_labour_ex, 350);
+    assert(r.writes.includes("RPC auto_issue_job_work_order"));
+    const issued = r.db.job_events.find((e: any) =>
+      e.event_type === "job_work_order_auto_issued"
+    );
+    assert(issued, "the issue is recorded on the job");
+    assert(!JSON.stringify(issued).includes("350"));
+  },
+);
+
+handlerTest(
+  "a status change with automatic issue off leaves the draft for the approver",
+  async () => {
+    const r = await requestAs(
+      "https://example.invalid/ops-api?action=update_job_status",
+      {
+        method: "POST",
+        headers: SERVER(),
+        body: { job_id: JOB, status: "scheduled" },
+      },
+    );
+    assertEquals(r.status, 200, JSON.stringify(r.body));
+    assertEquals(r.db.work_orders[0].status, "draft");
+    assert(!r.writes.includes("RPC auto_issue_job_work_order"));
+    assert(!r.writes.includes("PATCH work_orders"));
   },
 );

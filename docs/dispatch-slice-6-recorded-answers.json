@@ -1,0 +1,365 @@
+{
+  "note": "Recorded on a disposable local Postgres with the slice 6 migration applied; job, suppliers, person and orders are made up. The read is after every order was sighted; the write clears one sighting.",
+  "GET dispatch_materials (orders, deliveries, counts, lines)": {
+    "orders_status": "ok",
+    "orders": [
+      {
+        "id": "44444444-4444-4444-8444-000000000002",
+        "po_number": "PO-OUT1",
+        "supplier_name": "Old Supplier",
+        "status": "confirmed",
+        "created_at": "2026-09-01T00:00:00+08:00",
+        "updated_at": "2026-10-15T10:05:28.187862+08:00",
+        "supplier_id": null,
+        "source": null,
+        "pdf_version": null,
+        "last_sent_pdf_version": null,
+        "last_sent_at": null,
+        "in_xero": false,
+        "lines": [],
+        "po_type": "material",
+        "delivery": {
+          "expected": null,
+          "expected_editable": true,
+          "confirmed": {
+            "state": "date",
+            "date": "2026-04-09",
+            "set_by": null,
+            "set_at": null,
+            "by_hand": false
+          },
+          "sighted": {
+            "at": "2026-10-15T10:05:28.13+08:00",
+            "by": "dispatcher@example.test"
+          },
+          "step": 3,
+          "counted": true
+        }
+      },
+      {
+        "id": "44444444-4444-4444-8444-000000000003",
+        "po_number": "PO-XERO",
+        "supplier_name": "Xero Supplier",
+        "status": "confirmed",
+        "created_at": "2026-09-05T00:00:00+08:00",
+        "updated_at": "2026-10-15T10:05:28.890887+08:00",
+        "supplier_id": null,
+        "source": null,
+        "pdf_version": null,
+        "last_sent_pdf_version": null,
+        "last_sent_at": null,
+        "in_xero": true,
+        "lines": [],
+        "po_type": null,
+        "delivery": {
+          "expected": null,
+          "expected_editable": false,
+          "confirmed": {
+            "state": "status_only",
+            "date": null,
+            "set_by": null,
+            "set_at": null,
+            "by_hand": false
+          },
+          "sighted": {
+            "at": "2026-10-15T10:05:28.853+08:00",
+            "by": "Test Dispatcher"
+          },
+          "step": 3,
+          "counted": true
+        }
+      },
+      {
+        "id": "44444444-4444-4444-8444-000000000004",
+        "po_number": "PO-GONE",
+        "supplier_name": null,
+        "status": "cancelled",
+        "created_at": "2026-09-06T00:00:00+08:00",
+        "updated_at": "2026-10-15T10:05:23.377279+08:00",
+        "supplier_id": null,
+        "source": null,
+        "pdf_version": null,
+        "last_sent_pdf_version": null,
+        "last_sent_at": null,
+        "in_xero": false,
+        "lines": [],
+        "po_type": "material",
+        "delivery": {
+          "expected": null,
+          "expected_editable": true,
+          "confirmed": {
+            "state": "waiting",
+            "date": null,
+            "set_by": null,
+            "set_at": null,
+            "by_hand": false
+          },
+          "sighted": null,
+          "step": 1,
+          "counted": false
+        }
+      },
+      {
+        "id": "44444444-4444-4444-8444-000000000005",
+        "po_number": "PO-LAB",
+        "supplier_name": null,
+        "status": "draft",
+        "created_at": "2026-09-07T00:00:00+08:00",
+        "updated_at": "2026-10-15T10:05:23.377279+08:00",
+        "supplier_id": null,
+        "source": null,
+        "pdf_version": null,
+        "last_sent_pdf_version": null,
+        "last_sent_at": null,
+        "in_xero": false,
+        "lines": [],
+        "po_type": "labour",
+        "delivery": {
+          "expected": null,
+          "expected_editable": true,
+          "confirmed": {
+            "state": "waiting",
+            "date": null,
+            "set_by": null,
+            "set_at": null,
+            "by_hand": false
+          },
+          "sighted": null,
+          "step": 1,
+          "counted": false
+        }
+      },
+      {
+        "id": "44444444-4444-4444-8444-000000000001",
+        "po_number": "PO-1000001",
+        "supplier_name": "Example Steel",
+        "status": "sent",
+        "created_at": "2026-10-02T00:00:00+08:00",
+        "updated_at": "2026-10-15T10:05:28.60482+08:00",
+        "supplier_id": "33333333-3333-4333-8333-000000000001",
+        "source": "dispatch",
+        "pdf_version": null,
+        "last_sent_pdf_version": null,
+        "last_sent_at": null,
+        "in_xero": false,
+        "lines": [],
+        "po_type": "material",
+        "delivery": {
+          "expected": "2026-10-20",
+          "expected_editable": true,
+          "confirmed": {
+            "state": "date",
+            "date": "2026-10-21",
+            "set_by": "Test Dispatcher",
+            "set_at": "2026-10-15T10:05:26.055+08:00",
+            "by_hand": true
+          },
+          "sighted": {
+            "at": "2026-10-15T10:05:28.558+08:00",
+            "by": "Test Dispatcher"
+          },
+          "step": 3,
+          "counted": true
+        }
+      }
+    ],
+    "deliveries": {
+      "rows": [
+        {
+          "kind": "order",
+          "purchase_order_id": "44444444-4444-4444-8444-000000000001",
+          "po_number": "PO-1000001",
+          "supplier_name": "Example Steel",
+          "supplier_id": "33333333-3333-4333-8333-000000000001",
+          "made_in_dispatch": true,
+          "in_xero": false,
+          "status": "sent",
+          "updated_at": "2026-10-15T10:05:28.60482+08:00",
+          "delivery": {
+            "expected": "2026-10-20",
+            "expected_editable": true,
+            "confirmed": {
+              "state": "date",
+              "date": "2026-10-21",
+              "set_by": "Test Dispatcher",
+              "set_at": "2026-10-15T10:05:26.055+08:00",
+              "by_hand": true
+            },
+            "sighted": {
+              "at": "2026-10-15T10:05:28.558+08:00",
+              "by": "Test Dispatcher"
+            },
+            "step": 3,
+            "counted": true
+          }
+        },
+        {
+          "kind": "not_ordered",
+          "supplier_id": "33333333-3333-4333-8333-000000000002",
+          "supplier_name": "Example Sheets"
+        },
+        {
+          "kind": "order",
+          "purchase_order_id": "44444444-4444-4444-8444-000000000002",
+          "po_number": "PO-OUT1",
+          "supplier_name": "Old Supplier",
+          "supplier_id": null,
+          "made_in_dispatch": false,
+          "in_xero": false,
+          "status": "confirmed",
+          "updated_at": "2026-10-15T10:05:28.187862+08:00",
+          "delivery": {
+            "expected": null,
+            "expected_editable": true,
+            "confirmed": {
+              "state": "date",
+              "date": "2026-04-09",
+              "set_by": null,
+              "set_at": null,
+              "by_hand": false
+            },
+            "sighted": {
+              "at": "2026-10-15T10:05:28.13+08:00",
+              "by": "dispatcher@example.test"
+            },
+            "step": 3,
+            "counted": true
+          }
+        },
+        {
+          "kind": "order",
+          "purchase_order_id": "44444444-4444-4444-8444-000000000003",
+          "po_number": "PO-XERO",
+          "supplier_name": "Xero Supplier",
+          "supplier_id": null,
+          "made_in_dispatch": false,
+          "in_xero": true,
+          "status": "confirmed",
+          "updated_at": "2026-10-15T10:05:28.890887+08:00",
+          "delivery": {
+            "expected": null,
+            "expected_editable": false,
+            "confirmed": {
+              "state": "status_only",
+              "date": null,
+              "set_by": null,
+              "set_at": null,
+              "by_hand": false
+            },
+            "sighted": {
+              "at": "2026-10-15T10:05:28.853+08:00",
+              "by": "Test Dispatcher"
+            },
+            "step": 3,
+            "counted": true
+          }
+        }
+      ],
+      "counted": 3,
+      "sighted": 3,
+      "all_sighted": true
+    },
+    "counts": {
+      "total": 4,
+      "ready": 3
+    },
+    "lines": [
+      {
+        "id": "7e4192c2-ec53-418d-8a02-7c992c91767a",
+        "supplier_id": "33333333-3333-4333-8333-000000000001",
+        "description": "Posts",
+        "quantity": 4,
+        "unit": null,
+        "status": "to_order",
+        "display_status": "delivered",
+        "purchase_order_id": "44444444-4444-4444-8444-000000000001",
+        "source": "manual",
+        "position": 1,
+        "updated_at": "2026-10-15T10:05:23.378899+08:00",
+        "po_number": "PO-1000001"
+      },
+      {
+        "id": "52c13e1d-868e-49e9-a4cd-806e960a52b1",
+        "supplier_id": "33333333-3333-4333-8333-000000000001",
+        "description": "Rails",
+        "quantity": 8,
+        "unit": null,
+        "status": "to_order",
+        "display_status": "delivered",
+        "purchase_order_id": "44444444-4444-4444-8444-000000000001",
+        "source": "manual",
+        "position": 2,
+        "updated_at": "2026-10-15T10:05:23.378899+08:00",
+        "po_number": "PO-1000001"
+      },
+      {
+        "id": "1f54cc9a-d056-43b4-a448-0fd1cd407fdb",
+        "supplier_id": "33333333-3333-4333-8333-000000000002",
+        "description": "Sheets",
+        "quantity": 6,
+        "unit": null,
+        "status": "in_stock",
+        "display_status": "in_stock",
+        "purchase_order_id": null,
+        "source": "manual",
+        "position": 3,
+        "updated_at": "2026-10-15T10:05:23.378899+08:00"
+      },
+      {
+        "id": "d1a5c6c3-6725-4e51-8692-19e3fe681e93",
+        "supplier_id": "33333333-3333-4333-8333-000000000002",
+        "description": "Screws",
+        "quantity": 1,
+        "unit": null,
+        "status": "to_order",
+        "display_status": "to_order",
+        "purchase_order_id": null,
+        "source": "manual",
+        "position": 4,
+        "updated_at": "2026-10-15T10:05:23.378899+08:00"
+      }
+    ]
+  },
+  "POST dispatch_delivery_mark_sighted { sighted: false }": {
+    "success": true,
+    "order": {
+      "id": "44444444-4444-4444-8444-000000000001",
+      "po_number": "PO-1000001",
+      "supplier_name": "Example Steel",
+      "status": "sent",
+      "created_at": "2026-10-02T00:00:00+08:00",
+      "updated_at": "2026-10-15T10:05:50.566124+08:00",
+      "supplier_id": "33333333-3333-4333-8333-000000000001",
+      "source": "dispatch",
+      "pdf_version": null,
+      "last_sent_pdf_version": null,
+      "last_sent_at": null,
+      "in_xero": false,
+      "lines": [],
+      "po_type": "material",
+      "delivery": {
+        "expected": "2026-10-20",
+        "expected_editable": true,
+        "confirmed": {
+          "state": "date",
+          "date": "2026-10-21",
+          "set_by": "Test Dispatcher",
+          "set_at": "2026-10-15T10:05:26.055+08:00",
+          "by_hand": true
+        },
+        "sighted": null,
+        "step": 2,
+        "counted": true
+      }
+    },
+    "deliveries": {
+      "counted": 3,
+      "sighted": 2,
+      "all_sighted": false
+    },
+    "counts": {
+      "total": 4,
+      "ready": 1
+    }
+  }
+}

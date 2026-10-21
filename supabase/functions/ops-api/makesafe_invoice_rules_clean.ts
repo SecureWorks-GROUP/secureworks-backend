@@ -537,11 +537,11 @@ export interface SesRulesCleanPortalCapture {
 
 // ── Sealed pricing law, imported never copied ──────────────────────────────
 
-/** AJS/AJBR bill $80 ex per trade-hour; everyone else on the labour bases $85. */
+/** AJS/AJBR bill $80 ex per trade-hour. MLB weekday labour is $90 (Shaun 2026-09-22). */
 const SEALED_LABOUR_RATE_EX_GST: Record<string, number> = {
   ajs_labour_materials: 80,
   ajs_temporary_fence_labour_only: 80,
-  standard_labour_materials: 85,
+  standard_labour_materials: 90,
 };
 
 /** Australian GST, as `ses_prepare_docket_revision` applies it (`ex * 1.1`). */

@@ -22,6 +22,10 @@
 //                                   (expected_updated_at is required)
 //     backfill_job_work_orders POST ops key only; dry run unless apply:true AND
 //                                   feature flag job_work_order_backfill_v1 is on
+//     auto_issue_job_work_orders POST ops key only (the pg_cron sweep); fills
+//                                   and issues job work orders with no human
+//                                   approval while job_work_order_auto_issue_v1
+//                                   is on, nothing otherwise
 //     resend_work_order_variation_emails POST re-sends variation emails left
 //                                   failed, or stuck in sending past the
 //                                   staleness bound; nothing while the email
@@ -36,6 +40,12 @@
 //     report_work_order_variation POST a variation on the trade's own invoice;
 //                                   records the finance and admin emails, sent
 //                                   only while work_order_variation_emails_v1 is on
+//
+// While JOB_WORK_ORDER_AUTO_ISSUE_FLAG is on, a draft the quote fill wrote
+// that nobody has edited since is issued by the system (approved_via 'auto',
+// no approver; 20261016120000_job_work_order_auto_issue.sql): by the sweep,
+// on an ops status change, and by the backfill. A draft edited by hand waits
+// for the approver; customer variations always do.
 //
 // A draft is filled from the accepted quote (job_work_order_quote_fill.ts,
 // docs/quote-work-order-lines-v1.md) while nobody has written into it: when
@@ -57,6 +67,7 @@
 
 import {
   fillJobWorkOrderDraftFromQuote,
+  JOB_WORK_ORDER_OPEN_STATUSES,
   jobWorkOrderDraftIsUntouched,
   QuoteFillError,
   type QuoteFillOutcome,
@@ -84,8 +95,8 @@ export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
 
 /**
  * The one cost lane that counts against the agreed labour. The lane of a line
- * is v_trade_charge_resolved.cost_lane (20260831021701), the repo's single
- * definition; this module reads it and never restates it.
+ * is v_trade_charge_resolved.cost_lane (newest definition: 20261015093000),
+ * the repo's single definition; this module reads it and never restates it.
  */
 export const WORK_ORDER_LABOUR_COST_LANE = "labour";
 
@@ -93,12 +104,11 @@ export const WORK_ORDER_LABOUR_COST_LANE = "labour";
  * Whether a line is labour against the agreed labour figure: the one place
  * that decides it.
  *
- * TEMPORARY: the trade app's "Work Order" pay line (line_type 'work order',
- * or 'work_order') is labour, but the shared view does not classify it yet,
- * so it reads 'unclassified' there. It is counted here by line type until
- * v_trade_charge_resolved puts those types in its labour lane (the finance
- * desk's change, since it moves the job costing reports). Remove the
- * line-type test then.
+ * REDUNDANT: the trade app's "Work Order" pay line (line_type 'work order',
+ * or 'work_order') is labour, and v_trade_charge_resolved puts both types in
+ * its labour lane since migration 20261015093000 (owner call JP-04). The
+ * line-type test below predates that and agrees with the view; remove it
+ * separately.
  */
 export function workOrderLineIsLabour(
   line: { cost_lane: string; line_type: string | null },
@@ -125,6 +135,17 @@ export const WORK_ORDER_VARIATION_EMAIL_STALE_SENDING_MS = 10 * 60 * 1000;
 
 /** Rule near_agreed fires at this share of the agreed labour. */
 export const WORK_ORDER_NEAR_AGREED_RATIO = 0.9;
+
+/** Issues a job work order to the trades as soon as the quote fill writes it,
+ *  with no human approval (approved_via 'auto'). Seeded off. */
+export const JOB_WORK_ORDER_AUTO_ISSUE_FLAG = "job_work_order_auto_issue_v1";
+
+/** Open, approved job statuses. Mirrors the database's
+ *  job_work_order_open_statuses() (20261012130000): the jobs a draft is opened
+ *  for, and the only jobs whose work order is issued automatically. Declared
+ *  in job_work_order_quote_fill.ts, which also reads it (a job moved past
+ *  quoted), so the two modules import no cycle. */
+export { JOB_WORK_ORDER_OPEN_STATUSES };
 
 const MAX_SCOPE_ITEMS = 200;
 const MAX_TEXT = 4000;
@@ -386,6 +407,114 @@ export function computeWorkOrderFigures(input: {
     used_ratio: usedRatio,
     over_agreed: over,
     rules,
+  };
+}
+
+// ── Pure: the office's "needs checking" note ────────────────────────────────
+
+export type JobWorkOrderHeldReason =
+  | "hand_edited"
+  | "not_filled"
+  | "agreed_labour_missing"
+  | "filled_before_auto_issue"
+  | "auto_issue_switched_off"
+  | "awaiting_auto_issue";
+
+export type JobWorkOrderNeedsChecking = {
+  /** True when a line needs checking or the draft waits on the office. */
+  needs_checking: boolean;
+  /** The work order's lines the quote fill flagged for review. */
+  lines: Array<{
+    line_key: string | null;
+    description: string | null;
+    flags: string[];
+  }>;
+  /** Approved by the system (approved_via auto), not by a person. */
+  issued_automatically: boolean;
+  /** Why a draft has not gone to the trades; null once approved. */
+  held: { reason: JobWorkOrderHeldReason; message: string } | null;
+  message: string | null;
+};
+
+const HELD_MESSAGES: Record<JobWorkOrderHeldReason, string> = {
+  hand_edited:
+    "Edited by hand, so it is not issued automatically. Approve it to send it to the trades.",
+  not_filled:
+    "Not filled from an accepted quote. Fill it in and approve it to send it to the trades.",
+  agreed_labour_missing:
+    "The quote has no labour figure. Set the agreed labour and approve it to send it to the trades.",
+  filled_before_auto_issue:
+    "Filled before automatic issue, and it cannot be shown untouched since. Approve it to send it to the trades.",
+  auto_issue_switched_off:
+    "Goes to the trades automatically once automatic issue is switched on.",
+  awaiting_auto_issue: "Goes to the trades automatically within a few minutes.",
+};
+
+/** Held reasons the office has to act on; the other two clear by themselves. */
+const HELD_FOR_THE_OFFICE: ReadonlySet<JobWorkOrderHeldReason> = new Set([
+  "hand_edited",
+  "not_filled",
+  "agreed_labour_missing",
+  "filled_before_auto_issue",
+]);
+
+/**
+ * The office-only note on a job work order: the lines the quote fill flagged
+ * (they never stop the work order going out) and, for a draft, why it has
+ * not gone to the trades yet. Read from the work order itself, stored
+ * nowhere. Trades never see it: the trade read is an allowlist without flags.
+ */
+export function jobWorkOrderNeedsChecking(
+  wo: any,
+  autoIssueOn: boolean | null,
+): JobWorkOrderNeedsChecking | null {
+  if (!wo || wo.kind !== "job") return null;
+  const items = Array.isArray(wo.scope_items) ? wo.scope_items : [];
+  const lines = items
+    .filter((i: any) => i && typeof i === "object" && i.needs_review === true)
+    .map((i: any) => ({
+      line_key: typeof i.line_key === "string" ? i.line_key : null,
+      description: typeof i.description === "string" ? i.description : null,
+      flags: Array.isArray(i.flags) ? i.flags.map(String) : [],
+    }));
+  let held: JobWorkOrderNeedsChecking["held"] = null;
+  if (wo.status === "draft") {
+    const hasScope = items.length > 0 ||
+      writtenText(wo.special_instructions);
+    const reason: JobWorkOrderHeldReason = wo.hand_edited_at
+      ? "hand_edited"
+      : !hasScope
+      ? "not_filled"
+      : wo.agreed_labour_ex === null || wo.agreed_labour_ex === undefined
+      ? "agreed_labour_missing"
+      : !wo.quote_filled_at
+      ? "filled_before_auto_issue"
+      : autoIssueOn === true
+      ? "awaiting_auto_issue"
+      : "auto_issue_switched_off";
+    held = { reason, message: HELD_MESSAGES[reason] };
+  }
+  const messages: string[] = [];
+  if (lines.length > 0) {
+    messages.push(
+      `${lines.length} line${lines.length === 1 ? "" : "s"} need${
+        lines.length === 1 ? "s" : ""
+      } checking against the quote.${
+        wo.status === "approved"
+          ? " The work order went to the trades as it is; a change is made as a variation."
+          : ""
+      }`,
+    );
+  }
+  if (held) messages.push(held.message);
+  return {
+    needs_checking: lines.length > 0 ||
+      (held !== null && HELD_FOR_THE_OFFICE.has(held.reason)),
+    lines,
+    issued_automatically: wo.status === "approved" &&
+      wo.approved_via === "auto",
+    held,
+    message: messages.length > 0 ? messages.join(" ") : null,
   };
 }
 
@@ -838,7 +967,9 @@ export function buildVariationEmails(
         facts.map(([k, v]) =>
           `<tr><td><strong>${esc(k)}</strong></td><td>${esc(v)}</td></tr>`
         ).join("") +
-        `</table><p>SecureWorks Group</p>`,
+        // No closing name: send-outlook-email appends "Kind regards," and the
+        // admin@ SecureWorks Group card, the one sign-off.
+        `</table>`,
     );
     return {
       recipient_role: role,
@@ -855,7 +986,7 @@ export function buildVariationEmails(
 const JOB_COLUMNS =
   "id, org_id, job_number, client_name, type, status, site_address, site_suburb, work_order_id";
 const WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, hand_edited_at, created_at, updated_at";
 
 async function readJob(client: any, jobId: string) {
   const { data, error } = await client.from("jobs").select(JOB_COLUMNS).eq(
@@ -1312,11 +1443,13 @@ export async function readJobWorkOrder(
   }
   const live = liveOf(rows);
   const draft = draftOf(rows);
-  const [lines, variations, customerVariations] = await Promise.all([
-    readWorkOrderLines(client, [job.id]),
-    readVariations(client, [job.id]),
-    readCustomerVariations(client, [job.id]),
-  ]);
+  const [lines, variations, customerVariations, autoIssueOn] = await Promise
+    .all([
+      readWorkOrderLines(client, [job.id]),
+      readVariations(client, [job.id]),
+      readCustomerVariations(client, [job.id]),
+      readFlag(client, JOB_WORK_ORDER_AUTO_ISSUE_FLAG),
+    ]);
   const linked = lines.filter((l) => l.work_order_id);
   const before = lines.filter((l) => !l.work_order_id && l.counted);
   const invoiceLabour = labourByInvoice(lines);
@@ -1351,6 +1484,7 @@ export async function readJobWorkOrder(
     ),
     customer_variations: customerVariations.map(shapeCustomerVariation),
     quote_fill: quoteFill,
+    needs_checking: jobWorkOrderNeedsChecking(live || draft, autoIssueOn),
   };
 }
 
@@ -1676,19 +1810,35 @@ export async function backfillJobWorkOrders(client: any, body: any) {
     return {
       ...data,
       quote_fill: { dry_run: true, untouched_drafts: untouched.length },
+      auto_issue: {
+        dry_run: true,
+        switched_on: await readFlag(client, JOB_WORK_ORDER_AUTO_ISSUE_FLAG),
+      },
     };
   }
   const requested = Number(body?.fill_limit);
   const limit = Number.isInteger(requested) && requested > 0
     ? Math.min(requested, BACKFILL_QUOTE_FILL_MAX_LIMIT)
     : BACKFILL_QUOTE_FILL_DEFAULT_LIMIT;
+  const autoIssueOn = await readFlag(client, JOB_WORK_ORDER_AUTO_ISSUE_FLAG);
   const notFilled: Record<string, number> = {};
+  const notIssued: Record<string, number> = {};
   let filled = 0;
+  let issued = 0;
   const batch = untouched.slice(0, limit);
   for (const wo of batch) {
     const { summary } = await fillDraftFromQuote(client, String(wo.job_id));
     if (summary.filled) filled++;
     else notFilled[summary.reason] = (notFilled[summary.reason] || 0) + 1;
+    // A draft this run filled goes to the trades straight away while
+    // automatic issue is on, by the same rule as every other job.
+    if (summary.filled && autoIssueOn) {
+      const r = await autoIssueJobWorkOrderForJob(client, String(wo.job_id), {
+        flagOn: true,
+      });
+      if (r.issued) issued++;
+      else notIssued[r.reason] = (notIssued[r.reason] || 0) + 1;
+    }
   }
   return {
     ...data,
@@ -1700,6 +1850,266 @@ export async function backfillJobWorkOrders(client: any, body: any) {
       not_filled: notFilled,
       remaining: untouched.length - batch.length,
     },
+    auto_issue: autoIssueOn
+      ? { switched_on: true, issued, not_issued: notIssued }
+      : { switched_on: false, issued: 0, not_issued: {} },
+  };
+}
+
+// ── System: fill and issue automatically (switched off) ─────────────────────
+
+export type JobWorkOrderAutoIssueReason =
+  | "issued"
+  | "switched_off"
+  | "not_eligible"
+  | "job_not_open"
+  | "already_approved"
+  | "no_draft"
+  | "not_filled"
+  | "hand_edited"
+  | "filled_before_auto_issue"
+  | "agreed_labour_missing"
+  | "draft_changed"
+  | "issue_failed";
+
+export type JobWorkOrderAutoIssue = {
+  job_id: string;
+  work_order_id: string | null;
+  issued: boolean;
+  reason: JobWorkOrderAutoIssueReason;
+  /** The quote fill this call made first, else null. */
+  quote_fill: JobWorkOrderQuoteFill | null;
+  /** How many of the issued lines the fill flagged for the office. */
+  needs_checking_lines: number;
+  code?: string;
+};
+
+const AUTO_ISSUE_ERRORS: Record<string, [JobWorkOrderAutoIssueReason, string]> =
+  {
+    "42501": ["switched_off", "auto_issue_switched_off"],
+    "WO409": ["draft_changed", "stale_read"],
+    "WO423": ["hand_edited", "not_issuable"],
+    "23514": ["issue_failed", "work_order_not_ready"],
+    "P0002": ["no_draft", "work_order_not_found"],
+  };
+
+/**
+ * Fills the job's draft from the accepted quote when nobody has written into
+ * it, then issues it to the trades with no human approval (approved_via
+ * 'auto'), sealed as an approval seals it. Only while
+ * JOB_WORK_ORDER_AUTO_ISSUE_FLAG is on, only for an open fencing or patio job,
+ * and only for the draft the quote fill wrote that nobody has edited since
+ * (the database checks the last two again, under the row lock). Lines the
+ * fill flagged for review never stop it: they stay on the work order for the
+ * office (jobWorkOrderNeedsChecking). A draft edited by hand, a quote with no
+ * labour figure, and a job with no accepted quote wait for the approver.
+ * Never throws: every outcome is a reason.
+ */
+export async function autoIssueJobWorkOrderForJob(
+  client: any,
+  jobId: string,
+  opts: { flagOn?: boolean } = {},
+): Promise<JobWorkOrderAutoIssue> {
+  const out = (
+    reason: JobWorkOrderAutoIssueReason,
+    extra: Partial<JobWorkOrderAutoIssue> = {},
+  ): JobWorkOrderAutoIssue => ({
+    job_id: jobId,
+    work_order_id: null,
+    issued: reason === "issued",
+    reason,
+    quote_fill: null,
+    needs_checking_lines: 0,
+    ...extra,
+  });
+  try {
+    const flagOn = opts.flagOn ??
+      await readFlag(client, JOB_WORK_ORDER_AUTO_ISSUE_FLAG);
+    if (!flagOn) return out("switched_off");
+    const job = await readJob(client, requireUuid(jobId, "job_id"));
+    if (!JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""))) {
+      return out("not_eligible");
+    }
+    if (!JOB_WORK_ORDER_OPEN_STATUSES.has(String(job.status || ""))) {
+      return out("job_not_open");
+    }
+    const rows = await readJobWorkOrders(client, job.id);
+    const live = liveOf(rows);
+    if (live) return out("already_approved", { work_order_id: live.id });
+    let draft = draftOf(rows);
+    if (!draft) return out("no_draft");
+    let quoteFill: JobWorkOrderQuoteFill | null = null;
+    if (jobWorkOrderDraftIsUntouched(draft) && !draft.hand_edited_at) {
+      const fill = await fillDraftFromQuote(client, job.id);
+      quoteFill = fill.summary;
+      if (!fill.workOrder) {
+        return out(
+          fill.summary.reason === "draft_changed"
+            ? "draft_changed"
+            : "not_filled",
+          {
+            work_order_id: draft.id,
+            quote_fill: quoteFill,
+            ...(fill.summary.code ? { code: fill.summary.code } : {}),
+          },
+        );
+      }
+      draft = fill.workOrder;
+    }
+    const held = (reason: JobWorkOrderAutoIssueReason) =>
+      out(reason, { work_order_id: draft.id, quote_fill: quoteFill });
+    if (draft.hand_edited_at) return held("hand_edited");
+    const items = Array.isArray(draft.scope_items) ? draft.scope_items : [];
+    if (items.length === 0) return held("not_filled");
+    if (!draft.quote_filled_at) return held("filled_before_auto_issue");
+    if (
+      draft.agreed_labour_ex === null || draft.agreed_labour_ex === undefined
+    ) {
+      return held("agreed_labour_missing");
+    }
+    const { data, error } = await client.rpc("auto_issue_job_work_order", {
+      p_work_order_id: draft.id,
+      p_expected_updated_at: draft.updated_at,
+    });
+    if (error) {
+      const [reason, code] = AUTO_ISSUE_ERRORS[String(error.code || "")] ??
+        ["issue_failed", "issue_failed"];
+      console.error(
+        "[job-work-orders] automatic issue refused:",
+        job.id,
+        String(error.code || ""),
+        error.message,
+      );
+      return out(reason, {
+        work_order_id: draft.id,
+        quote_fill: quoteFill,
+        code,
+      });
+    }
+    const needsChecking = items.filter((i: any) => i?.needs_review === true)
+      .length;
+    // Ids and counts only (job_events is readable by every signed-in user of
+    // the org, trades included).
+    await logJobEvent(client, job.id, "job_work_order_auto_issued", {
+      work_order_id: draft.id,
+      wo_number: data?.wo_number ?? draft.wo_number,
+      line_count: items.length,
+      needs_checking_lines: needsChecking,
+    });
+    return out("issued", {
+      work_order_id: draft.id,
+      quote_fill: quoteFill,
+      needs_checking_lines: needsChecking,
+    });
+  } catch (e) {
+    const code = e instanceof JobWorkOrderError ? e.code : "issue_failed";
+    console.error(
+      "[job-work-orders] automatic issue failed:",
+      jobId,
+      code,
+      (e as Error)?.message,
+    );
+    return out("issue_failed", { code });
+  }
+}
+
+export const AUTO_ISSUE_SWEEP_DEFAULT_LIMIT = 25;
+export const AUTO_ISSUE_SWEEP_MAX_LIMIT = 100;
+/** An untouched draft is tried by the sweep for this long after it opened;
+ *  one with no accepted quote by then waits for the office. */
+export const AUTO_ISSUE_SWEEP_UNTOUCHED_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+
+const SWEEP_COLUMNS =
+  `id, job_id, kind, status, scope_items, agreed_labour_ex, quote_filled_at, hand_edited_at, created_at, jobs:job_id!inner(type, status)`;
+
+/**
+ * The sweep the pg_cron job (every 2 minutes) posts while the flag is on, and
+ * the catch-all behind every way a job becomes approved (send-quote's
+ * acceptance, a status change, a stage move from the CRM). Candidates are
+ * drafts nobody edited by hand on open fencing and patio jobs: every one the
+ * quote fill wrote with an agreed labour figure, then untouched drafts opened
+ * in the last 3 days, newest first, so a job with no accepted quote is not
+ * retried forever ahead of new ones. Writes nothing while the flag is off.
+ */
+export async function autoIssueJobWorkOrders(
+  client: any,
+  body: any,
+  now: Date = new Date(),
+) {
+  const flagOn = await readFlag(client, JOB_WORK_ORDER_AUTO_ISSUE_FLAG);
+  if (!flagOn) {
+    return {
+      schema: "job-work-order-auto-issue.v1",
+      switched_on: false,
+      candidates: 0,
+      issued: 0,
+      not_issued: {},
+      results: [],
+    };
+  }
+  const requested = Number(body?.limit);
+  const limit = Number.isInteger(requested) && requested > 0
+    ? Math.min(requested, AUTO_ISSUE_SWEEP_MAX_LIMIT)
+    : AUTO_ISSUE_SWEEP_DEFAULT_LIMIT;
+  const open = [...JOB_WORK_ORDER_OPEN_STATUSES];
+  const types = [...JOB_WORK_ORDER_JOB_TYPES];
+  const { data: filled, error: filledError } = await client.from("work_orders")
+    .select(SWEEP_COLUMNS)
+    .eq("kind", "job")
+    .eq("status", "draft")
+    .is("hand_edited_at", null)
+    .not("quote_filled_at", "is", null)
+    .not("agreed_labour_ex", "is", null)
+    .in("jobs.type", types)
+    .in("jobs.status", open)
+    .order("created_at", { ascending: true })
+    .limit(limit);
+  if (filledError) {
+    fail(500, "drafts_unreadable", "The draft work orders could not be read");
+  }
+  const since = new Date(now.getTime() - AUTO_ISSUE_SWEEP_UNTOUCHED_WINDOW_MS)
+    .toISOString();
+  const { data: fresh, error: freshError } = await client.from("work_orders")
+    .select(SWEEP_COLUMNS)
+    .eq("kind", "job")
+    .eq("status", "draft")
+    .is("hand_edited_at", null)
+    .is("agreed_labour_ex", null)
+    .gte("created_at", since)
+    .in("jobs.type", types)
+    .in("jobs.status", open)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (freshError) {
+    fail(500, "drafts_unreadable", "The draft work orders could not be read");
+  }
+  const jobIds: string[] = [];
+  for (
+    const wo of [
+      ...(filled || []),
+      ...(fresh || []).filter(jobWorkOrderDraftIsUntouched),
+    ]
+  ) {
+    const id = String(wo.job_id);
+    if (!jobIds.includes(id)) jobIds.push(id);
+  }
+  const batch = jobIds.slice(0, limit);
+  const results: JobWorkOrderAutoIssue[] = [];
+  const notIssued: Record<string, number> = {};
+  for (const jobId of batch) {
+    const r = await autoIssueJobWorkOrderForJob(client, jobId, {
+      flagOn: true,
+    });
+    results.push(r);
+    if (!r.issued) notIssued[r.reason] = (notIssued[r.reason] || 0) + 1;
+  }
+  return {
+    schema: "job-work-order-auto-issue.v1",
+    switched_on: true,
+    candidates: jobIds.length,
+    issued: results.filter((r) => r.issued).length,
+    not_issued: notIssued,
+    results,
   };
 }
 

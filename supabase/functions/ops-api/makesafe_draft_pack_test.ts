@@ -641,7 +641,7 @@ Deno.test("MLB temp-fence feedback applies hire card and keeps revised labour", 
   );
 
   assertEquals(labour?.quantity, 3);
-  assertEquals(labour?.unit_price, 85);
+  assertEquals(labour?.unit_price, 90);
   assertEquals(lines.length, 5);
   assertEquals(retrieval?.quantity, 2);
   assertEquals(retrieval?.unit_price, 90);

@@ -545,6 +545,7 @@ export type MaterialsChargeDecision =
       quantity: number;
       unit_price_ex_gst: number;
     }>;
+    omitted: string[];
   }
   | {
     action: "charge_line";
@@ -754,11 +755,9 @@ export function decideStandardLabourMaterialsCharge(input: {
     };
   }
 
-  // F29 (Captain 2026-08-13): the markdown card is executable below committed
-  // invoice money. Settled silicone/tape reproduce their existing no-ask lines;
-  // every other quantified composition is an explicitly review-only proposal.
-  // The proposal reaches a Xero DRAFT and Docs Ready, while its durable caveat
-  // keeps release/send closed until the Captain reviews it.
+  // The markdown card is the price. Settled rows bill under their invoice
+  // names. A tick with no settled rate is omitted (Shaun 2026-09-02): never
+  // mint "Proposed materials for Captain review" as billed money.
   const rateCard = priceRecordedMaterialsFromRateCard(
     recordedMaterialEntries(input.materials_used),
   );
@@ -767,6 +766,7 @@ export function decideStandardLabourMaterialsCharge(input: {
       action: "settled_charge_lines",
       materials,
       lines: rateCard.lines,
+      omitted: rateCard.omitted,
     };
   }
   if (rateCard.kind === "proposal") {

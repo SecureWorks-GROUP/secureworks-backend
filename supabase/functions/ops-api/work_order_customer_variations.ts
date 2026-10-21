@@ -25,6 +25,10 @@
 //     create_customer_variation_xero_draft POST  a Xero DRAFT holding that
 //                                       line; refused while feature flag
 //                                       customer_variation_xero_draft_v1 is off
+//     reconcile_customer_variation_xero_draft POST  approver only; after
+//                                       checking Xero by hand, records the
+//                                       draft that exists or releases a stuck
+//                                       record to `prepared`; never calls Xero
 //
 // job_events rows written here carry ids only, never an amount: job_events is
 // readable by every signed-in user of the org, trades included.
@@ -283,14 +287,14 @@ function requireActor(actor: { actor: string; missing: boolean }): string {
   return actor.actor;
 }
 
-function requireExpected(body: any): string {
+function requireExpected(
+  body: any,
+  message =
+    "Read the variation again and send its updated_at as expected_updated_at.",
+): string {
   const expected = body?.expected_updated_at;
   if (typeof expected !== "string" || !Number.isFinite(Date.parse(expected))) {
-    fail(
-      400,
-      "expected_updated_at_required",
-      "Read the variation again and send its updated_at as expected_updated_at.",
-    );
+    fail(400, "expected_updated_at_required", message);
   }
   return expected;
 }
@@ -471,28 +475,23 @@ const APPROVE_ERRORS: Record<string, [number, string]> = {
   "WO422": [409, "work_order_not_approved"],
 };
 
-export async function approveCustomerVariation(
+/**
+ * The approval's permission: the caller is a work order approver
+ * (work_order_settings), signed in, or named on a server key call while
+ * feature flag work_order_terminal_approval_v1 is on. The same people decide
+ * a customer variation's stuck Xero draft record.
+ */
+async function requireWorkOrderApprover(
   client: any,
-  body: any,
   approver: WorkOrderApprover | null,
-) {
-  const id = requireUuid(body?.variation_id, "variation_id");
-  if (!approver) {
-    fail(
-      403,
-      "approver_identity_missing",
-      "Approving needs the work order approver's own signed-in session.",
-    );
-  }
+  words: { missing: string; terminalOff: string; notApprover: string },
+): Promise<WorkOrderApprover> {
+  if (!approver) fail(403, "approver_identity_missing", words.missing);
   if (
     approver.via === "terminal" &&
     !(await readFlag(client, WORK_ORDER_TERMINAL_APPROVAL_FLAG))
   ) {
-    fail(
-      403,
-      "terminal_approval_switched_off",
-      "Approving from the terminal is switched off (feature flag work_order_terminal_approval_v1). Approve from a signed-in session.",
-    );
+    fail(403, "terminal_approval_switched_off", words.terminalOff);
   }
   const approvers = await readWorkOrderApprovers(client);
   if (approvers.length === 0) {
@@ -503,12 +502,23 @@ export async function approveCustomerVariation(
     );
   }
   if (!approvers.includes(approver.userId.toLowerCase())) {
-    fail(
-      403,
-      "approver_required",
-      "Only the work order approver approves a customer variation",
-    );
+    fail(403, "approver_required", words.notApprover);
   }
+  return approver;
+}
+
+export async function approveCustomerVariation(
+  client: any,
+  body: any,
+  approverIn: WorkOrderApprover | null,
+) {
+  const id = requireUuid(body?.variation_id, "variation_id");
+  const approver = await requireWorkOrderApprover(client, approverIn, {
+    missing: "Approving needs the work order approver's own signed-in session.",
+    terminalOff:
+      "Approving from the terminal is switched off (feature flag work_order_terminal_approval_v1). Approve from a signed-in session.",
+    notApprover: "Only the work order approver approves a customer variation",
+  });
   const expected = requireExpected(body);
   const current = await readVariation(client, id);
   if (current.status !== "draft") {
@@ -557,6 +567,7 @@ function shapeInvoiceRow(row: any) {
     invoice_number: row.invoice_number ?? null,
     xero_created_at: row.xero_created_at ?? null,
     failure: row.failure ?? null,
+    updated_at: row.updated_at ?? null,
   };
 }
 
@@ -819,8 +830,8 @@ export async function createCustomerVariationXeroDraft(
         ? "xero_outcome_unknown"
         : "xero_draft_in_progress",
       now?.status === "unknown"
-        ? "A Xero draft for this variation was requested and Xero did not confirm it. Check Xero before doing anything else."
-        : "A Xero draft for this variation is being created",
+        ? "A Xero draft for this variation was requested and Xero did not confirm it. Check Xero, then a work order approver records the draft or releases the line (reconcile_customer_variation_xero_draft)."
+        : "A Xero draft for this variation is being created. If it stays that way, a work order approver checks Xero and answers for it (reconcile_customer_variation_xero_draft).",
     );
   }
 
@@ -891,7 +902,7 @@ export async function createCustomerVariationXeroDraft(
         "xero_draft_outcome_not_saved",
         `Xero created draft invoice ${
           String(patch.invoice_number ?? "(no number)")
-        } (Xero invoice id ${xeroInvoiceId}) but this variation's record of it was not saved. Check that invoice in Xero before doing anything else.`,
+        } (Xero invoice id ${xeroInvoiceId}) but this variation's record of it was not saved. Check that invoice in Xero, then a work order approver records it (reconcile_customer_variation_xero_draft).`,
       );
     }
   }
@@ -905,10 +916,237 @@ export async function createCustomerVariationXeroDraft(
         : "xero_draft_refused",
       `${String(patch.failure)}${
         patch.status === "unknown"
-          ? " Check Xero before doing anything else: the draft may exist."
+          ? " Check Xero before doing anything else: the draft may exist. Then a work order approver records it or releases the line (reconcile_customer_variation_xero_draft)."
           : ""
       }`,
     );
   }
   return { ...prepared, invoice, duplicate: false };
+}
+
+// ── Approver: answer for a stuck Xero draft record (never calls Xero) ───────
+
+/**
+ * A `creating` claim younger than this may still have its create_invoice_draft
+ * call running, so it is not answered for. An ops-api request cannot outlive
+ * the edge worker's wall-clock limit (400 seconds), so an older claim has no
+ * request left that could still finish it.
+ */
+export const CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS = 15 * 60 * 1000;
+
+const XERO_DRAFT_OUTCOMES = new Set(["draft_exists", "no_draft"]);
+const MAX_INVOICE_NUMBER = 50;
+
+function parseReconcileBody(body: any) {
+  const outcome = body?.outcome;
+  if (typeof outcome !== "string" || !XERO_DRAFT_OUTCOMES.has(outcome)) {
+    fail(
+      400,
+      "invalid_outcome",
+      'outcome is "draft_exists" (you found the draft in Xero) or "no_draft" (you checked Xero and none was made)',
+    );
+  }
+  if (outcome === "no_draft") {
+    if (
+      (body?.xero_invoice_id ?? null) !== null ||
+      (body?.invoice_number ?? null) !== null
+    ) {
+      fail(
+        400,
+        "invalid_request",
+        "no_draft releases the line: it takes no Xero invoice id or number",
+      );
+    }
+    return { outcome, xeroInvoiceId: null, invoiceNumber: null };
+  }
+  const xeroInvoiceId = requireUuid(body?.xero_invoice_id, "xero_invoice_id")
+    .toLowerCase();
+  let invoiceNumber: string | null = null;
+  if (body?.invoice_number !== undefined && body.invoice_number !== null) {
+    const n = typeof body.invoice_number === "string"
+      ? body.invoice_number.trim()
+      : "";
+    if (!n || n.length > MAX_INVOICE_NUMBER) {
+      fail(
+        400,
+        "invalid_invoice_number",
+        `invoice_number is the Xero invoice number as shown in Xero (at most ${MAX_INVOICE_NUMBER} characters)`,
+      );
+    }
+    invoiceNumber = n;
+  }
+  return { outcome, xeroInvoiceId, invoiceNumber };
+}
+
+function creatingIsStale(row: any, nowMs: number): boolean {
+  const requested = Date.parse(String(row?.xero_requested_at ?? ""));
+  return Number.isFinite(requested) &&
+    nowMs - requested >= CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS;
+}
+
+function refuseUnreconcilable(row: any, nowMs: number): void {
+  if (!row) {
+    fail(
+      404,
+      "invoice_line_not_found",
+      "This variation has no invoice record to answer for",
+    );
+  }
+  if (row.status === "prepared") {
+    fail(
+      409,
+      "nothing_to_reconcile",
+      "This variation's line is prepared: no Xero draft is pending, so there is nothing to answer for",
+    );
+  }
+  if (row.status === "xero_draft_created") {
+    fail(
+      409,
+      "xero_draft_already_recorded",
+      `This variation's Xero draft is already recorded (Xero invoice id ${row.xero_invoice_id}). Change it in Xero.`,
+    );
+  }
+  if (row.status === "creating" && !creatingIsStale(row, nowMs)) {
+    fail(
+      409,
+      "xero_draft_in_progress",
+      `A Xero draft for this variation was requested at ${row.xero_requested_at} and may still be on its way. Wait ${
+        CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS / 60000
+      } minutes from then, check Xero, and answer for it after that.`,
+    );
+  }
+}
+
+/**
+ * A work order approver answers for a variation's Xero draft record that is
+ * `unknown` (Xero did not confirm the create) or stuck in `creating` (older
+ * than CUSTOMER_VARIATION_CREATING_STALE_AFTER_MS), after checking Xero by
+ * hand. Never calls Xero.
+ *
+ *   outcome draft_exists  records the draft they found: xero_invoice_id (and
+ *                         its invoice_number when given); the record becomes
+ *                         `xero_draft_created` and is sealed like any other.
+ *   outcome no_draft      releases the record to `prepared`, so the line can
+ *                         be sent to Xero again.
+ *
+ * The caller names the record's updated_at as read (expected_updated_at); the
+ * write is one compare-and-set on that, on the status read and, for
+ * `creating`, on the claim still being older than the threshold. Who answered,
+ * how, when and what is recorded in a job_events row.
+ */
+export async function reconcileCustomerVariationXeroDraft(
+  client: any,
+  body: any,
+  approverIn: WorkOrderApprover | null,
+  opts: { now?: () => number } = {},
+) {
+  const id = requireUuid(body?.variation_id, "variation_id");
+  const approver = await requireWorkOrderApprover(client, approverIn, {
+    missing:
+      "Answering for a variation's Xero draft needs the work order approver's own signed-in session.",
+    terminalOff:
+      "Answering for a variation's Xero draft from the terminal is switched off (feature flag work_order_terminal_approval_v1). Use a signed-in session.",
+    notApprover:
+      "Only the work order approver answers for a variation's Xero draft",
+  });
+  const expected = requireExpected(
+    body,
+    "Read the variation again and send its Xero draft record's updated_at (invoice.updated_at) as expected_updated_at.",
+  );
+  const answer = parseReconcileBody(body);
+  const nowMs = (opts.now ?? Date.now)();
+
+  const variation = await readVariation(client, id);
+  const row = await readInvoiceRow(client, id);
+  if (
+    row?.status === "xero_draft_created" &&
+    answer.outcome === "draft_exists" &&
+    String(row.xero_invoice_id || "").toLowerCase() === answer.xeroInvoiceId
+  ) {
+    return {
+      customer_variation_id: id,
+      invoice: shapeInvoiceRow(row),
+      duplicate: true,
+    };
+  }
+  refuseUnreconcilable(row, nowMs);
+
+  if (answer.outcome === "draft_exists") {
+    const { data: others, error: othersErr } = await client.from(
+      "work_order_customer_variation_invoices",
+    ).select("variation_id").eq("xero_invoice_id", answer.xeroInvoiceId);
+    if (othersErr) {
+      fail(
+        500,
+        "customer_variation_invoice_unreadable",
+        "The variations' invoice records could not be read",
+      );
+    }
+    if ((others || []).some((o: any) => o.variation_id !== id)) {
+      fail(
+        409,
+        "xero_invoice_already_recorded",
+        "That Xero invoice is already recorded for another variation. Check the invoice id in Xero.",
+      );
+    }
+  }
+
+  const nowIso = new Date(nowMs).toISOString();
+  const patch = answer.outcome === "draft_exists"
+    ? {
+      status: "xero_draft_created",
+      xero_invoice_id: answer.xeroInvoiceId,
+      invoice_number: answer.invoiceNumber,
+      xero_created_at: nowIso,
+    }
+    : {
+      status: "prepared",
+      xero_invoice_id: null,
+      invoice_number: null,
+      xero_created_at: null,
+    };
+  let write = client.from("work_order_customer_variation_invoices")
+    .update(patch)
+    .eq("variation_id", id).eq("status", row.status)
+    .eq("updated_at", expected);
+  if (row.status === "creating") {
+    // The claim must still be the stale one read: a fresh claim made since
+    // has its own xero_requested_at and is left alone.
+    write = write.eq("xero_requested_at", row.xero_requested_at);
+  }
+  const { data: saved, error } = await write.select(INVOICE_COLUMNS)
+    .maybeSingle();
+  if (error) {
+    fail(
+      500,
+      "invoice_record_not_saved",
+      "The variation's Xero draft record could not be saved",
+    );
+  }
+  if (!saved) {
+    fail(
+      409,
+      "stale_review",
+      "The variation's Xero draft record changed after it was read. Read the variation again and send its Xero draft record's updated_at (invoice.updated_at) as expected_updated_at.",
+    );
+  }
+  await logJobEvent(
+    client,
+    variation.job_id,
+    "customer_variation_xero_draft_reconciled",
+    {
+      customer_variation_id: id,
+      outcome: answer.outcome,
+      from_status: row.status,
+      xero_invoice_id: answer.xeroInvoiceId,
+      reconciled_by: approver.userId,
+      via: approver.via,
+    },
+    approver.userId,
+  );
+  return {
+    customer_variation_id: id,
+    invoice: shapeInvoiceRow(saved),
+    duplicate: false,
+  };
 }

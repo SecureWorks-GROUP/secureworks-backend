@@ -1021,3 +1021,457 @@ export async function readXeroBankSummary(
     },
   };
 }
+
+// ── Accounting reports (P&L, balance sheet, trial balance, aged payables) ──
+//
+// GET /Reports/* on the same credential path as the other evidence reads:
+// the caller injects getToken and xeroGet. This module does not refresh a
+// token itself and does not POST. Scope is the connection's existing
+// accounting.reports.read. A tracking pair filters the profit and loss
+// report to that one option; Xero does not return one column per option.
+
+const REPORT_TIMEFRAMES = new Set(["MONTH", "QUARTER", "YEAR"]);
+const REPORT_PERIOD_MAX = 11;
+
+type ReportCell = {
+  value: string | null;
+  amount: number | null;
+  attributes: Array<{ id: string; value: string }>;
+};
+type ReportLine = {
+  row_type: "Row" | "SummaryRow";
+  cells: ReportCell[];
+};
+type ReportSection = { title: string | null; rows: ReportLine[] };
+
+function invalidReport(message: string): XeroReceivablesReadError {
+  return new XeroReceivablesReadError(message, 502, "XERO_RESPONSE_INVALID");
+}
+
+function optionalUuid(value: unknown, field: string): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  return uuid(value, field);
+}
+
+function comparisonPeriods(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const text = typeof value === "number" ? String(value) : value;
+  const periods = typeof text === "string" && /^[1-9][0-9]*$/.test(text)
+    ? Number(text)
+    : NaN;
+  if (
+    !Number.isSafeInteger(periods) || periods < 1 || periods > REPORT_PERIOD_MAX
+  ) {
+    throw new XeroReceivablesReadError(
+      `periods must be an integer from 1 to ${REPORT_PERIOD_MAX}`,
+    );
+  }
+  return periods;
+}
+
+function reportTimeframe(value: unknown): "MONTH" | "QUARTER" | "YEAR" | null {
+  if (value === undefined || value === null || value === "") return null;
+  const timeframe = typeof value === "string" ? value.toUpperCase() : "";
+  if (!REPORT_TIMEFRAMES.has(timeframe)) {
+    throw new XeroReceivablesReadError(
+      "timeframe must be MONTH, QUARTER, or YEAR",
+    );
+  }
+  return timeframe as "MONTH" | "QUARTER" | "YEAR";
+}
+
+function requirePeriodPair(
+  periods: number | null,
+  timeframe: "MONTH" | "QUARTER" | "YEAR" | null,
+) {
+  if ((periods === null) !== (timeframe === null)) {
+    throw new XeroReceivablesReadError(
+      "periods and timeframe must be supplied together",
+    );
+  }
+}
+
+function trackingPair(
+  category: string | null,
+  option: string | null,
+  categoryField: string,
+  optionField: string,
+) {
+  if ((category === null) !== (option === null)) {
+    throw new XeroReceivablesReadError(
+      `${categoryField} and ${optionField} must be supplied together`,
+    );
+  }
+}
+
+function calendarMonth(
+  value: unknown,
+): { month: string; from: string; to: string } | null {
+  if (value === undefined || value === null || value === "") return null;
+  const bad = () => new XeroReceivablesReadError("month must be YYYY-MM");
+  if (typeof value !== "string" || !/^(\d{4})-(\d{2})$/.test(value)) {
+    throw bad();
+  }
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  if (month < 1 || month > 12) throw bad();
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const mm = String(month).padStart(2, "0");
+  return {
+    month: `${year}-${mm}`,
+    from: `${year}-${mm}-01`,
+    to: `${year}-${mm}-${String(last).padStart(2, "0")}`,
+  };
+}
+
+function cellText(cell: RawRecord): string | null {
+  if (typeof cell.Value === "string") return cell.Value;
+  if (typeof cell.Value === "number" && Number.isFinite(cell.Value)) {
+    return String(cell.Value);
+  }
+  if (cell.Value === undefined || cell.Value === null) return null;
+  throw invalidReport("Xero report cell value is invalid");
+}
+
+function amountOf(value: string | null): number | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const paren = trimmed.match(/^\((.+)\)$/);
+  const bare = (paren ? paren[1] : trimmed).trim().replace(/,/g, "");
+  if (!/^-?\d+(?:\.\d+)?$/.test(bare)) return null;
+  const amount = Number(bare);
+  if (!Number.isFinite(amount)) return null;
+  return paren ? -Math.abs(amount) : amount;
+}
+
+function cellAttributes(cell: RawRecord): Array<{ id: string; value: string }> {
+  if (cell.Attributes === undefined || cell.Attributes === null) return [];
+  if (!Array.isArray(cell.Attributes)) {
+    throw invalidReport("Xero report cell attributes are invalid");
+  }
+  return cell.Attributes.map((attr) => {
+    if (
+      !rawRecord(attr) || typeof attr.Id !== "string" ||
+      typeof attr.Value !== "string"
+    ) {
+      throw invalidReport("Xero report cell attributes are invalid");
+    }
+    return {
+      id: attr.Id,
+      value: UUID.test(attr.Value) ? attr.Value.toLowerCase() : attr.Value,
+    };
+  });
+}
+
+function lineCells(node: RawRecord): ReportCell[] {
+  if (!Array.isArray(node.Cells) || !node.Cells.every(rawRecord)) {
+    throw invalidReport("Xero report row cells are invalid");
+  }
+  return node.Cells.map((cell) => {
+    const value = cellText(cell);
+    return { value, amount: amountOf(value), attributes: cellAttributes(cell) };
+  });
+}
+
+function headerValues(node: RawRecord): string[] {
+  if (!Array.isArray(node.Cells) || !node.Cells.every(rawRecord)) {
+    throw invalidReport("Xero report header is invalid");
+  }
+  return node.Cells.map((cell) => cellText(cell) ?? "");
+}
+
+function childRows(node: RawRecord): RawRecord[] {
+  if (node.Rows === undefined || node.Rows === null) return [];
+  if (!Array.isArray(node.Rows) || !node.Rows.every(rawRecord)) {
+    throw invalidReport("Xero report rows are invalid");
+  }
+  return node.Rows;
+}
+
+function parseReportGrid(
+  report: RawRecord,
+): { columns: string[]; sections: ReportSection[] } {
+  const columns: string[] = [];
+  const sections: ReportSection[] = [];
+  const consume = (
+    nodes: RawRecord[],
+    title: string | null,
+    isSection: boolean,
+  ) => {
+    const rows: ReportLine[] = [];
+    const children: RawRecord[] = [];
+    for (const node of nodes) {
+      if (node.RowType === "Header") {
+        if (columns.length === 0) columns.push(...headerValues(node));
+        continue;
+      }
+      if (node.RowType === "Section") {
+        children.push(node);
+        continue;
+      }
+      if (node.RowType === "Row" || node.RowType === "SummaryRow") {
+        rows.push({ row_type: node.RowType, cells: lineCells(node) });
+        continue;
+      }
+      throw invalidReport("Xero report contains an unsupported row");
+    }
+    if (rows.length || (isSection && title)) sections.push({ title, rows });
+    for (const child of children) {
+      const childTitle = typeof child.Title === "string" && child.Title !== ""
+        ? child.Title
+        : null;
+      consume(childRows(child), childTitle, true);
+    }
+  };
+  consume(childRows(report), null, false);
+  return { columns, sections };
+}
+
+function reportTitles(report: RawRecord): Array<string | null> | null {
+  if (report.ReportTitles === undefined || report.ReportTitles === null) {
+    return null;
+  }
+  if (!Array.isArray(report.ReportTitles)) {
+    throw invalidReport("Xero report titles are invalid");
+  }
+  return report.ReportTitles.map((title) => {
+    if (title === null) return null;
+    if (typeof title !== "string") {
+      throw invalidReport("Xero report titles are invalid");
+    }
+    return title;
+  });
+}
+
+function reportText(report: RawRecord, field: string): string | null {
+  const value = report[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw invalidReport(`Xero report ${field} is invalid`);
+  }
+  return value;
+}
+
+function oneReport(result: unknown, expected: string): RawRecord {
+  const reports = records(result, "Reports");
+  if (reports.length !== 1) {
+    throw invalidReport(`Xero did not return the ${expected} report`);
+  }
+  const report = reports[0];
+  const id = typeof report.ReportID === "string" ? report.ReportID : null;
+  const type = typeof report.ReportType === "string" ? report.ReportType : null;
+  if ((id && type && id !== type) || (id ?? type) !== expected) {
+    throw invalidReport(`Xero did not return the ${expected} report`);
+  }
+  return report;
+}
+
+function reportResponse(
+  report: RawRecord,
+  provenance: Awaited<ReturnType<typeof providerRead>>["provenance"],
+  filters: Record<string, unknown>,
+  coverage: { source: string; note: string },
+) {
+  const grid = parseReportGrid(report);
+  const id = typeof report.ReportID === "string"
+    ? report.ReportID
+    : report.ReportType;
+  return {
+    ok: true as const,
+    report: {
+      id,
+      name: reportText(report, "ReportName"),
+      date: reportText(report, "ReportDate"),
+      titles: reportTitles(report),
+      columns: grid.columns,
+    },
+    sections: grid.sections,
+    filters,
+    provenance,
+    coverage,
+  };
+}
+
+export async function readXeroProfitAndLoss(
+  client: unknown,
+  params: Params,
+  deps: ReadDeps,
+) {
+  validateKeys(params, [
+    "month",
+    "date_from",
+    "date_to",
+    "periods",
+    "timeframe",
+    "tracking_category_id",
+    "tracking_option_id",
+    "tracking_category_id_2",
+    "tracking_option_id_2",
+  ]);
+  const month = calendarMonth(read(params, "month"));
+  const explicitFrom = isoDate(read(params, "date_from"), "date_from");
+  const explicitTo = isoDate(read(params, "date_to"), "date_to");
+  if (month && (explicitFrom || explicitTo)) {
+    throw new XeroReceivablesReadError(
+      "month cannot be combined with date_from or date_to",
+    );
+  }
+  const dateFrom = month?.from ?? explicitFrom;
+  const dateTo = month?.to ?? explicitTo;
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    throw new XeroReceivablesReadError("date_from must not be after date_to");
+  }
+  const periods = comparisonPeriods(read(params, "periods"));
+  const timeframe = reportTimeframe(read(params, "timeframe"));
+  requirePeriodPair(periods, timeframe);
+  const trackingCategoryId = optionalUuid(
+    read(params, "tracking_category_id"),
+    "tracking_category_id",
+  );
+  const trackingOptionId = optionalUuid(
+    read(params, "tracking_option_id"),
+    "tracking_option_id",
+  );
+  trackingPair(
+    trackingCategoryId,
+    trackingOptionId,
+    "tracking_category_id",
+    "tracking_option_id",
+  );
+  const trackingCategoryId2 = optionalUuid(
+    read(params, "tracking_category_id_2"),
+    "tracking_category_id_2",
+  );
+  const trackingOptionId2 = optionalUuid(
+    read(params, "tracking_option_id_2"),
+    "tracking_option_id_2",
+  );
+  trackingPair(
+    trackingCategoryId2,
+    trackingOptionId2,
+    "tracking_category_id_2",
+    "tracking_option_id_2",
+  );
+  const query: Record<string, string> = {};
+  if (dateFrom) query.fromDate = dateFrom;
+  if (dateTo) query.toDate = dateTo;
+  if (periods !== null && timeframe) {
+    query.periods = String(periods);
+    query.timeframe = timeframe;
+  }
+  if (trackingCategoryId && trackingOptionId) {
+    query.trackingCategoryID = trackingCategoryId;
+    query.trackingOptionID = trackingOptionId;
+  }
+  if (trackingCategoryId2 && trackingOptionId2) {
+    query.trackingCategoryID2 = trackingCategoryId2;
+    query.trackingOptionID2 = trackingOptionId2;
+  }
+  const { result, provenance } = await providerRead(
+    client,
+    deps,
+    "/Reports/ProfitAndLoss",
+    query,
+  );
+  return reportResponse(
+    oneReport(result, "ProfitAndLoss"),
+    provenance,
+    {
+      month: month?.month ?? null,
+      date_from: dateFrom,
+      date_to: dateTo,
+      periods,
+      timeframe,
+      tracking_category_id: trackingCategoryId,
+      tracking_option_id: trackingOptionId,
+      tracking_category_id_2: trackingCategoryId2,
+      tracking_option_id_2: trackingOptionId2,
+    },
+    {
+      source: "xero_reports_profit_and_loss",
+      note:
+        "month is one calendar month and is sent as fromDate and toDate. periods and timeframe add comparison columns and must be sent together; periods is 1 to 11. A tracking category and option filter the report to that one option. Xero does not return one column per option in this call. A blank cell is null, not zero. Figures are the report's own amounts.",
+    },
+  );
+}
+
+async function readPointInTimeReport(
+  client: unknown,
+  params: Params,
+  deps: ReadDeps,
+  path: string,
+  expected: string,
+  source: string,
+  note: string,
+) {
+  validateKeys(params, ["date"]);
+  const date = isoDate(read(params, "date"), "date");
+  const query: Record<string, string> = {};
+  if (date) query.date = date;
+  const { result, provenance } = await providerRead(client, deps, path, query);
+  return reportResponse(oneReport(result, expected), provenance, { date }, {
+    source,
+    note,
+  });
+}
+
+export function readXeroBalanceSheet(
+  client: unknown,
+  params: Params,
+  deps: ReadDeps,
+) {
+  return readPointInTimeReport(
+    client,
+    params,
+    deps,
+    "/Reports/BalanceSheet",
+    "BalanceSheet",
+    "xero_reports_balance_sheet",
+    "date is the as-of date. Omitted, Xero uses its own default date. A blank cell is null, not zero.",
+  );
+}
+
+export function readXeroTrialBalance(
+  client: unknown,
+  params: Params,
+  deps: ReadDeps,
+) {
+  return readPointInTimeReport(
+    client,
+    params,
+    deps,
+    "/Reports/TrialBalance",
+    "TrialBalance",
+    "xero_reports_trial_balance",
+    "date is the as-of date. Omitted, Xero uses its own default date. A blank cell is null, not zero. Debit and credit stay in the columns Xero returned.",
+  );
+}
+
+export async function readXeroAgedPayables(
+  client: unknown,
+  params: Params,
+  deps: ReadDeps,
+) {
+  validateKeys(params, ["contact_id", "date"]);
+  const contactId = uuid(read(params, "contact_id"), "contact_id");
+  const date = isoDate(read(params, "date"), "date");
+  const query: Record<string, string> = { contactId };
+  if (date) query.date = date;
+  const { result, provenance } = await providerRead(
+    client,
+    deps,
+    "/Reports/AgedPayablesByContact",
+    query,
+  );
+  return reportResponse(
+    oneReport(result, "AgedPayablesByContact"),
+    provenance,
+    { contact_id: contactId, date },
+    {
+      source: "xero_reports_aged_payables_by_contact",
+      note:
+        "One contact per call, Xero's Aged Payables By Contact report. contact_id is that contact. date is the as-of date; omitted, Xero uses its own default. Invoice identity is the invoiceID attribute on a cell. A blank cell is null, not zero. This is not a list of every supplier.",
+    },
+  );
+}
