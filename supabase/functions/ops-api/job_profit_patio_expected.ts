@@ -38,6 +38,13 @@
 // - A lane's variance is shown only when the job's actual for that lane is
 //   complete: an unlinked, ordered-not-billed or emailed-not-placed material,
 //   or missing or unapproved labour, would read as a false saving.
+// - An installer bill no recorded person confirmed (JP-12, #1107
+//   20261020181800; person rule 20261021173000) holds BOTH lanes open: the
+//   engine leaves its labour lines and any materials lines on the same bill
+//   out of actual cost and flags installer_bill_unconfirmed. An engine without
+//   JP-12 never raises that flag, so its absence is not known, never
+//   confirmed: the caller says whether the rule is there (installerCheck),
+//   and this reader gives no variance until it is. It must land after #1107.
 // The record carries no commission, so the expected profit is before
 // commission; the actual side carries commission as its own lane.
 
@@ -260,6 +267,7 @@ export const MATERIALS_ACTUAL_OPEN = [
   "unclassified_lines",
   "incomplete_invoice_lines",
   "xero_project_exceeds_line_costs",
+  "installer_bill_unconfirmed",
 ];
 export const LABOUR_ACTUAL_OPEN = [
   "no_cost_linked",
@@ -268,7 +276,13 @@ export const LABOUR_ACTUAL_OPEN = [
   "unclassified_lines",
   "incomplete_invoice_lines",
   "xero_project_exceeds_line_costs",
+  "installer_bill_unconfirmed",
 ];
+
+// The JP-12 rule's own function (#1107, 20261020181800). Present means the
+// engine flags an unconfirmed installer bill; absent or unreadable means it
+// cannot, so a missing flag says nothing.
+export const INSTALLER_RULE_PROBE = "job_cost_installer_bill";
 
 const ACCEPTED_SOURCES = ["frozen_at_acceptance", "accepted_quote_revision"];
 
@@ -277,13 +291,16 @@ const ACCEPTED_SOURCES = ["frozen_at_acceptance", "accepted_quote_revision"];
  * when neither the last save nor the frozen revision is a patio scoper 2.0
  * record. `current` is the projected jobs read (PATIO_EXPECTED_SCOPE_PROJECTION),
  * `frozen` the job's frozen scope_revisions row (PATIO_FROZEN_REVISION_COLUMNS),
- * `row` its v_job_profit row.
+ * `row` its v_job_profit row. `installerCheck` is true only when the engine
+ * applies JP-12 (INSTALLER_RULE_PROBE answered); anything else holds both
+ * lanes open.
  */
 export function patioExpectedVersusActual(
   current: Record<string, unknown> | null,
   frozen: Record<string, unknown> | null,
   row: Record<string, unknown>,
   lastSave: LastSaveHashes | null = null,
+  installerCheck: boolean | null = null,
 ): PatioExpectedVersusActual | null {
   const flags: string[] = [];
 
@@ -413,6 +430,8 @@ export function patioExpectedVersusActual(
     ? (row.completeness as unknown[]).map(String)
     : [];
   if (!completenessKnown) flags.push("actual_completeness_unreadable");
+  const installerKnown = installerCheck === true;
+  if (!installerKnown) flags.push("installer_confirmation_not_known");
   const lane = (
     expected: number | null,
     actualRaw: unknown,
@@ -420,7 +439,7 @@ export function patioExpectedVersusActual(
   ): PatioLane => {
     const actual = actualNum(actualRaw);
     const actualComplete = actual !== null && completenessKnown &&
-      !open.some((f) => completeness.includes(f));
+      installerKnown && !open.some((f) => completeness.includes(f));
     return {
       expected_ex: expected,
       actual_ex: actual,

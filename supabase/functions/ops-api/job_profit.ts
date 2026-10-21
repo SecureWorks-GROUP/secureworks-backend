@@ -17,6 +17,7 @@
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 import {
+  INSTALLER_RULE_PROBE,
   lastSaveHashes,
   PATIO_EXPECTED_SCOPE_PROJECTION,
   PATIO_FROZEN_REVISION_COLUMNS,
@@ -480,7 +481,20 @@ async function patioExpectedPart(
       .eq("id", summary.job_id).limit(1);
     if (!full.error) hashes = await lastSaveHashes(full.data?.[0] ?? null);
   }
-  const result = patioExpectedVersusActual(cur, frz, summary, hashes);
+  // JP-12: only an engine that has the installer rule can say an installer
+  // bill was confirmed. Asked for a patio job only; an error is not known.
+  let installerCheck: boolean | null = null;
+  if (frz || cur?.ptool === "patio-scoper") {
+    const probe = await client.rpc(INSTALLER_RULE_PROBE, { p_line_items: [] });
+    installerCheck = !probe.error && probe.data === false ? true : null;
+  }
+  const result = patioExpectedVersusActual(
+    cur,
+    frz,
+    summary,
+    hashes,
+    installerCheck,
+  );
   return result ? { patio_expected: result } : {};
 }
 

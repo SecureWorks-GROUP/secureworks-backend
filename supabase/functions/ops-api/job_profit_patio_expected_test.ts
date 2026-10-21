@@ -75,8 +75,10 @@ function pe(
   frz: Record<string, unknown> | null,
   r: Record<string, unknown>,
   hashes: LastSaveHashes | null = SAME,
+  // an engine with JP-12 (#1107)
+  installerCheck: boolean | null = true,
 ) {
-  return patioExpectedVersusActual(cur, frz, r, hashes);
+  return patioExpectedVersusActual(cur, frz, r, hashes, installerCheck);
 }
 
 // The job's frozen scope_revisions row: its id is the server's, never the
@@ -452,10 +454,21 @@ Deno.test("patio expected: anything but a patio scoper record is not read", () =
 function fake(
   tables: Record<string, any[]>,
   errors: Record<string, string> = {},
+  // the JP-12 probe: false is the rule's answer for no lines (#1107 applied)
+  probe: { data: unknown; error: { message: string } | null } = {
+    data: false,
+    error: null,
+  },
 ) {
   const calls: Array<{ table: string; select: unknown; eq: unknown[][] }> = [];
+  const rpcs: Array<{ fn: string; args: unknown }> = [];
   return {
     calls,
+    rpcs,
+    rpc(fn: string, args: unknown) {
+      rpcs.push({ fn, args });
+      return Promise.resolve(probe);
+    },
     from(table: string) {
       const call = { table, select: null as unknown, eq: [] as unknown[][] };
       calls.push(call);
@@ -504,6 +517,12 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
     PATIO_LAST_SAVE_HASH_COLUMNS,
   ]);
   for (const r of jobsReads) assertEquals(r.eq, [["id", JOB]]);
+  assertEquals(c.rpcs, [{
+    fn: "job_cost_installer_bill",
+    args: {
+      p_line_items: [],
+    },
+  }]);
   const frozenRead = c.calls.find((x) => x.table === "scope_revisions")!;
   assertEquals(frozenRead.select, PATIO_FROZEN_REVISION_COLUMNS);
   assertEquals(frozenRead.eq, [["job_id", JOB], ["status", "frozen"], [
@@ -601,6 +620,43 @@ Deno.test("job_profit: a job with no frozen patio row makes no whole-scope read"
   assertEquals(c.calls.filter((x) => x.table === "jobs").length, 1);
 });
 
+Deno.test("job_profit: a job that is not a patio record asks no installer probe", async () => {
+  const c = fake({ v_job_profit: [row()], jobs: [{ id: JOB, ptool: "x" }] });
+  await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(c.rpcs, []);
+});
+
+Deno.test("job_profit: an engine without the installer rule holds both patio lanes", async () => {
+  const saved = { scope_json: record(), pricing_json: pricing() };
+  const h = await lastSaveHashes(saved);
+  for (
+    const probe of [
+      { data: null, error: { message: "function does not exist" } },
+      { data: true, error: null },
+      { data: null, error: null },
+    ]
+  ) {
+    const c = fake(
+      {
+        v_job_profit: [row()],
+        jobs: [{ id: JOB, ...current(), ...saved }],
+        scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
+      },
+      {},
+      probe,
+    );
+    const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
+    assertEquals(out.status, 200);
+    const p = (out.body as any).patio_expected;
+    assertEquals(p.lanes.labour.variance_ex, null, JSON.stringify(probe));
+    assertEquals(p.lanes.materials.variance_ex, null, JSON.stringify(probe));
+    assert(p.flags.includes("installer_confirmation_not_known"));
+    assertEquals(p.status, "incomplete");
+    // the engine's own figures still pass through
+    assertEquals((out.body as any).job.profit_ex, 2450);
+  }
+});
+
 // Pinned literally: removing a flag from either list fails here.
 const MATERIALS_OPEN_PINNED = [
   "no_cost_linked",
@@ -611,6 +667,7 @@ const MATERIALS_OPEN_PINNED = [
   "unclassified_lines",
   "incomplete_invoice_lines",
   "xero_project_exceeds_line_costs",
+  "installer_bill_unconfirmed",
 ];
 const LABOUR_OPEN_PINNED = [
   "no_cost_linked",
@@ -619,6 +676,7 @@ const LABOUR_OPEN_PINNED = [
   "unclassified_lines",
   "incomplete_invoice_lines",
   "xero_project_exceeds_line_costs",
+  "installer_bill_unconfirmed",
 ];
 
 Deno.test("patio expected: every open flag holds its lane (lists pinned)", () => {
@@ -654,4 +712,40 @@ Deno.test("patio expected: an unreadable completeness list holds both lanes open
     assert(out.flags.includes("actual_completeness_unreadable"), String(c));
     assertEquals(out.status, "incomplete", String(c));
   }
+});
+
+// Codex review of #1122 at f2a11e61 (21 Oct 2026): confirmed labour beside an
+// installer bill no person confirmed must not read as a complete lane or a
+// saving. The engine (#1107) leaves the bill out of actual cost, its labour
+// lines and any materials lines on the same bill alike, and flags the job.
+Deno.test("patio expected: an unconfirmed installer bill holds both lanes open beside confirmed labour", () => {
+  const out = pe(
+    current(),
+    frozen(),
+    row({
+      actual_labour_ex: 1800,
+      completeness: ["installer_bill_unconfirmed"],
+    }),
+  )!;
+  assertEquals(out.lanes.labour.actual_ex, 1800);
+  assertEquals(out.lanes.labour.actual_complete, false);
+  assertEquals(out.lanes.labour.variance_ex, null);
+  assertEquals(out.lanes.materials.actual_complete, false);
+  assertEquals(out.lanes.materials.variance_ex, null);
+  assert(out.flags.includes("actual_labour_open"));
+  assert(out.flags.includes("actual_materials_open"));
+  assertEquals(out.status, "incomplete");
+});
+
+Deno.test("patio expected: without the installer rule a missing flag is not known, never confirmed", () => {
+  for (const check of [null, false]) {
+    const out = pe(current(), frozen(), row(), SAME, check)!;
+    assertEquals(out.lanes.labour.variance_ex, null, String(check));
+    assertEquals(out.lanes.materials.variance_ex, null, String(check));
+    assert(out.flags.includes("installer_confirmation_not_known"));
+    assertEquals(out.status, "incomplete", String(check));
+  }
+  const ok = pe(current(), frozen(), row())!;
+  assert(!ok.flags.includes("installer_confirmation_not_known"));
+  assertEquals(ok.status, "complete");
 });
