@@ -394,7 +394,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#293C46;backg
 <div class="section">
   <div class="section-title">Client Acceptance</div>
   <div class="sig-block">
-    ${signatureTag}`
+    ${signatureTag}
     <div class="sig-details">
       ${signature.signature_name ? `<div class="sig-name">${esc(signature.signature_name)}</div>` : ''}
       <div>Accepted: ${sigDateFormatted}</div>
@@ -784,6 +784,8 @@ serve(async (req: Request) => {
     let emailSent = false
     if (body.send_email && job.ghl_contact_id) {
       try {
+        const clientFirst = (job.client_name || '').split(' ')[0] || 'there'
+        const jobType = (job.type || 'patio').charAt(0).toUpperCase() + (job.type || 'patio').slice(1)
         const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_email`
         const emailResp = await fetch(ghlUrl, {
           method: 'POST',
