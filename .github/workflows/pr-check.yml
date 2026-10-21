@@ -430,6 +430,8 @@ jobs:
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/project_job_link_test.ts \
             supabase/functions/xero-sync/bill_prematch_test.ts \
+            supabase/functions/xero-sync/materials_ingest_test.ts \
+            supabase/functions/ops-api/materials_recon_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \

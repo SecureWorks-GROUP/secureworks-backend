@@ -21,10 +21,23 @@
 --            with 100 overhead: J3 carries 400, not 500.
 --   B-WHOLE  materials bill placed whole on J1 by the reference path: a split
 --            is refused, and a second whole row is refused.
---   B-301    installer bill on account 301 placed whole on J3 by Xero: labour.
+--   B-301    installer bill on account 301 linked to J3 by Xero's reference:
+--            not confirmed, so not actual and J3 is flagged (JP-12); once a
+--            person places it, labour.
 --   CA-DEAD  a cancelled job: a split onto it is refused.
 --   Credit share counts credit notes applied, never prepayments.
 --   A voided bill with allocation rows is never balanced.
+--
+-- JP-12 gap fix (21 Oct 2026): a person confirms each installer bill.
+--   CA-P1    patio job, invoiced 7,000 ex. B-PMAT materials 2,000 placed by a
+--            person. B-PINST installer bill (301) 600 ex linked by Xero's
+--            reference and still awaiting a person: no profit, no margin,
+--            flag installer_bill_unconfirmed, labour 0. A person places it:
+--            labour 600, profit 4,400, margin published.
+--   B-PNJR   installer bill on CA-P1 that a person marked not job related:
+--            never actual, flags nothing.
+--   B-PAUTO  installer labour placed on CA-P2 by the reference path (not a
+--            person): unconfirmed, CA-P2 flagged.
 
 \set ON_ERROR_STOP on
 
@@ -244,8 +257,28 @@ BEGIN
   IF r.own IS DISTINCT FROM 400::numeric THEN
     RAISE EXCEPTION 'cfo18 own job: J3 carries % from B-OWN; expected 400 (overhead ignored)', r.own;
   END IF;
-  IF r.l301 IS DISTINCT FROM 100::numeric THEN
-    RAISE EXCEPTION 'cfo18 301: J3 labour from B-301 is %; expected 100', r.l301;
+  -- JP-12: linked by Xero's reference only, so not yet labour on J3.
+  IF r.l301 IS NOT NULL THEN
+    RAISE EXCEPTION 'cfo18 301: J3 counts % of B-301 before a person confirmed it', r.l301;
+  END IF;
+  SELECT count(*) AS n, sum(amount_ex) AS ex, bool_and(NOT is_actual AND confidence = 'awaiting_confirmation') AS held
+    INTO r FROM public.v_job_cost_events
+   WHERE job_id = 'ca000000-0000-4000-8000-000000000003' AND document_id = 'B-301' AND source = 'installer_bill_unconfirmed';
+  IF r.n <> 1 OR r.ex <> 100 OR NOT r.held THEN
+    RAISE EXCEPTION 'cfo18 301: unconfirmed row % % %', r.n, r.ex, r.held;
+  END IF;
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CA-J3';
+  IF r.margin_ok OR NOT ('installer_bill_unconfirmed' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'cfo18 301: J3 margin_ok %, completeness %', r.margin_ok, r.completeness;
+  END IF;
+  -- A person places it on J3: labour.
+  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
+  VALUES ('B-301', 'ca000000-0000-4000-8000-000000000003', 'CA-J3', 'labour', 'actual', 100, 'high_manual', 'manual_queue', '2026-08-28');
+  SELECT sum(amount_ex) FILTER (WHERE is_actual AND document_id = 'B-301' AND lane = 'labour') AS l301,
+         count(*) FILTER (WHERE source = 'installer_bill_unconfirmed') AS held
+    INTO r FROM public.v_job_cost_events WHERE job_id = 'ca000000-0000-4000-8000-000000000003';
+  IF r.l301 IS DISTINCT FROM 100::numeric OR r.held <> 0 THEN
+    RAISE EXCEPTION 'cfo18 301: after a person placed it, J3 labour %, held rows %; expected 100, 0', r.l301, r.held;
   END IF;
 
   -- Credit notes applied decide; prepayments and overpayments are not credit.
@@ -281,9 +314,106 @@ BEGIN
   END IF;
 END $$;
 
+-- ── JP-12: an installer bill counts only once a person confirms it ─────────
+INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
+  ('ca000000-0000-4000-8000-000000000011', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'CA-P1', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z'),
+  ('ca000000-0000-4000-8000-000000000012', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'CA-P2', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z');
+
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'S-P1', 'INV-CA-P1', 'ACCREC', 'AUTHORISED', 'CA Customer', 7000, 7700, '2026-08-20',
+   '[{"Description": "Patio", "AccountCode": "200", "LineAmount": 7000, "TaxAmount": 700}]',
+   '{"LineAmountTypes": "Exclusive"}', 'ca000000-0000-4000-8000-000000000011'),
+  ('00000000-0000-0000-0000-000000000001', 'B-PMAT', 'CA-50', 'ACCPAY', 'AUTHORISED', 'CA Steel', 2000, 2200, '2026-08-21',
+   '[{"Description": "Roof sheets", "AccountCode": "310", "LineAmount": 2000, "TaxAmount": 200}]',
+   '{"LineAmountTypes": "Exclusive"}', 'ca000000-0000-4000-8000-000000000011'),
+  ('00000000-0000-0000-0000-000000000001', 'B-PINST', 'CA-51', 'ACCPAY', 'AUTHORISED', 'CA Installer', 600, 660, '2026-08-22',
+   '[{"Description": "Patio install", "AccountCode": "301", "LineAmount": 600, "TaxAmount": 60}]',
+   '{"LineAmountTypes": "Exclusive"}', 'ca000000-0000-4000-8000-000000000011'),
+  ('00000000-0000-0000-0000-000000000001', 'B-PNJR', 'CA-52', 'ACCPAY', 'AUTHORISED', 'CA Installer', 250, 275, '2026-08-22',
+   '[{"Description": "Yard work", "AccountCode": "306", "LineAmount": 250, "TaxAmount": 25}]',
+   '{"LineAmountTypes": "Exclusive"}', 'ca000000-0000-4000-8000-000000000011'),
+  ('00000000-0000-0000-0000-000000000001', 'B-PAUTO', 'CA-53', 'ACCPAY', 'AUTHORISED', 'CA Installer', 300, 330, '2026-08-22',
+   '[{"Description": "Install", "AccountCode": "306", "LineAmount": 300, "TaxAmount": 30}]',
+   '{"LineAmountTypes": "Exclusive"}', NULL);
+
+INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status) VALUES
+  ('B-PMAT', 'CA-50', 'CA Steel', 2000, 2200, '2026-08-21', 'assigned'),
+  ('B-PINST', 'CA-51', 'CA Installer', 600, 660, '2026-08-22', 'open'),
+  ('B-PNJR', 'CA-52', 'CA Installer', 250, 275, '2026-08-22', 'not_job_related');
+
+INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date) VALUES
+  ('B-PMAT', 'ca000000-0000-4000-8000-000000000011', 'CA-P1', 'materials', 'actual', 2000, 'high_manual', 'manual_queue', '2026-08-21'),
+  ('B-PAUTO', 'ca000000-0000-4000-8000-000000000012', 'CA-P2', 'labour', 'actual', 300, 'high', 'xero_ref_link', '2026-08-22');
+
+DO $$
+DECLARE r record;
+BEGIN
+  -- Awaiting a person: no profit, no margin, flagged, labour 0, amount kept.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CA-P1';
+  IF r.margin_ok OR r.profit_ex IS NOT NULL OR r.margin_pct IS NOT NULL
+     OR r.actual_labour_ex <> 0 OR r.actual_materials_ex <> 2000
+     OR r.cost_flag <> 'installer_bill_unconfirmed'
+     OR NOT ('installer_bill_unconfirmed' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'jp12 P1 unconfirmed: margin_ok %, profit %, labour %, materials %, flag %, completeness %',
+      r.margin_ok, r.profit_ex, r.actual_labour_ex, r.actual_materials_ex, r.cost_flag, r.completeness;
+  END IF;
+  SELECT count(*) AS n, sum(amount_ex) AS ex, bool_and(NOT is_actual) AS held
+    INTO r FROM public.v_job_cost_events
+   WHERE job_id = 'ca000000-0000-4000-8000-000000000011' AND document_id = 'B-PINST'
+     AND source = 'installer_bill_unconfirmed' AND confidence = 'awaiting_confirmation';
+  IF r.n <> 1 OR r.ex <> 600 OR NOT r.held THEN
+    RAISE EXCEPTION 'jp12 P1: B-PINST row % % %', r.n, r.ex, r.held;
+  END IF;
+  -- Marked not job related by a person: never actual, never flagged.
+  SELECT count(*) AS n, bool_and(NOT is_actual) AS out
+    INTO r FROM public.v_job_cost_events
+   WHERE job_id = 'ca000000-0000-4000-8000-000000000011' AND document_id = 'B-PNJR'
+     AND source = 'installer_bill_not_job_related';
+  IF r.n <> 1 OR NOT r.out THEN
+    RAISE EXCEPTION 'jp12 P1: B-PNJR row % %', r.n, r.out;
+  END IF;
+  -- Placed by the reference path, not a person: unconfirmed.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CA-P2';
+  IF r.margin_ok OR r.actual_labour_ex <> 0 OR NOT ('installer_bill_unconfirmed' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'jp12 P2: machine-placed installer labour counted (margin_ok %, labour %, completeness %)',
+      r.margin_ok, r.actual_labour_ex, r.completeness;
+  END IF;
+  -- The balance view never calls a machine-placed installer bill allocated
+  -- (verifier C8: an automatic xero_ref_link fact read as balanced).
+  SELECT * INTO r FROM public.v_bill_allocation_balance WHERE xero_invoice_id = 'B-PAUTO';
+  IF r.balanced OR NOT r.installer_unconfirmed OR r.remainder_ex <> 0 THEN
+    RAISE EXCEPTION 'jp12 balance: B-PAUTO balanced %, installer_unconfirmed %, remainder %',
+      r.balanced, r.installer_unconfirmed, r.remainder_ex;
+  END IF;
+  SELECT * INTO r FROM public.v_bill_allocation_balance WHERE xero_invoice_id = 'B-PMAT';
+  IF NOT r.balanced OR r.installer_unconfirmed THEN
+    RAISE EXCEPTION 'jp12 balance: materials bill B-PMAT balanced %, installer_unconfirmed %', r.balanced, r.installer_unconfirmed;
+  END IF;
+
+  -- A person places B-PINST on CA-P1: labour 600, profit 4,400, margin published.
+  INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date)
+  VALUES ('B-PINST', 'ca000000-0000-4000-8000-000000000011', 'CA-P1', 'labour', 'actual', 600, 'high_manual', 'manual_queue', '2026-08-22');
+  UPDATE public.materials_reconciliation_queue SET status = 'assigned' WHERE xero_invoice_id = 'B-PINST';
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CA-P1';
+  IF NOT r.margin_ok OR r.profit_ex <> 4400 OR r.actual_labour_ex <> 600 OR r.cost_flag <> 'ok'
+     OR 'installer_bill_unconfirmed' = ANY (COALESCE(r.completeness, '{}'::text[])) THEN
+    RAISE EXCEPTION 'jp12 P1 confirmed: margin_ok %, profit %, labour %, flag %, completeness %',
+      r.margin_ok, r.profit_ex, r.actual_labour_ex, r.cost_flag, r.completeness;
+  END IF;
+  SELECT * INTO r FROM public.v_bill_allocation_balance WHERE xero_invoice_id = 'B-PINST';
+  IF NOT r.balanced OR r.installer_unconfirmed THEN
+    RAISE EXCEPTION 'jp12 balance: person-placed B-PINST balanced %, installer_unconfirmed %', r.balanced, r.installer_unconfirmed;
+  END IF;
+END $$;
+
 -- ── Grants ──────────────────────────────────────────────────────────────────
 DO $$
 BEGIN
+  IF has_function_privilege('anon', 'public.job_cost_installer_bill(jsonb)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.job_cost_installer_bill(jsonb)', 'EXECUTE')
+     OR NOT has_function_privilege('service_role', 'public.job_cost_installer_bill(jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'jp12 grants: installer helper reachable by a browser role, or not by service_role';
+  END IF;
   IF has_function_privilege('anon', 'public.allocate_bill_split(text, jsonb, numeric, text, text)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.allocate_bill_split(text, jsonb, numeric, text, text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'cfo18 grants: a browser role can split bills';
