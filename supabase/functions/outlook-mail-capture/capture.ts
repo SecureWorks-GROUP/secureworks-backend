@@ -1289,23 +1289,42 @@ async function runSource(
     const { fromMs, toMs } = env.window!;
     const h = await deps.hash(c.id);
     const posts: Array<{ post: OutlookMailItem; threadId: string }> = [];
-    for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
-      // Each post carries its whole thread (outside the window too): who our
-      // own post went to is read from it.
-      for (
-        const p of withGroupThread(
-          await deps.mail.listGroupPosts(groupId, th.id, th.topic),
-        )
-      ) {
-        const t = ms(p.receivedAt);
-        if (t === null || t < fromMs || t >= toMs) continue;
-        posts.push({ post: p, threadId: th.id });
+    // A conversation the list names but Graph answers 404 for (its threads or
+    // a thread's posts are gone) can never be read: count it and move past
+    // it, or every later run of the window fails at the same conversation.
+    // Any other fault still fails the run with the cursor before it.
+    let gone = false;
+    try {
+      for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
+        // Each post carries its whole thread (outside the window too): who our
+        // own post went to is read from it.
+        let threadPosts: OutlookMailItem[];
+        try {
+          threadPosts = await deps.mail.listGroupPosts(
+            groupId,
+            th.id,
+            th.topic,
+          );
+        } catch (e) {
+          if (safeCode(e) !== "graph_404") throw e;
+          counts.threads_gone = (counts.threads_gone ?? 0) + 1;
+          continue;
+        }
+        for (const p of withGroupThread(threadPosts)) {
+          const t = ms(p.receivedAt);
+          if (t === null || t < fromMs || t >= toMs) continue;
+          posts.push({ post: p, threadId: th.id });
+        }
       }
+    } catch (e) {
+      if (safeCode(e) !== "graph_404") throw e;
+      gone = true;
+      counts.conversations_gone = (counts.conversations_gone ?? 0) + 1;
     }
     posts.sort((a, b) => byTimeThenId(a.post, b.post));
     const after = walk!.conv === h ? ms(walk!.conv_after) : null;
     const doneAt = new Set(after !== null ? walk!.conv_ids : []);
-    for (const { post, threadId } of posts) {
+    for (const { post, threadId } of gone ? [] : posts) {
       const t = ms(post.receivedAt)!;
       const ph = await deps.hash(post.graphId);
       if (after !== null && (t < after || (t === after && doneAt.has(ph)))) {
@@ -1329,6 +1348,9 @@ async function runSource(
           ? [...walk!.conv_ids, ph].slice(-POLICY.idsAtEndMax)
           : [ph],
       };
+      // A long conversation saves its cut point as it goes, so a worker
+      // stopped inside it (abandoned) hands on the posts it already saved.
+      await checkpoint();
     }
     const before = ms(walk!.before);
     walk = {
