@@ -14,6 +14,8 @@
 // - scope_items gets the builder's lines and agreed_labour_ex the quote's own
 //   labour figure. When the quote has none, agreed_labour_ex stays empty for
 //   the approver to set.
+// - The same write names the frozen scope revision the lines came from
+//   (quote_filled_scope_revision_id, 20261020120000).
 // - The same write stamps quote_filled_at, which marks the draft as the
 //   fill's own: only such a draft, never edited since (hand_edited_at, set by
 //   the database), is issued automatically (job_work_orders.ts,
@@ -35,7 +37,7 @@ const UUID_RE =
 const MAX_FILLED_SCOPE_ITEMS = 200;
 
 const FILL_WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, hand_edited_at, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, quote_filled_scope_revision_id, hand_edited_at, created_at, updated_at";
 
 export class QuoteFillError extends Error {
   constructor(
@@ -424,6 +426,13 @@ export async function fillJobWorkOrderDraftFromQuote(
   // special instructions, say), so such a draft is filled without it.
   if (!draft.hand_edited_at) {
     patch.quote_filled_at = new Date().toISOString();
+  }
+  // The revision the lines came from, on the row itself (Dispatch S6, R7;
+  // 20261020120000): also on a draft edited by hand, since its lines still
+  // come from this revision. A refill of a cleared draft may name a newer
+  // revision; the database allows the change only from a cleared draft.
+  if (quote.scope_revision_id && UUID_RE.test(quote.scope_revision_id)) {
+    patch.quote_filled_scope_revision_id = quote.scope_revision_id;
   }
   let update = client.from("work_orders").update(patch)
     .eq("id", draft.id)
