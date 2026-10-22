@@ -153,7 +153,7 @@ export function dispatchCanSuggest(
   workType: unknown,
   lineCount: number,
 ): boolean {
-  return workType === "patio" && lineCount === 0;
+  return (workType === "patio" || workType === "fencing") && lineCount === 0;
 }
 
 // ── Projections for the read's answer ───────────────────────────────────────
