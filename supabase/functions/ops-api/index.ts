@@ -180,6 +180,20 @@ import {
   type CompletionEvidence,
 } from './trade_completion_evidence.ts'
 import {
+  CLIENT_SIGNED_OFF_EVENT,
+  CLIENT_SIGNOFF_BLOCK_REASON,
+  CLIENT_SIGNOFF_NOT_HAPPY_EVENT,
+  CLIENT_SIGNOFF_NOT_RECORDED_EVENT,
+  chunkClientSignoffIds,
+  SIGNATURE_MEDIA_PHASE,
+  clientSignoffMessage,
+  clientSignoffRequired,
+  loadClientSignoffByJob,
+  loadClientSignoffSettings,
+  signoffRowCounts,
+  type ClientSignoff,
+} from './trade_client_signoff.ts'
+import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
   assembleFrozenQuoteExtractPacks,
@@ -203,6 +217,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { signatureMediaDeleteRefusal } from '../_shared/signature_media_guard.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import { findLiveJobContactForGhlContact } from '../_shared/job_contact_membership.ts'
 import {
@@ -9336,6 +9351,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })))
       // Office staff only, never a trade door: corrects a variation's amount
       // and description, keeping what the trade reported and who corrected it.
+      // Client sign-off (DSP-11): staff waive it for the client with a reason.
+      // Staff-only by the front door's default; never a trade door.
+      case 'waive_client_signoff':
+        if (req.method !== 'POST') {
+          return json({ error: 'waive_client_signoff is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await waiveClientSignoff(client, body, requestActor))
       case 'correct_work_order_variation':
         return json(await runJobWorkOrder(() => correctWorkOrderVariation(client, body, requestActor, {
           sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
@@ -11572,6 +11594,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             await assertFencingCompletionEvidence(client, [{
               id: String(woJob?.id || wo.job_id || ''),
               vertical: completionEvidenceVertical(woJob),
+              label: woJob?.job_number || null,
+            }])
+            await assertClientSignoffForInvoice(client, [{
+              id: String(woJob?.id || wo.job_id || ''),
               label: woJob?.job_number || null,
             }])
 
@@ -15806,6 +15832,13 @@ export async function _resolveWeeklyWorkOrderInvoice(
       return { id: String(job?.id || workOrder.job_id || ''), vertical: completionEvidenceVertical(job), label: job?.job_number || null }
     }).filter((j: any) => j.id),
   )
+  await assertClientSignoffForInvoice(
+    client,
+    (workOrders || []).map((workOrder: any) => {
+      const job = Array.isArray(workOrder.jobs) ? workOrder.jobs[0] : workOrder.jobs
+      return { id: String(job?.id || workOrder.job_id || ''), label: job?.job_number || null }
+    }).filter((j: any) => j.id),
+  )
 
   const requestedChargeIds = requestedBlocks.flatMap((block: any) =>
     Array.isArray(block?.crew_charge_line_ids) ? block.crew_charge_line_ids : []
@@ -16441,6 +16474,21 @@ export async function tradeWorkOrders(
       mapped[i].can_invoice = false
       mapped[i].can_add_to_weekly_invoice = false
       mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || COMPLETION_EVIDENCE_BLOCK_REASON
+    }
+  }
+  // Client sign-off (DSP-11): same rule the submit paths enforce; absent
+  // entirely while the switch is off.
+  const signoffByJob = await loadClientSignoffForJobIds(client, pageRows.map((row: any) => String(row.job_id || '')))
+  if (signoffByJob) {
+    for (let i = 0; i < mapped.length; i++) {
+      const so = signoffByJob.get(String(pageRows[i]?.job_id || ''))
+      if (!so || !so.applies) continue
+      mapped[i].client_signoff = so
+      if (!so.satisfied) {
+        mapped[i].can_invoice = false
+        mapped[i].can_add_to_weekly_invoice = false
+        mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || CLIENT_SIGNOFF_BLOCK_REASON
+      }
     }
   }
   if (retireCrewWorkOrders) {
@@ -19477,6 +19525,14 @@ async function generateWorkOrderDoc(client: any, body: any) {
   return { document_id: docId, url: publicUrl, file_name: fileName }
 }
 
+// The sign-off row's foreign key refuses the job_media delete, but only after
+// the storage file is gone, so a signature used by a sign-off is refused here,
+// before storage is touched. An unreadable check refuses too.
+async function assertSignatureMediaNotSignedOff(client: any, media: Array<{ id: string; phase?: string | null }>) {
+  const refusal = await signatureMediaDeleteRefusal(client, media)
+  if (refusal) throw new ApiError(refusal.message, refusal.status)
+}
+
 async function deleteMedia(client: any, body: any) {
   const mediaId = body.mediaId || body.media_id
   if (!mediaId) throw new Error('mediaId required')
@@ -19489,6 +19545,8 @@ async function deleteMedia(client: any, body: any) {
 
   if (fetchErr) throw fetchErr
   if (!media) throw new Error('Media not found')
+  // A client's signature on a sign-off is evidence: refuse before the file goes.
+  await assertSignatureMediaNotSignedOff(client, [media])
 
   // Delete from storage
   if (media.storage_url) {
@@ -53466,6 +53524,53 @@ async function assertFencingCompletionEvidence(
   }
 }
 
+// Client sign-off (DSP-11, trade_client_signoff.ts). Reads nothing while
+// trade_invoice_requires_client_signoff_v1 is off. Job type and completion
+// time are read here so every invoice path asks the same question.
+async function loadClientSignoffForJobIds(client: any, jobIds: string[]): Promise<Map<string, ClientSignoff> | null> {
+  // Flag first: while it is off the only extra read is the flag itself, and an
+  // unreadable flag counts as off.
+  if (!(await clientSignoffRequired(client))) return null
+  const ids = [...new Set((jobIds || []).map((id) => String(id || '')).filter(Boolean))]
+  if (ids.length === 0) return new Map()
+  const jobs: any[] = []
+  for (const chunk of chunkClientSignoffIds(ids)) {
+    const { data, error } = await client.from('jobs').select('id, type, completed_at').in('id', chunk)
+    if (error) {
+      console.error('[ops-api] client sign-off job read failed:', error.message)
+      // Unknown job type: with the flag on every job is held until the read succeeds.
+      return new Map(ids.map((id) => [id, clientSignoffUnavailable(id)]))
+    }
+    jobs.push(...(data || []))
+  }
+  const map = await loadClientSignoffByJob(client, jobs.map((j: any) => ({
+    id: String(j.id), type: String(j.type || ''), completed_at: j.completed_at || null,
+  }))) || new Map<string, ClientSignoff>()
+  // A job id the read did not return cannot be shown to be outside the gate.
+  for (const id of ids) if (!map.has(id)) map.set(id, clientSignoffUnavailable(id))
+  return map
+}
+
+function clientSignoffUnavailable(id: string): ClientSignoff {
+  return { job_id: id, applies: true, satisfied: false, current: null, missing: 'evidence_unavailable', read_failed: true }
+}
+
+async function assertClientSignoffForInvoice(
+  client: any,
+  jobs: Array<{ id: string; label?: string | null }>,
+): Promise<void> {
+  const wanted = (jobs || []).filter((j) => j && j.id)
+  if (wanted.length === 0) return
+  const map = await loadClientSignoffForJobIds(client, wanted.map((j) => j.id))
+  if (!map) return
+  for (const job of wanted) {
+    const ev = map.get(job.id) ?? clientSignoffUnavailable(job.id)
+    if (ev.applies && !ev.satisfied) {
+      throw new ApiError(clientSignoffMessage(ev, job.label || null), 422)
+    }
+  }
+}
+
 // ── Trade job completion + neighbour sign-off waiver ─────────────────────────
 // complete_my_job is the trade-scoped door to completeJob (complete_job stays a
 // staff action; the completion wizard 403'd for installers before this). For
@@ -53497,8 +53602,120 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     console.warn('[ops-api] complete_my_job invoice queue failed (non-blocking):', e instanceof Error ? e.message : e)
     invoiceQueue = { lane: null, work_orders: [], error: e instanceof Error ? e.message : String(e) }
   }
-  return { ...(result || {}), completion_evidence: ev, invoice_queue: invoiceQueue }
+  // DSP-11: record the client's on-site sign-off. Never blocks completion.
+  let clientSignoff: any = null
+  try {
+    clientSignoff = await recordOnSiteClientSignoff(client, body, tradeUser, job)
+  } catch (e) {
+    console.error('[ops-api] complete_my_job client sign-off record failed (non-blocking):', e instanceof Error ? e.message : e)
+    clientSignoff = { recorded: false, reason: 'record_failed' }
+  }
+  return { ...(result || {}), completion_evidence: ev, invoice_queue: invoiceQueue, client_signoff: clientSignoff }
 }
+
+// ── Client sign-off (DSP-11, trade_client_signoff.ts) ─────────────────────────
+// On site: the completion wizard has just stored the signature (job_media phase
+// 'signature', confirm_upload) and sends the name the client signed, the
+// rating and, from the next app release, client_happy. One append-only row in
+// job_client_signoffs; a row is written whether or not the client was happy,
+// and the job event says which. The signature must be this job's and uploaded
+// by this trade; with no stored signature nothing is recorded (client not on
+// site, blank pad), and the job waits for the office.
+const ON_SITE_SIGNATURE_WINDOW_MS = 6 * 60 * 60 * 1000
+
+async function recordOnSiteClientSignoff(client: any, body: any, tradeUser: TradeAuthContext, job: any) {
+  const signedName = String(body?.signatureName || '').replace(/\s+/g, ' ').trim()
+  if (!signedName) return { recorded: false, reason: 'no_signed_name' }
+  const sinceIso = new Date(Date.now() - ON_SITE_SIGNATURE_WINDOW_MS).toISOString()
+  let mediaQuery = client.from('job_media').select('id, created_at')
+    .eq('job_id', job.id).eq('phase', SIGNATURE_MEDIA_PHASE).eq('uploaded_by', tradeUser.id)
+  const askedId = String(body?.signature_media_id || '').trim()
+  mediaQuery = askedId ? mediaQuery.eq('id', askedId) : mediaQuery.gte('created_at', sinceIso)
+  const { data: media, error: mediaErr } = await mediaQuery.order('created_at', { ascending: false }).limit(1)
+  if (mediaErr) throw mediaErr
+  const signature = Array.isArray(media) ? media[0] : null
+  if (!signature) return { recorded: false, reason: 'no_signature' }
+  const ratingRaw = Number(body?.satisfaction_rating)
+  const rating = Number.isInteger(ratingRaw) && ratingRaw >= 1 && ratingRaw <= 5 ? ratingRaw : null
+  const happy = typeof body?.client_happy === 'boolean' ? body.client_happy : null
+  const { data: row, error: insErr } = await client.from('job_client_signoffs').insert({
+    org_id: tradeUser.orgId || null,
+    job_id: job.id,
+    method: 'on_site',
+    signed_name: signedName,
+    happy,
+    satisfaction_rating: rating,
+    signature_media_id: signature.id,
+    captured_by: tradeUser.id,
+    captured_by_actor: `user:${tradeUser.id}`,
+  }).select('id, job_id, method, signed_name, happy, satisfaction_rating, signature_media_id, waiver_reason, created_at').single()
+  if (insErr) {
+    // A lost sign-off would otherwise read as "never signed", so the failure
+    // leaves a trace for the office (ids only; job_events is readable by trades).
+    try {
+      const { error: evErr } = await client.from('job_events').insert({
+        job_id: job.id,
+        user_id: tradeUser.id,
+        event_type: CLIENT_SIGNOFF_NOT_RECORDED_EVENT,
+        detail_json: { method: 'on_site', signature_media_id: signature.id, code: String(insErr.code || '') || null },
+      })
+      if (evErr) console.error('[ops-api] client sign-off failure event write failed:', evErr.message)
+    } catch (e) { console.error('[ops-api] client sign-off failure event write threw:', e instanceof Error ? e.message : e) }
+    throw insErr
+  }
+  const { settings } = await loadClientSignoffSettings(client)
+  const counts = signoffRowCounts(row, settings)
+  // Audit is non-blocking, but PostgREST returns its error rather than throwing.
+  try {
+    const { error: evErr } = await client.from('job_events').insert({
+      job_id: job.id,
+      user_id: tradeUser.id,
+      event_type: counts ? CLIENT_SIGNED_OFF_EVENT : CLIENT_SIGNOFF_NOT_HAPPY_EVENT,
+      detail_json: { signoff_id: row.id, method: 'on_site', happy, satisfaction_rating: rating, signature_media_id: signature.id },
+    })
+    if (evErr) console.error('[ops-api] client sign-off event write failed:', evErr.message)
+  } catch (e) { console.error('[ops-api] client sign-off event write threw:', e instanceof Error ? e.message : e) }
+  return { recorded: true, signoff_id: row.id, counts }
+}
+
+// Office waiver: staff sign off for the client with a written reason (the
+// client will not respond, moved away). Names who did it; never a trade door.
+async function waiveClientSignoff(client: any, body: any, actor: { actor: string; missing: boolean }) {
+  const jobId = String(body?.job_id || body?.jobId || '').trim()
+  const reason = String(body?.reason || '').replace(/\s+/g, ' ').trim()
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (reason.length < 3) throw new ApiError('Say why the client cannot sign the job off', 400)
+  if (!actor || actor.missing) {
+    throw new ApiError('A client sign-off waiver records who made it. Sign in, or name the caller with x-sw-actor on a server key call.', 400)
+  }
+  const { data: job, error } = await client.from('jobs').select('id, org_id, job_number').eq('id', jobId).maybeSingle()
+  if (error) throw error
+  if (!job) throw new ApiError('Job not found', 404)
+  const userMatch = /^user:([0-9a-f-]{36})$/i.exec(actor.actor)
+  const { data: row, error: insErr } = await client.from('job_client_signoffs').insert({
+    org_id: job.org_id || null,
+    job_id: job.id,
+    method: 'office_waiver',
+    waiver_reason: reason,
+    captured_by: userMatch ? userMatch[1] : null,
+    captured_by_actor: actor.actor,
+  }).select('id, created_at').single()
+  if (insErr) throw insErr
+  try {
+    const { error: evErr } = await client.from('job_events').insert({
+      job_id: job.id,
+      user_id: userMatch ? userMatch[1] : null,
+      event_type: CLIENT_SIGNED_OFF_EVENT,
+      detail_json: { signoff_id: row.id, method: 'office_waiver', reason, actor: actor.actor },
+    })
+    if (evErr) console.error('[ops-api] client sign-off waiver event write failed:', evErr.message)
+  } catch (e) { console.error('[ops-api] client sign-off waiver event write threw:', e instanceof Error ? e.message : e) }
+  return { ok: true, signoff_id: row.id, job_number: job.job_number || null }
+}
+export const _recordOnSiteClientSignoffForTest = recordOnSiteClientSignoff
+export const _waiveClientSignoffForTest = waiveClientSignoff
+export const _assertSignatureMediaNotSignedOffForTest = assertSignatureMediaNotSignedOff
+export const _assertClientSignoffForInvoiceForTest = assertClientSignoffForInvoice
 
 // ── complete-to-invoice (2026-09-08, Marnin) ──────────────────────────────────
 // "When the guys say job complete on a repair job that has a work order, it
@@ -54150,6 +54367,15 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       a.completion_evidence = ev
       if (!ev.satisfied) a.invoice_block_reason = COMPLETION_EVIDENCE_BLOCK_REASON
     }
+    const signoffByJob = await loadClientSignoffForJobIds(client, enriched.map((a: any) => String(a.jobs?.id || '')))
+    if (signoffByJob) {
+      for (const a of enriched) {
+        const so = signoffByJob.get(String(a.jobs?.id || ''))
+        if (!so || !so.applies) continue
+        a.client_signoff = so
+        if (!so.satisfied) a.invoice_block_reason = a.invoice_block_reason || CLIENT_SIGNOFF_BLOCK_REASON
+      }
+    }
   }
 
   // Check if already submitted
@@ -54401,6 +54627,12 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
           vertical: completionEvidenceVertical(jobMap[item.job_id]),
           label: jobMap[item.job_id]?.job_number || null,
         })),
+    )
+    await assertClientSignoffForInvoice(
+      client,
+      items
+        .filter((item: any) => (Number(item?.metres) || 0) > 0 && jobMap[item.job_id])
+        .map((item: any) => ({ id: String(item.job_id), label: jobMap[item.job_id]?.job_number || null })),
     )
 
     for (const item of items) {
