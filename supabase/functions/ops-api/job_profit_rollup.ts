@@ -6,9 +6,11 @@
 // cents. A failed page fails the whole answer: a partial total is never returned.
 //
 // Profit and margin come only from rows the engine already published
-// (profit_ex not null). profit_ex_unsuppressed and the Xero Project figures are
-// never read: actual_cost_ex is the engine's line-level cost and is summed as
-// it stands, so a project total is in no total of cost or profit.
+// (profit_ex not null). profit_ex_unsuppressed is never read. actual_cost_ex
+// stays the engine's line-level cost and is summed as it stands, so a project
+// total is never in actual_cost_ex. published_cost uses margin_cost_ex when
+// the engine published a margin from the Xero Project, and actual_cost_ex
+// otherwise. A row whose profit is null contributes nothing to published cost.
 //
 // quoted_ex sums the engine's figures as they stand: the engine publishes a
 // quoted figure only from a sent or accepted quote and leaves it null
@@ -67,6 +69,7 @@ const ROLLUP_COLUMNS = [
   "expected_cost_ex",
   "actual_cost_ex",
   "profit_ex",
+  "margin_cost_ex",
   "revenue_verified_paid",
   "cost_flag",
   "holding_job",
@@ -140,6 +143,7 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
   const expected = toCents(row.expected_cost_ex, "expected_cost_ex");
   const actual = toCents(row.actual_cost_ex, "actual_cost_ex");
   const profit = toCents(row.profit_ex, "profit_ex");
+  const marginCost = toCents(row.margin_cost_ex, "margin_cost_ex") ?? actual;
 
   bucket.jobs += 1;
   bucket.invoiced += invoiced ?? 0n;
@@ -171,7 +175,7 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
     bucket.jobs_with_margin += 1;
     bucket.profit += profit;
     bucket.published_revenue += invoiced ?? 0n;
-    bucket.published_cost += actual ?? 0n;
+    bucket.published_cost += marginCost ?? 0n;
   }
 }
 

@@ -18,19 +18,19 @@ export const JOB_PROFIT_LABELS = {
   profit:
     "Gross profit on direct costs (trade labour, materials, commission and other direct lines), ex GST. No overhead share. Trade labour is the trade's charge; the company's super share is not added.",
   quoted_ex:
-    "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent. Never the live price. quoted_source names the quote it came from.",
+    "What was quoted, ex GST: a sent or accepted quote. On a patio, while job_profit_patio_quote_v1 is on, the one frozen tool quote when it is the only candidate and it agrees with the live price and with what has been invoiced. A conflict is blank and flagged. Null when no quote was sent, or when the patio figure conflicts or cannot be read. Never the live price. quoted_source names which one.",
   expected_cost_ex:
-    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. Null when no cost was fixed at a quote, including a quote sent with no cost figures. Never a live pricing estimate.",
+    "Expected cost, ex GST. Labour is the quote's, or, while job_profit_work_order_labour_v1 is on and an approved job work order (approved_at is not null) has agreed labour, that figure plus approved customer variations. A draft work order is ignored. Materials and commission stay the quote's. expected_source may be job_work_order, frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. Null when no cost was fixed and no approved agreed labour applies. Never a live estimate.",
   actual_cost_ex:
-    "Actual cost from the job's own lines only: trade charges, supplier bills and materials facts linked to the job (cost_basis is always line_level; line_level_cost_ex is the same figure). Never a Xero Project total.",
+    "Actual cost from the job's own lines only: trade charges, supplier bills and materials facts linked to the job (cost_basis is always line_level; line_level_cost_ex is the same figure). Never a Xero Project total, even when the published margin uses the project figure.",
   xero_project_expenses_ex:
-    "Expenses on record against the job's Xero Project. Evidence only, not the job's full cost: trade labour may sit outside it. Never part of actual cost, profit, margin or any company, work-type or month total. A Xero Project counts only when its name carries the job's own job number; one linked by contact only gives no figure and the job is flagged xero_project_linked_by_contact_only.",
+    "Expenses on record against the job's Xero Project. Evidence. While job_profit_xero_project_cost_v1 is on, margin_cost_ex uses this figure only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero. A stored 0 does not publish it. Linked trade labour that is not booked to the project is dropped from that margin. An unconfirmed installer bill blanks the margin either way. A Xero Project counts only when its name carries the job's own job number; one linked by contact only gives no figure and the job is flagged xero_project_linked_by_contact_only.",
   xero_project_exceeds_line_costs:
-    "The Xero Project has more expenses on record than the costs linked to the job, so the job's full cost is unknown. Profit and margin are null until those expenses are linked to the job.",
+    "The Xero Project has more expenses on record than the costs linked to the job. While job_profit_xero_project_cost_v1 is off, profit and margin are null and this stays the cost flag. While it is on, the margin uses the project figure only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero; then this suppressor is not set, cost_flag is ok, and margin_source is from Xero Project, may exclude unlinked labour. Otherwise the margin stays blank and this flag stays set. actual_cost_ex stays the linked lines. An unconfirmed installer bill blanks the margin either way.",
   verified_paid:
     "Xero recorded the payment (status PAID; trade invoices paid). Not a bank reconciliation.",
   margin:
-    "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), or when materials are owed but none is linked (labour-only cost).",
+    "Null when there is no client invoice, incomplete invoice lines, unclassified lines, or an unconfirmed installer bill. That installer blanking is always on. While job_profit_xero_project_cost_v1 is off, also null when no cost is linked, no labour is linked, materials are owed but unlinked, or the Xero Project exceeds the linked costs. While it is on, the margin is invoiced minus the project expenses only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero, and margin_source is from Xero Project, may exclude unlinked labour. Otherwise that margin stays blank.",
   profit_ex_unsuppressed:
     "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
   committed_open_ex:
@@ -39,6 +39,14 @@ export const JOB_PROFIT_LABELS = {
     "Ordered, not billed: sent purchase orders with no price (every Dispatch order) and no invoice or bill yet. A count, never a dollar figure. ordered_not_billed_over_30_count is those first sent 30 or more days ago.",
   invoice_emailed_count:
     "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
+  margin_source:
+    "from Xero Project, may exclude unlinked labour, when that margin is published. Null otherwise. actual_cost_ex stays the linked lines.",
+  margin_cost_ex:
+    "The Xero Project figure the published margin subtracted. Null when that margin is not published. actual_cost_ex is unchanged.",
+  expected_labour_quote_ex:
+    "Expected labour from the quote snapshot, even when expected_labour_ex is an approved job work order.",
+  work_order_agreed_labour_ex:
+    "Approved job work order agreed labour ex GST, plus approved customer-variation trade allocation. A draft is not included. Shown even while the labour switch is off. Null when no approved job work order has an agreed figure. A stored 0 is a real expected-labour figure and does not by itself publish a Xero Project margin.",
   rollup_expected_vs_actual:
     "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
   holding_jobs:

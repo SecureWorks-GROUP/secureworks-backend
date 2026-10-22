@@ -610,6 +610,47 @@ Deno.test("rollup: Xero Project expenses are in no total of cost or profit", asy
   }
 });
 
+Deno.test("rollup: a published Xero Project margin counts the project figure once", async () => {
+  const base = {
+    work_type: "fencing",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: "2026-08-08",
+    collected_ex: 0,
+    quoted_ex: null,
+    expected_cost_ex: null,
+    revenue_verified_paid: false,
+  };
+  const c = fakeClient({
+    v_job_profit: [
+      {
+        ...base,
+        job_id: "project",
+        invoiced_ex: 10000,
+        actual_cost_ex: 3000,
+        margin_cost_ex: 5000,
+        profit_ex: 5000,
+      },
+      {
+        ...base,
+        job_id: "plain",
+        invoiced_ex: 1000,
+        actual_cost_ex: 600,
+        profit_ex: 400,
+      },
+    ],
+  });
+  const body = (await jobProfitListAction(
+    c,
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  assertEquals(body.totals.jobs_with_margin, 2);
+  assertEquals(body.totals.actual_cost_ex, 3600);
+  assertEquals(body.totals.published_cost_ex, 5600);
+  assertEquals(body.totals.published_revenue_ex, 11000);
+  assertEquals(body.totals.profit_ex, 5400);
+});
+
 // CFO-12: the three purchase order states reach the timeline as orders, never
 // as a bill, never as actual cost, and an unpriced order carries no $0.00.
 Deno.test("job profit timeline: ordered, invoice-emailed and committed orders (CFO-12)", () => {
@@ -683,6 +724,12 @@ Deno.test("job profit labels name the CFO-12 commitment states", () => {
   assert(JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith("Ordered, not billed"));
   assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, no bill matched to this order"));
   assert(JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"));
+  assert(JOB_PROFIT_LABELS.margin_source.includes("from Xero Project, may exclude unlinked labour"));
+  assert(JOB_PROFIT_LABELS.work_order_agreed_labour_ex.includes("A draft is not included"));
+  assert(JOB_PROFIT_LABELS.expected_cost_ex.includes("approved job work order"));
+  assert(JOB_PROFIT_LABELS.xero_project_exceeds_line_costs.includes("this suppressor is not set"));
+  assert(JOB_PROFIT_LABELS.rollup_expected_vs_actual.includes("Unknown"));
+  assert(JOB_PROFIT_LABELS.holding_jobs.includes("holding_jobs"));
 });
 
 Deno.test("rollup: expected vs actual counts only jobs whose actual cost is complete", async () => {

@@ -952,7 +952,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Group work orders: the split, the flag and the
                       # invoice-line trigger (group_work_order.ts).
                       # Renumbered past every migration already on main.
-                      ("20261022050000", "group_work_orders")]:
+                      ("20261022050000", "group_work_orders"),
+                      # Job profit switches: the four v_job_profit columns and
+                      # job_profit_flag_on ops-api reads (job_profit.ts).
+                      # Renumbered past 20261022050000, the newest on main.
+                      ("20261022180000", "job_profit_work_order_xero_bills")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

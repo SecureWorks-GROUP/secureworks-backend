@@ -434,6 +434,7 @@ jobs:
             supabase/functions/xero-sync/materials_ingest_test.ts \
             supabase/functions/ops-api/materials_recon_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
+            supabase/functions/ops-api/job_profit_bill_match_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
