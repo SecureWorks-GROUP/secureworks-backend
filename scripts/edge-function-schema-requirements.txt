@@ -847,6 +847,13 @@ ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.re
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
 ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+
+# Reconciliation daily list: the recon_daily_list read and recon_record_decision
+# write call these, so the store and the list must exist before this ops-api ships.
+ops-api|supabase/migrations/20261020140000_context_reconciliation_decisions.sql|function|context_recon_record_decision
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_list
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
+
 # Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
 # invoice; ops-api job_receipt.ts reads the switch and writes the claims.
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
