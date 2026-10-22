@@ -102,6 +102,26 @@ marked not job related has source `installer_bill_not_job_related`, is never
 actual and flags nothing. In `v_bill_allocation_balance` such a bill whose
 rows no person made has `installer_unconfirmed` true and is never `balanced`.
 
+## Bill reconciliation outcome for Context (H7)
+
+`cfo_bill_reconciliation_outcomes` (migration `20261021161500`, service role
+only, read only) gives Context one row per supplier bill that is linked to a
+job, has allocation rows, or is in Bills to place. Trade-app mirror bills are
+left out. Its `state` is `confirmed`, `confirmed_overhead`, `placed_unconfirmed`,
+`installer_unconfirmed`, `unbalanced`, `unplaced`, `voided` or `unknown`; only
+the first two are a confirmed reconciliation (`confirmed` true), and only when a
+person is recorded as deciding it (`decided_by` set). A part's `placed_by` is
+`person` only when a person source (`manual_queue`, `manual_split`) wrote it and
+named who; a person source with a blank actor or the `ops_dashboard` fallback is
+`unrecorded`, and anything else is `machine`, including the bill's own Xero job
+link with no allocation row (`automation_source` `xero_job_link`). A decision
+with no single recorded person reads `placed_unconfirmed`. A person's "not job
+related" mark wins over the bill's Xero job link when no row places it.
+`evidence_hash` is md5 of a fixed jsonb array led by the contract version
+`cfo-recon-outcome-v1`. As a CFO proposal CIO may overturn, a payment does not
+move it; a changed total, line, credit, status class, part or overhead does. There
+is no history. `credit_applied_ex` is null when the stored copy shows no credit.
+
 ## Rollup fields
 
 Each of `totals`, `by_type[]`, `by_month[]` and `holding_jobs` carries:
