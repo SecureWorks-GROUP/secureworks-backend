@@ -381,8 +381,13 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
     "SWF-1",
   ]);
   for (const call of c.calls.slice(1)) {
-    assertEquals(call.ops.find(([op]) => op === "eq")![1], ["job_id", JOB]);
+    assertEquals(
+      call.ops.find(([op]) => op === "eq")![1],
+      call.table === "jobs" ? ["id", JOB] : ["job_id", JOB],
+    );
   }
+  // a job that is not a patio scoper record gets no patio_expected key
+  assertEquals("patio_expected" in body, false);
 });
 
 Deno.test("job_profit: a read error is a 500, never an empty job", async () => {
