@@ -4627,7 +4627,9 @@ fencing / patio job, draft then approved). An approved job work order is sealed
 by trigger: any update or delete raises, so a crew-path writer that touches it
 fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
-`kind = 'crew'`; a new one must too. Only the users in
+`kind = 'crew'` while `retire_crew_work_orders_v1` is off; a new crew-pay door
+must too. With that flag on, `my_work_orders` returns job work orders and hides
+retired crew rows. See the crew-invoice section below. Only the users in
 `work_order_settings.approver_user_ids` (Shaun) approve, never a role (the one
 other seal is the system's own `approved_via 'auto'` issue of an unedited
 quote-filled draft, behind `job_work_order_auto_issue_v1`), and an
@@ -4656,6 +4658,38 @@ draft someone wrote into, and the rates come only from the quote itself and
 the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
 carry a rate, amount, percent or money word. Rules:
 `docs/quote-work-order-lines-v1.md`.
+
+## Crew Invoices Sit On The Job Work Order, Behind Flags That Default Off
+
+`docs/job-work-order-crew-invoices-v1.md` owns the seven switches (all seeded
+off), the office queue (`list_office_job_work_orders`,
+`fill_job_work_order_allowance`, `approve_office_job_work_order`,
+`review_crew_invoice_line`), and the line stamp. The database writes
+`trade_invoice_lines.job_work_order_id`; never set it from TypeScript, and
+never put a job work order in `source_work_order_id` or
+`trade_invoices.work_order_id` (those stay the crew-pay fence). Travel stays
+off that fence. `create_work_order` without `kind: 'job'` is refused 409
+`crew_work_order_retired` while `retire_crew_work_orders_v1` is on, which is
+how `sw_create_work_order` and a cached page are stopped. The same flag
+stops `makeQuoteBuilderWorkOrder` creating another `kind = 'crew'` row;
+existing quote-builder rows stay visible and out of the retirement script.
+`backup_approver_user_ids` ships empty. The one `users` row on
+`marnin@secureworkswa.com.au` is `706c5258-70dd-483a-b36c-af6864b24498`;
+go-live writes that id, the migration does not. While
+`job_work_order_all_types_v1` is on, `job_detail.job_work_order` and
+`list_work_orders` accept every job type, and readiness "Work order exists"
+passes only for a filled approved job work order. Flag off keeps fencing
+and patio and `wo_count > 0`. The 30-day backfill is
+`scripts/backfill-job-work-orders-active.ts` (open jobs with an assignment,
+time entry, invoice line or status change; `--apply --file` opens only the
+reviewed ids) and the crew-row retirement is `scripts/retire-crew-work-orders.ts`:
+both dry-run by default, neither is a migration or a cron, and both are on
+Marnin's go-live checklist. Turn `crew_invoice_line_office_review_v1` on
+before or with `crew_invoice_on_job_work_order_v1`: that 410s
+`submit_trade_invoice` and holds the other crew-invoice doors until every
+line is approved. The hard rule, when on, refuses an open job only, and
+Travel is exempt. With `retire_crew_work_orders_v1` on, `my_work_orders`
+returns approved job work orders with the money stripped and drops drafts.
 
 ## A Trade's Time Line Says When It Was Worked, And One Module Owns The Rule
 

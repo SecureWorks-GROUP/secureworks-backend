@@ -678,14 +678,39 @@ import {
   JobWorkOrderError,
   listJobWorkOrders,
   readJobWorkOrder,
+  redactJobDetailWorkOrderForTrade,
   reportWorkOrderVariation,
   resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
   sendOutlookVariationEmail,
+  readFlag,
   tradeJobWorkOrderRead,
   type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
+import {
+  CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
+  crewWorkOrderCreateRefusal,
+  filledApprovedJobWorkOrder,
+  hideRetiredCrewWorkOrder,
+  JOB_WORK_ORDER_ALL_TYPES_FLAG,
+  loadCrewInvoiceJobWorkOrderRefusal,
+  OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
+  readInvoiceOfficeReview,
+  RETIRE_CREW_WORK_ORDERS_FLAG,
+  reviewStateFromOfficeStatus,
+  stripJobWorkOrderCardMoney,
+  xeroSyncRefusal,
+} from './crew_invoice_job_work_order.ts'
+import {
+  approveOfficeJobWorkOrder,
+  fillJobWorkOrderAllowance,
+  JobWorkOrderOfficeError,
+  listOfficeJobWorkOrderQueue,
+  openBlankJobWorkOrder,
+  reviewCrewInvoiceLine,
+  shouldOpenBlankJobWorkOrder,
+} from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
   approveCustomerVariation,
@@ -2185,6 +2210,240 @@ async function markTradeInvoiceRetryable(
   }
 }
 
+async function pushTradeInvoiceToXeroAction(client: any, body: any) {
+  const { invoice_id } = body
+  if (!invoice_id) throw new ApiError('invoice_id required', 400)
+
+  // Get the invoice + lines + user
+  const { data: inv } = await client.from('trade_invoices')
+    .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
+    .eq('id', invoice_id)
+    .maybeSingle()
+  if (!inv) throw new ApiError('Invoice not found', 404)
+  if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
+    throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
+  }
+
+  const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
+    .select('*')
+    .eq('trade_invoice_id', invoice_id)
+  if (linesErr) {
+    throw new ApiError('The office review on this invoice could not be read.', 503, {
+      error: 'The office review on this invoice could not be read.',
+      code: 'office_review_unreadable',
+    })
+  }
+  // A line still awaiting, queried or rejected holds the whole bill.
+  // A null review status is a line from before the switch and may sync.
+  const retryHold = xeroSyncRefusal(lines || [])
+  if (retryHold) {
+    throw new ApiError(retryHold.error, 409, { error: retryHold.error, code: retryHold.code })
+  }
+
+  // Pure read-only setup. Nothing here touches Xero or mutates Supabase.
+  // (getToken() is intentionally deferred — it can upsert xero_tokens on
+  // refresh, which would be a side effect before the reconciliation guard.)
+  const tradeName = inv.user?.name || 'Unknown Trade'
+  const tradeEmail = inv.user?.email || ''
+  const cachedContactId: string | null = inv.user?.xero_contact_id || null
+
+  const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
+  const reference = [tradeName, inv.invoice_number || 'TRADE', distinctJobNums].filter(Boolean).join(' | ')
+
+  const paymentDays = inv.user?.payment_terms_days || 7
+  const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
+
+  // Reconciliation guard runs BEFORE getToken (which can upsert xero_tokens),
+  // before any Xero call, and before any users/trade_invoices mutation.
+  // Computes the per-line value directly from raw trade_invoice_lines rows
+  // using the labour-vs-extras detection — same algorithm the line builder
+  // below uses, just without the Tracking enrichment that needs accessToken.
+  // A malformed-line-shape invoice throws here with zero side effects.
+  const retryLineAmounts = (lines || []).map((line: any) =>
+    persistedTradeInvoiceLineAmount(line)
+  )
+  const computedSubtotal = retryLineAmounts.reduce(
+    (sum: number, line: { lineTotalEx: number }) => sum + line.lineTotalEx,
+    0,
+  )
+  const invMoney = persistedTradeInvoiceMoney(inv)
+  const expectedSubtotal = invMoney.gross_earned
+  if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
+    throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+  }
+  const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
+
+  // Past the guard. From here side effects are allowed.
+  const { accessToken, tenantId } = await getToken(client)
+
+  // Look up tracking categories (Xero read).
+  let tracking: any[] = []
+  try {
+    const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
+    const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
+    if (divisionCat) tracking = divisionCat
+  } catch (e) { /* skip tracking */ }
+
+  // trade_invoice_lines come in two shapes:
+  //   - "labour" (legacy): total_hours / hourly_rate populated; quantity/unit_rate may be 0
+  //   - "extras" (current): quantity / unit_rate / line_total_ex populated; total_hours/hourly_rate are 0
+  // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
+  // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
+  // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
+  const grossXeroLineItems = (lines || []).map((line: any, index: number) => {
+    const recovered = retryLineAmounts[index]
+    const isLabour = recovered.basis === 'hours_rate'
+    const desc = isLabour
+      ? ((line.job_number || '') + ' ' + (line.client_name || '') + ' — ' + recovered.quantity + 'h @ $' + recovered.unitAmount + '/hr')
+      : (line.description || ((line.line_type || 'Extra') + (line.division ? ' (' + line.division + ')' : '')))
+    let trackingOption = trackingCategoryForJob(line.job_number || '')
+    if (!trackingOption && line.division) {
+      const divMap: Record<string, string> = {
+        'Patio': 'SW - PATIOS', 'Fencing': 'SW - FENCING', 'Decking': 'SW - DECKING',
+        'Make Safe': 'SW - INSURANCE WORK', 'General Labour': 'SW - GROUP',
+      }
+      trackingOption = divMap[line.division] || ''
+    }
+    const lineTracking = tracking && trackingOption ? [{ Name: 'Business Unit', Option: trackingOption }] : []
+    return {
+      Description: desc,
+      Quantity: recovered.quantity,
+      UnitAmount: recovered.unitAmount,
+      AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
+      TaxType: xeroTax.taxType,
+      Tracking: lineTracking,
+    }
+  })
+  const xeroLineItems = splitTradeInvoiceXeroLines(
+    grossXeroLineItems,
+    invMoney,
+    {
+      tradeName,
+      superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+    },
+  )
+
+  if (inv.xero_bill_id) {
+    const existingResult = await xeroGet(
+      `/Invoices/${encodeURIComponent(inv.xero_bill_id)}`,
+      accessToken,
+      tenantId,
+    )
+    const existingBill = existingResult?.Invoices?.[0]
+    const existingIdentity = assertExistingTradeInvoiceXeroBill(
+      existingBill,
+      inv.xero_bill_id,
+      invMoney,
+    )
+    const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+      client,
+      invoice_id,
+      existingIdentity,
+      {
+        accessToken,
+        tenantId,
+        filename: inv.invoice_number || reference || 'trade-invoice',
+        clientPdfBase64: body.pdf_base64,
+        submittedLines: grossXeroLineItems,
+        money: invMoney,
+        tradeName,
+      },
+    )
+    return ({
+      success: true,
+      xero_bill_id: existingIdentity.xeroBillId,
+      reference,
+      reconciled_existing: true,
+      pdf_attached: pdfAttached,
+    })
+  }
+
+  if (mustReuseExistingXeroBillForPdfRetry(inv.status)) {
+    throw new ApiError(
+      'PDF attach must reuse the existing Xero bill; a second ACCPAY is not allowed',
+      409,
+    )
+  }
+
+  // Resolve Xero contact for the trade. Name fallback is important for
+  // Jean-style suppliers whose Supabase login email differs from the
+  // existing Xero supplier contact email.
+  const xeroContactId = await resolveTradeXeroSupplierContact(client, {
+    userId: inv.user_id,
+    name: tradeName,
+    email: tradeEmail,
+    cachedContactId,
+    accessToken,
+    tenantId,
+  })
+
+  if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
+
+  const xeroPayload = {
+    Invoices: [{
+      Type: 'ACCPAY',
+      Contact: { ContactID: xeroContactId },
+      Reference: reference,
+      InvoiceNumber: tradeBillInvoiceNumber(inv.invoice_number, reference),
+      DueDate: dueDate,
+      Status: 'DRAFT',
+      LineAmountTypes: xeroTax.lineAmountTypes,
+      LineItems: xeroLineItems,
+    }],
+  }
+
+  const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
+  const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
+  const bill = xeroResult?.Invoices?.[0]
+  const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
+    bill,
+    money: invMoney,
+    checkpointIdentity: (identity) =>
+      checkpointTradeInvoiceXeroIdentity(
+        client,
+        invoice_id,
+        identity,
+        'push_trade_invoice_to_xero',
+      ),
+  }).catch((error) => tradeInvoiceMoneyApiError(error))
+  const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
+    client,
+    invoice_id,
+    billIdentity,
+    {
+      accessToken,
+      tenantId,
+      filename: inv.invoice_number || reference || 'trade-invoice',
+      clientPdfBase64: body.pdf_base64,
+      submittedLines: grossXeroLineItems,
+      money: invMoney,
+      tradeName,
+    },
+  )
+
+  // Cache in xero_invoices
+  try {
+    await client.from('xero_invoices').upsert({
+      org_id: DEFAULT_ORG_ID,
+      xero_invoice_id: billIdentity.xeroBillId,
+      invoice_number: billIdentity.xeroBillNumber,
+      invoice_type: 'ACCPAY',
+      status: bill.Status || 'DRAFT',
+      reference: reference,
+      sub_total: tradeInvoiceXeroBillSubtotal(invMoney),
+      total_tax: invMoney.gst_amount,
+      total: bill.Total || invMoney.trade_payable,
+      amount_due: bill.AmountDue || invMoney.trade_payable,
+      due_date: dueDate,
+      contact_name: tradeName,
+      xero_contact_id: xeroContactId,
+    }, { onConflict: 'org_id,xero_invoice_id' })
+  } catch (e) { /* non-blocking */ }
+
+  return ({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
+
+}
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -3547,6 +3806,10 @@ function computeReadiness(
   scopeJson: any,
   pricingJson?: any,
   assignments?: any[] | null,
+  // Set only while job_work_order_all_types_v1 is on. A blank draft must not
+  // satisfy "Work order exists"; only a filled approved job work order does.
+  // Omitted keeps wo_count > 0.
+  workOrderMet?: boolean,
 ): JobReadiness {
   const rules = READINESS_RULES[jobType] || DEFAULT_RULES
 
@@ -3575,7 +3838,9 @@ function computeReadiness(
     }
 
     totalRules++
-    const met = evaluateCheck(rule.check, data)
+    const met = rule.key === 'work_order' && typeof workOrderMet === 'boolean'
+      ? workOrderMet
+      : evaluateCheck(rule.check, data)
     if (met) metCount++
 
     const item: ReadinessItem = {
@@ -6788,11 +7053,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
         // Only staff or the ops server key may fill the work order draft on
         // this read; the routine key reads it and writes nothing.
+        const staffCaller = _opsApiCallerIsStaffOperator(authMode, authUser)
         return json(await jobDetail(client, jid, {
           slim,
-          fillWorkOrderFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+          fillWorkOrderFromQuote: staffCaller,
           // The paid close-out block reads service-role close-out tables: staff only.
-          includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
+          includeCloseout: staffCaller,
+          // A trade JWT must not see the sealed labour allowance. Staff, the
+          // ops key and the routine key keep the figures they already get.
+          redactAgreedLabour: authMode === 'jwt' && !_opsApiStaffOperatorRole(authUser?.role),
         }))
       }
       // Staff-only by the front door's default (not on the trade or routine lists).
@@ -8927,9 +9196,45 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
       case 'email_po': return json(await emailPO(client, body))
-      case 'create_work_order':
-        if (body?.kind === 'job') return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+      case 'create_work_order': {
+        // kind 'job' opens the job's work order. Anything else, including a
+        // missing kind from sw_create_work_order or a cached old page, is a
+        // crew work order. While retire_crew_work_orders_v1 is on that is
+        // refused and nothing is written. The switch off keeps today's insert.
+        if (body?.kind === 'job') {
+          if (await shouldOpenBlankJobWorkOrder(client, body)) {
+            return json(await runJobWorkOrder(() => openBlankJobWorkOrder(client, body)))
+          }
+          return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+        }
+        const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+        let assigneeInvoiceType: string | null = null
+        if (retireCrewWorkOrders) {
+          const assigneeId = String(body?.assigned_user_id || body?.user_id || '').trim()
+          if (assigneeId) {
+            const { data: assignee, error: assigneeErr } = await client.from('users')
+              .select('id, invoice_type')
+              .eq('id', assigneeId)
+              .maybeSingle()
+            if (assigneeErr) {
+              throw new ApiError('The work order assignee could not be read.', 503, {
+                error: 'The work order assignee could not be read.',
+                code: 'assignee_invoice_type_unreadable',
+              })
+            }
+            assigneeInvoiceType = assignee?.invoice_type ?? null
+          }
+        }
+        const crewRefusal = crewWorkOrderCreateRefusal(
+          body?.kind,
+          retireCrewWorkOrders,
+          assigneeInvoiceType,
+        )
+        if (crewRefusal) {
+          throw new ApiError(crewRefusal.error, 409, { error: crewRefusal.error, code: crewRefusal.code })
+        }
         return json(await createWorkOrder(client, body))
+      }
       case 'update_work_order':
         if (await workOrderIsJobKind(client, body?.id)) {
           return json(await runJobWorkOrder(() => updateJobWorkOrderDraft(client, body)))
@@ -8972,6 +9277,56 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
         }
         return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+      }
+      // Blank and draft job work orders for the office. The queue is a read.
+      // Fill and approve stay named-approver writes. Line review is any
+      // office role (DEFAULT, owner to confirm). The last approved line
+      // pushes the invoice. A rejected line returns it to the trade.
+      case 'list_office_job_work_orders': {
+        if (req.method !== 'GET') {
+          return json({ error: 'list_office_job_work_orders is GET only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => listOfficeJobWorkOrderQueue(client, officeJobWorkOrderActor(authMode, authUser))))
+      }
+      case 'fill_job_work_order_allowance': {
+        if (req.method !== 'POST') {
+          return json({ error: 'fill_job_work_order_allowance is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => fillJobWorkOrderAllowance(client, body, officeJobWorkOrderActor(authMode, authUser))))
+      }
+      case 'approve_office_job_work_order': {
+        if (req.method !== 'POST') {
+          return json({ error: 'approve_office_job_work_order is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => approveOfficeJobWorkOrder(client, body, officeJobWorkOrderActor(authMode, authUser))))
+      }
+      case 'review_crew_invoice_line': {
+        if (req.method !== 'POST') {
+          return json({ error: 'review_crew_invoice_line is POST only', code: 'method_not_allowed' }, 405)
+        }
+        const reviewed = await runJobWorkOrder(() => reviewCrewInvoiceLine(client, body, officeJobWorkOrderActor(authMode, authUser)))
+        if (reviewed.ready_for_xero_push && reviewed.trade_invoice_id) {
+          try {
+            const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: reviewed.trade_invoice_id })
+            return json({ ...reviewed, xero_push: pushed })
+          } catch (pushErr) {
+            try {
+              await markTradeInvoiceRetryable(
+                client,
+                String(reviewed.trade_invoice_id),
+                'Line review released this invoice, but the Xero push failed. It can be retried.',
+              )
+            } catch (markErr) {
+              console.error('[ops-api] line review xero push retry mark failed:', (markErr as Error).message)
+            }
+            return json({
+              ...reviewed,
+              xero_push: 'failed',
+              xero_push_error: (pushErr as Error)?.message || 'Xero push failed',
+            })
+          }
+        }
+        return json(reviewed)
       }
       // Re-sends variation emails left failed or stuck in sending. Sends
       // nothing while feature flag work_order_variation_emails_v1 is off.
@@ -9664,224 +10019,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true, invoice_id: rejInvId, status: 'ops-reject' })
       }
       case 'push_trade_invoice_to_xero': {
-        const { invoice_id } = body
-        if (!invoice_id) throw new ApiError('invoice_id required', 400)
-
-        // Get the invoice + lines + user
-        const { data: inv } = await client.from('trade_invoices')
-          .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
-          .eq('id', invoice_id)
-          .maybeSingle()
-        if (!inv) throw new ApiError('Invoice not found', 404)
-        if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
-          throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
-        }
-
-        const { data: lines } = await client.from('trade_invoice_lines')
-          .select('*')
-          .eq('trade_invoice_id', invoice_id)
-
-        // Pure read-only setup. Nothing here touches Xero or mutates Supabase.
-        // (getToken() is intentionally deferred — it can upsert xero_tokens on
-        // refresh, which would be a side effect before the reconciliation guard.)
-        const tradeName = inv.user?.name || 'Unknown Trade'
-        const tradeEmail = inv.user?.email || ''
-        const cachedContactId: string | null = inv.user?.xero_contact_id || null
-
-        const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
-        const reference = [tradeName, inv.invoice_number || 'TRADE', distinctJobNums].filter(Boolean).join(' | ')
-
-        const paymentDays = inv.user?.payment_terms_days || 7
-        const dueDate = new Date(new Date(inv.submitted_at || Date.now()).getTime() + paymentDays * 86400000).toISOString().slice(0, 10)
-
-        // Reconciliation guard runs BEFORE getToken (which can upsert xero_tokens),
-        // before any Xero call, and before any users/trade_invoices mutation.
-        // Computes the per-line value directly from raw trade_invoice_lines rows
-        // using the labour-vs-extras detection — same algorithm the line builder
-        // below uses, just without the Tracking enrichment that needs accessToken.
-        // A malformed-line-shape invoice throws here with zero side effects.
-        const retryLineAmounts = (lines || []).map((line: any) =>
-          persistedTradeInvoiceLineAmount(line)
-        )
-        const computedSubtotal = retryLineAmounts.reduce(
-          (sum: number, line: { lineTotalEx: number }) => sum + line.lineTotalEx,
-          0,
-        )
-        const invMoney = persistedTradeInvoiceMoney(inv)
-        const expectedSubtotal = invMoney.gross_earned
-        if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
-          throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
-        }
-        const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
-
-        // Past the guard. From here side effects are allowed.
-        const { accessToken, tenantId } = await getToken(client)
-
-        // Look up tracking categories (Xero read).
-        let tracking: any[] = []
-        try {
-          const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
-          const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
-          if (divisionCat) tracking = divisionCat
-        } catch (e) { /* skip tracking */ }
-
-        // trade_invoice_lines come in two shapes:
-        //   - "labour" (legacy): total_hours / hourly_rate populated; quantity/unit_rate may be 0
-        //   - "extras" (current): quantity / unit_rate / line_total_ex populated; total_hours/hourly_rate are 0
-        // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
-        // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
-        // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
-        const grossXeroLineItems = (lines || []).map((line: any, index: number) => {
-          const recovered = retryLineAmounts[index]
-          const isLabour = recovered.basis === 'hours_rate'
-          const desc = isLabour
-            ? ((line.job_number || '') + ' ' + (line.client_name || '') + ' — ' + recovered.quantity + 'h @ $' + recovered.unitAmount + '/hr')
-            : (line.description || ((line.line_type || 'Extra') + (line.division ? ' (' + line.division + ')' : '')))
-          let trackingOption = trackingCategoryForJob(line.job_number || '')
-          if (!trackingOption && line.division) {
-            const divMap: Record<string, string> = {
-              'Patio': 'SW - PATIOS', 'Fencing': 'SW - FENCING', 'Decking': 'SW - DECKING',
-              'Make Safe': 'SW - INSURANCE WORK', 'General Labour': 'SW - GROUP',
-            }
-            trackingOption = divMap[line.division] || ''
-          }
-          const lineTracking = tracking && trackingOption ? [{ Name: 'Business Unit', Option: trackingOption }] : []
-          return {
-            Description: desc,
-            Quantity: recovered.quantity,
-            UnitAmount: recovered.unitAmount,
-            AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
-            TaxType: xeroTax.taxType,
-            Tracking: lineTracking,
-          }
-        })
-        const xeroLineItems = splitTradeInvoiceXeroLines(
-          grossXeroLineItems,
-          invMoney,
-          {
-            tradeName,
-            superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
-          },
-        )
-
-        if (inv.xero_bill_id) {
-          const existingResult = await xeroGet(
-            `/Invoices/${encodeURIComponent(inv.xero_bill_id)}`,
-            accessToken,
-            tenantId,
-          )
-          const existingBill = existingResult?.Invoices?.[0]
-          const existingIdentity = assertExistingTradeInvoiceXeroBill(
-            existingBill,
-            inv.xero_bill_id,
-            invMoney,
-          )
-          const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
-            client,
-            invoice_id,
-            existingIdentity,
-            {
-              accessToken,
-              tenantId,
-              filename: inv.invoice_number || reference || 'trade-invoice',
-              clientPdfBase64: body.pdf_base64,
-              submittedLines: grossXeroLineItems,
-              money: invMoney,
-              tradeName,
-            },
-          )
-          return json({
-            success: true,
-            xero_bill_id: existingIdentity.xeroBillId,
-            reference,
-            reconciled_existing: true,
-            pdf_attached: pdfAttached,
-          })
-        }
-
-        if (mustReuseExistingXeroBillForPdfRetry(inv.status)) {
-          throw new ApiError(
-            'PDF attach must reuse the existing Xero bill; a second ACCPAY is not allowed',
-            409,
-          )
-        }
-
-        // Resolve Xero contact for the trade. Name fallback is important for
-        // Jean-style suppliers whose Supabase login email differs from the
-        // existing Xero supplier contact email.
-        const xeroContactId = await resolveTradeXeroSupplierContact(client, {
-          userId: inv.user_id,
-          name: tradeName,
-          email: tradeEmail,
-          cachedContactId,
-          accessToken,
-          tenantId,
-        })
-
-        if (!xeroContactId) throw new Error('Failed to resolve Xero contact for ' + tradeName)
-
-        const xeroPayload = {
-          Invoices: [{
-            Type: 'ACCPAY',
-            Contact: { ContactID: xeroContactId },
-            Reference: reference,
-            InvoiceNumber: tradeBillInvoiceNumber(inv.invoice_number, reference),
-            DueDate: dueDate,
-            Status: 'DRAFT',
-            LineAmountTypes: xeroTax.lineAmountTypes,
-            LineItems: xeroLineItems,
-          }],
-        }
-
-        const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
-        const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
-        const bill = xeroResult?.Invoices?.[0]
-        const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
-          bill,
-          money: invMoney,
-          checkpointIdentity: (identity) =>
-            checkpointTradeInvoiceXeroIdentity(
-              client,
-              invoice_id,
-              identity,
-              'push_trade_invoice_to_xero',
-            ),
-        }).catch((error) => tradeInvoiceMoneyApiError(error))
-        const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
-          client,
-          invoice_id,
-          billIdentity,
-          {
-            accessToken,
-            tenantId,
-            filename: inv.invoice_number || reference || 'trade-invoice',
-            clientPdfBase64: body.pdf_base64,
-            submittedLines: grossXeroLineItems,
-            money: invMoney,
-            tradeName,
-          },
-        )
-
-        // Cache in xero_invoices
-        try {
-          await client.from('xero_invoices').upsert({
-            org_id: DEFAULT_ORG_ID,
-            xero_invoice_id: billIdentity.xeroBillId,
-            invoice_number: billIdentity.xeroBillNumber,
-            invoice_type: 'ACCPAY',
-            status: bill.Status || 'DRAFT',
-            reference: reference,
-            sub_total: tradeInvoiceXeroBillSubtotal(invMoney),
-            total_tax: invMoney.gst_amount,
-            total: bill.Total || invMoney.trade_payable,
-            amount_due: bill.AmountDue || invMoney.trade_payable,
-            due_date: dueDate,
-            contact_name: tradeName,
-            xero_contact_id: xeroContactId,
-          }, { onConflict: 'org_id,xero_invoice_id' })
-        } catch (e) { /* non-blocking */ }
-
-        return json({ success: true, xero_bill_id: billIdentity.xeroBillId, reference, pdf_attached: pdfAttached })
+        return json(await pushTradeInvoiceToXeroAction(client, body))
       }
 
       case 'list_trade_invoice_lines': {
@@ -9900,6 +10038,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ...line,
           trade_name: line.trade_invoices?.user?.name || 'Unknown',
           week_label: line.trade_invoices?.week_start ? new Date(line.trade_invoices.week_start).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }) : '',
+          review_state: reviewStateFromOfficeStatus(line.office_review_status),
         }))
 
         return json({ lines: enrichedLines })
@@ -11386,14 +11525,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // The selector may widen a fencing manager past their own work
             // orders, but tenant and canonical job vertical remain hard server
             // boundaries at submission time too.
-            const { data: wo, error: woFetchErr } = await client.from('work_orders')
-              .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+            // While crew work orders are retired, a kind=job row is a clear
+            // refusal (hours invoice on the job, never this door) and a
+            // retired crew row is refused. The switch off keeps the kind
+            // exclusion, so a job work order still reads as not found.
+            const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+            // `kind` is not a token the typed select parser accepts, so this
+            // query is untyped. The two strings stay distinct: the switch off
+            // does not ask for kind or quote_builder_version_id.
+            const woColumns = retireCrewWorkOrders
+              ? 'id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, kind, quote_builder_version_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+              : 'id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+            let woQuery = (client as any).from('work_orders')
+              .select(woColumns)
               .eq('id', work_order_id)
-              .neq('kind', 'job')
+            if (!retireCrewWorkOrders) woQuery = woQuery.neq('kind', 'job')
+            const { data: wo, error: woFetchErr } = await woQuery
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
               .single()
             if (woFetchErr || !wo) throw new ApiError('Work order not found', 404)
+            if (retireCrewWorkOrders && wo.kind === 'job') {
+              throw new ApiError("This is the job's work order. Invoice your hours on the job; this door does not invoice it.", 409, {
+                error: "This is the job's work order. Invoice your hours on the job; this door does not invoice it.",
+                code: 'job_work_order_not_crew_invoice',
+              })
+            }
+            if (retireCrewWorkOrders) await stampCrewAssigneeInvoiceType(client, [wo])
+            if (hideRetiredCrewWorkOrder(wo, retireCrewWorkOrders)) {
+              throw new ApiError('Crew work orders are retired. Invoice your hours on the job.', 409, {
+                error: 'Crew work orders are retired. Invoice your hours on the job.',
+                code: 'crew_work_order_retired',
+              })
+            }
             const woJob = Array.isArray(wo.jobs) ? wo.jobs[0] : wo.jobs
             if (!_canSubmitWorkOrderInvoice(
               tradeUser,
@@ -11622,6 +11786,71 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               },
             )
             await noteTradeRecurringDeductionNotTaken(client, tradeInvoiceId, woRecurringDeduction)
+
+            // Saved line stamps hold the bill whether or not the review flag
+            // can be read. A work-order invoice is inserted as draft, so a
+            // hold moves it to pending_acknowledgment or the last approval
+            // can never release it. No Xero contact and no bill.
+            const woOfficeReview = await readInvoiceOfficeReview(client, tradeInvoiceId)
+            if (!woOfficeReview.ok) {
+              // Switches off, the line read still failed. Land the saved draft
+              // in the same retryable state a Xero miss uses. Do not 503.
+              await markTradeInvoiceRetryable(
+                client,
+                tradeInvoiceId,
+                OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
+              )
+              return json({
+                ok: false,
+                code: 'XERO_PUSH_FAILED',
+                userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
+                success: true,
+                xero_bill_number: null,
+                total,
+                ...tradeInvoiceMoneyResponse(woMoney),
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+                error: 'Xero push failed — contact admin',
+                pdf_attached: false,
+              })
+            }
+            if (woOfficeReview.hold) {
+              const { data: woHoldInv, error: woHoldReadErr } = await client.from('trade_invoices')
+                .select('query_note').eq('id', tradeInvoiceId).maybeSingle()
+              if (woHoldReadErr) console.error('[ops-api] work order office review hold note read failed:', woHoldReadErr.message)
+              const woHoldNote = [woHoldInv?.query_note, woOfficeReview.hold.error].filter(Boolean).join(' | ').slice(0, 2000)
+              const { data: woHeld, error: woHoldStatusErr } = await client.from('trade_invoices')
+                .update({ status: 'pending_acknowledgment', query_note: woHoldNote })
+                .eq('id', tradeInvoiceId)
+                .eq('status', 'draft')
+                .is('xero_bill_id', null)
+                .select('id, status')
+                .maybeSingle()
+              if (woHoldStatusErr || !woHeld) {
+                throw new ApiError(
+                  'This invoice was saved, but it could not be held for office review. It was not sent to Xero.',
+                  503,
+                  {
+                    error: 'This invoice was saved, but it could not be held for office review. It was not sent to Xero.',
+                    code: 'office_review_unreadable',
+                    invoice_id: tradeInvoiceId,
+                  },
+                )
+              }
+              return json({
+                ok: false,
+                success: true,
+                office_review: 'held',
+                code: woOfficeReview.hold.code,
+                invoice_id: tradeInvoiceId,
+                xero_bill_id: null,
+                xero_bill_number: null,
+                total,
+                ...tradeInvoiceMoneyResponse(woMoney),
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+                pdf_attached: false,
+                error: woOfficeReview.hold.error,
+              })
+            }
 
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
@@ -13125,6 +13354,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ),
               ...woLineAssignmentIds,
             ].filter(Boolean).map(String))]
+            // "No work order, no invoice" is its own switch, off by default.
+            // It runs before any invoice row is written. A line with no job
+            // is not refused. An unreadable read refuses rather than invoicing.
+            const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
+              client,
+              [...lineItems, ...extraLineItems],
+            )
+            if (jobWorkOrderRefusal) {
+              throw new ApiError(
+                jobWorkOrderRefusal.error,
+                jobWorkOrderRefusal.code === 'job_work_order_unreadable' ? 503 : 409,
+                {
+                  error: jobWorkOrderRefusal.error,
+                  code: jobWorkOrderRefusal.code,
+                  ...(jobWorkOrderRefusal.job_id ? { job_id: jobWorkOrderRefusal.job_id } : {}),
+                },
+              )
+            }
             const invoiceId = weeklyInvoice
               ? await _persistWeeklyTradeInvoice(
                 client,
@@ -13424,6 +13671,37 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             await recordWoLabourIssues(woLabourIssues)
 
+            // Office review holds the whole invoice out of Xero. The invoice
+            // and its lines are already saved. The saved stamps are read
+            // whether or not the review flag can be read: a failed flag read
+            // must not push a line the database already stamped awaiting. A
+            // failed line read fails closed. A null stamp does not hold.
+            const officeReview = await readInvoiceOfficeReview(client, invoice.id)
+            let officeReviewHold: ReturnType<typeof xeroSyncRefusal> = null
+            let officeReviewUnreadable = false
+            if (!officeReview.ok) {
+              // Switches off, the line read still failed. Mark the saved
+              // invoice retryable and skip Xero. The existing
+              // XERO_PUSH_FAILED return below is that state.
+              await markTradeInvoiceRetryable(
+                client,
+                invoice.id,
+                OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
+              )
+              officeReviewUnreadable = true
+            } else {
+              officeReviewHold = officeReview.hold
+            }
+            if (officeReviewHold) {
+              const { data: holderInv, error: holderReadErr } = await client.from('trade_invoices')
+                .select('query_note').eq('id', invoice.id).maybeSingle()
+              if (holderReadErr) console.error('[ops-api] office review hold note read failed:', holderReadErr.message)
+              const merged = [holderInv?.query_note, officeReviewHold.error].filter(Boolean).join(' | ').slice(0, 2000)
+              const { error: noteErr } = await client.from('trade_invoices')
+                .update({ query_note: merged }).eq('id', invoice.id)
+              if (noteErr) console.error('[ops-api] office review hold note update failed:', noteErr.message)
+            }
+
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
             // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
@@ -13434,7 +13712,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let xeroContactId: string | null = null
             let createdXeroBillId = ''
             let pdfAttached = false
-            try {
+            if (!officeReviewHold && !officeReviewUnreadable) try {
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -13687,6 +13965,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 tradeName: userProfile?.name || null,
                 flaggedLines: flaggedReviewLines,
                 xeroBillId,
+              })
+            }
+
+            if (officeReviewHold) {
+              return json({
+                success: true,
+                code: officeReviewHold.code,
+                office_review: 'held',
+                invoice_id: invoice.id,
+                invoice_number: invoiceNumber,
+                total_hours: totalHours,
+                ...tradeInvoiceMoneyResponse(money),
+                ...tradeRecurringDeductionResponse(recurringDeduction),
+                ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
+                line_count: lineItems.length + extraLineItems.length,
+                xero_bill_id: null,
+                xero_bill_number: null,
+                pdf_attached: false,
               })
             }
 
@@ -15079,6 +15375,29 @@ const WORK_ORDER_PAGE_MAX = 500
 const WORK_ORDER_READ_PAGE = 1000
 const WORK_ORDER_ID_CHUNK = 25
 
+// Per-metre weekly crew work orders stay when retirement is on. The type is
+// the assignee's users.invoice_type, read only while that switch is on. An
+// unreadable read refuses rather than treating the row as retired.
+async function stampCrewAssigneeInvoiceType(client: any, rows: any[]): Promise<void> {
+  const ids = [...new Set(rows.map((row) => String(row?.assigned_user_id || '')).filter(Boolean))]
+  const types = new Map<string, string | null>()
+  for (let i = 0; i < ids.length; i += WORK_ORDER_ID_CHUNK) {
+    const chunk = ids.slice(i, i + WORK_ORDER_ID_CHUNK)
+    const { data, error } = await client.from('users').select('id, invoice_type').in('id', chunk)
+    if (error) {
+      throw new ApiError('The work order assignee could not be read.', 503, {
+        error: 'The work order assignee could not be read.',
+        code: 'assignee_invoice_type_unreadable',
+      })
+    }
+    for (const user of data || []) types.set(String(user.id), user.invoice_type ?? null)
+  }
+  for (const row of rows) {
+    const id = String(row?.assigned_user_id || '')
+    row.assignee_invoice_type = id ? (types.get(id) ?? null) : null
+  }
+}
+
 function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100
 }
@@ -15435,7 +15754,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, kind, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+    .select('id, org_id, job_id, wo_number, kind, quote_builder_version_id, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)
@@ -15443,6 +15762,17 @@ export async function _resolveWeeklyWorkOrderInvoice(
   // A job work order (job_work_orders.ts) is never a crew-pay invoice source.
   if ((workOrders || []).some((row: any) => row.kind === 'job')) {
     throw new ApiError('A job work order cannot be invoiced as a weekly job block', 422)
+  }
+  const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+  if (retireCrewWorkOrders) await stampCrewAssigneeInvoiceType(client, workOrders || [])
+  if (
+    retireCrewWorkOrders &&
+    (workOrders || []).some((row: any) => hideRetiredCrewWorkOrder(row, true))
+  ) {
+    throw new ApiError('Crew work orders are retired. Invoice your hours on the job.', 409, {
+      error: 'Crew work orders are retired. Invoice your hours on the job.',
+      code: 'crew_work_order_retired',
+    })
   }
   if ((workOrders || []).length !== workOrderIds.length) {
     throw new ApiError('One or more weekly work orders were not found in your business', 404)
@@ -15704,10 +16034,26 @@ async function readWorkOrderChargeRows(
 
 // ── Job work orders (job_work_orders.ts) ──
 // The module throws JobWorkOrderError; the serve() handler answers ApiError.
+function officeJobWorkOrderActor(
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'id' | 'role'> | null,
+): {
+  staff: boolean
+  userId: string | null
+} {
+  return {
+    staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+    userId: authMode === 'jwt' ? authUser?.id || null : null,
+  }
+}
+
 async function runJobWorkOrder<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn()
   } catch (e) {
+    if (e instanceof JobWorkOrderOfficeError) {
+      throw new ApiError(e.message, e.status, e.body)
+    }
     if (e instanceof JobWorkOrderError || e instanceof QuoteFillError) {
       throw new ApiError(e.message, e.status, { error: e.message, code: e.code })
     }
@@ -15776,6 +16122,31 @@ export async function handleTradeWorkOrdersAction(req: Request, client: any): Pr
   return json(await tradeWorkOrders(client, url.searchParams, viewer, isDispatcher))
 }
 
+// Jobs this person is on as crew, not as a ghost watcher. A null assignment
+// status is live. Paged past the 1000-row cap. A failed read is a failed
+// list: an empty assignment read would hide every job work order.
+async function viewerGenuineAssignmentJobIds(client: any, viewer: TradeAuthContext): Promise<string[]> {
+  const ids: string[] = []
+  let offset = 0
+  while (true) {
+    const { data, error } = await client.from('job_assignments')
+      .select('job_id')
+      .eq('user_id', viewer.id)
+      .eq('is_ghost', false)
+      .or('status.is.null,status.neq.cancelled')
+      .order('job_id', { ascending: true })
+      .range(offset, offset + WORK_ORDER_READ_PAGE - 1)
+    if (error) throw new ApiError('Failed to load the jobs you are assigned to: ' + error.message, 500)
+    const page = data || []
+    for (const row of page) {
+      if (row?.job_id) ids.push(String(row.job_id))
+    }
+    if (page.length < WORK_ORDER_READ_PAGE) break
+    offset += WORK_ORDER_READ_PAGE
+  }
+  return [...new Set(ids)]
+}
+
 export async function tradeWorkOrders(
   client: any,
   params: URLSearchParams,
@@ -15835,20 +16206,16 @@ export async function tradeWorkOrders(
       : [`type.eq.${vertical}`]
   ).join(',')
 
-  const allRows: any[] = []
-  let readOffset = 0
-  while (true) {
-    let query = client
-      .from('work_orders')
-      .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
-      .neq('kind', 'job')
-      .eq('org_id', viewer.orgId)
-      .eq('jobs.org_id', viewer.orgId)
-      .not('status', 'in', '("cancelled","deleted")')
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: true })
-      .range(readOffset, readOffset + WORK_ORDER_READ_PAGE - 1)
-    if (mode === 'mine') query = query.eq('assigned_user_id', viewer.id)
+  // The trade app does not filter by kind. While crew work orders are
+  // retired, this list is the filter: retired crew rows drop out, and the
+  // job's own work order stays. The switch off keeps the old select and the
+  // kind exclusion, so the list is unchanged.
+  const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+  const workOrderSelect = retireCrewWorkOrders
+    ? 'id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, kind, quote_builder_version_id, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+    : 'id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)'
+
+  const applyWorkOrderListFilters = (query: any) => {
     if (status === 'complete') {
       // UX 287 asks status=complete. Live crew-pay WOs stay sent after the job
       // finishes, so the complete filter also returns sent/accepted rows and
@@ -15860,12 +16227,57 @@ export async function tradeWorkOrders(
     if (verticals.length > 0) {
       query = query.or(workOrderVerticalFilter, { referencedTable: 'jobs' })
     }
+    return query
+  }
+
+  const allRows: any[] = []
+  let readOffset = 0
+  while (true) {
+    let query = client
+      .from('work_orders')
+      .select(workOrderSelect)
+    if (!retireCrewWorkOrders) query = query.neq('kind', 'job')
+    query = query
+      .eq('org_id', viewer.orgId)
+      .eq('jobs.org_id', viewer.orgId)
+      .not('status', 'in', '("cancelled","deleted")')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(readOffset, readOffset + WORK_ORDER_READ_PAGE - 1)
+    if (mode === 'mine') query = query.eq('assigned_user_id', viewer.id)
+    query = applyWorkOrderListFilters(query)
     const { data, error } = await query
     if (error) throw new ApiError('Failed to load work orders: ' + error.message, 500)
     const page = data || []
     allRows.push(...page)
     if (page.length < WORK_ORDER_READ_PAGE) break
     readOffset += WORK_ORDER_READ_PAGE
+  }
+
+  // A job work order has no assignee, so mode=mine cannot see it on
+  // assigned_user_id. While the retirement switch is on, add the job work
+  // orders on jobs this person is genuinely assigned to.
+  if (retireCrewWorkOrders && mode === 'mine') {
+    const assignedJobIds = await viewerGenuineAssignmentJobIds(client, viewer)
+    for (let i = 0; i < assignedJobIds.length; i += WORK_ORDER_ID_CHUNK) {
+      const ids = assignedJobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
+      let query = client
+        .from('work_orders')
+        .select(workOrderSelect)
+        .eq('kind', 'job')
+        .neq('status', 'draft')
+        .eq('org_id', viewer.orgId)
+        .eq('jobs.org_id', viewer.orgId)
+        .in('job_id', ids)
+        .not('status', 'in', '("cancelled","deleted")')
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(0, WORK_ORDER_READ_PAGE - 1)
+      query = applyWorkOrderListFilters(query)
+      const { data, error } = await query
+      if (error) throw new ApiError('Failed to load job work orders: ' + error.message, 500)
+      allRows.push(...(data || []))
+    }
   }
 
   // Defensive de-duplication protects external offset paging if a database view
@@ -15891,6 +16303,13 @@ export async function tradeWorkOrders(
       row.jobs?.site_address,
       row.jobs?.site_suburb,
     ].some((value) => String(value || '').toLowerCase().includes(search)))
+  }
+  if (retireCrewWorkOrders) {
+    await stampCrewAssigneeInvoiceType(client, authorizedRows)
+    authorizedRows = authorizedRows.filter((row: any) =>
+      !hideRetiredCrewWorkOrder(row, true) &&
+      !(row.kind === 'job' && String(row.status || '') === 'draft')
+    )
   }
 
   const total = authorizedRows.length
@@ -15962,6 +16381,7 @@ export async function tradeWorkOrders(
     return {
       id: workOrder.id,
       wo_number: workOrder.wo_number,
+      kind: workOrder.kind || null,
       job_id: workOrder.job_id,
       job_number: workOrder.jobs?.job_number || '',
       client_name: workOrder.jobs?.client_name || '',
@@ -16015,6 +16435,11 @@ export async function tradeWorkOrders(
       mapped[i].can_invoice = false
       mapped[i].can_add_to_weekly_invoice = false
       mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || COMPLETION_EVIDENCE_BLOCK_REASON
+    }
+  }
+  if (retireCrewWorkOrders) {
+    for (let i = 0; i < mapped.length; i++) {
+      if (mapped[i]?.kind === 'job') mapped[i] = stripJobWorkOrderCardMoney(mapped[i])
     }
   }
   const hasMore = requestedOffset + mapped.length < total
@@ -16985,7 +17410,12 @@ export const _jobNotesForTest = jobNotes
 async function jobDetail(
   client: any,
   jobId: string,
-  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean; includeCloseout?: boolean } = {},
+  opts: {
+    slim?: boolean
+    fillWorkOrderFromQuote?: boolean
+    includeCloseout?: boolean
+    redactAgreedLabour?: boolean
+  } = {},
 ) {
   if (!jobId) throw new Error('jobId required')
 
@@ -17067,6 +17497,46 @@ async function jobDetail(
   createJobAnnotations(client, jobId, jobRes.data, invoices, poRes.data || [], assignRes.data || [])
     .catch(e => console.log('[ops-api] annotation creation failed:', (e as Error).message))
 
+  // The job's own work order (kind = 'job'). Fencing and patio always.
+  // Every other type only while job_work_order_all_types_v1 is on, which is
+  // what the overview card reads. A failed read never fails the job detail.
+  const allJobWorkOrderTypes = await readFlag(client, JOB_WORK_ORDER_ALL_TYPES_FLAG)
+  const jobTypeName = String(job?.type || '').trim()
+  let jobWorkOrder: any = null
+  let jobWorkOrderRead: { live_work_order?: { kind?: string | null; status?: string | null; agreed_labour_ex?: number | null } | null } | null = null
+  if (
+    jobTypeName === 'fencing' || jobTypeName === 'patio' ||
+    (allJobWorkOrderTypes && jobTypeName !== '')
+  ) {
+    try {
+      const jwo = await readJobWorkOrder(client, {
+        jobId,
+        fillFromQuote: opts.fillWorkOrderFromQuote === true,
+      })
+      jobWorkOrderRead = jwo
+      jobWorkOrder = {
+        work_order: jwo.work_order,
+        live_work_order_id: jwo.live_work_order?.id ?? null,
+        draft_work_order_id: jwo.draft_work_order?.id ?? null,
+        figures: jwo.figures,
+        addenda: jwo.addenda,
+        invoice_count: jwo.invoices.length,
+        variation_count: jwo.variations.length,
+        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
+        quote_fill: jwo.quote_fill,
+        // Office only: lines the quote fill flagged (they never stop the work
+        // order going out) and why a draft has not gone to the trades.
+        needs_checking: jwo.needs_checking,
+      }
+      if (opts.redactAgreedLabour) {
+        jobWorkOrder = redactJobDetailWorkOrderForTrade(jobWorkOrder)
+      }
+    } catch (e) {
+      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
+      jobWorkOrder = { unreadable: true }
+    }
+  }
+
   // ── Readiness computation ──
   let jobReadiness: JobReadiness | null = null
   try {
@@ -17086,6 +17556,11 @@ async function jobDetail(
         // M4: pass the LIVE assignments[] (already fetched above) so crew_assigned
         // reflects real allocation, not the stale assignment_count MV column.
         assignRes.data || [],
+        // Flag off: omit, so wo_count > 0 is unchanged. Flag on: a blank draft
+        // does not pass, and a crew work order alone does not either.
+        allJobWorkOrderTypes
+          ? filledApprovedJobWorkOrder(jobWorkOrderRead?.live_work_order)
+          : undefined,
       )
     }
   } catch (e) {
@@ -17130,34 +17605,6 @@ async function jobDetail(
     return rest
   })
 
-  // The job's own work order (job_work_orders.ts): additive, fencing and
-  // patio only. A failed read never fails the job detail.
-  let jobWorkOrder: any = null
-  if (job?.type === 'fencing' || job?.type === 'patio') {
-    try {
-      const jwo = await readJobWorkOrder(client, {
-        jobId,
-        fillFromQuote: opts.fillWorkOrderFromQuote === true,
-      })
-      jobWorkOrder = {
-        work_order: jwo.work_order,
-        live_work_order_id: jwo.live_work_order?.id ?? null,
-        draft_work_order_id: jwo.draft_work_order?.id ?? null,
-        figures: jwo.figures,
-        addenda: jwo.addenda,
-        invoice_count: jwo.invoices.length,
-        variation_count: jwo.variations.length,
-        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
-        quote_fill: jwo.quote_fill,
-        // Office only: lines the quote fill flagged (they never stop the work
-        // order going out) and why a draft has not gone to the trades.
-        needs_checking: jwo.needs_checking,
-      }
-    } catch (e) {
-      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
-      jobWorkOrder = { unreadable: true }
-    }
-  }
   // Trade time entries stamped against this job: who, which day, start,
   // finish and hours, from submitted trade invoices (view
   // job_trade_time_entries, with which invoice) and from the times trades
@@ -17165,6 +17612,29 @@ async function jobDetail(
   // invoice fields). Additive. A failed read never fails the job detail: the
   // list is then null with the reason, never an empty list.
   const tradeTimeEntries = await loadJobTradeTimeEntries(client, jobId)
+  // Crew invoice lines on this job, with the review state the trade app
+  // reads. No rates or totals. A failed read is null plus the reason.
+  let tradeInvoiceLines: Array<Record<string, unknown>> | null = null
+  let tradeInvoiceLinesError: string | null = null
+  try {
+    const { data: tilRows, error: tilErr } = await client.from('trade_invoice_lines')
+      .select('id, line_type, description, office_review_status')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false })
+    if (tilErr) {
+      tradeInvoiceLinesError = tilErr.message
+    } else {
+      tradeInvoiceLines = (tilRows || []).map((row: any) => ({
+        id: row.id,
+        line_type: row.line_type ?? null,
+        description: row.description ?? null,
+        office_review_status: row.office_review_status ?? null,
+        review_state: reviewStateFromOfficeStatus(row.office_review_status),
+      }))
+    }
+  } catch (e) {
+    tradeInvoiceLinesError = (e as Error).message
+  }
   // Paid close-out block (job_closeout_read.ts), fencing and patio only, staff only:
   // null when its read fails, absent for every other job type and caller.
   let closeoutBlock: CloseoutBlock | null | undefined
@@ -17181,6 +17651,8 @@ async function jobDetail(
     job: jobLite,
     trade_time_entries: tradeTimeEntries.entries,
     trade_time_entries_error: tradeTimeEntries.error,
+    trade_invoice_lines: tradeInvoiceLines,
+    trade_invoice_lines_error: tradeInvoiceLinesError,
     job_identity: _projectMakesafeJobIdentity({
       builder_claim_ref: job?.metadata?.builder_claim_ref,
       builder_work_order_number: job?.metadata?.builder_work_order_number,
@@ -17507,7 +17979,15 @@ export async function listWorkOrders(client: any, params: URLSearchParams) {
 
   const { data, error } = await query
   if (error) throw error
-  return { work_orders: data || [] }
+  const rows = data || []
+  // The ops crew list stays crew-only (kind=job is excluded above). Once
+  // crew work orders are retired, the leftover per-trade rows drop out too.
+  // A quote-builder crew row stays. A per-metre trade's weekly crew row stays.
+  if (!(await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG))) {
+    return { work_orders: rows }
+  }
+  await stampCrewAssigneeInvoiceType(client, rows)
+  return { work_orders: rows.filter((row: any) => !hideRetiredCrewWorkOrder(row, true)) }
 }
 
 async function listSuppliers(client: any) {
@@ -53026,14 +53506,26 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
 // save_trade_invoice_draft path with all its guards.
 async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthContext, job: any) {
   const nowIso = new Date().toISOString()
-  const { data: userRow } = await client.from('users').select('invoice_type').eq('id', tradeUser.id).maybeSingle()
+  const retireCrewWorkOrders = await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG)
+  const { data: userRow, error: userErr } = await client.from('users')
+    .select('invoice_type').eq('id', tradeUser.id).maybeSingle()
+  if (userErr && retireCrewWorkOrders) {
+    throw new ApiError('The work order assignee could not be read.', 503, {
+      error: 'The work order assignee could not be read.',
+      code: 'assignee_invoice_type_unreadable',
+    })
+  }
   const lane = userRow?.invoice_type === 'per_metre' ? 'weekly_work_order' : 'hours'
   const { data: mine, error: woErr } = await client.from('work_orders')
-    .select('id, wo_number, status, scheduled_date, completed_at, scope_items')
+    .select(retireCrewWorkOrders
+      ? 'id, wo_number, status, scheduled_date, completed_at, scope_items, kind, quote_builder_version_id'
+      : 'id, wo_number, status, scheduled_date, completed_at, scope_items')
     .eq('job_id', job.id).eq('org_id', tradeUser.orgId).eq('assigned_user_id', tradeUser.id)
   if (woErr) throw woErr
   const workOrders: any[] = []
   for (const wo of (mine || [])) {
+    if (retireCrewWorkOrders) wo.assignee_invoice_type = userRow?.invoice_type ?? null
+    if (retireCrewWorkOrders && (wo.kind === 'job' || hideRetiredCrewWorkOrder(wo, true))) continue
     const status = String(wo.status || '')
     if (status === 'cancelled' || status === 'draft') continue
     let completedAt = wo.completed_at || null
@@ -53061,6 +53553,8 @@ async function completeMyWorkOrdersForInvoice(client: any, tradeUser: TradeAuthC
       already_complete: status === 'complete',
     })
   }
+  // The job's own work order is not listed. The weekly invoice path does
+  // not accept it, so naming it here would be a dead end for a per-metre trade.
   const { data: asns } = await client.from('job_assignments')
     .select(LOG_HOURS_ASSIGNMENT_COLUMNS).eq('job_id', job.id).eq('user_id', tradeUser.id)
   const myAssignment = pickHoursAssignment(asns || [])
@@ -53713,6 +54207,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 export async function submitTradeInvoice(client: any, userId: string, body: any) {
   const { week_ending, notes, items } = body
   if (!week_ending) throw new Error('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
+  // While line review is on, this door is retired. A failed flag read does
+  // not retire it: the saved-stamp check below still holds a line the
+  // trigger already stamped awaiting.
+  if (await readFlag(client, CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG)) {
+    throw new ApiError(
+      'This invoice door is switched off. Send the invoice from the work order.',
+      410,
+      {
+        error: 'This invoice door is switched off. Send the invoice from the work order.',
+        code: 'submit_trade_invoice_retired',
+      },
+    )
+  }
 
   const weekStart = weekStartFromEnd(week_ending)
 
@@ -54003,6 +54510,21 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       'Invoice rejected: persisted job lines do not match gross earned. Reload and ask the office to check the affected job assignment.',
     )
   }
+  const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
+    client,
+    Object.values(jobLines).map((line) => ({ job_id: line.job_id, line_type: 'labour' })),
+  )
+  if (jobWorkOrderRefusal) {
+    throw new ApiError(
+      jobWorkOrderRefusal.error,
+      jobWorkOrderRefusal.code === 'job_work_order_unreadable' ? 503 : 409,
+      {
+        error: jobWorkOrderRefusal.error,
+        code: jobWorkOrderRefusal.code,
+        ...(jobWorkOrderRefusal.job_id ? { job_id: jobWorkOrderRefusal.job_id } : {}),
+      },
+    )
+  }
 
   // Own the complete invoice and relational line truth before contacting Xero.
   // A contact/bill failure remains recoverable through the ops retry route; an
@@ -54120,6 +54642,54 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
         ? stStampErr.message
         : 'Only stamped ' + stStampedIds.length + ' of ' + stCoveredAssignmentIds.length +
           ' assignments (concurrent submission; claim rolled back)')
+    }
+  }
+
+  // Saved line stamps hold the bill whether or not the review flag can be
+  // read. Status stays approved. Nothing reaches Xero.
+  const stOfficeReview = await readInvoiceOfficeReview(client, insertedInvoice.id)
+  if (!stOfficeReview.ok) {
+    await markTradeInvoiceRetryable(
+      client,
+      insertedInvoice.id,
+      OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
+    )
+    return {
+      ok: false,
+      success: true,
+      code: 'XERO_PUSH_FAILED',
+      userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
+      invoice_id: insertedInvoice.id,
+      xero_bill_id: null,
+      xero_bill_number: null,
+      total,
+      ...tradeInvoiceMoneyResponse(stMoney),
+      ...tradeRecurringDeductionResponse(stRecurringDeduction),
+      invoice_type: serverInvoiceType,
+      invoice_type_source: 'user',
+      pdf_attached: false,
+    }
+  }
+  if (stOfficeReview.hold) {
+    const { data: stHoldInv } = await client.from('trade_invoices')
+      .select('query_note').eq('id', insertedInvoice.id).maybeSingle()
+    const stHoldNote = [stHoldInv?.query_note, stOfficeReview.hold.error].filter(Boolean).join(' | ').slice(0, 2000)
+    await client.from('trade_invoices').update({ query_note: stHoldNote }).eq('id', insertedInvoice.id)
+    return {
+      ok: false,
+      success: true,
+      office_review: 'held',
+      code: stOfficeReview.hold.code,
+      invoice_id: insertedInvoice.id,
+      xero_bill_id: null,
+      xero_bill_number: null,
+      total,
+      ...tradeInvoiceMoneyResponse(stMoney),
+      ...tradeRecurringDeductionResponse(stRecurringDeduction),
+      invoice_type: serverInvoiceType,
+      invoice_type_source: 'user',
+      pdf_attached: false,
+      error: stOfficeReview.hold.error,
     }
   }
 
