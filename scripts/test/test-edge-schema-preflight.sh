@@ -928,7 +928,16 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261016150000", "dispatch_deliveries"),
                       # Dispatch slice 7, F2: the install_confirmed_for_day
                       # column comment states the mark rule.
-                      ("20261016160000", "job_dispatch_install_for_day_comment")]:
+                      ("20261016160000", "job_dispatch_install_for_day_comment"),
+                      # Paid close-out review switch: the per-job
+                      # review_opt_out columns (job_closeout.ts).
+                      ("20261020093000", "job_review_opt_out"),
+                      # The invoice mirror check: debt_ws_overview and the debt
+                      # report read the newest xero_mirror_checks row.
+                      ("20261020150000", "xero_mirror_checks"),
+                      # Paid-invoice receipt: the receipt switch and the
+                      # job_receipt_claims table (job_receipt.ts).
+                      ("20261021100000", "job_receipt_sender")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

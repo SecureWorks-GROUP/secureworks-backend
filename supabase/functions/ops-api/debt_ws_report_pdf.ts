@@ -16,6 +16,7 @@ import {
   perthClock as clock,
   REPORT_BUCKETS,
   shortDate,
+  xeroCheckNote,
 } from "./debt_ws_report.ts";
 import { money } from "./debt_ws_rules.ts";
 
@@ -312,9 +313,17 @@ export async function renderDebtReportPdf(
       false,
     ],
     [
-      "Total open in Xero",
-      money(r.xero_open.amount),
-      `${r.xero_open.count} invoices`,
+      "Total owed to us",
+      money(r.total_owed.amount),
+      `${r.total_owed.count} invoices${
+        r.xero_check && r.xero_check.status !== "not_checked"
+          ? `; ${
+            r.xero_check.status === "matches"
+              ? "matches Xero"
+              : "does not match Xero"
+          }`
+          : ""
+      }`,
       false,
     ],
     [
@@ -384,7 +393,7 @@ export async function renderDebtReportPdf(
   }
   catRows.push({
     cells: [
-      "Adds up to total open in Xero",
+      "Adds up to total owed to us",
       String(r.xero_open.count),
       money(r.tie.sum),
     ],
@@ -394,9 +403,9 @@ export async function renderDebtReportPdf(
     r.tie.ok
       ? {
         cells: [
-          `Check: ${money(r.tie.sum)} equals Xero's open total of ${
+          `Check: ${money(r.tie.sum)} equals the total owed in our Xero copy, ${
             money(r.tie.xero)
-          } to the cent. Every invoice was placed.`,
+          }, to the cent. Every invoice was placed.`,
         ],
         style: "ok",
       }
@@ -404,7 +413,7 @@ export async function renderDebtReportPdf(
         cells: [
           `Check failed: the buckets add up to ${
             money(r.tie.sum)
-          } but Xero's open total is ${money(r.tie.xero)}.${
+          } but the total owed in our Xero copy is ${money(r.tie.xero)}.${
             r.tie.unplaced.length
               ? ` Not placed: ${r.tie.unplaced.join(", ")}.`
               : ""
@@ -413,6 +422,11 @@ export async function renderDebtReportPdf(
         style: "warn",
       },
   );
+  // Whether our Xero copy matched Xero itself at the last hourly check.
+  catRows.push({
+    cells: [xeroCheckNote(r.xero_check)],
+    style: r.xero_check?.status === "matches" ? "ok" : "warn",
+  });
   table(
     [{ label: "Category", w: 70 }, { label: "No.", w: 10, align: "right" }, {
       label: "Amount",
@@ -635,7 +649,7 @@ export async function renderDebtReportPdf(
   // ── Every open invoice ──
   heading("Every open invoice");
   para(
-    `Grouped by the Debt tab's categories, worst first, then the open invoices that are not counted as debt, so the sections add up to Xero's ${
+    `Grouped by the Debt tab's categories, worst first, then the open invoices that are not counted as debt, so the sections add up to the total owed to us, ${
       money(r.xero_open.amount)
     }.`,
   );

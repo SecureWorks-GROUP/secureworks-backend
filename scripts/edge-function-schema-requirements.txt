@@ -835,3 +835,23 @@ ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purcha
 # rule ops-api's dispatch_install.ts follows (a mark stands while a booking is
 # on its day, past or ahead). Comment only; the marker is the same column.
 ops-api|supabase/migrations/20261016160000_job_dispatch_install_for_day_comment.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# Per-job review switch: the paid close-out sender and its card read select the
+# three columns, and set_review_opt_out writes them, so they must exist before
+# this ops-api ships.
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_at
+ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.review_opt_out_by
+# The invoice mirror check: xero-sync writes a row every hour; ops-api reads the newest
+# for the Debt tab's "Matches Xero" line and the debt report.
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
+ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+# Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
+# invoice; ops-api job_receipt.ts reads the switch and writes the claims.
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
