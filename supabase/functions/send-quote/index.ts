@@ -30,6 +30,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey, xeroRateLimitDetails, xeroRateLimitError } from '../_shared/xero_cooldown.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { frozenRevisionErrorCode, frozenRevisionReader, quoteFrozenRevisionGateError, quotePricingGateError, sitePlanArtifactReader } from '../_shared/quote_pricing_gate.ts'
 import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
@@ -166,30 +167,8 @@ function getDepositTermsString(depositPct: number): string {
   return `${depositPct}% deposit + ${remaining}% on completion`
 }
 
-// ── Server-side quote pricing gate ──
-// Returns an error string when a quote must NOT be sent, or null when it may.
-// Blocks: (1) explicit validation failure (pricing_validation_passed === false),
-// (2) a non-positive quote total. Accepts string-or-object pricing_json.
-// pricing_validation_passed is checked with strict === false so quotes that never
-// set the flag (fence-designer, legacy quotes) are NOT blocked — only an explicit
-// failed validation from the scoping tool blocks.
-function quotePricingGateError(pricingJsonRaw: any): string | null {
-  let pj: any = {}
-  try {
-    pj = typeof pricingJsonRaw === 'string' ? JSON.parse(pricingJsonRaw || '{}') : (pricingJsonRaw || {})
-  } catch {
-    // Unparseable pricing_json cannot be safely sent.
-    return 'Quote pricing is missing or invalid. Re-open the job in the scoping tool and re-save before sending.'
-  }
-  if (pj.pricing_validation_passed === false) {
-    return 'Quote failed pricing validation in the scoping tool and cannot be sent. Fix the flagged pricing issues, re-save, and try again.'
-  }
-  const total = Number(pj.totalIncGST ?? pj.total ?? pj.grandTotal ?? 0)
-  if (!(total > 0)) {
-    return 'Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.'
-  }
-  return null
-}
+// Server-side quote pricing gate: one rule for every send route, in
+// ../_shared/quote_pricing_gate.ts (imported above).
 
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
 function logEmailToGHL(contactId: string | null, subject: string, recipient: string) {
@@ -779,6 +758,9 @@ serve(async (req: Request) => {
       {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
+        // A sealed scoping-tool revision goes out only with its frozen row.
+        const frozenErr = await quoteFrozenRevisionGateError(frozenRevisionReader(sb), doc.job_id, doc.jobs?.pricing_json, sitePlanArtifactReader(sb))
+        if (frozenErr) return jsonResponse({ error: frozenErr, code: frozenRevisionErrorCode(frozenErr) }, 409, corsHeaders)
       }
 
       // Resolve name: use provided, fall back to job_contact, then job-level
@@ -2491,6 +2473,8 @@ serve(async (req: Request) => {
       {
         const gateErr = quotePricingGateError(pj)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
+        const frozenErr = await quoteFrozenRevisionGateError(frozenRevisionReader(sb), job.id, job.pricing_json, sitePlanArtifactReader(sb))
+        if (frozenErr) return jsonResponse({ error: frozenErr, code: frozenRevisionErrorCode(frozenErr) }, 409, corsHeaders)
       }
 
       const contacts = job.job_contacts || []
