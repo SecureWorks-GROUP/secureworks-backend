@@ -5,8 +5,11 @@
 -- This file replaces v_job_profit: JP-12 installer-bill blanking and every
 -- #1121 column stay, then margin_source, margin_cost_ex,
 -- expected_labour_quote_ex and work_order_agreed_labour_ex are appended.
--- It adds the switches below. Apply only after 20261020220000. The live
--- migration ledger was not read when 20261021180000 was chosen (not observed).
+-- It adds the switches below. Apply only after 20261020220000. This version
+-- was 20261021180000 and is renumbered to 20261022180000 so it sorts after
+-- 20261022050000_group_work_orders, the newest migration on main, and after
+-- 20261022060000 which another branch already uses. The live migration
+-- ledger was not read (not observed).
 --
 -- DEFAULT, owner to confirm. Three switches, all seeded OFF. While one of
 -- those switches is off, missing or unreadable, the columns that switch owns
@@ -70,7 +73,7 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_flag_on(text) IS
-  'Job profit switches (20261021180000). True only when that feature_flags row exists and is enabled. Missing, unreadable or any error is off.';
+  'Job profit switches (20261022180000). True only when that feature_flags row exists and is enabled. Missing, unreadable or any error is off.';
 
 CREATE OR REPLACE FUNCTION public.job_profit_patio_rule3_statuses()
 RETURNS text[]
@@ -252,7 +255,7 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.job_profit_patio_quote(uuid, text, text, numeric, numeric, jsonb, boolean) IS
-  'Patio sales price (20261021180000). Off, or not a patio, returns no row so the sent quote stands. One agreeing frozen quote is published only when it is consistent with the live price and with invoiced-to-date. A conflict returns no figure. Never reads jobs.quoted_value.';
+  'Patio sales price (20261022180000). Off, or not a patio, returns no row so the sent quote stands. One agreeing frozen quote is published only when it is consistent with the live price and with invoiced-to-date. A conflict returns no figure. Never reads jobs.quoted_value.';
 
 REVOKE ALL ON FUNCTION public.job_profit_flag_on(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_profit_patio_rule3_statuses() FROM PUBLIC, anon, authenticated;
@@ -814,7 +817,7 @@ SELECT
 FROM gated s;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted.  20261021180000 appends margin_source, margin_cost_ex, expected_labour_quote_ex and work_order_agreed_labour_ex. Three switches default off (job_profit_work_order_labour_v1, job_profit_xero_project_cost_v1, job_profit_patio_quote_v1). An unconfirmed installer bill always flags installer_bill_unconfirmed and blanks profit and margin, and its amount is not in actual cost; that blanking is not behind a switch, so a flags-off completeness list is what 20261020220000 published plus installer_bill_unconfirmed when such a bill is on the job. While the project switch is on, the Xero Project figure is the published cost only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero, and no installer bill is unconfirmed, and margin_source is exactly ''from Xero Project, may exclude unlinked labour''; a stored agreed labour of 0 does not publish that margin; otherwise the margin stays blank and xero_project_exceeds_line_costs stays set. When that margin publishes, the suppressor is not set and cost_flag is ok. While the labour switch is on, expected labour is an approved job work order only (approved_at is not null); a draft is ignored. While the patio switch is on, a patio sales price is one frozen quote that agrees with the live price and with what has been invoiced; a conflict is blank and flagged. Read only, service role only.';
+  'Job profit engine (20261009130000, CFO-12 20261019120000, 20261020220000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). quote_costs_incomplete names a job whose quote costs are still to confirm, so no expected cost is fixed; it is never shown as uncosted.  20261022180000 appends margin_source, margin_cost_ex, expected_labour_quote_ex and work_order_agreed_labour_ex. Three switches default off (job_profit_work_order_labour_v1, job_profit_xero_project_cost_v1, job_profit_patio_quote_v1). An unconfirmed installer bill always flags installer_bill_unconfirmed and blanks profit and margin, and its amount is not in actual cost; that blanking is not behind a switch, so a flags-off completeness list is what 20261020220000 published plus installer_bill_unconfirmed when such a bill is on the job. While the project switch is on, the Xero Project figure is the published cost only when the job is finished or billed labour has reached an approved work order whose agreed labour is above zero, and no installer bill is unconfirmed, and margin_source is exactly ''from Xero Project, may exclude unlinked labour''; a stored agreed labour of 0 does not publish that margin; otherwise the margin stays blank and xero_project_exceeds_line_costs stays set. When that margin publishes, the suppressor is not set and cost_flag is ok. While the labour switch is on, expected labour is an approved job work order only (approved_at is not null); a draft is ignored. While the patio switch is on, a patio sales price is one frozen quote that agrees with the live price and with what has been invoiced; a conflict is blank and flagged. Read only, service role only.';
 
 COMMENT ON COLUMN public.v_job_profit.quote_costs_incomplete IS
   'True when no expected cost is fixed because the revision the quote stands on (newest accepted, else newest sent) sealed its costs as still to confirm (cost_estimates.costs_complete false). Not the same as a job with no costed quote. Never a figure.';

@@ -13,6 +13,7 @@ import {
   _pipelineForTest,
   AGENT_READ_ALLOWED_ACTIONS,
   ApiError,
+  EXISTING_FENCE_TYPE_PROJECTION,
   LEAD_INSTALLER_READ_ACTIONS,
 } from "./index.ts";
 import {
@@ -413,7 +414,14 @@ Deno.test("pipeline without the flag is unchanged: same select, same rows, no ne
   assertEquals(read.ranged, false);
   assertEquals(read.neq, []);
   assert(!read.or.includes(DISPATCH_LISTED_WORK_FILTER));
-  assert(!read.select.includes("scope_json"));
+  // The fence type is the one scope value the plain read projects; the
+  // Dispatch description paths stay opt-in.
+  assert(read.select.includes(EXISTING_FENCE_TYPE_PROJECTION));
+  assert(
+    !read.select.replace(EXISTING_FENCE_TYPE_PROJECTION, "").includes(
+      "scope_json",
+    ),
+  );
   assert(!read.select.includes("metadata"));
   const statuses = read.in.find(([column]) => column === "status")?.[1] || [];
   assert(statuses.includes("draft") && statuses.includes("quoted"));

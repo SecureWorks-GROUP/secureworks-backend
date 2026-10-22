@@ -106,7 +106,7 @@ BEGIN
   SELECT column_name INTO last_col FROM information_schema.columns
    WHERE table_schema = 'public' AND table_name = 'v_job_profit'
    ORDER BY ordinal_position DESC LIMIT 1;
-  -- This check is the stack's final view. 20261021180000 rewrites
+  -- This check is the stack's final view. 20261022180000 rewrites
   -- v_job_profit, keeps JP-12, and appends four columns after
   -- quote_costs_incomplete. This migration's own column stays immediately
   -- before those four.

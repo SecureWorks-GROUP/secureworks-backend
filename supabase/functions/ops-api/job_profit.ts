@@ -47,6 +47,10 @@ export const JOB_PROFIT_LABELS = {
     "Expected labour from the quote snapshot, even when expected_labour_ex is an approved job work order.",
   work_order_agreed_labour_ex:
     "Approved job work order agreed labour ex GST, plus approved customer-variation trade allocation. A draft is not included. Shown even while the labour switch is off. Null when no approved job work order has an agreed figure. A stored 0 is a real expected-labour figure and does not by itself publish a Xero Project margin.",
+  rollup_expected_vs_actual:
+    "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
+  holding_jobs:
+    "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;
 
 /**

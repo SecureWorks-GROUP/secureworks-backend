@@ -1,4 +1,4 @@
--- Contract for 20261021180000_job_profit_work_order_xero_bills.
+-- Contract for 20261022180000_job_profit_work_order_xero_bills.
 --
 -- Synthetic jobs, fixed dates, no customer data. The three switches are
 -- seeded off. This transaction turns them on, proves the new behaviour, and

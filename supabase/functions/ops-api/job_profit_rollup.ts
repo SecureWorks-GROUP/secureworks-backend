@@ -12,13 +12,29 @@
 // the engine published a margin from the Xero Project, and actual_cost_ex
 // otherwise. A row whose profit is null contributes nothing to published cost.
 //
-// expected_cost_ex and quoted_ex sum the engine's figures as they stand: the
-// engine publishes a quoted figure only from a sent or accepted quote and an
-// expected cost only where it was fixed at the quote, and leaves both null
-// otherwise, so an unwon lead's live price is in neither sum.
+// quoted_ex sums the engine's figures as they stand: the engine publishes a
+// quoted figure only from a sent or accepted quote and leaves it null
+// otherwise, so an unwon lead's live price is in no sum.
+// expected_cost_ex, jobs_with_expected and actual_cost_on_expected_ex cover
+// only jobs with an expected cost whose actual cost is complete (cost_flag ok
+// or text_matched_lines: every cost the engine needs for a margin is linked).
+// A job whose actual cost is still partial (no cost linked, materials not
+// linked, labour missing, unclassified or incomplete lines, a Xero Project
+// above its lines) is not comparable: an expected cost of labour, materials
+// and commission against labour alone would read as a saving. Those jobs are
+// counted in jobs_with_expected_not_comparable and
+// expected_cost_not_comparable_ex, never in the comparison.
 // actual_cost_ex and invoiced_ex sum every job. Compare like with like through
 // actual_cost_on_expected_ex / jobs_with_expected and invoiced_on_quoted_ex /
-// jobs_with_quote, never expected_cost_ex against actual_cost_ex.
+// jobs_with_quote.
+//
+// A holding job (holding_job: costs parked on a bucket card, such as
+// SWF-PDF-BUCKET) is not a customer's job and is in no total, work type or
+// month. It is reported on its own in holding_jobs so its parked cost stays
+// visible.
+//
+// profit_ex, margin_pct, published_revenue_ex and published_cost_ex are null
+// (Unknown) for a group with no publishable job, never 0.
 //
 // by_month groups jobs by the date_field that filtered them (created Perth day
 // or first invoice date). It is a job cohort, not an accrual P&L period.
@@ -55,7 +71,14 @@ const ROLLUP_COLUMNS = [
   "profit_ex",
   "margin_cost_ex",
   "revenue_verified_paid",
+  "cost_flag",
+  "holding_job",
 ].join(", ");
+
+// cost_flag values whose actual cost is complete: the engine's margin needs
+// nothing more on the cost side (text-matched trade lines are linked, only by
+// job number rather than id).
+const COMPLETE_COST_FLAGS = new Set(["ok", "text_matched_lines"]);
 
 type Bucket = {
   jobs: number;
@@ -69,6 +92,8 @@ type Bucket = {
   invoiced_on_quoted: bigint | null;
   jobs_with_expected: number;
   actual_on_expected: bigint | null;
+  jobs_with_expected_not_comparable: number;
+  expected_not_comparable: bigint | null;
   published_revenue: bigint;
   published_cost: bigint;
   profit: bigint;
@@ -88,6 +113,8 @@ function emptyBucket(): Bucket {
     invoiced_on_quoted: null,
     jobs_with_expected: 0,
     actual_on_expected: null,
+    jobs_with_expected_not_comparable: 0,
+    expected_not_comparable: null,
     published_revenue: 0n,
     published_cost: 0n,
     profit: 0n,
@@ -129,10 +156,16 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
       (invoiced ?? 0n);
   }
   if (expected !== null) {
-    bucket.expected = (bucket.expected ?? 0n) + expected;
-    bucket.jobs_with_expected += 1;
-    bucket.actual_on_expected = (bucket.actual_on_expected ?? 0n) +
-      (actual ?? 0n);
+    if (COMPLETE_COST_FLAGS.has(String(row.cost_flag ?? ""))) {
+      bucket.expected = (bucket.expected ?? 0n) + expected;
+      bucket.jobs_with_expected += 1;
+      bucket.actual_on_expected = (bucket.actual_on_expected ?? 0n) +
+        (actual ?? 0n);
+    } else {
+      bucket.expected_not_comparable = (bucket.expected_not_comparable ??
+        0n) + expected;
+      bucket.jobs_with_expected_not_comparable += 1;
+    }
   }
   if (row.revenue_verified_paid === true) {
     bucket.revenue_verified_paid_jobs += 1;
@@ -147,9 +180,12 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
 }
 
 function presentBucket(bucket: Bucket): Record<string, unknown> {
-  const margin = bucket.published_revenue === 0n ? null : Math.round(
-    (Number(bucket.profit) / Number(bucket.published_revenue)) * 1000,
-  ) / 10;
+  const published = bucket.jobs_with_margin > 0;
+  const margin = !published || bucket.published_revenue === 0n
+    ? null
+    : Math.round(
+      (Number(bucket.profit) / Number(bucket.published_revenue)) * 1000,
+    ) / 10;
   return {
     jobs: bucket.jobs,
     jobs_with_margin: bucket.jobs_with_margin,
@@ -162,9 +198,15 @@ function presentBucket(bucket: Bucket): Record<string, unknown> {
     invoiced_on_quoted_ex: centsToNumber(bucket.invoiced_on_quoted),
     jobs_with_expected: bucket.jobs_with_expected,
     actual_cost_on_expected_ex: centsToNumber(bucket.actual_on_expected),
-    published_revenue_ex: centsToNumber(bucket.published_revenue),
-    published_cost_ex: centsToNumber(bucket.published_cost),
-    profit_ex: centsToNumber(bucket.profit),
+    jobs_with_expected_not_comparable: bucket.jobs_with_expected_not_comparable,
+    expected_cost_not_comparable_ex: centsToNumber(
+      bucket.expected_not_comparable,
+    ),
+    published_revenue_ex: published
+      ? centsToNumber(bucket.published_revenue)
+      : null,
+    published_cost_ex: published ? centsToNumber(bucket.published_cost) : null,
+    profit_ex: published ? centsToNumber(bucket.profit) : null,
     margin_pct: margin,
     revenue_verified_paid_jobs: bucket.revenue_verified_paid_jobs,
   };
@@ -191,6 +233,7 @@ export async function jobProfitRollupAction(
   labels: Record<string, unknown>,
 ): Promise<JobProfitRollupResult> {
   const totals = emptyBucket();
+  const holding = emptyBucket();
   const byType = new Map<string | null, Bucket>();
   const byMonth = new Map<string | null, Bucket>();
   const seen = new Set<string>();
@@ -229,6 +272,10 @@ export async function jobProfitRollupAction(
         if (jobId && seen.has(jobId)) continue;
         if (jobId) seen.add(jobId);
 
+        if (row.holding_job === true) {
+          addRow(holding, row);
+          continue;
+        }
         addRow(totals, row);
         const type = typeof row.work_type === "string" && row.work_type
           ? row.work_type
@@ -287,6 +334,7 @@ export async function jobProfitRollupAction(
       totals: presentBucket(totals),
       by_type,
       by_month,
+      holding_jobs: presentBucket(holding),
       filters: {
         type: f.types,
         status: f.statuses,

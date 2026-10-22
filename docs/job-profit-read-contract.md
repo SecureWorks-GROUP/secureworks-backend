@@ -97,7 +97,7 @@ Turning one on is the owner's word, after this migration is applied. While a
 switch is off, the fields that switch owns keep the meaning they had before
 it. Installer-bill blanking is not one of those switches: an unconfirmed
 installer bill blanks profit and margin with every switch off.
-The four columns added in `20261021180000` (`margin_source`, `margin_cost_ex`,
+The four columns added in `20261022180000` (`margin_source`, `margin_cost_ex`,
 `expected_labour_quote_ex`, `work_order_agreed_labour_ex`) are present either
 way.
 
@@ -174,18 +174,24 @@ rows no person made has `installer_unconfirmed` true and is never `balanced`.
 
 ## Rollup fields
 
-Each of `totals`, `by_type[]` and `by_month[]` carries:
+Each of `totals`, `by_type[]`, `by_month[]` and `holding_jobs` carries:
 
 | Field | Meaning |
 |---|---|
 | `jobs` | Jobs in the group |
 | `invoiced_ex`, `collected_ex`, `actual_cost_ex` | Summed over every job in the group |
 | `quoted_ex`, `jobs_with_quote`, `invoiced_on_quoted_ex` | Sent-quote value, how many jobs have one, and what those same jobs invoiced |
-| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost |
-| `profit_ex`, `margin_pct`, `jobs_with_margin`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published. `published_cost_ex` uses `margin_cost_ex` when that job's margin came from the Xero Project, and `actual_cost_ex` otherwise. `actual_cost_ex` in the same bucket stays line-level |
+| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost: only jobs whose actual cost is complete (`cost_flag` `ok` or `text_matched_lines`) |
+| `jobs_with_expected_not_comparable`, `expected_cost_not_comparable_ex` | Jobs with an expected cost whose actual cost is still partial (no cost linked, materials not linked, labour missing, unclassified or incomplete lines, a Xero Project above its lines), and their expected cost. Not compared |
+| `jobs_with_margin` | How many jobs in the group the engine published a profit for; 0 when none |
+| `profit_ex`, `margin_pct`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published. `published_cost_ex` uses `margin_cost_ex` when that job's margin came from the Xero Project, and `actual_cost_ex` otherwise. `actual_cost_ex` in the same bucket stays line-level. Null (Unknown) when `jobs_with_margin` is 0, never 0 |
 | `revenue_verified_paid_jobs` | Jobs whose sales invoices are all paid in Xero |
 
 Compare expected with actual through `actual_cost_on_expected_ex`, and quoted
 with invoiced through `invoiced_on_quoted_ex`, so both sides cover the same
 jobs. `by_month` groups jobs by the `date_field` that filtered them; it is a
 job cohort, not an accounting period.
+
+A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
+parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
+figure; `holding_jobs` reports it on its own so the parked cost stays visible.

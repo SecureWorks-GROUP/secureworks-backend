@@ -1,4 +1,4 @@
--- Rollback for 20261021180000_job_profit_work_order_xero_bills.sql.
+-- Rollback for 20261022180000_job_profit_work_order_xero_bills.sql.
 -- Restores v_job_profit exactly as 20261020220000 left it on #1121's head
 -- (JP-12 installer-bill blanking stays in the view, and
 -- quote_costs_incomplete is the last column). Drops the four appended
