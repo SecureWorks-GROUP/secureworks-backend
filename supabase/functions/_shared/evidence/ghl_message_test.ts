@@ -14,6 +14,7 @@ import {
   type GhlRecordBody,
   type GhlRecordEventType,
   ourLineForNumber,
+  ghlUnsupportedChannel,
 } from "./ghl_message.ts";
 import {
   ACTIVITY_ITEM,
@@ -311,8 +312,28 @@ Deno.test("activity items, id-less and contact-less items are not written, with 
   });
   assertEquals(
     buildGhlMessageRow({ ...R3_LIST_ITEM, messageType: "TYPE_WHATSAPP" }, LIVE),
-    { kind: "skip", reason: "unsupported_type" },
+    { kind: "skip", reason: "unsupported_type", channel: "whatsapp" },
   );
+});
+
+Deno.test("unsupported types: each is counted by channel, nothing written", () => {
+  for (
+    const [messageType, channel] of [
+      ["TYPE_WHATSAPP", "whatsapp"],
+      ["TYPE_FACEBOOK", "facebook"],
+      ["TYPE_INSTAGRAM", "instagram"],
+      ["TYPE_LIVE_CHAT", "webchat"],
+      ["TYPE_GMB", "google"],
+      ["TYPE_REVIEW", "google"],
+      ["TYPE_SOMETHING_NEW", "other"],
+    ] as const
+  ) {
+    assertEquals(ghlUnsupportedChannel(messageType), channel);
+    assertEquals(
+      buildGhlMessageRow({ ...R3_LIST_ITEM, messageType }, LIVE),
+      { kind: "skip", reason: "unsupported_type", channel },
+    );
+  }
 });
 
 Deno.test("our lines: 772 and 778 fencing, 774 patio, 771 and 776 none, other numbers unknown", () => {

@@ -125,7 +125,34 @@ export type GhlSkipReason =
 
 export type GhlMessageBuild =
   | { kind: "row"; row: Record<string, unknown> }
-  | { kind: "skip"; reason: GhlSkipReason };
+  | { kind: "skip"; reason: GhlSkipReason; channel?: GhlUnsupportedChannel };
+
+/** Where an item of a type we do not capture came from, for run counts only. */
+export type GhlUnsupportedChannel =
+  | "whatsapp"
+  | "facebook"
+  | "instagram"
+  | "webchat"
+  | "google"
+  | "other";
+
+/**
+ * The channel of a GHL message type we do not capture. Counted on the run row
+ * so the dropped mix is measured (no ids, no words); nothing is written.
+ */
+export function ghlUnsupportedChannel(
+  raw: string | null | undefined,
+): GhlUnsupportedChannel {
+  const kind = messageKind(raw);
+  if (kind.includes("WHATSAPP")) return "whatsapp";
+  if (kind.includes("FACEBOOK") || kind === "FB") return "facebook";
+  if (kind.includes("INSTAGRAM") || kind === "IG") return "instagram";
+  if (kind.includes("LIVECHAT") || kind.includes("WEBCHAT")) return "webchat";
+  if (kind.includes("GMB") || kind.includes("GOOGLE") || kind.includes("REVIEW")) {
+    return "google";
+  }
+  return "other";
+}
 
 const GHL_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const EXCERPT = 500;
@@ -236,7 +263,11 @@ export function buildGhlMessageRow(
       ? (channel === "email" ? "client.email_in" : "client.reply")
       : (channel === "email" ? "client.email_out" : "client.sms_out");
   } else {
-    return { kind: "skip", reason: "unsupported_type" };
+    return {
+      kind: "skip",
+      reason: "unsupported_type",
+      channel: ghlUnsupportedChannel(item.messageType),
+    };
   }
 
   const body = typeof item.body === "string" && item.body.trim()
