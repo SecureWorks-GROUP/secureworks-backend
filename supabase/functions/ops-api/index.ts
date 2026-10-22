@@ -15081,6 +15081,12 @@ async function opsSummary(client: any) {
   }
 }
 
+// The job's existing fence type (e.g. 'asbestos'), the one scope value the
+// ops dash job cards need. Text via `->>`, null when absent. Selected by both the
+// calendar and pipeline reads and returned as-is, never stripped.
+export const EXISTING_FENCE_TYPE_PROJECTION =
+  'existing_fence_type:scope_json->job->removal->>existingFenceType'
+
 // ── Calendar scope projection (edge-worker OOM fix) ─────────────────────────
 // calendar_events.scope_json averages ~100 kB per row and peaks at 2.6 MB — the
 // bulk is base64 media parked under scope_json.job.sitePlanImage / .checklist.
@@ -16468,6 +16474,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   const calSelect = [
     ...(includeFinancials ? CAL_FINANCIAL_COLUMNS : CAL_LIGHT_COLUMNS),
     ...CAL_SCOPE_PROJECTION,
+    EXISTING_FENCE_TYPE_PROJECTION,
   ].join(', ')
 
   // U-O3(a) M3c: window OVERLAP, not start-date containment. A multi-day job
@@ -16831,7 +16838,8 @@ async function pipeline(
   const buildJobsQuery = () => applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
-      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required' +
+      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required, ' +
+      EXISTING_FENCE_TYPE_PROJECTION +
       repairProjection + dispatchProjection))
     .order('updated_at', { ascending: false })
   // Test records and the search box read only raw job columns, so one rule
