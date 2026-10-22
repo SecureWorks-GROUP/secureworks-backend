@@ -134,6 +134,96 @@ function world(partial: Partial<World> = {}): World {
   };
 }
 
+function groupMail(w: World): CaptureDeps["mail"] {
+  const mail: CaptureDeps["mail"] = {
+    folderIds: async (mailbox) => {
+      if (w.mailboxes[mailbox] === "refuse") {
+        throw new GraphReadError("graph_403", 403);
+      }
+      return FOLDERS;
+    },
+    listMessages: async (mailbox, args) => {
+      w.listCalls++;
+      const box = w.mailboxes[mailbox];
+      if (box === "refuse" || !box) {
+        throw new GraphReadError("graph_403", 403);
+      }
+      const from = Date.parse(args.fromIso);
+      const to = args.toIso ? Date.parse(args.toIso) : Infinity;
+      const all = box.filter((m) => {
+        const t = Date.parse(m.receivedAt!);
+        return t >= from && t < to;
+      }).sort((a, b) =>
+        Date.parse(a.receivedAt!) - Date.parse(b.receivedAt!) ||
+        (a.graphId < b.graphId ? -1 : 1)
+      );
+      const offset = args.next ? Number(args.next.split("#")[1]) : 0;
+      const page = all.slice(offset, offset + args.top);
+      const next = offset + args.top < all.length
+        ? `https://graph.microsoft.com/v1.0/next#${offset + args.top}`
+        : null;
+      return { items: page.map((m) => ({ ...m, detailRead: true })), next };
+    },
+    messageDetail: async () => ({
+      text: "detail",
+      isHtml: false,
+      headers: {},
+    }),
+    resolveGroupId: async (address) => w.groups[address]?.id ?? null,
+    // Graph's order (lastDeliveredDateTime desc), 25 a page, the next
+    // link an offset into the list as it stands when the page is read.
+    listGroupConversations: async (groupId, next) => {
+      w.conversationPages++;
+      w.onConversationList?.();
+      const g = Object.values(w.groups).find((x) => x.id === groupId)!;
+      const convs = [...new Set(g.posts.map((p) => p.conv))].map((id) => ({
+        id,
+        lastDeliveredDateTime: g.posts.filter((p) => p.conv === id).map((p) =>
+          p.post.receivedAt!
+        ).sort().at(-1)!,
+      })).sort((a, b) =>
+        b.lastDeliveredDateTime.localeCompare(a.lastDeliveredDateTime) ||
+        (a.id < b.id ? -1 : 1)
+      );
+      const offset = next ? Number(next.split("#")[1]) : 0;
+      return {
+        items: convs.slice(offset, offset + 25),
+        next: offset + 25 < convs.length
+          ? `https://graph.microsoft.com/v1.0/conversations#${offset + 25}`
+          : null,
+      };
+    },
+    listGroupThreads: async (groupId, conv) => {
+      const g = Object.values(w.groups).find((x) => x.id === groupId)!;
+      return [
+        ...new Set(
+          g.posts.filter((p) => p.conv === conv).map((p) => p.thread),
+        ),
+      ].map((id) => ({ id, topic: "Topic" }));
+    },
+    listGroupPosts: async (groupId, thread) => {
+      w.postReads.push(thread);
+      const g = Object.values(w.groups).find((x) => x.id === groupId)!;
+      return g.posts.filter((p) => p.thread === thread).map((p) => p.post);
+    },
+    // One page. A next token is a later page the default fixtures never have,
+    // so a test that paginates overrides these. They call the bulk methods at
+    // call time, so a test that wraps those still applies.
+    listGroupThreadPage: async (groupId, conv, next) => {
+      if (next) return { items: [], next: null };
+      return { items: await mail.listGroupThreads(groupId, conv), next: null };
+    },
+    listGroupPostPage: async (groupId, thread, topic, next) => {
+      if (next) return { items: [], next: null };
+      return {
+        items: await mail.listGroupPosts(groupId, thread, topic),
+        next: null,
+      };
+    },
+  };
+  return mail;
+}
+
 function deps(w: World): CaptureDeps {
   let runSeq = 0;
   return {
@@ -217,78 +307,7 @@ function deps(w: World): CaptureDeps {
         Date.parse(l.receivedAt) === Date.parse(args.receivedAt)
       )?.id ?? null;
     },
-    mail: {
-      folderIds: async (mailbox) => {
-        if (w.mailboxes[mailbox] === "refuse") {
-          throw new GraphReadError("graph_403", 403);
-        }
-        return FOLDERS;
-      },
-      listMessages: async (mailbox, args) => {
-        w.listCalls++;
-        const box = w.mailboxes[mailbox];
-        if (box === "refuse" || !box) {
-          throw new GraphReadError("graph_403", 403);
-        }
-        const from = Date.parse(args.fromIso);
-        const to = args.toIso ? Date.parse(args.toIso) : Infinity;
-        const all = box.filter((m) => {
-          const t = Date.parse(m.receivedAt!);
-          return t >= from && t < to;
-        }).sort((a, b) =>
-          Date.parse(a.receivedAt!) - Date.parse(b.receivedAt!) ||
-          (a.graphId < b.graphId ? -1 : 1)
-        );
-        const offset = args.next ? Number(args.next.split("#")[1]) : 0;
-        const page = all.slice(offset, offset + args.top);
-        const next = offset + args.top < all.length
-          ? `https://graph.microsoft.com/v1.0/next#${offset + args.top}`
-          : null;
-        return { items: page.map((m) => ({ ...m, detailRead: true })), next };
-      },
-      messageDetail: async () => ({
-        text: "detail",
-        isHtml: false,
-        headers: {},
-      }),
-      resolveGroupId: async (mail) => w.groups[mail]?.id ?? null,
-      // Graph's order (lastDeliveredDateTime desc), 25 a page, the next
-      // link an offset into the list as it stands when the page is read.
-      listGroupConversations: async (groupId, next) => {
-        w.conversationPages++;
-        w.onConversationList?.();
-        const g = Object.values(w.groups).find((x) => x.id === groupId)!;
-        const convs = [...new Set(g.posts.map((p) => p.conv))].map((id) => ({
-          id,
-          lastDeliveredDateTime: g.posts.filter((p) => p.conv === id).map((p) =>
-            p.post.receivedAt!
-          ).sort().at(-1)!,
-        })).sort((a, b) =>
-          b.lastDeliveredDateTime.localeCompare(a.lastDeliveredDateTime) ||
-          (a.id < b.id ? -1 : 1)
-        );
-        const offset = next ? Number(next.split("#")[1]) : 0;
-        return {
-          items: convs.slice(offset, offset + 25),
-          next: offset + 25 < convs.length
-            ? `https://graph.microsoft.com/v1.0/conversations#${offset + 25}`
-            : null,
-        };
-      },
-      listGroupThreads: async (groupId, conv) => {
-        const g = Object.values(w.groups).find((x) => x.id === groupId)!;
-        return [
-          ...new Set(
-            g.posts.filter((p) => p.conv === conv).map((p) => p.thread),
-          ),
-        ].map((id) => ({ id, topic: "Topic" }));
-      },
-      listGroupPosts: async (groupId, thread) => {
-        w.postReads.push(thread);
-        const g = Object.values(w.groups).find((x) => x.id === groupId)!;
-        return g.posts.filter((p) => p.thread === thread).map((p) => p.post);
-      },
-    },
+    mail: groupMail(w),
     storeAttachments: async (args): Promise<AttachmentResult> => {
       w.attachmentCalls.push(args.providerMessageId);
       w.attachmentEvents.push(args.businessEventId);
@@ -1212,6 +1231,213 @@ Deno.test("W7: a long history run saves its cursor on its running row as it goes
   assertEquals(historyRuns(w)[0].status, "partial");
   // The second page was listed after checkpoints moved the running row's cursor.
   assert(seen.length >= 2 && seen.at(-1) !== null);
+});
+
+Deno.test("W7: a conversation Graph answers 404 for is counted and passed; the walk is not held there", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
+  });
+  const d = deps(w);
+  const threads = d.mail.listGroupThreads;
+  const posts = d.mail.listGroupPosts;
+  d.mail.listGroupThreads = async (g, c) => {
+    if (c === "C005") throw new GraphReadError("graph_404", 404);
+    return await threads(g, c);
+  };
+  d.mail.listGroupPosts = async (g, th, topic) => {
+    if (th === "T-C007") throw new GraphReadError("graph_404", 404);
+    return await posts(g, th, topic);
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const run = historyRuns(w)[0];
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.error_code, null);
+  assertEquals(run.counts!.conversations_gone, 1);
+  assertEquals(run.counts!.threads_gone, 1);
+  assertEquals(run.counts!.conversations_read, 30);
+  assertEquals(w.captured.length, 28);
+  assert(!w.keys.has("email:c005-0@mail.example.org"));
+  assert(!w.keys.has("email:c007-0@mail.example.org"));
+});
+
+Deno.test("W7: any other fault reading a conversation still fails the run at it, cursor before it", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
+  });
+  const d = deps(w);
+  const threads = d.mail.listGroupThreads;
+  d.mail.listGroupThreads = async (g, c) => {
+    if (c === "C005") throw new GraphReadError("graph_403", 403);
+    return await threads(g, c);
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const run = historyRuns(w)[0];
+  assertEquals(run.status, "failed");
+  assertEquals(run.error_code, "graph_403");
+  assertEquals(w.captured.length, 5);
+  assertEquals(walkOf(run).before_ids, ["h:C004"]);
+});
+
+Deno.test("W7: a long conversation checkpoints inside itself, so an abandoned run hands on the posts it saved", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(1, 60) },
+    tick: 1_000,
+  });
+  const d = deps(w);
+  const save = d.recordRun;
+  const running: Array<unknown> = [];
+  d.recordRun = async (row) => {
+    if (row.status === "running" && row.run_id) {
+      running.push(((row.cursor as Record<string, unknown>)?.group as Record<string, unknown>)?.conv ?? null);
+    }
+    return await save(row);
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  // A running-row checkpoint already names the conversation cut point.
+  assert(running.includes("h:C000"), `checkpoints: ${JSON.stringify(running)}`);
+});
+
+function groupPost(id: string, at: string): OutlookMailItem {
+  return {
+    graphId: id,
+    internetMessageId: `<${id}@mail.example.org>`,
+    conversationId: "C000",
+    subject: "Fence quote",
+    from: "sam.sample@example.net",
+    to: [],
+    receivedAt: at,
+    bodyText: id,
+    folderKind: "group",
+  };
+}
+
+Deno.test("W7: a many-page conversation saves its page and the next run resumes past it", async () => {
+  // T1's second page is older than its first. A time cursor would drop it.
+  const t0 = [
+    groupPost("P-T0-0", "2026-09-10T00:00:00.000Z"),
+    groupPost("P-T0-1", "2026-09-10T01:00:00.000Z"),
+  ];
+  const t1 = [
+    groupPost("P-T1-0", "2026-09-20T00:00:00.000Z"),
+    groupPost("P-T1-1", "2026-09-21T00:00:00.000Z"),
+    groupPost("P-T1-2", "2026-09-01T00:00:00.000Z"),
+    groupPost("P-T1-3", "2026-09-02T00:00:00.000Z"),
+  ];
+  const w = world({
+    sources: [FENCING],
+    groups: {
+      "fencing@secureworkswa.com.au": {
+        id: "GRP-FENCING",
+        posts: [
+          ...t0.map((post) => ({ conv: "C000", thread: "T0", post })),
+          ...t1.map((post) => ({ conv: "C000", thread: "T1", post })),
+        ],
+      },
+    },
+  });
+  const d = deps(w);
+  const postTokens: string[] = [];
+  d.mail.listGroupThreadPage = async (_groupId, _conv, next) => {
+    if (next) return { items: [], next: null };
+    return {
+      items: [
+        { id: "T0", topic: "A" },
+        { id: "T1", topic: "B" },
+      ],
+      next: null,
+    };
+  };
+  const pages: Record<string, OutlookMailItem[]> = { T0: t0, T1: t1 };
+  d.mail.listGroupPostPage = async (_groupId, thread, _topic, next) => {
+    const token = next ?? "start";
+    postTokens.push(`${thread}:${token}`);
+    const all = pages[thread] ?? [];
+    const offset = token === "start" ? 0 : Number(token);
+    const more = offset + 2 < all.length ? String(offset + 2) : null;
+    return { items: all.slice(offset, offset + 2), next: more };
+  };
+  let arm = true;
+  const capture = d.capture;
+  d.capture = async (row) => {
+    const out = await capture(row);
+    if (arm && w.keys.size >= 4) w.tick = 200_000;
+    return out;
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const first = historyRuns(w)[0];
+  assertEquals(first.status, "partial");
+  assertEquals(walkOf(first).conv, "h:C000");
+  assertEquals(walkOf(first).thread, "h:T1");
+  assertEquals(walkOf(first).post_page, "2");
+  assertEquals(walkOf(first).conv_after, null);
+  assertEquals(walkOf(first).before, null);
+  assertEquals(w.keys.size, 4);
+  assertEquals(postTokens, ["T0:start", "T1:start"]);
+
+  arm = false;
+  w.tick = 0;
+  w.now += 5 * 60_000;
+  postTokens.length = 0;
+  await runOutlookCapture(d, FENCING_HISTORY);
+  assertEquals(historyRuns(w)[1].status, "succeeded");
+  assertEquals(postTokens, ["T1:2"]);
+  assertEquals(w.keys.size, 6);
+  assertEquals(w.captured.length, 6);
+});
+
+Deno.test("W7: a hung post page times out as graph_timeout, keeps the page checkpoint, and is not retried in a loop", async () => {
+  const all = [
+    groupPost("P0", "2026-09-01T00:00:00.000Z"),
+    groupPost("P1", "2026-09-02T00:00:00.000Z"),
+    groupPost("P2", "2026-09-03T00:00:00.000Z"),
+    groupPost("P3", "2026-09-04T00:00:00.000Z"),
+  ];
+  const w = world({
+    sources: [FENCING],
+    groups: {
+      "fencing@secureworkswa.com.au": {
+        id: "GRP-FENCING",
+        posts: all.map((post) => ({ conv: "C000", thread: "T0", post })),
+      },
+    },
+  });
+  const d = deps(w);
+  const postTokens: string[] = [];
+  d.mail.listGroupThreadPage = async () => ({
+    items: [{ id: "T0", topic: "A" }],
+    next: null,
+  });
+  d.mail.listGroupPostPage = async (_groupId, thread, _topic, next) => {
+    const token = next ?? "start";
+    postTokens.push(`${thread}:${token}`);
+    if (postTokens.length > 4) throw new Error("post page retried in a loop");
+    if (token !== "start") throw new GraphReadError("graph_timeout", null);
+    return { items: all.slice(0, 2), next: "2" };
+  };
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const first = historyRuns(w)[0];
+  assertEquals(first.status, "failed");
+  assertEquals(first.error_code, "graph_timeout");
+  assertEquals(walkOf(first).conv, "h:C000");
+  assertEquals(walkOf(first).thread, "h:T0");
+  assertEquals(walkOf(first).post_page, "2");
+  assertEquals(walkOf(first).before, null);
+  assertEquals(w.keys.size, 2);
+  assertEquals(postTokens, ["T0:start", "T0:2"]);
+
+  w.now += 5 * 60_000;
+  postTokens.length = 0;
+  await runOutlookCapture(d, FENCING_HISTORY);
+  const second = historyRuns(w)[1];
+  assertEquals(second.status, "failed");
+  assertEquals(second.error_code, "graph_timeout");
+  assertEquals(postTokens, ["T0:2"]);
+  assertEquals(w.keys.size, 2);
+  assertEquals(w.captured.length, 2);
+  assertEquals(walkOf(second).post_page, "2");
 });
 
 // History depth PR B (7 Oct 2026): mode deep. One slice of a mailbox older
