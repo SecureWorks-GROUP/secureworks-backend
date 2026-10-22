@@ -22,8 +22,14 @@ import {
   buildQueueRow,
   dateWithinWindow,
   DEFAULT_MATCH_CONFIG,
+  amountIsKnown,
+  existingFactVerdict,
+  HELD_QUEUE_REASONS,
   extractJobNumber,
+  jobNumbersInText,
+  newPlacementAllowed,
   findUniquePOMatch,
+  isInstallerBill,
   isOpenPO,
   matchBill,
   type POCandidate,
@@ -449,4 +455,182 @@ Deno.test("gold-set replay — precision 100%, mirrors excluded", () => {
   assertEquals(autoAssignments, 2); // B1 (ref) + B2 (PO) only
   assertEquals(correctAuto, autoAssignments); // 100%
   assertEquals(factsFromMirrors, 0); // mirror exclusion proven
+});
+
+// Second-model review, 19 Oct 2026: a product code is no job reference.
+Deno.test("extractJobNumber: a product code that starts like a job number is not one", () => {
+  assertEquals(extractJobNumber("SWF-261009XL"), null);
+  assertEquals(extractJobNumber("XSWF-261009"), null);
+  assertEquals(extractJobNumber("Order SWF-261009-DEP50"), "SWF-261009");
+});
+
+// Fourth second-model review, 19 Oct 2026: the older path never moves a fact.
+const T = (...xs: string[]) => new Set(xs);
+Deno.test("existing fact: a PO fact whose bill now names two jobs is removed for a person", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobBlocked: false, refTokens: T("SWF-26535", "SWP-261060"), lineTokens: T(), jobFromRefId: null }), "remove");
+});
+Deno.test("existing fact: a billed PO dropping out of the candidates keeps its fact (never moved)", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, refTokens: T(), lineTokens: T(), jobFromRefId: null }), "keep");
+});
+Deno.test("existing fact: a reference fact whose reference is gone, refused or now names another job is removed", () => {
+  const base = { source: "xero_ref_link", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, lineTokens: T() };
+  assertEquals(existingFactVerdict({ ...base, refTokens: T(), jobFromRefId: null }), "remove");
+  assertEquals(existingFactVerdict({ ...base, refTokens: T("SWF-26535"), jobFromRefId: null }), "remove");
+  assertEquals(existingFactVerdict({ ...base, refTokens: T("SWF-26999"), jobFromRefId: "B" }), "remove");
+  assertEquals(existingFactVerdict({ ...base, refTokens: T("SWF-26535"), jobFromRefId: "A" }), "keep");
+});
+Deno.test("existing fact: lines naming a different job than the reference remove the fact", () => {
+  assertEquals(existingFactVerdict({ source: "xero_ref_link", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, refTokens: T("SWF-26535"), lineTokens: T("SWF-26999"), jobFromRefId: "A" }), "remove");
+});
+Deno.test("existing fact: a job that is no longer won or is a holding job loses this path's fact", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobBlocked: true, refTokens: T(), lineTokens: T(), jobFromRefId: null }), "remove");
+});
+Deno.test("existing fact: pre-match and human facts are never this path's to change", () => {
+  for (const source of ["agent_prematch", "manual_queue"]) {
+    assertEquals(existingFactVerdict({ source, factJobId: "A", factJobBlocked: true, refTokens: T("X", "Y"), lineTokens: T(), jobFromRefId: null }), "not_ours");
+  }
+});
+Deno.test("new placement: only one consistent job number, and never the PO fallback once a job is named", () => {
+  assertEquals(newPlacementAllowed({ refTokens: T("SWF-26535"), lineTokens: T("SWF-26999"), jobFromRefId: "A" }), { reference: false, poFallback: false });
+  assertEquals(newPlacementAllowed({ refTokens: T(), lineTokens: T("SWF-26999"), jobFromRefId: null }), { reference: false, poFallback: false });
+  assertEquals(newPlacementAllowed({ refTokens: T("SWF-26535"), lineTokens: T("SWF-26535"), jobFromRefId: "A" }), { reference: true, poFallback: false });
+  assertEquals(newPlacementAllowed({ refTokens: T(), lineTokens: T(), jobFromRefId: null }), { reference: false, poFallback: true });
+  assertEquals([...jobNumbersInText("SWF-26535 / swp-261060 and SWF-26535XL")], ["SWF-26535", "SWP-261060"]);
+});
+
+Deno.test("existing fact: a PO fact whose lines name a different job is removed for a person", () => {
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, refTokens: T(), lineTokens: T("SWF-26999"), jobFromRefId: null }), "remove");
+  assertEquals(existingFactVerdict({ source: "po_deterministic", factJobId: "A", factJobNumber: "SWF-26535", factJobBlocked: false, refTokens: T(), lineTokens: T("SWF-26535"), jobFromRefId: null }), "keep");
+});
+
+// ── Review 6 (PR 1063): one grammar, Xero link conflicts, holds ──
+Deno.test("jobNumbersInText sees a hyphenless job number in a line (same grammar as the pre-match)", () => {
+  const lines = jobNumbersInText("Posts for SWF26999 site");
+  assertEquals([...lines], ["SWF-26999"]);
+  // Reference SWF-26535 + line SWF26999: two jobs, never placed whole.
+  assertEquals(
+    newPlacementAllowed({ refTokens: jobNumbersInText("SWF-26535"), lineTokens: lines, jobFromRefId: "a" }),
+    { reference: false, poFallback: false },
+  );
+  // Still a whole token only.
+  assertEquals(jobNumbersInText("SWF-261009XL").size, 0);
+});
+
+Deno.test("a Xero job link the reference does not back blocks every automatic placement", () => {
+  const refTokens = jobNumbersInText("SWF-26535");
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "b", xeroJobId: "a" }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", xeroJobId: "a" }),
+    { reference: true, poFallback: false },
+  );
+  // No job number on the bill: the PO fallback leaves a linked bill to the pre-match.
+  assertEquals(
+    newPlacementAllowed({ refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, xeroJobId: "a" }),
+    { reference: false, poFallback: false },
+  );
+});
+
+Deno.test("an existing automatic fact on another job than Xero's link is removed", () => {
+  assertEquals(
+    existingFactVerdict({
+      source: "po_deterministic",
+      factJobId: "a",
+      factJobNumber: "SWF-26535",
+      factJobBlocked: false,
+      refTokens: new Set(),
+      lineTokens: new Set(),
+      jobFromRefId: null,
+      xeroJobId: "b",
+    }),
+    "remove",
+  );
+});
+
+Deno.test("a held queue row is never placed automatically", () => {
+  assertEquals(
+    newPlacementAllowed({ refTokens: jobNumbersInText("SWF-26535"), lineTokens: new Set(), jobFromRefId: "a", held: true }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(HELD_QUEUE_REASONS.has("fact_contradicted"), true);
+  assertEquals(HELD_QUEUE_REASONS.has("xero_link_conflict"), true);
+  assertEquals(HELD_QUEUE_REASONS.has("no_ref_no_po"), false);
+});
+
+Deno.test("an unknown bill amount blocks every automatic placement", () => {
+  assertEquals(
+    newPlacementAllowed({ refTokens: jobNumbersInText("SWF-26535"), lineTokens: new Set(), jobFromRefId: "a", amountKnown: false }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals([amountIsKnown(null), amountIsKnown(""), amountIsKnown(0), amountIsKnown("12.5")], [false, false, true, true]);
+});
+
+Deno.test("a bill naming a PO on another job is never placed by its reference", () => {
+  const refTokens = jobNumbersInText("SWF-26535");
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", namedPoJobIds: ["b"] }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", namedPoJobIds: [null] }),
+    { reference: false, poFallback: false },
+  );
+  assertEquals(
+    newPlacementAllowed({ refTokens, lineTokens: new Set(), jobFromRefId: "a", namedPoJobIds: ["a"] }),
+    { reference: true, poFallback: false },
+  );
+  // No job number, but a PO named: the supplier+amount fallback leaves it to the pre-match.
+  assertEquals(
+    newPlacementAllowed({ refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, namedPoJobIds: ["a"] }),
+    { reference: false, poFallback: false },
+  );
+});
+
+Deno.test("an existing sync fact is removed for staff when the bill names a PO on another job", () => {
+  const base = {
+    source: "xero_ref_link", factJobId: "a", factJobNumber: "SWF-26535", factJobBlocked: false,
+    refTokens: jobNumbersInText("SWF-26535"), lineTokens: new Set<string>(), jobFromRefId: "a",
+  };
+  assertEquals(existingFactVerdict({ ...base, namedPoJobIds: ["b"] }), "remove");
+  assertEquals(existingFactVerdict({ ...base, namedPoJobIds: [null] }), "remove");
+  assertEquals(existingFactVerdict({ ...base, namedPoJobIds: ["a"] }), "keep");
+  // Staff and agent facts are never touched by this path.
+  assertEquals(existingFactVerdict({ ...base, source: "agent_prematch", namedPoJobIds: ["b"] }), "not_ours");
+});
+
+Deno.test("an existing sync fact whose bill amount is now unknown goes to staff", () => {
+  assertEquals(existingFactVerdict({
+    source: "po_deterministic", factJobId: "a", factJobNumber: "SWF-26535", factJobBlocked: false,
+    refTokens: new Set(), lineTokens: new Set(), jobFromRefId: null, amountKnown: false,
+  }), "remove");
+});
+
+// ── JP-12: installer bills are never placed automatically ────
+Deno.test("isInstallerBill — a money line on 306 or 301", () => {
+  assert(isInstallerBill([{ AccountCode: "306", LineAmount: 500 }]));
+  assert(isInstallerBill([{ AccountCode: "310", LineAmount: 50 }, { AccountCode: "301", LineAmount: 400 }]));
+  assert(!isInstallerBill([{ AccountCode: "306", LineAmount: 0 }, { AccountCode: "310", LineAmount: 50 }]));
+  assert(!isInstallerBill(null));
+});
+
+Deno.test("matchBill — an installer bill with a job reference waits for a person", () => {
+  const m = matchBill(bill({ reference: "SWF-26824" }), {
+    isMirror: false,
+    installer: true,
+    jobFromRef: { id: "J-1", job_number: "SWF-26824" },
+    pos: [po()],
+  });
+  assertEquals(m.outcome, "queue");
+  assertEquals(m.suggestionReason, "installer_confirm");
+  assertEquals(m.suggestedJobId, "J-1");
+  assert(HELD_QUEUE_REASONS.has("installer_confirm"));
+});
+
+Deno.test("matchBill — an installer bill is never placed by the PO fallback", () => {
+  const m = matchBill(bill(), { isMirror: false, installer: true, jobFromRef: null, pos: [po()] });
+  assertEquals(m.outcome, "queue");
+  assertEquals(m.suggestionReason, "installer_confirm");
+  assertEquals(m.suggestedJobId, null);
 });

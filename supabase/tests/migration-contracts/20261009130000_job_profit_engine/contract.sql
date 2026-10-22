@@ -215,10 +215,14 @@ INSERT INTO public.purchase_orders (job_id, po_number, supplier_name, status, su
 
 -- PO-BILLED: its bill BILL-S1 landed as a materials fact matched to the PO;
 -- the PO itself was never stamped, and it is no longer open.
+-- BILL-S1 and BILL-S2 carry installer-account (306) lines, so under JP-12
+-- (20261020181800) they count only once a person placed them: both facts
+-- are a person's placement from Bills to place (automation_source manual_queue).
 INSERT INTO public.purchase_orders (id, job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
   ('a7400000-0000-4000-8000-000000000001', 'a7000000-0000-4000-8000-000000000001', 'PO-BILLED', 'Fence Supplies', 'sent', 100, 110, '2026-08-01T00:00:00Z');
-INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, matched_po_id) VALUES
-  ('a7000000-0000-4000-8000-000000000001', 'BILL-S1', 'S-1', 'Fence Supplies', 'materials', 'actual', 100, 'high', '2026-08-02', 'a7400000-0000-4000-8000-000000000001');
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, matched_po_id, automation_source) VALUES
+  ('a7000000-0000-4000-8000-000000000001', 'BILL-S1', 'S-1', 'Fence Supplies', 'materials', 'actual', 100, 'high', '2026-08-02', 'a7400000-0000-4000-8000-000000000001', 'manual_queue'),
+  ('a7000000-0000-4000-8000-000000000001', 'BILL-S2', 'S-2', 'Sales Agent', 'commission', 'actual', 20, 'high', '2026-08-12', NULL, 'manual_queue');
 
 -- JP-FENCE sent quote: the sealed revision total 1320 inc GST.
 INSERT INTO public.job_documents (id, job_id, type, sent_at, created_at) VALUES
