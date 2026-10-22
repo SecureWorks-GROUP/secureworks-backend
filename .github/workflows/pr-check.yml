@@ -444,6 +444,7 @@ jobs:
             supabase/functions/ops-api/xero_reports_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
             supabase/functions/ops-api/job_work_orders_test.ts \
+            supabase/functions/ops-api/job_work_order_crew_invoice_test.ts \
             supabase/functions/ops-api/quote_work_order_lines_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_handler_test.ts \
@@ -662,8 +663,11 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ops-api/group_work_order_test.ts \
+            supabase/functions/ops-api/trade_client_signoff_test.ts \
             supabase/functions/completion-pack/email_plan_test.ts \
             supabase/functions/completion-pack/client_signature_test.ts
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/trade_client_signoff_wiring_test.ts
 
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live

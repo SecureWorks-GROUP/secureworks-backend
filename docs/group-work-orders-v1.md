@@ -1,10 +1,10 @@
 # Group work orders and client job sign-off
 
 Backend contract for the trade app and the office. Schema:
-`supabase/migrations/20261021141000_group_work_orders.sql`. It depends on
-the client sign-off migrations from PR #1110
+`supabase/migrations/20261022050000_group_work_orders.sql`. It applies
+after the client sign-off migrations already on main
 (`20261020170000_job_media_signature_voice_note_phases.sql` and
-`20261020170100_job_client_signoffs.sql`), which this branch includes.
+`20261020170100_job_client_signoffs.sql`).
 Rules: `supabase/functions/ops-api/group_work_order.ts`. Nothing in this
 slice sends a text, an email, or a review request.
 
@@ -72,9 +72,9 @@ Deleting the last hour still leaves the group stamp, so the old drawing
 does not count. The comparison is `max()` over both stamps:
 `GREATEST` of a null and a stamp is null. That group
 rule lives in `group_client_signoff_counts`, not in
-`trade_client_signoff.ts`. PR #1110 should merge first:
-`trade_client_signoff.ts` and the two #1110 migrations on this branch
-are the #1110 copies.
+`trade_client_signoff.ts`. The shared helper treats a newest `revoked`
+row as not signed, and an office waiver still counts for ordinary
+invoicing.
 
 The Google URL is `group_work_order_settings.google_review_url`, seeded
 `https://share.google/AFyfkE7jLfCZcxanV`. The happy threshold is
@@ -179,9 +179,8 @@ Pending Marnin's call. Built as the safe default.
   `hours_changed_at` (insert, a real update, delete, and removing a
   participant). An identical re-save does not move it. The ordinary
   invoice gate still accepts
-  `office_waiver`. This check does not call #1110's helper. #1110 still
-  needs the same rule (a revoked row is not signed) before either switch
-  goes on.
+  `office_waiver` and refuses a newest `revoked` row. This check does
+  not call that helper.
 - Unfreeze removes only the share line and recalculates that invoice's
   totals from the lines that remain, the same split as a trade invoice.
   A weekly work order also rewrites its three headers: final-payout
@@ -202,10 +201,6 @@ Pending Marnin's call. Built as the safe default.
 - The down migration does not delete sign-off rows and does not disable
   the append-only trigger. The widened method check
   (`on_site`, `office_waiver`, `share_link`, `revoked`) stays.
-- PR #1110 should merge first. This branch's `trade_client_signoff.ts`
-  and the two sign-off migrations match #1110. #1110's helper still
-  counts a revoked row as signed; that has to be fixed before either
-  switch goes on.
 - Break minutes come off finish minus start, the same rule as a trade
   invoice time entry.
 

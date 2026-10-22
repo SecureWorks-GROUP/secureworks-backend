@@ -1,4 +1,4 @@
--- Reverse 20261021141000_group_work_orders.sql. Drops the group tables
+-- Reverse 20261022050000_group_work_orders.sql. Drops the group tables
 -- and the invoice pointer. Does not drop job_client_signoffs or
 -- client_signoff_settings, and does not delete any sign-off row.
 --

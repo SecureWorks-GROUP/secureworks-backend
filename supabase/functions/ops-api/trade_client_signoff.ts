@@ -14,9 +14,12 @@
 //     (waive_client_signoff), mirroring the neighbour sign-off waiver.
 //
 // Whether the current row counts is decided here, never stored:
+//   - a revoked row does not count. Revocation is a newer row, so the older
+//     drawing is not used in its place and the job is not signed;
 //   - a waiver always counts;
-//   - an on-site sign-off counts when happy is not false and the rating is
-//     absent or at least client_signoff_settings.min_happy_rating.
+//   - an on-site or share-link sign-off counts when happy is not false and
+//     the rating is absent or at least
+//     client_signoff_settings.min_happy_rating.
 //
 // PROPOSALS awaiting Marnin's word (client_signoff_settings, seeded by the
 // migration): the rating threshold (4), the job types the gate covers
@@ -148,6 +151,7 @@ export function evaluateClientSignoff(args: {
   let missing: ClientSignoffMissing | null = null
   if (args.readFailed) missing = 'evidence_unavailable'
   else if (!current) missing = 'not_signed'
+  else if (current.method === 'revoked') missing = 'not_signed'
   else if (current.method !== 'office_waiver') {
     if (current.happy === false) missing = 'client_not_happy'
     else if (current.satisfaction_rating != null && current.satisfaction_rating < args.settings.min_happy_rating) {

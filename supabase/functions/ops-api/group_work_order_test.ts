@@ -1351,7 +1351,7 @@ Deno.test("create_group_work_order is refused while the feature is off", async (
 Deno.test("normal pay is every line that is not on the exclusion list", async () => {
   const sql = await Deno.readTextFile(
     new URL(
-      "../../migrations/20261021141000_group_work_orders.sql",
+      "../../migrations/20261022050000_group_work_orders.sql",
       import.meta.url,
     ),
   );

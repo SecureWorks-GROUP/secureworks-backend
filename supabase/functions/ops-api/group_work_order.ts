@@ -1170,10 +1170,10 @@ function laterInstant(left: string | null, right: string | null): string | null 
 }
 
 /**
- * A group freeze counts a drawn signature only. This does not call #1110's
- * helper in trade_client_signoff.ts. A revoked row is not signed here even
- * if that helper still counts it. An office waiver still counts for the
- * ordinary invoice gate. It does not count here. The drawing has to be
+ * A group freeze counts a drawn signature only. The shared invoice helper
+ * treats a newest revoked row as not signed. This check does not call that
+ * helper. An office waiver still counts for the ordinary invoice gate. It
+ * does not count here. The drawing has to be
  * dated after the later of each remaining hours row's created_at and
  * updated_at and the group's hours_changed_at, on a non-void group for
  * the job. hours_changed_at moves when hours are inserted, really

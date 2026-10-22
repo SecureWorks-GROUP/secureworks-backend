@@ -557,10 +557,10 @@ DECLARE
   v_signed_at timestamptz;
   v_latest_hours timestamptz;
 BEGIN
-  -- A group needs a drawn signature. This does not call #1110's helper:
-  -- a revoked row is not signed here even if that helper still counts it.
-  -- An office waiver does not count here (it still counts for the ordinary
-  -- client-signoff invoice gate). The drawing has to be strictly newer
+  -- A group needs a drawn signature. The shared invoice helper treats a
+  -- newest revoked row as not signed. This function does not call that
+  -- helper: an office waiver does not count here (it still counts for the
+  -- ordinary client-signoff invoice gate). The drawing has to be strictly newer
   -- than every remaining hour row (later of created_at and updated_at)
   -- and the group's hours_changed_at. max() over both, not GREATEST:
   -- GREATEST of a null hour stamp and a stamp is null. An identical
