@@ -935,6 +935,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
+                      # Context reconciliation from a job: the context_job_mail
+                      # and recon_job_items doors (context_job_reconciliation.ts).
+                      ("20261020165000", "context_job_reconciliation"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
                       ("20261021100000", "job_receipt_sender"),
