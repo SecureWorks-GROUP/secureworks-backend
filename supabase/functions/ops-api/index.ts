@@ -15081,6 +15081,12 @@ async function opsSummary(client: any) {
   }
 }
 
+// The job's existing fence type (e.g. 'asbestos'), the one scope value the
+// ops dash job cards need. Text via `->>`, null when absent. Selected by both the
+// calendar and pipeline reads and returned as-is, never stripped.
+export const EXISTING_FENCE_TYPE_PROJECTION =
+  'existing_fence_type:scope_json->job->removal->>existingFenceType'
+
 // ── Calendar scope projection (edge-worker OOM fix) ─────────────────────────
 // calendar_events.scope_json averages ~100 kB per row and peaks at 2.6 MB — the
 // bulk is base64 media parked under scope_json.job.sitePlanImage / .checklist.
@@ -15103,12 +15109,6 @@ async function opsSummary(client: any) {
 // a superset of the blob can only raise fidelity, never flip an answer wrongly.
 // Projected payload is < ~2 kB/row
 // (worst-case observed key sizes: removal 516 B, quote 1.1 kB, siteNotes 437 B).
-// The job's existing fence type (e.g. 'asbestos'), the one scope value the
-// ops dash job cards need. Text via `->>`, null when absent. Selected by both the
-// calendar and pipeline reads and returned as-is, never stripped.
-export const EXISTING_FENCE_TYPE_PROJECTION =
-  'existing_fence_type:scope_json->job->removal->>existingFenceType'
-
 const CAL_SCOPE_PROJECTION = [
   'rd_attach_method:scope_json->attachmentMethod',
   'rd_attach:scope_json->attachment',
