@@ -115,10 +115,11 @@ if (import.meta.main) {
     JOBS_SQL,
   );
   const invoices = await query<SesMatchInvoice>(INVOICES_SQL);
-  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
-    jobs,
-    invoices,
-  );
+  const { matches, exclusions, manual_review } =
+    deriveSesUnlinkedInvoiceMatches(
+      jobs,
+      invoices,
+    );
 
   const sealedById = new Map(
     jobs.map((job) => [job.id, !!job.ses_money_sealed_at]),
@@ -171,6 +172,19 @@ if (import.meta.main) {
     }, {} as Record<string, number>),
     cohort,
     exclusions: [...exclusions].sort((a, b) =>
+      String(a.job_number).localeCompare(String(b.job_number))
+    ),
+    // One-sided PO evidence (DSP-T3-GAP-1 guard 5): never part of the cohort,
+    // listed so a person can decide each one.
+    manual_review_total: manual_review.length,
+    manual_review: manual_review.map((entry) => ({
+      job_id: entry.job_id,
+      job_number: entry.job_number,
+      reason: entry.reason,
+      detail: entry.detail,
+      invoice_number: entry.invoice.invoice_number ?? null,
+      invoice_total: entry.invoice.total ?? null,
+    })).sort((a, b) =>
       String(a.job_number).localeCompare(String(b.job_number))
     ),
   };
