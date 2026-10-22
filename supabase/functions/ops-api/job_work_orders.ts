@@ -81,6 +81,9 @@ export const JOB_WORK_ORDER_JOB_TYPES: ReadonlySet<string> = new Set([
   "patio",
 ]);
 
+/** Same switch as crew_invoice_job_work_order. Off: fencing and patio only. */
+export const JOB_WORK_ORDER_ALL_TYPES_FLAG = "job_work_order_all_types_v1";
+
 /** Mirror of public.job_work_order_billed_invoice_statuses(). */
 export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
   new Set([
@@ -668,6 +671,34 @@ function mapStringLeaves(item: unknown, map: (value: string) => string) {
       [key, value],
     ) => [key, typeof value === "string" ? map(value) : value]),
   );
+}
+
+/**
+ * job_detail's job_work_order for a caller who is not staff. Drops the sealed
+ * labour allowance, the figures built from it, and addendum prices. The
+ * group-work-order participant share is a different action and is not this
+ * object.
+ */
+export function redactJobDetailWorkOrderForTrade(block: any): any {
+  if (!block || typeof block !== "object" || block.unreadable) return block;
+  const workOrder = block.work_order && typeof block.work_order === "object"
+    ? { ...block.work_order }
+    : block.work_order;
+  if (workOrder && typeof workOrder === "object") {
+    delete workOrder.agreed_labour_ex;
+  }
+  const addenda = Array.isArray(block.addenda)
+    ? block.addenda.map((row: any) => {
+      if (!row || typeof row !== "object") return row;
+      const {
+        trade_allocation_ex: _trade,
+        customer_price_ex: _customer,
+        ...rest
+      } = row;
+      return rest;
+    })
+    : block.addenda;
+  return { ...block, work_order: workOrder, figures: null, addenda };
 }
 
 /**
@@ -1435,12 +1466,18 @@ export async function readJobWorkOrder(
   }
   const job = await readJob(client, requireUuid(jobId, "job_id"));
   const rows = await readJobWorkOrders(client, job.id);
-  const eligible = JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""));
+  const typeName = String(job.type || "").trim();
+  const quoteFillType = JOB_WORK_ORDER_JOB_TYPES.has(typeName);
+  // Quote fill stays fencing and patio. Other types are readable, and
+  // eligible, only while job_work_order_all_types_v1 is on.
+  const eligible = quoteFillType ||
+    (typeName !== "" &&
+      await readFlag(client, JOB_WORK_ORDER_ALL_TYPES_FLAG));
   // Every draft is read by staff before it can be approved (approval needs
   // the draft's updated_at as read), so an untouched draft is filled from the
   // accepted quote here, once, and the read returns the filled draft.
   let quoteFill: JobWorkOrderQuoteFill | null = null;
-  const untouched = params.fillFromQuote === true && eligible &&
+  const untouched = params.fillFromQuote === true && quoteFillType &&
       !liveOf(rows)
     ? draftOf(rows)
     : null;
@@ -1509,7 +1546,10 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   if (status && !["draft", "approved"].includes(status)) {
     fail(400, "invalid_status", "status must be draft or approved");
   }
-  if (type && !JOB_WORK_ORDER_JOB_TYPES.has(type)) {
+  if (
+    type && !JOB_WORK_ORDER_JOB_TYPES.has(type) &&
+    !(await readFlag(client, JOB_WORK_ORDER_ALL_TYPES_FLAG))
+  ) {
     fail(400, "invalid_type", "type must be fencing or patio");
   }
   const rows: any[] = [];
@@ -1915,6 +1955,8 @@ const AUTO_ISSUE_ERRORS: Record<string, [JobWorkOrderAutoIssueReason, string]> =
  * fill flagged for review never stop it: they stay on the work order for the
  * office (jobWorkOrderNeedsChecking). A draft edited by hand, a quote with no
  * labour figure, and a job with no accepted quote wait for the approver.
+ * A blank work order opened for another job type is never selected here, and
+ * filling its labour allowance stamps hand_edited_at, which this issue refuses.
  * Never throws: every outcome is a reason.
  */
 export async function autoIssueJobWorkOrderForJob(

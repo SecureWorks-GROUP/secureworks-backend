@@ -11,6 +11,10 @@ Code: `supabase/functions/_shared/job_paid_closeout.ts` (the paid rule, pure),
 `20261013150000_job_closeout_review_archive.sql`, and the per-job review switch
 `20261020093000_job_review_opt_out.sql`.
 
+The paid-invoice receipt (Xero emails each paid invoice of a fencing or patio
+job, deposits included, once) shares the `job_closeout_settings` switch table
+but runs per invoice, not at close: [job-receipt-v1.md](job-receipt-v1.md).
+
 ## What "paid" means
 
 All three, in `evaluateJobPaid`:
