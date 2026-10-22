@@ -400,3 +400,6 @@ job_closeout_paid # probe=source-only
 job_closeout_catch_up # probe=source-only
 job_closeout_sweep # probe=source-only
 job_closeout_backlog_preview # probe=source-only
+# Paid-invoice receipt for fencing and patio (job_receipt.ts): Xero emails each newly paid client invoice once
+job_receipt_paid # probe=source-only
+job_receipt_catch_up # probe=source-only

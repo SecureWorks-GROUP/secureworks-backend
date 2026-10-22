@@ -15,6 +15,7 @@ import {
   listJobWorkOrders,
   projectTradeJobWorkOrder,
   readJobWorkOrder,
+  redactJobDetailWorkOrderForTrade,
   reportWorkOrderVariation,
   resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
@@ -313,6 +314,64 @@ function baseDb(extra: Partial<Tables> = {}) {
 }
 
 // ── Approver identity ────────────────────────────────────────────────────────
+
+Deno.test("all-types flag: a make-safe is listed and read only while the flag is on", async () => {
+  const db = baseDb();
+  db.tables.jobs[0].type = "makesafe";
+  db.tables.work_orders[0].status = "draft";
+  db.tables.work_orders[0].agreed_labour_ex = null;
+  db.tables.work_orders[0].jobs = {
+    type: "makesafe",
+    job_number: "SWMS-1",
+    client_name: "Client",
+    status: "scheduled",
+    site_suburb: "Subiaco",
+  };
+
+  const refused = await assertRejects(
+    () => listJobWorkOrders(db, new URLSearchParams({ type: "makesafe" })),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals(refused.code, "invalid_type");
+
+  const off = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(off.eligible, false);
+  assertEquals(off.quote_fill, null);
+
+  db.tables.feature_flags.push({
+    flag_name: "job_work_order_all_types_v1",
+    enabled: true,
+  });
+  const listed = await listJobWorkOrders(
+    db,
+    new URLSearchParams({ type: "makesafe" }),
+  );
+  assertEquals(listed.total, 1);
+  assertEquals(listed.work_orders[0].job_type, "makesafe");
+
+  const on = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(on.eligible, true);
+  assertEquals(on.quote_fill, null);
+  assertEquals(on.work_order?.status, "draft");
+});
+
+Deno.test("job detail redaction drops the sealed labour allowance", () => {
+  const block = redactJobDetailWorkOrderForTrade({
+    work_order: { id: "wo", status: "approved", agreed_labour_ex: 400, wo_number: "WO-1" },
+    figures: { agreed_ex: 400, remaining_ex: 100 },
+    addenda: [{ id: "a", trade_allocation_ex: 80, customer_price_ex: 120, title: "Extra" }],
+    invoice_count: 1,
+  });
+  assertEquals(block.work_order.agreed_labour_ex, undefined);
+  assertEquals(block.work_order.wo_number, "WO-1");
+  assertEquals(block.figures, null);
+  assertEquals(block.addenda, [{ id: "a", title: "Extra" }]);
+  assertEquals(block.invoice_count, 1);
+  assertEquals(
+    redactJobDetailWorkOrderForTrade({ unreadable: true }),
+    { unreadable: true },
+  );
+});
 
 Deno.test("approver: a staff session is the signed-in user", () => {
   assertEquals(

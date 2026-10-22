@@ -22,6 +22,7 @@ import {
   _computeReadinessForTest,
   _scopeFromProjectionForTest,
   calendarEvents,
+  EXISTING_FENCE_TYPE_PROJECTION,
 } from "./index.ts";
 
 // ── Mock that captures the select string and serves calendar rows ──
@@ -330,4 +331,29 @@ Deno.test("response shape unchanged — rd_* aliases and scope_json/org_id are s
   );
   assertEquals(ev.assignment_id, "asg-1");
   assert(res.readiness["job-1"], "readiness still computed per job");
+});
+
+// ── existing_fence_type: the one scope value the ops dash job cards read ──
+Deno.test("calendar selects and returns existing_fence_type on every event", async () => {
+  for (
+    const extra of [{}, { include_financials: "true" }] as Record<
+      string,
+      string
+    >[]
+  ) {
+    const { client, captured } = calClient([
+      { ...projectedRow(fatScopeJson()), existing_fence_type: "asbestos" },
+    ]);
+    const res: any = await calendarEvents(client, params(extra));
+    assert(
+      captured.selects["calendar_events"].includes(
+        "existing_fence_type:scope_json->job->removal->>existingFenceType",
+      ),
+    );
+    assertEquals(res.events[0].existing_fence_type, "asbestos");
+  }
+  assertEquals(
+    EXISTING_FENCE_TYPE_PROJECTION,
+    "existing_fence_type:scope_json->job->removal->>existingFenceType",
+  );
 });

@@ -607,6 +607,24 @@ function closeoutMoveEnabled(sb: any): Promise<boolean> {
   return closeoutMoveSwitch
 }
 
+// The receipt switch (job_closeout_settings.receipt_sender_mode), read once per run.
+// Unreadable reads as off: nothing is posted. ops-api job_receipt.ts owns every rule.
+let receiptSwitch: Promise<boolean> | null = null
+function receiptSenderOn(sb: any): Promise<boolean> {
+  receiptSwitch ??= (async () => {
+    try {
+      const { data, error } = await sb.from('job_closeout_settings')
+        .select('receipt_sender_mode')
+        .eq('id', 1)
+        .maybeSingle()
+      return !error && (data?.receipt_sender_mode === 'dry_run' || data?.receipt_sender_mode === 'live')
+    } catch {
+      return false
+    }
+  })()
+  return receiptSwitch
+}
+
 async function postOpsApi(action: string, body: Record<string, unknown>): Promise<any> {
   try {
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=${action}`, {
@@ -653,7 +671,9 @@ async function logJobPaymentReceived(sb: any, jobId: string, inv: any) {
 
 async function syncInvoices(sb: any) {
   closeoutMoveSwitch = null
+  receiptSwitch = null
   const closeoutResults: { job_id: string; action: string }[] = []
+  const receiptResults: { xero_invoice_id: string; action: string }[] = []
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
 
@@ -883,6 +903,22 @@ async function syncInvoices(sb: any) {
                 console.warn('[xero-sync] sealed SES payment automation refused', paidInvoiceRefusal)
                 continue
               }
+              // ── Paid-invoice receipt: every paid client invoice of a fencing or patio job,
+              // deposits included, goes to ops-api job_receipt_paid, which decides (window,
+              // holds, wrong party, the once-only claim) and has Xero email it.
+              if (await receiptSenderOn(sb)) {
+                const { data: receiptJob } = await sb.from('jobs')
+                  .select('type')
+                  .eq('id', invRecord.job_id)
+                  .maybeSingle()
+                if (receiptJob && isCloseoutJobType(receiptJob.type)) {
+                  const receipt = await postOpsApi('job_receipt_paid', {
+                    xero_invoice_id: inv.InvoiceID,
+                    source: 'xero_sync',
+                  })
+                  receiptResults.push({ xero_invoice_id: inv.InvoiceID, action: receipt?.action ?? receipt?.code ?? 'error' })
+                }
+              }
               // Check if ALL invoices for this job are paid
               const { data: unpaid } = await sb.from('xero_invoices')
                 .select('id')
@@ -1006,6 +1042,14 @@ async function syncInvoices(sb: any) {
   }
   const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
+  // ── Paid-invoice receipt catch-up: in-window paid invoices with no receipt claim yet
+  //    (switch on only; ops-api job_receipt.ts decides).
+  let receiptCatchUp: unknown = { ran: false, reason: 'sender_off' }
+  if (await receiptSenderOn(sb)) {
+    receiptCatchUp = await postOpsApi('job_receipt_catch_up', { source: 'job_receipt_catch_up' })
+  }
+  const receipts = { on_paid: receiptResults, catch_up: receiptCatchUp }
+
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
@@ -1104,11 +1148,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts }
 }
 
 

@@ -4,7 +4,7 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _pipelineForTest } from "./index.ts";
+import { _pipelineForTest, EXISTING_FENCE_TYPE_PROJECTION } from "./index.ts";
 import { IN_URL_BUDGET } from "./makesafe_compact_reads.ts";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
@@ -106,6 +106,7 @@ function makePipelineClient(
   options: { failTable?: string; maxJobIdBytes?: number } = {},
 ) {
   const jobIdChunks: Record<string, string[][]> = {};
+  const selects: Record<string, string[]> = {};
 
   function from(table: string) {
     let selectSpec = "";
@@ -143,6 +144,7 @@ function makePipelineClient(
     const builder: any = {
       select: (columns: string) => {
         selectSpec = columns;
+        (selects[table] ||= []).push(columns);
         return builder;
       },
       eq: (column: string, value: unknown) => {
@@ -188,7 +190,7 @@ function makePipelineClient(
     return builder;
   }
 
-  return { client: { from }, jobIdChunks };
+  return { client: { from }, jobIdChunks, selects };
 }
 
 function assertPopulated(card: Record<string, any>) {
@@ -254,6 +256,24 @@ Deno.test("pipeline enrichment: an approved job work order with no crew work ord
   const byId = new Map(cards.map((card) => [card.id, card]));
   assertEquals(byId.get(crewJob)?.wo_count, 1);
   assertEquals(byId.get(jobOnlyJob)?.wo_count, 0);
+});
+
+Deno.test("pipeline: every card carries the job's existing_fence_type", async () => {
+  const tables = fixture(2);
+  tables.jobs[0].existing_fence_type = "asbestos";
+  tables.jobs[1].existing_fence_type = null;
+  const { client, selects } = makePipelineClient(tables);
+
+  const result = await _pipelineForTest(
+    client,
+    new URLSearchParams("type=fencing"),
+  );
+
+  assertStringIncludes(selects.jobs[0], EXISTING_FENCE_TYPE_PROJECTION);
+  const cards: Array<Record<string, any>> = (result as any).columns.scheduled;
+  const byId = new Map(cards.map((card) => [card.id, card]));
+  assertEquals(byId.get(jobId(1))?.existing_fence_type, "asbestos");
+  assertEquals(byId.get(jobId(2))?.existing_fence_type, null);
 });
 
 Deno.test("pipeline enrichment: a URL-breaking board chunks all nine reads and merges every row", async () => {
