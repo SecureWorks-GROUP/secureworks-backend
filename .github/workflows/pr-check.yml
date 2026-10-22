@@ -271,7 +271,9 @@ jobs:
 
       - name: Check migration extension schema contract
         run: |
-          deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
+          deno test --allow-read \
+            supabase/functions/ops-api/migration_extension_schema_test.ts \
+            supabase/functions/ops-api/context_recon_dispute_migration_test.ts
 
       # The repair intake pipeline routes SES work orders to a NEW jobs.type and
       # a NEW money-path branch, so its suite is CI-guarded rather than left to
