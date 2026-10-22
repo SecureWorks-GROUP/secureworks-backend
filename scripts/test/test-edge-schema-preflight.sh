@@ -919,6 +919,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Debt report freshness: the invoice sync cursor the
                       # report's "last synced" time and its send check read.
                       ("20260910100000", "xero_sync_state_and_pdf_attempts"),
+                      # Bill pre-match: the proposals store materials_recon_queue
+                      # reads and xero-sync writes, the agent fact source and
+                      # the void_in_xero queue status.
+                      ("20261015190000", "materials_bill_proposals"),
                       # Automatic issue of job work orders: the fill and edit
                       # stamps every job work order read selects
                       # (job_work_orders.ts).
