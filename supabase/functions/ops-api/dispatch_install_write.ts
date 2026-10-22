@@ -28,6 +28,7 @@ import {
   isDispatchInstallBooking,
 } from "./dispatch_install.ts";
 import { DISPATCH_STATE_SELECT, dispatchRowFields } from "./dispatch_stage.ts";
+import { findDispatchOperator } from "./dispatch_operator.ts";
 import {
   DispatchStageWriteError,
   readDispatchInstallBookings,
@@ -94,6 +95,7 @@ async function resolvePerson(
   client: any,
   actor: DispatchInstallActor,
   body: any,
+  orgId: string,
 ): Promise<{ userId: string | null; email: string }> {
   if (actor.mode === "jwt" && actor.userId) {
     if (cleanText(actor.email)) {
@@ -122,20 +124,15 @@ async function resolvePerson(
       { code: "operator_required" },
     );
   }
-  const { data, error } = await client.from("users")
-    .select("id, email")
-    .ilike("email", raw.replace(/[\\%_]/g, (c: string) => `\\${c}`))
-    .limit(1);
-  if (error) throw error;
-  const email = cleanText(data?.[0]?.email);
-  if (!email || email.toLowerCase() !== raw.toLowerCase()) {
+  const match = await findDispatchOperator(client, orgId, raw);
+  if (!match) {
     throw new DispatchStageWriteError(
       "operator_email does not match a person on record",
       400,
       { code: "operator_required" },
     );
   }
-  return { userId: null, email };
+  return { userId: null, email: match.email };
 }
 
 function answerFields(
@@ -244,7 +241,7 @@ export async function setDispatchInstallConfirmed(
   const shownAt = expectedConfirmedAt(body);
 
   const job = await readJob(client, jobId, orgId);
-  const person = await resolvePerson(client, actor, body);
+  const person = await resolvePerson(client, actor, body, orgId);
   const [bookings, state] = await Promise.all([
     readDispatchInstallBookings(client, jobId),
     readState(client, jobId),

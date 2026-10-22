@@ -474,6 +474,9 @@ function makeDb(initial = seed()) {
           return (value as unknown[]).map(String).includes(String(actual));
         }
         if (op === "is") return (actual ?? null) === value;
+        if (op === "ilike") {
+          return ilikeMatches(String(actual ?? ""), String(value));
+        }
         return true;
       });
 
@@ -604,6 +607,10 @@ function makeDb(initial = seed()) {
       },
       is(c: string, v: unknown) {
         request.filters.push(["is", c, v]);
+        return builder;
+      },
+      ilike(c: string, v: string) {
+        request.filters.push(["ilike", c, v]);
         return builder;
       },
       order(c: string, o?: { ascending?: boolean }) {
@@ -1302,6 +1309,21 @@ function assertOnlyAllowedTouches(db: ReturnType<typeof makeDb>) {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
+
+// PostgREST ILIKE: % and * are any run, _ is one character, a backslash
+// makes the next character literal; case-blind.
+function ilikeMatches(actual: string, pattern: string): boolean {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "\\" && i + 1 < pattern.length) {
+      re += pattern[++i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    } else if (c === "%" || c === "*") re += ".*";
+    else if (c === "_") re += ".";
+    else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, "is").test(actual);
+}
 
 Deno.test("create: one order with exactly the To order lines, no price; lines stamped; one PDF; one held draft; one event", async () => {
   const db = withLines();
