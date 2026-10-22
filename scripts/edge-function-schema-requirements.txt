@@ -849,3 +849,26 @@ xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_
 ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|column|work_orders.quote_filled_scope_revision_id
 ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|trigger|work_orders.trg_work_orders_fill_revision_guard
+# Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
+# invoice; ops-api job_receipt.ts reads the switch and writes the claims.
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
+xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
+ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
+
+# Crew invoices on the job work order. The office queue reads
+# backup_approver_user_ids, the line trigger writes office_review_status, and
+# the stamp reads job_invoice_work_order_id. ops-api must not deploy ahead of
+# this migration. The backfill and retirement scripts call the two RPCs and
+# are not part of the deploy.
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|work_order_settings.backup_approver_user_ids
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_review_status
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_reviewed_by
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_reviewed_at
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_review_note
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|constraint|trade_invoice_lines_office_review_status_check
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|function|job_invoice_work_order_id
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|function|preview_active_job_work_orders
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|function|apply_active_job_work_orders

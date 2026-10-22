@@ -372,3 +372,27 @@ Deno.test("both full list and lean detail carry the complete forwarded body besi
     ),
   );
 });
+
+Deno.test("a Graph GET that never returns is graph_timeout, once", async () => {
+  const deps: graph.GraphDeps = {
+    token: async () => "tok",
+    timeoutMs: 25,
+    fetch: (() => new Promise(() => {})) as typeof fetch,
+  };
+  const threads = await assertRejects(
+    () => graph.listGroupThreadPage(deps, "G", "C"),
+    graph.GraphReadError,
+  );
+  assertEquals(threads.code, "graph_timeout");
+  const bytes = await assertRejects(
+    () =>
+      graph.attachmentBytes(
+        deps,
+        { kind: "message", mailbox: "n@secureworkswa.com.au", messageId: "M" },
+        { id: "a" },
+        10,
+      ),
+    graph.GraphReadError,
+  );
+  assertEquals(bytes.code, "graph_timeout");
+});
