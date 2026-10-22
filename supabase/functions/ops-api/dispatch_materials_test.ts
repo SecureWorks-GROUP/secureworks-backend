@@ -1944,7 +1944,7 @@ Deno.test("list: dispatch=1 carries the two fields per row and dispatch_material
   assertEquals(materialsReads[0].select, DISPATCH_MATERIALS_LIST_SELECT);
   assertEquals(
     DISPATCH_MATERIALS_LIST_SELECT,
-    "job_id, status, purchase_order_id",
+    "job_id, status, purchase_order_id, id, quantity, purchase_order_attached_at",
   );
   assert(!db.requests.some((r) => r.table === "job_dispatch_workings"));
   assert(!db.requests.some((r) => r.select.includes("sketch_png")));

@@ -321,8 +321,12 @@ import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
-  dispatchSightedOrderIds,
 } from './dispatch_deliveries.ts'
+import {
+  DISPATCH_LINE_RECEIPT_COUNT_SELECT,
+  dispatchLineDeliveryView,
+  dispatchOnSiteSummary,
+} from './dispatch_line_receipts.ts'
 import {
   purchaseOrderCreatedBy,
   supplierReplyMayMoveOrder,
@@ -7157,7 +7161,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // Dispatch stage write, no order status change.
       case 'dispatch_delivery_set_expected':
       case 'dispatch_delivery_set_confirmed':
-      case 'dispatch_delivery_mark_sighted': {
+      case 'dispatch_delivery_mark_sighted':
+      // S5 (docs/dispatch-partial-deliveries-v1.md): record and void a line receipt.
+      case 'dispatch_delivery_record_receipt':
+      case 'dispatch_delivery_void_receipt': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
         }
@@ -16955,13 +16962,14 @@ async function pipeline(
   let invoiceEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let dispatchStateRes: PipelineEnrichmentResult = { data: [], error: null }
   let materialsRes: PipelineEnrichmentResult = { data: [], error: null }
+  let receiptsRes: PipelineEnrichmentResult = { data: [], error: null }
   // The Dispatch stage and the material lines are read for every returned
   // job, a draft included, so neither depends on the job's status
   // (dispatch_stage.ts, dispatch_materials.ts).
   const dispatchJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
 
   if (jobIds.length > 0 || dispatchJobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes, materialsRes] = await Promise.all([
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes, materialsRes, receiptsRes] = await Promise.all([
       // is_ghost/role feed next_scheduled_date only; assignment_count and
       // first_scheduled_date deliberately keep counting ghost rows as before.
       // `status` is nullable, so a `.neq` would drop NULL-status rows (SQL
@@ -17040,6 +17048,12 @@ async function pipeline(
         ? readPipelineEnrichmentRows(dispatchJobIds, 'job_material_lines', (chunkIds) =>
           client.from('job_material_lines').select(DISPATCH_MATERIALS_LIST_SELECT).in('job_id', chunkIds))
         : Promise.resolve({ data: [], error: null }),
+      // Dispatch S5 (docs/dispatch-partial-deliveries-v1.md): the live line
+      // receipts, for Delivered / Part delivered and the orders on site.
+      dispatchList
+        ? readPipelineEnrichmentRows(dispatchJobIds, 'job_material_line_receipts', (chunkIds) =>
+          client.from('job_material_line_receipts').select(DISPATCH_LINE_RECEIPT_COUNT_SELECT).in('job_id', chunkIds).is('voided_at', null))
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -17049,16 +17063,26 @@ async function pipeline(
   // Dispatch slice 6 (docs/dispatch-slice-6-contract.md): the order read feeds
   // the delivery counts and Delivered lines, so a failed order read leaves the
   // delivery fields AND the materials fields off every row (never 0).
+  // S5: the receipts decide Delivered and Part delivered too, so a failed
+  // receipts read leaves the materials fields off every row, and the delivery
+  // fields lose only their two S5 fields (slice 6's two need no receipt).
   const dispatchDeliveriesOk = dispatchList && !poRes.error
-  const dispatchMaterialsOk = dispatchList && !materialsRes.error && !poRes.error
+  const dispatchMaterialsOk = dispatchList && !materialsRes.error && !poRes.error && !receiptsRes.error
+  const dispatchOnSiteOk = dispatchMaterialsOk
+  if (dispatchList && receiptsRes.error) {
+    console.error('[pipeline] pipeline.job_material_line_receipts failed:', receiptsRes.error)
+  }
   if (dispatchList && materialsRes.error) {
     console.error('[pipeline] pipeline.job_material_lines failed:', materialsRes.error)
   }
   if (dispatchList && poRes.error) {
     console.error('[pipeline] pipeline.purchase_orders failed: dispatch deliveries and materials marked failed')
   }
-  const materialCountsByJob = dispatchMaterialsOk
-    ? dispatchMaterialCountsByJob(materialsRes.data, dispatchSightedOrderIds(poRes.data || []))
+  const dispatchLineView = dispatchMaterialsOk
+    ? dispatchLineDeliveryView(materialsRes.data, poRes.data || [], receiptsRes.data)
+    : null
+  const materialCountsByJob = dispatchLineView
+    ? dispatchMaterialCountsByJob(materialsRes.data, dispatchLineView)
     : new Map()
   // Orders per job, only for the jobs the order read covered (a draft row is
   // not read, so it gets no delivery fields rather than a made-up 0).
@@ -17275,7 +17299,12 @@ async function pipeline(
             : {}),
           ...(dispatchMaterialsOk ? dispatchMaterialListFields(materialCountsByJob.get(String(j.id))) : {}),
           ...(dispatchDeliveriesOk && deliveryReadJobIds.has(String(j.id))
-            ? dispatchDeliveryListFields(deliveryOrdersByJob.get(String(j.id)))
+            ? dispatchDeliveryListFields(
+              deliveryOrdersByJob.get(String(j.id)),
+              dispatchOnSiteOk && dispatchLineView
+                ? dispatchOnSiteSummary(deliveryOrdersByJob.get(String(j.id)), dispatchLineView)
+                : undefined,
+            )
             : {}),
         }
         : {}),
@@ -39689,7 +39718,15 @@ async function deletePO(client: any, body: any) {
   }
 
   const { error } = await client.from('purchase_orders').delete().eq('id', id)
-  if (error) throw new Error('Failed to delete PO: ' + error.message)
+  if (error) {
+    // S5: Dispatch delivery receipts reference their order and are kept as
+    // evidence, so an order with receipts is cancelled, never deleted.
+    if (error.code === '23503' && String(error.message || '').includes('job_material_line_receipts')) {
+      const message = 'Cannot delete: deliveries have been recorded against this PO. Cancel it instead.'
+      throw new ApiError(message, 409, { error: message, code: 'po_has_delivery_receipts' })
+    }
+    throw new Error('Failed to delete PO: ' + error.message)
+  }
 
   return { success: true, deleted: po.po_number }
 }
