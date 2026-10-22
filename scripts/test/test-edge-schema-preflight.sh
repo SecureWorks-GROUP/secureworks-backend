@@ -938,9 +938,17 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
                       ("20261021100000", "job_receipt_sender"),
+                      # Client sign-off: job_media phase signature and
+                      # job_client_signoffs, reused by group work orders.
+                      ("20261020170000", "job_media_signature_voice_note_phases"),
+                      ("20261020170100", "job_client_signoffs"),
                       # Crew invoices on the job work order: the office review
                       # columns and the job work order helpers ops-api reads.
-                      ("20261021143000", "job_work_order_crew_invoices")]:
+                      ("20261021143000", "job_work_order_crew_invoices"),
+                      # Group work orders: the split, the flag and the
+                      # invoice-line trigger (group_work_order.ts).
+                      # Renumbered past every migration already on main.
+                      ("20261022050000", "group_work_orders")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

@@ -137,6 +137,37 @@ Deno.test("invoice gate: flag off reads no sign-off and never refuses", async ()
   assertEquals(c.reads.includes("job_client_signoffs"), false);
 });
 
+Deno.test("invoice gate: a newest revoked sign-off blocks invoicing and an unrevoked signature allows it", async () => {
+  const flag = [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: true }];
+  const jobs = [{ id: "job-1", type: "fencing", completed_at: null }];
+  const drawn = {
+    id: "drawn",
+    job_id: "job-1",
+    method: "on_site",
+    happy: true,
+    satisfaction_rating: 5,
+    signature_media_id: "sig-1",
+    created_at: "2026-10-19T01:00:00Z",
+  };
+  const revoked = {
+    id: "revoked-row",
+    job_id: "job-1",
+    method: "revoked",
+    happy: true,
+    satisfaction_rating: 5,
+    created_at: "2026-10-19T02:00:00Z",
+  };
+  const blocked = fakeClient({ feature_flags: flag, jobs, job_client_signoffs: [drawn, revoked] });
+  const err = await assertRejects(
+    () => assertClientSignoffForInvoice(blocked, [{ id: "job-1", label: "SWF-1" }]),
+    Error,
+    "SWF-1 cannot be invoiced yet: waiting for the client to sign the job off.",
+  );
+  assertEquals((err as any).status, 422);
+  const open = fakeClient({ feature_flags: flag, jobs, job_client_signoffs: [drawn] });
+  await assertClientSignoffForInvoice(open, [{ id: "job-1", label: "SWF-1" }]);
+});
+
 Deno.test("invoice gate: flag on refuses an unsigned fencing job with 422 and passes a signed one", async () => {
   const flag = [{ flag_name: "trade_invoice_requires_client_signoff_v1", enabled: true }];
   const jobs = [
