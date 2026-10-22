@@ -193,6 +193,7 @@ import {
   signoffRowCounts,
   type ClientSignoff,
 } from './trade_client_signoff.ts'
+import { dispatchSignoffFields, type DispatchSignoffRead } from './dispatch_signoff.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
@@ -16986,6 +16987,17 @@ async function pipeline(
       return null
     })
     : null
+  // Client sign-off on the Dispatch list (dispatch_signoff.ts): the same rule
+  // and switch as the trade invoice gate. null while the switch is off (only
+  // the flag is read), 'failed' on a throw; read beside the enrichment wave.
+  const dispatchSignoffRead: Promise<Map<string, ClientSignoff> | null | 'failed'> | null = dispatchList
+    ? loadClientSignoffByJob(client, jobs.map((j: any) => ({
+      id: String(j.id), type: String(j.type || ''), completed_at: j.completed_at || null,
+    }))).catch((e) => {
+      console.error('[pipeline] dispatch sign-off read failed:', (e as Error)?.message)
+      return 'failed' as const
+    })
+    : null
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -17151,6 +17163,11 @@ async function pipeline(
   const quoteBuilderValues = await quoteBuilderValuesRead
   if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const closeoutBlocks = closeoutRead ? await closeoutRead : null
+  const dispatchSignoffResult = dispatchSignoffRead ? await dispatchSignoffRead : null
+  const dispatchSignoff: DispatchSignoffRead = dispatchSignoffResult === 'failed'
+    ? 'failed'
+    : dispatchSignoffResult ? 'ok' : 'off'
+  const dispatchSignoffByJob = dispatchSignoffResult instanceof Map ? dispatchSignoffResult : null
   if (closeoutRead && !closeoutBlocks) enrichmentErrors.push('pipeline.closeout')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
@@ -17242,9 +17259,9 @@ async function pipeline(
   }
 
   // Invoice status per job — track any invoice (for accepted) + deposit vs final split (for complete)
-  const invoiceMap: Record<string, { has_any: boolean; any_paid: boolean; has_deposit: boolean; deposit_paid: boolean; has_final: boolean; final_paid: boolean }> = {}
+  const invoiceMap: Record<string, { has_any: boolean; any_paid: boolean; has_deposit: boolean; deposit_paid: boolean; has_final: boolean; final_paid: boolean; final_raised: boolean }> = {}
   for (const inv of (invoiceRes.data || [])) {
-    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_any: false, any_paid: false, has_deposit: false, deposit_paid: false, has_final: false, final_paid: false }
+    if (!invoiceMap[inv.job_id]) invoiceMap[inv.job_id] = { has_any: false, any_paid: false, has_deposit: false, deposit_paid: false, has_final: false, final_paid: false, final_raised: false }
     const m = invoiceMap[inv.job_id]
     m.has_any = true
     if (inv.status === 'PAID') m.any_paid = true
@@ -17254,6 +17271,8 @@ async function pipeline(
       if (inv.status === 'PAID') m.deposit_paid = true
     } else {
       m.has_final = true
+      // Dispatch sign-off only (dispatch_signoff.ts): a DRAFT is not raised yet.
+      if (inv.status !== 'DRAFT') m.final_raised = true
       if (inv.status === 'PAID') m.final_paid = true
     }
   }
@@ -17324,6 +17343,12 @@ async function pipeline(
           ...(dispatchMaterialsOk ? dispatchMaterialListFields(materialCountsByJob.get(String(j.id))) : {}),
           ...(dispatchDeliveriesOk && deliveryReadJobIds.has(String(j.id))
             ? dispatchDeliveryListFields(deliveryOrdersByJob.get(String(j.id)))
+            : {}),
+          ...(dispatchSignoffByJob
+            ? dispatchSignoffFields(
+              dispatchSignoffByJob.get(String(j.id)),
+              invoiceRes.error || j.status === 'draft' ? null : !!invoiceMap[j.id]?.final_raised,
+            )
             : {}),
         }
         : {}),
@@ -17407,6 +17432,14 @@ async function pipeline(
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_deliveries: dispatchDeliveriesOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchList
+      ? {
+        dispatch_signoff: dispatchSignoff,
+        ...(dispatchSignoff === 'ok'
+          ? { final_invoice_ready_total: enriched.filter((j: any) => j.final_invoice_ready === true).length }
+          : {}),
+      }
+      : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
