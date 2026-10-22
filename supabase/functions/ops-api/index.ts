@@ -15103,6 +15103,12 @@ async function opsSummary(client: any) {
 // a superset of the blob can only raise fidelity, never flip an answer wrongly.
 // Projected payload is < ~2 kB/row
 // (worst-case observed key sizes: removal 516 B, quote 1.1 kB, siteNotes 437 B).
+// The job's existing fence type (e.g. 'asbestos'), the one scope value the
+// ops dash job cards need. Text via `->>`, null when absent. Selected by both the
+// calendar and pipeline reads and returned as-is, never stripped.
+export const EXISTING_FENCE_TYPE_PROJECTION =
+  'existing_fence_type:scope_json->job->removal->>existingFenceType'
+
 const CAL_SCOPE_PROJECTION = [
   'rd_attach_method:scope_json->attachmentMethod',
   'rd_attach:scope_json->attachment',
@@ -16468,6 +16474,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   const calSelect = [
     ...(includeFinancials ? CAL_FINANCIAL_COLUMNS : CAL_LIGHT_COLUMNS),
     ...CAL_SCOPE_PROJECTION,
+    EXISTING_FENCE_TYPE_PROJECTION,
   ].join(', ')
 
   // U-O3(a) M3c: window OVERLAP, not start-date containment. A multi-day job
@@ -16831,7 +16838,8 @@ async function pipeline(
   const buildJobsQuery = () => applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
-      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required' +
+      ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required, ' +
+      EXISTING_FENCE_TYPE_PROJECTION +
       repairProjection + dispatchProjection))
     .order('updated_at', { ascending: false })
   // Test records and the search box read only raw job columns, so one rule

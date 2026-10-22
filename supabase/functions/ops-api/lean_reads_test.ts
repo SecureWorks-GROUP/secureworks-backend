@@ -303,3 +303,15 @@ Deno.test("pipeline aliases are exact, lean, and stripped without changing key o
   assertEquals(Object.keys(newLeanRow), Object.keys(oldLeanRow));
   assertStrictEquals(JSON.stringify(newLeanRow), JSON.stringify(oldLeanRow));
 });
+
+Deno.test("pipeline select carries existing_fence_type, appended after the existing columns", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const start = source.indexOf("const buildJobsQuery = () => applyJobFilters(");
+  const sel = source.slice(start, source.indexOf(".order('updated_at'", start));
+  assertStringIncludes(
+    sel,
+    "council_required, ' +\n      EXISTING_FENCE_TYPE_PROJECTION +\n      repairProjection",
+  );
+});
