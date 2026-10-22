@@ -88,6 +88,46 @@ Deno.test("evaluate: on-site counts unless not happy or rated under the threshol
   assertEquals(noRating.satisfied, true);
 });
 
+Deno.test("invoicing: a newest revoked sign-off blocks, and an unrevoked signature allows", async () => {
+  const drawn = {
+    id: "drawn",
+    job_id: "j",
+    method: "on_site",
+    happy: true,
+    satisfaction_rating: 5,
+    signature_media_id: "sig-1",
+    created_at: "2026-10-19T01:00:00Z",
+  };
+  // The revoked row itself looks happy and well rated, so a check that only
+  // reads happy or rating would still let invoicing through.
+  const revoked = {
+    id: "revoked-row",
+    job_id: "j",
+    method: "revoked",
+    happy: true,
+    satisfaction_rating: 5,
+    created_at: "2026-10-19T02:00:00Z",
+  };
+  const held = evaluateClientSignoff({
+    job: { id: "j", type: "fencing" },
+    rows: [drawn, revoked],
+    settings: S,
+  });
+  assertEquals([held.satisfied, held.missing, held.current?.method], [false, "not_signed", "revoked"]);
+  assertEquals(
+    clientSignoffMessage(held, "SWF-1"),
+    "SWF-1 cannot be invoiced yet: waiting for the client to sign the job off.",
+  );
+
+  const blocked = fakeClient({ ...flagOn, job_client_signoffs: { data: [drawn, revoked] } });
+  const blockedMap = await loadClientSignoffByJob(blocked, [{ id: "j", type: "fencing" }]);
+  assertEquals([blockedMap?.get("j")?.satisfied, blockedMap?.get("j")?.missing], [false, "not_signed"]);
+
+  const open = fakeClient({ ...flagOn, job_client_signoffs: { data: [drawn] } });
+  const openMap = await loadClientSignoffByJob(open, [{ id: "j", type: "fencing" }]);
+  assertEquals([openMap?.get("j")?.satisfied, openMap?.get("j")?.missing], [true, null]);
+});
+
 Deno.test("evaluate: a waiver always counts, and a newer unhappy sign-off replaces an older happy one", () => {
   const job = { id: "j", type: "patio" };
   const waiver = evaluateClientSignoff({

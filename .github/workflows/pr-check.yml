@@ -662,6 +662,16 @@ jobs:
             supabase/functions/ops-api/service_credential_handler_test.ts \
             supabase/functions/ops-api/makesafe_cost_report_test.ts
 
+      - name: Test group work orders and completion-pack email
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/ops-api/group_work_order_test.ts \
+            supabase/functions/ops-api/trade_client_signoff_test.ts \
+            supabase/functions/completion-pack/email_plan_test.ts \
+            supabase/functions/completion-pack/client_signature_test.ts
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/trade_client_signoff_wiring_test.ts
+
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live
   # baseline drift, so the contract registry supplies the narrow prerequisites
