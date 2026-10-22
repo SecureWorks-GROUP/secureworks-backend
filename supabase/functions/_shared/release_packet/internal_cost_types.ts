@@ -30,9 +30,16 @@ export type InternalLineCost = {
 }
 
 export type InternalCostEstimates = {
-  material_total: number
-  labour_total: number
-  subcontract_commission_total: number
+  // null only when the pricing said its costs are not complete
+  // (pricing.internal.costs_complete === false): not known, never 0.
+  material_total: number | null
+  labour_total: number | null
+  subcontract_commission_total: number | null
+  // Present only on an incomplete-cost release, so a complete release's
+  // canonical text and hash are unchanged. Job Profit reads null totals as
+  // "no cost fixed at this quote".
+  costs_complete?: false
+  costs_to_confirm?: string[]
 }
 
 export type InternalMargin = {
