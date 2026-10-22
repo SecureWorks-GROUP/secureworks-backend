@@ -728,6 +728,37 @@ import {
 } from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
+  assertGroupJobDraftUsesShare,
+  assertGroupWorkOrderInvoiceFence,
+  assertLegacyInvoiceNotOnGroupJob,
+  captureGroupClientSignoff,
+  clientSignGroupWorkOrder,
+  createGroupWorkOrder,
+  deleteGroupWorkOrderHours,
+  freezeGroupWorkOrder,
+  groupBody,
+  GroupWorkOrderError,
+  isGroupShareInvoiceItem,
+  joinGroupWorkOrder,
+  previewGroupClientLink,
+  readGroupWorkOrderFeedback,
+  readGroupWorkOrderMyShare,
+  readGroupWorkOrderOffice,
+  readGroupWorkOrderPublic,
+  rekeyGroupWorkOrder,
+  removeGroupWorkOrderParticipant,
+  resolveGroupShareInvoiceExtra,
+  revokeGroupSignoff,
+  signGroupWorkOrderCrew,
+  submitGroupWorkOrderFeedback,
+  submitGroupWorkOrderHours,
+  unfreezeGroupWorkOrder,
+  voidGroupWorkOrder,
+  withoutGroupJobAssignments,
+  type GroupCaller,
+} from './group_work_order.ts'
+import { signatureImageTag } from '../_shared/signature_image.ts'
+import {
   approveCustomerVariation,
   cancelCustomerVariation,
   createCustomerVariation,
@@ -1888,6 +1919,43 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
 
 // A time line that does not say when it was worked (or says it wrongly) is a
 // 422 the trade app can show as it stands. Rule: trade_invoice_time_entry.ts.
+function groupWorkOrderApiError(error: unknown): never {
+  if (error instanceof GroupWorkOrderError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      code: error.code,
+      error: error.message,
+    })
+  }
+  // Start and finish still come from the time-entry rule. A bad entry is a
+  // 422 the trade app already knows, not a 500.
+  if (error instanceof TradeInvoiceTimeEntryError) tradeInvoiceTimeEntryApiError(error)
+  throw error
+}
+
+// The line trigger refuses ordinary pay on a group job and does not read the
+// feature flag. A draft save has to say that as 409, not wrap it as a 500.
+function throwIfGroupJobDraftClaim(error: unknown): never {
+  const message = error instanceof Error
+    ? error.message
+    : error && typeof error === 'object' && 'message' in error
+      ? String((error as { message?: unknown }).message ?? '')
+      : String(error ?? '')
+  if (message.includes('work_order_claim_blocked_by_group_share')) {
+    const text = 'This job is on a group work order. Save your share, not ordinary hours.'
+    throw new ApiError(text, 409, { ok: false, code: 'group_job_uses_share', error: text })
+  }
+  throw error
+}
+
+async function groupWorkOrderJson(work: Promise<unknown>): Promise<Response> {
+  try {
+    return json(await work)
+  } catch (error) {
+    groupWorkOrderApiError(error)
+  }
+}
+
 function tradeInvoiceTimeEntryApiError(error: unknown): never {
   if (error instanceof TradeInvoiceTimeEntryError) {
     throw new ApiError(error.message, error.status, {
@@ -4787,6 +4855,10 @@ const OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS = new Set([
   'ops_api_version',
   'ses_synthetic_livefire_capabilities',
   'view_shared_report',
+  // Public client sign-off. The share token is the secret; there is no account.
+  'group_work_order_public',
+  'group_work_order_client_sign',
+  'group_work_order_submit_feedback',
 ])
 
 const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
@@ -4805,6 +4877,17 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'complete_my_job',
   'waive_neighbour_signoff',
   'log_my_job_hours',
+  // Group work orders (group_work_order.ts). A participant sees the pot and
+  // their own share only. Feedback and the office split are not on this list.
+  'create_group_work_order',
+  'join_group_work_order',
+  'sign_group_work_order',
+  'submit_group_work_order_hours',
+  'delete_group_work_order_hours',
+  'group_work_order_my_share',
+  'capture_group_client_signoff',
+  'freeze_group_work_order',
+  'group_work_order_preview_client_link',
   'my_money',
   'unlock_makesafe_report',
   'upload_photo',
@@ -11155,6 +11238,57 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
       // ── Public (no auth) ──
       case 'view_shared_report': return viewSharedReport(client, url.searchParams)
+      // Client job sign-off. Token is the credential. Sends nothing.
+      case 'group_work_order_public':
+        return await groupWorkOrderJson(readGroupWorkOrderPublic(
+          client,
+          String(url.searchParams.get('token') || url.searchParams.get('share_token') || body.share_token || ''),
+        ))
+      case 'group_work_order_client_sign':
+        return await groupWorkOrderJson(clientSignGroupWorkOrder(client, groupBody({
+          ...body,
+          share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
+        })))
+      case 'group_work_order_submit_feedback':
+        return await groupWorkOrderJson(submitGroupWorkOrderFeedback(client, groupBody({
+          ...body,
+          share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
+        })))
+      // Office only. Not on the trade profile-scoped list, so a trade JWT is 403.
+      case 'group_work_order_feedback':
+      case 'group_work_order_office':
+      case 'unfreeze_group_work_order':
+      case 'revoke_group_signoff':
+      case 'void_group_work_order':
+      case 'rekey_group_work_order':
+      case 'remove_group_work_order_participant': {
+        const officeCaller: GroupCaller = {
+          userId: authUser?.id || '',
+          orgId: authUser?.orgId || null,
+          role: authUser?.role || '',
+          isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
+        }
+        const officeBody = groupBody({
+          ...body,
+          group_id: body.group_id || url.searchParams.get('group_id'),
+          job_id: body.job_id || url.searchParams.get('job_id'),
+        })
+        return await groupWorkOrderJson(
+          action === 'group_work_order_feedback'
+            ? readGroupWorkOrderFeedback(client, officeCaller, officeBody)
+            : action === 'unfreeze_group_work_order'
+            ? unfreezeGroupWorkOrder(client, officeCaller, officeBody)
+            : action === 'revoke_group_signoff'
+            ? revokeGroupSignoff(client, officeCaller, officeBody)
+            : action === 'void_group_work_order'
+            ? voidGroupWorkOrder(client, officeCaller, officeBody)
+            : action === 'rekey_group_work_order'
+            ? rekeyGroupWorkOrder(client, officeCaller, officeBody)
+            : action === 'remove_group_work_order_participant'
+            ? removeGroupWorkOrderParticipant(client, officeCaller, officeBody)
+            : readGroupWorkOrderOffice(client, officeCaller, officeBody),
+        )
+      }
 
       // ── Assignment Requests (trade calendar) ──
       case 'request_assistance': {
@@ -11295,6 +11429,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'complete_my_job':
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
+      case 'create_group_work_order':
+      case 'join_group_work_order':
+      case 'sign_group_work_order':
+      case 'submit_group_work_order_hours':
+      case 'delete_group_work_order_hours':
+      case 'group_work_order_my_share':
+      case 'capture_group_client_signoff':
+      case 'freeze_group_work_order':
+      case 'group_work_order_preview_client_link':
       case 'my_money':
       case 'unlock_makesafe_report':
       case 'upload_photo':
@@ -11429,6 +11572,48 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
           case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
           case 'log_my_job_hours': return json(await tradeLogMyJobHours(client, body, tradeUser, tradeJobAccess))
+          case 'create_group_work_order':
+          case 'join_group_work_order':
+          case 'sign_group_work_order':
+          case 'submit_group_work_order_hours':
+          case 'delete_group_work_order_hours':
+          case 'group_work_order_my_share':
+          case 'capture_group_client_signoff':
+          case 'freeze_group_work_order':
+          case 'group_work_order_preview_client_link': {
+            const groupCaller: GroupCaller = {
+              userId: tradeUser.id,
+              orgId: tradeUser.orgId,
+              role: tradeUser.role,
+              isStaff: _opsApiCallerIsStaffOperator('jwt', tradeUser),
+            }
+            const groupPayload = groupBody(body)
+            if (action === 'create_group_work_order') {
+              return await groupWorkOrderJson(createGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            if (action === 'join_group_work_order') {
+              return await groupWorkOrderJson(joinGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            if (action === 'sign_group_work_order') {
+              return await groupWorkOrderJson(signGroupWorkOrderCrew(client, groupCaller, groupPayload))
+            }
+            if (action === 'submit_group_work_order_hours') {
+              return await groupWorkOrderJson(submitGroupWorkOrderHours(client, groupCaller, groupPayload))
+            }
+            if (action === 'delete_group_work_order_hours') {
+              return await groupWorkOrderJson(deleteGroupWorkOrderHours(client, groupCaller, groupPayload))
+            }
+            if (action === 'group_work_order_my_share') {
+              return await groupWorkOrderJson(readGroupWorkOrderMyShare(client, groupCaller, groupPayload))
+            }
+            if (action === 'capture_group_client_signoff') {
+              return await groupWorkOrderJson(captureGroupClientSignoff(client, groupCaller, groupPayload))
+            }
+            if (action === 'freeze_group_work_order') {
+              return await groupWorkOrderJson(freezeGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            return await groupWorkOrderJson(previewGroupClientLink(client, groupCaller, groupPayload))
+          }
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
           case 'unlock_makesafe_report': return json(await unlockMakesafeReport(client, body, tradeUser, tradeJobAccess, isDispatcher))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
@@ -11490,14 +11675,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Get other trades' invoice lines on those jobs
             let query = client.from('trade_invoice_lines')
-              .select('id, job_id, job_number, client_name, total_hours, hourly_rate, line_total_ex, acknowledgment_status, override_amount, override_note, line_date, division, description, work_date, start_time, finish_time, break_minutes, trade_invoices!inner(user_id, week_start, status, users:user_id(name))')
+              .select('id, job_id, job_number, client_name, total_hours, hourly_rate, line_total_ex, acknowledgment_status, override_amount, override_note, line_date, division, description, work_date, start_time, finish_time, break_minutes, group_share_id, line_type, trade_invoices!inner(user_id, week_start, status, users:user_id(name))')
               .in('job_id', leadJobIds)
               .neq('trade_invoices.user_id', tradeUser.id)
             if (ccWeekStart) query = query.eq('trade_invoices.week_start', ccWeekStart)
             const { data: charges, error: ccErr } = await query.order('line_date', { ascending: true })
             if (ccErr) throw new Error('Failed to load crew charges: ' + ccErr.message)
 
-            const mapped = (charges || []).map((c: any) => ({
+            const mapped = (charges || []).filter((c: any) =>
+              !c.group_share_id && String(c.line_type || '').toLowerCase() !== 'group share'
+            ).map((c: any) => ({
               line_id: c.id,
               trade_name: c.trade_invoices?.users?.name || 'Unknown',
               job_number: c.job_number || '',
@@ -11526,8 +11713,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Verify user is the DESIGNATED lead on this job (is_lead), never
             // via job_assignments.role — see tradeLeadJobIds.
-            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id').eq('id', line_id).single()
+            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type').eq('id', line_id).single()
             if (!lineData) throw new ApiError('Line not found', 404)
+            if (lineData.group_share_id || String(lineData.line_type || '').toLowerCase() === 'group share') {
+              throw new ApiError('A group share is only visible to its owner.', 403)
+            }
             const isLead = await tradeIsDesignatedLead(client, tradeUser.id, lineData.job_id)
             if (!isLead) throw new ApiError('Not authorised — you are not lead on this job', 403)
 
@@ -11610,6 +11800,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               id: String(woJob?.id || wo.job_id || ''),
               label: woJob?.job_number || null,
             }])
+            // While group_work_order_v1 is off this reads feature_flags only.
+            await assertLegacyInvoiceNotOnGroupJob(client, {
+              jobIds: [String(wo.job_id || '')],
+              lines: [
+                ...(Array.isArray(body.items) ? body.items : []),
+                ...(Array.isArray(body.lines) ? body.lines : []),
+                ...(Array.isArray(body.extra_items) ? body.extra_items : []),
+              ],
+            }).catch((error) => groupWorkOrderApiError(error))
 
             // One live invoice per work order across the tenant, regardless of
             // which authorised manager/trade submitted it. The caller's own
@@ -11668,7 +11867,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (requestedNegativeChargeIds.length > 0) {
               const { data: selectedChargeRows, error: selectedChargeErr } = await client
                 .from('trade_invoice_lines')
-                .select('id, job_id, line_type, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+                .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
                 .in('id', requestedNegativeChargeIds)
                 .eq('trade_invoices.org_id', tradeUser.orgId)
               if (selectedChargeErr) throw selectedChargeErr
@@ -12063,10 +12262,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               )
               : null
 
-            let labourTotal = 0
             const labourLines = weeklyInvoice ? [] : (Array.isArray(draftLabour) ? draftLabour : [])
-            for (const l of labourLines) labourTotal += roundMoney(Number(l.line_total_ex || 0))
-            let extraTotal = 0
             const extras = !weeklyInvoice && Array.isArray(draftExtras)
               ? draftExtras.filter((e: any) => {
                 if (e?.source === 'clock' || e?._source === 'clock' || e?.source === 'server_labour') return false
@@ -12074,15 +12270,55 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return true
               })
               : []
+            const draftShareShaped = (item: any) =>
+              isGroupShareInvoiceItem(item) || Boolean(item?.group_share_id)
+            const plainLabour = labourLines.filter((line: any) => !draftShareShaped(line))
+            const plainExtras = extras.filter((extra: any) => !draftShareShaped(extra))
+            // Ordinary pay on a job that already has a group is 409 even while
+            // the switch is off. The line trigger does not read the flag.
+            await assertGroupJobDraftUsesShare(client, [
+              ...plainLabour,
+              ...plainExtras,
+              ...(weeklyInvoice?.lines || []),
+            ]).catch((error) => groupWorkOrderApiError(error))
+            const shareSources = [
+              ...labourLines.filter((line: any) => draftShareShaped(line)),
+              ...extras.filter((extra: any) => draftShareShaped(extra)),
+            ]
+            // Resolve before any invoice write. A share while the switch is
+            // off is 409. A share the server cannot price is 4xx, never a
+            // raw line the database trigger would turn into a 500.
+            const resolvedShares: Record<string, unknown>[] = []
+            for (const item of shareSources) {
+              try {
+                const shareLine = await resolveGroupShareInvoiceExtra(client, {
+                  userId: tradeUser.id,
+                  item,
+                })
+                if (!shareLine) {
+                  throw new ApiError('A group share has to be submitted as its own line.', 422)
+                }
+                resolvedShares.push(shareLine)
+              } catch (error) {
+                if (error instanceof ApiError) throw error
+                groupWorkOrderApiError(error)
+              }
+            }
+            let labourTotal = 0
+            for (const l of plainLabour) labourTotal += roundMoney(Number(l.line_total_ex || 0))
+            let extraTotal = 0
             const draftAssignmentIds = [...new Set(
-              labourLines.flatMap((line: any) =>
+              plainLabour.flatMap((line: any) =>
                 Array.isArray(line?.assignment_ids) ? line.assignment_ids : []
               ).filter(Boolean),
             )]
-            for (const e of extras) {
+            for (const e of plainExtras) {
               extraTotal += roundMoney(
                 roundMoney(Number(e.quantity || 1)) * roundMoney(Number(e.rate || 0)),
               )
+            }
+            for (const share of resolvedShares) {
+              extraTotal += roundMoney(Number(share.line_total_ex || 0))
             }
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
             // Recurring deduction: a dated draft shows what the submitted
@@ -12116,7 +12352,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // complete entry sets the line's hours; submit is where a missing
             // or wrong entry is refused.
             const hourlyDraftLineRows: Array<Record<string, unknown>> = [
-              ...labourLines.map((line: any) => {
+              ...plainLabour.map((line: any) => {
                 const draftTime = draftTradeInvoiceTimeEntry(line)
                 return {
                 job_id: line.job_id || null,
@@ -12148,7 +12384,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ...draftTime.columns,
                 }
               }),
-              ...extras.map((extra: any) => {
+              ...plainExtras.map((extra: any) => {
                 const quantity = roundMoney(Number(extra.quantity || 1))
                 const unitRate = roundMoney(Number(extra.rate || 0))
                 return {
@@ -12164,6 +12400,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     : tradeInvoiceTimeEntryColumns(null)),
                 }
               }),
+              ...resolvedShares.map((share) => ({
+                job_id: share.job_id || null,
+                job_number: share.job_number || null,
+                client_name: share.client_name || null,
+                site_address: share.site_address || null,
+                total_hours: 0,
+                hourly_rate: null,
+                line_total_ex: roundMoney(Number(share.line_total_ex || 0)),
+                line_type: 'group share',
+                description: share.description || 'Group work order share',
+                quantity: 1,
+                unit: 'ea',
+                unit_rate: share.unit_rate ?? null,
+                query_note: share.query_note || null,
+                division: share.division || null,
+                group_share_id: share.group_share_id || null,
+                source_work_order_id: null,
+                ...tradeInvoiceTimeEntryColumns(null),
+              })),
             ]
             const hourlyDraftPayload = {
               org_id: tradeUser.orgId,
@@ -12232,7 +12487,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }))
                 if (draftLineRows.length === 0) return
                 const { error: draftLinesErr } = await client.from('trade_invoice_lines').insert(draftLineRows)
-                if (draftLinesErr) throw new Error('Failed to save replacement draft lines: ' + draftLinesErr.message)
+                if (draftLinesErr) {
+                  const draftLineMessage = String(draftLinesErr.message || '')
+                  if (draftLineMessage.includes('work_order_claim_blocked_by_group_share')) {
+                    throwIfGroupJobDraftClaim(draftLinesErr)
+                  }
+                  throw new Error('Failed to save replacement draft lines: ' + draftLineMessage)
+                }
               },
               deleteInvoice: async (invoiceId) => {
                 const { data: deletedDraft, error: deleteErr } = await client.from('trade_invoices')
@@ -12937,6 +13198,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
                 if (rawItem?.source === 'clock' || rawItem?._source === 'clock' || rawItem?.source === 'server_labour') continue
+                // Group share: quantity 1 at the server's share. Not hours × rate.
+                // Client sign-off is the gate. source_work_order_id stays null.
+                if (isGroupShareInvoiceItem(rawItem) || rawItem?.group_share_id) {
+                  const shareLine = await resolveGroupShareInvoiceExtra(client, {
+                    userId: tradeUser.id,
+                    item: rawItem,
+                  }).catch((error) => groupWorkOrderApiError(error))
+                  if (!shareLine) {
+                    throw new ApiError('A group share has to be submitted as its own line.', 422)
+                  }
+                  extraSubtotal += Number(shareLine.line_total_ex)
+                  extraLineItems.push(shareLine)
+                  continue
+                }
                 const serverResolvedWeeklyLine = _resolveWeeklyInvoiceLineTrust(
                   weeklyInvoice,
                   rawItem,
@@ -13070,6 +13345,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 })
               }
             }
+
+            // A job is either a normal work-order / hours claim or a group
+            // share, never both. Travel and other extras are not a claim.
+            await assertGroupWorkOrderInvoiceFence(client, {
+              userId: tradeUser.id,
+              lines: [
+                ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+                ...extraLineItems,
+              ],
+            }).catch((error) => groupWorkOrderApiError(error))
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
@@ -13293,7 +13578,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 line_date: dbLine.line_date || null,
                 division: dbLine.division || null,
                 site_address: dbLine.site_address || null,
-                source_work_order_id: dbLine.source_work_order_id || null,
+                source_work_order_id: String(dbLine.line_type || '').toLowerCase() === 'group share'
+                  ? null
+                  : (dbLine.source_work_order_id || null),
+                group_share_id: dbLine.group_share_id || null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,
@@ -15520,6 +15808,8 @@ export function _selectWorkOrderNegativeCharges(
     const parentRaw = row?.trade_invoices
     const parent = Array.isArray(parentRaw) ? parentRaw[0] : parentRaw
     if (!id || !parent) continue
+    if (row.group_share_id) continue
+    if (String(row.line_type || '').toLowerCase().replace(/_/g, ' ') === 'group share') continue
     if (String(row.job_id || '') !== String(args.jobId)) continue
     if (String(parent.org_id || '') !== String(args.orgId)) continue
     if (String(parent.user_id || '') === String(args.viewerId)) continue
@@ -15689,7 +15979,11 @@ export async function _persistTradeInvoiceWeekDraft(
   })
   const invoiceId = String(data || '')
   if (error || !invoiceId) {
-    throw new Error('Failed to persist weekly/hourly draft invoice: ' + (error?.message || 'no invoice id returned'))
+    const persistMessage = String(error?.message || 'no invoice id returned')
+    if (persistMessage.includes('work_order_claim_blocked_by_group_share')) {
+      throwIfGroupJobDraftClaim(error)
+    }
+    throw new Error('Failed to persist weekly/hourly draft invoice: ' + persistMessage)
   }
   return invoiceId
 }
@@ -15891,7 +16185,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   if (chargeIds.length > 0) {
     reads.push(
       client.from('trade_invoice_lines')
-        .select('id, job_id, line_type, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+        .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
         .in('id', chargeIds)
         .eq('trade_invoices.org_id', tradeUser.orgId),
       client.from('trade_invoice_lines')
@@ -16071,7 +16365,7 @@ async function readWorkOrderChargeRows(
     const ids = jobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
     const { data, error } = await client
       .from('trade_invoice_lines')
-      .select('id, job_id, line_type, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+      .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
       .in('job_id', ids)
       .eq('trade_invoices.org_id', orgId)
       .neq('trade_invoices.user_id', viewerId)
@@ -45466,9 +45760,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;c
   }
 
   // Signature
-  if (report.signature_data) {
+  const signatureTag = signatureImageTag(report.signature_data, 'Signature')
+  if (signatureTag) {
     html += `<div class="section"><h3>Homeowner Sign-Off</h3>
-<div class="sig-block"><img src="${report.signature_data}" alt="Signature">`
+<div class="sig-block">${signatureTag}`
     if (report.signature_name) html += `<div class="sig-name">${esc(report.signature_name)}</div>`
     html += `</div></div>`
   }
@@ -54326,8 +54621,35 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
       .map((ti: any) => ti.id))
   }
-  const assignments = (rawAssignments || [])
+  let assignments = (rawAssignments || [])
     .filter((a: any) => !(a.invoiced_in && liveInvoiceIds.has(a.invoiced_in)))
+
+  // A group job is paid as a share. Leave it out of ordinary hours. A failed
+  // read fails closed: never show a group job as if it were a normal claim.
+  const groupHoursJobIds = [...new Set(assignments.map((a: any) => String(a.jobs?.id || '')).filter(Boolean))]
+  if (groupHoursJobIds.length > 0) {
+    const { data: groupHourRows, error: groupHourErr } = await client
+      .from('group_work_orders')
+      .select('job_id, status')
+      .in('job_id', groupHoursJobIds)
+    if (groupHourErr) {
+      throw new ApiError(
+        'Could not read group work orders for these hours.',
+        503,
+        {
+          ok: false,
+          code: 'group_work_order_unreadable',
+          error: 'Could not read group work orders for these hours.',
+        },
+      )
+    }
+    const groupJobIds = new Set<string>(
+      (groupHourRows || [])
+        .filter((row: any) => String(row.status || '') !== 'void' && row.job_id)
+        .map((row: any) => String(row.job_id)),
+    )
+    assignments = withoutGroupJobAssignments(assignments, groupJobIds)
+  }
 
   // Look up current rate
   const { data: rateRow } = await client
@@ -54784,6 +55106,17 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       },
     )
   }
+
+  // While group_work_order_v1 is off this reads feature_flags only and
+  // returns before any group table. The invoice-line trigger is the net.
+  await assertLegacyInvoiceNotOnGroupJob(client, {
+    jobIds: Object.keys(jobLines),
+    lines: [
+      ...(Array.isArray(body.items) ? body.items : []),
+      ...(Array.isArray(body.lines) ? body.lines : []),
+      ...Object.values(jobLines),
+    ],
+  }).catch((error) => groupWorkOrderApiError(error))
 
   // Own the complete invoice and relational line truth before contacting Xero.
   // A contact/bill failure remains recoverable through the ops retry route; an
