@@ -17,6 +17,10 @@ import {
 } from "./job_profit_patio_expected.ts";
 import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
 import { jobProfitAction } from "./job_profit.ts";
+import {
+  BASELINE_REVISION_PROJECTION,
+  JOB_ACCEPTANCE_NOT_TRUE,
+} from "./job_profit_revision_binding.ts";
 
 const JOB = "00000000-0000-4000-8000-0000000000aa";
 
@@ -575,6 +579,11 @@ function fake(
         rows = rows.filter((r) => r[col] === val);
         return b;
       };
+      b.in = (col: string, vals: unknown[]) => {
+        call.eq.push([`in.${col}`, vals]);
+        rows = rows.filter((r) => vals.includes(r[col]));
+        return b;
+      };
       b.then = (resolve: (v: unknown) => unknown) =>
         resolve(
           errors[table]
@@ -606,9 +615,13 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
     scope: "job",
   });
   assertEquals(pe.frozen_scope.last_save_matches_frozen, true);
-  // The job's acceptance may be another revision's: no record binds it to
-  // this one, so the frozen figures are shown but compared with nothing.
-  assertEquals(pe.frozen_scope.revision_acceptance, NO_REVISION_BINDING);
+  // The job's acceptance may be another revision's: no released quote row
+  // binds it to this one, so the frozen figures are shown but compared with
+  // nothing.
+  assertEquals(pe.frozen_scope.revision_acceptance, {
+    accepted: null,
+    basis: "accepted_document_not_released",
+  });
   assertEquals(pe.frozen_scope.expected.materials_ex, 4000);
   assertEquals(pe.lanes.materials.expected_ex, null);
   assertEquals(pe.lanes.materials.variance_ex, null);
@@ -619,6 +632,7 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
   assertEquals(jobsReads.map((x) => x.select), [
     PATIO_EXPECTED_SCOPE_PROJECTION,
     PATIO_LAST_SAVE_HASH_COLUMNS,
+    BASELINE_REVISION_PROJECTION,
   ]);
   for (const r of jobsReads) assertEquals(r.eq, [["id", JOB]]);
   assertEquals(c.rpcs, [{
@@ -691,8 +705,20 @@ Deno.test("job_profit: acceptance is read from quote documents and accepted runs
   assertEquals(found.p.frozen_scope.acceptance.accepted, true);
   assertEquals(found.p.lanes.materials.variance_ex, null);
   // every case: revision acceptance is unknown at the action
+  assertEquals(
+    none.p.frozen_scope.revision_acceptance,
+    JOB_ACCEPTANCE_NOT_TRUE,
+  );
+  assertEquals(
+    run.p.frozen_scope.revision_acceptance.basis,
+    "no_accepted_document",
+  );
+  assertEquals(
+    found.p.frozen_scope.revision_acceptance.basis,
+    "chain_unreadable",
+  );
   for (const x of [none, run, found]) {
-    assertEquals(x.p.frozen_scope.revision_acceptance, NO_REVISION_BINDING);
+    assertEquals(x.p.frozen_scope.revision_acceptance.accepted, null);
     assert(x.p.flags.includes("frozen_revision_acceptance_not_known"));
   }
 });
@@ -731,7 +757,22 @@ Deno.test("job_profit: an accepted revision A never opens a later frozen revisio
     ["run A accepted", {
       run_acceptances: [{ id: "r1", job_id: JOB, status: "accepted" }],
     }],
+    // A's released quote names A's revision, not the frozen B
+    ["quote A released naming A", {
+      job_documents: [QUOTE_ACCEPTED],
+      quote_revisions: [{
+        job_document_id: QUOTE_ACCEPTED.id,
+        scope_revision_id: "srv-row-A",
+        sent_at: "2026-10-19T09:00:00Z",
+      }],
+    }],
   ];
+  const basis: Record<string, string> = {
+    "quote A accepted": "accepted_document_not_released",
+    "quote A accepted, then superseded": "accepted_document_not_released",
+    "run A accepted": "no_accepted_document",
+    "quote A released naming A": "release_not_compared_revision",
+  };
   for (const [label, extra] of cases) {
     const c = fake({ ...base, ...extra });
     const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
@@ -739,7 +780,7 @@ Deno.test("job_profit: an accepted revision A never opens a later frozen revisio
     assertEquals(p.frozen_scope.acceptance.accepted, true, label);
     assertEquals(
       p.frozen_scope.revision_acceptance,
-      NO_REVISION_BINDING,
+      { accepted: null, basis: basis[label] },
       label,
     );
     assert(p.flags.includes("frozen_revision_acceptance_not_known"), label);
@@ -750,9 +791,12 @@ Deno.test("job_profit: an accepted revision A never opens a later frozen revisio
     assertEquals(p.lanes.materials.variance_ex, null, label);
     assertEquals(p.lanes.labour.variance_ex, null, label);
     assertEquals(p.status, "incomplete", label);
-    // the time-pinned baseline is not read for this
+    // the time-pinned baseline naming B is never enough on its own, and is
+    // read as its one projected path only
     for (const r of c.calls.filter((x) => x.table === "jobs")) {
-      assert(!String(r.select).includes("expected_costs"), label);
+      if (String(r.select).includes("expected_costs")) {
+        assertEquals(r.select, BASELINE_REVISION_PROJECTION, label);
+      }
     }
   }
 });
@@ -1041,4 +1085,87 @@ Deno.test("patio expected: without the installer rule a missing flag is not know
   const ok = pe(current(), frozen(), row())!;
   assert(!ok.flags.includes("installer_confirmation_not_known"));
   assertEquals(ok.status, "complete");
+});
+
+Deno.test("job_profit: a released quote naming the frozen and baseline revision opens the comparison", async () => {
+  const saved = { scope_json: record(), pricing_json: pricing() };
+  const h = await lastSaveHashes(saved);
+  const bound = {
+    v_job_profit: [row()],
+    // ec_rev stands in for the projected expected_costs->>scope_revision_id
+    // path; the fake does not project.
+    jobs: [{ id: JOB, ...current(), ...saved, ec_rev: "srv-row-9" }],
+    scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
+    job_documents: [QUOTE_ACCEPTED],
+    quote_revisions: [
+      {
+        job_document_id: QUOTE_ACCEPTED.id,
+        scope_revision_id: "srv-row-9",
+        sent_at: "2026-10-20T08:30:00Z",
+      },
+      // a staged row, never sent, is not a release
+      {
+        job_document_id: QUOTE_ACCEPTED.id,
+        scope_revision_id: "srv-row-X",
+        sent_at: null,
+      },
+    ],
+  };
+  const c = fake(bound);
+  const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(out.status, 200);
+  const p = (out.body as any).patio_expected;
+  assertEquals(p.frozen_scope.revision_acceptance, {
+    accepted: true,
+    basis: null,
+  });
+  assert(!p.flags.includes("frozen_revision_acceptance_not_known"));
+  assertEquals(p.lanes.materials.expected_ex, 4000);
+  assertEquals(p.lanes.materials.variance_ex, 300);
+  // The chain is read without time and without a write.
+  const chainTables = [
+    "job_documents",
+    "run_acceptances",
+    "job_variations",
+    "quote_revisions",
+  ];
+  for (const t of chainTables) {
+    assert(c.calls.some((x) => x.table === t), t);
+  }
+  const rel = c.calls.find((x) => x.table === "quote_revisions")!;
+  assertEquals(rel.select, "job_document_id, scope_revision_id");
+  assertEquals(rel.eq, [["in.job_document_id", [QUOTE_ACCEPTED.id]], [
+    "not.sent_at.is",
+    null,
+  ]]);
+  // The link column does not exist yet (42703): not known, the read is 200.
+  const missing = fake(bound, {
+    quote_revisions: "column quote_revisions.scope_revision_id does not exist",
+  });
+  const m = await jobProfitAction(
+    missing,
+    new URLSearchParams(`job_id=${JOB}`),
+  );
+  assertEquals(m.status, 200);
+  const mp = (m.body as any).patio_expected;
+  assertEquals(mp.frozen_scope.revision_acceptance, {
+    accepted: null,
+    basis: "chain_unreadable",
+  });
+  assertEquals(mp.lanes.materials.expected_ex, null);
+  assertEquals(mp.lanes.materials.variance_ex, null);
+  // Every other chain read failing is not known too.
+  for (const t of ["run_acceptances", "job_variations"]) {
+    const f = fake(bound, { [t]: "timeout" });
+    const fp = ((await jobProfitAction(
+      f,
+      new URLSearchParams(`job_id=${JOB}`),
+    )).body as any).patio_expected;
+    assertEquals(
+      fp.frozen_scope.revision_acceptance.basis,
+      "chain_unreadable",
+      t,
+    );
+    assertEquals(fp.lanes.materials.variance_ex, null, t);
+  }
 });

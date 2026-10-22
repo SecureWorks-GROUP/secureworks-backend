@@ -26,6 +26,10 @@ import {
   PATIO_LAST_SAVE_HASH_COLUMNS,
   patioExpectedVersusActual,
 } from "./job_profit_patio_expected.ts";
+import {
+  JOB_ACCEPTANCE_NOT_TRUE,
+  readRevisionAcceptance,
+} from "./job_profit_revision_binding.ts";
 
 export const JOB_PROFIT_LABELS = {
   profit:
@@ -509,6 +513,19 @@ async function patioExpectedPart(
       ? { accepted: null, source: null }
       : { accepted: false, source: null };
   }
+  // Whether that acceptance is this frozen revision's: read from the chain
+  // accepted document -> released quote_revisions row -> scope_revision_id
+  // (JP-23 slice 2). It can only narrow job acceptance. Until the send link
+  // (slice 1) exists every job reads not known, and nothing is compared.
+  const revisionAcceptance = !frz
+    ? NO_REVISION_BINDING
+    : acceptance?.accepted === true
+    ? await readRevisionAcceptance(
+      client,
+      String(summary.job_id),
+      typeof frz.id === "string" ? frz.id : null,
+    )
+    : JOB_ACCEPTANCE_NOT_TRUE;
   const result = patioExpectedVersusActual(
     cur,
     frz,
@@ -516,9 +533,7 @@ async function patioExpectedPart(
     hashes,
     installerCheck,
     acceptance,
-    // No record ties an acceptance to a frozen revision (Sales G-7; CFO check
-    // 20261021), so revision acceptance stays unknown and nothing is compared.
-    NO_REVISION_BINDING,
+    revisionAcceptance,
   );
   return result ? { patio_expected: result } : {};
 }
