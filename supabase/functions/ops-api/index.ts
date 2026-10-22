@@ -1112,6 +1112,10 @@ import {
   deriveFromDomain as _deriveFromDomain,
   isOwnDomain as _isOwnDomain,
 } from './makesafe_compact_reads.ts'
+import {
+  loadQuoteOptionVisibility,
+  quoteOptionSummary,
+} from '../_shared/quote_option_reader.ts'
 
 // Mission makesafe-inbound-filter-2026-06-16 — intake-draft gate. scanSesMakesafes
 // is the ONLY layer that creates makesafe_intake_drafts; this gate keeps it from
@@ -14566,8 +14570,15 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
     const quotedMs = row?.quoted_at ? new Date(row.quoted_at).getTime() : NaN
     return Number.isFinite(quotedMs) && (nowMs - quotedMs) < minQuoteAgeMs
   }
-  const rawQuotedRows = rawRows.filter((j: any) => j.status === 'quoted')
-  const realQuotedRows = realRows.filter((j: any) => j.status === 'quoted')
+  // SQ-23: a quoted option another option of the same quote superseded is
+  // not owed a nurture (quote_option_reader.ts). Switch off: unchanged.
+  const quoteOptions = await loadQuoteOptionVisibility(client, rawRows)
+  const rawQuotedRows = rawRows.filter((j: any) =>
+    j.status === 'quoted' && !quoteOptions.hidden.has(String(j.id))
+  )
+  const realQuotedRows = realRows.filter((j: any) =>
+    j.status === 'quoted' && !quoteOptions.hidden.has(String(j.id))
+  )
   const rawEligibleQuotedRows = rawQuotedRows.filter((j: any) => !isQuoteTooFresh(j))
   const realEligibleQuotedRows = realQuotedRows.filter((j: any) => !isQuoteTooFresh(j))
   const realTooFreshQuoted = realQuotedRows.length - realEligibleQuotedRows.length
@@ -14672,6 +14683,7 @@ async function dailyCoverageAudit(client: any, _params: URLSearchParams) {
     },
     assertions,
     events_emitted: ['coverage_audit_snapshot'],
+    ...quoteOptionSummary(quoteOptions),
   }
 
   await logBusinessEvent(client, {
@@ -14879,7 +14891,17 @@ async function opsSummary(client: any) {
   ).length
   const overdueCount = (overdueInvoices.data || []).length
   const overdueTotal = (overdueInvoices.data || []).reduce((sum: number, inv: any) => sum + (inv.amount_due || inv.total || 0), 0)
-  const quotePendingCount = (pendingQuotes.data || []).length
+  // SQ-23: a quote option another option of the same quote superseded is not
+  // pending work (quote_option_reader.ts). Switch off: nothing here changes.
+  const quoteOptions = await loadQuoteOptionVisibility(client, [
+    ...(allActiveJobs.data || []),
+    ...(scopePending.data || []).map((j: any) => ({ id: j.id, status: 'draft' })),
+    ...(pendingQuotes.data || []).map((d: any) => ({ id: d.job_id })),
+  ])
+  const quoteOptionLive = (jobId: unknown) => !quoteOptions.hidden.has(String(jobId))
+  const quotePendingCount = quoteOptions.hidden.size > 0
+    ? (pendingQuotes.data || []).filter((d: any) => quoteOptionLive(d.job_id)).length
+    : (pendingQuotes.data || []).length
 
   // ── Attention Items ──
   const attention: any[] = []
@@ -15058,7 +15080,7 @@ async function opsSummary(client: any) {
   }
 
   // Scope pending — draft jobs waiting 7+ days
-  const scopeData = scopePending.data || []
+  const scopeData = (scopePending.data || []).filter((j: any) => quoteOptionLive(j.id))
   if (scopeData.length > 0) {
     const oldest = Math.floor((Date.now() - new Date(scopeData[0].created_at).getTime()) / 86400000)
     attention.push({
@@ -15086,6 +15108,7 @@ async function opsSummary(client: any) {
     quoted: 0, accepted: 0, approvals: 0, processing: 0, in_progress: 0, complete: 0, invoiced: 0,
   }
   for (const j of allActive) {
+    if (!quoteOptionLive(j.id)) continue
     if (pipelineCounts[j.status] !== undefined) pipelineCounts[j.status]++
   }
 
@@ -15105,6 +15128,7 @@ async function opsSummary(client: any) {
       active_pos: (activePOs.data || []).length,
       active_wos: (activeWOs.data || []).length,
     },
+    ...quoteOptionSummary(quoteOptions),
   }
 }
 
@@ -17355,6 +17379,20 @@ async function pipeline(
       : pipelineRow
   }).filter(isListedPipelineRow)
 
+  // SQ-23: an open quote option another option of the same quote superseded
+  // stays at draft or quoted, so it is left out here (quote_option_reader.ts).
+  // Switch off: nothing below changes.
+  const quoteOptions = await loadQuoteOptionVisibility(client, enriched)
+  if (quoteOptions.status === 'failed') enrichmentErrors.push('pipeline.quote_options')
+  const listed = quoteOptions.hidden.size > 0
+    ? enriched.filter((j: any) => !quoteOptions.hidden.has(String(j.id)))
+    : enriched
+  for (const j of listed) {
+    if (quoteOptions.decisions.get(String(j.id))?.state === 'pending_review') {
+      j.quote_option_state = 'pending_review'
+    }
+  }
+
   // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
   // status as its own column key. The widened .in('status', [...]) filter
   // above pulls jobs in all 19 active substages, but the previous 8-key
@@ -17386,7 +17424,7 @@ async function pipeline(
     get_review: [],
     archived: [],
   }
-  for (const j of enriched) {
+  for (const j of listed) {
     // Legacy merge preserved: deposit → accepted.
     // 2026-06-02: removed scheduled → processing merge so Scheduled column renders its own jobs.
     const col = j.status === 'deposit' ? 'accepted'
@@ -17396,12 +17434,12 @@ async function pipeline(
 
   return {
     columns,
-    total: enriched.length,
+    total: listed.length,
     ...(dispatchList
       ? dispatchStagesOk
         ? {
           dispatch_stages: 'ok',
-          todo_total: enriched.filter((j: any) => j.dispatch_todo === true).length,
+          todo_total: listed.filter((j: any) => j.dispatch_todo === true).length,
         }
         : { dispatch_stages: 'failed' }
       : {}),
@@ -17411,6 +17449,7 @@ async function pipeline(
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
+    ...quoteOptionSummary(quoteOptions),
   }
 }
 
@@ -17974,15 +18013,23 @@ async function listQuotes(client: any, params: URLSearchParams) {
   const { data, error } = await query
   if (error) throw error
 
+  // SQ-23: leave out quote options another option superseded
+  // (quote_option_reader.ts). Switch off: unchanged.
+  const quoteOptions = await loadQuoteOptionVisibility(client, data || [])
   const quotes = (data || []).filter((j: any) => {
+    if (quoteOptions.hidden.has(String(j.id))) return false
     if (!search) return true
     const s = search.toLowerCase()
     return (j.client_name || '').toLowerCase().includes(s)
       || (j.site_suburb || '').toLowerCase().includes(s)
   })
 
-  return { quotes, total: quotes.length }
+  return { quotes, total: quotes.length, ...quoteOptionSummary(quoteOptions) }
 }
+
+export const _listQuotesForTest = listQuotes
+export const _opsSummaryForTest = opsSummary
+export const _dailyCoverageAuditForTest = dailyCoverageAudit
 
 async function listPOs(client: any, params: URLSearchParams) {
   const status = params.get('status')

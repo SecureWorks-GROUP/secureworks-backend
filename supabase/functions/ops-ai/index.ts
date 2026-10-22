@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { dropSupersededQuoteOptions } from '../_shared/quote_option_reader.ts'
 import { opsAiReviewRequestMessage } from './review_request.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -1218,11 +1219,14 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       const sb = sbClient()
       const days = input.days || 90
 
-      const { data: jobs } = await sb.from('jobs')
+      const { data: forecastRows } = await sb.from('jobs')
         .select('id, status, type, pricing_json, accepted_at, scheduled_at, quoted_at')
         .eq('org_id', DEFAULT_ORG_ID)
         .eq('legacy', false)
         .in('status', ['quoted', 'accepted', 'scheduled', 'in_progress'])
+      // A quote option another option of the same quote superseded is not in
+      // the forecast (SQ-23, _shared/quote_option_reader.ts). Switch off: unchanged.
+      const { rows: jobs } = await dropSupersededQuoteOptions(sb, forecastRows || [])
 
       // Historical conversion rate
       const { data: allJobs } = await sb.from('jobs')

@@ -16,6 +16,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { logQueryErrors } from '../_shared/pgrest.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { dropSupersededQuoteOptions } from '../_shared/quote_option_reader.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -209,8 +210,10 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
       worst_outliers: responseTimes.sort((a, b) => b.days - a.days).slice(0, 5),
     }
 
-    // 2. Stale quotes
-    const staleQuoteData = (staleQuotes.data || []).map((j: any) => {
+    // 2. Stale quotes. A quote option another option of the same quote
+    // superseded is not a stale quote (SQ-23, _shared/quote_option_reader.ts).
+    const { rows: liveStaleQuotes } = await dropSupersededQuoteOptions(sb, staleQuotes.data || [])
+    const staleQuoteData = liveStaleQuotes.map((j: any) => {
       const daysSince = j.quoted_at ? Math.round((now.getTime() - new Date(j.quoted_at).getTime()) / 86400000) : 0
       return { job: j.job_number, client: j.client_name, value: j.quoted_value, days_since_quote: daysSince, salesperson: j.created_by }
     }).filter((q: any) => q.days_since_quote > 3).sort((a: any, b: any) => b.days_since_quote - a.days_since_quote)
@@ -1441,8 +1444,13 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
         .eq('org_id', DEFAULT_ORG_ID)
         .lt('quoted_at', threeDaysAgo)
         .gt('quoted_at', new Date(Date.now() - 30 * 86400000).toISOString())
+      // A superseded quote option is not chased (SQ-23). Switch off: unchanged.
+      const { rows: liveStaleQuotes } = await dropSupersededQuoteOptions(
+        sb,
+        (staleQuotes || []).map((j: any) => ({ ...j, status: 'quoted' })),
+      )
 
-      for (const job of (staleQuotes || [])) {
+      for (const job of liveStaleQuotes) {
         const daysStale = Math.floor((Date.now() - new Date(job.quoted_at).getTime()) / 86400000)
         const quoteValue = job.pricing_json?.total || job.pricing_json?.totalPrice || 0
 
@@ -1884,9 +1892,11 @@ async function generateDigest(sb: any) {
     sb.from('job_assignments').select('job_id').eq('assignment_type', 'scope'),
   ])
 
-  const allJobs = (jobs || []).filter((j: any) =>
+  // A quote option another option of the same quote superseded is not live
+  // work (SQ-23, _shared/quote_option_reader.ts). Switch off: unchanged.
+  const { rows: allJobs } = await dropSupersededQuoteOptions(sb, (jobs || []).filter((j: any) =>
     !(j.status === 'scheduled' && !j.job_number && !j.site_suburb)
-    && !isTestJob(j))
+    && !isTestJob(j)))
   const allReceivables = receivables || []
 
   // ── Payment chase data (for PAYMENTS section) ──
@@ -2734,9 +2744,11 @@ async function createDailyAnnotations(sb: any, digest: any) {
       .limit(50),
   ])
 
-  const allJobs = (jobs || []).filter((j: any) =>
+  // A quote option another option of the same quote superseded is not live
+  // work (SQ-23, _shared/quote_option_reader.ts). Switch off: unchanged.
+  const { rows: allJobs } = await dropSupersededQuoteOptions(sb, (jobs || []).filter((j: any) =>
     !(j.status === 'scheduled' && !j.job_number && !j.site_suburb)
-    && !isTestJob(j))
+    && !isTestJob(j)))
   const poJobIds = new Set((allPOs || []).map((p: any) => p.job_id).filter(Boolean))
   const confirmedPOJobIds = new Set((allPOs || []).filter((p: any) =>
     ['confirmed', 'delivered', 'billed', 'authorised'].includes(p.status)
