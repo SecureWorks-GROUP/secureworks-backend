@@ -51,6 +51,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // so the canonical job ref + quote-back ask never drift between the two channels.
 import { canonicalJobRef, poEmailReferenceBanner } from '../_shared/po_reference.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { dispatchPoRefusal, isDispatchPurchaseOrder } from '../_shared/dispatch_po_guard.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -110,7 +111,7 @@ export async function _verifyPoEmailRecipient(
   // 1. PO must exist in purchase_orders
   const { data: po, error: poErr } = await client
     .from('purchase_orders')
-    .select('id, po_number, job_id, supplier_name, reference')
+    .select('id, po_number, job_id, supplier_name, reference, source')
     .eq('id', po_id)
     .maybeSingle()
 
@@ -121,6 +122,13 @@ export async function _verifyPoEmailRecipient(
       po_id,
       detail: poErr?.message || null,
     }, poErr ? 400 : 404) }
+  }
+
+  // 1b. A Dispatch order is sent from the Dispatch tab only, never from here
+  // (_shared/dispatch_po_guard.ts). Refused before any supplier lookup.
+  if (isDispatchPurchaseOrder(po)) {
+    const refusal = dispatchPoRefusal('send_po_email', po)
+    return { ok: false, response: json(refusal.body, refusal.status) }
   }
 
   // 2. PO must have a supplier_name on file

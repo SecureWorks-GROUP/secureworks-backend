@@ -338,6 +338,7 @@ import {
   dispatchDeliveryListFields,
   dispatchSightedOrderIds,
 } from './dispatch_deliveries.ts'
+import { dispatchPoRefusal, isDispatchPurchaseOrder } from '../_shared/dispatch_po_guard.ts'
 import {
   applyDispatchBoard,
   DISPATCH_BOARD_ACTIVE_FILTER,
@@ -17780,6 +17781,9 @@ async function pipeline(
 }
 
 export const _pipelineForTest = pipeline
+// The Dispatch order refusal tests drive the real two functions.
+export const _pushPOToXeroForTest = pushPOToXero
+export const _emailPOForTest = emailPO
 // Dispatch slice 4's suggestion runs this extractor unchanged; its tests drive
 // the real one rather than a copy.
 export const _extractMaterialsFromScopeForTest = extractMaterialsFromScope
@@ -36888,6 +36892,12 @@ async function pushPOToXero(client: any, body: any) {
     .single()
 
   if (error || !po) throw new Error('PO not found')
+  // A Dispatch order never goes to Xero (_shared/dispatch_po_guard.ts). This
+  // refusal comes before any other check, job read or Xero token.
+  if (isDispatchPurchaseOrder(po)) {
+    const refusal = dispatchPoRefusal('push_po_to_xero', po)
+    throw new ApiError(refusal.message, refusal.status, refusal.body)
+  }
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
   // A blank or placeholder supplier must not become a Xero contact, and only
   // while quote_builder_orders_v1 is on. Missing or unreadable is off. While
@@ -37024,11 +37034,16 @@ async function emailPO(client: any, body: any) {
 
   const { data: po, error } = await client
     .from('purchase_orders')
-    .select('xero_po_id, po_number, supplier_name, job_id, total')
+    .select('id, xero_po_id, po_number, supplier_name, job_id, total, source')
     .eq('id', id)
     .single()
 
   if (error || !po) throw new Error('PO not found')
+  // A Dispatch order is never emailed from Xero (_shared/dispatch_po_guard.ts).
+  if (isDispatchPurchaseOrder(po)) {
+    const refusal = dispatchPoRefusal('email_po', po)
+    throw new ApiError(refusal.message, refusal.status, refusal.body)
+  }
   if (!po.xero_po_id) throw new Error('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
 
   const { accessToken, tenantId } = await getToken(client)
