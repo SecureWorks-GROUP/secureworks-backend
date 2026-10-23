@@ -17,10 +17,10 @@
 --
 -- The seed links only supplier rows that exist (INSERT ... SELECT ... JOIN
 -- suppliers), so a row missing on a copy of the database is skipped, never an
--- error. Nine approved suppliers have no supplier row yet (Metric Fencing,
--- Mackson, Solarspan, Maxicoat, Palram, AB Steel Fabrication, Fielders, QSM
--- Fabrication, Unique Laser): their entries exist but link to nothing until
--- Shaun names the right contact.
+-- error. Seven approved suppliers have no supplier row yet (Metric Fencing,
+-- Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication,
+-- Unique Laser): their entries exist but link to nothing until Shaun names
+-- the right contact. Mackson and Palram were ruled on 23 Oct 2026 (below).
 --
 -- Row security on with no policy, revoked from the browser roles: only
 -- ops-api reaches these tables. Nothing here is applied by this file's author.
@@ -155,7 +155,13 @@ FROM (VALUES
   ('Bunnings', '7133480e-5a29-4e9a-b591-c8a49b811278'),
   ('Bunnings', 'bbc5da0b-8c82-4d26-b4fc-acabf8472e7d'),
   ('Bunnings', '677bcfaf-3684-47e8-a100-5edb616ed0ec'),
-  ('Bunnings', 'fbf9556c-d2b6-407b-85a3-b5dd003753c1')
+  ('Bunnings', 'fbf9556c-d2b6-407b-85a3-b5dd003753c1'),
+  -- Ruled 23 Oct 2026: MACKSON MANUFACTURING PTY LTD, the live Xero contact
+  -- with recent bills. d08cc885-7b45-4411-9d6d-13a5d13ae143 is a duplicate
+  -- contact and is deliberately NOT linked.
+  ('Mackson', '20d06d01-dab9-4493-a7d8-c2dcda4f3274'),
+  -- Ruled 23 Oct 2026: Palram Australia Pty Ltd.
+  ('Palram', '8f1d2d75-6905-4e02-b266-88a48c628e83')
 ) AS v(approved_name, supplier_id)
 JOIN public.dispatch_approved_supplier_emails a
   ON a.name = v.approved_name AND a.org_id = '00000000-0000-0000-0000-000000000001'::uuid

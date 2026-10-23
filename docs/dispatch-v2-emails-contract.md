@@ -207,7 +207,7 @@ The approved list comes first, then every other active Xero supplier contact.
 ```
 
 - An approved entry that has more than one Xero contact appears once per contact.
-- An approved entry with no linked Xero contact appears with `supplier_id: null` and `can_add: false`. Mackson and Palram are like this today: see Open questions.
+- An approved entry with no linked Xero contact appears with `supplier_id: null` and `can_add: false`. Seven entries are like this until Shaun names a contact: Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication and Unique Laser.
 - A supplier linked only to a retired (inactive) entry appears in `others`.
 
 ### dispatch_v2_photo_url (GET)
@@ -541,7 +541,7 @@ When the send does not go cleanly:
 | `approved_id` | The approved entry. |
 | `org_id`, `created_at`, `created_by_email` | Org and audit. |
 
-The migration seeds 26 approved entries (approved_by Shaun, 23 Oct 2026) and 42 links: the 34 known Xero contacts plus 8 more Bunnings contacts. A link is made only where the `suppliers` row exists in the org, and every insert is `ON CONFLICT DO NOTHING`.
+The migration seeds 26 approved entries (approved_by Shaun, 23 Oct 2026) and 44 links: the 34 known Xero contacts, 8 more Bunnings contacts, and Mackson (`20d06d01-dab9-4493-a7d8-c2dcda4f3274`, MACKSON MANUFACTURING PTY LTD) and Palram (`8f1d2d75-6905-4e02-b266-88a48c628e83`), both ruled on 23 Oct 2026. The duplicate Mackson contact `d08cc885-7b45-4411-9d6d-13a5d13ae143` is deliberately not linked. A link is made only where the `suppliers` row exists in the org, and every insert is `ON CONFLICT DO NOTHING`.
 
 ### Migration 2: `supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql`
 
@@ -655,10 +655,8 @@ Two v1 interactions to know about:
 ## Not done or not decided
 
 - **Decking team CC.** Decking copies patios@ for now, and every decking email says it is open. Other job types (miscellaneous, insurance that is not a repair) get no team CC and say so. Shaun to rule.
-- **Mackson and Palram** are approved but not linked to a Xero contact, so they show `can_add: false`. To link them, add rows to `dispatch_approved_supplier_email_links`. The candidates are:
-  - Mackson: `d08cc885-7b45-4411-9d6d-13a5d13ae143` or `20d06d01-dab9-4493-a7d8-c2dcda4f3274` (which one is Shaun's call);
-  - Palram: `8f1d2d75-6905-4e02-b266-88a48c628e83`.
-- **Signature.** Order emails go with no Outlook signature, because the template has no sign-off. Say if the company card should go on.
+- **Seven approved suppliers have no Xero contact linked** (Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication, Unique Laser), so they show `can_add: false` until Shaun names the right contact. Mackson and Palram were ruled and are linked in the seed.
+- **Signature (decided).** Order emails go with no Outlook signature: Shaun's template has no sign-off (ruled 23 Oct 2026).
 - **One open email per box.** A second order to the same supplier on the same job waits until the first is sent or discarded.
 - **Ids not checked against live Outlook.** That the draft gives `internetMessageId` and `conversationId` before sending is from Graph's documentation; it has not been tried against live Outlook (no sends from this build). The first test send will show it. `graph_message_id` may change in Sent Items: match on the conversation id or the Message-ID.
 - **Records written per send.** send-outlook-email also writes its usual `email_events` log row for each send. No `job_events` or `po_communications` row is written for a v2 send. The job's Emails panel shows the order only when admin@ mail capture picks it up.

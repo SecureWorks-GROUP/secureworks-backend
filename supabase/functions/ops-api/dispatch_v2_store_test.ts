@@ -83,7 +83,7 @@ const SUP = {
 const APPROVED = {
   stratco: uuid("c1", 1),
   metroll: uuid("c1", 2),
-  palram: uuid("c1", 3),
+  unlinked: uuid("c1", 3),
   retired: uuid("c1", 4),
 };
 const L = (n: number) => uuid("e1", n);
@@ -305,8 +305,8 @@ function seed(): Record<string, Row[]> {
         used_for: "patio",
         to_emails: ["orders@metroll.test"],
       }),
-      approved(APPROVED.palram, "Palram", {
-        to_emails: ["sales@palram.test"],
+      approved(APPROVED.unlinked, "Unique Laser", {
+        to_emails: ["orders@unique-laser.test"],
       }),
       approved(APPROVED.retired, "Retired", {
         to_emails: ["old@retired.test"],
@@ -958,8 +958,8 @@ Deno.test("search: approved list first, then every other active supplier, each f
     all.approved.map((a: any) => [a.approved_name, a.supplier_id, a.can_add]),
     [
       ["Metroll", SUP.metroll, true],
-      ["Palram", null, false],
       ["Stratco", SUP.stratco, true],
+      ["Unique Laser", null, false],
     ],
   );
   assert(all.approved.every((a: any) => a.has_approved_email === true));
