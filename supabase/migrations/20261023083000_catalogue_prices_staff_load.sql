@@ -8,7 +8,17 @@
 -- Every row must carry its ledger approval (approval_id, approved_until), as the table already requires.
 -- No prices live in this repo: the rows come from the private ledger at load time.
 --
+-- Also adds two nullable columns, as the load file states them: `source` (where the price came from, e.g.
+-- the supplier invoice and its date) and `source_class` (invoice, supplier list, equivalent product, WA
+-- trade default). Office and job-system readers can tell an invoice price from an estimate; scoper screens
+-- do not show them. Existing rows keep null.
+--
 -- Undo: drop function if exists public.catalogue_prices_staff_load(jsonb);
+--       alter table public.catalogue_prices drop column if exists source_class;
+--       alter table public.catalogue_prices drop column if exists source;
+
+alter table public.catalogue_prices add column if not exists source text;
+alter table public.catalogue_prices add column if not exists source_class text;
 
 create or replace function public.catalogue_prices_staff_load(p_rows jsonb)
 returns jsonb
@@ -44,17 +54,17 @@ begin
       price_id text, product_id text, offer_id text, supplier_id text, supplier_name text, description text,
       sku text, amount_ex_gst numeric, gst_rate numeric, currency text, basis text, length_mm numeric,
       min_qty numeric, max_qty numeric, valid_from date, approved_until date, approval_id text, entry_hash text,
-      catalogue_revision text, ledger_count integer, ledger_hash text, load_id text
+      catalogue_revision text, ledger_count integer, ledger_hash text, load_id text, source text, source_class text
     )
   ), ins as (
     insert into public.catalogue_prices (
       org_id, price_id, product_id, offer_id, supplier_id, supplier_name, description, sku, amount_ex_gst,
       gst_rate, currency, basis, length_mm, min_qty, max_qty, valid_from, approved_until, approval_id,
-      entry_hash, catalogue_revision, ledger_count, ledger_hash, load_id
+      entry_hash, catalogue_revision, ledger_count, ledger_hash, load_id, source, source_class
     )
     select v_org, price_id, product_id, offer_id, supplier_id, supplier_name, description, sku, amount_ex_gst,
       gst_rate, currency, basis, length_mm, min_qty, max_qty, valid_from, approved_until, approval_id,
-      entry_hash, catalogue_revision, ledger_count, ledger_hash, load_id
+      entry_hash, catalogue_revision, ledger_count, ledger_hash, load_id, nullif(btrim(source), ''), nullif(btrim(source_class), '')
     from input
     on conflict (org_id, price_id) do nothing
     returning 1
