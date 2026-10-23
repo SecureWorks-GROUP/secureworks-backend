@@ -1865,6 +1865,94 @@ async function addDraftAttachments(
   }
 }
 
+// The ids Outlook gives a message, so a reply can be matched to it later.
+// internet_message_id is the Message-ID header every reply quotes;
+// conversation_id is Outlook's thread id (the same one mail capture stores as
+// `outlook:<conversation_id>`); graph_message_id is the copy in the sender's
+// mailbox.
+export type OutlookSentIds = {
+  graph_message_id: string
+  internet_message_id: string | null
+  conversation_id: string | null
+}
+
+// An opt-in send (body.capture_thread_ids === true) that keeps those ids.
+// Plain /sendMail answers 202 with no ids at all, so this path makes the
+// message as a draft in the sender's mailbox first (Outlook gives the ids at
+// that point), adds the files one at a time, then sends that draft. The
+// message, recipients and signature are exactly what /sendMail would send.
+//
+// Anything that fails before the final send means nothing went: the error
+// says sent:false and retry_safe:true (a draft left behind is removed when it
+// can be). A failure on the final send itself keeps Graph's own unknown or
+// refused answer and carries the ids, so the caller can still match a reply.
+export async function sendCapturingThreadIds(
+  mailbox: string,
+  message: Record<string, unknown>,
+  attachments: GraphFileAttachment[],
+): Promise<OutlookSentIds> {
+  const notSent = (stage: string, error: unknown, ids: Record<string, unknown> = {}) => {
+    const status = error instanceof GraphProviderError ? error.status : 0
+    return new GraphProviderError(
+      status,
+      `Not sent (${stage}): ${(error as Error)?.message || String(error)}`,
+      false,
+      { sent: false, retry_safe: true, stage, ...ids },
+    )
+  }
+  let draft: Record<string, unknown>
+  try {
+    const response = await graphRequest(
+      `/users/${safeSegment(mailbox, 'mailbox')}/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message),
+      },
+      { mutating: true },
+    )
+    draft = await response.json() as Record<string, unknown>
+  } catch (error) {
+    throw notSent('draft', error)
+  }
+  const draftId = typeof draft?.id === 'string' && draft.id.trim() ? draft.id.trim() : ''
+  if (!draftId) throw notSent('draft', new Error('Graph draft response had no id'))
+  const ids: OutlookSentIds = {
+    graph_message_id: draftId,
+    internet_message_id: typeof draft.internetMessageId === 'string' && draft.internetMessageId
+      ? draft.internetMessageId
+      : null,
+    conversation_id: typeof draft.conversationId === 'string' && draft.conversationId
+      ? draft.conversationId
+      : null,
+  }
+  try {
+    await addDraftAttachments(mailbox, draftId, attachments)
+  } catch (error) {
+    // Best effort: do not leave a half-made draft in the sender's Drafts.
+    await graphRequest(
+      `/users/${safeSegment(mailbox, 'mailbox')}/messages/${safeSegment(draftId, 'draft_id')}`,
+      { method: 'DELETE' },
+      { mutating: true },
+    ).catch(() => {})
+    throw notSent('attachments', error, ids)
+  }
+  try {
+    await sendDraftById(mailbox, draftId)
+  } catch (error) {
+    if (error instanceof GraphProviderError) {
+      throw new GraphProviderError(error.status, error.message, error.outcomeUnknown, {
+        ...error.context,
+        stage: 'send',
+        sent: error.outcomeUnknown ? null : false,
+        ...ids,
+      })
+    }
+    throw error
+  }
+  return ids
+}
+
 function messageContent(
   body: Record<string, unknown>,
   mailbox: string,
@@ -2481,12 +2569,19 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
         messageBodyHtml(message),
         await prepareAttachments(body.attachments),
       )
-      if (graphAttachments.length) message.attachments = graphAttachments
-      await graphRequest(`/users/${safeSegment(from, 'from')}/sendMail`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, saveToSentItems: true }),
-      }, { mutating: true })
+      // Opt in with capture_thread_ids:true to get the sent message's ids back
+      // (Dispatch supplier order emails). Every other caller is unchanged.
+      let sentIds: OutlookSentIds | null = null
+      if (body.capture_thread_ids === true) {
+        sentIds = await sendCapturingThreadIds(from, message, graphAttachments)
+      } else {
+        if (graphAttachments.length) message.attachments = graphAttachments
+        await graphRequest(`/users/${safeSegment(from, 'from')}/sendMail`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, saveToSentItems: true }),
+        }, { mutating: true })
+      }
 
       const toStr = to.join(', ')
       if (body.job_id) {
@@ -2539,6 +2634,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
         bcc,
         subject,
         attachments: graphAttachments.length,
+        ...(sentIds ? sentIds : {}),
       })
     } catch (err) {
       if (err instanceof OutlookFenceError) {
