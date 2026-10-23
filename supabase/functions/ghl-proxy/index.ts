@@ -119,6 +119,7 @@ import { createCalendarAppointmentAction } from './calendar_appointment.ts'
 import { releaseCalendarAppointmentAction, releaseLedger } from './calendar_appointment_release.ts'
 import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
 import { appointmentLedger, bookingApprovalReader, bookingExecutionReader } from './calendar_appointment_ledger.ts'
+import { patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
 import {
   allocationOpportunityCustomFields,
   lookupAllocationOpportunityAction,
@@ -1400,12 +1401,12 @@ serve(async (req: Request) => {
       if (!opportunityId || !jobId) return json({ error: 'opportunityId and jobId required' }, 400)
 
       const tool = toolType === 'fencing' ? 'fencing' : 'patio'
-      // GitHub Pages hosts the tools
-      const toolUrls: Record<string, string> = {
-        patio: 'https://secureworks-group.github.io/patio/',
-        fencing: 'https://secureworks-group.github.io/fence-designer/',
-      }
-      const scopeUrl = `${toolUrls[tool] || toolUrls.patio}?jobId=${jobId}`
+      // GitHub Pages hosts the tools. The release owner moves a trade to the Scope
+      // Engine page by setting its env address; unset keeps the old tool.
+      const scopeUrl = `${scopeToolUrl(tool, {
+        patio: Deno.env.get('SCOPE_ENGINE_PATIO_URL'),
+        fencing: Deno.env.get('SCOPE_ENGINE_FENCE_URL'),
+      })}?jobId=${jobId}`
       const sbLink = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const jobAccess = await requireSameOrgJob(sbLink, jobId)
       if (!jobAccess.ok) return jobAccess.response
@@ -1497,7 +1498,10 @@ serve(async (req: Request) => {
             // so fencing jobs produced blank notes. Now branches on scope.tool (patio|fencing).
             const scopeToolType = scope.tool || tool
 
-            if (scopeToolType === 'fencing') {
+            if (scopeToolType === 'patio-scoper') {
+              // Scope Engine patio record: family, sealed revision, order lines.
+              lines.push(...patioScoperNoteLines(scope, { ...jobData, job_number: jobNumber }))
+            } else if (scopeToolType === 'fencing') {
               // Fencing shape: scope.job.* with runs[] + colour + profile
               const job = scope.job || {}
               const clientName = [job.clientFirstName, job.clientLastName].filter(Boolean).join(' ')
