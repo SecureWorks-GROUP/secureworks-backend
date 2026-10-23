@@ -539,6 +539,14 @@ Slice 7's install step and its To do rule at Trade scheduled live only in
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
 by `set_dispatch_install_confirmed`, never the calendar's booking lock.
 Contract: `docs/dispatch-slice-7-contract.md`.
+Dispatch v2's board (`pipeline&dispatch=1&board=v2`, `dispatch_arrival`)
+lives only in `dispatch_board.ts`: the list is the REAL job status (five
+statuses; repairs by Repairs stage), Archive is Dispatch-only and never writes
+a status, and `job_dispatch_state` decides nothing there. Moves are the
+existing `update_job_status` / `update_repair_stage`. A Dispatch purchase order
+(`source = 'dispatch'`) is refused by `push_po_to_xero`, `email_po` and
+send-po-email (`_shared/dispatch_po_guard.ts`). Contract:
+`docs/dispatch-v2-board-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
