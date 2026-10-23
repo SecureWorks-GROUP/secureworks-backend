@@ -339,6 +339,16 @@ import {
   dispatchSightedOrderIds,
 } from './dispatch_deliveries.ts'
 import {
+  applyDispatchBoard,
+  DISPATCH_BOARD_ACTIVE_FILTER,
+  DispatchArrivalError,
+  dispatchArrivalRead,
+  dispatchBoardRequest,
+  emptyDispatchBoardSummary,
+  loadDispatchBoardArchiveCandidates,
+  loadDispatchBoardExtras,
+} from './dispatch_board.ts'
+import {
   purchaseOrderCreatedBy,
   supplierReplyMayMoveOrder,
 } from './purchase_order_attribution.ts'
@@ -7162,6 +7172,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // ops key and the routine key keep the figures they already get.
           redactAgreedLabour: authMode === 'jwt' && !_opsApiStaffOperatorRole(authUser?.role),
         }))
+      }
+      // Dispatch v2: one job's Arrival line and install (dispatch_board.ts,
+      // docs/dispatch-v2-board-contract.md). A pure read, staff only as
+      // dispatch_materials.
+      case 'dispatch_arrival': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        try {
+          return json(await dispatchArrivalRead(
+            client,
+            url.searchParams.get('job_id') || url.searchParams.get('jobId'),
+            DEFAULT_ORG_ID,
+            _perthTodayYmd(),
+          ))
+        } catch (e) {
+          if (e instanceof DispatchArrivalError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
       }
       // Staff-only by the front door's default (not on the trade or routine lists).
       case 'job_notes':
@@ -17135,9 +17164,26 @@ async function pipeline(
   // An empty Dispatch answer still says the stage and materials reads had
   // nothing to fail on, so a search with no match never reads as a failed
   // load (docs/dispatch-slice-3-contract.md, docs/dispatch-slice-4-contract.md).
+  // Dispatch v2 board (dispatch_board.ts, docs/dispatch-v2-board-contract.md):
+  // opt-in with `board=v2` on top of `dispatch=1`. Absent, the Dispatch list
+  // answers exactly as before.
+  const dispatchBoard = dispatchList ? dispatchBoardRequest(params) : null
+  const dispatchBoardToday = _perthTodayYmd()
   const dispatchEmpty = dispatchList
-    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok', dispatch_deliveries: 'ok' }
+    ? {
+      dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok', dispatch_deliveries: 'ok',
+      ...(dispatchBoard ? { board: emptyDispatchBoardSummary(dispatchBoard, dispatchBoardToday, !!search) } : {}),
+    }
     : {}
+  // Archive (no search): only jobs with an install booking in the last weeks
+  // can be in it, so the job read is narrowed to those first. Null = read
+  // every accepted job (too many to list, or the narrowing read failed).
+  const dispatchArchiveIds = dispatchBoard?.view === 'archive' && !search
+    ? await loadDispatchBoardArchiveCandidates(client, dispatchBoardToday)
+    : null
+  if (dispatchArchiveIds && dispatchArchiveIds.length === 0) {
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+  }
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -17169,7 +17215,12 @@ async function pipeline(
     else if (typeFilter) scoped = scoped.eq('type', typeFilter)
     // Make-safe jobs are off the Dispatch list and come back only for a search;
     // a repair-family card typed makesafe is a repair and stays on it.
-    else if (dispatchList && !search) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
+    // The v2 board never lists make-safes, even for a search.
+    else if (dispatchList && (!search || dispatchBoard)) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
+    // v2 Active: the five board statuses, or a repair (its Repairs stage is
+    // checked in code). v2 Archive: the narrowed ids, when there are any.
+    if (dispatchBoard?.view === 'active') scoped = scoped.or(DISPATCH_BOARD_ACTIVE_FILTER)
+    if (dispatchArchiveIds) scoped = scoped.in('id', dispatchArchiveIds)
     return scoped
   }
 
@@ -17302,6 +17353,11 @@ async function pipeline(
   // job, a draft included, so neither depends on the job's status
   // (dispatch_stage.ts, dispatch_materials.ts).
   const dispatchJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
+  // v2 board only: stage change events and the Arrival line's reads. Starts
+  // beside the enrichment wave and never rejects.
+  const dispatchBoardExtrasRead = dispatchBoard
+    ? loadDispatchBoardExtras(client, dispatchJobIds)
+    : null
 
   if (jobIds.length > 0 || dispatchJobIds.length > 0) {
     ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes, materialsRes] = await Promise.all([
@@ -17553,7 +17609,7 @@ async function pipeline(
     }
   }
 
-  const enriched = jobs.map((j: any) => {
+  const enrichedRows = jobs.map((j: any) => {
     const { value, neighbours } = pipelinePricingProjectionValues(j)
     // Neighbour count for fencing shared fence badge. Rows whose blob is a
     // double-encoded string are recovered above via the malformed-blob probe, which
@@ -17648,6 +17704,20 @@ async function pipeline(
       )
       : pipelineRow
   }).filter(isListedPipelineRow)
+  // v2 board: keep the jobs on the view asked for, each with its `board`
+  // object. The raw rows still carry the `ds_` aliases the rows above drop.
+  const dispatchBoardResult = dispatchBoard && dispatchBoardExtrasRead
+    ? applyDispatchBoard(enrichedRows, new Map(jobs.map((j: any) => [String(j.id), j])), {
+      request: dispatchBoard,
+      today: dispatchBoardToday,
+      now: new Date(),
+      searching: !!search,
+      bookings: assignRes.error ? null : (assignRes.data || []),
+      invoicesReadOk: !invoiceRes.error,
+      extras: await dispatchBoardExtrasRead,
+    })
+    : null
+  const enriched = dispatchBoardResult ? dispatchBoardResult.rows : enrichedRows
 
   // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
   // status as its own column key. The widened .in('status', [...]) filter
@@ -17702,6 +17772,7 @@ async function pipeline(
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_deliveries: dispatchDeliveriesOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchBoardResult ? { board: dispatchBoardResult.summary } : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),

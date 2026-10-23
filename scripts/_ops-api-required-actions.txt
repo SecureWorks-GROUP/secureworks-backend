@@ -149,6 +149,11 @@ dispatch_order_send                  # probe=source-only
 dispatch_order_reply                 # probe=source-only
 dispatch_email_link_po               # probe=source-only
 
+# ── Ops screen Dispatch tab v2: one job's Arrival line and install
+#    (docs/dispatch-v2-board-contract.md). A pure read; a bare call is refused
+#    400 "job_id required" before any query. ──
+dispatch_arrival
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event
