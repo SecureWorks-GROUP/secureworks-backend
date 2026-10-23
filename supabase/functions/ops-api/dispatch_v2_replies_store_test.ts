@@ -17,7 +17,7 @@ import {
   SUGGESTION_SELECT,
 } from "./dispatch_v2_replies_store.ts";
 import {
-  DELIVERY_SOURCE_SUPPLIER_EMAIL,
+  DELIVERY_SOURCE_SUPPLIER_REPLY,
   isNotWired,
   postgrestDispatchRepliesSources,
 } from "./dispatch_v2_replies_sources.ts";
@@ -370,7 +370,7 @@ Deno.test("sources: the board's columns not there yet means no confirmed date, n
   assertEquals(r.rows[0].confirmed_delivery_date, null);
 });
 
-Deno.test("sources: Accept writes the supplier box's date, confirmed time and source only", async () => {
+Deno.test("sources: Accept writes the supplier box's date, source, who set it and who confirmed it", async () => {
   const { client, calls } = fakeClient(() => ({ data: [{ job_id: "j1" }] }));
   const order = {
     order_id: "o1",
@@ -391,14 +391,20 @@ Deno.test("sources: Accept writes the supplier box's date, confirmed time and so
       date: "2026-10-27",
       now: "2026-10-23T08:00:00Z",
       suggestionId: "s",
+      operator: { userId: "u1", email: "shaun@secureworkswa.com.au" },
     });
   assertEquals(r, { ok: true, confirmed_delivery_date: "2026-10-27" });
   assertEquals(calls[0].table, "job_material_suppliers");
   assertEquals(step(calls[0], "update"), [[{
     delivery_date: "2026-10-27",
+    delivery_date_source: "supplier_reply",
+    delivery_date_set_at: "2026-10-23T08:00:00Z",
+    delivery_date_set_by_email: "shaun@secureworkswa.com.au",
     delivery_date_confirmed_at: "2026-10-23T08:00:00Z",
-    delivery_date_source: DELIVERY_SOURCE_SUPPLIER_EMAIL,
+    delivery_date_confirmed_by: "u1",
+    delivery_date_confirmed_by_email: "shaun@secureworkswa.com.au",
   }]]);
+  assertEquals(DELIVERY_SOURCE_SUPPLIER_REPLY, "supplier_reply");
   assertEquals(step(calls[0], "eq"), [["job_id", "j1"], ["supplier_id", "s1"]]);
 
   const missing = fakeClient(() => ({ error: { code: "PGRST204" } }));
@@ -409,6 +415,7 @@ Deno.test("sources: Accept writes the supplier box's date, confirmed time and so
       date: "2026-10-27",
       now: "x",
       suggestionId: "s",
+      operator: { userId: null, email: "shaun@secureworkswa.com.au" },
     });
   assertEquals(r2.ok, false);
   assertEquals((r2 as any).code, "orders_not_wired");

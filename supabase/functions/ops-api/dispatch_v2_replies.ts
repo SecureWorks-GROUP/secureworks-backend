@@ -975,6 +975,7 @@ export async function acceptSuggestion(
     date: s.delivery_date,
     now,
     suggestionId: s.id,
+    operator,
   });
   if (!write.ok) refuse(write.status, write.code, write.message);
   const updated = await ctx.store.updateSuggestion(ctx.orgId, s.id, "open", {

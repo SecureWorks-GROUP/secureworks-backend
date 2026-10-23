@@ -18,9 +18,12 @@
 //                                             cc_emails, active
 //     dispatch_approved_supplier_email_links  supplier_id, approved_id
 //   The confirmed delivery date (board v2 branch, migration
-//   20261023160000_dispatch_v2_board_arrival_dates.sql), on the supplier box:
-//     job_material_suppliers  delivery_date, delivery_date_confirmed_at,
-//                             delivery_date_source
+//   20261023160000_dispatch_v2_board_arrival_dates.sql), on the supplier box
+//   (job_material_suppliers, matched by job_id and supplier_id):
+//     delivery_date, delivery_date_source ('by_hand' | 'supplier_reply'),
+//     delivery_date_set_at, delivery_date_set_by_email,
+//     delivery_date_confirmed_at (set = confirmed), delivery_date_confirmed_by,
+//     delivery_date_confirmed_by_email
 //
 // A table or column that is not there yet reads as "not wired": the matcher
 // still runs (job numbers still match), it just knows no orders, and Accept
@@ -45,6 +48,8 @@ export type SetConfirmedDeliveryInput = {
   date: string;
   now: string;
   suggestionId: string;
+  // The person who pressed Accept.
+  operator: { userId: string | null; email: string };
 };
 
 export type SetConfirmedDeliveryResult =
@@ -70,8 +75,9 @@ export interface DispatchRepliesSources {
   ): Promise<SetConfirmedDeliveryResult>;
 }
 
-// The supplier box column board v2 writes the date's origin into.
-export const DELIVERY_SOURCE_SUPPLIER_EMAIL = "supplier_email";
+// The supplier box's delivery_date_source for a date taken from a supplier's
+// email (board v2 allows 'by_hand' or 'supplier_reply').
+export const DELIVERY_SOURCE_SUPPLIER_REPLY = "supplier_reply";
 
 const ORDER_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, status, sent_at, sent_internet_message_id, sent_conversation_id";
@@ -258,8 +264,12 @@ export function postgrestDispatchRepliesSources(
       const { data, error } = await client.from("job_material_suppliers")
         .update({
           delivery_date: input.date,
+          delivery_date_source: DELIVERY_SOURCE_SUPPLIER_REPLY,
+          delivery_date_set_at: input.now,
+          delivery_date_set_by_email: input.operator.email,
           delivery_date_confirmed_at: input.now,
-          delivery_date_source: DELIVERY_SOURCE_SUPPLIER_EMAIL,
+          delivery_date_confirmed_by: input.operator.userId,
+          delivery_date_confirmed_by_email: input.operator.email,
         })
         .eq("job_id", input.order.job_id)
         .eq("supplier_id", input.order.supplier_id)

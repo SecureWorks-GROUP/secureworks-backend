@@ -962,6 +962,10 @@ Deno.test("accept: sets the order's confirmed date and never the job status", as
   });
   assertEquals(t.sources.writes.length, 1);
   assertEquals(t.sources.writes[0].date, "2026-10-27");
+  assertEquals(t.sources.writes[0].operator, {
+    userId: SHAUN.id,
+    email: SHAUN.email,
+  });
   assertEquals(JSON.stringify(t.store.jobs), jobsBefore);
   assertEquals(
     t.store.jobEvents.at(-1).event_type,
