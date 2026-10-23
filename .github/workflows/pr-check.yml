@@ -403,6 +403,12 @@ jobs:
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
             supabase/functions/receive-po-email/po_email_tag_test.ts
 
+      # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
+      # suggestions (rules, engine on an in-memory store, migration text).
+      - name: Test the Dispatch v2 supplier replies
+        run: |
+          deno test --no-check --allow-env --allow-read             supabase/functions/ops-api/dispatch_v2_replies_rules_test.ts             supabase/functions/ops-api/dispatch_v2_replies_test.ts             supabase/functions/ops-api/dispatch_v2_replies_store_test.ts
+
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh

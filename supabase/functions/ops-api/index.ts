@@ -333,6 +333,9 @@ import {
 } from './dispatch_orders_store.ts'
 import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
+import { runDispatchV2RepliesAction } from './dispatch_v2_replies.ts'
+import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
+import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -5162,6 +5165,7 @@ export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new 
   'makesafe_sent_mirror', // trigger_makesafe_sent_mirror (sw_service_key())
   'makesafe_story_recompute', // trigger_makesafe_story_recompute (sw_service_key())
   'makesafe_status_shadow_refresh', // trigger_makesafe_status_shadow_refresh (sw_service_key())
+  'dispatch_v2_replies_scan', // trigger_dispatch_v2_replies_scan, cron dispatch-v2-replies-scan (sw_service_key())
 ])
 
 export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
@@ -7273,6 +7277,71 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             orgId: DEFAULT_ORG_ID,
             actor: deliveriesActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2 slice 8, supplier replies and suggested moves (contract:
+      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and six
+      // presses (POST), gated as the other Dispatch actions. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. They write only the dispatch_v2_* reply
+      // tables, a job_events row, and on Accept the order's confirmed delivery
+      // date: no send, no Xero, never a job stage or status.
+      case 'dispatch_v2_replies':
+      case 'dispatch_v2_replies_unmatched':
+      case 'dispatch_v2_replies_assign':
+      case 'dispatch_v2_replies_confirm_guess':
+      case 'dispatch_v2_replies_reject_guess':
+      case 'dispatch_v2_replies_hide':
+      case 'dispatch_v2_suggestion_accept':
+      case 'dispatch_v2_suggestion_dismiss': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        const repliesRead = action === 'dispatch_v2_replies' || action === 'dispatch_v2_replies_unmatched'
+        if (repliesRead && req.method !== 'GET') throw new ApiError(`${action} requires GET`, 405)
+        if (!repliesRead && req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const repliesActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2RepliesAction(action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: repliesActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            store: postgrestRepliesStore(client),
+            sources: postgrestDispatchRepliesSources(client),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // The supplier reply scan (pg_cron dispatch-v2-replies-scan, every 5
+      // minutes, migration 20261023230100). Server key only. Does nothing while
+      // feature flag dispatch_v2_replies_v1 is off. Reads captured mail and
+      // writes only the dispatch_v2_* reply tables: no send, no job write.
+      case 'dispatch_v2_replies_scan': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: dispatch_v2_replies_scan requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'dispatch_v2_replies_scan is POST only', code: 'method_not_allowed' }, 405)
+        }
+        try {
+          return json(await runDispatchV2RepliesAction(action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: { userId: null, email: null, orgId: null },
+            via: 'terminal',
+            store: postgrestRepliesStore(client),
+            sources: postgrestDispatchRepliesSources(client),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
