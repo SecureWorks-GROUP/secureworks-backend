@@ -177,6 +177,11 @@ dispatch_v2_send_email               # probe=source-only
 #    400 "job_id required" before any query. ──
 dispatch_arrival
 
+# ── Ops screen Dispatch tab v2: a supplier order's delivery date set, changed or
+#    cleared by hand (docs/dispatch-v2-board-contract.md, section 3a). A staff
+#    write: source-only, never fired at production by a smoke run. ──
+dispatch_v2_set_delivery_date        # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event

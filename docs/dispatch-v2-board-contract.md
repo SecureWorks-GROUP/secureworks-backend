@@ -117,6 +117,10 @@ ignore them** and read `board` only.
         "delivery_date": "2026-10-24",
         "date_source": "box",
         "date_confirmed": true,
+        "box_id": "9a2e...",
+        "box_date_source": "by_hand",
+        "box_date_set_at": "2026-10-22T03:00:00Z",
+        "box_date_set_by_email": "shaun@...",
         "mark": "solid",
         "flag": null
       }
@@ -157,6 +161,9 @@ Arrival order fields:
 | `delivery_date` | the box's own date, else the date our sent email asked for, else the v1 PO's confirmed or expected date |
 | `date_source` | `box`, `requested` (from our email, never confirmed), `order`, or null |
 | `date_confirmed` | box: `delivery_date_confirmed_at` set; PO: `confirmed_delivery_date` set |
+| `box_id` | the supplier box's id (what `dispatch_v2_set_delivery_date` takes); null for a PO |
+| `box_date_source` | how the box's OWN date was set: `by_hand` or `supplier_reply`; null when the box has no date of its own (or for a PO) |
+| `box_date_set_at`, `box_date_set_by_email` | when and by whom the box's own date was last set; null as above. Send `box_date_set_at` back as `expected_set_at` |
 | `mark` | `solid` (confirmed), `ring` (date, not confirmed), `none` (no date) |
 | `flag` | `no_date` (sent, no date yet: red), `after_install` (date after the install day: red), `not_sent` (still being put together, not red), or null |
 | `counts.late` | orders flagged `no_date` or `after_install` |
@@ -289,6 +296,96 @@ It writes a `repair_stage_changed` job_event and never `jobs.status`.
 `set_dispatch_stage` and `set_dispatch_install_confirmed` ("Mark confirmed")
 still exist for old callers but the v2 screen must not call them.
 
+## 3a. Setting a delivery date by hand (`dispatch_v2_set_delivery_date`, new)
+
+Shaun's ruling: "we can tweak delivery dates manually". A supplier often
+confirms a day by phone, so staff can set, change or clear a supplier order's
+delivery date by hand. Code: `supabase/functions/ops-api/dispatch_v2_delivery_date.ts`.
+Tests: `dispatch_v2_delivery_date_test.ts`.
+
+`POST ops-api?action=dispatch_v2_set_delivery_date`
+
+```json
+{
+  "box_id": "<job_material_suppliers id, from board.arrival.orders[].box_id>",
+  "delivery_date": "2026-10-29",
+  "confirmed": true,
+  "expected_set_at": "2026-10-22T03:00:00Z",
+  "operator_email": "shaun@..."
+}
+```
+
+- `box_id`, or instead `job_id` + `supplier_id` (one box per supplier per job).
+- `delivery_date`: required. A real date `YYYY-MM-DD`, or `null` to clear.
+  Past dates and dates after the install are allowed (the line shows the red).
+- `confirmed`: required with a date (`true` = solid, the supplier agreed it;
+  `false` = ring). Ignored on a clear; `true` with `null` is refused.
+- `expected_set_at` (optional guard): the `box_date_set_at` the screen showed,
+  or `null` when the box had no date of its own. If the box changed since,
+  nothing is written and the answer is 409 `date_changed` with the box as it
+  is now. Without it, the write is still compare-and-set against the stamp
+  just read, so two presses at once never quietly overwrite each other.
+- `operator_email`: needed with the ops key and must name a person in
+  `users`; a signed-in session is named by the session.
+
+Staff sessions and the privileged ops key only (403 `operator_access_required`
+otherwise). GET is 405. Not on the trade, routine or agent-read lists. In
+`scripts/_ops-api-required-actions.txt` as `# probe=source-only`.
+
+What it writes: the seven delivery date columns of that one
+`job_material_suppliers` row, and one `job_events` row. Never `jobs` (no stage
+or status change, `job_status_changed` is always `false`), suppliers,
+purchase orders, the order emails, the reply tables, Xero, GHL, SMS or email.
+
+- Set: `delivery_date`, `delivery_date_source = 'by_hand'`,
+  `delivery_date_set_at` = now, `delivery_date_set_by_email` = the person;
+  confirmed also stamps `delivery_date_confirmed_at`/`_by`/`_by_email`,
+  unconfirmed clears those three.
+- Clear: all seven columns go back to null. The Arrival line then falls back
+  to the date our order email asked for (`date_source: "requested"`, a ring),
+  else a v1 PO date, else "no date yet".
+- **By hand overrides a supplier-reply date.** Whatever date is on the box
+  (including one accepted from a supplier reply) is replaced, and the box then
+  says `by_hand` with the person's email. The audit row records
+  `replaced_supplier_reply: true`. The latest press wins either way: pressing
+  Accept on a newer supplier reply later replaces a hand-set date. Open reply
+  suggestions are left as they are (not dismissed). The reply scan already
+  skips suggesting a date equal to the box's confirmed date, by hand or not.
+- Saving exactly what is there (same date, same tick, already `by_hand`), or
+  clearing a box with no date, writes nothing: `"unchanged": true`. The same
+  date saved over a supplier-reply date is a change (it becomes `by_hand`).
+
+Audit row (`job_events`): `event_type` `dispatch_v2_delivery_date_set` or
+`dispatch_v2_delivery_date_cleared`, `user_id` the signed-in person (null for
+the ops key), `detail_json`
+`{ box_id, supplier_id, supplier, from: { delivery_date, confirmed, source }, to: { ... }, replaced_supplier_reply, via: "screen" | "terminal", operator_email }`.
+A failed audit insert does not undo the date; the answer then carries
+`"audit_logged": false`.
+
+Answer:
+
+```json
+{
+  "success": true,
+  "job_status_changed": false,
+  "box": {
+    "box_id": "...", "job_id": "...", "supplier_id": "...", "supplier_name": "Stratco WA",
+    "delivery_date": "2026-10-29", "delivery_date_source": "by_hand", "confirmed": true,
+    "set_at": "...", "set_by_email": "shaun@...", "confirmed_at": "...", "confirmed_by_email": "shaun@..."
+  },
+  "arrival": { "...": "the dispatch_arrival answer for the job, after the write" }
+}
+```
+
+`arrival` is null if that read failed (the date is still saved; read
+`dispatch_arrival` again). The list card's thin line and count come from the
+next `pipeline&dispatch=1&board=v2` read.
+
+Errors: 400 `invalid_request` (bad body, before any read), 400
+`operator_required`, 404 `box_not_found` (no such box, or another
+organisation's), 409 `not_dispatch_work` (make-safe or another type), 409
+`date_changed`, 500 `dispatch_write_failed`.
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,
@@ -334,8 +431,9 @@ is one order):
 | `delivery_date_confirmed_by_email text` | who confirmed it |
 
 Checks: the source is one of the two values; a date always has `set_at` and a
-source; a confirmation needs a date and a person's email. No writer exists
-yet (see open points).
+source; a confirmation needs a date and a person's email. Writers: Accept on
+a supplier reply (`dispatch_v2_suggestion_accept`, source `supplier_reply`)
+and the by-hand action in section 3a (source `by_hand`).
 
 The Arrival line also reads `dispatch_supplier_order_emails` (status `sent`),
 which comes with the supplier order emails slice
@@ -349,10 +447,10 @@ degrades instead of failing, as the slice 6 precedent allows.
 
 ## 6. Not done, and open points
 
-- **No writer for the box delivery date yet.** Slice 8's Accept should write
-  `delivery_date`, `delivery_date_source = 'supplier_reply'`, `delivery_date_set_*`
-  and `delivery_date_confirmed_*` on the `job_material_suppliers` row. A by-hand
-  set or confirm action is not built.
+- **Box delivery date writers.** Slice 8's Accept writes the box date with
+  `delivery_date_source = 'supplier_reply'`; `dispatch_v2_set_delivery_date`
+  (section 3a) writes it by hand. A sighting ("on site") for an emailed order
+  is still not built (v1 POs keep theirs).
 - **What slice 8 calls an order.** Slice 8's `order_id` is "one per supplier
   box"; this board treats the `job_material_suppliers` row as the order. The
   emails slice keeps one `dispatch_supplier_order_emails` row per send. These

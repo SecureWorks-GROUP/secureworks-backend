@@ -343,6 +343,8 @@ import {
   runDispatchV2Action,
 } from './dispatch_v2_store.ts'
 import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
+// Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
+import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -7406,6 +7408,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             store: postgrestRepliesStore(client),
             sources: postgrestDispatchRepliesSources(client),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2: a supplier order's delivery date set, changed or cleared
+      // by hand, for example when a supplier confirms by phone
+      // (docs/dispatch-v2-board-contract.md, section 3a; dispatch_v2_delivery_date.ts).
+      // One press (POST), gated as the other Dispatch actions. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Writes the supplier box's delivery date
+      // columns (source 'by_hand') and one job_events row: no send, no Xero,
+      // never a job stage or status.
+      case 'dispatch_v2_set_delivery_date': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const deliveryDateActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2DeliveryDateAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: deliveryDateActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            today: _perthTodayYmd(),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)

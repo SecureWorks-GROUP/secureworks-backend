@@ -543,10 +543,12 @@ export type DispatchBoardSupplierBox = {
   delivery_date?: string | null;
   delivery_date_confirmed_at?: string | null;
   delivery_date_source?: string | null;
+  delivery_date_set_at?: string | null;
+  delivery_date_set_by_email?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email";
 
 // The v2 supplier order emails that really went (status sent). A test copy to
 // admin@ is never status sent, so it never counts as an order sent. The table
@@ -627,6 +629,14 @@ export type DispatchArrivalOrder = {
   // supplier reply), the date our sent email asked for, or a purchase order.
   date_source: "box" | "requested" | "order" | null;
   date_confirmed: boolean;
+  // A supplier box only (null for a purchase order): the box's id (what
+  // dispatch_v2_set_delivery_date takes), and how the box's OWN date was set:
+  // 'by_hand' (typed by a person) or 'supplier_reply' (Accept on a reply),
+  // when and by whom. Null when the box has no date of its own.
+  box_id: string | null;
+  box_date_source: "by_hand" | "supplier_reply" | null;
+  box_date_set_at: string | null;
+  box_date_set_by_email: string | null;
   // solid = confirmed date, ring = a date not confirmed, none = no date.
   mark: DispatchArrivalMark;
   // The red cases: no date yet on a sent order, or a date after the install.
@@ -651,6 +661,12 @@ export type DispatchArrival = {
 
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function boxDateSource(
+  value: unknown,
+): DispatchArrivalOrder["box_date_source"] {
+  return value === "by_hand" || value === "supplier_reply" ? value : null;
 }
 
 function arrivalEntry(
@@ -742,6 +758,12 @@ export function dispatchArrival(
       delivery_date: deliveryDate,
       date_source: dateSource,
       date_confirmed: dateConfirmed,
+      box_id: text(box.id),
+      box_date_source: boxDate ? boxDateSource(box.delivery_date_source) : null,
+      box_date_set_at: boxDate ? text(box.delivery_date_set_at) : null,
+      box_date_set_by_email: boxDate
+        ? text(box.delivery_date_set_by_email)
+        : null,
     }, installDay));
   }
 
@@ -760,6 +782,10 @@ export function dispatchArrival(
       delivery_date: date ? date.slice(0, 10) : null,
       date_source: date ? "order" : null,
       date_confirmed: !!confirmed,
+      box_id: null,
+      box_date_source: null,
+      box_date_set_at: null,
+      box_date_set_by_email: null,
     }, installDay));
   }
 
