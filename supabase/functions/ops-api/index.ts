@@ -333,6 +333,13 @@ import {
 } from './dispatch_orders_store.ts'
 import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
+// Dispatch v2 slices 5 and 6: draft list, supplier boxes and supplier order
+// emails sent from admin@ through send-outlook-email.
+import {
+  DISPATCH_V2_WRITE_ACTIONS,
+  runDispatchV2Action,
+} from './dispatch_v2_store.ts'
+import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -7273,6 +7280,57 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             orgId: DEFAULT_ORG_ID,
             actor: deliveriesActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2 slices 5 and 6, the draft list, supplier boxes and supplier
+      // order emails (docs/dispatch-v2-emails-contract.md): three reads and
+      // fourteen writes, gated exactly as slices 4 to 6. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Only dispatch_v2_send_email sends, once per
+      // press, from admin@ through send-outlook-email (test: true sends the
+      // marked copy to admin@ only). Nothing here writes jobs, suppliers.email,
+      // purchase orders or Xero, or posts any event row.
+      case 'dispatch_v2_materials':
+      case 'dispatch_v2_supplier_search':
+      case 'dispatch_v2_photo_url':
+      case 'dispatch_v2_save_line':
+      case 'dispatch_v2_move_line':
+      case 'dispatch_v2_delete_line':
+      case 'dispatch_v2_suggest_draft':
+      case 'dispatch_v2_add_supplier':
+      case 'dispatch_v2_remove_supplier':
+      case 'dispatch_v2_set_main_supplier':
+      case 'dispatch_v2_upload_photo':
+      case 'dispatch_v2_move_photo':
+      case 'dispatch_v2_delete_photo':
+      case 'dispatch_v2_make_email':
+      case 'dispatch_v2_save_email':
+      case 'dispatch_v2_discard_email':
+      case 'dispatch_v2_send_email': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if ((DISPATCH_V2_WRITE_ACTIONS as readonly string[]).includes(action) && req.method !== 'POST') {
+          throw new ApiError(`${action} requires POST`, 405)
+        }
+        const v2Actor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2Action(client, action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: v2Actor,
+            extractMaterialsFromScope: (scopeJson) => extractMaterialsFromScope(scopeJson, null),
+            // The same key and path the make-safe pack emails use.
+            sender: outlookDispatchV2Sender({ supabaseUrl: SUPABASE_URL, apiKey: SW_API_KEY }),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
