@@ -26,7 +26,9 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
 //   GET  ?action=get_conversation&contactId=xxx  — GHL conversation thread (last 30 msgs)
 //   GET  ?action=get_my_messages&contactId=xxx    — outbound-only messages (for Trade app)
-//   POST ?action=send_sms   { contactId, message, jobId?, userId?, fromNumber? } — also logs to job_events; sender defaults to +61489267771 (Group Admin)
+//   POST ?action=send_sms   { contactId?, phone?, message, jobId?, userId?, fromNumber?, directSms?, contactName? }
+//        contactId or phone. directSms (SecureSuite raw numbers) finds or creates a plain contact
+//        tagged direct-sms and never opens an opportunity. Sender defaults to +61489267771 (Group Admin).
 //   POST ?action=send_email { contactId, subject, htmlBody }
 //   POST ?action=add_note  { contactId, body, jobId? } — add note to GHL contact
 //   GET  ?action=search_jobs&q=smith&type=patio&limit=30  — search Supabase jobs
@@ -54,6 +56,12 @@ import { computeHash } from '../_shared/evidence/storage.ts'
 import { parseSendSmsRecipient, saveSendSmsEvidence } from './sms_capture.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import { checkSendSmsContactJob } from './send_sms_contact_guard.ts'
+import {
+  contactIdFromDuplicateError,
+  duplicateSearchPhones,
+  plainContactCreateBody,
+  toAuE164,
+} from './direct_sms_contact.ts'
 import {
   assignJobNumberWithNullCas,
   buildGhlContactUpdate,
@@ -4149,33 +4157,71 @@ serve(async (req: Request) => {
       const recipient = parseSendSmsRecipient(body)
       if (!recipient.ok) return json({ error: recipient.error }, 400)
 
-      // A4 (make-safe alarms + arrival texts): resolve a RAW phone to a GHL contact
-      // (find-or-create) so a send can target a bare E.164 number, not just an existing
-      // contactId. Backward compatible: contactId callers skip this branch entirely.
+      // A raw phone is resolved to a GHL contact (find-or-create) so the text
+      // goes through the conversation API. contactId callers skip this entirely.
+      // directSms is the SecureSuite path: an Australian number only, and a
+      // contact that does not already exist is created with a name (if given)
+      // and the direct-sms tag. No opportunity either way. Crew and staff
+      // texts leave directSms unset and keep the phone-only contact they had.
+      const directSms = body.directSms === true
+      let contactCreated = false
       if (!contactId && phone) {
-        const normalizedPhone = normalizeAUPhone(phone)
-        try {
-          const searchRes = await ghl(`/contacts/search/duplicate`, {
-            method: 'POST',
-            body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizedPhone }),
-          })
-          if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
-        } catch (e) {
-          console.log('[ghl-proxy] send_sms phone dedup search failed:', e)
-        }
-        if (!contactId) {
+        if (directSms) {
+          const parsed = toAuE164(phone)
+          if (!parsed.ok) return json({ success: false, error: parsed.error, code: 'invalid_phone' }, 400)
+          for (const candidate of duplicateSearchPhones(parsed.e164)) {
+            if (contactId) break
+            try {
+              const searchRes = await ghl(`/contacts/search/duplicate`, {
+                method: 'POST',
+                body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: candidate }),
+              })
+              if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
+            } catch (e) {
+              console.log('[ghl-proxy] send_sms direct dedup search failed:', e)
+            }
+          }
+          if (!contactId) {
+            try {
+              const createRes = await ghl('/contacts/', {
+                method: 'POST',
+                body: JSON.stringify(plainContactCreateBody(parsed.e164, body.contactName, GHL_LOCATION_ID)),
+              })
+              contactId = createRes.contact?.id || null
+              if (contactId) contactCreated = true
+            } catch (e) {
+              rethrowIfGhlRateLimited(e)
+              const errMsg = (e as Error).message || ''
+              const recovered = contactIdFromDuplicateError(errMsg)
+              if (recovered) contactId = recovered
+              else return json({ success: false, error: 'Failed to resolve GHL contact from phone: ' + errMsg, code: 'contact_unresolved' }, 500)
+            }
+          }
+        } else {
+          const normalizedPhone = normalizeAUPhone(phone)
           try {
-            const createRes = await ghl('/contacts/', {
+            const searchRes = await ghl(`/contacts/search/duplicate`, {
               method: 'POST',
-              body: JSON.stringify({ phone, locationId: GHL_LOCATION_ID }),
+              body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizedPhone }),
             })
-            contactId = createRes.contact?.id || null
+            if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
           } catch (e) {
-            rethrowIfGhlRateLimited(e)
-            const errMsg = (e as Error).message || ''
-            const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
-            if (dupMatch && dupMatch[1]) contactId = dupMatch[1]
-            else return json({ error: 'Failed to resolve GHL contact from phone: ' + errMsg }, 500)
+            console.log('[ghl-proxy] send_sms phone dedup search failed:', e)
+          }
+          if (!contactId) {
+            try {
+              const createRes = await ghl('/contacts/', {
+                method: 'POST',
+                body: JSON.stringify({ phone, locationId: GHL_LOCATION_ID }),
+              })
+              contactId = createRes.contact?.id || null
+            } catch (e) {
+              rethrowIfGhlRateLimited(e)
+              const errMsg = (e as Error).message || ''
+              const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
+              if (dupMatch && dupMatch[1]) contactId = dupMatch[1]
+              else return json({ error: 'Failed to resolve GHL contact from phone: ' + errMsg }, 500)
+            }
           }
         }
       }
@@ -4307,7 +4353,13 @@ serve(async (req: Request) => {
           metadata: { message_id: result.messageId || result.id },
         }).then(() => {}, () => {})
 
-        return json({ success: true, messageId: result.messageId || result.id, evidence: evidenceOutcome })
+        return json({
+          success: true,
+          messageId: result.messageId || result.id,
+          contactId,
+          contactCreated,
+          evidence: evidenceOutcome,
+        })
       } catch (e) {
         rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] send_sms failed:', e)
