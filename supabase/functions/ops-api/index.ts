@@ -590,6 +590,12 @@ import {
   withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
 import {
+  getRunningInvoiceDraft,
+  RunningDraftError,
+  runningInvoiceDraftEnabled,
+  saveRunningInvoiceDraft,
+} from './trade_invoice_running_draft.ts'
+import {
   loadTradeRecurringDeductionDecision,
   type TradeRecurringDeductionDecision,
   tradeRecurringDeductionInvoiceFields,
@@ -1911,6 +1917,20 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
       code: error.code,
       error: error.message,
       userMessage: error.message,
+    })
+  }
+  throw error
+}
+
+function runningDraftApiError(error: unknown): never {
+  if (error instanceof RunningDraftError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      code: error.code,
+      error: error.message,
+      userMessage: error.message,
+      submitted: false,
+      xero: false,
     })
   }
   throw error
@@ -4900,6 +4920,9 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'my_trade_invoices',
   'get_trade_invoice',
   'save_trade_invoice_draft',
+  'save_running_invoice_draft',
+  'get_running_invoice_draft',
+  'sync_running_invoice_draft',
   'set_trade_rate',
   'update_trade_profile',
   'attach_invoice_pdf',
@@ -11406,6 +11429,33 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true, status: aarNewStatus })
       }
 
+      // Save a weekly invoice draft. The ops server key or a staff session
+      // may store one. It cannot submit, authorise, pay, or create a Xero
+      // bill. Not a profile-scoped trade action, and not on the read-only
+      // agent or routine allow-lists.
+      case 'agent_save_running_invoice_draft': {
+        const agentOk = authMode === 'api_key'
+        const staffOk = authMode === 'jwt' && _opsApiCallerIsStaffOperator(authMode, authUser)
+        if (!agentOk && !staffOk) {
+          throw new ApiError(
+            'An agent can only save a draft. It cannot submit, send, authorise, pay, or create a Xero bill.',
+            403,
+            {
+              ok: false,
+              code: 'agent_draft_only',
+              error: 'An agent can only save a draft. It cannot submit, send, authorise, pay, or create a Xero bill.',
+              submitted: false,
+              xero: false,
+            },
+          )
+        }
+        try {
+          return json(await saveRunningInvoiceDraft(client, String(body?.user_id || ''), body, 'agent'))
+        } catch (error) {
+          runningDraftApiError(error)
+        }
+      }
+
       // ── Trade (mobile) — JWT auth required ──
       case 'trade_calendar':
         return await handleTradeCalendarAction(req, client)
@@ -11445,6 +11495,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // (Deno check: unreachable get_trade_invoice / save_trade_invoice_draft).
       case 'get_trade_invoice':
       case 'save_trade_invoice_draft':
+      case 'save_running_invoice_draft':
+      case 'get_running_invoice_draft':
+      case 'sync_running_invoice_draft':
       case 'set_trade_rate':
       case 'update_trade_profile':
       case 'attach_invoice_pdf':
@@ -12222,6 +12275,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             })
           }
 
+          case 'get_running_invoice_draft':
+            try {
+              return json(await getRunningInvoiceDraft(
+                client,
+                tradeUser.id,
+                url.searchParams.get('week_start') || body?.week_start || null,
+              ))
+            } catch (error) {
+              runningDraftApiError(error)
+            }
+          case 'save_running_invoice_draft':
+            try {
+              return json(await saveRunningInvoiceDraft(client, tradeUser.id, body, 'staff'))
+            } catch (error) {
+              runningDraftApiError(error)
+            }
+          case 'sync_running_invoice_draft':
+            try {
+              return json(await saveRunningInvoiceDraft(client, tradeUser.id, body, 'auto'))
+            } catch (error) {
+              runningDraftApiError(error)
+            }
           case 'save_trade_invoice_draft': {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
 
@@ -54763,6 +54838,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     gst,
     total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
+    running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     xero_bill_number: existingInvoice?.xero_bill_number || null,
     pending_verification: pendingVerification,
     all_verified: allVerified,
