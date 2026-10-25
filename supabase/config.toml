@@ -149,7 +149,8 @@ enabled = true
 # in emails.
 site_url = "https://secureworks-group.github.io"
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://secureworks-group.github.io/patio/", "https://secureworks-group.github.io/fence-designer/", "http://127.0.0.1:3000", "https://127.0.0.1:3000"]
+# Trade app password reset returns to this exact page. Do not widen it to a wildcard.
+additional_redirect_urls = ["https://secureworks-group.github.io/patio/", "https://secureworks-group.github.io/fence-designer/", "https://secureworks-group.github.io/secureworks-ux/trade.html", "http://127.0.0.1:3000", "https://127.0.0.1:3000"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to the local API URL (http://127.0.0.1:<port>/auth/v1).
