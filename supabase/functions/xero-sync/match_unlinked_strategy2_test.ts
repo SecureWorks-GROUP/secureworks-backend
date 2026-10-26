@@ -34,6 +34,8 @@ function makeClient(opts: {
   unlinked?: any[];
   jobsByContact?: Record<string, { data: any[] | null; error: any | null }>;
   captureEnabled?: boolean;
+  // INT-14: what a guarded link write returns. "lost" = a job was set since the read.
+  linkWrite?: "ok" | "lost" | "error";
 }) {
   const calls: Call[] = [];
   const updates: Array<{ table: string; row: any; id?: string }> = [];
@@ -49,7 +51,8 @@ function makeClient(opts: {
     const b: any = {
       select: (s: string) => {
         call.select = s;
-        mode = "select";
+        // .update(...).select('id') returns the written rows; it stays an update.
+        if (mode !== "update") mode = "select";
         return b;
       },
       update: (row: any) => {
@@ -97,12 +100,21 @@ function makeClient(opts: {
       then: (resolve: any, reject?: any) => {
         calls.push(call);
         if (mode === "update") {
-          updates.push({
-            table,
-            row: updateRow,
-            id: eqFilters.id as string | undefined,
-          });
-          return Promise.resolve({ data: null, error: null }).then(
+          const outcome = opts.linkWrite ?? "ok";
+          if (outcome === "error") {
+            return Promise.resolve({ data: null, error: { message: "write refused" } }).then(resolve, reject);
+          }
+          if (outcome === "ok") {
+            updates.push({
+              table,
+              row: updateRow,
+              id: eqFilters.id as string | undefined,
+            });
+          }
+          return Promise.resolve({
+            data: call.select ? (outcome === "ok" ? [{ id: eqFilters.id }] : []) : null,
+            error: null,
+          }).then(
             resolve,
             reject,
           );
@@ -499,5 +511,40 @@ Deno.test("INT-14: only invoices with no job are candidates for a link", async (
   assert(reads.length >= 1);
   for (const r of reads) {
     assert(r.filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null), "candidate read must be job_id is null");
+  }
+});
+
+Deno.test("INT-14: a lost race links nothing, records no evidence and counts nothing", async () => {
+  for (const linkWrite of ["lost", "error"] as const) {
+    const orig = console.error;
+    console.error = () => {};
+    try {
+      const { client, calls, inserts } = makeClient({
+        unlinked: UNLINKED,
+        linkWrite,
+        jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
+      });
+      const result = await matchUnlinkedInvoices(client);
+      assertEquals(result.matched, 0, `${linkWrite}: nothing counted`);
+      assertEquals(inserts.filter((i) => i.table === "business_events").length, 0, `${linkWrite}: no invoice.auto_linked evidence`);
+      // The write asked for the rows it changed, so a lost race is visible.
+      assertEquals(invoiceLinkWrites(calls)[0]?.select, "id");
+    } finally {
+      console.error = orig;
+    }
+  }
+});
+
+Deno.test("INT-14: every automatic invoice→job link write is guarded by job_id is null", async () => {
+  const files = ["./index.ts", "../reporting-api/index.ts"];
+  for (const f of files) {
+    const src = await Deno.readTextFile(new URL(f, import.meta.url));
+    const re = /\.update\(\{ job_id: [^}]*\}\)([\s\S]{0,160})/g;
+    let n = 0;
+    for (const m of src.matchAll(re)) {
+      n++;
+      assert(m[1].includes(".is('job_id', null)"), `${f}: unguarded job link write near: ${m[0].slice(0, 120)}`);
+    }
+    assert(n > 0, `${f}: expected job link writes`);
   }
 });

@@ -8,9 +8,12 @@
 
 | Who links | What it writes | Test |
 |---|---|---|
-| xero-sync `matchUnlinkedInvoices`, strategy 1 (a job number in the reference) and strategy 2 (`client_name_exact`, one live job) | `xero_invoices.job_id` and `updated_at` only, on rows read as `job_id is null`. The write itself is guarded by `job_id is null` (added here), so a job set between the read and the write is kept | `xero-sync/match_unlinked_strategy2_test.ts`, the `INT-14` cases |
-| The sync-time reference linker and `linkContactInvoicesToJob` | `job_id` only, already guarded by `job_id is null` | (unchanged) |
+| xero-sync `matchUnlinkedInvoices`, strategy 1 (a job number in the reference) and strategy 2 (`client_name_exact`, one live job) | `xero_invoices.job_id` and `updated_at` only, on rows read as `job_id is null`. The write itself is guarded by `job_id is null` and returns the rows it changed (added here). A job set between the read and the write is kept, and then no `invoice.auto_linked` evidence is written and nothing is counted | `xero-sync/match_unlinked_strategy2_test.ts`, the `INT-14` cases |
+| xero-sync `matchInvoicesByReference` (the `match_invoices_by_reference` action) and reporting-api `matchInvoicesToJobs` | `job_id` only. Guarded the same way (added here), and they count only a row that was actually linked | The `INT-14` source scan in the same test file: every automatic `.update({ job_id … })` in xero-sync and reporting-api carries `.is('job_id', null)` |
+| The sync-time reference linker and `linkContactInvoicesToJob` | `job_id` only, already guarded by `job_id is null` | Covered by the same source scan |
 | A Context decision (`context_recon_record_decision`, migration `20261020140000`) | `context_reconciliation_decisions` and `context_placement_links` only. Its subject is a `business_events` row, never an invoice. Context's money read (`context_job_owed_lines`) places an invoice on a job only by `xero_invoices.job_id` | Context's test, in that migration's contract |
+
+**Outside the rule:** a person moving an invoice to another job on purpose. That is ops-api `update_invoice_job_link`, and resolving an `unlinked_invoice` annotation. Those are staff presses, not automatic links, and they may move an invoice that already has a job.
 
 So a person who decides an `invoice.paid` event onto job B, while Xero's mirror says job A, moves the evidence to B. The money stays on A.
 
