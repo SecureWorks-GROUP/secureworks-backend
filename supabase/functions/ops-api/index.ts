@@ -1470,6 +1470,7 @@ import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xer
 import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
+import { readAllOpenInvoices, sentToContactOf, summarizeOpenInvoices } from './invoice_read_truth.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -17890,6 +17891,8 @@ async function jobDetail(
       invoices = data || []
     }
   }
+  // Xero's own sent flag from the stored Xero record (INT-36).
+  invoices = invoices.map((inv: any) => ({ ...inv, sent_to_contact: sentToContactOf(inv.raw_json) }))
 
   // Build invoice summary: quoted vs invoiced vs paid
   const job = jobRes.data
@@ -18132,11 +18135,11 @@ async function listInvoices(client: any, params: URLSearchParams) {
   if (jobId && !jobId.match(/^[0-9a-f]{8}-/i)) {
     const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1)
     if (found?.[0]) jobId = found[0].id
-    else return { invoices: [], total: 0, summary: { outstanding: 0, overdue: 0, total: 0 }, _note: `No job found for job_number: ${jobId}` }
+    else return { invoices: [], total: 0, summary: { outstanding: 0, overdue: 0, total: 0, summary_error: null }, _note: `No job found for job_number: ${jobId}` }
   }
 
   let query = client.from('xero_invoices')
-    .select('id, xero_invoice_id, invoice_number, contact_name, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id', { count: 'exact' })
+    .select('id, xero_invoice_id, invoice_number, contact_name, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id, sent_to_contact:raw_json->SentToContact', { count: 'exact' })
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .order('invoice_date', { ascending: false })
@@ -18162,20 +18165,27 @@ async function listInvoices(client: any, params: URLSearchParams) {
   const { data, error, count } = await query
   if (error) throw error
 
-  // Summary: total outstanding and overdue
+  // Summary: total outstanding and overdue. A failed or incomplete read, or an
+  // open invoice with no amount due on record, gives no figures and names its
+  // reason (INT-35, R-22); it never reads as $0.
   const todayStr = new Date().toISOString().slice(0, 10)
-  const { data: openInvs } = await client.from('xero_invoices')
+  const openRead = await readAllOpenInvoices((from, to) => client.from('xero_invoices')
     .select('status, amount_due, due_date')
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .in('status', ['AUTHORISED', 'SUBMITTED'])
+    .order('id', { ascending: true })
+    .range(from, to))
+  const { outstanding, overdue, summary_error } = summarizeOpenInvoices(openRead, todayStr)
+  if (summary_error) console.error(`[list_invoices] summary unknown: ${summary_error}`)
 
-  const outstanding = (openInvs || []).reduce((s: number, i: any) => s + (i.amount_due || 0), 0)
-  const overdue = (openInvs || [])
-    .filter((i: any) => i.due_date && i.due_date < todayStr)
-    .reduce((s: number, i: any) => s + (i.amount_due || 0), 0)
+  // Xero's own sent flag (INT-36): true or false only as Xero's record says.
+  const invoices = (data || []).map((row: any) => ({
+    ...row,
+    sent_to_contact: typeof row.sent_to_contact === 'boolean' ? row.sent_to_contact : null,
+  }))
 
-  return { invoices: data || [], total: count || 0, summary: { outstanding, overdue, total: count || 0 } }
+  return { invoices, total: count || 0, summary: { outstanding, overdue, total: count || 0, summary_error } }
 }
 
 // ── Finance Health summary (read-only) ──
