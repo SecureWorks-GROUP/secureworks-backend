@@ -1491,6 +1491,15 @@ import {
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
+import {
+  type DepositFlagBlock,
+  depositInvoiceSent,
+  type JobDepositCaller,
+  type JobDepositDeps,
+  loadDepositFlags,
+  runJobDepositAction,
+} from './job_deposit_advance.ts'
+import { DEPOSIT_RECEIVED_TEXT_TEMPLATE } from '../_shared/job_deposit_paid.ts'
 import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
@@ -8900,6 +8909,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
       }
+      // ── Deposit advance for fencing and patio (job_deposit_advance.ts;
+      // docs/job-deposit-advance-v1.md). Server key only for the two that move or text;
+      // a signed-in staff operator may clear a voided-deposit flag.
+      case 'job_deposit_paid':
+      case 'job_deposit_catch_up':
+      case 'clear_job_deposit_flag': {
+        const depositCaller: JobDepositCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' }
+          : _opsApiCallerIsStaffOperator(authMode, authUser)
+          ? { kind: 'staff', email: authUser?.email || null }
+          : { kind: 'none' }
+        const deposit = await runJobDepositAction(action, req.method, body || {}, depositCaller, jobDepositDeps(client))
+        return json(deposit.body, deposit.status)
+      }
       // ── Paid-invoice receipt for fencing and patio (job_receipt.ts; docs/job-receipt-v1.md).
       // Server key only: xero-sync posts these, and both can have Xero email a customer.
       case 'job_receipt_paid':
@@ -10146,17 +10169,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
             })
           } catch { /* non-blocking */ }
+          await landJobAfterDepositInvoiceSent(client, directSendInvoice?.job_id || siJobId, siId, 'send_invoice_email')
           return json({ success: true, emailed: true, via: 'xero_direct' })
         }
 
         // Enhanced path: to_email provided → delegate to extracted, testable helper.
-        return await _verifyAndSendInvoiceEmail({
+        const siResponse = await _verifyAndSendInvoiceEmail({
           client, body,
           getToken, xeroGet, logBusinessEvent,
           fetch: globalThis.fetch.bind(globalThis),
           xeroFetch: xeroAccountingFetch,
           env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
         })
+        // A deposit invoice that reached the client lands its job in Awaiting Deposit.
+        if (siResponse.ok) {
+          const siResult = await siResponse.clone().json().catch(() => null)
+          if (siResult?.success === true) {
+            await landJobAfterDepositInvoiceSent(client, directSendInvoice?.job_id || siJobId, siId, 'send_invoice_email')
+          }
+        }
+        return siResponse
       }
 
       case 'approve_and_send_invoice': {
@@ -10218,6 +10250,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
         // 3. Determine if we should send branded email
         let asBrandedSent = false
+        let asXeroEmailed = false
         const asUseBranded = body.use_branded_email !== false
 
         if (asUseBranded) {
@@ -10277,9 +10310,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // Send plain Xero email
           try {
             await xeroPost(`/Invoices/${asId}/Email`, asAt, asTi, {}, 'POST')
+            asXeroEmailed = true
           } catch (e) {
             console.log('[approve_and_send] Xero email failed:', (e as Error).message)
           }
+        }
+
+        // A deposit invoice that reached the client lands its job in Awaiting Deposit.
+        if (asBrandedSent || asXeroEmailed) {
+          await landJobAfterDepositInvoiceSent(client, asPrevInv?.job_id, asId, 'approve_and_send_invoice')
         }
 
         return json({
@@ -17581,6 +17620,15 @@ async function pipeline(
       return null
     })
     : null
+  // Deposit flag (job_deposit_advance.ts): a fencing or patio card whose deposit was voided
+  // or unpaid after it moved on, for a person to decide. Same callers as the close-out block.
+  const depositFlagJobIds = jobs.filter((j: any) => j.type === 'fencing' || j.type === 'patio').map((j: any) => String(j.id))
+  const depositFlagRead: Promise<Map<string, DepositFlagBlock> | null> | null = opts.includeCloseout && depositFlagJobIds.length
+    ? loadDepositFlags(client, depositFlagJobIds).catch((e) => {
+      console.error('[pipeline] deposit flag read failed:', (e as Error)?.message)
+      return null
+    })
+    : null
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -17752,6 +17800,8 @@ async function pipeline(
   if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const closeoutBlocks = closeoutRead ? await closeoutRead : null
   if (closeoutRead && !closeoutBlocks) enrichmentErrors.push('pipeline.closeout')
+  const depositFlags = depositFlagRead ? await depositFlagRead : null
+  if (depositFlagRead && !depositFlags) enrichmentErrors.push('pipeline.deposit_flag')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -17930,6 +17980,7 @@ async function pipeline(
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
         ? { closeout: closeoutBlocks?.get(String(j.id)) ?? null }
         : {}),
+      ...(depositFlags?.has(String(j.id)) ? { deposit_flag: depositFlags.get(String(j.id)) } : {}),
       ...pipelineScopeToolField(j),
     }
     if (stageTruth && stageTruthRows) {
@@ -18321,6 +18372,19 @@ async function jobDetail(
       closeoutBlock = null
     }
   }
+  // Deposit flag (job_deposit_advance.ts), fencing and patio only, staff only: the open
+  // flag after a deposit was voided or no longer paid once the job moved on, null when
+  // there is none; deposit_flag_unreadable when the read failed (never read as none).
+  let depositFlag: DepositFlagBlock | null | undefined
+  let depositFlagUnreadable = false
+  if (opts.includeCloseout && (job?.type === 'fencing' || job?.type === 'patio')) {
+    const flags = await loadDepositFlags(client, [String(job.id)]).catch(() => null)
+    if (flags) depositFlag = flags.get(String(job.id)) ?? null
+    else {
+      depositFlag = null
+      depositFlagUnreadable = true
+    }
+  }
 
   return {
     job: jobLite,
@@ -18363,6 +18427,8 @@ async function jobDetail(
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
     ...(closeoutBlock !== undefined ? { closeout: closeoutBlock } : {}),
+    ...(depositFlag !== undefined ? { deposit_flag: depositFlag } : {}),
+    ...(depositFlagUnreadable ? { deposit_flag_unreadable: true } : {}),
   }
 }
 
@@ -36837,8 +36903,9 @@ async function updateJobStatus(client: any, body: any) {
   }).catch(() => {})
 
   // ── Push status change to GHL (non-blocking) ──
-  // Skip if this change originated from a GHL webhook (anti-loop)
-  if (source !== 'ghl_webhook' && data.ghl_opportunity_id) {
+  // Skip if this change originated from a GHL webhook (anti-loop), or the writer asked
+  // to leave GHL alone (the deposit advance, job_deposit_advance.ts: captain, 26 Oct 2026).
+  if (source !== 'ghl_webhook' && body.skip_ghl_push !== true && data.ghl_opportunity_id) {
     try {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`
       const ghlResp = await fetch(ghlUrl, {
@@ -56637,6 +56704,12 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     },
   })
 
+  // The deposit invoice reached the client: a fencing or patio job still in Accepted lands
+  // in Awaiting Deposit. A failed email leaves the job in Accepted for the office.
+  if (brandedEmailSent) {
+    await landJobAfterDepositInvoiceSent(client, jId, invoiceResult.xero_invoice_id, 'send_acceptance_invoice')
+  }
+
   return {
     success: true,
     job_id: jId,
@@ -56673,6 +56746,35 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
     sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
     laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
+
+/** The deposit advance (job_deposit_advance.ts): moves through updateJobStatus, the client
+ *  text through ghl-proxy send_sms like the review text. */
+function jobDepositDeps(client: any): JobDepositDeps {
+  return {
+    client,
+    now: () => new Date(),
+    moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+  }
+}
+
+/** A deposit invoice was emailed successfully: a fencing or patio job still in Accepted
+ *  lands in Awaiting Deposit (job_deposit_advance.ts decides, under its switch). Never
+ *  throws into the send that just succeeded. */
+async function landJobAfterDepositInvoiceSent(client: any, jobId: unknown, xeroInvoiceId: unknown, source: string) {
+  const id = String(jobId ?? '').trim()
+  if (!id) return
+  try {
+    const landed = await depositInvoiceSent(jobDepositDeps(client), {
+      job_id: id,
+      xero_invoice_id: String(xeroInvoiceId ?? '').trim() || null,
+      source,
+    })
+    if (landed.action !== 'switch_off') console.log(`[ops-api] deposit invoice sent for ${id}: ${landed.action}`)
+  } catch (e) {
+    console.log('[ops-api] deposit invoice landing failed (non-blocking):', (e as Error)?.message)
   }
 }
 
@@ -62268,7 +62370,8 @@ export function streetFromAddress(address: string | null | undefined): string {
 const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string }> = {
   quote_sent: { channel: 'email', template: 'Hi {name}, your quote for {service} at {address} is ready. View it here: {link}' },
   quote_accepted: { channel: 'sms', template: 'Thanks for choosing SecureWorks! Your deposit invoice is on its way.' },
-  deposit_paid: { channel: 'sms', template: "Deposit received! We're ordering your materials and scheduling your install." },
+  // The deposit advance's text (job_deposit_advance.ts), one wording for both senders.
+  deposit_paid: { channel: 'sms', template: DEPOSIT_RECEIVED_TEXT_TEMPLATE },
   materials_ordered: { channel: 'sms', template: 'Your materials have been ordered. Expected delivery: {delivery_date}.' },
   council_submitted: { channel: 'sms', template: "We've submitted your application to {council}. Typical processing: 2-4 weeks." },
   council_approved: { channel: 'sms', template: "Great news! Your {service} has been approved. We'll confirm install dates shortly." },
@@ -62403,10 +62506,10 @@ export async function sendClientUpdate(client: any, body: any) {
     message = message.replace(new RegExp(`\\{${k}\\}`, 'g'), v)
   }
 
-  // Append cross-sell footer for SMS — except install_rescheduled, whose wording
-  // is approved verbatim and ends "Cheers, Shaun".
+  // Append cross-sell footer for SMS — except install_rescheduled and deposit_paid, whose
+  // wording is approved verbatim and ends "Cheers, Shaun".
   const channel = overrideChannel || tmpl?.channel || 'sms'
-  if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
+  if (channel === 'sms' && comms_trigger !== 'install_rescheduled' && comms_trigger !== 'deposit_paid') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }
 

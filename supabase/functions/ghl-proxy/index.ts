@@ -128,6 +128,7 @@ import { releaseCalendarAppointmentAction, releaseLedger } from './calendar_appo
 import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
 import { appointmentLedger, bookingApprovalReader, bookingExecutionReader } from './calendar_appointment_ledger.ts'
 import { linkSkipsXero, patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
+import { JOB_STATUS_RANK } from '../_shared/job_status_rank.ts'
 import {
   allocationOpportunityCustomFields,
   lookupAllocationOpportunityAction,
@@ -4056,10 +4057,6 @@ serve(async (req: Request) => {
               .limit(1)
 
             if (existing && existing.length > 0) {
-              const JOB_STATUS_RANK: Record<string, number> = {
-                draft: 0, quoted: 1, accepted: 2, scheduled: 3,
-                in_progress: 4, complete: 5, invoiced: 6, cancelled: -1,
-              }
               const currentRank = JOB_STATUS_RANK[existing[0].status] ?? 0
               const newRank = JOB_STATUS_RANK[mappedStatus] ?? 0
 

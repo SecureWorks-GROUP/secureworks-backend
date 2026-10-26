@@ -64,3 +64,29 @@ for (const status of ["get_review", "archived"]) {
     });
   }
 }
+
+// Deposit advance (26 Oct 2026): awaiting_deposit and order_materials used to be unranked
+// (0), so GHL's "Job Accepted Ready for Execution" (mapped to accepted) read as a forward
+// move and pulled the card back to Accepted.
+const GHL_PATIO_READY_TO_EXECUTE = "66742bf8-4917-406c-a1c1-33ac271cfe09"; // maps to accepted
+for (const status of ["awaiting_deposit", "deposit", "approvals", "order_materials", "processing", "awaiting_supplier", "order_confirmed", "schedule_install"]) {
+  Deno.test(`a GHL stage mapped to accepted cannot pull a ${status} card back`, async () => {
+    const events: unknown[] = [];
+    const res = await handleGhlWebhook(
+      stageChange(GHL_PATIO_READY_TO_EXECUTE),
+      deps(status, events),
+    );
+    const body = await res.json();
+    assertEquals(body.action, "conflict_logged");
+    assertEquals(body.current, status);
+    assertEquals(events.length, 1);
+  });
+}
+
+Deno.test("every stored job status has a rank", async () => {
+  const { STATUS_RANK } = await import("./handler.ts");
+  const { STATUS_MAP } = await import("../_shared/stage-gate/job-state-machine.ts");
+  for (const status of Object.keys(STATUS_MAP)) {
+    assertEquals(typeof STATUS_RANK[status], "number", `unranked status ${status}`);
+  }
+});
