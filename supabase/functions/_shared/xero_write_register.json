@@ -1,0 +1,195 @@
+{
+  "version": "xero-write-register-v1",
+  "about": "Every place in supabase/functions that can write to Xero, and the X row (Integrated Job Framework A4 4.2, INT-33) it belongs to. xero_write_register_test.ts scans the sources and fails when a write site appears that no row names, or a row names one that is gone. Owner is the accountable desk, not the code. A new row, or a change to who passes a gate, is a person's decision (P2, P12): the CFO desk confirms each row and Marnin approves the register. Human copy: docs/xero-write-register.md.",
+  "read_at": "secureworks-backend 879ca60, 26 Oct 2026",
+  "rows": [
+    {
+      "id": "X1",
+      "write": "Create a customer contact, or patch its address",
+      "owner": "Sales",
+      "gate_today": "Staff session (link_scope, create_invoice); the address sweep is a server job",
+      "moves_money": false,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ghl-proxy/index.ts :: (module) :: POST xero-sync:create_or_find_contact",
+        "xero-sync/index.ts :: createOrFindContact :: POST /Contacts",
+        "xero-sync/index.ts :: createOrFindContact :: POST /Contacts #2",
+        "xero-sync/index.ts :: sweepContactAddresses :: POST /Contacts",
+        "ops-api/index.ts :: createInvoice :: POST /Contacts",
+        "ops-api/index.ts :: createInvoice :: PUT /Contacts"
+      ]
+    },
+    {
+      "id": "X2",
+      "write": "Create a Xero quote",
+      "owner": "Sales",
+      "gate_today": "Staff press; an agent send needs approval (Jarvis sw_send_quote)",
+      "moves_money": false,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "send-quote/index.ts :: createXeroQuote :: PUT /Quotes"
+      ]
+    },
+    {
+      "id": "X3",
+      "write": "Create a customer invoice (deposit, acceptance, progress, final, per party)",
+      "owner": "Ops / Bookkeeping",
+      "gate_today": "Staff press; invariant Acceptance Deposit Invoice. createInvoice is the one creator: create_invoice, create_invoice_draft, create_deposit_invoice, complete_and_invoice and send_acceptance_invoice all reach it",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: createInvoice :: PUT /Invoices"
+      ]
+    },
+    {
+      "id": "X4",
+      "write": "Approve, void or email a customer invoice",
+      "owner": "Bookkeeping",
+      "gate_today": "Jarvis durable Xero money gate: ACCREC needs confirm=true or a chat approval tap; ACCPAY needs confirm=true; unknown refuses. createInvoice's email runs only when its caller asks to send",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: case void_invoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: case approve_invoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: case send_invoice_email :: POST /Invoices/{id}/Email",
+        "ops-api/index.ts :: case approve_and_send_invoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: case approve_and_send_invoice :: POST /Invoices/{id}/Email",
+        "ops-api/index.ts :: createInvoice :: POST /Invoices/{id}/Email"
+      ]
+    },
+    {
+      "id": "X5",
+      "write": "Record a payment against an invoice",
+      "owner": "Bookkeeping (CFO)",
+      "gate_today": "Chat: Jarvis write tool (approval card). MCP: no Jarvis yes until INT-19 PR 1 (jarvis #267) is switched to enforce. Legacy SES guard. Marks the invoice paid in Xero, into the first active BANK account unless account_code is given, then lowers our copy's amount_due itself",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: reconcilePayment :: PUT /Payments"
+      ]
+    },
+    {
+      "id": "X6",
+      "write": "Push a crew bill (trade invoice), and attach its PDF",
+      "owner": "Ops (crew pay) / CFO",
+      "gate_today": "With the office-review switches off, a crew submit goes straight to a Xero DRAFT bill and the bookkeeper's approval in Xero is the check. With crew_invoice_line_office_review_v1 on, the invoice is held out of Xero",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: pushTradeInvoiceToXeroAction :: PUT /Invoices",
+        "ops-api/index.ts :: case submit_work_order_invoice :: PUT /Invoices",
+        "ops-api/index.ts :: case generate_trade_invoice :: PUT /Invoices",
+        "ops-api/index.ts :: submitTradeInvoice :: PUT /Invoices",
+        "ops-api/index.ts :: case attach_invoice_pdf :: PUT /Invoices/{id}/Attachments/{id}"
+      ]
+    },
+    {
+      "id": "X7",
+      "write": "Push an expense bill",
+      "owner": "CFO",
+      "gate_today": "Approval routed to Shaun (job) or Jan (stock)",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: pushExpenseToXero :: POST /Invoices"
+      ]
+    },
+    {
+      "id": "X8",
+      "write": "Push or email a purchase order in Xero",
+      "owner": "Dispatch",
+      "gate_today": "Old path. Dispatch never pushes (slice 5 contract). Kept by choice only",
+      "moves_money": false,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: pushPOToXero :: PUT /PurchaseOrders",
+        "ops-api/index.ts :: emailPO :: POST /PurchaseOrders/{id}/Email"
+      ]
+    },
+    {
+      "id": "X9",
+      "write": "Draft, update or attach a supplier bill (ACCPAY), or draft a credit note",
+      "owner": "CFO",
+      "gate_today": "Forced to DRAFT. Never authorised, voided or paid",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/xero_accpay_books.ts :: createSupplierBill :: PUT /Invoices",
+        "ops-api/xero_accpay_books.ts :: updateSupplierBill :: POST /Invoices/{id}",
+        "ops-api/xero_accpay_books.ts :: createSupplierCreditNote :: PUT /CreditNotes",
+        "ops-api/xero_attachment.ts :: attachPdfToXeroInvoice :: PUT /Invoices/{id}/Attachments/{id}"
+      ]
+    },
+    {
+      "id": "X10",
+      "write": "Customer variation invoice draft",
+      "owner": "Dispatch / Bookkeeping",
+      "gate_today": "One Xero DRAFT per variation, refused while customer_variation_xero_draft_v1 is off",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "via": "X3: create_customer_variation_xero_draft calls create_invoice_draft, which reaches createInvoice. It has no call site of its own",
+      "call_sites": []
+    },
+    {
+      "id": "X11",
+      "write": "Make-safe and SES invoices: authorise, void, update or delete a draft, authorise on send",
+      "owner": "Make-safe desk",
+      "gate_today": "Legacy SES guard; the SES pipeline's own gates (read-only to this framework)",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: makeSesXeroGateway.authorise :: POST /Invoices/{id}",
+        "ops-api/index.ts :: makeSesInvoiceVoidGateway.voidInvoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: updateMakesafeExistingDraftInvoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: deleteMakesafeExistingDraftInvoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: makesafeSendPack :: POST /Invoices/{id}"
+      ]
+    },
+    {
+      "id": "X12",
+      "write": "Edit a customer invoice, and email it after the edit",
+      "owner": "Bookkeeping",
+      "gate_today": "Staff session",
+      "moves_money": true,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: updateInvoice :: POST /Invoices/{id}",
+        "ops-api/index.ts :: updateInvoice :: POST /Invoices/{id}/Email"
+      ]
+    },
+    {
+      "id": "X13",
+      "write": "Find or create a trade's or supplier's Xero contact",
+      "owner": "CFO",
+      "gate_today": "Inside X6, X8 and X9",
+      "moves_money": false,
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: resolveTradeXeroSupplierContact :: POST /Contacts",
+        "ops-api/index.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts",
+        "ops-api/index.ts :: pickContactId :: POST /Contacts",
+        "ops-api/index.ts :: case submit_work_order_invoice :: PUT /Contacts",
+        "ops-api/index.ts :: pushPOToXero :: PUT /Contacts",
+        "ops-api/xero_accpay_books.ts :: resolveSupplierContactId :: PUT /Contacts"
+      ]
+    },
+    {
+      "id": "X14",
+      "write": "Have Xero email a paid invoice to the customer as a receipt (fencing and patio)",
+      "owner": "Bookkeeping (proposed; found by INT-33, not in the first register)",
+      "gate_today": "job_closeout_settings.receipt_sender_mode (off, dry_run, live); server key only (job_receipt_paid, job_receipt_catch_up, posted by xero-sync); one claim per invoice. Contract docs/job-receipt-v1.md",
+      "moves_money": false,
+      "cfo_confirmed": false,
+      "proposed": true,
+      "call_sites": [
+        "ops-api/job_receipt.ts :: xeroReceiptEmailer :: POST /Invoices/{id}/Email"
+      ]
+    }
+  ],
+  "not_writes": [
+    {
+      "key": "ops-api/index.ts :: _xeroPostForTest :: POST {path}",
+      "why": "The test-only export of ops-api's xeroPost transport. It forwards its caller's path and makes no call of its own"
+    }
+  ]
+}
