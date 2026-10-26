@@ -302,9 +302,8 @@ export function depositFlagKey(
  * replacement deposit for the same party is paid in full flags nothing, and a party that
  * never had a deposit is the move's rule, never a flag. Pure.
  *
- * `countedIds` are the invoices that counted when the job moved (the automatic move
- * records them); when empty (a job a person moved on), only a voided or deleted deposit
- * invoice can raise the flag.
+ * `countedIds` are the invoices that counted when the automatic move moved the job (it
+ * records them); only those can raise a flag, so a job a person moved on never does.
  *
  * `cleared` are the flags a person already cleared (depositFlagKey; captain answer 8: a
  * person decides): the same reason on the same invoice is never raised again.
@@ -338,7 +337,7 @@ export function depositFlagFor(input: {
   );
   const voided = deposits.find((inv) =>
     isVoided(inv.status) &&
-    (counted.size === 0 || counted.has(text(inv.xero_invoice_id))) &&
+    counted.has(text(inv.xero_invoice_id)) &&
     !paidParties.has(depositPartyKey(inv, paying)) &&
     !wasCleared("deposit_voided", inv)
   );

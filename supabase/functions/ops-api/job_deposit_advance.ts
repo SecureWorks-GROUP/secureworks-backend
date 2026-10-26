@@ -122,7 +122,6 @@ export async function readDepositAdvanceMode(
 export interface DepositJobRow extends DepositJob {
   client_name: string | null;
   ghl_contact_id: string | null;
-  deposit_at: string | null;
 }
 
 export interface DepositStateRow {
@@ -138,7 +137,7 @@ export interface DepositStateRow {
 }
 
 const JOB_COLUMNS =
-  "id, job_number, type, status, deposit_invoice_id, council_required, client_name, ghl_contact_id, deposit_at";
+  "id, job_number, type, status, deposit_invoice_id, council_required, client_name, ghl_contact_id";
 const INVOICE_COLUMNS =
   "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on, job_contact_id, xero_contact_id";
 const PARTY_COLUMNS =
@@ -567,10 +566,8 @@ async function checkFlag(
   if (state.row?.flag && !state.row.flag_cleared_at) {
     return { ...base, action: "already_flagged", detail: state.row.flag };
   }
-  // Only a job whose deposit was once counted as paid can lose it: one this module moved,
-  // or one the Xero deposit stamp marked paid (jobs.deposit_at).
-  const moved = !!state.row?.moved_at;
-  if (!moved && !text(job.deposit_at)) return { ...base, action: "no_flag" };
+  // Only a job this module moved, and only the deposits that counted for its move.
+  if (!state.row?.moved_at) return { ...base, action: "no_flag" };
   // Every flag a person cleared: the earlier ones, and the one on the row now.
   const cleared = [...(state.row?.cleared_flags ?? [])];
   if (state.row?.flag && state.row.flag_cleared_at) {
@@ -579,7 +576,7 @@ async function checkFlag(
   const flag: DepositFlag | null = depositFlagFor({
     job,
     ...facts,
-    countedIds: moved ? (state.row?.counted_invoice_ids ?? []) : [],
+    countedIds: state.row.counted_invoice_ids ?? [],
     cleared,
   });
   if (!flag) return { ...base, action: "no_flag" };
@@ -679,9 +676,8 @@ export async function depositCatchUp(
   if (!waiting) return { ok: false, ran: false, reason: "jobs_unreadable" };
   const { data: movedRows, error: movedErr } = await deps.client.from(
     "job_deposit_advance_state",
-  ).select("job_id").not("moved_at", "is", null).is("flag_cleared_at", null).is(
-    "flag",
-    null,
+  ).select("job_id").not("moved_at", "is", null).or(
+    "flag.is.null,flag_cleared_at.not.is.null",
   ).limit(5000);
   if (movedErr) return { ok: false, ran: false, reason: "state_unreadable" };
   const movedIds = new Set<string>(

@@ -67,6 +67,15 @@ class Query {
     this.filters.push((r) => (read(r, col) ?? null) !== v);
     return this;
   }
+  or(expr: string) {
+    const tests = expr.split(",").map((part) => {
+      const m = part.match(/^(\w+)\.(not\.)?is\.null$/);
+      if (!m) throw new Error(`unsupported or(): ${part}`);
+      return (r: Row) => ((read(r, m[1]) ?? null) === null) !== !!m[2];
+    });
+    this.filters.push((r) => tests.some((t) => t(r)));
+    return this;
+  }
   order(col: string, opts?: { ascending?: boolean }) {
     this.sort = { col, asc: opts?.ascending !== false };
     return this;
@@ -209,7 +218,6 @@ function addJob(db: FakeDb, over: Row = {}): Row {
     council_required: null,
     client_name: "Vicky Zhang",
     ghl_contact_id: "ghl-vicky",
-    deposit_at: null,
     ...over,
   };
   db.rows("jobs").push(job);
@@ -783,17 +791,47 @@ Deno.test("deposit flag: a refund on a job the catch-up checks is flagged", asyn
   const r = await depositCatchUp(deps, {}) as any;
   assertEquals(r.results.map((x: any) => x.action), ["flagged"]);
   assertEquals(db.rows("job_deposit_advance_state")[0].flag, "deposit_unpaid");
-  // A job a person moved on whose deposit the Xero stamp marked paid: a void is flagged.
-  const hand = addJob(db, {
-    status: "scheduled",
-    deposit_at: "2026-10-01T00:00:00Z",
-  });
+  // A job a person moved on is never flagged, even when its deposit is voided.
+  const hand = addJob(db, { status: "scheduled" });
   const handInv = addDeposit(db, hand, { status: "VOIDED" });
   const r2 = await depositOnInvoiceChange(deps, {
     job_id: hand.id,
     xero_invoice_id: handInv.xero_invoice_id,
   });
-  assertEquals(r2.action, "flagged");
+  assertEquals(r2.action, "no_flag");
+  assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
+});
+
+Deno.test("deposit flag: the catch-up checks a job whose flag was cleared", async () => {
+  const { db, deps } = setup("live");
+  const job = addJob(db);
+  const inv = addDeposit(db, job);
+  await depositOnInvoiceChange(deps, { job_id: job.id });
+  assertEquals(job.status, "order_materials");
+  Object.assign(inv, {
+    status: "AUTHORISED",
+    amount_due: 2000,
+    amount_paid: 0,
+  });
+  assertEquals(
+    (await depositCatchUp(deps, {}) as any).results.map((x: any) => x.action),
+    [
+      "flagged",
+    ],
+  );
+  await runJobDepositAction(
+    "clear_job_deposit_flag",
+    "POST",
+    { job_id: job.id },
+    { kind: "staff", email: null },
+    deps,
+  );
+  assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
+  inv.status = "VOIDED";
+  const r = await depositCatchUp(deps, {}) as any;
+  assertEquals(r.results.map((x: any) => x.action), ["flagged"]);
+  assertEquals(db.rows("job_deposit_advance_state")[0].flag, "deposit_voided");
+  assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
 });
 
 Deno.test("deposit flag: an unreadable pipeline read is reported, not empty", async () => {

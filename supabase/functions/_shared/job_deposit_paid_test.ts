@@ -272,8 +272,8 @@ Deno.test("deposit flag: a neighbour's deposit voided after the move is flagged"
 });
 
 Deno.test("deposit flag: a replaced void is not flagged because another party has no deposit", () => {
-  // A shared fence a person moved on: the neighbour never had a deposit raised.
-  const handMoved = { deposit_invoice_id: "x-c", status: "scheduled" };
+  // A shared fence moved on party A's deposit: the neighbour has no deposit now.
+  const moved = { deposit_invoice_id: "x-c", status: "scheduled" };
   const parties = [
     party(),
     party({
@@ -296,20 +296,20 @@ Deno.test("deposit flag: a replaced void is not flagged because another party ha
   });
   assertEquals(
     depositFlagFor({
-      job: handMoved,
+      job: moved,
       invoices: [voidedA, replacementA],
       parties,
-      countedIds: [],
+      countedIds: ["x-a"],
     }),
     null,
   );
   // Without the replacement, the void is flagged.
   assertEquals(
     depositFlagFor({
-      job: handMoved,
+      job: moved,
       invoices: [voidedA],
       parties,
-      countedIds: [],
+      countedIds: ["x-a"],
     })?.reason,
     "deposit_voided",
   );
@@ -472,15 +472,15 @@ Deno.test("deposit flag: a voided counted deposit after the move is flagged", ()
     }),
     null,
   );
-  // A job a person moved on (nothing counted) is flagged on a voided deposit too.
+  // A job a person moved on (nothing counted) is never flagged, even on a void.
   assertEquals(
     depositFlagFor({
       parties: [],
       job: moved,
       invoices: [voided],
       countedIds: [],
-    })?.reason,
-    "deposit_voided",
+    }),
+    null,
   );
   // Still in the deposit columns: never a flag.
   assertEquals(
@@ -510,7 +510,7 @@ Deno.test("deposit flag: a counted deposit no longer paid in full is flagged", (
     })?.reason,
     "deposit_unpaid",
   );
-  // Without a counted record, a payment taken off alone raises nothing (only a void does).
+  // Without a counted record, nothing is flagged.
   assertEquals(
     depositFlagFor({
       parties: [],

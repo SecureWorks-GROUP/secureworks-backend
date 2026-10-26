@@ -150,14 +150,15 @@ This is the second recorded exception to the 30 Sep 2026 money-messages ruling
 ## Voided or refunded after the move: a flag, never a move back
 
 Captain answer 8: the job is not moved back. A person decides. The deposit is
-flagged on the job when the job is in Approvals, Order Materials or a later
-working stage (`DEPOSIT_FLAG_STATUSES`) and one of the reasons below holds.
+flagged on the job when the automatic move moved it, the job is in Approvals,
+Order Materials or a later working stage (`DEPOSIT_FLAG_STATUSES`) and one of
+the reasons below holds. Only the deposits that counted for that move
+(`counted_invoice_ids`) can raise a flag; a job a person moved on is never
+flagged.
 
 The flag reason is one of:
 - `deposit_voided`: a deposit that counted for the move is voided or deleted,
-  and its party has no other live deposit paid in full. On a job a person moved
-  on, any voided deposit counts, once xero-sync's deposit stamp had marked it
-  paid.
+  and its party has no other live deposit paid in full.
 - `deposit_unpaid`: a counted deposit is no longer paid in full, for example a
   payment taken off for a refund.
 
@@ -257,9 +258,9 @@ deposit is paid.
 - A deposit refunded through a credit note (the invoice stays PAID) is not
   flagged; only a void or a payment taken off is.
 - The flag is checked only when xero-sync sees one of the job's deposit invoices change,
-  and on the catch-up for jobs this module moved. A job a person moved on is
-  flagged only on a void of a deposit xero-sync had stamped paid
-  (`jobs.deposit_at`).
+  and on the catch-up for every job this module moved that has no open flag (a
+  cleared flag is checked again, and never raised again). A job a person moved
+  on is never flagged.
 
 ## Rollback
 
