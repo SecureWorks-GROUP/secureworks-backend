@@ -2,7 +2,8 @@
 //
 // A fencing or patio job moves along its early columns by payment, so nobody tracks each
 // job by hand:
-//   - accepted          -> awaiting_deposit  when its deposit invoice went out
+//   - accepted          -> awaiting_deposit  when its deposit invoice went out (our send
+//                                            path, or Xero's own sent flag)
 //   - accepted or
 //     awaiting_deposit  -> order_materials   when every live deposit invoice is paid in full
 //                                            (patio: -> approvals while council is needed
@@ -93,6 +94,9 @@ export interface DepositInvoice {
   /** Xero's CreditNotes on the invoice (our copy's raw_json->CreditNotes): the client credit
    *  notes allocated against it. Absent or null reads as none. */
   credit_notes?: unknown;
+  /** Xero's own sent flag (Invoice.SentToContact, ops-api invoice_read_truth.ts): true or
+   *  false only as Xero says, null when not known. Only true ever counts as sent. */
+  sent_to_contact?: boolean | null;
 }
 
 export interface DepositView {
@@ -260,6 +264,36 @@ export function depositInvoicesSent(input: {
     }
   }
   return { sent: reasons.length === 0, reasons };
+}
+
+/**
+ * The landing rule read from our Xero copy, for a deposit emailed by hand from Xero or
+ * sent before the deploy (neither ever called the send-path landing): the deposit
+ * invoices pass the landing rule above, and at least one live deposit, AUTHORISED or
+ * PAID, is marked sent by Xero itself (sent_to_contact true). Not known (null) and false
+ * are never sent, and status alone is never read as sent.
+ */
+export function depositSentInXero(input: {
+  job: Pick<DepositJob, "deposit_invoice_id">;
+  invoices: DepositInvoice[];
+}): { sent: boolean; reasons: string[]; sent_invoices: string[] } {
+  const landing = depositInvoicesSent(input);
+  const sentInvoices = liveDepositInvoices(
+    input.invoices,
+    input.job.deposit_invoice_id,
+  ).filter((inv) =>
+    inv.sent_to_contact === true &&
+    (upper(inv.status) === "AUTHORISED" || upper(inv.status) === "PAID")
+  ).map(label);
+  const reasons = [...landing.reasons];
+  if (landing.sent && sentInvoices.length === 0) {
+    reasons.push("not_sent_in_xero");
+  }
+  return {
+    sent: reasons.length === 0,
+    reasons,
+    sent_invoices: reasons.length === 0 ? sentInvoices : [],
+  };
 }
 
 /**

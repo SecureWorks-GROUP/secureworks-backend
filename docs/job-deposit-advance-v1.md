@@ -4,7 +4,8 @@ Captain, 26 Oct 2026: the pipeline moves a fencing or patio job along by its
 deposit, so nobody tracks each job by hand.
 
 - Accepted with no deposit invoice: the job stays in **Accepted**.
-- Its deposit invoice went out: it moves to **Awaiting Deposit**.
+- Its deposit invoice went out (through our send path, or marked sent by Xero
+  itself): it moves to **Awaiting Deposit**.
 - Every paying party has a deposit invoice and every live deposit invoice is
   paid in full: it moves to **Order Materials**.
   A patio job goes to **Approvals** instead while council is needed or not
@@ -47,6 +48,25 @@ It goes through `update_job_status` with `expected_statuses: ['accepted']`,
 under the calling path's own source name. A failed send never calls it, so that
 job stays in Accepted, and so does a job with no deposit invoice.
 
+**Deposit marked sent by Xero -> Awaiting Deposit.** A deposit emailed by hand
+straight from Xero, or sent before the deploy, never passed through those
+paths. It lands the job the same way when Xero's own sent flag says so
+(`depositSentInXero`):
+
+- the job is in `accepted`;
+- one of its live deposits, AUTHORISED or PAID, has `SentToContact` true in our
+  Xero copy (`xero_invoices.raw_json->SentToContact`, read as in
+  `invoice_read_truth.ts`, `docs/invoice-read-truth.md`);
+- the job has no draft deposit left.
+
+`SentToContact` false, or missing from the stored record (not known), is never
+sent, and neither is an AUTHORISED status alone. It is checked on
+`job_deposit_paid` (when the paid rule does not hold) and on every
+`job_deposit_catch_up`, so it needs no sync to see the invoice change. The move
+uses `expected_statuses: ['accepted']`, source `xero_deposit_sent`, and leaves
+GHL alone. Like the paid move, a job a person puts back in Accepted while its
+deposit stays sent is landed again on the next catch-up.
+
 **Deposit paid -> Order Materials or Approvals.** After xero-sync's deposit
 stamp, any change to a deposit invoice (as defined below) of a fencing or patio
 job posts `job_deposit_paid`. That covers paid, authorised (a payment removed),
@@ -66,7 +86,8 @@ Where it goes (`depositPaidTargetStatus`):
 
 After each run, xero-sync also posts `job_deposit_catch_up`. It makes the same
 paid move for every waiting card, which covers a deposit paid before the switch
-was on or before the card reached Accepted. It also checks the flag for every
+was on or before the card reached Accepted, and the Xero-sent landing for every
+accepted card whose deposit is not paid. It also checks the flag for every
 job this module moved.
 
 ## What counts as a deposit, and as paid
@@ -103,8 +124,9 @@ move sit behind it.
 - `off`: nothing is read, moved, texted or logged.
 - `dry_run` (watch only): each move that would happen writes one `job_events`
   row, `deposit_advance_dry_run`, once per job, from-status and target. The row
-  carries `would_move_to`, `would_text_client` and the deposits. Nothing moves
-  and nobody is texted.
+  carries `rule` and `would_move_to`; a paid move adds `would_text_client` and
+  the deposits, a Xero-sent landing adds `sent_in_xero` (the invoice numbers
+  Xero marks sent). Nothing moves and nobody is texted.
 - `live`: jobs move.
 
 Turn on, in this order:
@@ -269,20 +291,21 @@ Both are recorded as `deposit_advance_dry_run` rows on the first `dry_run` run,
 and move on the first `live` run of the xero-sync catch-up. A move to Order
 Materials texts the client then; Will Gethin's move to Approvals sends nothing.
 
-A job already in Accepted whose deposit invoice went out before the deploy (for
-example SWF-261410) does not land in Awaiting Deposit. The landing runs only at
-the send. Such a job moves straight from Accepted to Order Materials when its
-deposit is paid.
+A job already in Accepted whose deposit invoice went out before the deploy
+lands in Awaiting Deposit on the first catch-up only when Xero marks that
+deposit sent. Otherwise it moves straight from Accepted to Order Materials when
+its deposit is paid. Read-only check, 27 Oct 2026: SWF-261410's deposit
+INV-1746 reads `SentToContact` false in our Xero copy, so it does not land.
 
 ## Known gaps
 
 - On a shared fence, if one party's deposit invoice could not be created but
   another party's was sent, the job still lands in Awaiting Deposit. It does not
   move on until the missing party has a deposit of its own, paid in full.
-- A deposit emailed by hand from Xero, or one sent before the deploy, does not
-  land the job in Awaiting Deposit; the job moves on when it is paid. Closing
-  this waits on our Xero copy keeping Xero's sent flag (PR #1166); an
-  AUTHORISED deposit alone is never read as sent.
+- A deposit that went out before the deploy, or outside our send paths, but
+  that Xero does not mark sent (`SentToContact` false or not stored) does not
+  land the job; it moves on when it is paid. Why SWF-261410's sent deposit reads
+  false was not looked into.
 - A credit note that is never allocated against the deposit invoice (raised on
   the client's account and refunded in cash) is not flagged: our copy does not
   mirror client credit notes, so only an allocation against the deposit is seen.
@@ -302,7 +325,8 @@ table. The job events stay as history.
 
 ## Tests
 
-- `supabase/functions/_shared/job_deposit_paid_test.ts`: the rules.
+- `supabase/functions/_shared/job_deposit_paid_test.ts`: the rules, including
+  the Xero-sent landing.
 - `supabase/functions/ops-api/job_deposit_advance_test.ts`: moves, switch, text,
   flag (void, payment off and refund by credit note) and the action door,
   against an in-memory fake.

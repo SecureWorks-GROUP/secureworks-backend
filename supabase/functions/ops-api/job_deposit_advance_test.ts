@@ -44,9 +44,14 @@ class Query {
   private single = false;
   private returning = false;
   private head = false;
+  private projections: { alias: string; col: string; key: string }[] = [];
   constructor(private db: FakeDb, private table: string) {}
-  select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+  select(cols?: string, opts?: { count?: string; head?: boolean }) {
     if (this.mode !== "select") this.returning = true;
+    // A JSON path projection, alias:col->Key, reads like PostgREST: the JSON value, or null.
+    for (const m of String(cols ?? "").matchAll(/(\w+):(\w+)->(\w+)/g)) {
+      this.projections.push({ alias: m[1], col: m[2], key: m[3] });
+    }
     if (opts?.head) this.head = true;
     return this;
   }
@@ -149,6 +154,15 @@ class Query {
       this.from_,
       this.max === null ? undefined : this.from_ + this.max,
     );
+    if (this.projections.length) {
+      hit = hit.map((r) => {
+        const out = { ...r };
+        for (const p of this.projections) {
+          out[p.alias] = r[p.col]?.[p.key] ?? null;
+        }
+        return out;
+      });
+    }
     if (this.single) return { data: hit[0] ?? null, error: null };
     return { data: hit, error: null };
   }
@@ -339,6 +353,159 @@ Deno.test("deposit sent: no deposit invoice, a draft, or another invoice leaves 
     db.rows("jobs").filter((j) => j.status === "accepted").length,
     4,
   );
+});
+
+// ── Landing by Xero's own sent flag ──────────────────────────────────────────
+
+Deno.test("deposit sent in Xero: an accepted job whose deposit Xero marks sent lands in Awaiting Deposit", async () => {
+  const { db, deps, moves, sms } = setup("live");
+  const job = addJob(db, { status: "accepted" });
+  const inv = addDeposit(db, job, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: true },
+  });
+  const r = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: inv.xero_invoice_id,
+    source: "xero_sync",
+  });
+  assertEquals(r.action, "moved");
+  assertEquals(job.status, "awaiting_deposit");
+  assertEquals(moves[0].source, "xero_deposit_sent");
+  assertEquals(moves[0].expected_statuses, ["accepted"]);
+  assertEquals(moves[0].skip_ghl_push, true);
+  assertEquals(sms.length, 0);
+  // Landed, not paid: no move record, so nothing is flagged later.
+  assertEquals(db.rows("job_deposit_advance_state").length, 0);
+  // Then it moves on payment as before.
+  Object.assign(inv, {
+    status: "PAID",
+    amount_due: 0,
+    amount_paid: 2000,
+    fully_paid_on: "2026-10-27",
+  });
+  const paid = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: inv.xero_invoice_id,
+  });
+  assertEquals(paid.action, "moved");
+  assertEquals(job.status, "order_materials");
+});
+
+Deno.test("deposit sent in Xero: not known, false, a draft or status alone leaves it in Accepted", async () => {
+  const { db, deps, moves } = setup("live");
+  // No SentToContact on the stored record: not known, never sent.
+  const unknown = addJob(db, { status: "accepted" });
+  addDeposit(db, unknown, { status: "AUTHORISED", raw_json: {} });
+  const noRaw = addJob(db, { status: "accepted" });
+  addDeposit(db, noRaw, { status: "AUTHORISED" });
+  const notBool = addJob(db, { status: "accepted" });
+  addDeposit(db, notBool, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: "true" },
+  });
+  const no = addJob(db, { status: "accepted" });
+  addDeposit(db, no, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: false },
+  });
+  // A sent deposit beside a draft one: a draft was never sent.
+  const draft = addJob(db, { status: "accepted" });
+  addDeposit(db, draft, {
+    status: "AUTHORISED",
+    reference: `${draft.job_number}-A-DEP50`,
+    raw_json: { SentToContact: true },
+  });
+  addDeposit(db, draft, {
+    status: "DRAFT",
+    reference: `${draft.job_number}-B-DEP50`,
+  });
+  // Xero marks a non-deposit invoice sent: not a deposit (and not the job's pointer).
+  const fin = addJob(db, { status: "accepted", deposit_invoice_id: "x-other" });
+  addDeposit(db, fin, {
+    status: "AUTHORISED",
+    reference: `${fin.job_number}-FINBAL`,
+    raw_json: { SentToContact: true },
+  });
+  for (const job of [unknown, noRaw, notBool, no, draft]) {
+    const r = await depositOnInvoiceChange(deps, { job_id: job.id });
+    assertEquals(r.action, "not_paid");
+  }
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: fin.id })).action,
+    "not_paid",
+  );
+  const catchUp = await depositCatchUp(deps, {});
+  assertEquals(catchUp.results, []);
+  assertEquals(moves.length, 0);
+  assertEquals(
+    db.rows("jobs").filter((j) => j.status === "accepted").length,
+    6,
+  );
+});
+
+Deno.test("deposit sent in Xero: the catch-up lands a deposit sent before the deploy", async () => {
+  const { db, deps, moves } = setup("live");
+  const job = addJob(db, { status: "accepted" });
+  addDeposit(db, job, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: true },
+  });
+  // Already in Awaiting Deposit: the landing does nothing more.
+  const waiting = addJob(db, { status: "awaiting_deposit" });
+  addDeposit(db, waiting, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: true },
+  });
+  const r = await depositCatchUp(deps, {});
+  assertEquals(r.ran, true);
+  assertEquals(r.results?.map((x) => [x.job_id, x.action]), [
+    [job.id, "moved"],
+  ]);
+  assertEquals(job.status, "awaiting_deposit");
+  assertEquals(waiting.status, "awaiting_deposit");
+  assertEquals(moves.length, 1);
+  // The next run finds nothing to do.
+  assertEquals((await depositCatchUp(deps, {})).results, []);
+});
+
+Deno.test("deposit sent in Xero: dry_run records once and moves nothing; off reads nothing", async () => {
+  const { db, deps, moves } = setup("dry_run");
+  const job = addJob(db, { status: "accepted" });
+  addDeposit(db, job, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: true },
+  });
+  const first = await depositCatchUp(deps, {});
+  assertEquals(first.results?.[0].action, "dry_run");
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "dry_run_already_recorded",
+  );
+  assertEquals(job.status, "accepted");
+  assertEquals(moves.length, 0);
+  const rows = events(db, "deposit_advance_dry_run");
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].detail_json.rule, "deposit_sent_in_xero");
+  assertEquals(rows[0].detail_json.from_status, "accepted");
+  assertEquals(rows[0].detail_json.would_move_to, "awaiting_deposit");
+  assertEquals(rows[0].detail_json.sent_in_xero, [
+    db.rows("xero_invoices")[0].invoice_number,
+  ]);
+
+  const off = setup("off");
+  const offJob = addJob(off.db, { status: "accepted" });
+  addDeposit(off.db, offJob, {
+    status: "AUTHORISED",
+    raw_json: { SentToContact: true },
+  });
+  assertEquals(
+    (await depositOnInvoiceChange(off.deps, { job_id: offJob.id })).action,
+    "switch_off",
+  );
+  assertEquals((await depositCatchUp(off.deps, {})).ran, false);
+  assertEquals(offJob.status, "accepted");
+  assertEquals(off.moves.length + off.db.rows("job_events").length, 0);
 });
 
 // ── Paid -> Order Materials / Approvals ──────────────────────────────────────

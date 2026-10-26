@@ -16,6 +16,7 @@ import {
   depositInvoicesSent,
   depositPaidTargetStatus,
   depositReceivedText,
+  depositSentInXero,
   evaluateDepositPaid,
   isDepositAdvanceJobType,
   isDepositInvoice,
@@ -417,6 +418,58 @@ Deno.test("deposit sent: a live sent deposit lands, a draft or none does not", (
   assertEquals(depositInvoicesSent({ job, invoices: [] }).reasons, [
     "no_deposit_invoice",
   ]);
+});
+
+Deno.test("deposit sent in Xero: only Xero's own true flag on a live deposit lands", () => {
+  const sent = inv({
+    status: "AUTHORISED",
+    amount_due: 2000,
+    sent_to_contact: true,
+  });
+  assertEquals(depositSentInXero({ job, invoices: [sent] }), {
+    sent: true,
+    reasons: [],
+    sent_invoices: ["INV-1749"],
+  });
+  // Not known (null or absent) and false are never sent; status alone is never sent.
+  for (const flag of [null, undefined, false]) {
+    assertEquals(
+      depositSentInXero({
+        job,
+        invoices: [{ ...sent, sent_to_contact: flag }],
+      }),
+      { sent: false, reasons: ["not_sent_in_xero"], sent_invoices: [] },
+    );
+  }
+  // A voided deposit marked sent, or a draft beside the sent one, does not land.
+  assertEquals(
+    depositSentInXero({ job, invoices: [{ ...sent, status: "VOIDED" }] })
+      .reasons,
+    ["no_deposit_invoice"],
+  );
+  assertEquals(
+    depositSentInXero({
+      job,
+      invoices: [
+        sent,
+        inv({
+          xero_invoice_id: "x-2",
+          invoice_number: "INV-1750",
+          reference: "SWF-261369-B-DEP50",
+          status: "DRAFT",
+        }),
+      ],
+    }),
+    { sent: false, reasons: ["draft_deposit:INV-1750"], sent_invoices: [] },
+  );
+  // A sent invoice that is not a deposit does not land the job.
+  assertEquals(
+    depositSentInXero({
+      job: { deposit_invoice_id: null },
+      invoices: [{ ...sent, reference: "SWF-261369-FINBAL" }],
+    }).sent,
+    false,
+  );
 });
 
 Deno.test("deposit target: fencing to order materials, patio by council", () => {

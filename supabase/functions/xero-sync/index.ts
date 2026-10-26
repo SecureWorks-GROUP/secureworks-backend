@@ -882,9 +882,10 @@ async function syncInvoices(sb: any) {
           }
 
           // ── Deposit advance: a deposit invoice of a fencing or patio job changed (paid,
-          // voided, a payment taken off). ops-api job_deposit_paid re-checks every deposit
-          // on the job against our Xero copy and moves the job, or flags a lost deposit
-          // (job_deposit_advance.ts). Switch off: nothing is posted. Non-blocking.
+          // voided, a payment taken off, or marked sent by Xero). ops-api job_deposit_paid
+          // re-checks every deposit on the job against our Xero copy and moves the job, or
+          // flags a lost deposit (job_deposit_advance.ts). Switch off: nothing is posted.
+          // Non-blocking.
           if (inv.Type === 'ACCREC' && ['PAID', 'AUTHORISED', 'VOIDED', 'DELETED'].includes(String(inv.Status || '').toUpperCase()) &&
               await depositAdvanceOn(sb)) {
             try {
