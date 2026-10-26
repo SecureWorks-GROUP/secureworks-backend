@@ -22,11 +22,20 @@ function stageChange(stageId: string): Request {
   });
 }
 
-function deps(jobStatus: string, events: unknown[]): GhlWebhookDeps {
+// supabase-js query builders are thenables with no .catch, so the fake insert is too.
+function builder<T>(result: T): PromiseLike<T> {
+  return { then: (onFulfilled, onRejected) => Promise.resolve(result).then(onFulfilled, onRejected) };
+}
+
+function deps(
+  jobStatus: string,
+  events: unknown[],
+  jobEventsError: { message: string } | null = null,
+): GhlWebhookDeps {
   const table = (name: string) => ({
     insert: (row: unknown) => {
       if (name === "job_events") events.push(row);
-      return Promise.resolve({ error: null });
+      return builder({ error: name === "job_events" ? jobEventsError : null });
     },
     select: () => ({
       eq: () => ({
@@ -89,4 +98,27 @@ Deno.test("every stored job status has a rank", async () => {
   for (const status of Object.keys(STATUS_MAP)) {
     assertEquals(typeof STATUS_RANK[status], "number", `unranked status ${status}`);
   }
+});
+
+Deno.test("a backward move writes its ghl_conflict event and answers 200", async () => {
+  const events: { event_type?: string }[] = [];
+  const res = await handleGhlWebhook(
+    stageChange(GHL_PATIO_READY_TO_EXECUTE),
+    deps("order_materials", events),
+  );
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).action, "conflict_logged");
+  assertEquals(events.map((e) => e.event_type), ["ghl_conflict"]);
+});
+
+Deno.test("a failed ghl_conflict write is logged and the card still stays put with a 200", async () => {
+  const events: unknown[] = [];
+  const res = await handleGhlWebhook(
+    stageChange(GHL_PATIO_READY_TO_EXECUTE),
+    deps("awaiting_deposit", events, { message: "insert refused" }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.action, "conflict_logged");
+  assertEquals(body.current, "awaiting_deposit");
 });

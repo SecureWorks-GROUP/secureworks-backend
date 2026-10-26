@@ -234,7 +234,8 @@ async function handleStageChange(sb: any, body: any) {
     console.log(`[ghl-webhook] Conflict: ${job.status} (${currentRank}) → ${newStatus} (${newRank}) — backward move rejected`)
 
     // Log conflict event for Ops Dashboard attention panel
-    await sb.from('job_events').insert({
+    // supabase-js builders return { error } and have no .catch, so check the result.
+    const { error: conflictError } = await sb.from('job_events').insert({
       job_id: job.id,
       event_type: 'ghl_conflict',
       detail_json: {
@@ -245,7 +246,8 @@ async function handleStageChange(sb: any, body: any) {
         pipeline_id: pipelineId,
         message: `GHL backward move rejected: tried ${newStatus} but job is ${job.status}. Check GHL pipeline matches Ops Dashboard.`,
       },
-    }).catch((e: any) => console.error('[ghl-webhook] Failed to log conflict:', e))
+    })
+    if (conflictError) console.error('[ghl-webhook] Failed to log conflict:', conflictError.message)
 
     return jsonResponse({ success: true, action: 'conflict_logged', reason: 'backward_move', current: job.status, attempted: newStatus })
   }
@@ -370,7 +372,7 @@ async function attemptRelink(sb: any, newOpportunityId: string, pipelineId: stri
       .update({ ghl_opportunity_id: newOpportunityId })
       .eq('id', job.id)
 
-    await sb.from('job_events').insert({
+    const { error: relinkLogError } = await sb.from('job_events').insert({
       job_id: job.id,
       event_type: 'ghl_opportunity_relinked',
       detail_json: {
@@ -380,7 +382,8 @@ async function attemptRelink(sb: any, newOpportunityId: string, pipelineId: stri
         match_method: job._matchMethod || 'unknown',
         message: `Re-linked from Sales to Execution pipeline (old: ${oldOppId || 'none'})`,
       },
-    }).catch((e: any) => console.error('[ghl-webhook] Failed to log re-link:', e))
+    })
+    if (relinkLogError) console.error('[ghl-webhook] Failed to log re-link:', relinkLogError.message)
 
     console.log(`[ghl-webhook] Re-linked job ${job.job_number || job.id}: ${oldOppId} → ${newOpportunityId}`)
 
