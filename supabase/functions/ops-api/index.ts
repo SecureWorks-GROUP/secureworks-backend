@@ -1,4 +1,5 @@
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
+import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
@@ -40727,6 +40728,9 @@ async function morningBrief(client: any) {
 function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   if (!scope_json) return []
   const scope = typeof scope_json === 'string' ? JSON.parse(scope_json) : scope_json
+  // A Scope Engine record lists its own sealed lines; office fixings are skipped
+  // (scope_engine_materials.ts). Never the dimension guesses or the pricing fallback.
+  if (isScopeEnginePatioRecord(scope)) return scopeEngineMaterialLines(scope.lines)
   const config = scope.config || scope
 
   const items: any[] = []
