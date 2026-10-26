@@ -882,10 +882,9 @@ async function syncInvoices(sb: any) {
           }
 
           // ── Deposit advance: a deposit invoice of a fencing or patio job changed (paid,
-          // voided, a payment taken off, or marked sent by Xero). ops-api job_deposit_paid
-          // re-checks every deposit on the job against our Xero copy and moves the job, or
-          // flags a lost deposit (job_deposit_advance.ts). Switch off: nothing is posted.
-          // Non-blocking.
+          // voided, a payment taken off). ops-api job_deposit_paid re-checks every deposit
+          // on the job against our Xero copy and moves the job, or flags a lost deposit
+          // (job_deposit_advance.ts). Switch off: nothing is posted. Non-blocking.
           if (inv.Type === 'ACCREC' && ['PAID', 'AUTHORISED', 'VOIDED', 'DELETED'].includes(String(inv.Status || '').toUpperCase()) &&
               await depositAdvanceOn(sb)) {
             try {
@@ -1087,8 +1086,9 @@ async function syncInvoices(sb: any) {
   const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
   // ── Deposit advance catch-up: accepted and awaiting_deposit fencing and patio cards whose
-  //    deposits were paid before the card got there or before the switch was on, and moved
-  //    cards whose deposit was since voided (switch on only; ops-api decides).
+  //    deposits were paid before the card got there or before the switch was on, accepted
+  //    cards whose deposit Xero marks sent (landed in Awaiting Deposit), and moved cards
+  //    whose deposit was since voided (switch on only; ops-api decides).
   let depositCatchUp: unknown = { ran: false, reason: 'switch_off' }
   if (await depositAdvanceOn(sb)) {
     depositCatchUp = await postOpsApi('job_deposit_catch_up', { source: 'job_deposit_catch_up' })

@@ -60,9 +60,9 @@ paths. It lands the job the same way when Xero's own sent flag says so
 - the job has no draft deposit left.
 
 `SentToContact` false, or missing from the stored record (not known), is never
-sent, and neither is an AUTHORISED status alone. It is checked on
-`job_deposit_paid` (when the paid rule does not hold) and on every
-`job_deposit_catch_up`, so it needs no sync to see the invoice change. The move
+sent, and neither is an AUTHORISED status alone. It is checked only on
+`job_deposit_catch_up`, which xero-sync posts after every run, so it needs no
+sync to see the invoice change. The move
 uses `expected_statuses: ['accepted']`, source `xero_deposit_sent`, and leaves
 GHL alone. Like the paid move, a job a person puts back in Accepted while its
 deposit stays sent is landed again on the next catch-up.

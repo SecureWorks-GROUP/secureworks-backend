@@ -364,12 +364,18 @@ Deno.test("deposit sent in Xero: an accepted job whose deposit Xero marks sent l
     status: "AUTHORISED",
     raw_json: { SentToContact: true },
   });
-  const r = await depositOnInvoiceChange(deps, {
-    job_id: job.id,
-    xero_invoice_id: inv.xero_invoice_id,
-    source: "xero_sync",
-  });
-  assertEquals(r.action, "moved");
+  // The invoice change alone does not land it; the catch-up does.
+  assertEquals(
+    (await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: inv.xero_invoice_id,
+      source: "xero_sync",
+    })).action,
+    "not_paid",
+  );
+  assertEquals(job.status, "accepted");
+  const r = await depositCatchUp(deps, {});
+  assertEquals(r.results?.map((x) => x.action), ["moved"]);
   assertEquals(job.status, "awaiting_deposit");
   assertEquals(moves[0].source, "xero_deposit_sent");
   assertEquals(moves[0].expected_statuses, ["accepted"]);
@@ -479,7 +485,7 @@ Deno.test("deposit sent in Xero: dry_run records once and moves nothing; off rea
   const first = await depositCatchUp(deps, {});
   assertEquals(first.results?.[0].action, "dry_run");
   assertEquals(
-    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    (await depositCatchUp(deps, {})).results?.[0].action,
     "dry_run_already_recorded",
   );
   assertEquals(job.status, "accepted");

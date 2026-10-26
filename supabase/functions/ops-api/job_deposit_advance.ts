@@ -10,7 +10,7 @@
 //                           stays in Accepted, and so does a job with no deposit invoice.
 //                           A deposit emailed by hand from Xero, or sent before the deploy,
 //                           lands the same way when Xero's own sent flag says so
-//                           (depositSentInXero), on job_deposit_paid and the catch-up.
+//                           (depositSentInXero), on the catch-up.
 //   - depositOnInvoiceChange xero-sync calls job_deposit_paid when a client sales invoice of
 //                           a fencing or patio job changes: a job in accepted or
 //                           awaiting_deposit where every paying party has a deposit and
@@ -458,26 +458,6 @@ async function landSentInXero(
     };
 }
 
-/** A waiting card: the paid move when its deposits are paid, else the Xero-sent landing
- *  for an accepted card. */
-async function settleWaiting(
-  deps: JobDepositDeps,
-  job: DepositJobRow,
-  facts: DepositFacts,
-  mode: DepositAdvanceMode,
-  source: string,
-): Promise<DepositResult> {
-  const paid = await settlePaid(deps, job, facts, mode, source);
-  if (
-    paid.action !== "not_paid" ||
-    !(DEPOSIT_LAND_FROM_STATUSES as readonly string[]).includes(
-      text(job.status),
-    )
-  ) return paid;
-  const landed = await landSentInXero(deps, job, facts, mode, source);
-  return landed.action === "not_sent" ? paid : landed;
-}
-
 // ── Deposit paid -> Order Materials / Approvals ──────────────────────────────
 
 async function settlePaid(
@@ -750,10 +730,7 @@ export async function depositOnInvoiceChange(
   if (
     (DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(text(job.status))
   ) {
-    return {
-      ok: true,
-      ...(await settleWaiting(deps, job, facts, mode, source)),
-    };
+    return { ok: true, ...(await settlePaid(deps, job, facts, mode, source)) };
   }
   if ((DEPOSIT_FLAG_STATUSES as readonly string[]).includes(text(job.status))) {
     return { ok: true, ...(await checkFlag(deps, job, facts, source)) };
