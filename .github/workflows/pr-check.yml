@@ -253,6 +253,17 @@ jobs:
             supabase/functions/_shared/stage-gate/engine_test.ts \
             supabase/functions/ghl-webhook/stage_rank_test.ts
 
+      # Deposit advance for fencing and patio (docs/job-deposit-advance-v1.md): a
+      # sent deposit lands the job in Awaiting Deposit, every live deposit paid in
+      # full moves it to Order Materials (patio: Approvals unless no council), the
+      # switch (dry_run moves and texts nothing), the once-only client text and the
+      # flag after a void or refund. Every write and SMS is a fake.
+      - name: Test the deposit advance rule, moves, text and flag
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/job_deposit_paid_test.ts \
+            supabase/functions/ops-api/job_deposit_advance_test.ts
+
       # The read-only close-out block the Ops board and job view read (staff only,
       # fencing and patio, one batched read). It imports index.ts, so it runs with
       # the flags of the other index-importing steps (same --no-check reason).

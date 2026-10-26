@@ -436,3 +436,7 @@ job_closeout_backlog_preview # probe=source-only
 # Paid-invoice receipt for fencing and patio (job_receipt.ts): Xero emails each newly paid client invoice once
 job_receipt_paid # probe=source-only
 job_receipt_catch_up # probe=source-only
+# Deposit advance for fencing and patio (job_deposit_advance.ts): deposit sent -> Awaiting Deposit, paid -> Order Materials / Approvals
+job_deposit_paid # probe=source-only
+job_deposit_catch_up # probe=source-only
+clear_job_deposit_flag # probe=source-only

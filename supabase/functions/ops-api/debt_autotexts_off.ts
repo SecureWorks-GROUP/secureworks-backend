@@ -1,10 +1,14 @@
 // Our automated money messages are switched off (captain, 30 Sep 2026: "all off").
 // Xero's own reminder emails stay on permanently.
 //
-// One recorded exception (captain, 20 Oct 2026), receipts only: Xero emails each paid
+// Recorded exception (captain, 20 Oct 2026), receipts only: Xero emails each paid
 // invoice of a fencing or patio job as its receipt (job_receipt.ts,
 // docs/job-receipt-v1.md, behind job_closeout_settings.receipt_sender_mode). It asks for
-// no money. Everything below stays off.
+// no money. A second (captain, 26 Oct 2026): when a paid deposit moves a fencing or patio
+// job to Order Materials, the client gets one "deposit received, ordering your materials"
+// text (job_deposit_advance.ts, docs/job-deposit-advance-v1.md, behind
+// job_closeout_settings.deposit_advance_mode). It asks for no money either. Everything
+// below stays off.
 //
 // Every money message to a customer now goes through the Debt Workshop
 // (docs/debt-workshop/README.md), one guarded send at a time. These paths send nothing:
