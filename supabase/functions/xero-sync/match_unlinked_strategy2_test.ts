@@ -435,3 +435,69 @@ Deno.test("explicit SES invoice bindings still refuse auto-linking", async () =>
   );
   assertEquals(refusal?.code, "sealed_ses_release_required");
 });
+
+// ════════════════════════════════════════════════════════════
+// INT-14 — can an invoice→job decision move revenue? (CFO side, case b)
+//
+// The rule, word for word in both workflows' records and in Context's test:
+//   An invoice→job decision decides only which job an invoice counts on, never
+//   its money: total, amount due, amount paid and status come only from Xero's
+//   own record. xero-sync's reference and exact client-name links may set the
+//   job on an invoice that has none, and never move one already on a job. A
+//   Context decision never writes the invoice row, so it never moves revenue.
+// ════════════════════════════════════════════════════════════
+
+const MONEY_FIELDS = ["total", "sub_total", "total_tax", "amount_due", "amount_paid", "status", "fully_paid_on", "line_items"];
+
+function invoiceLinkWrites(calls: Call[]) {
+  return calls.filter((c) => c.table === "xero_invoices" && c.update);
+}
+
+Deno.test("INT-14: a client_name_exact link writes only the job, never the invoice's money", async () => {
+  const { client, calls } = makeClient({
+    unlinked: UNLINKED,
+    jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
+  });
+  const result = await matchUnlinkedInvoices(client);
+  assertEquals(result.matched, 1);
+  const writes = invoiceLinkWrites(calls);
+  assertEquals(writes.length, 1);
+  assertEquals(Object.keys(writes[0].update as Record<string, unknown>).sort(), ["job_id", "updated_at"]);
+  for (const f of MONEY_FIELDS) assert(!(f in (writes[0].update as Record<string, unknown>)), `link must not write ${f}`);
+});
+
+Deno.test("INT-14: a client_name_exact link never moves an invoice already on a job", async () => {
+  const { client, calls } = makeClient({
+    unlinked: UNLINKED,
+    jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
+  });
+  await matchUnlinkedInvoices(client);
+  const writes = invoiceLinkWrites(calls);
+  assertEquals(writes.length, 1);
+  // Guarded in the write itself: a job set between the read and the write is kept.
+  assert(
+    writes[0].filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null),
+    `the link write must be guarded by job_id is null; got ${JSON.stringify(writes[0].filters)}`,
+  );
+});
+
+Deno.test("INT-14: the reference link writes only the job, and only onto an invoice with none", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const at = src.indexOf("export async function matchUnlinkedInvoices");
+  const fn = src.slice(at, src.indexOf("// Strategy 2: Contact name matches", at));
+  assertStringIncludes(fn, ".is('job_id', null)\n      .eq('invoice_type', type)");
+  assertStringIncludes(
+    fn,
+    ".update({ job_id: job.id, updated_at: new Date().toISOString() })\n            .eq('id', inv.id)\n            .is('job_id', null)",
+  );
+});
+
+Deno.test("INT-14: only invoices with no job are candidates for a link", async () => {
+  const { client, calls } = makeClient({ unlinked: [] });
+  await matchUnlinkedInvoices(client);
+  const reads = calls.filter((c) => c.table === "xero_invoices" && c.select && !c.update);
+  assert(reads.length >= 1);
+  for (const r of reads) {
+    assert(r.filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null), "candidate read must be job_id is null");
+  }
+});

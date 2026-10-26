@@ -1235,9 +1235,11 @@ export async function matchUnlinkedInvoices(client: any) {
             continue
           }
 
+          // INT-14: a link only places an invoice that has no job; it never moves one.
           await client.from('xero_invoices')
             .update({ job_id: job.id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
+            .is('job_id', null)
 
           if (await automationLaneEnabled(client, 'capture')) {
             await insertCapturedEvidence(client, {
@@ -1294,6 +1296,7 @@ export async function matchUnlinkedInvoices(client: any) {
           await client.from('xero_invoices')
             .update({ job_id: jobs[0].id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
+            .is('job_id', null)
 
           if (await automationLaneEnabled(client, 'capture')) {
             await insertCapturedEvidence(client, {
