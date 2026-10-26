@@ -222,6 +222,17 @@ flag when a new one replaces it). A later change to the
 deposits (another invoice voided or unpaid, or another reason) can raise a new
 one.
 
+**One refund can raise two flags.** Xero takes the payment off before the
+credit note is allocated. If xero-sync reads the invoice between those two
+steps, it sees it AUTHORISED with money due and raises `deposit_unpaid`. Once
+the credit note is allocated the invoice reads PAID again, but that flag stays
+open and its words ("Deposit no longer paid") no longer match the invoice.
+When a person clears it, the next check finds the new credit note and raises
+`deposit_credited` for the same refund, naming the credit note
+(`credit_note_numbers`), because a cleared flag only stops the same reason on
+the same invoice. Expect the second flag: it confirms how the refund
+was made. Clear it the same way.
+
 ## Actions
 
 | Action | Caller | What it does |
