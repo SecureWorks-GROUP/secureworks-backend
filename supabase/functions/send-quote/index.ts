@@ -98,6 +98,7 @@ import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote
 // match_status + extraction enqueue). When OFF, legacy raw insert.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { customerModelViewerUrl, findCustomerModel, readCustomerModel } from './customer_model.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
 import { inspectSealedSesJob } from '../_shared/sealed_ses_money_fence.ts'
 import {
@@ -125,6 +126,8 @@ const FROM_EMAIL = Deno.env.get('FROM_EMAIL') || 'quotes@secureworksgroup.app'
 const FROM_NAME = Deno.env.get('FROM_NAME') || 'SecureWorks Group'
 const BASE_URL = Deno.env.get('PUBLIC_URL') || SUPABASE_URL
 const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://secureworks-website.pages.dev/quote.html'
+// The customer 3D page's static viewer (customer_model.ts): it reads send-quote/model with the quote's token.
+const CUSTOMER_MODEL_VIEWER_BASE = Deno.env.get('CUSTOMER_MODEL_VIEWER_URL') || 'https://secureworks-group.github.io/secureworks-ux/quote/3d.html'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 let _xeroAppKey: Promise<string> | null = null
@@ -1314,6 +1317,28 @@ serve(async (req: Request) => {
     }
 
     // ── CLIENT VIEWS QUOTE ──
+    // ── CUSTOMER 3D PAGE (customer_model.ts, flag customer_3d_page_v1, off) ──
+    // 3d: the link the quote shows; it goes to the static viewer page. model: the model JSON that page reads.
+    if ((path === '3d' || path === 'model') && req.method === 'GET') {
+      const token = url.searchParams.get('token')
+      const found = await findCustomerModel(sb, token)
+      if (path === '3d') {
+        if (!found.ok) {
+          if (found.reason === 'read_failed') return await htmlResponse(quoteViewRetryPage())
+          return await htmlResponse(errorPage('The 3D view is not available for this quote.'))
+        }
+        return Response.redirect(customerModelViewerUrl(CUSTOMER_MODEL_VIEWER_BASE, token!), 302)
+      }
+      const noStore = { ...corsHeaders, 'Cache-Control': 'private, no-store' }
+      if (!found.ok) {
+        if (found.reason === 'read_failed') return jsonResponse({ error: 'unavailable' }, 503, noStore)
+        return jsonResponse({ error: 'not_available' }, 404, noStore)
+      }
+      const read = await readCustomerModel(sb, found)
+      if (!read.ok) return jsonResponse({ error: 'unavailable' }, 503, noStore)
+      return jsonResponse({ rev_label: read.revLabel, model: read.model }, 200, noStore)
+    }
+
     if (path === 'view' && req.method === 'GET') {
       const token = url.searchParams.get('token')
       if (!token) return await htmlResponse(errorPage('Invalid link'))
@@ -1520,6 +1545,13 @@ serve(async (req: Request) => {
         }
       }
 
+      // The customer 3D page link (customer_model.ts): only with the flag on and a model on the current
+      // frozen revision. Any read failure leaves the link off; the quote itself never waits on it.
+      let model3dUrl: string | null = null
+      try {
+        if ((await findCustomerModel(sb, token)).ok) model3dUrl = `${BASE_URL}/functions/v1/send-quote/3d?token=${encodeURIComponent(token)}`
+      } catch { model3dUrl = null }
+
       // ── HTML REDIRECT (Slice 3) ──
       // Single-option docs with an html_url → redirect the client directly to the
       // interactive HTML quote. Docs with html_url NULL fall through to buildClientPage
@@ -1541,12 +1573,12 @@ serve(async (req: Request) => {
           htmlExists = false  // missing / network error / timeout -> safe fallback
         }
         if (htmlExists) {
-          return Response.redirect(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(doc.html_url)}`, 302)
+          return Response.redirect(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(doc.html_url)}${model3dUrl ? `&model3d=${encodeURIComponent(model3dUrl)}` : ''}`, 302)
         }
         // Object missing — fall through to the reliable server-rendered client page below
       }
 
-      return await htmlResponse(buildClientPage(doc, token, heroUrl))
+      return await htmlResponse(buildClientPage(doc, token, heroUrl, model3dUrl))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -3905,7 +3937,7 @@ function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string, heroUrl: string | null = null): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null, model3dUrl: string | null = null): string {
   // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
@@ -4026,6 +4058,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       <div class="mob-divider"></div>
       <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
       <a href="${doc.pdf_url}" download class="btn-mob-secondary">Download PDF</a>
+      ${model3dUrl ? `<a href="${model3dUrl}" target="_blank" rel="noopener" class="btn-mob-secondary">See it in 3D</a>` : ''}
       ${!isAccepted && !isDeclined ? `
       <div class="mob-actions-sep">
         <button class="btn btn-accept" onclick="respondToQuote('accept')" style="margin-bottom:8px;">Accept Quote</button>
@@ -4037,6 +4070,8 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
   <!-- Actions + chrome -->
   <div class="container">
     ${statusHtml}
+
+    ${model3dUrl ? `<p style="margin:0 0 16px;"><a href="${model3dUrl}" target="_blank" rel="noopener" style="color:#F15A29;font-weight:700;text-decoration:none;">See it in 3D: turn it round and zoom in &rarr;</a></p>` : ''}
 
     ${!isAccepted && !isDeclined ? `
     <div class="actions-card">

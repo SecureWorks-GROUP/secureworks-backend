@@ -32,7 +32,10 @@ export type EvidenceFlagKey =
   // The GHL call transcript fetcher (context slice T2). Its own flag, never
   // evidence_transcript_capture (the retired Whisper path's): off until the
   // milestone switch MS5-T, after the extended G-ANON check.
-  | "ghl_call_transcript_fetch_v1";
+  | "ghl_call_transcript_fetch_v1"
+  // The customer 3D page (send-quote customer_model.ts): off until the owner
+  // says yes to a new customer page.
+  | "customer_3d_page_v1";
 
 /**
  * Returns true when the flag is ON. Default OFF on any error.
