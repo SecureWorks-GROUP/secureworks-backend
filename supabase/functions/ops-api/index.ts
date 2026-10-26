@@ -18608,7 +18608,7 @@ async function listPOs(client: any, params: URLSearchParams) {
   const supplier = params.get('supplier')
 
   let query = client.from('purchase_orders')
-    .select('*, jobs:job_id(job_number, client_name, type), communications:po_communications(id, direction, from_email, subject, created_at, communication_type)')
+    .select('*, jobs:job_id(job_number, client_name, type, status), communications:po_communications(id, direction, from_email, subject, created_at, communication_type)')
     .eq('org_id', DEFAULT_ORG_ID)
     .neq('status', 'deleted')
     .order('created_at', { ascending: false })
@@ -18626,6 +18626,9 @@ async function listPOs(client: any, params: URLSearchParams) {
     job_number: po.jobs?.job_number || null,
     client_name: po.jobs?.client_name || null,
     job_type: po.jobs?.type || null,
+    // The job's status, so the Purchase Orders board can keep orders on
+    // finished jobs off it. Null when the order has no job.
+    job_status: po.jobs?.status || null,
     jobs: undefined,
   }))
 
