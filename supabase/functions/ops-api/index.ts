@@ -1357,6 +1357,7 @@ import {
   markReconNotJobRelated as _markReconNotJobRelated,
 } from './materials_recon.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
+import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
 import {
   MAKESAFE_COST_REPORT_ACTION,
@@ -8879,6 +8880,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const out = action === 'job_profit'
           ? await jobProfitAction(client, url.searchParams)
           : await jobProfitListAction(client, url.searchParams)
+        return json(out.body, out.status)
+      }
+      // ── Job trace (INT-34) — read only; the chain link by link. An
+      //    admin/owner session gets the Money-page figures, the ops key the
+      //    figure-free shape (job_trace.ts) ──
+      case 'job_trace': {
+        const view = jobTraceView(authMode, authUser?.role)
+        if (!view) {
+          return json({
+            ok: false,
+            code: 'operator_access_required',
+            error: 'job_trace requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        const out = await jobTraceAction(client, url.searchParams, view)
         return json(out.body, out.status)
       }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))

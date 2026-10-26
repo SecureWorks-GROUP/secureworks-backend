@@ -193,6 +193,10 @@ job_financials_detail
 job_profit                # probe=bounded-refusal
 job_profit_list           # probe=bounded-refusal probe-args=limit=0
 
+# ── Job trace (INT-34) — read-only, ops key (figure-free) or admin/owner ──
+# A bare GET refuses its missing job_number before any read.
+job_trace                 # probe=bounded-refusal
+
 # ── Make-safe audit — read-only; the compact pipeline reader the intake-audit
 #    and close-out-audit skills depend on (retires the per-job sw_job_detail loop) ──
 makesafe_audit
