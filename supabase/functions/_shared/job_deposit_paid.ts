@@ -18,12 +18,21 @@
 // The pointer alone is not enough: it is overwritten per invoice on a shared fence and it
 // never names a deposit made by hand in Xero.
 //
-// "Paid" (captain answer 3, 26 Oct 2026): every live deposit invoice (not voided or
-// deleted) is PAID with nothing left due. A part payment never counts, a draft never
-// counts, and a job with no live deposit invoice is not paid. On a shared fence that is
-// every party's deposit, whichever party it belongs to.
+// "Paid" (captain answer 3, 26 Oct 2026): every paying party has a live deposit invoice,
+// and every live deposit invoice (not voided or deleted) is PAID with nothing left due. A
+// part payment never counts, a draft never counts, and a job with no live deposit invoice
+// is not paid. The paying parties and which party an invoice belongs to are the paid
+// close-out's rule (_shared/job_paid_closeout.ts payingParties, invoicePartyKey): on a
+// shared fence that is the owner and each neighbour with a share, so a party whose
+// deposit was never raised holds the job back.
 
 import { parseReference } from "../ops-api/debt_ws_rules.ts";
+import {
+  type CloseoutParty,
+  invoicePartyKey,
+  OWNER_KEY,
+  payingParties,
+} from "./job_paid_closeout.ts";
 
 /** The only job types the deposit advance touches. */
 export const DEPOSIT_ADVANCE_JOB_TYPES = ["fencing", "patio"] as const;
@@ -75,6 +84,9 @@ export interface DepositInvoice {
   amount_due: number | string | null;
   amount_paid: number | string | null;
   fully_paid_on: string | null;
+  /** Which party the invoice is for (invoicePartyKey); absent reads as null. */
+  job_contact_id?: string | null;
+  xero_contact_id?: string | null;
 }
 
 export interface DepositView {
@@ -86,8 +98,8 @@ export interface DepositView {
 
 export interface DepositPaidVerdict {
   paid: boolean;
-  /** Why not, as codes: "no_deposit_invoice", "draft_deposit:INV-1", "part_paid:INV-1",
-   *  "unpaid_deposit:INV-1". Empty when paid. */
+  /** Why not, as codes: "no_deposit_invoice", "party_without_deposit:B",
+   *  "draft_deposit:INV-1", "part_paid:INV-1", "unpaid_deposit:INV-1". Empty when paid. */
   reasons: string[];
   deposits: DepositView[];
   /** The newest fully_paid_on among the live deposits (YYYY-MM-DD), or null. */
@@ -154,14 +166,39 @@ export function depositInvoicePaidInFull(inv: DepositInvoice): boolean {
   return upper(inv.status) === "PAID" && money(inv.amount_due) <= PAID_TOLERANCE;
 }
 
+/** The paying parties (job_contacts rows) with no live deposit invoice of their own. */
+function partiesWithoutDeposit(
+  live: DepositInvoice[],
+  parties: CloseoutParty[],
+): string[] {
+  const paying = payingParties(parties);
+  const keys = new Set(live.map((inv) =>
+    invoicePartyKey({
+      ...inv,
+      job_contact_id: inv.job_contact_id ?? null,
+      xero_contact_id: inv.xero_contact_id ?? null,
+    }, paying)
+  ));
+  if (paying.length === 0) return keys.has(OWNER_KEY) ? [] : ["owner"];
+  return paying.filter((p) => !keys.has(p.id)).map((p) =>
+    p.contact_label ? upper(p.contact_label) : p.is_primary ? "owner" : p.id
+  );
+}
+
 /** The paid rule. Pure. */
 export function evaluateDepositPaid(input: {
   job: Pick<DepositJob, "deposit_invoice_id">;
   invoices: DepositInvoice[];
+  parties: CloseoutParty[];
 }): DepositPaidVerdict {
   const live = liveDepositInvoices(input.invoices, input.job.deposit_invoice_id);
   const reasons: string[] = [];
   if (live.length === 0) reasons.push("no_deposit_invoice");
+  else {
+    for (const party of partiesWithoutDeposit(live, input.parties)) {
+      reasons.push(`party_without_deposit:${party}`);
+    }
+  }
   for (const inv of live) {
     const status = upper(inv.status);
     if (status === "PAID") {
@@ -246,11 +283,16 @@ export interface DepositFlag {
  * `countedIds` are the invoices that counted when the job moved (the automatic move
  * records them); when empty (a job a person moved on), only a voided or deleted deposit
  * invoice can raise the flag.
+ *
+ * `cleared` is the flag a person already cleared (captain answer 8: a person decides):
+ * the same reason on the same invoice is never raised again, only another one.
  */
 export function depositFlagFor(input: {
   job: Pick<DepositJob, "deposit_invoice_id" | "status">;
   invoices: DepositInvoice[];
+  parties: CloseoutParty[];
   countedIds: string[];
+  cleared?: { reason: string | null; xero_invoice_id: string | null } | null;
 }): DepositFlag | null {
   if (
     !(DEPOSIT_FLAG_STATUSES as readonly string[]).includes(
@@ -260,12 +302,22 @@ export function depositFlagFor(input: {
   const pointer = input.job.deposit_invoice_id;
   const counted = new Set(input.countedIds.map(text).filter(Boolean));
   const deposits = input.invoices.filter((inv) => isDepositInvoice(inv, pointer));
-  if (evaluateDepositPaid({ job: input.job, invoices: input.invoices }).paid) {
+  const wasCleared = (reason: DepositFlagReason, inv: DepositInvoice) =>
+    !!input.cleared && input.cleared.reason === reason &&
+    text(input.cleared.xero_invoice_id) === text(inv.xero_invoice_id);
+  if (
+    evaluateDepositPaid({
+      job: input.job,
+      invoices: input.invoices,
+      parties: input.parties,
+    }).paid
+  ) {
     return null;
   }
   const voided = deposits.find((inv) =>
     isVoided(inv.status) &&
-    (counted.size === 0 || counted.has(text(inv.xero_invoice_id)))
+    (counted.size === 0 || counted.has(text(inv.xero_invoice_id))) &&
+    !wasCleared("deposit_voided", inv)
   );
   if (voided) {
     return {
@@ -277,7 +329,7 @@ export function depositFlagFor(input: {
   }
   const unpaid = deposits.find((inv) =>
     counted.has(text(inv.xero_invoice_id)) && !isVoided(inv.status) &&
-    !depositInvoicePaidInFull(inv)
+    !depositInvoicePaidInFull(inv) && !wasCleared("deposit_unpaid", inv)
   );
   if (unpaid) {
     return {

@@ -10,8 +10,8 @@
 //                           stays in Accepted, and so does a job with no deposit invoice.
 //   - depositOnInvoiceChange xero-sync calls job_deposit_paid when a client sales invoice of
 //                           a fencing or patio job changes: a job in accepted or
-//                           awaiting_deposit whose every live deposit invoice is paid in full
-//                           moves to order_materials (patio: approvals while council is
+//                           awaiting_deposit where every paying party has a deposit and
+//                           every live deposit invoice is paid in full moves to order_materials (patio: approvals while council is
 //                           needed or not decided), compare and set on those two statuses,
 //                           source xero_deposit_paid; a job already moved on is checked for a
 //                           voided or no-longer-paid deposit, which is flagged for a person.
@@ -23,9 +23,9 @@
 //
 // The client text (captain answer 6): live mode only, only on an automatic move to Order
 // Materials, once per job (job_deposit_advance_state.text_status is claimed before the
-// send), only when the deposit was paid in the last DEPOSIT_TEXT_WITHIN_DAYS, never for a
-// hand move, through ghl-proxy send_sms (the shared sender policy and contact guard). A
-// patio move to Approvals sends nothing: "ordering your materials" would not be true yet.
+// send), never for a hand move, through ghl-proxy send_sms (the shared sender policy and
+// contact guard). A patio move to Approvals sends nothing: council comes before materials,
+// so "we're now ordering your materials" would not be true yet.
 //
 // GHL (captain answer 7): these moves pass skip_ghl_push, so the GHL opportunity is left
 // alone.
@@ -54,17 +54,14 @@ import {
   isDepositAdvanceJobType,
   isDepositInvoice,
 } from "../_shared/job_deposit_paid.ts";
+import type { CloseoutParty } from "../_shared/job_paid_closeout.ts";
 import type { SmsSendResult } from "./job_closeout.ts";
 
-/** The client text goes only when the deposit was paid this recently, so a card that
- *  waited (paid during the watch-only week, or before the switch existed) moves quietly. */
-export const DEPOSIT_TEXT_WITHIN_DAYS = 3;
 /** Jobs per page when the catch-up reads every candidate card. */
 const JOB_PAGE_SIZE = 500;
 const JOB_PAGES_MAX = 10;
 /** Ids per PostgREST .in() filter. */
 const ID_CHUNK = 50;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const DEPOSIT_PAID_SOURCE = "xero_deposit_paid";
 export const DEPOSIT_SENT_SOURCE = "deposit_invoice_sent";
@@ -134,15 +131,18 @@ export interface DepositStateRow {
   counted_invoice_ids: string[] | null;
   text_status: string | null;
   flag: string | null;
+  flag_invoice_id: string | null;
   flag_cleared_at: string | null;
 }
 
 const JOB_COLUMNS =
   "id, job_number, type, status, deposit_invoice_id, council_required, client_name, ghl_contact_id, deposit_at";
 const INVOICE_COLUMNS =
-  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on";
+  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on, job_contact_id, xero_contact_id";
+const PARTY_COLUMNS =
+  "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id";
 const STATE_COLUMNS =
-  "job_id, moved_at, moved_to, counted_invoice_ids, text_status, flag, flag_cleared_at";
+  "job_id, moved_at, moved_to, counted_invoice_ids, text_status, flag, flag_invoice_id, flag_cleared_at";
 
 function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   const out: T[][] = [];
@@ -190,18 +190,38 @@ async function loadJob(
   return data ?? null;
 }
 
-async function loadInvoices(
+export interface DepositFacts {
+  invoices: DepositInvoice[];
+  parties: CloseoutParty[];
+}
+
+/** Each job's client sales invoices and its party rows; null when either read fails. */
+async function loadFacts(
   // deno-lint-ignore no-explicit-any
   client: any,
   jobIds: string[],
-): Promise<Map<string, (DepositInvoice & { job_id: string })[]> | null> {
-  return await readByJob(
-    client,
-    "xero_invoices",
-    INVOICE_COLUMNS,
-    jobIds,
-    (q) => q.eq("invoice_type", "ACCREC"),
-  );
+): Promise<Map<string, DepositFacts> | null> {
+  const [invoices, parties] = await Promise.all([
+    readByJob<DepositInvoice & { job_id: string }>(
+      client,
+      "xero_invoices",
+      INVOICE_COLUMNS,
+      jobIds,
+      (q) => q.eq("invoice_type", "ACCREC"),
+    ),
+    readByJob<CloseoutParty & { job_id: string }>(
+      client,
+      "job_contacts",
+      PARTY_COLUMNS,
+      jobIds,
+    ),
+  ]);
+  if (!invoices || !parties) return null;
+  const out = new Map<string, DepositFacts>();
+  for (const id of jobIds) {
+    out.set(id, { invoices: invoices.get(id) ?? [], parties: parties.get(id) ?? [] });
+  }
+  return out;
 }
 
 async function loadState(
@@ -319,9 +339,9 @@ export async function depositInvoiceSent(
   if (!(DEPOSIT_LAND_FROM_STATUSES as readonly string[]).includes(text(job.status))) {
     return { ...base, action: "not_in_from_status", detail: job.status };
   }
-  const invoices = await loadInvoices(deps.client, [job.id]);
-  if (!invoices) return { ...base, action: "facts_unreadable" };
-  const rows = invoices.get(job.id) ?? [];
+  const facts = await loadFacts(deps.client, [job.id]);
+  if (!facts) return { ...base, action: "facts_unreadable" };
+  const rows = facts.get(job.id)?.invoices ?? [];
   if (input.xero_invoice_id) {
     const sentInvoice = rows.find((r) => text(r.xero_invoice_id) === text(input.xero_invoice_id));
     const status = text(sentInvoice?.status).toUpperCase();
@@ -360,16 +380,10 @@ export async function depositInvoiceSent(
 
 // ── Deposit paid -> Order Materials / Approvals ──────────────────────────────
 
-function paidRecently(lastPaidOn: string | null, now: Date): boolean {
-  if (!lastPaidOn) return false;
-  return now.getTime() - new Date(`${lastPaidOn}T23:59:59Z`).getTime() <=
-    DEPOSIT_TEXT_WITHIN_DAYS * DAY_MS;
-}
-
 async function settlePaid(
   deps: JobDepositDeps,
   job: DepositJobRow,
-  invoices: DepositInvoice[],
+  facts: DepositFacts,
   mode: DepositAdvanceMode,
   source: string,
 ): Promise<DepositResult> {
@@ -377,7 +391,7 @@ async function settlePaid(
   if (!(DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(text(job.status))) {
     return { ...base, action: "not_in_from_status", detail: job.status };
   }
-  const verdict = evaluateDepositPaid({ job, invoices });
+  const verdict = evaluateDepositPaid({ job, ...facts });
   if (!verdict.paid) return { ...base, action: "not_paid", detail: verdict.reasons };
   const target = depositPaidTargetStatus(job);
   if (!target) return { ...base, action: "no_target" };
@@ -387,8 +401,7 @@ async function settlePaid(
       action: await recordDryRun(deps, job, {
         rule: "deposit_paid",
         would_move_to: target,
-        would_text_client: target === DEPOSIT_ORDER_MATERIALS_STATUS &&
-          paidRecently(verdict.last_paid_on, deps.now()),
+        would_text_client: target === DEPOSIT_ORDER_MATERIALS_STATUS,
         council_required: job.council_required ?? null,
         last_paid_on: verdict.last_paid_on,
         deposits: depositSummary(verdict),
@@ -428,7 +441,7 @@ async function settlePaid(
   }
   let textResult = "not_order_materials";
   if (target === DEPOSIT_ORDER_MATERIALS_STATUS) {
-    textResult = await sendDepositText(deps, job, verdict, !stateErr);
+    textResult = await sendDepositText(deps, job, !stateErr);
   }
   return { ...base, action: "moved", detail: { to: target }, text: textResult };
 }
@@ -437,7 +450,6 @@ async function settlePaid(
 async function sendDepositText(
   deps: JobDepositDeps,
   job: DepositJobRow,
-  verdict: DepositPaidVerdict,
   stateWritten: boolean,
 ): Promise<string> {
   const { client } = deps;
@@ -467,16 +479,14 @@ async function sendDepositText(
     .select("job_id");
   if (claimErr) return "claim_failed";
   if (!Array.isArray(claimed) || claimed.length === 0) return "already_claimed";
-  if (!paidRecently(verdict.last_paid_on, deps.now())) {
-    return await finish("not_recent", { last_paid_on: verdict.last_paid_on });
-  }
   if (!text(job.ghl_contact_id)) return await finish("no_contact");
   const { count, error: priorErr } = await client.from("email_events")
     .select("id", { count: "exact", head: true })
     .eq("job_id", job.id)
     .eq("comms_trigger", DEPOSIT_TEXT_COMMS_TRIGGER)
     .eq("status", "sent");
-  if (priorErr) return await finish("unconfirmed", { text_error: "prior_send_unreadable" });
+  // Nothing was sent: the earlier sends could not be read, so it is not risked.
+  if (priorErr) return await finish("prior_send_unreadable");
   if ((count || 0) > 0) return await finish("already_sent");
   const message = depositReceivedText(job.client_name);
   let result: SmsSendResult;
@@ -516,7 +526,7 @@ async function sendDepositText(
 async function checkFlag(
   deps: JobDepositDeps,
   job: DepositJobRow,
-  invoices: DepositInvoice[],
+  facts: DepositFacts,
   source: string,
 ): Promise<DepositResult> {
   const base = { job_id: job.id, job_number: job.job_number };
@@ -531,8 +541,11 @@ async function checkFlag(
   if (!moved && !text(job.deposit_at)) return { ...base, action: "no_flag" };
   const flag: DepositFlag | null = depositFlagFor({
     job,
-    invoices,
+    ...facts,
     countedIds: moved ? (state.row?.counted_invoice_ids ?? []) : [],
+    cleared: state.row?.flag_cleared_at
+      ? { reason: state.row.flag, xero_invoice_id: state.row.flag_invoice_id }
+      : null,
   });
   if (!flag) return { ...base, action: "no_flag" };
   const nowIso = deps.now().toISOString();
@@ -587,9 +600,10 @@ export async function depositOnInvoiceChange(
   if (!isDepositAdvanceJobType(job.type)) {
     return { ok: true, ...base, action: "not_deposit_type" };
   }
-  const invoices = await loadInvoices(deps.client, [job.id]);
-  if (!invoices) return { ok: true, ...base, action: "facts_unreadable" };
-  const rows = invoices.get(job.id) ?? [];
+  const allFacts = await loadFacts(deps.client, [job.id]);
+  if (!allFacts) return { ok: true, ...base, action: "facts_unreadable" };
+  const facts = allFacts.get(job.id) ?? { invoices: [], parties: [] };
+  const rows = facts.invoices;
   const xeroInvoiceId = text(body.xero_invoice_id);
   if (xeroInvoiceId) {
     const changed = rows.find((r) => text(r.xero_invoice_id) === xeroInvoiceId);
@@ -598,10 +612,10 @@ export async function depositOnInvoiceChange(
     }
   }
   if ((DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(text(job.status))) {
-    return { ok: true, ...(await settlePaid(deps, job, rows, mode, source)) };
+    return { ok: true, ...(await settlePaid(deps, job, facts, mode, source)) };
   }
   if ((DEPOSIT_FLAG_STATUSES as readonly string[]).includes(text(job.status))) {
-    return { ok: true, ...(await checkFlag(deps, job, rows, source)) };
+    return { ok: true, ...(await checkFlag(deps, job, facts, source)) };
   }
   return { ok: true, ...base, action: "not_in_from_status", detail: job.status };
 }
@@ -639,17 +653,18 @@ export async function depositCatchUp(
     }
   }
   const all = [...waiting, ...movedJobs];
-  const invoices = await loadInvoices(deps.client, all.map((j) => j.id));
-  if (!invoices) return { ok: false, ran: false, reason: "invoices_unreadable" };
+  const facts = await loadFacts(deps.client, all.map((j) => j.id));
+  if (!facts) return { ok: false, ran: false, reason: "invoices_unreadable" };
+  const factsFor = (id: string): DepositFacts =>
+    facts.get(id) ?? { invoices: [], parties: [] };
   const results: DepositResult[] = [];
   for (const job of waiting) {
-    const rows = invoices.get(job.id) ?? [];
-    // Only a card with every live deposit paid can move; the rest are not listed.
-    if (!evaluateDepositPaid({ job, invoices: rows }).paid) continue;
-    results.push(await settlePaid(deps, job, rows, mode, source));
+    // Only a card whose deposits pass the paid rule can move; the rest are not listed.
+    if (!evaluateDepositPaid({ job, ...factsFor(job.id) }).paid) continue;
+    results.push(await settlePaid(deps, job, factsFor(job.id), mode, source));
   }
   for (const job of movedJobs) {
-    const r = await checkFlag(deps, job, invoices.get(job.id) ?? [], source);
+    const r = await checkFlag(deps, job, factsFor(job.id), source);
     if (r.action !== "no_flag") results.push(r);
   }
   return {

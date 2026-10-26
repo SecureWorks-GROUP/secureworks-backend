@@ -337,6 +337,31 @@ Deno.test("deposit paid: a shared fence moves only when every party has paid", a
   assertEquals(job.status, "order_materials");
 });
 
+Deno.test("deposit paid: a shared fence never moves while a paying party has no deposit", async () => {
+  const { db, deps, moves, sms } = setup("live");
+  const job = addJob(db);
+  db.rows("job_contacts").push(
+    { id: "jc-a", job_id: job.id, contact_label: "A", is_primary: true, share_percentage: 50, removed_at: null, status: "active", xero_contact_id: null },
+    { id: "jc-b", job_id: job.id, contact_label: "B", is_primary: false, share_percentage: 50, removed_at: null, status: "active", xero_contact_id: null },
+  );
+  const a = addDeposit(db, job, { reference: `${job.job_number}-A-DEP50` });
+  const r = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: a.xero_invoice_id });
+  assertEquals([r.action, r.detail], ["not_paid", ["party_without_deposit:B"]]);
+  assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
+  assertEquals(job.status, "awaiting_deposit");
+  assertEquals(moves.length + sms.length, 0);
+  // The neighbour's deposit is raised and paid: the job moves.
+  const b = addDeposit(db, job, { reference: `${job.job_number}-B-DEP50`, job_contact_id: "jc-b" });
+  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: b.xero_invoice_id })).action, "moved");
+  assertEquals(job.status, "order_materials");
+  // The party read failing moves nothing.
+  const other = addJob(db);
+  addDeposit(db, other);
+  db.failures.job_contacts = "boom";
+  assertEquals((await depositOnInvoiceChange(deps, { job_id: other.id })).action, "facts_unreadable");
+  assertEquals(other.status, "awaiting_deposit");
+});
+
 Deno.test("deposit paid: a hand-made Xero deposit that is not the job's pointer is counted", async () => {
   const { db, deps } = setup("live");
   const job = addJob(db);
@@ -419,13 +444,15 @@ Deno.test("deposit paid: dry_run moves and texts nothing and records once", asyn
   assertEquals(dry[1].detail_json.would_move_to, "awaiting_deposit");
 });
 
-Deno.test("deposit text: not sent for an old payment, no contact, or a prior send", async () => {
-  const old = setup("live");
-  const j1 = addJob(old.db);
-  addDeposit(old.db, j1, { fully_paid_on: "2026-10-10" });
-  const r1 = await depositOnInvoiceChange(old.deps, { job_id: j1.id });
-  assertEquals([r1.action, r1.text], ["moved", "not_recent"]);
-  assertEquals(old.sms.length, 0);
+Deno.test("deposit text: not sent with no contact, a prior send, or prior sends unreadable", async () => {
+  const unreadable = setup("live");
+  const j1 = addJob(unreadable.db);
+  addDeposit(unreadable.db, j1);
+  unreadable.db.failures.email_events = "boom";
+  const r1 = await depositOnInvoiceChange(unreadable.deps, { job_id: j1.id });
+  assertEquals([r1.action, r1.text], ["moved", "prior_send_unreadable"]);
+  assertEquals(unreadable.sms.length, 0);
+  assertEquals(unreadable.db.rows("job_deposit_advance_state")[0].text_status, "prior_send_unreadable");
 
   const noContact = setup("live");
   const j2 = addJob(noContact.db, { ghl_contact_id: null });
@@ -462,9 +489,9 @@ Deno.test("deposit catch-up: a card paid before the switch was on moves on the f
   assertEquals(vicky.status, "order_materials");
   assertEquals(waiting.status, "awaiting_deposit");
   assertEquals(r.results.length, 1);
-  // Paid six days ago: it moves quietly.
-  assertEquals(r.results[0].text, "not_recent");
-  assertEquals(sms.length, 0);
+  // Paid six days ago, before the switch was on: the client is still texted once.
+  assertEquals(r.results[0].text, "sent");
+  assertEquals(sms.length, 1);
 });
 
 // ── Voided or refunded after the move ────────────────────────────────────────
@@ -491,6 +518,39 @@ Deno.test("deposit flag: a void after the move is flagged once, never moved back
   assertEquals((await loadDepositFlags(db, [job.id]))?.size, 0);
   const twice = await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: null }, deps);
   assertEquals(twice.body.action, "no_open_flag");
+  // The same void seen again (the sync overlap, or another deposit changing): it stays cleared.
+  const replacement = addDeposit(db, job, { status: "AUTHORISED", amount_due: 2000, amount_paid: 0 });
+  const again = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: replacement.xero_invoice_id });
+  assertEquals(again.action, "no_flag");
+  assertEquals(events(db, "deposit_flagged").length, 1);
+  assertEquals((await loadDepositFlags(db, [job.id]))?.size, 0);
+});
+
+Deno.test("deposit flag: after a clear, another reason or invoice raises a new flag", async () => {
+  const { db, deps } = setup("live");
+  const job = addJob(db);
+  const first = addDeposit(db, job);
+  const second = addDeposit(db, job, { reference: `${job.job_number}-DEP2` });
+  await depositOnInvoiceChange(deps, { job_id: job.id });
+  assertEquals(job.status, "order_materials");
+  first.status = "VOIDED";
+  second.status = "AUTHORISED";
+  Object.assign(second, { amount_due: 2000, amount_paid: 0 });
+  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: first.xero_invoice_id })).detail, {
+    reason: "deposit_voided",
+    xero_invoice_id: first.xero_invoice_id,
+    invoice_number: first.invoice_number,
+    invoice_status: "VOIDED",
+  });
+  await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: null }, deps);
+  // The void is dealt with, but the other counted deposit is no longer paid: another
+  // reason on another invoice, so a new flag.
+  const r = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: second.xero_invoice_id });
+  assertEquals(r.action, "flagged");
+  assertEquals((r.detail as any).reason, "deposit_unpaid");
+  assertEquals((r.detail as any).xero_invoice_id, second.xero_invoice_id);
+  assertEquals(events(db, "deposit_flagged").length, 2);
+  assertEquals((await loadDepositFlags(db, [job.id]))?.size, 1);
 });
 
 Deno.test("deposit flag: a refund on a job the catch-up checks is flagged", async () => {

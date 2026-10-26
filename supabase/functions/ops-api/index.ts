@@ -40840,6 +40840,12 @@ async function createDepositInvoice(client: any, body: any) {
     metadata: { operator: body.operator_email || body.user_email || null },
   })
 
+  // Xero emailed the deposit invoice to the client: a fencing or patio job still in
+  // Accepted lands in Awaiting Deposit.
+  if (invoiceResult.emailed === true) {
+    await landJobAfterDepositInvoiceSent(client, jId, invoiceResult.xero_invoice_id, 'create_deposit_invoice')
+  }
+
   return {
     success: true,
     job_id: jId,

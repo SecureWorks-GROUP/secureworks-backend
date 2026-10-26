@@ -5,7 +5,8 @@ deposit, so nobody tracks each job by hand.
 
 - Accepted with no deposit invoice: the job stays in **Accepted**.
 - Its deposit invoice went out: it moves to **Awaiting Deposit**.
-- Every live deposit invoice is paid in full: it moves to **Order Materials**.
+- Every paying party has a deposit invoice and every live deposit invoice is
+  paid in full: it moves to **Order Materials**.
   A patio job goes to **Approvals** instead while council is needed or not
   decided.
 
@@ -29,7 +30,9 @@ Migration: `20261026160000_job_deposit_advance.sql`.
 - `send_acceptance_invoice` (the online accept, from send-quote), only when the
   branded Pay Now email went out;
 - `approve_and_send_invoice`, after the branded or the plain Xero email;
-- `send_invoice_email`, after the Xero or the enhanced send.
+- `send_invoice_email`, after the Xero or the enhanced send;
+- `create_deposit_invoice` (MCP `sw_create_deposit_invoice`), when Xero accepted
+  the email it was asked to send.
 
 The move happens only when:
 - the job is in `accepted`;
@@ -72,11 +75,20 @@ A deposit invoice is any ACCREC invoice on the job that matches either:
 The pointer alone is not enough. It is overwritten per invoice on a shared
 fence, and it never names a deposit made by hand in Xero.
 
-Paid means every live deposit invoice (not voided or deleted) is PAID with
-nothing left due. So:
+Paid means every paying party has a live deposit invoice of its own, and every
+live deposit invoice (not voided or deleted) is PAID with nothing left due. So:
 - a part payment never counts, and neither does a draft;
 - a job with no live deposit invoice is not paid;
-- on a shared fence, every party's deposit must be paid (captain answer 3).
+- on a shared fence, every party's deposit must be paid (captain answer 3). A
+  party whose deposit invoice was never raised holds the job back
+  (`party_without_deposit:<label>`).
+
+The paying parties, and which party an invoice belongs to, are the paid
+close-out's rule (`_shared/job_paid_closeout.ts`, `payingParties` and
+`invoicePartyKey`): `job_contacts` rows not removed whose share is not an
+explicit 0, or the job's client when there are none. An invoice belongs to the
+party its `job_contact_id` names, else the share letter on its reference, else
+its Xero contact, else the job's own client.
 
 ## The switch
 
@@ -118,16 +130,16 @@ How it is sent:
 - If one was already sent by hand, the automatic one is skipped.
 
 It is not sent when:
-- the move is a patio move to Approvals ("ordering your materials" would not be
-  true yet);
+- the move is a patio move to Approvals. Council comes before materials there,
+  so "we're now ordering your materials" would not be true yet, and nothing in
+  this flow texts the client later when the patio reaches Order Materials;
 - a person moved the job;
-- the deposit was paid more than 3 days ago (`DEPOSIT_TEXT_WITHIN_DAYS`), so a
-  card that waited, through the watch-only week for example, moves quietly;
 - the job has no GHL contact.
 
 Outcomes on `text_status`: `sent`, `refused` (a 4xx: nothing went), `unconfirmed`
-(may have reached GHL, never retried), `no_contact`, `not_recent` or
-`already_sent`. Each one writes one `deposit_received_text` job event.
+(may have reached GHL, never retried), `no_contact`, `prior_send_unreadable`
+(the earlier sends could not be read, so nothing was sent) or `already_sent`.
+Each one writes one `deposit_received_text` job event.
 
 This is the second recorded exception to the 30 Sep 2026 money-messages ruling
 (`ops-api/debt_autotexts_off.ts`). Like the receipts, it asks for no money.
@@ -182,8 +194,10 @@ check".
 **Clearing a flag:** `POST ops-api?action=clear_job_deposit_flag` with
 `{ "job_id": "<uuid>" }`, signed-in staff (admin, owner, ops_manager) or the
 server key. It answers `{ ok, job_id, action: "cleared" | "no_open_flag" }` and
-writes a `deposit_flag_cleared` job event. A cleared flag stops showing. A later
-change to the deposits can raise a new one.
+writes a `deposit_flag_cleared` job event. A cleared flag stops showing and is
+never raised again for the same reason and invoice. A later change to the
+deposits (another invoice voided or unpaid, or another reason) can raise a new
+one.
 
 ## Actions
 
@@ -218,8 +232,8 @@ they qualify under:
   needed.
 
 Both are recorded as `deposit_advance_dry_run` rows on the first `dry_run` run,
-and move on the first `live` run of the xero-sync catch-up. Both deposits were
-paid more than 3 days before then, so neither is texted.
+and move on the first `live` run of the xero-sync catch-up. A move to Order
+Materials texts the client then; Will Gethin's move to Approvals sends nothing.
 
 A job already in Accepted whose deposit invoice went out before the deploy (for
 example SWF-261410) does not land in Awaiting Deposit. The landing runs only at
@@ -229,8 +243,12 @@ deposit is paid.
 ## Known gaps
 
 - On a shared fence, if one party's deposit invoice could not be created but
-  another party's was sent, the job still lands in Awaiting Deposit. The paid
-  move counts only the deposits that exist.
+  another party's was sent, the job still lands in Awaiting Deposit. It does not
+  move on until the missing party has a deposit of its own, paid in full.
+- A deposit emailed by hand from Xero, or one sent before the deploy, does not
+  land the job in Awaiting Deposit; the job moves on when it is paid.
+- A deposit refunded through a credit note (the invoice stays PAID) is not
+  flagged; only a void or a payment taken off is.
 - The flag is checked only when xero-sync sees one of the job's invoices change,
   and on the catch-up for jobs this module moved. A job a person moved on is
   flagged only on a void of a deposit xero-sync had stamped paid

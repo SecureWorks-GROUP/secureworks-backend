@@ -1,9 +1,9 @@
 -- Deposit advance for fencing and patio jobs (captain, 26 Oct 2026).
 --
 -- The pipeline moves a fencing or patio job along by its deposit: a job whose deposit
--- invoice went out lands in Awaiting Deposit, and a job whose every live deposit invoice
--- is paid in full moves to Order Materials (patio: Approvals while council is needed or
--- not decided). The rule is supabase/functions/_shared/job_deposit_paid.ts; the reads,
+-- invoice went out lands in Awaiting Deposit, and a job where every paying party has a
+-- deposit and every live deposit invoice is paid in full moves to Order Materials (patio:
+-- Approvals while council is needed or not decided). The rule is supabase/functions/_shared/job_deposit_paid.ts; the reads,
 -- moves, the client text and the flag are supabase/functions/ops-api/job_deposit_advance.ts;
 -- the contract is docs/job-deposit-advance-v1.md. This migration ships only the switch and
 -- the per-job record, the switch OFF:
@@ -46,7 +46,7 @@ BEGIN
 END $$;
 
 COMMENT ON COLUMN public.job_closeout_settings.deposit_advance_mode IS
-  'Deposit advance (20261026160000): off | dry_run | live. live: a fencing or patio job whose deposit invoice was emailed moves accepted -> awaiting_deposit, and one whose every live deposit invoice is paid in full moves accepted or awaiting_deposit -> order_materials (patio: approvals unless council_required is false), texting the client once on a move to order_materials (ops-api job_deposit_advance.ts). dry_run: one job_events row deposit_advance_dry_run per move that would happen, nothing moved or sent. The database switch alone decides. Change with UPDATE.';
+  'Deposit advance (20261026160000): off | dry_run | live. live: a fencing or patio job whose deposit invoice was emailed moves accepted -> awaiting_deposit, and one where every paying party has a deposit and every live deposit invoice is paid in full moves accepted or awaiting_deposit -> order_materials (patio: approvals unless council_required is false), texting the client once on a move to order_materials (ops-api job_deposit_advance.ts). dry_run: one job_events row deposit_advance_dry_run per move that would happen, nothing moved or sent. The database switch alone decides. Change with UPDATE.';
 
 -- ── 2. The per-job record ────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.job_deposit_advance_state (
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS public.job_deposit_advance_state (
   moved_source        text,
   counted_invoice_ids text[] NOT NULL DEFAULT '{}',
   last_paid_on        date,
-  text_status         text CHECK (text_status IN ('claimed', 'sent', 'refused', 'unconfirmed', 'no_contact', 'not_recent', 'already_sent')),
+  text_status         text CHECK (text_status IN ('claimed', 'sent', 'refused', 'unconfirmed', 'no_contact', 'prior_send_unreadable', 'already_sent')),
   text_at             timestamptz,
   text_message_id     text,
   text_error          text,
@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_job_deposit_advance_state_open_flag
   WHERE flag IS NOT NULL AND flag_cleared_at IS NULL;
 
 COMMENT ON TABLE public.job_deposit_advance_state IS
-  'Deposit advance (20261026160000): per fencing or patio job, the automatic paid-deposit move (moved_at, moved_from, moved_to, counted_invoice_ids: the deposit invoices that counted), the once-only client text (text_status claimed before the send, then sent | refused | unconfirmed | no_contact | not_recent | already_sent; never re-sent), and the open flag a person decides on when a deposit is voided (deposit_voided) or no longer paid in full (deposit_unpaid) after the job moved on; the job is never moved back. Written only by ops-api job_deposit_advance.ts.';
+  'Deposit advance (20261026160000): per fencing or patio job, the automatic paid-deposit move (moved_at, moved_from, moved_to, counted_invoice_ids: the deposit invoices that counted), the once-only client text (text_status claimed before the send, then sent | refused | unconfirmed | no_contact | prior_send_unreadable | already_sent; never re-sent), and the open flag a person decides on when a deposit is voided (deposit_voided) or no longer paid in full (deposit_unpaid) after the job moved on; the job is never moved back. Written only by ops-api job_deposit_advance.ts.';
 
 ALTER TABLE public.job_deposit_advance_state ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.job_deposit_advance_state FROM PUBLIC, anon, authenticated;
