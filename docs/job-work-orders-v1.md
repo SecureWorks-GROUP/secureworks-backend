@@ -520,6 +520,20 @@ backfill's apply.
 A draft anyone has written into, and every approved work order, is left alone.
 Rules, line shape and flags: `docs/quote-work-order-lines-v1.md`.
 
+The fill also stores the frozen scope revision the lines came from on the row,
+`work_orders.quote_filled_scope_revision_id` (`20261020120000`, Dispatch S6,
+R7), in the same write. A trigger allows it only while a draft, only to a
+frozen or superseded revision of the same job, never clears it, and changes it
+only when a cleared draft (no lines, no agreed labour) is refilled, possibly
+from a newer revision. It is never a hand edit or part of the sealed content
+hash. It is null
+on crew work orders and on job work orders filled before that migration (no
+backfill: it would move a draft's `updated_at`, and approved rows are sealed).
+The staff read's `filled_from` answers from the column first, else the newest
+`job_work_order_draft_filled_from_quote` event for that work order; a draft
+stamped `quote_filled_at` with neither reads as unknown (`unreadable: true`),
+since a fill stands even when its event could not be written.
+
 ## API for the screens
 
 All on `ops-api`. Staff = ops server key, or a signed-in admin/owner/ops_manager.
@@ -527,7 +541,7 @@ Errors are `{error, code}`.
 
 | action | method | who | input | output |
 | --- | --- | --- | --- | --- |
-| `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[], quote_fill, needs_checking}`; `needs_checking` is the office note (see "Automatic issue"); `quote_fill` is `{filled, reason, scope_revision_id, needs_review, code?}` (`code` only when the fill failed) when this read tried to fill an untouched draft from the quote, else null |
+| `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[], quote_fill, filled_from, needs_checking}`; `filled_from` is `{scope_revision_id, source: "work_order" \| "fill_event" \| null, unreadable}` for the work order shown (`unreadable: true` when the fill event read failed, which is unknown, never "not filled"); `needs_checking` is the office note (see "Automatic issue"); `quote_fill` is `{filled, reason, scope_revision_id, needs_review, code?}` (`code` only when the fill failed) when this read tried to fill an untouched draft from the quote, else null |
 | `list_work_orders` | GET | staff | `kind=job`, optional `status` (draft, approved), `type` (fencing, patio), `job_id` | `{schema:"job-work-orders.v1", kind:"job", work_orders[] (row + job_number, client_name, job_type, job_status, site_suburb, figures for approved ones), total}`. Without `kind=job` the old list, crew work orders only: a job work order is never in it. |
 | `create_work_order` | POST | staff | `{kind:"job", job_id, ...draft fields}` | `{created, work_order, quote_fill}`: the open draft, else a new draft, filled from the quote unless the call sent `scope_items` or `agreed_labour_ex`; 409 `work_order_sealed` once the job's work order is approved |
 | `update_work_order` | POST | staff | `{id, scope_items?, special_instructions?, agreed_labour_ex?, scheduled_date?, site_address?}` | `{work_order}`; approved returns 409 `work_order_sealed`; a `status` other than `draft` returns 400 `invalid_status` |
@@ -560,7 +574,8 @@ labour its invoice bills on the job).
 Work order row fields: `id, job_id, wo_number, kind, status, scope_items,
 special_instructions, scheduled_date, site_address, agreed_labour_ex,
 approved_at, approved_by, approved_via, sealed_content_hash, origin,
-quote_filled_at, hand_edited_at, created_at, updated_at`. `approved_via` is
+quote_filled_at, quote_filled_scope_revision_id, hand_edited_at, created_at,
+updated_at`. `approved_via` is
 `session`, `terminal` or `auto` (issued by the system, `approved_by` null).
 
 Each customer variation row (the `customer_variation` of a write,

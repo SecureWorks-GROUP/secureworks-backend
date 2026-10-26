@@ -932,6 +932,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Paid close-out review switch: the per-job
                       # review_opt_out columns (job_closeout.ts).
                       ("20261020093000", "job_review_opt_out"),
+                      # S6 (R7): the scope revision a job work order was
+                      # filled from (job_work_orders.ts).
+                      ("20261020120000", "job_work_order_fill_revision"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
