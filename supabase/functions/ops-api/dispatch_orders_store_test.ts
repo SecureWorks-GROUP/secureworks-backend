@@ -189,6 +189,7 @@ const SCHEMA: Record<string, string[]> = {
     "delivery_sighted_at",
     "delivery_sighted_by",
     "delivery_sighted_by_email",
+    "quote_builder_version_id",
   ],
   job_order_emails: [
     "id",
@@ -497,6 +498,15 @@ function makeDb(initial = seed()) {
     const execute = (): any => {
       if (failures.has(`${request.kind}:${table}`)) {
         return violation("XX000", `forced failure on ${request.kind} ${table}`);
+      }
+      // `select:<table>:<column>` fails only the selects naming that column.
+      if (
+        request.kind === "select" &&
+        columnsOf(request.select).some(([, e]) =>
+          failures.has(`select:${table}:${baseColumn(e)}`)
+        )
+      ) {
+        return violation("XX000", `forced failure on select ${table}`);
       }
       const rows = tables[table] ||= [];
       const named = [
@@ -3188,4 +3198,58 @@ Deno.test("gate: the routine key is refused on all eleven before any call; a wri
     await get.body?.cancel();
     assertEquals(calls, []);
   });
+});
+
+Deno.test("read: the job's open orders from outside Dispatch are listed before a send, with no price", async () => {
+  const db = withLines();
+  await create(db);
+  db.tables.purchase_orders.push(
+    {
+      id: uuid("c9", 1),
+      org_id: ORG,
+      job_id: JOB.fence,
+      po_number: "PO-0901",
+      supplier_name: "Example Steel",
+      supplier_id: SUP.steel,
+      source: null,
+      status: "submitted",
+      subtotal: 812.5,
+      total: 893.75,
+      created_at: "2026-10-01T00:00:00Z",
+    },
+    {
+      // Billed already: not an open order.
+      id: uuid("c9", 2),
+      org_id: ORG,
+      job_id: JOB.fence,
+      po_number: "PO-0902",
+      supplier_name: "Example Sheets",
+      source: null,
+      status: "authorised",
+      subtotal: 100,
+      xero_bill_id: "bill-1",
+      created_at: "2026-10-02T00:00:00Z",
+    },
+  );
+  const read = await get(db, "dispatch_order_emails", { job_id: JOB.fence });
+  assertEquals(read.other_open_orders_status, "ok");
+  assertEquals(
+    read.other_open_orders.map((o: any) => [o.po_number, o.origin, o.priced]),
+    [["PO-0901", "office_or_xero", true]],
+  );
+  assert(read.other_open_orders_note.includes("PO-0901 (Example Steel)"));
+  assert(!JSON.stringify(read.other_open_orders).includes("812"));
+  assertEquals(read.drafts.length, 1);
+});
+
+Deno.test("read: a failed read of the other orders answers failed, never none, and the drafts still show", async () => {
+  const db = withLines();
+  await create(db);
+  // Only the other-orders read selects quote_builder_version_id.
+  db.failures.add("select:purchase_orders:quote_builder_version_id");
+  const read = await get(db, "dispatch_order_emails", { job_id: JOB.fence });
+  assertEquals(read.other_open_orders_status, "failed");
+  assertEquals("other_open_orders" in read, false);
+  assertEquals("other_open_orders_note" in read, false);
+  assertEquals(read.drafts.length, 1);
 });
