@@ -20,7 +20,9 @@ Code:
   and the flag.
 - `supabase/functions/xero-sync/index.ts`: calls in after its deposit stamp.
 
-Migration: `20261026160000_job_deposit_advance.sql`.
+Migrations: `20261026160000_job_deposit_advance.sql`, then
+`20261027120000_job_deposit_credit_note_flag.sql` (the refund by credit note
+flag). Apply each before its matching ops-api.
 
 ## The two moves
 
@@ -161,11 +163,25 @@ The flag reason is one of:
   and its party has no other live deposit paid in full.
 - `deposit_unpaid`: a counted deposit is no longer paid in full, for example a
   payment taken off for a refund.
+- `deposit_credited`: a client credit note was allocated against a counted
+  deposit after the move. This is the usual Xero refund: the payment is taken
+  off, a credit note is allocated and refunded, and the invoice reads PAID with
+  nothing due again, so neither rule above sees it.
+
+How the credit note is seen: our Xero copy already keeps the credit notes
+allocated against each invoice (`xero_invoices.raw_json->CreditNotes`, from
+Xero's own invoice record, re-read by xero-sync when the allocation changes the
+invoice). The move records the credit notes already allocated against the
+counted deposits (`job_deposit_advance_state.counted_credit_note_ids`). Only a
+credit note that is not in that list raises the flag: one that was there at the
+move, such as a rounding credit that closed the invoice, is part of how it was
+paid. A void or a payment still off is the stronger reason and is named first.
 
 A void whose replacement deposit for the same party is paid in full flags
 nothing. A party that never had a deposit holds the move back but is never a
 flag. Each flag writes
-one `deposit_flagged` job event. The flag is recorded in `dry_run` and in `live`,
+one `deposit_flagged` job event (a `deposit_credited` one also lists the new
+credit note numbers, `credit_note_numbers`). The flag is recorded in `dry_run` and in `live`,
 because it is a record, not a move. xero-sync's existing
 `job.deposit_stamp_contradicted` event is unchanged.
 
@@ -191,9 +207,10 @@ The flag shape:
 }
 ```
 
-`reason` is `deposit_voided` or `deposit_unpaid`. Suggested words:
-"Deposit voided after move - check" and "Deposit no longer paid after move -
-check".
+`reason` is `deposit_voided`, `deposit_unpaid` or `deposit_credited`. For
+`deposit_credited`, `invoice_status` is usually `PAID`. Suggested words:
+"Deposit voided after move - check", "Deposit no longer paid after move -
+check" and "Deposit refunded by credit note after move - check".
 
 **Clearing a flag:** `POST ops-api?action=clear_job_deposit_flag` with
 `{ "job_id": "<uuid>" }`, signed-in staff (admin, owner, ops_manager) or the
@@ -255,8 +272,9 @@ deposit is paid.
   land the job in Awaiting Deposit; the job moves on when it is paid. Closing
   this waits on our Xero copy keeping Xero's sent flag (PR #1166); an
   AUTHORISED deposit alone is never read as sent.
-- A deposit refunded through a credit note (the invoice stays PAID) is not
-  flagged; only a void or a payment taken off is.
+- A credit note that is never allocated against the deposit invoice (raised on
+  the client's account and refunded in cash) is not flagged: our copy does not
+  mirror client credit notes, so only an allocation against the deposit is seen.
 - The flag is checked only when xero-sync sees one of the job's deposit invoices change,
   and on the catch-up for every job this module moved that has no open flag (a
   cleared flag is checked again, and never raised again). A job a person moved
@@ -264,15 +282,20 @@ deposit is paid.
 
 ## Rollback
 
+`supabase/rollbacks/20261027120000_job_deposit_credit_note_flag_down.sql` first
+(it takes off any open `deposit_credited` flag and drops
+`counted_credit_note_ids`), then
 `supabase/rollbacks/20261026160000_job_deposit_advance_down.sql`. Roll back the
-matching ops-api and xero-sync first, because they read the column and the
+matching ops-api and xero-sync first, because they read the columns and the
 table. The job events stay as history.
 
 ## Tests
 
 - `supabase/functions/_shared/job_deposit_paid_test.ts`: the rules.
 - `supabase/functions/ops-api/job_deposit_advance_test.ts`: moves, switch, text,
-  flag and the action door, against an in-memory fake.
+  flag (void, payment off and refund by credit note) and the action door,
+  against an in-memory fake.
 - `supabase/functions/ghl-webhook/stage_rank_test.ts`: the rank.
-- The migration contract
-  `supabase/tests/migration-contracts/20261026160000_job_deposit_advance/`.
+- The migration contracts
+  `supabase/tests/migration-contracts/20261026160000_job_deposit_advance/` and
+  `supabase/tests/migration-contracts/20261027120000_job_deposit_credit_note_flag/`.

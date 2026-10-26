@@ -959,7 +959,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261026120000", "dispatch_v2_scope_fills"),
                       # Deposit advance: the move switch and the per-job
                       # move and flag state (job_deposit_advance.ts).
-                      ("20261026160000", "job_deposit_advance")]:
+                      ("20261026160000", "job_deposit_advance"),
+                      # Deposit credit note flag: the credit notes counted at
+                      # the move and the widened flag check.
+                      ("20261027120000", "job_deposit_credit_note_flag")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

@@ -932,3 +932,7 @@ ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_de
 ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_deposit_advance_state.cleared_flags
 ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|policy|job_deposit_advance_state.job_deposit_advance_state_service_role_all
 xero-sync|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_closeout_settings.deposit_advance_mode
+# Deposit credit note flag: the paid move writes counted_credit_note_ids and the flag
+# check reads it; the widened flag check keeps its name, so the ledger version and
+# the column prove it landed. ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261027120000_job_deposit_credit_note_flag.sql|column|job_deposit_advance_state.counted_credit_note_ids
