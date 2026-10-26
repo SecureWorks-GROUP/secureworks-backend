@@ -32,7 +32,9 @@ Migration: `20261026160000_job_deposit_advance.sql`.
 - `approve_and_send_invoice`, after the branded or the plain Xero email;
 - `send_invoice_email`, after the Xero or the enhanced send;
 - `create_deposit_invoice` (MCP `sw_create_deposit_invoice`), when Xero accepted
-  the email it was asked to send.
+  the email it was asked to send;
+- `create_unified_invoice`, after the branded email or the Xero email it was
+  asked to send.
 
 The move happens only when:
 - the job is in `accepted`;
@@ -119,7 +121,8 @@ The text goes only:
 It says: "Hi {first name}, Thanks, we've received your deposit. We're now
 ordering your materials and we'll be in touch to book your install. Cheers,
 Shaun". This is the old client-comms `deposit_paid` template reworded with no em
-dashes, and ops-api `send_client_update` `deposit_paid` now sends the same words.
+dashes. Only the automatic move sends it: a hand `send_client_update`
+`deposit_paid` keeps its own words and footer, unchanged.
 
 How it is sent:
 - `job_deposit_advance_state.text_status` is claimed before the send.
@@ -248,7 +251,9 @@ deposit is paid.
   another party's was sent, the job still lands in Awaiting Deposit. It does not
   move on until the missing party has a deposit of its own, paid in full.
 - A deposit emailed by hand from Xero, or one sent before the deploy, does not
-  land the job in Awaiting Deposit; the job moves on when it is paid.
+  land the job in Awaiting Deposit; the job moves on when it is paid. Closing
+  this waits on our Xero copy keeping Xero's sent flag (PR #1166); an
+  AUTHORISED deposit alone is never read as sent.
 - A deposit refunded through a credit note (the invoice stays PAID) is not
   flagged; only a void or a payment taken off is.
 - The flag is checked only when xero-sync sees one of the job's invoices change,

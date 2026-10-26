@@ -351,7 +351,8 @@ export function depositFlagFor(input: {
 /**
  * The client text on a paid-deposit move to Order Materials (captain answer 6, 26 Oct
  * 2026). The old client-comms deposit_paid template, reworded to the owner-comms rule (no
- * em dashes). ops-api sendClientUpdate's deposit_paid template is this same text.
+ * em dashes). Only the automatic move sends it; ops-api sendClientUpdate's hand-sent
+ * deposit_paid template is its own, unchanged.
  */
 export const DEPOSIT_RECEIVED_TEXT_TEMPLATE =
   "Hi {name},\nThanks, we've received your deposit. We're now ordering your materials and we'll be in touch to book your install.\nCheers, Shaun";

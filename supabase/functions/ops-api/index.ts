@@ -1499,7 +1499,6 @@ import {
   loadDepositFlags,
   runJobDepositAction,
 } from './job_deposit_advance.ts'
-import { DEPOSIT_RECEIVED_TEXT_TEMPLATE } from '../_shared/job_deposit_paid.ts'
 import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
@@ -40999,6 +40998,11 @@ async function createUnifiedInvoice(client: any, body: any) {
     }
   }
 
+  // A deposit invoice that reached the client lands its job in Awaiting Deposit.
+  if (brandedEmailSent || invoiceResult.emailed === true) {
+    await landJobAfterDepositInvoiceSent(client, jId, invoiceResult.xero_invoice_id, 'create_unified_invoice')
+  }
+
   // Log event
   await client.from('job_events').insert({
     job_id: jId,
@@ -62376,8 +62380,7 @@ export function streetFromAddress(address: string | null | undefined): string {
 const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string }> = {
   quote_sent: { channel: 'email', template: 'Hi {name}, your quote for {service} at {address} is ready. View it here: {link}' },
   quote_accepted: { channel: 'sms', template: 'Thanks for choosing SecureWorks! Your deposit invoice is on its way.' },
-  // The deposit advance's text (job_deposit_advance.ts), one wording for both senders.
-  deposit_paid: { channel: 'sms', template: DEPOSIT_RECEIVED_TEXT_TEMPLATE },
+  deposit_paid: { channel: 'sms', template: "Deposit received! We're ordering your materials and scheduling your install." },
   materials_ordered: { channel: 'sms', template: 'Your materials have been ordered. Expected delivery: {delivery_date}.' },
   council_submitted: { channel: 'sms', template: "We've submitted your application to {council}. Typical processing: 2-4 weeks." },
   council_approved: { channel: 'sms', template: "Great news! Your {service} has been approved. We'll confirm install dates shortly." },
@@ -62512,10 +62515,10 @@ export async function sendClientUpdate(client: any, body: any) {
     message = message.replace(new RegExp(`\\{${k}\\}`, 'g'), v)
   }
 
-  // Append cross-sell footer for SMS — except install_rescheduled and deposit_paid, whose
-  // wording is approved verbatim and ends "Cheers, Shaun".
+  // Append cross-sell footer for SMS — except install_rescheduled, whose wording
+  // is approved verbatim and ends "Cheers, Shaun".
   const channel = overrideChannel || tmpl?.channel || 'sms'
-  if (channel === 'sms' && comms_trigger !== 'install_rescheduled' && comms_trigger !== 'deposit_paid') {
+  if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }
 
