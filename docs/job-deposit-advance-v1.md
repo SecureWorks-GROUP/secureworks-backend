@@ -46,9 +46,9 @@ under the calling path's own source name. A failed send never calls it, so that
 job stays in Accepted, and so does a job with no deposit invoice.
 
 **Deposit paid -> Order Materials or Approvals.** After xero-sync's deposit
-stamp, any change to a client sales invoice of a fencing or patio job posts
-`job_deposit_paid`. That covers paid, authorised (a payment removed), voided and
-deleted. ops-api then re-reads our Xero copy (`xero_invoices`) and moves the job
+stamp, any change to a deposit invoice (as defined below) of a fencing or patio
+job posts `job_deposit_paid`. That covers paid, authorised (a payment removed),
+voided and deleted. ops-api then re-reads our Xero copy (`xero_invoices`) and moves the job
 only when it is in `accepted` or `awaiting_deposit` and the paid rule holds. The
 move uses `expected_statuses: ['accepted', 'awaiting_deposit']` and source
 `xero_deposit_paid`. A job someone already moved on is never moved, and nothing
@@ -256,7 +256,7 @@ deposit is paid.
   AUTHORISED deposit alone is never read as sent.
 - A deposit refunded through a credit note (the invoice stays PAID) is not
   flagged; only a void or a payment taken off is.
-- The flag is checked only when xero-sync sees one of the job's invoices change,
+- The flag is checked only when xero-sync sees one of the job's deposit invoices change,
   and on the catch-up for jobs this module moved. A job a person moved on is
   flagged only on a void of a deposit xero-sync had stamped paid
   (`jobs.deposit_at`).

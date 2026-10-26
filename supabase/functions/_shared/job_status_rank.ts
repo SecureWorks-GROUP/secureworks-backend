@@ -9,9 +9,26 @@
 // every stage GHL can map to. Legacy names rank with the stage they stand for (deposit
 // with awaiting_deposit, processing with order_materials).
 export const JOB_STATUS_RANK: Readonly<Record<string, number>> = {
-  draft: 0, quoted: 10, partially_accepted: 15, accepted: 20,
-  awaiting_deposit: 21, deposit: 21, approvals: 22, order_materials: 23, processing: 23,
-  awaiting_supplier: 24, order_confirmed: 25, schedule_install: 26, scheduled: 30,
-  in_progress: 40, rectification: 40, complete: 50, final_payment: 55, invoiced: 60,
-  get_review: 70, archived: 80, cancelled: -1, lost: -1,
-}
+  draft: 0,
+  quoted: 10,
+  partially_accepted: 15,
+  accepted: 20,
+  awaiting_deposit: 21,
+  deposit: 21,
+  approvals: 22,
+  order_materials: 23,
+  processing: 23,
+  awaiting_supplier: 24,
+  order_confirmed: 25,
+  schedule_install: 26,
+  scheduled: 30,
+  in_progress: 40,
+  rectification: 40,
+  complete: 50,
+  final_payment: 55,
+  invoiced: 60,
+  get_review: 70,
+  archived: 80,
+  cancelled: -1,
+  lost: -1,
+};

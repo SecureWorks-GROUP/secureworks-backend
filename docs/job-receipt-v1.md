@@ -22,6 +22,8 @@ The 30 Sep 2026 ruling keeps our automated money messages off
 off: the GHL chase workflow, the payment thank-you text, the Pay Now text on
 quote acceptance and the deposit chasers. A receipt asks for no money: it
 confirms money already paid.
+A second exception came on 26 Oct 2026, the deposit received text
+(`docs/job-deposit-advance-v1.md`).
 
 ## What the customer gets, and from whom
 

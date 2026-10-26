@@ -111,7 +111,10 @@ class Query {
       for (const row of [this.payload].flat()) {
         const clash = pk ? rows.find((r) => r[pk] === row[pk]) : null;
         if (clash && this.mode === "insert") {
-          return { data: null, error: { message: "duplicate key", code: "23505" } };
+          return {
+            data: null,
+            error: { message: "duplicate key", code: "23505" },
+          };
         }
         if (clash) Object.assign(clash, row);
         else rows.push({ ...row });
@@ -121,14 +124,22 @@ class Query {
     let hit = rows.filter((r) => this.filters.every((f) => f(r)));
     if (this.mode === "update") {
       hit.forEach((r) => Object.assign(r, this.payload));
-      return { data: this.returning ? hit.map((r) => ({ ...r })) : null, error: null };
+      return {
+        data: this.returning ? hit.map((r) => ({ ...r })) : null,
+        error: null,
+      };
     }
     if (this.head) return { data: null, error: null, count: hit.length };
     if (this.sort) {
       const { col, asc } = this.sort;
-      hit = [...hit].sort((a, b) => (String(a[col]) < String(b[col]) ? -1 : 1) * (asc ? 1 : -1));
+      hit = [...hit].sort((a, b) =>
+        (String(a[col]) < String(b[col]) ? -1 : 1) * (asc ? 1 : -1)
+      );
     }
-    hit = hit.slice(this.from_, this.max === null ? undefined : this.from_ + this.max);
+    hit = hit.slice(
+      this.from_,
+      this.max === null ? undefined : this.from_ + this.max,
+    );
     if (this.single) return { data: hit[0] ?? null, error: null };
     return { data: hit, error: null };
   }
@@ -151,7 +162,12 @@ const NOW = new Date("2026-10-26T06:00:00.000Z");
 
 function setup(mode: "off" | "dry_run" | "live" | null = "live") {
   const db = new FakeDb();
-  if (mode) db.rows("job_closeout_settings").push({ id: 1, deposit_advance_mode: mode });
+  if (mode) {
+    db.rows("job_closeout_settings").push({
+      id: 1,
+      deposit_advance_mode: mode,
+    });
+  }
   const moves: Row[] = [];
   const sms: Row[] = [];
   let smsResult: () => SmsSendResult = () => ({ ok: true, message_id: "m1" });
@@ -173,7 +189,13 @@ function setup(mode: "off" | "dry_run" | "live" | null = "live") {
       return Promise.resolve(smsResult());
     },
   };
-  return { db, deps, moves, sms, setSms: (f: typeof smsResult) => (smsResult = f) };
+  return {
+    db,
+    deps,
+    moves,
+    sms,
+    setSms: (f: typeof smsResult) => (smsResult = f),
+  };
 }
 
 function addJob(db: FakeDb, over: Row = {}): Row {
@@ -227,8 +249,14 @@ Deno.test("deposit switch: off, missing or unreadable reads as off and does noth
     const job = addJob(db);
     addDeposit(db, job);
     assertEquals(await readDepositAdvanceMode(db), "off");
-    assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id })).action, "switch_off");
-    assertEquals((await depositInvoiceSent(deps, { job_id: job.id, source: "t" })).action, "switch_off");
+    assertEquals(
+      (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+      "switch_off",
+    );
+    assertEquals(
+      (await depositInvoiceSent(deps, { job_id: job.id, source: "t" })).action,
+      "switch_off",
+    );
     assertEquals((await depositCatchUp(deps, {})).ran, false);
     assertEquals(moves.length + sms.length + db.rows("job_events").length, 0);
   }
@@ -258,28 +286,51 @@ Deno.test("deposit sent: an accepted job with its deposit sent lands in Awaiting
 Deno.test("deposit sent: no deposit invoice, a draft, or another invoice leaves it in Accepted", async () => {
   const { db, deps, moves } = setup("live");
   const none = addJob(db, { status: "accepted" });
-  assertEquals((await depositInvoiceSent(deps, { job_id: none.id, source: "t" })).action, "not_sent");
+  assertEquals(
+    (await depositInvoiceSent(deps, { job_id: none.id, source: "t" })).action,
+    "not_sent",
+  );
   const draft = addJob(db, { status: "accepted" });
   const d = addDeposit(db, draft, { status: "DRAFT" });
   assertEquals(
-    (await depositInvoiceSent(deps, { job_id: draft.id, xero_invoice_id: d.xero_invoice_id, source: "t" })).action,
+    (await depositInvoiceSent(deps, {
+      job_id: draft.id,
+      xero_invoice_id: d.xero_invoice_id,
+      source: "t",
+    })).action,
     "not_deposit_invoice",
   );
   const fin = addJob(db, { status: "accepted" });
   addDeposit(db, fin, { status: "AUTHORISED" });
-  const f = addDeposit(db, fin, { status: "AUTHORISED", reference: `${fin.job_number}-FINBAL` });
+  const f = addDeposit(db, fin, {
+    status: "AUTHORISED",
+    reference: `${fin.job_number}-FINBAL`,
+  });
   assertEquals(
-    (await depositInvoiceSent(deps, { job_id: fin.id, xero_invoice_id: f.xero_invoice_id, source: "t" })).action,
+    (await depositInvoiceSent(deps, {
+      job_id: fin.id,
+      xero_invoice_id: f.xero_invoice_id,
+      source: "t",
+    })).action,
     "not_deposit_invoice",
   );
   // Already moved on, or a make-safe: untouched.
   const on = addJob(db, { status: "scheduled" });
   addDeposit(db, on, { status: "AUTHORISED" });
-  assertEquals((await depositInvoiceSent(deps, { job_id: on.id, source: "t" })).action, "not_in_from_status");
+  assertEquals(
+    (await depositInvoiceSent(deps, { job_id: on.id, source: "t" })).action,
+    "not_in_from_status",
+  );
   const ms = addJob(db, { status: "accepted", type: "makesafe" });
-  assertEquals((await depositInvoiceSent(deps, { job_id: ms.id, source: "t" })).action, "not_deposit_type");
+  assertEquals(
+    (await depositInvoiceSent(deps, { job_id: ms.id, source: "t" })).action,
+    "not_deposit_type",
+  );
   assertEquals(moves.length, 0);
-  assertEquals(db.rows("jobs").filter((j) => j.status === "accepted").length, 4);
+  assertEquals(
+    db.rows("jobs").filter((j) => j.status === "accepted").length,
+    4,
+  );
 });
 
 // ── Paid -> Order Materials / Approvals ──────────────────────────────────────
@@ -288,7 +339,11 @@ Deno.test("deposit paid: full payment moves fencing to Order Materials and texts
   const { db, deps, moves, sms } = setup("live");
   const job = addJob(db);
   const inv = addDeposit(db, job);
-  const r = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: inv.xero_invoice_id, source: "xero_sync" });
+  const r = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: inv.xero_invoice_id,
+    source: "xero_sync",
+  });
   assertEquals(r.action, "moved");
   assertEquals(r.text, "sent");
   assertEquals(job.status, "order_materials");
@@ -302,9 +357,16 @@ Deno.test("deposit paid: full payment moves fencing to Order Materials and texts
   assertEquals(state.moved_to, "order_materials");
   assertEquals(state.counted_invoice_ids, [inv.xero_invoice_id]);
   assertEquals(state.text_status, "sent");
-  assertEquals(db.rows("email_events").filter((e) => e.comms_trigger === "deposit_paid").length, 1);
+  assertEquals(
+    db.rows("email_events").filter((e) => e.comms_trigger === "deposit_paid")
+      .length,
+    1,
+  );
   // The same paid invoice again (every sync re-reads it): nothing more.
-  const again = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: inv.xero_invoice_id });
+  const again = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: inv.xero_invoice_id,
+  });
   assertEquals(again.action, "no_flag");
   // Even if the job were put back and moved again, the text claim is already taken.
   job.status = "awaiting_deposit";
@@ -317,10 +379,16 @@ Deno.test("deposit paid: full payment moves fencing to Order Materials and texts
 Deno.test("deposit paid: a part payment does not move the job", async () => {
   const { db, deps, moves, sms } = setup("live");
   const job = addJob(db);
-  addDeposit(db, job, { status: "AUTHORISED", amount_due: 500, amount_paid: 1500 });
+  addDeposit(db, job, {
+    status: "AUTHORISED",
+    amount_due: 500,
+    amount_paid: 1500,
+  });
   const r = await depositOnInvoiceChange(deps, { job_id: job.id });
   assertEquals(r.action, "not_paid");
-  assertEquals(r.detail, [`part_paid:${db.rows("xero_invoices")[0].invoice_number}`]);
+  assertEquals(r.detail, [
+    `part_paid:${db.rows("xero_invoices")[0].invoice_number}`,
+  ]);
   assertEquals(job.status, "awaiting_deposit");
   assertEquals(moves.length + sms.length, 0);
 });
@@ -329,11 +397,28 @@ Deno.test("deposit paid: a shared fence moves only when every party has paid", a
   const { db, deps, moves } = setup("live");
   const job = addJob(db);
   addDeposit(db, job, { reference: `${job.job_number}-A-DEP50` });
-  const b = addDeposit(db, job, { reference: `${job.job_number}-B-DEP50`, status: "AUTHORISED" });
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id })).action, "not_paid");
+  const b = addDeposit(db, job, {
+    reference: `${job.job_number}-B-DEP50`,
+    status: "AUTHORISED",
+  });
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "not_paid",
+  );
   assertEquals(moves.length, 0);
-  Object.assign(b, { status: "PAID", amount_due: 0, amount_paid: 2000, fully_paid_on: "2026-10-26" });
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: b.xero_invoice_id })).action, "moved");
+  Object.assign(b, {
+    status: "PAID",
+    amount_due: 0,
+    amount_paid: 2000,
+    fully_paid_on: "2026-10-26",
+  });
+  assertEquals(
+    (await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: b.xero_invoice_id,
+    })).action,
+    "moved",
+  );
   assertEquals(job.status, "order_materials");
 });
 
@@ -341,24 +426,57 @@ Deno.test("deposit paid: a shared fence never moves while a paying party has no 
   const { db, deps, moves, sms } = setup("live");
   const job = addJob(db);
   db.rows("job_contacts").push(
-    { id: "jc-a", job_id: job.id, contact_label: "A", is_primary: true, share_percentage: 50, removed_at: null, status: "active", xero_contact_id: null },
-    { id: "jc-b", job_id: job.id, contact_label: "B", is_primary: false, share_percentage: 50, removed_at: null, status: "active", xero_contact_id: null },
+    {
+      id: "jc-a",
+      job_id: job.id,
+      contact_label: "A",
+      is_primary: true,
+      share_percentage: 50,
+      removed_at: null,
+      status: "active",
+      xero_contact_id: null,
+    },
+    {
+      id: "jc-b",
+      job_id: job.id,
+      contact_label: "B",
+      is_primary: false,
+      share_percentage: 50,
+      removed_at: null,
+      status: "active",
+      xero_contact_id: null,
+    },
   );
   const a = addDeposit(db, job, { reference: `${job.job_number}-A-DEP50` });
-  const r = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: a.xero_invoice_id });
+  const r = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: a.xero_invoice_id,
+  });
   assertEquals([r.action, r.detail], ["not_paid", ["party_without_deposit:B"]]);
   assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
   assertEquals(job.status, "awaiting_deposit");
   assertEquals(moves.length + sms.length, 0);
   // The neighbour's deposit is raised and paid: the job moves.
-  const b = addDeposit(db, job, { reference: `${job.job_number}-B-DEP50`, job_contact_id: "jc-b" });
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: b.xero_invoice_id })).action, "moved");
+  const b = addDeposit(db, job, {
+    reference: `${job.job_number}-B-DEP50`,
+    job_contact_id: "jc-b",
+  });
+  assertEquals(
+    (await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: b.xero_invoice_id,
+    })).action,
+    "moved",
+  );
   assertEquals(job.status, "order_materials");
   // The party read failing moves nothing.
   const other = addJob(db);
   addDeposit(db, other);
   db.failures.job_contacts = "boom";
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: other.id })).action, "facts_unreadable");
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: other.id })).action,
+    "facts_unreadable",
+  );
   assertEquals(other.status, "awaiting_deposit");
 });
 
@@ -366,14 +484,23 @@ Deno.test("deposit paid: a hand-made Xero deposit that is not the job's pointer 
   const { db, deps } = setup("live");
   const job = addJob(db);
   addDeposit(db, job); // the pointer, paid
-  const hand = addDeposit(db, job, { reference: `${job.job_number}-DEP`, status: "AUTHORISED" });
+  const hand = addDeposit(db, job, {
+    reference: `${job.job_number}-DEP`,
+    status: "AUTHORISED",
+  });
   assert(job.deposit_invoice_id !== hand.xero_invoice_id);
   // The hand-made deposit is unpaid: no move.
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id })).action, "not_paid");
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "not_paid",
+  );
   // Its own change is a deposit change, so it is acted on once paid.
   Object.assign(hand, { status: "PAID", amount_due: 0, amount_paid: 2000 });
   assertEquals(
-    (await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: hand.xero_invoice_id })).action,
+    (await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: hand.xero_invoice_id,
+    })).action,
     "moved",
   );
 });
@@ -428,9 +555,21 @@ Deno.test("deposit paid: dry_run moves and texts nothing and records once", asyn
   addDeposit(db, job);
   const landing = addJob(db, { status: "accepted" });
   addDeposit(db, landing, { status: "AUTHORISED" });
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id })).action, "dry_run");
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id })).action, "dry_run_already_recorded");
-  assertEquals((await depositInvoiceSent(deps, { job_id: landing.id, source: "send_acceptance_invoice" })).action, "dry_run");
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "dry_run",
+  );
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "dry_run_already_recorded",
+  );
+  assertEquals(
+    (await depositInvoiceSent(deps, {
+      job_id: landing.id,
+      source: "send_acceptance_invoice",
+    })).action,
+    "dry_run",
+  );
   const catchUp = await depositCatchUp(deps, {});
   assertEquals(catchUp.ran, true);
   assertEquals(moves.length + sms.length, 0);
@@ -452,28 +591,47 @@ Deno.test("deposit text: not sent with no contact, a prior send, or prior sends 
   const r1 = await depositOnInvoiceChange(unreadable.deps, { job_id: j1.id });
   assertEquals([r1.action, r1.text], ["moved", "prior_send_unreadable"]);
   assertEquals(unreadable.sms.length, 0);
-  assertEquals(unreadable.db.rows("job_deposit_advance_state")[0].text_status, "prior_send_unreadable");
+  assertEquals(
+    unreadable.db.rows("job_deposit_advance_state")[0].text_status,
+    "prior_send_unreadable",
+  );
 
   const noContact = setup("live");
   const j2 = addJob(noContact.db, { ghl_contact_id: null });
   addDeposit(noContact.db, j2);
-  assertEquals((await depositOnInvoiceChange(noContact.deps, { job_id: j2.id })).text, "no_contact");
+  assertEquals(
+    (await depositOnInvoiceChange(noContact.deps, { job_id: j2.id })).text,
+    "no_contact",
+  );
   assertEquals(noContact.sms.length, 0);
 
   const prior = setup("live");
   const j3 = addJob(prior.db);
   addDeposit(prior.db, j3);
-  prior.db.rows("email_events").push({ job_id: j3.id, comms_trigger: "deposit_paid", status: "sent" });
-  assertEquals((await depositOnInvoiceChange(prior.deps, { job_id: j3.id })).text, "already_sent");
+  prior.db.rows("email_events").push({
+    job_id: j3.id,
+    comms_trigger: "deposit_paid",
+    status: "sent",
+  });
+  assertEquals(
+    (await depositOnInvoiceChange(prior.deps, { job_id: j3.id })).text,
+    "already_sent",
+  );
   assertEquals(prior.sms.length, 0);
 
   const refused = setup("live");
   refused.setSms(() => ({ ok: false, refused: true, error: "contact DND" }));
   const j4 = addJob(refused.db);
   addDeposit(refused.db, j4);
-  assertEquals((await depositOnInvoiceChange(refused.deps, { job_id: j4.id })).text, "refused");
+  assertEquals(
+    (await depositOnInvoiceChange(refused.deps, { job_id: j4.id })).text,
+    "refused",
+  );
   assertEquals(refused.db.rows("email_events").length, 0);
-  assertEquals(events(refused.db, "deposit_received_text")[0].detail_json.result, "refused");
+  assertEquals(
+    events(refused.db, "deposit_received_text")[0].detail_json.result,
+    "refused",
+  );
 });
 
 // ── Catch-up ─────────────────────────────────────────────────────────────────
@@ -503,24 +661,49 @@ Deno.test("deposit flag: a void after the move is flagged once, never moved back
   await depositOnInvoiceChange(deps, { job_id: job.id });
   assertEquals(job.status, "order_materials");
   inv.status = "VOIDED";
-  const r = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: inv.xero_invoice_id });
+  const r = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: inv.xero_invoice_id,
+  });
   assertEquals(r.action, "flagged");
   assertEquals(job.status, "order_materials");
   assertEquals(moves.length, 1);
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id })).action, "already_flagged");
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "already_flagged",
+  );
   assertEquals(events(db, "deposit_flagged").length, 1);
   const flags = await loadDepositFlags(db, [job.id, "other"]);
   assertEquals(flags?.get(job.id)?.reason, "deposit_voided");
   assertEquals(flags?.has("other"), false);
   // A person clears it.
-  const cleared = await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: "shaun@secureworkswa.com.au" }, deps);
+  const cleared = await runJobDepositAction(
+    "clear_job_deposit_flag",
+    "POST",
+    { job_id: job.id },
+    { kind: "staff", email: "shaun@secureworkswa.com.au" },
+    deps,
+  );
   assertEquals(cleared.body.action, "cleared");
   assertEquals((await loadDepositFlags(db, [job.id]))?.size, 0);
-  const twice = await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: null }, deps);
+  const twice = await runJobDepositAction(
+    "clear_job_deposit_flag",
+    "POST",
+    { job_id: job.id },
+    { kind: "staff", email: null },
+    deps,
+  );
   assertEquals(twice.body.action, "no_open_flag");
   // The same void seen again (the sync overlap, or another deposit changing): it stays cleared.
-  const replacement = addDeposit(db, job, { status: "AUTHORISED", amount_due: 2000, amount_paid: 0 });
-  const again = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: replacement.xero_invoice_id });
+  const replacement = addDeposit(db, job, {
+    status: "AUTHORISED",
+    amount_due: 2000,
+    amount_paid: 0,
+  });
+  const again = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: replacement.xero_invoice_id,
+  });
   assertEquals(again.action, "no_flag");
   assertEquals(events(db, "deposit_flagged").length, 1);
   assertEquals((await loadDepositFlags(db, [job.id]))?.size, 0);
@@ -536,25 +719,49 @@ Deno.test("deposit flag: after a clear, another reason or invoice raises a new f
   first.status = "VOIDED";
   second.status = "AUTHORISED";
   Object.assign(second, { amount_due: 2000, amount_paid: 0 });
-  assertEquals((await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: first.xero_invoice_id })).detail, {
-    reason: "deposit_voided",
-    xero_invoice_id: first.xero_invoice_id,
-    invoice_number: first.invoice_number,
-    invoice_status: "VOIDED",
-  });
-  await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: null }, deps);
+  assertEquals(
+    (await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: first.xero_invoice_id,
+    })).detail,
+    {
+      reason: "deposit_voided",
+      xero_invoice_id: first.xero_invoice_id,
+      invoice_number: first.invoice_number,
+      invoice_status: "VOIDED",
+    },
+  );
+  await runJobDepositAction(
+    "clear_job_deposit_flag",
+    "POST",
+    { job_id: job.id },
+    { kind: "staff", email: null },
+    deps,
+  );
   // The void is dealt with, but the other counted deposit is no longer paid: another
   // reason on another invoice, so a new flag.
-  const r = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: second.xero_invoice_id });
+  const r = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: second.xero_invoice_id,
+  });
   assertEquals(r.action, "flagged");
   assertEquals((r.detail as any).reason, "deposit_unpaid");
   assertEquals((r.detail as any).xero_invoice_id, second.xero_invoice_id);
   assertEquals(events(db, "deposit_flagged").length, 2);
   assertEquals((await loadDepositFlags(db, [job.id]))?.size, 1);
   // Both cleared: neither comes back on the next sync, whichever was cleared first.
-  await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: null }, deps);
+  await runJobDepositAction(
+    "clear_job_deposit_flag",
+    "POST",
+    { job_id: job.id },
+    { kind: "staff", email: null },
+    deps,
+  );
   for (const inv of [first, second]) {
-    const again = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: inv.xero_invoice_id });
+    const again = await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: inv.xero_invoice_id,
+    });
     assertEquals(again.action, "no_flag");
   }
   assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
@@ -568,14 +775,24 @@ Deno.test("deposit flag: a refund on a job the catch-up checks is flagged", asyn
   const inv = addDeposit(db, job);
   await depositOnInvoiceChange(deps, { job_id: job.id });
   job.status = "scheduled";
-  Object.assign(inv, { status: "AUTHORISED", amount_due: 2000, amount_paid: 0 });
+  Object.assign(inv, {
+    status: "AUTHORISED",
+    amount_due: 2000,
+    amount_paid: 0,
+  });
   const r = await depositCatchUp(deps, {}) as any;
   assertEquals(r.results.map((x: any) => x.action), ["flagged"]);
   assertEquals(db.rows("job_deposit_advance_state")[0].flag, "deposit_unpaid");
   // A job a person moved on whose deposit the Xero stamp marked paid: a void is flagged.
-  const hand = addJob(db, { status: "scheduled", deposit_at: "2026-10-01T00:00:00Z" });
+  const hand = addJob(db, {
+    status: "scheduled",
+    deposit_at: "2026-10-01T00:00:00Z",
+  });
   const handInv = addDeposit(db, hand, { status: "VOIDED" });
-  const r2 = await depositOnInvoiceChange(deps, { job_id: hand.id, xero_invoice_id: handInv.xero_invoice_id });
+  const r2 = await depositOnInvoiceChange(deps, {
+    job_id: hand.id,
+    xero_invoice_id: handInv.xero_invoice_id,
+  });
   assertEquals(r2.action, "flagged");
 });
 
@@ -592,13 +809,57 @@ Deno.test("deposit door: the moves need the server key, a clear needs staff, POS
   const job = addJob(db);
   addDeposit(db, job);
   const staff = { kind: "staff" as const, email: "x@secureworkswa.com.au" };
-  assertEquals((await runJobDepositAction("job_deposit_paid", "POST", { job_id: job.id }, staff, deps)).status, 403);
-  assertEquals((await runJobDepositAction("job_deposit_catch_up", "POST", {}, { kind: "none" }, deps)).status, 403);
-  assertEquals((await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "none" }, deps)).status, 403);
-  assertEquals((await runJobDepositAction("job_deposit_paid", "GET", { job_id: job.id }, { kind: "server" }, deps)).status, 405);
-  assertEquals((await runJobDepositAction("job_deposit_paid", "POST", {}, { kind: "server" }, deps)).status, 400);
-  assertEquals((await runJobDepositAction("job_deposit_paid", "POST", { job_id: "nope" }, { kind: "server" }, deps)).status, 404);
+  assertEquals(
+    (await runJobDepositAction(
+      "job_deposit_paid",
+      "POST",
+      { job_id: job.id },
+      staff,
+      deps,
+    )).status,
+    403,
+  );
+  assertEquals(
+    (await runJobDepositAction("job_deposit_catch_up", "POST", {}, {
+      kind: "none",
+    }, deps)).status,
+    403,
+  );
+  assertEquals(
+    (await runJobDepositAction(
+      "clear_job_deposit_flag",
+      "POST",
+      { job_id: job.id },
+      { kind: "none" },
+      deps,
+    )).status,
+    403,
+  );
+  assertEquals(
+    (await runJobDepositAction("job_deposit_paid", "GET", { job_id: job.id }, {
+      kind: "server",
+    }, deps)).status,
+    405,
+  );
+  assertEquals(
+    (await runJobDepositAction("job_deposit_paid", "POST", {}, {
+      kind: "server",
+    }, deps)).status,
+    400,
+  );
+  assertEquals(
+    (await runJobDepositAction("job_deposit_paid", "POST", { job_id: "nope" }, {
+      kind: "server",
+    }, deps)).status,
+    404,
+  );
   assertEquals(job.status, "awaiting_deposit");
-  const ok = await runJobDepositAction("job_deposit_paid", "POST", { job_id: job.id }, { kind: "server" }, deps);
+  const ok = await runJobDepositAction(
+    "job_deposit_paid",
+    "POST",
+    { job_id: job.id },
+    { kind: "server" },
+    deps,
+  );
   assertEquals([ok.status, ok.body.action], [200, "moved"]);
 });

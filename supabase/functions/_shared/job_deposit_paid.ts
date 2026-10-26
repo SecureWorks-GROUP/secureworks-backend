@@ -42,7 +42,10 @@ export const DEPOSIT_LAND_FROM_STATUSES = ["accepted"] as const;
 export const DEPOSIT_LAND_STATUS = "awaiting_deposit";
 
 /** A paid deposit moves a job only from these: never one someone already moved on. */
-export const DEPOSIT_PAID_FROM_STATUSES = ["accepted", "awaiting_deposit"] as const;
+export const DEPOSIT_PAID_FROM_STATUSES = [
+  "accepted",
+  "awaiting_deposit",
+] as const;
 
 export const DEPOSIT_ORDER_MATERIALS_STATUS = "order_materials";
 export const DEPOSIT_APPROVALS_STATUS = "approvals";
@@ -163,7 +166,8 @@ function newestDate(values: (string | null)[]): string | null {
 
 /** One invoice is paid in full: PAID in Xero with nothing left due. */
 export function depositInvoicePaidInFull(inv: DepositInvoice): boolean {
-  return upper(inv.status) === "PAID" && money(inv.amount_due) <= PAID_TOLERANCE;
+  return upper(inv.status) === "PAID" &&
+    money(inv.amount_due) <= PAID_TOLERANCE;
 }
 
 /** The party one deposit invoice is for (invoicePartyKey over the paying parties). */
@@ -194,7 +198,10 @@ export function evaluateDepositPaid(input: {
   invoices: DepositInvoice[];
   parties: CloseoutParty[];
 }): DepositPaidVerdict {
-  const live = liveDepositInvoices(input.invoices, input.job.deposit_invoice_id);
+  const live = liveDepositInvoices(
+    input.invoices,
+    input.job.deposit_invoice_id,
+  );
   const reasons: string[] = [];
   if (live.length === 0) reasons.push("no_deposit_invoice");
   else {
@@ -237,7 +244,10 @@ export function depositInvoicesSent(input: {
   job: Pick<DepositJob, "deposit_invoice_id">;
   invoices: DepositInvoice[];
 }): { sent: boolean; reasons: string[] } {
-  const live = liveDepositInvoices(input.invoices, input.job.deposit_invoice_id);
+  const live = liveDepositInvoices(
+    input.invoices,
+    input.job.deposit_invoice_id,
+  );
   const reasons: string[] = [];
   if (live.length === 0) reasons.push("no_deposit_invoice");
   for (const inv of live) {
@@ -278,7 +288,10 @@ export interface DepositFlag {
 }
 
 /** One flag as a stored key, "reason:xero_invoice_id" (cleared_flags). */
-export function depositFlagKey(reason: string | null, xeroInvoiceId: string | null): string {
+export function depositFlagKey(
+  reason: string | null,
+  xeroInvoiceId: string | null,
+): string {
   return `${text(reason)}:${text(xeroInvoiceId)}`;
 }
 
@@ -310,13 +323,17 @@ export function depositFlagFor(input: {
   ) return null;
   const pointer = input.job.deposit_invoice_id;
   const counted = new Set(input.countedIds.map(text).filter(Boolean));
-  const deposits = input.invoices.filter((inv) => isDepositInvoice(inv, pointer));
+  const deposits = input.invoices.filter((inv) =>
+    isDepositInvoice(inv, pointer)
+  );
   const cleared = new Set(input.cleared ?? []);
   const wasCleared = (reason: DepositFlagReason, inv: DepositInvoice) =>
     cleared.has(depositFlagKey(reason, inv.xero_invoice_id));
   const paying = payingParties(input.parties);
   const paidParties = new Set(
-    deposits.filter((inv) => !isVoided(inv.status) && depositInvoicePaidInFull(inv))
+    deposits.filter((inv) =>
+      !isVoided(inv.status) && depositInvoicePaidInFull(inv)
+    )
       .map((inv) => depositPartyKey(inv, paying)),
   );
   const voided = deposits.find((inv) =>
@@ -357,7 +374,9 @@ export function depositFlagFor(input: {
 export const DEPOSIT_RECEIVED_TEXT_TEMPLATE =
   "Hi {name},\nThanks, we've received your deposit. We're now ordering your materials and we'll be in touch to book your install.\nCheers, Shaun";
 
-export function depositReceivedText(clientName: string | null | undefined): string {
+export function depositReceivedText(
+  clientName: string | null | undefined,
+): string {
   const first = text(clientName).split(/\s+/)[0] || "there";
   return DEPOSIT_RECEIVED_TEXT_TEMPLATE.replace("{name}", first);
 }

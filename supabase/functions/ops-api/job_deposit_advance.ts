@@ -48,8 +48,8 @@ import {
   type DepositInvoice,
   depositInvoicesSent,
   type DepositJob,
-  type DepositPaidVerdict,
   depositPaidTargetStatus,
+  type DepositPaidVerdict,
   depositReceivedText,
   evaluateDepositPaid,
   isDepositAdvanceJobType,
@@ -148,7 +148,9 @@ const STATE_COLUMNS =
 
 function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
   return out;
 }
 
@@ -221,7 +223,10 @@ async function loadFacts(
   if (!invoices || !parties) return null;
   const out = new Map<string, DepositFacts>();
   for (const id of jobIds) {
-    out.set(id, { invoices: invoices.get(id) ?? [], parties: parties.get(id) ?? [] });
+    out.set(id, {
+      invoices: invoices.get(id) ?? [],
+      parties: parties.get(id) ?? [],
+    });
   }
   return out;
 }
@@ -333,19 +338,27 @@ export async function depositInvoiceSent(
   const mode = await readDepositAdvanceMode(deps.client);
   if (mode === "off") return { ...base, action: "switch_off" };
   const job = await loadJob(deps.client, input.job_id);
-  if (!job) return { ...base, action: "facts_unreadable", detail: "job_not_found" };
+  if (!job) {
+    return { ...base, action: "facts_unreadable", detail: "job_not_found" };
+  }
   base.job_number = job.job_number;
   if (!isDepositAdvanceJobType(job.type)) {
     return { ...base, action: "not_deposit_type" };
   }
-  if (!(DEPOSIT_LAND_FROM_STATUSES as readonly string[]).includes(text(job.status))) {
+  if (
+    !(DEPOSIT_LAND_FROM_STATUSES as readonly string[]).includes(
+      text(job.status),
+    )
+  ) {
     return { ...base, action: "not_in_from_status", detail: job.status };
   }
   const facts = await loadFacts(deps.client, [job.id]);
   if (!facts) return { ...base, action: "facts_unreadable" };
   const rows = facts.get(job.id)?.invoices ?? [];
   if (input.xero_invoice_id) {
-    const sentInvoice = rows.find((r) => text(r.xero_invoice_id) === text(input.xero_invoice_id));
+    const sentInvoice = rows.find((r) =>
+      text(r.xero_invoice_id) === text(input.xero_invoice_id)
+    );
     const status = text(sentInvoice?.status).toUpperCase();
     if (
       !sentInvoice || !isDepositInvoice(sentInvoice, job.deposit_invoice_id) ||
@@ -390,11 +403,17 @@ async function settlePaid(
   source: string,
 ): Promise<DepositResult> {
   const base = { job_id: job.id, job_number: job.job_number };
-  if (!(DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(text(job.status))) {
+  if (
+    !(DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(
+      text(job.status),
+    )
+  ) {
     return { ...base, action: "not_in_from_status", detail: job.status };
   }
   const verdict = evaluateDepositPaid({ job, ...facts });
-  if (!verdict.paid) return { ...base, action: "not_paid", detail: verdict.reasons };
+  if (!verdict.paid) {
+    return { ...base, action: "not_paid", detail: verdict.reasons };
+  }
   const target = depositPaidTargetStatus(job);
   if (!target) return { ...base, action: "no_target" };
   if (mode === "dry_run") {
@@ -426,7 +445,9 @@ async function settlePaid(
     };
   }
   const nowIso = deps.now().toISOString();
-  const { error: stateErr } = await deps.client.from("job_deposit_advance_state")
+  const { error: stateErr } = await deps.client.from(
+    "job_deposit_advance_state",
+  )
     .upsert({
       job_id: job.id,
       moved_at: nowIso,
@@ -457,7 +478,10 @@ async function sendDepositText(
   const { client } = deps;
   // Without its state row there is no claim to take, so nothing is sent.
   if (!stateWritten) return "no_claim_row";
-  const finish = async (status: string, extra: Record<string, unknown> = {}) => {
+  const finish = async (
+    status: string,
+    extra: Record<string, unknown> = {},
+  ) => {
     await client.from("job_deposit_advance_state").update({
       text_status: status,
       text_at: deps.now().toISOString(),
@@ -499,7 +523,11 @@ async function sendDepositText(
       jobId: job.id,
     });
   } catch (e) {
-    result = { ok: false, refused: false, error: String((e as Error)?.message ?? e) };
+    result = {
+      ok: false,
+      refused: false,
+      error: String((e as Error)?.message ?? e),
+    };
   }
   if (result.ok) {
     await client.from("email_events").insert({
@@ -533,7 +561,9 @@ async function checkFlag(
 ): Promise<DepositResult> {
   const base = { job_id: job.id, job_number: job.job_number };
   const state = await loadState(deps.client, job.id);
-  if (!state.ok) return { ...base, action: "facts_unreadable", detail: "state_unreadable" };
+  if (!state.ok) {
+    return { ...base, action: "facts_unreadable", detail: "state_unreadable" };
+  }
   if (state.row?.flag && !state.row.flag_cleared_at) {
     return { ...base, action: "already_flagged", detail: state.row.flag };
   }
@@ -617,13 +647,20 @@ export async function depositOnInvoiceChange(
       return { ok: true, ...base, action: "not_deposit_invoice" };
     }
   }
-  if ((DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(text(job.status))) {
+  if (
+    (DEPOSIT_PAID_FROM_STATUSES as readonly string[]).includes(text(job.status))
+  ) {
     return { ok: true, ...(await settlePaid(deps, job, facts, mode, source)) };
   }
   if ((DEPOSIT_FLAG_STATUSES as readonly string[]).includes(text(job.status))) {
     return { ok: true, ...(await checkFlag(deps, job, facts, source)) };
   }
-  return { ok: true, ...base, action: "not_in_from_status", detail: job.status };
+  return {
+    ok: true,
+    ...base,
+    action: "not_in_from_status",
+    detail: job.status,
+  };
 }
 
 /** xero-sync, after each run: waiting cards whose deposits are paid, and moved cards whose
@@ -635,7 +672,10 @@ export async function depositCatchUp(
   const mode = await readDepositAdvanceMode(deps.client);
   if (mode === "off") return { ok: true, ran: false, reason: "switch_off" };
   const source = text(body.source) || "job_deposit_catch_up";
-  const waiting = await loadJobsByStatus(deps.client, DEPOSIT_PAID_FROM_STATUSES);
+  const waiting = await loadJobsByStatus(
+    deps.client,
+    DEPOSIT_PAID_FROM_STATUSES,
+  );
   if (!waiting) return { ok: false, ran: false, reason: "jobs_unreadable" };
   const { data: movedRows, error: movedErr } = await deps.client.from(
     "job_deposit_advance_state",
@@ -644,16 +684,21 @@ export async function depositCatchUp(
     null,
   ).limit(5000);
   if (movedErr) return { ok: false, ran: false, reason: "state_unreadable" };
-  const movedIds = new Set<string>((movedRows ?? []).map((r: { job_id: string }) => r.job_id));
+  const movedIds = new Set<string>(
+    (movedRows ?? []).map((r: { job_id: string }) => r.job_id),
+  );
   const movedJobs: DepositJobRow[] = [];
   for (const part of chunks([...movedIds])) {
-    const { data, error } = await deps.client.from("jobs").select(JOB_COLUMNS).in(
-      "id",
-      part,
-    );
+    const { data, error } = await deps.client.from("jobs").select(JOB_COLUMNS)
+      .in(
+        "id",
+        part,
+      );
     if (error) return { ok: false, ran: false, reason: "jobs_unreadable" };
     for (const j of data ?? []) {
-      if ((DEPOSIT_FLAG_STATUSES as readonly string[]).includes(text(j.status))) {
+      if (
+        (DEPOSIT_FLAG_STATUSES as readonly string[]).includes(text(j.status))
+      ) {
         movedJobs.push(j);
       }
     }
@@ -701,7 +746,11 @@ export async function clearDepositFlag(
     .is("flag_cleared_at", null)
     .select("job_id, flag");
   if (error) {
-    throw new JobDepositError(`flag clear failed: ${error.message}`, 503, "state_unwritable");
+    throw new JobDepositError(
+      `flag clear failed: ${error.message}`,
+      503,
+      "state_unwritable",
+    );
   }
   if (!Array.isArray(data) || data.length === 0) {
     return { ok: true, job_id: jobId, action: "no_open_flag" };
@@ -778,7 +827,10 @@ export async function runJobDepositAction(
     }
     if (action === "clear_job_deposit_flag") {
       if (caller.kind === "none") {
-        return { status: 403, body: { ok: false, code: "operator_access_required" } };
+        return {
+          status: 403,
+          body: { ok: false, code: "operator_access_required" },
+        };
       }
       const by = caller.kind === "staff"
         ? (caller.email || "staff")
@@ -797,7 +849,10 @@ export async function runJobDepositAction(
     return { status: 400, body: { ok: false, code: "unknown_action" } };
   } catch (e) {
     if (e instanceof JobDepositError) {
-      return { status: e.status, body: { ok: false, code: e.code, error: e.message } };
+      return {
+        status: e.status,
+        body: { ok: false, code: e.code, error: e.message },
+      };
     }
     throw e;
   }
