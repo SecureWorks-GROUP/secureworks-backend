@@ -238,7 +238,7 @@ was made. Clear it the same way.
 | Action | Caller | What it does |
 | --- | --- | --- |
 | `job_deposit_paid` | server key (xero-sync) | `{ job_id, xero_invoice_id?, source? }`: the paid move, or the flag check for a job already moved on |
-| `job_deposit_catch_up` | server key (xero-sync) | waiting cards whose deposits are paid; moved cards whose deposit was voided or unpaid |
+| `job_deposit_catch_up` | server key (xero-sync) | waiting cards whose deposits are paid; moved cards whose deposit was voided, unpaid or refunded by credit note |
 | `clear_job_deposit_flag` | staff or server key | a person has dealt with a flag |
 
 All three are POST only. A staff caller is refused 403 on the first two.
