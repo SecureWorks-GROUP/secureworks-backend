@@ -2,6 +2,7 @@ import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteR
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
+import { frozenRevisionReader, quoteFrozenRevisionGateError, quotePricingGateError, sitePlanArtifactReader } from '../_shared/quote_pricing_gate.ts'
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
 // ════════════════════════════════════════════════════════════
@@ -39835,19 +39836,14 @@ async function sendQuickQuoteEmail(client: any, body: any) {
 
   const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
 
-  // ── Server-side pricing gate (mirrors send-quote quotePricingGateError) ──
-  // Refuse to send a quote the scoping tool flagged as failing validation, or one
-  // with no/zero price. Strict === false so quotes that never set the flag
-  // (fence/legacy) are not blocked — only an explicit validation failure blocks.
-  if (pricing.pricing_validation_passed === false) {
-    throw new Error('Quote failed pricing validation in the scoping tool and cannot be sent. Fix the flagged pricing issues, re-save, and try again.')
-  }
-  // Same total fallback chain as send-quote so legacy quotes carrying only
-  // `total`/`grandTotal` (not `totalIncGST`) are not falsely blocked.
+  // ── Server-side pricing gate: the same rule as send-quote (one module) ──
+  // Refuses a failed validation, unconfirmed sell prices, unpriced cost lines,
+  // incomplete pricing, an unsealed revision, or a zero total.
+  const pricingGateErr = quotePricingGateError(job.pricing_json)
+  if (pricingGateErr) throw new Error(pricingGateErr)
+  const frozenRevisionErr = await quoteFrozenRevisionGateError(frozenRevisionReader(client), job_id, job.pricing_json, sitePlanArtifactReader(client))
+  if (frozenRevisionErr) throw new Error(frozenRevisionErr)
   const totalIncGST = Number(pricing.totalIncGST ?? pricing.total ?? pricing.grandTotal ?? 0)
-  if (!(totalIncGST > 0)) {
-    throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
-  }
   const paymentTerms = pricing.payment_terms || '50/50 split'
   const validDays = pricing.valid_days || 30
   const validUntil = new Date(Date.now() + validDays * 86400000).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })
