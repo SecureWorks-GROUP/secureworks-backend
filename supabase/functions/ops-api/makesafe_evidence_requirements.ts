@@ -72,7 +72,7 @@ import {
 } from "./ses_family_matrix.ts";
 
 export const SES_EVIDENCE_CONTRACT_VERSION =
-  "ses-evidence-requirements/c1-repair-restoration-sealed-v5";
+  "ses-evidence-requirements/c1-matcher-po-guards-after-claims-v8";
 
 /**
  * The draft contract's source document. Recorded so a measurement run can prove
