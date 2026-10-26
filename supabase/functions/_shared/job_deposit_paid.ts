@@ -166,19 +166,22 @@ export function depositInvoicePaidInFull(inv: DepositInvoice): boolean {
   return upper(inv.status) === "PAID" && money(inv.amount_due) <= PAID_TOLERANCE;
 }
 
+/** The party one deposit invoice is for (invoicePartyKey over the paying parties). */
+function depositPartyKey(inv: DepositInvoice, paying: CloseoutParty[]): string {
+  return invoicePartyKey({
+    ...inv,
+    job_contact_id: inv.job_contact_id ?? null,
+    xero_contact_id: inv.xero_contact_id ?? null,
+  }, paying);
+}
+
 /** The paying parties (job_contacts rows) with no live deposit invoice of their own. */
 function partiesWithoutDeposit(
   live: DepositInvoice[],
   parties: CloseoutParty[],
 ): string[] {
   const paying = payingParties(parties);
-  const keys = new Set(live.map((inv) =>
-    invoicePartyKey({
-      ...inv,
-      job_contact_id: inv.job_contact_id ?? null,
-      xero_contact_id: inv.xero_contact_id ?? null,
-    }, paying)
-  ));
+  const keys = new Set(live.map((inv) => depositPartyKey(inv, paying)));
   if (paying.length === 0) return keys.has(OWNER_KEY) ? [] : ["owner"];
   return paying.filter((p) => !keys.has(p.id)).map((p) =>
     p.contact_label ? upper(p.contact_label) : p.is_primary ? "owner" : p.id
@@ -274,25 +277,31 @@ export interface DepositFlag {
   invoice_status: string;
 }
 
+/** One flag as a stored key, "reason:xero_invoice_id" (cleared_flags). */
+export function depositFlagKey(reason: string | null, xeroInvoiceId: string | null): string {
+  return `${text(reason)}:${text(xeroInvoiceId)}`;
+}
+
 /**
  * After a job has moved on from the deposit columns: the deposit that moved it is voided
- * or deleted, or no longer paid in full (a payment taken off for a refund), and the job's
- * deposits as they stand no longer pass the paid rule. Returns the flag, or null. A void
- * whose replacement deposit is paid in full flags nothing. Pure.
+ * or deleted and its party has no other live deposit paid in full, or it is no longer
+ * paid in full (a payment taken off for a refund). Returns the flag, or null. A void whose
+ * replacement deposit for the same party is paid in full flags nothing, and a party that
+ * never had a deposit is the move's rule, never a flag. Pure.
  *
  * `countedIds` are the invoices that counted when the job moved (the automatic move
  * records them); when empty (a job a person moved on), only a voided or deleted deposit
  * invoice can raise the flag.
  *
- * `cleared` is the flag a person already cleared (captain answer 8: a person decides):
- * the same reason on the same invoice is never raised again, only another one.
+ * `cleared` are the flags a person already cleared (depositFlagKey; captain answer 8: a
+ * person decides): the same reason on the same invoice is never raised again.
  */
 export function depositFlagFor(input: {
   job: Pick<DepositJob, "deposit_invoice_id" | "status">;
   invoices: DepositInvoice[];
   parties: CloseoutParty[];
   countedIds: string[];
-  cleared?: { reason: string | null; xero_invoice_id: string | null } | null;
+  cleared?: string[];
 }): DepositFlag | null {
   if (
     !(DEPOSIT_FLAG_STATUSES as readonly string[]).includes(
@@ -302,21 +311,18 @@ export function depositFlagFor(input: {
   const pointer = input.job.deposit_invoice_id;
   const counted = new Set(input.countedIds.map(text).filter(Boolean));
   const deposits = input.invoices.filter((inv) => isDepositInvoice(inv, pointer));
+  const cleared = new Set(input.cleared ?? []);
   const wasCleared = (reason: DepositFlagReason, inv: DepositInvoice) =>
-    !!input.cleared && input.cleared.reason === reason &&
-    text(input.cleared.xero_invoice_id) === text(inv.xero_invoice_id);
-  if (
-    evaluateDepositPaid({
-      job: input.job,
-      invoices: input.invoices,
-      parties: input.parties,
-    }).paid
-  ) {
-    return null;
-  }
+    cleared.has(depositFlagKey(reason, inv.xero_invoice_id));
+  const paying = payingParties(input.parties);
+  const paidParties = new Set(
+    deposits.filter((inv) => !isVoided(inv.status) && depositInvoicePaidInFull(inv))
+      .map((inv) => depositPartyKey(inv, paying)),
+  );
   const voided = deposits.find((inv) =>
     isVoided(inv.status) &&
     (counted.size === 0 || counted.has(text(inv.xero_invoice_id))) &&
+    !paidParties.has(depositPartyKey(inv, paying)) &&
     !wasCleared("deposit_voided", inv)
   );
   if (voided) {

@@ -147,20 +147,20 @@ This is the second recorded exception to the 30 Sep 2026 money-messages ruling
 ## Voided or refunded after the move: a flag, never a move back
 
 Captain answer 8: the job is not moved back. A person decides. The deposit is
-flagged on the job when both of these hold:
-
-- the job is in Approvals, Order Materials or a later working stage
-  (`DEPOSIT_FLAG_STATUSES`);
-- the deposits as they stand fail the paid rule.
+flagged on the job when the job is in Approvals, Order Materials or a later
+working stage (`DEPOSIT_FLAG_STATUSES`) and one of the reasons below holds.
 
 The flag reason is one of:
-- `deposit_voided`: a deposit that counted for the move is voided or deleted. On
-  a job a person moved on, any voided deposit counts, once xero-sync's deposit
-  stamp had marked it paid.
+- `deposit_voided`: a deposit that counted for the move is voided or deleted,
+  and its party has no other live deposit paid in full. On a job a person moved
+  on, any voided deposit counts, once xero-sync's deposit stamp had marked it
+  paid.
 - `deposit_unpaid`: a counted deposit is no longer paid in full, for example a
   payment taken off for a refund.
 
-A void whose replacement deposit is paid in full flags nothing. Each flag writes
+A void whose replacement deposit for the same party is paid in full flags
+nothing. A party that never had a deposit holds the move back but is never a
+flag. Each flag writes
 one `deposit_flagged` job event. The flag is recorded in `dry_run` and in `live`,
 because it is a record, not a move. xero-sync's existing
 `job.deposit_stamp_contradicted` event is unchanged.
@@ -195,7 +195,9 @@ check".
 `{ "job_id": "<uuid>" }`, signed-in staff (admin, owner, ops_manager) or the
 server key. It answers `{ ok, job_id, action: "cleared" | "no_open_flag" }` and
 writes a `deposit_flag_cleared` job event. A cleared flag stops showing and is
-never raised again for the same reason and invoice. A later change to the
+never raised again for the same reason and invoice, however many flags the job
+has had (`job_deposit_advance_state.cleared_flags` keeps every earlier cleared
+flag when a new one replaces it). A later change to the
 deposits (another invoice voided or unpaid, or another reason) can raise a new
 one.
 

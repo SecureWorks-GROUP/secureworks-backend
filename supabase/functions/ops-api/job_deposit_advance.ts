@@ -44,6 +44,7 @@ import {
   DEPOSIT_PAID_FROM_STATUSES,
   type DepositFlag,
   depositFlagFor,
+  depositFlagKey,
   type DepositInvoice,
   depositInvoicesSent,
   type DepositJob,
@@ -133,6 +134,7 @@ export interface DepositStateRow {
   flag: string | null;
   flag_invoice_id: string | null;
   flag_cleared_at: string | null;
+  cleared_flags: string[] | null;
 }
 
 const JOB_COLUMNS =
@@ -142,7 +144,7 @@ const INVOICE_COLUMNS =
 const PARTY_COLUMNS =
   "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id";
 const STATE_COLUMNS =
-  "job_id, moved_at, moved_to, counted_invoice_ids, text_status, flag, flag_invoice_id, flag_cleared_at";
+  "job_id, moved_at, moved_to, counted_invoice_ids, text_status, flag, flag_invoice_id, flag_cleared_at, cleared_flags";
 
 function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   const out: T[][] = [];
@@ -539,13 +541,16 @@ async function checkFlag(
   // or one the Xero deposit stamp marked paid (jobs.deposit_at).
   const moved = !!state.row?.moved_at;
   if (!moved && !text(job.deposit_at)) return { ...base, action: "no_flag" };
+  // Every flag a person cleared: the earlier ones, and the one on the row now.
+  const cleared = [...(state.row?.cleared_flags ?? [])];
+  if (state.row?.flag && state.row.flag_cleared_at) {
+    cleared.push(depositFlagKey(state.row.flag, state.row.flag_invoice_id));
+  }
   const flag: DepositFlag | null = depositFlagFor({
     job,
     ...facts,
     countedIds: moved ? (state.row?.counted_invoice_ids ?? []) : [],
-    cleared: state.row?.flag_cleared_at
-      ? { reason: state.row.flag, xero_invoice_id: state.row.flag_invoice_id }
-      : null,
+    cleared,
   });
   if (!flag) return { ...base, action: "no_flag" };
   const nowIso = deps.now().toISOString();
@@ -558,6 +563,7 @@ async function checkFlag(
     flag_invoice_status: flag.invoice_status,
     flag_cleared_at: null,
     flag_cleared_by: null,
+    cleared_flags: [...new Set(cleared)],
     updated_at: nowIso,
   }, { onConflict: "job_id" });
   if (error) {

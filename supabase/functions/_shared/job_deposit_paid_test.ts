@@ -11,6 +11,7 @@ import {
   DEPOSIT_RECEIVED_TEXT_TEMPLATE,
   type DepositInvoice,
   depositFlagFor,
+  depositFlagKey,
   depositInvoicesSent,
   depositPaidTargetStatus,
   depositReceivedText,
@@ -155,6 +156,34 @@ Deno.test("deposit flag: a neighbour's deposit voided after the move is flagged"
     depositFlagFor({ job: moved, invoices: [a, b], parties, countedIds: ["x-a", "x-b"] })?.reason,
     "deposit_voided",
   );
+});
+
+Deno.test("deposit flag: a replaced void is not flagged because another party has no deposit", () => {
+  // A shared fence a person moved on: the neighbour never had a deposit raised.
+  const handMoved = { deposit_invoice_id: "x-c", status: "scheduled" };
+  const parties = [party(), party({ id: "jc-b", contact_label: "B", is_primary: false, share_percentage: null })];
+  const voidedA = inv({ xero_invoice_id: "x-a", invoice_number: "INV-1", reference: "SWF-26535-A-DEP50", status: "VOIDED" });
+  const replacementA = inv({ xero_invoice_id: "x-c", invoice_number: "INV-3", reference: "SWF-26535-A-DEP50" });
+  assertEquals(depositFlagFor({ job: handMoved, invoices: [voidedA, replacementA], parties, countedIds: [] }), null);
+  // Without the replacement, the void is flagged.
+  assertEquals(
+    depositFlagFor({ job: handMoved, invoices: [voidedA], parties, countedIds: [] })?.reason,
+    "deposit_voided",
+  );
+});
+
+Deno.test("deposit flag: a cleared flag is never raised again, another one still is", () => {
+  const moved = { deposit_invoice_id: "x-1", status: "order_materials" };
+  const voided1 = inv({ status: "VOIDED" });
+  const voided2 = inv({ xero_invoice_id: "x-2", invoice_number: "INV-2", reference: "SWF-261369-DEP2", status: "VOIDED" });
+  const counted = ["x-1", "x-2"];
+  const cleared = [depositFlagKey("deposit_voided", "x-1")];
+  assertEquals(
+    depositFlagFor({ job: moved, invoices: [voided1, voided2], parties: [], countedIds: counted, cleared })?.xero_invoice_id,
+    "x-2",
+  );
+  cleared.push(depositFlagKey("deposit_voided", "x-2"));
+  assertEquals(depositFlagFor({ job: moved, invoices: [voided1, voided2], parties: [], countedIds: counted, cleared }), null);
 });
 
 Deno.test("deposit paid: a hand-made Xero deposit that is not the pointer still counts", () => {

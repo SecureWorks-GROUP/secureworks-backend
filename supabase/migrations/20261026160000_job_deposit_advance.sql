@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS public.job_deposit_advance_state (
   flag_invoice_status text,
   flag_cleared_at     timestamptz,
   flag_cleared_by     text,
+  cleared_flags       text[] NOT NULL DEFAULT '{}',
   updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
@@ -76,7 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_job_deposit_advance_state_open_flag
   WHERE flag IS NOT NULL AND flag_cleared_at IS NULL;
 
 COMMENT ON TABLE public.job_deposit_advance_state IS
-  'Deposit advance (20261026160000): per fencing or patio job, the automatic paid-deposit move (moved_at, moved_from, moved_to, counted_invoice_ids: the deposit invoices that counted), the once-only client text (text_status claimed before the send, then sent | refused | unconfirmed | no_contact | prior_send_unreadable | already_sent; never re-sent), and the open flag a person decides on when a deposit is voided (deposit_voided) or no longer paid in full (deposit_unpaid) after the job moved on; the job is never moved back. Written only by ops-api job_deposit_advance.ts.';
+  'Deposit advance (20261026160000): per fencing or patio job, the automatic paid-deposit move (moved_at, moved_from, moved_to, counted_invoice_ids: the deposit invoices that counted), the once-only client text (text_status claimed before the send, then sent | refused | unconfirmed | no_contact | prior_send_unreadable | already_sent; never re-sent), and the open flag a person decides on when a deposit is voided (deposit_voided) or no longer paid in full (deposit_unpaid) after the job moved on; the job is never moved back. cleared_flags keeps every earlier flag a person cleared (reason:xero_invoice_id) when a new flag replaces it, so no cleared flag is raised again. Written only by ops-api job_deposit_advance.ts.';
 
 ALTER TABLE public.job_deposit_advance_state ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.job_deposit_advance_state FROM PUBLIC, anon, authenticated;

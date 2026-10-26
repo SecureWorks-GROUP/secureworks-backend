@@ -551,6 +551,15 @@ Deno.test("deposit flag: after a clear, another reason or invoice raises a new f
   assertEquals((r.detail as any).xero_invoice_id, second.xero_invoice_id);
   assertEquals(events(db, "deposit_flagged").length, 2);
   assertEquals((await loadDepositFlags(db, [job.id]))?.size, 1);
+  // Both cleared: neither comes back on the next sync, whichever was cleared first.
+  await runJobDepositAction("clear_job_deposit_flag", "POST", { job_id: job.id }, { kind: "staff", email: null }, deps);
+  for (const inv of [first, second]) {
+    const again = await depositOnInvoiceChange(deps, { job_id: job.id, xero_invoice_id: inv.xero_invoice_id });
+    assertEquals(again.action, "no_flag");
+  }
+  assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
+  assertEquals(events(db, "deposit_flagged").length, 2);
+  assertEquals((await loadDepositFlags(db, [job.id]))?.size, 0);
 });
 
 Deno.test("deposit flag: a refund on a job the catch-up checks is flagged", async () => {
