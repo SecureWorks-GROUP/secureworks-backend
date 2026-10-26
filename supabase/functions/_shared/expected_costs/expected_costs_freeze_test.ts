@@ -507,3 +507,57 @@ Deno.test('job not found → structured error', async () => {
 Deno.test('lane enum is exactly the three cost lanes', () => {
   assertEquals([...EXPECTED_LANES].sort(), ['commission', 'labour', 'materials'])
 })
+
+// ── Incomplete-cost rule (Sales request 20 Oct 2026, fence d4fc2ad) ─────────
+
+Deno.test('costs_incomplete — internal.costs_complete false → NO baseline (short cost never freezes)', async () => {
+  const pricing = {
+    ...LIVE_PRICING,
+    pricing_complete: false,
+    margin_pct: null,
+    internal: { cost: 300, labour: 245, margin: null, costs_complete: false, costs_to_confirm: ['delivery'] },
+  }
+  const client = makeMockClient({ jobs: [seedJob({ id: 'JI1', pricing_json: pricing })] })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JI1', now_iso: FROZE_AT })
+  assertEquals(r.ok, true)
+  if (!r.ok || r.snapshot !== false) throw new Error('expected suppression')
+  assertEquals(r.reason, 'costs_incomplete')
+  assertEquals((client._state.jobs[0] as any).expected_costs, null)
+  assertEquals((client._state.jobs[0] as any).expected_frozen_at, null)
+})
+
+Deno.test('costs_incomplete — an incomplete frozen revision is not rescued by complete live pricing', async () => {
+  const frozenIncomplete = { ...FROZEN_PRICING, pricing_complete: false, internal: { costs_complete: false } }
+  const job = seedJob({ id: 'JI2', pricing_json: LIVE_PRICING })
+  const rev = await seedFrozenRevision('JI2', frozenIncomplete)
+  const client = makeMockClient({ jobs: [job], scope_revisions: [rev] })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JI2', now_iso: FROZE_AT })
+  if (!r.ok || r.snapshot !== false) throw new Error('expected suppression')
+  assertEquals(r.reason, 'costs_incomplete')
+  assertEquals((client._state.jobs[0] as any).expected_costs, null)
+})
+
+Deno.test('sell to confirm only — costs complete freeze, margin_pct is not kept', async () => {
+  const pricing = {
+    ...LIVE_PRICING,
+    pricing_complete: false,
+    sell_to_confirm: ['Delivery'],
+    internal: { costs_complete: true, costs_to_confirm: [] },
+  }
+  const client = makeMockClient({ jobs: [seedJob({ id: 'JI3', pricing_json: pricing })] })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JI3', now_iso: FROZE_AT })
+  if (!r.ok || r.snapshot !== true) throw new Error('expected a snapshot')
+  const ec = (client._state.jobs[0] as any).expected_costs
+  assertEquals(ec.lanes.labour.amount_ex_gst, 245)
+  assertEquals(ec.totals.margin_pct, null)
+})
+
+Deno.test('complete pricing with the new fields reads exactly as before', async () => {
+  const pricing = { ...LIVE_PRICING, pricing_complete: true, sell_to_confirm: [], internal: { costs_complete: true, costs_to_confirm: [] } }
+  const client = makeMockClient({ jobs: [seedJob({ id: 'JI4', pricing_json: pricing })] })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JI4', now_iso: FROZE_AT })
+  if (!r.ok || r.snapshot !== true) throw new Error('expected a snapshot')
+  const ec = (client._state.jobs[0] as any).expected_costs
+  assertEquals(ec.totals.margin_pct, 50)
+  assertEquals(ec.totals.total_cost_ex_gst, 958.325)
+})

@@ -548,6 +548,39 @@ Deno.test('FenceAdapter — internal cost reads pricing.internal.{cost,labour,co
   }
 })
 
+Deno.test('FenceAdapter — costs_complete false seals the cost estimates as not known, never the short figures', () => {
+  const base = buildFenceInputs()
+  const pricing = base.job.pricing_json as Record<string, unknown>
+  const inputs = buildFenceInputs({
+    job: {
+      ...base.job,
+      pricing_json: {
+        ...pricing,
+        pricing_complete: false,
+        internal: { commission: 210, cost: 1200, labour: 900, margin: null, costs_complete: false, costs_to_confirm: ['delivery'] },
+      },
+    },
+  })
+  const r = dispatchAdapter(inputs)
+  assert(r.ok)
+  if (r.ok) {
+    const ce = r.output.internal_cost.cost_estimates
+    assertEquals(ce.material_total, null)
+    assertEquals(ce.labour_total, null)
+    assertEquals(ce.subcontract_commission_total, null)
+    assertEquals(ce.costs_complete, false)
+    assertEquals(ce.costs_to_confirm, ['delivery'])
+  }
+})
+
+Deno.test('FenceAdapter — complete pricing carries no completeness keys (canonical text unchanged)', () => {
+  const r = dispatchAdapter(buildFenceInputs())
+  assert(r.ok)
+  if (r.ok) {
+    assertEquals(Object.keys(r.output.internal_cost.cost_estimates).sort(), ['labour_total', 'material_total', 'subcontract_commission_total'])
+  }
+})
+
 Deno.test('FenceAdapter — shared-line per_contact ids are REAL contact UUIDs (no synthetic "primary" string)', () => {
   // Codex stop-time review caught: the fence adapter previously wrote the
   // literal string 'primary' as a contact_id when prepending the client
