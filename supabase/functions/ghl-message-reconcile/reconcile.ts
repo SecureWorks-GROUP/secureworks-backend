@@ -194,6 +194,15 @@ const COUNT_KEYS = [
   "call_pair_unreadable",
   "skipped_activity",
   "skipped_unsupported_type",
+  // The channel of each skipped_unsupported_type item (WhatsApp, Facebook,
+  // Instagram, web chat, Google, anything else), so the dropped mix is
+  // measured. Counts only; the run row stays within record_capture_run's 40.
+  "skipped_unsupported_whatsapp",
+  "skipped_unsupported_facebook",
+  "skipped_unsupported_instagram",
+  "skipped_unsupported_webchat",
+  "skipped_unsupported_google",
+  "skipped_unsupported_other",
   "backlog_conversations",
   "backlog_more",
   "boundary_tie_widened",
@@ -543,6 +552,9 @@ export async function runGhlMessageReconcile(
             ? built.reason
             : `skipped_${built.reason}`) as CountKey;
           counts[key]++;
+          if (built.channel) {
+            counts[`skipped_unsupported_${built.channel}` as CountKey]++;
+          }
           continue;
         }
         const key = String(built.row.provider_message_id);
