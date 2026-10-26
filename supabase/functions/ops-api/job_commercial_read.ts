@@ -1035,13 +1035,30 @@ export interface ScopeRevisionAlignment {
   // The frozen revision's own scope, read only when the last save differs and
   // only once its text hashes to the stored scope_hash.
   frozen_scope_json: Record<string, unknown> | null;
+  // The frozen revision's figure-free pricing status (INT-01). Only the
+  // booleans leave the read; the pricing object itself never does. null when
+  // there is no frozen row or its pricing cannot be read and verified.
+  frozen_pricing_status: PricingStatus | null;
 }
 
-// Sales patio-scoper draft (SQ-29): the scoper's own { site, design, pricing }.
+// Sales patio-scoper draft (SQ-29). The scoper's draft is { site, design,
+// pricing }, but agents read only the design and a non-contact site allowlist:
+// the pricing object (rates, margin, commission, labour) and the contact
+// fields belong to Sales and the CRM (Sales' 1117 review, spec r2.4).
 export interface PatioScoperDraft {
   site: Record<string, unknown> | null;
   design: Record<string, unknown> | null;
-  pricing: Record<string, unknown> | null;
+}
+
+// Sales' completeness rule on the frozen row's pricing, as booleans only:
+// pricing_complete is true, sell_to_confirm is empty, internal.costs_complete
+// is not false, and revision.sealed holds. null is unknown, never false.
+export interface PricingStatus {
+  pricing_complete: boolean | null;
+  sell_to_confirm_empty: boolean | null;
+  costs_complete_not_false: boolean | null;
+  revision_sealed: boolean | null;
+  complete: boolean | null;
 }
 
 export interface PatioScoperRecord {
@@ -1050,6 +1067,9 @@ export interface PatioScoperRecord {
   family: string | null;
   supported: boolean | null;
   draft: PatioScoperDraft | null;
+  // From the frozen scope_revisions row only, never the last save or the
+  // draft. null unless the summarised content is that frozen revision.
+  pricing_status: PricingStatus | null;
   revision_n: number | null;
   scope_revision_id: string | null;
   parent_revision_id: string | null;
@@ -1199,28 +1219,94 @@ function changedSinceLastQuote(
   return { changed: null, basis: "scope_update_time_not_recorded" };
 }
 
-// The Sales draft is { site, design, pricing }. A boolean, a missing draft,
-// or an object with none of those three is no draft.
+// The only site facts agents read. Contact fields (customer, mobile, email,
+// address, gate code) are left out by name never being listed here.
+const PATIO_SITE_ALLOWLIST = [
+  "storeys",
+  "houseRoof",
+  "fascia",
+  "windClass",
+  "readings",
+] as const;
+
+// The Sales draft is { site, design, pricing }. Only design (whole) and the
+// site allowlist are read; pricing is never read. A boolean, a missing draft,
+// or one with neither site facts nor design (a pricing-only draft) is no draft.
 function patioScoperDraft(value: unknown): PatioScoperDraft | null {
   const obj = parseJsonObject(value);
   if (!obj) return null;
-  const site = parseJsonObject(obj.site);
+  const rawSite = parseJsonObject(obj.site);
+  let site: Record<string, unknown> | null = null;
+  if (rawSite) {
+    const kept: Record<string, unknown> = {};
+    for (const key of PATIO_SITE_ALLOWLIST) {
+      if (Object.prototype.hasOwnProperty.call(rawSite, key)) {
+        kept[key] = rawSite[key];
+      }
+    }
+    if (Object.keys(kept).length > 0) site = kept;
+  }
   const design = parseJsonObject(obj.design);
-  const pricing = parseJsonObject(obj.pricing);
-  if (!site && !design && !pricing) return null;
-  return { site, design, pricing };
+  if (!site && !design) return null;
+  return { site, design };
+}
+
+function bool(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/**
+ * Figure-free status from a frozen row's pricing object (Sales' frozen-store
+ * reader contract, settled points S1 to S8 in spec r2.4). Returns booleans
+ * only: no figures and no line names. A missing internal.costs_complete is
+ * "not false" (S5); a missing sell_to_confirm is unknown (C5d).
+ */
+export function pricingStatusFrom(pricing: unknown): PricingStatus | null {
+  const p = parseJsonObject(pricing);
+  if (!p) return null;
+  const sell = (p as any).sell_to_confirm;
+  const internal = (p as any).internal;
+  let costsNotFalse: boolean | null;
+  if (internal === undefined) {
+    costsNotFalse = true;
+  } else if (!internal || typeof internal !== "object" || Array.isArray(internal)) {
+    costsNotFalse = null;
+  } else if (internal.costs_complete === undefined) {
+    costsNotFalse = true;
+  } else if (typeof internal.costs_complete === "boolean") {
+    costsNotFalse = internal.costs_complete !== false;
+  } else {
+    costsNotFalse = null;
+  }
+  const revision = (p as any).revision;
+  const parts = {
+    pricing_complete: bool((p as any).pricing_complete),
+    sell_to_confirm_empty: Array.isArray(sell) ? sell.length === 0 : null,
+    costs_complete_not_false: costsNotFalse,
+    revision_sealed: revision && typeof revision === "object"
+      ? bool(revision.sealed)
+      : null,
+  };
+  const values = Object.values(parts);
+  const complete = values.some((v) => v === false)
+    ? false
+    : values.every((v) => v === true)
+    ? true
+    : null;
+  return { ...parts, complete };
 }
 
 /**
  * The patio-scoper v2 record (Sales SQ-29) is the scoper's own shape, not the
  * older patio tool's, so the shared release-packet adapter would read it as a
  * bare "patio" with no lines. Read it here, lines only: `expected` holds
- * figures and is never read. `draft` is the Sales object (site, design,
- * pricing). An unsupported family is a scope with no quote or order behind
- * it, and its lines say so.
+ * figures and is never read. `draft` is the design and the site allowlist,
+ * never its pricing or contacts. An unsupported family is a scope with no
+ * quote or order behind it, and its lines say so.
  */
 function patioScoperSummary(
   scopeJson: Record<string, unknown>,
+  pricingStatus: PricingStatus | null,
 ): { lines: string[]; record: PatioScoperRecord } | null {
   if (scopeJson.tool !== "patio-scoper") return null;
   const rev = scopeJson.revision && typeof scopeJson.revision === "object" &&
@@ -1255,6 +1341,7 @@ function patioScoperSummary(
       family,
       supported,
       draft: patioScoperDraft(scopeJson.draft),
+      pricing_status: pricingStatus,
       revision_n: num(rev.n),
       scope_revision_id: str(rev.scopeRevisionId),
       parent_revision_id: str(rev.parentRevisionId),
@@ -1344,7 +1431,12 @@ export function summariseScope(
   if (!scopeJson || Object.keys(scopeJson).length === 0) {
     return { ...base, status: "no_scope" };
   }
-  const patioScoper = patioScoperSummary(scopeJson);
+  // The frozen pricing status describes the frozen revision, so it is shown
+  // only when the summarised content is that revision.
+  const pricingStatus = base.scope_source === "frozen_revision"
+    ? rev?.frozen_pricing_status ?? null
+    : null;
+  const patioScoper = patioScoperSummary(scopeJson, pricingStatus);
   if (patioScoper) {
     return {
       ...base,
@@ -1424,8 +1516,10 @@ async function sha256Hex(text: string): Promise<string> {
  * frozen content. Matching is by scope_hash, the same canonical hash
  * freeze_scope stores, never by the tool's own frozenId (a different id). The
  * frozen row's text (it can run to megabytes) is read only when the last save
- * differs, and used only once it hashes to scope_hash. Pricing text is never
- * read. A failed read is ok:false with a code, never an empty history.
+ * differs, and used only once it hashes to scope_hash. The frozen pricing text
+ * is read only to derive the figure-free status, once it hashes to
+ * pricing_hash; nothing else from it leaves this function. A failed read is
+ * ok:false with a code, never an empty history.
  */
 export async function readScopeRevisionAlignment(
   client: any,
@@ -1441,6 +1535,7 @@ export async function readScopeRevisionAlignment(
     frozen: null,
     last_save_matches_frozen: null,
     frozen_scope_json: null,
+    frozen_pricing_status: null,
   });
   let rows: any[];
   try {
@@ -1474,6 +1569,7 @@ export async function readScopeRevisionAlignment(
     frozen: frozenRow ? scopeRevisionRef(frozenRow) : null,
     last_save_matches_frozen: null,
     frozen_scope_json: null,
+    frozen_pricing_status: null,
   };
   if (!frozenRow) {
     if (frozenRows.length > 0) out.code = "frozen_tool_kind_mismatch";
@@ -1487,15 +1583,53 @@ export async function readScopeRevisionAlignment(
   } else {
     out.last_save_matches_frozen = false;
   }
-  if (out.last_save_matches_frozen) return out;
 
+  // One read of the frozen row: its pricing always (for the status), its scope
+  // text only when the last save differs.
+  const needScope = !out.last_save_matches_frozen;
+  let data: any;
   try {
-    const { data, error } = await client.from("scope_revisions")
-      .select("scope_canonical_text, scope_hash")
+    const read = await client.from("scope_revisions")
+      .select(
+        needScope
+          ? "pricing_canonical_text, pricing_hash, scope_canonical_text, scope_hash"
+          : "pricing_canonical_text, pricing_hash",
+      )
       .eq("id", frozenRow.id)
       .maybeSingle();
+    if (read.error) {
+      return {
+        ...out,
+        code: needScope ? "frozen_text_unreadable" : "frozen_pricing_unreadable",
+      };
+    }
+    data = read.data;
+  } catch (_e) {
+    return {
+      ...out,
+      code: needScope ? "frozen_text_unreadable" : "frozen_pricing_unreadable",
+    };
+  }
+  const pricingText = data?.pricing_canonical_text;
+  let pricingCode: string | undefined;
+  if (typeof pricingText !== "string") {
+    pricingCode = "frozen_pricing_unreadable";
+  } else if (
+    typeof data?.pricing_hash !== "string" ||
+    (await sha256Hex(pricingText)) !== data.pricing_hash
+  ) {
+    pricingCode = "frozen_pricing_hash_mismatch";
+  } else {
+    out.frozen_pricing_status = pricingStatusFrom(pricingText);
+    if (!out.frozen_pricing_status) pricingCode = "frozen_pricing_unreadable";
+  }
+  if (!needScope) {
+    return pricingCode ? { ...out, code: pricingCode } : out;
+  }
+
+  try {
     const text = data?.scope_canonical_text;
-    if (error || typeof text !== "string") {
+    if (typeof text !== "string") {
       return { ...out, code: "frozen_text_unreadable" };
     }
     if ((await sha256Hex(text)) !== frozenRow.scope_hash) {
@@ -1507,7 +1641,7 @@ export async function readScopeRevisionAlignment(
   } catch (_e) {
     return { ...out, code: "frozen_text_unreadable" };
   }
-  return out;
+  return pricingCode ? { ...out, code: pricingCode } : out;
 }
 
 /**
