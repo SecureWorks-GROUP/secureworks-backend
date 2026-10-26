@@ -6,7 +6,7 @@ Backend for Dispatch v2 slices 5 and 6. The ops screen's Dispatch tab uses it to
 - **split** those lines into **supplier boxes** (move a line in, out, or between boxes),
 - add **photos**, for example a handwritten list, under 3 MB each,
 - **make** a held, editable supplier order email in the template,
-- **send** it from `admin@secureworkswa.com.au` through Outlook, with one test copy to admin@ first.
+- **send** it from `admin@secureworkswa.com.au` through Outlook. A test copy to admin@ is optional.
 
 Code: `supabase/functions/ops-api/dispatch_v2_emails.ts` (the rules), `dispatch_v2_store.ts` (the actions), `dispatch_v2_send.ts` (the Outlook sender). Tests: `dispatch_v2_emails_test.ts`, `dispatch_v2_store_test.ts`, and `send-outlook-email/outlook_capture_thread_ids_test.ts`.
 
@@ -170,7 +170,7 @@ Params: `job_id`. Returns the whole tab for one job.
 ```
 
 - `send_blocked` is set when the supplier has no approved order email: `{ "code": "no_approved_email", "message": "This supplier has no approved order email. Ask Shaun to add one before sending." }`. The screen should grey out Make email and Send now for that box.
-- `test_send_done` is true once anyone has sent a test copy. Until then, every real send is refused.
+- `test_send_done` is true once anyone has sent a test copy. For information only: a real send does not wait for one (Shaun, 26 Oct).
 - `can_suggest` is true for a fencing or patio job with no lines yet.
 
 ### dispatch_v2_supplier_search (GET)
@@ -497,7 +497,7 @@ It records `test_sent_at`, `test_sent_to`, `test_sent_by_email`, `test_internet_
 
 A failed test gives 502 `test_send_refused` or `test_send_unknown`.
 
-**Real send.** It is refused 409 `test_send_first` until someone has sent a test copy (Shaun's rule: one test email to our own address before any supplier send). Then:
+**Real send.** A test copy first is optional (Shaun, 26 Oct; the old `test_send_first` refusal is gone). Then:
 
 1. The email is claimed (`status: sending`), so only one press can send it.
 2. ops-api posts to `send-outlook-email` from admin@ with `capture_thread_ids: true` and `signature: none`, and with no `job_id`, so it is not filed as a client email.
@@ -658,7 +658,7 @@ Two v1 interactions to know about:
 - **Seven approved suppliers have no Xero contact linked** (Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication, Unique Laser), so they show `can_add: false` until Shaun names the right contact. Mackson and Palram were ruled and are linked in the seed.
 - **Signature (decided).** Order emails go with no Outlook signature: Shaun's template has no sign-off (ruled 23 Oct 2026).
 - **One open email per box.** A second order to the same supplier on the same job waits until the first is sent or discarded.
-- **Ids not checked against live Outlook.** That the draft gives `internetMessageId` and `conversationId` before sending is from Graph's documentation; it has not been tried against live Outlook (no sends from this build). The first test send will show it. `graph_message_id` may change in Sent Items: match on the conversation id or the Message-ID.
+- **Ids not checked against live Outlook.** That the draft gives `internetMessageId` and `conversationId` before sending is from Graph's documentation; it has not been tried against live Outlook (no sends from this build). The first send will show it. `graph_message_id` may change in Sent Items: match on the conversation id or the Message-ID.
 - **Records written per send.** send-outlook-email also writes its usual `email_events` log row for each send. No `job_events` or `po_communications` row is written for a v2 send. The job's Emails panel shows the order only when admin@ mail capture picks it up.
 - **Deploy order.** send-outlook-email must deploy before, or with, ops-api for the ids to come back. With an old send-outlook-email, the send still works and counts as sent, but the ids are null.
 - **Request body size.** The edge function's limit for a 3 MB photo upload (about 4 MB as base64) has not been tested live.

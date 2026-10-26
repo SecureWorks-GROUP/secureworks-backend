@@ -435,8 +435,8 @@ async function readApprovedFor(
   return out;
 }
 
-// Has anyone sent a test copy yet? The first real supplier send waits for one
-// (Shaun's rule: one test email to our own address before any supplier send).
+// Has anyone sent a test copy yet? Shown on the screen only: a test copy is
+// optional and no longer holds back a real supplier send (Shaun, 26 Oct).
 async function testSendDone(client: any, ctx: DispatchV2Context) {
   const { data, error } = await client.from("dispatch_supplier_order_emails")
     .select("id")
@@ -1782,8 +1782,8 @@ async function emailAttachments(client: any, email: any) {
 
 // Send a held email. `test: true` sends the same email, clearly marked, to
 // admin@ only and records it in the test_* columns: the email stays held and
-// nothing is stamped. A real send needs a test copy to have been sent first
-// (once, by anyone), an approved order email for the supplier, the Date,
+// nothing is stamped. A test copy is optional (Shaun, 26 Oct). A real send
+// needs an approved order email for the supplier, the Date,
 // Address and Contact lines filled in, and the box's lines unchanged since the
 // email was made.
 export async function sendDispatchV2Email(
@@ -1888,14 +1888,6 @@ export async function sendDispatchV2Email(
       recorded: !error,
       email: projectDispatchV2Email(row, nowMs),
     };
-  }
-
-  if (!await testSendDone(client, ctx)) {
-    refuse(
-      409,
-      "test_send_first",
-      "Send one test email to admin@ first (Send test), and check it, before the first supplier send",
-    );
   }
 
   // The claim: only one press, tab or terminal gets past this line.

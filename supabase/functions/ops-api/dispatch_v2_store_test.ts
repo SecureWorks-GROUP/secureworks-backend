@@ -1327,6 +1327,24 @@ Deno.test("save and discard: edits are kept and seen as edited; a stale stamp is
 
 // ── Send ────────────────────────────────────────────────────────────────────
 
+Deno.test("send: a test copy is optional, so the first real send goes without one", async () => {
+  const db = await fencingJob();
+  const { sent, sender } = fakeSender();
+  const c = ctx(sender);
+  const email = (await makeEmail(db, JOB.fence, SUP.stratco)).email;
+  assertEquals(db.tables.dispatch_supplier_order_emails.some((r: any) => r.test_sent_at), false);
+
+  const real = await call(db, "dispatch_v2_send_email", {
+    email_id: email.id,
+    expected_updated_at: email.updated_at,
+  }, c);
+  assertEquals([real.success, real.test], [true, false]);
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].to, ["tradewa@stratcowa.com.au"]);
+  assert(!sent[0].subject.startsWith("TEST ONLY: "));
+  assertEquals(real.email.status, "sent");
+});
+
 Deno.test("send: test copy to admin@ only, then the real send from admin@ records the ids and locks the lines", async () => {
   const db = await fencingJob();
   await call(db, "dispatch_v2_upload_photo", {
@@ -1338,17 +1356,6 @@ Deno.test("send: test copy to admin@ only, then the real send from admin@ record
   const c = ctx(sender);
   const email = (await makeEmail(db, JOB.fence, SUP.stratco)).email;
   assertEquals(email.photo_ids.length, 1);
-
-  // A real send before any test send is refused, and nothing goes.
-  await refused(
-    call(db, "dispatch_v2_send_email", {
-      email_id: email.id,
-      expected_updated_at: email.updated_at,
-    }, c),
-    409,
-    "test_send_first",
-  );
-  assertEquals(sent.length, 0);
 
   const test = await call(db, "dispatch_v2_send_email", {
     email_id: email.id,
