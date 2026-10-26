@@ -215,7 +215,7 @@ const PRODUCTION_OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, apikey, x-client-info',
 }
 
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
