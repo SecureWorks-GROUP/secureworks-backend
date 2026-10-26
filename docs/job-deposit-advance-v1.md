@@ -61,8 +61,8 @@ paths. It lands the job the same way when Xero's own sent flag says so
 
 `SentToContact` false, or missing from the stored record (not known), is never
 sent, and neither is an AUTHORISED status alone. It is checked only on
-`job_deposit_catch_up`, which xero-sync posts after every run, so it needs no
-sync to see the invoice change. The move
+`job_deposit_catch_up`, which xero-sync posts after every run while the switch
+is on, so the invoice itself need not change in that run. The move
 uses `expected_statuses: ['accepted']`, source `xero_deposit_sent`, and leaves
 GHL alone. Like the paid move, a job a person puts back in Accepted while its
 deposit stays sent is landed again on the next catch-up.
@@ -260,7 +260,7 @@ was made. Clear it the same way.
 | Action | Caller | What it does |
 | --- | --- | --- |
 | `job_deposit_paid` | server key (xero-sync) | `{ job_id, xero_invoice_id?, source? }`: the paid move, or the flag check for a job already moved on |
-| `job_deposit_catch_up` | server key (xero-sync) | waiting cards whose deposits are paid; moved cards whose deposit was voided, unpaid or refunded by credit note |
+| `job_deposit_catch_up` | server key (xero-sync) | waiting cards whose deposits are paid; accepted cards whose deposit Xero marks sent; moved cards whose deposit was voided, unpaid or refunded by credit note |
 | `clear_job_deposit_flag` | staff or server key | a person has dealt with a flag |
 
 All three are POST only. A staff caller is refused 403 on the first two.
