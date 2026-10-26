@@ -539,6 +539,13 @@ Slice 7's install step and its To do rule at Trade scheduled live only in
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
 by `set_dispatch_install_confirmed`, never the calendar's booking lock.
 Contract: `docs/dispatch-slice-7-contract.md`.
+S5's partial deliveries are append-only `job_material_line_receipts` rows
+(undo is a void), written only by `dispatch_delivery_record_receipt` /
+`_void_receipt`. A line's delivered / part delivered state and an order's "on
+site" are worked out on read in `dispatch_line_receipts.ts`, never stored. A
+sighting covers only lines already on the order when it was sighted
+(`job_material_lines.purchase_order_attached_at`, stamped by trigger). Contract:
+`docs/dispatch-partial-deliveries-v1.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
