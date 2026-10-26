@@ -1077,6 +1077,40 @@ Deno.test("suggest: fills the draft list from the scope, leaves concrete bags ou
   );
 });
 
+Deno.test("suggest: a fence tool scope fills panels and plinths with profile and colour, and passes notes back", async () => {
+  const db = makeDb();
+  const fence = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  fence.scope_json = {
+    tool: "fence",
+    job: {
+      profile: "Neetascreen",
+      colour: "Paperbark",
+      gates: [],
+      runs: [{
+        name: "Rear",
+        sheetHeight: 1800,
+        panels: [
+          { height: 1800, retaining: 150, panelWidth: "standard" },
+          { height: 1800, retaining: 150, panelWidth: "long" },
+        ],
+      }],
+    },
+  };
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals(out.added, 2);
+  assertEquals(
+    out.lines.map((l: any) => [l.quantity, l.description, l.profile ?? null, l.colour ?? null, l.source]),
+    [
+      [2, "1800H standard width panels with 2700H posts", "Neetascreen", "Paperbark", "scope"],
+      [2, "150mm standard width plinths", null, "Paperbark", "scope"],
+    ],
+  );
+  assertEquals(out.notes, [
+    "1 panel is marked long width in the scope. Check the panel line with the supplier.",
+  ]);
+  assertOnlyV2Writes(db);
+});
+
 // ── Boxes and the main tick ─────────────────────────────────────────────────
 
 Deno.test("boxes: add flags a supplier with no approved email; an occupied box cannot be removed", async () => {

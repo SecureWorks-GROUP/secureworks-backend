@@ -31,6 +31,7 @@ import {
   cleanDispatchUnit,
   DISPATCH_MATERIAL_LINES_PER_JOB_MAX,
   dispatchSuggestedLines,
+  type DispatchSuggestedLine,
   isDispatchUuid,
 } from "./dispatch_materials.ts";
 import {
@@ -63,6 +64,10 @@ import {
   dispatchV2TestEmail,
   isDispatchV2Date,
 } from "./dispatch_v2_emails.ts";
+import {
+  dispatchV2FenceLinesFromScope,
+  type DispatchV2FenceLine,
+} from "./dispatch_v2_fence_scope.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 
 // ── The send seam ───────────────────────────────────────────────────────────
@@ -1041,17 +1046,31 @@ export async function suggestDispatchV2Draft(
     .eq("org_id", ctx.orgId)
     .maybeSingle();
   if (scopeError) readFailed("scope read", scopeError);
-  let items: any[];
-  try {
-    items = ctx.extractMaterialsFromScope(scopeRow?.scope_json ?? null, null);
-  } catch (error) {
-    console.error("[dispatch_v2] scope could not be read:", error);
-    refuse(409, "scope_unreadable", "The job's scope could not be read");
+  // A fencing job scoped in the fence tool is read with the material ordering
+  // rules (panels, posts, plinths, gates). Anything else uses the older
+  // extractor, which reads the patio tool's layout.
+  const fence = job.work_type === "fencing"
+    ? dispatchV2FenceLinesFromScope(scopeRow?.scope_json ?? null)
+    : null;
+  let suggested: Array<
+    DispatchSuggestedLine & Partial<Pick<DispatchV2FenceLine, "detail" | "profile" | "colour">>
+  >;
+  const notes: string[] = fence ? fence.notes : [];
+  if (fence) {
+    suggested = fence.lines;
+  } else {
+    let items: any[];
+    try {
+      items = ctx.extractMaterialsFromScope(scopeRow?.scope_json ?? null, null);
+    } catch (error) {
+      console.error("[dispatch_v2] scope could not be read:", error);
+      refuse(409, "scope_unreadable", "The job's scope could not be read");
+    }
+    suggested = dispatchSuggestedLines(
+      (items || []).filter((item) => dispatchV2SuggestionAllowed(item?.description)),
+    );
   }
-  const suggested = dispatchSuggestedLines(
-    (items || []).filter((item) => dispatchV2SuggestionAllowed(item?.description)),
-  );
-  if (suggested.length === 0) return { success: true, added: 0, lines: [] };
+  if (suggested.length === 0) return { success: true, added: 0, lines: [], notes };
   const now = nowIso(ctx);
   const ids = await Promise.all(
     suggested.map((_line, index) => suggestedLineId(job.id, index)),
@@ -1064,6 +1083,9 @@ export async function suggestDispatchV2Draft(
     description: line.description,
     quantity: line.quantity,
     unit: line.unit,
+    detail: line.detail ?? null,
+    profile: line.profile ?? null,
+    colour: line.colour ?? null,
     status: "not_reviewed",
     source: "scope",
     position: index + 1,
@@ -1086,7 +1108,12 @@ export async function suggestDispatchV2Draft(
   }
   const out: any[] = Array.isArray(inserted) ? inserted : [];
   out.sort((a, b) => Number(a.position) - Number(b.position));
-  return { success: true, added: out.length, lines: out.map(projectDispatchV2Line) };
+  return {
+    success: true,
+    added: out.length,
+    lines: out.map(projectDispatchV2Line),
+    notes,
+  };
 }
 
 // ── Supplier boxes ──────────────────────────────────────────────────────────
