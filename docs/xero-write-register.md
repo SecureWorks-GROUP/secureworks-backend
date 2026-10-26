@@ -5,27 +5,28 @@ Every place in `supabase/functions` that can write to Xero, grouped into the row
 - **Source of truth:** `supabase/functions/_shared/xero_write_register.json`. This page is its human copy; the test checks the two agree.
 - **The test:** `supabase/functions/_shared/xero_write_register_test.ts` scans every non-test `.ts` file with the TypeScript parser (`_shared/xero_write_sites.ts`) for an `xeroPost` call, a direct PUT, POST or DELETE fetch to a Xero accounting URL, or a call to a xero-sync write action. It fails when a site appears that no row names, or a row names one that is gone. A site's key is `file :: enclosing function or case :: METHOD /Path`, so moving a line does not change it.
 - **Owner** is the accountable desk, not the code. Bookkeeping's own code calls none of these paths (P1).
-- **A new row, or a change to who passes a gate, is a person's decision** (P2, P12). The CFO desk confirms each row's owner and gate (`cfo_confirmed`, all false until it does). Marnin approves the register.
+- **Confirmed:** the CFO desk confirmed every row's owner and gate on 26 Oct (review on backend #1165, corrections applied). **Marnin approves the register.** A new row, or a change to who passes a gate, is a person's decision (P2, P12).
+- **Changes the books:** *draft only* means the write lands as a Xero DRAFT, which posts nothing until a person approves it in Xero. **Sends outside** marks a path that can send to a customer or supplier (a separate gate, P2).
 - **Not covered:** writes made outside `supabase/functions` (Jarvis, Railway) reach Xero only through these ops-api actions; Jarvis's own tool gates are INT-19.
 
 ## The rows
 
-| # | Write | Owner | Gate today | Changes the books |
-|---|---|---|---|---|
-| X1 | Create a customer contact, or patch its address | Sales | Staff session (link_scope, create_invoice); the address sweep is a server job | no |
-| X2 | Create a Xero quote | Sales | Staff press; an agent send needs approval (Jarvis sw_send_quote) | no |
-| X3 | Create a customer invoice (deposit, acceptance, progress, final, per party) | Ops / Bookkeeping | Staff press; invariant Acceptance Deposit Invoice. createInvoice is the one creator: create_invoice, create_invoice_draft, create_deposit_invoice, complete_and_invoice and send_acceptance_invoice all reach it | yes |
-| X4 | Approve, void or email a customer invoice | Bookkeeping | Jarvis durable Xero money gate: ACCREC needs confirm=true or a chat approval tap; ACCPAY needs confirm=true; unknown refuses. createInvoice's email runs only when its caller asks to send | yes |
-| X5 | Record a payment against an invoice | Bookkeeping (CFO) | Chat: Jarvis write tool (approval card). MCP: no Jarvis yes until INT-19 PR 1 (jarvis #267) is switched to enforce. Legacy SES guard. Marks the invoice paid in Xero, into the first active BANK account unless account_code is given, then lowers our copy's amount_due itself | yes |
-| X6 | Push a crew bill (trade invoice), and attach its PDF | Ops (crew pay) / CFO | With the office-review switches off, a crew submit goes straight to a Xero DRAFT bill and the bookkeeper's approval in Xero is the check. With crew_invoice_line_office_review_v1 on, the invoice is held out of Xero | yes |
-| X7 | Push an expense bill | CFO | Approval routed to Shaun (job) or Jan (stock) | yes |
-| X8 | Push or email a purchase order in Xero | Dispatch | Old path. Dispatch never pushes (slice 5 contract). Kept by choice only | no |
-| X9 | Draft, update or attach a supplier bill (ACCPAY), or draft a credit note | CFO | Forced to DRAFT. Never authorised, voided or paid | yes |
-| X10 | Customer variation invoice draft | Dispatch / Bookkeeping | One Xero DRAFT per variation, refused while customer_variation_xero_draft_v1 is off | yes |
-| X11 | Make-safe and SES invoices: authorise, void, update or delete a draft, authorise on send | Make-safe desk | Legacy SES guard; the SES pipeline's own gates (read-only to this framework) | yes |
-| X12 | Edit a customer invoice, and email it after the edit | Bookkeeping | Staff session | yes |
-| X13 | Find or create a trade's or supplier's Xero contact | CFO | Inside X6, X8 and X9 | no |
-| X14 | Have Xero email a paid invoice to the customer as a receipt (fencing and patio) **(new: found by INT-33, not in the first register)** | Bookkeeping (proposed; found by INT-33, not in the first register) | job_closeout_settings.receipt_sender_mode (off, dry_run, live); server key only (job_receipt_paid, job_receipt_catch_up, posted by xero-sync); one claim per invoice. Contract docs/job-receipt-v1.md | no |
+| # | Write | Owner | Gate today | Changes the books | Sends outside |
+|---|---|---|---|---|---|
+| X1 | Create a customer contact, or patch its address | Sales | Staff session (link_scope, create_invoice); the address sweep is a server job | no | no |
+| X2 | Create a Xero quote | Sales | Staff press; an agent send needs approval (Jarvis sw_send_quote) | no | yes |
+| X3 | Create a customer invoice (deposit, acceptance, progress, final, per party) | Ops / Bookkeeping | Staff press; invariant Acceptance Deposit Invoice. createInvoice is the one creator: create_invoice, create_invoice_draft, create_deposit_invoice, complete_and_invoice and send_acceptance_invoice all reach it. The caller may ask for AUTHORISED (send_acceptance_invoice does by default), which posts and can email without X4's gate; over MCP these tools have no Jarvis yes until INT-19 enforces | yes when AUTHORISED; a DRAFT posts nothing | yes |
+| X4 | Approve, void or email a customer invoice | Bookkeeping | Jarvis durable Xero money gate: ACCREC needs confirm=true or a chat approval tap; ACCPAY needs confirm=true; unknown refuses. createInvoice's email runs only when its caller asks to send | yes | yes |
+| X5 | Record a payment against an invoice | Bookkeeping (CFO) | Chat: Jarvis write tool (approval card). MCP: no Jarvis yes until INT-19 PR 1 (jarvis #267) is switched to enforce. Legacy SES guard. Marks the invoice paid in Xero, into the first active BANK account unless account_code is given, then lowers our copy's amount_due itself (verification V-07: amount_due, amount_paid and status come from its own arithmetic until the next sync) | yes | no |
+| X6 | Push a crew bill (trade invoice), and attach its PDF | Ops (crew pay) / CFO | With the office-review switches off, a crew submit goes straight to a Xero DRAFT bill and the bookkeeper's approval in Xero is the check. With crew_invoice_line_office_review_v1 on, the invoice is held out of Xero | draft only | no |
+| X7 | Push an expense bill | CFO | Expense approved (Shaun for a job, Jan for stock); push by admin, owner or ops_manager; DRAFT only | draft only | no |
+| X8 | Push or email a purchase order in Xero | Dispatch | Old path. Dispatch never pushes (slice 5 contract). Kept by choice only | no | yes |
+| X9 | Draft, update or attach a supplier bill (ACCPAY), or draft a credit note | CFO | Forced to DRAFT (requireDraftStatus). Never authorised, voided or paid | draft only | no |
+| X10 | Customer variation invoice draft | Dispatch / Bookkeeping | One Xero DRAFT per variation, refused while customer_variation_xero_draft_v1 is off | draft only | no |
+| X11 | Make-safe and SES invoices: authorise, void, update or delete a draft, authorise on send | Make-safe desk | Legacy SES guard; the SES pipeline's own gates (read-only to this framework) | yes | yes |
+| X12 | Edit a customer invoice, and email it after the edit | Bookkeeping | Staff session | yes | yes |
+| X13 | Find or create a trade's or supplier's Xero contact | CFO | Inside X6, X8 and X9 | no | no |
+| X14 | Have Xero email a paid invoice to the customer as a receipt (fencing and patio) **(new: found by INT-33, not in the first register)** | Bookkeeping (new row found by INT-33; the CFO desk takes it) | job_closeout_settings.receipt_sender_mode (off, dry_run, live); server key only (job_receipt_paid, job_receipt_catch_up, posted by xero-sync); one claim per invoice. Contract docs/job-receipt-v1.md. receipt_sender_mode going to live is a send gate for Marnin | no | yes |
 
 **Over the SecureSuite MCP connector,** Jarvis adds its own yes only for X4 today. INT-19's first PR (jarvis #267, switch `MCP_WRITE_APPROVAL_MODE`, default `warn`) asks a named person's yes for the X2, X3, X5, X7 and X8 tools; until that switch enforces, the Claude client's permission prompt is the only human gate there.
 

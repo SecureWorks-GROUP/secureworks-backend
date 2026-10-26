@@ -73,7 +73,17 @@ Deno.test("the register's rows are X1 to X14, each with an owner and a gate, eac
     assert(String(row.write || "").length > 0, `${row.id} write`);
     assert(String(row.owner || "").length > 0, `${row.id} owner`);
     assert(String(row.gate_today || "").length > 0, `${row.id} gate_today`);
-    assertEquals(typeof row.moves_money, "boolean", `${row.id} moves_money`);
+    assert(
+      ["yes", "no", "draft_only", "yes_when_authorised"].includes(
+        row.changes_books,
+      ),
+      `${row.id} changes_books`,
+    );
+    assertEquals(
+      typeof row.sends_outside,
+      "boolean",
+      `${row.id} sends_outside`,
+    );
     assertEquals(
       typeof row.cfo_confirmed,
       "boolean",
