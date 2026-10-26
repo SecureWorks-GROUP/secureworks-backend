@@ -170,6 +170,17 @@ const SCHEMA: Record<string, string[]> = {
     "created_at",
     "created_by_email",
   ],
+  dispatch_v2_scope_fills: [
+    "job_id",
+    "org_id",
+    "auto",
+    "lines_added",
+    "supplier_id",
+    "scope_supplier",
+    "filled_at",
+    "filled_by",
+    "filled_by_email",
+  ],
   dispatch_material_photos: [
     "id",
     "org_id",
@@ -234,6 +245,7 @@ const V2_WRITABLE = new Set([
   "job_material_suppliers",
   "dispatch_material_photos",
   "dispatch_supplier_order_emails",
+  "dispatch_v2_scope_fills",
   "storage",
 ]);
 
@@ -322,6 +334,7 @@ function seed(): Record<string, Row[]> {
     job_material_lines: [],
     dispatch_material_photos: [],
     dispatch_supplier_order_emails: [],
+    dispatch_v2_scope_fills: [],
   };
 }
 
@@ -409,6 +422,11 @@ function makeDb(initial = seed()) {
         row.is_main_supplier &&
         others.some((r) => r.job_id === row.job_id && r.is_main_supplier)
       ) return violation("23505", "job_material_suppliers_one_main_idx");
+    }
+    if (table === "dispatch_v2_scope_fills") {
+      if (others.some((r) => r.job_id === row.job_id)) {
+        return violation("23505", "dispatch_v2_scope_fills_pkey");
+      }
     }
     if (table === "dispatch_material_photos") {
       if (
@@ -1109,6 +1127,92 @@ Deno.test("suggest: a fence tool scope fills panels and plinths with profile and
     "1 panel is marked long width in the scope. Check the panel line with the supplier.",
   ]);
   assertOnlyV2Writes(db);
+});
+
+// The fence tool scope the auto fill tests use: two panels, one supplier.
+function fenceScope(supplier: string) {
+  return {
+    tool: "fence",
+    job: {
+      profile: "Neetascreen",
+      colour: "Paperbark",
+      supplier,
+      gates: [],
+      runs: [{ name: "Rear", panels: [{ height: 1800, retaining: 0 }, { height: 1800, retaining: 0 }] }],
+    },
+  };
+}
+
+Deno.test("auto fill: a fence scope naming its supplier fills that supplier's box, and never fills again", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("stratco ");
+  const before = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(before.auto_fill, true);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out.added, 1);
+  assertEquals(out.supplier, { supplier_id: SUP.stratco, name: "Stratco (WA) Pty Ltd" });
+  assertEquals(out.lines.map((l: any) => [l.quantity, l.description, l.supplier_id]), [
+    [2, "1800H standard width panels with 2400H posts", SUP.stratco],
+  ]);
+  assertEquals(db.tables.job_material_suppliers.map((b: any) => b.supplier_id), [SUP.stratco]);
+  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.job_id, f.auto, f.lines_added, f.supplier_id, f.scope_supplier]), [
+    [JOB.fence, true, 1, SUP.stratco, "stratco"],
+  ]);
+  const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(after.auto_fill, false);
+  assertEquals(after.draft_list.lines, []);
+  assertEquals(after.suppliers.map((b: any) => b.supplier_id), [SUP.stratco]);
+  // A list cleared by hand is not filled again on its own; the button still works.
+  db.tables.job_material_lines = [];
+  assertEquals((await get(db, "dispatch_v2_materials", { job_id: JOB.fence })).auto_fill, false);
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true }), 409, "already_filled");
+  const byHand = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals(byHand.added, 1);
+  assertEquals(db.tables.job_material_suppliers.length, 1);
+  assertEquals(db.tables.dispatch_v2_scope_fills.length, 1);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("auto fill: a supplier with no approved order email leaves the lines on the draft list, with a note", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Paralink");
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out.supplier, null);
+  assertEquals(out.lines.map((l: any) => l.supplier_id), [null]);
+  assertEquals(out.notes, [
+    "The scope names Paralink as the supplier, which has no approved order email. The lines are on the draft list: add a supplier and move them in.",
+  ]);
+  assertEquals(db.tables.job_material_suppliers, []);
+  // An approved email no active supplier contact is linked to says so too.
+  const db2 = makeDb();
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Unique Laser");
+  const out2 = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out2.supplier, null);
+  assertEquals(out2.notes, [
+    "The scope names Unique Laser as the supplier, but no supplier contact is linked to its approved order email. The lines are on the draft list: add a supplier and move them in.",
+  ]);
+  // A scope with no supplier: the draft list, and no note about it.
+  const db3 = makeDb();
+  db3.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("");
+  const out3 = await call(db3, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals([out3.supplier, out3.notes], [null, []]);
+});
+
+Deno.test("auto fill: fencing only, never over lines, and a box already there is reused", async () => {
+  const db = makeDb();
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio, auto: true }), 409, "no_auto_fill");
+  assertEquals((await get(db, "dispatch_v2_materials", { job_id: JOB.patio })).auto_fill, false);
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Stratco");
+  await addBox(db, JOB.fence, SUP.stratco);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out.supplier.supplier_id, SUP.stratco);
+  assertEquals(db.tables.job_material_suppliers.length, 1);
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true }), 409, "already_filled");
+  // A fence scope with nothing to order fills nothing and records nothing.
+  const db2 = makeDb();
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = { tool: "fence", job: { supplier: "Stratco", runs: [], gates: [] } };
+  const empty = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals([empty.added, db2.tables.dispatch_v2_scope_fills.length, db2.tables.job_material_suppliers.length], [0, 0, 0]);
 });
 
 // ── Boxes and the main tick ─────────────────────────────────────────────────

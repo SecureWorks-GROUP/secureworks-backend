@@ -194,3 +194,51 @@ export function dispatchV2FenceLinesFromScope(
 
   return { lines, notes };
 }
+
+// ── The scope's supplier ────────────────────────────────────────────────────
+//
+// The fence tool's supplier is typed free text ("RNR", "Fence supply centre",
+// "Strato"). It is matched to one of Shaun's approved order emails by name, so
+// the filled lines can go straight into that supplier's box. A name that
+// matches none is left for a person: the lines stay on the draft list.
+
+// The short forms the scopes carry, to the approved email's name.
+const SCOPE_SUPPLIER_ALIASES: Record<string, string> = {
+  rnr: "R&R Fencing",
+  randr: "R&R Fencing",
+  strato: "Stratco WA",
+  fss: "Fencing Supply Centre",
+  fencesupplycentre: "Fencing Supply Centre",
+  bnd: "B&D Metals Group",
+  bandd: "B&D Metals Group",
+  bandmetals: "B&D Metals Group",
+};
+
+// "R&R Fencing" -> "randrfencing": case, spaces and punctuation never matter.
+function supplierKey(name: unknown): string {
+  return String(name ?? "").toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]/g, "");
+}
+
+// The scope's supplier as typed, or null.
+export function dispatchV2ScopeSupplierName(scopeJson: unknown): string | null {
+  const job = dispatchV2FenceScopeJob(scopeJson);
+  return job ? text(job.supplier) : null;
+}
+
+// The approved name a scope's supplier means, or null. An approved name also
+// matches without a trailing "WA" or "Perth" ("Metroll" is "Metroll Perth").
+export function dispatchV2MatchScopeSupplier(
+  scopeName: unknown,
+  approvedNames: string[],
+): string | null {
+  const key = supplierKey(scopeName);
+  if (!key) return null;
+  const alias = SCOPE_SUPPLIER_ALIASES[key];
+  for (const name of approvedNames) {
+    const k = supplierKey(name);
+    if (alias ? k === supplierKey(alias) : k === key || k.replace(/(wa|perth)$/, "") === key) {
+      return name;
+    }
+  }
+  return null;
+}

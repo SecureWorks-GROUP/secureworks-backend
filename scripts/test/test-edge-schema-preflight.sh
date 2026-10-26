@@ -953,7 +953,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # the draft list, boxes, photos and order emails
                       # (dispatch_v2_store.ts).
                       ("20261023214100", "dispatch_v2_emails_approved_supplier_store"),
-                      ("20261023214200", "dispatch_v2_emails_draft_list_and_order_emails")]:
+                      ("20261023214200", "dispatch_v2_emails_draft_list_and_order_emails"),
+                      # Dispatch v2: the scope fill record that makes a fencing
+                      # job fill itself only once (dispatch_v2_store.ts).
+                      ("20261026120000", "dispatch_v2_scope_fills")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

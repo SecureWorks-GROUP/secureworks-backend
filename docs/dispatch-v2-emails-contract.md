@@ -150,6 +150,8 @@ Params: `job_id`. Returns the whole tab for one job.
   "main_supplier_id": "uuid of the Stratco box",
   "main_supplier_ticked": false,
   "can_suggest": false,
+  "auto_fill": false,
+  "scope_filled": { "filled_at": "2026-10-26T03:00:00Z", "auto": true, "by": "shaun@secureworkswa.com.au" },
   "draft_list": { "lines": [Line], "photos": [Photo] },
   "suppliers": [
     {
@@ -172,6 +174,8 @@ Params: `job_id`. Returns the whole tab for one job.
 - `send_blocked` is set when the supplier has no approved order email: `{ "code": "no_approved_email", "message": "This supplier has no approved order email. Ask Shaun to add one before sending." }`. The screen should grey out Make email and Send now for that box.
 - `test_send_done` is true once anyone has sent a test copy. For information only: a real send does not wait for one (Shaun, 26 Oct).
 - `can_suggest` is true for a fencing or patio job with no lines yet.
+- `auto_fill` is true for a fencing job with no lines that was never filled from the scope. The screen then calls `dispatch_v2_suggest_draft` with `auto: true` on its own, once (Shaun, 26 Oct: the scope materials go on the list straight away, no button).
+- `scope_filled` is the job's fill record (`dispatch_v2_scope_fills`), or null. A list cleared by hand is not filled again on its own.
 
 ### dispatch_v2_supplier_search (GET)
 
@@ -271,7 +275,11 @@ Body: `{ "job_id", "id", "expected_updated_at" }`. Returns `{ "success": true }`
 
 ### dispatch_v2_suggest_draft (POST)
 
-Body: `{ "job_id" }`. Fills the draft list from the job's scope. It works only on fencing and patio jobs that have no lines yet. These are never suggested, because they never go on supplier copy:
+Body: `{ "job_id", "auto"? }`. Fills the draft list from the job's scope. It works only on fencing and patio jobs that have no lines yet.
+
+On a fencing job scoped in the fence tool, the lines go straight into the box of the supplier the scope names, made if it is not there yet. The scope's supplier is typed text ("RNR", "Fence supply centre", "Strato"), matched to an approved order email by name (`dispatchV2MatchScopeSupplier`), then to the active supplier contact linked to it. A name with no approved email, or no linked contact, leaves the lines on the draft list with a note saying so.
+
+With `auto: true` (the screen's own fill) it runs on fencing jobs only, and only once per job ever: it writes the fill record first as a claim, and a job with a record is refused `already_filled`. A fill by the button also writes the record when there is none. These are never suggested, because they never go on supplier copy:
 
 - concrete bags,
 - concrete footings,
@@ -282,9 +290,9 @@ Body: `{ "job_id" }`. Fills the draft list from the job's scope. It works only o
 
 The line ids are fixed by the job and the line's place, so a second press cannot add the lines twice.
 
-Returns `{ "success": true, "added": 3, "lines": [Line] }`.
+Returns `{ "success": true, "added": 3, "lines": [Line], "notes": [string], "supplier": { "supplier_id", "name" } or null }`.
 
-Refusals, all 409: `no_suggestion_for_work_type`, `lines_exist`, `scope_unreadable`.
+Refusals, all 409: `no_suggestion_for_work_type`, `lines_exist`, `scope_unreadable`, and with `auto`: `no_auto_fill`, `already_filled`.
 
 ### dispatch_v2_add_supplier (POST)
 

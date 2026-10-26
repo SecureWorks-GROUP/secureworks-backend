@@ -4,6 +4,7 @@ import {
 import {
   dispatchV2FenceLinesFromScope,
   dispatchV2FenceScopeJob,
+  dispatchV2MatchScopeSupplier,
 } from "./dispatch_v2_fence_scope.ts";
 import { dispatchV2LineText } from "./dispatch_v2_emails.ts";
 
@@ -119,4 +120,32 @@ Deno.test("fence fill: not a fence tool scope gives null", () => {
   assertEquals(dispatchV2FenceLinesFromScope({ config: { roofing: "solarspan75" } }), null);
   assertEquals(dispatchV2FenceLinesFromScope("not json"), null);
   assertEquals(dispatchV2FenceScopeJob(JSON.stringify(scope({ runs: [] })))?.profile, "Neetascreen");
+});
+
+Deno.test("scope supplier: the fence tool's typed names find Shaun's approved order emails", () => {
+  // The approved list as it stands (26 Oct 2026).
+  const approved = [
+    "R&R Fencing", "Fencing Warehouse WA", "Lysaght", "Oxworks", "Metric Fencing", "Teamwork Fencing", "Mackson",
+    "Fencing Supply Centre", "Twinside Retaining", "Fence Makers", "Stratco WA", "B&D Metals Group", "Metroll Perth",
+    "Bunnings", "Bondor",
+  ];
+  const match = (name: string) => dispatchV2MatchScopeSupplier(name, approved);
+  assertEquals(match("RNR"), "R&R Fencing");
+  assertEquals(match("R&R"), "R&R Fencing");
+  assertEquals(match("Metroll"), "Metroll Perth");
+  assertEquals(match("Lysaght"), "Lysaght");
+  assertEquals(match("Stratco"), "Stratco WA");
+  assertEquals(match("Strato"), "Stratco WA");
+  assertEquals(match("Oxworks "), "Oxworks");
+  assertEquals(match("FSS"), "Fencing Supply Centre");
+  assertEquals(match("Fencing supply centre "), "Fencing Supply Centre");
+  assertEquals(match("Fence supply centre"), "Fencing Supply Centre");
+  assertEquals(match("Fencing Warehouse"), "Fencing Warehouse WA");
+  assertEquals(match("BND"), "B&D Metals Group");
+  assertEquals(match("B&D"), "B&D Metals Group");
+  assertEquals(match("Paralink"), null);
+  assertEquals(match("Metline"), null);
+  assertEquals(match(""), null);
+  // An alias only counts when its approved email is there.
+  assertEquals(dispatchV2MatchScopeSupplier("RNR", ["Lysaght"]), null);
 });

@@ -67,6 +67,8 @@ import {
 import {
   dispatchV2FenceLinesFromScope,
   type DispatchV2FenceLine,
+  dispatchV2MatchScopeSupplier,
+  dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 
@@ -572,11 +574,12 @@ export async function readDispatchV2Materials(
     params.get("job_id") ?? params.get("jobId"),
     ctx,
   );
-  const [boxes, lines, photos, emails] = await Promise.all([
+  const [boxes, lines, photos, emails, scopeFill] = await Promise.all([
     readBoxes(client, job.id),
     readJobLines(client, job.id),
     readPhotos(client, job.id),
     readJobEmails(client, job.id),
+    readScopeFill(client, job.id),
   ]);
   const supplierIds = boxes.map((b) => String(b.supplier_id));
   const [contacts, approved, testDone] = await Promise.all([
@@ -597,6 +600,16 @@ export async function readDispatchV2Materials(
     main_supplier_id: mainId,
     main_supplier_ticked: boxes.some((b) => b.is_main_supplier === true),
     can_suggest: dispatchV2CanSuggest(job.work_type, lines.length),
+    // The screen fills a fencing job from the scope on its own when it opens
+    // and this is true: no lines and never filled before.
+    auto_fill: job.work_type === "fencing" && lines.length === 0 && !scopeFill,
+    scope_filled: scopeFill
+      ? {
+        filled_at: scopeFill.filled_at,
+        auto: scopeFill.auto === true,
+        by: scopeFill.filled_by_email ?? null,
+      }
+      : null,
     draft_list: {
       lines: lines.filter((l) => !l.supplier_id).map(projectDispatchV2Line),
       photos: photos.filter((p) => !p.supplier_id).map(projectPhoto),
@@ -1018,12 +1031,102 @@ async function suggestedLineId(jobId: string, index: number) {
 // Fill the draft list from the scope (fencing and patio jobs with no line).
 // Concrete bags, footings, tek screws, removal and labour are left out: they
 // never go on supplier copy.
+// ── The scope fill's record and the scope's supplier ────────────────────────
+
+// The job's scope fill record (dispatch_v2_scope_fills), or null. One row per
+// job, written the first time its list is filled from the scope, by the
+// button or on its own; the auto fill never runs on a job that has one, so a
+// list cleared by hand is not filled again.
+async function readScopeFill(client: any, jobId: string): Promise<any | null> {
+  const { data, error } = await client.from("dispatch_v2_scope_fills")
+    .select(
+      "job_id, auto, lines_added, supplier_id, scope_supplier, filled_at, filled_by_email",
+    )
+    .eq("job_id", jobId)
+    .maybeSingle();
+  if (error) readFailed("scope fill read", error);
+  return data ?? null;
+}
+
+// The supplier contact a fence scope's typed supplier means: the active
+// contact linked to the matching approved order email (the one named like it,
+// else the first by name). A name with no match says why in a note.
+async function resolveScopeSupplier(
+  client: any,
+  scopeName: string | null,
+  ctx: DispatchV2Context,
+): Promise<{ contact: any | null; note: string | null }> {
+  if (!scopeName) return { contact: null, note: null };
+  const onList =
+    "The lines are on the draft list: add a supplier and move them in.";
+  const { data: entries, error } = await client
+    .from("dispatch_approved_supplier_emails")
+    .select("id, name")
+    .eq("org_id", ctx.orgId)
+    .eq("active", true);
+  if (error) readFailed("approved emails read", error);
+  const list: any[] = entries || [];
+  const name = dispatchV2MatchScopeSupplier(
+    scopeName,
+    list.map((e) => String(e.name)),
+  );
+  const entry = name ? list.find((e) => String(e.name) === name) : null;
+  if (!entry) {
+    return {
+      contact: null,
+      note:
+        `The scope names ${scopeName} as the supplier, which has no approved order email. ${onList}`,
+    };
+  }
+  const { data: links, error: linksError } = await client
+    .from("dispatch_approved_supplier_email_links")
+    .select("supplier_id")
+    .eq("approved_id", entry.id)
+    .eq("org_id", ctx.orgId);
+  if (linksError) readFailed("approved email links read", linksError);
+  const ids: string[] = [
+    ...new Set<string>((links || []).map((l: any) => String(l.supplier_id))),
+  ];
+  const contacts = [...(await readContacts(client, ids, ctx)).values()]
+    .filter((c) => c.is_active === true);
+  const same = (n: unknown) => String(n ?? "").trim().toLowerCase();
+  const named = (c: any) => Number(same(c.name) === same(entry.name));
+  contacts.sort((a, b) =>
+    named(b) - named(a) || String(a.name).localeCompare(String(b.name)) ||
+    String(a.id).localeCompare(String(b.id))
+  );
+  if (!contacts.length) {
+    return {
+      contact: null,
+      note:
+        `The scope names ${scopeName} as the supplier, but no supplier contact is linked to its approved order email. ${onList}`,
+    };
+  }
+  return { contact: contacts[0], note: null };
+}
+
+// Fill the draft list from the scope. With auto (the screen's own fill when a
+// fencing job with no record is opened) it runs once per job, ever. On a
+// fence tool scope the lines go straight into the box of the supplier the
+// scope names, made if it is not there yet; otherwise they land on the draft
+// list.
 export async function suggestDispatchV2Draft(
   client: any,
   body: any,
   ctx: DispatchV2Context,
 ) {
   const job = await loadJob(client, bodyJobId(body), ctx);
+  const auto = body?.auto === true;
+  if (auto && job.work_type !== "fencing") {
+    refuse(
+      409,
+      "no_auto_fill",
+      "Only fencing jobs fill from the scope on their own",
+    );
+  }
+  if (auto && await readScopeFill(client, job.id)) {
+    refuse(409, "already_filled", "This job was filled from the scope before");
+  }
   if (job.work_type !== "fencing" && job.work_type !== "patio") {
     refuse(
       409,
@@ -1070,7 +1173,57 @@ export async function suggestDispatchV2Draft(
       (items || []).filter((item) => dispatchV2SuggestionAllowed(item?.description)),
     );
   }
-  if (suggested.length === 0) return { success: true, added: 0, lines: [], notes };
+  if (suggested.length === 0) {
+    return { success: true, added: 0, lines: [], notes, supplier: null };
+  }
+  // The auto fill claims the job first, so two screens never both fill it.
+  const scopeSupplier = fence
+    ? dispatchV2ScopeSupplierName(scopeRow?.scope_json ?? null)
+    : null;
+  const fill = {
+    job_id: job.id,
+    org_id: job.org_id,
+    auto,
+    lines_added: suggested.length,
+    supplier_id: null as string | null,
+    scope_supplier: scopeSupplier,
+    filled_at: nowIso(ctx),
+    filled_by: ctx.actor.userId,
+    filled_by_email: ctx.actor.email,
+  };
+  if (auto) {
+    const { error: claimError } = await client.from("dispatch_v2_scope_fills")
+      .insert(fill);
+    if (claimError) {
+      if (errorCode(claimError) === "23505") {
+        refuse(
+          409,
+          "already_filled",
+          "This job was filled from the scope before",
+        );
+      }
+      writeFailed("scope fill claim", claimError);
+    }
+  }
+  let box: { supplier_id: string; name: string } | null = null;
+  try {
+    if (fence) {
+      const found = await resolveScopeSupplier(client, scopeSupplier, ctx);
+      if (found.note) notes.push(found.note);
+      if (found.contact) {
+        const made = await readBox(client, job.id, String(found.contact.id)) ??
+          (await insertBox(client, job, found.contact, ctx)).box;
+        box = {
+          supplier_id: String(made.supplier_id),
+          name: String(found.contact.name),
+        };
+      }
+    }
+  } catch (error) {
+    if (auto) await releaseScopeFill(client, job.id);
+    throw error;
+  }
+  fill.supplier_id = box?.supplier_id ?? null;
   const now = nowIso(ctx);
   const ids = await Promise.all(
     suggested.map((_line, index) => suggestedLineId(job.id, index)),
@@ -1079,7 +1232,7 @@ export async function suggestDispatchV2Draft(
     id: ids[index],
     org_id: job.org_id,
     job_id: job.id,
-    supplier_id: null,
+    supplier_id: box?.supplier_id ?? null,
     description: line.description,
     quantity: line.quantity,
     unit: line.unit,
@@ -1101,10 +1254,24 @@ export async function suggestDispatchV2Draft(
     .insert(rows)
     .select(LINE_SELECT);
   if (insertError) {
+    if (auto) await releaseScopeFill(client, job.id);
     if (errorCode(insertError) === "23505") {
       refuse(409, "lines_exist", "This job already has lines");
     }
     writeFailed("suggested lines insert", insertError);
+  }
+  if (auto) {
+    const { error } = await client.from("dispatch_v2_scope_fills")
+      .update({ supplier_id: fill.supplier_id })
+      .eq("job_id", job.id);
+    if (error) console.error("[dispatch_v2] scope fill supplier not noted:", error);
+  } else {
+    // A fill by the button is noted too (the first one only), so the auto
+    // fill never runs after it.
+    const { error } = await client.from("dispatch_v2_scope_fills").insert(fill);
+    if (error && errorCode(error) !== "23505") {
+      console.error("[dispatch_v2] scope fill not noted:", error);
+    }
   }
   const out: any[] = Array.isArray(inserted) ? inserted : [];
   out.sort((a, b) => Number(a.position) - Number(b.position));
@@ -1113,7 +1280,20 @@ export async function suggestDispatchV2Draft(
     added: out.length,
     lines: out.map(projectDispatchV2Line),
     notes,
+    supplier: box,
   };
+}
+
+// An auto fill that failed after its claim gives the claim back, so the next
+// open tries again.
+async function releaseScopeFill(client: any, jobId: string) {
+  const { error } = await client.from("dispatch_v2_scope_fills")
+    .delete()
+    .eq("job_id", jobId)
+    .eq("auto", true);
+  if (error) {
+    console.error("[dispatch_v2] scope fill claim not released:", error);
+  }
 }
 
 // ── Supplier boxes ──────────────────────────────────────────────────────────
@@ -1152,6 +1332,19 @@ export async function addDispatchV2Supplier(
   if (contact.is_active !== true) {
     refuse(409, "supplier_inactive", "That supplier contact is not active");
   }
+  const made = await insertBox(client, job, contact, ctx);
+  return answer(made.box, made.raced);
+}
+
+// A new box at the end of the job's boxes. A box another press made meanwhile
+// is the same box (raced), never a second one.
+async function insertBox(
+  client: any,
+  job: any,
+  contact: any,
+  ctx: DispatchV2Context,
+): Promise<{ box: any; raced: boolean }> {
+  const supplierId = String(contact.id);
   const { data: top, error: topError } = await client
     .from("job_material_suppliers")
     .select("position")
@@ -1176,11 +1369,11 @@ export async function addDispatchV2Supplier(
   if (error) {
     if (errorCode(error) === "23505") {
       const raced = await readBox(client, job.id, supplierId);
-      if (raced) return answer(raced, true);
+      if (raced) return { box: raced, raced: true };
     }
     writeFailed("supplier box insert", error);
   }
-  return answer(inserted);
+  return { box: inserted, raced: false };
 }
 
 // A box goes only when it is empty (no line, no photo) and has no order email
