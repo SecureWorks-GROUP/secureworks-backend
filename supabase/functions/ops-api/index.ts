@@ -17034,6 +17034,11 @@ export const PIPELINE_PRICING_PROJECTION = [
   'pj_total:pricing_json->total',
   'pj_split_neighbours:pricing_json->neighbour_splits->neighbours',
   'pj_job_neighbours:pricing_json->job->neighbours',
+  // The tool that wrote the pricing (`patio-scoper` for the Scope Engine), so a job
+  // list card can open the right scope tool without the scope blob. Added back to
+  // the row only when it is a string (`pipelineScopeToolField`), so every row whose
+  // pricing names no tool keeps its exact previous shape.
+  'pj_tool:pricing_json->tool',
 ]
 
 // The alias half of each entry, derived rather than restated: adding a projection
@@ -17072,7 +17077,8 @@ export function pipelinePricingProjectionValues(row: any) {
 // instead of to wrong numbers.
 //
 // Detection is server-side: the same base filters as the main read, fencing only,
-// a non-null/non-empty blob, and all four projected paths NULL. The empty-object
+// a non-null/non-empty blob, and every projected path NULL (a string blob
+// reads NULL on the tool path too, so adding it narrows nothing that can be malformed). The empty-object
 // exclusion is load-bearing: 56 live fencing rows match the null-path predicates,
 // but every blob is `{}` (112 bytes total) and cannot contain neighbours. Excluding
 // them left zero candidates in the read-only 2026-07-20 check. A returned non-empty
@@ -17102,6 +17108,11 @@ export function pipelinePricingFallbackNeighbours(blob: any) {
   if (!pj || typeof pj !== 'object') return null
   const ns = pj.neighbour_splits?.neighbours || pj.job?.neighbours
   return Array.isArray(ns) ? ns : null
+}
+
+// Appended last on the pipeline row, and only when the pricing names its tool.
+export function pipelineScopeToolField(row: any): { pj_tool?: string } {
+  return typeof row?.pj_tool === 'string' && row.pj_tool ? { pj_tool: row.pj_tool } : {}
 }
 
 export function stripPipelinePricingAliases(row: any) {
@@ -17700,6 +17711,7 @@ async function pipeline(
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
         ? { closeout: closeoutBlocks?.get(String(j.id)) ?? null }
         : {}),
+      ...pipelineScopeToolField(j),
     }
     if (stageTruth && stageTruthRows) {
       Object.assign(
