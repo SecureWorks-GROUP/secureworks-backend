@@ -166,6 +166,8 @@ Deno.test("INT-35/36: index.ts wires the summary and the sent flag", async () =>
   assertEquals(body.includes("summary_error"), true);
   assertEquals(body.includes("amount_due || 0"), false);
   assertEquals(body.includes("sent_to_contact:raw_json->SentToContact"), true);
+  // The invoice preview opened from the list reads these (V-20).
+  assertEquals(body.includes("sub_total, total_tax, total,"), true);
   const jd = src.slice(src.indexOf("async function jobDetail("));
   assertEquals(
     jd.slice(0, 6000).includes("sentToContactOf(inv.raw_json)"),

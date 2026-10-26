@@ -18139,7 +18139,7 @@ async function listInvoices(client: any, params: URLSearchParams) {
   }
 
   let query = client.from('xero_invoices')
-    .select('id, xero_invoice_id, invoice_number, contact_name, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id, sent_to_contact:raw_json->SentToContact', { count: 'exact' })
+    .select('id, xero_invoice_id, invoice_number, contact_name, sub_total, total_tax, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id, sent_to_contact:raw_json->SentToContact', { count: 'exact' })
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .order('invoice_date', { ascending: false })
