@@ -1,5 +1,5 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { LEGACY_TOOL_URLS, patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
+import { LEGACY_TOOL_URLS, linkSkipsXero, patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
 
 Deno.test('scopeToolUrl keeps the old tools until a valid engine address is set', () => {
   assertEquals(scopeToolUrl('patio', {}), LEGACY_TOOL_URLS.patio)
@@ -20,4 +20,11 @@ Deno.test('patioScoperNoteLines reads the engine record and the job row', () => 
     { client_name: 'SE TEST, delete me', site_address: '1 Test St', site_suburb: 'Perth', job_number: 'SWP-1' },
   )
   assertEquals(lines, ['👤 SE TEST, delete me', '📍 1 Test St Perth', '', '🏠 Patio: Skillion, Trimdek', '📄 Sealed revision 3 (2 earlier)', '🧾 Order lines: 3', '', '📝 Job Ref: SWP-1'])
+})
+
+Deno.test('linkSkipsXero skips the Xero contact only on an exact true', () => {
+  assertEquals(linkSkipsXero({ skip_xero: true }), true)
+  for (const body of [{}, { skip_xero: 'true' }, { skip_xero: 1 }, { skip_xero: false }, { skipXero: true }, null, undefined, 'x']) {
+    assertEquals(linkSkipsXero(body), false)
+  }
 })

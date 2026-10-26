@@ -127,7 +127,7 @@ import { createCalendarAppointmentAction } from './calendar_appointment.ts'
 import { releaseCalendarAppointmentAction, releaseLedger } from './calendar_appointment_release.ts'
 import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
 import { appointmentLedger, bookingApprovalReader, bookingExecutionReader } from './calendar_appointment_ledger.ts'
-import { patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
+import { linkSkipsXero, patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
 import {
   allocationOpportunityCustomFields,
   lookupAllocationOpportunityAction,
@@ -1407,6 +1407,8 @@ serve(async (req: Request) => {
       const body = await req.json()
       const { opportunityId, jobId, toolType, contactId } = body
       if (!opportunityId || !jobId) return json({ error: 'opportunityId and jobId required' }, 400)
+      // The Scope Engine patio tool links GHL before Xero is switched on: it asks to skip the Xero contact.
+      const skipXero = linkSkipsXero(body)
 
       const tool = toolType === 'fencing' ? 'fencing' : 'patio'
       // GitHub Pages hosts the tools. The release owner moves a trade to the Scope
@@ -1697,9 +1699,9 @@ serve(async (req: Request) => {
         .eq('id', jobId)
         .single()
 
-      // ── Create/find Xero contact (non-blocking) ──
+      // ── Create/find Xero contact (non-blocking; skipped when the caller asks) ──
       let xeroResult: any = null
-      if (jobData?.client_name) {
+      if (jobData?.client_name && !skipXero) {
         try {
           const scope = jobData.scope_json || {}
           const client = scope.client || {}
@@ -1812,6 +1814,7 @@ serve(async (req: Request) => {
         jobNumber,
         leadSource,
         xeroContact: xeroResult ? { id: xeroResult.xero_contact_id, created: xeroResult.created } : null,
+        xeroSkipped: skipXero,
         monetaryValue,
         customFieldsWritten,
         opportunityRenamed,

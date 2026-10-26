@@ -51,3 +51,10 @@ export function patioScoperNoteLines(
   if (jobData.job_number) lines.push(`📝 Job Ref: ${jobData.job_number}`)
   return lines
 }
+
+// The Scope Engine patio tool calls `link` once GHL is switched on and before Xero is: it sends
+// `skip_xero: true`, and the Xero contact step is left out. Only an exact true skips it, so every
+// other caller (the old patio and fence pages) keeps the Xero contact as before.
+export function linkSkipsXero(body: unknown): boolean {
+  return !!body && typeof body === 'object' && (body as { skip_xero?: unknown }).skip_xero === true
+}
