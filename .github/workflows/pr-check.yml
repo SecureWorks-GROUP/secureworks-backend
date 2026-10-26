@@ -392,6 +392,9 @@ jobs:
       # PDF a supplier reads, the two reads and eight writes end to end (only
       # a send or a reply reaches the stubbed transport), and its fixes to
       # create_po, the reply reader's tag and the reply analysis.
+      # Dispatch v2 slices 5 and 6 add the draft list, supplier boxes and the
+      # supplier order email sent from admin@ through Outlook (the send itself
+      # is always a fake in these tests).
       - name: Test the Dispatch list and job notes reads
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
@@ -400,8 +403,16 @@ jobs:
             supabase/functions/ops-api/dispatch_materials_test.ts \
             supabase/functions/ops-api/dispatch_order_pdf_test.ts \
             supabase/functions/ops-api/dispatch_orders_store_test.ts \
+            supabase/functions/ops-api/dispatch_v2_emails_test.ts \
+            supabase/functions/ops-api/dispatch_v2_store_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
             supabase/functions/receive-po-email/po_email_tag_test.ts
+
+      # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
+      # suggestions (rules, engine on an in-memory store, migration text).
+      - name: Test the Dispatch v2 supplier replies
+        run: |
+          deno test --no-check --allow-env --allow-read             supabase/functions/ops-api/dispatch_v2_replies_rules_test.ts             supabase/functions/ops-api/dispatch_v2_replies_test.ts             supabase/functions/ops-api/dispatch_v2_replies_store_test.ts
 
       - name: Test edge deploy workflow classification
         run: |
@@ -411,6 +422,7 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/send-outlook-email/outlook_action_behavior_test.ts \
+            supabase/functions/send-outlook-email/outlook_capture_thread_ids_test.ts \
             supabase/functions/send-outlook-email/outlook_authorization_test.ts \
             supabase/functions/send-outlook-email/ses_delivery_fence_test.ts \
             supabase/functions/send-quote/xero_quote_outcome_test.ts \
