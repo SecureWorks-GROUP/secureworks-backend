@@ -119,6 +119,9 @@ BEGIN
   IF (public.context_recon_health('2026-01-01') ->> 'disputed_open')::bigint <> open_before + 1 THEN
     RAISE EXCEPTION 'recon dispute contract: health does not count the marker';
   END IF;
+  IF NOT (public.context_recon_health('2026-01-01') ? 'queue_by_lane') THEN
+    RAISE EXCEPTION 'recon dispute contract: health lost queue_by_lane from 20261020155000';
+  END IF;
   IF (SELECT count(*) FROM public.context_recon_disputes WHERE event_id = ev) <> 1 THEN
     RAISE EXCEPTION 'recon dispute contract: the marker is not one row';
   END IF;

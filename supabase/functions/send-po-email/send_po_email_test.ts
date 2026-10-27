@@ -188,3 +188,22 @@ Deno.test("PO.11: po_id query returns DB error (not just null) → 400 po_not_fo
   if (body.code !== "po_not_found") throw new Error(`expected po_not_found, got ${body.code}`)
   if (r.response.status !== 400) throw new Error(`expected 400 (DB error), got ${r.response.status}`)
 })
+
+Deno.test("PO.12: a Dispatch order (source 'dispatch') → 409 dispatch_po_refused, before any supplier lookup", async () => {
+  const { client, calls } = makeStubClient({ po: { ...SAMPLE_PO, source: "dispatch" }, supplier: SAMPLE_SUPPLIER })
+  const r = await _verifyPoEmailRecipient({ client }, { po_id: "po1" })
+  if (r.ok) throw new Error("expected reject")
+  const body = await readBody(r.response)
+  if (r.response.status !== 409) throw new Error(`expected 409, got ${r.response.status}`)
+  if (body.code !== "dispatch_po_refused") throw new Error(`expected dispatch_po_refused, got ${body.code}`)
+  if (body.action !== "send_po_email") throw new Error(`expected action send_po_email, got ${body.action}`)
+  if (calls.some((c) => c.table === "suppliers")) throw new Error("suppliers must not be read for a Dispatch order")
+  const poSelect = calls.find((c) => c.table === "purchase_orders" && c.method === "select")
+  if (!String(poSelect?.args || "").includes("source")) throw new Error("the PO read must ask for source")
+})
+
+Deno.test("PO.12b: an order with no source still sends as before", async () => {
+  const { client } = makeStubClient({ po: { ...SAMPLE_PO, source: null }, supplier: SAMPLE_SUPPLIER })
+  const r = await _verifyPoEmailRecipient({ client }, { po_id: "po1" })
+  if (!r.ok) throw new Error(`expected ok, got ${r.response.status}`)
+})

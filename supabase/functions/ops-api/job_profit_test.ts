@@ -5,6 +5,8 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildJobProfitTimeline,
+  costEventKind,
+  JOB_PROFIT_LABELS,
   jobProfitAction,
   jobProfitCallerAllowed,
   jobProfitListAction,
@@ -522,12 +524,14 @@ Deno.test("rollup: expected and quoted count only jobs the engine gave a quote f
         quoted_ex: 1400,
         expected_cost_ex: 1000,
         actual_cost_ex: 900,
+        cost_flag: "ok",
       }),
       row({
         job_id: "sent",
         status: "quoted",
         quoted_ex: 600,
         expected_cost_ex: 400,
+        cost_flag: "text_matched_lines",
       }),
       row({ job_id: "lead", status: "draft", actual_cost_ex: 50 }),
     ],
@@ -604,4 +608,242 @@ Deno.test("rollup: Xero Project expenses are in no total of cost or profit", asy
     assertEquals(bucket.published_cost_ex, 600);
     assertEquals(bucket.margin_pct, 40);
   }
+});
+
+// CFO-12: the three purchase order states reach the timeline as orders, never
+// as a bill, never as actual cost, and an unpriced order carries no $0.00.
+Deno.test("job profit timeline: ordered, invoice-emailed and committed orders (CFO-12)", () => {
+  const costs = [
+    {
+      source: "po_committed",
+      source_id: "po1",
+      document_id: "po1",
+      event_date: "2026-08-01",
+      lane: "materials",
+      party: "Supplier",
+      amount_ex: 200,
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+      confidence: "committed",
+    },
+    {
+      source: "po_ordered",
+      source_id: "po2",
+      document_id: "po2",
+      document_number: "PO-1000001",
+      event_date: "2026-08-02",
+      lane: "materials",
+      party: "Dispatch Supplier",
+      amount_ex: null,
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+      confidence: "ordered_not_billed",
+    },
+    {
+      source: "po_invoice_emailed",
+      source_id: "po3",
+      document_id: "po3",
+      event_date: "2026-09-02",
+      lane: "materials",
+      party: "Supplier",
+      amount_ex: 300,
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+      confidence: "invoice_emailed",
+    },
+  ];
+  const t = buildJobProfitTimeline(costs, []);
+  assertEquals(t.map((e) => [e.date, e.kind, e.amount_ex, e.counts]), [
+    ["2026-08-01", "purchase_order", 200, false],
+    ["2026-08-02", "purchase_order_ordered", null, false],
+    ["2026-09-02", "purchase_order_invoice_emailed", 300, false],
+  ]);
+  assert(!t.some((e) => e.kind === "cost_paid"), "no order is ever a paid cost");
+  assert(
+    !t.some((e) => e.kind === "supplier_bill"),
+    "no order state is shown as a supplier bill",
+  );
+});
+
+Deno.test("costEventKind: an unknown po_ state is a purchase order, other unknowns stay supplier bills", () => {
+  assertEquals(costEventKind("po_committed"), "purchase_order");
+  assertEquals(costEventKind("po_ordered"), "purchase_order_ordered");
+  assertEquals(costEventKind("po_invoice_emailed"), "purchase_order_invoice_emailed");
+  assertEquals(costEventKind("po_something_new"), "purchase_order");
+  assertEquals(costEventKind("supplier_bill"), "supplier_bill");
+  assertEquals(costEventKind("materials_fact"), "materials_fact");
+  assertEquals(costEventKind(undefined), "supplier_bill");
+});
+
+Deno.test("job profit labels name the CFO-12 commitment states", () => {
+  assert(JOB_PROFIT_LABELS.committed_open_ex.includes("never counted here as $0.00"));
+  assert(JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith("Ordered, not billed"));
+  assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, no bill matched to this order"));
+  assert(JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"));
+});
+
+Deno.test("rollup: expected vs actual counts only jobs whose actual cost is complete", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    work_type: "fencing",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: null,
+    invoiced_ex: 5000,
+    collected_ex: 0,
+    quoted_ex: 5000,
+    actual_cost_ex: 0,
+    profit_ex: null,
+    revenue_verified_paid: false,
+    holding_job: false,
+    ...over,
+  });
+  const body = (await jobProfitListAction(
+    fakeClient({
+      v_job_profit: [
+        // labour only so far: 3000 expected (labour, materials, commission)
+        // against 900 of labour must not read as 2100 under expected
+        row({
+          job_id: "labour-only",
+          expected_cost_ex: 3000,
+          actual_cost_ex: 900,
+          cost_flag: "materials_not_linked",
+        }),
+        row({
+          job_id: "nothing",
+          expected_cost_ex: 2000,
+          cost_flag: "no_cost_linked",
+        }),
+        row({
+          job_id: "complete",
+          expected_cost_ex: 2500,
+          actual_cost_ex: 2700,
+          cost_flag: "ok",
+          profit_ex: 2300,
+        }),
+      ],
+    }),
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  for (const bucket of [body.totals, body.by_type[0], body.by_month[0]]) {
+    assertEquals(bucket.jobs, 3);
+    assertEquals(bucket.jobs_with_expected, 1);
+    assertEquals(bucket.expected_cost_ex, 2500);
+    assertEquals(bucket.actual_cost_on_expected_ex, 2700);
+    assertEquals(bucket.jobs_with_expected_not_comparable, 2);
+    assertEquals(bucket.expected_cost_not_comparable_ex, 5000);
+    assertEquals(bucket.actual_cost_ex, 3600);
+  }
+
+  const partialOnly = (await jobProfitListAction(
+    fakeClient({
+      v_job_profit: [row({
+        job_id: "labour-only",
+        expected_cost_ex: 3000,
+        actual_cost_ex: 900,
+        cost_flag: "materials_not_linked",
+      })],
+    }),
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  assertEquals(partialOnly.totals.jobs_with_expected, 0);
+  assertEquals(partialOnly.totals.expected_cost_ex, null);
+  assertEquals(partialOnly.totals.actual_cost_on_expected_ex, null);
+});
+
+Deno.test("rollup: a group with no publishable job reads profit and margin as Unknown, not 0", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: null,
+    collected_ex: 0,
+    quoted_ex: null,
+    expected_cost_ex: null,
+    revenue_verified_paid: false,
+    holding_job: false,
+    ...over,
+  });
+  const body = (await jobProfitListAction(
+    fakeClient({
+      v_job_profit: [
+        row({
+          job_id: "fence",
+          work_type: "fencing",
+          invoiced_ex: 9000,
+          actual_cost_ex: 2000,
+          profit_ex: null,
+          cost_flag: "materials_not_linked",
+        }),
+        row({
+          job_id: "ms",
+          work_type: "makesafe",
+          invoiced_ex: 500,
+          actual_cost_ex: 200,
+          profit_ex: 300,
+          cost_flag: "ok",
+        }),
+      ],
+    }),
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  const fencing = body.by_type.find((r: any) => r.work_type === "fencing");
+  assertEquals(fencing.jobs_with_margin, 0);
+  assertEquals(fencing.profit_ex, null);
+  assertEquals(fencing.margin_pct, null);
+  assertEquals(fencing.published_revenue_ex, null);
+  assertEquals(fencing.published_cost_ex, null);
+  assertEquals(fencing.actual_cost_ex, 2000);
+  const makesafe = body.by_type.find((r: any) => r.work_type === "makesafe");
+  assertEquals(makesafe.profit_ex, 300);
+  assertEquals(makesafe.margin_pct, 60);
+  assertEquals(body.totals.profit_ex, 300);
+  assertEquals(body.totals.published_revenue_ex, 500);
+});
+
+Deno.test("rollup: a holding job is in no total, type or month, and is reported on its own", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    work_type: "fencing",
+    status: "archived",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: null,
+    collected_ex: 0,
+    quoted_ex: null,
+    expected_cost_ex: null,
+    profit_ex: null,
+    revenue_verified_paid: false,
+    cost_flag: "materials_not_linked",
+    ...over,
+  });
+  const body = (await jobProfitListAction(
+    fakeClient({
+      v_job_profit: [
+        row({
+          job_id: "bucket",
+          invoiced_ex: 0,
+          actual_cost_ex: 192604.7,
+          holding_job: true,
+          cost_flag: "no_labour_linked",
+        }),
+        row({
+          job_id: "real",
+          invoiced_ex: 8000,
+          actual_cost_ex: 1500,
+          holding_job: false,
+        }),
+      ],
+    }),
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  for (const bucket of [body.totals, body.by_type[0], body.by_month[0]]) {
+    assertEquals(bucket.jobs, 1);
+    assertEquals(bucket.actual_cost_ex, 1500);
+    assertEquals(bucket.invoiced_ex, 8000);
+  }
+  assertEquals(body.by_type.length, 1);
+  assertEquals(body.by_month.length, 1);
+  assertEquals(body.holding_jobs.jobs, 1);
+  assertEquals(body.holding_jobs.actual_cost_ex, 192604.7);
+  assertEquals(body.holding_jobs.profit_ex, null);
 });

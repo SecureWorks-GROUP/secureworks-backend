@@ -1,7 +1,7 @@
 -- Rollback for 20261021160000_context_recon_dispute.sql.
 --
--- Drops the dispute marker and restores context_job_view and context_recon_health to the
--- bodies from 20261020140000. context_recon_queue is not touched. An open marker (disputed_at
+-- Drops the dispute marker and restores context_job_view to its body from 20261020140000 and
+-- context_recon_health to its body from 20261020155000 (with queue_by_lane). context_recon_queue is not touched. An open marker (disputed_at
 -- set) is a person's statement and is kept nowhere else, so this refuses while one exists:
 -- clear it first, or keep the migration. A cleared row does not block the drop. Re-running
 -- after a successful drop is a no-op.
@@ -83,7 +83,9 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
     'held_since', (SELECT count(*) FROM public.business_events e
                    WHERE e.metadata ? 'recon_held' AND (e.metadata -> 'recon_held' ->> 'at')::timestamptz >= p_since),
     'queue_by_cause', coalesce((SELECT jsonb_object_agg(cause, n) FROM
-                       (SELECT q.cause, count(*) AS n FROM public.context_recon_queue() q GROUP BY q.cause) c), '{}'::jsonb))
+                       (SELECT q.cause, count(*) AS n FROM public.context_recon_queue() q GROUP BY q.cause) c), '{}'::jsonb),
+    'queue_by_lane', coalesce((SELECT jsonb_object_agg(lane, n) FROM
+                       (SELECT q.lane, count(*) AS n FROM public.context_recon_queue() q GROUP BY q.lane) c), '{}'::jsonb))
 $$;
 
 COMMENT ON FUNCTION public.context_job_view(uuid) IS NULL;

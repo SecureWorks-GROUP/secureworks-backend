@@ -9,9 +9,10 @@ read-only. Code: `supabase/functions/ops-api/dispatch_job_list.ts` (rules) and
 Slice 3 adds the stage rail fields to the same list read and two writes:
 `docs/dispatch-slice-3-contract.md`.
 
-Nothing here changes an existing caller: `pipeline` without `dispatch=1` runs the
-same selects and returns the same rows and keys as before, and `job_detail`
-changes only by the two document dates in section 4.
+`pipeline` without `dispatch=1` runs the same selects as before. A populated
+board already returns the nineteen column keys below. An empty plain pipeline
+returns those same nineteen keys. `job_detail` changes only by the two document
+dates in section 4.
 
 ## 1. The job list: `GET ops-api?action=pipeline&dispatch=1`
 
@@ -36,9 +37,13 @@ Every other row key is exactly what the plain read returns (`value`,
 `next_scheduled_date`, `last_scheduled_date`, `council_status`, `council_step`,
 `council_required`, `po_count`, ...).
 
-A read with no matching job returns the short empty shape
-`{ columns: { draft, quoted, accepted, approvals, processing, in_progress, complete, invoiced }, total: 0 }`
-(existing behaviour): treat a missing column as empty.
+A read with no matching job returns `{ columns, total: 0 }` with the same
+nineteen keys as a populated board: `draft`, `quoted`, `partially_accepted`,
+`accepted`, `awaiting_deposit`, `approvals`, `order_materials`, `processing`,
+`awaiting_supplier`, `order_confirmed`, `schedule_install`, `scheduled`,
+`in_progress`, `rectification`, `complete`, `final_payment`, `invoiced`,
+`get_review`, `archived`. An older caller may still treat a missing column as
+empty.
 
 ### The description line
 

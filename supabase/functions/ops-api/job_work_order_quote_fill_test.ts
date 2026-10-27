@@ -667,6 +667,76 @@ Deno.test("a job with no quote lines keeps its empty draft", async () => {
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
 });
 
+function noLinesDb() {
+  const db = baseDb();
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    line_items: [{ category: "delivery", quantity: 1, description: "Delivery" }],
+    labourCostEstimate: 0,
+  });
+  return db;
+}
+
+const noLinesEvents = (db: FakeDb) =>
+  db.tables.job_events.filter((e) =>
+    e.event_type === "job_work_order_quote_has_no_lines"
+  );
+
+Deno.test("a quote with nothing to copy records one event and holds the draft for the office (empty patio quote)", async () => {
+  const db = noLinesDb();
+  const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r.quote_fill.reason, "no_quote_lines");
+  assertEquals(r.needs_checking.held.reason, "quote_has_no_lines");
+  assertEquals(r.needs_checking.needs_checking, true);
+  assertEquals(/Enter the work and the agreed labour by hand/.test(r.needs_checking.message), true);
+  const events = noLinesEvents(db);
+  assertEquals(events.length, 1);
+  // Ids only: trades can read job_events.
+  assertEquals(events[0].detail_json, {
+    work_order_id: DRAFT,
+    wo_number: "WO-SWF-261527",
+    scope_revision_id: REV_ACCEPTED,
+  });
+});
+
+Deno.test("the no-lines event is written once per draft and revision, however often the fill retries", async () => {
+  const db = noLinesDb();
+  await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  await autoIssueJobWorkOrderForJob(db, JOB, { flagOn: true });
+  assertEquals(noLinesEvents(db).length, 1);
+  // A new frozen revision that still has nothing to copy is a new signal.
+  db.tables.scope_revisions.push({
+    ...db.tables.scope_revisions[0],
+    id: "rev-later",
+    revision_number: 2,
+  });
+  db.tables.jobs[0].expected_costs = { scope_revision_id: "rev-later" };
+  await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(noLinesEvents(db).map((e) => e.detail_json.scope_revision_id), [REV_ACCEPTED, "rev-later"]);
+});
+
+Deno.test("an unreadable event check writes no event and never fails the read", async () => {
+  const db = noLinesDb();
+  db.failOn.add("select:job_events");
+  const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r.quote_fill.reason, "no_quote_lines");
+  assertEquals(db.writes().includes("insert:job_events"), false);
+  const w = noLinesDb();
+  w.failOn.add("insert:job_events");
+  const r2: any = await readJobWorkOrder(w, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r2.needs_checking.held.reason, "quote_has_no_lines");
+});
+
+Deno.test("a job with no accepted quote stays not_filled and records no no-lines event", async () => {
+  const db = baseDb();
+  db.tables.jobs[0].expected_costs = null;
+  db.tables.scope_revisions = [];
+  const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r.quote_fill.reason, "no_accepted_quote");
+  assertEquals(r.needs_checking.held.reason, "not_filled");
+  assertEquals(noLinesEvents(db).length, 0);
+});
+
 Deno.test("opening the draft fills it, unless the call brought its own lines or agreed amount", async () => {
   const opened = () => {
     const db = baseDb({ work_orders: [] });

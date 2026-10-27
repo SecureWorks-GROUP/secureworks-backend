@@ -168,7 +168,7 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
 $$;
 
 -- Counts for the daily health row: held re-placements (all time and since p_since), the
--- queue by cause, and how many messages currently carry a dispute marker.
+-- queue by cause and by lane (kept from 20261020155000), and how many messages currently carry a dispute marker.
 CREATE OR REPLACE FUNCTION public.context_recon_health(p_since timestamptz DEFAULT now() - interval '1 day')
 RETURNS jsonb LANGUAGE sql STABLE AS $$
   SELECT jsonb_build_object(
@@ -177,6 +177,8 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
                    WHERE e.metadata ? 'recon_held' AND (e.metadata -> 'recon_held' ->> 'at')::timestamptz >= p_since),
     'queue_by_cause', coalesce((SELECT jsonb_object_agg(cause, n) FROM
                        (SELECT q.cause, count(*) AS n FROM public.context_recon_queue() q GROUP BY q.cause) c), '{}'::jsonb),
+    'queue_by_lane', coalesce((SELECT jsonb_object_agg(lane, n) FROM
+                       (SELECT q.lane, count(*) AS n FROM public.context_recon_queue() q GROUP BY q.lane) c), '{}'::jsonb),
     'disputed_open', (SELECT count(*) FROM public.context_recon_disputes d WHERE d.disputed_at IS NOT NULL))
 $$;
 

@@ -824,6 +824,25 @@ ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|co
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# 20261015190000 is the bill pre-match (JP-06): xero-sync's materials step writes
+# materials_bill_proposals, lands confident matches as agent_prematch facts and
+# closes voided bills as void_in_xero; ops-api materials_recon_queue reads the
+# proposals. Neither function may deploy ahead of it (the widened checks would
+# refuse every agent placement and void close).
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|table|materials_bill_proposals
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.proposal_kind
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.outcome
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|policy|materials_bill_proposals.service_role_all
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|table|materials_bill_proposals
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.proposal_kind
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.outcome
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|policy|materials_bill_proposals.service_role_all
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.auto_assigned_at
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_reconciliation_queue.closed_reason
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|index|materials_bill_proposals_live_uidx
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|constraint|job_materials_facts_source_chk
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|constraint|materials_recon_status_chk
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_at
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by_email
@@ -847,6 +866,15 @@ ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.re
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
 ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+
+# Reconciliation daily list: the recon_daily_list read and recon_record_decision
+# write call these, so the store and the list must exist before this ops-api ships.
+ops-api|supabase/migrations/20261020140000_context_reconciliation_decisions.sql|function|context_recon_record_decision
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_list
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_rows
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_left_out
+
 # Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
 # invoice; ops-api job_receipt.ts reads the switch and writes the claims.
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
@@ -855,3 +883,84 @@ xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_c
 xero-sync|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode_since
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|table|job_receipt_claims
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|policy|job_receipt_claims.job_receipt_claims_service_role_all
+# Group work orders reuse the client sign-off store. ops-api writes
+# job_media phase signature and job_client_signoffs, so those migrations
+# must be applied before this ops-api ships. The phase constraint is
+# the client sign-off migration on main; captured_device is added by the
+# group migration.
+ops-api|supabase/migrations/20261020170000_job_media_signature_voice_note_phases.sql|constraint|job_media_phase_check
+ops-api|supabase/migrations/20261020170100_job_client_signoffs.sql|table|job_client_signoffs
+ops-api|supabase/migrations/20261020170100_job_client_signoffs.sql|table|client_signoff_settings
+
+# Crew invoices on the job work order. The office queue reads
+# backup_approver_user_ids, the line trigger writes office_review_status, and
+# the stamp reads job_invoice_work_order_id. ops-api must not deploy ahead of
+# this migration. The backfill and retirement scripts call the two RPCs and
+# are not part of the deploy.
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|work_order_settings.backup_approver_user_ids
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_review_status
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_reviewed_by
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_reviewed_at
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|column|trade_invoice_lines.office_review_note
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|constraint|trade_invoice_lines_office_review_status_check
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|function|job_invoice_work_order_id
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|function|preview_active_job_work_orders
+ops-api|supabase/migrations/20261021143000_job_work_order_crew_invoices.sql|function|apply_active_job_work_orders
+
+# Group work orders: the flag, the split writer, the invoice-line trigger
+# and the share pointer. ops-api reads and writes these. The file sorts
+# after every migration already on main, including the crew-invoice one.
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_orders
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_participants
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_time_entries
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_shares
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_signatures
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_feedback
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_settings
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|table|group_work_order_events
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|column|group_work_orders.split_frozen_at
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|column|group_work_orders.hours_changed_at
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|column|trade_invoice_lines.group_share_id
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|column|job_client_signoffs.captured_device
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|column|group_work_order_time_entries.updated_at
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|group_work_order_write_split
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|freeze_group_work_order_split
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|project_group_work_order_split
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|unfreeze_group_work_order_split
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|group_work_order_line_is_normal_pay
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|group_work_order_lock_job
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|function|remove_group_work_order_participant
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|trigger|trade_invoice_lines.trg_trade_invoice_lines_group_share_snapshot
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|trigger|group_work_orders.trg_group_work_orders_refuse_existing_pay
+ops-api|supabase/migrations/20261022050000_group_work_orders.sql|trigger|group_work_orders.trg_group_work_orders_void_permanent
+# 20261023214100 and 20261023214200 are Dispatch v2 (supplier order emails):
+# the dispatch_v2_* actions read the approved supplier email list and write the
+# draft list, supplier boxes, photos and order emails, so ops-api must not
+# deploy ahead of either.
+ops-api|supabase/migrations/20261023214100_dispatch_v2_emails_approved_supplier_store.sql|table|dispatch_approved_supplier_emails
+ops-api|supabase/migrations/20261023214100_dispatch_v2_emails_approved_supplier_store.sql|table|dispatch_approved_supplier_email_links
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|table|dispatch_supplier_order_emails
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|table|dispatch_material_photos
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|dispatch_supplier_order_emails.sent_conversation_id
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|dispatch_supplier_order_emails.sent_internet_message_id
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|job_material_lines.dispatch_order_email_id
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|job_material_lines.detail
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|job_material_lines.profile
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|job_material_lines.colour
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|column|job_material_suppliers.is_main_supplier
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|index|dispatch_supplier_order_emails_one_open_idx
+ops-api|supabase/migrations/20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql|index|job_material_suppliers_one_main_idx
+ops-api|supabase/migrations/20261026120000_dispatch_v2_scope_fills.sql|table|dispatch_v2_scope_fills
+ops-api|supabase/migrations/20261026120000_dispatch_v2_scope_fills.sql|column|dispatch_v2_scope_fills.auto
+ops-api|supabase/migrations/20261026120000_dispatch_v2_scope_fills.sql|column|dispatch_v2_scope_fills.supplier_id
+ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_closeout_settings.deposit_advance_mode
+ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|table|job_deposit_advance_state
+ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_deposit_advance_state.counted_invoice_ids
+ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_deposit_advance_state.flag_cleared_at
+ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_deposit_advance_state.cleared_flags
+ops-api|supabase/migrations/20261026160000_job_deposit_advance.sql|policy|job_deposit_advance_state.job_deposit_advance_state_service_role_all
+xero-sync|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_closeout_settings.deposit_advance_mode
+# Deposit credit note flag: the paid move writes counted_credit_note_ids and the flag
+# check reads it; the widened flag check keeps its name, so the ledger version and
+# the column prove it landed. ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261027120000_job_deposit_credit_note_flag.sql|column|job_deposit_advance_state.counted_credit_note_ids

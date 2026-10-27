@@ -1,5 +1,5 @@
 -- After the down migration: the marker table and its two functions are gone, the job view and
--- health read are the 20261020140000 bodies, and the queue function is still there.
+-- health read are the 20261020140000 and 20261020155000 bodies, and the queue function is still there.
 \set ON_ERROR_STOP 1
 DO $$
 BEGIN
@@ -22,6 +22,9 @@ BEGIN
   IF position('disputed_open' IN pg_get_functiondef('public.context_recon_health(timestamptz)'::regprocedure)) > 0
      OR public.context_recon_health() ? 'disputed_open' THEN
     RAISE EXCEPTION 'recon dispute rollback: health still publishes disputed_open';
+  END IF;
+  IF NOT (public.context_recon_health() ? 'queue_by_lane') THEN
+    RAISE EXCEPTION 'recon dispute rollback: health lost queue_by_lane from 20261020155000';
   END IF;
 END $$;
 BEGIN;
