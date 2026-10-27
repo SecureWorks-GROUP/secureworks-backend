@@ -406,8 +406,8 @@ jobs:
 
       # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
       # stay exactly as it was, and the list must never drop a job past the
-      # 1000-row ceiling or select the whole scope blob. Same --no-check reason
-      # as above.
+      # 1000-row ceiling or select the whole scope blob. These files type-check,
+      # so this step does not pass --no-check.
       # Slice 3 adds the stage rail: its rules, the stage read on the list and
       # the two staff-only writes, none of which may touch the job status.
       # Slice 4 adds Materials by supplier: its count rule, the one read, the six
@@ -420,9 +420,13 @@ jobs:
       # Dispatch v2 slices 5 and 6 add the draft list, supplier boxes and the
       # supplier order email sent from admin@ through Outlook (the send itself
       # is always a fake in these tests).
+      # Slice 6 and 7 add the delivery and install rules. The offline dry run
+      # walks one fencing job from accepted through a draft order, the PDF, a
+      # stubbed email preview, a sighted delivery and the install mark. That
+      # transport is never asked to send.
       - name: Test the Dispatch list and job notes reads
         run: |
-          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/dispatch_job_list_test.ts \
             supabase/functions/ops-api/dispatch_stage_test.ts \
             supabase/functions/ops-api/dispatch_materials_test.ts \
@@ -431,7 +435,10 @@ jobs:
             supabase/functions/ops-api/dispatch_v2_emails_test.ts \
             supabase/functions/ops-api/dispatch_v2_store_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
-            supabase/functions/receive-po-email/po_email_tag_test.ts
+            supabase/functions/receive-po-email/po_email_tag_test.ts \
+            supabase/functions/ops-api/dispatch_deliveries_test.ts \
+            supabase/functions/ops-api/dispatch_install_test.ts \
+            supabase/functions/ops-api/dispatch_offline_dry_run_test.ts
 
       # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
       # suggestions (rules, engine on an in-memory store, migration text).

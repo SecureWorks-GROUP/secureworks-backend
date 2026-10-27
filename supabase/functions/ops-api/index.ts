@@ -17451,6 +17451,35 @@ export function _pipelineVisitDateMaps(
   return { next, last }
 }
 
+// An empty board must pre-allocate the same column keys as a populated one.
+// The two early returns used to answer with the old eight keys, so a repair
+// filter or a job read with no rows dropped scheduled, order_materials,
+// archived and the rest. Each call returns a fresh object: the success path
+// pushes into these arrays.
+function emptyPipelineColumns(): Record<string, any[]> {
+  return {
+    draft: [],
+    quoted: [],
+    partially_accepted: [],
+    accepted: [],
+    awaiting_deposit: [],
+    approvals: [],
+    order_materials: [],
+    processing: [],
+    awaiting_supplier: [],
+    order_confirmed: [],
+    schedule_install: [],
+    scheduled: [],
+    in_progress: [],
+    rectification: [],
+    complete: [],
+    final_payment: [],
+    invoiced: [],
+    get_review: [],
+    archived: [],
+  }
+}
+
 async function pipeline(
   client: any,
   params: URLSearchParams,
@@ -17493,7 +17522,7 @@ async function pipeline(
     : null
 
   if (repairJobIds && repairJobIds.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+    return { columns: emptyPipelineColumns(), total: 0, ...dispatchEmpty }
   }
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -17621,7 +17650,7 @@ async function pipeline(
   }
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+    return { columns: emptyPipelineColumns(), total: 0, ...dispatchEmpty }
   }
 
   // The default response keeps its non-draft enrichment scope. Stage truth
@@ -18046,27 +18075,7 @@ async function pipeline(
   // the canonical status set: supabase/functions/_shared/stage-gate/job-state-machine.ts.
   // The legacy `deposit → accepted` and `scheduled → processing` merges
   // are preserved deliberately; existing frontend column headers depend on them.
-  const columns: Record<string, any[]> = {
-    draft: [],
-    quoted: [],
-    partially_accepted: [],
-    accepted: [],
-    awaiting_deposit: [],
-    approvals: [],
-    order_materials: [],
-    processing: [],
-    awaiting_supplier: [],
-    order_confirmed: [],
-    schedule_install: [],
-    scheduled: [],
-    in_progress: [],
-    rectification: [],
-    complete: [],
-    final_payment: [],
-    invoiced: [],
-    get_review: [],
-    archived: [],
-  }
+  const columns = emptyPipelineColumns()
   for (const j of enriched) {
     // Legacy merge preserved: deposit → accepted.
     // 2026-06-02: removed scheduled → processing merge so Scheduled column renders its own jobs.
