@@ -32,7 +32,9 @@ ALTER TABLE public.materials_reconciliation_queue
   ADD COLUMN IF NOT EXISTS xero_contact_id text,
   ADD COLUMN IF NOT EXISTS contact_name text,
   ADD COLUMN IF NOT EXISTS total numeric,
-  ADD COLUMN IF NOT EXISTS invoice_date date;
+  ADD COLUMN IF NOT EXISTS invoice_date date,
+  ADD COLUMN IF NOT EXISTS suggested_job_number text,
+  ADD COLUMN IF NOT EXISTS suggestion_reason text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS job_materials_facts_invoice_uidx
   ON public.job_materials_facts (xero_invoice_id);
