@@ -62893,7 +62893,19 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
 
   // 1. Primary client (label A)
   // A party who pays $0 is a real answer, not a missing one: null checks, never falsy.
-  const clientPortionExGst = splits.client_portion_ex_gst ?? pricing.totalExGST ?? 0
+  // A flat split saved with share percentages but no portions (the fence page's
+  // shape before it wrote portions) works each portion out from the share; 0 is
+  // kept only when 0 was written.
+  const flatSplit = splits.method !== 'per_run'
+  const portionFromShare = (pct: unknown): number | null => {
+    const total = Number(pricing.totalExGST)
+    const share = pct == null ? 50 : Number(pct)
+    if (!flatSplit || pricing.totalExGST == null || !Number.isFinite(total) || !Number.isFinite(share)) return null
+    return Math.round(total * share) / 100
+  }
+  const clientPortionExGst = splits.client_portion_ex_gst
+    ?? portionFromShare(splits.client_share_percent)
+    ?? pricing.totalExGST ?? 0
   const { data: existingPrimary } = await client.from('job_contacts')
     .select('id').eq('job_id', jId).eq('is_primary', true).maybeSingle()
 
@@ -62942,7 +62954,7 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
       client_email: nb.email || '',
       site_address: nb.address || '',
       share_percentage: nb.share_percent ?? 50,
-      quote_value_ex_gst: nb.portion_ex_gst ?? 0,
+      quote_value_ex_gst: nb.portion_ex_gst ?? portionFromShare(nb.share_percent) ?? 0,
       assigned_runs: nb.assigned_runs || [],
       status: 'active',
       contact_type: contactType,
