@@ -940,7 +940,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261020165000", "context_job_reconciliation"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
-                      ("20261021100000", "job_receipt_sender")]:
+                      ("20261021100000", "job_receipt_sender"),
+                      # Card events (CTX-T22): get_job_conversation reads a
+                      # person's decisions through context_job_card_decisions.
+                      ("20261021150000", "context_job_card_events")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

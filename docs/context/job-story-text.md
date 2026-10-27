@@ -50,6 +50,12 @@ and any server collation. Changing the digest makes every saved story stale
 once; a change to how the card is built does too (record timeline T1, for
 example), and that is expected: the page words stale softly.
 
+Since CTX-T22 (`20261021150000`) the card follows a person's reconciliation
+decisions: a row a split, correct or confirm put on the job is on its card, one a
+decision took off is not, and that moves the timeline rows the digest reads. Meta
+`matching` and `person_placed` sit outside the digest. Contract:
+[job-card-events.md](job-card-events.md).
+
 ## The queue
 
 `context_job_story_requests`: at most one open request a job.

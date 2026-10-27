@@ -693,7 +693,9 @@ Deno.test("dossier: an empty live job returns its state and an explicit not-know
   ]);
   assertEquals(d.state.brief.present, false);
   assertEquals(client.writes, []);
+  // The conversation the dossier reuses follows a person's Matching decisions (CTX-T22).
   assertEquals([...new Set(client.rpcs)].sort(), [
+    "context_job_card_decisions",
     "context_job_freshness",
     "job_quote_values",
   ]);
