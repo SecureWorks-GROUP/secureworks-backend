@@ -5,7 +5,10 @@
 //
 // Every read asks for immutable ids and plain-text bodies. Errors are thrown
 // as GraphReadError with a code (graph_<http status>, graph_unreachable,
-// graph_bad_json); never the response text, which can carry mail content.
+// graph_timeout, graph_bad_json); never the response text, which can carry
+// mail content. Every GET carries an AbortSignal: a read that does not
+// finish in GRAPH_GET_TIMEOUT_MS is graph_timeout, one attempt, so a hung
+// call ends the run with the cursor it already saved.
 //
 // Group post attachments (6 Oct 2026): Microsoft refuses a post's own
 // attachments address (/posts/{id}/attachments, and its /$value) to an
@@ -21,6 +24,11 @@ import type {
 } from "../_shared/evidence/outlook_mail.ts";
 
 export const GRAPH = "https://graph.microsoft.com/v1.0";
+/**
+ * One Graph GET. Inside the history run's 120s budget, so a hung page ends
+ * the run while it can still record the cursor, and short of an isolate kill.
+ */
+export const GRAPH_GET_TIMEOUT_MS = 30_000;
 const PREFER = 'outlook.body-content-type="text", IdType="ImmutableId"';
 /** MAPI PR_INTERNET_MESSAGE_ID, so a group post and a member's copy share one key. */
 const INTERNET_ID_PROP = "String 0x1035";
@@ -34,6 +42,8 @@ export class GraphReadError extends Error {
 export interface GraphDeps {
   fetch: typeof fetch;
   token(): Promise<string>;
+  /** Per-GET timeout. Defaults to GRAPH_GET_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export interface FolderIds {
@@ -75,7 +85,8 @@ async function readCapped(
     let chunk: ReadableStreamReadResult<Uint8Array>;
     try {
       chunk = await reader.read();
-    } catch {
+    } catch (e) {
+      if (timedOut(e)) throw e;
       throw new GraphReadError("graph_unreachable", resp.status);
     }
     if (chunk.done) break;
@@ -95,43 +106,113 @@ async function readCapped(
   return out;
 }
 
+function timedOut(e: unknown): boolean {
+  const name = (e as { name?: unknown } | null)?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
+function timeoutError(): Error {
+  const e = new Error("graph_timeout");
+  e.name = "TimeoutError";
+  return e;
+}
+
+/** Reject when the signal aborts, even if fetch never observes it. */
+function raceSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? timeoutError());
+    if (signal.aborted) {
+      onAbort();
+      work.catch(() => {});
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
+async function graphFetch(
+  deps: GraphDeps,
+  url: string,
+  headers: HeadersInit,
+): Promise<{ resp: Response; signal: AbortSignal }> {
+  if (!url.startsWith(GRAPH + "/")) {
+    throw new GraphReadError("graph_bad_url", null);
+  }
+  const signal = AbortSignal.timeout(deps.timeoutMs ?? GRAPH_GET_TIMEOUT_MS);
+  try {
+    const resp = await raceSignal(
+      deps.fetch(url, { method: "GET", headers, signal }),
+      signal,
+    );
+    return { resp, signal };
+  } catch (e) {
+    if (timedOut(e) || signal.aborted) {
+      throw new GraphReadError("graph_timeout", null);
+    }
+    throw new GraphReadError("graph_unreachable", null);
+  }
+}
+
+async function readBody<T>(
+  resp: Response,
+  signal: AbortSignal,
+  read: () => Promise<T>,
+  bad: () => GraphReadError,
+): Promise<T> {
+  try {
+    return await raceSignal(read(), signal);
+  } catch (e) {
+    await resp.body?.cancel().catch(() => {});
+    if (e instanceof GraphReadError) throw e;
+    if (timedOut(e) || signal.aborted) {
+      throw new GraphReadError("graph_timeout", resp.status);
+    }
+    throw bad();
+  }
+}
+
 async function getJson(
   deps: GraphDeps,
   url: string,
   cap?: { maxBytes: number; code: string },
 ): Promise<Record<string, unknown>> {
-  if (!url.startsWith(GRAPH + "/")) {
-    throw new GraphReadError("graph_bad_url", null);
-  }
-  let resp: Response;
-  try {
-    resp = await deps.fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${await deps.token()}`,
-        Prefer: PREFER,
-      },
-    });
-  } catch {
-    throw new GraphReadError("graph_unreachable", null);
-  }
+  const { resp, signal } = await graphFetch(deps, url, {
+    Authorization: `Bearer ${await deps.token()}`,
+    Prefer: PREFER,
+  });
   if (!resp.ok) {
     await resp.body?.cancel().catch(() => {});
     throw new GraphReadError(`graph_${resp.status}`, resp.status);
   }
   if (cap) {
-    const raw = await readCapped(resp, cap.maxBytes, cap.code);
+    const raw = await readBody(
+      resp,
+      signal,
+      () => readCapped(resp, cap.maxBytes, cap.code),
+      () => new GraphReadError("graph_bad_json", resp.status),
+    );
     try {
       return JSON.parse(new TextDecoder().decode(raw));
     } catch {
       throw new GraphReadError("graph_bad_json", resp.status);
     }
   }
-  try {
-    return await resp.json();
-  } catch {
-    throw new GraphReadError("graph_bad_json", resp.status);
-  }
+  return await readBody(
+    resp,
+    signal,
+    () => resp.json() as Promise<Record<string, unknown>>,
+    () => new GraphReadError("graph_bad_json", resp.status),
+  );
 }
 
 async function getBytes(
@@ -139,18 +220,9 @@ async function getBytes(
   url: string,
   maxBytes: number,
 ): Promise<Uint8Array> {
-  if (!url.startsWith(GRAPH + "/")) {
-    throw new GraphReadError("graph_bad_url", null);
-  }
-  let resp: Response;
-  try {
-    resp = await deps.fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${await deps.token()}` },
-    });
-  } catch {
-    throw new GraphReadError("graph_unreachable", null);
-  }
+  const { resp, signal } = await graphFetch(deps, url, {
+    Authorization: `Bearer ${await deps.token()}`,
+  });
   if (!resp.ok) {
     await resp.body?.cancel().catch(() => {});
     throw new GraphReadError(`graph_${resp.status}`, resp.status);
@@ -160,7 +232,12 @@ async function getBytes(
     await resp.body?.cancel().catch(() => {});
     throw new GraphReadError("attachment_too_large", resp.status);
   }
-  const bytes = new Uint8Array(await resp.arrayBuffer());
+  const bytes = await readBody(
+    resp,
+    signal,
+    async () => new Uint8Array(await resp.arrayBuffer()),
+    () => new GraphReadError("graph_unreachable", resp.status),
+  );
   if (bytes.byteLength > maxBytes) {
     throw new GraphReadError("attachment_too_large", resp.status);
   }
@@ -369,26 +446,119 @@ export async function listGroupConversations(
   };
 }
 
+export interface GroupThread {
+  id: string;
+  topic: string | null;
+}
+
+export interface GroupThreadPage {
+  items: GroupThread[];
+  next: string | null;
+}
+
+export interface GroupPostPage {
+  items: OutlookMailItem[];
+  next: string | null;
+}
+
+/** One page of a conversation's threads. `next` is Graph's nextLink. */
+export async function listGroupThreadPage(
+  deps: GraphDeps,
+  groupId: string,
+  conversationId: string,
+  next?: string | null,
+): Promise<GroupThreadPage> {
+  const r = await getJson(
+    deps,
+    next ??
+      `${GRAPH}/groups/${enc(groupId)}/conversations/${
+        enc(conversationId)
+      }/threads?$select=id,topic`,
+  );
+  const items: GroupThread[] = [];
+  for (const t of Array.isArray(r.value) ? r.value : []) {
+    const id = str((t as { id?: unknown }).id);
+    if (id) items.push({ id, topic: str((t as { topic?: unknown }).topic) });
+  }
+  return { items, next: str(r["@odata.nextLink"]) };
+}
+
+/** Every thread page, capped, for the live poll. History walks page by page. */
 export async function listGroupThreads(
   deps: GraphDeps,
   groupId: string,
   conversationId: string,
-): Promise<Array<{ id: string; topic: string | null }>> {
-  const out: Array<{ id: string; topic: string | null }> = [];
-  let url: string | null = `${GRAPH}/groups/${enc(groupId)}/conversations/${
-    enc(conversationId)
-  }/threads?$select=id,topic`;
-  for (let page = 0; url && page < 10; page++) {
-    const r = await getJson(deps, url);
-    for (const t of Array.isArray(r.value) ? r.value : []) {
-      const id = str((t as { id?: unknown }).id);
-      if (id) out.push({ id, topic: str((t as { topic?: unknown }).topic) });
-    }
-    url = str(r["@odata.nextLink"]);
+): Promise<GroupThread[]> {
+  const out: GroupThread[] = [];
+  let next: string | null = null;
+  for (let page = 0; page < 10; page++) {
+    const got = await listGroupThreadPage(deps, groupId, conversationId, next);
+    out.push(...got.items);
+    next = got.next;
+    if (!next) break;
   }
   return out;
 }
 
+function postFromGraph(
+  p: Record<string, unknown>,
+  topic: string | null,
+): OutlookMailItem {
+  const props = Array.isArray(p.singleValueExtendedProperties)
+    ? p.singleValueExtendedProperties as Array<
+      { id?: unknown; value?: unknown }
+    >
+    : [];
+  const internet = props.find((x) =>
+    typeof x.id === "string" &&
+    x.id.toLowerCase() === INTERNET_ID_PROP.toLowerCase()
+  );
+  const body = p.body as { content?: unknown; contentType?: unknown } | null;
+  return {
+    graphId: String(p.id ?? ""),
+    internetMessageId: str(internet?.value),
+    conversationId: str(p.conversationId),
+    subject: topic,
+    from: addr(p.from) ?? addr(p.sender),
+    to: [],
+    cc: [],
+    receivedAt: str(p.receivedDateTime),
+    sentAt: str(p.receivedDateTime),
+    bodyText: str(body?.content),
+    bodyIsHtml: body?.contentType === "html",
+    headers: {},
+    folderKind: "group",
+    hasAttachments: p.hasAttachments === true,
+  };
+}
+
+/** One page of a thread's posts, bodies included. `next` is Graph's nextLink. */
+export async function listGroupPostPage(
+  deps: GraphDeps,
+  groupId: string,
+  threadId: string,
+  topic: string | null,
+  next?: string | null,
+): Promise<GroupPostPage> {
+  const r = await getJson(
+    deps,
+    next ??
+      `${GRAPH}/groups/${enc(groupId)}/threads/${
+        enc(threadId)
+      }/posts?$select=id,from,sender,receivedDateTime,body,hasAttachments,conversationId,conversationThreadId&$expand=${
+        enc(
+          `singleValueExtendedProperties($filter=id eq '${INTERNET_ID_PROP}')`,
+        )
+      }`,
+  );
+  const items = ((Array.isArray(r.value) ? r.value : []) as Record<
+    string,
+    unknown
+  >[]).map((p) => postFromGraph(p, topic)).filter((p) => p.graphId);
+  return { items, next: str(r["@odata.nextLink"]) };
+}
+
+/** Every post page, capped, for the live poll. History walks page by page. */
 export async function listGroupPosts(
   deps: GraphDeps,
   groupId: string,
@@ -396,51 +566,14 @@ export async function listGroupPosts(
   topic: string | null,
 ): Promise<OutlookMailItem[]> {
   const out: OutlookMailItem[] = [];
-  let url: string | null = `${GRAPH}/groups/${enc(groupId)}/threads/${
-    enc(threadId)
-  }/posts?$select=id,from,sender,receivedDateTime,body,hasAttachments,conversationId,conversationThreadId&$expand=${
-    enc(`singleValueExtendedProperties($filter=id eq '${INTERNET_ID_PROP}')`)
-  }`;
-  for (let page = 0; url && page < 10; page++) {
-    const r = await getJson(deps, url);
-    for (
-      const p of (Array.isArray(r.value) ? r.value : []) as Record<
-        string,
-        unknown
-      >[]
-    ) {
-      const props = Array.isArray(p.singleValueExtendedProperties)
-        ? p.singleValueExtendedProperties as Array<
-          { id?: unknown; value?: unknown }
-        >
-        : [];
-      const internet = props.find((x) =>
-        typeof x.id === "string" &&
-        x.id.toLowerCase() === INTERNET_ID_PROP.toLowerCase()
-      );
-      const body = p.body as
-        | { content?: unknown; contentType?: unknown }
-        | null;
-      out.push({
-        graphId: String(p.id ?? ""),
-        internetMessageId: str(internet?.value),
-        conversationId: str(p.conversationId),
-        subject: topic,
-        from: addr(p.from) ?? addr(p.sender),
-        to: [],
-        cc: [],
-        receivedAt: str(p.receivedDateTime),
-        sentAt: str(p.receivedDateTime),
-        bodyText: str(body?.content),
-        bodyIsHtml: body?.contentType === "html",
-        headers: {},
-        folderKind: "group",
-        hasAttachments: p.hasAttachments === true,
-      });
-    }
-    url = str(r["@odata.nextLink"]);
+  let next: string | null = null;
+  for (let page = 0; page < 10; page++) {
+    const got = await listGroupPostPage(deps, groupId, threadId, topic, next);
+    out.push(...got.items);
+    next = got.next;
+    if (!next) break;
   }
-  return out.filter((p) => p.graphId);
+  return out;
 }
 
 /** Where an item's attachments live: a user message or a group post. */
