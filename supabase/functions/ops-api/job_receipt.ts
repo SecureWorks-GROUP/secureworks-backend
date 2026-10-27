@@ -5,8 +5,9 @@
 // authorised the connection. Every paid invoice counts, deposits included. One email per
 // invoice, ever.
 //
-// This is the one recorded exception to the 30 Sep 2026 ruling that our automated money
-// messages stay off (debt_autotexts_off.ts): receipts only. Contract: docs/job-receipt-v1.md.
+// This is a recorded exception to the 30 Sep 2026 ruling that our automated money
+// messages stay off (debt_autotexts_off.ts): receipts only. (The other: the deposit
+// received text, job_deposit_advance.ts.) Contract: docs/job-receipt-v1.md.
 //
 //   - requestInvoiceReceipt  the one sender, for one xero_invoice_id. Order: switch ->
 //                            invoice (ACCREC, PAID, on a job) -> job (fencing or patio,
