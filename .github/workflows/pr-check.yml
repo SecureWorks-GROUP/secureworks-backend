@@ -213,6 +213,20 @@ jobs:
         run: |
           bash scripts/test/test-apply-pending-migrations.sh
 
+      # INT-18 (Context audit F5): functions are redefined whole with CREATE OR
+      # REPLACE, so a stale copy in one PR silently undoes another (1138's
+      # context_recon_health drops N1's queue_by_lane). Fail when a function a
+      # changed migration defines loses an output key its previous definition
+      # had. The checkout is the PR merged onto the current base, so the
+      # previous definition includes everything already on main. An intended
+      # removal is named in the migration:
+      #   -- output-key-guard: drop <schema.function> <key>
+      - name: Guard replaced functions against lost output keys
+        run: |
+          deno test --allow-read scripts/test/check-migration-output-keys_test.ts
+          deno run --allow-read --allow-run=git scripts/check-migration-output-keys.ts \
+            --base "${{ github.event.pull_request.base.sha }}" --head HEAD
+
       - name: Check visit outcome business records
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
@@ -252,6 +266,17 @@ jobs:
             supabase/functions/_shared/stage-gate/job-state-machine_test.ts \
             supabase/functions/_shared/stage-gate/engine_test.ts \
             supabase/functions/ghl-webhook/stage_rank_test.ts
+
+      # Deposit advance for fencing and patio (docs/job-deposit-advance-v1.md): a
+      # sent deposit lands the job in Awaiting Deposit, every live deposit paid in
+      # full moves it to Order Materials (patio: Approvals unless no council), the
+      # switch (dry_run moves and texts nothing), the once-only client text and the
+      # flag after a void or refund. Every write and SMS is a fake.
+      - name: Test the deposit advance rule, moves, text and flag
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/job_deposit_paid_test.ts \
+            supabase/functions/ops-api/job_deposit_advance_test.ts
 
       # The read-only close-out block the Ops board and job view read (staff only,
       # fencing and patio, one batched read). It imports index.ts, so it runs with
@@ -392,6 +417,9 @@ jobs:
       # PDF a supplier reads, the two reads and eight writes end to end (only
       # a send or a reply reaches the stubbed transport), and its fixes to
       # create_po, the reply reader's tag and the reply analysis.
+      # Dispatch v2 slices 5 and 6 add the draft list, supplier boxes and the
+      # supplier order email sent from admin@ through Outlook (the send itself
+      # is always a fake in these tests).
       - name: Test the Dispatch list and job notes reads
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
@@ -400,8 +428,16 @@ jobs:
             supabase/functions/ops-api/dispatch_materials_test.ts \
             supabase/functions/ops-api/dispatch_order_pdf_test.ts \
             supabase/functions/ops-api/dispatch_orders_store_test.ts \
+            supabase/functions/ops-api/dispatch_v2_emails_test.ts \
+            supabase/functions/ops-api/dispatch_v2_store_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
             supabase/functions/receive-po-email/po_email_tag_test.ts
+
+      # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
+      # suggestions (rules, engine on an in-memory store, migration text).
+      - name: Test the Dispatch v2 supplier replies
+        run: |
+          deno test --no-check --allow-env --allow-read             supabase/functions/ops-api/dispatch_v2_replies_rules_test.ts             supabase/functions/ops-api/dispatch_v2_replies_test.ts             supabase/functions/ops-api/dispatch_v2_replies_store_test.ts
 
       - name: Test edge deploy workflow classification
         run: |
@@ -411,6 +447,7 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/send-outlook-email/outlook_action_behavior_test.ts \
+            supabase/functions/send-outlook-email/outlook_capture_thread_ids_test.ts \
             supabase/functions/send-outlook-email/outlook_authorization_test.ts \
             supabase/functions/send-outlook-email/ses_delivery_fence_test.ts \
             supabase/functions/send-quote/xero_quote_outcome_test.ts \
@@ -431,8 +468,11 @@ jobs:
             supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/project_job_link_test.ts \
+            supabase/functions/xero-sync/bill_prematch_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
+            supabase/functions/ops-api/job_trace_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
