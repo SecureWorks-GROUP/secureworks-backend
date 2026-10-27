@@ -5,6 +5,9 @@
 //     -> RPC context_recon_daily_list(p_as_of, p_limit + 1): the resolver's list,
 //        ranked by consequence (owed invoices with no job, then messages from a
 //        contact who owes, then recent customer messages on a live job).
+//     -> RPC context_recon_daily_left_out(p_as_of): what the list leaves out, by
+//        cause, so an empty list is never read as nothing to do. A failed count
+//        read answers left_out null with left_out_unreadable, never zeros.
 //   POST ?action=recon_record_decision
 //     { subject_kind: event|invoice, subject_id, shown_hash, action, job_ids?,
 //       cause, escalate_to? }
@@ -233,10 +236,15 @@ export async function reconDailyList(
 ): Promise<Record<string, unknown>> {
   const args = reconDailyListArgs(params, now);
   // Ask for one more than the page so a cut list says more instead of reading as complete.
-  const { data, error } = await client.rpc("context_recon_daily_list", {
-    ...args,
-    p_limit: args.p_limit + 1,
-  });
+  const [{ data, error }, leftOutRead] = await Promise.all([
+    client.rpc("context_recon_daily_list", {
+      ...args,
+      p_limit: args.p_limit + 1,
+    }),
+    // A thrown count read is an unread count, never a failed list.
+    Promise.resolve(client.rpc("context_recon_daily_left_out", { p_as_of: args.p_as_of }))
+      .catch((error: unknown) => ({ data: null, error })),
+  ]);
   // A failed read, or an answer that is not a list, is never an empty list.
   if (error || !Array.isArray(data)) {
     console.error("[recon_daily_list] read failed", error ?? "result is not a list");
@@ -248,7 +256,44 @@ export async function reconDailyList(
   }
   const more = data.length > args.p_limit;
   const items = more ? data.slice(0, args.p_limit) : data;
-  return { as_of: args.p_as_of, limit: args.p_limit, count: items.length, more, items };
+  const leftOut = reconLeftOut(leftOutRead);
+  return {
+    as_of: args.p_as_of,
+    limit: args.p_limit,
+    count: items.length,
+    more,
+    items,
+    left_out: leftOut,
+    left_out_unreadable: leftOut === null,
+  };
+}
+
+export const RECON_LEFT_OUT_CAUSES = [
+  "no_identity",
+  "never_asked",
+  "not_ranked",
+  "backlog",
+] as const;
+
+export type ReconLeftOut = Record<(typeof RECON_LEFT_OUT_CAUSES)[number], number>;
+
+// The left-out counts, or null when the read failed or any count is missing or
+// not a whole number: an unread count must never show as zero.
+export function reconLeftOut(
+  read: { data: unknown; error: unknown },
+): ReconLeftOut | null {
+  const { data, error } = read;
+  if (error || !data || typeof data !== "object" || Array.isArray(data)) {
+    if (error) console.error("[recon_daily_list] left-out read failed", error);
+    return null;
+  }
+  const out = {} as ReconLeftOut;
+  for (const cause of RECON_LEFT_OUT_CAUSES) {
+    const n = (data as Record<string, unknown>)[cause];
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0) return null;
+    out[cause] = n;
+  }
+  return out;
 }
 
 export async function reconRecordDecision(
