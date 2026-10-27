@@ -1314,9 +1314,18 @@ export async function matchUnlinkedInvoices(client: any) {
             continue
           }
 
-          await client.from('xero_invoices')
+          // INT-14: a link only places an invoice that has no job; it never moves one.
+          // A lost race (a job set since the read) links nothing and records nothing.
+          const { data: linked, error: linkErr } = await client.from('xero_invoices')
             .update({ job_id: job.id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
+            .is('job_id', null)
+            .select('id')
+          if (linkErr) {
+            console.error(`[xero-sync] reference link failed for invoice ${inv.invoice_number}:`, linkErr.message)
+            continue
+          }
+          if (!linked || linked.length === 0) continue
 
           if (await automationLaneEnabled(client, 'capture')) {
             await insertCapturedEvidence(client, {
@@ -1370,9 +1379,16 @@ export async function matchUnlinkedInvoices(client: any) {
             continue
           }
 
-          await client.from('xero_invoices')
+          const { data: linked, error: linkErr } = await client.from('xero_invoices')
             .update({ job_id: jobs[0].id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
+            .is('job_id', null)
+            .select('id')
+          if (linkErr) {
+            console.error(`[xero-sync] Strategy 2 link failed for invoice ${inv.invoice_number}:`, linkErr.message)
+            continue
+          }
+          if (!linked || linked.length === 0) continue
 
           if (await automationLaneEnabled(client, 'capture')) {
             await insertCapturedEvidence(client, {
@@ -3191,9 +3207,17 @@ async function matchInvoicesByReference(sb: any) {
         sesLinkRefusals.push(refusal)
         continue
       }
-      await sb.from('xero_invoices')
+      // INT-14: only an invoice still without a job is linked; one already on a job is kept.
+      const { data: linked, error: linkErr } = await sb.from('xero_invoices')
         .update({ job_id: job.id })
         .eq('id', inv.id)
+        .is('job_id', null)
+        .select('id')
+      if (linkErr) {
+        console.error(`[xero-sync] match by reference failed for ${inv.invoice_number}:`, linkErr.message)
+        continue
+      }
+      if (!linked || linked.length === 0) continue
       matched++
       matchLog.push(`${inv.reference} → job ${swNumber} (job_number)`)
       continue
@@ -3219,9 +3243,16 @@ async function matchInvoicesByReference(sb: any) {
         sesLinkRefusals.push(refusal)
         continue
       }
-      await sb.from('xero_invoices')
+      const { data: linked, error: linkErr } = await sb.from('xero_invoices')
         .update({ job_id: xp.job_id })
         .eq('id', inv.id)
+        .is('job_id', null)
+        .select('id')
+      if (linkErr) {
+        console.error(`[xero-sync] match by project reference failed for ${inv.invoice_number}:`, linkErr.message)
+        continue
+      }
+      if (!linked || linked.length === 0) continue
       matched++
       matchLog.push(`${inv.reference} → job via xero_projects (${swNumber})`)
     }
