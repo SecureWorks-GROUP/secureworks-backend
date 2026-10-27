@@ -16,6 +16,7 @@ import {
   reconDailyListArgs,
   reconDailySenderWords,
   ReconDecisionError,
+  reconLeftOut,
   reconDecisionUser,
   reconRecordDecision,
   reconRecordDecisionCall,
@@ -266,4 +267,39 @@ Deno.test("source: both actions are dispatched, on no routine list, the person f
     src.includes("reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null })"),
     true,
   );
+});
+
+Deno.test("the daily list says what it left out, and an unread count is never zero", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  const counts = { no_identity: 3, never_asked: 1, not_ranked: 2, backlog: 40 };
+  const calls: { fn: string; args: any }[] = [];
+  const client = {
+    rpc(fn: string, args?: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return Promise.resolve(fn === "context_recon_daily_left_out"
+        ? { data: counts, error: null }
+        : { data: [], error: null });
+    },
+  };
+  const out = await reconDailyList(client, new URLSearchParams(""), now);
+  assertEquals(calls.map((c) => c.fn), ["context_recon_daily_list", "context_recon_daily_left_out"]);
+  assertEquals(calls[1].args, { p_as_of: "2026-10-20T00:00:00.000Z" });
+  assertEquals([out.count, out.left_out, out.left_out_unreadable], [0, counts, false]);
+  // A failed, list-shaped, partial or non-integer count answers null, never zeros.
+  assertEquals(reconLeftOut({ data: null, error: { message: "boom" } }), null);
+  assertEquals(reconLeftOut({ data: [counts], error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, backlog: undefined }, error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, not_ranked: 1.5 }, error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, never_asked: -1 }, error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, extra: 9 }, error: null }), counts);
+  // The list still answers when only the count read failed.
+  const half = {
+    rpc(fn: string) {
+      return Promise.resolve(fn === "context_recon_daily_left_out"
+        ? { data: null, error: { message: "boom" } }
+        : { data: [{ band: 1 }], error: null });
+    },
+  };
+  const partial = await reconDailyList(half, new URLSearchParams(""), now);
+  assertEquals([partial.count, partial.left_out, partial.left_out_unreadable], [1, null, true]);
 });

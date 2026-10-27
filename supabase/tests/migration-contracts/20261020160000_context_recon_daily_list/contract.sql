@@ -12,7 +12,9 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
      AND (has_function_privilege('authenticated', 'public.context_recon_daily_list(timestamptz,int)', 'EXECUTE')
           OR has_function_privilege('anon', 'public.context_recon_record_invoice_decision(uuid,text,text,uuid[],text,uuid,text)', 'EXECUTE')
-          OR has_function_privilege('authenticated', 'public.context_recon_invoice_evidence_hash(uuid)', 'EXECUTE')) THEN
+          OR has_function_privilege('authenticated', 'public.context_recon_invoice_evidence_hash(uuid)', 'EXECUTE')
+          OR has_function_privilege('authenticated', 'public.context_recon_daily_rows(timestamptz)', 'EXECUTE')
+          OR has_function_privilege('anon', 'public.context_recon_daily_left_out(timestamptz)', 'EXECUTE')) THEN
     RAISE EXCEPTION 'recon list contract: a browser role holds a grant';
   END IF;
 END $$;
@@ -52,7 +54,7 @@ WHERE source = 'recon-list';
 DO $$
 DECLARE asof timestamptz := '2026-10-20 00:00Z'; inv uuid := '7d200000-0000-0000-0000-000000000001';
   a uuid := '7d000000-0000-0000-0000-00000000000a'; staff uuid := '7d100000-0000-0000-0000-000000000001';
-  h text; r record; n int;
+  h text; r record; n int; lo jsonb;
 BEGIN
   -- 2. Ranking: the owed invoice first, then the owing contact's message, then the live-job message.
   SELECT count(*) INTO n FROM public.context_recon_daily_list(asof) WHERE subject_id IN
@@ -107,6 +109,21 @@ BEGIN
      OR r.summary ->> 'direction' IS DISTINCT FROM 'inbound'
      OR r.summary ->> 'counterpart_role' IS DISTINCT FROM 'customer' THEN
     RAISE EXCEPTION 'recon list contract: band 3 message summary shape is %', r.summary;
+  END IF;
+  -- 2b. What the list leaves out is counted, never hidden: the no-contact message is a
+  --     no-identity row, every count is a whole number, and nothing listed is counted as left out.
+  SELECT public.context_recon_daily_left_out(asof) INTO lo;
+  IF lo IS NULL OR NOT (lo ?& ARRAY['no_identity', 'never_asked', 'not_ranked', 'backlog'])
+     OR (lo ->> 'no_identity')::int < 1 OR (lo ->> 'never_asked')::int < 0
+     OR (lo ->> 'not_ranked')::int < 0 OR (lo ->> 'backlog')::int < 0 THEN
+    RAISE EXCEPTION 'recon list contract: the left-out counts are missing or wrong: %', lo;
+  END IF;
+  SELECT count(*) INTO n FROM public.context_recon_queue(asof) q
+  WHERE q.lane = 'live' AND q.cause LIKE 'ambiguity:%';
+  IF (lo ->> 'not_ranked')::int + (SELECT count(*) FROM public.context_recon_daily_rows(asof) d
+        JOIN public.context_recon_queue(asof) q ON q.event_id = d.subject_id
+        WHERE d.subject_kind = 'event' AND q.lane = 'live' AND q.cause LIKE 'ambiguity:%') <> n THEN
+    RAISE EXCEPTION 'recon list contract: listed and not-ranked rows do not add up to the live ambiguity rows';
   END IF;
   -- The list is cut at the asked limit, so ops-api can ask one more and say more.
   SELECT count(*) INTO n FROM public.context_recon_daily_list(asof, 2);
@@ -197,6 +214,9 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM public.context_recon_daily_list(asof) WHERE subject_id = inv) THEN
     RAISE EXCEPTION 'recon list contract: go-live took the owed invoice off the list';
+  END IF;
+  IF (public.context_recon_daily_left_out(asof) ->> 'backlog')::int < 1 THEN
+    RAISE EXCEPTION 'recon list contract: a message moved to the backlog is not counted as left out';
   END IF;
 
   -- 8. The list stops at 201 rows, so ops-api's 200 plus one can tell a full page from a cut one.
