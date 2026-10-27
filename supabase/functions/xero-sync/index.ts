@@ -37,6 +37,8 @@ import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { readAll, runBillPrematch } from './bill_prematch_run.ts'
+import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
@@ -46,10 +48,18 @@ import {
   buildQueueRow,
   DEFAULT_MATCH_CONFIG,
   extractJobNumber,
+  amountIsKnown,
+  existingFactVerdict,
+  HELD_QUEUE_REASONS,
+  JOB_NUMBER_RE,
+  jobNumbersInText,
+  newPlacementAllowed,
   matchBill,
+  OWN_FACT_SOURCES,
   type BillInput,
   type MatchConfig,
   type POCandidate,
+  type SuggestionReason,
 } from './materials_ingest.ts'
 import {
   sealedSesMoneyRefusal,
@@ -249,8 +259,10 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'ingest_materials': {
         // Standalone materials-actuals ingest (also runs inside sync_invoices).
         const windowDays = parseInt(url.searchParams.get('window_days') || '90', 10)
-        const limit = parseInt(url.searchParams.get('limit') || '500', 10)
-        return json(await ingestMaterialsActuals(sb, { windowDays, limit }))
+        const limitParam = url.searchParams.get('limit')
+        const limit = parseInt(limitParam || '500', 10)
+        // An explicit ?limit is a capped test run (no pre-match placements).
+        return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
         return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
@@ -1455,7 +1467,7 @@ export async function matchUnlinkedInvoices(client: any) {
 
 async function ingestMaterialsActuals(
   sb: any,
-  opts: { windowDays?: number; limit?: number; config?: MatchConfig } = {},
+  opts: { windowDays?: number; limit?: number; capped?: boolean; config?: MatchConfig } = {},
 ) {
   const windowDays = opts.windowDays ?? 90
   const limit = opts.limit ?? 500
@@ -1478,11 +1490,13 @@ async function ingestMaterialsActuals(
     //    trade-invoice mirror can never be a materials fact.
     const mirrorSet = new Set<string>()
     {
-      const { data: mirrors } = await sb
-        .from('trade_invoices')
-        .select('xero_bill_id')
-        .not('xero_bill_id', 'is', null)
-      for (const m of mirrors || []) {
+      // Every read below must be whole: a failed or truncated read would hide a
+      // mirror or a human placement, so it stops the step instead.
+      const mirrors = await readAll<any>(() =>
+        sb.from('trade_invoices').select('id, xero_bill_id').not('xero_bill_id', 'is', null).order('id')
+      )
+      if (!mirrors) throw new Error('trade invoice mirrors unreadable')
+      for (const m of mirrors) {
         if (m.xero_bill_id) mirrorSet.add(m.xero_bill_id)
       }
     }
@@ -1490,15 +1504,42 @@ async function ingestMaterialsActuals(
     // 2. Open PO candidates (all suppliers) — grouped by xero_contact_id. The PO
     //    anchor date is delivery_date if set, else created_at.
     const posByContact = new Map<string, POCandidate[]>()
+    // Every issued PO, whoever it is for: a PO the bill names must agree with
+    // the job this path would place it on.
+    let namedPoPool: Array<{ po_number: string | null; job_id: string | null; xero_bill_id: string | null }> = []
+    let blockedJobIds = new Set<string>() // jobs not won, or holding: never a cost by rule
+    const jobNumberById = new Map<string, string>()
     {
-      const { data: pos } = await sb
-        .from('purchase_orders')
-        .select(
-          'id, po_number, xero_contact_id, status, subtotal, total, job_id, xero_bill_id, delivery_date, created_at',
-        )
-        .not('xero_contact_id', 'is', null)
-        .is('xero_bill_id', null)
-      for (const po of pos || []) {
+      const pos = await readAll<any>(() =>
+        sb.from('purchase_orders')
+          .select('id, po_number, xero_contact_id, status, subtotal, total, job_id, xero_bill_id, delivery_date, created_at')
+          .not('xero_contact_id', 'is', null)
+          .is('xero_bill_id', null)
+          .order('id')
+      )
+      if (!pos) throw new Error('purchase orders unreadable')
+      const allPos = await readAll<any>(() =>
+        sb.from('purchase_orders').select('id, po_number, job_id, status, xero_bill_id').order('id')
+      )
+      if (!allPos) throw new Error('purchase orders unreadable')
+      // Drafts count here: a draft PO for another job still contradicts the reference.
+      namedPoPool = allPos.filter((p: any) => !poIsDead(p))
+      // A PO can only carry a cost to a job that was won and is not a holding
+      // job, and only once it has been issued (never a draft).
+      const notLiveJobs = await readAll<any>(() =>
+        sb.from('jobs').select('id, job_number, status, do_not_schedule:metadata->do_not_schedule').eq('org_id', DEFAULT_ORG_ID).order('id')
+      )
+      if (!notLiveJobs) throw new Error('jobs unreadable')
+      for (const j of notLiveJobs) jobNumberById.set(j.id, j.job_number)
+      blockedJobIds = new Set(
+        notLiveJobs
+          .filter((j: any) => DEAD_JOB_STATUSES.has(String(j.status || '').toLowerCase()) ||
+            String(j.do_not_schedule ?? '').toLowerCase() === 'true')
+          .map((j: any) => j.id),
+      )
+      for (const po of pos) {
+        if (String(po.status || '').toLowerCase() === 'draft') continue
+        if (!po.job_id || blockedJobIds.has(po.job_id)) continue
         const cand: POCandidate = {
           id: po.id,
           po_number: po.po_number,
@@ -1517,11 +1558,21 @@ async function ingestMaterialsActuals(
       }
     }
 
+    // 2b. Every live supplier bill, so the same supplier document entered twice
+    //     (even under two contacts, Metecno 1449582) is never placed by this path.
+    const allSupplierBills = await readAll<any>(() =>
+      sb.from('xero_invoices')
+        .select('xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type')
+        .eq('org_id', DEFAULT_ORG_ID).eq('invoice_type', 'ACCPAY').order('xero_invoice_id')
+    )
+    if (!allSupplierBills) throw new Error('supplier bills unreadable')
+    const documentIndex = buildDocumentIndex(allSupplierBills)
+
     // 3. Candidate bills — ACCPAY, in window, not void/deleted.
     const { data: bills } = await sb
       .from('xero_invoices')
       .select(
-        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type',
+        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type, line_items, job_id',
       )
       .eq('org_id', DEFAULT_ORG_ID)
       .eq('invoice_type', 'ACCPAY')
@@ -1533,15 +1584,27 @@ async function ingestMaterialsActuals(
     // never re-open a manually-resolved item.
     const factSourceById = new Map<string, string>() // xero_invoice_id -> automation_source
     const queueStatusById = new Map<string, string>() // xero_invoice_id -> status
+    const queueAssignedById = new Map<string, string>() // xero_invoice_id -> assigned_by
+    const queueReasonById = new Map<string, string>() // xero_invoice_id -> suggestion_reason
+    const factJobById = new Map<string, string>() // xero_invoice_id -> job_id
     {
-      const { data: facts } = await sb
-        .from('job_materials_facts')
-        .select('xero_invoice_id, automation_source')
-      for (const f of facts || []) factSourceById.set(f.xero_invoice_id, f.automation_source)
-      const { data: qrows } = await sb
-        .from('materials_reconciliation_queue')
-        .select('xero_invoice_id, status')
-      for (const q of qrows || []) queueStatusById.set(q.xero_invoice_id, q.status)
+      const facts = await readAll<any>(() =>
+        sb.from('job_materials_facts').select('id, xero_invoice_id, automation_source, job_id').order('id')
+      )
+      if (!facts) throw new Error('materials facts unreadable')
+      for (const f of facts) {
+        factSourceById.set(f.xero_invoice_id, f.automation_source)
+        factJobById.set(f.xero_invoice_id, f.job_id)
+      }
+      const qrows = await readAll<any>(() =>
+        sb.from('materials_reconciliation_queue').select('id, xero_invoice_id, status, assigned_by, suggestion_reason').order('id')
+      )
+      if (!qrows) throw new Error('materials queue unreadable')
+      for (const q of qrows) {
+        queueStatusById.set(q.xero_invoice_id, q.status)
+        if (q.assigned_by) queueAssignedById.set(q.xero_invoice_id, q.assigned_by)
+        if (q.suggestion_reason) queueReasonById.set(q.xero_invoice_id, q.suggestion_reason)
+      }
     }
 
     for (const b of bills || []) {
@@ -1559,14 +1622,19 @@ async function ingestMaterialsActuals(
         invoice_type: b.invoice_type,
       }
 
-      // Mirror — exclude, and defensively remove any stale derived rows.
+      // Mirror — exclude, and defensively remove this path's own stale facts.
+      // A person's or the agent's placement is never deleted here (and the
+      // delete is filtered by source, so a placement written since the read
+      // survives): it is left for review.
+      const ownSources = [...OWN_FACT_SOURCES]
       if (mirrorSet.has(bill.xero_invoice_id)) {
         result.mirrors_excluded++
-        if (factSourceById.get(bill.xero_invoice_id) === 'manual_queue') {
-          // A human somehow assigned a mirror — leave it, but flag in logs.
-          console.warn(`[materials] mirror ${bill.xero_invoice_id} has a manual fact — left untouched for review`)
-        } else if (factSourceById.has(bill.xero_invoice_id)) {
-          await sb.from('job_materials_facts').delete().eq('xero_invoice_id', bill.xero_invoice_id)
+        const src = factSourceById.get(bill.xero_invoice_id)
+        if (src && !OWN_FACT_SOURCES.has(src)) {
+          console.warn(`[materials] mirror ${bill.xero_invoice_id} has a ${src} fact — left untouched for review`)
+        } else if (src) {
+          await sb.from('job_materials_facts').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).in('automation_source', ownSources)
           result.cleaned++
         }
         continue
@@ -1578,58 +1646,280 @@ async function ingestMaterialsActuals(
         result.skipped_manual++
         continue
       }
+      // Only an issued bill can become a job's cost: a DRAFT or SUBMITTED bill
+      // waits until Xero authorises it (no fact, no queue row yet).
+      const billStatus = String(bill.status || '').toUpperCase()
+      if (billStatus !== 'AUTHORISED' && billStatus !== 'PAID') {
+        const counts = result as Record<string, unknown>
+        counts.skipped_unissued = Number(counts.skipped_unissued || 0) + 1
+        // This path's own fact on a bill that is not issued is removed. The
+        // agent's placement went through a person-equivalent assign and is left
+        // for review, like a person's.
+        const src = factSourceById.get(bill.xero_invoice_id)
+        if (src && OWN_FACT_SOURCES.has(src)) {
+          await sb.from('job_materials_facts').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).in('automation_source', ownSources)
+          result.cleaned++
+        } else if (src) {
+          console.warn(`[materials] unissued bill ${bill.xero_invoice_id} has a ${src} fact — left untouched for review`)
+        }
+        continue
+      }
+
       const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
       if (existingQueueStatus && existingQueueStatus !== 'open') {
         result.skipped_manual++
         continue
       }
 
-      // Resolve reference → job (the caller side of the pure function).
+
+      // Resolve reference → job (the caller side of the pure function). The
+      // same guards as the pre-match: never a job that was not won, a holding
+      // job, or a number whose digits another job also carries (SWF-26328 and
+      // SWP-26328); those go to Bills to place for a person.
       const token = extractJobNumber(bill.reference)
+      const refTokens = jobNumbersInText(bill.reference)
+      const lineTokens = jobNumbersInText(
+        (Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n '),
+      )
       let jobFromRef: { id: string; job_number: string } | null = null
-      if (token) {
-        const { data: job } = await sb
+      if (token && refTokens.size === 1) {
+        const digits = token.replace(/\D/g, '')
+        const { data: sameDigits, error: jErr } = await sb
           .from('jobs')
-          .select('id, job_number')
+          .select('id, job_number, status, do_not_schedule:metadata->do_not_schedule')
           .eq('org_id', DEFAULT_ORG_ID)
-          .eq('job_number', token)
-          .maybeSingle()
-        if (job) jobFromRef = { id: job.id, job_number: job.job_number }
+          .like('job_number', `%${digits}`)
+        // Evidence that could not be read is not a refusal: leave the bill as it is.
+        if (jErr || !Array.isArray(sameDigits)) {
+          console.error(`[materials] job lookup failed ${bill.xero_invoice_id}:`, jErr?.message)
+          continue
+        }
+        const rows = sameDigits.filter((j: any) => String(j.job_number).replace(/\D/g, '') === digits)
+        const job = rows.find((j: any) => j.job_number === token)
+        const live = job &&
+          !DEAD_JOB_STATUSES.has(String(job.status || '').toLowerCase()) &&
+          String(job.do_not_schedule ?? '').toLowerCase() !== 'true'
+        if (job && live && rows.length === 1) jobFromRef = { id: job.id, job_number: job.job_number }
       }
 
-      const pos = bill.xero_contact_id
+      // An existing fact: this path never moves it to another job. It keeps its
+      // own fact unless the bill now contradicts it, and then removes it (only
+      // that fact, by source) so a person decides on the queue row below.
+      // The job of every PO the bill names (null for a PO with no job).
+      const billText = `${bill.reference || ''} \n ${(Array.isArray(b.line_items) ? b.line_items : []).map((li: any) => li?.Description || '').join(' \n ')}`
+      // A PO linked to this bill counts the same as one it names.
+      const namedPoJobs = namedPoPool
+        .filter((p) => p.xero_bill_id === bill.xero_invoice_id || poNamedIn(p, billText))
+        .map((p) => p.job_id ?? null)
+      const existingSource = factSourceById.get(bill.xero_invoice_id)
+      const factJobId = factJobById.get(bill.xero_invoice_id)
+      // The same supplier document entered more than once: a person decides
+      // which bill is real. No automatic path places any of them, and this
+      // path's own earlier fact on one is taken off into a held row.
+      const duplicateDocument = duplicateDocumentsOf(bill, documentIndex).length > 0
+      if (duplicateDocument) {
+        const counts = result as Record<string, unknown>
+        counts.duplicate_documents_held = Number(counts.duplicate_documents_held || 0) + 1
+      }
+      const verdict = duplicateDocument && existingSource && OWN_FACT_SOURCES.has(existingSource)
+        ? 'remove'
+        : existingFactVerdict({
+        source: existingSource,
+        factJobId,
+        factJobNumber: factJobId ? jobNumberById.get(factJobId) ?? null : null,
+        factJobBlocked: !!factJobId && blockedJobIds.has(factJobId),
+        refTokens,
+        lineTokens,
+        jobFromRefId: jobFromRef?.id ?? null,
+        xeroJobId: b.job_id ?? null,
+        namedPoJobIds: namedPoJobs,
+        amountKnown: amountIsKnown(bill.sub_total),
+      })
+      if (verdict === 'not_ours') continue
+      if (verdict === 'keep') {
+        // The bill may have been amended in Xero: keep this path's own fact in
+        // step with it (only while it is still that fact on that job).
+        const { error: uErr } = await sb.from('job_materials_facts')
+          .update({
+            amount_ex_gst: bill.sub_total,
+            amount_inc_gst: bill.total ?? null,
+            fact_date: bill.invoice_date,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('xero_invoice_id', bill.xero_invoice_id)
+          .eq('automation_source', existingSource as string)
+          .eq('job_id', factJobId as string)
+        if (uErr) console.error(`[materials] fact refresh failed ${bill.xero_invoice_id}:`, uErr.message)
+        continue
+      }
+      // verdict 'remove': the fact is deleted only after the hold below is saved,
+      // so a failed write can never leave the bill with neither fact nor hold.
+
+      // A new placement only on one consistent job number (the reference), or on
+      // the PO fallback when the bill names no job at all; after a removal, never
+      // in the same pass. Anything else is a queue row for a person.
+      // A bill held for a person (an earlier removal, or a Xero link conflict)
+      // stays held until a person resolves its queue row.
+      const heldReason = existingQueueStatus === 'open' ? queueReasonById.get(bill.xero_invoice_id) : undefined
+      const held = !!heldReason && HELD_QUEUE_REASONS.has(heldReason)
+      // Xero links the bill to a job, and the bill names job numbers, none of
+      // them that job: a contradiction for a person, not for any automatic path.
+      const xeroJobNumber = b.job_id ? jobNumberById.get(b.job_id) ?? null : null
+      const named = new Set([...refTokens, ...lineTokens])
+      const xeroLinkConflict = !!b.job_id && named.size > 0 &&
+        !(xeroJobNumber && named.has(String(xeroJobNumber).toUpperCase()))
+      const allowed = verdict === 'remove' || duplicateDocument
+        ? { reference: false, poFallback: false }
+        : newPlacementAllowed({
+          refTokens,
+          lineTokens,
+          jobFromRefId: jobFromRef?.id ?? null,
+          xeroJobId: b.job_id ?? null,
+          held,
+          amountKnown: amountIsKnown(bill.sub_total),
+          namedPoJobIds: namedPoJobs,
+        })
+      const pos = allowed.poFallback && bill.xero_contact_id
         ? posByContact.get(bill.xero_contact_id) || []
         : []
-
-      const m = matchBill(bill, { isMirror: false, jobFromRef, refToken: token, pos, config })
+      const m = matchBill(bill, {
+        isMirror: false,
+        jobFromRef: allowed.reference ? jobFromRef : null,
+        refToken: token ?? ([...refTokens, ...lineTokens][0] ?? null),
+        pos,
+        config,
+      })
 
       if (m.outcome === 'fact') {
+        // A bill is a fact XOR a queue row. Take the open row off first, and
+        // only if it is still open: a person who filed it meanwhile wins.
+        if (existingQueueStatus === 'open') {
+          const { data: gone, error: dErr } = await sb.from('materials_reconciliation_queue').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('status', 'open')
+            .or(`suggestion_reason.is.null,suggestion_reason.not.in.(${[...HELD_QUEUE_REASONS].join(',')})`)
+            .select('id')
+          if (dErr || !Array.isArray(gone) || gone.length === 0) {
+            result.skipped_manual++
+            continue
+          }
+        }
         const row = buildMaterialsFactRow(bill, m, DEFAULT_ORG_ID)
         const { error: fErr } = await sb
           .from('job_materials_facts')
-          .upsert(row, { onConflict: 'xero_invoice_id' })
+          // Insert only: a fact written meanwhile (by a person or the agent) is
+          // never overwritten.
+          .upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true })
         if (fErr) {
+          // The bill has neither now; the next run sees no fact and no row and
+          // decides it again from scratch.
           console.error(`[materials] fact upsert failed ${bill.xero_invoice_id}:`, fErr.message)
           continue
         }
-        // A bill is a fact XOR a queue row — clear any open queue suggestion.
-        if (existingQueueStatus === 'open') {
-          await sb.from('materials_reconciliation_queue').delete().eq('xero_invoice_id', bill.xero_invoice_id)
-        }
         result.facts++
       } else if (m.outcome === 'queue') {
-        const row = buildQueueRow(bill, m, DEFAULT_ORG_ID)
-        const { error: qErr } = await sb
-          .from('materials_reconciliation_queue')
-          .upsert(row, { onConflict: 'xero_invoice_id' })
+        // Why a person must decide: a removed fact, or a Xero link the bill's
+        // job number does not back. Kept on the row so no automatic path places it.
+        const holdReason: SuggestionReason | null = duplicateDocument
+          ? 'duplicate_document'
+          : verdict === 'remove'
+          ? 'fact_contradicted'
+          : held
+          ? heldReason as SuggestionReason
+          : xeroLinkConflict
+          ? 'xero_link_conflict'
+          : null
+        const row = buildQueueRow(bill, holdReason ? { ...m, suggestionReason: holdReason } : m, DEFAULT_ORG_ID)
+        // A new row is inserted only if none exists; an existing row is updated
+        // only while still open. A person's decision made during this run stands.
+        const write = existingQueueStatus === 'open'
+          ? sb.from('materials_reconciliation_queue').update(row)
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('status', 'open').select('id')
+          : sb.from('materials_reconciliation_queue')
+            .upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true }).select('id')
+        const { data: written, error: qErr } = await write
         if (qErr) {
-          console.error(`[materials] queue upsert failed ${bill.xero_invoice_id}:`, qErr.message)
+          console.error(`[materials] queue write failed ${bill.xero_invoice_id}:`, qErr.message)
           continue
+        }
+        if (!Array.isArray(written) || written.length === 0) {
+          // Someone else wrote the row first: re-read it next run, change nothing now.
+          result.skipped_manual++
+          continue
+        }
+        if (verdict === 'remove') {
+          await sb.from('job_materials_facts').delete()
+            .eq('xero_invoice_id', bill.xero_invoice_id).eq('automation_source', existingSource as string)
+          result.cleaned++
         }
         result.queued++
       }
       // skip_mirror / skip_non_accpay: nothing to do (guards above already handled).
     }
+
+    // 5. This path's own facts outside this run's window or cap: a fact on a
+    //    supplier document entered more than once is taken off into a held row
+    //    too, so an older automatic cost never stays beside its duplicate.
+    {
+      const seenNow = new Set((bills || []).map((b: any) => b.xero_invoice_id))
+      const docById = new Map(allSupplierBills.map((r: any) => [r.xero_invoice_id, r]))
+      for (const [id, src] of factSourceById) {
+        if (seenNow.has(id) || !OWN_FACT_SOURCES.has(src)) continue
+        const doc: any = docById.get(id)
+        if (!doc) continue
+        const st = String(doc.status || '').toUpperCase()
+        if (st === 'VOIDED' || st === 'DELETED') continue
+        if (duplicateDocumentsOf(doc, documentIndex).length === 0) continue
+        const qs = queueStatusById.get(id)
+        if (qs && qs !== 'open') continue // a person's decision stands
+        const factJobId = factJobById.get(id) ?? null
+        const row = buildQueueRow(doc as BillInput, {
+          outcome: 'queue',
+          suggestedJobId: factJobId,
+          suggestedJobNumber: factJobId ? jobNumberById.get(factJobId) ?? null : null,
+          suggestionConfidence: 'low',
+          suggestionReason: 'duplicate_document',
+        }, DEFAULT_ORG_ID)
+        const write = qs === 'open'
+          ? sb.from('materials_reconciliation_queue').update(row).eq('xero_invoice_id', id).eq('status', 'open').select('id')
+          : sb.from('materials_reconciliation_queue').upsert(row, { onConflict: 'xero_invoice_id', ignoreDuplicates: true }).select('id')
+        const { data: written, error: qErr } = await write
+        if (qErr || !Array.isArray(written) || written.length === 0) {
+          if (qErr) console.error(`[materials] duplicate hold failed ${id}:`, qErr.message)
+          continue
+        }
+        // Only after the hold is saved: the fact goes, filtered by its own source.
+        const { data: gone, error: dErr } = await sb.from('job_materials_facts').delete()
+          .eq('xero_invoice_id', id).eq('automation_source', src).select('id')
+        const counts = result as Record<string, unknown>
+        if (dErr || !Array.isArray(gone)) {
+          // Held row saved, fact still there: reported, and retried next run.
+          console.error(`[materials] duplicate fact removal failed ${id}:`, dErr?.message)
+          counts.duplicate_fact_removal_failed = Number(counts.duplicate_fact_removal_failed || 0) + 1
+          continue
+        }
+        if (gone.length === 0) continue // removed or changed meanwhile: nothing claimed
+        result.cleaned++
+        counts.duplicate_facts_held = Number(counts.duplicate_facts_held || 0) + 1
+      }
+    }
+
+    // Bill pre-match (JP-06): after the queue upsert, close bills voided or
+    // deleted in Xero, propose a job (or not job related) for each open bill,
+    // and place the confident ones. Isolated: it can never fail the ingest.
+    let prematch: unknown
+    try {
+      // A capped manual run (?limit=N) is a test of the ingest only: it never
+      // starts the organisation-wide pre-match and its placements.
+      prematch = opts.capped
+        ? { ran: false, reason: 'capped_manual_run' }
+        : await runBillPrematch(sb, { orgId: DEFAULT_ORG_ID })
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      prematch = { ran: false, reason: 'error', error: (e as Error).message }
+      console.error('[materials] bill pre-match failed:', (e as Error).message)
+    }
+    ;(result as Record<string, unknown>).prematch = prematch
 
     await sb.from('webhook_log').insert({
       org_id: DEFAULT_ORG_ID,
