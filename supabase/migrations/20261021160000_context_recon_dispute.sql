@@ -200,6 +200,10 @@ BEGIN
     EXECUTE 'REVOKE ALL ON public.context_recon_disputes FROM anon, authenticated';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    -- Supabase's default privileges give service_role ALL on a new table, and a
+    -- GRANT never takes anything away, so service_role is revoked first. The
+    -- writer is SECURITY DEFINER, so service_role reads only.
+    EXECUTE 'REVOKE ALL ON public.context_recon_disputes FROM service_role';
     EXECUTE 'GRANT SELECT ON public.context_recon_disputes TO service_role';
   END IF;
 END $$;
