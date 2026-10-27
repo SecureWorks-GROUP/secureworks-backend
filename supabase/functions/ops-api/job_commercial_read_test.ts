@@ -50,6 +50,7 @@ import {
   decodeVariationText,
   readJobQuotes,
   readJobVariations,
+  pricingStatusFrom,
   readScopeRevisionAlignment,
   summariseScope,
   variationView,
@@ -1520,9 +1521,12 @@ function salesDraft() {
       mobile: "0400000000",
       email: "pat@example.com",
       address: "1 Example St",
+      gateCode: "GATE-5#",
       storeys: "single",
       houseRoof: "tile",
       fascia: "timber",
+      windClass: "N2",
+      readings: { slope: "flat" },
     },
     design: {
       shape: "skillion",
@@ -1532,13 +1536,22 @@ function salesDraft() {
       pitchDeg: 5,
     },
     pricing: {
-      rates: {},
-      materialsTotal: null,
-      labour: null,
+      rates: { roof: 77711 },
+      materialsTotal: 77712,
+      oneFigure: 77713,
+      labour: [{ name: "Install crew", amount: 77714 }],
       marginPct: 35,
       commissionPct: 13,
+      rateFrom: "catalogue-77715",
     },
   };
+}
+
+// The office reads the draft whole: margin, commission, rates and the
+// customer's contact details (INT-01, Jan 27 Oct 2026). The dossier itself is
+// refused to anyone who is not office (dossier_audience_test.ts).
+function assertWholeDraft(scope: { scope_record?: { draft: unknown } }) {
+  assertEquals(scope.scope_record?.draft, salesDraft());
 }
 
 Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and provenance, never its figures", () => {
@@ -1584,6 +1597,7 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
     family: "skillion",
     supported: true,
     draft,
+    pricing_status: null,
     revision_n: 3,
     scope_revision_id: "rev-3",
     parent_revision_id: "rev-2",
@@ -1596,7 +1610,7 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
   }
 });
 
-Deno.test("SQ-29 scope: a Sales draft object's site, design and pricing flow through", () => {
+Deno.test("INT-01 scope: the office reads the Sales draft whole, margin, commission and contacts included", () => {
   const draft = salesDraft();
   const scope = summariseScope({
     id: "job-sq29-draft",
@@ -1619,10 +1633,14 @@ Deno.test("SQ-29 scope: a Sales draft object's site, design and pricing flow thr
   });
   assertEquals(scope.scope_record?.draft?.site?.customer, "Pat Example");
   assertEquals(scope.scope_record?.draft?.site?.address, "1 Example St");
+  assertEquals(scope.scope_record?.draft?.site?.gateCode, "GATE-5#");
   assertEquals(scope.scope_record?.draft?.design?.widthMm, 6000);
   assertEquals(scope.scope_record?.draft?.design?.projectionMm, 4000);
   assertEquals(scope.scope_record?.draft?.pricing?.marginPct, 35);
   assertEquals(scope.scope_record?.draft?.pricing?.commissionPct, 13);
+  assertEquals(scope.scope_record?.draft?.pricing?.materialsTotal, 77712);
+  // No last-save status: the status comes from the frozen row only.
+  assertEquals(scope.scope_record?.pricing_status, null);
   assertEquals(
     Object.prototype.hasOwnProperty.call(scope.scope_record?.draft, "width"),
     false,
@@ -1643,6 +1661,74 @@ Deno.test("SQ-29 scope: a Sales draft object's site, design and pricing flow thr
     pricing_json: null,
   }, { newestQuoteSentAt: null, signedOff: null });
   assertEquals(booleanDraft.scope_record?.draft, null);
+
+  // A draft holding only pricing and contacts is still the office's draft.
+  const pricingOnly = summariseScope({
+    id: "job-sq29-pricing-only",
+    type: "patio",
+    scope_json: {
+      tool: "patio-scoper",
+      version: "2.0",
+      revision: { n: 1, scopeRevisionId: "rev-1", parentRevisionId: null },
+      family: "skillion",
+      supported: true,
+      lines: [],
+      draft: {
+        site: { customer: "Pat Example", mobile: "0400000000" },
+        pricing: draft.pricing,
+      },
+    },
+    pricing_json: null,
+  }, { newestQuoteSentAt: null, signedOff: null });
+  assertEquals(pricingOnly.scope_record?.draft, {
+    site: { customer: "Pat Example", mobile: "0400000000" },
+    design: null,
+    pricing: draft.pricing,
+  });
+});
+
+Deno.test("INT-01 status: Sales' completeness rule as booleans only", () => {
+  const complete = {
+    pricing_complete: true,
+    sell_to_confirm: [],
+    internal: { costs_complete: true, costs_to_confirm: [] },
+    revision: { sealed: true },
+  };
+  assertEquals(pricingStatusFrom(complete), {
+    pricing_complete: true,
+    sell_to_confirm_empty: true,
+    costs_complete_not_false: true,
+    revision_sealed: true,
+    complete: true,
+  });
+  // S5: a missing costs_complete is "not false".
+  assertEquals(
+    pricingStatusFrom({ ...complete, internal: {} })?.complete,
+    true,
+  );
+  // costs_complete false makes the whole rule false.
+  const costsFalse = pricingStatusFrom({
+    ...complete,
+    internal: { costs_complete: false },
+  });
+  assertEquals(costsFalse?.costs_complete_not_false, false);
+  assertEquals(costsFalse?.complete, false);
+  // C5d: a missing sell_to_confirm is unknown, not empty.
+  const { sell_to_confirm: _s, ...noSell } = complete;
+  const unknownSell = pricingStatusFrom(noSell);
+  assertEquals(unknownSell?.sell_to_confirm_empty, null);
+  assertEquals(unknownSell?.complete, null);
+  // No revision, or a non-boolean flag, is unknown.
+  const { revision: _r, ...noRevision } = complete;
+  assertEquals(pricingStatusFrom(noRevision)?.revision_sealed, null);
+  assertEquals(pricingStatusFrom(noRevision)?.complete, null);
+  assertEquals(
+    pricingStatusFrom({ ...complete, pricing_complete: "yes" })?.pricing_complete,
+    null,
+  );
+  assertEquals(pricingStatusFrom("not json"), null);
+  // The text form, as stored on the frozen row, reads the same.
+  assertEquals(pricingStatusFrom(JSON.stringify(complete))?.complete, true);
 });
 
 Deno.test("SQ-29 scope: an unsupported family says no quote or order is implied", () => {
@@ -1693,15 +1779,41 @@ function patioRecord(n: number, frozenId: string, desc: string) {
   };
 }
 
-async function frozenRows(jobId: string, frozenScope: unknown, earlierScope: unknown) {
+// The frozen row's pricing (Sales' pricing object, as freeze_scope stores it):
+// the status keys beside figures and line names that must never cross over.
+const FROZEN_PRICING = {
+  pricing_complete: false,
+  sell_to_confirm: ["Margin", "SENTINEL-LINE"],
+  internal: {
+    costs_complete: true,
+    costs_to_confirm: ["COST-SENTINEL"],
+    materials: 66601,
+    labour: 66602,
+  },
+  revision: { sealed: true },
+  margin_pct: 66603,
+  totalIncGST: 66604,
+};
+const FROZEN_PRICING_LEAKS = [
+  "66601", "66602", "66603", "66604", "Margin", "SENTINEL-LINE",
+  "COST-SENTINEL", "sell_to_confirm\"", "costs_to_confirm", "PRICINGTEXT",
+];
+
+async function frozenRows(
+  jobId: string,
+  frozenScope: unknown,
+  earlierScope: unknown,
+  frozenPricing: unknown = FROZEN_PRICING,
+) {
   const frozen = await canonicalJsonAndHash(frozenScope);
   const earlier = await canonicalJsonAndHash(earlierScope);
+  const pricing = await canonicalJsonAndHash(frozenPricing);
   return [
     {
       id: "srv-2", job_id: jobId, revision_number: 2, status: "frozen",
       tool_kind: "patio", tool_version: "patio-scoper/2.0",
       scope_hash: frozen.hash, scope_canonical_text: frozen.canonical,
-      pricing_canonical_text: "PRICINGTEXT",
+      pricing_canonical_text: pricing.canonical, pricing_hash: pricing.hash,
       frozen_at: "2026-10-20T02:00:00Z", superseded_at: null,
       superseded_by_scope_revision_id: null,
     },
@@ -1724,8 +1836,9 @@ Deno.test("SQ-29 frozen: a last save equal to the frozen row reads as that froze
   const rev = await readScopeRevisionAlignment(client, SQ29_JOB, current);
   assertEquals(rev.ok, true);
   assertEquals(rev.last_save_matches_frozen, true);
-  assertEquals(rev.frozen_scope_json, null); // the text is not read when it matches
-  assertEquals(client.reads.filter((t) => t === "scope_revisions").length, 1);
+  assertEquals(rev.frozen_scope_json, null); // the text is not used when it matches
+  // the second read is the frozen row's pricing, for the figure-free status
+  assertEquals(client.reads.filter((t) => t === "scope_revisions").length, 2);
   const scope = summariseScope(
     { id: SQ29_JOB, type: "patio", scope_json: current, pricing_json: null },
     { newestQuoteSentAt: null, signedOff: null, revisions: rev },
@@ -1740,6 +1853,17 @@ Deno.test("SQ-29 frozen: a last save equal to the frozen row reads as that froze
   ]);
   assertEquals(scope.revision_history?.[1].superseded_by_scope_revision_id, "srv-2");
   assertEquals(scope.lines, ["Roof sheet (2 ea)"]);
+  assertEquals(scope.scope_record?.pricing_status, {
+    pricing_complete: false,
+    sell_to_confirm_empty: false,
+    costs_complete_not_false: true,
+    revision_sealed: true,
+    complete: false,
+  });
+  const text = JSON.stringify(scope);
+  for (const leak of FROZEN_PRICING_LEAKS) {
+    assert(!text.includes(leak), `${leak} leaked`);
+  }
 });
 
 Deno.test("SQ-29 frozen: a save after the freeze is shown as unfrozen, and the lines come from the frozen row", async () => {
@@ -1757,10 +1881,63 @@ Deno.test("SQ-29 frozen: a save after the freeze is shown as unfrozen, and the l
   assertEquals(scope.last_save_matches_frozen, false);
   assertEquals(scope.lines, ["Roof sheet (2 ea)"]);
   assertEquals(scope.scope_record?.revision_n, 2);
+  // the frozen row's status, not the last save's pricing_json
+  assertEquals(scope.scope_record?.pricing_status?.complete, false);
   const text = JSON.stringify(scope);
-  for (const leak of ["4321", "1234", "9876", "PRICINGTEXT", "Unfrozen sheet"]) {
+  for (
+    const leak of ["4321", "1234", "9876", "Unfrozen sheet", ...FROZEN_PRICING_LEAKS]
+  ) {
     assert(!text.includes(leak), `${leak} leaked`);
   }
+});
+
+Deno.test("INT-01 frozen: the status never comes from the last save, a draft or unverified pricing", async () => {
+  const current = {
+    ...patioRecord(2, "frz-2", "Roof sheet"),
+    draft: salesDraft(),
+  };
+  const lastSavePricing = {
+    pricing_complete: true,
+    sell_to_confirm: [],
+    internal: { costs_complete: true },
+    revision: { sealed: true },
+    totalIncGST: 55501,
+  };
+
+  // No frozen row: null, even though the last save says complete.
+  const none = await readScopeRevisionAlignment(fakeClient({}), SQ29_JOB, current);
+  const s1 = summariseScope(
+    { id: SQ29_JOB, type: "patio", scope_json: current, pricing_json: lastSavePricing },
+    { newestQuoteSentAt: null, signedOff: null, revisions: none },
+  );
+  assertEquals(s1.scope_record?.pricing_status, null);
+  assertWholeDraft(s1);
+
+  // Pricing that does not hash to pricing_hash is not read.
+  const rows = await frozenRows(SQ29_JOB, current, patioRecord(1, "frz-1", "Old sheet"));
+  rows[0].pricing_canonical_text = JSON.stringify(lastSavePricing);
+  const tampered = await readScopeRevisionAlignment(fakeClient({ scope_revisions: rows }), SQ29_JOB, current);
+  assertEquals(tampered.frozen_pricing_status, null);
+  assertEquals(tampered.code, "frozen_pricing_hash_mismatch");
+  const s2 = summariseScope(
+    { id: SQ29_JOB, type: "patio", scope_json: current, pricing_json: lastSavePricing },
+    { newestQuoteSentAt: null, signedOff: null, revisions: tampered },
+  );
+  assertEquals(s2.scope_source, "frozen_revision");
+  assertEquals(s2.scope_record?.pricing_status, null);
+
+  // Frozen scope text unusable: the last save is shown, so no status.
+  const rows3 = await frozenRows(SQ29_JOB, patioRecord(2, "frz-2", "Roof sheet"), patioRecord(1, "frz-1", "Old sheet"));
+  rows3[0].scope_canonical_text = "{}";
+  const mismatch = await readScopeRevisionAlignment(fakeClient({ scope_revisions: rows3 }), SQ29_JOB, current);
+  assertEquals(mismatch.code, "frozen_text_hash_mismatch");
+  const s3 = summariseScope(
+    { id: SQ29_JOB, type: "patio", scope_json: current, pricing_json: lastSavePricing },
+    { newestQuoteSentAt: null, signedOff: null, revisions: mismatch },
+  );
+  assertEquals(s3.scope_source, "last_save");
+  assertEquals(s3.scope_record?.pricing_status, null);
+  assertWholeDraft(s3);
 });
 
 Deno.test("SQ-29 frozen: a frozen text that does not hash to its scope_hash is not used", async () => {
