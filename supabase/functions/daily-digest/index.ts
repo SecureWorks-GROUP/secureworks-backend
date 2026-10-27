@@ -276,7 +276,7 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
     // 6. Cash collection speed
     const paidInvoices = (xeroInvoices.data || []).filter((i: any) => i.fully_paid_on_date && i.date)
     const collectionDays = paidInvoices.map((i: any) => (new Date(i.fully_paid_on_date).getTime() - new Date(i.date).getTime()) / 86400000)
-    const unpaidOverdue = (xeroInvoices.data || []).filter((i: any) => !i.fully_paid_on_date && i.amount_due > 0 && i.status !== 'VOIDED')
+    const unpaidOverdue = (xeroInvoices.data || []).filter((i: any) => !i.fully_paid_on_date && i.amount_due > 0 && i.status !== 'VOIDED' && i.status !== 'DELETED')
       .map((i: any) => ({ contact: i.contact_name, amount: i.amount_due, days_outstanding: Math.round((now.getTime() - new Date(i.due_date || i.date).getTime()) / 86400000) }))
       .filter((i: any) => i.days_outstanding > 0)
       .sort((a: any, b: any) => b.days_outstanding - a.days_outstanding)

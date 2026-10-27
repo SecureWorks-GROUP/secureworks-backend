@@ -33,6 +33,10 @@ export const JOB_PROFIT_LABELS = {
     "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), or when materials are owed but none is linked (labour-only cost).",
   profit_ex_unsuppressed:
     "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
+  rollup_expected_vs_actual:
+    "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
+  holding_jobs:
+    "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;
 
 /**
