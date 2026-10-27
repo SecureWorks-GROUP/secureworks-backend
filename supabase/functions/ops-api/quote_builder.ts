@@ -12,7 +12,10 @@
 // beside it) and job_variations (a variation, from its first issue). While
 // feature flag quote_builder_orders_v1 is on, the two make actions also write
 // one draft crew work_orders row, draft purchase_orders rows, and a job_events
-// row. While it is off they write nothing, job acceptance does not filter on
+// row. retire_crew_work_orders_v1 refuses that crew insert and writes nothing
+// for it; an existing row for the version is still returned, and purchase
+// orders are unchanged. While quote_builder_orders_v1 is off they write
+// nothing, job acceptance does not filter on
 // quote_builder_version_id, and pushPOToXero does not refuse a placeholder
 // supplier. The job's own pricing
 // (jobs.pricing_json) is never written: invoices, the quote send paths and the
@@ -38,6 +41,11 @@ import { quoteBuilderRunLabel } from "../_shared/quote_builder_run_label.ts";
 import { tradeTextHasMoneyToken } from "../_shared/trade_quote_pack/pack_trade_quote.ts";
 import { QUOTE_BUILDER_PHOTO_PHASE } from "./makesafe_cycle_evidence.ts";
 import { fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
+import {
+  crewWorkOrderCreateRefusal,
+  RETIRE_CREW_WORK_ORDERS_FLAG,
+} from "./crew_invoice_job_work_order.ts";
+import { readFlag } from "./job_work_orders.ts";
 
 export const QUOTE_BUILDER_ORG_ID = "00000000-0000-0000-0000-000000000001";
 /** Seeded off in 20261014140000. Missing or unreadable reads as off. */
@@ -2217,6 +2225,16 @@ export async function makeQuoteBuilderWorkOrder(
   const { version, job } = await loadIssuedQuoteVersion(client, body, actor);
   const existing = await ordersForVersion(client, version.id);
   if (existing.work_order) return ordersReply(version, existing);
+
+  // Owner decision 10: a quote-builder crew row is still kind 'crew'. While
+  // retire_crew_work_orders_v1 is on, do not create another one. An existing
+  // row for this version is returned above. Purchase orders are a different
+  // action and are not refused here.
+  const retired = crewWorkOrderCreateRefusal(
+    "crew",
+    await readFlag(client, RETIRE_CREW_WORK_ORDERS_FLAG),
+  );
+  if (retired) fail(retired.code, retired.error, 409);
 
   const scope = quoteBuilderCrewScope(version);
   const woNumber = `WO-${orderStamp()}`;

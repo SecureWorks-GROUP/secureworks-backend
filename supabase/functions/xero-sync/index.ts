@@ -17,12 +17,15 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 //   sync_tracking_pl   — Pull P&L by tracking category (monthly, for service type breakdown)
 //   match_contacts     — Match GHL contacts to Xero contacts by email (daily 3am AWST)
 //   backfill_invoices  — One-time full invoice fetch (?year=2025 for batching)
+//   check_invoice_mirror: compare our invoice copy with Xero's open list now (also runs
+//                        hourly inside sync_invoices); see xero_mirror_check.ts
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
+import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
@@ -34,6 +37,7 @@ import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
@@ -214,6 +218,9 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await backfillContacts(sb))
       case 'backfill_invoices':
         return json(await backfillInvoices(sb, url.searchParams))
+      case 'check_invoice_mirror':
+        // Reads Xero and heals only our copy; never writes to Xero. Same as the hourly run.
+        return json(await invoiceMirrorCheck(sb, true))
       case 'sync_purchase_orders':
         return json(await syncPurchaseOrders(sb))
       case 'sync_suppliers':
@@ -247,7 +254,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {
@@ -588,6 +595,43 @@ function closeoutMoveEnabled(sb: any): Promise<boolean> {
   return closeoutMoveSwitch
 }
 
+// The receipt switch (job_closeout_settings.receipt_sender_mode), read once per run.
+// Unreadable reads as off: nothing is posted. ops-api job_receipt.ts owns every rule.
+let receiptSwitch: Promise<boolean> | null = null
+function receiptSenderOn(sb: any): Promise<boolean> {
+  receiptSwitch ??= (async () => {
+    try {
+      const { data, error } = await sb.from('job_closeout_settings')
+        .select('receipt_sender_mode')
+        .eq('id', 1)
+        .maybeSingle()
+      return !error && (data?.receipt_sender_mode === 'dry_run' || data?.receipt_sender_mode === 'live')
+    } catch {
+      return false
+    }
+  })()
+  return receiptSwitch
+}
+
+// The deposit advance switch (job_closeout_settings.deposit_advance_mode), read once per
+// run. Unreadable reads as off: nothing is posted. ops-api job_deposit_advance.ts owns
+// every rule, including what dry_run does.
+let depositAdvanceSwitch: Promise<boolean> | null = null
+function depositAdvanceOn(sb: any): Promise<boolean> {
+  depositAdvanceSwitch ??= (async () => {
+    try {
+      const { data, error } = await sb.from('job_closeout_settings')
+        .select('deposit_advance_mode')
+        .eq('id', 1)
+        .maybeSingle()
+      return !error && (data?.deposit_advance_mode === 'dry_run' || data?.deposit_advance_mode === 'live')
+    } catch {
+      return false
+    }
+  })()
+  return depositAdvanceSwitch
+}
+
 async function postOpsApi(action: string, body: Record<string, unknown>): Promise<any> {
   try {
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=${action}`, {
@@ -634,7 +678,11 @@ async function logJobPaymentReceived(sb: any, jobId: string, inv: any) {
 
 async function syncInvoices(sb: any) {
   closeoutMoveSwitch = null
+  receiptSwitch = null
+  depositAdvanceSwitch = null
   const closeoutResults: { job_id: string; action: string }[] = []
+  const depositResults: { job_id: string; action: string }[] = []
+  const receiptResults: { xero_invoice_id: string; action: string }[] = []
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
 
@@ -834,6 +882,41 @@ async function syncInvoices(sb: any) {
             }
           }
 
+          // ── Deposit advance: a deposit invoice of a fencing or patio job changed (paid,
+          // voided, a payment taken off). ops-api job_deposit_paid re-checks every deposit
+          // on the job against our Xero copy and moves the job, or flags a lost deposit
+          // (job_deposit_advance.ts). Switch off: nothing is posted. Non-blocking.
+          if (inv.Type === 'ACCREC' && ['PAID', 'AUTHORISED', 'VOIDED', 'DELETED'].includes(String(inv.Status || '').toUpperCase()) &&
+              await depositAdvanceOn(sb)) {
+            try {
+              const { data: depLink } = await sb.from('xero_invoices')
+                .select('job_id')
+                .eq('xero_invoice_id', inv.InvoiceID)
+                .eq('org_id', DEFAULT_ORG_ID)
+                .not('job_id', 'is', null)
+                .maybeSingle()
+              if (depLink?.job_id) {
+                const { data: depJob } = await sb.from('jobs')
+                  .select('id, type, deposit_invoice_id')
+                  .eq('id', depLink.job_id)
+                  .maybeSingle()
+                if (depJob && isDepositAdvanceJobType(depJob.type) &&
+                    isDepositInvoice({ xero_invoice_id: inv.InvoiceID, invoice_type: inv.Type, reference: inv.Reference || null }, depJob.deposit_invoice_id)) {
+                  const advanced = await postOpsApi('job_deposit_paid', {
+                    job_id: depJob.id,
+                    xero_invoice_id: inv.InvoiceID,
+                    source: 'xero_sync',
+                  })
+                  depositResults.push({ job_id: depJob.id, action: advanced?.action ?? advanced?.code ?? 'error' })
+                  console.log(`[xero-sync] Job ${depJob.id} deposit advance: ${advanced?.action ?? advanced?.error}`)
+                }
+              }
+            } catch (e: any) {
+              if (e instanceof XeroCooldownError) throw e
+              console.error('[xero-sync] Deposit advance failed:', (e as Error).message)
+            }
+          }
+
           // ── Auto-update job status when all invoices are PAID ──
           // Only for sales invoices (ACCREC) that are linked to a job
           if (inv.Type === 'ACCREC' && inv.Status === 'PAID') {
@@ -863,6 +946,22 @@ async function syncInvoices(sb: any) {
                 sesLinkRefusals.push(paidInvoiceRefusal)
                 console.warn('[xero-sync] sealed SES payment automation refused', paidInvoiceRefusal)
                 continue
+              }
+              // ── Paid-invoice receipt: every paid client invoice of a fencing or patio job,
+              // deposits included, goes to ops-api job_receipt_paid, which decides (window,
+              // holds, wrong party, the once-only claim) and has Xero email it.
+              if (await receiptSenderOn(sb)) {
+                const { data: receiptJob } = await sb.from('jobs')
+                  .select('type')
+                  .eq('id', invRecord.job_id)
+                  .maybeSingle()
+                if (receiptJob && isCloseoutJobType(receiptJob.type)) {
+                  const receipt = await postOpsApi('job_receipt_paid', {
+                    xero_invoice_id: inv.InvoiceID,
+                    source: 'xero_sync',
+                  })
+                  receiptResults.push({ xero_invoice_id: inv.InvoiceID, action: receipt?.action ?? receipt?.code ?? 'error' })
+                }
               }
               // Check if ALL invoices for this job are paid
               const { data: unpaid } = await sb.from('xero_invoices')
@@ -987,6 +1086,24 @@ async function syncInvoices(sb: any) {
   }
   const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
+  // ── Deposit advance catch-up: accepted and awaiting_deposit fencing and patio cards whose
+  //    deposits were paid before the card got there or before the switch was on, accepted
+  //    cards whose deposit Xero marks sent (landed in Awaiting Deposit), and moved cards
+  //    whose deposit was since voided (switch on only; ops-api decides).
+  let depositCatchUp: unknown = { ran: false, reason: 'switch_off' }
+  if (await depositAdvanceOn(sb)) {
+    depositCatchUp = await postOpsApi('job_deposit_catch_up', { source: 'job_deposit_catch_up' })
+  }
+  const depositAdvance = { on_change: depositResults, catch_up: depositCatchUp }
+
+  // ── Paid-invoice receipt catch-up: in-window paid invoices with no receipt claim yet
+  //    (switch on only; ops-api job_receipt.ts decides).
+  let receiptCatchUp: unknown = { ran: false, reason: 'sender_off' }
+  if (await receiptSenderOn(sb)) {
+    receiptCatchUp = await postOpsApi('job_receipt_catch_up', { source: 'job_receipt_catch_up' })
+  }
+  const receipts = { on_paid: receiptResults, catch_up: receiptCatchUp }
+
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
 
@@ -1074,16 +1191,48 @@ async function syncInvoices(sb: any) {
     console.error('[xero-sync] Settlement evidence capture failed:', e.message)
   }
 
+  // ── Mirror check: does our copy owe the same as Xero? At most once an hour. ──
+  // Last on purpose: it reads Xero's open list, heals our copy where Xero says money is
+  // owed and the copy disagrees, and records the result for the Debt tab. It never
+  // throws, so it cannot break the sync or skip any step above.
+  const mirrorCheck = await invoiceMirrorCheck(sb, false)
+
   // Log sync
   await sb.from('webhook_log').insert({
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// INVOICE MIRROR CHECK
+//
+// Compares our copy of open sales invoices with Xero's own open list and heals our copy
+// from Xero by id (xero_mirror_check.ts). force = true skips the once-an-hour gate.
+// ════════════════════════════════════════════════════════════
+
+async function invoiceMirrorCheck(sb: any, force: boolean) {
+  try {
+    const { accessToken, tenantId } = await getToken(sb)
+    return await runInvoiceMirrorCheck(sb, DEFAULT_ORG_ID, {
+      listPage: (status, page) => xeroGet('/Invoices', accessToken, tenantId, {
+        page: String(page),
+        where: 'Type=="ACCREC"',
+        Statuses: status,
+      }),
+      readInvoice: (invoiceId) => xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId, {}),
+    }, { force })
+  } catch (e: any) {
+    // Only the token read can land here; the check itself never throws.
+    console.error('[xero-sync] Mirror check could not start:', (e as Error).message)
+    return { ran: false, reason: 'token_unavailable', error: (e as Error).message }
+  }
 }
 
 
