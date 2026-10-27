@@ -2635,8 +2635,13 @@ async function reconciliationStateTokens(
   return tokens
 }
 
-function sb() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+// supabase-js 2.99.3 defaults autoRefreshToken to true on every runtime. On Deno 2.5.6
+// window and document are undefined, so the non-browser branch of _handleVisibilityChange starts the interval.
+function sb(options?: { global?: { headers?: Record<string, string> } }) {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    ...options,
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
 }
 
 function sesActionAuth(
@@ -3511,7 +3516,7 @@ export const _notifyMintedDeterministicPhysicalJobForTest =
 // canonical record) — it just cannot SMS. Non-blocking; never throws.
 async function notifyBusinessEventsSms(text: string, source = ''): Promise<void> {
   try {
-    const svc = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    const svc = sb()
     const settings = await _loadNotifySettings(svc)
     if (!_shouldSendAlarmSms(source, settings)) return
     const recipients = (settings.alarm_phones || []).map((p) => String(p || '').trim()).filter(Boolean)
@@ -5707,7 +5712,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     console.log(opsApiRequestLogLine(MAKESAFE_COST_REPORT_ACTION, req.method, _costReportActor))
     recordOpsApiActorMissing(sb, 'hmac_link', _costReportActor)
     try {
-      const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const _crClient = sb()
       const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
       if (!_crData) {
         return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
@@ -5790,7 +5795,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   } else if (authIntent === 'jwt') {
     // Validate as user JWT (browser request)
     try {
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const adminClient = sb()
       const { data: { user }, error } = await adminClient.auth.getUser(bearerToken!)
       if (error || !user) {
         return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
@@ -6083,10 +6088,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // Browser reads/notes carry the verified JWT through to RLS/RPC; the
         // shared and agent server keys are never collector write credentials.
         const performanceClient = authMode === 'jwt'
-          ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-              global: { headers: { Authorization: `Bearer ${bearerToken}` } },
-              auth: { persistSession: false, autoRefreshToken: false },
-            })
+          ? sb({ global: { headers: { Authorization: `Bearer ${bearerToken}` } } })
           : client
         const result = await salesPerformanceAction(
           salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
@@ -7946,7 +7948,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // extract each PDF's text layer (pdf_mode) and compare the template parse vs the
       // actual draft. Still NO Anthropic call; the PDF extraction is local + deterministic.
       case 'intake_golden_replay': {
-        const goldenAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const goldenAdmin = sb()
         const goldenDownloadPdf = async (storagePath: string): Promise<Uint8Array | null> => {
           try {
             const { data: blob, error } = await goldenAdmin.storage
@@ -10028,7 +10030,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'create_trade_user': {
         const { email, password, name, role, phone } = body
         if (!email || !password || !name) return json({ error: 'email, password, name required' }, 400)
-        const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const adminClient = sb()
         const { data: authUser, error: authErr } = await adminClient.auth.admin.createUser({
           email, password, email_confirm: true,
           user_metadata: { full_name: name }
@@ -21052,7 +21054,7 @@ async function createMakesafeJob(
     try {
       const pdfBuffer = Uint8Array.from(atob(pdf_base64), c => c.charCodeAt(0))
       const pdfPath = `${job.id}/work-order-${jobNumber}.pdf`
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const adminClient = sb()
       const { error: upErr } = await adminClient.storage
         .from('job-documents')
         .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
@@ -30637,7 +30639,7 @@ async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (SUPABASE_URL/SERVICE_KEY are module consts, so a test
   // cannot supply them via env.set after import).
-  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = adminClientOverride ?? sb()
   const SES_MAILBOX = _SES_MAILBOX
 
   // 1. Load the existing draft.
@@ -31063,7 +31065,7 @@ async function _reextractExtractFields(
   const { subject, fromEmail, fromName } = input
   // Admin/service client for the private-bucket download + public re-upload (created here
   // so the injectable test extractor path never triggers createClient with empty env).
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = sb()
   const rawEmailBody = input.body || ''
   const builderEmailTextForTrade = _stripEmailHtmlForTrade(rawEmailBody)
   const deterministicPortalLinks = _extractBuilderEmailLinks(rawEmailBody)
@@ -33320,7 +33322,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
 
   // One admin/service client for both the private-bucket download and the public
   // re-upload below (hoisted out of the loop — was re-created per attachment).
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = sb()
 
   // Load known make-safe company sender patterns + per-builder template parsing rules
   // (M1.5: parsing_rules drives the deterministic template-parse cost lever).
@@ -39328,7 +39330,7 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (required so the report-job gate reads xero_invoices /
   // makesafe_job_details past RLS — see ea2f778).
-  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = adminClientOverride ?? sb()
   await assertLegacySesInvoiceActionAllowed(
     adminClient,
     xero_invoice_id,
@@ -46474,7 +46476,7 @@ async function attachEmailAttachmentToJob(
 
   // ── PRIMARY: resolve a synced email_attachments row. A miss no longer throws —
   //    it falls through to the live-Graph fallback below.
-  const adminClient = deps.adminClient || createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = deps.adminClient || sb()
   let att: any = null
   if (body.email_attachment_id || body.attachment_id) {
     const { data, error } = await adminClient.from('email_attachments')
@@ -46593,7 +46595,7 @@ async function attachEmailAttachmentToJob(
 // existing row of the same type+file_name is updated (version bumped) instead of
 // inserting a duplicate — mirrors the work-order attach pattern.
 function defaultMakesafeDocumentStorageAdmin() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  return sb()
 }
 
 let makesafeDocumentStorageAdminFactory = defaultMakesafeDocumentStorageAdmin
