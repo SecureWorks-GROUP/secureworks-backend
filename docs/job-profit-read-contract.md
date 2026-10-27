@@ -43,7 +43,9 @@ Legacy jobs have no row.
 | `profit_ex`, `margin_pct` | Invoiced minus actual cost, and that as a share of invoiced | Unknown. `cost_flag` and `completeness` name why |
 | `profit_ex_unsuppressed` | Invoiced minus the costs linked so far. Not a profit figure | The Xero Project total exceeds the linked costs |
 | `revenue_verified_paid`, `costs_verified_paid` | Xero recorded the payment. Not a bank reconciliation | Never null |
-| `committed_open_ex` | Open purchase orders with no bill yet. Committed, not actual: never in `actual_cost_ex` | Never null |
+| `committed_open_ex` | Priced open purchase orders with no supplier invoice emailed and no bill placed. Committed, not actual: never in `actual_cost_ex`. An order with no price is never here as $0.00 | Never null |
+| `ordered_not_billed_count`, `ordered_not_billed_over_30_count` | Ordered, not billed: sent orders with no price (every Dispatch order) and no invoice or bill yet, and those first sent 30 or more Perth days ago. Counts, never dollars. Show "ordered, not billed: N" | Never null (0). Absent before migration 20261019120000 |
+| `invoice_emailed_count`, `invoice_emailed_ex` | Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order and no bill is linked to the order yet (the bill may be on the job without that link). Never show as nothing owed. `invoice_emailed_ex` is the priced ones' amount, in neither `committed_open_ex` nor actual cost | Count never null (0); amount null when none is priced. Absent before migration 20261019120000 |
 | `cost_flag`, `revenue_flag`, `completeness` | The first reason, and every reason, a figure is missing or weak. Values below | Never null |
 
 There is no live price or live estimate field. Show "no quote sent" when
@@ -68,10 +70,13 @@ reason and note that applies.
 | `xero_project_linked_by_contact_only` | The job's Xero Project is linked by contact, not by name, so it gives no project figure | Shown |
 | `unapproved_trade_charges` | A trade charge is on an invoice not yet approved | Shown |
 | `open_purchase_orders` | `committed_open_ex` is above zero | Shown |
+| `ordered_not_billed` | A sent order with no price has no invoice or bill yet | Shown |
+| `ordered_not_billed_over_30_days` | Such an order was first sent 30 or more days ago | Shown |
+| `invoice_emailed_bill_not_placed` | A supplier emailed an invoice for an order, and no bill is linked to that order (it may be on the job unlinked) | Shown |
 | `draft_revenue` | `draft_revenue_ex` is above zero | Shown |
 | `holding_job` | A holding job, not a customer's job | Shown |
 
-The last five appear in `completeness` only.
+The last eight appear in `completeness` only.
 
 ## Xero Project rule
 

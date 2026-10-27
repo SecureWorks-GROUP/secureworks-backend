@@ -824,6 +824,25 @@ ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|co
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
 ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day
+
+# 20261015190000 is the bill pre-match (JP-06): xero-sync's materials step writes
+# materials_bill_proposals, lands confident matches as agent_prematch facts and
+# closes voided bills as void_in_xero; ops-api materials_recon_queue reads the
+# proposals. Neither function may deploy ahead of it (the widened checks would
+# refuse every agent placement and void close).
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|table|materials_bill_proposals
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.proposal_kind
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.outcome
+ops-api|supabase/migrations/20261015190000_materials_bill_proposals.sql|policy|materials_bill_proposals.service_role_all
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|table|materials_bill_proposals
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.proposal_kind
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.outcome
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|policy|materials_bill_proposals.service_role_all
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_bill_proposals.auto_assigned_at
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|column|materials_reconciliation_queue.closed_reason
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|index|materials_bill_proposals_live_uidx
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|constraint|job_materials_facts_source_chk
+xero-sync|supabase/migrations/20261015190000_materials_bill_proposals.sql|constraint|materials_recon_status_chk
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_at
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by
 ops-api|supabase/migrations/20261016150000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by_email
@@ -847,6 +866,19 @@ ops-api|supabase/migrations/20261020093000_job_review_opt_out.sql|column|jobs.re
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
 xero-sync|supabase/migrations/20261020150000_xero_mirror_checks.sql|policy|xero_mirror_checks.xero_mirror_checks_service_role_all
 ops-api|supabase/migrations/20261020150000_xero_mirror_checks.sql|table|xero_mirror_checks
+
+# Reconciliation daily list: the recon_daily_list read and recon_record_decision
+# write call these, so the store and the list must exist before this ops-api ships.
+ops-api|supabase/migrations/20261020140000_context_reconciliation_decisions.sql|function|context_recon_record_decision
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_list
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_rows
+ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_left_out
+# Context reconciliation from a job: the context_job_mail and recon_job_items
+# reads call these, so they must exist before this ops-api ships.
+ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_job_mail
+ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_recon_job_items
+
 # Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
 # invoice; ops-api job_receipt.ts reads the switch and writes the claims.
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
@@ -936,3 +968,5 @@ xero-sync|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_
 # check reads it; the widened flag check keeps its name, so the ledger version and
 # the column prove it landed. ops-api must not deploy ahead of it.
 ops-api|supabase/migrations/20261027120000_job_deposit_credit_note_flag.sql|column|job_deposit_advance_state.counted_credit_note_ids
+ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_decisions
+ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_events

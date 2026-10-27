@@ -20,6 +20,12 @@ SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NUL
 \endif
 -- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
 -- goes first, as the story lead rank's refuses while a later assembler body is live)
+-- (card events, 20261021150000, replaced the record messages, the story meta and the assembler since:
+-- its down goes first, as the story settled notes' refuses while a later assembler body is live)
+SELECT to_regprocedure('public.context_job_card_events(uuid[])') IS NOT NULL AS card_events_live \gset
+\if :card_events_live
+\ir ../../../rollbacks/20261021150000_context_job_card_events_down.sql
+\endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
        LIKE '%(story settled notes, 20261011120000)%' AS story_settled_notes_live \gset
 \if :story_settled_notes_live

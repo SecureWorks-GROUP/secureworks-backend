@@ -140,3 +140,69 @@ BEGIN
     RAISE EXCEPTION 'recon contract: job view does not use containment on candidate_job_ids';
   END IF;
 END $$;
+
+-- 10. INT-14 (Integrated Job Framework, case a): a Context decision linking invoice evidence to
+-- a job never moves revenue. The rule, shared with the CFO side (#1163,
+-- docs/invoice-job-link-rule.md, case b is xero-sync's links), verbatim:
+--   "An invoice→job decision decides only which job an invoice counts on, never its money:
+--    total, amount due, amount paid and status come only from Xero's own record. xero-sync's
+--    reference and exact client-name links may set the job on an invoice that has none, and
+--    never move one already on a job. A Context decision never writes the invoice row, so it
+--    never moves revenue."
+-- Here a person decides a payment row onto job B while the mirror has the invoice on job A:
+-- the row reads on B, the money stays on A, and the invoice row is unchanged.
+BEGIN;
+INSERT INTO public.jobs (id, org_id, type, status, job_number, ghl_contact_id, created_at) VALUES
+  ('7c000000-0000-0000-0000-0000000014a0', '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'SWF-97014', 'int14-contract', '2026-09-01'),
+  ('7c000000-0000-0000-0000-0000000014b0', '00000000-0000-0000-0000-000000000001', 'patio', 'accepted', 'SWP-97015', 'int14-contract', '2026-09-01');
+INSERT INTO public.users (id, org_id, name, role) VALUES
+  ('7c100000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000001', 'INT-14 staff', 'ops_manager');
+INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, job_id, invoice_number, reference, invoice_type,
+                                  status, total, amount_due, amount_paid, raw_json)
+VALUES ('7c300000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-000000000001',
+        '7c3a0000-0000-0000-0000-000000000014', '7c000000-0000-0000-0000-0000000014a0', 'INV-97014',
+        'SWF-97014', 'ACCREC', 'AUTHORISED', 1100, 600, 500,
+        '{"Status":"AUTHORISED","AmountCredited":0,"Payments":[{"Date":"2026-10-10","Amount":500}]}');
+INSERT INTO public.business_events (id, channel, direction, occurred_at, contact_id, payload, event_type, source,
+                                    entity_type, entity_id)
+VALUES ('7c200000-0000-0000-0000-000000000014', 'xero', 'inbound', '2026-10-10 02:00Z', 'int14-contract',
+        '{"invoice_number":"INV-97014","amount":500}', 'invoice.payment_received', 'int14-contract',
+        'invoice', '7c300000-0000-0000-0000-000000000014');
+UPDATE public.business_events SET job_id = NULL, attribution_status = 'unplaced',
+  candidate_job_ids = ARRAY['7c000000-0000-0000-0000-0000000014a0', '7c000000-0000-0000-0000-0000000014b0']::uuid[]
+WHERE id = '7c200000-0000-0000-0000-000000000014';
+
+DO $$
+DECLARE ev uuid := '7c200000-0000-0000-0000-000000000014'; inv uuid := '7c300000-0000-0000-0000-000000000014';
+  a uuid := '7c000000-0000-0000-0000-0000000014a0'; b uuid := '7c000000-0000-0000-0000-0000000014b0';
+  staff uuid := '7c100000-0000-0000-0000-000000000014'; before_row jsonb; d bigint;
+BEGIN
+  SELECT to_jsonb(x) INTO before_row FROM public.xero_invoices x WHERE x.id = inv;
+  d := public.context_recon_record_decision(ev, public.context_recon_evidence_hash(ev), 'correct', ARRAY[b],
+                                            'ambiguity:several_candidates', staff);
+  -- The evidence row reads on B, by a person.
+  IF NOT EXISTS (SELECT 1 FROM public.context_event_jobs(ev) WHERE job_id = b AND placement = 'certain' AND by = 'person') THEN
+    RAISE EXCEPTION 'INT-14 contract: the decision did not place the invoice evidence on job B';
+  END IF;
+  -- The invoice row is unchanged: job, amount, status, amount_due, payment, everything.
+  IF (SELECT to_jsonb(x) FROM public.xero_invoices x WHERE x.id = inv) IS DISTINCT FROM before_row THEN
+    RAISE EXCEPTION 'INT-14 contract: a Context decision changed the invoice row';
+  END IF;
+  -- The money stays on A, from Xero's record, and never appears on B.
+  IF NOT EXISTS (SELECT 1 FROM public.context_job_owed_lines(ARRAY[a]) l WHERE l.invoice_id = inv AND l.due = 600) THEN
+    RAISE EXCEPTION 'INT-14 contract: the invoice''s money left job A';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.context_job_owed_lines(ARRAY[b]) l WHERE l.invoice_id = inv) THEN
+    RAISE EXCEPTION 'INT-14 contract: the decision moved the invoice''s money onto job B';
+  END IF;
+  IF (public.context_job_view(b) ->> 'owed_due')::numeric <> 0
+     OR jsonb_array_length(public.context_job_view(b) -> 'money') <> 0 THEN
+    RAISE EXCEPTION 'INT-14 contract: job B''s view shows the invoice''s money';
+  END IF;
+  -- The writer touches only the decision and link tables (static, so a new write is caught too).
+  IF pg_get_functiondef('public.context_recon_record_decision(uuid,text,text,uuid[],text,uuid,text)'::regprocedure)
+     ~* '(update|insert\s+into|delete\s+from)\s+(public\.)?(xero_invoices|xero_payments|jobs)\M' THEN
+    RAISE EXCEPTION 'INT-14 contract: the decision writer writes an invoice, payment or job row';
+  END IF;
+END $$;
+ROLLBACK;

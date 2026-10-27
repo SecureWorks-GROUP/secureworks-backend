@@ -505,6 +505,8 @@ import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
+import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
+import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -522,6 +524,7 @@ import {
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeRevisionAlignment, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
+import { resolveDossierAudience } from './dossier_audience.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
 import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
@@ -1381,6 +1384,7 @@ import {
   markReconNotJobRelated as _markReconNotJobRelated,
 } from './materials_recon.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
+import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
 import {
   MAKESAFE_COST_REPORT_ACTION,
@@ -2633,8 +2637,13 @@ async function reconciliationStateTokens(
   return tokens
 }
 
-function sb() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+// supabase-js 2.99.3 defaults autoRefreshToken to true on every runtime. On Deno 2.5.6
+// window and document are undefined, so the non-browser branch of _handleVisibilityChange starts the interval.
+function sb(options?: { global?: { headers?: Record<string, string> } }) {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    ...options,
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
 }
 
 function sesActionAuth(
@@ -3509,7 +3518,7 @@ export const _notifyMintedDeterministicPhysicalJobForTest =
 // canonical record) — it just cannot SMS. Non-blocking; never throws.
 async function notifyBusinessEventsSms(text: string, source = ''): Promise<void> {
   try {
-    const svc = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    const svc = sb()
     const settings = await _loadNotifySettings(svc)
     if (!_shouldSendAlarmSms(source, settings)) return
     const recipients = (settings.alarm_phones || []).map((p) => String(p || '').trim()).filter(Boolean)
@@ -5705,7 +5714,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     console.log(opsApiRequestLogLine(MAKESAFE_COST_REPORT_ACTION, req.method, _costReportActor))
     recordOpsApiActorMissing(sb, 'hmac_link', _costReportActor)
     try {
-      const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const _crClient = sb()
       const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
       if (!_crData) {
         return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
@@ -5788,7 +5797,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   } else if (authIntent === 'jwt') {
     // Validate as user JWT (browser request)
     try {
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const adminClient = sb()
       const { data: { user }, error } = await adminClient.auth.getUser(bearerToken!)
       if (error || !user) {
         return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
@@ -6081,10 +6090,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // Browser reads/notes carry the verified JWT through to RLS/RPC; the
         // shared and agent server keys are never collector write credentials.
         const performanceClient = authMode === 'jwt'
-          ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-              global: { headers: { Authorization: `Bearer ${bearerToken}` } },
-              auth: { persistSession: false, autoRefreshToken: false },
-            })
+          ? sb({ global: { headers: { Authorization: `Bearer ${bearerToken}` } } })
           : client
         const result = await salesPerformanceAction(
           salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
@@ -7944,7 +7950,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // extract each PDF's text layer (pdf_mode) and compare the template parse vs the
       // actual draft. Still NO Anthropic call; the PDF extraction is local + deterministic.
       case 'intake_golden_replay': {
-        const goldenAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const goldenAdmin = sb()
         const goldenDownloadPdf = async (storagePath: string): Promise<Uint8Array | null> => {
           try {
             const { data: blob, error } = await goldenAdmin.storage
@@ -8499,6 +8505,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Context reconciliation from a job (CTX-N1, 20261020165000): the
+      // email rows Context places on a job, with how sure and the other jobs
+      // each sits on, and the queued rows that offer the job (defects
+      // included) with the hash a decision echoes. Staff front door (the
+      // default for an action on no static, profile, routine or agent list),
+      // GET only, read-only SQL functions, nothing written.
+      case 'context_job_mail':
+      case 'recon_job_items': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(action === 'context_job_mail'
+            ? await contextJobMail(client, url.searchParams)
+            : await reconJobItems(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof ContextJobReconError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Job story (story slice S2): the story of one job, its client's story,
       // and the done-definition scorecard. Staff front door (the default for an
       // action on no static, profile, routine or agent list), GET only,
@@ -8570,6 +8595,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await ledgerPersonEdit(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
         } catch (error) {
           if (error instanceof LedgerPersonEditError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Reconciliation daily list (CTX-R1, 20261020160000): the resolver's
+      // ranked list and the one-tap decision on an item. Staff front door (the
+      // default for an action on no static, profile, routine or agent list).
+      // recon_daily_list is GET only and writes nothing; recon_record_decision
+      // is POST only and the person is the verified session user, never a body
+      // field, so a server key call is refused (a decision needs a person).
+      case 'recon_daily_list':
+      case 'recon_record_decision': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        try {
+          if (action === 'recon_daily_list') {
+            if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+            return json(await reconDailyList(client, url.searchParams))
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          return json(await reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
+        } catch (error) {
+          if (error instanceof ReconDecisionError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }
@@ -9096,6 +9142,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : await jobProfitListAction(client, url.searchParams)
         return json(out.body, out.status)
       }
+      // ── Job trace (INT-34) — read only; the chain link by link. An
+      //    admin/owner session gets the Money-page figures, the ops key the
+      //    figure-free shape (job_trace.ts) ──
+      case 'job_trace': {
+        const view = jobTraceView(authMode, authUser?.role)
+        if (!view) {
+          return json({
+            ok: false,
+            code: 'operator_access_required',
+            error: 'job_trace requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        const out = await jobTraceAction(client, url.searchParams, view)
+        return json(out.body, out.status)
+      }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       // The sealed-SES read exemption (captain, 2026-08-02) needs the resolved
       // operator identity, not a request parameter: the ops key, or an
@@ -9258,6 +9319,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
       case 'assemble_job_dossier':
       case 'assemble_job_brain': {
+        // INT-01 (Jan, 27 Oct 2026): the dossier and the job story carry every
+        // figure (margin, commission, cost, contacts) for office staff and
+        // their agents, and are never built for a crew, supplier or customer.
+        const audience = resolveDossierAudience(
+          (authMode === 'api_key' && serverSecretPresented) ||
+            (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role)),
+          body?.audience,
+        )
+        if (!audience.ok) return json({ error: audience.error, code: audience.code }, audience.status)
         try {
           return json(await assembleJobDossier(client, body))
         } catch (e) {
@@ -10002,7 +10072,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'create_trade_user': {
         const { email, password, name, role, phone } = body
         if (!email || !password || !name) return json({ error: 'email, password, name required' }, 400)
-        const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const adminClient = sb()
         const { data: authUser, error: authErr } = await adminClient.auth.admin.createUser({
           email, password, email_confirm: true,
           user_metadata: { full_name: name }
@@ -17435,6 +17505,35 @@ export function _pipelineVisitDateMaps(
   return { next, last }
 }
 
+// An empty board must pre-allocate the same column keys as a populated one.
+// The two early returns used to answer with the old eight keys, so a repair
+// filter or a job read with no rows dropped scheduled, order_materials,
+// archived and the rest. Each call returns a fresh object: the success path
+// pushes into these arrays.
+function emptyPipelineColumns(): Record<string, any[]> {
+  return {
+    draft: [],
+    quoted: [],
+    partially_accepted: [],
+    accepted: [],
+    awaiting_deposit: [],
+    approvals: [],
+    order_materials: [],
+    processing: [],
+    awaiting_supplier: [],
+    order_confirmed: [],
+    schedule_install: [],
+    scheduled: [],
+    in_progress: [],
+    rectification: [],
+    complete: [],
+    final_payment: [],
+    invoiced: [],
+    get_review: [],
+    archived: [],
+  }
+}
+
 async function pipeline(
   client: any,
   params: URLSearchParams,
@@ -17447,7 +17546,9 @@ async function pipeline(
   // stay byte-identical: same selects, same enrichment, same row keys.
   const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
   // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
-  // absent: nothing below changes for any existing caller.
+  // absent, a populated board's keys stay as they are. An empty plain pipeline
+  // returns the same nineteen column keys as a populated one
+  // (`emptyPipelineColumns`). Dispatch fields are added only when `dispatch=1`.
   const dispatchList = isDispatchListRequested(params)
   // An empty Dispatch answer still says the stage and materials reads had
   // nothing to fail on, so a search with no match never reads as a failed
@@ -17477,7 +17578,7 @@ async function pipeline(
     : null
 
   if (repairJobIds && repairJobIds.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+    return { columns: emptyPipelineColumns(), total: 0, ...dispatchEmpty }
   }
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -17605,7 +17706,7 @@ async function pipeline(
   }
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+    return { columns: emptyPipelineColumns(), total: 0, ...dispatchEmpty }
   }
 
   // The default response keeps its non-draft enrichment scope. Stage truth
@@ -18030,27 +18131,7 @@ async function pipeline(
   // the canonical status set: supabase/functions/_shared/stage-gate/job-state-machine.ts.
   // The legacy `deposit → accepted` and `scheduled → processing` merges
   // are preserved deliberately; existing frontend column headers depend on them.
-  const columns: Record<string, any[]> = {
-    draft: [],
-    quoted: [],
-    partially_accepted: [],
-    accepted: [],
-    awaiting_deposit: [],
-    approvals: [],
-    order_materials: [],
-    processing: [],
-    awaiting_supplier: [],
-    order_confirmed: [],
-    schedule_install: [],
-    scheduled: [],
-    in_progress: [],
-    rectification: [],
-    complete: [],
-    final_payment: [],
-    invoiced: [],
-    get_review: [],
-    archived: [],
-  }
+  const columns = emptyPipelineColumns()
   for (const j of enriched) {
     // Legacy merge preserved: deposit → accepted.
     // 2026-06-02: removed scheduled → processing merge so Scheduled column renders its own jobs.
@@ -19085,16 +19166,23 @@ async function getJobConversation(client: any, body: any) {
   //    R0): how the ladder placed the row, so a reader can see why it is on
   //    this job. placement_rule is metadata.placement_rule (null until the
   //    placement rules that write it ship).
+  //    (CTX-T22) The rows follow a person's reconciliation decisions as the job
+  //    card does (context_job_card_decisions): a row a split, correct or confirm
+  //    put on the job is listed with placed_by_person, one a decision took off
+  //    is not. A failed decisions read is named in person_decisions_read_failed.
   const eventMessages: any[] = []
+  let personDecisionsReadFailed: string | null = null
   try {
-    const { rows: bev, error: bevErr } = await readBusinessEventsBySourceTime(client, {
+    const { rows: bev, error: bevErr, decisionsError } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: TIMELINE_MESSAGE_COLUMNS,
       limit,
       since: sinceFilter,
       until,
       messagesOnly: true,
+      personDecisions: true,
     })
+    if (decisionsError) personDecisionsReadFailed = decisionsError
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
     for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
@@ -19193,7 +19281,12 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
+  return {
+    messages: sliced,
+    summary,
+    ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}),
+    ...(personDecisionsReadFailed ? { person_decisions_read_failed: personDecisionsReadFailed } : {}),
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -21015,7 +21108,7 @@ async function createMakesafeJob(
     try {
       const pdfBuffer = Uint8Array.from(atob(pdf_base64), c => c.charCodeAt(0))
       const pdfPath = `${job.id}/work-order-${jobNumber}.pdf`
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const adminClient = sb()
       const { error: upErr } = await adminClient.storage
         .from('job-documents')
         .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
@@ -30600,7 +30693,7 @@ async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (SUPABASE_URL/SERVICE_KEY are module consts, so a test
   // cannot supply them via env.set after import).
-  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = adminClientOverride ?? sb()
   const SES_MAILBOX = _SES_MAILBOX
 
   // 1. Load the existing draft.
@@ -31026,7 +31119,7 @@ async function _reextractExtractFields(
   const { subject, fromEmail, fromName } = input
   // Admin/service client for the private-bucket download + public re-upload (created here
   // so the injectable test extractor path never triggers createClient with empty env).
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = sb()
   const rawEmailBody = input.body || ''
   const builderEmailTextForTrade = _stripEmailHtmlForTrade(rawEmailBody)
   const deterministicPortalLinks = _extractBuilderEmailLinks(rawEmailBody)
@@ -33283,7 +33376,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
 
   // One admin/service client for both the private-bucket download and the public
   // re-upload below (hoisted out of the loop — was re-created per attachment).
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = sb()
 
   // Load known make-safe company sender patterns + per-builder template parsing rules
   // (M1.5: parsing_rules drives the deterministic template-parse cost lever).
@@ -39291,7 +39384,7 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (required so the report-job gate reads xero_invoices /
   // makesafe_job_details past RLS — see ea2f778).
-  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = adminClientOverride ?? sb()
   await assertLegacySesInvoiceActionAllowed(
     adminClient,
     xero_invoice_id,
@@ -46468,7 +46561,7 @@ async function attachEmailAttachmentToJob(
 
   // ── PRIMARY: resolve a synced email_attachments row. A miss no longer throws —
   //    it falls through to the live-Graph fallback below.
-  const adminClient = deps.adminClient || createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = deps.adminClient || sb()
   let att: any = null
   if (body.email_attachment_id || body.attachment_id) {
     const { data, error } = await adminClient.from('email_attachments')
@@ -46587,7 +46680,7 @@ async function attachEmailAttachmentToJob(
 // existing row of the same type+file_name is updated (version bumped) instead of
 // inserting a duplicate — mirrors the work-order attach pattern.
 function defaultMakesafeDocumentStorageAdmin() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  return sb()
 }
 
 let makesafeDocumentStorageAdminFactory = defaultMakesafeDocumentStorageAdmin

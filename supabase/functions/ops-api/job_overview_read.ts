@@ -19,7 +19,12 @@
 //                 photo count and whether a scope exists;
 //   - story_text  the saved written story and whether it is still current
 //                 (context_job_story_text_get, given the card just read, so the
-//                 card is built once).
+//                 card is built once);
+//   - matching    how many queued rows offer this job and wait on a person in
+//                 Matching (context_recon_job_items, contact or not), so the
+//                 card can link to Matching, Find by job;
+//   - not_seen    the sources Context cannot see for any job, as standing
+//                 lines, until each is captured.
 //
 // Every part reads on its own: a failed part is null with a code in sources,
 // never an empty list, and the answer is 200 whenever the job resolves. A
@@ -41,6 +46,7 @@ import {
   sanitizedError,
   StoryReadError,
 } from "./job_story_read.ts";
+import { RECON_JOB_ITEMS_PAGE } from "./context_job_reconciliation.ts";
 
 export const JOB_OVERVIEW_VERSION = "job-overview-v1";
 /** Messages returned, newest kept, oldest first. */
@@ -53,6 +59,39 @@ export const OVERVIEW_ATTACHMENT_LIMIT = 100;
 
 const TRANSCRIPT_EVENT = "call.transcript_completed";
 
+/**
+ * Sources Context cannot see for any job today. They stand on every card
+ * until the source is captured, so a quiet card is never read as complete.
+ * Remove a line only in the change that starts capturing that source.
+ */
+export const OVERVIEW_NOT_SEEN = [
+  {
+    key: "material_orders",
+    text: "Material orders and deliveries are not recorded here.",
+  },
+  {
+    key: "crew_tasks_and_crm_notes",
+    text: "Crew tasks and GHL notes are not captured.",
+  },
+] as const;
+
+/**
+ * The Matching count from a context_recon_job_items answer: rows waiting on a
+ * person for this job (the function returns one row over its page), and how
+ * many of them have no contact or were never asked (the daily list leaves
+ * those out, so only Find by job shows them).
+ */
+export function overviewMatching(rows: any[]) {
+  const listed = rows.slice(0, RECON_JOB_ITEMS_PAGE);
+  return {
+    waiting: listed.length,
+    more: rows.length > RECON_JOB_ITEMS_PAGE,
+    left_off_daily_list: listed.filter((r: any) =>
+      String(r?.cause ?? "").startsWith("defect:")
+    ).length,
+  };
+}
+
 export type OverviewPartState = "ok" | "failed" | "not_deployed";
 
 export interface OverviewPartStatus {
@@ -61,6 +100,8 @@ export interface OverviewPartStatus {
   count: number;
   code?: string;
   error?: string;
+  /** messages only: people's Matching decisions could not be read (CTX-T22). */
+  decisions?: "unread";
 }
 
 export interface JobOverviewDeps {
@@ -560,6 +601,27 @@ export function overviewMessages(
       if (r.subject) base.subject = r.subject;
       if (r.attachments_only) base.attachments_only = true;
     }
+    // (CTX-T22) a person's Matching decision put this row on the job: who,
+    // when, the action, any other jobs the split named, and the evidence hash
+    // the decision was recorded against.
+    const placed = m.placed_by_person;
+    if (placed && typeof placed === "object") {
+      base.placed_by_person = {
+        action: placed.action ?? null,
+        decision_id: placed.decision_id ?? null,
+        decided_at: placed.decided_at ?? null,
+        decided_at_perth: perthStamp(placed.decided_at ?? null),
+        decided_by_name: typeof placed.decided_by_name === "string"
+          ? placed.decided_by_name
+          : null,
+        other_job_numbers: Array.isArray(placed.other_job_numbers)
+          ? placed.other_job_numbers.map(String)
+          : [],
+        evidence_hash: typeof placed.evidence_hash === "string"
+          ? placed.evidence_hash
+          : null,
+      };
+    }
     return base;
   });
   const t = (x: any) => {
@@ -923,6 +985,7 @@ export async function jobOverviewAction(
     return { data: row, status: ok(1) };
   });
   const jobRow = header.data;
+  let personDecisionsUnread = false;
 
   const [
     storyRead,
@@ -934,6 +997,7 @@ export async function jobOverviewAction(
     attachmentsRead,
     mediaRead,
     scopeRead,
+    matchingRead,
   ] = await Promise.all([
     part<any>("story", async () => {
       const read = await readJobStory(client, { jobId: job.id });
@@ -981,6 +1045,12 @@ export async function jobOverviewAction(
         ? conversation.messages
         : null;
       if (!messages) return { data: null, status: failed("invalid_shape") };
+      // (CTX-T22) a failed read of people's Matching decisions still lists the
+      // job's own rows; the status names it so the page never reads it as
+      // "no decisions".
+      if (conversation?.person_decisions_read_failed) {
+        personDecisionsUnread = true;
+      }
       return { data: messages, status: ok(messages.length) };
     }),
     part<JobQuotes>("quotes", async () => {
@@ -1088,6 +1158,37 @@ export async function jobOverviewAction(
         (Array.isArray(data) ? data : data ? [data] : []).length > 0;
       return { data: { exists }, status: ok(exists ? 1 : 0) };
     }),
+    part<any>("matching", async () => {
+      const { data, error } = await client.rpc("context_recon_job_items", {
+        p_job: job.id,
+      });
+      if (error) {
+        if (isMissingFunction(error)) {
+          return {
+            data: null,
+            status: {
+              ok: false,
+              state: "not_deployed" as const,
+              count: 0,
+              code: "not_deployed",
+            },
+          };
+        }
+        return {
+          data: null,
+          status: failed(
+            "rpc_failed",
+            sanitizedError("matching read failed", error),
+          ),
+        };
+      }
+      // An answer that is not a list is a failed read, never "nothing waiting".
+      if (!Array.isArray(data)) {
+        return { data: null, status: failed("invalid_shape") };
+      }
+      const matching = overviewMatching(data);
+      return { data: matching, status: ok(matching.waiting) };
+    }),
   ]);
 
   // The saved story: compared with the card just read (never built twice); a
@@ -1169,6 +1270,7 @@ export async function jobOverviewAction(
     messagesStatus = {
       ...ok(messages.length),
       ...(facts.ok ? {} : { code: "call_facts_unread" }),
+      ...(personDecisionsUnread ? { decisions: "unread" } : {}),
     };
   }
 
@@ -1223,6 +1325,8 @@ export async function jobOverviewAction(
       scope: scopeRead.data,
     },
     story_text: storyText.data,
+    matching: matchingRead.data,
+    not_seen: OVERVIEW_NOT_SEEN.map((n) => ({ ...n })),
     sources: {
       job: header.status,
       story: storyRead.status,
@@ -1235,6 +1339,7 @@ export async function jobOverviewAction(
       media: mediaRead.status,
       scope: scopeRead.status,
       story_text: storyText.status,
+      matching: matchingRead.status,
     },
   };
 }

@@ -919,6 +919,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Debt report freshness: the invoice sync cursor the
                       # report's "last synced" time and its send check read.
                       ("20260910100000", "xero_sync_state_and_pdf_attempts"),
+                      # Bill pre-match: the proposals store materials_recon_queue
+                      # reads and xero-sync writes, the agent fact source and
+                      # the void_in_xero queue status.
+                      ("20261015190000", "materials_bill_proposals"),
                       # Automatic issue of job work orders: the fill and edit
                       # stamps every job work order read selects
                       # (job_work_orders.ts).
@@ -935,6 +939,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
+                      # Reconciliation daily list: the recon_daily_list and
+                      # recon_record_decision doors (recon_decisions.ts).
+                      ("20261020140000", "context_reconciliation_decisions"),
+                      ("20261020160000", "context_recon_daily_list"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
                       ("20261021100000", "job_receipt_sender"),
@@ -962,7 +970,13 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261026160000", "job_deposit_advance"),
                       # Deposit credit note flag: the credit notes counted at
                       # the move and the widened flag check.
-                      ("20261027120000", "job_deposit_credit_note_flag")]:
+                      ("20261027120000", "job_deposit_credit_note_flag"),
+                      # Context reconciliation from a job: the context_job_mail
+                      # and recon_job_items doors (context_job_reconciliation.ts).
+                      ("20261020165000", "context_job_reconciliation"),
+                      # Card events (CTX-T22): get_job_conversation reads a
+                      # person's decisions through context_job_card_decisions.
+                      ("20261021150000", "context_job_card_events")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

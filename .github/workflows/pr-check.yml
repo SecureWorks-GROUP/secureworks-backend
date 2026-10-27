@@ -213,6 +213,20 @@ jobs:
         run: |
           bash scripts/test/test-apply-pending-migrations.sh
 
+      # INT-18 (Context audit F5): functions are redefined whole with CREATE OR
+      # REPLACE, so a stale copy in one PR silently undoes another (1138's
+      # context_recon_health drops N1's queue_by_lane). Fail when a function a
+      # changed migration defines loses an output key its previous definition
+      # had. The checkout is the PR merged onto the current base, so the
+      # previous definition includes everything already on main. An intended
+      # removal is named in the migration:
+      #   -- output-key-guard: drop <schema.function> <key>
+      - name: Guard replaced functions against lost output keys
+        run: |
+          deno test --allow-read scripts/test/check-migration-output-keys_test.ts
+          deno run --allow-read --allow-run=git scripts/check-migration-output-keys.ts \
+            --base "${{ github.event.pull_request.base.sha }}" --head HEAD
+
       - name: Check visit outcome business records
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
@@ -282,7 +296,9 @@ jobs:
 
       - name: Check migration extension schema contract
         run: |
-          deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
+          deno test --allow-read \
+            supabase/functions/ops-api/migration_extension_schema_test.ts \
+            supabase/functions/ops-api/context_recon_dispute_migration_test.ts
 
       # The repair intake pipeline routes SES work orders to a NEW jobs.type and
       # a NEW money-path branch, so its suite is CI-guarded rather than left to
@@ -392,8 +408,8 @@ jobs:
 
       # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
       # stay exactly as it was, and the list must never drop a job past the
-      # 1000-row ceiling or select the whole scope blob. Same --no-check reason
-      # as above.
+      # 1000-row ceiling or select the whole scope blob. These files type-check,
+      # so this step does not pass --no-check.
       # Slice 3 adds the stage rail: its rules, the stage read on the list and
       # the two staff-only writes, none of which may touch the job status.
       # Slice 4 adds Materials by supplier: its count rule, the one read, the six
@@ -406,9 +422,14 @@ jobs:
       # Dispatch v2 slices 5 and 6 add the draft list, supplier boxes and the
       # supplier order email sent from admin@ through Outlook (the send itself
       # is always a fake in these tests).
+      # Slice 6 and 7 add the delivery and install rules, and the store writers
+      # are tested against an in-memory client. The offline dry run walks one
+      # fencing job through the real send path. The transport is a stub that
+      # records the payload and returns 2xx, and the run refuses any fetch, so
+      # nothing is emailed.
       - name: Test the Dispatch list and job notes reads
         run: |
-          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/dispatch_job_list_test.ts \
             supabase/functions/ops-api/dispatch_stage_test.ts \
             supabase/functions/ops-api/dispatch_materials_test.ts \
@@ -417,7 +438,12 @@ jobs:
             supabase/functions/ops-api/dispatch_v2_emails_test.ts \
             supabase/functions/ops-api/dispatch_v2_store_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
-            supabase/functions/receive-po-email/po_email_tag_test.ts
+            supabase/functions/receive-po-email/po_email_tag_test.ts \
+            supabase/functions/ops-api/dispatch_deliveries_test.ts \
+            supabase/functions/ops-api/dispatch_deliveries_store_test.ts \
+            supabase/functions/ops-api/dispatch_install_test.ts \
+            supabase/functions/ops-api/dispatch_install_write_test.ts \
+            supabase/functions/ops-api/dispatch_offline_dry_run_test.ts
 
       # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
       # suggestions (rules, engine on an in-memory store, migration text).
@@ -454,8 +480,11 @@ jobs:
             supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/project_job_link_test.ts \
+            supabase/functions/xero-sync/bill_prematch_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
+            supabase/functions/ops-api/job_trace_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
@@ -683,6 +712,12 @@ jobs:
             supabase/functions/ops-api/service_credential_handler_test.ts \
             supabase/functions/ops-api/makesafe_cost_report_test.ts
 
+      # Recon daily list: a customer message is labelled from counterpart_role
+      # and never reads "Sender not known". Imports index.ts, so --no-check.
+      - name: Test the recon daily list sender label
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/recon_decisions_test.ts
       - name: Test group work orders and completion-pack email
         run: |
           deno test --allow-read --allow-env \

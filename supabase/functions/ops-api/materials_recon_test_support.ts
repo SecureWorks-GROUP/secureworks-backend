@@ -12,15 +12,25 @@
 //   .from(t).insert(row).select().single()
 //   .from(t).update(patch).eq('id', v).select().single()
 //   .from(t).insert(row)                                (thenable, for job_events)
+//   .from(t).select(cols).in(c,vals).neq(c,v)           (awaited, proposals)
+//   .from(t).update(patch).eq('id',v).eq('status',v).select().single()
+//   .from(t).delete().eq(c,v)                           (awaited)
+//   .from(t).select(cols).not(c,'is',null).order(c).range(a,b)  (awaited, paged reads)
 // ════════════════════════════════════════════════════════════
+
+const MAX_ROWS = 1000;
 
 export type Store = Record<string, Array<Record<string, any>>>;
 
-type Filter = { kind: "eq" | "ilike"; col: string; val: any };
+type Filter = { kind: "eq" | "ilike" | "in" | "neq" | "not_null" | "null_or_not_in"; col: string; val: any };
 
 function rowMatches(row: Record<string, any>, filters: Filter[]): boolean {
   return filters.every((f) => {
     if (f.kind === "eq") return row[f.col] === f.val;
+    if (f.kind === "neq") return row[f.col] !== f.val;
+    if (f.kind === "null_or_not_in") return row[f.col] == null || !f.val.includes(row[f.col]);
+    if (f.kind === "in") return (f.val as any[]).includes(row[f.col]);
+    if (f.kind === "not_null") return row[f.col] != null;
     // ilike → case-insensitive full-string equality on trimmed values
     const a = String(row[f.col] ?? "").trim().toLowerCase();
     const b = String(f.val ?? "").trim().toLowerCase();
@@ -37,6 +47,8 @@ class Query {
   private orderCol: string | null = null;
   private orderAsc = true;
   private limitN: number | null = null;
+  private rangeFrom: number | null = null;
+  private rangeTo = 0;
 
   constructor(private store: Store, private table: string) {}
 
@@ -67,6 +79,18 @@ class Query {
     this.filters.push({ kind: "eq", col, val });
     return this;
   }
+  in(col: string, vals: any[]) {
+    this.filters.push({ kind: "in", col, val: vals });
+    return this;
+  }
+  neq(col: string, val: any) {
+    this.filters.push({ kind: "neq", col, val });
+    return this;
+  }
+  delete() {
+    this.op = "delete" as any;
+    return this;
+  }
   ilike(col: string, val: any) {
     this.filters.push({ kind: "ilike", col, val });
     return this;
@@ -78,6 +102,23 @@ class Query {
   }
   limit(n: number) {
     this.limitN = n;
+    return this;
+  }
+  range(from: number, to: number) {
+    this.rangeFrom = from;
+    this.rangeTo = to;
+    return this;
+  }
+  // Only the form "c.is.null,c.not.in.(a,b)" (a column is null or not one of a list).
+  or(expr: string) {
+    const m = expr.match(/^(\w+)\.is\.null,(\w+)\.not\.in\.\(([^)]*)\)$/);
+    if (!m || m[1] !== m[2]) throw new Error(`fake client: unsupported or(${expr})`);
+    this.filters.push({ kind: "null_or_not_in", col: m[1], val: m[3].split(",") });
+    return this;
+  }
+  not(col: string, op: string, val: any) {
+    if (op !== "is" || val !== null) throw new Error(`fake client: unsupported not(${col}, ${op}, ${val})`);
+    this.filters.push({ kind: "not_null", col, val });
     return this;
   }
 
@@ -94,6 +135,9 @@ class Query {
       });
     }
     if (this.limitN != null) out = out.slice(0, this.limitN);
+    if (this.rangeFrom != null) out = out.slice(this.rangeFrom, this.rangeTo + 1);
+    // PostgREST's max-rows: a read returns at most 1,000 rows, with no error.
+    out = out.slice(0, MAX_ROWS);
     // return clones so callers can't mutate the store by reference
     return out.map((r) => ({ ...r }));
   }
@@ -131,7 +175,8 @@ class Query {
     }
     if (this.op === "update") {
       const rows = this.runUpdate();
-      return { data: rows[0] ?? null, error: null };
+      if (!rows[0]) return { data: null, error: { code: "PGRST116", message: "no row matched" } };
+      return { data: rows[0], error: null };
     }
     const rows = this.runSelect();
     return { data: rows[0] ?? null, error: null };
@@ -148,6 +193,12 @@ class Query {
       if (this.op === "update") {
         const rows = this.runUpdate();
         resolve({ data: this.selectAfter ? rows : null, error: null });
+        return;
+      }
+      if ((this.op as string) === "delete") {
+        const keep = this.rows().filter((r) => !rowMatches(r, this.filters));
+        this.store[this.table] = keep;
+        resolve({ data: null, error: null });
         return;
       }
       resolve({ data: this.runSelect(), error: null });
