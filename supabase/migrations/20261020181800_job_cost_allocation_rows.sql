@@ -333,7 +333,7 @@ BEGIN
   -- replaces the machine's row. Any other placement must be undone first.
   SELECT count(*) INTO v_existing FROM public.job_materials_facts
    WHERE xero_invoice_id = p_xero_invoice_id AND automation_source <> 'manual_split'
-     AND NOT (v_bill_lane = 'labour'
+     AND NOT (v_bill_lane IS NOT DISTINCT FROM 'labour'
               AND automation_source IN ('xero_ref_link', 'po_deterministic', 'agent_prematch'));
   IF v_existing > 0 THEN
     RAISE EXCEPTION 'split_refused: bill % is already placed by another route; undo that first', p_xero_invoice_id;
