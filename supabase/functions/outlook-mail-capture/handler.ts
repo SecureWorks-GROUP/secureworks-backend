@@ -351,6 +351,10 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
         graph.listGroupConversations(g, id, next),
       listGroupThreads: (id, c) => graph.listGroupThreads(g, id, c),
       listGroupPosts: (id, t, topic) => graph.listGroupPosts(g, id, t, topic),
+      listGroupThreadPage: (id, c, next) =>
+        graph.listGroupThreadPage(g, id, c, next),
+      listGroupPostPage: (id, t, topic, next) =>
+        graph.listGroupPostPage(g, id, t, topic, next),
     },
     storeAttachments: (args) => storeEmailAttachments(attachmentDeps, args),
     hash: async (text) => (await sha256Hex(text)).slice(0, 16),
