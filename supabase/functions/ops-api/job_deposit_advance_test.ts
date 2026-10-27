@@ -834,6 +834,116 @@ Deno.test("deposit flag: the catch-up checks a job whose flag was cleared", asyn
   assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
 });
 
+// Xero's CreditNotes on an invoice, as the read projects them (raw_json->CreditNotes).
+const creditNote = (id: string, number: string, applied: number) => ({
+  CreditNoteID: id,
+  CreditNoteNumber: number,
+  AppliedAmount: applied,
+  Total: applied,
+  DateString: "2026-10-28T00:00:00",
+});
+
+Deno.test("deposit flag: a refund by credit note after the move is flagged once, never moved back, then cleared", async () => {
+  const { db, deps, moves, sms } = setup("live");
+  const job = addJob(db);
+  // A rounding credit closed the invoice before the move: part of how it was paid.
+  const inv = addDeposit(db, job, {
+    amount_paid: 1999.82,
+    credit_notes: [creditNote("cn-r", "CN-0499", 0.18)],
+  });
+  await depositOnInvoiceChange(deps, { job_id: job.id });
+  assertEquals(job.status, "order_materials");
+  const state = db.rows("job_deposit_advance_state")[0];
+  assertEquals(state.counted_credit_note_ids, ["cn-r"]);
+  assertEquals(
+    (await depositOnInvoiceChange(deps, {
+      job_id: job.id,
+      xero_invoice_id: inv.xero_invoice_id,
+    })).action,
+    "no_flag",
+  );
+  // Xero refund: payment taken off, credit note allocated and refunded; still PAID.
+  Object.assign(inv, {
+    amount_paid: 0,
+    credit_notes: [
+      creditNote("cn-r", "CN-0499", 0.18),
+      creditNote("cn-1", "CN-0500", 1999.82),
+    ],
+  });
+  const r = await depositOnInvoiceChange(deps, {
+    job_id: job.id,
+    xero_invoice_id: inv.xero_invoice_id,
+  });
+  assertEquals(r.action, "flagged");
+  assertEquals((r.detail as any).reason, "deposit_credited");
+  assertEquals(job.status, "order_materials");
+  assertEquals(moves.length, 1);
+  assertEquals(sms.length, 1);
+  const flagged = events(db, "deposit_flagged");
+  assertEquals(flagged.length, 1);
+  assertEquals(flagged[0].detail_json.reason, "deposit_credited");
+  assertEquals(flagged[0].detail_json.credit_note_numbers, ["CN-0500"]);
+  assertEquals(flagged[0].detail_json.invoice_status, "PAID");
+  assertEquals((await loadDepositFlags(db, [job.id]))?.get(job.id), {
+    reason: "deposit_credited",
+    invoice_number: inv.invoice_number,
+    invoice_status: "PAID",
+    flagged_at: NOW.toISOString(),
+  });
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "already_flagged",
+  );
+  // A person clears it: it stays cleared on the next sync and the catch-up.
+  const cleared = await runJobDepositAction(
+    "clear_job_deposit_flag",
+    "POST",
+    { job_id: job.id },
+    { kind: "staff", email: "shaun@secureworkswa.com.au" },
+    deps,
+  );
+  assertEquals(cleared.body.action, "cleared");
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "no_flag",
+  );
+  assertEquals((await depositCatchUp(deps, {}) as any).results.length, 0);
+  assertEquals(events(db, "deposit_flagged").length, 1);
+  assertEquals(moves.length + sms.length, 2);
+});
+
+Deno.test("deposit flag: a refund by credit note follows the switch like a void", async () => {
+  const { db, deps, moves, sms } = setup("live");
+  const settings = db.rows("job_closeout_settings")[0];
+  const job = addJob(db);
+  const inv = addDeposit(db, job);
+  await depositOnInvoiceChange(deps, { job_id: job.id });
+  assertEquals(job.status, "order_materials");
+  Object.assign(inv, {
+    amount_paid: 0,
+    credit_notes: [creditNote("cn-1", "CN-0500", 2000)],
+  });
+  // off: nothing is read or written.
+  settings.deposit_advance_mode = "off";
+  assertEquals(
+    (await depositOnInvoiceChange(deps, { job_id: job.id })).action,
+    "switch_off",
+  );
+  assertEquals((await depositCatchUp(deps, {})).ran, false);
+  assertEquals(events(db, "deposit_flagged").length, 0);
+  // dry_run: the flag is a record, not a move, so it is recorded (here by the catch-up).
+  settings.deposit_advance_mode = "dry_run";
+  const r = await depositCatchUp(deps, {}) as any;
+  assertEquals(r.results.map((x: any) => x.action), ["flagged"]);
+  assertEquals(
+    db.rows("job_deposit_advance_state")[0].flag,
+    "deposit_credited",
+  );
+  assertEquals(job.status, "order_materials");
+  assertEquals(moves.length + sms.length, 2);
+  assertEquals(events(db, "deposit_flagged").length, 1);
+});
+
 Deno.test("deposit flag: an unreadable pipeline read is reported, not empty", async () => {
   const { db } = setup("live");
   db.failures.job_deposit_advance_state = "boom";

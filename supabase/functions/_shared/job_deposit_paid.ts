@@ -90,6 +90,9 @@ export interface DepositInvoice {
   /** Which party the invoice is for (invoicePartyKey); absent reads as null. */
   job_contact_id?: string | null;
   xero_contact_id?: string | null;
+  /** Xero's CreditNotes on the invoice (our copy's raw_json->CreditNotes): the client credit
+   *  notes allocated against it. Absent or null reads as none. */
+  credit_notes?: unknown;
 }
 
 export interface DepositView {
@@ -278,13 +281,51 @@ export function depositPaidTargetStatus(
   return null;
 }
 
-export type DepositFlagReason = "deposit_voided" | "deposit_unpaid";
+export type DepositFlagReason =
+  | "deposit_voided"
+  | "deposit_unpaid"
+  | "deposit_credited";
 
 export interface DepositFlag {
   reason: DepositFlagReason;
   xero_invoice_id: string | null;
   invoice_number: string | null;
   invoice_status: string;
+  /** deposit_credited only: the credit notes allocated against the deposit after the move. */
+  credit_note_numbers?: string[];
+}
+
+export interface DepositCreditAllocation {
+  credit_note_id: string;
+  credit_note_number: string | null;
+  amount: number;
+}
+
+/**
+ * The client credit notes allocated against one invoice, from Xero's CreditNotes on it
+ * (AppliedAmount is the part allocated to this invoice). An allocation of nothing is not
+ * one. A row with no applied amount counts at its total, so an unclear row is never
+ * dropped. Pure.
+ */
+export function depositCreditAllocations(
+  inv: Pick<DepositInvoice, "credit_notes">,
+): DepositCreditAllocation[] {
+  if (!Array.isArray(inv.credit_notes)) return [];
+  const out: DepositCreditAllocation[] = [];
+  for (const cn of inv.credit_notes as Record<string, unknown>[]) {
+    if (!cn || typeof cn !== "object") continue;
+    const id = text(cn.CreditNoteID ?? cn.ID);
+    if (!id) continue;
+    const applied = cn.AppliedAmount ?? cn.Total;
+    const amount = money(applied);
+    if (amount <= PAID_TOLERANCE) continue;
+    out.push({
+      credit_note_id: id,
+      credit_note_number: text(cn.CreditNoteNumber) || null,
+      amount,
+    });
+  }
+  return out;
 }
 
 /** One flag as a stored key, "reason:xero_invoice_id" (cleared_flags). */
@@ -298,12 +339,20 @@ export function depositFlagKey(
 /**
  * After a job has moved on from the deposit columns: the deposit that moved it is voided
  * or deleted and its party has no other live deposit paid in full, or it is no longer
- * paid in full (a payment taken off for a refund). Returns the flag, or null. A void whose
+ * paid in full (a payment taken off for a refund), or a client credit note was allocated
+ * against it after the move (a refund by credit note). Returns the flag, or null. A void whose
  * replacement deposit for the same party is paid in full flags nothing, and a party that
  * never had a deposit is the move's rule, never a flag. Pure.
  *
  * `countedIds` are the invoices that counted when the automatic move moved the job (it
  * records them); only those can raise a flag, so a job a person moved on never does.
+ *
+ * `countedCreditNoteIds` are the credit notes already allocated against those invoices at
+ * the move (it records them). A credit note allocated against a counted deposit after the
+ * move is the usual Xero refund: the payment is taken off, the credit note is allocated
+ * and refunded, and the invoice reads PAID with nothing due again. That is flagged
+ * deposit_credited. A credit note that was there at the move (often a rounding credit
+ * that closed the invoice) is part of how it was paid, never a flag.
  *
  * `cleared` are the flags a person already cleared (depositFlagKey; captain answer 8: a
  * person decides): the same reason on the same invoice is never raised again.
@@ -313,6 +362,7 @@ export function depositFlagFor(input: {
   invoices: DepositInvoice[];
   parties: CloseoutParty[];
   countedIds: string[];
+  countedCreditNoteIds?: string[];
   cleared?: string[];
 }): DepositFlag | null {
   if (
@@ -359,6 +409,26 @@ export function depositFlagFor(input: {
       xero_invoice_id: unpaid.xero_invoice_id,
       invoice_number: unpaid.invoice_number,
       invoice_status: upper(unpaid.status),
+    };
+  }
+  const known = new Set(
+    (input.countedCreditNoteIds ?? []).map(text).filter(Boolean),
+  );
+  const newCredits = (inv: DepositInvoice) =>
+    depositCreditAllocations(inv).filter((a) => !known.has(a.credit_note_id));
+  const credited = deposits.find((inv) =>
+    counted.has(text(inv.xero_invoice_id)) && !isVoided(inv.status) &&
+    newCredits(inv).length > 0 && !wasCleared("deposit_credited", inv)
+  );
+  if (credited) {
+    return {
+      reason: "deposit_credited",
+      xero_invoice_id: credited.xero_invoice_id,
+      invoice_number: credited.invoice_number,
+      invoice_status: upper(credited.status),
+      credit_note_numbers: newCredits(credited).map((a) =>
+        a.credit_note_number || a.credit_note_id
+      ),
     };
   }
   return null;

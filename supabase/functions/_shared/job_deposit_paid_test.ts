@@ -9,6 +9,7 @@ import {
 import type { CloseoutParty } from "./job_paid_closeout.ts";
 import {
   DEPOSIT_RECEIVED_TEXT_TEMPLATE,
+  depositCreditAllocations,
   depositFlagFor,
   depositFlagKey,
   type DepositInvoice,
@@ -529,6 +530,187 @@ Deno.test("deposit flag: a counted deposit no longer paid in full is flagged", (
       countedIds: ["x-1"],
     }),
     null,
+  );
+});
+
+// Xero's CreditNotes on an invoice, as our copy keeps them (raw_json->CreditNotes).
+function creditNote(id: string, number: string, applied: number) {
+  return {
+    ID: id,
+    Date: "/Date(1793059200000+0000)/",
+    Total: applied,
+    HasErrors: false,
+    LineItems: [],
+    DateString: "2026-10-28T00:00:00",
+    CreditNoteID: id,
+    AppliedAmount: applied,
+    CreditNoteNumber: number,
+    InvoiceAddresses: [],
+  };
+}
+
+Deno.test("deposit credit: the credit notes allocated against an invoice", () => {
+  assertEquals(depositCreditAllocations(inv()), []);
+  assertEquals(depositCreditAllocations(inv({ credit_notes: null })), []);
+  assertEquals(depositCreditAllocations(inv({ credit_notes: "x" })), []);
+  assertEquals(
+    depositCreditAllocations(inv({
+      credit_notes: [
+        creditNote("cn-1", "CN-0500", 2000),
+        // An allocation of nothing is not one; a row with no id is unreadable.
+        creditNote("cn-2", "CN-0501", 0),
+        { CreditNoteNumber: "CN-0502", AppliedAmount: 5 },
+        // No applied amount: counted at its total, never dropped.
+        { CreditNoteID: "cn-3", Total: 40 },
+      ],
+    })),
+    [
+      { credit_note_id: "cn-1", credit_note_number: "CN-0500", amount: 2000 },
+      { credit_note_id: "cn-3", credit_note_number: null, amount: 40 },
+    ],
+  );
+});
+
+Deno.test("deposit flag: a credit note allocated against a counted deposit after the move is flagged", () => {
+  const moved = { deposit_invoice_id: "x-1", status: "order_materials" };
+  // The usual Xero refund: payment taken off, credit note allocated and refunded, the
+  // invoice reads PAID with nothing due again.
+  const refunded = inv({
+    amount_paid: 0,
+    credit_notes: [creditNote("cn-1", "CN-0500", 2000)],
+  });
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [refunded],
+      countedIds: ["x-1"],
+      countedCreditNoteIds: [],
+    }),
+    {
+      reason: "deposit_credited",
+      xero_invoice_id: "x-1",
+      invoice_number: "INV-1749",
+      invoice_status: "PAID",
+      credit_note_numbers: ["CN-0500"],
+    },
+  );
+  // A part refund by credit note is flagged too.
+  const part = inv({
+    amount_paid: 1500,
+    credit_notes: [creditNote("cn-1", "CN-0500", 500)],
+  });
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [part],
+      countedIds: ["x-1"],
+    })?.reason,
+    "deposit_credited",
+  );
+  // A credit note that was there at the move (a rounding credit that closed the invoice)
+  // is part of how it was paid: never a flag. A later one still is.
+  const rounding = inv({
+    amount_paid: 1999.82,
+    credit_notes: [creditNote("cn-r", "CN-0499", 0.18)],
+  });
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [rounding],
+      countedIds: ["x-1"],
+      countedCreditNoteIds: ["cn-r"],
+    }),
+    null,
+  );
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [inv({
+        amount_paid: 0,
+        credit_notes: [
+          creditNote("cn-r", "CN-0499", 0.18),
+          creditNote("cn-1", "CN-0500", 1999.82),
+        ],
+      })],
+      countedIds: ["x-1"],
+      countedCreditNoteIds: ["cn-r"],
+    })?.credit_note_numbers,
+    ["CN-0500"],
+  );
+  // Only a counted deposit: a job a person moved on, or another invoice, never flags.
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [refunded],
+      countedIds: [],
+    }),
+    null,
+  );
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [
+        inv(),
+        inv({
+          xero_invoice_id: "x-9",
+          reference: "SWF-261369-FINBAL",
+          credit_notes: [creditNote("cn-9", "CN-0600", 300)],
+        }),
+      ],
+      countedIds: ["x-1", "x-9"],
+    }),
+    null,
+  );
+  // Still in the deposit columns: never a flag.
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: { ...moved, status: "awaiting_deposit" },
+      invoices: [refunded],
+      countedIds: ["x-1"],
+    }),
+    null,
+  );
+  // Cleared by a person: never raised again for the same invoice.
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [refunded],
+      countedIds: ["x-1"],
+      cleared: [depositFlagKey("deposit_credited", "x-1")],
+    }),
+    null,
+  );
+  // A void or a payment still off is the stronger reason and is named first.
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [{ ...refunded, status: "VOIDED" }],
+      countedIds: ["x-1"],
+    })?.reason,
+    "deposit_voided",
+  );
+  assertEquals(
+    depositFlagFor({
+      parties: [],
+      job: moved,
+      invoices: [{
+        ...refunded,
+        status: "AUTHORISED",
+        amount_due: 1000,
+        credit_notes: [creditNote("cn-1", "CN-0500", 1000)],
+      }],
+      countedIds: ["x-1"],
+    })?.reason,
+    "deposit_unpaid",
   );
 });
 

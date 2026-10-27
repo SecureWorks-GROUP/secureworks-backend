@@ -14,7 +14,8 @@
 //                           every live deposit invoice is paid in full moves to order_materials (patio: approvals while council is
 //                           needed or not decided), compare and set on those two statuses,
 //                           source xero_deposit_paid; a job already moved on is checked for a
-//                           voided or no-longer-paid deposit, which is flagged for a person.
+//                           voided, no-longer-paid or credit-noted deposit, which is flagged
+//                           for a person.
 //   - depositCatchUp        xero-sync calls job_deposit_catch_up after each run: the same
 //                           paid move for accepted and awaiting_deposit cards whose deposit
 //                           was paid before the switch was on or before the card got there,
@@ -42,6 +43,7 @@ import {
   DEPOSIT_LAND_STATUS,
   DEPOSIT_ORDER_MATERIALS_STATUS,
   DEPOSIT_PAID_FROM_STATUSES,
+  depositCreditAllocations,
   type DepositFlag,
   depositFlagFor,
   depositFlagKey,
@@ -129,6 +131,7 @@ export interface DepositStateRow {
   moved_at: string | null;
   moved_to: string | null;
   counted_invoice_ids: string[] | null;
+  counted_credit_note_ids: string[] | null;
   text_status: string | null;
   flag: string | null;
   flag_invoice_id: string | null;
@@ -138,12 +141,14 @@ export interface DepositStateRow {
 
 const JOB_COLUMNS =
   "id, job_number, type, status, deposit_invoice_id, council_required, client_name, ghl_contact_id";
+// credit_notes projects only Xero's CreditNotes out of raw_json (the client credit notes
+// allocated against the invoice), never the whole blob.
 const INVOICE_COLUMNS =
-  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on, job_contact_id, xero_contact_id";
+  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on, job_contact_id, xero_contact_id, credit_notes:raw_json->CreditNotes";
 const PARTY_COLUMNS =
   "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id";
 const STATE_COLUMNS =
-  "job_id, moved_at, moved_to, counted_invoice_ids, text_status, flag, flag_invoice_id, flag_cleared_at, cleared_flags";
+  "job_id, moved_at, moved_to, counted_invoice_ids, counted_credit_note_ids, text_status, flag, flag_invoice_id, flag_cleared_at, cleared_flags";
 
 function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   const out: T[][] = [];
@@ -444,6 +449,19 @@ async function settlePaid(
     };
   }
   const nowIso = deps.now().toISOString();
+  const countedIds = verdict.deposits.map((d) => text(d.xero_invoice_id))
+    .filter(Boolean);
+  // The credit notes already allocated against the counted deposits: only one allocated
+  // after the move is a refund by credit note (depositFlagFor).
+  const countedCreditNoteIds = [
+    ...new Set(
+      facts.invoices.filter((inv) =>
+        countedIds.includes(text(inv.xero_invoice_id))
+      ).flatMap((inv) =>
+        depositCreditAllocations(inv).map((a) => a.credit_note_id)
+      ),
+    ),
+  ];
   const { error: stateErr } = await deps.client.from(
     "job_deposit_advance_state",
   )
@@ -453,8 +471,8 @@ async function settlePaid(
       moved_from: text(job.status),
       moved_to: target,
       moved_source: source,
-      counted_invoice_ids: verdict.deposits.map((d) => text(d.xero_invoice_id))
-        .filter(Boolean),
+      counted_invoice_ids: countedIds,
+      counted_credit_note_ids: countedCreditNoteIds,
       last_paid_on: verdict.last_paid_on,
       updated_at: nowIso,
     }, { onConflict: "job_id" });
@@ -577,6 +595,7 @@ async function checkFlag(
     job,
     ...facts,
     countedIds: state.row.counted_invoice_ids ?? [],
+    countedCreditNoteIds: state.row.counted_credit_note_ids ?? [],
     cleared,
   });
   if (!flag) return { ...base, action: "no_flag" };
@@ -605,6 +624,9 @@ async function checkFlag(
       invoice_number: flag.invoice_number,
       xero_invoice_id: flag.xero_invoice_id,
       invoice_status: flag.invoice_status,
+      ...(flag.credit_note_numbers
+        ? { credit_note_numbers: flag.credit_note_numbers }
+        : {}),
       job_status: job.status,
       source,
       note: "The job was not moved back. A person decides.",
@@ -661,7 +683,7 @@ export async function depositOnInvoiceChange(
 }
 
 /** xero-sync, after each run: waiting cards whose deposits are paid, and moved cards whose
- *  deposit has since been voided or unpaid. */
+ *  deposit has since been voided, unpaid or refunded by credit note. */
 export async function depositCatchUp(
   deps: JobDepositDeps,
   body: Record<string, unknown>,
