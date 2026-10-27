@@ -42,6 +42,7 @@ import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, 
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
+import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
   buildMaterialsFactRow,
@@ -3394,61 +3395,34 @@ async function syncBankBalances(sb: any) {
   const now = new Date().toISOString()
   const today = now.split('T')[0]
 
-  // Use Bank Summary Report for actual balances (GET /Accounts doesn't include balances)
-  try {
-    const report = await xeroGet('/Reports/BankSummary', accessToken, tenantId, { date: today })
-    const rows = report.Reports?.[0]?.Rows || []
-    let synced = 0
-
-    for (const section of rows) {
-      if (section.RowType !== 'Section' || !section.Rows) continue
-      for (const row of section.Rows) {
-        if (row.RowType !== 'Row' || !row.Cells) continue
-        const cells = row.Cells
-        const accountName = cells[0]?.Value || ''
-        const accountId = cells[0]?.Attributes?.[0]?.Value || accountName
-        const balance = parseFloat(cells[1]?.Value || '0') || 0
-
-        if (!accountName) continue
-
-        await sb.from('xero_bank_balances').upsert({
-          org_id: DEFAULT_ORG_ID,
-          account_id: accountId,
-          account_name: accountName,
-          balance: balance,
-          balance_date: today,
-          synced_at: now,
-        }, { onConflict: 'org_id,account_id,balance_date' })
-
-        synced++
-      }
-    }
-
-    console.log(`[xero-sync] Synced ${synced} bank balances from Bank Summary report`)
-    return { success: true, accounts_synced: synced }
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    console.error('[xero-sync] Bank Summary report failed, falling back to Accounts API:', (e as Error).message)
-
-    // Fallback: GET /Accounts (won't have balances but at least gets account names)
-    const data = await xeroGet('/Accounts', accessToken, tenantId, {
-      where: 'Type=="BANK"&&Status=="ACTIVE"',
-    })
-    const accounts = data.Accounts || []
-    let synced = 0
-    for (const acct of accounts) {
-      await sb.from('xero_bank_balances').upsert({
-        org_id: DEFAULT_ORG_ID,
-        account_id: acct.AccountID,
-        account_name: acct.Name || '',
-        balance: 0,
-        balance_date: today,
-        synced_at: now,
-      }, { onConflict: 'org_id,account_id,balance_date' })
-      synced++
-    }
-    return { success: true, accounts_synced: synced, note: 'Used fallback — balances may be $0' }
+  // Bank Summary for the one day: each account's Closing Balance at that date
+  // (GET /Accounts has no balances). Without a period Xero reports the whole
+  // month, and the second column is the Opening Balance, which is what this
+  // stored until 19 Oct 2026 (CFO-14).
+  const report = await xeroGet('/Reports/BankSummary', accessToken, tenantId, { fromDate: today, toDate: today })
+  const { rows, closingColumn } = parseBankSummary(report)
+  if (closingColumn === null) {
+    // An unreadable report stores nothing: an unknown balance is never $0.
+    console.error('[xero-sync] Bank Summary has no Closing Balance column; no balances stored')
+    return { success: false, accounts_synced: 0, error: 'bank_summary_unreadable' }
   }
+  let synced = 0
+  for (const row of rows) {
+    const { error } = await sb.from('xero_bank_balances').upsert({
+      org_id: DEFAULT_ORG_ID,
+      account_id: row.account_id,
+      account_name: row.account_name,
+      balance: row.balance,
+      balance_date: today,
+      synced_at: now,
+    }, { onConflict: 'org_id,account_id,balance_date' })
+    if (error) console.error(`[xero-sync] bank balance write failed ${row.account_name}:`, error.message)
+    else synced++
+  }
+  console.log(`[xero-sync] Synced ${synced} bank closing balances from Bank Summary report`)
+  // Nothing stored is a failed refresh, never a quiet success.
+  if (synced === 0) return { success: false, accounts_synced: 0, error: rows.length ? 'bank_balance_writes_failed' : 'no_readable_balances' }
+  return { success: true, accounts_synced: synced, accounts_skipped: rows.length - synced }
 }
 
 
