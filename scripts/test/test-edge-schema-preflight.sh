@@ -970,7 +970,13 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261026160000", "job_deposit_advance"),
                       # Deposit credit note flag: the credit notes counted at
                       # the move and the widened flag check.
-                      ("20261027120000", "job_deposit_credit_note_flag")]:
+                      ("20261027120000", "job_deposit_credit_note_flag"),
+                      # Context reconciliation from a job: the context_job_mail
+                      # and recon_job_items doors (context_job_reconciliation.ts).
+                      ("20261020165000", "context_job_reconciliation"),
+                      # Card events (CTX-T22): get_job_conversation reads a
+                      # person's decisions through context_job_card_decisions.
+                      ("20261021150000", "context_job_card_events")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

@@ -505,6 +505,7 @@ import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
+import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
 import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
@@ -8501,6 +8502,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : await contextUnlinkedRows(client, url.searchParams, actor))
         } catch (error) {
           if (error instanceof ContextUnlinkedError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Context reconciliation from a job (CTX-N1, 20261020165000): the
+      // email rows Context places on a job, with how sure and the other jobs
+      // each sits on, and the queued rows that offer the job (defects
+      // included) with the hash a decision echoes. Staff front door (the
+      // default for an action on no static, profile, routine or agent list),
+      // GET only, read-only SQL functions, nothing written.
+      case 'context_job_mail':
+      case 'recon_job_items': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(action === 'context_job_mail'
+            ? await contextJobMail(client, url.searchParams)
+            : await reconJobItems(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof ContextJobReconError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }
@@ -19146,16 +19166,23 @@ async function getJobConversation(client: any, body: any) {
   //    R0): how the ladder placed the row, so a reader can see why it is on
   //    this job. placement_rule is metadata.placement_rule (null until the
   //    placement rules that write it ship).
+  //    (CTX-T22) The rows follow a person's reconciliation decisions as the job
+  //    card does (context_job_card_decisions): a row a split, correct or confirm
+  //    put on the job is listed with placed_by_person, one a decision took off
+  //    is not. A failed decisions read is named in person_decisions_read_failed.
   const eventMessages: any[] = []
+  let personDecisionsReadFailed: string | null = null
   try {
-    const { rows: bev, error: bevErr } = await readBusinessEventsBySourceTime(client, {
+    const { rows: bev, error: bevErr, decisionsError } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: TIMELINE_MESSAGE_COLUMNS,
       limit,
       since: sinceFilter,
       until,
       messagesOnly: true,
+      personDecisions: true,
     })
+    if (decisionsError) personDecisionsReadFailed = decisionsError
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
     for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
@@ -19254,7 +19281,12 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
+  return {
+    messages: sliced,
+    summary,
+    ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}),
+    ...(personDecisionsReadFailed ? { person_decisions_read_failed: personDecisionsReadFailed } : {}),
+  }
 }
 
 // ════════════════════════════════════════════════════════════

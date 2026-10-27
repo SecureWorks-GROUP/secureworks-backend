@@ -1360,8 +1360,10 @@ Deno.test("D1 dossier: quotes, variations and scope sections on SWF-26818, read 
 
     // read-only contract
     assertEquals(client.writes, []);
-    // job_quote_values (D1) and context_job_freshness (K4) are the only calls.
+    // job_quote_values (D1), context_job_freshness (K4) and, through the
+    // conversation it reuses, context_job_card_decisions (CTX-T22) are the only calls.
     assertEquals([...new Set(client.rpcs)].sort(), [
+      "context_job_card_decisions",
       "context_job_freshness",
       "job_quote_values",
     ]);
