@@ -33,6 +33,12 @@ export const JOB_PROFIT_LABELS = {
     "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), or when materials are owed but none is linked (labour-only cost).",
   profit_ex_unsuppressed:
     "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
+  committed_open_ex:
+    "Priced open purchase orders with no supplier invoice emailed and no bill placed, ex GST. Committed, not actual. An order with no price is never counted here as $0.00.",
+  ordered_not_billed_count:
+    "Ordered, not billed: sent purchase orders with no price (every Dispatch order) and no invoice or bill yet. A count, never a dollar figure. ordered_not_billed_over_30_count is those first sent 30 or more days ago.",
+  invoice_emailed_count:
+    "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
   rollup_expected_vs_actual:
     "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
   holding_jobs:
@@ -74,6 +80,8 @@ export type TimelineEntry = {
     | "supplier_bill"
     | "materials_fact"
     | "purchase_order"
+    | "purchase_order_ordered"
+    | "purchase_order_invoice_emailed"
     | "sales_invoice"
     | "variation"
     | "sales_invoice_paid"
@@ -98,7 +106,15 @@ const COST_KIND: Record<string, TimelineEntry["kind"]> = {
   supplier_bill: "supplier_bill",
   materials_fact: "materials_fact",
   po_committed: "purchase_order",
+  po_ordered: "purchase_order_ordered",
+  po_invoice_emailed: "purchase_order_invoice_emailed",
 };
+
+/** Timeline kind of a cost event. An unknown purchase order state is still a purchase order, never a supplier bill. */
+export function costEventKind(source: unknown): TimelineEntry["kind"] {
+  const s = String(source ?? "");
+  return COST_KIND[s] ?? (s.startsWith("po_") ? "purchase_order" : "supplier_bill");
+}
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
@@ -122,7 +138,7 @@ export function buildJobProfitTimeline(
   for (const e of costEvents) {
     out.push({
       date: e.event_date ?? null,
-      kind: COST_KIND[e.source] ?? "supplier_bill",
+      kind: costEventKind(e.source),
       lane: e.lane ?? null,
       party: e.party ?? null,
       amount_ex: num(e.amount_ex),

@@ -35,6 +35,7 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
+import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { readAll, runBillPrematch } from './bill_prematch_run.ts'
@@ -261,7 +262,7 @@ if (import.meta.main) serve(async (req: Request) => {
         // Standalone materials-actuals ingest (also runs inside sync_invoices).
         const windowDays = parseInt(url.searchParams.get('window_days') || '90', 10)
         const limitParam = url.searchParams.get('limit')
-        const limit = parseInt(limitParam || '500', 10)
+        const limit = limitParam ? parseInt(limitParam, 10) : null
         // An explicit ?limit is a capped test run (no pre-match placements).
         return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
@@ -1484,16 +1485,20 @@ export async function matchUnlinkedInvoices(client: any) {
 
 async function ingestMaterialsActuals(
   sb: any,
-  opts: { windowDays?: number; limit?: number; capped?: boolean; config?: MatchConfig } = {},
+  opts: { windowDays?: number; limit?: number | null; capped?: boolean; config?: MatchConfig } = {},
 ) {
   const windowDays = opts.windowDays ?? 90
-  const limit = opts.limit ?? 500
+  // No cap by default: every bill in the window is read each run. A manual
+  // ?action=ingest_materials&limit=N still caps a test run.
+  const limit = opts.limit ?? null
   const config = opts.config ?? DEFAULT_MATCH_CONFIG
   const cutoff = new Date(Date.now() - windowDays * 86_400_000)
     .toISOString()
     .slice(0, 10)
 
   const result = {
+    bills_in_window: 0,
+    bill_pages: 0,
     scanned: 0,
     facts: 0,
     queued: 0,
@@ -1585,17 +1590,19 @@ async function ingestMaterialsActuals(
     if (!allSupplierBills) throw new Error('supplier bills unreadable')
     const documentIndex = buildDocumentIndex(allSupplierBills)
 
-    // 3. Candidate bills — ACCPAY, in window, not void/deleted.
-    const { data: bills } = await sb
-      .from('xero_invoices')
-      .select(
-        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type, line_items, job_id',
-      )
-      .eq('org_id', DEFAULT_ORG_ID)
-      .eq('invoice_type', 'ACCPAY')
-      .gte('invoice_date', cutoff)
-      .not('status', 'in', '("VOIDED","DELETED")')
-      .limit(limit)
+    // 3. Candidate bills — ACCPAY, in window, not void/deleted. EVERY bill in
+    //    the window, paged in a fixed order (CFO-12: a single .limit(500) read
+    //    skipped bills once the window held more). A failed page stops the step.
+    const billRead = await readBillsInWindow(sb, {
+      orgId: DEFAULT_ORG_ID,
+      cutoff,
+      cap: limit,
+      columns: `${BILLS_WINDOW_COLUMNS}, line_items, job_id`,
+    })
+    if (!billRead) throw new Error('bills in window unreadable')
+    const bills = billRead.bills
+    result.bills_in_window = bills.length
+    result.bill_pages = billRead.pages
 
     // Existing derived rows in the window — so we respect human decisions and
     // never re-open a manually-resolved item.
