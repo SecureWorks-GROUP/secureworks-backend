@@ -62859,6 +62859,37 @@ type FencingNeighbourSyncResult = {
   ghl_created_count?: number
 }
 
+// The fence page's party role -> job_contacts.party_role (its CHECK allows owner,
+// neighbour, strata, strata_rep, builder, tenant, agent, other_payer). A role the
+// table has no word for is an other payer; a missing one is a neighbour.
+function fencePartyRole(role: unknown): string {
+  const r = typeof role === 'string' ? role.trim().toLowerCase() : ''
+  if (r === 'client') return 'owner'
+  if (['owner', 'neighbour', 'strata', 'strata_rep', 'builder', 'tenant', 'agent', 'other_payer'].includes(r)) return r
+  if (r === '') return 'neighbour'
+  return 'other_payer'
+}
+
+// pricing_json.parties keyed by letter, or null when it is absent or does not
+// agree with itself (duplicate or missing letters, a bad amount, or a sum that is
+// not the job's ex-GST total to the cent).
+function fencePartiesByLetter(pricing: any): Map<string, { ex_gst: number; name: string }> | null {
+  const parties = pricing?.parties
+  const total = Number(pricing?.totalExGST)
+  if (!Array.isArray(parties) || parties.length === 0 || pricing?.totalExGST == null || !Number.isFinite(total)) return null
+  const out = new Map<string, { ex_gst: number; name: string }>()
+  let sum = 0
+  for (const p of parties) {
+    const letter = typeof p?.letter === 'string' ? p.letter.trim().toUpperCase() : ''
+    const ex = Number(p?.ex_gst)
+    if (!/^[A-Z]$/.test(letter) || out.has(letter) || p?.ex_gst == null || !Number.isFinite(ex) || ex < 0) return null
+    out.set(letter, { ex_gst: ex, name: typeof p?.name === 'string' ? p.name.trim() : '' })
+    sum += ex
+  }
+  if (Math.abs(sum - total) > 0.01) return null
+  return out
+}
+
 async function syncFencingNeighbours(client: any, body: any): Promise<FencingNeighbourSyncResult> {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -62903,7 +62934,24 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
     if (!flatSplit || pricing.totalExGST == null || !Number.isFinite(total) || !Number.isFinite(share)) return null
     return Math.round(total * share) / 100
   }
-  const clientPortionExGst = splits.client_portion_ex_gst
+  // pricing_json.parties (the fence page's per-party money, T88) is the source when
+  // it agrees with this sync: letters A, B, C... in contact order, unique, and the
+  // parties add to the job's ex-GST total. The page leaves a $0 party out, so a
+  // contact with no entry pays $0. Anything else falls back to neighbour_splits.
+  // Every party letter must name a contact this sync writes (A plus one per
+  // neighbour), or the two lists disagree and parties[] is not used.
+  const rawPartyByLetter = fencePartiesByLetter(pricing)
+  const syncedLetters = new Set(['A', ...splits.neighbours.map((_: unknown, i: number) => labels[i + 1] || String.fromCharCode(66 + i))])
+  const partyByLetter = rawPartyByLetter && [...rawPartyByLetter.keys()].every((l) => syncedLetters.has(l))
+    ? rawPartyByLetter
+    : null
+  const partyEx = (letter: string): number | null => {
+    if (!partyByLetter) return null
+    const p = partyByLetter.get(letter)
+    return p ? p.ex_gst : 0
+  }
+  const clientPortionExGst = partyEx('A')
+    ?? splits.client_portion_ex_gst
     ?? portionFromShare(splits.client_share_percent)
     ?? pricing.totalExGST ?? 0
   const { data: existingPrimary } = await client.from('job_contacts')
@@ -62926,6 +62974,7 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
     assigned_runs: splits.client_assigned_runs || [],
     status: 'active',
     contact_type: 'primary',
+    party_role: 'owner',
   }
 
   if (existingPrimary) {
@@ -62949,19 +62998,26 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
       job_id: jId,
       contact_label: label,
       is_primary: false,
-      client_name: nb.name || '',
+      client_name: partyByLetter?.get(label)?.name || nb.name || '',
       client_phone: nb.phone || '',
       client_email: nb.email || '',
       site_address: nb.address || '',
       share_percentage: nb.share_percent ?? 50,
-      quote_value_ex_gst: nb.portion_ex_gst ?? portionFromShare(nb.share_percent) ?? 0,
+      quote_value_ex_gst: partyEx(label) ?? nb.portion_ex_gst ?? portionFromShare(nb.share_percent) ?? 0,
       assigned_runs: nb.assigned_runs || [],
       status: 'active',
       contact_type: contactType,
+      party_role: fencePartyRole(nb.role),
     }
+    // The fence page names the party's GHL contact when it already has one: use
+    // it rather than creating a second contact for the same person.
+    const givenGhlContactId = typeof nb.ghl_contact_id === 'string' && nb.ghl_contact_id.trim()
+      ? nb.ghl_contact_id.trim()
+      : null
+    if (givenGhlContactId) nbData.ghl_contact_id = givenGhlContactId
 
     // Create GHL contact for neighbour if they have a phone number
-    if (nb.phone && !existingNb) {
+    if (nb.phone && !existingNb && !givenGhlContactId) {
       try {
         const nameParts = (nb.name || '').split(' ')
         const ghlRes = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=create_contact`, {
@@ -62990,7 +63046,7 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
       // Preserve existing GHL contact ID
       const { data: existing } = await client.from('job_contacts')
         .select('ghl_contact_id, xero_contact_id').eq('id', existingNb.id).single()
-      if (existing?.ghl_contact_id) nbData.ghl_contact_id = existing.ghl_contact_id
+      if (existing?.ghl_contact_id && !givenGhlContactId) nbData.ghl_contact_id = existing.ghl_contact_id
       if (existing?.xero_contact_id) nbData.xero_contact_id = existing.xero_contact_id
     }
 
