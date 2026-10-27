@@ -1035,19 +1035,21 @@ export interface ScopeRevisionAlignment {
   // The frozen revision's own scope, read only when the last save differs and
   // only once its text hashes to the stored scope_hash.
   frozen_scope_json: Record<string, unknown> | null;
-  // The frozen revision's figure-free pricing status (INT-01). Only the
-  // booleans leave the read; the pricing object itself never does. null when
-  // there is no frozen row or its pricing cannot be read and verified.
+  // The frozen revision's pricing status (INT-01): Sales' completeness rule as
+  // booleans. null when there is no frozen row or its pricing cannot be read
+  // and verified against pricing_hash.
   frozen_pricing_status: PricingStatus | null;
 }
 
-// Sales patio-scoper draft (SQ-29). The scoper's draft is { site, design,
-// pricing }, but agents read only the design and a non-contact site allowlist:
-// the pricing object (rates, margin, commission, labour) and the contact
-// fields belong to Sales and the CRM (Sales' 1117 review, spec r2.4).
+// Sales patio-scoper draft (SQ-29): the scoper's own { site, design,
+// pricing }, read whole. The dossier is an office read (staff and their
+// agents), and the office sees margin, commission and the customer's contact
+// details (Jan, 27 Oct 2026). Crew, supplier and customer surfaces never read
+// this: see dossier_audience.ts.
 export interface PatioScoperDraft {
   site: Record<string, unknown> | null;
   design: Record<string, unknown> | null;
+  pricing: Record<string, unknown> | null;
 }
 
 // Sales' completeness rule on the frozen row's pricing, as booleans only:
@@ -1219,36 +1221,16 @@ function changedSinceLastQuote(
   return { changed: null, basis: "scope_update_time_not_recorded" };
 }
 
-// The only site facts agents read. Contact fields (customer, mobile, email,
-// address, gate code) are left out by name never being listed here.
-const PATIO_SITE_ALLOWLIST = [
-  "storeys",
-  "houseRoof",
-  "fascia",
-  "windClass",
-  "readings",
-] as const;
-
-// The Sales draft is { site, design, pricing }. Only design (whole) and the
-// site allowlist are read; pricing is never read. A boolean, a missing draft,
-// or one with neither site facts nor design (a pricing-only draft) is no draft.
+// The Sales draft is { site, design, pricing }. A boolean, a missing draft,
+// or an object with none of those three is no draft.
 function patioScoperDraft(value: unknown): PatioScoperDraft | null {
   const obj = parseJsonObject(value);
   if (!obj) return null;
-  const rawSite = parseJsonObject(obj.site);
-  let site: Record<string, unknown> | null = null;
-  if (rawSite) {
-    const kept: Record<string, unknown> = {};
-    for (const key of PATIO_SITE_ALLOWLIST) {
-      if (Object.prototype.hasOwnProperty.call(rawSite, key)) {
-        kept[key] = rawSite[key];
-      }
-    }
-    if (Object.keys(kept).length > 0) site = kept;
-  }
+  const site = parseJsonObject(obj.site);
   const design = parseJsonObject(obj.design);
-  if (!site && !design) return null;
-  return { site, design };
+  const pricing = parseJsonObject(obj.pricing);
+  if (!site && !design && !pricing) return null;
+  return { site, design, pricing };
 }
 
 function bool(value: unknown): boolean | null {
@@ -1300,9 +1282,9 @@ export function pricingStatusFrom(pricing: unknown): PricingStatus | null {
  * The patio-scoper v2 record (Sales SQ-29) is the scoper's own shape, not the
  * older patio tool's, so the shared release-packet adapter would read it as a
  * bare "patio" with no lines. Read it here, lines only: `expected` holds
- * figures and is never read. `draft` is the design and the site allowlist,
- * never its pricing or contacts. An unsupported family is a scope with no
- * quote or order behind it, and its lines say so.
+ * figures and is never read. `draft` is the Sales object (site, design,
+ * pricing). An unsupported family is a scope with no quote or order behind
+ * it, and its lines say so.
  */
 function patioScoperSummary(
   scopeJson: Record<string, unknown>,

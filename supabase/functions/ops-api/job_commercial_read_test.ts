@@ -1521,7 +1521,7 @@ function salesDraft() {
       mobile: "0400000000",
       email: "pat@example.com",
       address: "1 Example St",
-      gateCode: "1234#",
+      gateCode: "GATE-5#",
       storeys: "single",
       houseRoof: "tile",
       fascia: "timber",
@@ -1547,27 +1547,11 @@ function salesDraft() {
   };
 }
 
-// What agents may read of the draft (INT-01, spec r2.4): the site allowlist
-// and the design, never pricing or contacts.
-const ALLOWED_SITE = {
-  storeys: "single",
-  houseRoof: "tile",
-  fascia: "timber",
-  windClass: "N2",
-  readings: { slope: "flat" },
-};
-const DRAFT_LEAKS = [
-  "Pat Example", "0400000000", "pat@example.com", "1 Example St", "1234#",
-  "77711", "77712", "77713", "77714", "77715", "Install crew",
-  "customer", "mobile", "email", "address", "gateCode",
-  "pricing\"", "rates", "materialsTotal", "oneFigure", "labour", "marginPct",
-  "commissionPct", "rateFrom",
-];
-function assertNoDraftLeak(scope: unknown) {
-  const text = JSON.stringify(scope);
-  for (const leak of DRAFT_LEAKS) {
-    assert(!text.includes(leak), `${leak} leaked into the scope`);
-  }
+// The office reads the draft whole: margin, commission, rates and the
+// customer's contact details (INT-01, Jan 27 Oct 2026). The dossier itself is
+// refused to anyone who is not office (dossier_audience_test.ts).
+function assertWholeDraft(scope: { scope_record?: { draft: unknown } }) {
+  assertEquals(scope.scope_record?.draft, salesDraft());
 }
 
 Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and provenance, never its figures", () => {
@@ -1612,7 +1596,7 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
     version: "2.0",
     family: "skillion",
     supported: true,
-    draft: { site: ALLOWED_SITE, design: draft.design },
+    draft,
     pricing_status: null,
     revision_n: 3,
     scope_revision_id: "rev-3",
@@ -1624,10 +1608,9 @@ Deno.test("SQ-29 scope: a sealed patio-scoper record reads its own lines and pro
   for (const figure of ["4321", "1234", "9876"]) {
     assert(!text.includes(figure), `figure ${figure} leaked`);
   }
-  assertNoDraftLeak(scope);
 });
 
-Deno.test("INT-01 scope: only the design and the site allowlist reach agents; pricing and contacts never do", () => {
+Deno.test("INT-01 scope: the office reads the Sales draft whole, margin, commission and contacts included", () => {
   const draft = salesDraft();
   const scope = summariseScope({
     id: "job-sq29-draft",
@@ -1644,14 +1627,20 @@ Deno.test("INT-01 scope: only the design and the site allowlist reach agents; pr
     pricing_json: null,
   }, { newestQuoteSentAt: null, signedOff: null });
   assertEquals(scope.scope_record?.draft, {
-    site: ALLOWED_SITE,
+    site: draft.site,
     design: draft.design,
+    pricing: draft.pricing,
   });
+  assertEquals(scope.scope_record?.draft?.site?.customer, "Pat Example");
+  assertEquals(scope.scope_record?.draft?.site?.address, "1 Example St");
+  assertEquals(scope.scope_record?.draft?.site?.gateCode, "GATE-5#");
   assertEquals(scope.scope_record?.draft?.design?.widthMm, 6000);
   assertEquals(scope.scope_record?.draft?.design?.projectionMm, 4000);
+  assertEquals(scope.scope_record?.draft?.pricing?.marginPct, 35);
+  assertEquals(scope.scope_record?.draft?.pricing?.commissionPct, 13);
+  assertEquals(scope.scope_record?.draft?.pricing?.materialsTotal, 77712);
   // No last-save status: the status comes from the frozen row only.
   assertEquals(scope.scope_record?.pricing_status, null);
-  assertNoDraftLeak(scope);
   assertEquals(
     Object.prototype.hasOwnProperty.call(scope.scope_record?.draft, "width"),
     false,
@@ -1673,7 +1662,7 @@ Deno.test("INT-01 scope: only the design and the site allowlist reach agents; pr
   }, { newestQuoteSentAt: null, signedOff: null });
   assertEquals(booleanDraft.scope_record?.draft, null);
 
-  // A draft holding only pricing and contacts is no draft at all.
+  // A draft holding only pricing and contacts is still the office's draft.
   const pricingOnly = summariseScope({
     id: "job-sq29-pricing-only",
     type: "patio",
@@ -1691,8 +1680,11 @@ Deno.test("INT-01 scope: only the design and the site allowlist reach agents; pr
     },
     pricing_json: null,
   }, { newestQuoteSentAt: null, signedOff: null });
-  assertEquals(pricingOnly.scope_record?.draft, null);
-  assertNoDraftLeak(pricingOnly);
+  assertEquals(pricingOnly.scope_record?.draft, {
+    site: { customer: "Pat Example", mobile: "0400000000" },
+    design: null,
+    pricing: draft.pricing,
+  });
 });
 
 Deno.test("INT-01 status: Sales' completeness rule as booleans only", () => {
@@ -1919,8 +1911,7 @@ Deno.test("INT-01 frozen: the status never comes from the last save, a draft or 
     { newestQuoteSentAt: null, signedOff: null, revisions: none },
   );
   assertEquals(s1.scope_record?.pricing_status, null);
-  assertEquals(s1.scope_record?.draft, { site: ALLOWED_SITE, design: salesDraft().design });
-  assertNoDraftLeak(s1);
+  assertWholeDraft(s1);
 
   // Pricing that does not hash to pricing_hash is not read.
   const rows = await frozenRows(SQ29_JOB, current, patioRecord(1, "frz-1", "Old sheet"));
@@ -1934,7 +1925,6 @@ Deno.test("INT-01 frozen: the status never comes from the last save, a draft or 
   );
   assertEquals(s2.scope_source, "frozen_revision");
   assertEquals(s2.scope_record?.pricing_status, null);
-  assertNoDraftLeak(s2);
 
   // Frozen scope text unusable: the last save is shown, so no status.
   const rows3 = await frozenRows(SQ29_JOB, patioRecord(2, "frz-2", "Roof sheet"), patioRecord(1, "frz-1", "Old sheet"));
@@ -1947,7 +1937,7 @@ Deno.test("INT-01 frozen: the status never comes from the last save, a draft or 
   );
   assertEquals(s3.scope_source, "last_save");
   assertEquals(s3.scope_record?.pricing_status, null);
-  assertNoDraftLeak(s3);
+  assertWholeDraft(s3);
 });
 
 Deno.test("SQ-29 frozen: a frozen text that does not hash to its scope_hash is not used", async () => {

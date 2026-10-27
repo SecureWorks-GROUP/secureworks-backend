@@ -498,6 +498,7 @@ import {
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeRevisionAlignment, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
+import { resolveDossierAudience } from './dossier_audience.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
 import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
@@ -9043,6 +9044,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
       case 'assemble_job_dossier':
       case 'assemble_job_brain': {
+        // INT-01 (Jan, 27 Oct 2026): the dossier and the job story carry every
+        // figure (margin, commission, cost, contacts) for office staff and
+        // their agents, and are never built for a crew, supplier or customer.
+        const audience = resolveDossierAudience(
+          (authMode === 'api_key' && serverSecretPresented) ||
+            (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role)),
+          body?.audience,
+        )
+        if (!audience.ok) return json({ error: audience.error, code: audience.code }, audience.status)
         try {
           return json(await assembleJobDossier(client, body))
         } catch (e) {
