@@ -8,6 +8,9 @@
 //                           a job still in accepted moves to awaiting_deposit (compare and
 //                           set on accepted). A failed send never calls it, so that job
 //                           stays in Accepted, and so does a job with no deposit invoice.
+//                           A deposit emailed by hand from Xero, or sent before the deploy,
+//                           lands the same way when Xero's own sent flag says so
+//                           (depositSentInXero), on the catch-up.
 //   - depositOnInvoiceChange xero-sync calls job_deposit_paid when a client sales invoice of
 //                           a fencing or patio job changes: a job in accepted or
 //                           awaiting_deposit where every paying party has a deposit and
@@ -19,7 +22,8 @@
 //   - depositCatchUp        xero-sync calls job_deposit_catch_up after each run: the same
 //                           paid move for accepted and awaiting_deposit cards whose deposit
 //                           was paid before the switch was on or before the card got there,
-//                           and the same flag check for every job this module moved.
+//                           the Xero-sent landing for accepted cards, and the same flag
+//                           check for every job this module moved.
 //   - clearDepositFlag      a person has dealt with a flag (clear_job_deposit_flag).
 //
 // The client text (captain answer 6): live mode only, only on an automatic move to Order
@@ -53,12 +57,14 @@ import {
   depositPaidTargetStatus,
   type DepositPaidVerdict,
   depositReceivedText,
+  depositSentInXero,
   evaluateDepositPaid,
   isDepositAdvanceJobType,
   isDepositInvoice,
 } from "../_shared/job_deposit_paid.ts";
 import type { CloseoutParty } from "../_shared/job_paid_closeout.ts";
 import type { SmsSendResult } from "./job_closeout.ts";
+import { sentToContactFlag } from "./invoice_read_truth.ts";
 
 /** Jobs per page when the catch-up reads every candidate card. */
 const JOB_PAGE_SIZE = 500;
@@ -68,6 +74,8 @@ const ID_CHUNK = 50;
 
 export const DEPOSIT_PAID_SOURCE = "xero_deposit_paid";
 export const DEPOSIT_SENT_SOURCE = "deposit_invoice_sent";
+/** The move source when Xero's own sent flag lands the job (depositSentInXero). */
+export const DEPOSIT_SENT_IN_XERO_SOURCE = "xero_deposit_sent";
 /** The email_events comms trigger the client text is logged under; send_client_update
  *  deposit_paid dedupes on it, so a hand send after the automatic one is refused. */
 export const DEPOSIT_TEXT_COMMS_TRIGGER = "deposit_paid";
@@ -142,9 +150,10 @@ export interface DepositStateRow {
 const JOB_COLUMNS =
   "id, job_number, type, status, deposit_invoice_id, council_required, client_name, ghl_contact_id";
 // credit_notes projects only Xero's CreditNotes out of raw_json (the client credit notes
-// allocated against the invoice), never the whole blob.
+// allocated against the invoice) and sent_to_contact only Xero's SentToContact, never the
+// whole blob.
 const INVOICE_COLUMNS =
-  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on, job_contact_id, xero_contact_id, credit_notes:raw_json->CreditNotes";
+  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_due, amount_paid, fully_paid_on, job_contact_id, xero_contact_id, credit_notes:raw_json->CreditNotes, sent_to_contact:raw_json->SentToContact";
 const PARTY_COLUMNS =
   "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id";
 const STATE_COLUMNS =
@@ -228,7 +237,11 @@ async function loadFacts(
   const out = new Map<string, DepositFacts>();
   for (const id of jobIds) {
     out.set(id, {
-      invoices: invoices.get(id) ?? [],
+      // Xero's sent flag, true or false only as Xero stored it (invoice_read_truth.ts).
+      invoices: (invoices.get(id) ?? []).map((inv) => ({
+        ...inv,
+        sent_to_contact: sentToContactFlag(inv.sent_to_contact),
+      })),
       parties: parties.get(id) ?? [],
     });
   }
@@ -395,6 +408,54 @@ export async function depositInvoiceSent(
     action: "move_skipped",
     detail: moved?.skipped ?? moved?.error ?? null,
   };
+}
+
+/**
+ * An accepted job whose deposit Xero itself marks sent (emailed by hand from Xero, or sent
+ * before the deploy) lands in Awaiting Deposit, the same as one sent through our send path.
+ */
+async function landSentInXero(
+  deps: JobDepositDeps,
+  job: DepositJobRow,
+  facts: DepositFacts,
+  mode: DepositAdvanceMode,
+  source: string,
+): Promise<DepositResult> {
+  const base = { job_id: job.id, job_number: job.job_number };
+  if (
+    !(DEPOSIT_LAND_FROM_STATUSES as readonly string[]).includes(
+      text(job.status),
+    )
+  ) {
+    return { ...base, action: "not_in_from_status", detail: job.status };
+  }
+  const sent = depositSentInXero({ job, invoices: facts.invoices });
+  if (!sent.sent) return { ...base, action: "not_sent", detail: sent.reasons };
+  if (mode === "dry_run") {
+    return {
+      ...base,
+      action: await recordDryRun(deps, job, {
+        rule: "deposit_sent_in_xero",
+        would_move_to: DEPOSIT_LAND_STATUS,
+        sent_in_xero: sent.sent_invoices,
+        source,
+      }),
+    };
+  }
+  const moved = await deps.moveJobStatus({
+    jobId: job.id,
+    status: DEPOSIT_LAND_STATUS,
+    source: DEPOSIT_SENT_IN_XERO_SOURCE,
+    expected_statuses: [...DEPOSIT_LAND_FROM_STATUSES],
+    skip_ghl_push: true,
+  });
+  return moved?.success === true
+    ? { ...base, action: "moved", detail: { to: DEPOSIT_LAND_STATUS } }
+    : {
+      ...base,
+      action: "move_skipped",
+      detail: moved?.skipped ?? moved?.error ?? null,
+    };
 }
 
 // ── Deposit paid -> Order Materials / Approvals ──────────────────────────────
@@ -728,9 +789,18 @@ export async function depositCatchUp(
     facts.get(id) ?? { invoices: [], parties: [] };
   const results: DepositResult[] = [];
   for (const job of waiting) {
-    // Only a card whose deposits pass the paid rule can move; the rest are not listed.
-    if (!evaluateDepositPaid({ job, ...factsFor(job.id) }).paid) continue;
-    results.push(await settlePaid(deps, job, factsFor(job.id), mode, source));
+    // Only a card whose deposits pass the paid rule, or an accepted card whose deposit
+    // Xero marks sent, can move; the rest are not listed.
+    const jobFacts = factsFor(job.id);
+    if (evaluateDepositPaid({ job, ...jobFacts }).paid) {
+      results.push(await settlePaid(deps, job, jobFacts, mode, source));
+    } else if (
+      (DEPOSIT_LAND_FROM_STATUSES as readonly string[]).includes(
+        text(job.status),
+      ) && depositSentInXero({ job, invoices: jobFacts.invoices }).sent
+    ) {
+      results.push(await landSentInXero(deps, job, jobFacts, mode, source));
+    }
   }
   for (const job of movedJobs) {
     const r = await checkFlag(deps, job, factsFor(job.id), source);

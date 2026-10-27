@@ -1086,8 +1086,9 @@ async function syncInvoices(sb: any) {
   const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
   // ── Deposit advance catch-up: accepted and awaiting_deposit fencing and patio cards whose
-  //    deposits were paid before the card got there or before the switch was on, and moved
-  //    cards whose deposit was since voided (switch on only; ops-api decides).
+  //    deposits were paid before the card got there or before the switch was on, accepted
+  //    cards whose deposit Xero marks sent (landed in Awaiting Deposit), and moved cards
+  //    whose deposit was since voided (switch on only; ops-api decides).
   let depositCatchUp: unknown = { ran: false, reason: 'switch_off' }
   if (await depositAdvanceOn(sb)) {
     depositCatchUp = await postOpsApi('job_deposit_catch_up', { source: 'job_deposit_catch_up' })

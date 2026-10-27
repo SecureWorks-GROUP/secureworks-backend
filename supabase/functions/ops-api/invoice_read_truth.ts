@@ -104,6 +104,11 @@ export function sentToContactOf(rawJson: unknown): boolean | null {
     }
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const flag = (raw as Record<string, unknown>).SentToContact;
+  return sentToContactFlag((raw as Record<string, unknown>).SentToContact);
+}
+
+// The same flag read through a projection (`sent_to_contact:raw_json->SentToContact`):
+// a boolean as Xero stored it, anything else null.
+export function sentToContactFlag(flag: unknown): boolean | null {
   return typeof flag === "boolean" ? flag : null;
 }
