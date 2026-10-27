@@ -38,3 +38,8 @@ ALTER TABLE public.materials_reconciliation_queue
 
 CREATE UNIQUE INDEX IF NOT EXISTS job_materials_facts_invoice_uidx
   ON public.job_materials_facts (xero_invoice_id);
+
+-- Production's queue is one row per bill (20260705000010 materials_recon_invoice_uidx);
+-- the installer holds insert ON CONFLICT on it.
+CREATE UNIQUE INDEX IF NOT EXISTS materials_recon_invoice_uidx
+  ON public.materials_reconciliation_queue (xero_invoice_id);
