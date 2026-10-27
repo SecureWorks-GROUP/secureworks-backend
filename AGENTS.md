@@ -35,8 +35,9 @@ Invariants (do not regress):
 - The `daily-digest` "Unpaid Deposits" section only annotates `AUTHORISED`
   deposits (positive filter) and sends nothing: automated money messages,
   including the acceptance Pay Now SMS, are off (`ops-api/debt_autotexts_off.ts`;
-  one exception, receipts only: Xero emails each paid fencing or patio invoice,
-  `docs/job-receipt-v1.md`).
+  two exceptions, neither asking for money: Xero emails each paid fencing or patio
+  invoice, `docs/job-receipt-v1.md`, and a paid deposit's move to Order Materials
+  texts the client once, `docs/job-deposit-advance-v1.md`).
   `sendPaymentLink` (ops-api `send_payment_link`) throws a 409 for any
   non-AUTHORISED invoice.
 
@@ -539,6 +540,18 @@ Slice 7's install step and its To do rule at Trade scheduled live only in
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
 by `set_dispatch_install_confirmed`, never the calendar's booking lock.
 Contract: `docs/dispatch-slice-7-contract.md`.
+Dispatch v2's board (`pipeline&dispatch=1&board=v2`, `dispatch_arrival`)
+lives only in `dispatch_board.ts`: the list is the REAL job status (five
+statuses; repairs by Repairs stage), Archive is Dispatch-only and never writes
+a status, and `job_dispatch_state` decides nothing there. Moves are the
+existing `update_job_status` / `update_repair_stage`. A Dispatch purchase order
+(`source = 'dispatch'`) is refused by `push_po_to_xero`, `email_po` and
+send-po-email (`_shared/dispatch_po_guard.ts`). A supplier box's delivery
+date (`job_material_suppliers.delivery_date*`) is written only by Accept on a
+supplier reply (`supplier_reply`) and by `dispatch_v2_set_delivery_date`
+(`dispatch_v2_delivery_date.ts`, `by_hand`; it overrides a reply date and
+never touches the job status). Contract:
+`docs/dispatch-v2-board-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 

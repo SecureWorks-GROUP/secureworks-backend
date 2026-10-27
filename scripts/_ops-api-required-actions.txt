@@ -149,6 +149,39 @@ dispatch_order_send                  # probe=source-only
 dispatch_order_reply                 # probe=source-only
 dispatch_email_link_po               # probe=source-only
 
+# ── Ops screen Dispatch tab v2: the draft list, supplier boxes, photos and
+#    supplier order emails sent from admin@ (docs/dispatch-v2-emails-contract.md).
+#    All seventeen are staff-guarded and source-only: dispatch_v2_send_email
+#    sends a supplier email, so no smoke run may fire any of them at
+#    production, even with an invalid bound. ──
+dispatch_v2_materials                # probe=source-only
+dispatch_v2_supplier_search          # probe=source-only
+dispatch_v2_photo_url                # probe=source-only
+dispatch_v2_save_line                # probe=source-only
+dispatch_v2_move_line                # probe=source-only
+dispatch_v2_delete_line              # probe=source-only
+dispatch_v2_suggest_draft            # probe=source-only
+dispatch_v2_add_supplier             # probe=source-only
+dispatch_v2_remove_supplier          # probe=source-only
+dispatch_v2_set_main_supplier        # probe=source-only
+dispatch_v2_upload_photo             # probe=source-only
+dispatch_v2_move_photo               # probe=source-only
+dispatch_v2_delete_photo             # probe=source-only
+dispatch_v2_make_email               # probe=source-only
+dispatch_v2_save_email               # probe=source-only
+dispatch_v2_discard_email            # probe=source-only
+dispatch_v2_send_email               # probe=source-only
+
+# ── Ops screen Dispatch tab v2: one job's Arrival line and install
+#    (docs/dispatch-v2-board-contract.md). A pure read; a bare call is refused
+#    400 "job_id required" before any query. ──
+dispatch_arrival
+
+# ── Ops screen Dispatch tab v2: a supplier order's delivery date set, changed or
+#    cleared by hand (docs/dispatch-v2-board-contract.md, section 3a). A staff
+#    write: source-only, never fired at production by a smoke run. ──
+dispatch_v2_set_delivery_date        # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event
@@ -403,3 +436,7 @@ job_closeout_backlog_preview # probe=source-only
 # Paid-invoice receipt for fencing and patio (job_receipt.ts): Xero emails each newly paid client invoice once
 job_receipt_paid # probe=source-only
 job_receipt_catch_up # probe=source-only
+# Deposit advance for fencing and patio (job_deposit_advance.ts): deposit sent -> Awaiting Deposit, paid -> Order Materials / Approvals
+job_deposit_paid # probe=source-only
+job_deposit_catch_up # probe=source-only
+clear_job_deposit_flag # probe=source-only
