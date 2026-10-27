@@ -14,10 +14,18 @@ Supplier bills in Bills to place (`materials_reconciliation_queue`, status
 | 0 | Any money line on account 306 or 301 (subcontractor labour) | left out, no proposal |
 | 0b | The same supplier document entered more than once: another live bill sharing a document key (its longest 5+ digit run, or all its digits joined without leading zeros, so "00027773" meets "27773" and "Qute 1449582" meets "1449582"), the same ex-GST amount to the cent, and the same supplier (same contact, or the same name without legal words such as Pty Ltd, so "Metecno" meets "Metecno Pty Ltd" but "National Steel" does not meet "National Hire"). An unknown amount or a bill with no supplier identity holds rather than clears | review, low, rule `duplicate_document`, nothing picked. The hold is written to the queue row (`suggestion_reason = duplicate_document`, a held reason), so it lasts if a copy is voided later. The sync never places it, and takes its own earlier automatic fact (any window) off into a held row. An agent or person placement is left; its new duplicate is held and names it |
 | 1 | A job number in the bill reference or any line, or the job of the PO the bill is linked to (`purchase_orders.xero_bill_id`) or names, naming exactly one live job, nothing disagreeing | **placed by the agent** (confidence high) |
-| 2 | Invoice email filed on one job, one site street address, supplier plus amount equals one PO (2% or $5), Xero links a real job: all naming the same one job | proposal, medium, one staff press |
+| 2 | Invoice email filed on one job, one site street address, supplier plus amount equals one priced PO (2% or $5; an unpriced Dispatch order, subtotal 0, is never an amount), Xero links a real job: all naming the same one job | proposal, medium, one staff press |
 | 3 | Two or more jobs from any of the above, a job number not on record or not live, a bill dated more than 14 days before its job existed, more than one rule-1 PO, or a rule-1 PO already linked to or matched by another bill | review, low, candidates listed, nothing picked |
 | 4 | Every money line on an overhead account, or every money line tagged Business Unit SW - GROUP | proposal: not job related |
 | 5 | Anything else | no proposal |
+
+A PO number counts as written the way suppliers write ours: `PO-1000123`,
+`PO1000123`, `PO 1000123` or `PO#1000123`, never inside a longer word or number
+and never the bare digits. A PO named in the text places only when it is not
+`draft`, is the bill's supplier (same Xero contact, or the same supplier name;
+a Dispatch order carries no contact, so only the name can match it, and a name
+that differs goes to a person) and sits on one live job. The Dispatch-order cases
+are the gold set in `bill_prematch_dispatch_po_test.ts` (INT-25.1).
 
 Live means not cancelled or lost and not a holding job (`metadata.do_not_schedule`,
 such as SWF-PDF-BUCKET). Every rule reads the full job population; a failed read

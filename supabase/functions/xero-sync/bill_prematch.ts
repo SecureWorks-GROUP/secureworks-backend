@@ -285,7 +285,18 @@ export function poIsDead(po: { status?: string | null }): boolean {
 export function poNamedIn(po: { po_number: string | null }, text: string): boolean {
   const n = String(po.po_number || "").trim();
   if (n.length < 5 || !/\d/.test(n)) return false;
-  return normWords(text).includes(normWords(n));
+  if (normWords(text).includes(normWords(n))) return true;
+  // Suppliers write our "PO-1000123" as "PO1000123", "PO 1000123" or "PO#1000123"
+  // (INT-25.1). The letters and the whole number must both be there, never
+  // inside a longer word or number, and never the bare digits alone.
+  const m = n.match(/^([A-Za-z]+)[\s#:.-]*(\d+)$/);
+  if (!m) return false;
+  return new RegExp(`(?<![A-Za-z0-9])${m[1]}[\\s#:.-]{0,3}${m[2]}(?![A-Za-z0-9])`, "i").test(text);
+}
+
+/** A purchase order with no price (a Dispatch order: subtotal 0) has no amount to equal. */
+export function poPriced(po: { subtotal: number | null }): boolean {
+  return po.subtotal != null && Number.isFinite(Number(po.subtotal)) && Number(po.subtotal) > 0;
 }
 
 function moneyLines(bill: PrematchBill): PrematchLine[] {
@@ -526,7 +537,8 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
     if (!po.job_id || poIsDead(po)) continue;
     const sameSupplier = (bill.xero_contact_id && po.xero_contact_id === bill.xero_contact_id) ||
       (contactKey.length > 0 && normWords(po.supplier_name).trim() === contactKey);
-    if (!sameSupplier || !amountWithinTolerance(bill.sub_total, po.subtotal, cfg)) continue;
+    // An unpriced PO is unknown, never $0: a small bill does not "equal" it.
+    if (!sameSupplier || !poPriced(po) || !amountWithinTolerance(bill.sub_total, po.subtotal, cfg)) continue;
     const job = ctx.jobsById.get(po.job_id);
     if (job && jobIsLive(job)) add(job, "supplier_amount_po", `${po.po_number || "PO"} amount`);
   }
