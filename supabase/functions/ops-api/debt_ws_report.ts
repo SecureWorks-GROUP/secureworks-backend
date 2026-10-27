@@ -13,9 +13,12 @@
 //
 // The rules are the tab's own: every open invoice gets the category the tab gives it, so the
 // report always matches the tab. Every open Xero invoice lands in exactly one bucket, and the
-// buckets add up to Xero's open total to the cent (the "tie" below). Contacts on the
-// not-chased list (Emergency Trade Services, Builderwest) are left out of the debt total,
-// as the tab's chart leaves them out, and listed under "not counted as debt" instead.
+// buckets add up to the total owed in our Xero copy to the cent (the "tie" below). Contacts
+// on the not-chased list (Emergency Trade Services, Builderwest) are left out of the debt
+// total, as the tab's chart leaves them out, and listed under "not counted as debt" instead.
+// "Total owed to us" (totalOwedFrom) is every open invoice, broken down from the same
+// buckets; whether our copy matches Xero itself comes from the hourly check
+// (debt_ws_xero_check.ts), shown under it.
 //
 // Plain words only: no long dashes and no emoji anywhere in what this file writes.
 
@@ -47,6 +50,7 @@ import {
   type StatementStatus,
 } from "./debt_ws_book.ts";
 import type { WsPayment, WsStatementRow } from "./debt_ws_store.ts";
+import type { XeroCheckView } from "./debt_ws_xero_check.ts";
 
 export const DEBT_REPORT_VERSION = "debt-report/v1";
 /** The day the Debt tab went live: chase history in the tab starts here. */
@@ -88,6 +92,8 @@ export interface DebtReportInput {
   syncedAt: string | null;
   /** Who the report was prepared for or by: "Shaun", or "the Wednesday 12pm auto-send". */
   preparedBy: string;
+  /** The newest check of our Xero copy against Xero (debt_ws_xero_check.ts); null: unread. */
+  xeroCheck?: XeroCheckView | null;
 }
 
 // ── The report, as data ──
@@ -187,6 +193,141 @@ export const REPORT_BUCKETS: Array<
 export const DEBT_BUCKETS: BucketKey[] = REPORT_BUCKETS.filter((b) => b.debt)
   .map((b) => b.key);
 
+// ── Total owed to us (Shaun approved 20 Oct 2026) ──
+//
+// The Debt tab's chart is the debt being chased (the five categories). "Total owed to us"
+// is every open invoice, the same total as Xero's open receivables once our copy matches
+// Xero. Its lines are the report's own buckets, with "not due yet" shown in three parts
+// by the kind the tab already gives each invoice (a progress payment, a company invoice,
+// or anything else), so the lines always add up to the total. No new rule is made here.
+
+export type OwedLineKey =
+  | "debt"
+  | "not_due"
+  | "progress"
+  | "companies"
+  | "deposits"
+  | "not_chased"
+  | "needs_a_look"
+  | "test"
+  | "unplaced";
+
+export interface OwedInvoice {
+  xero_invoice_id: string;
+  invoice_number: string | null;
+  payer: string;
+  job_number: string | null;
+  amount: number;
+  /** One short line: the category and day, the due date, or why it is not debt. */
+  detail: string;
+}
+
+export interface OwedLine {
+  key: OwedLineKey;
+  name: string;
+  sub: string;
+  count: number;
+  amount: number;
+  invoices: OwedInvoice[];
+}
+
+export interface TotalOwed {
+  count: number;
+  amount: number;
+  /** Always shown: debt to needs a look. Test invoices and not placed only when there are any. */
+  lines: OwedLine[];
+  /** The lines add up to the total, invoice for invoice and to the cent. */
+  adds_up: boolean;
+}
+
+const OWED_LINES: Array<
+  { key: OwedLineKey; name: string; sub: string; always: boolean }
+> = [
+  { key: "debt", name: "Debt", sub: "Past due and followed up: the figure above", always: true },
+  { key: "not_due", name: "Not due yet", sub: "Before the tab's due date", always: true },
+  { key: "progress", name: "Progress payments", sub: "Not due yet", always: true },
+  { key: "companies", name: "Companies on statements", sub: "Not due yet", always: true },
+  { key: "deposits", name: "Deposits", sub: "Go-ahead payments: the job starts when paid", always: true },
+  { key: "not_chased", name: "Not chased", sub: "On the not-chased list", always: true },
+  { key: "needs_a_look", name: "Needs a look", sub: "The rules could not place it", always: true },
+  { key: "test", name: "Test invoices", sub: "SAMPLE- reference, ignored", always: false },
+  { key: "unplaced", name: "Not placed", sub: "No rule placed it: check by hand", always: false },
+];
+
+/** Which line of "Total owed to us" a placed invoice belongs to. */
+export function owedLineOf(row: ReportRow): OwedLineKey {
+  if (DEBT_BUCKETS.includes(row.bucket)) return "debt";
+  switch (row.bucket) {
+    case "not_due":
+      return row.lane === "account"
+        ? "companies"
+        : row.stage
+        ? "progress"
+        : "not_due";
+    case "go_ahead":
+      return "deposits";
+    case "not_chased":
+      return "not_chased";
+    case "needs_a_look":
+      return "needs_a_look";
+    case "excluded":
+      return "test";
+    default:
+      return "unplaced";
+  }
+}
+
+function owedDetail(row: ReportRow): string {
+  const bucket = REPORT_BUCKETS.find((b) => b.key === row.bucket);
+  if (DEBT_BUCKETS.includes(row.bucket)) {
+    return `${bucket?.name ?? "Debt"}, day ${row.days}`;
+  }
+  if (row.bucket === "not_due" && row.due) return `Due ${shortDate(row.due)}`;
+  if (row.bucket === "go_ahead" && row.invoice_date) {
+    return `Invoiced ${shortDate(row.invoice_date)}`;
+  }
+  return row.next;
+}
+
+/** "Total owed to us" from the placed invoices (placeOpenInvoices). */
+export function totalOwedFrom(
+  rows: ReportRow[],
+  notChasedNames: string[] = [],
+): TotalOwed {
+  const lines: OwedLine[] = [];
+  for (const def of OWED_LINES) {
+    const mine = rows.filter((r) => owedLineOf(r) === def.key)
+      .sort((a, b) => c(b.amount) - c(a.amount));
+    if (!def.always && !mine.length) continue;
+    lines.push({
+      key: def.key,
+      name: def.name,
+      sub: def.key === "not_chased" && notChasedNames.length
+        ? notChasedNames.join(", ")
+        : def.sub,
+      count: mine.length,
+      amount: sum(mine),
+      invoices: mine.map((r) => ({
+        xero_invoice_id: r.xero_invoice_id,
+        invoice_number: r.invoice_number,
+        payer: r.payer,
+        job_number: r.job_number,
+        amount: r.amount,
+        detail: owedDetail(r),
+      })),
+    });
+  }
+  const amount = sum(rows);
+  const lineCents = lines.reduce((s, l) => s + c(l.amount), 0);
+  const lineCount = lines.reduce((s, l) => s + l.count, 0);
+  return {
+    count: rows.length,
+    amount,
+    lines,
+    adds_up: lineCents === c(amount) && lineCount === rows.length,
+  };
+}
+
 /** A short explanation printed under some invoice sections. */
 const SECTION_NOTES: Partial<Record<BucketKey, string>> = {
   bad_debt:
@@ -262,6 +403,10 @@ export interface DebtReport {
   };
   expected: { d7: Money; d30: Money };
   xero_open: Money;
+  /** Total owed to us: every open invoice, broken down so the lines add up to it. */
+  total_owed: TotalOwed;
+  /** Whether our Xero copy matched Xero at the last hourly check; null when unread. */
+  xero_check: XeroCheckView | null;
   buckets: Record<BucketKey, Money>;
   debt: Money & { share_of_open: number };
   not_chased_names: string[];
@@ -478,10 +623,16 @@ const STATEMENT_WORDS: Record<StatementStatus | "not_chased", string> = {
 
 // ── Building the report ──
 
-export function buildDebtReport(input: DebtReportInput): DebtReport {
-  const { book } = input;
+/**
+ * Every open invoice in exactly one bucket, by the Debt tab's own book. The report, the
+ * Debt tab's "Total owed to us" (totalOwedFrom) and the tie to the total all read this one
+ * placement, so they can never disagree.
+ */
+export function placeOpenInvoices(
+  book: Book,
+  openInvoices: WsInvoice[],
+): ReportRow[] {
   const today = book.today;
-  const year = today.slice(0, 4);
   const jobs = book.jobs;
   const entryBy = new Map(book.entries.map((e) => [e.inv.xero_invoice_id, e]));
   const lookBy = new Map(book.needsALook.map((n) => [n.xero_invoice_id, n]));
@@ -489,9 +640,8 @@ export function buildDebtReport(input: DebtReportInput): DebtReport {
   const xeroDaysOver = (due: string | null | undefined) =>
     due ? Math.max(0, daysBetween(String(due).slice(0, 10), today)) : 0;
 
-  // Every open invoice gets exactly one bucket.
   const rows: ReportRow[] = [];
-  for (const inv of input.openInvoices) {
+  for (const inv of openInvoices) {
     const id = String(inv.xero_invoice_id).toLowerCase();
     const job = inv.job_id ? jobs.get(String(inv.job_id)) ?? null : null;
     const base = {
@@ -578,6 +728,16 @@ export function buildDebtReport(input: DebtReportInput): DebtReport {
       next: "Not placed by any rule: check by hand",
     });
   }
+  return rows;
+}
+
+export function buildDebtReport(input: DebtReportInput): DebtReport {
+  const { book } = input;
+  const today = book.today;
+  const year = today.slice(0, 4);
+
+  // Every open invoice gets exactly one bucket.
+  const rows = placeOpenInvoices(book, input.openInvoices);
 
   const by = (b: BucketKey) => rows.filter((r) => r.bucket === b);
   const buckets = Object.fromEntries(
@@ -797,6 +957,8 @@ export function buildDebtReport(input: DebtReportInput): DebtReport {
     received,
     expected: { d7: upcoming(7), d30: upcoming(30) },
     xero_open: xeroOpen,
+    total_owed: totalOwedFrom(rows, notChasedNames),
+    xero_check: input.xeroCheck ?? null,
     buckets,
     debt: { ...debt, share_of_open: xeroOpen.amount ? debt.amount / xeroOpen.amount : 0 },
     not_chased_names: notChasedNames,
@@ -861,6 +1023,11 @@ function keyPoints(r: DebtReport, rows: ReportRow[]): string[] {
       } in Xero.`,
     );
   }
+  if (r.xero_check && r.xero_check.status === "differs") {
+    out.push(
+      `${r.xero_check.words}. Every figure here comes from our Xero copy, so it is out by those invoices until the next sync heals them.`,
+    );
+  }
   if (r.buckets.not_chased.count) {
     out.push(
       `Not chased: ${money(r.buckets.not_chased.amount)} owed by contacts on the not-chased list${
@@ -890,8 +1057,8 @@ function notes(r: DebtReport): string[] {
     r.tie.ok
       ? `Cross-check. Debt ${money(r.debt.amount)}${parts.length ? ` + ${parts.join(" + ")}` : ""} = ${
         money(r.tie.sum)
-      }, equal to Xero's open total of ${money(r.tie.xero)} (${r.xero_open.count} invoices) to the cent. Every invoice was placed.`
-      : `Cross-check FAILED. The buckets add up to ${money(r.tie.sum)} but Xero's open total is ${money(r.tie.xero)}${
+      }, equal to the total owed to us in our Xero copy, ${money(r.tie.xero)} (${r.xero_open.count} invoices), to the cent. Every invoice was placed.`
+      : `Cross-check FAILED. The buckets add up to ${money(r.tie.sum)} but the total owed to us in our Xero copy is ${money(r.tie.xero)}${
         r.tie.unplaced.length ? `; not placed: ${r.tie.unplaced.join(", ")}` : ""
       }. Check before relying on these figures.`,
   );
@@ -900,6 +1067,7 @@ function notes(r: DebtReport): string[] {
       "Warning: the Debt tab's own category totals did not equal this report's. Check the tab before relying on these figures.",
     );
   }
+  out.push(xeroCheckNote(r.xero_check));
   const feed = r.bank_feed;
   if (feed.status === "unavailable") {
     out.push(
@@ -940,6 +1108,23 @@ function notes(r: DebtReport): string[] {
     `Chase history. The Debt tab went live on ${longDate(DEBT_TAB_LIVE_DATE)} ${DEBT_TAB_LIVE_DATE.slice(0, 4)}, so the Last chase column shows only what was logged in the tab since then.`,
   );
   return out;
+}
+
+/** One sentence on the hourly check of our Xero copy against Xero itself. */
+export function xeroCheckNote(x: XeroCheckView | null): string {
+  if (!x) return "Check against Xero: it could not be read for this report.";
+  if (x.status === "not_checked") {
+    return "Check against Xero: our Xero copy has not been checked against Xero yet (it is checked every hour).";
+  }
+  const when = `at ${perthClock(x.checked_at)} on ${shortDate(perthDateOf(x.checked_at!))}`;
+  if (x.status === "matches") {
+    return `Check against Xero: our Xero copy matched Xero's own open invoices ${when}: ${
+      x.xero?.count ?? 0
+    } invoices, ${money(x.xero?.amount ?? 0)}.`;
+  }
+  return `Check against Xero ${when}: ${x.words}. Xero says ${money(x.xero?.amount ?? 0)} across ${
+    x.xero?.count ?? 0
+  } invoices; our copy says ${money(x.copy?.amount ?? 0)} across ${x.copy?.count ?? 0}.`;
 }
 
 // ── The report as an HTML page (the view, and the copy kept on a send) ──
@@ -989,8 +1174,8 @@ export function debtReportHtml(r: DebtReport): string {
       }</tr>`;
     }).join("");
   const tieLine = r.tie.ok
-    ? `<tr><td class="ok" colspan="3">Check: ${esc(money(r.tie.sum))} equals Xero's open total of ${esc(money(r.tie.xero))} to the cent. Every invoice was placed.</td></tr>`
-    : `<tr><td class="warn" colspan="3">Check failed: the buckets add up to ${esc(money(r.tie.sum))} but Xero's open total is ${
+    ? `<tr><td class="ok" colspan="3">Check: ${esc(money(r.tie.sum))} equals the total owed in our Xero copy, ${esc(money(r.tie.xero))}, to the cent. Every invoice was placed.</td></tr>`
+    : `<tr><td class="warn" colspan="3">Check failed: the buckets add up to ${esc(money(r.tie.sum))} but the total owed in our Xero copy is ${
       esc(money(r.tie.xero))
     }.${r.tie.unplaced.length ? ` Not placed: ${esc(r.tie.unplaced.join(", "))}.` : ""}</td></tr>`;
 
@@ -1012,7 +1197,9 @@ export function debtReportHtml(r: DebtReport): string {
     <div class="kpi"><div class="l">Received, last 7 days</div><div class="v">${
     rec.status === "ok" ? esc(money(rec.d7.amount)) : "Not read"
   }</div><div class="s">${rec.status === "ok" ? `${rec.d7.count} payments; last 30 days ${esc(money(rec.d30.amount))}` : ""}</div></div>
-    <div class="kpi"><div class="l">Total open in Xero</div><div class="v">${esc(money(r.xero_open.amount))}</div><div class="s">${r.xero_open.count} invoices</div></div>
+    <div class="kpi"><div class="l">Total owed to us</div><div class="v">${esc(money(r.total_owed.amount))}</div><div class="s">${r.total_owed.count} invoices${
+    r.xero_check && r.xero_check.status !== "not_checked" ? `; ${esc(r.xero_check.status === "matches" ? "matches Xero" : "does not match Xero")}` : ""
+  }</div></div>
     <div class="kpi hot"><div class="l">Debt (past due, tab rules)</div><div class="v">${esc(money(r.debt.amount))}</div><div class="s">${r.debt.count} invoices, ${
     esc(pct(r.debt.amount, r.xero_open.amount) || "0%")
   } of open</div></div>
@@ -1038,8 +1225,9 @@ export function debtReportHtml(r: DebtReport): string {
         <tr class="sub"><td>Total debt</td><td class="n">${r.debt.count}</td>${R(r.debt.amount)}</tr>
         <tr class="grp"><td colspan="3">Not counted as debt</td></tr>
         ${notCounted}
-        <tr class="tot"><td>Adds up to total open in Xero</td><td class="n">${r.xero_open.count}</td>${R(r.tie.sum)}</tr>
+        <tr class="tot"><td>Adds up to total owed to us</td><td class="n">${r.xero_open.count}</td>${R(r.tie.sum)}</tr>
         ${tieLine}
+        <tr><td class="${r.xero_check?.status === "matches" ? "ok" : "warn"}" colspan="3">${esc(xeroCheckNote(r.xero_check))}</td></tr>
       </table>
       <div class="cols2">
         <div>
@@ -1239,8 +1427,15 @@ export function debtReportSummaryLines(r: DebtReport): string[] {
   }
   lines.push(
     r.tie.ok
-      ? `Total open in Xero: ${money(r.xero_open.amount)} across ${r.xero_open.count} invoices. The report ties to it to the cent.`
-      : `Total open in Xero: ${money(r.xero_open.amount)}. The cross-check did NOT tie: see the notes in the report.`,
+      ? `Total owed to us: ${money(r.total_owed.amount)} across ${r.total_owed.count} invoices. The report ties to it to the cent.`
+      : `Total owed to us: ${money(r.total_owed.amount)}. The cross-check did NOT tie: see the notes in the report.`,
+  );
+  lines.push(
+    !r.xero_check
+      ? "Check against Xero: could not be read."
+      : r.xero_check.status === "not_checked"
+      ? "Check against Xero: not checked yet."
+      : `Check against Xero: ${r.xero_check.words}.`,
   );
   return lines;
 }
@@ -1280,6 +1475,10 @@ export function debtReportTotals(r: DebtReport): Record<string, unknown> {
     today: r.today,
     read_at: r.read_at,
     xero_open: r.xero_open,
+    total_owed: { count: r.total_owed.count, amount: r.total_owed.amount },
+    xero_check: r.xero_check
+      ? { status: r.xero_check.status, checked_at: r.xero_check.checked_at, differ_count: r.xero_check.differ_count }
+      : null,
     debt: { count: r.debt.count, amount: r.debt.amount },
     buckets: r.buckets,
     bank_total: r.bank.status === "ok" ? r.bank.total : null,

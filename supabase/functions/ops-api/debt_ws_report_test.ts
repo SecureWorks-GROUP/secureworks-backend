@@ -551,3 +551,187 @@ Deno.test("auto: a stale copy at 12:00 sends nothing and is recorded as refused,
   assertEquals((again.body as any).sent, true, JSON.stringify(again.body));
   assertEquals(r2.emails.length, 1);
 });
+
+// ── Total owed to us (Shaun approved 20 Oct 2026) ──
+
+function mirrorRow(over: Record<string, unknown> = {}) {
+  return {
+    checked_at: "2026-10-08T01:30:00Z",
+    complete: true,
+    matches: true,
+    xero_count: 8,
+    xero_total: 10131,
+    copy_count: 8,
+    copy_total: 10131,
+    differ_count: 0,
+    differences: [],
+    drafts_count: 2,
+    drafts_total: 1500,
+    error: null,
+    ...over,
+  } as any;
+}
+
+async function overview(store = new FakeStore()) {
+  const { deps } = fakeDeps(store);
+  const res = await call(deps, "debt_ws_overview", STAFF);
+  assertEquals(res.status, 200, JSON.stringify(res.body));
+  return res.body as any;
+}
+
+Deno.test("total owed: every open invoice, and the lines add up to it to the cent", async () => {
+  const ov = await overview();
+  const t = ov.total_owed;
+  assertEquals(t.count, 8);
+  assertEquals(t.amount, 10131);
+  assertEquals(t.adds_up, true);
+  const line = (k: string) => t.lines.find((l: any) => l.key === k);
+  assertEquals(t.lines.map((l: any) => l.key), [
+    "debt",
+    "not_due",
+    "progress",
+    "companies",
+    "deposits",
+    "not_chased",
+    "needs_a_look",
+  ]);
+  // Debt is the chart's figure: the five categories, not-chased left out.
+  assertEquals([line("debt").count, line("debt").amount], [4, 4080]);
+  const book = await loadBook(new FakeStore(), { now: NOW });
+  const tab = categoryTotals(book.entries.filter((e) => e.open && !e.notChased));
+  assertEquals(
+    cents(line("debt").amount),
+    Object.values(tab).reduce((s, x) => s + cents(x.amount), 0),
+  );
+  // MLB's second make-safe is in grace: a company invoice, not due yet.
+  assertEquals([line("companies").count, line("companies").amount], [1, 440]);
+  assertEquals(line("companies").invoices[0].invoice_number, "INV-2008");
+  assertEquals([line("deposits").count, line("deposits").amount], [1, 5000]);
+  assertEquals([line("not_chased").count, line("not_chased").amount], [1, 561]);
+  assertStringIncludes(line("not_chased").sub, "Builderwest");
+  assertEquals([line("needs_a_look").count, line("needs_a_look").amount], [1, 50]);
+  assertEquals([line("not_due").count, line("progress").count], [0, 0]);
+  const sum = t.lines.reduce((s: number, l: any) => s + cents(l.amount), 0) / 100;
+  assertEquals(sum, t.amount);
+  // Each invoice is in exactly one line.
+  const ids = t.lines.flatMap((l: any) => l.invoices.map((i: any) => i.xero_invoice_id));
+  assertEquals(ids.length, t.count);
+  assertEquals(new Set(ids).size, t.count);
+});
+
+Deno.test("total owed: not due yet splits by the kind the tab already gives (progress, company, other)", async () => {
+  const store = new FakeStore();
+  const base = store.invoices.find((i) => i.xero_invoice_id === IDS.progress)!;
+  // A progress payment invoiced today: due in 7 days.
+  store.invoices.push({
+    ...base,
+    xero_invoice_id: "10000000-0000-4000-8000-0000000000f1",
+    invoice_number: "INV-3001",
+    reference: "SWP-90002-PROG25",
+    first_description: "Progress (25%)",
+    amount_due: 700,
+    total: 700,
+    invoice_date: "2026-10-08",
+  });
+  const fin = store.invoices.find((i) => i.xero_invoice_id === IDS.final)!;
+  // A final dated tomorrow: not due yet.
+  store.invoices.push({
+    ...fin,
+    xero_invoice_id: "10000000-0000-4000-8000-0000000000f2",
+    invoice_number: "INV-3002",
+    amount_due: 300,
+    total: 300,
+    invoice_date: "2026-10-09",
+  });
+  const t = (await overview(store)).total_owed;
+  const line = (k: string) => t.lines.find((l: any) => l.key === k);
+  assertEquals(line("progress").invoices.map((i: any) => i.invoice_number), ["INV-3001"]);
+  assertEquals(line("not_due").invoices.map((i: any) => i.invoice_number), ["INV-3002"]);
+  assertStringIncludes(line("not_due").invoices[0].detail, "Due");
+  assertEquals(t.amount, 10131 + 700 + 300);
+  assertEquals(t.adds_up, true);
+});
+
+Deno.test("total owed: the debt report shows the same total and lines as the Debt tab", async () => {
+  const ov = await overview();
+  const { report: r } = await report();
+  assertEquals(r.total_owed.amount, ov.total_owed.amount);
+  assertEquals(
+    r.total_owed.lines.map((l) => [l.key, l.count, l.amount]),
+    ov.total_owed.lines.map((l: any) => [l.key, l.count, l.amount]),
+  );
+  assertEquals(r.total_owed.amount, r.xero_open.amount);
+  const html = debtReportHtml(r);
+  assertStringIncludes(html, "Total owed to us");
+  assertStringIncludes(html, "Adds up to total owed to us");
+  assert(!LONG_DASH_OR_EMOJI.test(html));
+});
+
+Deno.test("xero check: matches, differs (with the invoice numbers), not checked, and unreadable", async () => {
+  // None recorded yet.
+  let ov = await overview();
+  assertEquals(ov.xero_check.status, "not_checked");
+  assertEquals(ov.xero_check.words, "Not checked against Xero yet");
+
+  const store = new FakeStore();
+  store.mirrorCheckRows = [mirrorRow()];
+  ov = await overview(store);
+  assertEquals(ov.xero_check.status, "matches");
+  assertEquals(ov.xero_check.words, "Matches Xero");
+  assertEquals(ov.xero_check.drafts, { count: 2, amount: 1500 });
+
+  store.mirrorCheckRows.push(mirrorRow({
+    checked_at: "2026-10-08T01:45:00Z",
+    matches: false,
+    xero_count: 9,
+    xero_total: 11217.48,
+    differ_count: 2,
+    differences: [
+      { invoice_number: "INV-0034", reason: "missing_from_copy", xero_amount_due: 734.48, copy_amount_due: null, copy_status: "DELETED" },
+      { invoice_number: "INV-0177", reason: "missing_from_copy", xero_amount_due: 352, copy_amount_due: null, copy_status: "DELETED" },
+    ],
+  }));
+  ov = await overview(store);
+  assertEquals(ov.xero_check.status, "differs");
+  assertEquals(ov.xero_check.words, "Does not match Xero: 2 invoices differ (INV-0034, INV-0177)");
+  assertEquals(ov.xero_check.differences[0].words, "Xero says $734.48 is owed; our copy says deleted");
+
+  // A failed newer attempt is reported, and the last complete answer still stands.
+  store.mirrorCheckRows.push(mirrorRow({
+    checked_at: "2026-10-08T01:55:00Z",
+    complete: false,
+    matches: null,
+    error: "Xero asked us to wait (rate limit), so the check did not finish",
+  }));
+  ov = await overview(store);
+  assertEquals(ov.xero_check.status, "differs");
+  assertEquals(ov.xero_check.last_failed.at, "2026-10-08T01:55:00Z");
+
+  // The table cannot be read: never "Matches Xero", and the tab still loads.
+  const broken = new FakeStore();
+  broken.mirrorReadFails = true;
+  ov = await overview(broken);
+  assertEquals(ov.xero_check.status, "not_checked");
+  assertEquals(ov.xero_check.words, "Could not read the check against Xero");
+  assertEquals(ov.total_owed.amount, 10131);
+});
+
+Deno.test("xero check: the report says it under the total, in the notes and in the email", async () => {
+  const store = new FakeStore();
+  store.mirrorCheckRows = [mirrorRow({
+    matches: false,
+    differ_count: 1,
+    differences: [{ invoice_number: "INV-0704", reason: "missing_from_copy", xero_amount_due: 561, copy_status: "DELETED" }],
+  })];
+  const { report: r } = await report(store);
+  assertEquals(r.xero_check?.status, "differs");
+  const html = debtReportHtml(r);
+  assertStringIncludes(html, "does not match Xero");
+  assertStringIncludes(html, "Does not match Xero: 1 invoice differs (INV-0704)");
+  assert(r.key_points.some((k) => k.includes("INV-0704")));
+  assert(r.notes.some((n) => n.startsWith("Check against Xero")));
+  const mail = debtReportEmail(r, { greeting: "Marnin", sentBy: "Shaun" });
+  assertStringIncludes(mail.text, "Check against Xero: Does not match Xero: 1 invoice differs (INV-0704).");
+  assertStringIncludes(mail.text, "Total owed to us: $10,131.00 across 8 invoices.");
+  assert(!LONG_DASH_OR_EMOJI.test(html + mail.text));
+});
