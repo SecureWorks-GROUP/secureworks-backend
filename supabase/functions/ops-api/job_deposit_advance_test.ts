@@ -1022,7 +1022,7 @@ Deno.test("deposit flag: a refund by credit note after the move is flagged once,
   // A rounding credit closed the invoice before the move: part of how it was paid.
   const inv = addDeposit(db, job, {
     amount_paid: 1999.82,
-    credit_notes: [creditNote("cn-r", "CN-0499", 0.18)],
+    raw_json: { CreditNotes: [creditNote("cn-r", "CN-0499", 0.18)] },
   });
   await depositOnInvoiceChange(deps, { job_id: job.id });
   assertEquals(job.status, "order_materials");
@@ -1038,10 +1038,12 @@ Deno.test("deposit flag: a refund by credit note after the move is flagged once,
   // Xero refund: payment taken off, credit note allocated and refunded; still PAID.
   Object.assign(inv, {
     amount_paid: 0,
-    credit_notes: [
-      creditNote("cn-r", "CN-0499", 0.18),
-      creditNote("cn-1", "CN-0500", 1999.82),
-    ],
+    raw_json: {
+      CreditNotes: [
+        creditNote("cn-r", "CN-0499", 0.18),
+        creditNote("cn-1", "CN-0500", 1999.82),
+      ],
+    },
   });
   const r = await depositOnInvoiceChange(deps, {
     job_id: job.id,
@@ -1094,7 +1096,7 @@ Deno.test("deposit flag: a refund by credit note follows the switch like a void"
   assertEquals(job.status, "order_materials");
   Object.assign(inv, {
     amount_paid: 0,
-    credit_notes: [creditNote("cn-1", "CN-0500", 2000)],
+    raw_json: { CreditNotes: [creditNote("cn-1", "CN-0500", 2000)] },
   });
   // off: nothing is read or written.
   settings.deposit_advance_mode = "off";
