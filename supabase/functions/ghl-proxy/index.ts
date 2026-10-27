@@ -26,7 +26,9 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
 //   GET  ?action=get_conversation&contactId=xxx  — GHL conversation thread (last 30 msgs)
 //   GET  ?action=get_my_messages&contactId=xxx    — outbound-only messages (for Trade app)
-//   POST ?action=send_sms   { contactId, message, jobId?, userId?, fromNumber? } — also logs to job_events; sender defaults to +61489267771 (Group Admin)
+//   POST ?action=send_sms   { contactId?, phone?, message, jobId?, userId?, fromNumber?, directSms?, contactName? }
+//        contactId or phone. directSms (SecureSuite raw numbers) finds or creates a plain contact
+//        tagged direct-sms and never opens an opportunity. Sender defaults to +61489267771 (Group Admin).
 //   POST ?action=send_email { contactId, subject, htmlBody }
 //   POST ?action=add_note  { contactId, body, jobId? } — add note to GHL contact
 //   GET  ?action=search_jobs&q=smith&type=patio&limit=30  — search Supabase jobs
@@ -54,6 +56,12 @@ import { computeHash } from '../_shared/evidence/storage.ts'
 import { parseSendSmsRecipient, saveSendSmsEvidence } from './sms_capture.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import { checkSendSmsContactJob } from './send_sms_contact_guard.ts'
+import {
+  contactIdFromDuplicateError,
+  duplicateSearchPhones,
+  plainContactCreateBody,
+  toAuE164,
+} from './direct_sms_contact.ts'
 import {
   assignJobNumberWithNullCas,
   buildGhlContactUpdate,
@@ -119,6 +127,8 @@ import { createCalendarAppointmentAction } from './calendar_appointment.ts'
 import { releaseCalendarAppointmentAction, releaseLedger } from './calendar_appointment_release.ts'
 import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
 import { appointmentLedger, bookingApprovalReader, bookingExecutionReader } from './calendar_appointment_ledger.ts'
+import { linkSkipsXero, patioScoperNoteLines, scopeToolUrl } from './scope_engine_links.ts'
+import { JOB_STATUS_RANK } from '../_shared/job_status_rank.ts'
 import {
   allocationOpportunityCustomFields,
   lookupAllocationOpportunityAction,
@@ -206,7 +216,7 @@ const PRODUCTION_OPS_TO_GHL_STAGES: Record<string, Record<string, string>> = {
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, apikey, x-client-info',
 }
 
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
@@ -1398,14 +1408,16 @@ serve(async (req: Request) => {
       const body = await req.json()
       const { opportunityId, jobId, toolType, contactId } = body
       if (!opportunityId || !jobId) return json({ error: 'opportunityId and jobId required' }, 400)
+      // The Scope Engine patio tool links GHL before Xero is switched on: it asks to skip the Xero contact.
+      const skipXero = linkSkipsXero(body)
 
       const tool = toolType === 'fencing' ? 'fencing' : 'patio'
-      // GitHub Pages hosts the tools
-      const toolUrls: Record<string, string> = {
-        patio: 'https://secureworks-group.github.io/patio/',
-        fencing: 'https://secureworks-group.github.io/fence-designer/',
-      }
-      const scopeUrl = `${toolUrls[tool] || toolUrls.patio}?jobId=${jobId}`
+      // GitHub Pages hosts the tools. The release owner moves a trade to the Scope
+      // Engine page by setting its env address; unset keeps the old tool.
+      const scopeUrl = `${scopeToolUrl(tool, {
+        patio: Deno.env.get('SCOPE_ENGINE_PATIO_URL'),
+        fencing: Deno.env.get('SCOPE_ENGINE_FENCE_URL'),
+      })}?jobId=${jobId}`
       const sbLink = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const jobAccess = await requireSameOrgJob(sbLink, jobId)
       if (!jobAccess.ok) return jobAccess.response
@@ -1497,7 +1509,10 @@ serve(async (req: Request) => {
             // so fencing jobs produced blank notes. Now branches on scope.tool (patio|fencing).
             const scopeToolType = scope.tool || tool
 
-            if (scopeToolType === 'fencing') {
+            if (scopeToolType === 'patio-scoper') {
+              // Scope Engine patio record: family, sealed revision, order lines.
+              lines.push(...patioScoperNoteLines(scope, { ...jobData, job_number: jobNumber }))
+            } else if (scopeToolType === 'fencing') {
               // Fencing shape: scope.job.* with runs[] + colour + profile
               const job = scope.job || {}
               const clientName = [job.clientFirstName, job.clientLastName].filter(Boolean).join(' ')
@@ -1685,9 +1700,9 @@ serve(async (req: Request) => {
         .eq('id', jobId)
         .single()
 
-      // ── Create/find Xero contact (non-blocking) ──
+      // ── Create/find Xero contact (non-blocking; skipped when the caller asks) ──
       let xeroResult: any = null
-      if (jobData?.client_name) {
+      if (jobData?.client_name && !skipXero) {
         try {
           const scope = jobData.scope_json || {}
           const client = scope.client || {}
@@ -1800,6 +1815,7 @@ serve(async (req: Request) => {
         jobNumber,
         leadSource,
         xeroContact: xeroResult ? { id: xeroResult.xero_contact_id, created: xeroResult.created } : null,
+        xeroSkipped: skipXero,
         monetaryValue,
         customFieldsWritten,
         opportunityRenamed,
@@ -4041,10 +4057,6 @@ serve(async (req: Request) => {
               .limit(1)
 
             if (existing && existing.length > 0) {
-              const JOB_STATUS_RANK: Record<string, number> = {
-                draft: 0, quoted: 1, accepted: 2, scheduled: 3,
-                in_progress: 4, complete: 5, invoiced: 6, cancelled: -1,
-              }
               const currentRank = JOB_STATUS_RANK[existing[0].status] ?? 0
               const newRank = JOB_STATUS_RANK[mappedStatus] ?? 0
 
@@ -4145,33 +4157,71 @@ serve(async (req: Request) => {
       const recipient = parseSendSmsRecipient(body)
       if (!recipient.ok) return json({ error: recipient.error }, 400)
 
-      // A4 (make-safe alarms + arrival texts): resolve a RAW phone to a GHL contact
-      // (find-or-create) so a send can target a bare E.164 number, not just an existing
-      // contactId. Backward compatible: contactId callers skip this branch entirely.
+      // A raw phone is resolved to a GHL contact (find-or-create) so the text
+      // goes through the conversation API. contactId callers skip this entirely.
+      // directSms is the SecureSuite path: an Australian number only, and a
+      // contact that does not already exist is created with a name (if given)
+      // and the direct-sms tag. No opportunity either way. Crew and staff
+      // texts leave directSms unset and keep the phone-only contact they had.
+      const directSms = body.directSms === true
+      let contactCreated = false
       if (!contactId && phone) {
-        const normalizedPhone = normalizeAUPhone(phone)
-        try {
-          const searchRes = await ghl(`/contacts/search/duplicate`, {
-            method: 'POST',
-            body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizedPhone }),
-          })
-          if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
-        } catch (e) {
-          console.log('[ghl-proxy] send_sms phone dedup search failed:', e)
-        }
-        if (!contactId) {
+        if (directSms) {
+          const parsed = toAuE164(phone)
+          if (!parsed.ok) return json({ success: false, error: parsed.error, code: 'invalid_phone' }, 400)
+          for (const candidate of duplicateSearchPhones(parsed.e164)) {
+            if (contactId) break
+            try {
+              const searchRes = await ghl(`/contacts/search/duplicate`, {
+                method: 'POST',
+                body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: candidate }),
+              })
+              if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
+            } catch (e) {
+              console.log('[ghl-proxy] send_sms direct dedup search failed:', e)
+            }
+          }
+          if (!contactId) {
+            try {
+              const createRes = await ghl('/contacts/', {
+                method: 'POST',
+                body: JSON.stringify(plainContactCreateBody(parsed.e164, body.contactName, GHL_LOCATION_ID)),
+              })
+              contactId = createRes.contact?.id || null
+              if (contactId) contactCreated = true
+            } catch (e) {
+              rethrowIfGhlRateLimited(e)
+              const errMsg = (e as Error).message || ''
+              const recovered = contactIdFromDuplicateError(errMsg)
+              if (recovered) contactId = recovered
+              else return json({ success: false, error: 'Failed to resolve GHL contact from phone: ' + errMsg, code: 'contact_unresolved' }, 500)
+            }
+          }
+        } else {
+          const normalizedPhone = normalizeAUPhone(phone)
           try {
-            const createRes = await ghl('/contacts/', {
+            const searchRes = await ghl(`/contacts/search/duplicate`, {
               method: 'POST',
-              body: JSON.stringify({ phone, locationId: GHL_LOCATION_ID }),
+              body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizedPhone }),
             })
-            contactId = createRes.contact?.id || null
+            if (searchRes.contact && searchRes.contact.id) contactId = searchRes.contact.id
           } catch (e) {
-            rethrowIfGhlRateLimited(e)
-            const errMsg = (e as Error).message || ''
-            const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
-            if (dupMatch && dupMatch[1]) contactId = dupMatch[1]
-            else return json({ error: 'Failed to resolve GHL contact from phone: ' + errMsg }, 500)
+            console.log('[ghl-proxy] send_sms phone dedup search failed:', e)
+          }
+          if (!contactId) {
+            try {
+              const createRes = await ghl('/contacts/', {
+                method: 'POST',
+                body: JSON.stringify({ phone, locationId: GHL_LOCATION_ID }),
+              })
+              contactId = createRes.contact?.id || null
+            } catch (e) {
+              rethrowIfGhlRateLimited(e)
+              const errMsg = (e as Error).message || ''
+              const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
+              if (dupMatch && dupMatch[1]) contactId = dupMatch[1]
+              else return json({ error: 'Failed to resolve GHL contact from phone: ' + errMsg }, 500)
+            }
           }
         }
       }
@@ -4303,7 +4353,13 @@ serve(async (req: Request) => {
           metadata: { message_id: result.messageId || result.id },
         }).then(() => {}, () => {})
 
-        return json({ success: true, messageId: result.messageId || result.id, evidence: evidenceOutcome })
+        return json({
+          success: true,
+          messageId: result.messageId || result.id,
+          contactId,
+          contactCreated,
+          evidence: evidenceOutcome,
+        })
       } catch (e) {
         rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] send_sms failed:', e)

@@ -34,6 +34,8 @@ function makeClient(opts: {
   unlinked?: any[];
   jobsByContact?: Record<string, { data: any[] | null; error: any | null }>;
   captureEnabled?: boolean;
+  // INT-14: what a guarded link write returns. "lost" = a job was set since the read.
+  linkWrite?: "ok" | "lost" | "error";
 }) {
   const calls: Call[] = [];
   const updates: Array<{ table: string; row: any; id?: string }> = [];
@@ -49,7 +51,8 @@ function makeClient(opts: {
     const b: any = {
       select: (s: string) => {
         call.select = s;
-        mode = "select";
+        // .update(...).select('id') returns the written rows; it stays an update.
+        if (mode !== "update") mode = "select";
         return b;
       },
       update: (row: any) => {
@@ -97,12 +100,21 @@ function makeClient(opts: {
       then: (resolve: any, reject?: any) => {
         calls.push(call);
         if (mode === "update") {
-          updates.push({
-            table,
-            row: updateRow,
-            id: eqFilters.id as string | undefined,
-          });
-          return Promise.resolve({ data: null, error: null }).then(
+          const outcome = opts.linkWrite ?? "ok";
+          if (outcome === "error") {
+            return Promise.resolve({ data: null, error: { message: "write refused" } }).then(resolve, reject);
+          }
+          if (outcome === "ok") {
+            updates.push({
+              table,
+              row: updateRow,
+              id: eqFilters.id as string | undefined,
+            });
+          }
+          return Promise.resolve({
+            data: call.select ? (outcome === "ok" ? [{ id: eqFilters.id }] : []) : null,
+            error: null,
+          }).then(
             resolve,
             reject,
           );
@@ -434,4 +446,105 @@ Deno.test("explicit SES invoice bindings still refuse auto-linking", async () =>
     "test SES-bound invoice link",
   );
   assertEquals(refusal?.code, "sealed_ses_release_required");
+});
+
+// ════════════════════════════════════════════════════════════
+// INT-14 — can an invoice→job decision move revenue? (CFO side, case b)
+//
+// The rule, word for word in both workflows' records and in Context's test:
+//   An invoice→job decision decides only which job an invoice counts on, never
+//   its money: total, amount due, amount paid and status come only from Xero's
+//   own record. xero-sync's reference and exact client-name links may set the
+//   job on an invoice that has none, and never move one already on a job. A
+//   Context decision never writes the invoice row, so it never moves revenue.
+// ════════════════════════════════════════════════════════════
+
+const MONEY_FIELDS = ["total", "sub_total", "total_tax", "amount_due", "amount_paid", "status", "fully_paid_on", "line_items"];
+
+function invoiceLinkWrites(calls: Call[]) {
+  return calls.filter((c) => c.table === "xero_invoices" && c.update);
+}
+
+Deno.test("INT-14: a client_name_exact link writes only the job, never the invoice's money", async () => {
+  const { client, calls } = makeClient({
+    unlinked: UNLINKED,
+    jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
+  });
+  const result = await matchUnlinkedInvoices(client);
+  assertEquals(result.matched, 1);
+  const writes = invoiceLinkWrites(calls);
+  assertEquals(writes.length, 1);
+  assertEquals(Object.keys(writes[0].update as Record<string, unknown>).sort(), ["job_id", "updated_at"]);
+  for (const f of MONEY_FIELDS) assert(!(f in (writes[0].update as Record<string, unknown>)), `link must not write ${f}`);
+});
+
+Deno.test("INT-14: a client_name_exact link never moves an invoice already on a job", async () => {
+  const { client, calls } = makeClient({
+    unlinked: UNLINKED,
+    jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
+  });
+  await matchUnlinkedInvoices(client);
+  const writes = invoiceLinkWrites(calls);
+  assertEquals(writes.length, 1);
+  // Guarded in the write itself: a job set between the read and the write is kept.
+  assert(
+    writes[0].filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null),
+    `the link write must be guarded by job_id is null; got ${JSON.stringify(writes[0].filters)}`,
+  );
+});
+
+Deno.test("INT-14: the reference link writes only the job, and only onto an invoice with none", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const at = src.indexOf("export async function matchUnlinkedInvoices");
+  const fn = src.slice(at, src.indexOf("// Strategy 2: Contact name matches", at));
+  assertStringIncludes(fn, ".is('job_id', null)\n      .eq('invoice_type', type)");
+  assertStringIncludes(
+    fn,
+    ".update({ job_id: job.id, updated_at: new Date().toISOString() })\n            .eq('id', inv.id)\n            .is('job_id', null)",
+  );
+});
+
+Deno.test("INT-14: only invoices with no job are candidates for a link", async () => {
+  const { client, calls } = makeClient({ unlinked: [] });
+  await matchUnlinkedInvoices(client);
+  const reads = calls.filter((c) => c.table === "xero_invoices" && c.select && !c.update);
+  assert(reads.length >= 1);
+  for (const r of reads) {
+    assert(r.filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null), "candidate read must be job_id is null");
+  }
+});
+
+Deno.test("INT-14: a lost race links nothing, records no evidence and counts nothing", async () => {
+  for (const linkWrite of ["lost", "error"] as const) {
+    const orig = console.error;
+    console.error = () => {};
+    try {
+      const { client, calls, inserts } = makeClient({
+        unlinked: UNLINKED,
+        linkWrite,
+        jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
+      });
+      const result = await matchUnlinkedInvoices(client);
+      assertEquals(result.matched, 0, `${linkWrite}: nothing counted`);
+      assertEquals(inserts.filter((i) => i.table === "business_events").length, 0, `${linkWrite}: no invoice.auto_linked evidence`);
+      // The write asked for the rows it changed, so a lost race is visible.
+      assertEquals(invoiceLinkWrites(calls)[0]?.select, "id");
+    } finally {
+      console.error = orig;
+    }
+  }
+});
+
+Deno.test("INT-14: every automatic invoice→job link write is guarded by job_id is null", async () => {
+  const files = ["./index.ts", "../reporting-api/index.ts"];
+  for (const f of files) {
+    const src = await Deno.readTextFile(new URL(f, import.meta.url));
+    const re = /\.update\(\{ job_id: [^}]*\}\)([\s\S]{0,160})/g;
+    let n = 0;
+    for (const m of src.matchAll(re)) {
+      n++;
+      assert(m[1].includes(".is('job_id', null)"), `${f}: unguarded job link write near: ${m[0].slice(0, 120)}`);
+    }
+    assert(n > 0, `${f}: expected job link writes`);
+  }
 });

@@ -1,4 +1,5 @@
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
+import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
@@ -333,11 +334,34 @@ import {
 } from './dispatch_orders_store.ts'
 import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
+import { runDispatchV2RepliesAction } from './dispatch_v2_replies.ts'
+import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
+import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
+// Dispatch v2 slices 5 and 6: draft list, supplier boxes and supplier order
+// emails sent from admin@ through send-outlook-email.
+import {
+  DISPATCH_V2_WRITE_ACTIONS,
+  runDispatchV2Action,
+} from './dispatch_v2_store.ts'
+import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
+// Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
+import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
   dispatchSightedOrderIds,
 } from './dispatch_deliveries.ts'
+import { dispatchPoRefusal, isDispatchPurchaseOrder } from '../_shared/dispatch_po_guard.ts'
+import {
+  applyDispatchBoard,
+  DISPATCH_BOARD_ACTIVE_FILTER,
+  DispatchArrivalError,
+  dispatchArrivalRead,
+  dispatchBoardRequest,
+  emptyDispatchBoardSummary,
+  loadDispatchBoardArchiveCandidates,
+  loadDispatchBoardExtras,
+} from './dispatch_board.ts'
 import {
   purchaseOrderCreatedBy,
   supplierReplyMayMoveOrder,
@@ -481,6 +505,8 @@ import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
+import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
+import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -498,6 +524,7 @@ import {
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeRevisionAlignment, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
+import { resolveDossierAudience } from './dossier_audience.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
 import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
@@ -589,6 +616,12 @@ import {
   validatePersistedTradeInvoiceMoney,
   withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
+import {
+  getRunningInvoiceDraft,
+  RunningDraftError,
+  runningInvoiceDraftEnabled,
+  saveRunningInvoiceDraft,
+} from './trade_invoice_running_draft.ts'
 import {
   loadTradeRecurringDeductionDecision,
   type TradeRecurringDeductionDecision,
@@ -1352,6 +1385,7 @@ import {
   splitReconRow as _splitReconRow,
 } from './materials_recon.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
+import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
 import {
   MAKESAFE_COST_REPORT_ACTION,
@@ -1462,9 +1496,18 @@ import {
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
+import {
+  type DepositFlagBlock,
+  depositInvoiceSent,
+  type JobDepositCaller,
+  type JobDepositDeps,
+  loadDepositFlags,
+  runJobDepositAction,
+} from './job_deposit_advance.ts'
 import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
+import { readAllOpenInvoices, sentToContactOf, summarizeOpenInvoices } from './invoice_read_truth.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -1912,6 +1955,20 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
       code: error.code,
       error: error.message,
       userMessage: error.message,
+    })
+  }
+  throw error
+}
+
+function runningDraftApiError(error: unknown): never {
+  if (error instanceof RunningDraftError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      code: error.code,
+      error: error.message,
+      userMessage: error.message,
+      submitted: false,
+      xero: false,
     })
   }
   throw error
@@ -2581,8 +2638,13 @@ async function reconciliationStateTokens(
   return tokens
 }
 
-function sb() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+// supabase-js 2.99.3 defaults autoRefreshToken to true on every runtime. On Deno 2.5.6
+// window and document are undefined, so the non-browser branch of _handleVisibilityChange starts the interval.
+function sb(options?: { global?: { headers?: Record<string, string> } }) {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    ...options,
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
 }
 
 function sesActionAuth(
@@ -3457,7 +3519,7 @@ export const _notifyMintedDeterministicPhysicalJobForTest =
 // canonical record) — it just cannot SMS. Non-blocking; never throws.
 async function notifyBusinessEventsSms(text: string, source = ''): Promise<void> {
   try {
-    const svc = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    const svc = sb()
     const settings = await _loadNotifySettings(svc)
     if (!_shouldSendAlarmSms(source, settings)) return
     const recipients = (settings.alarm_phones || []).map((p) => String(p || '').trim()).filter(Boolean)
@@ -4901,6 +4963,9 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'my_trade_invoices',
   'get_trade_invoice',
   'save_trade_invoice_draft',
+  'save_running_invoice_draft',
+  'get_running_invoice_draft',
+  'sync_running_invoice_draft',
   'set_trade_rate',
   'update_trade_profile',
   'attach_invoice_pdf',
@@ -5163,6 +5228,7 @@ export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new 
   'makesafe_sent_mirror', // trigger_makesafe_sent_mirror (sw_service_key())
   'makesafe_story_recompute', // trigger_makesafe_story_recompute (sw_service_key())
   'makesafe_status_shadow_refresh', // trigger_makesafe_status_shadow_refresh (sw_service_key())
+  'dispatch_v2_replies_scan', // trigger_dispatch_v2_replies_scan, cron dispatch-v2-replies-scan (sw_service_key())
 ])
 
 export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
@@ -5649,7 +5715,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     console.log(opsApiRequestLogLine(MAKESAFE_COST_REPORT_ACTION, req.method, _costReportActor))
     recordOpsApiActorMissing(sb, 'hmac_link', _costReportActor)
     try {
-      const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const _crClient = sb()
       const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
       if (!_crData) {
         return new Response(renderCostReportError('That job could not be found.'), { status: 404, headers: _crHtml })
@@ -5732,7 +5798,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   } else if (authIntent === 'jwt') {
     // Validate as user JWT (browser request)
     try {
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const adminClient = sb()
       const { data: { user }, error } = await adminClient.auth.getUser(bearerToken!)
       if (error || !user) {
         return new Response(JSON.stringify({ error: 'Session expired — please log in again' }), {
@@ -6025,10 +6091,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // Browser reads/notes carry the verified JWT through to RLS/RPC; the
         // shared and agent server keys are never collector write credentials.
         const performanceClient = authMode === 'jwt'
-          ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-              global: { headers: { Authorization: `Bearer ${bearerToken}` } },
-              auth: { persistSession: false, autoRefreshToken: false },
-            })
+          ? sb({ global: { headers: { Authorization: `Bearer ${bearerToken}` } } })
           : client
         const result = await salesPerformanceAction(
           salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
@@ -7164,6 +7227,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           redactAgreedLabour: authMode === 'jwt' && !_opsApiStaffOperatorRole(authUser?.role),
         }))
       }
+      // Dispatch v2: one job's Arrival line and install (dispatch_board.ts,
+      // docs/dispatch-v2-board-contract.md). A pure read, staff only as
+      // dispatch_materials.
+      case 'dispatch_arrival': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        try {
+          return json(await dispatchArrivalRead(
+            client,
+            url.searchParams.get('job_id') || url.searchParams.get('jobId'),
+            DEFAULT_ORG_ID,
+            _perthTodayYmd(),
+          ))
+        } catch (e) {
+          if (e instanceof DispatchArrivalError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       // Staff-only by the front door's default (not on the trade or routine lists).
       case 'job_notes':
         return json(await jobNotes(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
@@ -7274,6 +7356,154 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             orgId: DEFAULT_ORG_ID,
             actor: deliveriesActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2 slices 5 and 6, the draft list, supplier boxes and supplier
+      // order emails (docs/dispatch-v2-emails-contract.md): three reads and
+      // fourteen writes, gated exactly as slices 4 to 6. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Only dispatch_v2_send_email sends, once per
+      // press, from admin@ through send-outlook-email (test: true sends the
+      // marked copy to admin@ only). Nothing here writes jobs, suppliers.email,
+      // purchase orders or Xero, or posts any event row.
+      case 'dispatch_v2_materials':
+      case 'dispatch_v2_supplier_search':
+      case 'dispatch_v2_photo_url':
+      case 'dispatch_v2_save_line':
+      case 'dispatch_v2_move_line':
+      case 'dispatch_v2_delete_line':
+      case 'dispatch_v2_suggest_draft':
+      case 'dispatch_v2_add_supplier':
+      case 'dispatch_v2_remove_supplier':
+      case 'dispatch_v2_set_main_supplier':
+      case 'dispatch_v2_upload_photo':
+      case 'dispatch_v2_move_photo':
+      case 'dispatch_v2_delete_photo':
+      case 'dispatch_v2_make_email':
+      case 'dispatch_v2_save_email':
+      case 'dispatch_v2_discard_email':
+      case 'dispatch_v2_send_email': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if ((DISPATCH_V2_WRITE_ACTIONS as readonly string[]).includes(action) && req.method !== 'POST') {
+          throw new ApiError(`${action} requires POST`, 405)
+        }
+        const v2Actor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2Action(client, action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: v2Actor,
+            extractMaterialsFromScope: (scopeJson) => extractMaterialsFromScope(scopeJson, null),
+            // The same key and path the make-safe pack emails use.
+            sender: outlookDispatchV2Sender({ supabaseUrl: SUPABASE_URL, apiKey: SW_API_KEY }),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2 slice 8, supplier replies and suggested moves (contract:
+      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and six
+      // presses (POST), gated as the other Dispatch actions. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. They write only the dispatch_v2_* reply
+      // tables, a job_events row, and on Accept the order's confirmed delivery
+      // date: no send, no Xero, never a job stage or status.
+      case 'dispatch_v2_replies':
+      case 'dispatch_v2_replies_unmatched':
+      case 'dispatch_v2_replies_assign':
+      case 'dispatch_v2_replies_confirm_guess':
+      case 'dispatch_v2_replies_reject_guess':
+      case 'dispatch_v2_replies_hide':
+      case 'dispatch_v2_suggestion_accept':
+      case 'dispatch_v2_suggestion_dismiss': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        const repliesRead = action === 'dispatch_v2_replies' || action === 'dispatch_v2_replies_unmatched'
+        if (repliesRead && req.method !== 'GET') throw new ApiError(`${action} requires GET`, 405)
+        if (!repliesRead && req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const repliesActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2RepliesAction(action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: repliesActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            store: postgrestRepliesStore(client),
+            sources: postgrestDispatchRepliesSources(client),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2: a supplier order's delivery date set, changed or cleared
+      // by hand, for example when a supplier confirms by phone
+      // (docs/dispatch-v2-board-contract.md, section 3a; dispatch_v2_delivery_date.ts).
+      // One press (POST), gated as the other Dispatch actions. Absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Writes the supplier box's delivery date
+      // columns (source 'by_hand') and one job_events row: no send, no Xero,
+      // never a job stage or status.
+      case 'dispatch_v2_set_delivery_date': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const deliveryDateActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2DeliveryDateAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: deliveryDateActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            today: _perthTodayYmd(),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // The supplier reply scan (pg_cron dispatch-v2-replies-scan, every 5
+      // minutes, migration 20261023230100). Server key only. Does nothing while
+      // feature flag dispatch_v2_replies_v1 is off. Reads captured mail and
+      // writes only the dispatch_v2_* reply tables: no send, no job write.
+      case 'dispatch_v2_replies_scan': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: dispatch_v2_replies_scan requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'dispatch_v2_replies_scan is POST only', code: 'method_not_allowed' }, 405)
+        }
+        try {
+          return json(await runDispatchV2RepliesAction(action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: { userId: null, email: null, orgId: null },
+            via: 'terminal',
+            store: postgrestRepliesStore(client),
+            sources: postgrestDispatchRepliesSources(client),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -7721,7 +7951,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // extract each PDF's text layer (pdf_mode) and compare the template parse vs the
       // actual draft. Still NO Anthropic call; the PDF extraction is local + deterministic.
       case 'intake_golden_replay': {
-        const goldenAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const goldenAdmin = sb()
         const goldenDownloadPdf = async (storagePath: string): Promise<Uint8Array | null> => {
           try {
             const { data: blob, error } = await goldenAdmin.storage
@@ -8276,6 +8506,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Context reconciliation from a job (CTX-N1, 20261020165000): the
+      // email rows Context places on a job, with how sure and the other jobs
+      // each sits on, and the queued rows that offer the job (defects
+      // included) with the hash a decision echoes. Staff front door (the
+      // default for an action on no static, profile, routine or agent list),
+      // GET only, read-only SQL functions, nothing written.
+      case 'context_job_mail':
+      case 'recon_job_items': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(action === 'context_job_mail'
+            ? await contextJobMail(client, url.searchParams)
+            : await reconJobItems(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof ContextJobReconError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Job story (story slice S2): the story of one job, its client's story,
       // and the done-definition scorecard. Staff front door (the default for an
       // action on no static, profile, routine or agent list), GET only,
@@ -8347,6 +8596,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await ledgerPersonEdit(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
         } catch (error) {
           if (error instanceof LedgerPersonEditError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Reconciliation daily list (CTX-R1, 20261020160000): the resolver's
+      // ranked list and the one-tap decision on an item. Staff front door (the
+      // default for an action on no static, profile, routine or agent list).
+      // recon_daily_list is GET only and writes nothing; recon_record_decision
+      // is POST only and the person is the verified session user, never a body
+      // field, so a server key call is refused (a decision needs a person).
+      case 'recon_daily_list':
+      case 'recon_record_decision': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        try {
+          if (action === 'recon_daily_list') {
+            if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+            return json(await reconDailyList(client, url.searchParams))
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          return json(await reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
+        } catch (error) {
+          if (error instanceof ReconDecisionError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }
@@ -8686,6 +8956,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
       }
+      // ── Deposit advance for fencing and patio (job_deposit_advance.ts;
+      // docs/job-deposit-advance-v1.md). Server key only for the two that move or text;
+      // a signed-in staff operator may clear a voided-deposit flag.
+      case 'job_deposit_paid':
+      case 'job_deposit_catch_up':
+      case 'clear_job_deposit_flag': {
+        const depositCaller: JobDepositCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' }
+          : _opsApiCallerIsStaffOperator(authMode, authUser)
+          ? { kind: 'staff', email: authUser?.email || null }
+          : { kind: 'none' }
+        const deposit = await runJobDepositAction(action, req.method, body || {}, depositCaller, jobDepositDeps(client))
+        return json(deposit.body, deposit.status)
+      }
       // ── Paid-invoice receipt for fencing and patio (job_receipt.ts; docs/job-receipt-v1.md).
       // Server key only: xero-sync posts these, and both can have Xero email a customer.
       case 'job_receipt_paid':
@@ -8859,6 +9143,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : await jobProfitListAction(client, url.searchParams)
         return json(out.body, out.status)
       }
+      // ── Job trace (INT-34) — read only; the chain link by link. An
+      //    admin/owner session gets the Money-page figures, the ops key the
+      //    figure-free shape (job_trace.ts) ──
+      case 'job_trace': {
+        const view = jobTraceView(authMode, authUser?.role)
+        if (!view) {
+          return json({
+            ok: false,
+            code: 'operator_access_required',
+            error: 'job_trace requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        const out = await jobTraceAction(client, url.searchParams, view)
+        return json(out.body, out.status)
+      }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       // The sealed-SES read exemption (captain, 2026-08-02) needs the resolved
       // operator identity, not a request parameter: the ops key, or an
@@ -9029,6 +9328,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
       case 'assemble_job_dossier':
       case 'assemble_job_brain': {
+        // INT-01 (Jan, 27 Oct 2026): the dossier and the job story carry every
+        // figure (margin, commission, cost, contacts) for office staff and
+        // their agents, and are never built for a crew, supplier or customer.
+        const audience = resolveDossierAudience(
+          (authMode === 'api_key' && serverSecretPresented) ||
+            (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role)),
+          body?.audience,
+        )
+        if (!audience.ok) return json({ error: audience.error, code: audience.code }, audience.status)
         try {
           return json(await assembleJobDossier(client, body))
         } catch (e) {
@@ -9773,7 +10081,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'create_trade_user': {
         const { email, password, name, role, phone } = body
         if (!email || !password || !name) return json({ error: 'email, password, name required' }, 400)
-        const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const adminClient = sb()
         const { data: authUser, error: authErr } = await adminClient.auth.admin.createUser({
           email, password, email_confirm: true,
           user_metadata: { full_name: name }
@@ -9940,17 +10248,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
             })
           } catch { /* non-blocking */ }
+          await landJobAfterDepositInvoiceSent(client, directSendInvoice?.job_id || siJobId, siId, 'send_invoice_email')
           return json({ success: true, emailed: true, via: 'xero_direct' })
         }
 
         // Enhanced path: to_email provided → delegate to extracted, testable helper.
-        return await _verifyAndSendInvoiceEmail({
+        const siResponse = await _verifyAndSendInvoiceEmail({
           client, body,
           getToken, xeroGet, logBusinessEvent,
           fetch: globalThis.fetch.bind(globalThis),
           xeroFetch: xeroAccountingFetch,
           env: { XERO_API_BASE, SUPABASE_URL, SW_API_KEY: Deno.env.get('SW_API_KEY') || '' },
         })
+        // A deposit invoice that reached the client lands its job in Awaiting Deposit.
+        if (siResponse.ok) {
+          const siResult = await siResponse.clone().json().catch(() => null)
+          if (siResult?.success === true) {
+            await landJobAfterDepositInvoiceSent(client, directSendInvoice?.job_id || siJobId, siId, 'send_invoice_email')
+          }
+        }
+        return siResponse
       }
 
       case 'approve_and_send_invoice': {
@@ -10012,6 +10329,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
         // 3. Determine if we should send branded email
         let asBrandedSent = false
+        let asXeroEmailed = false
         const asUseBranded = body.use_branded_email !== false
 
         if (asUseBranded) {
@@ -10071,9 +10389,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // Send plain Xero email
           try {
             await xeroPost(`/Invoices/${asId}/Email`, asAt, asTi, {}, 'POST')
+            asXeroEmailed = true
           } catch (e) {
             console.log('[approve_and_send] Xero email failed:', (e as Error).message)
           }
+        }
+
+        // A deposit invoice that reached the client lands its job in Awaiting Deposit.
+        if (asBrandedSent || asXeroEmailed) {
+          await landJobAfterDepositInvoiceSent(client, asPrevInv?.job_id, asId, 'approve_and_send_invoice')
         }
 
         return json({
@@ -11415,6 +11739,33 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true, status: aarNewStatus })
       }
 
+      // Save a weekly invoice draft. The ops server key or a staff session
+      // may store one. It cannot submit, authorise, pay, or create a Xero
+      // bill. Not a profile-scoped trade action, and not on the read-only
+      // agent or routine allow-lists.
+      case 'agent_save_running_invoice_draft': {
+        const agentOk = authMode === 'api_key'
+        const staffOk = authMode === 'jwt' && _opsApiCallerIsStaffOperator(authMode, authUser)
+        if (!agentOk && !staffOk) {
+          throw new ApiError(
+            'An agent can only save a draft. It cannot submit, send, authorise, pay, or create a Xero bill.',
+            403,
+            {
+              ok: false,
+              code: 'agent_draft_only',
+              error: 'An agent can only save a draft. It cannot submit, send, authorise, pay, or create a Xero bill.',
+              submitted: false,
+              xero: false,
+            },
+          )
+        }
+        try {
+          return json(await saveRunningInvoiceDraft(client, String(body?.user_id || ''), body, 'agent'))
+        } catch (error) {
+          runningDraftApiError(error)
+        }
+      }
+
       // ── Trade (mobile) — JWT auth required ──
       case 'trade_calendar':
         return await handleTradeCalendarAction(req, client)
@@ -11454,6 +11805,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // (Deno check: unreachable get_trade_invoice / save_trade_invoice_draft).
       case 'get_trade_invoice':
       case 'save_trade_invoice_draft':
+      case 'save_running_invoice_draft':
+      case 'get_running_invoice_draft':
+      case 'sync_running_invoice_draft':
       case 'set_trade_rate':
       case 'update_trade_profile':
       case 'attach_invoice_pdf':
@@ -12231,6 +12585,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             })
           }
 
+          case 'get_running_invoice_draft':
+            try {
+              return json(await getRunningInvoiceDraft(
+                client,
+                tradeUser.id,
+                url.searchParams.get('week_start') || body?.week_start || null,
+              ))
+            } catch (error) {
+              runningDraftApiError(error)
+            }
+          case 'save_running_invoice_draft':
+            try {
+              return json(await saveRunningInvoiceDraft(client, tradeUser.id, body, 'staff'))
+            } catch (error) {
+              runningDraftApiError(error)
+            }
+          case 'sync_running_invoice_draft':
+            try {
+              return json(await saveRunningInvoiceDraft(client, tradeUser.id, body, 'auto'))
+            } catch (error) {
+              runningDraftApiError(error)
+            }
           case 'save_trade_invoice_draft': {
             const { week_start: draftWeekStart, extra_items: draftExtras, notes: draftNotes, labour_lines: draftLabour } = body
 
@@ -16968,6 +17344,11 @@ export const PIPELINE_PRICING_PROJECTION = [
   'pj_total:pricing_json->total',
   'pj_split_neighbours:pricing_json->neighbour_splits->neighbours',
   'pj_job_neighbours:pricing_json->job->neighbours',
+  // The tool that wrote the pricing (`patio-scoper` for the Scope Engine), so a job
+  // list card can open the right scope tool without the scope blob. Added back to
+  // the row only when it is a string (`pipelineScopeToolField`), so every row whose
+  // pricing names no tool keeps its exact previous shape.
+  'pj_tool:pricing_json->tool',
 ]
 
 // The alias half of each entry, derived rather than restated: adding a projection
@@ -17006,7 +17387,8 @@ export function pipelinePricingProjectionValues(row: any) {
 // instead of to wrong numbers.
 //
 // Detection is server-side: the same base filters as the main read, fencing only,
-// a non-null/non-empty blob, and all four projected paths NULL. The empty-object
+// a non-null/non-empty blob, and every projected path NULL (a string blob
+// reads NULL on the tool path too, so adding it narrows nothing that can be malformed). The empty-object
 // exclusion is load-bearing: 56 live fencing rows match the null-path predicates,
 // but every blob is `{}` (112 bytes total) and cannot contain neighbours. Excluding
 // them left zero candidates in the read-only 2026-07-20 check. A returned non-empty
@@ -17036,6 +17418,11 @@ export function pipelinePricingFallbackNeighbours(blob: any) {
   if (!pj || typeof pj !== 'object') return null
   const ns = pj.neighbour_splits?.neighbours || pj.job?.neighbours
   return Array.isArray(ns) ? ns : null
+}
+
+// Appended last on the pipeline row, and only when the pricing names its tool.
+export function pipelineScopeToolField(row: any): { pj_tool?: string } {
+  return typeof row?.pj_tool === 'string' && row.pj_tool ? { pj_tool: row.pj_tool } : {}
 }
 
 export function stripPipelinePricingAliases(row: any) {
@@ -17127,6 +17514,35 @@ export function _pipelineVisitDateMaps(
   return { next, last }
 }
 
+// An empty board must pre-allocate the same column keys as a populated one.
+// The two early returns used to answer with the old eight keys, so a repair
+// filter or a job read with no rows dropped scheduled, order_materials,
+// archived and the rest. Each call returns a fresh object: the success path
+// pushes into these arrays.
+function emptyPipelineColumns(): Record<string, any[]> {
+  return {
+    draft: [],
+    quoted: [],
+    partially_accepted: [],
+    accepted: [],
+    awaiting_deposit: [],
+    approvals: [],
+    order_materials: [],
+    processing: [],
+    awaiting_supplier: [],
+    order_confirmed: [],
+    schedule_install: [],
+    scheduled: [],
+    in_progress: [],
+    rectification: [],
+    complete: [],
+    final_payment: [],
+    invoiced: [],
+    get_review: [],
+    archived: [],
+  }
+}
+
 async function pipeline(
   client: any,
   params: URLSearchParams,
@@ -17139,20 +17555,39 @@ async function pipeline(
   // stay byte-identical: same selects, same enrichment, same row keys.
   const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
   // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
-  // absent: nothing below changes for any existing caller.
+  // absent, a populated board's keys stay as they are. An empty plain pipeline
+  // returns the same nineteen column keys as a populated one
+  // (`emptyPipelineColumns`). Dispatch fields are added only when `dispatch=1`.
   const dispatchList = isDispatchListRequested(params)
   // An empty Dispatch answer still says the stage and materials reads had
   // nothing to fail on, so a search with no match never reads as a failed
   // load (docs/dispatch-slice-3-contract.md, docs/dispatch-slice-4-contract.md).
+  // Dispatch v2 board (dispatch_board.ts, docs/dispatch-v2-board-contract.md):
+  // opt-in with `board=v2` on top of `dispatch=1`. Absent, the Dispatch list
+  // answers exactly as before.
+  const dispatchBoard = dispatchList ? dispatchBoardRequest(params) : null
+  const dispatchBoardToday = _perthTodayYmd()
   const dispatchEmpty = dispatchList
-    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok', dispatch_deliveries: 'ok' }
+    ? {
+      dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok', dispatch_deliveries: 'ok',
+      ...(dispatchBoard ? { board: emptyDispatchBoardSummary(dispatchBoard, dispatchBoardToday, !!search) } : {}),
+    }
     : {}
+  // Archive (no search): only jobs with an install booking in the last weeks
+  // can be in it, so the job read is narrowed to those first. Null = read
+  // every accepted job (too many to list, or the narrowing read failed).
+  const dispatchArchiveIds = dispatchBoard?.view === 'archive' && !search
+    ? await loadDispatchBoardArchiveCandidates(client, dispatchBoardToday)
+    : null
+  if (dispatchArchiveIds && dispatchArchiveIds.length === 0) {
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+  }
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
 
   if (repairJobIds && repairJobIds.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+    return { columns: emptyPipelineColumns(), total: 0, ...dispatchEmpty }
   }
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -17178,7 +17613,12 @@ async function pipeline(
     else if (typeFilter) scoped = scoped.eq('type', typeFilter)
     // Make-safe jobs are off the Dispatch list and come back only for a search;
     // a repair-family card typed makesafe is a repair and stays on it.
-    else if (dispatchList && !search) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
+    // The v2 board never lists make-safes, even for a search.
+    else if (dispatchList && (!search || dispatchBoard)) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
+    // v2 Active: the five board statuses, or a repair (its Repairs stage is
+    // checked in code). v2 Archive: the narrowed ids, when there are any.
+    if (dispatchBoard?.view === 'active') scoped = scoped.or(DISPATCH_BOARD_ACTIVE_FILTER)
+    if (dispatchArchiveIds) scoped = scoped.in('id', dispatchArchiveIds)
     return scoped
   }
 
@@ -17275,7 +17715,7 @@ async function pipeline(
   }
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
+    return { columns: emptyPipelineColumns(), total: 0, ...dispatchEmpty }
   }
 
   // The default response keeps its non-draft enrichment scope. Stage truth
@@ -17287,6 +17727,15 @@ async function pipeline(
   const closeoutRead: Promise<Map<string, CloseoutBlock> | null> | null = opts.includeCloseout
     ? loadCloseoutBlocks(client, jobs).catch((e) => {
       console.error('[pipeline] closeout read failed:', (e as Error)?.message)
+      return null
+    })
+    : null
+  // Deposit flag (job_deposit_advance.ts): a fencing or patio card whose deposit was voided
+  // or unpaid after it moved on, for a person to decide. Same callers as the close-out block.
+  const depositFlagJobIds = jobs.filter((j: any) => j.type === 'fencing' || j.type === 'patio').map((j: any) => String(j.id))
+  const depositFlagRead: Promise<Map<string, DepositFlagBlock> | null> | null = opts.includeCloseout && depositFlagJobIds.length
+    ? loadDepositFlags(client, depositFlagJobIds).catch((e) => {
+      console.error('[pipeline] deposit flag read failed:', (e as Error)?.message)
       return null
     })
     : null
@@ -17311,6 +17760,11 @@ async function pipeline(
   // job, a draft included, so neither depends on the job's status
   // (dispatch_stage.ts, dispatch_materials.ts).
   const dispatchJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
+  // v2 board only: stage change events and the Arrival line's reads. Starts
+  // beside the enrichment wave and never rejects.
+  const dispatchBoardExtrasRead = dispatchBoard
+    ? loadDispatchBoardExtras(client, dispatchJobIds)
+    : null
 
   if (jobIds.length > 0 || dispatchJobIds.length > 0) {
     ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes, materialsRes] = await Promise.all([
@@ -17456,6 +17910,8 @@ async function pipeline(
   if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const closeoutBlocks = closeoutRead ? await closeoutRead : null
   if (closeoutRead && !closeoutBlocks) enrichmentErrors.push('pipeline.closeout')
+  const depositFlags = depositFlagRead ? await depositFlagRead : null
+  if (depositFlagRead && !depositFlags) enrichmentErrors.push('pipeline.deposit_flag')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -17562,7 +18018,7 @@ async function pipeline(
     }
   }
 
-  const enriched = jobs.map((j: any) => {
+  const enrichedRows = jobs.map((j: any) => {
     const { value, neighbours } = pipelinePricingProjectionValues(j)
     // Neighbour count for fencing shared fence badge. Rows whose blob is a
     // double-encoded string are recovered above via the malformed-blob probe, which
@@ -17634,6 +18090,8 @@ async function pipeline(
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
         ? { closeout: closeoutBlocks?.get(String(j.id)) ?? null }
         : {}),
+      ...(depositFlags?.has(String(j.id)) ? { deposit_flag: depositFlags.get(String(j.id)) } : {}),
+      ...pipelineScopeToolField(j),
     }
     if (stageTruth && stageTruthRows) {
       Object.assign(
@@ -17657,6 +18115,20 @@ async function pipeline(
       )
       : pipelineRow
   }).filter(isListedPipelineRow)
+  // v2 board: keep the jobs on the view asked for, each with its `board`
+  // object. The raw rows still carry the `ds_` aliases the rows above drop.
+  const dispatchBoardResult = dispatchBoard && dispatchBoardExtrasRead
+    ? applyDispatchBoard(enrichedRows, new Map(jobs.map((j: any) => [String(j.id), j])), {
+      request: dispatchBoard,
+      today: dispatchBoardToday,
+      now: new Date(),
+      searching: !!search,
+      bookings: assignRes.error ? null : (assignRes.data || []),
+      invoicesReadOk: !invoiceRes.error,
+      extras: await dispatchBoardExtrasRead,
+    })
+    : null
+  const enriched = dispatchBoardResult ? dispatchBoardResult.rows : enrichedRows
 
   // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
   // status as its own column key. The widened .in('status', [...]) filter
@@ -17668,27 +18140,7 @@ async function pipeline(
   // the canonical status set: supabase/functions/_shared/stage-gate/job-state-machine.ts.
   // The legacy `deposit → accepted` and `scheduled → processing` merges
   // are preserved deliberately; existing frontend column headers depend on them.
-  const columns: Record<string, any[]> = {
-    draft: [],
-    quoted: [],
-    partially_accepted: [],
-    accepted: [],
-    awaiting_deposit: [],
-    approvals: [],
-    order_materials: [],
-    processing: [],
-    awaiting_supplier: [],
-    order_confirmed: [],
-    schedule_install: [],
-    scheduled: [],
-    in_progress: [],
-    rectification: [],
-    complete: [],
-    final_payment: [],
-    invoiced: [],
-    get_review: [],
-    archived: [],
-  }
+  const columns = emptyPipelineColumns()
   for (const j of enriched) {
     // Legacy merge preserved: deposit → accepted.
     // 2026-06-02: removed scheduled → processing merge so Scheduled column renders its own jobs.
@@ -17711,6 +18163,7 @@ async function pipeline(
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
     ...(dispatchList ? { dispatch_deliveries: dispatchDeliveriesOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchBoardResult ? { board: dispatchBoardResult.summary } : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
@@ -17718,6 +18171,9 @@ async function pipeline(
 }
 
 export const _pipelineForTest = pipeline
+// The Dispatch order refusal tests drive the real two functions.
+export const _pushPOToXeroForTest = pushPOToXero
+export const _emailPOForTest = emailPO
 // Dispatch slice 4's suggestion runs this extractor unchanged; its tests drive
 // the real one rather than a copy.
 export const _extractMaterialsFromScopeForTest = extractMaterialsFromScope
@@ -17824,6 +18280,8 @@ async function jobDetail(
       invoices = data || []
     }
   }
+  // Xero's own sent flag from the stored Xero record (INT-36).
+  invoices = invoices.map((inv: any) => ({ ...inv, sent_to_contact: sentToContactOf(inv.raw_json) }))
 
   // Build invoice summary: quoted vs invoiced vs paid
   const job = jobRes.data
@@ -18006,6 +18464,19 @@ async function jobDetail(
       closeoutBlock = null
     }
   }
+  // Deposit flag (job_deposit_advance.ts), fencing and patio only, staff only: the open
+  // flag after a deposit was voided or no longer paid once the job moved on, null when
+  // there is none; deposit_flag_unreadable when the read failed (never read as none).
+  let depositFlag: DepositFlagBlock | null | undefined
+  let depositFlagUnreadable = false
+  if (opts.includeCloseout && (job?.type === 'fencing' || job?.type === 'patio')) {
+    const flags = await loadDepositFlags(client, [String(job.id)]).catch(() => null)
+    if (flags) depositFlag = flags.get(String(job.id)) ?? null
+    else {
+      depositFlag = null
+      depositFlagUnreadable = true
+    }
+  }
 
   return {
     job: jobLite,
@@ -18048,6 +18519,8 @@ async function jobDetail(
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
     ...(closeoutBlock !== undefined ? { closeout: closeoutBlock } : {}),
+    ...(depositFlag !== undefined ? { deposit_flag: depositFlag } : {}),
+    ...(depositFlagUnreadable ? { deposit_flag_unreadable: true } : {}),
   }
 }
 
@@ -18066,11 +18539,11 @@ async function listInvoices(client: any, params: URLSearchParams) {
   if (jobId && !jobId.match(/^[0-9a-f]{8}-/i)) {
     const { data: found } = await client.from('jobs').select('id').ilike('job_number', jobId).limit(1)
     if (found?.[0]) jobId = found[0].id
-    else return { invoices: [], total: 0, summary: { outstanding: 0, overdue: 0, total: 0 }, _note: `No job found for job_number: ${jobId}` }
+    else return { invoices: [], total: 0, summary: { outstanding: 0, overdue: 0, total: 0, summary_error: null }, _note: `No job found for job_number: ${jobId}` }
   }
 
   let query = client.from('xero_invoices')
-    .select('id, xero_invoice_id, invoice_number, contact_name, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id', { count: 'exact' })
+    .select('id, xero_invoice_id, invoice_number, contact_name, sub_total, total_tax, total, amount_due, amount_paid, status, due_date, invoice_date, reference, job_id, sent_to_contact:raw_json->SentToContact', { count: 'exact' })
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .order('invoice_date', { ascending: false })
@@ -18096,20 +18569,27 @@ async function listInvoices(client: any, params: URLSearchParams) {
   const { data, error, count } = await query
   if (error) throw error
 
-  // Summary: total outstanding and overdue
+  // Summary: total outstanding and overdue. A failed or incomplete read, or an
+  // open invoice with no amount due on record, gives no figures and names its
+  // reason (INT-35, R-22); it never reads as $0.
   const todayStr = new Date().toISOString().slice(0, 10)
-  const { data: openInvs } = await client.from('xero_invoices')
+  const openRead = await readAllOpenInvoices((from, to) => client.from('xero_invoices')
     .select('status, amount_due, due_date')
     .eq('org_id', DEFAULT_ORG_ID)
     .eq('invoice_type', type)
     .in('status', ['AUTHORISED', 'SUBMITTED'])
+    .order('id', { ascending: true })
+    .range(from, to))
+  const { outstanding, overdue, summary_error } = summarizeOpenInvoices(openRead, todayStr)
+  if (summary_error) console.error(`[list_invoices] summary unknown: ${summary_error}`)
 
-  const outstanding = (openInvs || []).reduce((s: number, i: any) => s + (i.amount_due || 0), 0)
-  const overdue = (openInvs || [])
-    .filter((i: any) => i.due_date && i.due_date < todayStr)
-    .reduce((s: number, i: any) => s + (i.amount_due || 0), 0)
+  // Xero's own sent flag (INT-36): true or false only as Xero's record says.
+  const invoices = (data || []).map((row: any) => ({
+    ...row,
+    sent_to_contact: typeof row.sent_to_contact === 'boolean' ? row.sent_to_contact : null,
+  }))
 
-  return { invoices: data || [], total: count || 0, summary: { outstanding, overdue, total: count || 0 } }
+  return { invoices, total: count || 0, summary: { outstanding, overdue, total: count || 0, summary_error } }
 }
 
 // ── Finance Health summary (read-only) ──
@@ -18293,7 +18773,7 @@ async function listPOs(client: any, params: URLSearchParams) {
   const supplier = params.get('supplier')
 
   let query = client.from('purchase_orders')
-    .select('*, jobs:job_id(job_number, client_name, type), communications:po_communications(id, direction, from_email, subject, created_at, communication_type)')
+    .select('*, jobs:job_id(job_number, client_name, type, status), communications:po_communications(id, direction, from_email, subject, created_at, communication_type)')
     .eq('org_id', DEFAULT_ORG_ID)
     .neq('status', 'deleted')
     .order('created_at', { ascending: false })
@@ -18311,6 +18791,9 @@ async function listPOs(client: any, params: URLSearchParams) {
     job_number: po.jobs?.job_number || null,
     client_name: po.jobs?.client_name || null,
     job_type: po.jobs?.type || null,
+    // The job's status, so the Purchase Orders board can keep orders on
+    // finished jobs off it. Null when the order has no job.
+    job_status: po.jobs?.status || null,
     jobs: undefined,
   }))
 
@@ -18692,16 +19175,23 @@ async function getJobConversation(client: any, body: any) {
   //    R0): how the ladder placed the row, so a reader can see why it is on
   //    this job. placement_rule is metadata.placement_rule (null until the
   //    placement rules that write it ship).
+  //    (CTX-T22) The rows follow a person's reconciliation decisions as the job
+  //    card does (context_job_card_decisions): a row a split, correct or confirm
+  //    put on the job is listed with placed_by_person, one a decision took off
+  //    is not. A failed decisions read is named in person_decisions_read_failed.
   const eventMessages: any[] = []
+  let personDecisionsReadFailed: string | null = null
   try {
-    const { rows: bev, error: bevErr } = await readBusinessEventsBySourceTime(client, {
+    const { rows: bev, error: bevErr, decisionsError } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: TIMELINE_MESSAGE_COLUMNS,
       limit,
       since: sinceFilter,
       until,
       messagesOnly: true,
+      personDecisions: true,
     })
+    if (decisionsError) personDecisionsReadFailed = decisionsError
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
     for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
@@ -18800,7 +19290,12 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
+  return {
+    messages: sliced,
+    summary,
+    ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}),
+    ...(personDecisionsReadFailed ? { person_decisions_read_failed: personDecisionsReadFailed } : {}),
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -20622,7 +21117,7 @@ async function createMakesafeJob(
     try {
       const pdfBuffer = Uint8Array.from(atob(pdf_base64), c => c.charCodeAt(0))
       const pdfPath = `${job.id}/work-order-${jobNumber}.pdf`
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+      const adminClient = sb()
       const { error: upErr } = await adminClient.storage
         .from('job-documents')
         .upload(pdfPath, pdfBuffer, { contentType: 'application/pdf', upsert: true })
@@ -30207,7 +30702,7 @@ async function recaptureIntakeDraft(client: any, body: any, adminClientOverride?
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (SUPABASE_URL/SERVICE_KEY are module consts, so a test
   // cannot supply them via env.set after import).
-  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = adminClientOverride ?? sb()
   const SES_MAILBOX = _SES_MAILBOX
 
   // 1. Load the existing draft.
@@ -30633,7 +31128,7 @@ async function _reextractExtractFields(
   const { subject, fromEmail, fromName } = input
   // Admin/service client for the private-bucket download + public re-upload (created here
   // so the injectable test extractor path never triggers createClient with empty env).
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = sb()
   const rawEmailBody = input.body || ''
   const builderEmailTextForTrade = _stripEmailHtmlForTrade(rawEmailBody)
   const deterministicPortalLinks = _extractBuilderEmailLinks(rawEmailBody)
@@ -32890,7 +33385,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
 
   // One admin/service client for both the private-bucket download and the public
   // re-upload below (hoisted out of the loop — was re-created per attachment).
-  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = sb()
 
   // Load known make-safe company sender patterns + per-builder template parsing rules
   // (M1.5: parsing_rules drives the deterministic template-parse cost lever).
@@ -36522,8 +37017,9 @@ async function updateJobStatus(client: any, body: any) {
   }).catch(() => {})
 
   // ── Push status change to GHL (non-blocking) ──
-  // Skip if this change originated from a GHL webhook (anti-loop)
-  if (source !== 'ghl_webhook' && data.ghl_opportunity_id) {
+  // Skip if this change originated from a GHL webhook (anti-loop), or the writer asked
+  // to leave GHL alone (the deposit advance, job_deposit_advance.ts: captain, 26 Oct 2026).
+  if (source !== 'ghl_webhook' && body.skip_ghl_push !== true && data.ghl_opportunity_id) {
     try {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`
       const ghlResp = await fetch(ghlUrl, {
@@ -36826,6 +37322,12 @@ async function pushPOToXero(client: any, body: any) {
     .single()
 
   if (error || !po) throw new Error('PO not found')
+  // A Dispatch order never goes to Xero (_shared/dispatch_po_guard.ts). This
+  // refusal comes before any other check, job read or Xero token.
+  if (isDispatchPurchaseOrder(po)) {
+    const refusal = dispatchPoRefusal('push_po_to_xero', po)
+    throw new ApiError(refusal.message, refusal.status, refusal.body)
+  }
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
   // A blank or placeholder supplier must not become a Xero contact, and only
   // while quote_builder_orders_v1 is on. Missing or unreadable is off. While
@@ -36962,11 +37464,16 @@ async function emailPO(client: any, body: any) {
 
   const { data: po, error } = await client
     .from('purchase_orders')
-    .select('xero_po_id, po_number, supplier_name, job_id, total')
+    .select('id, xero_po_id, po_number, supplier_name, job_id, total, source')
     .eq('id', id)
     .single()
 
   if (error || !po) throw new Error('PO not found')
+  // A Dispatch order is never emailed from Xero (_shared/dispatch_po_guard.ts).
+  if (isDispatchPurchaseOrder(po)) {
+    const refusal = dispatchPoRefusal('email_po', po)
+    throw new ApiError(refusal.message, refusal.status, refusal.body)
+  }
   if (!po.xero_po_id) throw new Error('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
 
   const { accessToken, tenantId } = await getToken(client)
@@ -38886,7 +39393,7 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
   // adminClientOverride is a test-only seam; production callers omit it and get
   // the service-role client (required so the report-job gate reads xero_invoices /
   // makesafe_job_details past RLS — see ea2f778).
-  const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = adminClientOverride ?? sb()
   await assertLegacySesInvoiceActionAllowed(
     adminClient,
     xero_invoice_id,
@@ -40447,6 +40954,12 @@ async function createDepositInvoice(client: any, body: any) {
     metadata: { operator: body.operator_email || body.user_email || null },
   })
 
+  // Xero emailed the deposit invoice to the client: a fencing or patio job still in
+  // Accepted lands in Awaiting Deposit.
+  if (invoiceResult.emailed === true) {
+    await landJobAfterDepositInvoiceSent(client, jId, invoiceResult.xero_invoice_id, 'create_deposit_invoice')
+  }
+
   return {
     success: true,
     job_id: jId,
@@ -40600,6 +41113,11 @@ async function createUnifiedInvoice(client: any, body: any) {
     }
   }
 
+  // A deposit invoice that reached the client lands its job in Awaiting Deposit.
+  if (brandedEmailSent || invoiceResult.emailed === true) {
+    await landJobAfterDepositInvoiceSent(client, jId, invoiceResult.xero_invoice_id, 'create_unified_invoice')
+  }
+
   // Log event
   await client.from('job_events').insert({
     job_id: jId,
@@ -40661,6 +41179,9 @@ async function morningBrief(client: any) {
 function extractMaterialsFromScope(scope_json: any, pricing_json: any): any[] {
   if (!scope_json) return []
   const scope = typeof scope_json === 'string' ? JSON.parse(scope_json) : scope_json
+  // A Scope Engine record lists its own sealed lines; office fixings are skipped
+  // (scope_engine_materials.ts). Never the dimension guesses or the pricing fallback.
+  if (isScopeEnginePatioRecord(scope)) return scopeEngineMaterialLines(scope.lines)
   const config = scope.config || scope
 
   const items: any[] = []
@@ -46018,7 +46539,7 @@ async function attachEmailAttachmentToJob(
 
   // ── PRIMARY: resolve a synced email_attachments row. A miss no longer throws —
   //    it falls through to the live-Graph fallback below.
-  const adminClient = deps.adminClient || createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  const adminClient = deps.adminClient || sb()
   let att: any = null
   if (body.email_attachment_id || body.attachment_id) {
     const { data, error } = await adminClient.from('email_attachments')
@@ -46137,7 +46658,7 @@ async function attachEmailAttachmentToJob(
 // existing row of the same type+file_name is updated (version bumped) instead of
 // inserting a duplicate — mirrors the work-order attach pattern.
 function defaultMakesafeDocumentStorageAdmin() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  return sb()
 }
 
 let makesafeDocumentStorageAdminFactory = defaultMakesafeDocumentStorageAdmin
@@ -54772,6 +55293,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     gst,
     total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
+    running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     xero_bill_number: existingInvoice?.xero_bill_number || null,
     pending_verification: pendingVerification,
     all_verified: allVerified,
@@ -56307,6 +56829,12 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     },
   })
 
+  // The deposit invoice reached the client: a fencing or patio job still in Accepted lands
+  // in Awaiting Deposit. A failed email leaves the job in Accepted for the office.
+  if (brandedEmailSent) {
+    await landJobAfterDepositInvoiceSent(client, jId, invoiceResult.xero_invoice_id, 'send_acceptance_invoice')
+  }
+
   return {
     success: true,
     job_id: jId,
@@ -56343,6 +56871,35 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
     sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
     laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
+
+/** The deposit advance (job_deposit_advance.ts): moves through updateJobStatus, the client
+ *  text through ghl-proxy send_sms like the review text. */
+function jobDepositDeps(client: any): JobDepositDeps {
+  return {
+    client,
+    now: () => new Date(),
+    moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+  }
+}
+
+/** A deposit invoice was emailed successfully: a fencing or patio job still in Accepted
+ *  lands in Awaiting Deposit (job_deposit_advance.ts decides, under its switch). Never
+ *  throws into the send that just succeeded. */
+async function landJobAfterDepositInvoiceSent(client: any, jobId: unknown, xeroInvoiceId: unknown, source: string) {
+  const id = String(jobId ?? '').trim()
+  if (!id) return
+  try {
+    const landed = await depositInvoiceSent(jobDepositDeps(client), {
+      job_id: id,
+      xero_invoice_id: String(xeroInvoiceId ?? '').trim() || null,
+      source,
+    })
+    if (landed.action !== 'switch_off') console.log(`[ops-api] deposit invoice sent for ${id}: ${landed.action}`)
+  } catch (e) {
+    console.log('[ops-api] deposit invoice landing failed (non-blocking):', (e as Error)?.message)
   }
 }
 

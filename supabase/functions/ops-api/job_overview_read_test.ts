@@ -21,6 +21,8 @@ import {
   noteGroup,
   noteOwner,
   OVERVIEW_MESSAGE_LIMIT,
+  OVERVIEW_NOT_SEEN,
+  overviewMatching,
   overviewInvoice,
   overviewMessages,
   overviewNote,
@@ -622,6 +624,10 @@ function fullClient(extra: Partial<Parameters<typeof fakeClient>[0]> = {}) {
       context_job_story_ledger: LEDGER,
       context_job_story_text_get: STORY_TEXT,
       job_quote_values: QUOTE_VALUES,
+      context_recon_job_items: [
+        { event_id: "ev-1", cause: "defect:no_identity" },
+        { event_id: "ev-2", cause: "ambiguity:one_candidate" },
+      ],
       ...(extra.rpc ?? {}),
     },
     ...extra,
@@ -680,6 +686,63 @@ Deno.test("GET job_overview: every part, read only, no network, the card passed 
   for (const [name, s] of Object.entries(o.sources) as [string, any][]) {
     assertEquals(s.ok, true, `${name} ${JSON.stringify(s)}`);
   }
+  assertEquals(
+    client.rpcs.find((r) => r.fn === "context_recon_job_items")!.args,
+    { p_job: JOB },
+  );
+  assertEquals(o.matching, { waiting: 2, more: false, left_off_daily_list: 1 });
+  assertEquals(o.not_seen.map((n: any) => n.key), [
+    "material_orders",
+    "crew_tasks_and_crm_notes",
+  ]);
+});
+
+Deno.test("Matching: rows waiting for this job are counted, a cut page says more, and an unread count is never zero", async () => {
+  const rows = Array.from({ length: 201 }, (_, i) => ({
+    event_id: `e${i}`,
+    cause: i < 3 ? "defect:backfill_never_asked" : "ambiguity:no_candidate",
+  }));
+  assertEquals(overviewMatching(rows), {
+    waiting: 200,
+    more: true,
+    left_off_daily_list: 3,
+  });
+  assertEquals(overviewMatching([]), {
+    waiting: 0,
+    more: false,
+    left_off_daily_list: 0,
+  });
+  for (const data of [null, {}, "x"]) {
+    const o: any = await jobOverviewAction(
+      fullClient({ rpc: { context_recon_job_items: data } }),
+      new URLSearchParams(`jobId=${JOB}`),
+      deps(),
+    );
+    assertEquals([o.matching, o.sources.matching.code], [null, "invalid_shape"]);
+  }
+  const failedRead: any = await jobOverviewAction(
+    fullClient({ rpcErrors: { context_recon_job_items: { code: "57014", message: "timeout" } } }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals([failedRead.matching, failedRead.sources.matching.code], [null, "rpc_failed"]);
+  assert(failedRead.story, "a failed Matching read leaves every other part");
+  const notDeployed: any = await jobOverviewAction(
+    fullClient({ rpcErrors: { context_recon_job_items: { code: "PGRST202", message: "missing" } } }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals(notDeployed.sources.matching.state, "not_deployed");
+});
+
+Deno.test("what Context cannot see stands on every card, even a failed one", async () => {
+  const o: any = await jobOverviewAction(
+    fullClient({ failTables: new Set(["xero_invoices", "job_media"]) }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals(o.not_seen, OVERVIEW_NOT_SEEN.map((n) => ({ ...n })));
+  for (const n of o.not_seen) assert(!/[\u2013\u2014]/.test(n.text), n.text);
 });
 
 Deno.test("no call transcript words anywhere in the answer", async () => {
@@ -774,6 +837,63 @@ Deno.test("calls merge into one row with their length and no words; empty texts 
     ),
     false,
   );
+});
+
+Deno.test("CTX-T22: a row a person placed carries who, when, the other jobs and the evidence hash; a failed decisions read is named", async () => {
+  const placedRow = {
+    id: "bev:p1",
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-10-08T02:00:00Z",
+    subject: "Plans",
+    body: "Plans attached",
+    source_system: "business_events",
+    source_ref: "p1",
+    placed_by_person: {
+      action: "split",
+      decision_id: 7,
+      decided_at: "2026-10-09T01:00:00Z",
+      decided_by: "u0000000-0000-4000-8000-000000000001",
+      decided_by_name: "Staff Person",
+      other_job_numbers: ["SWP-98101"],
+      evidence_hash: "0123456789abcdef0123456789abcdef",
+    },
+  };
+  const out = overviewMessages([placedRow], new Map(), null);
+  assertEquals(out[0].placed_by_person, {
+    action: "split",
+    decision_id: 7,
+    decided_at: "2026-10-09T01:00:00Z",
+    decided_at_perth: "Fri 9 Oct, 9:00am",
+    decided_by_name: "Staff Person",
+    other_job_numbers: ["SWP-98101"],
+    evidence_hash: "0123456789abcdef0123456789abcdef",
+  });
+  // a row nobody placed carries no provenance key
+  const own = overviewMessages([{ ...placedRow, placed_by_person: undefined }], new Map(), null);
+  assertEquals("placed_by_person" in own[0], false);
+
+  const o: any = await jobOverviewAction(
+    fullClient(),
+    new URLSearchParams(`jobId=${JOB}`),
+    {
+      ...deps(),
+      getJobConversation: () =>
+        Promise.resolve({
+          messages: conversation(),
+          summary: {},
+          person_decisions_read_failed: "rpc failed",
+        }),
+    },
+  );
+  assert(Array.isArray(o.messages) && o.messages.length > 0);
+  assertEquals(o.sources.messages.decisions, "unread");
+  const fine: any = await jobOverviewAction(
+    fullClient(),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals("decisions" in fine.sources.messages, false);
 });
 
 Deno.test("the newest 80 messages, oldest first, at most 400 characters each", () => {
@@ -1481,4 +1601,27 @@ Deno.test("held notes: a note a held message holds up says job not certain; ever
   const plain = overviewNote(base, new Map());
   assert(!("job_certain" in plain) && !("certainty" in plain), "a certain note carries no new key");
   assertEquals(Object.keys(plain).sort(), Object.keys(overviewNote({ ...base, job_certain: true }, new Map())).sort());
+});
+
+Deno.test("CTX-T22, Finance's allocation contract: a bill counted on two jobs reaches the page as the card says it, never summed again", () => {
+  const card = {
+    version: "job-story-v1",
+    not_known: [{
+      what: "Supplier bill BILL-1 is counted as cost on this job and also on SWP-2.",
+      why: "A bill counts as cost once, on the job Xero's bill link puts it on; counted on two jobs it is a defect for Finance to correct, and until then the jobs' costs count it more than once.",
+    }],
+    money: { supplier_bills: [{ number: "BILL-1", total: 1100 }] },
+    meta: {
+      cost_check: {
+        read_from: "v_job_cost_events",
+        bills: 1,
+        counted_elsewhere: 1,
+        items: [{ document_id: "x1", document_number: "BILL-1", here_ex: 1000, elsewhere_ex: 1000, other_job_numbers: ["SWP-2"] }],
+      },
+    },
+  };
+  const shown = overviewStory(card);
+  assertEquals(shown.meta.cost_check, card.meta.cost_check);
+  assertEquals(shown.not_known, card.not_known);
+  assertEquals(shown.money, card.money);
 });

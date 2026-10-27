@@ -35,13 +35,15 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
-import { readBillsInWindow } from './bills_window_read.ts'
+import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { readAll, runBillPrematch } from './bill_prematch_run.ts'
 import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
+import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
+import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
   buildMaterialsFactRow,
@@ -625,6 +627,25 @@ function receiptSenderOn(sb: any): Promise<boolean> {
   return receiptSwitch
 }
 
+// The deposit advance switch (job_closeout_settings.deposit_advance_mode), read once per
+// run. Unreadable reads as off: nothing is posted. ops-api job_deposit_advance.ts owns
+// every rule, including what dry_run does.
+let depositAdvanceSwitch: Promise<boolean> | null = null
+function depositAdvanceOn(sb: any): Promise<boolean> {
+  depositAdvanceSwitch ??= (async () => {
+    try {
+      const { data, error } = await sb.from('job_closeout_settings')
+        .select('deposit_advance_mode')
+        .eq('id', 1)
+        .maybeSingle()
+      return !error && (data?.deposit_advance_mode === 'dry_run' || data?.deposit_advance_mode === 'live')
+    } catch {
+      return false
+    }
+  })()
+  return depositAdvanceSwitch
+}
+
 async function postOpsApi(action: string, body: Record<string, unknown>): Promise<any> {
   try {
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=${action}`, {
@@ -672,7 +693,9 @@ async function logJobPaymentReceived(sb: any, jobId: string, inv: any) {
 async function syncInvoices(sb: any) {
   closeoutMoveSwitch = null
   receiptSwitch = null
+  depositAdvanceSwitch = null
   const closeoutResults: { job_id: string; action: string }[] = []
+  const depositResults: { job_id: string; action: string }[] = []
   const receiptResults: { xero_invoice_id: string; action: string }[] = []
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
@@ -873,6 +896,41 @@ async function syncInvoices(sb: any) {
             }
           }
 
+          // ── Deposit advance: a deposit invoice of a fencing or patio job changed (paid,
+          // voided, a payment taken off). ops-api job_deposit_paid re-checks every deposit
+          // on the job against our Xero copy and moves the job, or flags a lost deposit
+          // (job_deposit_advance.ts). Switch off: nothing is posted. Non-blocking.
+          if (inv.Type === 'ACCREC' && ['PAID', 'AUTHORISED', 'VOIDED', 'DELETED'].includes(String(inv.Status || '').toUpperCase()) &&
+              await depositAdvanceOn(sb)) {
+            try {
+              const { data: depLink } = await sb.from('xero_invoices')
+                .select('job_id')
+                .eq('xero_invoice_id', inv.InvoiceID)
+                .eq('org_id', DEFAULT_ORG_ID)
+                .not('job_id', 'is', null)
+                .maybeSingle()
+              if (depLink?.job_id) {
+                const { data: depJob } = await sb.from('jobs')
+                  .select('id, type, deposit_invoice_id')
+                  .eq('id', depLink.job_id)
+                  .maybeSingle()
+                if (depJob && isDepositAdvanceJobType(depJob.type) &&
+                    isDepositInvoice({ xero_invoice_id: inv.InvoiceID, invoice_type: inv.Type, reference: inv.Reference || null }, depJob.deposit_invoice_id)) {
+                  const advanced = await postOpsApi('job_deposit_paid', {
+                    job_id: depJob.id,
+                    xero_invoice_id: inv.InvoiceID,
+                    source: 'xero_sync',
+                  })
+                  depositResults.push({ job_id: depJob.id, action: advanced?.action ?? advanced?.code ?? 'error' })
+                  console.log(`[xero-sync] Job ${depJob.id} deposit advance: ${advanced?.action ?? advanced?.error}`)
+                }
+              }
+            } catch (e: any) {
+              if (e instanceof XeroCooldownError) throw e
+              console.error('[xero-sync] Deposit advance failed:', (e as Error).message)
+            }
+          }
+
           // ── Auto-update job status when all invoices are PAID ──
           // Only for sales invoices (ACCREC) that are linked to a job
           if (inv.Type === 'ACCREC' && inv.Status === 'PAID') {
@@ -1042,6 +1100,16 @@ async function syncInvoices(sb: any) {
   }
   const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
+  // ── Deposit advance catch-up: accepted and awaiting_deposit fencing and patio cards whose
+  //    deposits were paid before the card got there or before the switch was on, accepted
+  //    cards whose deposit Xero marks sent (landed in Awaiting Deposit), and moved cards
+  //    whose deposit was since voided (switch on only; ops-api decides).
+  let depositCatchUp: unknown = { ran: false, reason: 'switch_off' }
+  if (await depositAdvanceOn(sb)) {
+    depositCatchUp = await postOpsApi('job_deposit_catch_up', { source: 'job_deposit_catch_up' })
+  }
+  const depositAdvance = { on_change: depositResults, catch_up: depositCatchUp }
+
   // ── Paid-invoice receipt catch-up: in-window paid invoices with no receipt claim yet
   //    (switch on only; ops-api job_receipt.ts decides).
   let receiptCatchUp: unknown = { ran: false, reason: 'sender_off' }
@@ -1148,11 +1216,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
@@ -1249,9 +1317,18 @@ export async function matchUnlinkedInvoices(client: any) {
             continue
           }
 
-          await client.from('xero_invoices')
+          // INT-14: a link only places an invoice that has no job; it never moves one.
+          // A lost race (a job set since the read) links nothing and records nothing.
+          const { data: linked, error: linkErr } = await client.from('xero_invoices')
             .update({ job_id: job.id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
+            .is('job_id', null)
+            .select('id')
+          if (linkErr) {
+            console.error(`[xero-sync] reference link failed for invoice ${inv.invoice_number}:`, linkErr.message)
+            continue
+          }
+          if (!linked || linked.length === 0) continue
 
           if (await automationLaneEnabled(client, 'capture')) {
             await insertCapturedEvidence(client, {
@@ -1305,9 +1382,16 @@ export async function matchUnlinkedInvoices(client: any) {
             continue
           }
 
-          await client.from('xero_invoices')
+          const { data: linked, error: linkErr } = await client.from('xero_invoices')
             .update({ job_id: jobs[0].id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
+            .is('job_id', null)
+            .select('id')
+          if (linkErr) {
+            console.error(`[xero-sync] Strategy 2 link failed for invoice ${inv.invoice_number}:`, linkErr.message)
+            continue
+          }
+          if (!linked || linked.length === 0) continue
 
           if (await automationLaneEnabled(client, 'capture')) {
             await insertCapturedEvidence(client, {
@@ -1510,18 +1594,16 @@ async function ingestMaterialsActuals(
     // 3. Candidate bills — ACCPAY, in window, not void/deleted. EVERY bill in
     //    the window, paged in a fixed order (CFO-12: a single .limit(500) read
     //    skipped bills once the window held more). A failed page stops the step.
-    //    Columns include line_items and job_id for the guards above (PR 1063).
     const billRead = await readBillsInWindow(sb, {
       orgId: DEFAULT_ORG_ID,
       cutoff,
       cap: limit,
-      columns:
-        'xero_invoice_id, invoice_number, xero_contact_id, contact_name, reference, sub_total, total, invoice_date, status, invoice_type, line_items, job_id',
+      columns: `${BILLS_WINDOW_COLUMNS}, line_items, job_id`,
     })
     if (!billRead) throw new Error('bills in window unreadable')
     const bills = billRead.bills
-    ;(result as Record<string, unknown>).bills_in_window = bills.length
-    ;(result as Record<string, unknown>).bill_pages = billRead.pages
+    result.bills_in_window = bills.length
+    result.bill_pages = billRead.pages
 
     // Existing derived rows in the window — so we respect human decisions and
     // never re-open a manually-resolved item.
@@ -3156,9 +3238,17 @@ async function matchInvoicesByReference(sb: any) {
         sesLinkRefusals.push(refusal)
         continue
       }
-      await sb.from('xero_invoices')
+      // INT-14: only an invoice still without a job is linked; one already on a job is kept.
+      const { data: linked, error: linkErr } = await sb.from('xero_invoices')
         .update({ job_id: job.id })
         .eq('id', inv.id)
+        .is('job_id', null)
+        .select('id')
+      if (linkErr) {
+        console.error(`[xero-sync] match by reference failed for ${inv.invoice_number}:`, linkErr.message)
+        continue
+      }
+      if (!linked || linked.length === 0) continue
       matched++
       matchLog.push(`${inv.reference} → job ${swNumber} (job_number)`)
       continue
@@ -3184,9 +3274,16 @@ async function matchInvoicesByReference(sb: any) {
         sesLinkRefusals.push(refusal)
         continue
       }
-      await sb.from('xero_invoices')
+      const { data: linked, error: linkErr } = await sb.from('xero_invoices')
         .update({ job_id: xp.job_id })
         .eq('id', inv.id)
+        .is('job_id', null)
+        .select('id')
+      if (linkErr) {
+        console.error(`[xero-sync] match by project reference failed for ${inv.invoice_number}:`, linkErr.message)
+        continue
+      }
+      if (!linked || linked.length === 0) continue
       matched++
       matchLog.push(`${inv.reference} → job via xero_projects (${swNumber})`)
     }
@@ -3328,61 +3425,34 @@ async function syncBankBalances(sb: any) {
   const now = new Date().toISOString()
   const today = now.split('T')[0]
 
-  // Use Bank Summary Report for actual balances (GET /Accounts doesn't include balances)
-  try {
-    const report = await xeroGet('/Reports/BankSummary', accessToken, tenantId, { date: today })
-    const rows = report.Reports?.[0]?.Rows || []
-    let synced = 0
-
-    for (const section of rows) {
-      if (section.RowType !== 'Section' || !section.Rows) continue
-      for (const row of section.Rows) {
-        if (row.RowType !== 'Row' || !row.Cells) continue
-        const cells = row.Cells
-        const accountName = cells[0]?.Value || ''
-        const accountId = cells[0]?.Attributes?.[0]?.Value || accountName
-        const balance = parseFloat(cells[1]?.Value || '0') || 0
-
-        if (!accountName) continue
-
-        await sb.from('xero_bank_balances').upsert({
-          org_id: DEFAULT_ORG_ID,
-          account_id: accountId,
-          account_name: accountName,
-          balance: balance,
-          balance_date: today,
-          synced_at: now,
-        }, { onConflict: 'org_id,account_id,balance_date' })
-
-        synced++
-      }
-    }
-
-    console.log(`[xero-sync] Synced ${synced} bank balances from Bank Summary report`)
-    return { success: true, accounts_synced: synced }
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    console.error('[xero-sync] Bank Summary report failed, falling back to Accounts API:', (e as Error).message)
-
-    // Fallback: GET /Accounts (won't have balances but at least gets account names)
-    const data = await xeroGet('/Accounts', accessToken, tenantId, {
-      where: 'Type=="BANK"&&Status=="ACTIVE"',
-    })
-    const accounts = data.Accounts || []
-    let synced = 0
-    for (const acct of accounts) {
-      await sb.from('xero_bank_balances').upsert({
-        org_id: DEFAULT_ORG_ID,
-        account_id: acct.AccountID,
-        account_name: acct.Name || '',
-        balance: 0,
-        balance_date: today,
-        synced_at: now,
-      }, { onConflict: 'org_id,account_id,balance_date' })
-      synced++
-    }
-    return { success: true, accounts_synced: synced, note: 'Used fallback — balances may be $0' }
+  // Bank Summary for the one day: each account's Closing Balance at that date
+  // (GET /Accounts has no balances). Without a period Xero reports the whole
+  // month, and the second column is the Opening Balance, which is what this
+  // stored until 19 Oct 2026 (CFO-14).
+  const report = await xeroGet('/Reports/BankSummary', accessToken, tenantId, { fromDate: today, toDate: today })
+  const { rows, closingColumn } = parseBankSummary(report)
+  if (closingColumn === null) {
+    // An unreadable report stores nothing: an unknown balance is never $0.
+    console.error('[xero-sync] Bank Summary has no Closing Balance column; no balances stored')
+    return { success: false, accounts_synced: 0, error: 'bank_summary_unreadable' }
   }
+  let synced = 0
+  for (const row of rows) {
+    const { error } = await sb.from('xero_bank_balances').upsert({
+      org_id: DEFAULT_ORG_ID,
+      account_id: row.account_id,
+      account_name: row.account_name,
+      balance: row.balance,
+      balance_date: today,
+      synced_at: now,
+    }, { onConflict: 'org_id,account_id,balance_date' })
+    if (error) console.error(`[xero-sync] bank balance write failed ${row.account_name}:`, error.message)
+    else synced++
+  }
+  console.log(`[xero-sync] Synced ${synced} bank closing balances from Bank Summary report`)
+  // Nothing stored is a failed refresh, never a quiet success.
+  if (synced === 0) return { success: false, accounts_synced: 0, error: rows.length ? 'bank_balance_writes_failed' : 'no_readable_balances' }
+  return { success: true, accounts_synced: synced, accounts_skipped: rows.length - synced }
 }
 
 

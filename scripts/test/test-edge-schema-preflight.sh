@@ -939,6 +939,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
+                      # Reconciliation daily list: the recon_daily_list and
+                      # recon_record_decision doors (recon_decisions.ts).
+                      ("20261020140000", "context_reconciliation_decisions"),
+                      ("20261020160000", "context_recon_daily_list"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
                       ("20261021100000", "job_receipt_sender"),
@@ -952,7 +956,27 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Group work orders: the split, the flag and the
                       # invoice-line trigger (group_work_order.ts).
                       # Renumbered past every migration already on main.
-                      ("20261022050000", "group_work_orders")]:
+                      ("20261022050000", "group_work_orders"),
+                      # Dispatch v2: the approved supplier order email list,
+                      # the draft list, boxes, photos and order emails
+                      # (dispatch_v2_store.ts).
+                      ("20261023214100", "dispatch_v2_emails_approved_supplier_store"),
+                      ("20261023214200", "dispatch_v2_emails_draft_list_and_order_emails"),
+                      # Dispatch v2: the scope fill record that makes a fencing
+                      # job fill itself only once (dispatch_v2_store.ts).
+                      ("20261026120000", "dispatch_v2_scope_fills"),
+                      # Deposit advance: the move switch and the per-job
+                      # move and flag state (job_deposit_advance.ts).
+                      ("20261026160000", "job_deposit_advance"),
+                      # Deposit credit note flag: the credit notes counted at
+                      # the move and the widened flag check.
+                      ("20261027120000", "job_deposit_credit_note_flag"),
+                      # Context reconciliation from a job: the context_job_mail
+                      # and recon_job_items doors (context_job_reconciliation.ts).
+                      ("20261020165000", "context_job_reconciliation"),
+                      # Card events (CTX-T22): get_job_conversation reads a
+                      # person's decisions through context_job_card_decisions.
+                      ("20261021150000", "context_job_card_events")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

@@ -251,6 +251,12 @@ ROLLBACK;
 
 -- Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (card events, 20261021150000, replaced the record messages, the story meta and the assembler since:
+-- its down goes first, inside this transaction only)
+SELECT to_regprocedure('public.context_job_card_events(uuid[])') IS NOT NULL AS card_events_live \gset
+\if :card_events_live
+\ir ../../../rollbacks/20261021150000_context_job_card_events_down.sql
+\endif
 -- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
 -- so the bodies snapshotted and re-applied below are this migration's own)
 SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
