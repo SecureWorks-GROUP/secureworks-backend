@@ -767,6 +767,7 @@ import {
   deleteGroupWorkOrderHours,
   freezeGroupWorkOrder,
   groupBody,
+  groupFeatureOn,
   GroupWorkOrderError,
   isGroupShareInvoiceItem,
   joinGroupWorkOrder,
@@ -18390,6 +18391,7 @@ async function jobDetail(
 
   return {
     job: jobLite,
+    group_work_order_enabled: await groupFeatureOn(client),
     trade_time_entries: tradeTimeEntries.entries,
     trade_time_entries_error: tradeTimeEntries.error,
     trade_invoice_lines: tradeInvoiceLines,
@@ -45203,6 +45205,7 @@ async function tradeJobDetail(
 
   return {
     job: tradeSafeJob,
+    group_work_order_enabled: await groupFeatureOn(client),
     // Additive: the resolved tier and the quote fence, so the app can render the
     // right controls without re-deriving authority client-side.
     access_tier: accessDecision.tier,

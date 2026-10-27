@@ -324,7 +324,11 @@ class Memory {
     })[0];
     if (!newest) return false;
     const method = String(newest.method || "");
-    if (method === "revoked" || method === "office_waiver") return false;
+    if (method === "revoked") return false;
+    if (method === "office_waiver") {
+      const latest = this.latestHoursAt(jobId);
+      return String(newest.waiver_reason || "").trim().length >= 3 && Boolean(String(newest.captured_by_actor || "").trim()) && (!latest || Date.parse(String(newest.created_at)) > Date.parse(latest));
+    }
     if (method !== "on_site" && method !== "share_link") return false;
     if (!newest.signature_media_id) return false;
     if (newest.happy === false) return false;
@@ -1655,7 +1659,7 @@ Deno.test("freeze names an installer who has not joined, and removal is only bef
   );
 });
 
-Deno.test("a group sign-off is a drawn signature after the latest hours, never a waiver", async () => {
+Deno.test("group sign-off requires fresh evidence; incomplete waiver and revoked rows fail", async () => {
   const memory = new Memory();
   seedSplit(memory, "open");
   memory.rows("group_work_order_time_entries").push(
@@ -2185,4 +2189,19 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   assert(pack.includes("plan.send"));
   assert(pack.includes("completionPackClientSignature"));
   assertEquals(pack.includes("job_service_reports"), false);
+});
+
+Deno.test("office approval with reason and actor clears sign-off; later hours invalidate it", async () => {
+  const memory = new Memory();
+  seedSplit(memory, "open");
+  memory.rows("job_client_signoffs").push({ id: "office-approved", job_id: JOB,
+    method: "office_waiver", waiver_reason: "Owner confirmed client approval",
+    captured_by_actor: "user:office", created_at: "2099-01-01T00:00:00Z" });
+  const before = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {group_id: GROUP});
+  assertEquals(before.client_signed, true);
+  assertEquals(before.client_signoff_method, "office_waiver");
+  assertEquals(before.split_frozen, false);
+  memory.rows("group_work_orders")[0].hours_changed_at = "2099-01-02T00:00:00Z";
+  const after = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {group_id: GROUP});
+  assertEquals(after.client_signed, false);
 });
