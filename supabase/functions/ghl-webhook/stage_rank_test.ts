@@ -22,11 +22,23 @@ function stageChange(stageId: string): Request {
   });
 }
 
-function deps(jobStatus: string, events: unknown[]): GhlWebhookDeps {
+// supabase-js query builders are thenables with no .catch, so the fake insert is too.
+function builder<T>(result: T): PromiseLike<T> {
+  return {
+    then: (onFulfilled, onRejected) =>
+      Promise.resolve(result).then(onFulfilled, onRejected),
+  };
+}
+
+function deps(
+  jobStatus: string,
+  events: unknown[],
+  jobEventsError: { message: string } | null = null,
+): GhlWebhookDeps {
   const table = (name: string) => ({
     insert: (row: unknown) => {
       if (name === "job_events") events.push(row);
-      return Promise.resolve({ error: null });
+      return builder({ error: name === "job_events" ? jobEventsError : null });
     },
     select: () => ({
       eq: () => ({
@@ -64,3 +76,69 @@ for (const status of ["get_review", "archived"]) {
     });
   }
 }
+
+// Deposit advance (26 Oct 2026): awaiting_deposit and order_materials used to be unranked
+// (0), so GHL's "Job Accepted Ready for Execution" (mapped to accepted) read as a forward
+// move and pulled the card back to Accepted.
+const GHL_PATIO_READY_TO_EXECUTE = "66742bf8-4917-406c-a1c1-33ac271cfe09"; // maps to accepted
+for (
+  const status of [
+    "awaiting_deposit",
+    "deposit",
+    "approvals",
+    "order_materials",
+    "processing",
+    "awaiting_supplier",
+    "order_confirmed",
+    "schedule_install",
+  ]
+) {
+  Deno.test(`a GHL stage mapped to accepted cannot pull a ${status} card back`, async () => {
+    const events: unknown[] = [];
+    const res = await handleGhlWebhook(
+      stageChange(GHL_PATIO_READY_TO_EXECUTE),
+      deps(status, events),
+    );
+    const body = await res.json();
+    assertEquals(body.action, "conflict_logged");
+    assertEquals(body.current, status);
+    assertEquals(events.length, 1);
+  });
+}
+
+Deno.test("every stored job status has a rank", async () => {
+  const { STATUS_RANK } = await import("./handler.ts");
+  const { STATUS_MAP } = await import(
+    "../_shared/stage-gate/job-state-machine.ts"
+  );
+  for (const status of Object.keys(STATUS_MAP)) {
+    assertEquals(
+      typeof STATUS_RANK[status],
+      "number",
+      `unranked status ${status}`,
+    );
+  }
+});
+
+Deno.test("a backward move writes its ghl_conflict event and answers 200", async () => {
+  const events: { event_type?: string }[] = [];
+  const res = await handleGhlWebhook(
+    stageChange(GHL_PATIO_READY_TO_EXECUTE),
+    deps("order_materials", events),
+  );
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).action, "conflict_logged");
+  assertEquals(events.map((e) => e.event_type), ["ghl_conflict"]);
+});
+
+Deno.test("a failed ghl_conflict write is logged and the card still stays put with a 200", async () => {
+  const events: unknown[] = [];
+  const res = await handleGhlWebhook(
+    stageChange(GHL_PATIO_READY_TO_EXECUTE),
+    deps("awaiting_deposit", events, { message: "insert refused" }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.action, "conflict_logged");
+  assertEquals(body.current, "awaiting_deposit");
+});

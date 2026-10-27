@@ -34,6 +34,7 @@
 // invent one.
 
 import { dispatchAdapter } from "../_shared/release_packet/adapters/dispatch.ts";
+import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
 import { OUR_DOMAINS } from "./makesafe_story.ts";
 
 export const JOB_COMMERCIAL_READ_VERSION = "job-commercial/v1";
@@ -994,6 +995,88 @@ export interface ScopeSummary {
   current_price_inc_gst: number | null;
   changed_since_last_quote: boolean | null;
   changed_since_last_quote_basis: string;
+  // Present only for a sealed patio-scoper v2 record (SQ-29): where this
+  // scope came from. Never its expected figures.
+  scope_record?: PatioScoperRecord;
+  // Present only when the frozen revisions were read (the dossier). Which
+  // content the lines above came from: the job's frozen scope_revisions row,
+  // or the last save when nothing frozen matches or could be read.
+  scope_source?: "frozen_revision" | "last_save";
+  frozen_revision?: ScopeRevisionRef | null;
+  // true: the last save is the frozen revision; false: it changed after the
+  // freeze (unfrozen); null: not known.
+  last_save_matches_frozen?: boolean | null;
+  // Every server revision of this scope, newest first, frozen and superseded
+  // alike. Open one with ops-api get_scope_revision_for_viewer. null when the
+  // read failed (revision_read_code says why), never an empty list.
+  revision_history?: ScopeRevisionRef[] | null;
+  revision_history_more?: boolean;
+  revision_read_code?: string;
+}
+
+export interface ScopeRevisionRef {
+  scope_revision_id: string;
+  revision_number: number | null;
+  status: string | null;
+  tool_kind: string | null;
+  tool_version: string | null;
+  frozen_at: string | null;
+  superseded_at: string | null;
+  superseded_by_scope_revision_id: string | null;
+}
+
+export interface ScopeRevisionAlignment {
+  ok: boolean;
+  code?: string;
+  history: ScopeRevisionRef[];
+  more: boolean;
+  frozen: ScopeRevisionRef | null;
+  last_save_matches_frozen: boolean | null;
+  // The frozen revision's own scope, read only when the last save differs and
+  // only once its text hashes to the stored scope_hash.
+  frozen_scope_json: Record<string, unknown> | null;
+  // The frozen revision's pricing status (INT-01): Sales' completeness rule as
+  // booleans. null when there is no frozen row or its pricing cannot be read
+  // and verified against pricing_hash.
+  frozen_pricing_status: PricingStatus | null;
+}
+
+// Sales patio-scoper draft (SQ-29): the scoper's own { site, design,
+// pricing }, read whole. The dossier is an office read (staff and their
+// agents), and the office sees margin, commission and the customer's contact
+// details (Jan, 27 Oct 2026). Crew, supplier and customer surfaces never read
+// this: see dossier_audience.ts.
+export interface PatioScoperDraft {
+  site: Record<string, unknown> | null;
+  design: Record<string, unknown> | null;
+  pricing: Record<string, unknown> | null;
+}
+
+// Sales' completeness rule on the frozen row's pricing, as booleans only:
+// pricing_complete is true, sell_to_confirm is empty, internal.costs_complete
+// is not false, and revision.sealed holds. null is unknown, never false.
+export interface PricingStatus {
+  pricing_complete: boolean | null;
+  sell_to_confirm_empty: boolean | null;
+  costs_complete_not_false: boolean | null;
+  revision_sealed: boolean | null;
+  complete: boolean | null;
+}
+
+export interface PatioScoperRecord {
+  tool: "patio-scoper";
+  version: string | null;
+  family: string | null;
+  supported: boolean | null;
+  draft: PatioScoperDraft | null;
+  // From the frozen scope_revisions row only, never the last save or the
+  // draft. null unless the summarised content is that frozen revision.
+  pricing_status: PricingStatus | null;
+  revision_n: number | null;
+  scope_revision_id: string | null;
+  parent_revision_id: string | null;
+  frozen_id: string | null;
+  sealed_at: string | null;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> | null {
@@ -1138,6 +1221,118 @@ function changedSinceLastQuote(
   return { changed: null, basis: "scope_update_time_not_recorded" };
 }
 
+// The Sales draft is { site, design, pricing }. A boolean, a missing draft,
+// or an object with none of those three is no draft.
+function patioScoperDraft(value: unknown): PatioScoperDraft | null {
+  const obj = parseJsonObject(value);
+  if (!obj) return null;
+  const site = parseJsonObject(obj.site);
+  const design = parseJsonObject(obj.design);
+  const pricing = parseJsonObject(obj.pricing);
+  if (!site && !design && !pricing) return null;
+  return { site, design, pricing };
+}
+
+function bool(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/**
+ * Figure-free status from a frozen row's pricing object (Sales' frozen-store
+ * reader contract, settled points S1 to S8 in spec r2.4). Returns booleans
+ * only: no figures and no line names. A missing internal.costs_complete is
+ * "not false" (S5); a missing sell_to_confirm is unknown (C5d).
+ */
+export function pricingStatusFrom(pricing: unknown): PricingStatus | null {
+  const p = parseJsonObject(pricing);
+  if (!p) return null;
+  const sell = (p as any).sell_to_confirm;
+  const internal = (p as any).internal;
+  let costsNotFalse: boolean | null;
+  if (internal === undefined) {
+    costsNotFalse = true;
+  } else if (!internal || typeof internal !== "object" || Array.isArray(internal)) {
+    costsNotFalse = null;
+  } else if (internal.costs_complete === undefined) {
+    costsNotFalse = true;
+  } else if (typeof internal.costs_complete === "boolean") {
+    costsNotFalse = internal.costs_complete !== false;
+  } else {
+    costsNotFalse = null;
+  }
+  const revision = (p as any).revision;
+  const parts = {
+    pricing_complete: bool((p as any).pricing_complete),
+    sell_to_confirm_empty: Array.isArray(sell) ? sell.length === 0 : null,
+    costs_complete_not_false: costsNotFalse,
+    revision_sealed: revision && typeof revision === "object"
+      ? bool(revision.sealed)
+      : null,
+  };
+  const values = Object.values(parts);
+  const complete = values.some((v) => v === false)
+    ? false
+    : values.every((v) => v === true)
+    ? true
+    : null;
+  return { ...parts, complete };
+}
+
+/**
+ * The patio-scoper v2 record (Sales SQ-29) is the scoper's own shape, not the
+ * older patio tool's, so the shared release-packet adapter would read it as a
+ * bare "patio" with no lines. Read it here, lines only: `expected` holds
+ * figures and is never read. `draft` is the Sales object (site, design,
+ * pricing). An unsupported family is a scope with no quote or order behind
+ * it, and its lines say so.
+ */
+function patioScoperSummary(
+  scopeJson: Record<string, unknown>,
+  pricingStatus: PricingStatus | null,
+): { lines: string[]; record: PatioScoperRecord } | null {
+  if (scopeJson.tool !== "patio-scoper") return null;
+  const rev = scopeJson.revision && typeof scopeJson.revision === "object" &&
+      !Array.isArray(scopeJson.revision)
+    ? scopeJson.revision as Record<string, unknown>
+    : null;
+  if (!rev) return null;
+  const supported = typeof scopeJson.supported === "boolean"
+    ? scopeJson.supported
+    : null;
+  const family = str(scopeJson.family);
+  const lines: string[] = [];
+  if (supported === false) {
+    lines.push(
+      `${family ?? "this patio"}: not a family the scoper prices, so no quote or order is implied`,
+    );
+  }
+  for (const line of Array.isArray(scopeJson.lines) ? scopeJson.lines : []) {
+    const desc = str((line as any)?.description);
+    if (!desc) continue;
+    const qty = num((line as any)?.quantity);
+    const unit = str((line as any)?.unit);
+    const colour = str((line as any)?.colour);
+    const amount = qty === null ? "quantity to confirm" : `${qty}${unit ? ` ${unit}` : ""}`;
+    lines.push(`${desc} (${amount})${colour ? `, ${colour}` : ""}`);
+  }
+  return {
+    lines,
+    record: {
+      tool: "patio-scoper",
+      version: str(scopeJson.version),
+      family,
+      supported,
+      draft: patioScoperDraft(scopeJson.draft),
+      pricing_status: pricingStatus,
+      revision_n: num(rev.n),
+      scope_revision_id: str(rev.scopeRevisionId),
+      parent_revision_id: str(rev.parentRevisionId),
+      frozen_id: str(rev.frozenId),
+      sealed_at: str(rev.sealedAt),
+    },
+  };
+}
+
 /**
  * Pure scope summary. Reads the adapter's scope block only (never pricing or
  * internal cost). newestQuoteSentAt is the newest CURRENT quote's sent_at.
@@ -1162,9 +1357,10 @@ export function summariseScope(
     signedOff: { at: string; source: string } | null;
     quoteReadFailed?: boolean;
     boundRevision?: BoundRevision | null;
+    revisions?: ScopeRevisionAlignment;
   },
 ): ScopeSummary {
-  const scopeJson = parseJsonObject(job.scope_json);
+  const lastSave = parseJsonObject(job.scope_json);
   const pricingJson = parseJsonObject(job.pricing_json);
   const scopeUpdatedAt = job.scope_updated_at ?? null;
   const { changed, basis } = changedSinceLastQuote(job, opts);
@@ -1181,8 +1377,55 @@ export function summariseScope(
     changed_since_last_quote: changed,
     changed_since_last_quote_basis: basis,
   };
+
+  // Which content to summarise: the frozen revision when there is one we can
+  // read, else the last save. A freeze says nothing about quote acceptance.
+  let scopeJson = lastSave;
+  const rev = opts.revisions;
+  if (rev) {
+    if (!rev.ok) {
+      Object.assign(base, {
+        scope_source: "last_save",
+        frozen_revision: null,
+        last_save_matches_frozen: null,
+        revision_history: null,
+        revision_read_code: rev.code ?? "scope_revisions_read_failed",
+      });
+    } else {
+      Object.assign(base, {
+        frozen_revision: rev.frozen,
+        last_save_matches_frozen: rev.last_save_matches_frozen,
+        revision_history: rev.history,
+        revision_history_more: rev.more,
+      });
+      if (rev.frozen && rev.last_save_matches_frozen === true) {
+        base.scope_source = "frozen_revision";
+      } else if (rev.frozen && rev.frozen_scope_json) {
+        base.scope_source = "frozen_revision";
+        scopeJson = rev.frozen_scope_json;
+      } else {
+        base.scope_source = "last_save";
+        if (rev.code) base.revision_read_code = rev.code;
+      }
+    }
+  }
+
   if (!scopeJson || Object.keys(scopeJson).length === 0) {
     return { ...base, status: "no_scope" };
+  }
+  // The frozen pricing status describes the frozen revision, so it is shown
+  // only when the summarised content is that revision.
+  const pricingStatus = base.scope_source === "frozen_revision"
+    ? rev?.frozen_pricing_status ?? null
+    : null;
+  const patioScoper = patioScoperSummary(scopeJson, pricingStatus);
+  if (patioScoper) {
+    return {
+      ...base,
+      kind: "patio",
+      lines: patioScoper.lines,
+      scope_record: patioScoper.record,
+    };
   }
   try {
     const result = dispatchAdapter({
@@ -1216,6 +1459,171 @@ export function summariseScope(
   } catch (_e) {
     return { ...base, status: "not_summarised:adapter_error" };
   }
+}
+
+const SCOPE_REVISION_HISTORY_LIMIT = 50;
+
+// jobs.type -> scope_revisions.tool_kind, for the two tools on Sales' route.
+const SCOPE_TOOL_KIND_BY_JOB_TYPE: Record<string, string> = {
+  patio: "patio",
+  fencing: "fencing",
+};
+
+function scopeRevisionRef(row: any): ScopeRevisionRef {
+  return {
+    scope_revision_id: String(row?.id),
+    revision_number: num(row?.revision_number),
+    status: str(row?.status),
+    tool_kind: str(row?.tool_kind),
+    tool_version: str(row?.tool_version),
+    frozen_at: str(row?.frozen_at),
+    superseded_at: str(row?.superseded_at),
+    superseded_by_scope_revision_id: str(row?.superseded_by_scope_revision_id),
+  };
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * The job's server scope revisions (Sales' save-then-freeze route, SQ-29):
+ * history newest first, the one frozen row, and whether the last save is that
+ * frozen content. Matching is by scope_hash, the same canonical hash
+ * freeze_scope stores, never by the tool's own frozenId (a different id). The
+ * frozen row's text (it can run to megabytes) is read only when the last save
+ * differs, and used only once it hashes to scope_hash. The frozen pricing text
+ * is read only to derive the figure-free status, once it hashes to
+ * pricing_hash; nothing else from it leaves this function. A failed read is
+ * ok:false with a code, never an empty history.
+ */
+export async function readScopeRevisionAlignment(
+  client: any,
+  jobId: string,
+  scopeJson: unknown,
+  jobType?: string | null,
+): Promise<ScopeRevisionAlignment> {
+  const failed = (code: string): ScopeRevisionAlignment => ({
+    ok: false,
+    code,
+    history: [],
+    more: false,
+    frozen: null,
+    last_save_matches_frozen: null,
+    frozen_scope_json: null,
+    frozen_pricing_status: null,
+  });
+  let rows: any[];
+  try {
+    const { data, error } = await client.from("scope_revisions")
+      .select(
+        "id, revision_number, status, tool_kind, tool_version, scope_hash, frozen_at, superseded_at, superseded_by_scope_revision_id",
+      )
+      .eq("job_id", jobId)
+      .order("revision_number", { ascending: false })
+      .limit(SCOPE_REVISION_HISTORY_LIMIT + 1);
+    if (error) return failed("scope_revisions_read_failed");
+    if (!Array.isArray(data)) return failed("scope_revisions_not_a_list");
+    rows = data;
+  } catch (_e) {
+    return failed("scope_revisions_read_failed");
+  }
+  const more = rows.length > SCOPE_REVISION_HISTORY_LIMIT;
+  const kept = rows.slice(0, SCOPE_REVISION_HISTORY_LIMIT);
+  // Sales' contract: the current revision is the job's one frozen row of the
+  // job's own tool kind. A frozen row of another kind is not this scope.
+  const expectedKind = SCOPE_TOOL_KIND_BY_JOB_TYPE[String(jobType ?? "")] ??
+    null;
+  const frozenRows = rows.filter((r) => r?.status === "frozen");
+  const frozenRow = frozenRows.find((r) =>
+    !expectedKind || r?.tool_kind === expectedKind
+  ) ?? null;
+  const out: ScopeRevisionAlignment = {
+    ok: true,
+    history: kept.map(scopeRevisionRef),
+    more,
+    frozen: frozenRow ? scopeRevisionRef(frozenRow) : null,
+    last_save_matches_frozen: null,
+    frozen_scope_json: null,
+    frozen_pricing_status: null,
+  };
+  if (!frozenRow) {
+    if (frozenRows.length > 0) out.code = "frozen_tool_kind_mismatch";
+    return out;
+  }
+
+  const lastSave = parseJsonObject(scopeJson);
+  if (lastSave && Object.keys(lastSave).length > 0) {
+    const { hash } = await canonicalJsonAndHash(lastSave);
+    out.last_save_matches_frozen = hash === frozenRow.scope_hash;
+  } else {
+    out.last_save_matches_frozen = false;
+  }
+
+  // One read of the frozen row: its pricing always (for the status), its scope
+  // text only when the last save differs.
+  const needScope = !out.last_save_matches_frozen;
+  let data: any;
+  try {
+    const read = await client.from("scope_revisions")
+      .select(
+        needScope
+          ? "pricing_canonical_text, pricing_hash, scope_canonical_text, scope_hash"
+          : "pricing_canonical_text, pricing_hash",
+      )
+      .eq("id", frozenRow.id)
+      .maybeSingle();
+    if (read.error) {
+      return {
+        ...out,
+        code: needScope ? "frozen_text_unreadable" : "frozen_pricing_unreadable",
+      };
+    }
+    data = read.data;
+  } catch (_e) {
+    return {
+      ...out,
+      code: needScope ? "frozen_text_unreadable" : "frozen_pricing_unreadable",
+    };
+  }
+  const pricingText = data?.pricing_canonical_text;
+  let pricingCode: string | undefined;
+  if (typeof pricingText !== "string") {
+    pricingCode = "frozen_pricing_unreadable";
+  } else if (
+    typeof data?.pricing_hash !== "string" ||
+    (await sha256Hex(pricingText)) !== data.pricing_hash
+  ) {
+    pricingCode = "frozen_pricing_hash_mismatch";
+  } else {
+    out.frozen_pricing_status = pricingStatusFrom(pricingText);
+    if (!out.frozen_pricing_status) pricingCode = "frozen_pricing_unreadable";
+  }
+  if (!needScope) {
+    return pricingCode ? { ...out, code: pricingCode } : out;
+  }
+
+  try {
+    const text = data?.scope_canonical_text;
+    if (typeof text !== "string") {
+      return { ...out, code: "frozen_text_unreadable" };
+    }
+    if ((await sha256Hex(text)) !== frozenRow.scope_hash) {
+      return { ...out, code: "frozen_text_hash_mismatch" };
+    }
+    const parsed = parseJsonObject(text);
+    if (!parsed) return { ...out, code: "frozen_text_unreadable" };
+    out.frozen_scope_json = parsed;
+  } catch (_e) {
+    return { ...out, code: "frozen_text_unreadable" };
+  }
+  return pricingCode ? { ...out, code: pricingCode } : out;
 }
 
 /**
