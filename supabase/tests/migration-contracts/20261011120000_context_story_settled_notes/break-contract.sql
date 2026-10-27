@@ -22,6 +22,7 @@ SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NUL
 -- its down goes first, inside this transaction only)
 SELECT to_regprocedure('public.context_job_card_events(uuid[])') IS NOT NULL AS card_events_live \gset
 \if :card_events_live
+\ir ../../../rollbacks/20261027140000_context_cost_check_person_splits_down.sql
 \ir ../../../rollbacks/20261021150000_context_job_card_events_down.sql
 \endif
 \ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
