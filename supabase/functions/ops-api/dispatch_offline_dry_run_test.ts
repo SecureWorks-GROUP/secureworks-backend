@@ -1,27 +1,32 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 // One fencing job, fixture only, from accepted through a draft Dispatch
-// purchase order, the order PDF, the supplier email preview, a sighted
-// delivery and the install mark. The send transport is stubbed and never
-// called. Nothing here opens a database connection or writes a live row.
+// purchase order, the order PDF, the supplier email preview, then the real
+// send, delivery and install writers. The transport is a stub that records
+// the payload and answers 2xx. fetch is refused, so a path that posts to
+// Resend fails this run. Nothing here opens a database connection or writes
+// a live row.
 import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  dispatchDelivery,
-  dispatchDeliveryRailLine,
-  dispatchDeliverySummary,
-  dispatchSightedOrderIds,
-  isDispatchDeliveryDate,
-} from "./dispatch_deliveries.ts";
+  markDispatchDeliverySighted,
+  setDispatchDeliveryConfirmed,
+  setDispatchDeliveryExpected,
+} from "./dispatch_deliveries_store.ts";
+import { setDispatchInstallConfirmed } from "./dispatch_install_write.ts";
 import { dispatchMaterialDisplayStatus } from "./dispatch_materials.ts";
+import { makeDispatchMemory } from "./dispatch_memory_client.ts";
 import { renderDispatchOrderPdf } from "./dispatch_order_pdf.ts";
 import {
   buildDispatchEmail,
   dispatchBytesToBase64,
+  dispatchDraftIdempotencyKey,
   type DispatchMailTransport,
 } from "./dispatch_order_send.ts";
+import { sendDispatchOrderDraft } from "./dispatch_orders_store.ts";
 import {
+  DISPATCH_ORDER_PDF_BUCKET,
   dispatchAddressCheck,
   dispatchDeliverTo,
   dispatchDraftHash,
@@ -52,6 +57,12 @@ const PO_NUMBER = "PO-1000001";
 const ORDERED_AT = "2026-10-18T03:00:00.000Z";
 const SUPPLIER_EMAIL = "orders@example.test";
 
+function seen(value: object, key: string): unknown {
+  return Object.hasOwn(value, key)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
 async function pdfText(bytes: Uint8Array): Promise<string> {
   const raw = new TextDecoder("latin1").decode(bytes);
   const out: string[] = [];
@@ -79,12 +90,12 @@ async function pdfText(bytes: Uint8Array): Promise<string> {
   return out.join("\n");
 }
 
-Deno.test("offline dry run: accepted fence through a sighted order and the install mark, and the stubbed transport is never asked to send", async () => {
+Deno.test("offline dry run: accepted fence through the real send, a sighted delivery and the install mark", async () => {
   const fetchCalls: string[] = [];
   const transportCalls: unknown[] = [];
   const transport: DispatchMailTransport = (request) => {
     transportCalls.push(request);
-    return Promise.resolve({ status: 200, body: { id: "not-sent" } });
+    return Promise.resolve({ status: 200, body: { id: "re_dry_run_fixture" } });
   };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL) => {
@@ -287,60 +298,227 @@ Deno.test("offline dry run: accepted fence through a sighted order and the insta
         pdf_sha256: pdf.sha256,
       }),
     );
-    // The preview is the payload. The send is a separate call, and this run
-    // does not make it.
-    void transport;
-    assertEquals(transportCalls.length, 0);
+    const orgId = "00000000-0000-4000-8000-000000000001";
+    const pdfPath = `${JOB_ID}/${PO_NUMBER}.pdf`;
+    const storedDraft = {
+      ...draft,
+      org_id: orgId,
+      job_id: JOB_ID,
+      pdf_version: 1,
+      pdf_path: pdfPath,
+      pdf_sha256: pdf.sha256,
+      line_count: 1,
+      order_lines: orderLines,
+      to_email_sent: null,
+      attempt_to_email: null,
+      attempt_in_reply_to: null,
+      send_attempt: null,
+      last_error: null,
+      communication_id: null,
+      resend_id: null,
+      sent_at: null,
+      sent_by_email: null,
+      sent_via: null,
+      created_at: ORDERED_AT,
+      updated_at: ORDERED_AT,
+    };
+    const memory = makeDispatchMemory({
+      jobs: [{
+        ...job,
+        org_id: orgId,
+        metadata: null,
+        council_required: false,
+      }],
+      users: [{
+        id: PERSON,
+        org_id: orgId,
+        name: "Office Person",
+        email: "office@example.test",
+      }],
+      suppliers: [{
+        id: SUPPLIER_ID,
+        org_id: orgId,
+        name: "Example Steel",
+        email: SUPPLIER_EMAIL,
+      }],
+      purchase_orders: [{
+        ...order,
+        org_id: orgId,
+        job_id: JOB_ID,
+        line_items: [],
+        reference: null,
+        pdf_path: pdfPath,
+        pdf_sha256: pdf.sha256,
+        confirmed_delivery_date: null,
+        confirmed_delivery_set_at: null,
+        confirmed_delivery_set_by: null,
+        confirmed_delivery_set_by_email: null,
+        delivery_sighted_at: null,
+        delivery_sighted_by: null,
+        delivery_sighted_by_email: null,
+      }],
+      job_order_emails: [storedDraft],
+      job_material_lines: [
+        {
+          id: LINE_TO_ORDER,
+          org_id: orgId,
+          job_id: JOB_ID,
+          supplier_id: SUPPLIER_ID,
+          status: "to_order",
+          purchase_order_id: PO_ID,
+        },
+        {
+          id: LINE_IN_STOCK,
+          org_id: orgId,
+          job_id: JOB_ID,
+          supplier_id: SUPPLIER_ID,
+          status: "in_stock",
+          purchase_order_id: null,
+        },
+      ],
+      po_communications: [],
+      email_events: [],
+      job_events: [],
+      job_assignments: [],
+      job_dispatch_state: [],
+    });
+    memory.putFile(DISPATCH_ORDER_PDF_BUCKET, pdfPath, pdf.bytes);
+    const expectedHash = (await projectDispatchDraft({
+      draft: storedDraft,
+      order,
+      supplier: { name: "Example Steel", email: SUPPLIER_EMAIL },
+      nowMs,
+      currentGeneratedSha: null,
+    })).draft_hash;
 
-    assert(isDispatchDeliveryDate("2026-10-22"));
-    order.delivery_date = "2026-10-22";
-    let delivery = dispatchDelivery(order);
-    assertEquals(delivery.expected, "2026-10-22");
-    assertEquals(delivery.expected_editable, true);
-    assertEquals(delivery.confirmed.state, "waiting");
-    assertEquals(delivery.step, 1);
+    const sent = await sendDispatchOrderDraft(memory, {
+      draft_id: DRAFT_ID,
+      expected_draft_hash: expectedHash,
+    }, {
+      orgId,
+      actor: {
+        userId: PERSON,
+        email: "office@example.test",
+        orgId,
+      },
+      via: "screen",
+      transport,
+      now: () => "2026-10-18T06:00:00.000Z",
+    });
+    assertEquals(sent.success, true);
+    assertEquals(sent.filed, true);
+    assertEquals(sent.resend_id, "re_dry_run_fixture");
+    assertEquals(sent.draft, {
+      id: DRAFT_ID,
+      status: "sent",
+      to_email_sent: SUPPLIER_EMAIL,
+      sent_at: "2026-10-18T06:00:00.000Z",
+      sent_by_email: "office@example.test",
+    });
+    assertEquals(sent.order.status, "sent");
+    assertEquals(transportCalls.length, 1);
+    const carried = transportCalls[0] as {
+      payload: { to: string[]; subject: string; attachments?: Array<{ filename: string; content: string }> };
+      idempotencyKey: string;
+    };
+    assertEquals(carried.payload.to, [SUPPLIER_EMAIL]);
+    assertEquals(carried.payload.subject, email.subject);
+    assertEquals(carried.payload.attachments?.[0].filename, `${PO_NUMBER}.pdf`);
+    assert((carried.payload.attachments?.[0].content.length ?? 0) > 0);
+    assertEquals(
+      carried.idempotencyKey,
+      dispatchDraftIdempotencyKey(DRAFT_ID, 1),
+    );
+    assertEquals(memory.rows("job_order_emails")[0].status, "sent");
+    assertEquals(memory.rows("purchase_orders")[0].status, "sent");
+    assertEquals(
+      memory.rows("job_events").map((row) => row.event_type),
+      ["po_email_sent"],
+    );
+    assertEquals(memory.rows("po_communications").length, 1);
+    assertEquals(memory.rows("email_events").length, 1);
 
-    const names = new Map([[PERSON, "Office Person"]]);
-    order.confirmed_delivery_date = "2026-10-23";
-    order.confirmed_delivery_set_at = "2026-10-18T04:00:00.000Z";
-    order.confirmed_delivery_set_by = PERSON;
-    order.confirmed_delivery_set_by_email = "office@example.test";
-    delivery = dispatchDelivery(order, names);
-    assertEquals(delivery.confirmed.state, "date");
-    assertEquals(delivery.confirmed.date, "2026-10-23");
-    assertEquals(delivery.confirmed.by_hand, true);
-    assertEquals(delivery.confirmed.set_by, "Office Person");
-    assertEquals(delivery.step, 2);
+    const deliveries = {
+      orgId,
+      actor: {
+        userId: PERSON,
+        email: "office@example.test",
+        orgId,
+      },
+      via: "screen" as const,
+      now: () => "2026-10-18T07:00:00.000Z",
+    };
+    const sentStamp = seen(sent.order, "updated_at");
+    if (typeof sentStamp !== "string" || !sentStamp) {
+      throw new Error("sent order published no updated_at");
+    }
+    const expected = await setDispatchDeliveryExpected(memory, {
+      purchase_order_id: PO_ID,
+      expected_updated_at: sentStamp,
+      delivery_date: "2026-10-22",
+    }, deliveries);
+    assertEquals(expected.success, true);
+    assertEquals(seen(expected, "unchanged"), undefined);
+    assertEquals(expected.order.delivery.expected, "2026-10-22");
+    assertEquals(expected.order.delivery.step, 1);
+    assertEquals(expected.order.delivery.confirmed.state, "waiting");
+    assertEquals(expected.deliveries, {
+      counted: 1,
+      sighted: 0,
+      all_sighted: false,
+    });
+    assertEquals(expected.counts, { total: 2, ready: 1 });
 
-    order.delivery_sighted_at = "2026-10-23T02:00:00.000Z";
-    order.delivery_sighted_by = PERSON;
-    order.delivery_sighted_by_email = "office@example.test";
-    delivery = dispatchDelivery(order, names);
-    assertEquals(delivery.sighted, {
-      at: "2026-10-23T02:00:00.000Z",
+    const confirmed = await setDispatchDeliveryConfirmed(memory, {
+      purchase_order_id: PO_ID,
+      expected_updated_at: expected.order.updated_at,
+      confirmed_delivery_date: "2026-10-23",
+      via: "deliveries",
+    }, deliveries);
+    assertEquals(confirmed.order.delivery.confirmed, {
+      state: "date",
+      date: "2026-10-23",
+      set_by: "Office Person",
+      set_at: "2026-10-18T07:00:00.000Z",
+      by_hand: true,
+    });
+    assertEquals(confirmed.order.delivery.step, 2);
+    assertEquals(
+      memory.rows("purchase_orders")[0].confirmed_delivery_set_by,
+      PERSON,
+    );
+
+    const sighted = await markDispatchDeliverySighted(memory, {
+      purchase_order_id: PO_ID,
+      expected_updated_at: confirmed.order.updated_at,
+      sighted: true,
+    }, deliveries);
+    assertEquals(sighted.order.delivery.sighted, {
+      at: "2026-10-18T07:00:00.000Z",
       by: "Office Person",
     });
-    assertEquals(delivery.step, 3);
-    const sighted = dispatchSightedOrderIds([order]);
+    assertEquals(sighted.order.delivery.step, 3);
+    assertEquals(sighted.deliveries, {
+      counted: 1,
+      sighted: 1,
+      all_sighted: true,
+    });
+    assertEquals(sighted.counts, { total: 2, ready: 2 });
+    assertEquals(memory.rows("purchase_orders")[0].status, "sent");
     assertEquals(
-      dispatchMaterialDisplayStatus(stamped[0], sighted),
-      "delivered",
-    );
-    const summary = dispatchDeliverySummary([order]);
-    assertEquals(summary, { counted: 1, sighted: 1, all_sighted: true });
-    assertEquals(
-      dispatchDeliveryRailLine(
-        summary.counted,
-        summary.sighted,
-        accepted.index,
-      ),
-      "Every order on this job is sighted on site. Press Materials on site to move the job.",
+      memory.rows("job_events").map((row) => row.event_type),
+      [
+        "po_email_sent",
+        "po_delivery_expected_set",
+        "po_delivery_confirmed_set",
+        "po_delivery_sighted",
+      ],
     );
 
     const bookingDay = "2026-10-20";
-    const scheduled = { ...job, status: "scheduled" };
-    const booking = {
-      id: "asg-1",
+    memory.rows("jobs")[0].status = "scheduled";
+    memory.rows("job_assignments").push({
+      id: "a2000000-0000-4000-8000-000000000010",
       job_id: JOB_ID,
       user_id: PERSON,
       scheduled_date: bookingDay,
@@ -351,38 +529,54 @@ Deno.test("offline dry run: accepted fence through a sighted order and the insta
       role: "lead_installer",
       is_lead: true,
       confirmation_status: "confirmed",
-      person: { name: "Office Person" },
-    };
-    const beforeMark = dispatchRowFields(scheduled, null, {
-      bookings: [booking],
-      today: TODAY,
     });
+    const beforeMark = dispatchRowFields(
+      memory.rows("jobs")[0],
+      null,
+      { bookings: memory.rows("job_assignments"), today: TODAY },
+    );
     assertEquals(beforeMark.dispatch_stage, "trade_scheduled");
-    assertEquals(beforeMark.dispatch_stage_index, 6);
-    assertEquals(beforeMark.dispatch_install?.calendar_confirmed, true);
-    assertEquals(beforeMark.dispatch_install?.confirmed, null);
     assertEquals(beforeMark.dispatch_todo, true);
     assertEquals(beforeMark.dispatch_install_open, "not_confirmed");
 
-    const marked = dispatchRowFields(scheduled, {
-      install_confirmed_at: "2026-10-18T05:00:00.000Z",
-      install_confirmed_by: PERSON,
-      install_confirmed_by_email: "office@example.test",
-      install_confirmed_for_day: bookingDay,
-      install_confirmer: { name: "Office Person" },
-    }, { bookings: [booking], today: TODAY });
-    assertEquals(marked.dispatch_install?.confirmed, {
-      at: "2026-10-18T05:00:00.000Z",
-      by: "Office Person",
-      for_day: bookingDay,
-    });
+    const marked = await setDispatchInstallConfirmed(memory, {
+      job_id: JOB_ID,
+      confirmed: true,
+      expected_install_day: bookingDay,
+      expected_confirmed_at: null,
+    }, {
+      mode: "jwt",
+      userId: PERSON,
+      email: "office@example.test",
+    }, orgId, TODAY);
+    assertEquals(marked.success, true);
+    assertEquals(marked.audit_logged, true);
+    assertEquals(marked.dispatch_install?.confirmed?.for_day, bookingDay);
+    assertEquals(marked.dispatch_install?.confirmed?.by, "Office Person");
     assertEquals(marked.dispatch_install?.confirmed_current, true);
     assertEquals(marked.dispatch_todo, false);
     assertEquals(marked.dispatch_install_open, null);
+    const state = memory.rows("job_dispatch_state")[0];
+    assertEquals(state.install_confirmed_by, PERSON);
+    assertEquals(state.install_confirmed_for_day, bookingDay);
+    assertEquals(state.stage ?? null, null);
+    assertEquals(
+      marked.dispatch_install?.confirmed?.at,
+      state.install_confirmed_at,
+    );
+    assertEquals(memory.rows("jobs")[0].status, "scheduled");
+    assertEquals(
+      memory.rows("job_assignments")[0].confirmation_status,
+      "confirmed",
+    );
+    assertEquals(
+      memory.rows("job_events").at(-1)?.event_type,
+      "dispatch_install_confirmed",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
 
   assertEquals(fetchCalls, []);
-  assertEquals(transportCalls.length, 0);
+  assertEquals(transportCalls.length, 1);
 });

@@ -17502,7 +17502,9 @@ async function pipeline(
   // stay byte-identical: same selects, same enrichment, same row keys.
   const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
   // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
-  // absent: nothing below changes for any existing caller.
+  // absent, a populated board's keys stay as they are. An empty plain pipeline
+  // returns the same nineteen column keys as a populated one
+  // (`emptyPipelineColumns`). Dispatch fields are added only when `dispatch=1`.
   const dispatchList = isDispatchListRequested(params)
   // An empty Dispatch answer still says the stage and materials reads had
   // nothing to fail on, so a search with no match never reads as a failed

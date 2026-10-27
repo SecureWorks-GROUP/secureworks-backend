@@ -420,10 +420,11 @@ jobs:
       # Dispatch v2 slices 5 and 6 add the draft list, supplier boxes and the
       # supplier order email sent from admin@ through Outlook (the send itself
       # is always a fake in these tests).
-      # Slice 6 and 7 add the delivery and install rules. The offline dry run
-      # walks one fencing job from accepted through a draft order, the PDF, a
-      # stubbed email preview, a sighted delivery and the install mark. That
-      # transport is never asked to send.
+      # Slice 6 and 7 add the delivery and install rules, and the store writers
+      # are tested against an in-memory client. The offline dry run walks one
+      # fencing job through the real send path. The transport is a stub that
+      # records the payload and returns 2xx, and the run refuses any fetch, so
+      # nothing is emailed.
       - name: Test the Dispatch list and job notes reads
         run: |
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
@@ -437,7 +438,9 @@ jobs:
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
             supabase/functions/receive-po-email/po_email_tag_test.ts \
             supabase/functions/ops-api/dispatch_deliveries_test.ts \
+            supabase/functions/ops-api/dispatch_deliveries_store_test.ts \
             supabase/functions/ops-api/dispatch_install_test.ts \
+            supabase/functions/ops-api/dispatch_install_write_test.ts \
             supabase/functions/ops-api/dispatch_offline_dry_run_test.ts
 
       # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
