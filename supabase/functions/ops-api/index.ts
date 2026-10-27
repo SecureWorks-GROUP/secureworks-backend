@@ -40792,10 +40792,17 @@ async function createDepositInvoice(client: any, body: any) {
   let invoiceContactId = job_contact_id ? undefined : (job.xero_contact_id || undefined)
   let invoiceContactName = job.client_name
   let contactLabel = '' // A, B, C, D — used for reference suffix
+  // The party's own quoted share (ex GST), when the caller names a party. Null is
+  // "not recorded"; 0 is "this party pays nothing" and must never fall back to the
+  // whole job (past jobs SWF-261423 / SWF-26545 carry a full-job DEP50 that way).
+  let partyPortionExGst: number | null = null
   if (job_contact_id) {
     const { data: jc } = await client.from('job_contacts')
-      .select('client_name, xero_contact_id, contact_label')
+      .select('client_name, xero_contact_id, contact_label, quote_value_ex_gst')
       .eq('id', job_contact_id).single()
+    if (jc?.quote_value_ex_gst != null && Number.isFinite(Number(jc.quote_value_ex_gst))) {
+      partyPortionExGst = Number(jc.quote_value_ex_gst)
+    }
     if (jc?.xero_contact_id) invoiceContactId = jc.xero_contact_id
     if (jc?.client_name) invoiceContactName = jc.client_name
     if (jc?.contact_label) contactLabel = jc.contact_label
@@ -40804,6 +40811,23 @@ async function createDepositInvoice(client: any, body: any) {
 
   // Per-run label (for multi-neighbour fencing)
   const runLabel = body.run_label || null
+
+  // A job with more than one paying party has no single "whole job" deposit: the
+  // client would be billed a share of every neighbour's work. Each party's deposit
+  // comes from its own accepted quote, so a call naming no party is refused here.
+  // A paying neighbour is a non-primary row that is not removed (checked in code:
+  // status is nullable and a PostgREST .neq would drop NULL rows).
+  if (!job_contact_id) {
+    const { data: parties, error: partiesErr } = await client.from('job_contacts')
+      .select('id, is_primary, status, removed_at')
+      .eq('job_id', jId)
+    if (partiesErr) throw new Error(`Could not read the job's paying parties: ${partiesErr.message}`)
+    const payingNeighbours = (parties || []).filter((p: any) =>
+      p && p.is_primary !== true && p.status !== 'removed' && p.removed_at == null)
+    if (payingNeighbours.length > 0) {
+      throw new Error("This job has more than one paying party. Raise each party's deposit from its own accepted quote (job_contact_id), not one deposit for the whole job.")
+    }
+  }
 
   // Check for existing deposit invoice (neighbour + run aware)
   let depRefPattern = '%DEP%'
@@ -40846,14 +40870,21 @@ async function createDepositInvoice(client: any, body: any) {
 
   // Allow override from body
   const depositAmountOverride = body.deposit_amount
-  const depositAmountIncGst = depositAmountOverride || Math.round(quotedTotal * (depositPercent / 100) * 100) / 100
+  if (job_contact_id && depositAmountOverride == null && partyPortionExGst === 0) {
+    throw new Error('This party pays nothing on the quote, so no deposit invoice is raised for them.')
+  }
+  // Basis: an explicit amount, else the named party's own share, else the whole job.
+  const depositBasisIncGst = job_contact_id && partyPortionExGst != null
+    ? Math.round(partyPortionExGst * 1.1 * 100) / 100
+    : quotedTotal
+  const depositAmountIncGst = depositAmountOverride ?? Math.round(depositBasisIncGst * (depositPercent / 100) * 100) / 100
 
   if (depositAmountIncGst <= 0) {
     throw new Error('Cannot create a $0 deposit invoice. Set pricing_json on the job first.')
   }
 
   // Build rich description with all job metadata baked in
-  const depositLabel = `Deposit (${depositPercent}% of $${quotedTotal.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} inc GST)`
+  const depositLabel = `Deposit (${depositPercent}% of $${depositBasisIncGst.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} inc GST)`
   const description = buildRichDescription(job, depositLabel)
 
   // Reference: SWP-25042-DEP50 (single), SWF-25030-A-DEP50 (neighbour A), SWF-25030-REAR-A-DEP50 (per-run)
@@ -62954,7 +62985,20 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
   let ghlCreated = 0
 
   // 1. Primary client (label A)
-  const clientPortionExGst = splits.client_portion_ex_gst || pricing.totalExGST || 0
+  // A party who pays $0 is a real answer, not a missing one: null checks, never falsy.
+  // A flat split saved with share percentages but no portions (the fence page's
+  // shape before it wrote portions) works each portion out from the share; 0 is
+  // kept only when 0 was written.
+  const flatSplit = splits.method !== 'per_run'
+  const portionFromShare = (pct: unknown): number | null => {
+    const total = Number(pricing.totalExGST)
+    const share = pct == null ? 50 : Number(pct)
+    if (!flatSplit || pricing.totalExGST == null || !Number.isFinite(total) || !Number.isFinite(share)) return null
+    return Math.round(total * share) / 100
+  }
+  const clientPortionExGst = splits.client_portion_ex_gst
+    ?? portionFromShare(splits.client_share_percent)
+    ?? pricing.totalExGST ?? 0
   const { data: existingPrimary } = await client.from('job_contacts')
     .select('id').eq('job_id', jId).eq('is_primary', true).maybeSingle()
 
@@ -62970,7 +63014,7 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
     xero_contact_id: job.xero_contact_id || null,
     share_percentage: splits.method === 'per_run'
       ? Math.round(clientPortionExGst / (pricing.totalExGST || 1) * 100)
-      : (splits.client_share_percent || 50),
+      : (splits.client_share_percent ?? 50),
     quote_value_ex_gst: clientPortionExGst,
     assigned_runs: splits.client_assigned_runs || [],
     status: 'active',
@@ -63002,8 +63046,8 @@ async function syncFencingNeighbours(client: any, body: any): Promise<FencingNei
       client_phone: nb.phone || '',
       client_email: nb.email || '',
       site_address: nb.address || '',
-      share_percentage: nb.share_percent || 50,
-      quote_value_ex_gst: nb.portion_ex_gst || 0,
+      share_percentage: nb.share_percent ?? 50,
+      quote_value_ex_gst: nb.portion_ex_gst ?? portionFromShare(nb.share_percent) ?? 0,
       assigned_runs: nb.assigned_runs || [],
       status: 'active',
       contact_type: contactType,

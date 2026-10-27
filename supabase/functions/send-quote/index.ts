@@ -2128,7 +2128,7 @@ serve(async (req: Request) => {
                   .eq('id', doc.job_contact_id)
 
                 // Add note to new GHL contact
-                const noteBody = `Neighbour on ${job?.job_number || 'N/A'} — accepted quote ${doc.quote_number || ''} for $${totalIncGST ? (totalIncGST * ((doc.job_contacts.share_percentage || 50) / 100)).toLocaleString() : 'N/A'}`
+                const noteBody = `Neighbour on ${job?.job_number || 'N/A'} — accepted quote ${doc.quote_number || ''} for $${totalIncGST ? (totalIncGST * ((doc.job_contacts.share_percentage ?? 50) / 100)).toLocaleString() : 'N/A'}`
                 await fetch(`https://services.leadconnectorhq.com/contacts/${createData.contactId}/notes`, {
                   method: 'POST',
                   headers: {
@@ -2148,7 +2148,11 @@ serve(async (req: Request) => {
 
         // Auto-create + send deposit invoice via send_acceptance_invoice
         // For multi-contact: create per-contact deposit invoice using their share
-        if (job?.id) {
+        // A party whose quoted share is $0 (a neighbour paid for the only gate, say)
+        // owes no deposit: 0 is a real answer, never read as "missing".
+        const partyPaysNothing = !!(doc.job_contact_id && doc.job_contacts &&
+          doc.job_contacts.quote_value_ex_gst != null && Number(doc.job_contacts.quote_value_ex_gst) === 0)
+        if (job?.id && !partyPaysNothing) {
           try {
             const invoiceBody: any = {
               job_id: job.id,
@@ -2163,10 +2167,10 @@ serve(async (req: Request) => {
               invoiceBody.job_contact_id = doc.job_contact_id
               // Calculate this contact's deposit from their exact quote value (not back-calculated share %)
               let contactPortionIncGST
-              if (doc.job_contacts.quote_value_ex_gst) {
-                contactPortionIncGST = doc.job_contacts.quote_value_ex_gst * 1.10
+              if (doc.job_contacts.quote_value_ex_gst != null) {
+                contactPortionIncGST = Number(doc.job_contacts.quote_value_ex_gst) * 1.10
               } else {
-                const sharePct = doc.job_contacts.share_percentage || 50
+                const sharePct = doc.job_contacts.share_percentage ?? 50
                 contactPortionIncGST = totalIncGST * (sharePct / 100)
               }
               const depositPct = depositConfig.percent || 50
