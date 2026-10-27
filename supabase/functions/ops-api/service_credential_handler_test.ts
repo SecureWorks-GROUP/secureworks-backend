@@ -225,6 +225,8 @@ const CRON_ACTIONS = [
   { action: "makesafe_sent_mirror", method: "POST" },
   { action: "makesafe_story_recompute", method: "POST" },
   { action: "makesafe_status_shadow_refresh", method: "POST" },
+  // GET so the test never runs a scan: reaching the 405 proves the server caller.
+  { action: "dispatch_v2_replies_scan", method: "GET" },
 ];
 
 Deno.test("the timed jobs' service-role bearer reaches each action as the server", async () => {
@@ -241,7 +243,10 @@ Deno.test("the timed jobs' service-role bearer reaches each action as the server
     );
     assertEquals(cron.status, server.status, opts.action);
     assertEquals(cron.probed, [CRON_KEY], opts.action);
-    if (opts.action === "auto_issue_job_work_orders") {
+    if (
+      opts.action === "auto_issue_job_work_orders" ||
+      opts.action === "dispatch_v2_replies_scan"
+    ) {
       assertEquals(cron.status, 405);
     } else {
       assertEquals(cron.status === 401, false, opts.action);

@@ -13,6 +13,7 @@ import {
   _pipelineForTest,
   AGENT_READ_ALLOWED_ACTIONS,
   ApiError,
+  EXISTING_FENCE_TYPE_PROJECTION,
   LEAD_INSTALLER_READ_ACTIONS,
 } from "./index.ts";
 import {
@@ -413,7 +414,14 @@ Deno.test("pipeline without the flag is unchanged: same select, same rows, no ne
   assertEquals(read.ranged, false);
   assertEquals(read.neq, []);
   assert(!read.or.includes(DISPATCH_LISTED_WORK_FILTER));
-  assert(!read.select.includes("scope_json"));
+  // The fence type is the one scope value the plain read projects; the
+  // Dispatch description paths stay opt-in.
+  assert(read.select.includes(EXISTING_FENCE_TYPE_PROJECTION));
+  assert(
+    !read.select.replace(EXISTING_FENCE_TYPE_PROJECTION, "").includes(
+      "scope_json",
+    ),
+  );
   assert(!read.select.includes("metadata"));
   const statuses = read.in.find(([column]) => column === "status")?.[1] || [];
   assert(statuses.includes("draft") && statuses.includes("quoted"));
@@ -427,6 +435,80 @@ Deno.test("pipeline without the flag is unchanged: same select, same rows, no ne
     // through as it always has rather than start stripping keys.
     assert("ds_runs" in row);
   }
+});
+
+// Named here, not imported from the pipeline helper: an assertion that only
+// compared two callers of the same helper would stay green if both dropped a
+// column.
+const PIPELINE_COLUMN_KEYS = [
+  "draft",
+  "quoted",
+  "partially_accepted",
+  "accepted",
+  "awaiting_deposit",
+  "approvals",
+  "order_materials",
+  "processing",
+  "awaiting_supplier",
+  "order_confirmed",
+  "schedule_install",
+  "scheduled",
+  "in_progress",
+  "rectification",
+  "complete",
+  "final_payment",
+  "invoiced",
+  "get_review",
+  "archived",
+];
+
+function assertEmptyBoardColumns(columns: Record<string, unknown>) {
+  assertEquals(Object.keys(columns), PIPELINE_COLUMN_KEYS);
+  for (const key of PIPELINE_COLUMN_KEYS) {
+    assertEquals(columns[key], [], key);
+  }
+}
+
+Deno.test("empty board: every return path publishes the same column set", async () => {
+  const populated = await _pipelineForTest(
+    makeClient(mixedBoard()).client,
+    params(""),
+  );
+  assertEquals(Object.keys(populated.columns), PIPELINE_COLUMN_KEYS);
+
+  // A repair filter that matches no job returns before the job read.
+  const repairEmpty = await _pipelineForTest(
+    makeClient({ jobs: [] }).client,
+    params("type=repair"),
+  );
+  assertEquals(repairEmpty.total, 0);
+  assertEmptyBoardColumns(repairEmpty.columns);
+  assertEquals("dispatch_stages" in repairEmpty, false);
+
+  // A job read that comes back empty is the other early return.
+  const noJobs = await _pipelineForTest(
+    makeClient({ jobs: [] }).client,
+    params(""),
+  );
+  assertEquals(noJobs.total, 0);
+  assertEmptyBoardColumns(noJobs.columns);
+  assertEquals(Object.keys(noJobs.columns), Object.keys(populated.columns));
+
+  const dispatchEmpty = await _pipelineForTest(
+    makeClient({ jobs: [] }).client,
+    params("dispatch=1"),
+  );
+  assertEquals(dispatchEmpty.total, 0);
+  assertEmptyBoardColumns(dispatchEmpty.columns);
+  // The pipeline return is a union: a plain read has none of these keys, and
+  // a failed Dispatch read has a different set. Read this answer as a record
+  // so the empty Dispatch shape is what the assertion checks.
+  const dispatchFields = dispatchEmpty as Record<string, unknown>;
+  assertEquals(dispatchFields.dispatch_stages, "ok");
+  assertEquals(dispatchFields.todo_total, 0);
+  assertEquals(dispatchFields.dispatch_materials, "ok");
+  assertEquals(dispatchFields.dispatch_installs, "ok");
+  assertEquals(dispatchFields.dispatch_deliveries, "ok");
 });
 
 Deno.test("dispatch list: accepted work only, make-safe left out, the new fields on every row", async () => {

@@ -20,6 +20,7 @@
 // ════════════════════════════════════════════════════════════
 
 import { isMessageWebhook, messageWebhookAnswer } from './message_webhook.ts'
+import { JOB_STATUS_RANK } from '../_shared/job_status_rank.ts'
 
 const GHL_API_TOKEN = Deno.env.get('GHL_API_TOKEN') || ''
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -90,13 +91,8 @@ const EXECUTION_PIPELINE_IDS = new Set([
   'SxayUz0KRDlCUk58apCC', // Patio Execution
 ])
 
-// Status rank for forward-only progression. get_review and archived rank above every
-// stage GHL can map to, so a GHL stage event can never pull a paid card out of Get Review
-// or an archived card back onto the board (an unranked status used to read as 0).
-const STATUS_RANK: Record<string, number> = {
-  draft: 0, quoted: 1, accepted: 2, scheduled: 3,
-  in_progress: 4, complete: 5, invoiced: 6, get_review: 7, archived: 8, cancelled: -1,
-}
+// Status rank for forward-only progression: the one table, shared with ghl-proxy sync_ghl.
+export const STATUS_RANK = JOB_STATUS_RANK
 
 // Pipeline ID → job type for fallback contact matching
 const PIPELINE_TO_TYPE: Record<string, string> = {
@@ -238,7 +234,8 @@ async function handleStageChange(sb: any, body: any) {
     console.log(`[ghl-webhook] Conflict: ${job.status} (${currentRank}) → ${newStatus} (${newRank}) — backward move rejected`)
 
     // Log conflict event for Ops Dashboard attention panel
-    await sb.from('job_events').insert({
+    // supabase-js builders return { error } and have no .catch, so check the result.
+    const { error: conflictError } = await sb.from('job_events').insert({
       job_id: job.id,
       event_type: 'ghl_conflict',
       detail_json: {
@@ -249,7 +246,8 @@ async function handleStageChange(sb: any, body: any) {
         pipeline_id: pipelineId,
         message: `GHL backward move rejected: tried ${newStatus} but job is ${job.status}. Check GHL pipeline matches Ops Dashboard.`,
       },
-    }).catch((e: any) => console.error('[ghl-webhook] Failed to log conflict:', e))
+    })
+    if (conflictError) console.error('[ghl-webhook] Failed to log conflict:', conflictError.message)
 
     return jsonResponse({ success: true, action: 'conflict_logged', reason: 'backward_move', current: job.status, attempted: newStatus })
   }
@@ -374,7 +372,7 @@ async function attemptRelink(sb: any, newOpportunityId: string, pipelineId: stri
       .update({ ghl_opportunity_id: newOpportunityId })
       .eq('id', job.id)
 
-    await sb.from('job_events').insert({
+    const { error: relinkLogError } = await sb.from('job_events').insert({
       job_id: job.id,
       event_type: 'ghl_opportunity_relinked',
       detail_json: {
@@ -384,7 +382,8 @@ async function attemptRelink(sb: any, newOpportunityId: string, pipelineId: stri
         match_method: job._matchMethod || 'unknown',
         message: `Re-linked from Sales to Execution pipeline (old: ${oldOppId || 'none'})`,
       },
-    }).catch((e: any) => console.error('[ghl-webhook] Failed to log re-link:', e))
+    })
+    if (relinkLogError) console.error('[ghl-webhook] Failed to log re-link:', relinkLogError.message)
 
     console.log(`[ghl-webhook] Re-linked job ${job.job_number || job.id}: ${oldOppId} → ${newOpportunityId}`)
 
