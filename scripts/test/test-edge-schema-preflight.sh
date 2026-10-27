@@ -939,6 +939,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
+                      # Reconciliation daily list: the recon_daily_list and
+                      # recon_record_decision doors (recon_decisions.ts).
+                      ("20261020140000", "context_reconciliation_decisions"),
+                      ("20261020160000", "context_recon_daily_list"),
                       # Paid-invoice receipt: the receipt switch and the
                       # job_receipt_claims table (job_receipt.ts).
                       ("20261021100000", "job_receipt_sender"),
