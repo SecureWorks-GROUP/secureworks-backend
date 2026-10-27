@@ -2487,11 +2487,15 @@ async function matchInvoicesToJobs(sb: any) {
   })
 
   for (const plan of allowedMatches) {
-    const { error } = await sb
+    // INT-14: only an invoice still without a job is linked; one already on a job is kept.
+    const { data: linked, error } = await sb
       .from('xero_invoices')
       .update({ job_id: plan.job.id })
       .eq('id', plan.invoice.id)
+      .is('job_id', null)
+      .select('id')
 
+    if (!error && (!linked || linked.length === 0)) continue
     if (!error) {
       matched++
       const invLabel = plan.invoice.contact_name || plan.invoice.reference || '?'

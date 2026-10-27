@@ -213,6 +213,20 @@ jobs:
         run: |
           bash scripts/test/test-apply-pending-migrations.sh
 
+      # INT-18 (Context audit F5): functions are redefined whole with CREATE OR
+      # REPLACE, so a stale copy in one PR silently undoes another (1138's
+      # context_recon_health drops N1's queue_by_lane). Fail when a function a
+      # changed migration defines loses an output key its previous definition
+      # had. The checkout is the PR merged onto the current base, so the
+      # previous definition includes everything already on main. An intended
+      # removal is named in the migration:
+      #   -- output-key-guard: drop <schema.function> <key>
+      - name: Guard replaced functions against lost output keys
+        run: |
+          deno test --allow-read scripts/test/check-migration-output-keys_test.ts
+          deno run --allow-read --allow-run=git scripts/check-migration-output-keys.ts \
+            --base "${{ github.event.pull_request.base.sha }}" --head HEAD
+
       - name: Check visit outcome business records
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
@@ -454,8 +468,11 @@ jobs:
             supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/project_job_link_test.ts \
+            supabase/functions/xero-sync/bill_prematch_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
+            supabase/functions/ops-api/job_trace_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
