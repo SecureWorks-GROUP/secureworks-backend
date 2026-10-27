@@ -20,6 +20,7 @@ import {
 } from "./debt_ws_store.ts";
 import type { DebtWsCaller, DebtWsDeps } from "./debt_ws_actions.ts";
 import type { BankAccountBalance } from "./debt_ws_report.ts";
+import type { MirrorCheckRow } from "./debt_ws_xero_check.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
 
 export const SHAUN_ID = "30000000-0000-4000-8000-0000000000aa";
@@ -334,6 +335,10 @@ export class FakeStore implements DebtWsStore {
   reportRows: Array<WsReportRow & Record<string, unknown>> = [];
   /** Set to make the report store reads fail (the migration not applied yet). */
   reportReadsFail = false;
+  /** xero_mirror_checks rows (the hourly check against Xero). None by default. */
+  mirrorCheckRows: MirrorCheckRow[] = [];
+  /** Set to make the check read fail (its migration not applied yet). */
+  mirrorReadFails = false;
 
   settings() {
     return Promise.resolve({ ...this.settingsRow });
@@ -613,6 +618,16 @@ export class FakeStore implements DebtWsStore {
   }
   lastInvoiceSync() {
     return Promise.resolve(this.syncedAt);
+  }
+  mirrorChecks() {
+    if (this.mirrorReadFails) return Promise.reject(new Error("no table"));
+    const newest = [...this.mirrorCheckRows].sort((a, b) =>
+      String(b.checked_at).localeCompare(String(a.checked_at))
+    );
+    return Promise.resolve({
+      latest: newest[0] ?? null,
+      latestComplete: newest.find((r) => r.complete) ?? null,
+    });
   }
   reportSends(limit: number) {
     if (this.reportReadsFail) return Promise.reject(new Error("no table"));

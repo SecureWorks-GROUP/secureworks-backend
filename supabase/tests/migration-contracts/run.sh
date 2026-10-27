@@ -201,6 +201,9 @@ for case_directory in "${case_directories[@]}"; do
   run_sql_file "$case_name migration" "$REPO_ROOT/supabase/migrations/$case_name.sql"
   if [ -f "$case_directory/rollback-contract.sql" ]; then
     copy_database_to_proof "$CONTRACT_DATABASE"
+    if [ -f "$case_directory/rollback-before.sql" ]; then
+      run_sql_file "$case_name rollback before" "$case_directory/rollback-before.sql"
+    fi
     run_sql_file \
       "$case_name rollback" \
       "$REPO_ROOT/supabase/rollbacks/${case_name}_down.sql"
