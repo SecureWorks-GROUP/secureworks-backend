@@ -472,6 +472,7 @@ jobs:
             supabase/functions/ops-api/job_profit_test.ts \
             supabase/functions/ops-api/job_trace_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
