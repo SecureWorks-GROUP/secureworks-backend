@@ -376,7 +376,15 @@ Deno.test("a jobless reply refuses an unusable or group stored sender", async ()
 Deno.test("a reply refuses an unknown source message or a mailbox that did not receive it", async () => {
   const unknown = await refusal(clientFor({ inbox: null }), senderOnlyReply());
   assertEquals(unknown.status, 409);
-  assertEquals(unknown.refusal.code, "pdf_provenance_required");
+  assertEquals(unknown.refusal.code, "source_not_ingested_yet");
+  assertEquals(unknown.refusal.evidence.retry_after_seconds, 600);
+  assertEquals(
+    String(unknown.refusal.recovery_action).includes("10 minutes"),
+    true,
+  );
+  const notIngested = `${unknown.refusal.fact} ${unknown.refusal.recovery_action}`;
+  assertEquals(notIngested.includes("intake poller"), true);
+  assertEquals(notIngested.includes("never succeed"), true);
 
   const wrongMailbox = await refusal(
     clientFor({ inbox: inboxRow({ mailbox: "marnin@secureworkswa.com.au" }) }),

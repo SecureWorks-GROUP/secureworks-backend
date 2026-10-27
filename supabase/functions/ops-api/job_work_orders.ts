@@ -81,6 +81,9 @@ export const JOB_WORK_ORDER_JOB_TYPES: ReadonlySet<string> = new Set([
   "patio",
 ]);
 
+/** Same switch as crew_invoice_job_work_order. Off: fencing and patio only. */
+export const JOB_WORK_ORDER_ALL_TYPES_FLAG = "job_work_order_all_types_v1";
+
 /** Mirror of public.job_work_order_billed_invoice_statuses(). */
 export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
   new Set([
@@ -417,6 +420,7 @@ export type JobWorkOrderHeldReason =
   | "not_filled"
   | "agreed_labour_missing"
   | "filled_before_auto_issue"
+  | "quote_has_no_lines"
   | "auto_issue_switched_off"
   | "awaiting_auto_issue";
 
@@ -445,6 +449,8 @@ const HELD_MESSAGES: Record<JobWorkOrderHeldReason, string> = {
     "The quote has no labour figure. Set the agreed labour and approve it to send it to the trades.",
   filled_before_auto_issue:
     "Filled before automatic issue, and it cannot be shown untouched since. Approve it to send it to the trades.",
+  quote_has_no_lines:
+    "The accepted quote has no labour or work lines to copy. Enter the work and the agreed labour by hand and approve it to send it to the trades.",
   auto_issue_switched_off:
     "Goes to the trades automatically once automatic issue is switched on.",
   awaiting_auto_issue: "Goes to the trades automatically within a few minutes.",
@@ -456,6 +462,7 @@ const HELD_FOR_THE_OFFICE: ReadonlySet<JobWorkOrderHeldReason> = new Set([
   "not_filled",
   "agreed_labour_missing",
   "filled_before_auto_issue",
+  "quote_has_no_lines",
 ]);
 
 /**
@@ -467,6 +474,8 @@ const HELD_FOR_THE_OFFICE: ReadonlySet<JobWorkOrderHeldReason> = new Set([
 export function jobWorkOrderNeedsChecking(
   wo: any,
   autoIssueOn: boolean | null,
+  /** The quote fill this read made, when it made one. */
+  quoteFill: { reason?: string | null } | null = null,
 ): JobWorkOrderNeedsChecking | null {
   if (!wo || wo.kind !== "job") return null;
   const items = Array.isArray(wo.scope_items) ? wo.scope_items : [];
@@ -484,7 +493,9 @@ export function jobWorkOrderNeedsChecking(
     const reason: JobWorkOrderHeldReason = wo.hand_edited_at
       ? "hand_edited"
       : !hasScope
-      ? "not_filled"
+      ? quoteFill?.reason === "no_quote_lines"
+        ? "quote_has_no_lines"
+        : "not_filled"
       : wo.agreed_labour_ex === null || wo.agreed_labour_ex === undefined
       ? "agreed_labour_missing"
       : !wo.quote_filled_at
@@ -660,6 +671,34 @@ function mapStringLeaves(item: unknown, map: (value: string) => string) {
       [key, value],
     ) => [key, typeof value === "string" ? map(value) : value]),
   );
+}
+
+/**
+ * job_detail's job_work_order for a caller who is not staff. Drops the sealed
+ * labour allowance, the figures built from it, and addendum prices. The
+ * group-work-order participant share is a different action and is not this
+ * object.
+ */
+export function redactJobDetailWorkOrderForTrade(block: any): any {
+  if (!block || typeof block !== "object" || block.unreadable) return block;
+  const workOrder = block.work_order && typeof block.work_order === "object"
+    ? { ...block.work_order }
+    : block.work_order;
+  if (workOrder && typeof workOrder === "object") {
+    delete workOrder.agreed_labour_ex;
+  }
+  const addenda = Array.isArray(block.addenda)
+    ? block.addenda.map((row: any) => {
+      if (!row || typeof row !== "object") return row;
+      const {
+        trade_allocation_ex: _trade,
+        customer_price_ex: _customer,
+        ...rest
+      } = row;
+      return rest;
+    })
+    : block.addenda;
+  return { ...block, work_order: workOrder, figures: null, addenda };
 }
 
 /**
@@ -967,7 +1006,9 @@ export function buildVariationEmails(
         facts.map(([k, v]) =>
           `<tr><td><strong>${esc(k)}</strong></td><td>${esc(v)}</td></tr>`
         ).join("") +
-        `</table><p>SecureWorks Group</p>`,
+        // No closing name: send-outlook-email appends "Kind regards," and the
+        // admin@ SecureWorks Group card, the one sign-off.
+        `</table>`,
     );
     return {
       recipient_role: role,
@@ -1425,12 +1466,18 @@ export async function readJobWorkOrder(
   }
   const job = await readJob(client, requireUuid(jobId, "job_id"));
   const rows = await readJobWorkOrders(client, job.id);
-  const eligible = JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""));
+  const typeName = String(job.type || "").trim();
+  const quoteFillType = JOB_WORK_ORDER_JOB_TYPES.has(typeName);
+  // Quote fill stays fencing and patio. Other types are readable, and
+  // eligible, only while job_work_order_all_types_v1 is on.
+  const eligible = quoteFillType ||
+    (typeName !== "" &&
+      await readFlag(client, JOB_WORK_ORDER_ALL_TYPES_FLAG));
   // Every draft is read by staff before it can be approved (approval needs
   // the draft's updated_at as read), so an untouched draft is filled from the
   // accepted quote here, once, and the read returns the filled draft.
   let quoteFill: JobWorkOrderQuoteFill | null = null;
-  const untouched = params.fillFromQuote === true && eligible &&
+  const untouched = params.fillFromQuote === true && quoteFillType &&
       !liveOf(rows)
     ? draftOf(rows)
     : null;
@@ -1482,7 +1529,11 @@ export async function readJobWorkOrder(
     ),
     customer_variations: customerVariations.map(shapeCustomerVariation),
     quote_fill: quoteFill,
-    needs_checking: jobWorkOrderNeedsChecking(live || draft, autoIssueOn),
+    needs_checking: jobWorkOrderNeedsChecking(
+      live || draft,
+      autoIssueOn,
+      quoteFill,
+    ),
   };
 }
 
@@ -1495,7 +1546,10 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   if (status && !["draft", "approved"].includes(status)) {
     fail(400, "invalid_status", "status must be draft or approved");
   }
-  if (type && !JOB_WORK_ORDER_JOB_TYPES.has(type)) {
+  if (
+    type && !JOB_WORK_ORDER_JOB_TYPES.has(type) &&
+    !(await readFlag(client, JOB_WORK_ORDER_ALL_TYPES_FLAG))
+  ) {
     fail(400, "invalid_type", "type must be fencing or patio");
   }
   const rows: any[] = [];
@@ -1901,6 +1955,8 @@ const AUTO_ISSUE_ERRORS: Record<string, [JobWorkOrderAutoIssueReason, string]> =
  * fill flagged for review never stop it: they stay on the work order for the
  * office (jobWorkOrderNeedsChecking). A draft edited by hand, a quote with no
  * labour figure, and a job with no accepted quote wait for the approver.
+ * A blank work order opened for another job type is never selected here, and
+ * filling its labour allowance stamps hand_edited_at, which this issue refuses.
  * Never throws: every outcome is a reason.
  */
 export async function autoIssueJobWorkOrderForJob(
