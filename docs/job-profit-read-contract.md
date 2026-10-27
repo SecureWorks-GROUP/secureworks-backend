@@ -43,7 +43,9 @@ Legacy jobs have no row.
 | `profit_ex`, `margin_pct` | Invoiced minus actual cost, and that as a share of invoiced | Unknown. `cost_flag` and `completeness` name why |
 | `profit_ex_unsuppressed` | Invoiced minus the costs linked so far. Not a profit figure | The Xero Project total exceeds the linked costs |
 | `revenue_verified_paid`, `costs_verified_paid` | Xero recorded the payment. Not a bank reconciliation | Never null |
-| `committed_open_ex` | Open purchase orders with no bill yet. Committed, not actual: never in `actual_cost_ex` | Never null |
+| `committed_open_ex` | Priced open purchase orders with no supplier invoice emailed and no bill placed. Committed, not actual: never in `actual_cost_ex`. An order with no price is never here as $0.00 | Never null |
+| `ordered_not_billed_count`, `ordered_not_billed_over_30_count` | Ordered, not billed: sent orders with no price (every Dispatch order) and no invoice or bill yet, and those first sent 30 or more Perth days ago. Counts, never dollars. Show "ordered, not billed: N" | Never null (0). Absent before migration 20261019120000 |
+| `invoice_emailed_count`, `invoice_emailed_ex` | Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order and no bill is linked to the order yet (the bill may be on the job without that link). Never show as nothing owed. `invoice_emailed_ex` is the priced ones' amount, in neither `committed_open_ex` nor actual cost | Count never null (0); amount null when none is priced. Absent before migration 20261019120000 |
 | `cost_flag`, `revenue_flag`, `completeness` | The first reason, and every reason, a figure is missing or weak. Values below | Never null |
 
 There is no live price or live estimate field. Show "no quote sent" when
@@ -68,10 +70,13 @@ reason and note that applies.
 | `xero_project_linked_by_contact_only` | The job's Xero Project is linked by contact, not by name, so it gives no project figure | Shown |
 | `unapproved_trade_charges` | A trade charge is on an invoice not yet approved | Shown |
 | `open_purchase_orders` | `committed_open_ex` is above zero | Shown |
+| `ordered_not_billed` | A sent order with no price has no invoice or bill yet | Shown |
+| `ordered_not_billed_over_30_days` | Such an order was first sent 30 or more days ago | Shown |
+| `invoice_emailed_bill_not_placed` | A supplier emailed an invoice for an order, and no bill is linked to that order (it may be on the job unlinked) | Shown |
 | `draft_revenue` | `draft_revenue_ex` is above zero | Shown |
 | `holding_job` | A holding job, not a customer's job | Shown |
 
-The last five appear in `completeness` only.
+The last eight appear in `completeness` only.
 
 ## Xero Project rule
 
@@ -84,18 +89,24 @@ job's cost.
 
 ## Rollup fields
 
-Each of `totals`, `by_type[]` and `by_month[]` carries:
+Each of `totals`, `by_type[]`, `by_month[]` and `holding_jobs` carries:
 
 | Field | Meaning |
 |---|---|
 | `jobs` | Jobs in the group |
 | `invoiced_ex`, `collected_ex`, `actual_cost_ex` | Summed over every job in the group |
 | `quoted_ex`, `jobs_with_quote`, `invoiced_on_quoted_ex` | Sent-quote value, how many jobs have one, and what those same jobs invoiced |
-| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost |
-| `profit_ex`, `margin_pct`, `jobs_with_margin`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published |
+| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost: only jobs whose actual cost is complete (`cost_flag` `ok` or `text_matched_lines`) |
+| `jobs_with_expected_not_comparable`, `expected_cost_not_comparable_ex` | Jobs with an expected cost whose actual cost is still partial (no cost linked, materials not linked, labour missing, unclassified or incomplete lines, a Xero Project above its lines), and their expected cost. Not compared |
+| `jobs_with_margin` | How many jobs in the group the engine published a profit for; 0 when none |
+| `profit_ex`, `margin_pct`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published. Null (Unknown) when `jobs_with_margin` is 0, never 0 |
 | `revenue_verified_paid_jobs` | Jobs whose sales invoices are all paid in Xero |
 
 Compare expected with actual through `actual_cost_on_expected_ex`, and quoted
 with invoiced through `invoiced_on_quoted_ex`, so both sides cover the same
 jobs. `by_month` groups jobs by the `date_field` that filtered them; it is a
 job cohort, not an accounting period.
+
+A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
+parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
+figure; `holding_jobs` reports it on its own so the parked cost stays visible.

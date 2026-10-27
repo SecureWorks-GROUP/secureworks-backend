@@ -919,6 +919,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Debt report freshness: the invoice sync cursor the
                       # report's "last synced" time and its send check read.
                       ("20260910100000", "xero_sync_state_and_pdf_attempts"),
+                      # Bill pre-match: the proposals store materials_recon_queue
+                      # reads and xero-sync writes, the agent fact source and
+                      # the void_in_xero queue status.
+                      ("20261015190000", "materials_bill_proposals"),
                       # Automatic issue of job work orders: the fill and edit
                       # stamps every job work order read selects
                       # (job_work_orders.ts).
@@ -928,7 +932,41 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261016150000", "dispatch_deliveries"),
                       # Dispatch slice 7, F2: the install_confirmed_for_day
                       # column comment states the mark rule.
-                      ("20261016160000", "job_dispatch_install_for_day_comment")]:
+                      ("20261016160000", "job_dispatch_install_for_day_comment"),
+                      # Paid close-out review switch: the per-job
+                      # review_opt_out columns (job_closeout.ts).
+                      ("20261020093000", "job_review_opt_out"),
+                      # The invoice mirror check: debt_ws_overview and the debt
+                      # report read the newest xero_mirror_checks row.
+                      ("20261020150000", "xero_mirror_checks"),
+                      # Paid-invoice receipt: the receipt switch and the
+                      # job_receipt_claims table (job_receipt.ts).
+                      ("20261021100000", "job_receipt_sender"),
+                      # Client sign-off: job_media phase signature and
+                      # job_client_signoffs, reused by group work orders.
+                      ("20261020170000", "job_media_signature_voice_note_phases"),
+                      ("20261020170100", "job_client_signoffs"),
+                      # Crew invoices on the job work order: the office review
+                      # columns and the job work order helpers ops-api reads.
+                      ("20261021143000", "job_work_order_crew_invoices"),
+                      # Group work orders: the split, the flag and the
+                      # invoice-line trigger (group_work_order.ts).
+                      # Renumbered past every migration already on main.
+                      ("20261022050000", "group_work_orders"),
+                      # Dispatch v2: the approved supplier order email list,
+                      # the draft list, boxes, photos and order emails
+                      # (dispatch_v2_store.ts).
+                      ("20261023214100", "dispatch_v2_emails_approved_supplier_store"),
+                      ("20261023214200", "dispatch_v2_emails_draft_list_and_order_emails"),
+                      # Dispatch v2: the scope fill record that makes a fencing
+                      # job fill itself only once (dispatch_v2_store.ts).
+                      ("20261026120000", "dispatch_v2_scope_fills"),
+                      # Deposit advance: the move switch and the per-job
+                      # move and flag state (job_deposit_advance.ts).
+                      ("20261026160000", "job_deposit_advance"),
+                      # Deposit credit note flag: the credit notes counted at
+                      # the move and the widened flag check.
+                      ("20261027120000", "job_deposit_credit_note_flag")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
