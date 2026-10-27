@@ -14,7 +14,9 @@ import {
 import {
   reconDailyList,
   reconDailyListArgs,
+  reconDailySenderWords,
   ReconDecisionError,
+  reconLeftOut,
   reconDecisionUser,
   reconRecordDecision,
   reconRecordDecisionCall,
@@ -182,6 +184,62 @@ Deno.test("the daily list reads with a bounded limit and reports a failed read",
   assertEquals([e.code, e.status], ["daily_list_unreadable", 502]);
 });
 
+Deno.test("the daily list asks one more than its page and says more only when it was cut", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ band: 1, subject_id: `s${i}` }));
+  const full = fakeRpc(rows(3));
+  const exact = await reconDailyList(full, new URLSearchParams("limit=3"), now);
+  assertEquals(full.calls[0].args.p_limit, 4);
+  assertEquals([exact.count, exact.more, exact.limit], [3, false, 3]);
+  const cut = await reconDailyList(fakeRpc(rows(4)), new URLSearchParams("limit=3"), now);
+  assertEquals([cut.count, cut.more, (cut.items as unknown[]).length], [3, true, 3]);
+  const top = fakeRpc(rows(201));
+  const big = await reconDailyList(top, new URLSearchParams("limit=200"), now);
+  assertEquals([top.calls[0].args.p_limit, big.count, big.more], [201, 200, true]);
+  const none = await reconDailyList(fakeRpc([]), new URLSearchParams(""), now);
+  assertEquals([none.count, none.more], [0, false]);
+});
+
+Deno.test("a customer message is labelled by role and never reads Sender not known", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  const summary = {
+    channel: "sms",
+    counterpart_role: "customer",
+    direction: "inbound",
+    from: null,
+    occurred_at: "2026-10-17T01:00:00Z",
+    preview: "Patio start date?",
+    subject: null,
+  };
+  for (const role of ["customer", "job_customer", "any_job_customer", "Customer"]) {
+    const words = reconDailySenderWords(role);
+    assertEquals(words, "Customer");
+    assertEquals(words.includes("Sender not known"), false);
+    const out = await reconDailyList(
+      fakeRpc([{ band: 3, subject_kind: "event", subject_id: EVENT, summary: { ...summary, counterpart_role: role } }]),
+      new URLSearchParams(""),
+      now,
+    );
+    const item = (out.items as { summary: { counterpart_role: string } }[])[0];
+    assertEquals(item.summary.counterpart_role, role);
+    const labelled = reconDailySenderWords(item.summary.counterpart_role);
+    assertEquals(labelled, "Customer");
+    assertEquals(labelled.includes("Sender not known"), false);
+    assertEquals(JSON.stringify(item).includes("Sender not known"), false);
+  }
+  for (const role of [null, undefined, "", "unknown", "unstamped", "lead"]) {
+    assertEquals(reconDailySenderWords(role), "Sender not known");
+  }
+});
+
+Deno.test("a daily list answer that is not a list is a failed read, never an empty list", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  for (const data of [null, undefined, {}, { items: [] }, "x", 0]) {
+    const e = await assertRejects(() => reconDailyList(fakeRpc(data), new URLSearchParams(""), now), ReconDecisionError);
+    assertEquals([e.code, e.status], ["daily_list_unreadable", 502]);
+  }
+});
+
 Deno.test("front door: staff only, never a trade, the shared key or agent-read", () => {
   for (const action of ["recon_daily_list", "recon_record_decision"]) {
     const url = new URL(`https://x.test/ops-api?action=${action}`);
@@ -209,4 +267,39 @@ Deno.test("source: both actions are dispatched, on no routine list, the person f
     src.includes("reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null })"),
     true,
   );
+});
+
+Deno.test("the daily list says what it left out, and an unread count is never zero", async () => {
+  const now = new Date("2026-10-20T00:00:00Z");
+  const counts = { no_identity: 3, never_asked: 1, not_ranked: 2, backlog: 40 };
+  const calls: { fn: string; args: any }[] = [];
+  const client = {
+    rpc(fn: string, args?: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return Promise.resolve(fn === "context_recon_daily_left_out"
+        ? { data: counts, error: null }
+        : { data: [], error: null });
+    },
+  };
+  const out = await reconDailyList(client, new URLSearchParams(""), now);
+  assertEquals(calls.map((c) => c.fn), ["context_recon_daily_list", "context_recon_daily_left_out"]);
+  assertEquals(calls[1].args, { p_as_of: "2026-10-20T00:00:00.000Z" });
+  assertEquals([out.count, out.left_out, out.left_out_unreadable], [0, counts, false]);
+  // A failed, list-shaped, partial or non-integer count answers null, never zeros.
+  assertEquals(reconLeftOut({ data: null, error: { message: "boom" } }), null);
+  assertEquals(reconLeftOut({ data: [counts], error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, backlog: undefined }, error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, not_ranked: 1.5 }, error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, never_asked: -1 }, error: null }), null);
+  assertEquals(reconLeftOut({ data: { ...counts, extra: 9 }, error: null }), counts);
+  // The list still answers when only the count read failed.
+  const half = {
+    rpc(fn: string) {
+      return Promise.resolve(fn === "context_recon_daily_left_out"
+        ? { data: null, error: { message: "boom" } }
+        : { data: [{ band: 1 }], error: null });
+    },
+  };
+  const partial = await reconDailyList(half, new URLSearchParams(""), now);
+  assertEquals([partial.count, partial.left_out, partial.left_out_unreadable], [1, null, true]);
 });
