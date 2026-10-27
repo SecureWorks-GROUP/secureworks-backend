@@ -406,6 +406,55 @@ BEGIN
   END IF;
 END $$;
 
+-- ── Release review (27 Oct 2026): a machine-placed installer bill reaches a person ──
+--   B-PAUTO (installer labour on CA-P2, placed by the reference path, no queue
+--   row) gets an open row held for a person; a second run adds nothing; the
+--   person's split replaces the machine row and CA-P2 counts the labour.
+DO $$
+DECLARE r record; v jsonb; n int;
+BEGIN
+  n := public.materials_recon_installer_holds();
+  SELECT * INTO r FROM public.materials_reconciliation_queue WHERE xero_invoice_id = 'B-PAUTO';
+  IF NOT FOUND OR r.status <> 'open' OR r.suggestion_reason <> 'installer_confirm'
+     OR r.suggested_job_id <> 'ca000000-0000-4000-8000-000000000012' OR r.sub_total <> 300 THEN
+    RAISE EXCEPTION 'review holds: B-PAUTO not held for a person (% rows added; % % % %)', n, r.status, r.suggestion_reason, r.suggested_job_id, r.sub_total;
+  END IF;
+  -- A person's own placement (B-PINST, manual_queue) and a materials bill are never held.
+  IF EXISTS (SELECT 1 FROM public.materials_reconciliation_queue
+              WHERE xero_invoice_id IN ('B-PINST', 'B-PMAT') AND suggestion_reason = 'installer_confirm') THEN
+    RAISE EXCEPTION 'review holds: a person-placed or materials bill was held';
+  END IF;
+  IF public.materials_recon_installer_holds() <> 0 THEN
+    RAISE EXCEPTION 'review holds: a second run changed rows';
+  END IF;
+
+  v := public.allocate_bill_split('B-PAUTO',
+    '[{"job_id": "ca000000-0000-4000-8000-000000000012", "amount_ex": 300, "lane": "materials"}]'::jsonb,
+    0, NULL, 'person@example.test');
+  IF NOT (v ->> 'ok')::boolean THEN RAISE EXCEPTION 'review split: %', v; END IF;
+  SELECT count(*) AS n, bool_and(automation_source = 'manual_split') AS person, bool_and(lane = 'labour') AS labour
+    INTO r FROM public.job_materials_facts WHERE xero_invoice_id = 'B-PAUTO';
+  IF r.n <> 1 OR NOT r.person OR NOT r.labour THEN
+    RAISE EXCEPTION 'review split: B-PAUTO rows % person % labour %', r.n, r.person, r.labour;
+  END IF;
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'CA-P2';
+  IF r.actual_labour_ex <> 300 OR 'installer_bill_unconfirmed' = ANY (COALESCE(r.completeness, '{}'::text[])) THEN
+    RAISE EXCEPTION 'review split: CA-P2 labour %, completeness %', r.actual_labour_ex, r.completeness;
+  END IF;
+  -- A materials bill placed by the reference path still refuses a split.
+  BEGIN
+    PERFORM public.allocate_bill_split('B-WHOLE',
+      '[{"job_id": "ca000000-0000-4000-8000-000000000002", "amount_ex": 70, "lane": "materials"}]'::jsonb, 0, NULL, 'person@example.test');
+    RAISE EXCEPTION 'review split: B-WHOLE split accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM NOT LIKE 'split_refused:%already placed by another route%' THEN RAISE; END IF;
+  END;
+  IF has_function_privilege('anon', 'public.materials_recon_installer_holds()', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.materials_recon_installer_holds()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'review grants: a browser role can run the installer holds';
+  END IF;
+END $$;
+
 -- ── Grants ──────────────────────────────────────────────────────────────────
 DO $$
 BEGIN

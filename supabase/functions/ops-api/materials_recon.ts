@@ -76,6 +76,9 @@ export type AssignAction = "accept-suggestion" | "assign-to-job";
 // match through this same path, stamped as its own source so it is traceable
 // and reversible (delete the one fact, re-open the queue row).
 export const AGENT_PREMATCH_SOURCE = "agent_prematch";
+// Rows a machine wrote. On an installer bill (JP-12) such a row is never
+// actual: it waits for a person, whose placement replaces it.
+export const MACHINE_FACT_SOURCES = new Set(["xero_ref_link", "po_deterministic", AGENT_PREMATCH_SOURCE]);
 export interface AgentLanding {
   matchReason: string; // the proposal's rule and reason
   matchedPoId?: string | null; // the one PO a rule-1b placement rests on
@@ -158,15 +161,19 @@ export function buildManualFactRow(
 //   'idempotent' — the SAME manual fact already exists for the SAME job (double
 //                  click / retry); succeed without a second write.
 //   'conflict'   — a DIFFERENT fact owns this bill; refuse (revert it first).
+//   'confirm'    — a person places an installer bill a machine placed before
+//                  JP-12: their placement replaces the machine's row.
 export function classifyAssign(
   existing: ExistingFact | null,
   targetJobId: string,
   source = "manual_queue",
-): "proceed" | "idempotent" | "conflict" {
+  personConfirmsInstaller = false,
+): "proceed" | "idempotent" | "conflict" | "confirm" {
   if (!existing) return "proceed";
   if (existing.automation_source === source && existing.job_id === targetJobId) {
     return "idempotent";
   }
+  if (personConfirmsInstaller && MACHINE_FACT_SOURCES.has(existing.automation_source)) return "confirm";
   return "conflict";
 }
 
@@ -501,7 +508,7 @@ export async function assignReconRow(
   // BOUNDARY GUARD: a bill can only ever carry one fact.
   const existing = await loadFact(client, queue.xero_invoice_id);
   const source = args.agent ? AGENT_PREMATCH_SOURCE : "manual_queue";
-  const disposition = classifyAssign(existing, job.id, source);
+  const disposition = classifyAssign(existing, job.id, source, !args.agent && lane === "labour");
   if (disposition === "conflict") {
     throw new Error(
       `bill ${queue.xero_invoice_id} already has a materials fact on job ${existing!.job_number ?? existing!.job_id} ` +
@@ -528,14 +535,41 @@ export async function assignReconRow(
     return { ok: true, idempotent: true, action, fact: existing, queue: q2 };
   }
 
-  // Land the fact.
+  // Land the fact. A person confirming a machine-placed installer bill turns
+  // the machine's row into theirs in one write (only while it is still that
+  // row), keeping any purchase order it closed; the old row is kept to undo.
   const factRow = buildManualFactRow(queue, job, args.actor, action, now, args.agent, lane);
-  const { data: fact, error: fErr } = await client
-    .from("job_materials_facts")
-    .insert(factRow)
-    .select()
-    .single();
-  if (fErr) throw fErr;
+  let replaced: Record<string, unknown> | null = null;
+  let fact: any;
+  if (disposition === "confirm") {
+    const { data: old, error: oErr } = await client
+      .from("job_materials_facts").select("*").eq("id", existing!.id).single();
+    if (oErr) throw oErr;
+    replaced = old;
+    const { matched_po_id: _keepPo, ...confirmRow } = factRow as Record<string, unknown>;
+    const { data: upd, error: uErr } = await client
+      .from("job_materials_facts")
+      .update(confirmRow)
+      .eq("id", existing!.id)
+      .eq("automation_source", existing!.automation_source)
+      .select()
+      .single();
+    if (uErr) {
+      if (uErr.code === "PGRST116") {
+        throw new Error(`bill ${queue.xero_invoice_id} changed while you were placing it; reload and try again`);
+      }
+      throw uErr;
+    }
+    fact = upd;
+  } else {
+    const { data: ins, error: fErr } = await client
+      .from("job_materials_facts")
+      .insert(factRow)
+      .select()
+      .single();
+    if (fErr) throw fErr;
+    fact = ins;
+  }
 
   // Flip the queue row → assigned (the bill is no longer open work). The agent's
   // flip only lands on a row still open; if a person moved it meanwhile, its
@@ -561,7 +595,11 @@ export async function assignReconRow(
   }
   const { data: updatedQueue, error: qErr } = await flip.select().single();
   if (qErr) {
-    if (fact?.id) {
+    if (replaced) {
+      // Put the machine's row back as it was.
+      const { id: _id, ...prior } = replaced;
+      await client.from("job_materials_facts").update(prior).eq("id", fact.id);
+    } else if (fact?.id) {
       await client.from("job_materials_facts").delete().eq("id", fact.id);
     }
     if (qErr.code === "PGRST116") {
@@ -578,6 +616,7 @@ export async function assignReconRow(
       source: args.agent ? AGENT_PREMATCH_SOURCE : "materials_recon_queue",
       action: args.agent ? "agent-prematch" : action,
       manual: !args.agent,
+      confirmed_machine_row: replaced ? replaced.automation_source : undefined,
       reason: args.agent ? args.agent.matchReason : undefined,
       reversible: args.agent ? "delete this bill's job_materials_facts row and re-open its queue row" : undefined,
       xero_invoice_id: queue.xero_invoice_id,

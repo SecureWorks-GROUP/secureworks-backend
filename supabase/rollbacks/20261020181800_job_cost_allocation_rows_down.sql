@@ -710,6 +710,7 @@ COMMENT ON VIEW public.v_job_profit IS
 DROP VIEW IF EXISTS public.v_bill_allocation_balance;
 DROP FUNCTION IF EXISTS public.job_cost_installer_bill(jsonb);
 DROP FUNCTION IF EXISTS public.allocate_bill_split(text, jsonb, numeric, text, text);
+DROP FUNCTION IF EXISTS public.materials_recon_installer_holds();
 DROP FUNCTION IF EXISTS public.job_cost_credit_share(jsonb, numeric);
 
 ALTER TABLE public.materials_reconciliation_queue DROP CONSTRAINT IF EXISTS materials_recon_overhead_chk;

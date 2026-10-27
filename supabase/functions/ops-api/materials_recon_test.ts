@@ -77,6 +77,9 @@ Deno.test("classifyAssign — proceed / idempotent / conflict", () => {
   assertEquals(classifyAssign(manualOtherJob, "job-x"), "conflict");
   const autoFact: ExistingFact = { ...manualSameJob, automation_source: "xero_ref_link", confidence: "high" };
   assertEquals(classifyAssign(autoFact, "job-x"), "conflict"); // never overwrite an auto fact
+  // JP-12: a person placing an installer bill a machine placed confirms it.
+  assertEquals(classifyAssign(autoFact, "job-x", "manual_queue", true), "confirm");
+  assertEquals(classifyAssign(manualOtherJob, "job-x", "manual_queue", true), "conflict");
 });
 
 // ── (a) The worklist surface + drain stat ────────────────────
@@ -211,6 +214,65 @@ Deno.test("assign — CONFLICT when an auto fact already owns the bill", async (
     Error, "already has a materials fact",
   );
   assertEquals(store.job_materials_facts.length, 1); // no second fact written
+});
+
+// JP-12 (release review, 27 Oct 2026): an installer bill a machine placed is
+// held in Bills to place; a person's placement replaces the machine's row.
+function installerSeed() {
+  const seed = baseSeed();
+  seed.xero_invoices = [{
+    xero_invoice_id: "xinv-001", invoice_type: "ACCPAY",
+    line_items: [{ Description: "Installs", AccountCode: "306", LineAmount: 1000 }],
+  }];
+  seed.job_materials_facts.push({
+    id: "f-auto", org_id: ORG, xero_invoice_id: "xinv-001", job_id: "job-patio-2",
+    job_number: "SWP-25029", automation_source: "xero_ref_link", confidence: "high",
+    amount_ex_gst: 1000, lane: "labour", kind: "actual", matched_po_id: "po-1",
+  });
+  const q = seed.materials_reconciliation_queue.find((r: any) => r.id === "q-open-noref")!;
+  Object.assign(q, { suggestion_reason: "installer_confirm", suggested_job_id: "job-patio-2", suggested_job_number: "SWP-25029" });
+  return seed;
+}
+
+Deno.test("assign — a person confirms a machine-placed installer bill: the machine row becomes theirs", async () => {
+  const { client, store } = makeFakeClient(installerSeed());
+  const out = await assignReconRow(client, { queueId: "q-open-noref", useSuggestion: true, actor: "staff@x", orgId: ORG, nowIso: NOW });
+  assertEquals(out.ok, true);
+  assertEquals(store.job_materials_facts.length, 1);
+  const f = store.job_materials_facts[0];
+  assertEquals(f.id, "f-auto");
+  assertEquals(f.automation_source, "manual_queue");
+  assertEquals(f.confidence, "high_manual");
+  assertEquals(f.lane, "labour");
+  assertEquals(f.job_id, "job-patio-2");
+  assertEquals(f.assigned_by, "staff@x");
+  assertEquals(f.matched_po_id, "po-1"); // the PO it closed stays closed
+  assertEquals(store.materials_reconciliation_queue.find((r: any) => r.id === "q-open-noref")!.status, "assigned");
+});
+
+Deno.test("assign — confirming onto another job moves the machine row there", async () => {
+  const { client, store } = makeFakeClient(installerSeed());
+  await assignReconRow(client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "staff@x", orgId: ORG, nowIso: NOW });
+  assertEquals(store.job_materials_facts.length, 1);
+  assertEquals(store.job_materials_facts[0].job_id, "job-fence-1");
+  assertEquals(store.job_materials_facts[0].automation_source, "manual_queue");
+});
+
+Deno.test("assign — the agent never confirms an installer bill, and a materials bill's machine row still conflicts", async () => {
+  const { client, store } = makeFakeClient(installerSeed());
+  await assertRejects(
+    () => assignReconRow(client, { queueId: "q-open-noref", jobNumber: "SWP-25029", actor: "agent", orgId: ORG, nowIso: NOW,
+      agent: { matchReason: "x" } }),
+    Error,
+  );
+  assertEquals(store.job_materials_facts[0].automation_source, "xero_ref_link");
+  const seed = installerSeed();
+  seed.xero_invoices[0].line_items = [{ Description: "Posts", AccountCode: "310", LineAmount: 1000 }];
+  const m = makeFakeClient(seed);
+  await assertRejects(
+    () => assignReconRow(m.client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "x", orgId: ORG, nowIso: NOW }),
+    Error, "already has a materials fact",
+  );
 });
 
 Deno.test("mark-not-job-related — BLOCKED when a fact already owns the bill", async () => {

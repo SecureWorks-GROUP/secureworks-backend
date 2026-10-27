@@ -1951,6 +1951,16 @@ async function ingestMaterialsActuals(
       }
     }
 
+    // JP-12: an installer bill a machine placed before JP-12 is held for a
+    // person in Bills to place (installer_confirm), so its job can be
+    // confirmed. Adds or re-opens queue rows only. Before the pre-match, which
+    // never places a held row.
+    if (!opts.capped) {
+      const { data: holds, error: hErr } = await sb.rpc('materials_recon_installer_holds')
+      if (hErr) console.error('[materials] installer holds failed:', hErr.message)
+      else (result as Record<string, unknown>).installer_holds = holds
+    }
+
     // Bill pre-match (JP-06): after the queue upsert, close bills voided or
     // deleted in Xero, propose a job (or not job related) for each open bill,
     // and place the confident ones. Isolated: it can never fail the ingest.

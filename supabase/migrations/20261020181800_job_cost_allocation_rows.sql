@@ -59,6 +59,18 @@
 --   * v_job_profit (7, from 20261019120000) flags installer_bill_unconfirmed
 --     and gives no profit or margin while one is open on the job.
 --
+-- Release review (27 Oct 2026, independent second model):
+--   * An installer bill a machine placed before JP-12 had no route to a
+--     person: no queue row, and Assign and Split both refused its machine row.
+--     materials_recon_installer_holds() (3b, run once at 8 and by the sync)
+--     gives each an open row held for a person (installer_confirm). A person's
+--     split of such a bill replaces the machine row; Assign does the same in
+--     ops-api.
+--   * A split keeps the purchase order the replaced row closed on that job's
+--     part (matched_po_id), so the PO never reopens as committed cost.
+--   * The split function reads installer bills with job_cost_installer_bill,
+--     the engine's own test.
+--
 -- Both engine views keep their columns, names and types, and v_job_profit keeps
 -- every column, so its functions and every caller keep working. Not applied
 -- anywhere until released. Credit notes not applied to any invoice are not in our copy of
@@ -233,6 +245,8 @@ DECLARE
   v_existing int;
   v_same boolean;
   v_bill_lane text;
+  v_po_job uuid;
+  v_po_id uuid;
 BEGIN
   IF p_actor IS NULL OR btrim(p_actor) = '' THEN
     RAISE EXCEPTION 'split_refused: actor required';
@@ -273,11 +287,9 @@ BEGIN
   END IF;
   -- An installer bill (a money line on 306 or 301) is labour on every part,
   -- whatever the screen sent.
-  v_bill_lane := CASE WHEN EXISTS (
-      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(b.line_items) = 'array' THEN b.line_items ELSE '[]'::jsonb END) li
-      WHERE li.value ->> 'AccountCode' IN ('306', '301')
-        AND COALESCE(public.job_profit_num(li.value -> 'LineAmount'), 0) <> 0)
-    THEN 'labour' END;
+  -- The same test as the engine (job_cost_installer_bill), so a bill the
+  -- engine holds as installer labour is never split as materials.
+  v_bill_lane := CASE WHEN public.job_cost_installer_bill(b.line_items) THEN 'labour' END;
 
   FOR part IN SELECT value FROM jsonb_array_elements(p_parts) LOOP
     IF jsonb_typeof(part -> 'amount_ex') IS DISTINCT FROM 'number' THEN
@@ -316,11 +328,21 @@ BEGIN
       v_sum, v_overhead, round(b.sub_total, 2);
   END IF;
 
+  -- An installer bill a machine placed before JP-12 is awaiting a person
+  -- (installer_confirm): this person's split is that confirmation, so it
+  -- replaces the machine's row. Any other placement must be undone first.
   SELECT count(*) INTO v_existing FROM public.job_materials_facts
-   WHERE xero_invoice_id = p_xero_invoice_id AND automation_source <> 'manual_split';
+   WHERE xero_invoice_id = p_xero_invoice_id AND automation_source <> 'manual_split'
+     AND NOT (v_bill_lane = 'labour'
+              AND automation_source IN ('xero_ref_link', 'po_deterministic', 'agent_prematch'));
   IF v_existing > 0 THEN
     RAISE EXCEPTION 'split_refused: bill % is already placed by another route; undo that first', p_xero_invoice_id;
   END IF;
+  -- A purchase order the replaced row closed stays closed on its own job's part.
+  SELECT f.job_id, f.matched_po_id INTO v_po_job, v_po_id FROM public.job_materials_facts f
+   WHERE f.xero_invoice_id = p_xero_invoice_id AND f.automation_source <> 'manual_split'
+     AND f.matched_po_id IS NOT NULL
+   LIMIT 1;
 
   -- Same parts again: nothing to do.
   SELECT (q.status = 'split'
@@ -340,20 +362,22 @@ BEGIN
     RETURN jsonb_build_object('ok', true, 'idempotent', true, 'xero_invoice_id', p_xero_invoice_id);
   END IF;
 
+  -- Re-split replaces only split rows; a machine-placed installer row (allowed
+  -- above) goes too, so the bill is never whole and split at once.
   DELETE FROM public.job_materials_facts
-   WHERE xero_invoice_id = p_xero_invoice_id AND automation_source = 'manual_split';
+   WHERE xero_invoice_id = p_xero_invoice_id;
 
   INSERT INTO public.job_materials_facts (
     org_id, xero_invoice_id, invoice_number, xero_contact_id, contact_name, job_id, job_number,
     lane, kind, amount_ex_gst, amount_inc_gst, confidence, automation_source, match_reason,
-    fact_date, assigned_by, updated_at)
+    fact_date, assigned_by, updated_at, matched_po_id)
   SELECT
     q.org_id, q.xero_invoice_id, q.invoice_number, q.xero_contact_id, q.contact_name, j.id, j.job_number,
     COALESCE(v_bill_lane, p.value ->> 'lane', 'materials'), 'actual', round((p.value ->> 'amount_ex')::numeric, 2), NULL,
     'high_manual', 'manual_split',
     'manual_split:' || jsonb_array_length(p_parts) || ' jobs' ||
       CASE WHEN v_overhead > 0 THEN ' + overhead ' || v_overhead ELSE '' END,
-    q.invoice_date, p_actor, now()
+    q.invoice_date, p_actor, now(), CASE WHEN j.id = v_po_job THEN v_po_id END
   FROM jsonb_array_elements(p_parts) p
   JOIN public.jobs j ON j.id = (p.value ->> 'job_id')::uuid;
 
@@ -374,6 +398,74 @@ $$;
 REVOKE ALL ON FUNCTION public.allocate_bill_split(text, jsonb, numeric, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.allocate_bill_split(text, jsonb, numeric, text, text) FROM anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.allocate_bill_split(text, jsonb, numeric, text, text) TO service_role;
+
+-- ─────────────────────────────────────────────────────────────
+-- 3b. Installer bills a machine placed before JP-12 wait for a person
+--     An automatic row (xero_ref_link, po_deterministic, agent_prematch) on an
+--     installer bill is never actual (job_cost_installer_bill below), so its
+--     job shows no margin until a person confirms it. Bills to place shows only
+--     queue rows, so each such bill gets an open row held for a person
+--     (installer_confirm), suggesting the job the machine picked. A row the
+--     agent closed as assigned is re-opened; a person's decision (assigned by a
+--     person, not job related, split) is never touched. Adds and re-opens rows
+--     only; no fact moves. Run once below and by the sync after each pass.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.materials_recon_installer_holds()
+RETURNS integer
+LANGUAGE sql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+  WITH auto AS (
+    SELECT COALESCE(f.org_id, x.org_id) AS org_id, f.xero_invoice_id, COALESCE(f.invoice_number, x.invoice_number) AS invoice_number,
+           COALESCE(f.xero_contact_id, x.xero_contact_id) AS xero_contact_id, COALESCE(f.contact_name, x.contact_name) AS contact_name,
+           f.job_id, f.job_number, x.sub_total, x.total, x.invoice_date
+      FROM public.job_materials_facts f
+      JOIN LATERAL (
+        SELECT x.org_id, x.invoice_number, x.xero_contact_id, x.contact_name,
+               x.line_items, x.sub_total, x.total, x.invoice_date, x.status
+          FROM public.xero_invoices x
+         WHERE x.xero_invoice_id = f.xero_invoice_id AND x.invoice_type = 'ACCPAY'
+         ORDER BY (x.status IN ('AUTHORISED', 'PAID')) DESC
+         LIMIT 1) x ON true
+     WHERE f.automation_source IN ('xero_ref_link', 'po_deterministic', 'agent_prematch')
+       AND x.status IN ('AUTHORISED', 'PAID')
+       AND public.job_cost_installer_bill(x.line_items)
+  ),
+  added AS (
+    INSERT INTO public.materials_reconciliation_queue (
+      org_id, xero_invoice_id, xero_contact_id, contact_name, invoice_number, sub_total, total, invoice_date,
+      suggested_job_id, suggested_job_number, suggestion_confidence, suggestion_reason, status, updated_at)
+    SELECT a.org_id, a.xero_invoice_id, a.xero_contact_id, a.contact_name, a.invoice_number, a.sub_total, a.total,
+           a.invoice_date, a.job_id, a.job_number, 'medium', 'installer_confirm', 'open', now()
+      FROM auto a
+    ON CONFLICT (xero_invoice_id) DO NOTHING
+    RETURNING 1
+  ),
+  reopened AS (
+    -- Sees only rows that existed before this statement, so a row just added
+    -- above is never counted twice.
+    UPDATE public.materials_reconciliation_queue q
+       SET status = 'open',
+           suggestion_reason = 'installer_confirm',
+           suggestion_confidence = 'medium',
+           suggested_job_id = a.job_id,
+           suggested_job_number = a.job_number,
+           assigned_job_id = NULL,
+           assigned_by = NULL,
+           assigned_at = NULL,
+           updated_at = now()
+      FROM auto a
+     WHERE q.xero_invoice_id = a.xero_invoice_id
+       AND (q.status = 'assigned'
+            OR (q.status = 'open' AND (q.suggestion_reason IS NULL OR q.suggestion_reason NOT IN
+                  ('installer_confirm', 'fact_contradicted', 'xero_link_conflict', 'duplicate_document'))))
+    RETURNING 1
+  )
+  SELECT ((SELECT count(*) FROM added) + (SELECT count(*) FROM reopened))::integer
+$$;
+REVOKE ALL ON FUNCTION public.materials_recon_installer_holds() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.materials_recon_installer_holds() TO service_role;
 
 -- ─────────────────────────────────────────────────────────────
 -- 4. Conservation check
@@ -1254,3 +1346,9 @@ FROM flagged f;
 COMMENT ON VIEW public.v_job_profit IS
   'Job profit engine (20261009130000, CFO-12 20261019120000, JP-12 20261020181800): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. committed_open_ex is priced open orders only; unpriced sent orders are counted (ordered_not_billed_count) and orders with an emailed invoice but no placed bill are reported apart (invoice_emailed_count, invoice_emailed_ex). An installer bill on the job that no person has confirmed (JP-12) flags installer_bill_unconfirmed and gives no profit or margin; its amount is not in actual cost. Read only, service role only.';
 
+
+-- ─────────────────────────────────────────────────────────────
+-- 8. Installer bills already placed by a machine: hold each for a person in
+--    Bills to place (3b), so no job loses its margin with nothing to confirm.
+-- ─────────────────────────────────────────────────────────────
+SELECT public.materials_recon_installer_holds();
