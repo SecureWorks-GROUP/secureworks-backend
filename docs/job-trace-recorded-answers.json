@@ -1,0 +1,203 @@
+{
+  "_about": "Recorded answer for ops-api job_trace (INT-34). SIMULATED: the trace run on a copy of the rows DSP-10's hand trace of SWF-26979 recorded on 19 Oct 2026 (secureworks-projects dispatch/verify/evidence/20261019-chain-trace-SWF-26979.md), with made-up row ids. Not a production read. Regenerate only when the contract changes, and say why in the PR.",
+  "swf_26979_figure_free": {
+    "ok": true,
+    "version": "job-trace-v1",
+    "view": "figure_free",
+    "job": {
+      "id": "a7100000-0000-4000-8000-000000000001",
+      "job_number": "SWF-26979",
+      "type": "fencing",
+      "status": "complete",
+      "accepted_at": "2026-09-01T02:46:00+00:00"
+    },
+    "first_gap": {
+      "link": "L2",
+      "name": "material_lines",
+      "state": "missing",
+      "reason": "no_material_lines"
+    },
+    "links": [
+      {
+        "link": "L1",
+        "name": "quote",
+        "state": "present",
+        "reason": null,
+        "notes": [],
+        "items": [
+          {
+            "kind": "scope_revision",
+            "key": "revision 1",
+            "row_id": "a7100000-0000-4000-8000-0000000000a1",
+            "state": "frozen",
+            "source": "accepted_revision",
+            "scope_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pricing_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "frozen_at": "2026-09-01T02:40:00+00:00"
+          },
+          {
+            "kind": "sent_quote",
+            "key": "version 1",
+            "row_id": "a7100000-0000-4000-8000-0000000000a2",
+            "state": "sent",
+            "sent_at": "2026-08-28T03:00:00+00:00"
+          }
+        ]
+      },
+      {
+        "link": "L2",
+        "name": "material_lines",
+        "state": "missing",
+        "reason": "no_material_lines",
+        "notes": [],
+        "items": []
+      },
+      {
+        "link": "L3",
+        "name": "orders",
+        "state": "partial",
+        "reason": "legacy_po",
+        "notes": [
+          "legacy_po"
+        ],
+        "items": [
+          {
+            "kind": "purchase_order",
+            "key": "PO-298035",
+            "row_id": "a7100000-0000-4000-8000-0000000000b1",
+            "state": "legacy",
+            "po_status": "confirmed",
+            "source": null,
+            "supplier_id": null,
+            "supplier_name": "R&R Fencing",
+            "reference": "R&R INV-86844",
+            "xero_po_id": null,
+            "xero_bill_id": null,
+            "emails": []
+          }
+        ]
+      },
+      {
+        "link": "L4",
+        "name": "supplier_bills",
+        "state": "missing",
+        "reason": "bill_not_placed",
+        "notes": [
+          "bill_not_placed"
+        ],
+        "items": [
+          {
+            "kind": "supplier_bill",
+            "key": "INV-86844",
+            "row_id": "x-bill-86844",
+            "state": "not_placed",
+            "queue_id": "a7100000-0000-4000-8000-0000000000e1",
+            "queue_reason": "no_ref_no_po",
+            "queue_suggestion": "low",
+            "xero_status": "AUTHORISED",
+            "supplier": "R&R Fencing",
+            "found_via": "named_by_po_reference"
+          }
+        ]
+      },
+      {
+        "link": "L5",
+        "name": "work_order",
+        "state": "missing",
+        "reason": "no_job_work_order",
+        "notes": [],
+        "items": []
+      },
+      {
+        "link": "L6",
+        "name": "crew_lines",
+        "state": "partial",
+        "reason": "line_not_on_work_order",
+        "notes": [
+          "line_not_on_work_order"
+        ],
+        "items": [
+          {
+            "kind": "crew_line",
+            "key": "TI-1",
+            "row_id": "a7100000-0000-4000-8000-0000000000d2",
+            "state": "billed",
+            "line_type": "work_order",
+            "trade_invoice_id": "a7100000-0000-4000-8000-0000000000d1",
+            "invoice_status": "approved",
+            "job_work_order_id": null,
+            "office_review_status": null,
+            "xero_bill_id": "x-crew-bill-1",
+            "xero_bill_status": "AUTHORISED"
+          }
+        ]
+      },
+      {
+        "link": "L7",
+        "name": "invoices",
+        "state": "present",
+        "reason": null,
+        "notes": [],
+        "items": [
+          {
+            "kind": "customer_invoice",
+            "key": "INV-0001",
+            "row_id": "x-inv-1",
+            "state": "paid",
+            "xero_status": "PAID",
+            "party": "A",
+            "job_contact_id": "a7100000-0000-4000-8000-0000000000c1",
+            "reference": "SWF-26979",
+            "invoice_date": "2026-09-15",
+            "fully_paid_on": "2026-09-20"
+          }
+        ]
+      },
+      {
+        "link": "L8",
+        "name": "card",
+        "state": "missing",
+        "reason": "no_live_card_reading",
+        "notes": [
+          "h7_not_released"
+        ],
+        "items": [
+          {
+            "kind": "h7_outcome",
+            "key": null,
+            "row_id": null,
+            "state": "not_released"
+          }
+        ]
+      }
+    ],
+    "reasons": {
+      "read_failed": "A read behind this link failed, so its state is not known. Never read as missing.",
+      "job_not_accepted": "The job has no acceptance and is not in an open (past quoted) status.",
+      "no_accepted_quote": "The job is accepted or open, but no sent quote or frozen scope revision is on record.",
+      "accepted_without_frozen_revision": "A quote was sent and the job is accepted, but no frozen scope revision marks what was accepted.",
+      "no_material_lines": "No Dispatch material line is on the job.",
+      "lines_not_reviewed": "At least one material line is still not_reviewed.",
+      "lines_not_on_order": "At least one material line marked to_order is on no purchase order.",
+      "no_purchase_orders": "No live purchase order is on the job.",
+      "legacy_po": "A purchase order on the job was not made by Dispatch (no source): a retyped order, not linked to lines and never sent through Dispatch.",
+      "order_not_sent": "A Dispatch purchase order on the job has no sent order email.",
+      "order_send_unknown": "A Dispatch order email is sending or send_unknown: whether it reached the supplier is not known.",
+      "no_supplier_bills": "No supplier bill is placed on the job and none is known to be waiting for it.",
+      "bill_not_placed": "A supplier bill known to belong to the job (named by its purchase order, or suggested for it) has no materials fact on the job.",
+      "bill_linked_no_fact": "Our Xero copy links a supplier bill to the job, but no materials fact counts it.",
+      "no_job_work_order": "The job has no job work order (kind job).",
+      "work_order_draft": "The job work order is a draft: not approved, not sealed.",
+      "work_order_not_sealed": "The job work order is approved but carries no seal hash.",
+      "no_crew_lines": "No crew pay line is on the job.",
+      "line_not_on_work_order": "A crew line on the job is not stamped onto the job work order.",
+      "crew_bill_held": "A crew line waits on office review (awaiting, queried or rejected), so its invoice is held out of Xero.",
+      "crew_bill_not_in_xero": "A crew invoice with lines on the job has no Xero bill.",
+      "no_customer_invoice": "No customer invoice is on the job.",
+      "invoice_draft_only": "The job's customer invoices are all drafts in Xero.",
+      "party_not_invoiced": "A paying party on the job has no customer invoice of its own.",
+      "no_live_card_reading": "The job card has no live reading (no live ledger generation).",
+      "h7_not_released": "The H7 bill outcome reader is not on main (backend drafts #1129 and #1141), so the card shows no bill outcome yet."
+    }
+  }
+}

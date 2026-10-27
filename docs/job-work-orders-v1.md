@@ -121,6 +121,13 @@ What is issued, and what waits for the approver:
   quotes from before the tools froze quotes, or no quote in the system; 26 of
   the 81 open jobs on 16 Oct 2026), and a draft filled before this switch that
   cannot be shown untouched since (`filled_before_auto_issue`).
+- A frozen quote with nothing to copy (no labour and no work lines, so the
+  fill answers `no_quote_lines`) shows as `quote_has_no_lines` on the staff
+  read instead of `not_filled`, and the fill writes one ids-only job event
+  `job_work_order_quote_has_no_lines` per draft and quote revision (19 Oct
+  2026; three patio jobs had such quotes and the office got no
+  signal). An unreadable check of earlier events writes
+  nothing, so the 2-minute sweep cannot flood the job's events.
 - Customer variations still need the work order approver, exactly as before
   ("Customer variations" below). They join an automatically issued work order
   the same way.
@@ -166,9 +173,11 @@ counts only, no user).
 
 `lines` are the work order's lines the fill flagged (`needs_review`).
 `held` is set only on a draft: `hand_edited`, `not_filled`,
-`agreed_labour_missing`, `filled_before_auto_issue` (each needs the office:
+`agreed_labour_missing`, `filled_before_auto_issue`,
+`quote_has_no_lines` (each needs the office:
 `needs_checking` true), or `auto_issue_switched_off` / `awaiting_auto_issue`
-(nothing to do). Computed at read time from the work order, stored nowhere.
+(nothing to do). Computed at read time from the work order and the fill that
+read made (`quote_has_no_lines` comes from the fill's answer), stored nowhere.
 The trade read is an allowlist and never carries it.
 
 ### Turning it on (the captain's "make it live")

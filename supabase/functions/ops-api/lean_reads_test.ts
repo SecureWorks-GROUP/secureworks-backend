@@ -14,6 +14,7 @@ import {
   PIPELINE_PRICING_PROJECTION,
   pipelinePricingFallbackNeighbours,
   pipelinePricingProjectionValues,
+  pipelineScopeToolField,
   stripPipelinePricingAliases,
   toOpsSummaryScheduleEvent,
 } from "./index.ts";
@@ -102,6 +103,7 @@ function projectedRow(row: Record<string, unknown>) {
         ?.neighbours ?? null,
     pj_job_neighbours:
       (pricing?.job as Record<string, unknown> | undefined)?.neighbours ?? null,
+    pj_tool: pricing?.tool ?? null,
     status: row.status,
   };
 }
@@ -175,6 +177,7 @@ Deno.test("malformed pricing_json probe targets exactly the projected paths", as
     "pricing_json->total",
     "pricing_json->neighbour_splits->neighbours",
     "pricing_json->job->neighbours",
+    "pricing_json->tool",
   ]);
   assertEquals(
     PIPELINE_PRICING_NULL_PATHS.length,
@@ -281,12 +284,14 @@ Deno.test("pipeline aliases are exact, lean, and stripped without changing key o
     "pj_total:pricing_json->total",
     "pj_split_neighbours:pricing_json->neighbour_splits->neighbours",
     "pj_job_neighbours:pricing_json->job->neighbours",
+    "pj_tool:pricing_json->tool",
   ]);
   assertEquals(PIPELINE_PRICING_ALIASES, [
     "pj_total_inc",
     "pj_total",
     "pj_split_neighbours",
     "pj_job_neighbours",
+    "pj_tool",
   ]);
   assertFalse(PIPELINE_PRICING_PROJECTION.includes("pricing_json"));
 
@@ -302,4 +307,14 @@ Deno.test("pipeline aliases are exact, lean, and stripped without changing key o
   assertEquals(newLeanRow, oldLeanRow);
   assertEquals(Object.keys(newLeanRow), Object.keys(oldLeanRow));
   assertStrictEquals(JSON.stringify(newLeanRow), JSON.stringify(oldLeanRow));
+});
+
+Deno.test("pipeline adds pj_tool only for a pricing that names its tool", () => {
+  const engine = projectedRow({ id: "e", type: "patio", pricing_json: { tool: "patio-scoper", totalIncGST: 15950 }, status: "quoted" });
+  assertEquals(pipelineScopeToolField(engine), { pj_tool: "patio-scoper" });
+  assertEquals(Object.keys(stripPipelinePricingAliases(engine)), ["id", "type", "status"]);
+  for (const pricing_json of [null, {}, { totalIncGST: 10 }, { tool: "" }, { tool: 7 }]) {
+    const row = projectedRow({ id: "o", type: "fencing", pricing_json, status: "quoted" });
+    assertEquals(pipelineScopeToolField(row), {}, JSON.stringify(pricing_json));
+  }
 });

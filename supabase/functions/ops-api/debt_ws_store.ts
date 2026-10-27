@@ -8,6 +8,7 @@
 
 import type { WsInvoice, WsJob } from "./debt_ws_rules.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
+import type { MirrorCheckRow } from "./debt_ws_xero_check.ts";
 
 export const DEBT_WS_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const IN_CHUNK = 50;
@@ -275,6 +276,16 @@ export interface DebtWsStore {
   /** The claim: inserts a 'sending' report row. Null when this week's auto report is taken. */
   claimReport(row: WsReportClaim): Promise<WsReportRow | null>;
   settleReport(id: string, patch: WsReportSettle): Promise<void>;
+
+  // ── The check against Xero (20261020150000_xero_mirror_checks.sql) ──
+  /**
+   * The newest invoice mirror check xero-sync recorded (complete or not) and the newest
+   * complete one; null when there is none. Throws when the table cannot be read, so the
+   * caller can say "could not read" rather than "matches".
+   */
+  mirrorChecks(): Promise<
+    { latest: MirrorCheckRow | null; latestComplete: MirrorCheckRow | null }
+  >;
 }
 
 /** debt_ws_settings report columns (20261015170000_debt_ws_report.sql). */
@@ -334,6 +345,31 @@ export interface WsReportSettle {
 
 const REPORT_ROW_SELECT =
   "id, kind, week_start, status, to_emails, cc_emails, subject, sent_by_name, error, created_at, sent_at";
+
+const MIRROR_CHECK_SELECT =
+  "checked_at, complete, matches, xero_count, xero_total, copy_count, copy_total, differ_count, differences, drafts_count, drafts_total, error";
+
+/** A xero_mirror_checks row with its numbers as numbers (numeric reads come back as text). */
+// deno-lint-ignore no-explicit-any
+function toMirrorCheck(r: any): MirrorCheckRow {
+  const n = (v: unknown) => v === null || v === undefined ? null : Number(v);
+  return {
+    checked_at: String(r.checked_at),
+    complete: r.complete === true,
+    matches: r.matches === null || r.matches === undefined
+      ? null
+      : r.matches === true,
+    xero_count: n(r.xero_count),
+    xero_total: n(r.xero_total),
+    copy_count: n(r.copy_count),
+    copy_total: n(r.copy_total),
+    differ_count: Number(r.differ_count ?? 0),
+    differences: Array.isArray(r.differences) ? r.differences : [],
+    drafts_count: n(r.drafts_count),
+    drafts_total: n(r.drafts_total),
+    error: r.error ? String(r.error) : null,
+  };
+}
 
 // ── The Supabase store ──
 
@@ -903,6 +939,20 @@ export function createSupabaseDebtWsStore(
       }).limit(1);
       if (error) readFailed("the invoice sync time", error);
       return data?.[0]?.synced_at ? String(data[0].synced_at) : null;
+    },
+    async mirrorChecks() {
+      const read = (complete: boolean) => {
+        let q = client.from("xero_mirror_checks").select(MIRROR_CHECK_SELECT)
+          .eq("org_id", orgId);
+        if (complete) q = q.eq("complete", true);
+        return q.order("checked_at", { ascending: false }).limit(1);
+      };
+      const [latest, done] = await Promise.all([read(false), read(true)]);
+      if (latest.error) readFailed("the check against Xero", latest.error);
+      if (done.error) readFailed("the check against Xero", done.error);
+      const one = (data: unknown) =>
+        Array.isArray(data) && data[0] ? toMirrorCheck(data[0]) : null;
+      return { latest: one(latest.data), latestComplete: one(done.data) };
     },
     async reportSends(limit) {
       const { data, error } = await client.from("debt_ws_reports").select(

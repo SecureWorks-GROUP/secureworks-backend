@@ -162,6 +162,16 @@ if [[ "$action" == "job_profit" ]]; then
   fi
   exit 0
 fi
+# Stands in for the job trace door (job_trace.ts): a call with no job_number
+# or job_id is refused before any read.
+if [[ "$action" == "job_trace" ]]; then
+  if printf '%s' "$url" | grep -qE '[?&](job_id|job_number)='; then
+    printf '%s\n' '{"ok":true,"version":"job-trace-v1","links":[]}'
+  else
+    printf '%s\n' '{"error":"job_number or job_id required"}'
+  fi
+  exit 0
+fi
 if [[ "$action" == "job_profit_list" ]]; then
   if printf '%s' "$url" | grep -q 'limit=0'; then
     printf '%s\n' '{"error":"limit must be 1 to 500"}'

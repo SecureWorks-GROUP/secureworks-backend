@@ -41,8 +41,12 @@
 // group re-read its newest 400 conversations every 5 minutes for a day. A
 // group history run walks the conversations instead and records the walk in
 // cursor.group (see GroupWalk): every run starts where the last one stopped,
-// a conversation cut part way resumes after its last saved post, and the
-// window is finished by a pass that sees every conversation in one run. Every
+// a conversation cut part way resumes at the saved thread page and post page
+// (an older cursor that only has conv_after still resumes after its last
+// saved post), and the window is finished by a pass that sees every
+// conversation in one run. Each page is processed and the cursor saved
+// before the next page is requested, and past the time budget the run
+// returns partial with that cursor. Every
 // history run carries its cursor from the start (on its running row, saved
 // again every 15 seconds), so a failed or abandoned run hands it on, and a
 // run that has not moved yet gets a short grace past the time budget to move
@@ -109,8 +113,10 @@
 // call), so the ladder can place a builder's email by its reference.
 //
 // Group mailbox audience (9 Oct 2026): a group post carries no recipients, so
-// every post of a thread is handed its thread's posts (withGroupThread), and
-// the row builder reads who our own post went to from the others: the outside
+// every post of a thread is handed its thread's posts (withGroupThread). A
+// history walk reads a thread one page at a time and stamps the posts read
+// so far in that run; a thread that fits on one page is the whole thread.
+// The row builder reads who our own post went to from the others: the outside
 // party whose thread it is in, else unknown, never internal
 // (counts.audience_from_thread, counts.audience_unknown). One email is one row
 // whichever copy is saved first, so when a copy of our own email meets the
@@ -151,6 +157,8 @@ import type {
   AttachmentHome,
   FolderIds,
   GroupConversation,
+  GroupPostPage,
+  GroupThreadPage,
   MessagePage,
 } from "./graph.ts";
 
@@ -195,7 +203,8 @@ export const POLICY = {
  * cursor cannot say where a cut run stopped. The walk records it instead:
  * conversations last delivered after `before` (and those exactly at it whose
  * id hash is in `before_ids`) are done in this pass; a conversation cut part
- * way is `conv`, with its last post done (`conv_after`, `conv_ids`). A pass
+ * way is `conv`, with its last post done (`conv_after`, `conv_ids`) and the
+ * page still to read (`thread_page`, `thread`, `post_page`). A pass
  * ends at `floor` (the window start). Conversations that received mail after
  * the pass began (`pass_started`) may have moved above `before` unread, so a
  * pass that took more than one run is followed by a top-up pass over just
@@ -211,6 +220,15 @@ export interface GroupWalk {
   conv_after: string | null;
   conv_ids: string[];
   passes: number;
+  /**
+   * Thread-list page still to request (null = the first page). A Graph
+   * nextLink, or a test token. Set while this conversation is open.
+   */
+  thread_page: string | null;
+  /** Hash of the thread this conversation is inside. Null = first thread of thread_page. */
+  thread: string | null;
+  /** Post-list page still to request for `thread` (null = the first page). */
+  post_page: string | null;
 }
 
 function strList(v: unknown): string[] {
@@ -241,18 +259,30 @@ export function groupWalkFrom(cursor: unknown): GroupWalk | null {
       ms(g.conv_after) !== null
     ? g.conv_after
     : null;
+  const pageToken = (v: unknown): string | null =>
+    typeof v === "string" && v !== "" ? v : null;
+  const threadPage = pageToken(g.thread_page);
+  const thread = pageToken(g.thread);
+  const postPage = pageToken(g.post_page);
+  // A page cursor keeps the conversation open after a page finished and
+  // conv_after was cleared. A cursor with only conv_after is the older
+  // mid-post cut and still resumes by time.
+  const open = !!(conv && (convAfter || thread || threadPage || postPage));
   return {
     floor,
     pass_started: started,
     before,
     before_ids: before ? strList(g.before_ids) : [],
-    conv: convAfter ? conv : null,
-    conv_after: convAfter,
-    conv_ids: convAfter ? strList(g.conv_ids) : [],
+    conv: open ? conv : null,
+    conv_after: open ? convAfter : null,
+    conv_ids: open && convAfter ? strList(g.conv_ids) : [],
     passes: typeof g.passes === "number" && Number.isInteger(g.passes) &&
         g.passes >= 0
       ? g.passes
       : 0,
+    thread_page: open ? threadPage : null,
+    thread: open ? thread : null,
+    post_page: open ? postPage : null,
   };
 }
 
@@ -335,6 +365,19 @@ export interface MailReads {
     threadId: string,
     topic: string | null,
   ): Promise<OutlookMailItem[]>;
+  /** One thread page. History requests the next only after this page is saved. */
+  listGroupThreadPage(
+    groupId: string,
+    conversationId: string,
+    next?: string | null,
+  ): Promise<GroupThreadPage>;
+  /** One post page. History requests the next only after this page is saved. */
+  listGroupPostPage(
+    groupId: string,
+    threadId: string,
+    topic: string | null,
+    next?: string | null,
+  ): Promise<GroupPostPage>;
 }
 
 /** The deep load's switch and bounds (context_email_deep_enabled). */
@@ -958,6 +1001,9 @@ async function runSource(
       conv_after: null,
       conv_ids: [],
       passes: 0,
+      thread_page: null,
+      thread: null,
+      post_page: null,
     };
     if (ms(walk.floor)! < env.window!.fromMs) {
       walk = { ...walk, floor: iso(env.window!.fromMs) };
@@ -1276,10 +1322,14 @@ async function runSource(
       spent > POLICY.budgetMs + POLICY.progressGraceMs;
   };
 
-  // One conversation of a group history walk: its posts inside the window,
-  // oldest first, after the cut point when it was cut before. True when
-  // finished (the walk moves past it), false when cut part way (the walk
-  // records the last post done).
+  // One conversation, one Graph page at a time. Each thread page and each
+  // post page is filtered to the window, processed, and checkpointed before
+  // the next page is requested. True when the conversation is finished.
+  // False when the time or post budget cuts it: the cursor names the page
+  // still to read, and the next run resumes there. A Graph 404 on a thread
+  // page passes the conversation; a 404 on a thread's posts passes that
+  // thread. Any other fault, including graph_timeout, fails the run with
+  // the cursor on the page that failed. It is not retried inside this run.
   const readConversation = async (
     groupId: string,
     c: GroupConversation,
@@ -1288,63 +1338,238 @@ async function runSource(
   ): Promise<boolean> => {
     const { fromMs, toMs } = env.window!;
     const h = await deps.hash(c.id);
-    const posts: Array<{ post: OutlookMailItem; threadId: string }> = [];
-    for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
-      // Each post carries its whole thread (outside the window too): who our
-      // own post went to is read from it.
-      for (
-        const p of withGroupThread(
-          await deps.mail.listGroupPosts(groupId, th.id, th.topic),
-        )
-      ) {
-        const t = ms(p.receivedAt);
-        if (t === null || t < fromMs || t >= toMs) continue;
-        posts.push({ post: p, threadId: th.id });
+    const resuming = walk!.conv === h;
+    // A cursor saved before page tokens existed resumes by post time, and
+    // keeps that skip on every page: Graph pages are not in time order.
+    const legacy = resuming && !walk!.thread && walk!.conv_after !== null;
+    let seeking: string | null = resuming && walk!.thread ? walk!.thread : null;
+    let threadUrl: string | null = resuming ? walk!.thread_page : null;
+    const seenThreadPages = new Set<string>();
+
+    const finishConversation = (): boolean => {
+      const before = ms(walk!.before);
+      walk = {
+        ...walk!,
+        before: iso(last),
+        before_ids: before === last
+          ? [...walk!.before_ids, h].slice(-POLICY.idsAtEndMax)
+          : [h],
+        conv: null,
+        conv_after: null,
+        conv_ids: [],
+        thread_page: null,
+        thread: null,
+        post_page: null,
+      };
+      budget.conversations--;
+      counts.conversations_read++;
+      counts.progressed++;
+      return true;
+    };
+
+    const readThread = async (
+      th: { id: string; topic: string | null },
+      thHash: string,
+      threadPageToken: string | null,
+    ): Promise<boolean> => {
+      let postUrl: string | null = walk!.conv === h && walk!.thread === thHash
+        ? walk!.post_page
+        : null;
+      const seen = new Set<string>();
+      const roster: Array<{
+        graphId: string;
+        from: string | null;
+        receivedAt: string | null;
+      }> = [];
+      for (let page = 0; page < POLICY.groupHistoryMaxPages; page++) {
+        const pageKey = postUrl ?? "";
+        if (seen.has(pageKey)) {
+          throw new SourceStop("graph_page_cycle", "failed");
+        }
+        seen.add(pageKey);
+        // Time-skip only the page a cut stopped inside, or a legacy cursor.
+        // A finished page is named by its next token, with conv_after cleared,
+        // so an older post on the next page is not dropped.
+        const midPage = walk!.conv === h && walk!.thread === thHash &&
+          (walk!.post_page ?? null) === postUrl && walk!.conv_after !== null;
+        const skipTime = midPage || legacy;
+        const savedAfter = skipTime ? walk!.conv_after : null;
+        const savedIds = skipTime ? walk!.conv_ids : [];
+        // Name the page in memory before the read. The previous page already
+        // checkpointed this token; checkpointing again here would spend the
+        // run clock once per page before any mail is saved. A fault on this
+        // read still fails with the cursor on this page: the closing run row
+        // stores the walk.
+        walk = {
+          ...walk!,
+          conv: h,
+          thread_page: threadPageToken,
+          thread: thHash,
+          post_page: postUrl,
+          conv_after: savedAfter,
+          conv_ids: savedIds,
+        };
+        let got: GroupPostPage;
+        try {
+          got = await deps.mail.listGroupPostPage(
+            groupId,
+            th.id,
+            th.topic,
+            postUrl,
+          );
+        } catch (e) {
+          if (safeCode(e) !== "graph_404") throw e;
+          counts.threads_gone = (counts.threads_gone ?? 0) + 1;
+          return true;
+        }
+        for (const p of got.items) {
+          roster.push({
+            graphId: p.graphId,
+            from: p.from ?? null,
+            receivedAt: p.receivedAt ?? null,
+          });
+        }
+        const threadPosts = roster.map((p) => ({ ...p }));
+        const inWindow = got.items.filter((p) => {
+          const t = ms(p.receivedAt);
+          return t !== null && t >= fromMs && t < toMs;
+        }).sort(byTimeThenId);
+        const after = ms(savedAfter);
+        const doneAt = new Set(after !== null ? savedIds : []);
+        for (const post of inWindow) {
+          const t = ms(post.receivedAt)!;
+          const ph = await deps.hash(post.graphId);
+          if (
+            after !== null && (t < after || (t === after && doneAt.has(ph)))
+          ) {
+            counts.skipped_before_cursor++;
+            continue;
+          }
+          if (budget.posts <= 0 || overBudget()) return false;
+          await process({ ...post, threadPosts }, {
+            kind: "post",
+            groupId,
+            threadId: th.id,
+            postId: post.graphId,
+          });
+          budget.posts--;
+          const at = iso(t);
+          walk = {
+            ...walk!,
+            conv: h,
+            thread_page: threadPageToken,
+            thread: thHash,
+            post_page: postUrl,
+            conv_after: at,
+            conv_ids: walk!.conv === h && walk!.thread === thHash &&
+                walk!.conv_after === at
+              ? [...walk!.conv_ids, ph].slice(-POLICY.idsAtEndMax)
+              : [ph],
+          };
+          // A long page saves its cut point as it goes, so a worker stopped
+          // inside it (abandoned) hands on the posts it already saved.
+          await checkpoint();
+        }
+        if (!got.next) return true;
+        if (got.next === postUrl || seen.has(got.next)) {
+          throw new SourceStop("graph_page_cycle", "failed");
+        }
+        postUrl = got.next;
+        walk = {
+          ...walk!,
+          conv: h,
+          thread_page: threadPageToken,
+          thread: thHash,
+          post_page: postUrl,
+          conv_after: legacy ? walk!.conv_after : null,
+          conv_ids: legacy ? walk!.conv_ids : [],
+        };
+        await checkpoint();
+        if (budget.posts <= 0 || overBudget()) return false;
       }
-    }
-    posts.sort((a, b) => byTimeThenId(a.post, b.post));
-    const after = walk!.conv === h ? ms(walk!.conv_after) : null;
-    const doneAt = new Set(after !== null ? walk!.conv_ids : []);
-    for (const { post, threadId } of posts) {
-      const t = ms(post.receivedAt)!;
-      const ph = await deps.hash(post.graphId);
-      if (after !== null && (t < after || (t === after && doneAt.has(ph)))) {
-        counts.skipped_before_cursor++;
-        continue;
+      return false;
+    };
+
+    for (let page = 0; page < POLICY.groupHistoryMaxPages; page++) {
+      const pageKey = threadUrl ?? "";
+      if (seenThreadPages.has(pageKey)) {
+        throw new SourceStop("graph_page_cycle", "failed");
       }
-      if (budget.posts <= 0 || overBudget()) return false;
-      await process(post, {
-        kind: "post",
-        groupId,
-        threadId,
-        postId: post.graphId,
-      });
-      budget.posts--;
-      const at = iso(t);
+      seenThreadPages.add(pageKey);
+      let got: GroupThreadPage;
+      try {
+        got = await deps.mail.listGroupThreadPage(groupId, c.id, threadUrl);
+      } catch (e) {
+        if (safeCode(e) !== "graph_404") throw e;
+        counts.conversations_gone = (counts.conversations_gone ?? 0) + 1;
+        return finishConversation();
+      }
+      let startAt = 0;
+      if (seeking) {
+        let idx = -1;
+        for (let i = 0; i < got.items.length; i++) {
+          if (await deps.hash(got.items[i].id) === seeking) {
+            idx = i;
+            break;
+          }
+        }
+        if (idx < 0) {
+          if (!got.next) throw new SourceStop("graph_thread_missing", "failed");
+          if (got.next === threadUrl || seenThreadPages.has(got.next)) {
+            throw new SourceStop("graph_page_cycle", "failed");
+          }
+          threadUrl = got.next;
+          walk = {
+            ...walk!,
+            conv: h,
+            thread_page: threadUrl,
+            thread: seeking,
+            post_page: walk!.post_page,
+          };
+          await checkpoint();
+          if (overBudget()) return false;
+          continue;
+        }
+        startAt = idx;
+        seeking = null;
+      }
+      for (let i = startAt; i < got.items.length; i++) {
+        const th = got.items[i];
+        const thHash = await deps.hash(th.id);
+        if (!(await readThread(th, thHash, threadUrl))) return false;
+        const nextTh = got.items[i + 1];
+        if (nextTh) {
+          walk = {
+            ...walk!,
+            conv: h,
+            thread_page: threadUrl,
+            thread: await deps.hash(nextTh.id),
+            post_page: null,
+            conv_after: null,
+            conv_ids: [],
+          };
+          await checkpoint();
+          if (budget.posts <= 0 || overBudget()) return false;
+        }
+      }
+      if (!got.next) return finishConversation();
+      if (got.next === threadUrl || seenThreadPages.has(got.next)) {
+        throw new SourceStop("graph_page_cycle", "failed");
+      }
+      threadUrl = got.next;
       walk = {
         ...walk!,
         conv: h,
-        conv_after: at,
-        conv_ids: walk!.conv === h && walk!.conv_after === at
-          ? [...walk!.conv_ids, ph].slice(-POLICY.idsAtEndMax)
-          : [ph],
+        thread_page: threadUrl,
+        thread: null,
+        post_page: null,
+        conv_after: null,
+        conv_ids: [],
       };
+      await checkpoint();
+      if (budget.posts <= 0 || overBudget()) return false;
     }
-    const before = ms(walk!.before);
-    walk = {
-      ...walk!,
-      before: iso(last),
-      before_ids: before === last
-        ? [...walk!.before_ids, h].slice(-POLICY.idsAtEndMax)
-        : [h],
-      conv: null,
-      conv_after: null,
-      conv_ids: [],
-    };
-    budget.conversations--;
-    counts.conversations_read++;
-    counts.progressed++;
-    return true;
+    return false;
   };
 
   // The group history walk (see GroupWalk). True when the window is finished.
@@ -1409,6 +1634,9 @@ async function runSource(
         conv_after: null,
         conv_ids: [],
         passes: walk!.passes + 1,
+        thread_page: null,
+        thread: null,
+        post_page: null,
       };
     }
   };

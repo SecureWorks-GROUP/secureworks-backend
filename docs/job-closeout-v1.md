@@ -7,8 +7,13 @@ Xero rule (`invoiced` -> `complete` once every linked sales invoice is PAID).
 
 Code: `supabase/functions/_shared/job_paid_closeout.ts` (the paid rule, pure),
 `supabase/functions/ops-api/job_closeout.ts` (reads, moves, sender, sweeps),
-`supabase/functions/xero-sync/index.ts` (calls in). Migration:
-`20261013150000_job_closeout_review_archive.sql`.
+`supabase/functions/xero-sync/index.ts` (calls in). Migrations:
+`20261013150000_job_closeout_review_archive.sql`, and the per-job review switch
+`20261020093000_job_review_opt_out.sql`.
+
+The paid-invoice receipt (Xero emails each paid invoice of a fencing or patio
+job, deposits included, once) shares the `job_closeout_settings` switch table
+but runs per invoice, not at close: [job-receipt-v1.md](job-receipt-v1.md).
 
 ## What "paid" means
 
@@ -50,6 +55,43 @@ and the sender answer `facts_unreadable`, the backlog list excludes it as
 Holds (never moved, texted or archived): status `rectification`, or
 `jobs.is_callback`.
 
+## Who gets the review text
+
+Captain, 20 Oct 2026: the review text is always sent, unless a person switches
+it off for that job. Every fully paid, unheld fencing or patio job entering
+`get_review` texts every paying owner (each skipped if sent any review text in
+the last 90 days), except a job whose `jobs.review_opt_out` is true. The switch
+is per job, on (sends) by default; the Ops card shows it from Complete onwards.
+Turn it off before the final payment lands: the text goes out within about 15
+minutes of the job showing fully paid.
+
+- **`set_review_opt_out`** (POST `{ job_id, opt_out: boolean }`, staff sessions
+  and the ops key only, never the routine key) sets it, stamps
+  `review_opt_out_at` and `review_opt_out_by` (the signed-in person's email,
+  else the operator email the screen stamps), writes one `job_events` row
+  `review_opt_out_changed` (`{ review_opt_out, review: 'off' | 'on', by, at }`)
+  and answers `{ success, changed, review_opt_out, review_opt_out_at,
+  review_opt_out_by }`. Asking for the value the job already has changes and
+  logs nothing. Once the job has a review claim (text sent or in flight) it is
+  refused 409 `{ error: 'review_already_sent', review_claim_status }`. The
+  claim is looked for again after the write, and the automatic sender reads
+  the switch again after taking its claim and before sending (a switch it
+  finds off releases the claim and sends nothing), so a press racing a send
+  is either honoured or answered 409, never a 200 over a text that went out.
+  When that second look finds a claim (409) or cannot be read (503
+  `review_claim_unreadable`), the switch and its stamps are put back as they
+  were and no event is written, so a refused press leaves no trace; a sender
+  holding the claim then reads the switch as it was.
+- **Switched off**, the automatic sender (the Get Review hook and the sweep's
+  backstop) sends nothing and keeps no claim, answers `opted_out` and logs one
+  `review_request_not_sent` row with status and reason `opted_out` (who and when
+  in `opted_out`); a dry run puts `skip_reason: 'opted_out'` on its one
+  `review_request_dry_run` row. The sweep counts `opted_out` as review done, so
+  the card still archives 24 hours after entering `get_review`; a sweep dry run
+  reports such a card `would_archive`, never `would_send_review_then_archive`.
+- **Send review** (`send_review_request`) is a deliberate staff action and still
+  sends on a switched-off job.
+
 ## The flow
 
 - **Paid -> Get Review.** When a linked sales invoice of a fencing or patio job
@@ -67,8 +109,8 @@ Holds (never moved, texted or archived): status `rectification`, or
   by id), so cards that stay put never hide newer ones.
 - **Review text.** Any fencing or patio card entering `get_review` (by the sync
   or by hand) asks the one sender, `requestJobReview`. It re-checks get_review,
-  holds and the paid rule, then texts every paying owner once, in the wording
-  the GHL review workflow already used, with the one review link, through
+  holds and the paid rule, then texts every paying owner once, in the owner's
+  wording (20 Oct 2026), with the one review link, through
   ghl-proxy `send_sms` (the shared sender policy, +61489267771, and the
   contact/job guard). A `job_review_claims` row is inserted before any text, so
   a job is never texted twice by this system; a contact sent any review text in
@@ -82,8 +124,8 @@ Holds (never moved, texted or archived): status `rectification`, or
   `review_request_not_sent`). A real send keeps its claim. A text that
   does not answer within 15 seconds counts as unconfirmed, keeps its claim and
   is never retried. Manual `send_review_request` uses
-  the same sender and switch (it skips only the status, hold, paid and window
-  checks); only a fencing or patio job that passes the paid rule gets the
+  the same sender and switch (it skips only the status, hold, per-job review
+  switch, paid and window checks); only a fencing or patio job that passes the paid rule gets the
   "Payment is well received" wording, every other manual request gets a
   neutral text signed "SecureWorks", and a fencing or patio job whose quote
   could not be read is not texted (`facts_unreadable`).
@@ -91,7 +133,7 @@ Holds (never moved, texted or archived): status `rectification`, or
   gated on the `closeout` lane) posts `job_closeout_sweep`. A card archives when
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
   its review claim is finished, or the sender answered `no_contact`,
-  `paid_too_long_ago` or `refused` (no claim is kept, so the review can still be
+  `paid_too_long_ago`, `opted_out` or `refused` (no claim is kept, so the review can still be
   sent by hand once the cause is fixed), or the sender is not live. A live sweep
   that cannot read the switches archives nothing (`switches_unreadable`). A claim still `claimed` more than an hour
   after it was taken (the finish write failed or the worker died mid-send) is
@@ -117,7 +159,9 @@ closeout: {
   review: { status, reason } | null,
   get_review_entered_at: string | null,
   archive_due_at: string | null,
-  held: 'rectification' | 'callback' | null
+  held: 'rectification' | 'callback' | null,
+  review_opt_out: boolean,
+  review_claim_status: string | null
 }
 ```
 
@@ -135,6 +179,13 @@ closeout: {
   24 hours while the job is in `get_review`, else null. The sweep still decides:
   it archives only a paid, unheld card whose review is done.
 - `held` is the sweep's hold (`closeoutHold`).
+- `review_opt_out` is the job's review switch (false unless a person switched
+  it off) and `review_claim_status` the job's `job_review_claims` status, or
+  null with no claim. This block is the one place the card's switch is read,
+  on the `pipeline` row and the `job_detail` answer alike; neither is copied
+  to the top level (a failed read nulls the whole block). `job_detail.job`
+  still carries the raw `jobs` columns (`review_opt_out`, `review_opt_out_at`,
+  `review_opt_out_by`).
 
 Every other job type, and every non-staff caller, gets no `closeout` key. A
 draft fencing or patio row is never read (a draft cannot be paid, claimed or in
@@ -155,8 +206,9 @@ nothing.
    the message).
 3. **Someone must switch the old GoHighLevel review workflow OFF** in GHL
    Automation before step 4, or customers can get two review texts.
-4. Set `JOB_REVIEW_SENDING_ENABLED=true` on ops-api, then
-   `review_sender_mode = 'live'`. Live without the env reads as dry run.
+4. `review_sender_mode = 'live'`. The database switch alone decides whether
+   real review texts go out (Captain, 20 Oct 2026); the old ops-api env
+   `JOB_REVIEW_SENDING_ENABLED` is retired and ignored.
 5. `UPDATE automation_switches SET closeout = true ... WHERE id = 1;` (the
    archive sweep). `all_stop` stops it like every other lane.
 
@@ -180,6 +232,6 @@ which are not paid, so the sweep will not archive them. No `invoiced` or
 - Decking follows the patio stage list in the state machine, as before, so
   `get_review` reads as legal there too (shadow observation only); the close-out
   itself touches fencing and patio only.
-- A patio review text signs "SecureWorks" (no patio wording was captured);
-  fencing signs "SecureWorks Fencing"; a manual text on any other job, or on a
+- A paid review text signs "Shaun" then "SecureWorks Patios" for a patio job
+  or "SecureWorks Fencing" for a fencing job; a manual text on any other job, or on a
   job not paid, makes no payment claim and signs "SecureWorks".

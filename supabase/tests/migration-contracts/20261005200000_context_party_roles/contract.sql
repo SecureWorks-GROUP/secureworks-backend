@@ -217,7 +217,10 @@ DECLARE f text; r text; t text[];
 BEGIN
  SELECT array_agg(t.tgname ORDER BY t.tgname) INTO t FROM pg_trigger t
  WHERE t.tgrelid='public.business_events'::regclass AND NOT t.tgisinternal AND t.tgname LIKE 'context\_%' AND (t.tgtype & 2)=2;
- IF t IS DISTINCT FROM ARRAY['context_attribute_business_event','context_party_roles_business_event']::text[] THEN
+ -- The reconciliation hold (20261020140000) adds a BEFORE UPDATE trigger that sorts
+-- first, so a held placement is put back before party roles re-stamps the row.
+IF t IS DISTINCT FROM ARRAY['context_attribute_business_event','context_party_roles_business_event']::text[]
+   AND t IS DISTINCT FROM ARRAY['context_aa_recon_hold_decided','context_attribute_business_event','context_party_roles_business_event']::text[] THEN
   RAISE EXCEPTION 'party roles: the BEFORE triggers must be the ladder then party roles, got %',t; END IF;
  IF NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgname='context_party_roles_business_event'
    AND t.tgfoid='public.context_stamp_party_roles()'::regprocedure AND (t.tgtype & 4)=4 AND (t.tgtype & 16)=16) THEN
