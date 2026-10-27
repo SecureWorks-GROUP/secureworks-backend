@@ -9,8 +9,10 @@
 // population, the purchase orders and the email attachments the context system
 // filed, and this file decides. One decision per bill, rules in this order:
 //
-//   0. Any money line on subcontractor labour (306, 301): left out (owner call:
-//      its own lane later; some of it is already on the trade app).
+//   0. Any money line on subcontractor labour (306, 301): an installer bill.
+//      Decided by the rules below like any bill, but a certain match is only
+//      ever a proposal a person confirms (JP-12, 20 Oct 2026). Trade-app
+//      mirrors never reach here (the caller excludes them).
 //   1. A job number in the bill reference or any line, or the job of the PO the
 //      bill is linked to or names, naming exactly ONE live job with nothing
 //      disagreeing: confident (high). The caller places it.
@@ -415,14 +417,31 @@ export function duplicateDocumentsOf(
   return out.sort();
 }
 
+// True when any money line is subcontractor labour (306, 301): an installer bill.
+export function isInstallerBill(bill: PrematchBill): boolean {
+  return moneyLines(bill).some((l) => LABOUR_ACCOUNTS.has(String(l.account_code || "")));
+}
+
 export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {
+  const d = decideBillPrematchCore(bill, ctx);
+  // 0. Installer bills (JP-12, owner 20 Oct 2026: "Include installer bills
+  // with human confirmation for now"): the agent proposes, a person confirms
+  // each. A certain match is never placed by the agent; it becomes a proposal.
+  if (!isInstallerBill(bill)) return d;
+  if (d.kind === "job" && d.confidence === "high") {
+    return {
+      ...d,
+      confidence: "medium",
+      rule: `${d.rule}+installer_confirm`,
+      reason: `Installer bill (account 306 or 301): a person confirms each placement (JP-12). ${d.reason}`,
+    };
+  }
+  return d;
+}
+
+function decideBillPrematchCore(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {
   const cfg = ctx.config || DEFAULT_MATCH_CONFIG;
   const money = moneyLines(bill);
-
-  // 0. Subcontractor labour stays out of the agent for now.
-  if (money.some((l) => LABOUR_ACCOUNTS.has(String(l.account_code || "")))) {
-    return { kind: "excluded", rule: "subcontractor_labour", reason: "Subcontractor labour (account 306 or 301): left for its own lane." };
-  }
 
   // 0b. The same supplier document entered more than once: a person decides
   // which bill is real before any of them is placed.

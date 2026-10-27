@@ -76,6 +76,9 @@ export type AssignAction = "accept-suggestion" | "assign-to-job";
 // match through this same path, stamped as its own source so it is traceable
 // and reversible (delete the one fact, re-open the queue row).
 export const AGENT_PREMATCH_SOURCE = "agent_prematch";
+// Rows a machine wrote. On an installer bill (JP-12) such a row is never
+// actual: it waits for a person, whose placement replaces it.
+export const MACHINE_FACT_SOURCES = new Set(["xero_ref_link", "po_deterministic", AGENT_PREMATCH_SOURCE]);
 export interface AgentLanding {
   matchReason: string; // the proposal's rule and reason
   matchedPoId?: string | null; // the one PO a rule-1b placement rests on
@@ -128,6 +131,7 @@ export function buildManualFactRow(
   action: AssignAction,
   nowIso: string,
   agent?: AgentLanding | null,
+  lane: BillLane = "materials",
 ): Record<string, unknown> {
   return {
     org_id: queue.org_id,
@@ -137,7 +141,7 @@ export function buildManualFactRow(
     contact_name: queue.contact_name,
     job_id: job.id,
     job_number: job.job_number ?? null,
-    lane: "materials",
+    lane,
     kind: "actual",
     amount_ex_gst: queue.sub_total ?? 0,
     amount_inc_gst: queue.total ?? null,
@@ -157,16 +161,39 @@ export function buildManualFactRow(
 //   'idempotent' — the SAME manual fact already exists for the SAME job (double
 //                  click / retry); succeed without a second write.
 //   'conflict'   — a DIFFERENT fact owns this bill; refuse (revert it first).
+//   'confirm'    — a person places an installer bill a machine placed before
+//                  JP-12: their placement replaces the machine's row.
 export function classifyAssign(
   existing: ExistingFact | null,
   targetJobId: string,
   source = "manual_queue",
-): "proceed" | "idempotent" | "conflict" {
+  personConfirmsInstaller = false,
+): "proceed" | "idempotent" | "conflict" | "confirm" {
   if (!existing) return "proceed";
   if (existing.automation_source === source && existing.job_id === targetJobId) {
     return "idempotent";
   }
+  if (personConfirmsInstaller && MACHINE_FACT_SOURCES.has(existing.automation_source)) return "confirm";
   return "conflict";
+}
+
+// The cost lane a whole bill lands in: labour when any money line is
+// subcontractor labour (306, 301: an installer bill), otherwise materials.
+// Before 20 Oct every manual landing was materials, so installer labour placed
+// by hand showed as materials.
+export type BillLane = "materials" | "labour" | "other";
+export const INSTALLER_ACCOUNTS = new Set(["306", "301"]);
+export function laneOfBillLines(lines: unknown): BillLane {
+  if (!Array.isArray(lines)) return "materials";
+  const money = lines.filter((l: any) => Number(l?.LineAmount ?? 0) !== 0);
+  return money.some((l: any) => INSTALLER_ACCOUNTS.has(String(l?.AccountCode ?? ""))) ? "labour" : "materials";
+}
+
+// Parse the database refusal from allocate_bill_split into the person's words.
+export function splitRefusal(message: unknown): string | null {
+  const m = String(message ?? "");
+  const i = m.indexOf("split_refused:");
+  return i >= 0 ? m.slice(i + "split_refused:".length).trim() : null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -224,14 +251,34 @@ async function resolveJob(
   return null;
 }
 
-async function loadFact(client: any, xeroInvoiceId: string): Promise<ExistingFact | null> {
+async function loadFacts(client: any, xeroInvoiceId: string): Promise<ExistingFact[]> {
   const { data, error } = await client
     .from("job_materials_facts")
     .select("id, xero_invoice_id, job_id, job_number, automation_source, confidence")
-    .eq("xero_invoice_id", xeroInvoiceId)
-    .maybeSingle();
+    .eq("xero_invoice_id", xeroInvoiceId);
   if (error) throw error;
-  return (data as ExistingFact) ?? null;
+  return Array.isArray(data) ? (data as ExistingFact[]) : [];
+}
+
+// One allocation row, or null. A bill split across jobs (several rows) is
+// refused here: it is changed only through a new split.
+async function loadFact(client: any, xeroInvoiceId: string): Promise<ExistingFact | null> {
+  const rows = await loadFacts(client, xeroInvoiceId);
+  if (rows.length > 1) {
+    throw new Error(`bill ${xeroInvoiceId} is split across ${rows.length} jobs; change it with Split, not a single placement`);
+  }
+  return rows[0] ?? null;
+}
+
+async function loadBillLines(client: any, xeroInvoiceId: string): Promise<unknown> {
+  const { data, error } = await client
+    .from("xero_invoices")
+    .select("line_items")
+    .eq("xero_invoice_id", xeroInvoiceId)
+    .eq("invoice_type", "ACCPAY")
+    .limit(1);
+  if (error) throw error;
+  return Array.isArray(data) && data[0] ? (data[0] as any).line_items : null;
 }
 
 export async function loadLiveProposals(
@@ -395,6 +442,10 @@ export async function assignReconRow(
   const now = args.nowIso || new Date().toISOString();
   const queue = await loadQueueRow(client, args);
   if (!queue) throw new Error("reconciliation queue row not found");
+  // A split bill changes only through a new split (CFO-18).
+  if (queue.status === "split") {
+    throw new Error(`bill ${queue.xero_invoice_id} is split across jobs; change it with Split, not a single placement`);
+  }
   // The agent only ever places a bill nobody has placed or filed.
   if (args.agent && queue.status !== "open") {
     throw new Error(`bill ${queue.xero_invoice_id} is ${queue.status}; the agent never moves a placed or filed bill`);
@@ -417,6 +468,12 @@ export async function assignReconRow(
     if (Array.isArray(mirror) && mirror.length > 0) {
       throw new Error(`bill ${queue.xero_invoice_id} is a trade invoice already counted as labour; it is never a materials cost`);
     }
+  }
+
+  // Installer bills (JP-12): labour lane, and only a person places them.
+  const lane = laneOfBillLines(await loadBillLines(client, queue.xero_invoice_id));
+  if (args.agent && lane === "labour") {
+    throw new Error(`bill ${queue.xero_invoice_id} is an installer bill; a person confirms each placement (JP-12)`);
   }
 
   // Resolve the target job.
@@ -451,7 +508,7 @@ export async function assignReconRow(
   // BOUNDARY GUARD: a bill can only ever carry one fact.
   const existing = await loadFact(client, queue.xero_invoice_id);
   const source = args.agent ? AGENT_PREMATCH_SOURCE : "manual_queue";
-  const disposition = classifyAssign(existing, job.id, source);
+  const disposition = classifyAssign(existing, job.id, source, !args.agent && lane === "labour");
   if (disposition === "conflict") {
     throw new Error(
       `bill ${queue.xero_invoice_id} already has a materials fact on job ${existing!.job_number ?? existing!.job_id} ` +
@@ -478,14 +535,41 @@ export async function assignReconRow(
     return { ok: true, idempotent: true, action, fact: existing, queue: q2 };
   }
 
-  // Land the fact.
-  const factRow = buildManualFactRow(queue, job, args.actor, action, now, args.agent);
-  const { data: fact, error: fErr } = await client
-    .from("job_materials_facts")
-    .insert(factRow)
-    .select()
-    .single();
-  if (fErr) throw fErr;
+  // Land the fact. A person confirming a machine-placed installer bill turns
+  // the machine's row into theirs in one write (only while it is still that
+  // row), keeping any purchase order it closed; the old row is kept to undo.
+  const factRow = buildManualFactRow(queue, job, args.actor, action, now, args.agent, lane);
+  let replaced: Record<string, unknown> | null = null;
+  let fact: any;
+  if (disposition === "confirm") {
+    const { data: old, error: oErr } = await client
+      .from("job_materials_facts").select("*").eq("id", existing!.id).single();
+    if (oErr) throw oErr;
+    replaced = old;
+    const { matched_po_id: _keepPo, ...confirmRow } = factRow as Record<string, unknown>;
+    const { data: upd, error: uErr } = await client
+      .from("job_materials_facts")
+      .update(confirmRow)
+      .eq("id", existing!.id)
+      .eq("automation_source", existing!.automation_source)
+      .select()
+      .single();
+    if (uErr) {
+      if (uErr.code === "PGRST116") {
+        throw new Error(`bill ${queue.xero_invoice_id} changed while you were placing it; reload and try again`);
+      }
+      throw uErr;
+    }
+    fact = upd;
+  } else {
+    const { data: ins, error: fErr } = await client
+      .from("job_materials_facts")
+      .insert(factRow)
+      .select()
+      .single();
+    if (fErr) throw fErr;
+    fact = ins;
+  }
 
   // Flip the queue row → assigned (the bill is no longer open work). The agent's
   // flip only lands on a row still open; if a person moved it meanwhile, its
@@ -504,11 +588,22 @@ export async function assignReconRow(
     // Re-checked at the write: still open and still not held.
     flip = flip.eq("status", "open")
       .or(`suggestion_reason.is.null,suggestion_reason.not.in.(${[...HELD_QUEUE_REASONS].join(",")})`);
+  } else {
+    // A person's flip lands only on the row as it was read: if a split or the
+    // agent moved it meanwhile, this fact is taken back off and that stands.
+    flip = flip.eq("status", queue.status);
   }
   const { data: updatedQueue, error: qErr } = await flip.select().single();
   if (qErr) {
-    if (args.agent && fact?.id) {
+    if (replaced) {
+      // Put the machine's row back as it was.
+      const { id: _id, ...prior } = replaced;
+      await client.from("job_materials_facts").update(prior).eq("id", fact.id);
+    } else if (fact?.id) {
       await client.from("job_materials_facts").delete().eq("id", fact.id);
+    }
+    if (qErr.code === "PGRST116") {
+      throw new Error(`bill ${queue.xero_invoice_id} changed while you were placing it; reload and try again`);
     }
     throw qErr;
   }
@@ -521,6 +616,7 @@ export async function assignReconRow(
       source: args.agent ? AGENT_PREMATCH_SOURCE : "materials_recon_queue",
       action: args.agent ? "agent-prematch" : action,
       manual: !args.agent,
+      confirmed_machine_row: replaced ? replaced.automation_source : undefined,
       reason: args.agent ? args.agent.matchReason : undefined,
       reversible: args.agent ? "delete this bill's job_materials_facts row and re-open its queue row" : undefined,
       xero_invoice_id: queue.xero_invoice_id,
@@ -583,4 +679,72 @@ export async function markReconNotJobRelated(
 
   // No fact written; audit lives on the queue row (status + assigned_by + assigned_at).
   return { ok: true, action: "mark-not-job-related", fact: null, queue: updatedQueue };
+}
+
+// (b4) split — one bill across several jobs, with any overhead part. The
+// database function allocate_bill_split does every check and every write in
+// one transaction (parts plus overhead equal the bill to the cent; no holding
+// job; no trade app mirror; no voided bill; nothing placed by another route).
+export async function splitReconRow(
+  client: any,
+  args: {
+    xeroInvoiceId?: string | null;
+    parts: unknown;
+    overheadEx?: unknown;
+    overheadNote?: unknown;
+    actor: string;
+  },
+): Promise<Record<string, unknown>> {
+  if (!args.xeroInvoiceId) throw new Error("xero_invoice_id is required to split a bill");
+  if (!Array.isArray(args.parts) || args.parts.length === 0) {
+    throw new Error("parts are required: one job and amount per part");
+  }
+  // An installer bill (306/301) is labour on every part whatever the screen
+  // sent (the database enforces the same); any other bill takes the person's
+  // lane, materials when none was given.
+  const billLane = laneOfBillLines(await loadBillLines(client, args.xeroInvoiceId));
+  const parts = args.parts.map((p: any) => {
+    const asked = p?.lane == null || p.lane === "" ? "materials" : String(p.lane);
+    if (!["materials", "labour", "other"].includes(asked)) {
+      throw new Error(`lane ${asked} is not materials, labour or other`);
+    }
+    return {
+      job_id: String(p?.job_id ?? ""),
+      amount_ex: Number(p?.amount_ex),
+      lane: billLane === "labour" ? "labour" : asked,
+    };
+  });
+  const overhead = args.overheadEx == null || args.overheadEx === "" ? 0 : Number(args.overheadEx);
+  if (!Number.isFinite(overhead)) throw new Error("overhead must be a number");
+  const { data, error } = await client.rpc("allocate_bill_split", {
+    p_xero_invoice_id: args.xeroInvoiceId,
+    p_parts: parts,
+    p_overhead_ex: overhead,
+    p_overhead_note: args.overheadNote == null ? null : String(args.overheadNote),
+    p_actor: args.actor,
+  });
+  if (error) {
+    const why = splitRefusal(error.message);
+    throw new Error(why ? `Split refused: ${why}` : String(error.message || error));
+  }
+  // The same split again changed nothing: nothing to log.
+  if ((data as any)?.idempotent) return { ok: true, action: "split", result: data };
+  for (const p of parts) {
+    logJobEvent(client, {
+      job_id: p.job_id,
+      event_type: "materials_bill_split",
+      detail_json: {
+        source: "materials_recon_queue",
+        action: "split",
+        manual: true,
+        xero_invoice_id: args.xeroInvoiceId,
+        amount_ex_gst: p.amount_ex,
+        lane: p.lane,
+        parts: parts.length,
+        overhead_ex: overhead,
+        assigned_by: args.actor,
+      },
+    });
+  }
+  return { ok: true, action: "split", result: data };
 }

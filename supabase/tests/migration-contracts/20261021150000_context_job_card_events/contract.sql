@@ -210,24 +210,23 @@ BEGIN
     RAISE EXCEPTION 'card events contract: before the duplicate, the not-known lines are wrong: % / %', nka, nkb;
   END IF;
 
-  -- A duplicate actual row: a materials fact on B for the bill Xero links to A.
+  -- A materials fact on B for the bill Xero links to A. Since CFO-18 (20261020181800) a bill with
+  -- an allocation row on another job is read through its rows only: the row moves the bill to B,
+  -- so it is still cost once (B 1000, A none) and no card names a defect.
   INSERT INTO public.job_materials_facts (xero_invoice_id, invoice_number, contact_name, job_id, lane, kind, amount_ex_gst, fact_date)
   VALUES ('cardev-bill-1', 'BILL-98101', 'Supplier', b, 'materials', 'actual', 1000, '2026-10-08');
   SELECT count(*) INTO facts_n FROM public.job_materials_facts;
   SELECT count(*) INTO linked_n FROM public.xero_invoices WHERE job_id IS NOT NULL;
   sa := public.context_job_story(a, t); sb := public.context_job_story(b, t);
-  IF sa->'meta'->'cost_check'->'counted_elsewhere' <> '1' OR sb->'meta'->'cost_check'->'counted_elsewhere' <> '1'
-     OR sa->'meta'->'cost_check'->'items' IS DISTINCT FROM
-        '[{"document_id":"cardev-bill-1","document_number":"BILL-98101","here_ex":1000,"elsewhere_ex":1000,"other_job_numbers":["SWP-98102"]}]'::jsonb
-     OR sb->'meta'->'cost_check'->'items'->0->'other_job_numbers' IS DISTINCT FROM '["SWP-98101"]'::jsonb THEN
-    RAISE EXCEPTION 'card events contract: the duplicate is not in cost_check: % %', sa->'meta'->'cost_check', sb->'meta'->'cost_check';
+  IF sa->'meta'->'cost_check' IS DISTINCT FROM '{"read_from":"v_job_cost_events","bills":0,"counted_elsewhere":0,"items":[]}'::jsonb
+     OR sb->'meta'->'cost_check' IS DISTINCT FROM '{"read_from":"v_job_cost_events","bills":1,"counted_elsewhere":0,"items":[]}'::jsonb
+     OR (SELECT sum(e.amount_ex) FROM public.v_job_cost_events e WHERE e.document_id = 'cardev-bill-1' AND e.is_actual AND e.job_id IN (a, b))
+        IS DISTINCT FROM 1000 THEN
+    RAISE EXCEPTION 'card events contract: the placed row does not move the bill once: % %', sa->'meta'->'cost_check', sb->'meta'->'cost_check';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(sa->'not_known') x
-                 WHERE x->>'what' = 'Supplier bill BILL-98101 is counted as cost on this job and also on SWP-98102.'
-                   AND x->>'why' LIKE '%a defect for Finance to correct%')
-     OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(sb->'not_known') x
-                    WHERE x->>'what' = 'Supplier bill BILL-98101 is counted as cost on this job and also on SWP-98101.') THEN
-    RAISE EXCEPTION 'card events contract: the duplicate is not named on both cards';
+  IF EXISTS (SELECT 1 FROM (SELECT jsonb_array_elements(sa->'not_known') UNION ALL SELECT jsonb_array_elements(sb->'not_known')) u(x)
+             WHERE x->>'what' LIKE 'Supplier bill %counted as cost%') THEN
+    RAISE EXCEPTION 'card events contract: a bill counted once is named a defect';
   END IF;
   -- The story only reads: no fact, bill link or queue row is written by it.
   IF (SELECT count(*) FROM public.job_materials_facts) <> facts_n

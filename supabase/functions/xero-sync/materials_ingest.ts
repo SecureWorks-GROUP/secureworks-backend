@@ -138,7 +138,10 @@ export type SuggestionReason =
   // Xero links the bill to a job that the bill's own job number does not name.
   | "xero_link_conflict"
   // The same supplier document is entered more than once in Xero (CFO-16).
-  | "duplicate_document";
+  | "duplicate_document"
+  // An installer bill (subcontractor labour, account 306 or 301): a person
+  // confirms each placement (JP-12), so no automatic path places it.
+  | "installer_confirm";
 
 /** Is a bill amount a known number (not null, blank or NaN)? */
 export function amountIsKnown(v: unknown): boolean {
@@ -146,7 +149,22 @@ export function amountIsKnown(v: unknown): boolean {
 }
 
 /** Queue reasons that hold a bill for a person: no automatic placement while open. */
-export const HELD_QUEUE_REASONS = new Set<string>(["fact_contradicted", "xero_link_conflict", "duplicate_document"]);
+export const HELD_QUEUE_REASONS = new Set<string>([
+  "fact_contradicted",
+  "xero_link_conflict",
+  "duplicate_document",
+  "installer_confirm",
+]);
+
+// Installer bills: any money line on subcontractor labour (306, 301). The same
+// rule as ops-api laneOfBillLines.
+export const INSTALLER_ACCOUNT_CODES = new Set(["306", "301"]);
+export function isInstallerBill(lines: unknown): boolean {
+  if (!Array.isArray(lines)) return false;
+  return lines.some((l: any) =>
+    Number(l?.LineAmount ?? 0) !== 0 && INSTALLER_ACCOUNT_CODES.has(String(l?.AccountCode ?? ""))
+  );
+}
 
 export interface MatchResult {
   outcome: MatchOutcome;
@@ -249,6 +267,7 @@ export function matchBill(
     refToken?: string | null; // the extracted token (may exist even when no job found)
     pos: POCandidate[]; // POs to consider (caller may pre-filter to supplier; we re-filter defensively)
     config?: MatchConfig;
+    installer?: boolean; // the bill has an installer (306/301) money line
   },
 ): MatchResult {
   const cfg = ctx.config || DEFAULT_MATCH_CONFIG;
@@ -261,6 +280,18 @@ export function matchBill(
   }
 
   const token = ctx.refToken ?? extractJobNumber(bill.reference);
+
+  // An installer bill is never placed automatically (JP-12): it waits in Bills
+  // to place for a person, with the job its reference names as the suggestion.
+  if (ctx.installer) {
+    return {
+      outcome: "queue",
+      suggestedJobId: ctx.jobFromRef?.id ?? null,
+      suggestedJobNumber: ctx.jobFromRef?.job_number ?? null,
+      suggestionConfidence: ctx.jobFromRef ? "medium" : "low",
+      suggestionReason: "installer_confirm",
+    };
+  }
 
   // (1) Reference → existing job. Highest confidence.
   if (ctx.jobFromRef) {

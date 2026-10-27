@@ -255,6 +255,7 @@ BEGIN;
 -- its down goes first, inside this transaction only)
 SELECT to_regprocedure('public.context_job_card_events(uuid[])') IS NOT NULL AS card_events_live \gset
 \if :card_events_live
+\ir ../../../rollbacks/20261027140000_context_cost_check_person_splits_down.sql
 \ir ../../../rollbacks/20261021150000_context_job_card_events_down.sql
 \endif
 -- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
