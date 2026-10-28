@@ -970,3 +970,4 @@ xero-sync|supabase/migrations/20261026160000_job_deposit_advance.sql|column|job_
 ops-api|supabase/migrations/20261027120000_job_deposit_credit_note_flag.sql|column|job_deposit_advance_state.counted_credit_note_ids
 ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_decisions
 ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_events
+ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|function|reschedule_job_assignments_v1

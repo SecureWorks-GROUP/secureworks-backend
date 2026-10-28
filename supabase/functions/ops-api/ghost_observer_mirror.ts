@@ -190,6 +190,19 @@ async function resolveGhostWatchers(
   return watchers;
 }
 
+/**
+ * Every watcher's user id, whatever their scope. A writer that moves real
+ * crew rows in one step (reschedule_job_bookings) releases these users' own
+ * ghosts off a target key, exactly as releaseGhostObserverMirrorForRealAssignee
+ * does for one row. A read fault returns no ids, so nothing is released and
+ * a held key refuses the write instead.
+ */
+export async function resolveGhostWatcherUserIds(
+  client: any,
+): Promise<string[]> {
+  return (await resolveGhostWatchers(client)).map((w) => w.id);
+}
+
 /** The job's raw `jobs.type`, or null when it cannot be read. */
 async function readJobType(client: any, jobId: string): Promise<string | null> {
   const { data, error } = await client
