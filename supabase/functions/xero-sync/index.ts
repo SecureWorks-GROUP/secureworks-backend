@@ -261,7 +261,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await syncBankTransactions(sb))
       case 'ingest_materials': {
         // Standalone materials-actuals ingest (also runs inside sync_invoices).
-        const windowDays = parseInt(url.searchParams.get('window_days') || '90', 10)
+        const windowDays = parseInt(url.searchParams.get('window_days') || String(MATERIALS_WINDOW_DAYS), 10)
         const limitParam = url.searchParams.get('limit')
         const limit = limitParam ? parseInt(limitParam, 10) : null
         // An explicit ?limit is a capped test run (no pre-match placements).
@@ -1484,11 +1484,16 @@ export async function matchUnlinkedInvoices(client: any) {
 // (trade_invoices.xero_bill_id) can never become a fact.
 // ════════════════════════════════════════════════════════════
 
+// Every bill is read, not only the last 90 days (owner 28 Oct 2026: the AI
+// bill reader places the older bills too; 720 bills older than 90 days had
+// never reached a fact or Bills to place). Ten years is "all of them".
+const MATERIALS_WINDOW_DAYS = 3650
+
 async function ingestMaterialsActuals(
   sb: any,
   opts: { windowDays?: number; limit?: number | null; capped?: boolean; config?: MatchConfig } = {},
 ) {
-  const windowDays = opts.windowDays ?? 90
+  const windowDays = opts.windowDays ?? MATERIALS_WINDOW_DAYS
   // No cap by default: every bill in the window is read each run. A manual
   // ?action=ingest_materials&limit=N still caps a test run.
   const limit = opts.limit ?? null

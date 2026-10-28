@@ -339,12 +339,22 @@ export async function runBillPrematch(
     "xero_invoice_id",
     bills.map((b) => b.xero_invoice_id),
   );
-  if (!facts || !proposals) return { ...result, reason: "existing_rows_unreadable" };
+  // A person undid the AI bill reader's placement: never placed automatically again.
+  const aiUndone = await readIn<any>(
+    sb,
+    "materials_ai_placements",
+    "id, xero_invoice_id",
+    "xero_invoice_id",
+    bills.map((b) => b.xero_invoice_id),
+    (q) => q.not("undone_at", "is", null),
+  );
+  if (!facts || !proposals || !aiUndone) return { ...result, reason: "existing_rows_unreadable" };
   const hasFact = new Set(facts.map((f) => f.xero_invoice_id));
   const liveProposal = new Map<string, any>();
   const placedBefore = new Set<string>(
     live.filter((q) => q.assigned_by === AGENT_PREMATCH_SOURCE).map((q) => q.xero_invoice_id),
   );
+  for (const u of aiUndone) placedBefore.add(u.xero_invoice_id);
   for (const p of proposals) {
     if (p.outcome !== "superseded") liveProposal.set(p.xero_invoice_id, p);
     if (p.auto_assigned_at) placedBefore.add(p.xero_invoice_id);
