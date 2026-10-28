@@ -198,7 +198,7 @@ BEGIN
     PERFORM public.materials_ai_record_second_check(pid, '{"decision":"job","job_number":"AI-J2","model":"claude"}');
   END LOOP;
   SELECT * INTO r FROM public.materials_ai_settings WHERE id;
-  IF r.confidence_bar <> 0.880 OR jsonb_array_length(r.bar_history) <> 1 THEN
+  IF r.confidence_bar <> 0.930 OR jsonb_array_length(r.bar_history) <> 1 THEN
     RAISE EXCEPTION 'bar: % %', r.confidence_bar, r.bar_history;
   END IF;
 
