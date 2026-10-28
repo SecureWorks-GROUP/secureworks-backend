@@ -62733,8 +62733,8 @@ export async function sendClientUpdate(client: any, body: any) {
   if (!tmpl && !custom_message) throw new ApiError(`Unknown comms_trigger: ${comms_trigger}. Valid triggers: ${Object.keys(CLIENT_COMMS_TEMPLATES).join(', ')}`, 400)
 
   const channel = overrideChannel || tmpl?.channel || 'sms'
-  if (channel === 'sms' && !CLIENT_UPDATE_SMS_TRIGGERS_ON.has(comms_trigger)) {
-    return { sent: false, reason: `${comms_trigger} texts are switched off` }
+  if (channel === 'sms' && comms_trigger === 'install_rescheduled' && custom_message) {
+    return { sent: false, reason: 'custom reschedule texts are not allowed' }
   }
 
   // CP1 install_rescheduled: the new start day comes from the calendar drop.
@@ -62832,6 +62832,12 @@ export async function sendClientUpdate(client: any, body: any) {
     message = message.replace(new RegExp(`\\{${k}\\}`, 'g'), v)
   }
 
+  // Append cross-sell footer for SMS — except install_rescheduled, whose wording
+  // is approved verbatim and ends "Cheers, Shaun".
+  if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
+    message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
+  }
+
   let sent = false
   let failReason: string | null = null
   if (channel === 'sms') {
@@ -62839,26 +62845,30 @@ export async function sendClientUpdate(client: any, body: any) {
     if (!contactGhlId) {
       return { sent: false, reason: 'No GHL contact ID — cannot send SMS' }
     }
-    try {
-      // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
-      // so only a body confirming success may record status='sent' — an in-band
-      // failure logged as sent would make the reschedule dedup above swallow the
-      // operator's retry.
-      const sms = await postGhlProxySendSms({
-        supabaseUrl: SUPABASE_URL,
-        serviceKey: SUPABASE_SERVICE_KEY,
-        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
-        // the contact must be the job's or a live party on the same job's list.
-        payload: { contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) },
-      })
-      sent = sms.sent
-      if (!sent) {
-        failReason = sms.reason
-        console.log('[ops-api] GHL SMS failed:', sms.reason)
+    if (!CLIENT_UPDATE_SMS_TRIGGERS_ON.has(comms_trigger)) {
+      failReason = `${comms_trigger} texts are switched off`
+    } else {
+      try {
+        // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
+        // so only a body confirming success may record status='sent' — an in-band
+        // failure logged as sent would make the reschedule dedup above swallow the
+        // operator's retry.
+        const sms = await postGhlProxySendSms({
+          supabaseUrl: SUPABASE_URL,
+          serviceKey: SUPABASE_SERVICE_KEY,
+          // A per-contact send names the job, so ghl-proxy's contact/job match runs:
+          // the contact must be the job's or a live party on the same job's list.
+          payload: { contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) },
+        })
+        sent = sms.sent
+        if (!sent) {
+          failReason = sms.reason
+          console.log('[ops-api] GHL SMS failed:', sms.reason)
+        }
+      } catch (e) {
+        failReason = (e as Error).message || 'SMS request failed'
+        console.log('[ops-api] GHL SMS failed:', failReason)
       }
-    } catch (e) {
-      failReason = (e as Error).message || 'SMS request failed'
-      console.log('[ops-api] GHL SMS failed:', failReason)
     }
   } else {
     // Send via Resend
@@ -62913,6 +62923,7 @@ export async function sendClientUpdate(client: any, body: any) {
     comms_trigger,
     comms_channel: channel,
     sent_at: sent ? new Date().toISOString() : null,
+    ...(failReason ? { failure_reason: failReason } : {}),
   })
 
   logBusinessEvent(client, {

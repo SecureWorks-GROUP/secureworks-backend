@@ -746,12 +746,23 @@ for (
         job_id: "job-1",
         comms_trigger: trigger,
       });
-      assertEquals(res, {
-        sent: false,
-        reason: `${trigger} texts are switched off`,
-      });
+      assertEquals(res.sent, false);
+      assertEquals(res.reason, `${trigger} texts are switched off`);
       assertEquals(smsCalls(calls).length, 0);
-      assertEquals(store.emailEvents ?? [], []);
+      assertEquals(
+        store.emailEvents!.map((r) => ({
+          comms_trigger: r.comms_trigger,
+          comms_channel: r.comms_channel,
+          status: r.status,
+          failure_reason: r.failure_reason,
+        })),
+        [{
+          comms_trigger: trigger,
+          comms_channel: "sms",
+          status: "failed",
+          failure_reason: `${trigger} texts are switched off`,
+        }],
+      );
     } finally {
       restore();
     }
@@ -770,6 +781,61 @@ Deno.test("a custom text on a trigger that is not switched on never reaches ghl-
     assertEquals(res.sent, false);
     assertEquals(res.reason, "job_complete texts are switched off");
     assertEquals(smsCalls(calls).length, 0);
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("quote_sent: the day-5 follow-up email is still answered already sent after a switched-off day-3 text", async () => {
+  const { calls, restore } = stubFetch();
+  const priorResendKey = Deno.env.get("RESEND_API_KEY");
+  Deno.env.set("RESEND_API_KEY", "test-resend-key");
+  try {
+    const store = baseStore();
+    store.jobs!["job-1"].client_email = "jane@example.com";
+    const client = makeClient(store);
+    const day3 = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "quote_sent",
+      channel: "sms",
+      custom_message: "Hi Jane, just checking you received your quote.",
+    });
+    assertEquals(day3.sent, false);
+    const day5 = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "quote_sent",
+      channel: "email",
+      custom_message: "Hi Jane, just following up on your quote.",
+    });
+    assertEquals(day5, {
+      sent: false,
+      reason: "quote_sent already sent for this job",
+    });
+    assertEquals(smsCalls(calls).length, 0);
+    assertEquals(calls.filter((c) => c.url.includes("resend.com")).length, 0);
+  } finally {
+    if (priorResendKey === undefined) Deno.env.delete("RESEND_API_KEY");
+    else Deno.env.set("RESEND_API_KEY", priorResendKey);
+    restore();
+  }
+});
+
+Deno.test("install_rescheduled: a custom reschedule text is refused, so only the approved wording can go out", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store = baseStore();
+    const res = await sendClientUpdate(makeClient(store), {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      custom_message: "Hi Jane, anything at all.",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(res, {
+      sent: false,
+      reason: "custom reschedule texts are not allowed",
+    });
+    assertEquals(smsCalls(calls).length, 0);
+    assertEquals(store.emailEvents ?? [], []);
   } finally {
     restore();
   }
