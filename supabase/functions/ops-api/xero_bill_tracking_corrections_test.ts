@@ -344,3 +344,69 @@ Deno.test("provider update timestamps may change while financial readback remain
     true,
   );
 });
+
+Deno.test("elapsed budget before first bill prevents reads and writes", async () => {
+  const f = fixture();
+  let clock = 0;
+  let reads = 0;
+  const deps = {
+    ...f.deps,
+    nowMs: () => clock,
+    getToken: async () => {
+      clock = 80_000;
+      return await f.deps.getToken();
+    },
+    xeroGet: async (...args: Parameters<typeof f.deps.xeroGet>) => {
+      reads++;
+      return await f.deps.xeroGet(...args);
+    },
+  };
+  const result = await correctSupplierBillTracking(null, f.body, deps);
+  assertEquals(result.stopped_reason, "WORK_BUDGET_EXHAUSTED");
+  assertEquals(result.not_attempted, [id(1)]);
+  assertEquals(reads, 0);
+  assertEquals(f.writes, 0);
+  assertEquals(result.ok, false);
+});
+Deno.test("preflight consuming budget cannot start a provider write or next bill", async () => {
+  const f = fixture();
+  const body = await applyInput(f);
+  let clock = 0;
+  let reads = 0;
+  body.bills.push({ ...body.bills[0], xero_invoice_id: id(20) });
+  const deps = {
+    ...f.deps,
+    nowMs: () => clock,
+    xeroGet: async (...args: Parameters<typeof f.deps.xeroGet>) => {
+      const response = await f.deps.xeroGet(...args);
+      if (args[0].startsWith("/Invoices/") && ++reads === 2) clock = 80_000;
+      return response;
+    },
+  };
+  const result = await correctSupplierBillTracking(null, body, deps);
+  assertEquals(result.stopped_reason, "WORK_BUDGET_EXHAUSTED");
+  assertEquals(result.not_attempted, [id(1), id(20)]);
+  assertEquals(result.results, []);
+  assertEquals(f.writes, 0);
+});
+Deno.test("in-flight write reaching budget completes verification but starts no next bill", async () => {
+  const f = fixture();
+  const body = await applyInput(f);
+  let clock = 0;
+  body.bills.push({ ...body.bills[0], xero_invoice_id: id(20) });
+  const deps = {
+    ...f.deps,
+    nowMs: () => clock,
+    xeroPost: async (...args: Parameters<typeof f.deps.xeroPost>) => {
+      const response = await f.deps.xeroPost(...args);
+      clock = 80_000;
+      return response;
+    },
+  };
+  const result = await correctSupplierBillTracking(null, body, deps);
+  assertEquals(result.results[0].state, "verified");
+  assertEquals(result.stopped_reason, "WORK_BUDGET_EXHAUSTED");
+  assertEquals(result.not_attempted, [id(20)]);
+  assertEquals(f.writes, 1);
+  assertEquals(result.ok, false);
+});

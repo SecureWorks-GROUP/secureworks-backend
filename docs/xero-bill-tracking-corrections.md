@@ -43,3 +43,10 @@ resending lines can recalculate their totals. Invoice reads and writes request
 representations are excluded from comparison; financial fields remain checked.
 
 Verification: `deno test --allow-env supabase/functions/ops-api/xero_bill_tracking_corrections_test.ts supabase/functions/ops-api/xero_accpay_books_test.ts`.
+
+The server has an 80-second elapsed-work budget, beginning before token acquisition.
+It checks before each bill and again immediately before a provider write. On expiry,
+`stopped_reason: WORK_BUDGET_EXHAUSTED` and `not_attempted` identify bills that were
+not submitted; earlier receipts remain intact. Readback of an already-submitted
+bill still runs. This does not cancel an in-flight provider request, guarantee a
+response before the caller timeout, or replace a durable batch ledger or Xero CAS.

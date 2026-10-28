@@ -14,7 +14,9 @@ export type TrackingCorrectionDeps = {
   xeroGet: XeroGetFn;
   xeroPost: XeroPostFn;
   authorized: boolean;
+  nowMs?: () => number;
 };
+export const BILL_TRACKING_WORK_BUDGET_MS = 80_000;
 const runningTenants = new Set<string>(); // Isolate-local only, not a distributed lock.
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function requireValue(
@@ -204,6 +206,12 @@ export async function correctSupplierBillTracking(
   body: Row,
   deps: TrackingCorrectionDeps,
 ) {
+  // Start before token acquisition: authentication/provider-read latency counts.
+  // This limits starting NEW work, not the duration of an in-flight provider call.
+  const nowMs = deps.nowMs ?? (() => performance.now());
+  const startedAt = nowMs();
+  const exhausted = () => nowMs() - startedAt >= BILL_TRACKING_WORK_BUDGET_MS;
+  let stoppedReason: string | undefined;
   requireValue(
     deps.authorized === true,
     "Owner/admin or dedicated server authorization required",
@@ -289,6 +297,10 @@ export async function correctSupplierBillTracking(
       return inv;
     };
     for (const bill of body.bills) {
+      if (exhausted()) {
+        stoppedReason = "WORK_BUDGET_EXHAUSTED";
+        break;
+      }
       let submitted = false;
       let operationKey: string | undefined;
       try {
@@ -342,6 +354,12 @@ export async function correctSupplierBillTracking(
             expected_snapshot_hash: hash,
           });
           continue;
+        }
+        // Recheck after all asynchronous preflight work, immediately before
+        // submission. Finish readback for a submitted bill even if time expires.
+        if (exhausted()) {
+          stoppedReason = "WORK_BUDGET_EXHAUSTED";
+          break;
         }
         const key = crypto.randomUUID();
         operationKey = key;
@@ -420,6 +438,8 @@ export async function correctSupplierBillTracking(
       mode: body.mode,
       tenant_id: tenantId,
       results,
+      stopped_reason: stoppedReason,
+      work_budget_ms: BILL_TRACKING_WORK_BUDGET_MS,
       not_attempted: body.bills.slice(results.length).map((b: Row) =>
         b.xero_invoice_id
       ),
