@@ -286,6 +286,16 @@ jobs:
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/job_closeout_read_test.ts
 
+      # The calendar's job bookings read and its all-or-nothing move / stretch
+      # (one rpc, follow-ups once after commit, a clash midway applies nothing)
+      # plus the ghost mirror it reuses. Imports index.ts: same --no-check reason.
+      # The Postgres half is the 20261028150000 migration contract.
+      - name: Test job bookings read and whole-job move
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/job_bookings_test.ts \
+            supabase/functions/ops-api/ghost_observer_auto_mirror_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

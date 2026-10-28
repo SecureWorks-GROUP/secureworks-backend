@@ -3476,7 +3476,9 @@ row covers that job/date, and re-ensures it from the remaining crew when the
 departing row was the ops manager's own real assignment) are wired into `createAssignment`, `updateAssignment`,
 `deleteAssignment`, the make-safe submitter override
 (`overrideMakesafeAllocationToSubmitter`) and the legacy
-`approve_assignment_request` direct-insert writer — every place a real crew
+`approve_assignment_request` direct-insert writer, plus the whole-job
+`reschedule_job_bookings` (`job_bookings.ts`, one sync per date after its
+single-transaction write) — every place a real crew
 `job_assignments` row is written or cancelled. Watcher user ids are
 resolved from their emails at runtime, never hard-coded. `backfill_ghost_observers` (api_key-only, dry-run unless
 `apply:true`) mirrors the pre-existing population dated today or later, one

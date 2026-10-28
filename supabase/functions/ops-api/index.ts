@@ -288,8 +288,15 @@ import {
   isGenuineCrewAssignmentRow,
   reconcileGhostObserverMirrorOnReschedule,
   releaseGhostObserverMirrorForRealAssignee,
+  resolveGhostWatcherUserIds,
   syncGhostObserverMirrorForSpan,
 } from './ghost_observer_mirror.ts'
+import {
+  JobBookingsError,
+  type JobBookingsDeps,
+  readJobBookings,
+  rescheduleJobBookings,
+} from './job_bookings.ts'
 import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
 import {
   deriveFencingStageV1,
@@ -5021,6 +5028,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // refused inside the route exactly as for set_job_lead.
   'update_assignment',
   'delete_assignment',
+  // The calendar's job-level pair (job_bookings.ts): the light read of a
+  // job's bookings and the all-or-nothing move/stretch of them. Same gate as
+  // update_assignment, at the dispatch case.
+  'job_bookings',
+  'reschedule_job_bookings',
   'reattend_makesafe',
   'confirm_roof_report_done',
   'cancel_makesafe',
@@ -9376,6 +9388,35 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           assignmentId: body.assignmentId || body.assignment_id || body.id,
         })
         return json(await deleteAssignment(client, body))
+      }
+      // Ops Dash calendar, owner's go 28 Oct 2026 (job_bookings.ts). The
+      // light read returns a job's non-cancelled bookings (id, user_id, role,
+      // status, is_ghost, scheduled_date, scheduled_end) for the clash check,
+      // in place of the full job_detail read. reschedule_job_bookings moves
+      // or stretches every live booking of one job in one transaction, so a
+      // whole-job drag is one call and never half applies. Both take the
+      // job's assignment gate, as update_assignment does.
+      case 'job_bookings':
+      case 'reschedule_job_bookings': {
+        const jobId = String(url.searchParams.get('job_id') || body.job_id || '').trim()
+        if (!jobId) return json({ error: 'job_id required', code: 'job_id_required' }, 400)
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+          return json({ error: 'job_id must be a job id', code: 'job_id_invalid' }, 400)
+        }
+        if (action === 'reschedule_job_bookings' && req.method !== 'POST') {
+          return json({ error: 'reschedule_job_bookings requires POST', code: 'method_not_allowed' }, 405)
+        }
+        await assertAssignmentMutationAuthz(client, authMode, authUser, { jobId })
+        try {
+          return json(action === 'job_bookings'
+            ? await readJobBookings(client, jobId)
+            : await rescheduleJobBookings(client, { ...body, job_id: jobId }, jobBookingsDeps(client)))
+        } catch (e) {
+          if (e instanceof JobBookingsError) {
+            throw new ApiError(e.message, e.status, { error: e.message, code: e.code, ...e.details })
+          }
+          throw e
+        }
       }
       // Recurring calendar series (ops.html "this / this and future / all"
       // dialog). Same gate as a single assignment write; an org-event series
@@ -36373,6 +36414,46 @@ export async function updateAssignment(client: any, body: any) {
   }
 
   return { assignment: data, all_complete: allComplete, suggest_status: suggestStatus, job_id: data?.job_id }
+}
+
+// What reschedule_job_bookings borrows from the assignment writers above, so
+// a whole-job move keeps their make-safe binding, event log, GHL push and job
+// intelligence recompute.
+function jobBookingsDeps(client: any): JobBookingsDeps {
+  return {
+    isMakesafeJobType: (job: any) => isMakesafeAccessJob(job),
+    ensureAttendanceCycle: (jobId, cycleNumber, reason) =>
+      ensureMakesafeAttendanceCycle(client, jobId, cycleNumber, reason),
+    reconcileReportBinding: async (p) => {
+      await reconcileMakesafeReportBindingWithAllocation(client, {
+        jobId: p.jobId,
+        userId: p.userId,
+        attendanceCycleId: p.attendanceCycleId,
+        canonicalAssignmentId: p.attendanceCycleId,
+        canonicalCreated: false,
+        preferredAssignmentId: p.preferredAssignmentId,
+      })
+    },
+    isGenuineTradeAssignment,
+    logBusinessEvent: (event) => { logBusinessEvent(client, event as any) },
+    pushGhlScheduledDate: (opportunityId, scheduledDate) => {
+      fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=update_custom_fields`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ opportunityId, fields: { scheduled_date: scheduledDate } }),
+      }).catch(() => {})
+    },
+    recomputeJobIntelligence: (jobId) => {
+      fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jobId}`, {
+        headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+      }).catch(() => {})
+    },
+    ghostWatcherUserIds: () => resolveGhostWatcherUserIds(client),
+    syncGhostWatchers: async (jobId, scheduledDate) => {
+      await syncGhostObserverMirrorForSpan(client, { jobId, scheduledDate })
+    },
+    releasedInvoiceStatuses: RELEASED_INVOICE_STATUSES,
+  }
 }
 
 export async function deleteAssignment(client: any, body: any) {

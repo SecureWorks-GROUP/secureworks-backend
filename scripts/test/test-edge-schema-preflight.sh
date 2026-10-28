@@ -976,7 +976,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261020165000", "context_job_reconciliation"),
                       # Card events (CTX-T22): get_job_conversation reads a
                       # person's decisions through context_job_card_decisions.
-                      ("20261021150000", "context_job_card_events")]:
+                      ("20261021150000", "context_job_card_events"),
+                      # Whole-job move / stretch: reschedule_job_bookings calls
+                      # reschedule_job_assignments_v1 (job_bookings.ts).
+                      ("20261028150000", "reschedule_job_assignments")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
