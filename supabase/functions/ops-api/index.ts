@@ -645,6 +645,7 @@ import {
   mustReuseExistingXeroBillForPdfRetry,
   XeroPdfAttachError,
 } from './xero_attachment.ts'
+import { correctSupplierBillTracking, canCorrectBillTracking } from './xero_bill_tracking_corrections.ts'
 import { renderTradeInvoiceAuditPdf } from './trade_invoice_pdf.ts'
 import {
   attachSupplierBillPdf,
@@ -9098,6 +9099,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'create_xero_bill': {
         try {
           return json(await createSupplierBill(client, body, { getToken, xeroGet, xeroPost, fetchImpl: xeroAccountingFetch }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'xero_correct_bill_tracking': {
+        if (req.method !== 'POST') return json({ ok: false, code: 'METHOD_NOT_ALLOWED' }, 405)
+        const authorized = canCorrectBillTracking(authMode, authUser, serverSecretPresented, DEFAULT_ORG_ID)
+        if (!authorized) return json({ ok: false, code: 'OWNER_OR_SERVER_REQUIRED' }, 403)
+        try {
+          return json(await correctSupplierBillTracking(client, body, { getToken, xeroGet, xeroPost, authorized }))
         } catch (error) {
           return supplierBillApiError(error)
         }
