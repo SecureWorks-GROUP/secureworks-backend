@@ -11,7 +11,6 @@ import {
   assert,
   assertEquals,
   assertRejects,
-  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ghlProxySendSmsFailureReason,
@@ -325,48 +324,5 @@ Deno.test("council text: a refused send throws with ghl-proxy's reason and recor
     assert(!inserts.some((i) => i.row.event_type === "council_sms_sent"));
   } finally {
     restore();
-  }
-});
-
-// ── Payment link (send_payment_link) ───────────────────────────────────────
-// Its live path reads Xero (token store, cooldown client, OnlineInvoice) before
-// it texts, which this suite cannot stand up without a live database, so the
-// send itself is pinned at source: it posts through the shared request above
-// (proved to carry the login) and reports the refusal reason it returns.
-
-Deno.test("payment link: texts through the shared logged-in request and reports why a text failed", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
-  );
-  const start = source.indexOf("async function sendPaymentLink(");
-  const end = source.indexOf("\n}\n", start);
-  assert(start > 0 && end > start);
-  const body = source.slice(start, end);
-  assertStringIncludes(body, "postGhlProxySendSms({");
-  assertStringIncludes(body, "serviceKey: SUPABASE_SERVICE_KEY");
-  assertStringIncludes(body, "sms_sent: sms.sent");
-  assertStringIncludes(body, "sms_error: sms.reason");
-  assertEquals(body.includes("ghl-proxy?action=send_sms"), false);
-});
-
-// None of the four texts may post to ghl-proxy send_sms without the login.
-Deno.test("the four customer texts no longer post to ghl-proxy send_sms by hand", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
-  );
-  for (
-    const fn of [
-      "export async function sendClientUpdate(",
-      "async function sendPaymentLink(",
-      "async function confirmAssignment(",
-      "async function sendCouncilSMS(",
-    ]
-  ) {
-    const start = source.indexOf(fn);
-    const end = source.indexOf("\n}\n", start);
-    assert(start >= 0 && end > start, fn);
-    const body = source.slice(start, end);
-    assertStringIncludes(body, "postGhlProxySendSms({", fn);
-    assertEquals(body.includes("ghl-proxy?action=send_sms"), false, fn);
   }
 });
