@@ -142,7 +142,7 @@ Deno.test("all legacy sealed-SES money and link surfaces fence before effects", 
   before(
     "async function sendClientUpdate(",
     "assertLegacySesMoneyActionAllowedForJob(",
-    "fetch(ghlUrl",
+    "postGhlProxySendSms(",
   );
 });
 
