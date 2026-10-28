@@ -1,10 +1,11 @@
 -- Contract for 20261028010000_context_tier1_catchup_resume.sql. Fixture writes roll back.
 
--- 1. After the forward stack: the tier 1 switch exists and is on; the reserve is at or under 100.
+-- 1. After the forward stack: the tier 1 switch exists (on here, off once 20261028160000 has switched
+--    Jev off); the reserve is at or under 100.
 DO $$
 BEGIN
-  IF (SELECT enabled FROM public.feature_flags WHERE flag_name = 'context_jev_gate_decides_v1') IS NOT TRUE THEN
-    RAISE EXCEPTION 'tier1 contract: context_jev_gate_decides_v1 is missing or off';
+  IF NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'context_jev_gate_decides_v1') THEN
+    RAISE EXCEPTION 'tier1 contract: context_jev_gate_decides_v1 is missing';
   END IF;
   IF (SELECT live_reserve_calls_day FROM public.context_cadence_settings WHERE id) > 100
      OR (SELECT live_reserve_calls_morning FROM public.context_cadence_settings WHERE id) > 100 THEN
