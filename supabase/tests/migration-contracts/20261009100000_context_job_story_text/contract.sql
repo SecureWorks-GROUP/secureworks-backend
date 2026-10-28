@@ -27,6 +27,15 @@
 -- Concurrent claims (SKIP LOCKED) are in concurrent.sh.
 \set ON_ERROR_STOP on
 
+-- The story money book (20261028190000) replaced five of these bodies after this migration (the
+-- policy at 240 calls a day, the staff read, the request, the sweep and the writer's input): when a
+-- full stack has it, it is rolled back for this contract, which proves this migration's own result,
+-- and applied again at the end (its own contract proves it).
+SELECT to_regprocedure('public.context_job_story_book(uuid,timestamptz)') IS NOT NULL AS money_book_live \gset
+\if :money_book_live
+\ir ../../../rollbacks/20261028190000_context_story_money_book_down.sql
+\endif
+
 CREATE FUNCTION pg_temp.st_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF p_ok IS NOT TRUE THEN RAISE EXCEPTION 'story text contract: %', p_msg; END IF; END $$;
 CREATE FUNCTION pg_temp.st_today() RETURNS date LANGUAGE sql AS $$ SELECT (now() AT TIME ZONE 'Australia/Perth')::date $$;
@@ -901,3 +910,7 @@ BEGIN
    AND pg_get_constraintdef(oid) LIKE '%phase = ANY%') = 1, 'a second apply doubled the phase list');
 END $c$;
 ROLLBACK;
+
+\if :money_book_live
+\ir ../../../migrations/20261028190000_context_story_money_book.sql
+\endif
