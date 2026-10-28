@@ -12867,6 +12867,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 query_note: share.query_note || null,
                 division: share.division || null,
                 group_share_id: share.group_share_id || null,
+                office_review_status: 'awaiting',
                 source_work_order_id: null,
                 ...tradeInvoiceTimeEntryColumns(null),
               })),
@@ -14033,6 +14034,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   ? null
                   : (dbLine.source_work_order_id || null),
                 group_share_id: dbLine.group_share_id || null,
+                // Only the server-priced group lane adds this hold. Ordinary
+                // invoices retain the existing flag-controlled review policy.
+                office_review_status: isGroupShareInvoiceItem(dbLine) ? 'awaiting' : null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,

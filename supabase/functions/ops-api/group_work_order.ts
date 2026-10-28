@@ -76,6 +76,7 @@ export const PARTICIPANT_SHARE_KEYS = [
   "client_signed",
   "group_id",
   "awaiting",
+  "group_share_office_review_required",
 ] as const;
 
 /** What my-share is waiting on. A trade is not told another person's name. */
@@ -245,6 +246,7 @@ export function participantShareResponse(input: {
     client_signed: input.clientSigned,
     group_id: input.groupId,
     awaiting: input.awaiting,
+    group_share_office_review_required: true,
   };
   return response;
 }
@@ -2090,6 +2092,9 @@ export async function resolveGroupShareInvoiceExtra(
     wo_labour_deduction: null,
     wo_labour_lines: null,
     group_share_id: group.split_frozen_at ? mine.id : null,
+    // Group shares require an office check even when the wider rollout is off.
+    // This is a server-owned stamp, never an approval supplied by the trade.
+    office_review_status: "awaiting",
     _hoursFlag: null,
     _woProblems: null,
   };
