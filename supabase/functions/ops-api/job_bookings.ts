@@ -162,18 +162,6 @@ export function workingSpanDays(
   return paintedSpanDates(startStr, endStr).length;
 }
 
-/** The date N working days from startStr (negative goes back); weekends skipped. */
-export function shiftWorkingDays(startStr: string, n: number): string {
-  const steps = Math.round(Number(n) || 0);
-  const dir = steps < 0 ? -1 : 1;
-  let cur = startStr;
-  for (let i = 0; i < Math.abs(steps); i++) {
-    cur = addDays(cur, dir);
-    while (isWeekend(cur)) cur = addDays(cur, dir);
-  }
-  return cur;
-}
-
 // ── Which rows move ──────────────────────────────────────────────────────────
 
 const GHOST_MARKERS = new Set(["observer", "ghost"]);
@@ -577,23 +565,28 @@ export function orderPlanForWrite(
 
 /** A job's non-cancelled bookings, with exactly JOB_BOOKING_READ_COLUMNS. */
 export async function readJobBookings(client: any, jobId: string) {
-  const [jobRes, rowsRes] = await Promise.all([
+  const [jobRes, bookings] = await Promise.all([
     client.from("jobs").select("id").eq("id", jobId).maybeSingle(),
-    client.from("job_assignments")
-      .select(JOB_BOOKING_READ_COLUMNS)
-      .eq("job_id", jobId)
-      .or(NOT_CANCELLED_PREDICATE)
-      .order("scheduled_date", { ascending: true })
-      .order("id", { ascending: true }),
+    readBookingRows(client, jobId),
   ]);
   if (jobRes.error) throw jobRes.error;
-  if (rowsRes.error) throw rowsRes.error;
   if (!jobRes.data) {
     throw new JobBookingsError("job_not_found", 404, "Job not found", {
       job_id: jobId,
     });
   }
-  return { job_id: jobId, bookings: (rowsRes.data || []).map(toReadShape) };
+  return { job_id: jobId, bookings };
+}
+
+async function readBookingRows(client: any, jobId: string) {
+  const { data, error } = await client.from("job_assignments")
+    .select(JOB_BOOKING_READ_COLUMNS)
+    .eq("job_id", jobId)
+    .or(NOT_CANCELLED_PREDICATE)
+    .order("scheduled_date", { ascending: true })
+    .order("id", { ascending: true });
+  if (error) throw error;
+  return (data || []).map(toReadShape);
 }
 
 function toReadShape(row: any) {
@@ -641,7 +634,6 @@ export type RescheduleRequest =
     jobId: string;
     kind: "move";
     newStart: string;
-    assignmentIds: string[] | null;
     operator: string | null;
   }
   | {
@@ -649,66 +641,34 @@ export type RescheduleRequest =
     kind: "stretch";
     edge: "start" | "end";
     target: string;
-    assignmentIds: string[] | null;
     operator: string | null;
   };
 
-/** Reads and checks the request body. `shift_working_days` is resolved later. */
-export function parseRescheduleBody(
-  body: any,
-): RescheduleRequest & { shiftWorkingDays?: number } {
-  const jobId = String(body?.job_id || body?.jobId || "").trim();
+/** Reads and checks the request body. */
+export function parseRescheduleBody(body: any): RescheduleRequest {
+  const jobId = String(body?.job_id || "").trim();
   if (!jobId) {
     throw new JobBookingsError("job_id_required", 400, "job_id required");
   }
-  const kind = String(body?.mode || body?.kind || "").toLowerCase();
-  const rawIds = body?.assignment_ids ?? body?.assignmentIds;
-  let assignmentIds: string[] | null = null;
-  if (rawIds !== undefined && rawIds !== null) {
-    if (
-      !Array.isArray(rawIds) || !rawIds.length ||
-      rawIds.some((id: unknown) => typeof id !== "string" || !id)
-    ) {
-      throw new JobBookingsError(
-        "assignment_ids_invalid",
-        400,
-        "assignment_ids must be a non-empty list of booking ids",
-      );
-    }
-    assignmentIds = [...new Set(rawIds as string[])];
-  }
+  const kind = String(body?.mode || "").toLowerCase();
   const operator = body?.operator_email || body?.user_email || null;
   if (kind === "move") {
-    const newStart = body?.new_start ?? body?.newStart;
-    const shift = body?.shift_working_days ?? body?.shiftWorkingDays;
-    if (newStart !== undefined && newStart !== null) {
-      if (!isIsoDate(newStart)) {
-        throw new JobBookingsError(
-          "new_start_invalid",
-          400,
-          "new_start must be a YYYY-MM-DD date",
-        );
-      }
-      return { jobId, kind, newStart, assignmentIds, operator };
+    const newStart = body?.new_start;
+    if (newStart === undefined || newStart === null) {
+      throw new JobBookingsError(
+        "move_target_required",
+        400,
+        "A move needs new_start (YYYY-MM-DD)",
+      );
     }
-    if (
-      typeof shift === "number" && Number.isInteger(shift) && shift !== 0 &&
-      Math.abs(shift) <= 366
-    ) {
-      return {
-        jobId,
-        kind,
-        newStart: "",
-        shiftWorkingDays: shift,
-        assignmentIds,
-        operator,
-      };
+    if (!isIsoDate(newStart)) {
+      throw new JobBookingsError(
+        "new_start_invalid",
+        400,
+        "new_start must be a YYYY-MM-DD date",
+      );
     }
-    throw new JobBookingsError(
-      "move_target_required",
-      400,
-      "A move needs new_start (YYYY-MM-DD) or shift_working_days (a whole number of working days, not 0)",
-    );
+    return { jobId, kind, newStart, operator };
   }
   if (kind === "stretch") {
     const edge = String(body?.edge || "").toLowerCase();
@@ -719,7 +679,7 @@ export function parseRescheduleBody(
         "A stretch needs edge: 'start' or 'end'",
       );
     }
-    const target = body?.target ?? body?.target_date;
+    const target = body?.target;
     if (!isIsoDate(target)) {
       throw new JobBookingsError(
         "target_invalid",
@@ -727,7 +687,7 @@ export function parseRescheduleBody(
         "A stretch needs target (YYYY-MM-DD)",
       );
     }
-    return { jobId, kind, edge, target, assignmentIds, operator };
+    return { jobId, kind, edge, target, operator };
   }
   throw new JobBookingsError(
     "mode_invalid",
@@ -795,21 +755,7 @@ export async function rescheduleJobBookings(
   }
   const allRows: JobBookingRow[] = (rowsRes.data || []).map(normaliseRow);
 
-  let live = allRows.filter(isLiveJobBookingRow);
-  if (req.assignmentIds) {
-    const liveIds = new Set(live.map((r) => r.id));
-    const notLive = req.assignmentIds.filter((id) => !liveIds.has(id));
-    if (notLive.length) {
-      throw new JobBookingsError(
-        "booking_not_live",
-        409,
-        "Not changed: a booking named is not a live crew booking on this job (it may have moved, been cancelled or been completed)",
-        { assignment_ids: notLive },
-      );
-    }
-    const wanted = new Set(req.assignmentIds);
-    live = live.filter((r) => wanted.has(r.id));
-  }
+  const live = allRows.filter(isLiveJobBookingRow);
   if (!live.length) {
     throw new JobBookingsError(
       "no_live_bookings",
@@ -818,15 +764,9 @@ export async function rescheduleJobBookings(
     );
   }
 
-  let plan: JobBookingPlan;
-  if (req.kind === "move") {
-    const shift = (req as { shiftWorkingDays?: number }).shiftWorkingDays;
-    const span = jobSpan(live)!;
-    const newStart = shift ? shiftWorkingDays(span.start, shift) : req.newStart;
-    plan = planJobBookingMove(live, newStart);
-  } else {
-    plan = planJobBookingStretch(live, req.edge, req.target);
-  }
+  const plan = req.kind === "move"
+    ? planJobBookingMove(live, req.newStart)
+    : planJobBookingStretch(live, req.edge, req.target);
   if (plan.unbookable.length) {
     throw new JobBookingsError(
       "crew_without_user",
@@ -948,7 +888,7 @@ export async function rescheduleJobBookings(
   const updated: any[] = written?.updated || [];
   const created: any[] = written?.created || [];
   const deleted: any[] = written?.deleted || [];
-  const bookings: any[] = written?.bookings || [];
+  const writtenBookings: any[] = written?.bookings || [];
   const followUpFailures: Array<{ step: string; error: string }> = [];
   const followUp = async (step: string, fn: () => Promise<void> | void) => {
     try {
@@ -1048,7 +988,7 @@ export async function rescheduleJobBookings(
   }
 
   // One GHL push for the job: its new first day.
-  const firstDay = bookings
+  const firstDay = writtenBookings
     .filter((r) => isLiveJobBookingRow(r))
     .map((r) => day(r.scheduled_date))
     .sort()[0];
@@ -1113,6 +1053,11 @@ export async function rescheduleJobBookings(
     }
   }
 
+  let bookings = writtenBookings.map(toReadShape);
+  await followUp("bookings_read", async () => {
+    bookings = await readBookingRows(client, req.jobId);
+  });
+
   return {
     ok: true,
     changed: true,
@@ -1124,7 +1069,7 @@ export async function rescheduleJobBookings(
     updated,
     created,
     deleted: deleted.map((r) => r.id),
-    bookings: bookings.map(toReadShape),
+    bookings,
     follow_up_failures: followUpFailures,
   };
 }

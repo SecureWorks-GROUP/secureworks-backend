@@ -31,7 +31,6 @@ import {
   planJobBookingStretch,
   readJobBookings,
   rescheduleJobBookings,
-  shiftWorkingDays,
 } from "./job_bookings.ts";
 import { _opsApiActionNeedsStaffRole } from "./index.ts";
 
@@ -90,9 +89,6 @@ Deno.test("working-day math matches the calendar: weekends are breaks unless cho
     "2026-10-30",
     "2026-10-31",
   ]);
-  assertEquals(shiftWorkingDays("2026-10-30", 1), "2026-11-02");
-  assertEquals(shiftWorkingDays("2026-11-02", -1), "2026-10-30");
-  assertEquals(shiftWorkingDays("2026-11-02", 5), "2026-11-09");
 });
 
 Deno.test("move keeps every gap and the weekend rule: Fri, Mon, Tue, Thu one working day later is Mon, Tue, Wed, Fri", () => {
@@ -284,6 +280,8 @@ type Store = {
   detail: Record<string, any> | null;
   /** Rows another writer adds between the action's read and its write. */
   concurrent?: JobBookingRow[];
+  /** Every job_assignments read after the write fails. */
+  failReadsAfterRpc?: boolean;
   rpcCalls: any[];
   directWrites: Array<{ table: string; op: string; payload?: any }>;
   orFilters: string[];
@@ -425,6 +423,16 @@ function makeClient(store: Store) {
         return Promise.resolve({ data: null, error: null });
       },
       then: (res: any, rej: any) => {
+        if (
+          op === "select" && table === "job_assignments" &&
+          store.failReadsAfterRpc && store.rpcCalls.length
+        ) {
+          return Promise.resolve({
+            data: null,
+            error: { message: "read failed" },
+          })
+            .then(res, rej);
+        }
         const data = op === "select" && table === "job_assignments"
           ? store.rows.map((r) => ({ ...r }))
           : op === "select"
@@ -516,7 +524,7 @@ Deno.test("a whole-job move is one write, then one GHL push and one ghost sync p
   const out = await rescheduleJobBookings(makeClient(store), {
     job_id: JOB,
     mode: "move",
-    shift_working_days: 1,
+    new_start: "2026-11-03",
   }, deps);
 
   assertEquals(store.rpcCalls.length, 1);
@@ -598,7 +606,7 @@ Deno.test("a clash with a row the plan cannot move is refused before the write",
       rescheduleJobBookings(makeClient(store), {
         job_id: JOB,
         mode: "move",
-        shift_working_days: 1,
+        new_start: "2026-11-03",
       }, deps),
     JobBookingsError,
   );
@@ -732,35 +740,6 @@ Deno.test("make-safe: unbound rows are bound to the current cycle once, bound ro
   assertEquals(calls.reconciled.sort(), [ARI, BO].sort());
 });
 
-Deno.test("only the named bookings move, and a named booking that is no longer live refuses", async () => {
-  const store = makeStore(MILAN_ROWS());
-  const { deps } = makeDeps();
-  await rescheduleJobBookings(makeClient(store), {
-    job_id: JOB,
-    mode: "move",
-    new_start: "2026-11-04",
-    assignment_ids: ["a2", "b2"],
-  }, deps);
-  assertEquals(store.rpcCalls[0].args.p_updates.map((u: any) => u.id).sort(), [
-    "a2",
-    "b2",
-  ]);
-
-  const err = await assertRejects(
-    () =>
-      rescheduleJobBookings(makeClient(makeStore(MILAN_ROWS())), {
-        job_id: JOB,
-        mode: "move",
-        new_start: "2026-11-04",
-        assignment_ids: ["a2", "gone"],
-      }, deps),
-    JobBookingsError,
-  );
-  assertEquals([err.code, err.details.assignment_ids], ["booking_not_live", [
-    "gone",
-  ]]);
-});
-
 Deno.test("a follow-up failure is reported and never undoes the committed move", async () => {
   const store = makeStore(MILAN_ROWS());
   const { deps } = makeDeps({
@@ -769,7 +748,7 @@ Deno.test("a follow-up failure is reported and never undoes the committed move",
   const out = await rescheduleJobBookings(makeClient(store), {
     job_id: JOB,
     mode: "move",
-    shift_working_days: 1,
+    new_start: "2026-11-03",
   }, deps);
   assertEquals(out.ok, true);
   assert(out.follow_up_failures.length > 0);
@@ -777,6 +756,74 @@ Deno.test("a follow-up failure is reported and never undoes the committed move",
   assertEquals(
     store.rows.find((r) => r.id === "b1")!.scheduled_date,
     "2026-11-03",
+  );
+});
+
+Deno.test("the returned bookings are read after the ghost sync, so a watcher's ghost shows on the day crew moved to", async () => {
+  // Ari alone on Mon with Wren's ghost mirrored onto Mon; Ari moves to Tue.
+  const store = makeStore([
+    row("a1", ARI, "2026-11-02"),
+    row("g1", WREN, "2026-11-02", "2026-11-02", {
+      is_ghost: true,
+      role: "observer",
+    }),
+  ]);
+  const { deps } = makeDeps({
+    syncGhostWatchers: (_jobId, date) => {
+      const crewOn = store.rows.some((r) =>
+        !r.is_ghost && r.scheduled_date === date
+      );
+      const ghost = store.rows.find((r) =>
+        r.is_ghost && r.scheduled_date === date
+      );
+      if (!crewOn && ghost) {
+        store.rows = store.rows.filter((r) => r !== ghost);
+      }
+      if (crewOn && !ghost) {
+        store.rows.push(
+          row(`g-${date}`, WREN, date, date, {
+            is_ghost: true,
+            role: "observer",
+          }),
+        );
+      }
+      return Promise.resolve();
+    },
+  });
+  const out = await rescheduleJobBookings(makeClient(store), {
+    job_id: JOB,
+    mode: "move",
+    new_start: "2026-11-03",
+  }, deps);
+  assertEquals(out.follow_up_failures, []);
+  assertEquals(
+    out.bookings.map((b: any) => [b.id, b.is_ghost, b.scheduled_date]).sort(),
+    [
+      ["a1", false, "2026-11-03"],
+      ["g-2026-11-03", true, "2026-11-03"],
+    ],
+  );
+});
+
+Deno.test("a failed read after the write returns the write's own bookings and reports the read", async () => {
+  const store = makeStore(MILAN_ROWS(), { failReadsAfterRpc: true });
+  const out = await rescheduleJobBookings(makeClient(store), {
+    job_id: JOB,
+    mode: "move",
+    new_start: "2026-11-03",
+  }, makeDeps().deps);
+  assertEquals(out.changed, true);
+  assertEquals(out.follow_up_failures.map((f: any) => f.step), [
+    "bookings_read",
+  ]);
+  assertEquals(
+    out.bookings.map((b: any) => [b.id, b.scheduled_date]).sort(),
+    [
+      ["a1", "2026-11-03"],
+      ["a2", "2026-11-04"],
+      ["b1", "2026-11-03"],
+      ["b2", "2026-11-04"],
+    ],
   );
 });
 
@@ -811,7 +858,15 @@ Deno.test("the request body is checked before anything is read", () => {
     "new_start_invalid",
   );
   assertEquals(
-    code({ job_id: JOB, mode: "move", shift_working_days: 0 }),
+    code({ jobId: JOB, mode: "move", new_start: "2026-11-02" }),
+    "job_id_required",
+  );
+  assertEquals(
+    code({ job_id: JOB, kind: "move", new_start: "2026-11-02" }),
+    "mode_invalid",
+  );
+  assertEquals(
+    code({ job_id: JOB, mode: "move", newStart: "2026-11-02" }),
     "move_target_required",
   );
   assertEquals(
@@ -830,14 +885,14 @@ Deno.test("the request body is checked before anything is read", () => {
   assertEquals(
     code({
       job_id: JOB,
-      mode: "move",
-      new_start: "2026-11-02",
-      assignment_ids: [],
+      mode: "stretch",
+      edge: "end",
+      target_date: "2026-11-02",
     }),
-    "assignment_ids_invalid",
+    "target_invalid",
   );
   assertEquals(
-    code({ job_id: JOB, mode: "move", shift_working_days: -2 }),
+    code({ job_id: JOB, mode: "move", new_start: "2026-10-29" }),
     "ok",
   );
 });

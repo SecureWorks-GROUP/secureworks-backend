@@ -9398,10 +9398,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // job's assignment gate, as update_assignment does.
       case 'job_bookings':
       case 'reschedule_job_bookings': {
-        const jobId = String(
-          url.searchParams.get('jobId') || url.searchParams.get('job_id') ||
-            body.jobId || body.job_id || '',
-        ).trim()
+        const jobId = String(url.searchParams.get('job_id') || body.job_id || '').trim()
         if (!jobId) return json({ error: 'job_id required', code: 'job_id_required' }, 400)
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
           return json({ error: 'job_id must be a job id', code: 'job_id_invalid' }, 400)
