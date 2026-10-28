@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS public.materials_ai_settings (
   enabled boolean NOT NULL DEFAULT true,
   confidence_bar numeric(4,3) NOT NULL DEFAULT 0.850 CHECK (confidence_bar >= 0.5 AND confidence_bar <= 0.99),
   confidence_bar_floor numeric(4,3) NOT NULL DEFAULT 0.850 CHECK (confidence_bar_floor >= 0.5 AND confidence_bar_floor <= 0.99),
-  daily_call_cap integer NOT NULL DEFAULT 300 CHECK (daily_call_cap BETWEEN 0 AND 2000),
+  daily_call_cap integer NOT NULL DEFAULT 800 CHECK (daily_call_cap BETWEEN 0 AND 2000),
   bills_per_call integer NOT NULL DEFAULT 6 CHECK (bills_per_call BETWEEN 1 AND 20),
   reread_after_days integer NOT NULL DEFAULT 14 CHECK (reread_after_days BETWEEN 1 AND 365),
   second_check_over_ex numeric(12,2) NOT NULL DEFAULT 5000 CHECK (second_check_over_ex >= 0),
