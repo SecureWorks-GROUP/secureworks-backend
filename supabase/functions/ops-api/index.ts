@@ -38772,6 +38772,38 @@ async function createInvoiceDraftAction(
   )
 }
 
+// pricing_json.billing_contact ({organisation, name, email, phone}) as the Xero
+// contact for an invoice of the client's share, or null. Applies only when the
+// invoice names no party or names the job's primary party; a read fault is null
+// (the invoice goes to the client as before, never to a guessed payer).
+async function loadClientBillingContact(
+  client: any,
+  jobId: string | null | undefined,
+  jobContactId: string | null | undefined,
+): Promise<{ xeroName: string; email: string | null; phone: string | null } | null> {
+  if (!jobId) return null
+  if (jobContactId) {
+    const { data: jc, error: jcErr } = await client.from('job_contacts')
+      .select('is_primary').eq('id', jobContactId).maybeSingle()
+    if (jcErr || jc?.is_primary !== true) return null
+  }
+  const { data, error } = await client.from('jobs')
+    .select('billing_contact:pricing_json->billing_contact')
+    .eq('id', jobId).maybeSingle()
+  if (error) {
+    console.error('[createInvoice] billing contact read failed, invoicing the client:', error.message)
+    return null
+  }
+  const bc = data?.billing_contact
+  if (!bc || typeof bc !== 'object') return null
+  const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+  const organisation = text(bc.organisation)
+  const name = text(bc.name)
+  const xeroName = organisation || name
+  if (!xeroName) return null
+  return { xeroName, email: text(bc.email) || null, phone: text(bc.phone) || null }
+}
+
 async function createInvoice(
   client: any,
   body: any,
@@ -38784,7 +38816,7 @@ async function createInvoice(
 
   const items = line_items || lineItems
   if (!items || items.length === 0) throw new Error('line_items required')
-  const contact = contact_name || contactName
+  let contact = contact_name || contactName
   if (!contact && !xero_contact_id) throw new Error('contact_name or xero_contact_id required')
 
   // ── REPORT JOB $0 GATE (generic createInvoice path) ──
@@ -38887,8 +38919,16 @@ async function createInvoice(
 
   const { accessToken, tenantId } = await getToken(client)
 
+  // Billing contact: when the fence page records that the client's share is
+  // invoiced to someone else (a company, an agent), an invoice for the client's
+  // share (no party named, or the primary party) goes to that contact instead of
+  // the client's Xero contact. Never on SES work, never on a neighbour's invoice,
+  // and the client's own xero_contact_id is not overwritten with it.
+  const billingContact = sesContext ? null : await loadClientBillingContact(client, job_id || jobId, job_contact_id)
+  if (billingContact) contact = billingContact.xeroName
+
   // Resolve Xero contact — find or create if no xero_contact_id provided
-  let resolvedContactId = xero_contact_id
+  let resolvedContactId = billingContact ? undefined : xero_contact_id
   if (!resolvedContactId && contact) {
     try {
       const jId = job_id || jobId
@@ -38903,6 +38943,9 @@ async function createInvoice(
       if (sesContext) {
         contactEmail = undefined
         contactPhone = undefined
+      } else if (billingContact) {
+        contactEmail = billingContact.email || undefined
+        contactPhone = billingContact.phone || undefined
       } else if (job_contact_id) {
         const { data: jcData } = await client.from('job_contacts')
           .select('client_email, client_phone, site_address')
@@ -38962,8 +39005,9 @@ async function createInvoice(
         }, 'PUT', `contact-${contact.replace(/\s/g, '-')}`)
         resolvedContactId = newContact?.Contacts?.[0]?.ContactID
       }
-      // Backfill xero_contact_id so future invoices don't need lookup
-      if (resolvedContactId) {
+      // Backfill xero_contact_id so future invoices don't need lookup (not for a
+      // billing contact: that id belongs to the payer, not the client).
+      if (resolvedContactId && !billingContact) {
         if (job_contact_id) {
           // Neighbour: write to job_contacts, not jobs
           await client.from('job_contacts').update({ xero_contact_id: resolvedContactId }).eq('id', job_contact_id)
@@ -39171,7 +39215,7 @@ async function createInvoice(
     const mirrorRow = {
       org_id: DEFAULT_ORG_ID,
       xero_invoice_id: xeroInvId,
-      xero_contact_id: xero_contact_id || xeroInv?.Contact?.ContactID || null,
+      xero_contact_id: (billingContact ? null : xero_contact_id) || xeroInv?.Contact?.ContactID || null,
       contact_name: contact || xeroInv?.Contact?.Name || null,
       invoice_number: invNumber,
       invoice_type: 'ACCREC',
