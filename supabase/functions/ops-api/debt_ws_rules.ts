@@ -263,7 +263,8 @@ export function parseReference(reference: unknown): {
 
 /** Final endings: FIN, FINBAL or BAL with up to three digits (FIN25, FINBAL50), FINAL, PRIVATE. */
 const FINAL_ENDING = /^(?:(?:FIN|FINBAL|BAL)\d{0,3}|FINAL|PRIVATE)$/;
-const FINAL_DESCRIPTIONS = ["balance", "remaining", "remainder"];
+/** "Final" too: staff word finals "Final Balance (30% of ...)" (SWP-26328, 28 Oct 2026). */
+const FINAL_DESCRIPTIONS = ["balance", "remaining", "remainder", "final"];
 /** Not-final endings, the description each must start with, and the stage it names. */
 const NOT_FINAL_ENDINGS: Array<
   { ending: RegExp; starts: string; stage: string }

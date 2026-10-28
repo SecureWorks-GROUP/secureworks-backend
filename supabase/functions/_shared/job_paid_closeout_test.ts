@@ -217,6 +217,36 @@ Deno.test("a single-payer job with a paid deposit and paid final is paid", () =>
   assertEquals(v.last_paid_on, "2026-10-01");
 });
 
+Deno.test('SWP-26328 shape: a paid final worded "Final Balance" -> paid', () => {
+  const v = evaluateJobPaid({
+    job: job({ job_number: "SWP-26328", type: "patio" }),
+    invoices: [
+      inv("SWP-26328-DEP20", "PAID", 1204.98, {
+        first_description: "Deposit (20% of $6,024.89)",
+        fully_paid_on: "2026-05-15",
+      }),
+      inv("SWP-26328-DEP50", "PAID", 3012.45, {
+        first_description: "Deposit (50% of $6,024.89)",
+        fully_paid_on: "2026-08-10",
+      }),
+      inv("SWP-26328-FINBAL", "PAID", 1807.46, {
+        first_description: "Final Balance (30% of $6,024.89)",
+        fully_paid_on: "2026-10-27",
+      }),
+    ],
+    parties: [],
+    quote: {
+      quote_total_inc: 6024.89,
+      variations_inc: 0,
+      unknown_reason: null,
+    },
+  });
+  assertEquals(v.outcome, "paid");
+  assertEquals(v.reasons, []);
+  assertEquals(v.paid_total_inc, 6024.89);
+  assertEquals(v.last_paid_on, "2026-10-27");
+});
+
 Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invoiced -> not paid", () => {
   const v = evaluateJobPaid({
     job: job({ job_number: "SWF-261335" }),

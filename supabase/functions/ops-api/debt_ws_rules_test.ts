@@ -301,6 +301,19 @@ Deno.test("kind: numbered endings (FIN25, FINBAL25, DEP10) and Remainder (review
   });
 });
 
+Deno.test('kind: a final ending worded "Final Balance" is final (SWP-26328, 28 Oct 2026)', () => {
+  assertEquals(
+    invoiceKindOf("SWP-26328-FINBAL", "Final Balance (30% of $6,024.89)"),
+    { kind: "final", stage: null },
+  );
+  assertEquals(invoiceKindOf("SWF-1-FIN", "final payment").kind, "final");
+  // The word alone never makes a deposit or materials invoice a final.
+  const none = { kind: null, stage: null };
+  assertEquals(invoiceKindOf("SWP-1-DEP20", "Final Balance"), none);
+  assertEquals(invoiceKindOf("SWP-1-MAT50", "Final Balance"), none);
+  assertEquals(invoiceKindOf("SWP-1", "Final Balance"), none);
+});
+
 Deno.test("kind: every not-final ending with its matching description", () => {
   const cases: Array<[string, string, string]> = [
     ["DEP", "Deposit", "deposit"],

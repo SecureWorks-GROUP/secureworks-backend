@@ -29,7 +29,7 @@ All three, in `evaluateJobPaid`:
    needs positive evidence, the Debt tab's rule (`invoiceKindOf` in
    `debt_ws_rules.ts`): a reference ending `FIN`, `FINBAL` or `BAL` (up to
    three digits), `FINAL` or `PRIVATE`, and a first line item starting
-   "balance", "remaining" or "remainder" (read as
+   "balance", "remaining", "remainder" or "final" (read as
    `line_items->0->>Description`), and never `jobs.deposit_invoice_id`. An
    unlabelled invoice is not a final, so such a card stays where it is for
    staff to move by hand. An invoice belongs to the party its

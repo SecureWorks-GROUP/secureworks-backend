@@ -15,7 +15,7 @@
 //      shared fence); a job with no such row has one payer, its client. A final needs
 //      positive evidence: the Debt tab's rule (debt_ws_rules.ts invoiceKindOf), a final
 //      reference ending (FIN, FINBAL or BAL with up to three digits, FINAL, PRIVATE)
-//      whose first line starts "balance", "remaining" or "remainder"; an unlabelled
+//      whose first line starts "balance", "remaining", "remainder" or "final"; an unlabelled
 //      invoice is never a final. An invoice belongs to the party its job_contact_id
 //      names, else the party whose share letter is on its reference (SWF-26624-B-FINBAL
 //      is share B), else the party whose Xero contact it carries, else the job's own
