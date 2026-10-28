@@ -20,8 +20,22 @@ export const FENCE_MINT_INTENTS = new Set([
 
 export type FenceMintIntent = "RESOLVED_NO_JOB" | "DELIBERATE_REPEAT";
 
+// The mint serves every scoping trade the one tool starts on site (owner
+// ruling 28 Oct 2026). Fencing stays the default so mint_fence_job and every
+// existing caller behave exactly as before.
+export type ScopeMintJobType = "fencing" | "patio";
+export const SCOPE_MINT_JOB_TYPES: ReadonlySet<string> = new Set([
+  "fencing",
+  "patio",
+]);
+const SCOPE_MINT_TRADE_LABEL: Record<ScopeMintJobType, string> = {
+  fencing: "Fencing",
+  patio: "Patio",
+};
+
 export type FenceMintInput = {
   requestId: string;
+  jobType: ScopeMintJobType;
   organisationId: string;
   intent: FenceMintIntent;
   contactId: string | null;
@@ -82,6 +96,7 @@ export type FenceMintProgress = {
 };
 
 export type FenceMintDeps = {
+  // The GHL pipeline of the request's trade (named for the fencing slice).
   fencePipelineId: string;
   reserve: (
     args: {
@@ -302,8 +317,18 @@ export function validateFenceMintInput(rawBody: unknown): FenceMintInput {
     );
   }
 
+  const rawJobType = body.jobType ?? body.job_type ?? "fencing";
+  if (typeof rawJobType !== "string" || !SCOPE_MINT_JOB_TYPES.has(rawJobType)) {
+    throw new FenceMintError(
+      400,
+      "invalid_job_type",
+      "jobType must be fencing or patio",
+    );
+  }
+
   return {
     requestId,
+    jobType: rawJobType as ScopeMintJobType,
     organisationId,
     intent,
     contactId,
@@ -387,7 +412,7 @@ export async function fenceMintFingerprint(
     suburb: input.suburb,
     expectedExistingJobIds: input.expectedExistingJobIds,
     repeatReason: input.repeatReason,
-    type: "fencing",
+    type: input.jobType,
   };
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -564,7 +589,7 @@ export async function executeFenceJobMint(args: {
         throw new FenceMintError(
           409,
           "opportunity_pipeline_conflict",
-          "Opportunity is not in the fencing pipeline",
+          `Opportunity is not in the ${input.jobType} pipeline`,
         );
       }
     }
@@ -628,7 +653,7 @@ export async function executeFenceJobMint(args: {
           email: contact.email ?? input.email,
           address: contact.address1 ?? input.address,
         })
-      } — Fencing`;
+      } — ${SCOPE_MINT_TRADE_LABEL[input.jobType]}`;
       // The stamp embeds this requestId, so a first execution cannot possibly
       // find one already created. Reconciliation is confined to ambiguous
       // retries, where a prior attempt's response may have been lost. This keeps

@@ -18,6 +18,10 @@ Authentication: Supabase user JWT only. Shared keys and service credentials are 
 
 This command owns the permanent Supabase job UUID, `SWF-` job number, GHL contact resolution, GHL fencing-opportunity mapping, and mapping reuse. It does not save scope, prepare/send a quote, send SMS/email, or perform any other outbound communication.
 
+### Patio: `mint_scope_job` (28 Oct 2026)
+
+`POST /functions/v1/ghl-proxy?action=mint_scope_job` is the same command for every trade the Scope Engine starts on site. The body is the request below plus `"jobType": "fencing" | "patio"` (default `fencing`; anything else is `400 invalid_job_type`). A patio mint uses the patio sales pipeline, names the opportunity `<client> — Patio [SW-MINT:<id>]`, and numbers the job `SWP-` through `next_job_number('patio')`; the ledger row and its lock carry the trade, so a fencing and a patio job for one contact never reuse or block each other. `mint_fence_job` is always fencing whatever the body says. Migration `20261028031500_scope_job_mint_patio.sql` widens the ledger; every rule below applies to both trades.
+
 ### Request
 
 ```json

@@ -1190,7 +1190,7 @@ Deno.test("stamp matching tolerates absent shape fields rather than discarding a
   );
   assertStringIncludes(
     source,
-    "(!opportunity.pipelineId || opportunity.pipelineId === PIPELINES.fencing)",
+    "(!opportunity.pipelineId || opportunity.pipelineId === mintPipelineId)",
   );
   // A row with no contact id is a shape variation, not proof the filter dropped.
   assertStringIncludes(
@@ -1393,4 +1393,101 @@ Deno.test("the recovery scan is bounded by wall clock inside the mint lease", as
   assertStringIncludes(source, "budgetMs: 30000,");
   // Budget exhaustion must leave the absence unproven, never authorise a create.
   assertStringIncludes(source, "if (!exact.length && !paged.exhausted)");
+});
+
+const PATIO_PIPELINE_ID = "OGZLpPPVWVarN94HL6af";
+
+Deno.test("scope mint: the trade defaults to fencing and only fencing or patio is accepted", async () => {
+  assertEquals(input().jobType, "fencing");
+  assertEquals(input(REQUEST_A, { jobType: "patio" }).jobType, "patio");
+  assertEquals(input(REQUEST_A, { job_type: "patio" }).jobType, "patio");
+  for (const jobType of ["decking", "", 7]) {
+    await assertRejects(
+      async () => input(REQUEST_A, { jobType }),
+      FenceMintError,
+      "jobType must be fencing or patio",
+    );
+  }
+});
+
+Deno.test("scope mint: a patio mint names its opportunity Patio in the patio pipeline and reserves as patio", async () => {
+  let reservedType: string | null = null;
+  let cleanNameSeen = "";
+  await executeFenceJobMint({
+    input: input(REQUEST_A, { jobType: "patio", contactId: null }),
+    actorId: "user-1",
+    deps: deps({
+      fencePipelineId: PATIO_PIPELINE_ID,
+      reserve: async ({ input: reserved }) => {
+        reservedType = reserved.jobType;
+        return progress();
+      },
+      createContact: async () => ({ id: "contact-1", firstName: "Test", lastName: "Client" }),
+      createStampedOpportunity: async ({ ownerRequestId, contact, cleanName }) => {
+        cleanNameSeen = cleanName;
+        return {
+          id: "opp-1",
+          contactId: contact.id,
+          pipelineId: PATIO_PIPELINE_ID,
+          name: `${cleanName} ${fenceMintStamp(ownerRequestId)}`,
+        };
+      },
+      complete: async () => ({ ...canonical(), jobNumber: "SWP-26001" }),
+    }),
+  });
+  assertEquals(reservedType, "patio");
+  assertStringIncludes(cleanNameSeen, "Patio");
+  assertEquals(cleanNameSeen.includes("Fencing"), false);
+});
+
+Deno.test("scope mint: a fencing opportunity is refused for a patio mint", async () => {
+  await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A, { jobType: "patio", opportunityId: "opp-f" }),
+        actorId: "user-1",
+        deps: deps({
+          fencePipelineId: PATIO_PIPELINE_ID,
+          getOpportunity: async (id) => ({ id, contactId: "contact-1", pipelineId: FENCE_PIPELINE_ID }),
+        }),
+      }),
+    FenceMintError,
+    "not in the patio pipeline",
+  );
+});
+
+Deno.test("scope mint: the same request under another trade has a different fingerprint", async () => {
+  const { fenceMintFingerprint } = await import("./fence_mint.ts");
+  const fence = await fenceMintFingerprint(input());
+  const patio = await fenceMintFingerprint(input(REQUEST_A, { jobType: "patio" }));
+  assertEquals(fence === patio, false);
+});
+
+Deno.test("scope mint: mint_fence_job is always fencing and both actions take a staff session", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(source, "(action === 'mint_fence_job' || action === 'mint_scope_job') && req.method === 'POST'");
+  assertStringIncludes(source, "action === 'mint_fence_job' && parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)");
+  assertStringIncludes(source, "{ ...(parsedBody as Record<string, unknown>), jobType: 'fencing', job_type: 'fencing' }");
+  assertStringIncludes(source, "const mintPipelineId = PIPELINES[input.jobType]");
+  assertStringIncludes(source, "p_type: reserved.jobType,");
+  const helpers = await Deno.readTextFile(new URL("./hardening_helpers.ts", import.meta.url));
+  assertStringIncludes(helpers, "'mint_scope_job',");
+});
+
+Deno.test("scope mint: the patio migration keeps no fencing literal inside the mint bodies", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("../../migrations/20261028031500_scope_job_mint_patio.sql", import.meta.url),
+  );
+  const bodies = sql.slice(sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("));
+  const stray = bodies
+    .split("\n")
+    .filter((line) => line.includes("'fencing'"))
+    .filter((line) =>
+      !line.includes("p_type text DEFAULT 'fencing'") &&
+      !line.includes("p_type NOT IN ('fencing', 'patio')") &&
+      !line.includes("v_request.type = 'fencing' THEN 'fence_server_mint'")
+    );
+  assertEquals(stray, []);
+  assertStringIncludes(bodies, "next_job_number(v_request.type)");
+  assertStringIncludes(sql, "DROP FUNCTION IF EXISTS public.reserve_fence_job_mint(uuid, uuid, uuid, text, text, text, text, text, uuid[], text, text, text, text, text, text, text);");
 });

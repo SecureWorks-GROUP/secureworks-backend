@@ -1457,8 +1457,10 @@ post-dedupe zero-duplicate gate. Apply
 `20260723000001_fence_job_mint_record_guards.sql` after the base mint migration:
 untyped PL/pgSQL records must be protected by nested `FOUND`/owner guards, never
 `FOUND AND record.field`, because a no-row result otherwise raises SQLSTATE
-`55000`. Legacy non-fence create endpoints remain unchanged until separately
-migrated.
+`55000`. Since `20261028031500_scope_job_mint_patio.sql` the same ledger mints
+patio too (`mint_scope_job`, `jobType`, SWP via `next_job_number(type)`); never
+add a second mint for another trade, widen this one. Legacy non-fence create
+endpoints remain unchanged until separately migrated.
 
 ## Fencing Stage Truth Is An Opt-In Read, Not Placement
 

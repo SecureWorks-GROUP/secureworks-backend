@@ -2134,10 +2134,12 @@ serve(async (req: Request) => {
       return json({ jobs: trimmed })
     }
 
-    // ── Authenticated, idempotent fencing job mint ──
+    // ── Authenticated, idempotent scoping job mint ──
     // One narrow command replaces the browser's fence-only create-contact/opp,
     // create-job and assign-number chain. It never sends a quote or message.
-    if (action === 'mint_fence_job' && req.method === 'POST') {
+    // mint_scope_job is the same command for every trade the one tool starts
+    // on site (jobType fencing or patio); mint_fence_job is always fencing.
+    if ((action === 'mint_fence_job' || action === 'mint_scope_job') && req.method === 'POST') {
       const requestStarted = performance.now()
       const MINT_CONFLICT_STATUS: Record<string, number> = {
         invalid_mint_request: 400,
@@ -2180,14 +2182,21 @@ serve(async (req: Request) => {
         } catch {
           throw new FenceMintError(400, 'invalid_request', 'JSON object body required')
         }
-        const routedBody = route.testMode && parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+        const tradeBody = action === 'mint_fence_job' && parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+          ? { ...(parsedBody as Record<string, unknown>), jobType: 'fencing', job_type: 'fencing' }
+          : parsedBody
+        const routedBody = route.testMode && tradeBody && typeof tradeBody === 'object' && !Array.isArray(tradeBody)
           ? {
-            ...(parsedBody as Record<string, unknown>),
+            ...(tradeBody as Record<string, unknown>),
             organisationId: route.organisationId,
             organisation_id: route.organisationId,
           }
-          : parsedBody
+          : tradeBody
         const input = validateFenceMintInput(routedBody)
+        const mintPipelineId = PIPELINES[input.jobType]
+        if (!mintPipelineId) {
+          throw new FenceMintError(503, 'pipeline_not_configured', `No GHL pipeline is configured for ${input.jobType}`)
+        }
         authorizeFenceMintCaller({
           mode: credential.mode,
           authUserId,
@@ -2274,7 +2283,7 @@ serve(async (req: Request) => {
           input,
           actorId: authUserId!,
           deps: {
-            fencePipelineId: PIPELINES.fencing,
+            fencePipelineId: mintPipelineId,
             reserve: ({ input: reserved, actorId, fingerprint, identityKey }) => rpcProgress('reserve_fence_job_mint', {
               p_request_id: reserved.requestId,
               p_org_id: reserved.organisationId,
@@ -2292,6 +2301,7 @@ serve(async (req: Request) => {
               p_client_phone: reserved.phone,
               p_site_address: reserved.address,
               p_site_suburb: reserved.suburb,
+              p_type: reserved.jobType,
             }),
             bindIdentity: ({ ownerRequestId, contact, opportunity }) => rpcProgress('bind_fence_job_mint_identity', {
               p_request_id: ownerRequestId,
@@ -2370,7 +2380,7 @@ serve(async (req: Request) => {
               // on the listing being complete.
               const paged = await fetchOpportunityPages({
                 locationId: GHL_LOCATION_ID,
-                pipelineId: PIPELINES.fencing,
+                pipelineId: mintPipelineId,
                 contactId,
                 limit: 100,
                 maxPages: 10,
@@ -2386,7 +2396,7 @@ serve(async (req: Request) => {
                 // and the scan is already server-side scoped by pipeline_id, so an
                 // absent field must not silently discard a real match.
                 .filter((opportunity) => (!opportunity.contactId || opportunity.contactId === contactId) &&
-                  (!opportunity.pipelineId || opportunity.pipelineId === PIPELINES.fencing) &&
+                  (!opportunity.pipelineId || opportunity.pipelineId === mintPipelineId) &&
                   opportunityHasFenceMintStamp(opportunity, ownerRequestId))
               if (exact.length > 1) {
                 throw new FenceMintError(409, 'duplicate_stamped_opportunities', 'Multiple GHL opportunities carry the same mint request stamp')
@@ -2425,7 +2435,7 @@ serve(async (req: Request) => {
             createStampedOpportunity: async ({ ownerRequestId, contact, cleanName }) => opportunityShape(await ghl('/opportunities/', {
               method: 'POST',
               body: JSON.stringify({
-                pipelineId: PIPELINES.fencing,
+                pipelineId: mintPipelineId,
                 locationId: GHL_LOCATION_ID,
                 contactId: contact.id,
                 name: stampedFenceOpportunityName(cleanName, ownerRequestId),
@@ -2473,6 +2483,7 @@ serve(async (req: Request) => {
         console.log(JSON.stringify({
           event: 'fence_mint_complete',
           request_id: input.requestId,
+          job_type: input.jobType,
           job_id: result.jobId,
           mapping_outcome: result.mapping.outcome,
           timing_ms: result.timingMs,
