@@ -364,6 +364,12 @@ deno_version = 2
 [functions.ops-api]
 static_files = ["./functions/ops-api/references/materials-rate-card.md"]
 
+# GHL Marketplace app install callback: GHL redirects the installer's browser
+# here with no Supabase JWT. Production deploys read the matching
+# --no-verify-jwt header in supabase/functions/ghl-oauth-callback/index.ts.
+[functions.ghl-oauth-callback]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
