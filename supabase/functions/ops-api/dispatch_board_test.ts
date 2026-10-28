@@ -268,7 +268,7 @@ Deno.test("request: board=v2 only counts on the Dispatch list, and the view defa
 
 // ── Stages ──────────────────────────────────────────────────────────────────
 
-Deno.test("stage: the five real statuses are the board, in pipeline order", () => {
+Deno.test("stage: the seven real statuses are the board, in pipeline order", () => {
   const seen = DISPATCH_BOARD_STATUSES.map((status) =>
     dispatchBoardStage(job(1, { status }))
   );
@@ -278,8 +278,10 @@ Deno.test("stage: the five real statuses are the board, in pipeline order", () =
     "Order Confirmed",
     "Schedule Install",
     "Scheduled",
+    "In Progress",
+    "Rectification",
   ]);
-  assertEquals(seen.map((s) => s?.order), [1, 2, 3, 4, 5]);
+  assertEquals(seen.map((s) => s?.order), [1, 2, 3, 4, 5, 6, 7]);
   assert(seen.every((s) => s?.track === "pipeline" && s.phase === "window"));
 });
 
@@ -312,8 +314,8 @@ Deno.test("stage: nothing earlier, no legacy processing, no make-safe and no oth
   }
 });
 
-Deno.test("stage: a job past Scheduled is 'after' (Archive only)", () => {
-  for (const status of ["in_progress", "complete", "invoiced", "archived"]) {
+Deno.test("stage: a job past Rectification is 'after' (Archive only)", () => {
+  for (const status of ["complete", "final_payment", "invoiced", "archived"]) {
     const stage = dispatchBoardStage(job(1, { status }));
     assertEquals(stage?.phase, "after", status);
     assertEquals(stage?.order, 0);
@@ -388,11 +390,22 @@ Deno.test("placement: Scheduled leaves for Archive the day after its last instal
   assertEquals(dispatchBoardPlacement(scheduled, null), "active");
 });
 
-Deno.test("placement: an earlier stage stays Active after its install day; a job past Scheduled needs a booking", () => {
+Deno.test("placement: an earlier stage stays Active after its install day; a job past Rectification needs a booking", () => {
   const ordering = dispatchBoardStage(job(1, { status: "order_materials" }))!;
   const gone = dispatchBoardInstall([booking(1, addDays(TODAY, -3))] as any, TODAY);
   assertEquals(dispatchBoardPlacement(ordering, gone), "active");
-  const after = dispatchBoardStage(job(1, { status: "in_progress" }))!;
+  // In Progress and Rectification stay Active whatever the install day, with
+  // or without a booking (Shaun, 27 Oct 2026: extras are ordered there).
+  for (const status of ["in_progress", "rectification"]) {
+    const onSite = dispatchBoardStage(job(1, { status }))!;
+    assertEquals(dispatchBoardPlacement(onSite, gone), "active", status);
+    assertEquals(
+      dispatchBoardPlacement(onSite, dispatchBoardInstall([], TODAY)),
+      "active",
+    );
+    assertEquals(dispatchBoardPlacement(onSite, null), "active");
+  }
+  const after = dispatchBoardStage(job(1, { status: "complete" }))!;
   assertEquals(dispatchBoardPlacement(after, gone), "archive");
   assertEquals(
     dispatchBoardPlacement(after, dispatchBoardInstall([], TODAY)),
@@ -511,6 +524,8 @@ Deno.test("moves: every other board status, forwards and backwards, through upda
       ["awaiting_supplier", "back"],
       ["schedule_install", "forward"],
       ["scheduled", "forward"],
+      ["in_progress", "forward"],
+      ["rectification", "forward"],
     ],
   );
   const repair = dispatchBoardMoves(dispatchBoardStage(job(1, {
@@ -522,7 +537,7 @@ Deno.test("moves: every other board status, forwards and backwards, through upda
   assertEquals(repair.field, "stage");
   assertEquals(repair.targets, [{ key: "materials", label: "Materials", direction: "back" }]);
   assertEquals(
-    dispatchBoardMoves(dispatchBoardStage(job(1, { status: "in_progress" }))!),
+    dispatchBoardMoves(dispatchBoardStage(job(1, { status: "complete" }))!),
     null,
   );
 });
@@ -561,7 +576,7 @@ Deno.test("arrival: solid when confirmed, ring when not, red when sent with no d
       ["Draft Co", "none", "not_sent", false],
     ],
   );
-  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2 });
+  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, open: 5, on_us: 1, extra_open: 0 });
   assertEquals(arrival.all_confirmed_in_time, false);
   // The install day itself is in time.
   const onDay = dispatchArrival({
@@ -632,13 +647,17 @@ Deno.test("groups: Active has every stage in pipeline order then the repairs; Ar
     "order_confirmed",
     "schedule_install",
     "scheduled",
+    "in_progress",
+    "rectification",
     "repair_materials",
     "repair_scheduled",
   ]);
   assertEquals(groups[0].job_ids, ["e", "d"]);
   assertEquals(groups[4].job_ids, ["b", "a", "c"]);
-  assertEquals(groups[5].label, "Repairs: Materials");
-  assertEquals(groups[6].count, 0);
+  assertEquals(groups[5].label, "In Progress");
+  assertEquals(groups[6].label, "Rectification");
+  assertEquals(groups[7].label, "Repairs: Materials");
+  assertEquals(groups[8].count, 0);
   const archive = dispatchBoardGroups([
     { id: "x", board: { install: { last_day: "2026-10-01" } } },
     { id: "y", board: { install: { last_day: "2026-10-09" } } },
@@ -708,8 +727,9 @@ Deno.test("pipeline v2 Active: only board jobs, each with its card fields", asyn
   const { client } = makeClient(boardFixture());
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
   const ids = allRows(result).map((row) => row.id).sort();
-  assertEquals(ids, [jobId(1), jobId(11), jobId(3), jobId(6)].sort());
-  assertEquals(result.total, 4);
+  // Job 10 is In Progress: on the board whatever its install day.
+  assertEquals(ids, [jobId(1), jobId(11), jobId(3), jobId(6), jobId(10)].sort());
+  assertEquals(result.total, 5);
 
   const ordering = rowFor(result, 1)!.board;
   assertEquals(ordering.title, "SWF-1001 · Customer Number1");
@@ -747,7 +767,24 @@ Deno.test("pipeline v2 Active: only board jobs, each with its card fields", asyn
   const counts = Object.fromEntries(result.board.groups.map((g: any) => [g.key, g.count]));
   assertEquals(counts.order_materials, 1);
   assertEquals(counts.scheduled, 2);
+  assertEquals(counts.in_progress, 1);
+  assertEquals(counts.rectification, 0);
   assertEquals(counts.repair_materials, 1);
+  const onSite = rowFor(result, 10)!.board;
+  assertEquals(onSite.stage_phase, "window");
+  assertEquals(onSite.view, "active");
+  // A day gone by is expected once the crew has been: no red flag.
+  assertEquals(onSite.flags.install_date_passed, false);
+  assertEquals(onSite.moves.action, "update_job_status");
+  // Waiting on us: Order Materials with nothing ordered yet. The patio is
+  // confirmed with its install booked: waiting on Stratco, not on us.
+  assertEquals(ordering.waiting, { on_us: true, todo: ["Order the materials"] });
+  assertEquals(patio.waiting, { on_us: false, todo: [] });
+  assertEquals(patio.arrival.orders[0].material_stage, "order_confirmed");
+  assertEquals(patio.arrival.orders[0].waiting_on, "supplier");
+  // The repair at Materials with nothing ordered is waiting on us too.
+  assertEquals(repair.waiting.todo, ["Order the materials"]);
+  assertEquals(result.board.waiting_on_us, 2);
   // The real columns still carry the rows.
   assertEquals(result.columns.scheduled.length, 2);
 });
@@ -757,17 +794,14 @@ Deno.test("pipeline v2 Archive: the day after the install, 30 days shown, a sear
   const { client, reads } = makeClient(fixture);
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2&view=archive"));
   const ids = allRows(result).map((row) => row.id).sort();
-  assertEquals(ids, [jobId(10), jobId(9)].sort());
+  // Job 10 is In Progress: it stays Active, never in Archive.
+  assertEquals(ids, [jobId(9)]);
   assertEquals(result.board.groups.length, 1);
-  // Newest install first.
-  assertEquals(result.board.groups[0].job_ids, [jobId(9), jobId(10)]);
+  assertEquals(result.board.groups[0].job_ids, [jobId(9)]);
   const archived = rowFor(result, 9)!.board;
   assertEquals(archived.view, "archive");
   assertEquals(archived.real_status, "scheduled");
   assertEquals(archived.install.archive_on, TODAY);
-  const moved = rowFor(result, 10)!.board;
-  assertEquals(moved.stage_phase, "after");
-  assertEquals(moved.moves, null);
   // The narrowing read ran first.
   assert(reads.some((r) => r.table === "job_assignments" && r.select === "id, job_id, status"));
 
@@ -791,9 +825,19 @@ Deno.test("pipeline v2: a search still never lists a make-safe", async () => {
 Deno.test("pipeline v2: until the order emails table exists, the Arrival line says failed", async () => {
   const { client } = makeClient(boardFixture(), { fail: ["dispatch_supplier_order_emails"] });
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
-  assertEquals(result.total, 4);
+  assertEquals(result.total, 5);
   assertEquals(result.board.reads.arrival, "failed");
   assertEquals(rowFor(result, 3)!.board.arrival, null);
+});
+
+Deno.test("pipeline v2: a failed material lines read says the Arrival line failed", async () => {
+  const { client } = makeClient(boardFixture(), { fail: ["job_material_lines"] });
+  const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
+  assertEquals(result.total, 5);
+  assertEquals(result.board.reads.arrival, "failed");
+  // With no Arrival line nobody knows whether anything is ordered, so the
+  // card never claims "Order the materials".
+  assertEquals(rowFor(result, 1)!.board.waiting, { on_us: false, todo: [] });
 });
 
 Deno.test("pipeline v2: failed side reads are said, and never hide a job", async () => {
@@ -801,7 +845,7 @@ Deno.test("pipeline v2: failed side reads are said, and never hide a job", async
     fail: ["job_material_suppliers", "job_events", "xero_invoices"],
   });
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
-  assertEquals(result.total, 4);
+  assertEquals(result.total, 5);
   assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed" });
   const ordering = rowFor(result, 1)!.board;
   assertEquals(ordering.arrival, null);
@@ -823,7 +867,8 @@ Deno.test("pipeline v2: an empty answer still carries the board summary", async 
   const { client } = makeClient({ jobs: [] });
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
   assertEquals(result.total, 0);
-  assertEquals(result.board.groups.length, 7);
+  assertEquals(result.board.groups.length, 9);
+  assertEquals(result.board.waiting_on_us, 0);
   assertEquals(result.board.reads.arrival, "ok");
 });
 

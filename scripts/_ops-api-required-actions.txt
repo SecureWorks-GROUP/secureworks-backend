@@ -182,6 +182,11 @@ dispatch_arrival
 #    write: source-only, never fired at production by a smoke run. ──
 dispatch_v2_set_delivery_date        # probe=source-only
 
+# ── Ops screen Dispatch tab v2: a supplier order's material stage set by hand
+#    (docs/dispatch-v2-board-contract.md, section 3b). A staff write:
+#    source-only, never fired at production by a smoke run. ──
+dispatch_v2_set_material_stage       # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event

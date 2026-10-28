@@ -149,6 +149,18 @@ const SCHEMA: Record<string, string[]> = {
     "created_by",
     "created_by_email",
     "is_main_supplier",
+    // 20261023160000_dispatch_v2_board_arrival_dates.sql
+    "delivery_date",
+    "delivery_date_source",
+    "delivery_date_set_at",
+    "delivery_date_set_by_email",
+    "delivery_date_confirmed_at",
+    "delivery_date_confirmed_by",
+    "delivery_date_confirmed_by_email",
+    // 20261028170000_dispatch_v2_material_stages.sql
+    "material_stage",
+    "material_stage_set_at",
+    "material_stage_set_by_email",
   ],
   dispatch_approved_supplier_emails: [
     "id",

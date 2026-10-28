@@ -453,7 +453,9 @@ jobs:
             supabase/functions/ops-api/dispatch_deliveries_store_test.ts \
             supabase/functions/ops-api/dispatch_install_test.ts \
             supabase/functions/ops-api/dispatch_install_write_test.ts \
-            supabase/functions/ops-api/dispatch_offline_dry_run_test.ts
+            supabase/functions/ops-api/dispatch_offline_dry_run_test.ts \
+            supabase/functions/ops-api/dispatch_board_test.ts \
+            supabase/functions/ops-api/dispatch_v2_material_stage_test.ts
 
       # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
       # suggestions (rules, engine on an in-memory store, migration text).
