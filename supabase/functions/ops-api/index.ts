@@ -522,6 +522,7 @@ import {
   supabaseAttachmentReader,
 } from '../_shared/approved_send.ts'
 import { makeGhlCall } from '../_shared/approved_send_sms.ts'
+import { postGhlProxySendSms } from './ghl_proxy_send_sms.ts'
 import {
   approvedSendCredentialClass,
   makeForwardEmail,
@@ -56627,16 +56628,14 @@ async function sendPaymentLink(client: any, body: any) {
   // Send SMS via GHL
   const smsMessage = `Hi ${job.client_name?.split(' ')[0] || 'there'}, your invoice for ${job.job_number} is ready. You can view and pay online here: ${onlineUrl}\n\nThanks,\nSecureWorks Group`
 
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  const sms = await postGhlProxySendSms({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SUPABASE_SERVICE_KEY,
+    payload: {
       contactId: job.ghl_contact_id,
       message: smsMessage,
-    }),
+    },
   })
-  const smsResult = await smsResp.json()
 
   // Log event
   await client.from('job_events').insert({
@@ -56646,7 +56645,8 @@ async function sendPaymentLink(client: any, body: any) {
       invoice_number: invoice.invoice_number,
       xero_invoice_id: invoice.xero_invoice_id,
       online_url: onlineUrl,
-      sms_sent: smsResult.success || false,
+      sms_sent: sms.sent,
+      ...(sms.reason ? { sms_error: sms.reason } : {}),
     },
   })
 
@@ -56671,7 +56671,8 @@ async function sendPaymentLink(client: any, body: any) {
     success: true,
     invoice_number: invoice.invoice_number,
     payment_url: onlineUrl,
-    sms_sent: smsResult.success || false,
+    sms_sent: sms.sent,
+    ...(sms.reason ? { sms_error: sms.reason } : {}),
   }
 }
 
@@ -57259,25 +57260,26 @@ async function confirmAssignment(client: any, body: any) {
 
   // Notify client via SMS if requested
   let smsSent = false
+  let smsError: string | null = null
   if (shouldNotify && job.ghl_contact_id) {
     const firstName = (job.client_name || '').split(' ')[0] || 'there'
     const dateStr = new Date(assignment.scheduled_date).toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })
     const smsText = message || `Hi ${firstName}, your ${assignment.assignment_type || 'job'} at ${job.site_address || 'your property'} has been confirmed for ${dateStr}. We'll be in touch closer to the date with any details.\n\nThanks,\nSecureWorks Group`
 
     try {
-      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      const smsResp = await fetch(ghlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const sms = await postGhlProxySendSms({
+        supabaseUrl: SUPABASE_URL,
+        serviceKey: SUPABASE_SERVICE_KEY,
+        payload: {
           contactId: job.ghl_contact_id,
           message: smsText,
           jobId: assignment.job_id,
           userId: byUser,
-        }),
+        },
       })
-      const smsResult = await smsResp.json()
-      smsSent = smsResult.success || false
+      smsSent = sms.sent
+      smsError = sms.reason
+      if (smsError) console.log('[ops-api] Client notification SMS failed (non-blocking):', smsError)
 
       if (smsSent) {
         await client.from('job_assignments')
@@ -57285,6 +57287,7 @@ async function confirmAssignment(client: any, body: any) {
           .eq('id', aId)
       }
     } catch (e) {
+      smsError = (e as Error).message || 'SMS request failed'
       console.log('[ops-api] Client notification SMS failed (non-blocking):', e)
     }
   }
@@ -57309,8 +57312,11 @@ async function confirmAssignment(client: any, body: any) {
     assignment_id: aId,
     confirmation_status: 'confirmed',
     client_notified: smsSent,
+    ...(smsError ? { client_notify_error: smsError } : {}),
   }
 }
+
+export const _confirmAssignmentForTest = confirmAssignment
 
 async function bulkConfirm(client: any, body: any) {
   const { assignmentIds, assignment_ids, notifyClient, notify_client, confirmedBy, confirmed_by } = body
@@ -62395,14 +62401,12 @@ async function sendCouncilSMS(client: any, body: any) {
   if (!job) throw new Error('Job not found')
   if (!job.ghl_contact_id) throw new Error('No GHL contact linked to this job — cannot send SMS')
 
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contactId: job.ghl_contact_id, message }),
+  const sms = await postGhlProxySendSms({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SUPABASE_SERVICE_KEY,
+    payload: { contactId: job.ghl_contact_id, message },
   })
-  const smsResult = await smsResp.json()
-  if (!smsResp.ok) throw new Error('SMS send failed: ' + (smsResult.message || JSON.stringify(smsResult)))
+  if (!sms.sent) throw new Error('SMS send failed: ' + sms.reason)
 
   // Log as job event
   await client.from('job_events').insert({
@@ -62413,6 +62417,8 @@ async function sendCouncilSMS(client: any, body: any) {
 
   return { success: true, sms_sent: true }
 }
+
+export const _sendCouncilSMSForTest = sendCouncilSMS
 
 async function listCouncilSubmissions(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id')
@@ -62828,32 +62834,32 @@ export async function sendClientUpdate(client: any, body: any) {
   }
 
   let sent = false
+  let failReason: string | null = null
   if (channel === 'sms') {
     // Send via GHL (use per-contact GHL ID if available)
     if (!contactGhlId) {
       return { sent: false, reason: 'No GHL contact ID — cannot send SMS' }
     }
     try {
-      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      const smsRes = await fetch(ghlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
-        // the contact must be the job's or a live party on the same job's list.
-        body: JSON.stringify({ contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) }),
-      })
       // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
       // so only a body confirming success may record status='sent' — an in-band
       // failure logged as sent would make the reschedule dedup above swallow the
       // operator's retry.
-      const smsBody = await smsRes.json().catch(() => null)
-      if (smsRes.ok && smsBody?.success === true) {
-        sent = true
-      } else {
-        console.log('[ops-api] GHL SMS failed:', smsBody?.error || `HTTP ${smsRes.status}`)
+      const sms = await postGhlProxySendSms({
+        supabaseUrl: SUPABASE_URL,
+        serviceKey: SUPABASE_SERVICE_KEY,
+        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
+        // the contact must be the job's or a live party on the same job's list.
+        payload: { contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) },
+      })
+      sent = sms.sent
+      if (!sent) {
+        failReason = sms.reason
+        console.log('[ops-api] GHL SMS failed:', sms.reason)
       }
     } catch (e) {
-      console.log('[ops-api] GHL SMS failed:', (e as Error).message)
+      failReason = (e as Error).message || 'SMS request failed'
+      console.log('[ops-api] GHL SMS failed:', failReason)
     }
   } else {
     // Send via Resend
@@ -62918,7 +62924,13 @@ export async function sendClientUpdate(client: any, body: any) {
     payload: { comms_trigger, channel, message_preview: message.slice(0, 100) },
   })
 
-  return { sent, channel, message_preview: message.slice(0, 200) }
+  return {
+    sent,
+    channel,
+    message_preview: message.slice(0, 200),
+    // JSON drops an undefined key, so a sent text answers exactly as before.
+    reason: !sent && failReason ? failReason : undefined,
+  }
 }
 
 

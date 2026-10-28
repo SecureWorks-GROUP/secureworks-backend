@@ -150,12 +150,32 @@ function makeClient(store: Store) {
 }
 
 type FetchCall = { url: string; init?: any };
+// The service login ops-api must send: the service-role bearer, as ops-api reads it.
+const SERVICE_BEARER = `Bearer ${
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
+}`;
+function hasServiceLogin(init?: any): boolean {
+  const raw = init?.headers?.Authorization ?? init?.headers?.authorization;
+  return typeof raw === "string" && raw === SERVICE_BEARER;
+}
 function stubFetch(opts: { failSms?: boolean; inbandFailSms?: boolean } = {}) {
   const calls: FetchCall[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = ((input: any, init?: any) => {
     const url = String(input instanceof Request ? input.url : input);
     calls.push({ url, init });
+    if (url.includes("ghl-proxy") && !hasServiceLogin(init)) {
+      // ghl-proxy refuses every request with no login, exactly like this.
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: "Authentication required",
+            code: "missing_auth",
+          }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    }
     if (opts.failSms && url.includes("send_sms")) {
       return Promise.reject(new Error("GHL unreachable"));
     }
@@ -463,7 +483,7 @@ Deno.test("install_rescheduled: dedup is per (job, new date) — double-tap swal
       template_vars: { new_date: "2026-07-02" },
     });
     assertEquals(dup.sent, false);
-    assertStringIncludes(dup.reason, "job and date");
+    assertStringIncludes(dup.reason ?? "", "job and date");
     const again = await sendClientUpdate(client, {
       job_id: "job-1",
       comms_trigger: "install_rescheduled",
@@ -505,7 +525,7 @@ Deno.test("install_rescheduled: A→B→A re-sends for the return to A (most rec
       template_vars: { new_date: "2026-07-02" },
     });
     assertEquals(dup.sent, false);
-    assertStringIncludes(dup.reason, "job and date");
+    assertStringIncludes(dup.reason ?? "", "job and date");
   } finally {
     restore();
   }
@@ -578,6 +598,61 @@ Deno.test("install_rescheduled: an in-band GHL failure (HTTP 200 success:false) 
     assertEquals(dup.sent, false);
   } finally {
     stub.restore();
+  }
+});
+
+Deno.test("install_rescheduled: the text carries ops-api's service login to ghl-proxy", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const res = await sendClientUpdate(makeClient(baseStore()), {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(res.sent, true);
+    assertEquals((res as any).reason, undefined);
+    const sms = smsCalls(calls);
+    assertEquals(sms.length, 1);
+    assertEquals(sms[0].init.headers.Authorization, SERVICE_BEARER);
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("install_rescheduled: a refused send returns ghl-proxy's reason for the toast and logs failed", async () => {
+  const { restore } = stubFetch({ inbandFailSms: true });
+  try {
+    const store = baseStore();
+    const res = await sendClientUpdate(makeClient(store), {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(res.sent, false);
+    assertEquals((res as any).reason, "GHL API error");
+    assertEquals(
+      store.emailEvents!.filter((r) =>
+        r.comms_trigger === "install_rescheduled" && r.status === "failed"
+      ).length,
+      1,
+    );
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("install_rescheduled: an unreachable texting service names the network error", async () => {
+  const { restore } = stubFetch({ failSms: true });
+  try {
+    const res = await sendClientUpdate(makeClient(baseStore()), {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(res.sent, false);
+    assertEquals((res as any).reason, "GHL unreachable");
+  } finally {
+    restore();
   }
 });
 
