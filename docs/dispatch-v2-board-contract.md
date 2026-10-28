@@ -11,8 +11,12 @@ Nothing here is deployed or applied. The migration below is a file only.
 ## The rules in business words
 
 - The Dispatch list shows a job only when its **real** pipeline status is Order
-  Materials, Awaiting Supplier, Order Confirmed, Schedule Install or Scheduled,
-  and its type is fencing, patio or decking. A repair shows when its Repairs
+  Materials, Awaiting Supplier, Order Confirmed, Schedule Install, Scheduled,
+  In Progress or Rectification, and its type is fencing, patio or decking.
+  In Progress and Rectification were added 27 Oct 2026 (Shaun and Marnin:
+  extra materials, a flashing or a downpipe, are ordered once the crew is on
+  site); they stay in Active whatever the install day and never carry
+  `install_date_passed`. A repair shows when its Repairs
   board stage is Materials or Scheduled. Nothing earlier, no make-safes (even
   for a search), no insurance or miscellaneous jobs, no test records, no legacy
   jobs. The legacy `processing` status is not shown.
@@ -20,8 +24,8 @@ Nothing here is deployed or applied. The migration below is a file only.
   v2 board.
 - **Archive** is Dispatch's own view and never changes the real status. A
   Scheduled job goes there the day after its last install day (Perth time; a
-  booking's `scheduled_end` counts). A job already moved past Scheduled (In
-  Progress, Complete, Invoiced...) is also in Archive, placed by its install
+  booking's `scheduled_end` counts). A job already moved past Rectification
+  (Complete, Final Payment, Invoiced...) is also in Archive, placed by its install
   day; with no install booking at all it is in neither view. Archive shows the
   last 30 days by last install day; a search shows every Archive job, however
   old.
@@ -385,6 +389,134 @@ Errors: 400 `invalid_request` (bad body, before any read), 400
 `operator_required`, 404 `box_not_found` (no such box, or another
 organisation's), 409 `not_dispatch_work` (make-safe or another type), 409
 `date_changed`, 500 `dispatch_write_failed`.
+
+## 3b. Material stages and "waiting on us" (`dispatch_v2_set_material_stage`, new)
+
+Shaun and Marnin, 27 Oct 2026: the materials need their own stages, separate
+from the job's, and the board must say what is waiting on us rather than on a
+supplier or the client. Code: `supabase/functions/ops-api/dispatch_v2_material_stage.ts`
+(the rules) and `dispatch_v2_material_stage_write.ts` (the set press). Tests:
+`dispatch_v2_material_stage_test.ts`.
+
+One stage per supplier order (a `job_material_suppliers` row, the supplier
+box). The eight stages, in order, and who each waits on:
+
+| Key | Label | Waiting on | Next thing to do |
+|---|---|---|---|
+| `order_materials` | Order materials | us | Send the order to X |
+| `sent` | Sent to supplier | supplier | Waiting on X to reply |
+| `quote_received` | Quote received | us | Check the quote from X |
+| `awaiting_payment` | Awaiting payment | us | Pay X |
+| `order_confirmed` | Order confirmed | us until the install is booked, then supplier | Book the install and tell the client / Waiting on X for the materials |
+| `manufacturing` | Manufacturing | supplier | X is making it |
+| `ready` | Materials ready | us | Arrange delivery or pickup from X |
+| `delivered` | Delivered | nobody | (none) |
+
+**The stage a box shows: whatever happened last decides.** The newest of:
+
+- the stage a person set (`material_stage`, at `material_stage_set_at`);
+- the newest order email sent from the box (shows Sent to supplier);
+- the newest change to a line still to be ordered (no order email, no
+  purchase order, not In stock; shows Order materials).
+
+On the same moment a set stage wins. A delivery date confirmed after that
+lifts an earlier stage to Order confirmed (never pulls a later one back). A
+date set or confirmed before the box's newest send belongs to an earlier
+order, so it neither lifts the stage nor shows as the date: the newest send's
+asked-for date shows instead. Nothing is written when a send or a line moves
+the stage on; the stage shown is worked out on each read. A purchase order
+with no box takes its stage from its status (sent, submitted, authorised,
+acked = Sent to supplier; confirmed = Order confirmed; delivered, billed =
+Delivered; anything else = Order materials).
+
+**Extra orders.** An order is an extra when its newest send (or, still to be
+ordered, today) is on or after the install's first day; a purchase order
+when it was made on or after that day. No install booked = never an extra. An
+extra or delivered order never carries the red `after_install` flag, and a
+delivered order never carries `no_date`.
+
+### New fields
+
+Each `board.arrival.orders[]` entry (and `dispatch_arrival`) gains:
+
+```json
+{
+  "material_stage": "awaiting_payment",
+  "material_stage_label": "Awaiting payment",
+  "material_stage_source": "set",
+  "material_stage_set_at": "2026-10-28T02:00:00Z",
+  "material_stage_set_by_email": "hugo@...",
+  "waiting_on": "us",
+  "todo": "Pay Metroll",
+  "extra": false
+}
+```
+
+`material_stage_source` is `set` (a person chose it and nothing newer
+happened), `worked_out` (from the box) or `order` (a purchase order's
+status); `material_stage_set_at` and `_by_email` are only filled for `set`.
+`arrival.counts` gains `open` (not delivered), `on_us` and `extra_open`
+(extras not delivered), and `arrival.waiting_on_us` lists each `todo` waiting
+on us, in box order.
+
+Each row's `board` gains `waiting: { on_us, todo[] }`: the job's own step
+first ("Order the materials" at Order Materials or Repairs Materials when
+nothing is ordered yet, known only when the Arrival line read; "Book the
+install" at Schedule Install), then `arrival.waiting_on_us`. The top-level
+`board` gains `waiting_on_us`, the count of rows waiting on us.
+`dispatch_arrival` also answers `waiting`. Each supplier in the materials
+panel read (`dispatch_v2_materials`) gains `material_stage: { box_id, key,
+label, source, set_at, set_by_email }`, where `set_at` is the stored stamp the
+set press guards on (null = never set).
+
+### The set press
+
+`POST ops-api?action=dispatch_v2_set_material_stage`
+
+```json
+{
+  "box_id": "<job_material_suppliers id>",
+  "material_stage": "awaiting_payment",
+  "expected_set_at": "2026-10-22T05:00:00Z",
+  "operator_email": "shaun@..."
+}
+```
+
+- `box_id`, or instead `job_id` + `supplier_id`.
+- `material_stage`: one of the eight keys.
+- `expected_set_at` (optional guard): the `material_stage.set_at` the screen
+  showed, or `null` when the box had no stage of its own. Changed since =
+  409 `stage_changed` with the box as it is now. Without it the write is still
+  compare-and-set against the stamp just read.
+- `operator_email`: needed with the ops key, must name a person in `users`.
+
+Pressing a stage always stamps it again (now, by the person), even the same
+stage: that is how a person says "still at this stage" after a newer send or
+line moved the box on. Gate as section 3a: staff sessions and the privileged
+ops key only, GET 405, on no allow-list, `# probe=source-only`.
+
+What it writes: the three `material_stage*` columns of that one box and one
+`job_events` row, `dispatch_v2_material_stage_set`, `detail_json`
+`{ box_id, supplier_id, supplier, from, to, via, operator_email }` (`from` is
+the stored stage before, null if none). Never `jobs` (`job_status_changed` is
+always `false`), suppliers, purchase orders, the order emails, Xero, GHL, SMS
+or email. A failed audit insert does not undo the stage (`"audit_logged":
+false`).
+
+Answer: `{ success, job_status_changed: false, box: { box_id, job_id,
+supplier_id, supplier_name, material_stage, material_stage_label, set_at,
+set_by_email }, arrival }`, with `arrival` the fresh `dispatch_arrival`
+answer (null if that read failed).
+
+Errors: 400 `invalid_request`, 400 `operator_required`, 404 `box_not_found`,
+409 `not_dispatch_work`, 409 `stage_changed`, 500 `dispatch_write_failed`.
+
+Migration: `supabase/migrations/20261028170000_dispatch_v2_material_stages.sql`
+(rollback in `supabase/rollbacks/`): three nullable columns on
+`job_material_suppliers` and a check that a stage is one of the eight and
+always has when and by whom. Listed in
+`scripts/edge-function-schema-requirements.txt`: the materials panel read
+selects the columns, so ops-api must not deploy ahead of it.
 
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 

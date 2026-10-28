@@ -71,6 +71,11 @@ import {
   dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
+import {
+  dispatchMaterialStageLabel,
+  dispatchMaterialStageOf,
+  dispatchUnsentLineChanges,
+} from "./dispatch_v2_material_stage.ts";
 
 // ── The send seam ───────────────────────────────────────────────────────────
 
@@ -147,7 +152,7 @@ export const DISPATCH_V2_ACTIONS = [
 const LINE_SELECT =
   "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at";
 const BOX_SELECT =
-  "supplier_id, supplier_name, position, is_main_supplier, created_at";
+  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email";
 const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
@@ -643,8 +648,50 @@ export async function readDispatchV2Materials(
         sent_emails: boxEmails.filter((e) => e.status === "sent").map((e) =>
           projectDispatchV2Email(e, nowMs)
         ),
+        material_stage: boxMaterialStage(box, boxEmails, lines, id),
       };
     }),
+  };
+}
+
+// The box's material stage as the box shows it (dispatch_v2_material_stage.ts):
+// the stage, whether a person set it or it was worked out from the box, and
+// the stamp the set press guards on (material_stage_set_at, null = never set).
+// A delivery date confirmed before the box's newest send belongs to an earlier
+// order, so it does not lift the stage (the board's rule too).
+function boxMaterialStage(
+  box: any,
+  boxEmails: any[],
+  lines: any[],
+  supplierId: string,
+) {
+  const sentAts = boxEmails.filter((e) => e.status === "sent").map((e) =>
+    e.sent_at
+  );
+  const newestSent = Math.max(
+    -Infinity,
+    ...sentAts.map((at: unknown) => Date.parse(String(at ?? ""))).filter(
+      Number.isFinite,
+    ),
+  );
+  const dateSetAt = Date.parse(String(box?.delivery_date_set_at ?? ""));
+  const dateIsCurrent = !Number.isFinite(dateSetAt) || dateSetAt >= newestSent;
+  const shown = dispatchMaterialStageOf({
+    stored: box?.material_stage,
+    storedAt: box?.material_stage_set_at,
+    sentAts,
+    unsentLineChanges: dispatchUnsentLineChanges(lines, supplierId),
+    confirmedAt: dateIsCurrent ? box?.delivery_date_confirmed_at : null,
+  });
+  return {
+    box_id: box?.id ?? null,
+    key: shown.key,
+    label: dispatchMaterialStageLabel(shown.key),
+    source: shown.source,
+    set_at: box?.material_stage_set_at ?? null,
+    set_by_email: shown.source === "set"
+      ? box?.material_stage_set_by_email ?? null
+      : null,
   };
 }
 
