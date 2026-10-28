@@ -162,7 +162,7 @@
 ### Client Comms
 | Action | Input | Output |
 |--------|-------|--------|
-| `send_client_update` | `{ job_id, comms_trigger, channel?, custom_message?, template_vars? }` | `{ sent, channel, message_preview }` |
+| `send_client_update` | `{ job_id, comms_trigger, channel?, custom_message?, template_vars? }` | `{ sent, channel, message_preview, reason? }` |
 
 **IMPORTANT:** `send_client_update` is **caller-triggered only**. It is NOT automatic. The ops dashboard, AI, or Phase 2 trigger logic must call it explicitly. Phase 2 terminals that want automated lifecycle comms should build trigger logic and use this as the delivery mechanism.
 
@@ -172,6 +172,8 @@
 - Dedup is per **(job, new date)** against the most recent successfully-sent reschedule, not once-per-job: a double-tap on the same drop is swallowed, a later reschedule to a different date still sends, and a failed send never blocks a retry. A ghl-proxy in-band failure (HTTP 200 `success:false`) records `status='failed'`, not sent, so it can be retried too. Every other trigger keeps once-per-job (or per-contact) dedup.
 - The only SMS trigger WITHOUT the cross-sell footer — the approved wording ends "Cheers, Shaun".
 - Fired only from the ops calendar reschedule popup's explicit Yes; nothing sends it automatically.
+
+**Only `install_rescheduled` may text a customer** (Captain 28 Oct 2026; `CLIENT_UPDATE_SMS_TRIGGERS_ON` in `ops-api/index.ts`). Every other SMS trigger sends nothing: it still writes its `email_events` row as `status='failed'` (with `failure_reason` "`<trigger>` texts are switched off"), so every existing dedup behaves as before, and answers `sent:false` with that `reason`. An `install_rescheduled` SMS with `custom_message` is refused (`sent:false`, reason "custom reschedule texts are not allowed"). A failed send answers `reason` with ghl-proxy's own error; a sent one carries no `reason`. The send carries the service-role bearer (`ghl_proxy_send_sms.ts`), because ghl-proxy refuses a request with no login.
 
 **SMS:** Always via GHL (locked). **Email:** Via Resend. SMS messages get a cross-sell footer appended (`SecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe`), except `install_rescheduled`.
 
