@@ -1,8 +1,9 @@
 -- Rollback of 20261028190000_context_story_money_book: the job story's Money block is removed.
 --
--- The five story text functions it replaced go back to the 20261009100000 bodies and comments,
--- byte for byte (the policy with calls_per_day 80, the staff read, the request, the sweep and the
--- writer's input), and the five functions it added are dropped. No row is touched: saved stories
+-- The seven story text functions it replaced go back to the 20261009100000 bodies and comments,
+-- byte for byte (the policy with calls_per_day 80, the staff read, the request, the sweep, the
+-- writer's input, the claim state and the finish), and the five functions and two indexes it added
+-- are dropped. No row is touched: saved stories
 -- keep their words and checks (a story written with the Money block reads stale against the
 -- story-digest-v1 hash, so it is rewritten without it once the sweep next finds something new).
 --
@@ -17,7 +18,9 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_job_story_text_policy()', ARRAY['b263f36187edbfa9e49f6ddf0333c7d3', '27ac61c4fee7d15d3b71356271295eab']),
   ('public.context_job_story_request(uuid,text,text)', ARRAY['7b08a13cc6477ae00194acd6d96f8539', '7a75f855aafb50a8821a106ff64ba173']),
-  ('public.context_job_story_enqueue_changed(integer)', ARRAY['700761eeee2696d31131e07ae46e5ee3', '6fdbb9442d7184241971f3a96da378bc']),
+  ('public.context_job_story_enqueue_changed(integer)', ARRAY['700761eeee2696d31131e07ae46e5ee3', 'b0d7b0c0d3b99759c37814a68fab6b17']),
+  ('public.context_job_story_claim_state(uuid)', ARRAY['b70b21fa1fa0cea3acf60ba382008f48', '2f53d49dc49e9382d2ff3c6d98714761']),
+  ('public.context_job_story_request_finish(uuid,uuid,text,text,timestamptz)', ARRAY['d63337ed4159fa2d2f66ac7481d58afe', '032099f4f543efc989788613af6255b8']),
   ('public.context_job_story_writer_input(uuid)', ARRAY['3ba2c297f97483afccffd83d3d8f4cb2', '13097e3cc7abebfdeabff122bee66e1a']),
   ('public.context_job_story_text_get(uuid,jsonb,boolean)', ARRAY['ecf91571c4e75613c05bce5aaa3a9146', '3cea9dd6df2d2f00660ccd8438637385'])
  ) v(sig, accepted) LOOP
@@ -31,7 +34,7 @@ BEGIN
  END IF;
 END $guard$;
 
--- 1. The five bodies back (20261009100000), byte for byte.
+-- 1. The seven bodies back (20261009100000), byte for byte.
 CREATE OR REPLACE FUNCTION public.context_job_story_text_policy()
 RETURNS jsonb
 LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = pg_catalog
@@ -248,7 +251,77 @@ END $fn$;
 COMMENT ON FUNCTION public.context_job_story_writer_input(uuid) IS
  'Job story text (20261009100000): everything the story writer reads, from one snapshot (STABLE): {version story-writer-input-v1, job_id, as_of, job_status, card (context_job_story(job, now())), card_hash (context_job_story_card_hash of that card), current {text_id, card_hash, written_at, checked_at} or null, notes (context_job_story_ledger(job, null, now()): the live AI reading with every citation re-checked), transcript_row_ids (the job''s call.transcript_completed rows: their words are never prompt text)}. NULL for an unknown job. Read only. Service role only.';
 
--- 2. The functions this migration added.
+CREATE OR REPLACE FUNCTION public.context_job_story_claim_state(p_job_id uuid)
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $fn$
+ SELECT jsonb_build_object(
+  'job_status', (SELECT jb.status::text FROM public.jobs jb WHERE jb.id = p_job_id),
+  'record_sig', public.context_job_story_record_sig(p_job_id),
+  'generation_id', (SELECT r.generation_id FROM public.context_job_story_reading(p_job_id) r),
+  'evidence_until', (SELECT r.evidence_until FROM public.context_job_story_reading(p_job_id) r))
+$fn$;
+COMMENT ON FUNCTION public.context_job_story_claim_state(uuid) IS
+ 'Job story text (20261009100000): the job as a claim finds it: {job_status, record_sig (context_job_story_record_sig), generation_id and evidence_until (context_job_story_reading)}. Kept on the request; the story saved or confirmed unchanged by it carries these, so the sweep wakes only for what changed after the claim. Service role only.';
+
+CREATE OR REPLACE FUNCTION public.context_job_story_request_finish(p_request_id uuid, p_lease_token uuid, p_outcome text,
+ p_error text DEFAULT NULL, p_retry_at timestamptz DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $fn$
+DECLARE pol jsonb := public.context_job_story_text_policy(); r public.context_job_story_requests; v_stop boolean; v_attempts integer;
+ v_retry timestamptz; v_waits jsonb; v_text uuid;
+ stops constant text[] := ARRAY['story_off', 'story_budget', 'model_cap', 'cap', 'paused', 'model_admission_paused', 'switch_off',
+  'rate_limited', 'auth_required', 'worker_stopping'];
+BEGIN
+ IF p_request_id IS NULL OR p_lease_token IS NULL OR p_outcome IS NULL OR p_outcome NOT IN ('unchanged', 'failed', 'released')
+  OR (p_error IS NOT NULL AND p_error !~ '^[a-z0-9_]{1,64}$') OR (p_outcome = 'failed' AND p_error IS NULL) THEN
+  RAISE EXCEPTION 'context_job_story_finish_invalid' USING ERRCODE = '22023';
+ END IF;
+ SELECT * INTO r FROM public.context_job_story_requests q WHERE q.id = p_request_id FOR UPDATE;
+ IF r.id IS NULL OR r.done_at IS NOT NULL OR r.lease_token IS DISTINCT FROM p_lease_token
+  OR r.lease_expires_at IS NULL OR r.lease_expires_at <= now() THEN
+  RETURN jsonb_build_object('outcome', 'lease_lost');
+ END IF;
+ IF p_outcome = 'unchanged' THEN
+  -- the story still says what the card says: it now covers the claim, and the job as the claim found it
+  UPDATE public.context_job_story_texts t SET
+   checked_at = greatest(t.checked_at, r.picked_at),
+   job_status = coalesce(r.claimed_state ->> 'job_status', t.job_status),
+   record_sig = coalesce(r.claimed_state ->> 'record_sig', t.record_sig),
+   generation_id = CASE WHEN r.claimed_state ? 'generation_id' THEN (r.claimed_state ->> 'generation_id')::uuid ELSE t.generation_id END,
+   evidence_until = CASE WHEN r.claimed_state ? 'evidence_until' THEN (r.claimed_state ->> 'evidence_until')::timestamptz ELSE t.evidence_until END
+  WHERE t.job_id = r.job_id AND t.status = 'current'
+  RETURNING t.id INTO v_text;
+  UPDATE public.context_job_story_requests SET done_at = now(), outcome = 'unchanged', error = NULL, lease_token = NULL, lease_expires_at = NULL
+  WHERE id = r.id;
+  RETURN jsonb_build_object('outcome', 'closed', 'closed_as', 'unchanged', 'text_id', v_text);
+ END IF;
+ IF p_outcome = 'failed' THEN
+  UPDATE public.context_job_story_requests SET done_at = now(), outcome = 'failed', error = p_error, lease_token = NULL, lease_expires_at = NULL
+  WHERE id = r.id;
+  RETURN jsonb_build_object('outcome', 'closed', 'closed_as', 'failed', 'error', p_error);
+ END IF;
+ -- released: a stop (the switch, the budget, a pause, a login, a rate limit, the worker stopping) is no
+ -- attempt and waits 5 minutes unless told when; any other error counts and waits retry_minutes
+ v_stop := p_error IS NOT NULL AND p_error = ANY (stops);
+ v_attempts := r.attempts + CASE WHEN v_stop THEN 0 ELSE 1 END;
+ v_waits := pol -> 'retry_minutes';
+ v_retry := CASE
+  WHEN p_retry_at IS NOT NULL THEN least(greatest(p_retry_at, now()), now() + interval '2 days')
+  WHEN v_stop THEN now() + interval '5 minutes'
+  ELSE now() + make_interval(mins => (v_waits ->> (least(greatest(v_attempts, 1), jsonb_array_length(v_waits)) - 1))::integer) END;
+ UPDATE public.context_job_story_requests SET attempts = v_attempts, next_attempt_at = v_retry, error = p_error,
+  lease_token = NULL, lease_expires_at = NULL
+ WHERE id = r.id;
+ RETURN jsonb_build_object('outcome', 'released', 'attempts', v_attempts, 'next_attempt_at', v_retry, 'counted', NOT v_stop);
+END $fn$;
+COMMENT ON FUNCTION public.context_job_story_request_finish(uuid, uuid, text, text, timestamptz) IS
+ 'Job story text (20261009100000): ends a claimed request without a save. unchanged: the card''s hash equals the current story''s, so the story stays and now covers the claim (checked_at moves to picked_at; job_status, record_sig, generation_id and evidence_until become the claim''s), and the request closes unchanged. failed: closes with p_error (a code). released: clears the lease for a retry; a stop (story_off, story_budget, model_cap, cap, paused, model_admission_paused, switch_off, rate_limited, auth_required, worker_stopping) is not counted and waits 5 minutes, any other error counts an attempt and waits retry_minutes (30, then 120); p_retry_at, when given, is the wait (clamped to now .. now plus 2 days). {outcome closed|released|lease_lost, ...}. Raises context_job_story_finish_invalid for bad arguments. Service role only.';
+
+-- 2. The functions and indexes this migration added.
+DROP INDEX IF EXISTS public.context_story_mrq_suggested_open;
+DROP INDEX IF EXISTS public.context_story_trade_lines_job;
 DROP FUNCTION IF EXISTS public.context_job_story_full_hash(jsonb);
 DROP FUNCTION IF EXISTS public.context_job_story_book(uuid, timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_story_money_sig(uuid);
@@ -263,6 +336,8 @@ BEGIN
   ('public.context_job_story_text_policy()', 'b263f36187edbfa9e49f6ddf0333c7d3'),
   ('public.context_job_story_request(uuid,text,text)', '7b08a13cc6477ae00194acd6d96f8539'),
   ('public.context_job_story_enqueue_changed(integer)', '700761eeee2696d31131e07ae46e5ee3'),
+  ('public.context_job_story_claim_state(uuid)', 'b70b21fa1fa0cea3acf60ba382008f48'),
+  ('public.context_job_story_request_finish(uuid,uuid,text,text,timestamptz)', 'd63337ed4159fa2d2f66ac7481d58afe'),
   ('public.context_job_story_writer_input(uuid)', '3ba2c297f97483afccffd83d3d8f4cb2'),
   ('public.context_job_story_text_get(uuid,jsonb,boolean)', 'ecf91571c4e75613c05bce5aaa3a9146')
  ) v(sig, want) LOOP

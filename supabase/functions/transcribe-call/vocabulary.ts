@@ -6,9 +6,12 @@
 // "Kyle"; "Marnin", not "Marvin"). It is a hint, never a fact: nothing here is
 // written into the transcript, and a failed read only shortens the list.
 //
-// Whisper reads at most the last 224 tokens of a prompt, so the list is capped
-// in characters and ordered most important first: staff, then suppliers, then
-// products, then suburbs.
+// Whisper keeps only the last 224 tokens of a prompt and drops the start, so the
+// list is capped at 800 characters (about 200 tokens) to keep it whole, and it is
+// cut at our own cap, never Whisper's: ordered most important first (staff, then
+// suppliers, then products, then suburbs), so what the cap drops is the least
+// important. The transcript keeps whisper_prompt_chars, so a call where the list
+// leaks into a near-silent recording can be found.
 
 /** Words every call may use, in our own spelling. Trade products and the brands crews name on calls. */
 export const TRANSCRIPTION_FIXED_TERMS: readonly string[] = [
@@ -98,7 +101,7 @@ export async function loadTranscriptionPrompt(sb: Client, orgId: string): Promis
   const [users, suppliers, jobs] = await Promise.all([
     read('users', () => sb.from('users').select('name').eq('org_id', orgId).limit(100)),
     read('suppliers', () => sb.from('suppliers').select('name').eq('org_id', orgId).eq('is_active', true).order('updated_at', { ascending: false }).limit(40)),
-    read('suburbs', () => sb.from('jobs').select('site_suburb').eq('org_id', orgId).gte('created_at', since).not('site_suburb', 'is', null).limit(1000)),
+    read('suburbs', () => sb.from('jobs').select('site_suburb').eq('org_id', orgId).gte('created_at', since).not('site_suburb', 'is', null).order('created_at', { ascending: false }).limit(1000)),
   ])
   const counts = new Map<string, number>()
   for (const row of jobs) {

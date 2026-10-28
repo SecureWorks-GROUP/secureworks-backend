@@ -87,11 +87,26 @@ input and the staff read both use it, so the first apply reads every story
 stale once.
 
 `context_job_story_money_sig(job)` is the md5 of the raw rows the book is
-built from (Xero invoices and bills, placed bill rows, crew invoice lines and
-their invoice's status, purchase orders, open bills suggested for the job,
-work orders, client sign-offs, Xero Projects, the job's work order and
-completion time). The writer saves it as `checks.money_sig`; a story saved
-without that key was written without the book.
+built from (Xero invoices and bills, placed bill rows, crew invoice lines on
+the job or on no job naming its number, with their invoice's status and Xero
+bill status, purchase orders, open bills suggested for the job, work orders,
+client sign-offs, Xero Projects, the job's work order and completion time).
+The writer saves it as `checks.money_sig`; a story saved without that key was
+written without the book. The claim keeps it in `claimed_state`, and an
+`unchanged` finish moves `checks.money_sig` on to it, so a change the book
+does not print (a bill paid) wakes the story once, not every tick.
+
+Days in the book carry their year and nothing says "overdue", so the clock
+alone never changes its words or its digest.
+
+Since `20261028190000` the sweep also: wakes on the money signature; keeps a
+complete, completed or archived job awake for 30 days after completion or its
+newest sign-off, without asking the lead rule (a finished job is no lead);
+keeps every candidate before asking the lead rule about the live ones, so a
+lead the rule refuses can never hold the head of the order; leaves a job alone
+for 24 hours (`failed_backoff_hours`) after a request for it closed `failed`;
+and rewrites a story written without the book only while fewer than 10
+requests are open.
 
 ## The queue
 

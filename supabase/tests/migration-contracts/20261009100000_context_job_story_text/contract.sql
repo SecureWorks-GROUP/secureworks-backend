@@ -27,7 +27,7 @@
 -- Concurrent claims (SKIP LOCKED) are in concurrent.sh.
 \set ON_ERROR_STOP on
 
--- The story money book (20261028190000) replaced five of these bodies after this migration (the
+-- The story money book (20261028190000) replaced seven of these bodies after this migration (the
 -- policy at 240 calls a day, the staff read, the request, the sweep and the writer's input): when a
 -- full stack has it, it is rolled back for this contract, which proves this migration's own result,
 -- and applied again at the end (its own contract proves it).

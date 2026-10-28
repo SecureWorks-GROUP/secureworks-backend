@@ -27,7 +27,7 @@
 --     story-digest-v1 hash together with the book's digest (story-digest-v1+story-book-v1). A bill
 --     placed on the job makes the story stale. Every saved story reads stale once, which is true:
 --     none of them was written with the book.
---  4. Replaced (bodies of 20261009100000):
+--  4. Replaced (seven bodies of 20261009100000):
 --     context_job_story_writer_input: version story-writer-input-v2; card.book is the book; card_hash
 --      is the full hash.
 --     context_job_story_text_get: freshness by the full hash; adds money {version, lines, complete,
@@ -37,15 +37,23 @@
 --      from the one the story was written with (checks.money_sig, saved by the writer); keeps waking
 --      complete, completed and archived jobs for 30 days after completion or the client sign-off;
 --      rewrites a story written without the book (no checks.money_sig) only while fewer than 10
---      requests are open, so a real change is never queued behind the one-off rewrite of every story.
+--      requests are open, so a real change is never queued behind the one-off rewrite of every story;
+--      asks the lead rule only about live jobs (a finished job is no lead) and keeps every candidate
+--      before asking, so a lead it refuses can never hold the head of the order; leaves a job alone
+--      for 24 hours after a request for it closed failed.
+--     context_job_story_claim_state: adds money_sig.
+--     context_job_story_request_finish: an unchanged check also moves checks.money_sig on to the
+--      claim's, so a money change the book does not print (a bill paid) wakes the story once, not on
+--      every tick.
 --     context_job_story_text_policy: calls_per_day 240 (was 80), so the one-off rewrite of every
 --      story (about 630) takes days, not weeks. Everything else as it was.
 --  5. context_job_story_book_policy(): this slice's numbers.
 --
--- Writes nothing: no table, column, row, trigger or cron job. Service role only.
+-- Writes no table, column, row, trigger or cron job. Adds two indexes for the sweep's look-ups
+-- (open Bills to place rows by suggested job, crew invoice lines by job). Service role only.
 --
--- Rollback: supabase/rollbacks/20261028190000_context_story_money_book_down.sql (the five bodies
--- back byte for byte, the new functions dropped).
+-- Rollback: supabase/rollbacks/20261028190000_context_story_money_book_down.sql (the seven bodies
+-- back byte for byte, the new functions and the two indexes dropped).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -57,7 +65,9 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_job_story_text_policy()', ARRAY['b263f36187edbfa9e49f6ddf0333c7d3', '27ac61c4fee7d15d3b71356271295eab']),
   ('public.context_job_story_request(uuid,text,text)', ARRAY['7b08a13cc6477ae00194acd6d96f8539', '7a75f855aafb50a8821a106ff64ba173']),
-  ('public.context_job_story_enqueue_changed(integer)', ARRAY['700761eeee2696d31131e07ae46e5ee3', '6fdbb9442d7184241971f3a96da378bc']),
+  ('public.context_job_story_enqueue_changed(integer)', ARRAY['700761eeee2696d31131e07ae46e5ee3', 'b0d7b0c0d3b99759c37814a68fab6b17']),
+  ('public.context_job_story_claim_state(uuid)', ARRAY['b70b21fa1fa0cea3acf60ba382008f48', '2f53d49dc49e9382d2ff3c6d98714761']),
+  ('public.context_job_story_request_finish(uuid,uuid,text,text,timestamptz)', ARRAY['d63337ed4159fa2d2f66ac7481d58afe', '032099f4f543efc989788613af6255b8']),
   ('public.context_job_story_writer_input(uuid)', ARRAY['3ba2c297f97483afccffd83d3d8f4cb2', '13097e3cc7abebfdeabff122bee66e1a']),
   ('public.context_job_story_text_get(uuid,jsonb,boolean)', ARRAY['ecf91571c4e75613c05bce5aaa3a9146', '3cea9dd6df2d2f00660ccd8438637385'])
  ) v(sig, accepted) LOOP
@@ -88,6 +98,8 @@ BEGIN
    'work_orders.agreed_labour_ex', 'xero_invoices.sub_total', 'xero_invoices.raw_json', 'job_materials_facts.job_id',
    'job_materials_facts.xero_invoice_id', 'job_materials_facts.amount_ex_gst', 'job_materials_facts.lane', 'job_materials_facts.kind',
    'trade_invoice_lines.job_id', 'trade_invoice_lines.trade_invoice_id', 'trade_invoice_lines.line_total_ex', 'trade_invoices.status',
+   'trade_invoice_lines.job_number', 'trade_invoice_lines.description', 'trade_invoice_lines.line_type', 'trade_invoices.xero_bill_status',
+   'jobs.job_number', 'context_job_story_requests.outcome', 'context_job_story_requests.claimed_state',
    'purchase_orders.job_id', 'purchase_orders.status', 'purchase_orders.total', 'materials_reconciliation_queue.suggested_job_id',
    'materials_reconciliation_queue.status', 'materials_reconciliation_queue.sub_total', 'job_client_signoffs.job_id',
    'job_client_signoffs.method', 'job_client_signoffs.happy', 'job_client_signoffs.created_at', 'xero_projects.job_id',
@@ -121,13 +133,15 @@ AS $fn$
   'after_done_days', 30,
   -- a story written without the book is rewritten only while fewer requests than this are open
   'backfill_open_max', 10,
+  -- the sweep leaves a job alone this long after a request for it closed failed
+  'failed_backoff_hours', 24,
   -- the most owing invoices and crew members the book names one by one
   'owing_max', 6,
   'crew_max', 6,
   'payers_max', 4)
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_book_policy() IS
- 'Story money book (20261028190000): this slice''s numbers: version story-book-v1, after_done_days 30 (a complete, completed or archived job keeps waking that long after its completion or client sign-off), backfill_open_max 10 (a story written without the book is rewritten only while fewer requests are open), owing_max 6, crew_max 6, payers_max 4 (named one by one, the rest counted). Changed only by migration. Service role only.';
+ 'Story money book (20261028190000): this slice''s numbers: version story-book-v1, after_done_days 30 (a complete, completed or archived job keeps waking that long after its completion or client sign-off), backfill_open_max 10 (a story written without the book is rewritten only while fewer requests are open), failed_backoff_hours 24 (the sweep leaves a job alone that long after a request for it closed failed), owing_max 6, crew_max 6, payers_max 4 (named one by one, the rest counted). Changed only by migration. Service role only.';
 
 -- 2. A dollar figure as the story writes it: "$1,234.50", "-$12.00". Pure.
 CREATE OR REPLACE FUNCTION public.context_job_story_money_words(p numeric)
@@ -151,8 +165,14 @@ AS $fn$
    FROM public.xero_invoices x WHERE x.job_id = p_job_id),
   (SELECT string_agg(concat_ws(',', f.id::text, f.xero_invoice_id, f.amount_ex_gst::text, f.lane, f.kind), ';' ORDER BY f.id)
    FROM public.job_materials_facts f WHERE f.job_id = p_job_id),
-  (SELECT string_agg(concat_ws(',', l.id::text, l.line_total_ex::text, ti.status), ';' ORDER BY l.id)
-   FROM public.trade_invoice_lines l LEFT JOIN public.trade_invoices ti ON ti.id = l.trade_invoice_id WHERE l.job_id = p_job_id),
+  -- crew lines on the job, and lines with no job that name its number (Job Profit places those by
+  -- number or description, v_trade_charge_resolved; a wider net only costs a spare wake)
+  (SELECT string_agg(concat_ws(',', l.id::text, l.line_total_ex::text, l.line_type, ti.status, ti.xero_bill_status), ';' ORDER BY l.id)
+   FROM public.trade_invoice_lines l LEFT JOIN public.trade_invoices ti ON ti.id = l.trade_invoice_id
+   WHERE l.job_id = p_job_id
+      OR (l.job_id IS NULL AND (SELECT nullif(btrim(jb.job_number), '') FROM public.jobs jb WHERE jb.id = p_job_id) IS NOT NULL
+          AND (upper(btrim(coalesce(l.job_number, ''))) = (SELECT upper(btrim(jb.job_number)) FROM public.jobs jb WHERE jb.id = p_job_id)
+               OR upper(coalesce(l.description, '')) LIKE '%' || (SELECT upper(btrim(jb.job_number)) FROM public.jobs jb WHERE jb.id = p_job_id) || '%'))),
   (SELECT string_agg(concat_ws(',', po.id::text, po.status, po.total::text), ';' ORDER BY po.id)
    FROM public.purchase_orders po WHERE po.job_id = p_job_id),
   (SELECT string_agg(concat_ws(',', q.id::text, q.status, q.sub_total::text), ';' ORDER BY q.id)
@@ -166,14 +186,14 @@ AS $fn$
   (SELECT concat_ws(',', jb.work_order_id::text, to_char(jb.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')) FROM public.jobs jb WHERE jb.id = p_job_id)))
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_money_sig(uuid) IS
- 'Story money book (20261028190000): md5 (money-sig-v1) of the rows a job''s Money block is built from: its Xero invoices and bills (type, status, sub total, total, due, paid, credited, due date), placed bill rows (job_materials_facts), crew invoice lines and their invoice''s status, purchase orders, open bills suggested for it in Bills to place, work orders, client sign-offs, Xero Projects, and the job''s work order and completion time. A sync that rewrites a row without changing these leaves it alone. The story writer saves it in checks.money_sig; context_job_story_enqueue_changed wakes the story when it moves. Service role only.';
+ 'Story money book (20261028190000): md5 (money-sig-v1) of the rows a job''s Money block is built from: its Xero invoices and bills (type, status, sub total, total, due, paid, credited, due date), placed bill rows (job_materials_facts), crew invoice lines (on the job, or on no job and naming its number) and their invoice''s status and Xero bill status, purchase orders, open bills suggested for it in Bills to place, work orders, client sign-offs, Xero Projects, and the job''s work order and completion time. A sync that rewrites a row without changing these leaves it alone. The story writer saves it in checks.money_sig; context_job_story_enqueue_changed wakes the story when it moves. Service role only.';
 
 -- 4. The book: the job's money in fixed lines, from Job Profit.
 CREATE OR REPLACE FUNCTION public.context_job_story_book(p_job_id uuid, p_as_of timestamptz DEFAULT now())
 RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
-DECLARE pol jsonb := public.context_job_story_book_policy(); p record; v_today date := (coalesce(p_as_of, now()) AT TIME ZONE 'Australia/Perth')::date;
+DECLARE pol jsonb := public.context_job_story_book_policy(); p record;
  v_lines text[] := '{}'; v_job_lines text[] := '{}'; v_reasons text[] := '{}'; v_cost_reasons integer := 0;
  v_txt text; v_n integer; v_amt numeric; v_why text; v_complete boolean; v_started boolean; v_incomplete text;
  v_likely_n integer; v_likely_ex numeric; v_priced_n integer; w record; s record;
@@ -239,8 +259,7 @@ BEGIN
   IF w.o <= (pol ->> 'owing_max')::integer THEN
    v_lines := v_lines || ('Owing now on ' || coalesce(nullif(btrim(w.invoice_number), ''), 'an invoice without a number') || ': '
     || public.context_job_story_money_words(w.amount_due) || ' inc GST'
-    || CASE WHEN w.due_date IS NOT NULL THEN ', due ' || public.context_job_story_day(w.due_date, v_today) ELSE '' END
-    || CASE WHEN w.due_date < v_today THEN ', overdue' ELSE '' END || '.');
+    || CASE WHEN w.due_date IS NOT NULL THEN ', due ' || to_char(w.due_date, 'Dy FMDD Mon YYYY') ELSE '' END || '.');
   ELSIF w.o = (pol ->> 'owing_max')::integer + 1 THEN
    v_lines := v_lines || ('Owing now on ' || (w.n - (pol ->> 'owing_max')::integer) || ' more invoices.');
   END IF;
@@ -295,7 +314,7 @@ BEGIN
  FROM public.jobs jb JOIN public.work_orders wo ON wo.id = jb.work_order_id WHERE jb.id = p_job_id;
  IF w.status IS NOT NULL THEN
   v_lines := v_lines || CASE WHEN w.approved_at IS NOT NULL
-   THEN 'Work order: approved ' || public.context_job_story_day((w.approved_at AT TIME ZONE 'Australia/Perth')::date, v_today)
+   THEN 'Work order: approved ' || to_char((w.approved_at AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon YYYY')
         || CASE WHEN w.agreed_labour_ex IS NOT NULL THEN ', agreed labour ' || public.context_job_story_money_words(w.agreed_labour_ex) || ' ex GST' ELSE '' END || '.'
    ELSE 'Work order: drafted, not approved yet.' END;
  ELSIF p.work_type IN ('fencing', 'patio', 'decking', 'combo') THEN
@@ -355,7 +374,7 @@ BEGIN
  WHERE sg.job_id = p_job_id ORDER BY sg.created_at DESC, sg.id DESC LIMIT 1;
  v_job_lines := v_job_lines || CASE WHEN s.created_at IS NULL THEN 'Client sign-off: none on record.'
   ELSE 'Client sign-off: ' || CASE WHEN s.method = 'office_waiver' THEN 'waived by the office' ELSE 'signed on site' END || ' '
-       || public.context_job_story_day((s.created_at AT TIME ZONE 'Australia/Perth')::date, v_today)
+       || to_char((s.created_at AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon YYYY')
        || CASE WHEN s.happy IS TRUE THEN ', the customer said they were happy' WHEN s.happy IS FALSE THEN ', the customer said they were not happy' ELSE '' END || '.' END;
 
  RETURN jsonb_build_object(
@@ -378,7 +397,7 @@ BEGIN
   'money_sig', public.context_job_story_money_sig(p_job_id));
 END $fn$;
 COMMENT ON FUNCTION public.context_job_story_book(uuid, timestamptz) IS
- 'Story money book (20261028190000): the job''s money in fixed plain lines from Job Profit (v_job_profit, v_job_cost_events, v_job_revenue_events, the engine Job Profit''s screen reads; figures are the engine''s, formatted, never worked out here): {version story-book-v1, job_id, source job_profit|none, complete, started (any invoice, cost, order or waiting bill), reason, reasons, lines, job_lines, incomplete_line, facts, digest, money_sig}. lines: quoted; expected cost at the quote; invoiced and collected (ex GST) and by payer; owing now per invoice (Xero, inc GST); labour, and crew invoices by crew member; materials, commission, other and total costs placed; priced orders not billed, unpriced orders, invoices emailed with no bill placed; bills that probably belong to the job waiting in Bills to place (open queue rows suggested for it); the Xero Project total (a cross-check); the job work order; the margin or "Unknown, because ..."; and, unless complete, one "Costs incomplete: ..." (or "Money incomplete: ...") line with counts and no dollar figure. complete: Job Profit shows a margin and nothing is waiting. job_lines: the client sign-off. digest: md5 of the words. NULL for an unknown job. Read only. Service role only.';
+ 'Story money book (20261028190000): the job''s money in fixed plain lines from Job Profit (v_job_profit, v_job_cost_events, v_job_revenue_events, the engine Job Profit''s screen reads; figures are the engine''s, formatted, never worked out here): {version story-book-v1, job_id, source job_profit|none, complete, started (any invoice, cost, order or waiting bill), reason, reasons, lines, job_lines, incomplete_line, facts, digest, money_sig}. lines: quoted; expected cost at the quote; invoiced and collected (ex GST) and by payer; owing now per invoice (Xero, inc GST); labour, and crew invoices by crew member; materials, commission, other and total costs placed; priced orders not billed, unpriced orders, invoices emailed with no bill placed; bills that probably belong to the job waiting in Bills to place (open queue rows suggested for it); the Xero Project total (a cross-check); the job work order; the margin or "Unknown, because ..."; and, unless complete, one "Costs incomplete: ..." (or "Money incomplete: ...") line with counts and no dollar figure. complete: Job Profit shows a margin and nothing is waiting. job_lines: the client sign-off. digest: md5 of the words. Days are written with their year and nothing says overdue, so the clock alone never changes the words (p_as_of is kept for callers and changes nothing). NULL for an unknown job. Read only. Service role only.';
 
 -- 5. What a saved story is fresh against: the card's digest and the book's.
 CREATE OR REPLACE FUNCTION public.context_job_story_full_hash(p_card jsonb)
@@ -529,7 +548,8 @@ RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
 DECLARE pol jsonb := public.context_job_story_text_policy(); bpol jsonb := public.context_job_story_book_policy(); v_cap integer; v_limit integer;
- v_rewrite interval; v_quiet interval; v_after interval; v_open integer; v_cand uuid[]; v_jobs uuid[]; v_ids jsonb;
+ v_rewrite interval; v_quiet interval; v_after interval; v_failed interval; v_open integer; v_cand uuid[]; v_done uuid[]; v_jobs uuid[];
+ v_ids jsonb;
 BEGIN
  IF NOT public.context_job_story_text_on() THEN
   RETURN jsonb_build_object('outcome', 'off', 'queued', 0, 'job_ids', '[]'::jsonb);
@@ -542,6 +562,7 @@ BEGIN
  v_rewrite := make_interval(mins => (pol ->> 'min_rewrite_minutes')::integer);
  v_quiet := make_interval(mins => (pol ->> 'quiet_minutes')::integer);
  v_after := make_interval(days => (bpol ->> 'after_done_days')::integer);
+ v_failed := make_interval(hours => (bpol ->> 'failed_backoff_hours')::integer);
  SELECT count(*)::integer INTO v_open FROM public.context_job_story_requests q WHERE q.done_at IS NULL;
  -- 1. Cheap signals first: a current story older than the rewrite floor, no open request, a live job
  --    (or one complete, completed or archived inside after_done_days of its completion or client
@@ -552,16 +573,22 @@ BEGIN
  --    with: a bill, crew line, order, credit or sign-off placed or removed), or, with no AI reading at
  --    all, a message row recorded since that has been quiet for quiet_minutes. A story written without
  --    the Money block (no checks.money_sig) is rewritten only while fewer than backfill_open_max
- --    requests are open, and after every real change. Oldest checked first.
- SELECT array_agg(c.job_id ORDER BY c.backfill, c.checked_at, c.job_id) INTO v_cand
+ --    requests are open, and after every real change. A job whose request closed failed inside
+ --    failed_backoff_hours is left alone. Every candidate is kept (no limit here), so a job the lead
+ --    rule refuses below can never hold the head of the order.
+ SELECT array_agg(c.job_id ORDER BY c.backfill, c.checked_at, c.job_id),
+        array_agg(c.job_id) FILTER (WHERE c.finished) INTO v_cand, v_done
  FROM (
-  SELECT t.job_id, t.checked_at, NOT coalesce(t.checks ? 'money_sig', false) AS backfill
+  SELECT t.job_id, t.checked_at, NOT coalesce(t.checks ? 'money_sig', false) AS backfill,
+         jb.status::text IN ('archived', 'complete', 'completed') AS finished
   FROM public.context_job_story_texts t
   JOIN public.jobs jb ON jb.id = t.job_id
   LEFT JOIN LATERAL public.context_job_story_reading(t.job_id) lg ON true
   WHERE t.status = 'current'
     AND t.written_at <= now() - v_rewrite
     AND NOT EXISTS (SELECT 1 FROM public.context_job_story_requests q WHERE q.job_id = t.job_id AND q.done_at IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM public.context_job_story_requests q
+                    WHERE q.job_id = t.job_id AND q.outcome = 'failed' AND q.done_at > now() - v_failed)
     AND (jb.status::text NOT IN ('cancelled', 'draft', 'archived', 'complete', 'completed', 'lost')
          OR (jb.status::text IN ('archived', 'complete', 'completed')
              AND greatest(jb.completed_at, (SELECT max(s.created_at) FROM public.job_client_signoffs s WHERE s.job_id = t.job_id))
@@ -587,15 +614,17 @@ BEGIN
          OR (coalesce(t.checks ? 'money_sig', false)
              AND public.context_job_story_money_sig(t.job_id) IS DISTINCT FROM t.checks ->> 'money_sig')
          OR (NOT coalesce(t.checks ? 'money_sig', false) AND v_open < (bpol ->> 'backfill_open_max')::integer))
-  ORDER BY 3, t.checked_at, t.job_id
-  LIMIT v_limit * 10
- ) c;
+  ) c;
  IF v_cand IS NULL THEN
   RETURN jsonb_build_object('outcome', 'queued', 'queued', 0, 'job_ids', '[]'::jsonb, 'candidates', 0);
  END IF;
- -- 2. Then the lead rule, for the survivors only: a lead no longer followed up is never rewritten by itself.
- SELECT array_agg(m.job_id ORDER BY array_position(v_cand, m.job_id)) INTO v_jobs
- FROM public.context_lead_monitored_jobs(v_cand, now()) m WHERE m.monitored;
+ -- 2. Then the lead rule, for the live survivors only: a lead no longer followed up is never rewritten
+ --    by itself. A finished job inside after_done_days is no lead and keeps its 30 days.
+ SELECT array_agg(k.job_id ORDER BY k.ord) INTO v_jobs
+ FROM unnest(v_cand) WITH ORDINALITY AS k(job_id, ord)
+ WHERE k.job_id = ANY (coalesce(v_done, '{}'::uuid[]))
+    OR k.job_id IN (SELECT m.job_id FROM public.context_lead_monitored_jobs(
+         ARRAY(SELECT x FROM unnest(v_cand) x WHERE NOT x = ANY (coalesce(v_done, '{}'::uuid[]))), now()) m WHERE m.monitored);
  WITH ins AS (
   INSERT INTO public.context_job_story_requests (job_id, requested_by, reason)
   SELECT j.job_id, pol ->> 'writer', 'job_changed'
@@ -607,7 +636,87 @@ BEGIN
  RETURN jsonb_build_object('outcome', 'queued', 'queued', jsonb_array_length(v_ids), 'job_ids', v_ids, 'candidates', cardinality(v_cand));
 END $fn$;
 COMMENT ON FUNCTION public.context_job_story_enqueue_changed(integer) IS
- 'Story money book (20261028190000), job story text (20261009100000): the one rule for "something new happened" (SQL decides what is due; the worker calls it each tick): queues reason job_changed, requested_by luna-story-writer, for at most p_limit (default and most enqueue_per_call, 5) jobs: a current story written more than min_rewrite_minutes ago, no open request, a live job (not cancelled, draft, archived, complete, completed or lost, never a holding job) or one complete, completed or archived whose completion (jobs.completed_at) or newest client sign-off is inside after_done_days (30), monitored by the lead rule (context_lead_monitored_jobs, read only for the jobs the cheap signals keep), and something newer than the story covers: the job''s status differs from the story''s; its AI reading (context_job_story_reading) is another generation or reads to another evidence_until; a customer invoice or quote row was touched since checked_at and the record signature (context_job_story_record_sig) differs; its money signature (context_job_story_money_sig) differs from the story''s checks.money_sig; with no AI reading, a message row (not a copy) recorded since checked_at and quiet for quiet_minutes; or the story was written without the Money block (no checks.money_sig), only while fewer than backfill_open_max (10) requests are open. Real changes first, then the rewrites without the block, oldest checked first. {outcome off|queued, queued, job_ids, candidates}. Service role only.';
+ 'Story money book (20261028190000), job story text (20261009100000): the one rule for "something new happened" (SQL decides what is due; the worker calls it each tick): queues reason job_changed, requested_by luna-story-writer, for at most p_limit (default and most enqueue_per_call, 5) jobs: a current story written more than min_rewrite_minutes ago, no open request, a live job (not cancelled, draft, archived, complete, completed or lost, never a holding job) or one complete, completed or archived whose completion (jobs.completed_at) or newest client sign-off is inside after_done_days (30) (no lead: the lead rule is not asked), a live one monitored by the lead rule (context_lead_monitored_jobs, read only for the live jobs the cheap signals keep, all of them, so a refused lead never holds the head of the order), no request for it closed failed inside failed_backoff_hours (24), and something newer than the story covers: the job''s status differs from the story''s; its AI reading (context_job_story_reading) is another generation or reads to another evidence_until; a customer invoice or quote row was touched since checked_at and the record signature (context_job_story_record_sig) differs; its money signature (context_job_story_money_sig) differs from the story''s checks.money_sig; with no AI reading, a message row (not a copy) recorded since checked_at and quiet for quiet_minutes; or the story was written without the Money block (no checks.money_sig), only while fewer than backfill_open_max (10) requests are open. Real changes first, then the rewrites without the block, oldest checked first. {outcome off|queued, queued, job_ids, candidates}. Service role only.';
+
+-- 9a. The job as a claim finds it, now with its money signature.
+CREATE OR REPLACE FUNCTION public.context_job_story_claim_state(p_job_id uuid)
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $fn$
+ SELECT jsonb_build_object(
+  'job_status', (SELECT jb.status::text FROM public.jobs jb WHERE jb.id = p_job_id),
+  'record_sig', public.context_job_story_record_sig(p_job_id),
+  'generation_id', (SELECT r.generation_id FROM public.context_job_story_reading(p_job_id) r),
+  'evidence_until', (SELECT r.evidence_until FROM public.context_job_story_reading(p_job_id) r),
+  'money_sig', public.context_job_story_money_sig(p_job_id))
+$fn$;
+COMMENT ON FUNCTION public.context_job_story_claim_state(uuid) IS
+ 'Story money book (20261028190000), job story text (20261009100000): the job as a claim finds it: {job_status, record_sig (context_job_story_record_sig), generation_id and evidence_until (context_job_story_reading), money_sig (context_job_story_money_sig)}. Kept on the request; the story saved or confirmed unchanged by it carries these, so the sweep wakes only for what changed after the claim. Service role only.';
+
+-- 9b. An unchanged check also moves the story's money signature on, so a change the book does not
+--     print never queues the same job again and again.
+CREATE OR REPLACE FUNCTION public.context_job_story_request_finish(p_request_id uuid, p_lease_token uuid, p_outcome text,
+ p_error text DEFAULT NULL, p_retry_at timestamptz DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $fn$
+DECLARE pol jsonb := public.context_job_story_text_policy(); r public.context_job_story_requests; v_stop boolean; v_attempts integer;
+ v_retry timestamptz; v_waits jsonb; v_text uuid;
+ stops constant text[] := ARRAY['story_off', 'story_budget', 'model_cap', 'cap', 'paused', 'model_admission_paused', 'switch_off',
+  'rate_limited', 'auth_required', 'worker_stopping'];
+BEGIN
+ IF p_request_id IS NULL OR p_lease_token IS NULL OR p_outcome IS NULL OR p_outcome NOT IN ('unchanged', 'failed', 'released')
+  OR (p_error IS NOT NULL AND p_error !~ '^[a-z0-9_]{1,64}$') OR (p_outcome = 'failed' AND p_error IS NULL) THEN
+  RAISE EXCEPTION 'context_job_story_finish_invalid' USING ERRCODE = '22023';
+ END IF;
+ SELECT * INTO r FROM public.context_job_story_requests q WHERE q.id = p_request_id FOR UPDATE;
+ IF r.id IS NULL OR r.done_at IS NOT NULL OR r.lease_token IS DISTINCT FROM p_lease_token
+  OR r.lease_expires_at IS NULL OR r.lease_expires_at <= now() THEN
+  RETURN jsonb_build_object('outcome', 'lease_lost');
+ END IF;
+ IF p_outcome = 'unchanged' THEN
+  -- the story still says what the card says: it now covers the claim, and the job as the claim found it
+  UPDATE public.context_job_story_texts t SET
+   checked_at = greatest(t.checked_at, r.picked_at),
+   job_status = coalesce(r.claimed_state ->> 'job_status', t.job_status),
+   record_sig = coalesce(r.claimed_state ->> 'record_sig', t.record_sig),
+   generation_id = CASE WHEN r.claimed_state ? 'generation_id' THEN (r.claimed_state ->> 'generation_id')::uuid ELSE t.generation_id END,
+   evidence_until = CASE WHEN r.claimed_state ? 'evidence_until' THEN (r.claimed_state ->> 'evidence_until')::timestamptz ELSE t.evidence_until END,
+   -- a story written with the Money block now covers the money as the claim found it (a change the
+   -- book does not print, a bill paid, leaves the words as they are and must not wake it again)
+   checks = CASE WHEN t.checks ? 'money_sig' AND r.claimed_state ->> 'money_sig' ~ '^[0-9a-f]{32}$'
+                 THEN jsonb_set(t.checks, '{money_sig}', r.claimed_state -> 'money_sig') ELSE t.checks END
+  WHERE t.job_id = r.job_id AND t.status = 'current'
+  RETURNING t.id INTO v_text;
+  UPDATE public.context_job_story_requests SET done_at = now(), outcome = 'unchanged', error = NULL, lease_token = NULL, lease_expires_at = NULL
+  WHERE id = r.id;
+  RETURN jsonb_build_object('outcome', 'closed', 'closed_as', 'unchanged', 'text_id', v_text);
+ END IF;
+ IF p_outcome = 'failed' THEN
+  UPDATE public.context_job_story_requests SET done_at = now(), outcome = 'failed', error = p_error, lease_token = NULL, lease_expires_at = NULL
+  WHERE id = r.id;
+  RETURN jsonb_build_object('outcome', 'closed', 'closed_as', 'failed', 'error', p_error);
+ END IF;
+ -- released: a stop (the switch, the budget, a pause, a login, a rate limit, the worker stopping) is no
+ -- attempt and waits 5 minutes unless told when; any other error counts and waits retry_minutes
+ v_stop := p_error IS NOT NULL AND p_error = ANY (stops);
+ v_attempts := r.attempts + CASE WHEN v_stop THEN 0 ELSE 1 END;
+ v_waits := pol -> 'retry_minutes';
+ v_retry := CASE
+  WHEN p_retry_at IS NOT NULL THEN least(greatest(p_retry_at, now()), now() + interval '2 days')
+  WHEN v_stop THEN now() + interval '5 minutes'
+  ELSE now() + make_interval(mins => (v_waits ->> (least(greatest(v_attempts, 1), jsonb_array_length(v_waits)) - 1))::integer) END;
+ UPDATE public.context_job_story_requests SET attempts = v_attempts, next_attempt_at = v_retry, error = p_error,
+  lease_token = NULL, lease_expires_at = NULL
+ WHERE id = r.id;
+ RETURN jsonb_build_object('outcome', 'released', 'attempts', v_attempts, 'next_attempt_at', v_retry, 'counted', NOT v_stop);
+END $fn$;
+COMMENT ON FUNCTION public.context_job_story_request_finish(uuid, uuid, text, text, timestamptz) IS
+ 'Story money book (20261028190000), job story text (20261009100000): ends a claimed request without a save. unchanged: the card''s hash equals the current story''s, so the story stays and now covers the claim (checked_at moves to picked_at; job_status, record_sig, generation_id and evidence_until become the claim''s, and a story written with the Money block takes the claim''s money_sig in checks), and the request closes unchanged. failed: closes with p_error (a code). released: clears the lease for a retry; a stop (story_off, story_budget, model_cap, cap, paused, model_admission_paused, switch_off, rate_limited, auth_required, worker_stopping) is not counted and waits 5 minutes, any other error counts an attempt and waits retry_minutes (30, then 120); p_retry_at, when given, is the wait (clamped to now .. now plus 2 days). {outcome closed|released|lease_lost, ...}. Raises context_job_story_finish_invalid for bad arguments. Service role only.';
+
+-- 9c. Two look-ups the sweep makes for every story each tick.
+CREATE INDEX IF NOT EXISTS context_story_mrq_suggested_open ON public.materials_reconciliation_queue (suggested_job_id) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS context_story_trade_lines_job ON public.trade_invoice_lines (job_id);
 
 -- 10. What the writer reads, from one snapshot: the card with its book.
 CREATE OR REPLACE FUNCTION public.context_job_story_writer_input(p_job_id uuid)
@@ -651,7 +760,8 @@ BEGIN
    'public.context_job_story_money_sig(uuid)', 'public.context_job_story_book(uuid,timestamptz)', 'public.context_job_story_full_hash(jsonb)',
    'public.context_job_story_text_policy()', 'public.context_job_story_text_get(uuid,jsonb,boolean)',
    'public.context_job_story_request(uuid,text,text)', 'public.context_job_story_enqueue_changed(integer)',
-   'public.context_job_story_writer_input(uuid)'] LOOP
+   'public.context_job_story_writer_input(uuid)', 'public.context_job_story_claim_state(uuid)',
+   'public.context_job_story_request_finish(uuid,uuid,text,text,timestamptz)'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;
@@ -664,7 +774,9 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_job_story_text_policy()', '27ac61c4fee7d15d3b71356271295eab'),
   ('public.context_job_story_request(uuid,text,text)', '7a75f855aafb50a8821a106ff64ba173'),
-  ('public.context_job_story_enqueue_changed(integer)', '6fdbb9442d7184241971f3a96da378bc'),
+  ('public.context_job_story_enqueue_changed(integer)', 'b0d7b0c0d3b99759c37814a68fab6b17'),
+  ('public.context_job_story_claim_state(uuid)', '2f53d49dc49e9382d2ff3c6d98714761'),
+  ('public.context_job_story_request_finish(uuid,uuid,text,text,timestamptz)', '032099f4f543efc989788613af6255b8'),
   ('public.context_job_story_writer_input(uuid)', '13097e3cc7abebfdeabff122bee66e1a'),
   ('public.context_job_story_text_get(uuid,jsonb,boolean)', '3cea9dd6df2d2f00660ccd8438637385')
  ) v(sig, want) LOOP

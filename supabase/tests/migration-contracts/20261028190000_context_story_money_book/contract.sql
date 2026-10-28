@@ -1,6 +1,6 @@
 -- Contract for 20261028190000_context_story_money_book: the job story's Money block.
 -- Every fixture write is rolled back; ids, names and numbers are made up.
---  1. Shape: the new functions with this migration's comment, service role only; the five
+--  1. Shape: the new functions with this migration's comment, service role only; the seven
 --     replaced bodies are this migration's; the policy's numbers.
 --  2. The book on a job with a quote, an invoice owing, crew pay, a placed bill, a priced order,
 --     a bill waiting in Bills to place and a sign-off: every line, word for word, and the same
@@ -11,7 +11,10 @@
 --  5. Freshness: a bill placed on the job makes a fresh story stale; the staff read carries the
 --     Money block; the writer's input carries the book and the same hash.
 --  6. The sweep: wakes on money (checks.money_sig), keeps waking a completed job for 30 days, not
---     after; rewrites a story written without the block only while few requests are open.
+--     after; rewrites a story written without the block only while few requests are open; 60 leads
+--     the lead rule refuses never hold the head of the order; a job whose request failed is left
+--     alone for a day; an unchanged check moves checks.money_sig on (no endless re-queue); a crew
+--     line on no job naming the job's number moves the signature.
 --  7. A second apply changes nothing; the rollback restores the 20261009100000 bodies.
 \set ON_ERROR_STOP on
 
@@ -33,7 +36,9 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_job_story_text_policy()', '27ac61c4fee7d15d3b71356271295eab'),
   ('public.context_job_story_request(uuid,text,text)', '7a75f855aafb50a8821a106ff64ba173'),
-  ('public.context_job_story_enqueue_changed(integer)', '6fdbb9442d7184241971f3a96da378bc'),
+  ('public.context_job_story_enqueue_changed(integer)', 'b0d7b0c0d3b99759c37814a68fab6b17'),
+  ('public.context_job_story_claim_state(uuid)', '2f53d49dc49e9382d2ff3c6d98714761'),
+  ('public.context_job_story_request_finish(uuid,uuid,text,text,timestamptz)', '032099f4f543efc989788613af6255b8'),
   ('public.context_job_story_writer_input(uuid)', '13097e3cc7abebfdeabff122bee66e1a'),
   ('public.context_job_story_text_get(uuid,jsonb,boolean)', '3cea9dd6df2d2f00660ccd8438637385')
  ) v(sig, want) LOOP
@@ -47,7 +52,7 @@ BEGIN
  PERFORM pg_temp.mb_assert(public.context_job_story_text_policy() - 'calls_per_day' = '{"flag":"context_job_story_text_v1","lease_minutes":15,"min_rewrite_minutes":10,'
   '"quiet_minutes":15,"enqueue_per_call":5,"max_attempts":3,"retry_minutes":[30,120],"digest":"story-digest-v1","writer":"luna-story-writer"}'::jsonb,
   'the policy''s other numbers moved');
- PERFORM pg_temp.mb_assert(public.context_job_story_book_policy() = '{"version":"story-book-v1","after_done_days":30,"backfill_open_max":10,'
+ PERFORM pg_temp.mb_assert(public.context_job_story_book_policy() = '{"version":"story-book-v1","after_done_days":30,"backfill_open_max":10,"failed_backoff_hours":24,'
   '"owing_max":6,"crew_max":6,"payers_max":4}'::jsonb, 'book policy');
  PERFORM pg_temp.mb_assert(public.context_job_story_money_words(1234567.891) = '$1,234,567.89' AND public.context_job_story_money_words(-0.5) = '-$0.50',
   'dollar words');
@@ -101,7 +106,7 @@ BEGIN
    'Quoted: ' || public.context_job_story_money_words(p.quoted_ex) || ' ex GST.',
    'Expected cost at the quote: $1,000.00 ex GST (labour $600.00, materials $400.00, commission $0.00).',
    'Invoiced: $2,000.00 ex GST on 1 invoice; collected ' || public.context_job_story_money_words(p.collected_ex) || ' ex GST.',
-   'Owing now on INV-MB1: $1,100.00 inc GST, due Sat 15 Aug, overdue.',
+   'Owing now on INV-MB1: $1,100.00 inc GST, due Sat 15 Aug 2026.',
    'Labour placed: ' || public.context_job_story_money_words(p.actual_labour_ex) || ' ex GST.',
    'Crew invoices placed (ex GST): Crew Lee $600.00.',
    'Materials placed: ' || public.context_job_story_money_words(p.actual_materials_ex) || ' ex GST.',
@@ -113,10 +118,13 @@ BEGIN
    'Costs incomplete: 1 bill that probably belongs to this job is waiting to be placed; 1 priced purchase order has no bill yet.'),
   'book lines ' || (b -> 'lines')::text);
  PERFORM pg_temp.mb_assert(p.quoted_ex = 2000 AND p.actual_cost_ex = 950 AND p.profit_ex = 1050 AND p.margin_ok, 'job profit fixture ' || row_to_json(p)::text);
- PERFORM pg_temp.mb_assert(b -> 'job_lines' = '["Client sign-off: waived by the office Thu 20 Aug, the customer said they were happy."]'::jsonb,
+ PERFORM pg_temp.mb_assert(b -> 'job_lines' = '["Client sign-off: waived by the office Thu 20 Aug 2026, the customer said they were happy."]'::jsonb,
   'job lines ' || (b -> 'job_lines')::text);
  PERFORM pg_temp.mb_assert((b ->> 'complete')::boolean = false AND (b ->> 'started')::boolean AND b ->> 'reason' = 'costs_waiting', 'complete flags');
  PERFORM pg_temp.mb_assert(b ->> 'incomplete_line' !~ '\$', 'the incomplete line carries a dollar figure');
+ -- the clock alone never changes the words: the same book a year on
+ PERFORM pg_temp.mb_assert(public.context_job_story_book('5eb00000-0000-4000-8000-000000000001', '2027-09-01T00:00:00Z') ->> 'digest' = b ->> 'digest',
+  'the book''s words moved with the clock');
  PERFORM pg_temp.mb_assert(b ->> 'digest' ~ '^[0-9a-f]{32}$' AND b ->> 'money_sig' = public.context_job_story_money_sig('5eb00000-0000-4000-8000-000000000001'),
   'digest and signature');
  -- the quote-stage job: margin unknown with its reason, not started
@@ -150,6 +158,18 @@ BEGIN
  PERFORM pg_temp.mb_assert(s1 <> s0, 'a bill placed did not move the signature');
  DELETE FROM public.job_materials_facts WHERE xero_invoice_id = 'MB-BILL-9';
  PERFORM pg_temp.mb_assert(public.context_job_story_money_sig(j) = s0, 'a bill removed did not move the signature back');
+ -- a crew line on no job that names the job's number (Job Profit places it by number)
+ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, line_type, description, line_total_ex, total_hours, line_date)
+ VALUES ('5eb30000-0000-4000-8000-000000000001', NULL, NULL, 'labour', 'Extra day on MB-1', 100, 2, '2026-08-05');
+ PERFORM pg_temp.mb_assert(public.context_job_story_money_sig(j) <> s0, 'a crew line naming the job number did not move the signature');
+ DELETE FROM public.trade_invoice_lines WHERE description = 'Extra day on MB-1';
+ PERFORM pg_temp.mb_assert(public.context_job_story_money_sig(j) = s0, 'removing that line did not move the signature back');
+ -- the crew invoice's Xero bill voided
+ UPDATE public.trade_invoices SET xero_bill_status = 'VOIDED' WHERE id = '5eb30000-0000-4000-8000-000000000001';
+ PERFORM pg_temp.mb_assert(public.context_job_story_money_sig(j) <> s0, 'a voided crew bill did not move the signature');
+ UPDATE public.trade_invoices SET xero_bill_status = NULL WHERE id = '5eb30000-0000-4000-8000-000000000001';
+ -- a claim finds the signature
+ PERFORM pg_temp.mb_assert(public.context_job_story_claim_state(j) ->> 'money_sig' = s0, 'the claim state has no money signature');
 END $$;
 
 -- 5. Freshness, the staff read and the writer's input.
@@ -223,6 +243,59 @@ BEGIN
  SELECT ('5eb60000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'test', 'asked' FROM generate_series(1, 10) n;
  r := public.context_job_story_enqueue_changed(5);
  PERFORM pg_temp.mb_assert(NOT r -> 'job_ids' @> to_jsonb(ARRAY[j::text]), 'a rewrite without a change was queued behind 10 open requests: ' || r::text);
+END $$;
+
+-- 6b. Leads the lead rule refuses never hold the head of the order; a failed request backs off; an
+--     unchanged check moves the money signature on.
+DO $$
+DECLARE j uuid := '5eb00000-0000-4000-8000-000000000001'; r jsonb; tok uuid := gen_random_uuid(); rid uuid; sig text;
+BEGIN
+ DELETE FROM public.context_job_story_requests;
+ -- MB-1 has a real change (its money moved) and a story checked an hour ago
+ UPDATE public.context_job_story_texts SET checks = checks || '{"money_sig":"00000000000000000000000000000000"}'::jsonb WHERE job_id = j;
+ -- 60 quoted leads, quote sent long ago, never followed up: the lead rule refuses them; their stories
+ -- are older and each has a real change (the status moved)
+ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, quoted_at, created_at)
+ SELECT ('5eb70000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'MB-L' || n, false,
+  '{}', '2026-01-05T00:00:00Z', '2026-01-01T00:00:00Z' FROM generate_series(1, 60) n;
+ INSERT INTO public.job_documents (job_id, type, sent_at, created_at)
+ SELECT ('5eb70000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'quote', '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z' FROM generate_series(1, 60) n;
+ INSERT INTO public.context_job_story_texts (job_id, checked_at, job_status, card_hash, model, sections, checks, written_at)
+ SELECT ('5eb70000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, now() - interval '30 days', 'draft', md5('lead' || n), 'gpt-test',
+  '{"headline":"h","the_job":"j","how_we_got_here":"h","where_it_is_at":"w","watch_out":"Nothing stands out."}',
+  '{"writer":"luna-story:v4","money_sig":"00000000000000000000000000000000"}', now() - interval '30 days'
+ FROM generate_series(1, 60) n;
+ PERFORM pg_temp.mb_assert(NOT EXISTS (SELECT 1 FROM public.context_lead_monitored_jobs(ARRAY['5eb70000-0000-4000-8000-000000000001'::uuid], now()) m
+  WHERE m.monitored), 'fixture: the old lead is still monitored');
+ r := public.context_job_story_enqueue_changed(5);
+ PERFORM pg_temp.mb_assert(r -> 'job_ids' = to_jsonb(ARRAY[j::text]), '60 refused leads held the head of the order: ' || r::text);
+ PERFORM pg_temp.mb_assert((r ->> 'candidates')::integer >= 61, 'the candidates were cut before the lead rule: ' || r::text);
+ -- the request closes failed: left alone for a day, though its money still differs
+ UPDATE public.context_job_story_requests SET done_at = now(), outcome = 'failed', error = 'fact_check_failed' WHERE job_id = j;
+ r := public.context_job_story_enqueue_changed(5);
+ PERFORM pg_temp.mb_assert(NOT r -> 'job_ids' @> to_jsonb(ARRAY[j::text]), 'a job whose request just failed was queued again: ' || r::text);
+ UPDATE public.context_job_story_requests SET done_at = now() - interval '25 hours' WHERE job_id = j;
+ r := public.context_job_story_enqueue_changed(5);
+ PERFORM pg_temp.mb_assert(r -> 'job_ids' @> to_jsonb(ARRAY[j::text]), 'a day after the failure it was not queued: ' || r::text);
+ -- an unchanged check: the story takes the claim's money signature, and the sweep is quiet again
+ SELECT id INTO rid FROM public.context_job_story_requests WHERE job_id = j AND done_at IS NULL;
+ sig := public.context_job_story_money_sig(j);
+ UPDATE public.context_job_story_requests SET picked_at = now(), lease_token = tok, lease_expires_at = now() + interval '10 minutes',
+  claimed_state = public.context_job_story_claim_state(j) WHERE id = rid;
+ r := public.context_job_story_request_finish(rid, tok, 'unchanged');
+ PERFORM pg_temp.mb_assert(r ->> 'closed_as' = 'unchanged', 'finish ' || r::text);
+ PERFORM pg_temp.mb_assert((SELECT t.checks ->> 'money_sig' FROM public.context_job_story_texts t WHERE t.job_id = j) = sig,
+  'an unchanged check left the old money signature');
+ UPDATE public.context_job_story_texts SET written_at = now() - interval '1 hour' WHERE job_id = j;
+ r := public.context_job_story_enqueue_changed(5);
+ PERFORM pg_temp.mb_assert(NOT r -> 'job_ids' @> to_jsonb(ARRAY[j::text]), 'queued again after an unchanged check: ' || r::text);
+ -- a story written without the block keeps no money signature from an unchanged check
+ UPDATE public.context_job_story_texts SET checks = checks - 'money_sig' WHERE job_id = j;
+ INSERT INTO public.context_job_story_requests (job_id, requested_by, reason, picked_at, lease_token, lease_expires_at, claimed_state)
+ VALUES (j, 'test', 'asked', now(), tok, now() + interval '10 minutes', public.context_job_story_claim_state(j)) RETURNING id INTO rid;
+ PERFORM public.context_job_story_request_finish(rid, tok, 'unchanged');
+ PERFORM pg_temp.mb_assert(NOT (SELECT t.checks ? 'money_sig' FROM public.context_job_story_texts t WHERE t.job_id = j),
+  'an unchanged check gave a story without the block a money signature');
 END $$;
 ROLLBACK;
 
