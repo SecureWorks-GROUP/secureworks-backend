@@ -226,7 +226,15 @@ Deno.test("greeting: looksLikeCompanyName knows the spec's full company token li
   ) {
     assert(looksLikeCompanyName(name), name);
   }
-  for (const name of ["Tuan Tran", "Jo Smith", "Pattie Groupman", "Cody Coleman", null]) {
+  for (
+    const name of [
+      "Tuan Tran",
+      "Jo Smith",
+      "Pattie Groupman",
+      "Cody Coleman",
+      null,
+    ]
+  ) {
     assert(!looksLikeCompanyName(name), String(name));
   }
 });
