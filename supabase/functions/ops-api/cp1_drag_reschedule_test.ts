@@ -730,23 +730,46 @@ Deno.test("install_rescheduled: requires template_vars.new_date (YYYY-MM-DD)", a
   }
 });
 
-Deno.test("other SMS triggers keep the cross-sell footer and once-per-job dedup (no regression)", async () => {
+for (
+  const trigger of [
+    "quote_accepted",
+    "deposit_reminder_day3",
+    "deposit_reminder_day7",
+    "follow_up_day3",
+  ]
+) {
+  Deno.test(`${trigger}: a client update text that is not switched on never reaches ghl-proxy`, async () => {
+    const { calls, restore } = stubFetch();
+    try {
+      const store = baseStore();
+      const res = await sendClientUpdate(makeClient(store), {
+        job_id: "job-1",
+        comms_trigger: trigger,
+      });
+      assertEquals(res, {
+        sent: false,
+        reason: `${trigger} texts are switched off`,
+      });
+      assertEquals(smsCalls(calls).length, 0);
+      assertEquals(store.emailEvents ?? [], []);
+    } finally {
+      restore();
+    }
+  });
+}
+
+Deno.test("a custom text on a trigger that is not switched on never reaches ghl-proxy", async () => {
   const { calls, restore } = stubFetch();
   try {
-    const store = baseStore();
-    const client = makeClient(store);
-    const res = await sendClientUpdate(client, {
+    const res = await sendClientUpdate(makeClient(baseStore()), {
       job_id: "job-1",
-      comms_trigger: "quote_accepted",
+      comms_trigger: "job_complete",
+      channel: "sms",
+      custom_message: "Your fence is finished.",
     });
-    assertEquals(res.sent, true);
-    const body = JSON.parse(smsCalls(calls)[0].init.body);
-    assertStringIncludes(body.message, "SecureWorks Group — Patios | Fencing");
-    const dup = await sendClientUpdate(client, {
-      job_id: "job-1",
-      comms_trigger: "quote_accepted",
-    });
-    assertEquals(dup.sent, false);
+    assertEquals(res.sent, false);
+    assertEquals(res.reason, "job_complete texts are switched off");
+    assertEquals(smsCalls(calls).length, 0);
   } finally {
     restore();
   }

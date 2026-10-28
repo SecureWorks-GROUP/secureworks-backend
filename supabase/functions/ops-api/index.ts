@@ -56628,14 +56628,16 @@ async function sendPaymentLink(client: any, body: any) {
   // Send SMS via GHL
   const smsMessage = `Hi ${job.client_name?.split(' ')[0] || 'there'}, your invoice for ${job.job_number} is ready. You can view and pay online here: ${onlineUrl}\n\nThanks,\nSecureWorks Group`
 
-  const sms = await postGhlProxySendSms({
-    supabaseUrl: SUPABASE_URL,
-    serviceKey: SUPABASE_SERVICE_KEY,
-    payload: {
+  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
+  const smsResp = await fetch(ghlUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
       contactId: job.ghl_contact_id,
       message: smsMessage,
-    },
+    }),
   })
+  const smsResult = await smsResp.json()
 
   // Log event
   await client.from('job_events').insert({
@@ -56645,8 +56647,7 @@ async function sendPaymentLink(client: any, body: any) {
       invoice_number: invoice.invoice_number,
       xero_invoice_id: invoice.xero_invoice_id,
       online_url: onlineUrl,
-      sms_sent: sms.sent,
-      ...(sms.reason ? { sms_error: sms.reason } : {}),
+      sms_sent: smsResult.success || false,
     },
   })
 
@@ -56671,8 +56672,7 @@ async function sendPaymentLink(client: any, body: any) {
     success: true,
     invoice_number: invoice.invoice_number,
     payment_url: onlineUrl,
-    sms_sent: sms.sent,
-    ...(sms.reason ? { sms_error: sms.reason } : {}),
+    sms_sent: smsResult.success || false,
   }
 }
 
@@ -57260,26 +57260,25 @@ async function confirmAssignment(client: any, body: any) {
 
   // Notify client via SMS if requested
   let smsSent = false
-  let smsError: string | null = null
   if (shouldNotify && job.ghl_contact_id) {
     const firstName = (job.client_name || '').split(' ')[0] || 'there'
     const dateStr = new Date(assignment.scheduled_date).toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })
     const smsText = message || `Hi ${firstName}, your ${assignment.assignment_type || 'job'} at ${job.site_address || 'your property'} has been confirmed for ${dateStr}. We'll be in touch closer to the date with any details.\n\nThanks,\nSecureWorks Group`
 
     try {
-      const sms = await postGhlProxySendSms({
-        supabaseUrl: SUPABASE_URL,
-        serviceKey: SUPABASE_SERVICE_KEY,
-        payload: {
+      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
+      const smsResp = await fetch(ghlUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           contactId: job.ghl_contact_id,
           message: smsText,
           jobId: assignment.job_id,
           userId: byUser,
-        },
+        }),
       })
-      smsSent = sms.sent
-      smsError = sms.reason
-      if (smsError) console.log('[ops-api] Client notification SMS failed (non-blocking):', smsError)
+      const smsResult = await smsResp.json()
+      smsSent = smsResult.success || false
 
       if (smsSent) {
         await client.from('job_assignments')
@@ -57287,7 +57286,6 @@ async function confirmAssignment(client: any, body: any) {
           .eq('id', aId)
       }
     } catch (e) {
-      smsError = (e as Error).message || 'SMS request failed'
       console.log('[ops-api] Client notification SMS failed (non-blocking):', e)
     }
   }
@@ -57312,11 +57310,8 @@ async function confirmAssignment(client: any, body: any) {
     assignment_id: aId,
     confirmation_status: 'confirmed',
     client_notified: smsSent,
-    ...(smsError ? { client_notify_error: smsError } : {}),
   }
 }
-
-export const _confirmAssignmentForTest = confirmAssignment
 
 async function bulkConfirm(client: any, body: any) {
   const { assignmentIds, assignment_ids, notifyClient, notify_client, confirmedBy, confirmed_by } = body
@@ -62401,12 +62396,14 @@ async function sendCouncilSMS(client: any, body: any) {
   if (!job) throw new Error('Job not found')
   if (!job.ghl_contact_id) throw new Error('No GHL contact linked to this job — cannot send SMS')
 
-  const sms = await postGhlProxySendSms({
-    supabaseUrl: SUPABASE_URL,
-    serviceKey: SUPABASE_SERVICE_KEY,
-    payload: { contactId: job.ghl_contact_id, message },
+  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
+  const smsResp = await fetch(ghlUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contactId: job.ghl_contact_id, message }),
   })
-  if (!sms.sent) throw new Error('SMS send failed: ' + sms.reason)
+  const smsResult = await smsResp.json()
+  if (!smsResp.ok) throw new Error('SMS send failed: ' + (smsResult.message || JSON.stringify(smsResult)))
 
   // Log as job event
   await client.from('job_events').insert({
@@ -62417,8 +62414,6 @@ async function sendCouncilSMS(client: any, body: any) {
 
   return { success: true, sms_sent: true }
 }
-
-export const _sendCouncilSMSForTest = sendCouncilSMS
 
 async function listCouncilSubmissions(client: any, params: URLSearchParams) {
   const jobId = params.get('job_id')
@@ -62719,6 +62714,12 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   deposit_reminder_day7: { channel: 'sms', template: "Hi {name}, your deposit for {service} is still outstanding (7 days). Please pay soon to secure your install date: {payment_url}" },
 }
 
+// The only client-update texts that may reach a customer. Every other trigger
+// stays off as a text (Captain 28 Oct 2026: "turn only the reschedule text
+// on"), including the automatic quote-acceptance and day-3 quote texts and the
+// deposit reminders; turning one on is its own decision.
+const CLIENT_UPDATE_SMS_TRIGGERS_ON = new Set(['install_rescheduled'])
+
 export async function sendClientUpdate(client: any, body: any) {
   const { job_id, comms_trigger, channel: overrideChannel, custom_message, template_vars, job_contact_id } = body
   if (!job_id || !comms_trigger) throw new Error('job_id and comms_trigger required')
@@ -62730,6 +62731,11 @@ export async function sendClientUpdate(client: any, body: any) {
 
   const tmpl = CLIENT_COMMS_TEMPLATES[comms_trigger]
   if (!tmpl && !custom_message) throw new ApiError(`Unknown comms_trigger: ${comms_trigger}. Valid triggers: ${Object.keys(CLIENT_COMMS_TEMPLATES).join(', ')}`, 400)
+
+  const channel = overrideChannel || tmpl?.channel || 'sms'
+  if (channel === 'sms' && !CLIENT_UPDATE_SMS_TRIGGERS_ON.has(comms_trigger)) {
+    return { sent: false, reason: `${comms_trigger} texts are switched off` }
+  }
 
   // CP1 install_rescheduled: the new start day comes from the calendar drop.
   // Required so the message can say "Thursday the 2nd of July" server-side.
@@ -62824,13 +62830,6 @@ export async function sendClientUpdate(client: any, body: any) {
   let message = custom_message || tmpl.template
   for (const [k, v] of Object.entries(vars)) {
     message = message.replace(new RegExp(`\\{${k}\\}`, 'g'), v)
-  }
-
-  // Append cross-sell footer for SMS — except install_rescheduled, whose wording
-  // is approved verbatim and ends "Cheers, Shaun".
-  const channel = overrideChannel || tmpl?.channel || 'sms'
-  if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
-    message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }
 
   let sent = false

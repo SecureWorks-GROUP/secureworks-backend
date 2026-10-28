@@ -1,18 +1,17 @@
 // deno-lint-ignore-file no-explicit-any
-// One POST to ghl-proxy send_sms for the ops-api customer texts that pass a
-// GHL contact id: the client update (calendar reschedule, trade job complete),
-// the payment link, the booking-confirmation text and council texts.
+// One POST to ghl-proxy send_sms for ops-api's client update text. Only the
+// calendar reschedule text uses it: sendClientUpdate keeps every other client
+// update text switched off.
 //
-// ghl-proxy refuses any request with no login (401 missing_auth), and these
-// four sent none, so every one of them failed silently from the day it was
-// built. The service-role bearer goes on here, the way the make-safe arrival
-// texts already send it, so no caller can leave it off again.
+// ghl-proxy refuses any request with no login (401 missing_auth), and the
+// reschedule text sent none, so it failed silently from the day it was built.
+// The service-role bearer goes on here, the way the make-safe arrival texts
+// already send it.
 //
 // A text counts as sent only when ghl-proxy answers HTTP 2xx with
 // success:true: it reports a GHL failure as HTTP 200 { success:false, error }.
 // Otherwise `reason` carries ghl-proxy's own error text (or the HTTP status)
-// so the operator sees why. A network failure is thrown, as fetch throws it;
-// each caller already decides what that means for its own action.
+// so the operator sees why. A network failure is thrown, as fetch throws it.
 
 export type GhlProxySendSmsResult = {
   sent: boolean;
