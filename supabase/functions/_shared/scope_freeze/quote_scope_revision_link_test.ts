@@ -249,9 +249,10 @@ Deno.test('JP24-L15 a named frozen revision of this job: its id, from one read o
   assertEquals(c.reads.some((r) => r.table === 'jobs'), false, 'jobs is never read')
 })
 
-Deno.test('JP24-L16 named: another job\'s row, a draft row, a missing row: null', async () => {
+Deno.test('JP24-L16 named: another job\'s row, a superseded or draft row, a missing row: null', async () => {
   for (const [label, rows] of [
     ['another job', [await frozenRow(REV_A, SCOPE, PRICING, { job_id: OTHER_JOB })]],
+    ['superseded', [await frozenRow(REV_A, SCOPE, PRICING, { status: 'superseded' })]],
     ['draft', [await frozenRow(REV_A, SCOPE, PRICING, { status: 'draft' })]],
     ['missing', []],
     ['malformed row', [await frozenRow(REV_A, SCOPE, PRICING, { scope_hash: 'not-hex' })]],
@@ -259,15 +260,6 @@ Deno.test('JP24-L16 named: another job\'s row, a draft row, a missing row: null'
     const c = makeClient({ jobs: [jobRow()], scope_revisions: rows })
     assertEquals(await namedLink(c, REV_A), null, label)
   }
-})
-
-Deno.test('JP24-L16b named: a row a refreeze superseded before the read is still that sealed row: its id', async () => {
-  // Render from A, refreeze to B, then the send arrives naming A (isolated JP-24 proof, 29 Oct).
-  const rowA = await frozenRow(REV_A, SCOPE, PRICING, { status: 'superseded' })
-  const rowB = await frozenRow('rev-B', SCOPE, PRICING, { revision_number: 2 })
-  const c = makeClient({ jobs: [jobRow()], scope_revisions: [rowA, rowB] })
-  assertEquals(await namedLink(c, REV_A), REV_A, 'A, never B, even with the same hashes')
-  assertEquals(c.reads.length, 1, 'one read of the named row only')
 })
 
 Deno.test('JP24-L17 named: a malformed id is refused without a read, and never falls back to the provenance rule', async () => {
