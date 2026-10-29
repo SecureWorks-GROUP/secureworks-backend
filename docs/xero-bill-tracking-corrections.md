@@ -21,6 +21,17 @@ invoice field apart from tracking and provider update metadata. Any conflict, pr
 this request. Results retain the bill state and `not_attempted` ID when applicable. There is no automatic retry. On `unknown`, read
 the invoice and compare it with the saved preview before preparing another change.
 
+Verification receipts separate `provider_response` from `readback_verification`.
+When readback completes, `verification_reasons` identifies each POST response or
+readback verification failure; missing
+provider fields are null, not proof of a clean response. A matching fresh invoice
+GET does not clear a POST warning/error or prove project associations or bank
+reconciliation. `verification_failed` can therefore coexist with verified invoice
+readback. Retain that receipt and independently inspect the bill; never retry the
+write just to recover missing POST evidence. If readback throws, the unchanged
+exception path returns `unknown` and may omit diagnostics already collected from
+the POST response; this is not evidence that the write failed.
+
 ## Limits and release proof
 
 Xero offers no transactional compare-and-swap for these updates. The local guard

@@ -466,3 +466,118 @@ Deno.test("other tracking categories cannot be changed", async () => {
   );
   assertEquals(f.writes, 0);
 });
+
+for (
+  const example of [
+    {
+      name: "missing invoice",
+      response: (_bill: any): any => ({}),
+      reasons: ["POST_INVOICE_MISSING", "POST_INVOICE_COUNT_INVALID"],
+      count: null,
+      invoiceId: null,
+    },
+    {
+      name: "wrong invoice",
+      response: (bill: any) => ({ Invoices: [{ ...bill, InvoiceID: id(99) }] }),
+      reasons: ["POST_INVOICE_ID_MISMATCH"],
+      count: 1,
+      invoiceId: id(99),
+    },
+    {
+      name: "extra invoice",
+      response: (bill: any) => ({ Invoices: [bill, bill] }),
+      reasons: ["POST_INVOICE_COUNT_INVALID"],
+      count: 2,
+      invoiceId: id(1),
+    },
+    {
+      name: "warning",
+      response: (bill: any) => ({
+        Invoices: [{
+          ...bill,
+          StatusAttributeString: "WARNING",
+          Warnings: [{ Message: "Provider warning" }],
+        }],
+      }),
+      reasons: ["POST_WARNINGS", "POST_WARNING_STATUS"],
+      count: 1,
+      invoiceId: id(1),
+    },
+    {
+      name: "error",
+      response: (bill: any) => ({
+        Invoices: [{
+          ...bill,
+          HasErrors: true,
+          StatusAttributeString: "ERROR",
+          ValidationErrors: [{ Message: "Provider error" }],
+        }],
+      }),
+      reasons: [
+        "POST_HAS_ERRORS",
+        "POST_ERROR_STATUS",
+        "POST_VALIDATION_ERRORS",
+      ],
+      count: 1,
+      invoiceId: id(1),
+    },
+  ]
+) {
+  Deno.test(`matching readback does not hide POST ${example.name} or retry`, async () => {
+    const f = fixture();
+    const body = await applyInput(f);
+    const post = f.deps.xeroPost;
+    f.deps.xeroPost = async (...args: Parameters<typeof post>) => {
+      const response = await post(...args);
+      return example.response(response.Invoices[0]);
+    };
+    const result = await correctSupplierBillTracking(null, body, f.deps);
+    const receipt = result.results[0];
+    assertEquals(result.ok, false);
+    assertEquals(receipt.state, "verification_failed");
+    assertEquals(receipt.verification_reasons, example.reasons);
+    assertEquals(receipt.provider_response.invoice_count, example.count);
+    assertEquals(receipt.provider_response.invoice_id, example.invoiceId);
+    assertEquals(receipt.provider_response.verified, false);
+    const returned = example.response(f.bill).Invoices?.[0];
+    assertEquals(
+      receipt.provider_response.has_errors,
+      returned?.HasErrors ?? null,
+    );
+    assertEquals(
+      receipt.provider_response.status_attribute_string,
+      returned?.StatusAttributeString ?? null,
+    );
+    assertEquals(
+      receipt.provider_response.validation_errors,
+      returned?.ValidationErrors ?? null,
+    );
+    assertEquals(
+      receipt.provider_response.warnings,
+      returned?.Warnings ?? null,
+    );
+    assertEquals(receipt.readback_verification.verified, true);
+    assertEquals(
+      receipt.readback_verification.source,
+      "fresh_xero_invoice_get",
+    );
+    assertEquals(receipt.preserved, true);
+    assertEquals(receipt.tracking_matches, true);
+    assertEquals(f.writes, 1);
+  });
+}
+
+Deno.test("clean POST and matching readback report both evidence checks passed", async () => {
+  const f = fixture();
+  const result = await correctSupplierBillTracking(
+    null,
+    await applyInput(f),
+    f.deps,
+  );
+  assertEquals(result.ok, true);
+  assertEquals(result.results[0].state, "verified");
+  assertEquals(result.results[0].verification_reasons, []);
+  assertEquals(result.results[0].provider_response.verified, true);
+  assertEquals(result.results[0].readback_verification.verified, true);
+  assertEquals(f.writes, 1);
+});

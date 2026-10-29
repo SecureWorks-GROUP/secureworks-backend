@@ -386,12 +386,42 @@ export async function correctSupplierBillTracking(
           key,
         );
         const returned = response?.Invoices?.[0];
-        const errors = !returned || response.Invoices.length !== 1 ||
-          returned.InvoiceID !== bill.xero_invoice_id ||
-          returned.HasErrors === true ||
-          returned.StatusAttributeString === "ERROR" ||
-          returned.ValidationErrors?.length || returned.Warnings?.length ||
-          returned.StatusAttributeString === "WARNING";
+        const verificationReasons: string[] = [];
+        if (!returned) verificationReasons.push("POST_INVOICE_MISSING");
+        if (
+          !Array.isArray(response?.Invoices) || response.Invoices.length !== 1
+        ) {
+          verificationReasons.push("POST_INVOICE_COUNT_INVALID");
+        }
+        if (returned && returned.InvoiceID !== bill.xero_invoice_id) {
+          verificationReasons.push("POST_INVOICE_ID_MISMATCH");
+        }
+        if (returned?.HasErrors === true) {
+          verificationReasons.push("POST_HAS_ERRORS");
+        }
+        if (returned?.StatusAttributeString === "ERROR") {
+          verificationReasons.push("POST_ERROR_STATUS");
+        }
+        if (returned?.ValidationErrors?.length) {
+          verificationReasons.push("POST_VALIDATION_ERRORS");
+        }
+        if (returned?.Warnings?.length) {
+          verificationReasons.push("POST_WARNINGS");
+        }
+        if (returned?.StatusAttributeString === "WARNING") {
+          verificationReasons.push("POST_WARNING_STATUS");
+        }
+        const providerResponse = {
+          invoice_count: Array.isArray(response?.Invoices)
+            ? response.Invoices.length
+            : null,
+          invoice_id: returned?.InvoiceID ?? null,
+          has_errors: returned?.HasErrors ?? null,
+          status_attribute_string: returned?.StatusAttributeString ?? null,
+          validation_errors: returned?.ValidationErrors ?? null,
+          warnings: returned?.Warnings ?? null,
+          verified: verificationReasons.length === 0,
+        };
         const after = await read(bill.xero_invoice_id);
         const preserved = canonical(snapshot(before, true)) ===
           canonical(snapshot(after, true));
@@ -402,10 +432,30 @@ export async function correctSupplierBillTracking(
           trackingIdentity(line.Tracking) ===
             trackingIdentity(after.LineItems[i]?.Tracking)
         );
-        if (errors || !preserved || !trackingMatches) {
+        if (!preserved) {
+          verificationReasons.push("READBACK_PRESERVATION_MISMATCH");
+        }
+        if (!trackingMatches) {
+          verificationReasons.push("READBACK_TRACKING_MISMATCH");
+        }
+        const readbackVerification = {
+          source: "fresh_xero_invoice_get",
+          preserved,
+          tracking_matches: trackingMatches,
+          verified: preserved && trackingMatches,
+          scope:
+            "Invoice API fields only; not independent project or bank reconciliation proof",
+        };
+        const verification = {
+          verification_reasons: verificationReasons,
+          provider_response: providerResponse,
+          readback_verification: readbackVerification,
+        };
+        if (verificationReasons.length > 0) {
           results.push({
             xero_invoice_id: bill.xero_invoice_id,
             state: "verification_failed",
+            ...verification,
             idempotency_key: key,
             before,
             after,
@@ -418,6 +468,7 @@ export async function correctSupplierBillTracking(
         results.push({
           xero_invoice_id: bill.xero_invoice_id,
           state: "verified",
+          ...verification,
           idempotency_key: key,
           before,
           after,
