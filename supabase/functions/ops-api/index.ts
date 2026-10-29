@@ -152,6 +152,7 @@ import {
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import { quoteScopeRevisionIdForSend } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -3733,6 +3734,12 @@ async function recordReleasedQuoteRevision(
       }
     }
 
+    // JP-24 slice 1: the frozen scope revision this send came from, only when
+    // both the job's current scope and pricing hashes equal that one frozen
+    // row's. Null (unknown) on any mismatch, ambiguity or failed read; the
+    // lookup never throws and never changes the send.
+    const scopeRevisionId = await quoteScopeRevisionIdForSend(sb, input.job_id, { handler: ctx.handler })
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
         id: releaseId,
@@ -3754,6 +3761,7 @@ async function recordReleasedQuoteRevision(
         released_via: input.released_via,
         sent_at: sentAtIso,
         schema_version: '1.0',
+        scope_revision_id: scopeRevisionId,
         ...v2Cols,
       })
       .select('id')
@@ -3811,6 +3819,9 @@ async function recordReleasedQuoteRevision(
     return null
   }
 }
+
+// Test seam: the real quick-quote writer, driven by quick_quote_test.ts (JP-24 slice 1).
+export const _recordReleasedQuickQuoteRevisionForTest = recordReleasedQuoteRevision
 
 // ════════════════════════════════════════════════════════════
 // READINESS ENGINE — Reusable job readiness computation

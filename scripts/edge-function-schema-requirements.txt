@@ -978,3 +978,11 @@ ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|functi
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_at
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_by_email
+# JP-24 slice 1: both quote_revisions writers (send-quote recordReleasedQuoteRevision
+# and the ops-api quick-quote copy) INSERT scope_revision_id. A writer deployed
+# ahead of the column has that insert refused and loses the send's release row,
+# so neither function may deploy before the migration.
+send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
+send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
+ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
+ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey

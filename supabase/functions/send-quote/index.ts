@@ -32,6 +32,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import { quoteScopeRevisionIdForSend } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
   currentQuoteForParty,
@@ -575,6 +576,12 @@ async function recordReleasedQuoteRevision(
       }
     }
 
+    // JP-24 slice 1: the frozen scope revision this send came from, only when
+    // both the job's current scope and pricing hashes equal that one frozen
+    // row's. Null (unknown) on any mismatch, ambiguity or failed read; the
+    // lookup never throws and never changes the send.
+    const scopeRevisionId = await quoteScopeRevisionIdForSend(sb, input.job_id, { handler: ctx.handler })
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
         id: releaseId,
@@ -601,6 +608,7 @@ async function recordReleasedQuoteRevision(
         released_via: input.released_via,
         sent_at: sentAtIso,
         schema_version: '1.0',
+        scope_revision_id: scopeRevisionId,
         ...v2Cols,
       })
       .select('id')
@@ -669,6 +677,9 @@ async function recordReleasedQuoteRevision(
     return null
   }
 }
+
+// Test seam: the real writer, driven by send-quote/index_test.ts (JP-24 slice 1).
+export const _recordReleasedQuoteRevisionForTest = recordReleasedQuoteRevision
 
 if (import.meta.main) {
 serve(async (req: Request) => {

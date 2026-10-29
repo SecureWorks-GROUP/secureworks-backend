@@ -715,3 +715,147 @@ Deno.test("Q3.c — duplicate upload (409): treated as success, manifest_url is 
   const rev = sb._state.quoteRevisionInserts[0] as any
   assertEquals(rev.manifest_url, `${SUPABASE_URL}/storage/v1/object/release-manifests/${rev.manifest_hash}.json`)
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// JP-24 slice 1 — the REAL ops-api quick-quote writer records which frozen scope
+// revision the quote was sent from (quote_revisions.scope_revision_id).
+// ════════════════════════════════════════════════════════════════════════════
+//
+// These drive recordReleasedQuoteRevision itself (the _ForTest seam), not a
+// mirror. The writer runs only after Resend accepted the email, so the link
+// can never change the email, text, PDF, view link or acceptance; what these
+// pin is that the release row and manifest are byte-identical whatever the
+// link answers, and that the writer's return value never moves.
+
+const JP24_JOB = 'aa1da77f-1951-4d64-be86-a810781d9813'
+const JP24_SCOPE = { lines: [{ id: 'line-rhs-1', metres: 12.4 }], job: { siteAddress: '1 Test St' } }
+const JP24_PRICING = { totalIncGST: 5500, totalExGST: 5000, gst: 500 }
+
+async function jp24FrozenRow(id: string, scope: unknown, pricing: unknown) {
+  return {
+    id, job_id: JP24_JOB, revision_number: 1, status: 'frozen',
+    scope_hash: (await canonicalJsonAndHash(scope)).hash,
+    pricing_hash: (await canonicalJsonAndHash(pricing)).hash,
+  }
+}
+
+function jp24Supabase(opts: {
+  jobScope?: unknown
+  jobPricing?: unknown
+  revisions?: Array<Record<string, unknown>>
+  revisionsError?: boolean
+}) {
+  const state = { inserted: [] as Array<Record<string, any>>, uploaded: [] as string[] }
+  const sb = {
+    storage: {
+      from: (_b: string) => ({
+        upload: async (path: string, body: Uint8Array) => {
+          state.uploaded.push(path + ':' + new TextDecoder().decode(body))
+          return { error: null }
+        },
+      }),
+    },
+    from: (table: string) => {
+      const q: any = {
+        method: 'select', filters: [] as Array<[string, unknown]>,
+        insert(p: any) { this.method = 'insert'; state.inserted.push(p); return this },
+        select(_c: string) { return this },
+        eq(c: string, v: unknown) { this.filters.push([c, v]); return this },
+        order() { return this },
+        limit() { return this },
+        async single() {
+          if (table === 'quote_revisions' && this.method === 'insert') return { data: { id: 'rev-inserted' }, error: null }
+          throw new Error(`unexpected single() on ${table}`)
+        },
+        async maybeSingle() {
+          if (table === 'jobs') {
+            return { data: { scope_json: opts.jobScope ?? JP24_SCOPE, pricing_json: opts.jobPricing ?? JP24_PRICING }, error: null }
+          }
+          return { data: null, error: null }
+        },
+        then(onF: any, onR: any) {
+          if (table !== 'scope_revisions') return Promise.reject(new Error(`unexpected list read on ${table}`)).then(onF, onR)
+          const rows = (opts.revisions ?? []).filter((r) => this.filters.every(([c, v]: [string, unknown]) => r[c] === v))
+          const res = opts.revisionsError
+            ? { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } }
+            : { data: rows, error: null }
+          return Promise.resolve(res).then(onF, onR)
+        },
+      }
+      return q
+    },
+    _state: state,
+  }
+  return sb as any
+}
+
+const jp24Input = {
+  job_id: JP24_JOB,
+  job_document_id: null,
+  version: 1,
+  recipient_email: 'client@example.test',
+  recipient_label: null,
+  build_kind: 'misc' as const,
+  scope: { client_name: 'CAP0 TEST', site_address: '1 Test St', site_suburb: 'Perth', job_type: 'miscellaneous', job_number: 'SWM-26133' },
+  pricing_json: JP24_PRICING,
+  pdf_url: 'https://example.com/x.pdf',
+  released_via: 'ops-api/send_quick_quote_email' as const,
+  org_id: '00000000-0000-0000-0000-000000000001',
+}
+
+// The manifest stamps captured_at with the clock; hold the clock still so two
+// runs can be compared byte for byte.
+async function jp24AtFixedClock<T>(fn: () => Promise<T>): Promise<T> {
+  const RealDate = Date
+  const fixed = RealDate.parse('2026-10-29T12:00:00.000Z')
+  class FixedDate extends RealDate {
+    constructor(...args: any[]) { if (args.length === 0) super(fixed); else super(...(args as [any])) }
+    static now() { return fixed }
+  }
+  ;(globalThis as any).Date = FixedDate
+  try { return await fn() } finally { (globalThis as any).Date = RealDate }
+}
+
+async function jp24Run(sb: any) {
+  const { _recordReleasedQuickQuoteRevisionForTest } = await import('./index.ts')
+  const id = await jp24AtFixedClock(() =>
+    _recordReleasedQuickQuoteRevisionForTest(sb, jp24Input, { handler: 'ops-api/send_quick_quote_email', job_id: JP24_JOB }))
+  assertEquals(sb._state.inserted.length, 1, 'exactly one release row')
+  const { id: _rowId, sent_at: _sentAt, scope_revision_id, ...rest } = sb._state.inserted[0]
+  return { id, scope_revision_id, rest, uploaded: sb._state.uploaded }
+}
+
+Deno.test('JP24-Q1 quick-quote writer: both hashes match the one frozen row -> its id is stored', async () => {
+  const r = await jp24Run(jp24Supabase({ revisions: [await jp24FrozenRow('scope-rev-1', JP24_SCOPE, JP24_PRICING)] }))
+  assertEquals(r.id, 'rev-inserted')
+  assertEquals(r.scope_revision_id, 'scope-rev-1')
+})
+
+Deno.test('JP24-Q2 quick-quote writer: null on scope mismatch, pricing mismatch, missing row, several rows, read error; release row otherwise unchanged', async () => {
+  const frozen = await jp24FrozenRow('scope-rev-1', JP24_SCOPE, JP24_PRICING)
+  const baseline = await jp24Run(jp24Supabase({ revisions: [frozen] }))
+  const cases: Array<[string, any]> = [
+    ['scope mismatch', jp24Supabase({ jobScope: { ...JP24_SCOPE, lines: [] }, revisions: [frozen] })],
+    ['pricing mismatch', jp24Supabase({ jobPricing: { ...JP24_PRICING, totalIncGST: 5600 }, revisions: [frozen] })],
+    ['missing row', jp24Supabase({ revisions: [] })],
+    ['several rows', jp24Supabase({ revisions: [frozen, { ...frozen, id: 'scope-rev-2', revision_number: 2 }] })],
+    ['read error', jp24Supabase({ revisions: [frozen], revisionsError: true })],
+  ]
+  for (const [label, sb] of cases) {
+    const r = await jp24Run(sb)
+    assertEquals(r.scope_revision_id, null, `${label}: link is null (unknown)`)
+    assertEquals(r.id, baseline.id, `${label}: writer return value unchanged`)
+    assertEquals(r.rest, baseline.rest, `${label}: every other release column unchanged`)
+    assertEquals(r.uploaded, baseline.uploaded, `${label}: manifest bytes unchanged`)
+  }
+})
+
+Deno.test('JP24-Q3 ops-api: the link is looked up only inside the quick-quote release-row writer', async () => {
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const calls = src.split('quoteScopeRevisionIdForSend(').length - 1
+  assertEquals(calls, 1, 'one call site')
+  const writer = src.indexOf('async function recordReleasedQuoteRevision(')
+  const call = src.indexOf('quoteScopeRevisionIdForSend(')
+  const writerEnd = src.indexOf('export const _recordReleasedQuickQuoteRevisionForTest')
+  assert(writer > 0 && call > writer && call < writerEnd, 'the call sits inside recordReleasedQuoteRevision')
+})
