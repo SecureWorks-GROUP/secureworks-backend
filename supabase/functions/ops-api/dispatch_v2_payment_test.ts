@@ -27,6 +27,7 @@ import { dispatchArrival, dispatchArrivalRead } from "./dispatch_board.ts";
 import {
   DISPATCH_V2_MARK_PAID_ACTION,
   DISPATCH_V2_PAYMENT_ACTIONS,
+  DISPATCH_V2_SET_PAY_ON_ACTION,
   DISPATCH_V2_UNDO_PAID_ACTION,
   type DispatchV2PaymentContext,
   runDispatchV2PaymentAction,
@@ -98,7 +99,7 @@ const SENT_AT = "2026-10-28T01:00:00.000Z";
 const SHAUN = { userId: uuid("d2", 1), email: "shaun@ops.test", orgId: ORG };
 
 // The supplier box's columns (20261014130000 + 20261023160000 + 20261023214200
-// + 20261028170000 + 20261029120100).
+// + 20261028170000 + 20261029120100 + 20261029120200).
 const BOX_COLUMNS = new Set([
   "id",
   "org_id",
@@ -123,12 +124,22 @@ const BOX_COLUMNS = new Set([
   "paid_at",
   "paid_by",
   "paid_by_email",
+  "pay_on",
+  "pay_on_set_at",
+  "pay_on_set_by",
+  "pay_on_set_by_email",
 ]);
 
 // The migrations' checks on the box, as Postgres would keep them.
 function boxChecksPass(row: Row): boolean {
   // 20261029120100: a paid stamp always says by whom.
   if ((row.paid_at == null) !== (row.paid_by_email == null)) return false;
+  // 20261029120200: a Pay on tag is pickup or delivery, with when and by whom.
+  if (row.pay_on != null && !["pickup", "delivery"].includes(row.pay_on)) {
+    return false;
+  }
+  if ((row.pay_on == null) !== (row.pay_on_set_at == null)) return false;
+  if ((row.pay_on == null) !== (row.pay_on_set_by_email == null)) return false;
   return true;
 }
 
@@ -160,6 +171,10 @@ function box(
     paid_at: null,
     paid_by: null,
     paid_by_email: null,
+    pay_on: null,
+    pay_on_set_at: null,
+    pay_on_set_by: null,
+    pay_on_set_by_email: null,
     ...extra,
   };
 }
@@ -524,7 +539,7 @@ Deno.test("paid: a pay-first box with no stamp is unpaid and holds the job up", 
   assertEquals(p.blocks_job_move, true);
   assertEquals(p.can_mark_paid, true);
   assertEquals(p.can_undo_paid, false);
-  assertEquals(p.guard, { paid_at: null });
+  assertEquals(p.guard, { paid_at: null, pay_on_set_at: null });
   // A delivered box never holds the job up.
   assertEquals(paymentOf({ materialStage: "delivered" }).blocks_job_move, false);
 });
@@ -535,7 +550,7 @@ Deno.test("paid: a stamp after the newest send counts for the current order", ()
   assertEquals([p.paid, p.paid_at, p.paid_by_email], [true, PAID_AT, SHAUN.email]);
   assertEquals(p.earlier_order_paid_at, null);
   assertEquals([p.blocks_job_move, p.can_mark_paid, p.can_undo_paid], [false, false, true]);
-  assertEquals(p.guard, { paid_at: PAID_AT });
+  assertEquals(p.guard, { paid_at: PAID_AT, pay_on_set_at: null });
 });
 
 Deno.test("paid: a stamp from before the newest send is an earlier order's", () => {
@@ -545,7 +560,7 @@ Deno.test("paid: a stamp from before the newest send is an earlier order's", () 
   assertEquals(p.earlier_order_paid_at, BEFORE_SEND);
   assertEquals(p.can_mark_paid, true);
   // The guard is the raw stamp, so Mark paid again guards on what is stored.
-  assertEquals(p.guard, { paid_at: BEFORE_SEND });
+  assertEquals(p.guard, { paid_at: BEFORE_SEND, pay_on_set_at: null });
   // The same moment as the send does not count either.
   assertEquals(paymentOf({ paidAt: SENT_AT, paidByEmail: SHAUN.email }).paid, false);
 });
@@ -934,4 +949,273 @@ Deno.test("paid gate: the routine key is refused, a GET is 405, and a bad id is 
       else Deno.env.set(n, v);
     }
   }
+});
+
+// ── A3: Pay on pickup or delivery ───────────────────────────────────────────
+
+const TAGGED_AT = "2026-10-28T04:00:00.000Z";
+
+Deno.test("pay on: a tag after the newest send counts and confirms the order without paying", () => {
+  const p = paymentOf({
+    payOn: "pickup",
+    payOnSetAt: TAGGED_AT,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals(p.state, "pay_on_pickup");
+  assertEquals([p.pay_on, p.pay_on_set_at, p.pay_on_set_by_email], [
+    "pickup",
+    TAGGED_AT,
+    SHAUN.email,
+  ]);
+  assertEquals(p.paid, false);
+  // Not unpaid, so it never holds the job up; Mark paid is still offered.
+  assertEquals([p.blocks_job_move, p.can_mark_paid, p.can_set_pay_on], [
+    false,
+    true,
+    true,
+  ]);
+  assertEquals(p.guard, { paid_at: null, pay_on_set_at: TAGGED_AT });
+  assertEquals(
+    paymentOf({
+      payOn: "delivery",
+      payOnSetAt: TAGGED_AT,
+      payOnSetByEmail: SHAUN.email,
+    }).state,
+    "pay_on_delivery",
+  );
+});
+
+Deno.test("pay on: paid wins when both count, and both stamps are kept", () => {
+  const p = paymentOf({
+    paidAt: PAID_AT,
+    paidByEmail: SHAUN.email,
+    payOn: "pickup",
+    payOnSetAt: TAGGED_AT,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals(p.state, "paid");
+  assertEquals([p.paid_at, p.pay_on], [PAID_AT, "pickup"]);
+});
+
+Deno.test("pay on: a tag from before the newest send is an earlier order's", () => {
+  const p = paymentOf({
+    payOn: "pickup",
+    payOnSetAt: BEFORE_SEND,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals(p.state, "unpaid");
+  assertEquals(p.pay_on, null);
+  assertEquals(p.earlier_order_pay_on_set_at, BEFORE_SEND);
+  assertEquals(p.guard.pay_on_set_at, BEFORE_SEND);
+  // Anything other than pickup or delivery is no tag.
+  assertEquals(
+    paymentOf({
+      payOn: "later",
+      payOnSetAt: TAGGED_AT,
+      payOnSetByEmail: SHAUN.email,
+    }).pay_on,
+    null,
+  );
+});
+
+Deno.test("pay on: allowed on account, where it shows the tag instead of not needed", () => {
+  const p = paymentOf({
+    terms: "on_account",
+    payOn: "delivery",
+    payOnSetAt: TAGGED_AT,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals(p.state, "pay_on_delivery");
+  assertEquals([p.can_mark_paid, p.can_set_pay_on], [false, true]);
+});
+
+Deno.test("pay on: the stage shows Order confirmed from the tag; the payment step never moves a box back", () => {
+  const base = {
+    stored: null,
+    storedAt: null,
+    sentAts: [SENT_AT],
+    unsentLineChanges: [],
+    confirmedAt: null,
+  };
+  const tagged = paymentOf({
+    payOn: "pickup",
+    payOnSetAt: TAGGED_AT,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals(dispatchMaterialStageOf({ ...base, payment: tagged }), {
+    key: "order_confirmed",
+    source: "payment",
+  });
+  // Materials ready picked after the tag; Mark paid pressed later on the day
+  // of pickup: the box stays at Materials ready.
+  const both = paymentOf({
+    paidAt: "2026-10-28T09:00:00.000Z",
+    paidByEmail: SHAUN.email,
+    payOn: "pickup",
+    payOnSetAt: TAGGED_AT,
+    payOnSetByEmail: SHAUN.email,
+    storedStage: "ready",
+    storedStageAt: "2026-10-28T06:00:00.000Z",
+  });
+  assertEquals(
+    dispatchMaterialStageOf({
+      ...base,
+      stored: "ready",
+      storedAt: "2026-10-28T06:00:00.000Z",
+      payment: both,
+    }),
+    { key: "ready", source: "set" },
+  );
+});
+
+Deno.test("pay on: setting the tag writes it, logs it and confirms the order; the same tag again writes nothing", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  const answer = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "pickup",
+    expected_set_at: null,
+  });
+  assertEquals(answer.unchanged, false);
+  assertEquals(answer.job_status_changed, false);
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals(
+    [row.pay_on, row.pay_on_set_at, row.pay_on_set_by, row.pay_on_set_by_email],
+    ["pickup", NOW, SHAUN.userId, SHAUN.email],
+  );
+  assertEquals(answer.box.material_stage, "order_confirmed");
+  assertEquals(answer.box.payment.state, "pay_on_pickup");
+  assertEquals(writes.map((w) => `${w.kind}:${w.table}`), [
+    "update:job_material_suppliers",
+    "insert:job_events",
+  ]);
+  const event = tables.job_events[0];
+  assertEquals(event.event_type, "dispatch_v2_pay_on_set");
+  assertEquals(event.detail_json, {
+    box_id: BOX.lysaght,
+    supplier_id: SUP.lysaght,
+    supplier: "Lysaght",
+    from: null,
+    to: "pickup",
+    order_email_id: EMAIL.lysaght,
+    stage_before: "sent",
+    stage_after: "order_confirmed",
+    via: "screen",
+    operator_email: SHAUN.email,
+  });
+  const again = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "pickup",
+  });
+  assertEquals(again.unchanged, true);
+  assertEquals(writes.length, 2);
+  assertEquals(tables.jobs[0].status, "awaiting_supplier");
+});
+
+Deno.test("pay on: Mark paid can still be pressed later, and both stamps stay", async () => {
+  const tables = fixture();
+  const { client } = makeClient(tables);
+  await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "delivery",
+  });
+  const later = ctx({ now: () => "2026-10-29T04:00:00.000Z" });
+  const answer = await press(
+    client,
+    DISPATCH_V2_MARK_PAID_ACTION,
+    { box_id: BOX.lysaght },
+    later,
+  );
+  assertEquals(answer.unchanged, false);
+  assertEquals(answer.box.payment.state, "paid");
+  assertEquals(answer.box.payment.pay_on, "delivery");
+  assertEquals(answer.box.material_stage, "order_confirmed");
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals([row.pay_on, row.paid_at], ["delivery", "2026-10-29T04:00:00.000Z"]);
+});
+
+Deno.test("pay on: allowed on an on-account box, and without the account list", async () => {
+  const tables = fixture();
+  const { client } = makeClient(tables, {
+    fail: ["dispatch_approved_supplier_emails"],
+  });
+  const answer = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.stratco,
+    pay_on: "delivery",
+  });
+  assertEquals(answer.unchanged, false);
+  assertEquals(boxRow(tables, BOX.stratco).pay_on, "delivery");
+  assertEquals(answer.box.material_stage, "order_confirmed");
+});
+
+Deno.test("pay on: switching the tag, and taking it off, each log what changed", async () => {
+  const tables = fixture();
+  const { client } = makeClient(tables);
+  await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "pickup",
+  });
+  const switched = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "delivery",
+    expected_set_at: NOW,
+  }, ctx({ now: () => "2026-10-29T03:30:00.000Z" }));
+  assertEquals(switched.box.payment.state, "pay_on_delivery");
+  assertEquals(tables.job_events[1].detail_json.from, "pickup");
+  assertEquals(tables.job_events[1].detail_json.to, "delivery");
+
+  const cleared = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: null,
+    expected_set_at: "2026-10-29T03:30:00.000Z",
+  });
+  assertEquals(cleared.unchanged, false);
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals(
+    [row.pay_on, row.pay_on_set_at, row.pay_on_set_by, row.pay_on_set_by_email],
+    [null, null, null, null],
+  );
+  assertEquals(cleared.box.material_stage, "sent");
+  const event = tables.job_events[2];
+  assertEquals(event.event_type, "dispatch_v2_pay_on_cleared");
+  assertEquals([event.detail_json.from, event.detail_json.to], ["delivery", null]);
+  assertEquals(
+    [event.detail_json.stage_before, event.detail_json.stage_after],
+    ["order_confirmed", "sent"],
+  );
+
+  // No tag to take off: nothing written.
+  const empty = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: null,
+  });
+  assertEquals(empty.unchanged, true);
+  assertEquals(tables.job_events.length, 3);
+});
+
+Deno.test("pay on: a bad value is refused, and a changed tag is refused with the box as it is now", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  const missing = await refused(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+  });
+  assertEquals([missing.status, missing.code], [400, "invalid_request"]);
+  const bad = await refused(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "later",
+  });
+  assertEquals([bad.status, bad.code], [400, "invalid_request"]);
+  Object.assign(boxRow(tables, BOX.lysaght), {
+    pay_on: "pickup",
+    pay_on_set_at: TAGGED_AT,
+    pay_on_set_by_email: "someone@ops.test",
+  });
+  const changed = await refused(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.lysaght,
+    pay_on: "delivery",
+    expected_set_at: null,
+  });
+  assertEquals([changed.status, changed.code], [409, "pay_on_changed"]);
+  assertEquals(changed.body.box.payment.pay_on, "pickup");
+  assertEquals(writes, []);
 });

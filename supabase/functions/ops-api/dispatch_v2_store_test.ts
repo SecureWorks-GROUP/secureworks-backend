@@ -165,6 +165,11 @@ const SCHEMA: Record<string, string[]> = {
     "paid_at",
     "paid_by",
     "paid_by_email",
+    // 20261029120200_dispatch_v2_box_pay_on.sql
+    "pay_on",
+    "pay_on_set_at",
+    "pay_on_set_by",
+    "pay_on_set_by_email",
   ],
   dispatch_approved_supplier_emails: [
     "id",

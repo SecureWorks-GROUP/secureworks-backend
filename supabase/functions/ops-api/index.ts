@@ -7583,13 +7583,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
       // Dispatch v2: the payment step on a supplier order
       // (docs/dispatch-v2-board-contract.md, section 3c;
-      // dispatch_v2_payment_write.ts). Mark paid and Undo paid are a record
-      // only: they pay nobody, touch no Xero and send nothing. POST only, gated
+      // dispatch_v2_payment_write.ts). Mark paid, Undo paid and Pay on
+      // pickup / delivery are a record only: they pay nobody, touch no Xero
+      // and send nothing. POST only, gated
       // as the stage press above. Absent from ROUTINE_ALLOWED_ACTIONS,
       // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS. Each writes
       // one supplier box and one job_events row: never a job stage or status.
       case 'dispatch_v2_mark_paid':
-      case 'dispatch_v2_undo_paid': {
+      case 'dispatch_v2_undo_paid':
+      case 'dispatch_v2_set_pay_on': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
         }

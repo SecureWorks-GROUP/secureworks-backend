@@ -13,6 +13,10 @@
 //     A supplier on account has no payment step: refused (409 on_account).
 //   * Undo paid takes the stamp off. The box then shows what it would have
 //     shown without it (usually Awaiting payment).
+//   * Pay on pickup / Pay on delivery confirms the order without paying: the
+//     box shows Order confirmed exactly as Mark paid would, with a visible
+//     tag. Allowed on any box, on account included. Set to null it comes
+//     off. Mark paid can still be pressed later; both stamps are kept.
 //
 // What this touches: one job_material_suppliers row (the paid columns only)
 // and one job_events row (the audit line) per press. Never jobs, suppliers,
@@ -36,9 +40,11 @@ import {
 
 export const DISPATCH_V2_MARK_PAID_ACTION = "dispatch_v2_mark_paid";
 export const DISPATCH_V2_UNDO_PAID_ACTION = "dispatch_v2_undo_paid";
+export const DISPATCH_V2_SET_PAY_ON_ACTION = "dispatch_v2_set_pay_on";
 export const DISPATCH_V2_PAYMENT_ACTIONS = [
   DISPATCH_V2_MARK_PAID_ACTION,
   DISPATCH_V2_UNDO_PAID_ACTION,
+  DISPATCH_V2_SET_PAY_ON_ACTION,
 ] as const;
 
 export type DispatchV2PaymentContext = {
@@ -52,7 +58,7 @@ export type DispatchV2PaymentContext = {
 };
 
 const BOX_SELECT =
-  "id, org_id, job_id, supplier_id, supplier_name, material_stage, material_stage_set_at, paid_at, paid_by, paid_by_email";
+  "id, org_id, job_id, supplier_id, supplier_name, material_stage, material_stage_set_at, paid_at, paid_by, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by, pay_on_set_by_email";
 const JOB_SELECT =
   "id, org_id, type, status, job_number, ds_ses_family:metadata->>ses_family, ds_makesafe_family:metadata->>makesafe_job_family, ds_repair_stage:metadata->>repair_stage";
 
@@ -216,17 +222,19 @@ function entryFor(arrival: any, boxId: string) {
 // What a press needs to know before it writes: the box as the board shows it
 // (stage and payment, by the same rules), with the account list read. A press
 // never guesses: if the Arrival line or the account list could not be read it
-// is refused.
+// is refused. Pay on does not depend on the terms, so it can skip the
+// account list check (needTerms false).
 async function boxAsShown(
   client: any,
   box: any,
   ctx: DispatchV2PaymentContext,
+  needTerms = true,
 ) {
   const arrival = await arrivalOf(client, String(box.job_id), ctx);
   if (!arrival || arrival.arrival_read !== "ok") {
     refuse(500, "dispatch_read_failed", "Arrival read failed");
   }
-  if (arrival.accounts_read !== "ok") {
+  if (needTerms && arrival.accounts_read !== "ok") {
     refuse(500, "dispatch_read_failed", "account list read failed");
   }
   const entry = entryFor(arrival, String(box.id));
@@ -497,6 +505,96 @@ export async function undoDispatchV2Paid(
   });
 }
 
+/** POST {box_id | job_id + supplier_id, pay_on ('pickup' | 'delivery' |
+ * null), expected_set_at?, operator_email (ops key)}. Sets or takes off the
+ * Pay on tag. */
+export async function setDispatchV2PayOn(
+  client: any,
+  body: any,
+  ctx: DispatchV2PaymentContext,
+) {
+  if (!body || typeof body !== "object") badRequest("A JSON body is required");
+  if (!("pay_on" in body)) badRequest("pay_on is required");
+  const target = body.pay_on;
+  if (target !== null && target !== "pickup" && target !== "delivery") {
+    badRequest("pay_on must be pickup, delivery or null");
+  }
+  const guard = readGuard(body, "expected_set_at", false);
+  const box = await loadBox(client, body, ctx);
+  await loadJob(client, String(box.job_id), ctx);
+  const operator = await resolveOperator(client, body, ctx);
+
+  if (guard !== undefined && !sameInstant(box.pay_on_set_at, guard)) {
+    await changedElsewhere(
+      client,
+      box,
+      "pay_on_changed",
+      "This order's Pay on tag was changed somewhere else",
+      ctx,
+    );
+  }
+  const { arrival, entry } = await boxAsShown(client, box, ctx, false);
+  // Nothing to do: the same tag already counts for the current order, or
+  // there is no tag to take off.
+  if (
+    (target === null && !text(box.pay_on)) ||
+    (target !== null && entry.payment.pay_on === target)
+  ) {
+    return await answer(client, box, ctx, { unchanged: true, arrival });
+  }
+
+  const now = ctx.now ? ctx.now() : new Date().toISOString();
+  const patch = target === null
+    ? {
+      pay_on: null,
+      pay_on_set_at: null,
+      pay_on_set_by: null,
+      pay_on_set_by_email: null,
+    }
+    : {
+      pay_on: target,
+      pay_on_set_at: now,
+      pay_on_set_by: operator.userId,
+      pay_on_set_by_email: operator.email,
+    };
+  const updated = await writeBox(client, box, patch, "pay_on_set_at", ctx);
+  if (!updated) {
+    await changedElsewhere(
+      client,
+      box,
+      "pay_on_changed",
+      "This order's Pay on tag was changed somewhere else",
+      ctx,
+    );
+  }
+  const after = await arrivalOf(client, String(box.job_id), ctx);
+  const afterEntry = entryFor(after, String(box.id));
+  const audited = await audit(
+    client,
+    updated,
+    operator,
+    target === null ? "dispatch_v2_pay_on_cleared" : "dispatch_v2_pay_on_set",
+    {
+      box_id: updated.id,
+      supplier_id: updated.supplier_id ?? null,
+      supplier: updated.supplier_name ?? null,
+      from: text(box.pay_on),
+      to: target,
+      // The order this tag is for: the box's newest sent order email.
+      order_email_id: await newestSentEmailId(client, updated),
+      stage_before: entry.material_stage,
+      stage_after: afterEntry?.material_stage ?? null,
+      via: ctx.via,
+      operator_email: operator.email,
+    },
+  );
+  return await answer(client, updated, ctx, {
+    unchanged: false,
+    audited,
+    arrival: after,
+  });
+}
+
 export async function runDispatchV2PaymentAction(
   client: any,
   action: string,
@@ -508,6 +606,8 @@ export async function runDispatchV2PaymentAction(
       return await markDispatchV2Paid(client, body, ctx);
     case DISPATCH_V2_UNDO_PAID_ACTION:
       return await undoDispatchV2Paid(client, body, ctx);
+    case DISPATCH_V2_SET_PAY_ON_ACTION:
+      return await setDispatchV2PayOn(client, body, ctx);
     default:
       refuse(400, "unknown_action", `Unknown action: ${action}`);
   }

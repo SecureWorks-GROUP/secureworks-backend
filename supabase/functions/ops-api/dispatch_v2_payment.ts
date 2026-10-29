@@ -97,6 +97,11 @@ export type DispatchV2PaymentInput = {
   terms: DispatchV2PaymentTerms;
   paidAt: unknown;
   paidByEmail: unknown;
+  // The Pay on pickup / Pay on delivery tag (migration
+  // 20261029120200_dispatch_v2_box_pay_on.sql). Left out = no tag.
+  payOn?: unknown;
+  payOnSetAt?: unknown;
+  payOnSetByEmail?: unknown;
   // The box's newest sent order email (null = nothing sent yet).
   newestSentAt: unknown;
   // The stage a person picked on the box, and when.
@@ -107,27 +112,48 @@ export type DispatchV2PaymentInput = {
   materialStage?: string;
 };
 
+export type DispatchV2PayOn = "pickup" | "delivery";
+
 export type DispatchV2Payment = {
   terms: DispatchV2PaymentTerms;
-  // not_needed: on account. unpaid: pay first, nothing counts. paid: a paid
-  // stamp counts for the current order. unknown: the terms are unknown.
-  state: "not_needed" | "unpaid" | "paid" | "unknown";
+  // not_needed: on account and no tag. unpaid: pay first, nothing counts.
+  // paid / pay_on_pickup / pay_on_delivery: that stamp counts for the current
+  // order (paid wins when both count). unknown: the terms are unknown.
+  state:
+    | "not_needed"
+    | "unpaid"
+    | "paid"
+    | "pay_on_pickup"
+    | "pay_on_delivery"
+    | "unknown";
   // A paid stamp counts for the current order.
   paid: boolean;
   // The counting stamp (null when none counts).
   paid_at: string | null;
   paid_by_email: string | null;
+  // The Pay on tag, only while it counts for the current order.
+  pay_on: DispatchV2PayOn | null;
+  pay_on_set_at: string | null;
+  pay_on_set_by_email: string | null;
   // A stamp on the box that belongs to an earlier order.
   earlier_order_paid_at: string | null;
+  earlier_order_pay_on_set_at: string | null;
   // Counts towards "a box on the job is unpaid": pay first, unpaid, not
   // delivered.
   blocks_job_move: boolean;
   // What the screen may offer on this box.
   can_mark_paid: boolean;
   can_undo_paid: boolean;
+  // Pay on pickup / delivery can be set on any supplier box, on account too.
+  can_set_pay_on: boolean;
   // The stored stamps the presses guard on (raw, null = never set).
-  guard: { paid_at: string | null };
+  guard: { paid_at: string | null; pay_on_set_at: string | null };
 };
+
+/** A Pay on value from the box, or null for anything else. */
+export function dispatchV2PayOnOf(value: unknown): DispatchV2PayOn | null {
+  return value === "pickup" || value === "delivery" ? value : null;
+}
 
 function stampText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -169,8 +195,14 @@ export function dispatchV2PaymentOf(
   const paidByEmail = stampText(input.paidByEmail);
   const paid = !!paidAt && !!paidByEmail &&
     dispatchV2StampCounts(paidAt, input);
+  const payOn = dispatchV2PayOnOf(input.payOn);
+  const payOnSetAt = payOn ? stampText(input.payOnSetAt) : null;
+  const payOnSetByEmail = payOn ? stampText(input.payOnSetByEmail) : null;
+  const tagged = !!payOnSetAt && !!payOnSetByEmail &&
+    dispatchV2StampCounts(payOnSetAt, input);
   let state: DispatchV2Payment["state"];
   if (paid) state = "paid";
+  else if (tagged) state = payOn === "pickup" ? "pay_on_pickup" : "pay_on_delivery";
   else if (input.terms === "on_account") state = "not_needed";
   else if (input.terms === "pay_first") state = "unpaid";
   else state = "unknown";
@@ -180,10 +212,19 @@ export function dispatchV2PaymentOf(
     paid,
     paid_at: paid ? paidAt : null,
     paid_by_email: paid ? paidByEmail : null,
+    pay_on: tagged ? payOn : null,
+    pay_on_set_at: tagged ? payOnSetAt : null,
+    pay_on_set_by_email: tagged ? payOnSetByEmail : null,
     earlier_order_paid_at: !paid && paidAt ? paidAt : null,
+    earlier_order_pay_on_set_at: !tagged && payOnSetAt ? payOnSetAt : null,
     blocks_job_move: state === "unpaid" && input.materialStage !== "delivered",
     can_mark_paid: input.terms !== "on_account" && !paid,
     can_undo_paid: paid,
-    guard: { paid_at: paidAt },
+    can_set_pay_on: true,
+    guard: {
+      paid_at: paidAt,
+      // The raw stored stamp, so a guard always matches what is on the box.
+      pay_on_set_at: stampText(input.payOnSetAt),
+    },
   };
 }

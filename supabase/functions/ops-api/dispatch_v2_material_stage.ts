@@ -214,16 +214,25 @@ function lastThingThatHappened(
   return shown;
 }
 
-// Step 2, the payment step (contract section 3c): a paid stamp that counts
-// for the current order is one more candidate, at its stamp time: Order
-// confirmed. The newest still wins, so a person's later pick beats it, and
-// on the same moment the earlier steps win.
+// Step 2, the payment step (contract section 3c): a paid stamp or a Pay on
+// tag that counts for the current order is one more candidate, at its stamp
+// time (the newer one when both count): Order confirmed. The newest still
+// wins, so a person's later pick beats it, and on the same moment the earlier
+// steps win. Forward only: a box already at Order confirmed or past it stays
+// where it is (Mark paid pressed on the day of pickup never pulls a box back
+// from Materials ready).
 function paymentStep(
   shown: StageCandidate,
   payment: DispatchV2Payment | null | undefined,
 ): StageCandidate {
-  if (!payment?.paid) return shown;
-  const at = instant(payment.paid_at);
+  if (!payment) return shown;
+  if (
+    dispatchMaterialStageRank(shown.key) >=
+      dispatchMaterialStageRank("order_confirmed")
+  ) {
+    return shown;
+  }
+  const at = newest([payment.paid_at, payment.pay_on_set_at]);
   if (at === null || at <= shown.at) return shown;
   return { at, key: "order_confirmed", source: "payment" };
 }
@@ -396,6 +405,9 @@ export function dispatchV2BoxStage(
     terms,
     paidAt: box.paid_at,
     paidByEmail: box.paid_by_email,
+    payOn: box.pay_on,
+    payOnSetAt: box.pay_on_set_at,
+    payOnSetByEmail: box.pay_on_set_by_email,
     newestSentAt: newestSent?.sent_at ?? null,
     storedStage: box.material_stage,
     storedStageAt: box.material_stage_set_at,

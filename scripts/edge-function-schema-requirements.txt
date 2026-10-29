@@ -988,3 +988,9 @@ ops-api|supabase/migrations/20261029120000_dispatch_v2_on_account_suppliers.sql|
 ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_at
 ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by
 ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by_email
+# Pay on pickup / delivery on a supplier box: the board, dispatch_arrival, the
+# materials panel and the dispatch_v2_set_pay_on press select these columns.
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_at
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by_email
