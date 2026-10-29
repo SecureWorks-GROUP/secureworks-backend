@@ -101,7 +101,7 @@ so a later migration can flip one without rewriting the view:
 
 | Check | As shipped | Why |
 |---|---|---|
-| `materials_below_quote` | Holds (always) | Placing the missing bill clears it |
+| `materials_below_quote` | Holds | Placing the missing bill clears it. Its switch can make it warn, for a job whose materials really came in under quote |
 | `po_no_bill_overdue`, `ordered_not_billed_over_30_days` | Warn | A person's bill placement records no order (`materials_recon.ts` writes `matched_po_id` null), so a placed bill never closes its order and a hold could never clear |
 | `variation_not_costed` | Warn | The variation writer dropped a cost of 0 until the same change, and the trade app sends no cost (its `estimated_cost` is the price) |
 | `variation_not_invoiced` | Holds | Issuing the invoice clears it; with no sent quote it is `variation_invoice_unchecked` instead, which never holds |

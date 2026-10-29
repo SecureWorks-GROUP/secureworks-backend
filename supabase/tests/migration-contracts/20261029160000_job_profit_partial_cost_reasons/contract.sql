@@ -15,7 +15,7 @@
 --   TP13-04  quote 1,200 + variation 300, invoiced 2,000 (covered)   margin 900
 --   TP13-05  completed 5 days ago, no labour           no_labour_linked, not overdue
 --   TP13-06  quote 1,200 + variation 300, invoiced 1,500 (covered)   margin 400
---   TP13-11  materials 300 of 700 (43%)                materials_below_quote (holds)
+--   TP13-11  materials 300 of 700 (43%)                materials_below_quote (holds; warns under its switch)
 --   TP13-12  priced order, delivery 45 days ago        po_no_bill_overdue (warns)
 --   TP13-13  unpriced order sent 45 days ago           ordered_not_billed_over_30_days (warns)
 --   TP13-14  supplier invoice emailed 40 days ago      po_no_bill_overdue (warns)
@@ -188,7 +188,7 @@ DECLARE p jsonb := public.job_profit_partial_cost_policy();
 BEGIN
   IF p IS DISTINCT FROM '{"version": "tp13-v1", "po_no_bill_days": 30, "work_done_no_labour_days": 14,
        "materials_below_quote_share": 0.6, "variation_cover_tolerance_ex": 1.00,
-       "holds_margin": {"ordered_not_billed_over_30_days": false, "po_no_bill_overdue": false,
+       "holds_margin": {"materials_below_quote": true, "ordered_not_billed_over_30_days": false, "po_no_bill_overdue": false,
                         "variation_not_costed": false, "variation_not_invoiced": true}}'::jsonb THEN
     RAISE EXCEPTION 'tp13 policy: %', p;
   END IF;
@@ -375,7 +375,7 @@ DECLARE shipped jsonb := public.job_profit_partial_cost_policy();
 BEGIN
   EXECUTE format($f$CREATE OR REPLACE FUNCTION public.job_profit_partial_cost_policy()
     RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $b$ SELECT %L::jsonb $b$ $f$,
-    jsonb_set(shipped, '{holds_margin}', '{"ordered_not_billed_over_30_days": true, "po_no_bill_overdue": true,
+    jsonb_set(shipped, '{holds_margin}', '{"materials_below_quote": true, "ordered_not_billed_over_30_days": true, "po_no_bill_overdue": true,
                                           "variation_not_costed": true, "variation_not_invoiced": true}'::jsonb)::text);
 END $$;
 DO $$
@@ -439,6 +439,69 @@ BEGIN
   END IF;
 END $$;
 ROLLBACK TO SAVEPOINT tp13_warn_variation;
+
+-- And materials_below_quote set to warn (materials that really came in under
+-- quote): TP13-11 shows its margin on the costs placed, the gap stays named,
+-- and every other check is as shipped. The switch is the only thing that
+-- moves it: a body that read another switch for it is caught.
+SAVEPOINT tp13_warn_materials;
+DO $$
+DECLARE shipped jsonb := public.job_profit_partial_cost_policy();
+BEGIN
+  EXECUTE format($f$CREATE OR REPLACE FUNCTION public.job_profit_partial_cost_policy()
+    RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $b$ SELECT %L::jsonb $b$ $f$,
+    jsonb_set(shipped, '{holds_margin,materials_below_quote}', 'false'::jsonb)::text);
+END $$;
+CREATE FUNCTION pg_temp.tp13_materials_warn_problems() RETURNS text[] LANGUAGE plpgsql AS $$
+DECLARE r record; b jsonb; pr text[] := '{}';
+BEGIN
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'TP13-11';
+  IF NOT r.margin_ok OR r.profit_ex IS DISTINCT FROM 1200::numeric OR r.cost_flag IS DISTINCT FROM 'ok'
+     OR NOT ('materials_below_quote' = ANY (r.completeness)) THEN
+    pr := pr || format('TP13-11 under the warn switch: margin_ok %s profit %s cost_flag %s completeness %s',
+                       r.margin_ok, r.profit_ex, r.cost_flag, r.completeness);
+  END IF;
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'TP13-19';
+  IF r.margin_ok THEN
+    pr := pr || 'TP13-19 lost its variation hold under the materials warn switch'::text;
+  END IF;
+  b := public.context_job_story_book('d1300000-0000-4000-8000-000000000011');
+  IF b ->> 'reason' = 'materials_below_quote'
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(b -> 'lines') l WHERE l LIKE 'Margin: Unknown%') THEN
+    pr := pr || format('TP13-11 story book still withholds the margin: %s', b -> 'lines');
+  END IF;
+  RETURN pr;
+END $$;
+DO $$
+DECLARE pr text[];
+BEGIN
+  pr := pg_temp.tp13_materials_warn_problems();
+  IF cardinality(pr) > 0 THEN
+    RAISE EXCEPTION 'tp13 warn materials: %', array_to_string(pr, '; ');
+  END IF;
+END $$;
+DO $$
+DECLARE pr text[]; v_def text := pg_get_viewdef('public.v_job_profit'::regclass);
+  v_from text := $s$'holds_margin'::text) ->> 'materials_below_quote'::text)$s$;
+BEGIN
+  IF (length(v_def) - length(replace(v_def, v_from, ''))) / length(v_from) <> 1 THEN
+    RAISE EXCEPTION 'tp13 break: the materials switch is not read exactly once in the view body';
+  END IF;
+  BEGIN
+    EXECUTE 'CREATE OR REPLACE VIEW public.v_job_profit AS '
+      || replace(v_def, v_from, $s$'holds_margin'::text) ->> 'variation_not_invoiced'::text)$s$);
+    pr := pg_temp.tp13_materials_warn_problems();
+    RAISE EXCEPTION USING ERRCODE = 'P0099', MESSAGE = array_to_string(pr, '; ');
+  EXCEPTION WHEN SQLSTATE 'P0099' THEN
+    IF cardinality(pr) = 0 OR pr[1] NOT LIKE 'TP13-11 under the warn switch:%' THEN
+      RAISE EXCEPTION 'tp13 break: a body that ignores the materials switch was not caught (%)', pr;
+    END IF;
+  END;
+  IF cardinality(pg_temp.tp13_materials_warn_problems()) > 0 THEN
+    RAISE EXCEPTION 'tp13 break: the materials switch break leaked';
+  END IF;
+END $$;
+ROLLBACK TO SAVEPOINT tp13_warn_materials;
 
 -- ── Each rule, broken on its own, is caught by the blind sample ───────────
 -- The break takes the rule's code out of the live body (every place the view

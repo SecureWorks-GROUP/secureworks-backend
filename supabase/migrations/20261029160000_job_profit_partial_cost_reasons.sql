@@ -12,7 +12,7 @@
 -- estimated.
 --
 -- The checks (completeness code; holds the margin?; what it reads):
---   1. materials_below_quote (always holds): placed materials above 0 but
+--   1. materials_below_quote (holds; its switch can make it warn): placed materials above 0 but
 --        below materials_below_quote_share of the quote's materials cost
 --        (expected_materials_ex). None placed is the existing
 --        materials_not_linked. Placing the missing bill clears it.
@@ -166,6 +166,7 @@ AS $$
     -- Every one is named in completeness either way. A later migration flips
     -- one here; the view body never changes for it.
     'holds_margin', jsonb_build_object(
+      'materials_below_quote', true,
       'ordered_not_billed_over_30_days', false,
       'po_no_bill_overdue', false,
       'variation_not_costed', false,
@@ -175,7 +176,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.job_profit_partial_cost_policy() IS
-  'Job profit TP-13 (20261029160000): the partial-cost check numbers v_job_profit reads. po_no_bill_days: an open order with no bill this many Perth days after its date (a priced order: its delivery day, else the Perth day it was created; an unpriced order: the day it was sent; an emailed invoice: the day it arrived) is po_no_bill_overdue (priced or emailed) or ordered_not_billed_over_30_days (unpriced; the name is CFO-12''s, the limit is this one). work_done_no_labour_days: no labour this many Perth days after completion or first client sign-off is work_done_no_labour_overdue. materials_below_quote_share: placed materials below this share of the quote''s materials cost is materials_below_quote. variation_cover_tolerance_ex: how far invoices may fall short of the sent quote plus agreed variations and still cover them. holds_margin: per check, true hides profit and margin (and names the check in cost_flag when it is a cost), false only names it in completeness; materials_below_quote always holds, work_done_no_labour_overdue, variation_invoice_unchecked and expected_cost_lane_missing never do. A manual bill placement records no purchase order (materials_recon.ts), so a placed bill never closes an order: the two order checks only warn until that is fixed. Change only by migration. Service role only.';
+  'Job profit TP-13 (20261029160000): the partial-cost check numbers v_job_profit reads. po_no_bill_days: an open order with no bill this many Perth days after its date (a priced order: its delivery day, else the Perth day it was created; an unpriced order: the day it was sent; an emailed invoice: the day it arrived) is po_no_bill_overdue (priced or emailed) or ordered_not_billed_over_30_days (unpriced; the name is CFO-12''s, the limit is this one). work_done_no_labour_days: no labour this many Perth days after completion or first client sign-off is work_done_no_labour_overdue. materials_below_quote_share: placed materials below this share of the quote''s materials cost is materials_below_quote. variation_cover_tolerance_ex: how far invoices may fall short of the sent quote plus agreed variations and still cover them. holds_margin: per check, true hides profit and margin (and names the check in cost_flag when it is a cost), false only names it in completeness; work_done_no_labour_overdue, variation_invoice_unchecked and expected_cost_lane_missing never do. A manual bill placement records no purchase order (materials_recon.ts), so a placed bill never closes an order: the two order checks only warn until that is fixed. Change only by migration. Service role only.';
 
 REVOKE ALL ON FUNCTION public.job_profit_partial_cost_policy() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit_partial_cost_policy() TO service_role;
@@ -544,6 +545,8 @@ costed AS (
 held AS (
   SELECT
     c.*,
+    (c.materials_below_quote
+      AND (public.job_profit_partial_cost_policy() -> 'holds_margin' ->> 'materials_below_quote')::boolean) AS materials_below_quote_holds,
     (c.ordered_not_billed_over_30_count > 0
       AND (public.job_profit_partial_cost_policy() -> 'holds_margin' ->> 'ordered_not_billed_over_30_days')::boolean) AS ordered_over_limit_holds,
     (c.po_no_bill_overdue_count > 0
@@ -567,7 +570,7 @@ flagged AS (
       WHEN c.materials_missing THEN 'materials_not_linked'
       WHEN c.labour_missing THEN 'no_labour_linked'
       -- TP-13: a cost check names itself here only while it holds the margin
-      WHEN c.materials_below_quote THEN 'materials_below_quote'
+      WHEN c.materials_below_quote_holds THEN 'materials_below_quote'
       WHEN c.ordered_over_limit_holds THEN 'ordered_not_billed_over_30_days'
       WHEN c.po_no_bill_overdue_holds THEN 'po_no_bill_overdue'
       WHEN c.variation_not_costed_holds THEN 'variation_not_costed'
@@ -578,7 +581,7 @@ flagged AS (
       AND NOT c.project_exceeds_line_costs AND NOT c.has_installer_unconfirmed
       AND NOT c.materials_missing AND NOT c.labour_missing
       -- TP-13: a check that holds is a named reason, never a margin
-      AND NOT c.materials_below_quote AND NOT c.ordered_over_limit_holds
+      AND NOT c.materials_below_quote_holds AND NOT c.ordered_over_limit_holds
       AND NOT c.po_no_bill_overdue_holds AND NOT c.variation_not_costed_holds
       AND NOT c.variation_not_invoiced_holds) AS margin_ok
   FROM held c

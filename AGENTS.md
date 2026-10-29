@@ -4864,7 +4864,7 @@ legacy insert), and only send-quote's own sources (`send-quote`,
 `v_job_profit` (TP-13, `20261029160000`) names in `completeness` every cost
 that is probably missing, and holds the margin only for the checks
 `job_profit_partial_cost_policy()->'holds_margin'` switches on. As shipped,
-`materials_below_quote` (always) and `variation_not_invoiced` (agreed
+`materials_below_quote` and `variation_not_invoiced` (agreed
 variations not covered by the invoices, only when a sent quote exists) hold;
 the order checks (`ordered_not_billed_over_30_days`, `po_no_bill_overdue`)
 and `variation_not_costed` warn, because a person's bill placement records no
