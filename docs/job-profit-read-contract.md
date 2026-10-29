@@ -151,7 +151,15 @@ The `evidence_hash` is led by the contract version; a payment does not move it
 (`LineAmountTypes`, which the engine reads), credit, status class, allocation
 row or overhead does. A DRAFT bill linked to a job reads `not_counted`,
 `bill_not_approved`, as the engine treats it. Context's job card reads it through
-`context_job_bill_outcomes(job)` (`20261029170100`), which carries no amount;
+`context_job_bill_outcomes(job)` (`20261029170100`), which carries no amount.
+The rule is one function, `cfo_bill_cost_outcomes_scoped(job)`: the view is
+its call with null, and a job's call first finds that job's bills (its Xero
+links and actual allocation rows) and judges only those (and every other job
+they touch), giving exactly the view's rows for those bills (the contract
+compares both ways for every fixture job). A job with no bill skips the engine
+read. The engine's own shared parts still read every bill once per call (the
+floor until the engine can be filtered), so the job read runs with
+`jit = off`: JIT compiling that plan costs seconds and saves nothing.
 ops-api `job_overview` serves that as `bills` and refuses any other contract
 version or any amount (`job_bill_outcomes_read.ts`); a placed mirror reads
 `where_counted` `trade_app` there. The one-job timing read for the 8 s API

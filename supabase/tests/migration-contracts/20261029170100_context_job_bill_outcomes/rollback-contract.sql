@@ -9,4 +9,5 @@ BEGIN
     RAISE EXCEPTION 'rollback took CFO''s view with it';
   END IF;
   PERFORM 1 FROM public.cfo_bill_cost_outcomes LIMIT 1;
+  PERFORM 1 FROM public.cfo_bill_cost_outcomes_scoped(NULL::uuid) LIMIT 1;
 END $$;

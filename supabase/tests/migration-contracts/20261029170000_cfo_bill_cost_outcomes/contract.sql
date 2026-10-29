@@ -212,12 +212,62 @@ BEGIN
   IF o.bill_counted_jobs <> 2 THEN RAISE EXCEPTION 'H7-SPLIT counted jobs: %', o.bill_counted_jobs; END IF;
 END $$;
 
+-- ── 2b. One rule, two scopes: a job's read is the estate's rows for its bills ─
+DO $$
+DECLARE j record; d1 bigint; d2 bigint; n bigint; def text;
+BEGIN
+  -- The view is exactly the rule with no job.
+  def := pg_get_viewdef('public.cfo_bill_cost_outcomes'::regclass, true);
+  IF def !~ 'cfo_bill_cost_outcomes_scoped\(NULL::uuid\)' THEN
+    RAISE EXCEPTION 'the estate view is not the scoped rule with no job: %', def;
+  END IF;
+  -- The rule inlines: plain SQL, STABLE, not strict, no SET clause, invoker.
+  IF NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+                  WHERE p.oid = 'public.cfo_bill_cost_outcomes_scoped(uuid)'::regprocedure
+                    AND l.lanname = 'sql' AND p.provolatile = 's' AND NOT p.proisstrict
+                    AND p.proconfig IS NULL AND NOT p.prosecdef AND p.proretset) THEN
+    RAISE EXCEPTION 'cfo_bill_cost_outcomes_scoped is not an inlinable SQL rule';
+  END IF;
+  -- Every fixture job, and a job with nothing on it: the scoped rows are the
+  -- view's rows for the bills placed on that job, byte for byte, both ways.
+  FOR j IN SELECT id, job_number FROM public.jobs WHERE job_number LIKE 'H7-%'
+           UNION ALL SELECT 'c7000000-0000-4000-8000-0000000000ff'::uuid, 'none' LOOP
+    WITH scope AS (
+      SELECT x.xero_invoice_id FROM public.xero_invoices x
+       WHERE x.invoice_type = 'ACCPAY' AND x.job_id = j.id AND x.xero_invoice_id IS NOT NULL
+      UNION
+      SELECT f.xero_invoice_id FROM public.job_materials_facts f
+       WHERE f.kind = 'actual' AND f.job_id = j.id AND f.xero_invoice_id IS NOT NULL
+    ), est AS (
+      SELECT v.* FROM public.cfo_bill_cost_outcomes v WHERE v.xero_invoice_id IN (SELECT xero_invoice_id FROM scope)
+    ), mine AS (
+      SELECT o.* FROM public.cfo_bill_cost_outcomes_scoped(j.id) o
+    )
+    SELECT (SELECT count(*) FROM (SELECT * FROM est EXCEPT ALL SELECT * FROM mine) a),
+           (SELECT count(*) FROM (SELECT * FROM mine EXCEPT ALL SELECT * FROM est) b),
+           (SELECT count(*) FROM mine)
+      INTO d1, d2, n;
+    IF d1 <> 0 OR d2 <> 0 THEN
+      RAISE EXCEPTION 'job % read differs from the estate: % estate rows missing, % extra', j.job_number, d1, d2;
+    END IF;
+    IF j.job_number = 'H7-J1' AND n = 0 THEN RAISE EXCEPTION 'H7-J1 scoped read is empty'; END IF;
+    IF j.job_number = 'none' AND n <> 0 THEN RAISE EXCEPTION 'a job with nothing on it reads % rows', n; END IF;
+  END LOOP;
+END $$;
+
+-- The service role, the rule's only caller, reads both scopes with the grants
+-- the migrations give it (no grant is made in this contract).
+SET LOCAL ROLE service_role;
+SELECT count(*) AS service_role_estate_rows FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id LIKE 'H7-%';
+SELECT count(*) AS service_role_job_rows FROM public.cfo_bill_cost_outcomes_scoped('c7000000-0000-4000-8000-000000000001');
+RESET ROLE;
+
 -- ── 3. The change hash (D22: CFO's recommendation, a payment never moves it) ─
 DO $$
 DECLARE h0 text; h1 text; c0 text; c1 text; def text;
 BEGIN
-  def := pg_get_viewdef('public.cfo_bill_cost_outcomes'::regclass, true);
-  IF def !~ 'md5\(\(?jsonb_build_array\(''cfo-bill-cost-outcome-v1''' THEN
+  def := pg_get_functiondef('public.cfo_bill_cost_outcomes_scoped(uuid)'::regprocedure);
+  IF def !~ 'md5\(\(?jsonb_build_array\(\s*''cfo-bill-cost-outcome-v1''' THEN
     RAISE EXCEPTION 'the contract version does not lead the change hash';
   END IF;
 
@@ -285,6 +335,11 @@ BEGIN
   IF has_table_privilege('anon', 'public.cfo_bill_cost_outcomes', 'SELECT')
      OR has_table_privilege('authenticated', 'public.cfo_bill_cost_outcomes', 'SELECT') THEN
     RAISE EXCEPTION 'a browser role can read the outcome';
+  END IF;
+  IF NOT has_function_privilege('service_role', 'public.cfo_bill_cost_outcomes_scoped(uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.cfo_bill_cost_outcomes_scoped(uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.cfo_bill_cost_outcomes_scoped(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'cfo_bill_cost_outcomes_scoped is not service role only';
   END IF;
 END $$;
 

@@ -5,6 +5,9 @@ BEGIN
   IF to_regclass('public.cfo_bill_cost_outcomes') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback left cfo_bill_cost_outcomes';
   END IF;
+  IF to_regprocedure('public.cfo_bill_cost_outcomes_scoped(uuid)') IS NOT NULL THEN
+    RAISE EXCEPTION 'rollback left cfo_bill_cost_outcomes_scoped';
+  END IF;
   PERFORM 1 FROM public.v_job_cost_events LIMIT 1;
   PERFORM 1 FROM public.v_job_profit LIMIT 1;
   PERFORM 1 FROM public.v_bill_allocation_balance LIMIT 1;

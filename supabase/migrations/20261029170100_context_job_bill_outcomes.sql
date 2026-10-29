@@ -2,7 +2,9 @@
 --
 -- For one job, the supplier bills placed on it (its own Xero link, or an
 -- allocation row on it), each with where Finance's engine counts its cost,
--- read from CFO's cfo_bill_cost_outcomes (20261029170000) and nothing else.
+-- read from CFO's rule (20261029170000) and nothing else: the scoped call
+-- cfo_bill_cost_outcomes_scoped(job), which reads only this job's bills and
+-- gives exactly cfo_bill_cost_outcomes' rows for them.
 -- Context owns the record link and the placement it shows; CFO owns where the
 -- cost counts, its confirmation and every amount. So this read carries no
 -- amount at all: no total, no part, no overhead, no credit, no count of
@@ -34,9 +36,12 @@
 -- where its cost counts is not settled, so the card says nothing about it,
 -- never "counts here" and never "counts nowhere". unknown stays unknown.
 --
--- Plain SQL, STABLE, SECURITY INVOKER: it reads the view with the caller's
+-- Plain SQL, STABLE, SECURITY INVOKER: it reads CFO's rule with the caller's
 -- rights, and only the service role may call it (the server-side job overview
--- read). No new grant on CFO's view. Writes nothing.
+-- read). Writes nothing. It is called once per job page, never per row, and
+-- carries SET jit = off: the engine view it reads is large to plan, and on a
+-- local 2,000-bill estate JIT compiling alone took 4 to 7 s of an 8 s budget
+-- for a read that runs in milliseconds without it.
 -- Contract: supabase/tests/migration-contracts/20261029170100_context_job_bill_outcomes/.
 -- Rollback: supabase/rollbacks/20261029170100_context_job_bill_outcomes_down.sql.
 
@@ -44,17 +49,11 @@ CREATE OR REPLACE FUNCTION public.context_job_bill_outcomes(p_job uuid)
 RETURNS jsonb
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $fn$
-  WITH mine AS (
-    SELECT x.xero_invoice_id FROM public.xero_invoices x
-     WHERE x.invoice_type = 'ACCPAY' AND x.job_id = p_job AND x.xero_invoice_id IS NOT NULL
-    UNION
-    SELECT f.xero_invoice_id FROM public.job_materials_facts f
-     WHERE f.kind = 'actual' AND f.job_id = p_job AND f.xero_invoice_id IS NOT NULL
-  ),
-  o AS (
-    SELECT c.* FROM public.cfo_bill_cost_outcomes c
-     WHERE c.xero_invoice_id IN (SELECT m.xero_invoice_id FROM mine m)
+  WITH o AS (
+    -- This job's bills only, from the first read on (never the estate).
+    SELECT c.* FROM public.cfo_bill_cost_outcomes_scoped(p_job) c
   ),
   per_bill AS (
     SELECT
@@ -126,4 +125,4 @@ $fn$;
 REVOKE ALL ON FUNCTION public.context_job_bill_outcomes(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_job_bill_outcomes(uuid) TO service_role;
 COMMENT ON FUNCTION public.context_job_bill_outcomes(uuid) IS
-  'Context H7 read, INT-10 (20261029170100): for one job, the supplier bills on it (its Xero link or an actual allocation row) with where CFO''s cfo_bill_cost_outcomes says each bill''s cost counts, and no amount at all. contract_version is the producer''s (cfo-bill-cost-outcome-v1), shape context-job-bill-outcomes-v1. where_counted here, elsewhere, here_and_elsewhere, no_job, trade_app (a trade-app mirror a person placed: counted through the trade lines, never as this bill), held (F1, JP-21: counts held on every job, never shown as settled) or unknown (never 0). bill_state is CFO''s, over_counted included. change_hash is CFO''s evidence_hash: a payment never moves it. Read only, service role only.';
+  'Context H7 read, INT-10 (20261029170100): for one job, the supplier bills on it (its Xero link or an actual allocation row) with where CFO''s rule (cfo_bill_cost_outcomes_scoped(job), exactly cfo_bill_cost_outcomes for those bills) says each bill''s cost counts, and no amount at all. contract_version is the producer''s (cfo-bill-cost-outcome-v1), shape context-job-bill-outcomes-v1. where_counted here, elsewhere, here_and_elsewhere, no_job, trade_app (a trade-app mirror a person placed: counted through the trade lines, never as this bill), held (F1, JP-21: counts held on every job, never shown as settled) or unknown (never 0). bill_state is CFO''s, over_counted included. change_hash is CFO''s evidence_hash: a payment never moves it. Read only, service role only.';

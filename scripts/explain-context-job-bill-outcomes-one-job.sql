@@ -3,9 +3,11 @@
 -- READ ONLY. Runs exactly what ops-api job_overview calls for one job,
 -- public.context_job_bill_outcomes(job), as the service role, for the newest
 -- job Job Profit reads (legacy IS NOT TRUE), under EXPLAIN (ANALYZE, BUFFERS).
--- The function is plain SQL with a WITH body, so the planner runs it as one
--- call: the plan's execution time is the read's time; compare it with the
--- 8 s API statement limit. Writes nothing; the transaction is read only and
+-- The function reads only that job's bills through
+-- cfo_bill_cost_outcomes_scoped(job) and runs with jit = off; the plan's
+-- execution time is the read's time (planning included, since the function
+-- plans its body on each call): compare it with the 8 s API statement limit.
+-- For a job with bills, swap the subquery for that job's id. Writes nothing; the transaction is read only and
 -- ends when the session does. The EXPLAIN is the final result set.
 BEGIN;
 SET TRANSACTION READ ONLY;

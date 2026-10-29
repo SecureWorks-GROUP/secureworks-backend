@@ -153,6 +153,28 @@ BEGIN
   END IF;
 END $$;
 
+-- ── the service role runs it with the grants the migrations give (none made here) ──
+SET LOCAL ROLE service_role;
+DO $$
+DECLARE v jsonb;
+BEGIN
+  v := public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000001');
+  IF jsonb_array_length(v -> 'bills') = 0 THEN
+    RAISE EXCEPTION 'the service role read no bills for H7-J1';
+  END IF;
+END $$;
+RESET ROLE;
+
+-- ── it reads CFO's scoped rule, and carries jit off ──
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid = 'public.context_job_bill_outcomes(uuid)'::regprocedure
+                    AND p.proconfig = ARRAY['jit=off'] AND NOT p.prosecdef
+                    AND p.prosrc ~ 'cfo_bill_cost_outcomes_scoped\(p_job\)') THEN
+    RAISE EXCEPTION 'context_job_bill_outcomes does not read the scoped rule with jit off';
+  END IF;
+END $$;
+
 -- ── service role only ──
 DO $$
 BEGIN

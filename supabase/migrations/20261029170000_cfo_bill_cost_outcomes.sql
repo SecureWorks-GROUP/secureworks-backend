@@ -81,18 +81,52 @@
 -- and credit not shown hashes as the 0 the engine applies).
 -- No history in v1.
 --
+-- One rule, two scopes. cfo_bill_cost_outcomes_scoped(job) holds the whole
+-- rule. With no job it is the estate, and the view is exactly that call. With
+-- a job it reads only the bills placed on that job (its Xero link, or an actual
+-- allocation row on it) from the first read on, so the per-bill work never
+-- runs over the estate; the rows are the view's rows for those bills, byte for
+-- byte (the contract proves it for every fixture job, both ways). Every scope
+-- filter sits on a read keyed by the bill id, and every later step is keyed by
+-- the bill, so a bill's rows never depend on another bill. The function is
+-- plain SQL, STABLE, with no SET clause, so it inlines (the view's call with a
+-- constant null folds the scope filter away). The engine view it reads
+-- (v_job_cost_events) still builds its own shared steps over every bill; that
+-- floor is the engine's, not this rule's.
+--
 -- Amounts here are CFO's. The Context-facing read (context_job_bill_outcomes,
 -- 20261029170100) drops every one of them. Writes nothing, moves no money.
 -- Contract: supabase/tests/migration-contracts/20261029170000_cfo_bill_cost_outcomes/.
 -- Rollback: supabase/rollbacks/20261029170000_cfo_bill_cost_outcomes_down.sql.
 
-CREATE OR REPLACE VIEW public.cfo_bill_cost_outcomes AS
-WITH bill AS (
+CREATE OR REPLACE FUNCTION public.cfo_bill_cost_outcomes_scoped(p_job uuid)
+RETURNS TABLE (
+  contract_version text, subject_kind text, xero_invoice_id text, invoice_number text, contact_name text,
+  bill_status text, job_id uuid, job_number text, holding_job boolean, xero_linked boolean, row_source text,
+  placed_by text, counts text, reason text, bill_state text, held_reason text, overhead_part boolean,
+  not_job_related_mark boolean, mirror_bill boolean, bill_counted_jobs integer, counted_ex numeric,
+  placed_ex numeric, bill_ex numeric, overhead_ex numeric, credit_applied_ex numeric, evidence_hash text
+)
+LANGUAGE sql
+STABLE
+AS $fn$
+WITH
+-- The bills in scope: with a job, those placed on it; with none, every bill
+-- (each filter below is then true).
+scope AS (
+  SELECT x.xero_invoice_id FROM public.xero_invoices x
+   WHERE x.invoice_type = 'ACCPAY' AND x.job_id = p_job AND x.xero_invoice_id IS NOT NULL
+  UNION
+  SELECT f.xero_invoice_id FROM public.job_materials_facts f
+   WHERE f.kind = 'actual' AND f.job_id = p_job AND f.xero_invoice_id IS NOT NULL
+),
+bill AS (
   SELECT DISTINCT ON (x.xero_invoice_id)
          x.xero_invoice_id, x.invoice_number, x.contact_name, x.status, x.sub_total, x.total,
          x.line_items, x.raw_json, x.job_id
   FROM public.xero_invoices x
   WHERE x.invoice_type = 'ACCPAY' AND x.xero_invoice_id IS NOT NULL
+    AND (p_job IS NULL OR x.xero_invoice_id IN (SELECT s.xero_invoice_id FROM scope s))
   ORDER BY x.xero_invoice_id, (x.status IN ('AUTHORISED', 'PAID')) DESC, x.job_id::text COLLATE "C"
 ),
 -- The engine's own mirror test (v_job_cost_events.trade_mirror_bill).
@@ -100,6 +134,7 @@ mirror AS (
   SELECT DISTINCT x.xero_invoice_id
   FROM public.xero_invoices x
   WHERE x.invoice_type = 'ACCPAY'
+    AND (p_job IS NULL OR x.xero_invoice_id IN (SELECT s.xero_invoice_id FROM scope s))
     AND (
       EXISTS (SELECT 1 FROM public.trade_invoices t WHERE t.xero_bill_id = x.xero_invoice_id)
       OR EXISTS (
@@ -124,6 +159,7 @@ fact AS (
          END AS placed_by
   FROM public.job_materials_facts f
   WHERE f.kind = 'actual' AND f.job_id IS NOT NULL AND f.xero_invoice_id IS NOT NULL
+    AND (p_job IS NULL OR f.xero_invoice_id IN (SELECT s.xero_invoice_id FROM scope s))
 ),
 -- What stops the engine reading the bill through its Xero lines (the two NOT
 -- EXISTS of v_job_cost_events.bill_line), per bill.
@@ -154,6 +190,10 @@ eng AS (
     AND e.source IN ('supplier_bill', 'materials_fact', 'supplier_credit',
                      'installer_bill_unconfirmed', 'installer_bill_not_job_related')
     AND e.document_id IS NOT NULL AND e.job_id IS NOT NULL
+    AND (p_job IS NULL OR e.document_id IN (SELECT s.xero_invoice_id FROM scope s))
+    -- A job with no bill skips the engine read entirely (a one-time
+    -- filter); it changes no row, since the IN above would keep none.
+    AND (p_job IS NULL OR EXISTS (SELECT 1 FROM scope s))
   GROUP BY e.document_id, e.job_id
 ),
 pair AS (
@@ -341,9 +381,27 @@ SELECT
     j.overhead_ex,
     j.queue_status
   )::text) AS evidence_hash
-FROM judged j;
+FROM judged j
+$fn$;
+
+REVOKE ALL ON FUNCTION public.cfo_bill_cost_outcomes_scoped(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cfo_bill_cost_outcomes_scoped(uuid) TO service_role;
+COMMENT ON FUNCTION public.cfo_bill_cost_outcomes_scoped(uuid) IS
+  'Job profit H7, INT-12 (20261029170000): the one rule behind cfo_bill_cost_outcomes. With p_job null, every bill (the view is exactly this call); with a job, only the bills placed on it (its Xero link or an actual allocation row on it), read from the first step, giving the view''s rows for those bills byte for byte. Plain SQL, STABLE, no SET clause (inlinable). Read only, service role only.';
+
+-- The estate: the rule with no job.
+CREATE OR REPLACE VIEW public.cfo_bill_cost_outcomes AS
+SELECT * FROM public.cfo_bill_cost_outcomes_scoped(NULL::uuid);
 
 COMMENT ON VIEW public.cfo_bill_cost_outcomes IS
   'Job profit H7, INT-12 (20261029170000): one row per supplier bill (Xero ACCPAY; trade-app mirrors left out unless a person placed one) and job it is Xero-linked to, has an actual allocation row on, or is counted on. counts counted (v_job_cost_events has an actual row of the bill on the job and v_job_profit reads the job), not_counted (readable, engine counts none of it here; reason names why) or unknown (the reason cannot be read; never 0). Whether a placement counts is read from the engine, never re-derived. bill_state unknown, voided, trade_mirror (a trade-app mirror a person placed: shown, reason mirror_bill_person_placed, never counted), held (a not-job-related mark while the engine counts the bill: F1, JP-21, held_reason not_job_related_mark_on_counted_bill), not_job_related, overhead, not_counted, over_counted (counted parts plus overhead above the bill ex GST), counted_in_full or counted_in_part (below it), compared as v_bill_allocation_balance balances a bill. placed_by is descriptive only. evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-bill-cost-outcome-v1; a payment does not move it (AUTHORISED and PAID one class; D22 working rule, CFO''s recommendation), a changed total, line, tax-inclusive flag (LineAmountTypes), credit, status class, row or overhead does. No history. Amounts are CFO''s: context_job_bill_outcomes drops them. Read only, service role only.';
 REVOKE ALL ON public.cfo_bill_cost_outcomes FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.cfo_bill_cost_outcomes TO service_role;
+
+-- The rule reads these tables with the caller's rights (an inlined function's
+-- reads are the caller's, not the view owner's), and the service role is its
+-- only caller. Some of these it may hold already (20260705000010 grants
+-- job_materials_facts); stated here, SELECT only and to the service role only,
+-- so a stack built from migrations alone runs it too.
+GRANT SELECT ON public.xero_invoices, public.job_materials_facts, public.materials_reconciliation_queue,
+  public.jobs, public.trade_invoices, public.v_job_cost_events TO service_role;
