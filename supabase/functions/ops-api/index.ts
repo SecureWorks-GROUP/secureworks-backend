@@ -94,7 +94,7 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   my_hours            — Completed assignments for a week with hours
 //   submit_trade_invoice — Build invoice + push to Xero as ACCPAY bill
 //   my_trade_invoices   — Trade's invoice history
-//   set_trade_rate      — Trade sets/updates their hourly rate
+//   set_trade_rate      — Retired trade write; rates are set by ops
 //   create_trade_alert  — Report on-site issue → ai_alerts (amber)
 //
 //   ── Trade Invoicing (Ops) ──
@@ -56187,13 +56187,13 @@ async function myMoney(client: any, tradeUser: TradeAuthContext, params: URLSear
 export const _myMoneyForTest = myMoney
 export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 
-// ── set_trade_rate: trade or ops sets hourly rate ──
+// ── set_trade_rate: office sets rate; trade writes are refused ──
 async function setTradeRate(client: any, authUserId: string | null, body: any) {
   const { user_id, hourly_rate } = body
-  if (authUserId && user_id && user_id !== authUserId) {
-    throw new ApiError('A trade can only update their own rate.', 403)
+  if (authUserId) {
+    throw new ApiError('Rates are set by the office. Contact the office to change your rate.', 403)
   }
-  const targetUserId = authUserId || user_id
+  const targetUserId = user_id
   if (!targetUserId) throw new Error('user_id required')
   if (!hourly_rate || hourly_rate <= 0) throw new Error('Valid hourly_rate required')
 
