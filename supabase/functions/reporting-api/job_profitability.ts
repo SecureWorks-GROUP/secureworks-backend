@@ -82,6 +82,9 @@ export const JOB_PROFIT_VIEW_COLUMNS = [
 // sets margin_ok false in v_job_profit), in the order they are reported, plus
 // this route's own two. Other codes (text_matched_lines, open_purchase_orders,
 // draft_revenue, ...) are notes, not reasons the margin is unknown.
+// materials_below_quote and variation_not_invoiced are Job Profit TP-13's
+// (20261029160000): as shipped both hold the margin; each has a switch in
+// job_profit_partial_cost_policy(), and the words match the story money book.
 export const MARGIN_BLOCKING_REASONS: Record<string, string> = {
   missing_client_invoice: "no client invoice yet",
   no_cost_linked: "no cost linked to the job yet",
@@ -92,7 +95,11 @@ export const MARGIN_BLOCKING_REASONS: Record<string, string> = {
   incomplete_invoice_lines: "a trade invoice on the job has incomplete lines",
   unclassified_lines: "some cost lines are unclassified",
   materials_not_linked: "materials are owed but none is linked",
+  materials_below_quote:
+    "the materials bills placed are well under the materials in the quote, so a bill is probably still to come",
   no_labour_linked: "no labour linked",
+  variation_not_invoiced:
+    "an agreed variation is not covered by the invoices yet",
   not_in_job_profit_engine: "the job is not in the Job Profit engine",
   engine_reason_not_given:
     "the Job Profit engine published no margin and gave no reason",

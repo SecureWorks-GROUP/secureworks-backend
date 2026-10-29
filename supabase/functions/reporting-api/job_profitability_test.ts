@@ -554,6 +554,50 @@ Deno.test("unknown with no code and no flag: engine_reason_not_given", () => {
   assertEquals(body.jobs[0].margin_reason_codes, ["engine_reason_not_given"]);
 });
 
+Deno.test("unknown for a TP-13 reason: worded, never engine_reason_not_given", () => {
+  const body: any = full([job("t1"), job("t2"), job("t3")], [
+    // materials far below the quote: also the cost_flag
+    profit("t1", {
+      margin_ok: false,
+      completeness: ["materials_below_quote"],
+      revenue_flag: "ok",
+      cost_flag: "materials_below_quote",
+    }),
+    // an agreed variation not invoiced: a revenue gap, so cost_flag stays ok
+    profit("t2", {
+      margin_ok: false,
+      completeness: ["variation_not_invoiced"],
+      revenue_flag: "ok",
+      cost_flag: "ok",
+    }),
+    // both, beside a note that is not a reason
+    profit("t3", {
+      margin_ok: false,
+      completeness: ["open_purchase_orders", "variation_not_invoiced", "materials_below_quote"],
+      revenue_flag: "ok",
+      cost_flag: "materials_below_quote",
+    }),
+  ]);
+  assertEquals(rowOf(body, "t1").margin_reason_codes, ["materials_below_quote"]);
+  assertEquals(
+    rowOf(body, "t1").margin_reason,
+    "Unknown: the materials bills placed are well under the materials in the quote, so a bill is probably still to come",
+  );
+  assertEquals(rowOf(body, "t2").margin_reason_codes, ["variation_not_invoiced"]);
+  assertEquals(
+    rowOf(body, "t2").margin_reason,
+    "Unknown: an agreed variation is not covered by the invoices yet",
+  );
+  assertEquals(rowOf(body, "t3").margin_reason_codes, [
+    "materials_below_quote",
+    "variation_not_invoiced",
+  ]);
+  assertEquals(body.summary.unknown_reasons, {
+    materials_below_quote: 2,
+    variation_not_invoiced: 2,
+  });
+});
+
 Deno.test("duplicate engine rows for one job fail loudly", () => {
   assertThrows(
     () => full([job("1")], [KNOWN, KNOWN]),
