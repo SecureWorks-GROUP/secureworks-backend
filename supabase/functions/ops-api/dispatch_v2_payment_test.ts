@@ -2041,40 +2041,64 @@ Deno.test("asap: the email says Date: ASAP, needs no date and can be sent", () =
   assert(dispatchV2EmptyDetailLines(picked.body_text).includes("date"));
 });
 
-Deno.test("asap: a box's mode, from its newest sent email, its own choice, or worked out", () => {
-  const sentAsap = { date_mode: "asap" as const };
-  const sentDate = { date_mode: "date" as const };
-  // A sent order: the email's Date line, whatever the box says now.
-  assertEquals(
-    dispatchV2BoxDateMode({ stored: "date", boxHasDate: false, newestSent: sentAsap }),
-    { mode: "asap", derived: false },
-  );
-  assertEquals(
-    dispatchV2BoxDateMode({ stored: null, boxHasDate: false, newestSent: sentDate }),
-    { mode: "date", derived: true },
-  );
-  // Nothing sent: the box's choice.
+Deno.test("asap: a box's mode for its next email, and what its sent order asked", () => {
+  const SENT = "2026-10-28T01:00:00.000Z";
+  const BEFORE = "2026-10-27T01:00:00.000Z";
+  const AFTER = "2026-10-28T02:00:00.000Z";
+  const sentAsap = { date_mode: "asap" as const, sent_at: SENT };
+  const sentDate = { date_mode: "date" as const, sent_at: SENT };
+  // Nothing sent: the box's own choice.
   assertEquals(
     dispatchV2BoxDateMode({ stored: "date", boxHasDate: false, newestSent: null }),
-    { mode: "date", derived: false },
+    { mode: "date", derived: false, sent_mode: null },
   );
-  // A box made before piece C (NULL): date when it or its open email has a
-  // date, else ASAP.
+  // Sent ASAP, then the toggle set Pick a date after the send: the next
+  // email is Pick a date; the sent order still says ASAP.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "date", storedSetAt: AFTER, boxHasDate: false, newestSent: sentAsap }),
+    { mode: "date", derived: false, sent_mode: "asap" },
+  );
+  // The other way: sent Pick a date, then ASAP chosen after the send.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "asap", storedSetAt: AFTER, boxHasDate: false, newestSent: sentDate }),
+    { mode: "asap", derived: false, sent_mode: "date" },
+  );
+  // A choice from before the send, nothing under way since: the sent
+  // order's mode carries on.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "date", storedSetAt: BEFORE, boxHasDate: false, newestSent: sentAsap }),
+    { mode: "asap", derived: false, sent_mode: "asap" },
+  );
+  // ...unless a next order is under way (an open email, or lines changed
+  // since the send): then the box's choice.
+  for (const extra of [{ openEmail: { body_text: "Date: ASAP\n" } }, { hasUnsentChanges: true }]) {
+    assertEquals(
+      dispatchV2BoxDateMode({ stored: "date", storedSetAt: BEFORE, boxHasDate: false, newestSent: sentAsap, ...extra }),
+      { mode: "date", derived: false, sent_mode: "asap" },
+    );
+  }
+  // A NULL choice after a send: the sent order's mode, derived.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: null, boxHasDate: false, newestSent: sentDate }),
+    { mode: "date", derived: true, sent_mode: "date" },
+  );
+  // A box made before piece C (NULL), nothing sent: date when it or its open
+  // email has a date, else ASAP.
   const nul = { stored: null, newestSent: null };
-  assertEquals(dispatchV2BoxDateMode({ ...nul, boxHasDate: true }), { mode: "date", derived: true });
+  assertEquals(dispatchV2BoxDateMode({ ...nul, boxHasDate: true }), { mode: "date", derived: true, sent_mode: null });
   assertEquals(
     dispatchV2BoxDateMode({ ...nul, boxHasDate: false, openEmail: { delivery_date: "2026-11-05" } }),
-    { mode: "date", derived: true },
+    { mode: "date", derived: true, sent_mode: null },
   );
   assertEquals(
     dispatchV2BoxDateMode({ ...nul, boxHasDate: false, openEmail: { body_text: "Date: 5 November 2026\n" } }),
-    { mode: "date", derived: true },
+    { mode: "date", derived: true, sent_mode: null },
   );
   assertEquals(
     dispatchV2BoxDateMode({ ...nul, boxHasDate: false, openEmail: { body_text: ASAP_BODY } }),
-    { mode: "asap", derived: true },
+    { mode: "asap", derived: true, sent_mode: null },
   );
-  assertEquals(dispatchV2BoxDateMode({ ...nul, boxHasDate: false }), { mode: "asap", derived: true });
+  assertEquals(dispatchV2BoxDateMode({ ...nul, boxHasDate: false }), { mode: "asap", derived: true, sent_mode: null });
 });
 
 Deno.test("asap: the Arrival line carries each box's mode; a purchase order has none", () => {

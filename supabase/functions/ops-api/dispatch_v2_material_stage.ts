@@ -548,10 +548,14 @@ export type DispatchV2BoxStage = {
   // crew collects it on the way, so the screen leaves "Materials ready" out
   // of this box's strip and picker.
   skips_ready: boolean;
-  // ASAP or Pick a date (dispatchV2BoxDateMode); derived = the box's own
-  // choice is NULL (made before piece C) and the mode was worked out.
+  // ASAP or Pick a date (dispatchV2BoxDateMode): the mode for the box's next
+  // order email; derived = the box's own choice is NULL (made before piece
+  // C) and the mode was worked out. sent_date_mode: the newest sent order's
+  // mode (its Date line), null when nothing was sent; the board's flag
+  // reads it.
   date_mode: DispatchV2DateMode;
   date_mode_derived: boolean;
+  sent_date_mode: DispatchV2DateMode | null;
   // The payment step (dispatch_v2_payment.ts).
   payment: DispatchV2Payment;
 };
@@ -561,24 +565,53 @@ function textOrNull(value: unknown): string | null {
 }
 
 /** ASAP or Pick a date for one supplier box (contract section 3c, rule 10).
- * A sent order: its newest order email's Date line. Else the box's own
- * choice. A NULL choice (a box made before piece C): "date" when the box or
- * its open email has a date, else "asap"; derived is then true. */
+ *
+ * mode is the mode for the box's NEXT order email (what the panel's toggle
+ * shows and Make email uses):
+ *   - the box's own choice, when nothing was sent yet, when the choice was
+ *     set after the newest send, or when a next order is already under way
+ *     (an open email, or lines changed since the send);
+ *   - otherwise the newest sent order's mode (its Date line), so a box whose
+ *     choice was never touched since that send carries it on;
+ *   - a NULL choice (a box made before piece C) with no sent order, or with
+ *     a next order under way: "date" when the box or its open email has a
+ *     date, else "asap".
+ * derived: the box's own choice is NULL and the mode was worked out.
+ * sent_mode: the newest sent order's mode (null when nothing was sent): what
+ * the supplier was actually asked, which the board's flag reads. */
 export function dispatchV2BoxDateMode(input: {
   stored: unknown;
+  // When the box's choice was set (order_date_mode_set_at).
+  storedSetAt?: unknown;
   // The box has a date of its own for the current order.
   boxHasDate: boolean;
-  newestSent: Pick<DispatchV2BoxNewestSent, "date_mode"> | null;
+  newestSent: Pick<DispatchV2BoxNewestSent, "date_mode" | "sent_at"> | null;
   // The open order email (delivery_date, body_text), when read.
   openEmail?: any | null;
-}): { mode: DispatchV2DateMode; derived: boolean } {
+  // Lines added or changed since the newest send (a next order to make).
+  hasUnsentChanges?: boolean;
+}): {
+  mode: DispatchV2DateMode;
+  derived: boolean;
+  sent_mode: DispatchV2DateMode | null;
+} {
   const stored = input.stored === "asap" || input.stored === "date"
     ? input.stored as DispatchV2DateMode
     : null;
-  if (input.newestSent) {
-    return { mode: input.newestSent.date_mode, derived: stored === null };
+  const sent = input.newestSent;
+  const sentMode = sent ? sent.date_mode : null;
+  const setAt = instant(input.storedSetAt);
+  const sentAt = sent ? instant(sent.sent_at) : null;
+  const nextUnderWay = !!input.openEmail || input.hasUnsentChanges === true;
+  const choiceIsNewer = !sent || nextUnderWay ||
+    (setAt !== null && (sentAt === null || setAt > sentAt));
+  if (stored && choiceIsNewer) {
+    return { mode: stored, derived: false, sent_mode: sentMode };
   }
-  if (stored) return { mode: stored, derived: false };
+  if (sent && !nextUnderWay) {
+    return { mode: sent.date_mode, derived: stored === null, sent_mode: sentMode };
+  }
+  if (stored) return { mode: stored, derived: false, sent_mode: sentMode };
   const open = input.openEmail;
   const openHasDate = !!open && (
     isDispatchDeliveryDate(open.delivery_date) ||
@@ -589,6 +622,7 @@ export function dispatchV2BoxDateMode(input: {
   return {
     mode: input.boxHasDate || openHasDate ? "date" : "asap",
     derived: true,
+    sent_mode: sentMode,
   };
 }
 
@@ -686,9 +720,11 @@ export function dispatchV2BoxStage(
     : input.installDay;
   const dateMode = dispatchV2BoxDateMode({
     stored: box.order_date_mode,
+    storedSetAt: box.order_date_mode_set_at,
     boxHasDate: !!boxDate,
     newestSent,
     openEmail: input.openEmail,
+    hasUnsentChanges: unsent.length > 0,
   });
   return {
     key: shown.key,
@@ -708,6 +744,7 @@ export function dispatchV2BoxStage(
       date === firstDay,
     date_mode: dateMode.mode,
     date_mode_derived: dateMode.derived,
+    sent_date_mode: dateMode.sent_mode,
     // Worked out again with the stage shown, so a delivered box never holds
     // the job up, and with whether the gate is holding the stage.
     payment: dispatchV2PaymentOf({

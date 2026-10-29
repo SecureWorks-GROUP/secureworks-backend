@@ -1035,7 +1035,9 @@ export function dispatchArrival(
       held_by_payment: view.held_by_payment,
       material_stage_reply: view.reply,
       skips_ready: view.skips_ready,
-      date_mode: view.date_mode,
+      // What the supplier was asked (the newest sent order's Date line);
+      // the box's next-email mode while nothing was sent.
+      date_mode: view.sent_date_mode ?? view.date_mode,
     }, installDay, view));
   }
 

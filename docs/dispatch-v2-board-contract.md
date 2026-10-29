@@ -606,7 +606,10 @@ Nothing merges to main until Shaun says "merge to main".
     `Date: ASAP` in plain text, and the send is allowed (the Date line is
     not empty). A sent ASAP order with no supplier date yet is "ASAP, waiting
     on their date": an amber dashed ring, **not** red "no date" and **not**
-    counted late.
+    counted late. The box's choice is for its **next** order email: after a
+    send, the toggle shows the choice made since (or, untouched since the
+    send, what that order asked), while the board's flag and ring always
+    follow what the sent order actually asked (review fix, 30 Oct 2026).
 11. **Earliest install (piece C).** Once every open order on the job has a
     confirmed date, the job suggests the earliest install: the next working
     day after the last order arrives (Monday to Friday, skipping WA public
@@ -867,7 +870,7 @@ and the `arrival` echoed by every write):
 | `material_stage_label` | `Picked up` instead of `Delivered` for a pickup |
 | `skips_ready` | pickup on the install's first day: leave Materials ready out of the strip and picker |
 | `payment` | as `DispatchV2Payment` above; `null` for a purchase order with no box |
-| `date_mode` (C) | `asap` or `date`: the newest sent email's Date line (`Date: ASAP` = asap) for a sent order; else the box's `order_date_mode`; a NULL mode (box made before piece C) is `date` when the box or open email has a date, else `asap`. Null for a purchase order |
+| `date_mode` (C) | `asap` or `date`: what the supplier was asked, the newest sent email's Date line (`Date: ASAP` = asap) for a sent order; else the box's mode for its next email (as the panel's `date_mode.mode`). Null for a purchase order |
 | `flag` (C) | adds `asap`: sent, ASAP, no date yet. Not red, not counted late. `no_date` is now only a sent "Pick a date" order with no date |
 
 **`board.arrival`** gains:
@@ -916,9 +919,20 @@ move, `payment_hold: null`); a failed replies read gives no reply moves.
 `payment` (the same object, computed with the same functions) and
 `approved_email.on_account`; its `material_stage` object gains `source`
 values `reply` / `payment`, `reply`, `held_by_payment`, the pickup label, and
-`skips_ready`. Piece C adds `date_mode: { mode, set_at, set_by_email,
-derived }` to each supplier (`derived: true` when the stored mode is NULL and
-the mode was worked out).
+`skips_ready`. Piece C adds `date_mode: { mode, sent_mode, set_at,
+set_by_email, derived }` to each supplier:
+
+- `mode`: the mode for the box's **next** order email (what the toggle shows
+  and Make email uses). The box's own choice wins when nothing was sent yet,
+  when the choice was set after the newest send (`set_at` later than its
+  `sent_at`), or when a next order is under way (an open email, or lines
+  added or changed since the send). Otherwise the newest sent order's mode
+  carries on. A NULL choice (box made before piece C) with no sent order, or
+  with a next order under way, is `date` when the box or its open email has a
+  date, else `asap`.
+- `sent_mode`: what the newest sent order asked (its Date line), `null` when
+  nothing was sent. The board's `orders[].date_mode` and its flag read this.
+- `derived: true` when the stored choice is NULL and the mode was worked out.
 
 **`dispatch_v2_suggestion_accept`** (Accept on a reply) answer gains:
 
@@ -1042,11 +1056,24 @@ Common errors: 400 `invalid_request` (bad body, before any read), 400
 - Choosing ASAP does not clear a box date already set (a supplier date stays
   a supplier date).
 
-**`dispatch_v2_make_email`** (existing, C) accepts `date_mode: "asap" |
-"date"` (default: the box's mode, NULL read as above). `asap` requires
-`delivery_date` null (else 400 `invalid_request`), writes `Date: ASAP` in
-the body, stores `delivery_date` null, saves the mode on the box, and leaves
-`date` out of `missing`. The send check (`dispatchV2EmptyDetailLines`) is
+**`dispatch_v2_make_email`** (existing, C) takes `date_mode` three ways:
+
+- `"asap"` or `"date"`: used for this email. `asap` requires `delivery_date`
+  null (else 400 `invalid_request`), writes `Date: ASAP` in the body, stores
+  `delivery_date` null and leaves `date` out of `missing`. When it changes
+  the box's choice, the choice is saved on the box **after** the email row
+  has landed (org-scoped write), with one `job_events` row
+  `dispatch_v2_date_mode_set` (`via: "make_email"`, `from`, `to`). A failed
+  email saves nothing.
+- `null`: the box's own mode for its next email (`date` when a
+  `delivery_date` is given). Nothing is saved.
+- left out (a screen from before piece C): exactly as before. The Date line is
+  the `delivery_date` given, blank without one (the send is then refused);
+  the box's choice is neither used nor saved.
+
+The answer gains `date_mode` (the mode used) and `date_mode_saved`: `true`
+saved with its audit line, `null` nothing to save, `false` the box could not
+be written (the email stands; the toggle can set it). The send check (`dispatchV2EmptyDetailLines`) is
 unchanged: `Date: ASAP` is not an empty line, so the send is allowed; a
 blank Date line on a "Pick a date" email is still refused (409
 `email_details_missing`). ASAP is read back from the Date line exactly as
