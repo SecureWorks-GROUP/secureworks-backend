@@ -1,4 +1,5 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
+import { opportunityFieldInputs, readOpportunityFieldDefs } from './opportunity_custom_fields.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
@@ -1752,19 +1753,23 @@ serve(async (req: Request) => {
 
       // ── Write custom fields to GHL opportunity (for pipeline visibility + webhook re-link) ──
       let customFieldsWritten = false
+      let customFieldsMissing: string[] = []
       if (jobNumber || jobId) {
         try {
-          const customFields: { key: string; value: string | number }[] = []
-          if (jobNumber) customFields.push({ key: 'job_number', value: jobNumber })
-          customFields.push({ key: 'supabase_job_id', value: jobId })
-          customFields.push({ key: 'job_type', value: tool })
-          if (monetaryValue) customFields.push({ key: 'quote_value', value: monetaryValue })
-          await ghl(`/opportunities/${opportunityId}`, {
-            method: 'PUT',
-            body: JSON.stringify({ customFields }),
+          // GHL takes { id, field_value }: the ids come from the location's opportunity field list.
+          const defs = readOpportunityFieldDefs(await ghl(`/locations/${GHL_LOCATION_ID}/customFields?model=opportunity`))
+          const { inputs, missing } = opportunityFieldInputs(defs, {
+            job_number: jobNumber, supabase_job_id: jobId, job_type: tool, quote_value: monetaryValue,
           })
-          customFieldsWritten = true
-          console.log(`[ghl-proxy] Custom fields written: ${customFields.map(f => f.key).join(', ')}`)
+          customFieldsMissing = missing
+          if (inputs.length) {
+            await ghl(`/opportunities/${opportunityId}`, {
+              method: 'PUT',
+              body: JSON.stringify({ customFields: inputs }),
+            })
+            customFieldsWritten = true
+          }
+          console.log(`[ghl-proxy] Custom fields written: ${inputs.length}; no GHL field for: ${missing.join(', ') || 'none'}`)
         } catch (e) {
           console.log('[ghl-proxy] Custom field write failed (non-blocking):', (e as Error).message)
         }
@@ -1818,6 +1823,7 @@ serve(async (req: Request) => {
         xeroSkipped: skipXero,
         monetaryValue,
         customFieldsWritten,
+        customFieldsMissing,
         opportunityRenamed,
       })
     }
@@ -1914,16 +1920,16 @@ serve(async (req: Request) => {
 
       try {
         // GHL custom fields are set via opportunity update
-        const customFields: any[] = []
-        for (const [key, value] of Object.entries(fields)) {
-          customFields.push({ key, value })
+        const defs = readOpportunityFieldDefs(await ghl(`/locations/${GHL_LOCATION_ID}/customFields?model=opportunity`))
+        const { inputs, missing } = opportunityFieldInputs(defs, fields as Record<string, string | number | null>)
+        if (inputs.length) {
+          await ghl(`/opportunities/${opportunityId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ customFields: inputs }),
+          })
         }
-        await ghl(`/opportunities/${opportunityId}`, {
-          method: 'PUT',
-          body: JSON.stringify({ customFields }),
-        })
-        console.log(`[ghl-proxy] Custom fields updated for ${opportunityId}:`, Object.keys(fields))
-        return json({ success: true })
+        console.log(`[ghl-proxy] Custom fields updated for ${opportunityId}: ${inputs.length}; no GHL field for: ${missing.join(', ') || 'none'}`)
+        return json({ success: true, written: inputs.length, missing })
       } catch (e) {
         rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] Custom field update failed:', e)
