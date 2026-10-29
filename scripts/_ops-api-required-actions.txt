@@ -196,6 +196,11 @@ dispatch_v2_mark_paid                # probe=source-only
 dispatch_v2_undo_paid                # probe=source-only
 dispatch_v2_set_pay_on               # probe=source-only
 
+# ── Ops screen Dispatch tab v2: ASAP or Pick a date on a supplier box
+#    (docs/dispatch-v2-board-contract.md, section 3c, piece C). Staff write:
+#    source-only, never fired at production by a smoke run. ──
+dispatch_v2_set_date_mode            # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event

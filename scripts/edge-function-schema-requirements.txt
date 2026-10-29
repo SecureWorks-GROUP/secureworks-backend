@@ -994,3 +994,9 @@ ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job
 ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_at
 ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by
 ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by_email
+# ASAP or Pick a date on a supplier box: the board, dispatch_arrival, the
+# materials panel, dispatch_v2_make_email and the dispatch_v2_set_date_mode
+# press select these columns.
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode_set_at
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode_set_by_email

@@ -170,6 +170,10 @@ const SCHEMA: Record<string, string[]> = {
     "pay_on_set_at",
     "pay_on_set_by",
     "pay_on_set_by_email",
+    // 20261030120000_dispatch_v2_box_date_mode.sql
+    "order_date_mode",
+    "order_date_mode_set_at",
+    "order_date_mode_set_by_email",
   ],
   dispatch_approved_supplier_emails: [
     "id",
@@ -625,6 +629,8 @@ function makeDb(initial = seed()) {
           row.created_at ??= new Date().toISOString();
           if (table === "job_material_suppliers") {
             row.is_main_supplier ??= false;
+            // The column default (20261030120000): new boxes start on ASAP.
+            row.order_date_mode ??= "asap";
           }
           if (table === "dispatch_supplier_order_emails") {
             row.cc_emails ??= [];
@@ -1636,6 +1642,81 @@ Deno.test("make email: pickup says so, has no Address line and a rebuild keeps i
   ));
   assert(back.email.body_text.includes("Address:"));
   assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: a new box starts on ASAP, says Date: ASAP and saves nothing new", async () => {
+  const db = await fencingJob();
+  const box = () =>
+    db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  assertEquals(box().order_date_mode, "asap");
+  // The helper sends a date unless told not to; a new screen sends none.
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, { delivery_date: null });
+  assert(made.email.body_text.includes("\nDate: ASAP\n"));
+  assertEquals(made.date_mode, "asap");
+  assertEquals(made.missing.includes("date"), false);
+  assertEquals(made.email.delivery_date, null);
+  // Already ASAP: the box is not written.
+  assertEquals(box().order_date_mode_set_at ?? null, null);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const stratco = read.suppliers.find((s: any) => s.supplier_id === SUP.stratco);
+  assertEquals(stratco.date_mode, {
+    mode: "asap",
+    set_at: null,
+    set_by_email: null,
+    derived: false,
+  });
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: Pick a date with a date writes it and saves the choice on the box", async () => {
+  const db = await fencingJob();
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    date_mode: "date",
+    delivery_date: "2026-11-04",
+  });
+  assert(!made.email.body_text.includes("Date: ASAP"));
+  assertEquals(made.date_mode, "date");
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  assertEquals(box.order_date_mode, "date");
+  assert(box.order_date_mode_set_at);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: an older screen that sends only a date gets Pick a date", async () => {
+  const db = await fencingJob();
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    delivery_date: "2026-11-04",
+  });
+  assertEquals(made.date_mode, "date");
+  assertEquals(made.email.delivery_date, "2026-11-04");
+});
+
+Deno.test("make email: ASAP with a date, or a bad choice, is refused before anything is made", async () => {
+  const db = await fencingJob();
+  await refused(
+    makeEmail(db, JOB.fence, SUP.stratco, { date_mode: "asap", delivery_date: "2026-11-04" }),
+    400,
+    "invalid_request",
+  );
+  await refused(
+    makeEmail(db, JOB.fence, SUP.stratco, { date_mode: "soon", delivery_date: null }),
+    400,
+    "invalid_request",
+  );
+  assertEquals(db.tables.dispatch_supplier_order_emails.length, 0);
+});
+
+Deno.test("read: a box made before ASAP existed reads as Pick a date when it has a date", async () => {
+  const db = await fencingJob();
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  box.order_date_mode = null;
+  const before = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const find = (read: any) => read.suppliers.find((s: any) => s.supplier_id === SUP.stratco);
+  assertEquals([find(before).date_mode.mode, find(before).date_mode.derived], ["asap", true]);
+  box.delivery_date = "2026-11-04";
+  box.delivery_date_set_at = "2026-10-28T01:00:00.000Z";
+  const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals([find(after).date_mode.mode, find(after).date_mode.derived], ["date", true]);
 });
 
 Deno.test("read: each box says delivery or pickup from its open email, else its newest sent one", async () => {

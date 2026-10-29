@@ -49,6 +49,8 @@ import {
   DISPATCH_V2_TEST_TO,
   dispatchV2BodyHtml,
   dispatchV2BuildEmail,
+  type DispatchV2DateMode,
+  dispatchV2DateModeParam,
   dispatchV2FulfilmentOf,
   dispatchV2FulfilmentParam,
   dispatchV2BytesToBase64,
@@ -73,7 +75,10 @@ import {
   dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
-import { dispatchV2BoxStage } from "./dispatch_v2_material_stage.ts";
+import {
+  dispatchV2BoxDateMode,
+  dispatchV2BoxStage,
+} from "./dispatch_v2_material_stage.ts";
 import { dispatchV2PaymentTerms } from "./dispatch_v2_payment.ts";
 import {
   loadDispatchInstall,
@@ -159,7 +164,7 @@ export const DISPATCH_V2_ACTIONS = [
 const LINE_SELECT =
   "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at";
 const BOX_SELECT =
-  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email";
+  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, order_date_mode, order_date_mode_set_at, order_date_mode_set_by_email";
 const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
@@ -670,6 +675,7 @@ export async function readDispatchV2Materials(
         replies: replies.error ? [] : replies.data,
         installDay: install?.day ?? null,
         installFirstDay: install?.first_day ?? null,
+        openEmail: open ?? null,
       });
       return {
         supplier_id: id,
@@ -700,6 +706,14 @@ export async function readDispatchV2Materials(
         material_stage: boxMaterialStage(box, view),
         // The box's payment step (contract section 3c).
         payment: view.payment,
+        // ASAP or Pick a date (piece C). derived: the box's own choice is
+        // NULL (made before piece C) and the mode was worked out.
+        date_mode: {
+          mode: view.date_mode,
+          set_at: box.order_date_mode_set_at ?? null,
+          set_by_email: box.order_date_mode_set_by_email ?? null,
+          derived: view.date_mode_derived,
+        },
       };
     }),
   };
@@ -1796,6 +1810,10 @@ function noApprovedEmail(): never {
 // returned as it is (rebuild: true rebuilds it from the lines, losing edits).
 // fulfilment: "delivery" (the default) or "pickup" (no Address line). A
 // rebuild without one keeps the open email's, read from its opening line.
+// date_mode (piece C): "asap" writes "Date: ASAP" and needs no
+// delivery_date; "date" works as before. Left out: "date" when a
+// delivery_date is given (an older screen), else the box's own choice. The
+// mode used is saved on the box.
 export async function makeDispatchV2Email(
   client: any,
   body: any,
@@ -1811,6 +1829,13 @@ export async function makeDispatchV2Email(
   const asked = dispatchV2FulfilmentParam(body?.fulfilment);
   if (asked === undefined) {
     badRequest('fulfilment must be "delivery" or "pickup"');
+  }
+  const askedMode = dispatchV2DateModeParam(body?.date_mode);
+  if (askedMode === undefined) {
+    badRequest('date_mode must be "asap" or "date"');
+  }
+  if (askedMode === "asap" && deliveryDate !== null) {
+    badRequest("An ASAP order has no delivery_date: leave it out, or choose Pick a date");
   }
   const rebuild = body?.rebuild === true;
   const info = await boxContext(client, job, supplierId, ctx);
@@ -1840,6 +1865,14 @@ export async function makeDispatchV2Email(
     };
   }
 
+  const dateMode: DispatchV2DateMode = askedMode ??
+    (deliveryDate !== null ? "date" : dispatchV2BoxDateMode({
+      stored: info.box.order_date_mode,
+      boxHasDate: !!info.box.delivery_date,
+      newestSent: null,
+      openEmail: open,
+    }).mode);
+  await saveBoxDateMode(client, info.box, dateMode, ctx);
   const built = dispatchV2BuildEmail({
     job,
     workType: job.work_type,
@@ -1847,6 +1880,7 @@ export async function makeDispatchV2Email(
     lines: info.orderable,
     deliveryDate,
     fulfilment: asked ?? (open ? dispatchV2FulfilmentOf(open.body_text) : null),
+    dateMode,
   });
   const to = (info.approved.to_emails || []).map((e: string) =>
     String(e).toLowerCase()
@@ -1899,6 +1933,7 @@ export async function makeDispatchV2Email(
       rebuilt: true,
       email: projectDispatchV2Email(row, nowMs),
       missing: built.missing,
+      date_mode: dateMode,
       team_cc_open_question: team.open_question,
     };
   }
@@ -1938,8 +1973,28 @@ export async function makeDispatchV2Email(
     success: true,
     email: projectDispatchV2Email(inserted, nowMs),
     missing: built.missing,
+    date_mode: dateMode,
     team_cc_open_question: team.open_question,
   };
+}
+
+// Save the date choice a Make email used on its box (piece C), so the panel
+// and the next email show it. Nothing written when the box already says so.
+async function saveBoxDateMode(
+  client: any,
+  box: any,
+  mode: DispatchV2DateMode,
+  ctx: DispatchV2Context,
+) {
+  if (box.order_date_mode === mode) return;
+  const { error } = await client.from("job_material_suppliers")
+    .update({
+      order_date_mode: mode,
+      order_date_mode_set_at: nowIso(ctx),
+      order_date_mode_set_by_email: ctx.actor.email,
+    })
+    .eq("id", box.id);
+  if (error) writeFailed("box date choice", error);
 }
 
 // Save edits to a held email: To, CC, subject, body and which photos go.

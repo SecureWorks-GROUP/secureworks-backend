@@ -973,6 +973,8 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261029120000", "dispatch_v2_on_account_suppliers"),
                       ("20261029120100", "dispatch_v2_box_paid"),
                       ("20261029120200", "dispatch_v2_box_pay_on"),
+                      # ASAP or Pick a date on a supplier box.
+                      ("20261030120000", "dispatch_v2_box_date_mode"),
                       # Deposit advance: the move switch and the per-job
                       # move and flag state (job_deposit_advance.ts).
                       ("20261026160000", "job_deposit_advance"),

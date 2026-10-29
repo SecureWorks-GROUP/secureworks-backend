@@ -47,6 +47,7 @@ import {
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows, fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
 import {
+  type DispatchV2DateMode,
   type DispatchV2Fulfilment,
   dispatchV2FulfilmentOf,
 } from "./dispatch_v2_emails.ts";
@@ -600,10 +601,12 @@ export type DispatchBoardSupplierBox = {
   pay_on?: string | null;
   pay_on_set_at?: string | null;
   pay_on_set_by_email?: string | null;
+  // ASAP or Pick a date (migration 20261030120000_dispatch_v2_box_date_mode.sql).
+  order_date_mode?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, order_date_mode";
 
 // The material lines in the boxes, only for the material stage: which lines
 // are still to be ordered, and when each last changed.
@@ -764,6 +767,9 @@ export type DispatchArrivalOrder = {
   // A pickup on the install's first day: the screen leaves Materials ready
   // out of the box's strip and picker. Always false for a purchase order.
   skips_ready: boolean;
+  // ASAP or Pick a date (piece C): the newest sent email's Date line for a
+  // sent order, else the box's choice. Null for a purchase order.
+  date_mode: DispatchV2DateMode | null;
 };
 
 export type DispatchArrival = {
@@ -1002,6 +1008,7 @@ export function dispatchArrival(
       held_by_payment: view.held_by_payment,
       material_stage_reply: view.reply,
       skips_ready: view.skips_ready,
+      date_mode: view.date_mode,
     }, installDay, view));
   }
 
@@ -1036,6 +1043,7 @@ export function dispatchArrival(
       held_by_payment: false,
       material_stage_reply: null,
       skips_ready: false,
+      date_mode: null,
     }, installDay));
   }
 
