@@ -168,7 +168,8 @@ ops-api `job_overview` serves that as `bills` and refuses any other contract
 version or any amount (`job_bill_outcomes_read.ts`); a mirror bill reads
 `where_counted` `trade_app` there, both on a job a person placed it on and on
 its Xero-linked job where CFO's view lists no row (there `here` is
-`not_counted`, reason `mirror_bill_not_placed_here`), and each bill carries
+`not_counted`, reason `mirror_bill_not_placed_here`; a voided mirror there
+has reason `bill_voided` and reads `no_job`, never a count), and each bill carries
 CFO's `mirror_bill` flag as given. The one-job timing read for the 8 s API limit is
 `scripts/explain-context-job-bill-outcomes-one-job.sql` (read only). INT-10's
 five-job acceptance, `scripts/int10-five-job-bill-outcomes-acceptance.sql` (read

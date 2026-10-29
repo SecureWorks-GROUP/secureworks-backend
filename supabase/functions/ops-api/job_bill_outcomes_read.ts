@@ -22,7 +22,8 @@
 // counts through the trade app's lines, never as this bill. On a job a person
 // placed it on, here.reason is mirror_bill_person_placed; on its Xero-linked
 // job where no person placed it (CFO's view has no row there), here is
-// not_counted with reason mirror_bill_not_placed_here.
+// not_counted with reason mirror_bill_not_placed_here. A voided mirror there
+// has reason bill_voided and reads no_job, never a count.
 
 export const BILL_OUTCOME_CONTRACT_VERSION = "cfo-bill-cost-outcome-v1";
 export const BILL_OUTCOME_SHAPE = "context-job-bill-outcomes-v1";

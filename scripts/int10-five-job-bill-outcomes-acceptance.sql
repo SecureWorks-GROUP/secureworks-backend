@@ -10,7 +10,7 @@
 --
 -- Which five jobs (fixed in advance, never picked for a good result): every
 -- job Job Profit reads (legacy IS NOT TRUE) that is not a holding job
--- (metadata.do_not_schedule not true) and has at least one supplier bill
+-- (metadata.do_not_schedule 'true' or '1', any case) and has at least one supplier bill
 -- placed on it (an ACCPAY Xero link, or an actual allocation row in
 -- job_materials_facts), ordered by md5('int-10-acceptance-v1:' || job id),
 -- first five. The order is a fixed shuffle of the ids: it does not look at
@@ -44,7 +44,7 @@ WITH placed AS (
   SELECT j.id AS job_id, j.job_number
     FROM public.jobs j
    WHERE j.legacy IS NOT TRUE
-     AND coalesce(j.metadata ->> 'do_not_schedule', '') NOT IN ('true', '1')
+     AND lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) NOT IN ('true', '1')
      AND EXISTS (SELECT 1 FROM placed p WHERE p.job_id = j.id)
    ORDER BY md5('int-10-acceptance-v1:' || j.id::text)
    LIMIT 5

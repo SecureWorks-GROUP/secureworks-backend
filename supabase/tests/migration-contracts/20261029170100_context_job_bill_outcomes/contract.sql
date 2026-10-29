@@ -197,7 +197,27 @@ BEGIN
   END IF;
 END $$;
 RESET ROLE;
-UPDATE public.xero_invoices SET job_id = NULL WHERE xero_invoice_id = 'H7-MIRP';
+-- (review, 29 Oct: a VOIDED mirror on its Xero job read unknown there) voided: no_job on both, never a count
+UPDATE public.xero_invoices SET status = 'VOIDED' WHERE xero_invoice_id = 'H7-MIRP';
+SET LOCAL ROLE service_role;
+DO $$
+DECLARE b jsonb;
+BEGIN
+  SELECT e INTO b FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000001') -> 'bills') e
+   WHERE e ->> 'xero_invoice_id' = 'H7-MIRP';
+  IF b IS NULL OR b ->> 'where_counted' <> 'no_job' OR b ->> 'bill_state' <> 'voided' OR b ->> 'bill_status' <> 'VOIDED'
+     OR b -> 'here' <> '{"xero_linked": true, "placed_by": null, "counts": "not_counted", "reason": "bill_voided", "holding_job": false}'::jsonb
+     OR b #>> '{other_jobs,0,counts}' <> 'not_counted' THEN
+    RAISE EXCEPTION 'a voided mirror on its Xero job is not no_job / bill_voided: %', coalesce(b::text, 'not listed');
+  END IF;
+  SELECT e INTO b FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000005') -> 'bills') e
+   WHERE e ->> 'xero_invoice_id' = 'H7-MIRP';
+  IF b ->> 'where_counted' <> 'no_job' OR b #>> '{here,counts}' <> 'not_counted' THEN
+    RAISE EXCEPTION 'a voided mirror on the job a person placed it on claims a count: %', b::text;
+  END IF;
+END $$;
+RESET ROLE;
+UPDATE public.xero_invoices SET job_id = NULL, status = 'AUTHORISED' WHERE xero_invoice_id = 'H7-MIRP';
 
 -- ── it reads CFO's scoped rule, and carries jit off ──
 DO $$
