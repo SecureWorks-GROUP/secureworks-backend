@@ -26,7 +26,22 @@
 // A purchase order with no box (a v1 Dispatch order or one made elsewhere) has
 // no stage of its own: it is read from the order's status.
 //
-// Nothing here reads or writes the database.
+// One function, dispatchV2BoxStage, turns a supplier box and its order
+// emails into everything a box shows (the stage, who it waits on, the next
+// step and the payment). The board (dispatch_board.ts) and the materials
+// panel (dispatch_v2_store.ts) both call it, so the two can never disagree.
+//
+// Nothing here reads or writes the database: the local preview stand-in
+// imports this file as it is.
+
+import { isDispatchDeliveryDate } from "./dispatch_deliveries.ts";
+import {
+  type DispatchV2Fulfilment,
+  dispatchV2FulfilmentOf,
+} from "./dispatch_v2_emails.ts";
+import {
+  type DispatchV2PaymentTerms,
+} from "./dispatch_v2_payment.ts";
 
 export type DispatchMaterialWaitingOn = "us" | "supplier" | "nobody";
 
@@ -241,4 +256,133 @@ export function dispatchUnsentLineChanges(
     out.push(at || "1970-01-01T00:00:00.000Z");
   }
   return out;
+}
+
+// ── One supplier box, as the board and the materials panel show it ─────────
+
+export type DispatchV2BoxStageInput = {
+  // The job_material_suppliers row (the columns the readers select).
+  box: any;
+  // The box's order emails. Only status "sent" ones count as sent.
+  emails: any[] | null | undefined;
+  // The job's material lines (only this box's supplier's are used).
+  lines: any[] | null | undefined;
+  // The box's payment terms (dispatch_v2_payment.ts); left out = unknown.
+  terms?: DispatchV2PaymentTerms;
+  // The install day the board shows (null = no install booked).
+  installDay?: string | null;
+};
+
+export type DispatchV2BoxNewestSent = {
+  // The order email's id (what a supplier reply's order_id names); null only
+  // for a row read without its id.
+  id: string | null;
+  sent_at: string;
+  // The date that email asked for (its Date: line), if any.
+  requested_date: string | null;
+  // Delivery or pickup, from that email's opening line.
+  fulfilment: DispatchV2Fulfilment;
+};
+
+export type DispatchV2BoxStage = {
+  key: DispatchMaterialStageKey;
+  label: string;
+  source: DispatchMaterialStageShown["source"];
+  // Who set the stage, when a person did (source "set"); else null.
+  set_at: string | null;
+  set_by_email: string | null;
+  // The box's newest sent order email, null when none went.
+  newest_sent: DispatchV2BoxNewestSent | null;
+  // The box's own delivery date for the current order: a date set before the
+  // newest send belongs to an earlier order, so it is left out (null).
+  box_date: string | null;
+  box_date_confirmed: boolean;
+  // Lines still to be ordered and when each last changed.
+  unsent_line_changes: string[];
+  waiting_on: DispatchMaterialWaitingOn;
+  todo: string | null;
+  payment: { terms: DispatchV2PaymentTerms };
+};
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** The box's newest sent order email (status sent, newest sent_at). */
+export function dispatchV2NewestSent(
+  emails: any[] | null | undefined,
+): DispatchV2BoxNewestSent | null {
+  let best: any = null;
+  let bestAt: number | null = null;
+  for (const email of emails || []) {
+    if (String(email?.status ?? "").trim().toLowerCase() !== "sent") continue;
+    const at = instant(email?.sent_at);
+    if (at === null) continue;
+    if (bestAt === null || at > bestAt) {
+      best = email;
+      bestAt = at;
+    }
+  }
+  if (!best) return null;
+  return {
+    id: best.id ? String(best.id) : null,
+    sent_at: String(best.sent_at),
+    requested_date: isDispatchDeliveryDate(best.delivery_date)
+      ? best.delivery_date
+      : null,
+    fulfilment: dispatchV2FulfilmentOf(best.body_text),
+  };
+}
+
+/** Everything one supplier box shows, by the rules at the top of this file.
+ * The board's Arrival line and the materials panel both call this. */
+export function dispatchV2BoxStage(
+  input: DispatchV2BoxStageInput,
+): DispatchV2BoxStage {
+  const box = input.box || {};
+  const supplierId = String(box.supplier_id ?? "");
+  const emails = (input.emails || []).filter((e: any) =>
+    String(e?.supplier_id ?? supplierId) === supplierId
+  );
+  const sentAts = emails
+    .filter((e: any) =>
+      String(e?.status ?? "").trim().toLowerCase() === "sent"
+    )
+    .map((e: any) => e?.sent_at)
+    .filter((at: unknown): at is string => instant(at) !== null);
+  const newestSent = dispatchV2NewestSent(emails);
+  // A box date set before the newest send belongs to an earlier order.
+  const dateSetAt = instant(box.delivery_date_set_at);
+  const dateOlderThanSend = !!newestSent && dateSetAt !== null &&
+    (instant(newestSent.sent_at) as number) > dateSetAt;
+  const boxDate = isDispatchDeliveryDate(box.delivery_date) &&
+      !dateOlderThanSend
+    ? box.delivery_date as string
+    : null;
+  const unsent = dispatchUnsentLineChanges(input.lines, supplierId);
+  const terms: DispatchV2PaymentTerms = input.terms ?? "unknown";
+  const shown = dispatchMaterialStageOf({
+    stored: box.material_stage,
+    storedAt: box.material_stage_set_at,
+    sentAts,
+    unsentLineChanges: unsent,
+    confirmedAt: boxDate ? box.delivery_date_confirmed_at : null,
+  });
+  const installBooked = !!input.installDay;
+  const supplierName = textOrNull(box.supplier_name);
+  const set = shown.source === "set";
+  return {
+    key: shown.key,
+    label: dispatchMaterialStageLabel(shown.key),
+    source: shown.source,
+    set_at: set ? textOrNull(box.material_stage_set_at) : null,
+    set_by_email: set ? textOrNull(box.material_stage_set_by_email) : null,
+    newest_sent: newestSent,
+    box_date: boxDate,
+    box_date_confirmed: !!boxDate && !!box.delivery_date_confirmed_at,
+    unsent_line_changes: unsent,
+    waiting_on: dispatchMaterialWaitingOn(shown.key, installBooked),
+    todo: dispatchMaterialTodo(shown.key, supplierName, installBooked),
+    payment: { terms },
+  };
 }

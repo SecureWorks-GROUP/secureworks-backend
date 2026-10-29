@@ -53,13 +53,18 @@ import {
 import {
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
-  dispatchMaterialStageOf,
   dispatchMaterialTodo,
   type DispatchMaterialWaitingOn,
   dispatchMaterialWaitingOn,
   dispatchPoMaterialStage,
-  dispatchUnsentLineChanges,
+  dispatchV2BoxStage,
+  type DispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
+import {
+  type DispatchV2Accounts,
+  dispatchV2AccountsOf,
+  dispatchV2TermsFor,
+} from "./dispatch_v2_payment.ts";
 
 // ── The request ─────────────────────────────────────────────────────────────
 
@@ -603,6 +608,12 @@ export const DISPATCH_BOARD_LINE_SELECT =
 export const DISPATCH_BOARD_SENT_EMAIL_SELECT =
   "id, job_id, supplier_id, status, sent_at, delivery_date, body_text";
 
+// The account list (on account or pay first): which approved entry each Xero
+// supplier is linked to, and each entry's on_account (migration
+// 20261029120000_dispatch_v2_on_account_suppliers.sql).
+export const DISPATCH_ACCOUNT_LINK_SELECT = "supplier_id, approved_id";
+export const DISPATCH_ACCOUNT_ENTRY_SELECT = "id, name, active, on_account";
+
 export type DispatchBoardSentEmail = {
   id?: string | null;
   job_id?: string | null;
@@ -722,6 +733,10 @@ export type DispatchArrivalOrder = {
   // Delivery or pickup, from the box's newest sent order email (its opening
   // line). Null for an order not sent from Dispatch, and for a purchase order.
   fulfilment: DispatchV2Fulfilment | null;
+  // The box's payment step (dispatch_v2_payment.ts, contract section 3c):
+  // its terms (on_account, pay_first, or unknown when the account list read
+  // failed). Null for a purchase order with no box.
+  payment: DispatchV2BoxStage["payment"] | null;
 };
 
 export type DispatchArrival = {
@@ -756,12 +771,16 @@ function boxDateSource(
   return value === "by_hand" || value === "supplier_reply" ? value : null;
 }
 
+// `shown` is a supplier box's own label, waiting on and next step
+// (dispatchV2BoxStage); a purchase order leaves it out and gets them from its
+// stage here.
 function arrivalEntry(
   base: Omit<
     DispatchArrivalOrder,
     "mark" | "flag" | "material_stage_label" | "waiting_on" | "todo"
   >,
   installDay: string | null,
+  shown?: Pick<DispatchV2BoxStage, "label" | "waiting_on" | "todo">,
 ): DispatchArrivalOrder {
   const mark: DispatchArrivalMark = base.delivery_date
     ? (base.date_confirmed ? "solid" : "ring")
@@ -776,6 +795,16 @@ function arrivalEntry(
     flag = "after_install";
   }
   const installBooked = !!installDay;
+  if (shown) {
+    return {
+      ...base,
+      mark,
+      flag,
+      material_stage_label: shown.label,
+      waiting_on: shown.waiting_on,
+      todo: shown.todo,
+    };
+  }
   return {
     ...base,
     mark,
@@ -820,7 +849,10 @@ function oldestFirst(a: any, b: any): number {
 // order went since), so that send's asked-for date shows instead.
 //
 // Each entry also carries its material stage (dispatch_v2_material_stage.ts),
-// worked out from the box, its sends and `lines` (the job's material lines).
+// worked out from the box, its sends and `lines` (the job's material lines),
+// by the same dispatchV2BoxStage the materials panel calls. `accounts` is the
+// account list (dispatch_v2_payment.ts); left out or null = not read, every
+// box's terms are "unknown".
 export function dispatchArrival(
   input: {
     boxes: DispatchBoardSupplierBox[];
@@ -829,19 +861,9 @@ export function dispatchArrival(
     lines?: any[];
     installDay: string | null;
     today: string;
+    accounts?: DispatchV2Accounts | null;
   },
 ): DispatchArrival {
-  const sentBySupplier = dispatchBoardSentBySupplier(input.sentEmails);
-  const sentAtsBySupplier = new Map<string, string[]>();
-  for (const email of input.sentEmails || []) {
-    if (token(email?.status) !== "sent") continue;
-    const id = String(email?.supplier_id ?? "");
-    const at = text(email?.sent_at);
-    if (!id || !at) continue;
-    const list = sentAtsBySupplier.get(id);
-    if (list) list.push(at);
-    else sentAtsBySupplier.set(id, [at]);
-  }
   const installDay = input.installDay;
   const orders = (input.orders || [])
     .filter(isDispatchDeliveryCounted)
@@ -860,14 +882,15 @@ export function dispatchArrival(
       !used.has(String(o.id))
     );
     if (v1) used.add(String(v1.id));
-    const sent = sentBySupplier.get(supplierId) || null;
-    const boxDateSetAt = Date.parse(String(box.delivery_date_set_at ?? ""));
-    const boxDateOlderThanSend = !!sent && Number.isFinite(boxDateSetAt) &&
-      Date.parse(sent.sent_at) > boxDateSetAt;
-    const boxDate = isDispatchDeliveryDate(box.delivery_date) &&
-        !boxDateOlderThanSend
-      ? box.delivery_date
-      : null;
+    const view = dispatchV2BoxStage({
+      box,
+      emails: input.sentEmails,
+      lines: input.lines,
+      terms: dispatchV2TermsFor(input.accounts, supplierId),
+      installDay,
+    });
+    const sent = view.newest_sent;
+    const boxDate = view.box_date;
     const v1Date = text(v1?.confirmed_delivery_date) ||
       text(v1?.delivery_date);
     let deliveryDate: string | null = null;
@@ -876,7 +899,7 @@ export function dispatchArrival(
     if (boxDate) {
       deliveryDate = boxDate;
       dateSource = "box";
-      dateConfirmed = !!box.delivery_date_confirmed_at;
+      dateConfirmed = view.box_date_confirmed;
     } else if (sent?.requested_date) {
       deliveryDate = sent.requested_date;
       dateSource = "requested";
@@ -888,15 +911,7 @@ export function dispatchArrival(
     const sentByOrder = v1
       ? ORDER_SENT_STATUSES.has(token(v1.status))
       : false;
-    const unsent = dispatchUnsentLineChanges(input.lines, supplierId);
-    const stage = dispatchMaterialStageOf({
-      stored: box.material_stage,
-      storedAt: box.material_stage_set_at,
-      sentAts: sentAtsBySupplier.get(supplierId) || [],
-      unsentLineChanges: unsent,
-      confirmedAt: boxDate ? box.delivery_date_confirmed_at : null,
-    });
-    const stageSet = stage.source === "set";
+    const unsent = view.unsent_line_changes;
     entries.push(arrivalEntry({
       key: `box:${supplierId}`,
       source: "supplier_box",
@@ -914,19 +929,18 @@ export function dispatchArrival(
         ? text(box.delivery_date_set_by_email)
         : null,
       fulfilment: sent?.fulfilment ?? null,
-      material_stage: stage.key,
-      material_stage_source: stage.source,
-      material_stage_set_at: stageSet ? text(box.material_stage_set_at) : null,
-      material_stage_set_by_email: stageSet
-        ? text(box.material_stage_set_by_email)
-        : null,
+      material_stage: view.key,
+      material_stage_source: view.source,
+      material_stage_set_at: view.set_at,
+      material_stage_set_by_email: view.set_by_email,
       extra: isExtraOrder(
         installDay,
         input.today,
         sent?.sent_at ?? null,
-        stage.key === "order_materials" && unsent.length > 0,
+        view.key === "order_materials" && unsent.length > 0,
       ),
-    }, installDay));
+      payment: view.payment,
+    }, installDay, view));
   }
 
   for (const order of orders) {
@@ -956,6 +970,7 @@ export function dispatchArrival(
       // A purchase order is an extra when it was made on or after the
       // install's first day.
       extra: !!installDay && (perthDayOf(order.created_at) ?? "") >= installDay,
+      payment: null,
     }, installDay));
   }
 
@@ -1062,6 +1077,9 @@ export type DispatchBoardContext = {
   // The boxes' material lines by job id (the material stage); null or left
   // out = no lines.
   linesByJob?: Map<string, any[]> | null;
+  // The account list (dispatch_v2_payment.ts); null or left out = not read,
+  // every box's terms are "unknown".
+  accounts?: DispatchV2Accounts | null;
 };
 
 // The board fields of one job for the view asked for, or null when the job is
@@ -1102,6 +1120,7 @@ export function dispatchBoardRow(
       lines: ctx.linesByJob?.get(id) || [],
       installDay: install?.day ?? null,
       today: ctx.today,
+      accounts: ctx.accounts ?? null,
     })
     : null;
 
@@ -1159,6 +1178,9 @@ export type DispatchBoardReads = {
   days_in_stage: "ok" | "failed";
   deposits: "ok" | "failed";
   arrival: "ok" | "failed";
+  // The account list (on account or pay first). Failed = every box's terms
+  // are "unknown": no payment gate, no reply move (contract section 3c).
+  accounts: "ok" | "failed";
 };
 
 function byNumber(a: any, b: any): number {
@@ -1323,17 +1345,28 @@ export type DispatchBoardExtras = {
   sent: ReadResult<DispatchBoardSentEmail>;
   // Left out = no lines (stages read from the boxes and sends only).
   lines?: ReadResult<any>;
+  // The account list's two reads (dispatch_v2_payment.ts). Left out = not
+  // read (terms unknown).
+  accountLinks?: ReadResult<any>;
+  accountEntries?: ReadResult<any>;
 };
 
-// The five reads only the v2 board makes, for the jobs the list read
-// returned: stage change events (days in stage), and supplier boxes, orders,
-// sent order emails and material lines (the Arrival line and its material
-// stages). Each fails on its own and never rejects.
+// The reads only the v2 board makes, for the jobs the list read returned:
+// stage change events (days in stage), and supplier boxes, orders, sent order
+// emails and material lines (the Arrival line and its material stages), and
+// the account list (on account or pay first, the whole organisation's: about
+// 26 entries). Each fails on its own and never rejects.
 export async function loadDispatchBoardExtras(
   client: any,
   jobIds: string[],
+  orgId?: string,
 ): Promise<DispatchBoardExtras> {
   const ids = jobIds.map((id) => String(id));
+  const [accountLinks, accountEntries] = loadDispatchAccountList(
+    client,
+    orgId,
+    "pipeline.dispatch_board",
+  );
   const [events, boxes, orders, sent, lines] = await Promise.all([
     safeRead<DispatchBoardStageEvent>(() =>
       fetchAllRowsInChunks<DispatchBoardStageEvent>(
@@ -1409,7 +1442,78 @@ export async function loadDispatchBoardExtras(
       );
     }
   }
-  return { events, boxes, orders, sent, lines };
+  return {
+    events,
+    boxes,
+    orders,
+    sent,
+    lines,
+    accountLinks: await accountLinks,
+    accountEntries: await accountEntries,
+  };
+}
+
+// The account list's two reads (links and entries), started together; each
+// fails on its own and never rejects. Logged here, so callers only look.
+function loadDispatchAccountList(
+  client: any,
+  orgId: string | undefined,
+  label: string,
+): [Promise<ReadResult<any>>, Promise<ReadResult<any>>] {
+  const logged = (name: string, read: Promise<ReadResult<any>>) =>
+    read.then((result) => {
+      if (result.error) {
+        console.error(
+          `[dispatch] ${label} ${name} read failed:`,
+          (result.error as Error)?.message ?? result.error,
+        );
+      }
+      return result;
+    });
+  const scoped = (query: any) => orgId ? query.eq("org_id", orgId) : query;
+  return [
+    logged(
+      "dispatch_approved_supplier_email_links",
+      safeRead<any>(() =>
+        fetchAllRows<any>(
+          () =>
+            scoped(
+              client.from("dispatch_approved_supplier_email_links")
+                .select(DISPATCH_ACCOUNT_LINK_SELECT),
+            ),
+          `${label}_account_links`,
+          "supplier_id",
+        )
+      ),
+    ),
+    logged(
+      "dispatch_approved_supplier_emails",
+      safeRead<any>(() =>
+        fetchAllRows<any>(
+          () =>
+            scoped(
+              client.from("dispatch_approved_supplier_emails")
+                .select(DISPATCH_ACCOUNT_ENTRY_SELECT),
+            ),
+          `${label}_account_entries`,
+          "id",
+        )
+      ),
+    ),
+  ];
+}
+
+// The account list as the payment rules take it; null data when either read
+// failed (dispatchV2AccountsOf then says the read failed).
+function accountsFrom(
+  links: ReadResult<any> | undefined,
+  entries: ReadResult<any> | undefined,
+): DispatchV2Accounts | null {
+  if (!links || !entries) return null;
+  return dispatchV2AccountsOf(
+    links.error ? null : links.data,
+    entries.error ? null : entries.data,
+  );
 }
 
 // Apply the board to the list's rows: keep the rows on the view asked for,
@@ -1432,6 +1536,7 @@ export function applyDispatchBoard(
   const { extras } = input;
   const arrivalOk = !extras.boxes.error && !extras.orders.error &&
     !extras.sent.error && !extras.lines?.error;
+  const accounts = accountsFrom(extras.accountLinks, extras.accountEntries);
   const ctx: DispatchBoardContext = {
     view: input.request.view,
     today: input.today,
@@ -1446,6 +1551,7 @@ export function applyDispatchBoard(
     ordersByJob: arrivalOk ? groupByJob(extras.orders.data) : null,
     sentByJob: arrivalOk ? groupByJob(extras.sent.data) : null,
     linesByJob: arrivalOk ? groupByJob(extras.lines?.data || []) : null,
+    accounts,
   };
   const kept: any[] = [];
   for (const row of rows) {
@@ -1463,6 +1569,7 @@ export function applyDispatchBoard(
       days_in_stage: extras.events.error ? "failed" : "ok",
       deposits: input.invoicesReadOk ? "ok" : "failed",
       arrival: arrivalOk ? "ok" : "failed",
+      accounts: accounts?.readOk ? "ok" : "failed",
     },
   );
   return { rows: kept, summary };
@@ -1479,6 +1586,7 @@ export function emptyDispatchBoardSummary(
     days_in_stage: "ok",
     deposits: "ok",
     arrival: "ok",
+    accounts: "ok",
   });
 }
 
@@ -1537,6 +1645,11 @@ export async function dispatchArrivalRead(
       "not_dispatch_work",
     );
   }
+  const [accountLinks, accountEntries] = loadDispatchAccountList(
+    client,
+    orgId,
+    "dispatch_arrival",
+  );
   const [bookings, boxes, orders, sent, lines] = await Promise.all([
     safeRead<DispatchInstallBooking>(() =>
       fetchAllRows<DispatchInstallBooking>(
@@ -1598,6 +1711,7 @@ export async function dispatchArrivalRead(
   const arrivalOk = !boxes.error && !orders.error && !sent.error &&
     !lines.error;
   const stage = dispatchBoardStage(job);
+  const accounts = accountsFrom(await accountLinks, await accountEntries);
   const arrival = arrivalOk
     ? dispatchArrival({
       boxes: boxes.data,
@@ -1606,6 +1720,7 @@ export async function dispatchArrivalRead(
       lines: lines.data,
       installDay: install?.day ?? null,
       today,
+      accounts,
     })
     : null;
   return {
@@ -1617,6 +1732,9 @@ export async function dispatchArrivalRead(
     installs: bookings.error ? "failed" : "ok",
     arrival,
     arrival_read: arrivalOk ? "ok" : "failed",
+    // The account list (on account or pay first): failed = every box's
+    // payment terms are "unknown" (contract section 3c).
+    accounts_read: accounts?.readOk ? "ok" : "failed",
     // What the job is waiting on us for (null when it is not on the board).
     waiting: stage ? dispatchBoardWaiting(stage, arrival) : null,
   };

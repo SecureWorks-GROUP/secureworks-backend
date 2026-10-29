@@ -968,6 +968,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch v2: the supplier box's material stage
                       # (dispatch_v2_material_stage_write.ts).
                       ("20261028170000", "dispatch_v2_material_stages"),
+                      # Dispatch v2 payment step: on account or pay first
+                      # (dispatch_v2_payment.ts).
+                      ("20261029120000", "dispatch_v2_on_account_suppliers"),
                       # Deposit advance: the move switch and the per-job
                       # move and flag state (job_deposit_advance.ts).
                       ("20261026160000", "job_deposit_advance"),

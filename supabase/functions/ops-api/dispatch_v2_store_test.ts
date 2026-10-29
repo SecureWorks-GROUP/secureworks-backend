@@ -174,6 +174,8 @@ const SCHEMA: Record<string, string[]> = {
     "approved_on",
     "created_at",
     "updated_at",
+    // 20261029120000_dispatch_v2_on_account_suppliers.sql
+    "on_account",
   ],
   dispatch_approved_supplier_email_links: [
     "supplier_id",
@@ -295,6 +297,7 @@ function seed(): Record<string, Row[]> {
     to_emails: [],
     cc_emails: [],
     active: true,
+    on_account: false,
     approved_by: "Shaun",
     approved_on: "2026-10-23",
     ...over,
@@ -324,6 +327,8 @@ function seed(): Record<string, Row[]> {
         used_for: "fencing+patio",
         to_emails: ["tradewa@stratcowa.com.au"],
         cc_emails: ["tony.bacich@stratcowa.com.au"],
+        // We have an account with Stratco (the payment step, section 3c).
+        on_account: true,
       }),
       approved(APPROVED.metroll, "Metroll", {
         used_for: "patio",
@@ -951,6 +956,14 @@ Deno.test("read: boxes, draft list, main supplier, team CC and the no-approved-e
   assertEquals(stratco.lines.map((l: any) => l.id), [L(1), L(2), L(4)]);
   assertEquals(stratco.lines[0].profile, "Neetascreen");
   assertEquals(read.suppliers[2].send_blocked.code, "no_approved_email");
+  // The payment step's terms (contract section 3c): Stratco is on account,
+  // Metroll pays first, and a supplier with no approved entry pays first too.
+  assertEquals(stratco.approved_email.on_account, true);
+  assertEquals(read.suppliers[0].approved_email.on_account, false);
+  assertEquals(
+    read.suppliers.map((s: any) => s.payment.terms),
+    ["pay_first", "on_account", "pay_first"],
+  );
   assertOnlyV2Writes(db);
 });
 

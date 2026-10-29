@@ -17941,7 +17941,7 @@ async function pipeline(
   // v2 board only: stage change events and the Arrival line's reads. Starts
   // beside the enrichment wave and never rejects.
   const dispatchBoardExtrasRead = dispatchBoard
-    ? loadDispatchBoardExtras(client, dispatchJobIds)
+    ? loadDispatchBoardExtras(client, dispatchJobIds, DEFAULT_ORG_ID)
     : null
 
   if (jobIds.length > 0 || dispatchJobIds.length > 0) {

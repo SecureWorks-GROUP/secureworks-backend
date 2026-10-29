@@ -978,3 +978,8 @@ ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|functi
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_at
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_by_email
+
+# Dispatch v2 payment step (docs/dispatch-v2-board-contract.md, section 3c):
+# which approved suppliers are on account. The board, dispatch_arrival and the
+# materials panel select it, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261029120000_dispatch_v2_on_account_suppliers.sql|column|dispatch_approved_supplier_emails.on_account

@@ -792,7 +792,7 @@ Deno.test("pipeline v2 Active: only board jobs, each with its card fields", asyn
 
   assertEquals(result.board.version, "v2");
   assertEquals(result.board.view, "active");
-  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "ok", deposits: "ok", arrival: "ok" });
+  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "ok", deposits: "ok", arrival: "ok", accounts: "ok" });
   const counts = Object.fromEntries(result.board.groups.map((g: any) => [g.key, g.count]));
   assertEquals(counts.order_materials, 1);
   assertEquals(counts.scheduled, 2);
@@ -875,7 +875,7 @@ Deno.test("pipeline v2: failed side reads are said, and never hide a job", async
   });
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
   assertEquals(result.total, 5);
-  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed" });
+  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed", accounts: "ok" });
   const ordering = rowFor(result, 1)!.board;
   assertEquals(ordering.arrival, null);
   assertEquals(ordering.days_in_stage, null);
