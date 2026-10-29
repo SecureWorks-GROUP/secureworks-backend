@@ -142,8 +142,12 @@ the engine still counts reads `bill_state` `held` (F1, JP-21). A bill counted
 for more than its ex GST total (counted parts plus any overhead part: 1200
 counted on a 1000 bill, two 700 placements on one) reads `over_counted`, never
 `counted_in_part`; less reads `counted_in_part`, equal `counted_in_full`, all
-compared as `v_bill_allocation_balance` balances a bill (the remainder within
-half a cent). A trade-app mirror bill is left out unless a person placed it on a
+using `v_bill_allocation_balance`'s comparison (the remainder within half a
+cent) over the parts the engine counts, not every allocation row. So they agree
+with that view only where every allocation row is counted at its own amount: a
+whole row on the bill's own Xero job with a different amount, or a split with a
+legacy part plus overhead, can read `counted_in_full` or `counted_in_part` here
+while the view reads the bill over-allocated. A trade-app mirror bill is left out unless a person placed it on a
 job: that row reads `not_counted`, reason `mirror_bill_person_placed`,
 `bill_state` `trade_mirror`, because its cost counts through the trade lines.
 The `evidence_hash` is led by the contract version; a payment does not move it
@@ -161,9 +165,11 @@ read. The engine's own shared parts still read every bill once per call (the
 floor until the engine can be filtered), so the job read runs with
 `jit = off`: JIT compiling that plan costs seconds and saves nothing.
 ops-api `job_overview` serves that as `bills` and refuses any other contract
-version or any amount (`job_bill_outcomes_read.ts`); a placed mirror reads
-`where_counted` `trade_app` there, and each bill carries CFO's `mirror_bill`
-flag as given. The one-job timing read for the 8 s API limit is
+version or any amount (`job_bill_outcomes_read.ts`); a mirror bill reads
+`where_counted` `trade_app` there, both on a job a person placed it on and on
+its Xero-linked job where CFO's view lists no row (there `here` is
+`not_counted`, reason `mirror_bill_not_placed_here`), and each bill carries
+CFO's `mirror_bill` flag as given. The one-job timing read for the 8 s API limit is
 `scripts/explain-context-job-bill-outcomes-one-job.sql` (read only). INT-10's
 five-job acceptance, `scripts/int10-five-job-bill-outcomes-acceptance.sql` (read
 only, after both migrations apply), sets each placed bill's engine rows beside

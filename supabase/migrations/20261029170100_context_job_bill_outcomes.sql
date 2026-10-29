@@ -22,10 +22,13 @@
 --     overhead_part, not_job_related_mark, mirror_bill (CFO's: a trade-app
 --     mirror bill, shown only where a person placed it),
 --     where_counted  here | elsewhere | here_and_elsewhere | no_job | trade_app |
---                    held | unknown (trade_app: a trade-app mirror bill a person
---                    placed here; its cost counts through the trade app's lines,
---                    never as this bill, and here.reason says
---                    mirror_bill_person_placed)
+--                    held | unknown (trade_app: a trade-app mirror bill; its cost
+--                    counts through the trade app's lines, never as this bill.
+--                    Where a person placed it, here.reason is CFO's
+--                    mirror_bill_person_placed; on its other jobs (its Xero link,
+--                    say), where CFO's view lists no row for a mirror, here reads
+--                    not_counted with reason mirror_bill_not_placed_here, so the
+--                    card says trade_app there too, never unknown)
 --     bill_state     CFO's, passed on: unknown, voided, trade_mirror, held,
 --                    not_job_related, overhead, not_counted, over_counted (more
 --                    counted than the bill: never "in part"), counted_in_full,
@@ -72,13 +75,28 @@ AS $fn$
       bool_or(o.job_id = p_job AND o.counts = 'counted') AS here_counted,
       bool_or(o.job_id <> p_job AND o.counts = 'counted') AS other_counted,
       bool_or(o.job_id = p_job AND o.counts = 'unknown') AS here_unknown,
-      (SELECT jsonb_build_object(
-                'xero_linked', h.xero_linked,
-                'placed_by', h.placed_by,
-                'counts', CASE WHEN h.bill_state = 'held' THEN 'held' ELSE h.counts END,
-                'reason', CASE WHEN h.bill_state = 'held' THEN NULL ELSE h.reason END,
-                'holding_job', h.holding_job)
-         FROM o h WHERE h.xero_invoice_id = o.xero_invoice_id AND h.job_id = p_job) AS here,
+      COALESCE(
+        (SELECT jsonb_build_object(
+                  'xero_linked', h.xero_linked,
+                  'placed_by', h.placed_by,
+                  'counts', CASE WHEN h.bill_state = 'held' THEN 'held' ELSE h.counts END,
+                  'reason', CASE WHEN h.bill_state = 'held' THEN NULL ELSE h.reason END,
+                  'holding_job', h.holding_job)
+           FROM o h WHERE h.xero_invoice_id = o.xero_invoice_id AND h.job_id = p_job),
+        -- A trade-app mirror on this job that a person did not place here (its Xero
+        -- link, or a machine's row): CFO's view lists a mirror only where a person
+        -- placed it, so it has no row here. Its cost counts through the trade lines,
+        -- never as this bill, on this job as on every other: not_counted, reason
+        -- mirror_bill_not_placed_here, read as trade_app, never as unknown.
+        CASE WHEN min(o.bill_state) = 'trade_mirror' THEN jsonb_build_object(
+                  'xero_linked', EXISTS (SELECT 1 FROM public.xero_invoices x
+                                          WHERE x.xero_invoice_id = o.xero_invoice_id
+                                            AND x.invoice_type = 'ACCPAY' AND x.job_id = p_job),
+                  'placed_by', NULL,
+                  'counts', 'not_counted',
+                  'reason', 'mirror_bill_not_placed_here',
+                  'holding_job', (SELECT COALESCE(lower(j.metadata ->> 'do_not_schedule') = 'true', false)
+                                    FROM public.jobs j WHERE j.id = p_job)) END) AS here,
       COALESCE((SELECT jsonb_agg(jsonb_build_object(
                 'job_id', e.job_id,
                 'job_number', e.job_number,
@@ -128,4 +146,4 @@ $fn$;
 REVOKE ALL ON FUNCTION public.context_job_bill_outcomes(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_job_bill_outcomes(uuid) TO service_role;
 COMMENT ON FUNCTION public.context_job_bill_outcomes(uuid) IS
-  'Context H7 read, INT-10 (20261029170100): for one job, the supplier bills on it (its Xero link or an actual allocation row) with where CFO''s rule (cfo_bill_cost_outcomes_scoped(job), exactly cfo_bill_cost_outcomes for those bills) says each bill''s cost counts, and no amount at all. contract_version is the producer''s (cfo-bill-cost-outcome-v1), shape context-job-bill-outcomes-v1. where_counted here, elsewhere, here_and_elsewhere, no_job, trade_app (a trade-app mirror a person placed: counted through the trade lines, never as this bill), held (F1, JP-21: counts held on every job, never shown as settled) or unknown (never 0). bill_state is CFO''s, over_counted included. change_hash is CFO''s evidence_hash: a payment never moves it. Read only, service role only.';
+  'Context H7 read, INT-10 (20261029170100): for one job, the supplier bills on it (its Xero link or an actual allocation row) with where CFO''s rule (cfo_bill_cost_outcomes_scoped(job), exactly cfo_bill_cost_outcomes for those bills) says each bill''s cost counts, and no amount at all. contract_version is the producer''s (cfo-bill-cost-outcome-v1), shape context-job-bill-outcomes-v1. where_counted here, elsewhere, here_and_elsewhere, no_job, trade_app (a trade-app mirror bill: counted through the trade lines, never as this bill; on a job a person placed it on, here.reason is CFO''s mirror_bill_person_placed, and on its other jobs, where CFO''s view lists no row, here is not_counted with reason mirror_bill_not_placed_here), held (F1, JP-21: counts held on every job, never shown as settled) or unknown (never 0). bill_state is CFO''s, over_counted included. change_hash is CFO''s evidence_hash: a payment never moves it. Read only, service role only.';

@@ -18,9 +18,11 @@
 // over_counted, counted_in_full, counted_in_part. over_counted is more counted
 // (parts plus any overhead part) than the bill ex GST, such as 1200 on a 1000
 // bill or two 700 placements on one: never read it as "in part". trade_mirror
-// is a trade-app mirror bill a person placed on a job: where_counted reads
-// trade_app and here.reason mirror_bill_person_placed, because its cost counts
-// through the trade app's lines, never as this bill.
+// is a trade-app mirror bill: where_counted reads trade_app, because its cost
+// counts through the trade app's lines, never as this bill. On a job a person
+// placed it on, here.reason is mirror_bill_person_placed; on its Xero-linked
+// job where no person placed it (CFO's view has no row there), here is
+// not_counted with reason mirror_bill_not_placed_here.
 
 export const BILL_OUTCOME_CONTRACT_VERSION = "cfo-bill-cost-outcome-v1";
 export const BILL_OUTCOME_SHAPE = "context-job-bill-outcomes-v1";

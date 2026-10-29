@@ -60,8 +60,10 @@ BEGIN
   IF (SELECT count(*) FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id IN ('H7-OVER1', 'H7-OVER2', 'H7-OVER3')) <> 4 THEN
     INSERT INTO h7_contract_failures (msg) VALUES ('over-counted bills are not all listed');
   END IF;
-  -- Below the bill is in part, equal is in full: the comparison is the one
-  -- v_bill_allocation_balance balances a bill with.
+  -- Below the bill is in part, equal is in full. On these fixtures every
+  -- allocation row is counted at its own amount, so the states agree with
+  -- v_bill_allocation_balance; they need not elsewhere (the read counts the
+  -- engine's parts, the view sums every allocation row).
   IF EXISTS (SELECT 1 FROM public.cfo_bill_cost_outcomes o
                JOIN public.v_bill_allocation_balance a ON a.xero_invoice_id = o.xero_invoice_id
               WHERE o.xero_invoice_id LIKE 'H7-%' AND o.bill_counted_jobs > 0

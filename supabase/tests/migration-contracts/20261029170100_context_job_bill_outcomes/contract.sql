@@ -171,6 +171,34 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── a trade-app mirror on its Xero job, placed by a person on another: trade_app on both ──
+-- (review, 29 Oct: the Xero job had no CFO row for a mirror, so it read here null / unknown)
+UPDATE public.xero_invoices SET job_id = 'c7000000-0000-4000-8000-000000000001' WHERE xero_invoice_id = 'H7-MIRP';
+SET LOCAL ROLE service_role;
+DO $$
+DECLARE b jsonb;
+BEGIN
+  SELECT e INTO b FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000001') -> 'bills') e
+   WHERE e ->> 'xero_invoice_id' = 'H7-MIRP';
+  IF b IS NULL OR b ->> 'where_counted' <> 'trade_app' OR b -> 'mirror_bill' <> 'true'::jsonb OR b ->> 'bill_state' <> 'trade_mirror'
+     OR b -> 'here' <> '{"xero_linked": true, "placed_by": null, "counts": "not_counted", "reason": "mirror_bill_not_placed_here", "holding_job": false}'::jsonb
+     OR jsonb_array_length(b -> 'other_jobs') <> 1 OR b #>> '{other_jobs,0,reason}' <> 'mirror_bill_person_placed' THEN
+    RAISE EXCEPTION 'a mirror on its Xero job is not trade_app there: %', coalesce(b::text, 'not listed');
+  END IF;
+  SELECT e INTO b FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000005') -> 'bills') e
+   WHERE e ->> 'xero_invoice_id' = 'H7-MIRP';
+  IF b ->> 'where_counted' <> 'trade_app' OR b #>> '{here,reason}' <> 'mirror_bill_person_placed' OR b #>> '{here,xero_linked}' <> 'false' THEN
+    RAISE EXCEPTION 'the job a person placed the mirror on changed: %', b::text;
+  END IF;
+  -- a bill that is no mirror keeps no placement where CFO lists none
+  IF EXISTS (SELECT 1 FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000001') -> 'bills') e
+              WHERE e -> 'here' ->> 'reason' = 'mirror_bill_not_placed_here' AND e ->> 'xero_invoice_id' <> 'H7-MIRP') THEN
+    RAISE EXCEPTION 'a bill that is no mirror read mirror_bill_not_placed_here';
+  END IF;
+END $$;
+RESET ROLE;
+UPDATE public.xero_invoices SET job_id = NULL WHERE xero_invoice_id = 'H7-MIRP';
+
 -- ── it reads CFO's scoped rule, and carries jit off ──
 DO $$
 BEGIN

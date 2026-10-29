@@ -60,9 +60,14 @@
 --                    equal the bill ex GST to the cent
 --   counted_in_part  counted on a job, and those parts plus any overhead part
 --                    are less than the bill ex GST
--- The three compare as v_bill_allocation_balance balances a bill: the bill ex
--- GST rounded to the cent, less the counted parts and the overhead part, within
--- half a cent.
+-- The three use v_bill_allocation_balance's comparison (the bill ex GST rounded
+-- to the cent, less the parts and the overhead part, within half a cent) but over
+-- the parts the engine counts, not every allocation row. They agree with that
+-- view only where every allocation row is counted at its own amount, as on the
+-- contract's fixtures. Otherwise they can differ: a whole row on the bill's own
+-- Xero job with a different amount, or a split with a legacy part plus overhead,
+-- can read counted_in_full or counted_in_part here while the view reads the bill
+-- over-allocated.
 --
 -- placed_by (descriptive only, never decides counts): xero_link, person
 --   (manual_queue/manual_split with a stored actor), unrecorded (a person
@@ -329,7 +334,8 @@ judged AS (
       WHEN s.counted_jobs = 0 AND COALESCE(q.overhead_ex, 0) > 0
            AND abs(round(b.sub_total, 2) - round(q.overhead_ex, 2)) <= 0.005 THEN 'overhead'
       WHEN s.counted_jobs = 0 THEN 'not_counted'
-      -- v_bill_allocation_balance's own comparison (remainder within half a cent).
+      -- v_bill_allocation_balance's comparison (remainder within half a cent), over
+      -- the counted parts only, so it can differ from that view (see the header).
       WHEN round(b.sub_total, 2) - s.counted_gross_ex - COALESCE(q.overhead_ex, 0) < -0.005 THEN 'over_counted'
       WHEN abs(round(b.sub_total, 2) - s.counted_gross_ex - COALESCE(q.overhead_ex, 0)) <= 0.005 THEN 'counted_in_full'
       ELSE 'counted_in_part'
@@ -394,7 +400,7 @@ CREATE OR REPLACE VIEW public.cfo_bill_cost_outcomes AS
 SELECT * FROM public.cfo_bill_cost_outcomes_scoped(NULL::uuid);
 
 COMMENT ON VIEW public.cfo_bill_cost_outcomes IS
-  'Job profit H7, INT-12 (20261029170000): one row per supplier bill (Xero ACCPAY; trade-app mirrors left out unless a person placed one) and job it is Xero-linked to, has an actual allocation row on, or is counted on. counts counted (v_job_cost_events has an actual row of the bill on the job and v_job_profit reads the job), not_counted (readable, engine counts none of it here; reason names why) or unknown (the reason cannot be read; never 0). Whether a placement counts is read from the engine, never re-derived. bill_state unknown, voided, trade_mirror (a trade-app mirror a person placed: shown, reason mirror_bill_person_placed, never counted), held (a not-job-related mark while the engine counts the bill: F1, JP-21, held_reason not_job_related_mark_on_counted_bill), not_job_related, overhead, not_counted, over_counted (counted parts plus overhead above the bill ex GST), counted_in_full or counted_in_part (below it), compared as v_bill_allocation_balance balances a bill. placed_by is descriptive only. evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-bill-cost-outcome-v1; a payment does not move it (AUTHORISED and PAID one class; D22 working rule, CFO''s recommendation), a changed total, line, tax-inclusive flag (LineAmountTypes), credit, status class, row or overhead does. No history. Amounts are CFO''s: context_job_bill_outcomes drops them. Read only, service role only.';
+  'Job profit H7, INT-12 (20261029170000): one row per supplier bill (Xero ACCPAY; trade-app mirrors left out unless a person placed one) and job it is Xero-linked to, has an actual allocation row on, or is counted on. counts counted (v_job_cost_events has an actual row of the bill on the job and v_job_profit reads the job), not_counted (readable, engine counts none of it here; reason names why) or unknown (the reason cannot be read; never 0). Whether a placement counts is read from the engine, never re-derived. bill_state unknown, voided, trade_mirror (a trade-app mirror a person placed: shown, reason mirror_bill_person_placed, never counted), held (a not-job-related mark while the engine counts the bill: F1, JP-21, held_reason not_job_related_mark_on_counted_bill), not_job_related, overhead, not_counted, over_counted (counted parts plus overhead above the bill ex GST), counted_in_full or counted_in_part (below it), using v_bill_allocation_balance''s comparison over the counted parts only, so it can differ from that view where an allocation row is not counted at its own amount. placed_by is descriptive only. evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-bill-cost-outcome-v1; a payment does not move it (AUTHORISED and PAID one class; D22 working rule, CFO''s recommendation), a changed total, line, tax-inclusive flag (LineAmountTypes), credit, status class, row or overhead does. No history. Amounts are CFO''s: context_job_bill_outcomes drops them. Read only, service role only.';
 REVOKE ALL ON public.cfo_bill_cost_outcomes FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.cfo_bill_cost_outcomes TO service_role;
 
