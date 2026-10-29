@@ -63,7 +63,7 @@ DECLARE problems text[] := '{}'; live text; f text; t text;
 BEGIN
  -- The replaced body: 20261029093000's, or this migration's (a re-apply).
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.materials_ai_hard_keys(text,uuid)');
- IF live IS NULL OR live NOT IN ('2ef85da40004fb45adc42ea2488e8947', '876de05a1bf1ea9bf7fcb5bac3ef60b9') THEN
+ IF live IS NULL OR live NOT IN ('2ef85da40004fb45adc42ea2488e8947', '5c842e65f177a9de4b42ccb4a3abd9f4') THEN
   problems := problems || format('%s md5 %s', 'public.materials_ai_hard_keys(text,uuid)', coalesce(live, '<missing>'));
  END IF;
  -- Read, never replaced: the B0 address rule.
@@ -295,14 +295,21 @@ BEGIN
      LIMIT 1;
     -- Every live job (a job number, not cancelled or lost, not a holding job:
     -- the picture's live set) other than this one whose exact site key the
-    -- bill writes. The street's first name word narrows the read first.
+    -- bill writes. The B0 key itself is compared over the whole live set;
+    -- nothing narrows the read on the raw text first. B0 drops apostrophes
+    -- and turns any other punctuation into a space before it keys an
+    -- address ("14 O'Connor Street" and "14 OConnor St" share
+    -- "14 oconnor st"; "1'4" keys as "14"), so no substring of the raw site
+    -- address is provably kept by the key, and a raw-text prefilter can drop
+    -- a job whose key is equal. There is no index on context_address_key
+    -- either: it is revoked from the API roles and index upkeep runs as the
+    -- writing role, so such an index would make every jobs write fail.
     SELECT array_agg(DISTINCT j.job_number COLLATE "C" ORDER BY j.job_number COLLATE "C") INTO v_addr_jobs
       FROM public.jobs j
      WHERE j.id <> v_job.id
        AND j.job_number IS NOT NULL
        AND lower(COALESCE(j.status, '')) NOT IN ('cancelled', 'lost')
        AND lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) <> 'true'
-       AND lower(COALESCE(j.site_address, '')) LIKE ANY (ARRAY(SELECT '%' || split_part(a, ' ', 2) || '%' FROM unnest(v_exact) a))
        AND public.context_address_key(j.site_address) = ANY (v_exact);
     IF v_addr_jobs IS NULL THEN
       v_keys := v_keys || 'site_address'::text;

@@ -18,7 +18,7 @@ DO $guard$
 DECLARE live text;
 BEGIN
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.materials_ai_hard_keys(text,uuid)');
-  IF live IS NOT NULL AND live NOT IN ('876de05a1bf1ea9bf7fcb5bac3ef60b9', '2ef85da40004fb45adc42ea2488e8947') THEN
+  IF live IS NOT NULL AND live NOT IN ('5c842e65f177a9de4b42ccb4a3abd9f4', '2ef85da40004fb45adc42ea2488e8947') THEN
     RAISE EXCEPTION 'materials_ai_address_supplier_keys_down_preimage_mismatch: %; roll the later migration back first',
       format('%s md5 %s', 'public.materials_ai_hard_keys(text,uuid)', live);
   END IF;

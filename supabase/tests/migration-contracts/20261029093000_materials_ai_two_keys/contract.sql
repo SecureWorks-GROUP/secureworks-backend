@@ -43,7 +43,7 @@ BEGIN;
 -- supplier recorded only, no site address), so while that later body is live
 -- it is rolled back first, inside this rolled-back transaction. That later
 -- case proves the job_number and purchase_order clues are unchanged by it.
-SELECT COALESCE((SELECT md5(prosrc) = '876de05a1bf1ea9bf7fcb5bac3ef60b9' FROM pg_proc
+SELECT COALESCE((SELECT md5(prosrc) = '5c842e65f177a9de4b42ccb4a3abd9f4' FROM pg_proc
                   WHERE oid = to_regprocedure('public.materials_ai_hard_keys(text,uuid)')), false) AS tp03_later_keys_live \gset
 \if :tp03_later_keys_live
 \ir ../../../rollbacks/20261029230000_materials_ai_address_supplier_keys_down.sql

@@ -7,6 +7,8 @@
 --   SWF-29105 site 22 Loose Bend (no type word, so no exact key)
 --   SWF-29106 the supplier job            SWF-29107 holding job at 9 Holding Lane
 --   SWF-29108 site 9 Holding Lane
+--   SWF-29109 site 14 OConnor St          SWF-29110 site 14 O'Connor Street (the same B0 key)
+--   SWF-29111 site 3 D'Arcy Road
 --
 -- Bills (no job number or PO unless said):
 --   AK-LOOSE   "Deliver 14 Keystone" on SWF-29101: loose only, no key; held,
@@ -23,6 +25,13 @@
 --   AK-HOLDAD  "9 Holding Lane" on SWF-29108: the holding job at the same
 --              address is not a job, key.
 --   AK-OTHJOB  SWF-29101's address and the number SWP-29102: rule 0, no key.
+--   AK-OCON    "Deliver to 14 OConnor St" on SWF-29109: SWF-29110's raw site
+--              address differs ("O'Connor Street") but its B0 key is the same,
+--              so no key, and the bill is held (Codex R on 29c0bbd0: a raw
+--              text narrowing must never drop a job whose key is equal).
+--   AK-OCON2   the same the other way round, on SWF-29110.
+--   AK-DARCY   SWF-29101's address and "3 Darcy Rd", which is SWF-29111's
+--              B0 key though its raw address is "3 D'Arcy Road": no key.
 --   AK-SUP     supplier C-AK-SUP, a person placed AK-SUPP1 on SWF-29106:
 --              placed on the supplier alone, audit and event name same_supplier.
 --   AK-RULE    supplier C-AK-RULE, a rule placed AK-RULEP (xero_ref_link): key.
@@ -284,7 +293,13 @@ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata,
   ('d7000000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing', 'SWF-29107', false,
    '{"do_not_schedule": "true"}', '{}', NULL, '2026-07-01T00:00:00Z', 'Holding', NULL, NULL, '9 Holding Lane', 'Keyburn'),
   ('d7000000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'SWF-29108', false, '{}', '{}', NULL,
-   '2026-07-01T00:00:00Z', 'Ak Client Eight', NULL, NULL, '9 Holding Lane', 'Keyburn');
+   '2026-07-01T00:00:00Z', 'Ak Client Eight', NULL, NULL, '9 Holding Lane', 'Keyburn'),
+  ('d7000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'SWF-29109', false, '{}', '{}', NULL,
+   '2026-07-01T00:00:00Z', 'Ak Client Nine', NULL, NULL, '14 OConnor St', 'Keyburn'),
+  ('d7000000-0000-4000-8000-000000000010', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'SWF-29110', false, '{}', '{}', NULL,
+   '2026-07-01T00:00:00Z', 'Ak Client Ten', NULL, NULL, '14 O''Connor Street', 'Keyburn'),
+  ('d7000000-0000-4000-8000-000000000011', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'SWF-29111', false, '{}', '{}', NULL,
+   '2026-07-01T00:00:00Z', 'Ak Client Eleven', NULL, NULL, '3 D''Arcy Road', 'Keyburn');
 
 INSERT INTO public.purchase_orders (id, po_number, job_id, xero_contact_id, supplier_name, subtotal, status) VALUES
   ('d7000000-0000-4000-8000-0000000000a1', 'PO-2910101', 'd7000000-0000-4000-8000-000000000001', 'C-AK-PO', 'Ak Steel', 345.67, 'sent');
@@ -316,6 +331,9 @@ SELECT '00000000-0000-0000-0000-000000000001', b.id, 'AKB-' || b.id, 'ACCPAY', b
     ('AK-TWOP1', 'Ak Two', 100.05, NULL, '[{"Description": "Wire", "AccountCode": "310", "LineAmount": 100.05}]', 'AUTHORISED'),
     ('AK-TWOP2', 'Ak Two', 100.06, NULL, '[{"Description": "Wire", "AccountCode": "310", "LineAmount": 100.06}]', 'AUTHORISED'),
     ('AK-TWO', 'Ak Two', 317.17, NULL, '[{"Description": "Wire", "AccountCode": "310", "LineAmount": 317.17}]', 'AUTHORISED'),
+    ('AK-OCON', 'Ak Steel', 319.19, 'Deliver to 14 OConnor St', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 319.19}]', 'AUTHORISED'),
+    ('AK-OCON2', 'Ak Steel', 320.20, 'Deliver to 14 O''Connor Street', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 320.20}]', 'AUTHORISED'),
+    ('AK-DARCY', 'Ak Steel', 321.21, '14 Keystone St and 3 Darcy Rd', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 321.21}]', 'AUTHORISED'),
     ('AK-NONE', 'Ak Steel', 318.18, NULL, '[{"Description": "Screws", "AccountCode": "310", "LineAmount": 318.18}]', 'AUTHORISED')
   ) b(id, supplier, amount, ref, lines, status);
 
@@ -407,6 +425,33 @@ BEGIN
   IF k -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'AK-HOLDAD: a holding job got a key: %', k; END IF;
   k := public.materials_ai_hard_keys('AK-OTHJOB', j1);
   IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'the bill also names SWP-29102' THEN RAISE EXCEPTION 'AK-OTHJOB: %', k; END IF;
+  -- The same B0 key behind different raw text: never dropped by a narrowing.
+  IF public.context_address_key('14 OConnor St') IS DISTINCT FROM public.context_address_key('14 O''Connor Street')
+     OR public.context_address_key('3 D''Arcy Road') IS DISTINCT FROM '3 darcy rd' THEN
+    RAISE EXCEPTION 'address and supplier keys: witness keys %', public.context_address_key('14 O''Connor Street');
+  END IF;
+  k := public.materials_ai_hard_keys('AK-OCON', 'd7000000-0000-4000-8000-000000000009');
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' NOT LIKE '%also the site of SWF-29110%' THEN
+    RAISE EXCEPTION 'address and supplier keys: AK-OCON a twin with the same B0 key was dropped: %', k;
+  END IF;
+  RAISE NOTICE 'witness %: %', 'AK-OCON', k;
+  k := public.materials_ai_hard_keys('AK-OCON2', 'd7000000-0000-4000-8000-000000000010');
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' NOT LIKE '%also the site of SWF-29109%' THEN
+    RAISE EXCEPTION 'address and supplier keys: AK-OCON2 a twin with the same B0 key was dropped: %', k;
+  END IF;
+  RAISE NOTICE 'witness %: %', 'AK-OCON2', k;
+  k := public.materials_ai_hard_keys('AK-DARCY', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' NOT LIKE '%SWF-29111%' THEN
+    RAISE EXCEPTION 'address and supplier keys: AK-DARCY another job''s address with the same B0 key was dropped: %', k;
+  END IF;
+  RAISE NOTICE 'witness %: %', 'AK-DARCY', k;
+  -- Above the bar with no other clue, the witness is held for the blind check, not placed.
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"AK-OCON","decision":"job","job_number":"SWF-29109","confidence":0.97,"reason":"Delivered to the site.","evidence":["address"]}');
+  IF v ->> 'outcome' <> 'held_for_check' OR v -> 'keys' <> '["ai_confidence"]'::jsonb
+     OR EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id = 'AK-OCON') THEN
+    RAISE EXCEPTION 'address and supplier keys: AK-OCON placed without the blind check: %', v;
+  END IF;
+  RAISE NOTICE 'witness %: %', 'AK-OCON apply at 0.97', v;
   -- Job number and PO keep their place before the address.
   k := public.materials_ai_hard_keys('AK-PO', j1);
   IF k -> 'keys' <> '["purchase_order", "site_address"]'::jsonb THEN RAISE EXCEPTION 'AK-PO: %', k; END IF;
@@ -479,7 +524,7 @@ BEGIN
                        || COALESCE((SELECT string_agg((detail_json -> 'key_evidence')::text, ' ') FROM public.job_events
                                      WHERE event_type = 'materials_bill_assigned' AND detail_json ->> 'xero_invoice_id' LIKE 'AK-%'), '');
   FOREACH bad IN ARRAY ARRAY['400555101', '400 555 101', '400555102', 'example.test', 'ak.one', '345.67', '301.11', '302.22',
-    '303.33', '311.11', '312.12', '313.13', '100.01', '100.02', '316.16', '$'] LOOP
+    '303.33', '311.11', '312.12', '313.13', '100.01', '100.02', '316.16', '319.19', '320.20', '321.21', '$'] LOOP
     IF strpos(out_text, bad) > 0 THEN RAISE EXCEPTION 'address and supplier keys: leaks %', bad; END IF;
   END LOOP;
 END $$;
@@ -502,7 +547,7 @@ END $$;
 \ir ../../../migrations/20261029230000_materials_ai_address_supplier_keys.sql
 DO $$ BEGIN
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.materials_ai_hard_keys(text,uuid)'))
-     IS DISTINCT FROM '876de05a1bf1ea9bf7fcb5bac3ef60b9'
+     IS DISTINCT FROM '5c842e65f177a9de4b42ccb4a3abd9f4'
      OR has_function_privilege('anon', 'public.materials_ai_hard_keys(text,uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'address and supplier keys: a re-apply moved something';
   END IF;
@@ -539,7 +584,7 @@ DO $$ BEGIN RAISE EXCEPTION 'address and supplier keys: the down migration repla
 
 DO $$ BEGIN
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.materials_ai_hard_keys(text,uuid)'))
-     IS DISTINCT FROM '876de05a1bf1ea9bf7fcb5bac3ef60b9' THEN
+     IS DISTINCT FROM '5c842e65f177a9de4b42ccb4a3abd9f4' THEN
     RAISE EXCEPTION 'address and supplier keys: a refused drift check left the function changed';
   END IF;
 END $$;
