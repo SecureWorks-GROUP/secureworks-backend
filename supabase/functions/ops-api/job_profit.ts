@@ -30,7 +30,9 @@ export const JOB_PROFIT_LABELS = {
   verified_paid:
     "Xero recorded the payment (status PAID; trade invoices paid). Not a bank reconciliation.",
   margin:
-    "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), or when materials are owed but none is linked (labour-only cost).",
+    "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), when materials are owed but none is linked (labour-only cost), or while a cost is probably still missing: materials placed far below the quote's materials (materials_below_quote), an order with no bill 30 days on (ordered_not_billed_over_30_days, po_no_bill_overdue), an agreed variation with no cost figure (variation_not_costed) or not yet invoiced (variation_not_invoiced). Each is a named reason in completeness, never a margin.",
+  partial_cost_reasons:
+    "TP-13 named reasons in completeness: materials_below_quote, ordered_not_billed_over_30_days, po_no_bill_overdue, variation_not_costed and variation_not_invoiced hold the margin; work_done_no_labour_overdue (completed or signed off 14 days ago with no labour) and expected_cost_lane_missing (the quote's expected cost left a lane unknown, so expected_cost_ex is partial) are named only. The numbers are in job_profit_partial_cost_policy().",
   profit_ex_unsuppressed:
     "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
   committed_open_ex:
@@ -40,7 +42,7 @@ export const JOB_PROFIT_LABELS = {
   invoice_emailed_count:
     "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
   rollup_expected_vs_actual:
-    "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
+    "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines) and whose expected cost names every lane (no expected_cost_lane_missing). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
   holding_jobs:
     "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;

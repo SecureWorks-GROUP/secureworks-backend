@@ -4859,6 +4859,21 @@ legacy insert), and only send-quote's own sources (`send-quote`,
 `supabase/tests/migration-contracts/20260923233000_job_quote_values/`,
 `job_commercial_read_test.ts`.
 
+## Job Profit Names A Probably Missing Cost, Never A Margin
+
+`v_job_profit` (TP-13, `20261029160000`) holds the margin and names the
+reason in `completeness` when a cost is probably missing: materials placed
+below 60% of the quote's (`materials_below_quote`), an order with no bill 30
+days on (`ordered_not_billed_over_30_days`, `po_no_bill_overdue`), an agreed
+variation with no cost figure or not invoiced (`variation_not_costed`,
+`variation_not_invoiced`). `work_done_no_labour_overdue` and
+`expected_cost_lane_missing` are named only. Never turn one into an estimate,
+and never re-derive one in a reader: read `completeness`, `cost_flag` and
+`margin_ok`. The numbers are in `job_profit_partial_cost_policy()`, changed
+only by migration. The time rules read the Perth day, so a margin can turn
+Unknown with no row changing. A later `v_job_profit` body keeps every column
+and every reason. Contract: `docs/job-profit-read-contract.md`.
+
 ## Booking confirmation authority
 
 Read/approval handoff, published availability freshness and ledger/outcome

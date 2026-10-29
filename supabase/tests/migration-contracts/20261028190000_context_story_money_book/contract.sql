@@ -87,8 +87,11 @@ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, li
  ('5eb30000-0000-4000-8000-000000000001', '5eb00000-0000-4000-8000-000000000001', NULL, 'labour', 'Fence labour', 600, 12, '2026-08-04');
 INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source) VALUES
  ('5eb00000-0000-4000-8000-000000000001', 'MB-BILL-1', 'B-1', 'Fence Supplies', 'materials', 'actual', 350, 'high', '2026-08-02', 'manual_queue');
+-- PO-MB1 is dated two days before the run: an open order inside TP-13's 30
+-- days (20261029160000), so Job Profit still shows the margin "on the costs
+-- placed so far". An older open order holds the margin.
 INSERT INTO public.purchase_orders (id, job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
- ('5eb40000-0000-4000-8000-000000000001', '5eb00000-0000-4000-8000-000000000001', 'PO-MB1', 'Fence Supplies', 'sent', 80, 88, '2026-08-01T00:00:00Z');
+ ('5eb40000-0000-4000-8000-000000000001', '5eb00000-0000-4000-8000-000000000001', 'PO-MB1', 'Fence Supplies', 'sent', 80, 88, now() - interval '2 days');
 INSERT INTO public.materials_reconciliation_queue (id, xero_invoice_id, invoice_number, sub_total, total, suggested_job_id, status, updated_at) VALUES
  ('5eb50000-0000-4000-8000-000000000001', 'MB-BILL-2', 'B-2', 120, 132, '5eb00000-0000-4000-8000-000000000001', 'open', '2026-08-03T00:00:00Z'),
  ('5eb50000-0000-4000-8000-000000000002', 'MB-BILL-3', 'B-3', 999, 1098.9, '5eb00000-0000-4000-8000-000000000001', 'not_job_related', '2026-08-03T00:00:00Z');
