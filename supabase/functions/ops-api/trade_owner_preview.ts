@@ -3,7 +3,7 @@ export const TRADE_PREVIEW_PARAM = 'preview_trade_user_id'
 export const TRADE_PREVIEW_READS = new Set([
   'trade_preview_context', 'trade_calendar', 'my_jobs', 'search_all_jobs',
   'trade_job_detail', 'my_work_orders', 'my_job_work_order',
-  'group_work_order_my_share', 'my_hours', 'my_money', 'my_trade_invoices',
+  'my_group_work_orders', 'group_work_order_my_share', 'my_hours', 'my_money', 'my_trade_invoices',
   'get_trade_invoice', 'get_running_invoice_draft', 'my_invoices',
   'crew_charges_on_my_jobs',
 ])
@@ -37,7 +37,7 @@ export async function readTradePreviewProfile(client: any, caller: Caller, targe
     .select('id, name, email, org_id, role, managed_verticals, trade_sees_all_jobs, trade_tier, invoice_type, abn, trade_details')
     .eq('id', target).eq('org_id', caller.orgId).maybeSingle()
   if (error) throw new TradePreviewError('Could not load that trade. Try again.', 503, 'trade_preview_unavailable')
-  if (!data || ['admin', 'owner', 'ops_manager'].includes(String(data.role).toLowerCase())) {
+  if (!data || ['admin', 'owner'].includes(String(data.role).toLowerCase()) || (String(data.role).toLowerCase() === 'ops_manager' && !['hourly', 'per_metre'].includes(String(data.invoice_type)))) {
     throw new TradePreviewError('That trade is not available for preview.', 404, 'trade_preview_not_found')
   }
   // Only the GST preference is needed from the private profile on this screen.
@@ -51,5 +51,5 @@ export async function tradePreviewContext(client: any, caller: Caller | null, ta
     .eq('org_id', caller!.orgId).order('name')
   if (error) throw new TradePreviewError('Could not load the trade list. Try again.', 503, 'trade_preview_unavailable')
   return { can_preview: true, trades: (data || []).filter((p: any) =>
-    !['admin', 'owner', 'ops_manager'].includes(String(p.role).toLowerCase())) }
+    !['admin', 'owner'].includes(String(p.role).toLowerCase()) && (String(p.role).toLowerCase() !== 'ops_manager' || ['hourly', 'per_metre'].includes(String(p.invoice_type)))) }
 }

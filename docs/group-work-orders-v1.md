@@ -284,3 +284,9 @@ response sets `prompt_google_review: true` and includes
 - The master switch stays off until the owner turns it on.
 - Withheld quote PDFs and the trade app's price-free extract are a different
   fence. This slice does not change them.
+
+## Normal Trade invoice flow, 29 October 2026
+
+`my_group_work_orders` lists only the caller's participant groups in their organisation, including previous work dates. It returns current sign-off/readiness, approved pool and their own frozen or explicitly projected share, never other workers' amounts. Held shares are omitted. All owned group job IDs remain marked to replace ordinary labour cards. Failed reads fail the normal invoice closed.
+
+Trade > Pay > Weekly Invoice renders these claims inline. Finalise uses the existing guarded freeze; only a current frozen share can be selected. Selected shares join the normal invoice total and generate_trade_invoice extra_items, alongside ordinary work orders and extras. Existing server pricing, signature freshness, duplicate guards and mandatory office review remain authoritative. Save stores selected group identities in the existing draft builder; reloading validates them against fresh own group state before inclusion. No new migration, permission role, rate or pay formula.

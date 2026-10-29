@@ -394,7 +394,9 @@ Deno.test("save then reload returns the same draft, still unsent", async () => {
   const db = baseDb();
   db.tables.job_assignments.push(assignment({ id: AS_HOURS }));
   db.tables.work_orders.push(workOrder());
-  const saved = await saveRunningInvoiceDraft(db, USER, saveBody(), "staff");
+  const body = saveBody();
+  body.draft_builder.groupIds = ["33333333-3333-4333-8333-333333333333"];
+  const saved = await saveRunningInvoiceDraft(db, USER, body, "staff");
   assertEquals(saved.ok, true);
   assertEquals(saved.status, "draft");
   assertEquals(saved.xero, false);
@@ -405,6 +407,7 @@ Deno.test("save then reload returns the same draft, still unsent", async () => {
   assertEquals(saved.added, ["wo:" + WO_READY]);
 
   const builder = saved.draft_builder as Row;
+  assertEquals(builder.groupIds, ["33333333-3333-4333-8333-333333333333"]);
   assertEquals(builder.notes, "Gate was locked");
   assertEquals(builder.gst_on, false);
   assertEquals(builder.weekStart, WEEK);

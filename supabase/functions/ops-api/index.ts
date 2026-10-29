@@ -788,6 +788,7 @@ import {
   previewGroupClientLink,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
+  readMyGroupWorkOrders,
   readGroupWorkOrderOffice,
   readGroupWorkOrderPublic,
   rekeyGroupWorkOrder,
@@ -4975,6 +4976,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'submit_group_work_order_hours',
   'delete_group_work_order_hours',
   'group_work_order_my_share',
+  'my_group_work_orders',
   'capture_group_client_signoff',
   'freeze_group_work_order',
   'group_work_order_preview_client_link',
@@ -11950,6 +11952,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'sign_group_work_order':
       case 'submit_group_work_order_hours':
       case 'delete_group_work_order_hours':
+      case 'my_group_work_orders':
       case 'group_work_order_my_share':
       case 'capture_group_client_signoff':
       case 'freeze_group_work_order':
@@ -12096,7 +12099,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'sign_group_work_order':
           case 'submit_group_work_order_hours':
           case 'delete_group_work_order_hours':
-          case 'group_work_order_my_share':
+          case 'my_group_work_orders':
+      case 'group_work_order_my_share':
           case 'capture_group_client_signoff':
           case 'freeze_group_work_order':
           case 'group_work_order_preview_client_link': {
@@ -12121,6 +12125,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             if (action === 'delete_group_work_order_hours') {
               return await groupWorkOrderJson(deleteGroupWorkOrderHours(client, groupCaller, groupPayload))
+            }
+            if (action === 'my_group_work_orders') {
+              return await groupWorkOrderJson(readMyGroupWorkOrders(client, groupCaller))
             }
             if (action === 'group_work_order_my_share') {
               return await groupWorkOrderJson(readGroupWorkOrderMyShare(client, groupCaller, groupPayload))
