@@ -193,6 +193,18 @@ const SCHEMA: Record<string, string[]> = {
     "created_at",
     "created_by_email",
   ],
+  // The reply step (dispatch_board.ts loadDispatchV2MatchedReplies).
+  feature_flags: ["flag_name", "enabled"],
+  dispatch_v2_supplier_emails: [
+    "id",
+    "org_id",
+    "job_id",
+    "state",
+    "order_id",
+    "received_at",
+    "matched_at",
+    "rung",
+  ],
   dispatch_v2_scope_fills: [
     "job_id",
     "org_id",
@@ -361,6 +373,8 @@ function seed(): Record<string, Row[]> {
     dispatch_material_photos: [],
     dispatch_supplier_order_emails: [],
     dispatch_v2_scope_fills: [],
+    feature_flags: [],
+    dispatch_v2_supplier_emails: [],
   };
 }
 
@@ -994,6 +1008,54 @@ Deno.test("read: the payment gate holds a pay-first box's confirmed date, as on 
   // Stratco is on account: Order confirmed as before.
   assertEquals(stratco.material_stage.key, "order_confirmed");
   assertEquals(stratco.material_stage.held_by_payment, false);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: a matched supplier reply moves the box on, as on the board", async () => {
+  const db = await fencingJob();
+  const sentAt = "2026-10-28T01:00:00.000Z";
+  const emailId = "00000000-0000-0000-0000-0000000e0001";
+  const columns = SCHEMA.dispatch_supplier_order_emails;
+  const email: Row = Object.fromEntries(columns.map((c) => [c, null]));
+  Object.assign(email, {
+    id: emailId,
+    org_id: ORG,
+    job_id: JOB.fence,
+    supplier_id: SUP.metroll,
+    status: "sent",
+    body_text: "Hi, please deliver the following.",
+    sent_at: sentAt,
+    created_at: sentAt,
+    updated_at: sentAt,
+    to_emails: [],
+    cc_emails: [],
+    order_lines: [],
+    photo_ids: [],
+    sent_to_emails: [],
+    sent_cc_emails: [],
+  });
+  db.tables.dispatch_supplier_order_emails.push(email);
+  db.tables.dispatch_v2_supplier_emails.push({
+    id: "00000000-0000-0000-0000-0000000b0001",
+    org_id: ORG,
+    job_id: JOB.fence,
+    state: "matched",
+    order_id: emailId,
+    received_at: "2026-10-28T04:00:00.000Z",
+    matched_at: "2026-10-28T04:01:00.000Z",
+    rung: "thread",
+  });
+  // Switch off: no reply is read, Metroll stays at Sent.
+  const off = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(off.replies_read, "ok");
+  assertEquals(off.suppliers[0].material_stage.key, "sent");
+  // Switch on: Metroll pays first, so the reply moves it to Awaiting payment.
+  db.tables.feature_flags.push({ flag_name: "dispatch_v2_replies_v1", enabled: true });
+  const on = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const metroll = on.suppliers[0];
+  assertEquals(metroll.material_stage.key, "awaiting_payment");
+  assertEquals(metroll.material_stage.source, "reply");
+  assertEquals(metroll.material_stage.reply.email_id, "00000000-0000-0000-0000-0000000b0001");
   assertOnlyV2Writes(db);
 });
 

@@ -193,6 +193,49 @@ export function dispatchV2StampCounts(
   return true;
 }
 
+// ── Supplier replies (contract section 3c, the reply step) ─────────────────
+//
+// A supplier reply that the reply scan (or a person in the tray) matched to
+// the box's newest order moves a Sent box on by itself: to Awaiting payment
+// on a pay-first box (the supplier is waiting on our money), to Quote
+// received on an on-account box. Unknown terms never move a box.
+
+/** The stage a matched reply moves a Sent box to, or null for no move. */
+export function dispatchV2ReplyStage(
+  terms: DispatchV2PaymentTerms,
+): "awaiting_payment" | "quote_received" | null {
+  if (terms === "pay_first") return "awaiting_payment";
+  if (terms === "on_account") return "quote_received";
+  return null;
+}
+
+// When a reply arrived: received_at, else when it was matched.
+export function dispatchV2ReplyAt(reply: {
+  received_at: unknown;
+  matched_at: unknown;
+}): string | null {
+  return stampText(reply?.received_at) ?? stampText(reply?.matched_at);
+}
+
+/** Whether one reply is tied to the box's newest order: matched, naming
+ * that order email, and arrived after it was sent. */
+export function dispatchV2ReplyTiedToOrder(
+  reply: {
+    state: unknown;
+    order_id: unknown;
+    received_at: unknown;
+    matched_at: unknown;
+  },
+  newestSent: { id: string | null; sent_at: string } | null,
+): boolean {
+  if (!reply || !newestSent?.id) return false;
+  if (reply.state !== "matched") return false;
+  if (String(reply.order_id ?? "") !== newestSent.id) return false;
+  const at = stampInstant(dispatchV2ReplyAt(reply));
+  const sentAt = stampInstant(newestSent.sent_at);
+  return at !== null && sentAt !== null && at > sentAt;
+}
+
 /** The box's payment, by the rules above. */
 export function dispatchV2PaymentOf(
   input: DispatchV2PaymentInput,

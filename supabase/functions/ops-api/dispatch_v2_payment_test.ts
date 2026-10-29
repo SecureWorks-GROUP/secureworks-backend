@@ -17,6 +17,8 @@ import {
   dispatchV2AccountsOf,
   dispatchV2PaymentOf,
   dispatchV2PaymentTerms,
+  dispatchV2ReplyStage,
+  dispatchV2ReplyTiedToOrder,
   dispatchV2TermsFor,
 } from "./dispatch_v2_payment.ts";
 import {
@@ -1344,4 +1346,180 @@ Deno.test("gate: the Arrival line and Mark paid agree with the gate", async () =
   );
   assertEquals(tables.job_events[0].detail_json.had_date, true);
   assertEquals(tables.job_events[0].detail_json.stage_before, "awaiting_payment");
+});
+
+// ── A5: a matched supplier reply moves a Sent box on ────────────────────────
+
+const REPLY_AT = "2026-10-28T04:58:00.000Z";
+const NEWEST = { id: EMAIL.lysaght, sent_at: SENT_AT };
+
+function reply(id: string, extra: Row = {}): any {
+  return {
+    id,
+    job_id: JOB.fence,
+    state: "matched",
+    order_id: EMAIL.lysaght,
+    received_at: REPLY_AT,
+    matched_at: "2026-10-28T05:01:00.000Z",
+    rung: "thread",
+    ...extra,
+  };
+}
+
+const REPLY = { one: uuid("b3", 1), two: uuid("b3", 2) };
+
+function sentStage(extra: Partial<Parameters<typeof dispatchMaterialStageOf>[0]> = {}) {
+  return dispatchMaterialStageOf({
+    stored: null,
+    storedAt: null,
+    sentAts: [SENT_AT],
+    unsentLineChanges: [],
+    confirmedAt: null,
+    terms: "pay_first",
+    newestSent: NEWEST,
+    replies: [reply(REPLY.one)],
+    ...extra,
+  });
+}
+
+Deno.test("reply: pay first goes to Awaiting payment, on account to Quote received, unknown nowhere", () => {
+  assertEquals(dispatchV2ReplyStage("pay_first"), "awaiting_payment");
+  assertEquals(dispatchV2ReplyStage("on_account"), "quote_received");
+  assertEquals(dispatchV2ReplyStage("unknown"), null);
+});
+
+Deno.test("reply: tied to the order only when matched, naming the newest order email, after it was sent", () => {
+  assert(dispatchV2ReplyTiedToOrder(reply(REPLY.one), NEWEST));
+  assert(!dispatchV2ReplyTiedToOrder(reply(REPLY.one, { state: "needs_confirmation" }), NEWEST));
+  assert(!dispatchV2ReplyTiedToOrder(reply(REPLY.one, { order_id: EMAIL.stratco }), NEWEST));
+  assert(!dispatchV2ReplyTiedToOrder(reply(REPLY.one, { received_at: BEFORE_SEND }), NEWEST));
+  // No received time: when it was matched.
+  assert(dispatchV2ReplyTiedToOrder(reply(REPLY.one, { received_at: null }), NEWEST));
+  assert(!dispatchV2ReplyTiedToOrder(reply(REPLY.one), null));
+  assert(!dispatchV2ReplyTiedToOrder(reply(REPLY.one), { id: null, sent_at: SENT_AT }));
+});
+
+Deno.test("reply: a Sent box moves on and names the earliest reply", () => {
+  const shown = sentStage({
+    replies: [
+      reply(REPLY.two, { received_at: "2026-10-28T06:00:00.000Z" }),
+      reply(REPLY.one),
+    ],
+  });
+  assertEquals(shown, {
+    key: "awaiting_payment",
+    source: "reply",
+    held_by_payment: false,
+    reply: { email_id: REPLY.one, received_at: REPLY_AT, rung: "thread" },
+  });
+  assertEquals(sentStage({ terms: "on_account" }).key, "quote_received");
+  assertEquals(sentStage({ terms: "unknown" }).key, "sent");
+  // No replies passed: the old answer, with no reply key.
+  assertEquals("reply" in sentStage({ replies: undefined }), false);
+});
+
+Deno.test("reply: never moves a box that is past Sent, paid, or picked after the reply", () => {
+  // A person picked Manufacturing after the send.
+  assertEquals(
+    sentStage({ stored: "manufacturing", storedAt: "2026-10-28T02:00:00.000Z" }).key,
+    "manufacturing",
+  );
+  // Paid: Order confirmed from the payment, not the reply.
+  const paid = sentStage({
+    payment: paymentOf({ paidAt: PAID_AT, paidByEmail: SHAUN.email }),
+  });
+  assertEquals([paid.key, paid.source, paid.reply], ["order_confirmed", "payment", null]);
+  // A person picked Sent again after the reply came in: the pick stands.
+  const picked = sentStage({ stored: "sent", storedAt: "2026-10-28T07:00:00.000Z" });
+  assertEquals([picked.key, picked.source], ["sent", "set"]);
+  // A newer order went after the reply: the reply was for the earlier one.
+  const newer = sentStage({
+    sentAts: [SENT_AT, "2026-10-28T08:00:00.000Z"],
+    newestSent: { id: uuid("f2", 3), sent_at: "2026-10-28T08:00:00.000Z" },
+  });
+  assertEquals(newer.key, "sent");
+});
+
+Deno.test("reply: a confirmed date already in place is not undone by a later reply", () => {
+  const onAccount = sentStage({
+    terms: "on_account",
+    confirmedAt: "2026-10-28T03:00:00.000Z",
+  });
+  assertEquals([onAccount.key, onAccount.source], ["order_confirmed", "worked_out"]);
+  const payFirst = sentStage({ confirmedAt: "2026-10-28T03:00:00.000Z" });
+  assertEquals(
+    [payFirst.key, payFirst.source, payFirst.held_by_payment],
+    ["awaiting_payment", "worked_out", true],
+  );
+});
+
+Deno.test("reply: a date confirmed after the reply is held by the gate, and the reply stays named", () => {
+  const shown = sentStage({ confirmedAt: "2026-10-28T06:00:00.000Z" });
+  assertEquals(shown, {
+    key: "awaiting_payment",
+    source: "reply",
+    held_by_payment: true,
+    reply: { email_id: REPLY.one, received_at: REPLY_AT, rung: "thread" },
+  });
+});
+
+function withReplies(flag: boolean | null): Record<string, Row[]> {
+  const tables = fixture();
+  tables.feature_flags = flag === null
+    ? []
+    : [{ flag_name: "dispatch_v2_replies_v1", enabled: flag }];
+  tables.dispatch_v2_supplier_emails = [
+    reply(REPLY.one),
+    // Not matched yet: never moves a box.
+    reply(REPLY.two, { state: "needs_confirmation", order_id: EMAIL.stratco }),
+  ];
+  return tables;
+}
+
+Deno.test("reply: dispatch_arrival moves a box on a matched reply while the replies switch is on", async () => {
+  const { client } = makeClient(withReplies(true));
+  const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+  assertEquals(read.replies_read, "ok");
+  const lysaght = orderFor(read.arrival, SUP.lysaght);
+  assertEquals(lysaght.material_stage, "awaiting_payment");
+  assertEquals(lysaght.material_stage_source, "reply");
+  assertEquals(lysaght.material_stage_reply, {
+    email_id: REPLY.one,
+    received_at: REPLY_AT,
+    rung: "thread",
+  });
+  assertEquals(lysaght.todo, "Pay Lysaght");
+  // Stratco's reply is not matched: still Sent.
+  const stratco = orderFor(read.arrival, SUP.stratco);
+  assertEquals([stratco.material_stage, stratco.material_stage_reply], ["sent", null]);
+});
+
+Deno.test("reply: switch off, no switch row, or a failed read: nothing moves", async () => {
+  for (const flag of [false, null]) {
+    const { client } = makeClient(withReplies(flag));
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    assertEquals(read.replies_read, "ok");
+    assertEquals(orderFor(read.arrival, SUP.lysaght).material_stage, "sent");
+  }
+  for (const table of ["feature_flags", "dispatch_v2_supplier_emails"]) {
+    const { client } = makeClient(withReplies(true), { fail: [table] });
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    assertEquals(read.replies_read, "failed", table);
+    assertEquals(read.arrival_read, "ok");
+    assertEquals(orderFor(read.arrival, SUP.lysaght).material_stage, "sent");
+  }
+});
+
+Deno.test("reply: Mark paid on a box a reply moved confirms the order", async () => {
+  const tables = withReplies(true);
+  const { client } = makeClient(tables);
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+  });
+  assertEquals(answer.box.material_stage, "order_confirmed");
+  assertEquals(tables.job_events[0].detail_json.stage_before, "awaiting_payment");
+  assertEquals(
+    orderFor(answer.arrival.arrival, SUP.lysaght).material_stage_source,
+    "payment",
+  );
 });

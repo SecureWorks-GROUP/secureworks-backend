@@ -53,6 +53,7 @@ import {
 import {
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
+  type DispatchMaterialStageReply,
   type DispatchMaterialStageShown,
   dispatchMaterialTodo,
   type DispatchMaterialWaitingOn,
@@ -622,6 +623,13 @@ export const DISPATCH_BOARD_SENT_EMAIL_SELECT =
 export const DISPATCH_ACCOUNT_LINK_SELECT = "supplier_id, approved_id";
 export const DISPATCH_ACCOUNT_ENTRY_SELECT = "id, name, active, on_account";
 
+// Matched supplier replies (dispatch_v2_supplier_emails, migration
+// 20261023230000_dispatch_v2_replies_tables.sql): the reply step of the
+// material stage (contract section 3c).
+export const DISPATCH_BOARD_REPLY_SELECT =
+  "id, job_id, state, order_id, received_at, matched_at, rung";
+const DISPATCH_V2_REPLIES_SWITCH = "dispatch_v2_replies_v1";
+
 export type DispatchBoardSentEmail = {
   id?: string | null;
   job_id?: string | null;
@@ -750,6 +758,9 @@ export type DispatchArrivalOrder = {
   // A confirmed date is saved but the payment gate holds the stage at
   // Awaiting payment. Always false for a purchase order.
   held_by_payment: boolean;
+  // The matched supplier reply that moved the box (source "reply"); null
+  // otherwise, and for a purchase order.
+  material_stage_reply: DispatchMaterialStageReply | null;
 };
 
 export type DispatchArrival = {
@@ -875,6 +886,8 @@ export function dispatchArrival(
     installDay: string | null;
     today: string;
     accounts?: DispatchV2Accounts | null;
+    // The job's matched supplier replies; left out or null = no reply moves.
+    replies?: any[] | null;
   },
 ): DispatchArrival {
   const installDay = input.installDay;
@@ -901,6 +914,7 @@ export function dispatchArrival(
       lines: input.lines,
       terms: dispatchV2TermsFor(input.accounts, supplierId),
       installDay,
+      replies: input.replies,
     });
     const sent = view.newest_sent;
     const boxDate = view.box_date;
@@ -954,6 +968,7 @@ export function dispatchArrival(
       ),
       payment: view.payment,
       held_by_payment: view.held_by_payment,
+      material_stage_reply: view.reply,
     }, installDay, view));
   }
 
@@ -986,6 +1001,7 @@ export function dispatchArrival(
       extra: !!installDay && (perthDayOf(order.created_at) ?? "") >= installDay,
       payment: null,
       held_by_payment: false,
+      material_stage_reply: null,
     }, installDay));
   }
 
@@ -1095,6 +1111,8 @@ export type DispatchBoardContext = {
   // The account list (dispatch_v2_payment.ts); null or left out = not read,
   // every box's terms are "unknown".
   accounts?: DispatchV2Accounts | null;
+  // Matched supplier replies by job id; null or left out = no reply moves.
+  repliesByJob?: Map<string, any[]> | null;
 };
 
 // The board fields of one job for the view asked for, or null when the job is
@@ -1136,6 +1154,7 @@ export function dispatchBoardRow(
       installDay: install?.day ?? null,
       today: ctx.today,
       accounts: ctx.accounts ?? null,
+      replies: ctx.repliesByJob?.get(id) || [],
     })
     : null;
 
@@ -1196,6 +1215,8 @@ export type DispatchBoardReads = {
   // The account list (on account or pay first). Failed = every box's terms
   // are "unknown": no payment gate, no reply move (contract section 3c).
   accounts: "ok" | "failed";
+  // The matched supplier replies. Failed = no reply moves.
+  replies: "ok" | "failed";
 };
 
 function byNumber(a: any, b: any): number {
@@ -1289,7 +1310,7 @@ export function dispatchBoardSummary(
 
 // ── Reads ───────────────────────────────────────────────────────────────────
 
-type ReadResult<T> = { data: T[]; error: unknown | null };
+export type ReadResult<T> = { data: T[]; error: unknown | null };
 
 async function safeRead<T>(read: () => Promise<T[]>): Promise<ReadResult<T>> {
   try {
@@ -1364,6 +1385,8 @@ export type DispatchBoardExtras = {
   // read (terms unknown).
   accountLinks?: ReadResult<any>;
   accountEntries?: ReadResult<any>;
+  // The matched supplier replies. Left out = not read (no reply moves).
+  replies?: ReadResult<any>;
 };
 
 // The reads only the v2 board makes, for the jobs the list read returned:
@@ -1380,6 +1403,11 @@ export async function loadDispatchBoardExtras(
   const [accountLinks, accountEntries] = loadDispatchAccountList(
     client,
     orgId,
+    "pipeline.dispatch_board",
+  );
+  const replies = loadDispatchV2MatchedReplies(
+    client,
+    ids,
     "pipeline.dispatch_board",
   );
   const [events, boxes, orders, sent, lines] = await Promise.all([
@@ -1465,7 +1493,46 @@ export async function loadDispatchBoardExtras(
     lines,
     accountLinks: await accountLinks,
     accountEntries: await accountEntries,
+    replies: await replies,
   };
+}
+
+/** The matched supplier replies on these jobs, for the reply step. Read only
+ * while the replies switch (feature_flags dispatch_v2_replies_v1) is on: off
+ * means no reply is read and nothing moves by itself (an empty answer, not a
+ * failure). Fails on its own and never rejects; logged here. */
+export async function loadDispatchV2MatchedReplies(
+  client: any,
+  jobIds: string[],
+  label: string,
+): Promise<ReadResult<any>> {
+  const ids = [...new Set(jobIds.map((id) => String(id)).filter(Boolean))];
+  const result = await safeRead<any>(async () => {
+    if (!ids.length) return [];
+    const { data: flag, error } = await client.from("feature_flags")
+      .select("enabled")
+      .eq("flag_name", DISPATCH_V2_REPLIES_SWITCH)
+      .maybeSingle();
+    if (error) throw error;
+    if (flag?.enabled !== true) return [];
+    return await fetchAllRowsInChunks<any>(
+      ids,
+      (chunk) =>
+        client.from("dispatch_v2_supplier_emails")
+          .select(DISPATCH_BOARD_REPLY_SELECT)
+          .in("job_id", chunk)
+          .eq("state", "matched"),
+      `${label}_replies`,
+      "id",
+    );
+  });
+  if (result.error) {
+    console.error(
+      `[dispatch] ${label} dispatch_v2_supplier_emails read failed:`,
+      (result.error as Error)?.message ?? result.error,
+    );
+  }
+  return result;
 }
 
 // The account list's two reads (links and entries), started together; each
@@ -1567,6 +1634,9 @@ export function applyDispatchBoard(
     sentByJob: arrivalOk ? groupByJob(extras.sent.data) : null,
     linesByJob: arrivalOk ? groupByJob(extras.lines?.data || []) : null,
     accounts,
+    repliesByJob: extras.replies && !extras.replies.error
+      ? groupByJob(extras.replies.data)
+      : null,
   };
   const kept: any[] = [];
   for (const row of rows) {
@@ -1585,6 +1655,7 @@ export function applyDispatchBoard(
       deposits: input.invoicesReadOk ? "ok" : "failed",
       arrival: arrivalOk ? "ok" : "failed",
       accounts: accounts?.readOk ? "ok" : "failed",
+      replies: extras.replies && !extras.replies.error ? "ok" : "failed",
     },
   );
   return { rows: kept, summary };
@@ -1602,6 +1673,7 @@ export function emptyDispatchBoardSummary(
     deposits: "ok",
     arrival: "ok",
     accounts: "ok",
+    replies: "ok",
   });
 }
 
@@ -1663,6 +1735,11 @@ export async function dispatchArrivalRead(
   const [accountLinks, accountEntries] = loadDispatchAccountList(
     client,
     orgId,
+    "dispatch_arrival",
+  );
+  const repliesRead = loadDispatchV2MatchedReplies(
+    client,
+    [jobId],
     "dispatch_arrival",
   );
   const [bookings, boxes, orders, sent, lines] = await Promise.all([
@@ -1727,6 +1804,7 @@ export async function dispatchArrivalRead(
     !lines.error;
   const stage = dispatchBoardStage(job);
   const accounts = accountsFrom(await accountLinks, await accountEntries);
+  const replies = await repliesRead;
   const arrival = arrivalOk
     ? dispatchArrival({
       boxes: boxes.data,
@@ -1736,6 +1814,7 @@ export async function dispatchArrivalRead(
       installDay: install?.day ?? null,
       today,
       accounts,
+      replies: replies.error ? [] : replies.data,
     })
     : null;
   return {
@@ -1750,6 +1829,8 @@ export async function dispatchArrivalRead(
     // The account list (on account or pay first): failed = every box's
     // payment terms are "unknown" (contract section 3c).
     accounts_read: accounts?.readOk ? "ok" : "failed",
+    // The matched supplier replies: failed = no reply moves.
+    replies_read: replies.error ? "failed" : "ok",
     // What the job is waiting on us for (null when it is not on the board).
     waiting: stage ? dispatchBoardWaiting(stage, arrival) : null,
   };

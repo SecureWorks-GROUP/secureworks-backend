@@ -75,6 +75,7 @@ import {
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 import { dispatchV2BoxStage } from "./dispatch_v2_material_stage.ts";
 import { dispatchV2PaymentTerms } from "./dispatch_v2_payment.ts";
+import { loadDispatchV2MatchedReplies } from "./dispatch_board.ts";
 
 // ── The send seam ───────────────────────────────────────────────────────────
 
@@ -588,13 +589,18 @@ export async function readDispatchV2Materials(
     params.get("job_id") ?? params.get("jobId"),
     ctx,
   );
-  const [boxes, lines, photos, emails, scopeFill] = await Promise.all([
-    readBoxes(client, job.id),
-    readJobLines(client, job.id),
-    readPhotos(client, job.id),
-    readJobEmails(client, job.id),
-    readScopeFill(client, job.id),
-  ]);
+  const [boxes, lines, photos, emails, scopeFill, replies] = await Promise
+    .all([
+      readBoxes(client, job.id),
+      readJobLines(client, job.id),
+      readPhotos(client, job.id),
+      readJobEmails(client, job.id),
+      readScopeFill(client, job.id),
+      // The matched supplier replies (the reply step, the board's read too).
+      // A failed read never refuses the panel: no reply moves, as on the
+      // board.
+      loadDispatchV2MatchedReplies(client, [job.id], "dispatch_v2_materials"),
+    ]);
   const supplierIds = boxes.map((b) => String(b.supplier_id));
   const [contacts, approved, testDone] = await Promise.all([
     readContacts(client, supplierIds, ctx),
@@ -613,6 +619,8 @@ export async function readDispatchV2Materials(
     test_send_done: testDone,
     main_supplier_id: mainId,
     main_supplier_ticked: boxes.some((b) => b.is_main_supplier === true),
+    // The matched supplier replies read: failed = no reply moves.
+    replies_read: replies.error ? "failed" : "ok",
     can_suggest: dispatchV2CanSuggest(job.work_type, lines.length),
     // The screen fills a fencing job from the scope on its own when it opens
     // and this is true: no lines and never filled before.
@@ -646,6 +654,7 @@ export async function readDispatchV2Materials(
           linked: !!entry,
           onAccount: entry ? entry.on_account === true : null,
         }),
+        replies: replies.error ? [] : replies.data,
       });
       return {
         supplier_id: id,
@@ -712,6 +721,8 @@ function boxMaterialStage(
     set_by_email: view.set_by_email,
     // A confirmed date is saved but the payment gate holds the stage.
     held_by_payment: view.held_by_payment,
+    // The matched supplier reply that moved the box (source "reply").
+    reply: view.reply,
   };
 }
 
