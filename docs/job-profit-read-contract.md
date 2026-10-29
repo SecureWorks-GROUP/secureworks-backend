@@ -18,8 +18,10 @@ Its legacy keys keep their names: `invoiced` is `invoiced_ex`, `bills` is
 `profit_ex` / `margin_pct` (null unless `margin_ok`, with `margin_status` and
 `margin_reason`), `quote_value` is `quoted_ex`. Its summary average covers
 margin-known customer jobs only and excludes holding jobs. Its added detail
-fields (expected, committed, engine codes, holding job money) are returned only
-to staff and server callers (`summary.detail` says `full` or `basic`).
+fields (expected, committed, collected, holding job money) are returned only
+to staff and server callers (`summary.detail` says `full` or `basic`); every
+caller gets `margin_status`, `margin_reason` and `margin_reason_codes`, which
+carry no money.
 
 ## Actions
 

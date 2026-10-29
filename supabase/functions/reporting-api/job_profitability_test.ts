@@ -566,7 +566,7 @@ Deno.test("limit: clamped to 1..5000, default 50", () => {
   assertEquals(jobProfitabilityLimit(null), 50);
   assertEquals(jobProfitabilityLimit(""), 50);
   assertEquals(jobProfitabilityLimit("abc"), 50);
-  assertEquals(jobProfitabilityLimit("0"), 1);
+  assertEquals(jobProfitabilityLimit("0"), 50);
   assertEquals(jobProfitabilityLimit("-20"), 1);
   assertEquals(jobProfitabilityLimit("120"), 120);
   assertEquals(jobProfitabilityLimit("999999"), 5000);

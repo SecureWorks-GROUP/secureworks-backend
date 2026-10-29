@@ -26,12 +26,14 @@
 //     any customer job's margin is unknown.
 //
 // Access: the action is not gated (AGENTS.md: only job_context and
-// job_intelligence are). The fields added by CFO-01 that carry extra money or
-// engine codes go only to staff (admin / owner / ops_manager) and server
-// callers (detail 'full', reporting_staff_gate.ts
+// job_intelligence are). The fields added by CFO-01 that carry extra money
+// (expected, committed, collected, holding job money) go only to staff (admin /
+// owner / ops_manager) and server callers (detail 'full', reporting_staff_gate.ts
 // reportingApiCallerSeesStaffDetail). Everyone else (the public SW_API_KEY, a
 // trade JWT) gets detail 'basic': the earlier key set, with the Unknown-not-zero
-// rule applied and the reason in words. The earlier keys (invoiced, bills,
+// rule applied. Every caller gets margin_status, margin_reason and
+// margin_reason_codes: they carry no money and say why a margin is Unknown.
+// The earlier keys (invoiced, bills,
 // margin, margin_pct, quote_value) were already readable by any signed-in user.
 //
 // Job selection (org, legacy, type, status, created from/to, limit, newest
@@ -415,10 +417,10 @@ export function buildJobProfitability(
   };
 }
 
-/** `limit`: whole number 1..5000, default 50. */
+/** `limit`: whole number 1..5000, default 50 (0 and non-numbers too, as before). */
 export function jobProfitabilityLimit(raw: string | null): number {
   const n = parseInt(raw ?? "", 10);
-  if (!Number.isFinite(n)) return 50;
+  if (!Number.isFinite(n) || n === 0) return 50;
   return Math.min(Math.max(n, 1), 5000);
 }
 
@@ -433,8 +435,9 @@ async function readProfitChunks(
   }
   const results: Record<string, unknown>[][] = new Array(chunks.length);
   let next = 0;
+  let failed = false;
   const worker = async () => {
-    while (next < chunks.length) {
+    while (!failed && next < chunks.length) {
       const at = next++;
       const { data, error } = await sb
         .from("v_job_profit")
@@ -442,6 +445,7 @@ async function readProfitChunks(
         .eq("org_id", orgId)
         .in("job_id", chunks[at]);
       if (error) {
+        failed = true;
         throw new Error(
           `job_profitability: v_job_profit read failed: ${
             error.message ?? String(error)
