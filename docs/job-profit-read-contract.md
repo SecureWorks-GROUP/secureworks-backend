@@ -11,6 +11,14 @@ Access: a server key or an admin/owner session. Everyone else gets 403.
 
 All money is ex GST. Profit is gross profit on direct costs, no overhead.
 
+`reporting-api?action=job_profitability` (Jarvis and the older Job P&L tab)
+reads the same `v_job_profit` rows (`reporting-api/job_profitability.ts`).
+Its legacy keys keep their names: `invoiced` is `invoiced_ex`, `bills` is
+`actual_cost_ex` (null when nothing is placed), `margin` / `margin_pct` are
+`profit_ex` / `margin_pct` (null unless `margin_ok`, with `margin_status` and
+`margin_reason`), `quote_value` is `quoted_ex`. Its summary average covers
+margin-known customer jobs only and excludes holding jobs.
+
 ## Actions
 
 | Action | Returns |

@@ -677,6 +677,25 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cos
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
 
+# reporting-api job_profitability (CFO-01 / R-22) reads its money from the same
+# engine: margin_ok gates margin, completeness / cost_flag word the Unknown reason,
+# holding_job keeps a bucket card out of the summary.
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|table|v_job_profit
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.margin_ok
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.completeness
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.cost_flag
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.revenue_flag
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.holding_job
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.profit_ex
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.margin_pct
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.actual_cost_ex
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.actual_cost_events
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.expected_cost_ex
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.committed_open_ex
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.ordered_not_billed_count
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.invoice_emailed_count
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|column|v_job_profit.invoice_emailed_ex
+
 # The deterministic intake stamps each case with its adapter id; the Ambrose
 # adapter is refused on every case insert until this migration admits it. The
 # constraint name is unchanged, so the ledger version is what proves it landed.
