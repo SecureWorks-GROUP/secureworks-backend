@@ -16,25 +16,52 @@ import {
   LEAD_INSTALLER_READ_ACTIONS,
 } from "./index.ts";
 
+const ORG = "00000000-0000-0000-0000-000000000001";
+
 function url(query = ""): URL {
   return new URL(`https://example.invalid/ops-api?action=xero_tieout${query}`);
 }
 
 Deno.test("Xero tie-out: parameters default to today and 12 months", () => {
-  assertEquals(tieoutParams(null, null), { p_as_of: null, p_months: 12 });
-  assertEquals(tieoutParams("", " "), { p_as_of: null, p_months: 12 });
-  assertEquals(tieoutParams("2026-10-29", "6"), {
+  assertEquals(tieoutParams(null, null, ORG), {
+    p_as_of: null,
+    p_months: 12,
+    p_org_id: ORG,
+  });
+  assertEquals(tieoutParams("", " ", ORG), {
+    p_as_of: null,
+    p_months: 12,
+    p_org_id: ORG,
+  });
+  assertEquals(tieoutParams("2026-10-29", "6", ORG), {
     p_as_of: "2026-10-29",
     p_months: 6,
+    p_org_id: ORG,
   });
 });
 
 Deno.test("Xero tie-out: a bad date or month count is refused, not guessed", () => {
   for (const d of ["2026-13-01", "2026-02-30", "29/10/2026", "yesterday"]) {
-    assertThrows(() => tieoutParams(d, null), XeroTieoutError, "as_of", d);
+    assertThrows(() => tieoutParams(d, null, ORG), XeroTieoutError, "as_of", d);
   }
   for (const m of ["0", "121", "2.5", "six"]) {
-    assertThrows(() => tieoutParams(null, m), XeroTieoutError, "months", m);
+    assertThrows(
+      () => tieoutParams(null, m, ORG),
+      XeroTieoutError,
+      "months",
+      m,
+    );
+  }
+});
+
+Deno.test("Xero tie-out: no org is a 403, never every org's bills", () => {
+  for (const o of [null, undefined, "", "not-a-uuid"]) {
+    const err = assertThrows(
+      () => tieoutParams(null, null, o),
+      XeroTieoutError,
+      "organisation",
+    );
+    assertEquals(err.status, 403);
   }
 });
 
@@ -48,12 +75,17 @@ Deno.test("Xero tie-out: passes the parameters and returns the read whole", asyn
     },
   };
   assertEquals(
-    await readXeroTieout(client, { asOf: "2026-10-29", months: "6" }),
+    await readXeroTieout(client, {
+      asOf: "2026-10-29",
+      months: "6",
+      orgId: ORG,
+    }),
     { ok: true, tieout: body },
   );
   assertEquals(calls, [["xero_tieout_monthly", {
     p_as_of: "2026-10-29",
     p_months: 6,
+    p_org_id: ORG,
   }]]);
 });
 
@@ -69,7 +101,7 @@ Deno.test("Xero tie-out: an unreadable answer is a 503, never an empty page", as
     ]
   ) {
     const err = await assertRejects(
-      () => readXeroTieout({ rpc: () => Promise.resolve(res) }, {}),
+      () => readXeroTieout({ rpc: () => Promise.resolve(res) }, { orgId: ORG }),
       XeroTieoutError,
     );
     assertEquals(err.status, 503);

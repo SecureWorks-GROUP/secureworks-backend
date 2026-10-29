@@ -9359,6 +9359,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await readXeroTieout(client, {
             asOf: url.searchParams.get('as_of'),
             months: url.searchParams.get('months'),
+            // Never substitute the server org for a JWT caller with a missing profile org.
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
           }))
         } catch (err) {
           if (err instanceof XeroTieoutError) throw new ApiError(err.message, err.status)

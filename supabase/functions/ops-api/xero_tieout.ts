@@ -6,11 +6,18 @@
 //                     &months=N (1..120, default 12)
 //
 // By month, every AUTHORISED or PAID supplier bill dollar (ex GST) in our copy
-// of Xero, sorted into on a job, a named non-job bucket (overhead / not job
-// related, trade-app mirror) or unplaced, with the unplaced share and the last
-// 6 months. The SQL function xero_tieout_monthly does all the sorting; this
-// door only passes the two parameters and refuses to show an unreadable answer
-// as an empty one.
+// of Xero, sorted into on a job, trade-app labour (already counted on jobs by
+// the trade app), overhead / not job related, or unplaced, with the unplaced
+// share and the last 6 months. The SQL function xero_tieout_monthly does all
+// the sorting; this door only passes the parameters and the caller's org, and
+// refuses to show an unreadable answer as an empty one.
+//
+// Org: always the caller's. A staff session reads its profile's org (never
+// the server org substituted for a missing one); the server key reads the
+// server org, as the other staff reads here do.
+//
+// as_of picks the months shown and nothing else: allocation rows and Bills to
+// place states are read as they are today.
 //
 // Supplier credit notes (TP-07) and spend money (TP-08) come back as
 // not_yet_read with null amounts, never $0. Staff only: the action is not in
@@ -27,10 +34,21 @@ export class XeroTieoutError extends Error {
   }
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function tieoutParams(
   asOf: string | null | undefined,
   months: string | null | undefined,
-): { p_as_of: string | null; p_months: number } {
+  orgId: string | null | undefined,
+): { p_as_of: string | null; p_months: number; p_org_id: string } {
+  const org = String(orgId ?? "").trim();
+  if (!UUID_RE.test(org)) {
+    throw new XeroTieoutError(
+      "Your profile has no organisation, so the tie-out cannot be read",
+      403,
+    );
+  }
   let pAsOf: string | null = null;
   if (asOf != null && String(asOf).trim() !== "") {
     const v = String(asOf).trim();
@@ -48,14 +66,14 @@ export function tieoutParams(
     }
     pMonths = n;
   }
-  return { p_as_of: pAsOf, p_months: pMonths };
+  return { p_as_of: pAsOf, p_months: pMonths, p_org_id: org };
 }
 
 export async function readXeroTieout(
   client: any,
-  opts: { asOf?: string | null; months?: string | null },
+  opts: { asOf?: string | null; months?: string | null; orgId: string | null },
 ): Promise<Record<string, unknown>> {
-  const params = tieoutParams(opts.asOf, opts.months);
+  const params = tieoutParams(opts.asOf, opts.months, opts.orgId);
   const { data, error } = await client.rpc("xero_tieout_monthly", params);
   // An unreadable tie-out is never shown as "nothing unplaced".
   if (

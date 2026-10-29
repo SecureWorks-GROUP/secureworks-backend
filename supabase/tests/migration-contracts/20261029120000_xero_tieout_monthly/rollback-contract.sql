@@ -3,7 +3,7 @@
 \set ON_ERROR_STOP on
 DO $$
 BEGIN
-  IF to_regprocedure('public.xero_tieout_monthly(date,integer)') IS NOT NULL THEN
+  IF to_regprocedure('public.xero_tieout_monthly(date,integer,uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback: xero_tieout_monthly remains';
   END IF;
   PERFORM 1 FROM public.xero_invoices LIMIT 1;

@@ -18,7 +18,7 @@ BEGIN
       RAISE EXCEPTION 'xero tie-out setup: % missing from the registered stack', t;
     END IF;
   END LOOP;
-  IF to_regprocedure('public.xero_tieout_monthly(date,integer)') IS NOT NULL THEN
+  IF to_regprocedure('public.xero_tieout_monthly(date,integer,uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'xero tie-out setup: the tie-out exists before the migration';
   END IF;
 END $$;
