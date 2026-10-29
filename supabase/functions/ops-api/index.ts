@@ -152,7 +152,7 @@ import {
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
-import { quoteScopeRevisionIdForSend } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
+import { quoteScopeRevisionIdForSend, type SentQuoteSourceHashes } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -3604,6 +3604,12 @@ type QuickQuoteRecordReleaseInput = {
   // mode='warn' and column values land in the same INSERT as V1 columns.
   // V1 release-truth path proceeds unconditionally if V2 build fails.
   v2_inputs?: Omit<V2AugmentationInput, 'release_id'> | null
+
+  // JP-24 slice 1: the provenance of the sent document, the hashes of the
+  // exact scope_json / pricing_json it was built from (sentQuoteSourceHashes),
+  // captured by its producer before any await of the send. No caller has it
+  // today (the PDF records no source hashes), so the link stores null.
+  sent_source_hashes?: SentQuoteSourceHashes | null
 }
 
 async function recordReleasedQuoteRevision(
@@ -3734,11 +3740,14 @@ async function recordReleasedQuoteRevision(
       }
     }
 
-    // JP-24 slice 1: the frozen scope revision this send came from, only when
-    // both the job's current scope and pricing hashes equal that one frozen
-    // row's. Null (unknown) on any mismatch, ambiguity or failed read; the
+    // JP-24 slice 1: the frozen scope revision this send came from, bound only
+    // to the sent document's own provenance (never a re-read of the job, which
+    // may have been saved and refrozen since the quote was built). Null
+    // (unknown) without it, or on any mismatch, ambiguity or failed read; the
     // lookup never throws and never changes the send.
-    const scopeRevisionId = await quoteScopeRevisionIdForSend(sb, input.job_id, { handler: ctx.handler })
+    const scopeRevisionId = await quoteScopeRevisionIdForSend(
+      sb, input.job_id, input.sent_source_hashes ?? null, { handler: ctx.handler },
+    )
 
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({

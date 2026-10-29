@@ -11,6 +11,7 @@ import { freezeScope } from './scope_freeze.ts'
 import {
   quoteScopeRevisionIdForSend,
   resolveQuoteScopeRevisionLink,
+  sentQuoteSourceHashes,
 } from './quote_scope_revision_link.ts'
 
 type Row = Record<string, unknown>
@@ -19,7 +20,9 @@ type Read = { table: string; cols: string | null; filters: Array<[string, unknow
 
 const JOB = 'a1b2c3d4-0000-4000-8000-000000000001'
 
-// A fence scope with line ids (INT-23 / D21) and a patio-style revision block.
+// A SYNTHETIC fence scope with line ids. Real fence scopes carry no
+// lines[].id until Sales' INT-23 half lands; the ids here prove what
+// freeze_scope keeps once they exist (D21), plus a patio-style revision block.
 const SCOPE = {
   tool: 'fence',
   lines: [
@@ -113,104 +116,100 @@ function jobRow(scope: unknown = SCOPE, pricing: unknown = PRICING): Row {
   return { id: JOB, scope_json: structuredClone(scope), pricing_json: structuredClone(pricing) }
 }
 
-Deno.test('JP24-L1 both hashes match the one frozen row: its id is the link', async () => {
+const sent = (scope: unknown = SCOPE, pricing: unknown = PRICING) => sentQuoteSourceHashes(scope, pricing)
+
+Deno.test('JP24-L1 the sent document\'s hashes match the one frozen row: its id is the link', async () => {
   const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-  assertEquals(await resolveQuoteScopeRevisionLink(c, JOB), { scope_revision_id: 'rev-frozen', reason: 'matched' })
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), 'rev-frozen')
+  assertEquals(await resolveQuoteScopeRevisionLink(c, JOB, await sent()), { scope_revision_id: 'rev-frozen', reason: 'matched' })
+  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, await sent(), { handler: 'test' }), 'rev-frozen')
 })
 
-Deno.test('JP24-L2 key order inside the stored blobs does not matter (same canonical form freeze_scope hashes)', async () => {
+Deno.test('JP24-L2 key order inside the blobs does not matter (same canonical form freeze_scope hashes)', async () => {
   const reordered = { job: SCOPE.job, revision: SCOPE.revision, lines: SCOPE.lines, tool: SCOPE.tool }
-  const c = makeClient({ jobs: [jobRow(reordered)], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), 'rev-frozen')
+  const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, await sent(reordered), { handler: 'test' }), 'rev-frozen')
 })
 
-Deno.test('JP24-L3 a scope saved after the freeze: null, scope_hash_mismatch', async () => {
-  const edited = { ...SCOPE, lines: [...SCOPE.lines, { id: 'line-lhs-3', label: 'LHS', metres: 4, height: 1.8 }] }
-  const c = makeClient({ jobs: [jobRow(edited)], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-  const link = await resolveQuoteScopeRevisionLink(c, JOB)
-  assertEquals(link, { scope_revision_id: null, reason: 'scope_hash_mismatch', read_revision_id: 'rev-frozen' })
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), null)
+Deno.test('JP24-L3 no provenance on the sent document: null, and nothing is read', async () => {
+  const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+  assertEquals(await resolveQuoteScopeRevisionLink(c, JOB, null), { scope_revision_id: null, reason: 'sent_document_provenance_unavailable' })
+  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, undefined, { handler: 'test' }), null)
+  assertEquals(c.reads.length, 0)
 })
 
-Deno.test('JP24-L4 pricing changed after the freeze: null, pricing_hash_mismatch (no price search)', async () => {
-  const c = makeClient({ jobs: [jobRow(SCOPE, { ...PRICING, totalIncGST: 5501 })], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB)).reason, 'pricing_hash_mismatch')
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), null)
+Deno.test('JP24-L4 the job matching the frozen row proves nothing: a quote built from A against job and freeze at B is null', async () => {
+  const B = { ...SCOPE, lines: [...SCOPE.lines, { id: 'line-lhs-3', label: 'LHS', metres: 4, height: 1.8 }] }
+  const c = makeClient({ jobs: [jobRow(B)], scope_revisions: [await frozenRow('rev-B', B, PRICING)] })
+  assertEquals(await resolveQuoteScopeRevisionLink(c, JOB, await sent()), { scope_revision_id: null, reason: 'scope_hash_mismatch', read_revision_id: 'rev-B' })
+  assert(!c.reads.some((r) => r.table === 'jobs'), 'jobs is never read')
 })
 
-Deno.test('JP24-L5 both changed: null, scope_and_pricing_hash_mismatch', async () => {
-  const c = makeClient({ jobs: [jobRow({ ...SCOPE, tool: 'x' }, { ...PRICING, gst: 1 })], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB)).reason, 'scope_and_pricing_hash_mismatch')
+Deno.test('JP24-L5 pricing mismatch, and both: null (no price search)', async () => {
+  const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB, await sent(SCOPE, { ...PRICING, totalIncGST: 5501 }))).reason, 'pricing_hash_mismatch')
+  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB, await sent({ ...SCOPE, tool: 'x' }, { ...PRICING, gst: 1 }))).reason, 'scope_and_pricing_hash_mismatch')
 })
 
 Deno.test('JP24-L6 no frozen row (drafts and superseded rows never count): null', async () => {
   const c = makeClient({
-    jobs: [jobRow()],
+    jobs: [],
     scope_revisions: [
       await frozenRow('rev-draft', SCOPE, PRICING, { status: 'draft', revision_number: 2 }),
       await frozenRow('rev-old', SCOPE, PRICING, { status: 'superseded' }),
     ],
   })
-  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB)).reason, 'no_frozen_revision')
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), null)
+  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB, await sent())).reason, 'no_frozen_revision')
 })
 
 Deno.test('JP24-L7 several frozen rows: null even when one of them matches', async () => {
   const c = makeClient({
-    jobs: [jobRow()],
+    jobs: [],
     scope_revisions: [
       await frozenRow('rev-a', SCOPE, PRICING, { revision_number: 1 }),
       await frozenRow('rev-b', SCOPE, PRICING, { revision_number: 2 }),
     ],
   })
-  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB)).reason, 'several_frozen_revisions')
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), null)
+  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB, await sent())).reason, 'several_frozen_revisions')
 })
 
 Deno.test('JP24-L8 another job\'s frozen row is never read as this job\'s', async () => {
-  const other = await frozenRow('rev-other', SCOPE, PRICING, { job_id: 'other-job' })
-  const c = makeClient({ jobs: [jobRow()], scope_revisions: [other] })
-  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB)).reason, 'no_frozen_revision')
+  const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-other', SCOPE, PRICING, { job_id: 'other-job' })] })
+  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB, await sent())).reason, 'no_frozen_revision')
 })
 
-Deno.test('JP24-L9 a failed jobs read or scope_revisions read: null, never a throw', async () => {
+Deno.test('JP24-L9 a failed or thrown scope_revisions read: null, never a throw', async () => {
   const rev = await frozenRow('rev-frozen', SCOPE, PRICING)
-  const jobsErr = makeClient({ jobs: [jobRow()], scope_revisions: [rev] }, { jobsError: true })
-  assertEquals((await resolveQuoteScopeRevisionLink(jobsErr, JOB)).reason, 'job_read_failed')
-  const revErr = makeClient({ jobs: [jobRow()], scope_revisions: [rev] }, { revisionsError: true })
-  assertEquals((await resolveQuoteScopeRevisionLink(revErr, JOB)).reason, 'revision_read_failed')
-  assertEquals(await quoteScopeRevisionIdForSend(revErr, JOB, { handler: 'test' }), null)
-  const throws = makeClient({ jobs: [jobRow()], scope_revisions: [rev] }, { throwOn: 'scope_revisions' })
-  assertEquals((await resolveQuoteScopeRevisionLink(throws, JOB)).reason, 'lookup_threw')
-  assertEquals(await quoteScopeRevisionIdForSend(throws, JOB, { handler: 'test' }), null)
+  const revErr = makeClient({ jobs: [], scope_revisions: [rev] }, { revisionsError: true })
+  assertEquals((await resolveQuoteScopeRevisionLink(revErr, JOB, await sent())).reason, 'revision_read_failed')
+  const throws = makeClient({ jobs: [], scope_revisions: [rev] }, { throwOn: 'scope_revisions' })
+  assertEquals((await resolveQuoteScopeRevisionLink(throws, JOB, await sent())).reason, 'lookup_threw')
+  assertEquals(await quoteScopeRevisionIdForSend(throws, JOB, await sent(), { handler: 'test' }), null)
 })
 
-Deno.test('JP24-L10 a missing job, a non-object or empty blob: null', async () => {
-  const rev = await frozenRow('rev-frozen', SCOPE, PRICING)
-  assertEquals((await resolveQuoteScopeRevisionLink(makeClient({ jobs: [], scope_revisions: [rev] }), JOB)).reason, 'job_not_found')
-  assertEquals((await resolveQuoteScopeRevisionLink(makeClient({ jobs: [{ id: JOB, scope_json: JSON.stringify(SCOPE), pricing_json: PRICING }], scope_revisions: [rev] }), JOB)).reason, 'job_scope_not_object')
-  assertEquals((await resolveQuoteScopeRevisionLink(makeClient({ jobs: [{ id: JOB, scope_json: SCOPE, pricing_json: {} }], scope_revisions: [rev] }), JOB)).reason, 'job_pricing_not_object')
+Deno.test('JP24-L10 provenance: blobs freeze_scope would refuse give none; malformed hashes are refused', async () => {
+  assertEquals(await sentQuoteSourceHashes(JSON.stringify(SCOPE), PRICING), null)
+  assertEquals(await sentQuoteSourceHashes(SCOPE, {}), null)
+  const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+  assertEquals((await resolveQuoteScopeRevisionLink(c, JOB, { scope_hash: 'x', pricing_hash: 'y' })).reason, 'sent_document_provenance_malformed')
+  assertEquals(c.reads.length, 0)
 })
 
 Deno.test('JP24-L11 a malformed frozen row (bad hash shape): null', async () => {
-  const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-bad', SCOPE, PRICING, { scope_hash: 'nothex' })] })
-  assertEquals(await resolveQuoteScopeRevisionLink(c, JOB), { scope_revision_id: null, reason: 'revision_row_malformed', read_revision_id: 'rev-bad' })
+  const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-bad', SCOPE, PRICING, { scope_hash: 'nothex' })] })
+  assertEquals(await resolveQuoteScopeRevisionLink(c, JOB, await sent()), { scope_revision_id: null, reason: 'revision_row_malformed', read_revision_id: 'rev-bad' })
 })
 
 Deno.test('JP24-L12 a read that never answers is cut off at the bound: null, the send is not held', async () => {
-  const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] }, { hangOn: 'jobs' })
+  const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] }, { hangOn: 'scope_revisions' })
   const started = Date.now()
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }, { timeoutMs: 30 }), null)
+  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, await sent(), { handler: 'test' }, { timeoutMs: 30 }), null)
   assert(Date.now() - started < 2000, 'the bound cut the lookup off')
 })
 
-Deno.test('JP24-L13 reads only what the rule needs: one job by id, frozen rows of that job, at most two, ids and hashes only', async () => {
+Deno.test('JP24-L13 reads only what the rule needs: frozen rows of that job, at most two, ids and hashes; never jobs', async () => {
   const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-  await resolveQuoteScopeRevisionLink(c, JOB)
-  assertEquals(c.reads.length, 2)
-  assertEquals(c.reads[0], { table: 'jobs', cols: 'scope_json, pricing_json', filters: [['id', JOB]], limit: null })
-  assertEquals(c.reads[1], { table: 'scope_revisions', cols: 'id, scope_hash, pricing_hash', filters: [['job_id', JOB], ['status', 'frozen']], limit: 2 })
+  await resolveQuoteScopeRevisionLink(c, JOB, await sent())
+  assertEquals(c.reads, [{ table: 'scope_revisions', cols: 'id, scope_hash, pricing_hash', filters: [['job_id', JOB], ['status', 'frozen']], limit: 2 }])
 })
 
 Deno.test('JP24-L14 the log line on a null carries ids and a reason only, no customer data', async () => {
@@ -218,8 +217,8 @@ Deno.test('JP24-L14 the log line on a null carries ids and a reason only, no cus
   const orig = console.log
   console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')) }
   try {
-    const c = makeClient({ jobs: [jobRow(SCOPE, { ...PRICING, totalIncGST: 1 })], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
-    assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'send-quote/send' }), null)
+    const c = makeClient({ jobs: [], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+    assertEquals(await quoteScopeRevisionIdForSend(c, JOB, await sent(SCOPE, { ...PRICING, totalIncGST: 1 }), { handler: 'send-quote/send' }), null)
   } finally {
     console.log = orig
   }
@@ -244,6 +243,7 @@ Deno.test('JP24-D21 a frozen revision\'s scope_canonical_text still holds scope_
   assertEquals(parsed.lines.map((l: { id: string }) => l.id), ['line-rhs-1', 'line-rear-2'])
   assertEquals(parsed.revision, SCOPE.revision)
 
-  // And the send-time link recognises the revision freeze_scope just wrote.
-  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, { handler: 'test' }), row.id)
+  // And a quote built from the same blobs, carrying their hashes, links to the
+  // revision freeze_scope just wrote.
+  assertEquals(await quoteScopeRevisionIdForSend(c, JOB, await sentQuoteSourceHashes(SCOPE, PRICING), { handler: 'test' }), row.id)
 })

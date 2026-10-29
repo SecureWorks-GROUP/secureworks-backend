@@ -301,9 +301,10 @@ jobs:
             supabase/functions/ops-api/ghost_observer_auto_mirror_test.ts
 
       # JP-24 slice 1: a sent quote records which frozen scope revision it was
-      # sent from (quote_revisions.scope_revision_id), stored only when both the
-      # job's current scope and pricing hashes equal the one frozen row's, null
-      # (unknown) otherwise, and never changing the send. The rule and the D21
+      # sent from (quote_revisions.scope_revision_id), stored only when the sent
+      # document's own source hashes equal the one frozen row's (never a re-read
+      # of the job after the send), null (unknown) otherwise, and never
+      # changing the send. The rule and the D21
       # pin (frozen text keeps scope line ids) are type-checked; the two writer
       # suites drive the real writers and import index.ts, so they take the
       # --no-check of the other index-importing steps.

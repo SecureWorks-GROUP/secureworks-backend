@@ -5,14 +5,16 @@
 --
 --   scope_revision_id  the job's single current frozen scope_revisions row,
 --                      stored at send only when BOTH its scope_hash and its
---                      pricing_hash equal canonicalJsonAndHash of the job's
---                      current jobs.scope_json and jobs.pricing_json (the
---                      function freeze_scope hashes with). Null otherwise.
+--                      pricing_hash equal the sent document's own provenance:
+--                      the canonicalJsonAndHash hashes of the exact
+--                      jobs.scope_json and jobs.pricing_json blobs the sent
+--                      quote was built from, captured before the send. Never a
+--                      re-read of the job after the send. Null otherwise.
 --
--- Null means unknown, never "no revision": a save after the last freeze, no
--- frozen row, several frozen rows or a failed read all store null. There is no
--- backfill. Every row written before this migration stays null (unknown), on
--- purpose: an old send's scope at the moment it left cannot be re-proved now.
+-- Null means unknown, never "no revision" and never "edited after freeze".
+-- Today no sent document records its source hashes, so every send stores null
+-- until the producer of the quote document records them. There is no
+-- backfill: an old send's source cannot be re-proved now.
 --
 -- Writers: send-quote recordReleasedQuoteRevision (/send, /send-runs) and the
 -- ops-api quick-quote copy (send_quick_quote_email), through the one rule in
@@ -43,4 +45,4 @@ ALTER TABLE public.quote_revisions
     REFERENCES public.scope_revisions(id) ON DELETE RESTRICT;
 
 COMMENT ON COLUMN public.quote_revisions.scope_revision_id IS
-  'JP-24 slice 1. The frozen scope_revisions row this quote was sent from, stored at send only when both its scope_hash and pricing_hash equal canonicalJsonAndHash of the job''s current jobs.scope_json and jobs.pricing_json. NULL = unknown (mismatch, no or several frozen rows, failed read, or a row written before 20261029123500). Never backfilled.';
+  'JP-24 slice 1. The frozen scope_revisions row this quote was sent from, stored at send only when both its scope_hash and pricing_hash equal the sent document''s own source hashes (canonicalJsonAndHash of the exact scope_json and pricing_json it was built from, captured before the send). NULL = unknown (no provenance on the sent document, mismatch, no or several frozen rows, failed read, or a row written before 20261029123500). Never backfilled.';
