@@ -170,6 +170,8 @@ const SCHEMA: Record<string, string[]> = {
     "pay_on_set_at",
     "pay_on_set_by",
     "pay_on_set_by_email",
+    // 20261029120300_dispatch_v2_box_payment_reopened.sql
+    "payment_reopened_at",
   ],
   dispatch_approved_supplier_emails: [
     "id",

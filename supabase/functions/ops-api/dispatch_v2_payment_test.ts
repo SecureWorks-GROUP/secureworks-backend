@@ -139,6 +139,7 @@ const BOX_COLUMNS = new Set([
   "pay_on_set_at",
   "pay_on_set_by",
   "pay_on_set_by_email",
+  "payment_reopened_at",
 ]);
 
 // The migrations' checks on the box, as Postgres would keep them.
@@ -186,6 +187,7 @@ function box(
     pay_on_set_at: null,
     pay_on_set_by: null,
     pay_on_set_by_email: null,
+    payment_reopened_at: null,
     ...extra,
   };
 }
@@ -592,6 +594,39 @@ Deno.test("paid: picking Awaiting payment by hand after the stamp re-opens it", 
     storedStageAt: "2026-10-28T06:00:00.000Z",
   });
   assertEquals(other.paid, true);
+});
+
+Deno.test("paid: a re-opened payment stays open after another hand pick", () => {
+  // Paid at PAID_AT, Awaiting payment picked by hand at 06:00 (re-open),
+  // then Manufacturing picked by hand at 07:00. The 05:00 stamp must not
+  // count again.
+  const reopened = {
+    paidAt: PAID_AT,
+    paidByEmail: SHAUN.email,
+    paymentReopenedAt: "2026-10-28T06:00:00.000Z",
+    storedStage: "manufacturing",
+    storedStageAt: "2026-10-28T07:00:00.000Z",
+  };
+  const p = paymentOf(reopened);
+  assertEquals([p.state, p.paid, p.earlier_order_paid_at], ["unpaid", false, PAID_AT]);
+  // A Pay on tag from before the re-open stops counting the same way.
+  const tag = paymentOf({
+    ...reopened,
+    paidAt: null,
+    paidByEmail: null,
+    payOn: "pickup",
+    payOnSetAt: PAID_AT,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals([tag.state, tag.pay_on, tag.earlier_order_pay_on_set_at], ["unpaid", null, PAID_AT]);
+  // Paid again after the re-open: counts.
+  const again = paymentOf({ ...reopened, paidAt: "2026-10-28T08:00:00.000Z" });
+  assertEquals([again.state, again.paid], ["paid", true]);
+  // A re-open from before the stamp changes nothing.
+  assertEquals(
+    paymentOf({ ...reopened, paymentReopenedAt: "2026-10-28T04:00:00.000Z" }).paid,
+    true,
+  );
 });
 
 Deno.test("paid: on account needs no payment; unknown terms say so", () => {

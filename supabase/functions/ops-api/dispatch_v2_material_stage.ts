@@ -602,6 +602,7 @@ export function dispatchV2BoxStage(
     newestSentAt: newestSent?.sent_at ?? null,
     storedStage: box.material_stage,
     storedStageAt: box.material_stage_set_at,
+    paymentReopenedAt: box.payment_reopened_at,
   };
   const shown = dispatchMaterialStageOf({
     stored: box.material_stage,

@@ -994,3 +994,6 @@ ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job
 ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_at
 ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by
 ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by_email
+# A re-opened payment on a supplier box: the dispatch_v2_set_material_stage
+# press writes it; the board, dispatch_arrival and the materials panel read it.
+ops-api|supabase/migrations/20261029120300_dispatch_v2_box_payment_reopened.sql|column|job_material_suppliers.payment_reopened_at

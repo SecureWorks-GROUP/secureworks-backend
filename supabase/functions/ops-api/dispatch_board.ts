@@ -600,10 +600,13 @@ export type DispatchBoardSupplierBox = {
   pay_on?: string | null;
   pay_on_set_at?: string | null;
   pay_on_set_by_email?: string | null;
+  // The latest hand pick of Awaiting payment (migration
+  // 20261029120300_dispatch_v2_box_payment_reopened.sql).
+  payment_reopened_at?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at";
 
 // The material lines in the boxes, only for the material stage: which lines
 // are still to be ordered, and when each last changed.

@@ -89,9 +89,12 @@ export function dispatchV2TermsFor(
 //     migration 20261029120100_dispatch_v2_box_paid.sql).
 //   * A paid stamp counts for the order it was marked against: only while it
 //     is newer than the box's newest order email (a second order to the same
-//     supplier reuses the box) and newer than a hand pick of Awaiting payment
-//     (picking Awaiting payment by hand re-opens the payment). A stamp that no
-//     longer counts is kept on the box and shown as an earlier order's.
+//     supplier reuses the box) and newer than the latest hand pick of
+//     Awaiting payment (picking Awaiting payment by hand re-opens the
+//     payment). The latest such pick is kept in payment_reopened_at, so a
+//     later hand pick of another stage does not make the old stamp count
+//     again. A stamp that no longer counts is kept on the box and shown as an
+//     earlier order's.
 
 export type DispatchV2PaymentInput = {
   terms: DispatchV2PaymentTerms;
@@ -107,6 +110,9 @@ export type DispatchV2PaymentInput = {
   // The stage a person picked on the box, and when.
   storedStage: unknown;
   storedStageAt: unknown;
+  // When a person last picked Awaiting payment by hand (migration
+  // 20261029120300_dispatch_v2_box_payment_reopened.sql). Left out = never.
+  paymentReopenedAt?: unknown;
   // The stage the box finally shows (for blocks_job_move: a delivered box
   // never holds the job up). Left out = not delivered.
   materialStage?: string;
@@ -173,19 +179,23 @@ function stampInstant(value: unknown): number | null {
 }
 
 /** Whether a stamp made at `stampAt` counts for the box's current order:
- * newer than the newest send, and newer than a hand pick of Awaiting
- * payment. */
+ * newer than the newest send, and newer than the latest hand pick of
+ * Awaiting payment (payment_reopened_at, or the stored pick when the box's
+ * stored stage is still Awaiting payment, which covers a box re-opened
+ * before the column existed). */
 export function dispatchV2StampCounts(
   stampAt: unknown,
   input: Pick<
     DispatchV2PaymentInput,
-    "newestSentAt" | "storedStage" | "storedStageAt"
+    "newestSentAt" | "storedStage" | "storedStageAt" | "paymentReopenedAt"
   >,
 ): boolean {
   const at = stampInstant(stampAt);
   if (at === null) return false;
   const sentAt = stampInstant(input.newestSentAt);
   if (sentAt !== null && at <= sentAt) return false;
+  const reopenedAt = stampInstant(input.paymentReopenedAt);
+  if (reopenedAt !== null && at <= reopenedAt) return false;
   if (input.storedStage === "awaiting_payment") {
     const pickedAt = stampInstant(input.storedStageAt);
     if (pickedAt !== null && at <= pickedAt) return false;

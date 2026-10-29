@@ -565,8 +565,14 @@ Nothing merges to main until Shaun says "merge to main".
    would have shown without it.
 5. **Paid counts for the order it was marked against.** A paid stamp counts
    only while it is newer than the box's newest order email (a second order
-   to the same supplier reuses the box) and newer than a hand pick of
-   Awaiting payment (picking Awaiting payment by hand re-opens the payment).
+   to the same supplier reuses the box) and newer than the latest hand pick
+   of Awaiting payment (picking Awaiting payment by hand re-opens the
+   payment). The latest such pick is kept on the box in
+   `payment_reopened_at`, so picking another stage by hand afterwards (for
+   example Manufacturing) does not make the old stamp count again: the
+   payment stays open until Mark paid or Pay on is pressed again. A box
+   re-opened before that column existed is still read from its stored
+   Awaiting payment pick, while that is the stored stage.
 6. **Pay on pickup / Pay on delivery** confirms the order without paying: the
    box moves to Order confirmed exactly as Mark paid would, and carries a
    visible tag ("Pay on pickup"). It counts for the current order on the same
@@ -624,6 +630,7 @@ function deploy).
 | `20261029120000_dispatch_v2_on_account_suppliers.sql` (A) | `dispatch_approved_supplier_emails.on_account boolean NOT NULL DEFAULT false`; sets `true` for exactly `Bunnings`, `Fence Makers`, `Fencing Warehouse WA`, `R&R Fencing`, `Stratco WA` in org `00000000-0000-0000-0000-000000000001` (names as stored, checked read-only 29 Oct 2026: all five present and active, 26 entries in all). |
 | `20261029120100_dispatch_v2_box_paid.sql` (A) | On `job_material_suppliers`: `paid_at timestamptz NULL`, `paid_by uuid NULL REFERENCES users(id) ON DELETE SET NULL`, `paid_by_email text NULL`. Check: `(paid_at IS NULL) = (paid_by_email IS NULL)`. |
 | `20261029120200_dispatch_v2_box_pay_on.sql` (A) | On `job_material_suppliers`: `pay_on text NULL CHECK (pay_on IN ('pickup','delivery'))`, `pay_on_set_at timestamptz NULL`, `pay_on_set_by uuid NULL REFERENCES users(id) ON DELETE SET NULL`, `pay_on_set_by_email text NULL`. Check: `pay_on` set if and only if `pay_on_set_at` and `pay_on_set_by_email` are set. |
+| `20261029120300_dispatch_v2_box_payment_reopened.sql` (A, review fix) | On `job_material_suppliers`: `payment_reopened_at timestamptz NULL`, stamped by `dispatch_v2_set_material_stage` on every hand pick of Awaiting payment (rule 5). |
 | `20261030120000_dispatch_v2_box_date_mode.sql` (C) | On `job_material_suppliers`: `order_date_mode text NULL CHECK (order_date_mode IN ('asap','date'))`, `order_date_mode_set_at timestamptz NULL`, `order_date_mode_set_by_email text NULL`. The column is added with no default (existing boxes stay NULL, read as below), then `SET DEFAULT 'asap'` so every new box starts on ASAP. |
 
 No backfill. Only two boxes have ever been sent from Dispatch (both on
@@ -689,7 +696,7 @@ export type DispatchV2Payment = {
   pay_on_set_at: string | null;
   pay_on_set_by_email: string | null;
   // A stamp that is on the box but belongs to an earlier order (older than
-  // the newest send, or than a hand pick of Awaiting payment).
+  // the newest send, or than the latest hand pick of Awaiting payment).
   earlier_order_paid_at: string | null;
   earlier_order_pay_on_set_at: string | null;
   // The confirmed date is saved but the gate is holding the stage.
