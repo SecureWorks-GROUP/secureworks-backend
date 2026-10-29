@@ -5,7 +5,8 @@
 -- called with a fixed as_of (2031-10-15), never the run's clock.
 --
 --   TO-J1    a real job.   TO-HOLD  the holding job (do_not_schedule 'TRUE', any case).
---   TO-HOLD1 a holding job marked do_not_schedule '1', as the context layer reads it.
+--   TO-HOLD1 a job marked do_not_schedule '1'. Job Profit (v_job_profit) reads only
+--            'true' as holding, so this is a job here too, never a holding job.
 --   Org 1 is ours; org 2 is another org, never read by an org-1 call.
 --   October 2031 bills (ex GST):
 --   TO-FACT   1000.10  a rule's row on TO-J1                 on a job
@@ -30,7 +31,7 @@
 --   reach org 1's TO-NONE.
 --   March 2031 (read on its own, as_of 2031-03-15):
 --   TO-M-OH    100.00  overhead part 150.00                  100 overhead, 50 over
---   TO-M-HJ    200.00  150.00 on TO-J1 + 80.00 on TO-HOLD1   150 on job, 50 unplaced (holding), 30 over
+--   TO-M-HJ    200.00  150.00 on TO-J1 + 80.00 on TO-HOLD    150 on job, 50 unplaced (holding), 30 over
 --   TO-M-ZERO    0.00  a row of 40.00 on TO-J1               40 over
 --   TO-M-NEG   -60.00  waiting in Bills to place             negative_bill only
 --   TO-M-OPEN  300.00  waiting in Bills to place             unplaced
@@ -132,7 +133,7 @@ INSERT INTO public.job_materials_facts (xero_invoice_id, job_id, job_number, lan
   ('TO-SHORT', 'b7000000-0000-4000-8000-000000000001', 'TO-J1', 'materials', 'actual', 150.00, 'high_manual', 'manual_queue', '2031-10-12'),
   ('TO-SEP', 'b7000000-0000-4000-8000-000000000001', 'TO-J1', 'materials', 'actual', 400.00, 'high', 'xero_ref_link', '2031-09-20'),
   ('TO-M-HJ', 'b7000000-0000-4000-8000-000000000001', 'TO-J1', 'materials', 'actual', 150.00, 'high_manual', 'manual_split', '2031-03-03'),
-  ('TO-M-HJ', 'b7000000-0000-4000-8000-000000000008', 'TO-HOLD1', 'materials', 'actual', 80.00, 'high_manual', 'manual_split', '2031-03-03'),
+  ('TO-M-HJ', 'b7000000-0000-4000-8000-000000000009', 'TO-HOLD', 'materials', 'actual', 80.00, 'high_manual', 'manual_split', '2031-03-03'),
   ('TO-M-ZERO', 'b7000000-0000-4000-8000-000000000001', 'TO-J1', 'materials', 'actual', 40.00, 'high_manual', 'manual_queue', '2031-03-04');
 
 -- An org-2 allocation row on org 1's TO-NONE id: never org 1's.
@@ -297,7 +298,7 @@ BEGIN
      OR NOT (b ->> 'parts_add_up')::boolean THEN
     RAISE EXCEPTION 'March buckets: %', b;
   END IF;
-  -- A row on a holding job marked '1' is unplaced, never on a job.
+  -- A row on a holding job ('TRUE') is unplaced, never on a job.
   IF (b -> 'unplaced_by_reason' ->> 'holding_job')::numeric <> 50.00
      OR (b -> 'unplaced_by_reason' ->> 'waiting_in_bills_to_place')::numeric <> 300.00 THEN
     RAISE EXCEPTION 'March reasons: %', b -> 'unplaced_by_reason';
@@ -318,6 +319,35 @@ BEGIN
   IF (v -> 'last_6_months' ->> 'bills_total_ex')::numeric <> 600.00 OR (v -> 'last_6_months' ->> 'unplaced_ex')::numeric <> 350.00 THEN
     RAISE EXCEPTION 'March last 6 months: %', v -> 'last_6_months';
   END IF;
+
+  -- Job Profit's rule, true only: a job marked do_not_schedule '1' is a job.
+  -- The same 80.00 row moved to TO-HOLD1 is on a job (150 + 80 capped at the
+  -- 200 bill, so March on job is 200), and nothing is unplaced as holding.
+  UPDATE public.job_materials_facts SET job_id = 'b7000000-0000-4000-8000-000000000008', job_number = 'TO-HOLD1'
+   WHERE xero_invoice_id = 'TO-M-HJ' AND job_number = 'TO-HOLD';
+  b := public.xero_tieout_monthly('2031-03-15', 1, '00000000-0000-0000-0000-000000000001') -> 'months' -> 0 -> 'bills';
+  IF (b ->> 'on_job_ex')::numeric <> 200.00 OR (b ->> 'unplaced_ex')::numeric <> 300.00
+     OR (b -> 'unplaced_by_reason' ->> 'holding_job')::numeric <> 0
+     OR (b -> 'over_allocated' ->> 'ex')::numeric <> 120.00 OR NOT (b ->> 'parts_add_up')::boolean THEN
+    RAISE EXCEPTION 'a row on a job marked 1 must be on a job: %', b;
+  END IF;
+  -- The Xero job link reads the same rule: a link to TO-HOLD ('TRUE') leaves
+  -- the bill unplaced as holding, a link to TO-HOLD1 ('1') puts it on the job.
+  UPDATE public.xero_invoices SET job_id = 'b7000000-0000-4000-8000-000000000009'
+   WHERE org_id = '00000000-0000-0000-0000-000000000001' AND xero_invoice_id = 'TO-M-OPEN';
+  b := public.xero_tieout_monthly('2031-03-15', 1, '00000000-0000-0000-0000-000000000001') -> 'months' -> 0 -> 'bills';
+  IF (b ->> 'on_job_ex')::numeric <> 200.00 OR (b -> 'unplaced_by_reason' ->> 'holding_job')::numeric <> 300.00 THEN
+    RAISE EXCEPTION 'a Xero link to a holding job must be unplaced: %', b;
+  END IF;
+  UPDATE public.xero_invoices SET job_id = 'b7000000-0000-4000-8000-000000000008'
+   WHERE org_id = '00000000-0000-0000-0000-000000000001' AND xero_invoice_id = 'TO-M-OPEN';
+  b := public.xero_tieout_monthly('2031-03-15', 1, '00000000-0000-0000-0000-000000000001') -> 'months' -> 0 -> 'bills';
+  IF (b ->> 'on_job_ex')::numeric <> 500.00 OR (b ->> 'unplaced_ex')::numeric <> 0
+     OR NOT (b ->> 'parts_add_up')::boolean THEN
+    RAISE EXCEPTION 'a Xero link to a job marked 1 must be on the job: %', b;
+  END IF;
+  UPDATE public.xero_invoices SET job_id = NULL
+   WHERE org_id = '00000000-0000-0000-0000-000000000001' AND xero_invoice_id = 'TO-M-OPEN';
 
   -- A month holding only a negative bill: total 0, unplaced 0, no share, never below 0.
   UPDATE public.xero_invoices SET status = 'DRAFT'

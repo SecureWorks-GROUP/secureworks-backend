@@ -36,8 +36,9 @@
 --   * Allocation rows (job_materials_facts, kind actual) and a person's
 --     overhead part (materials_reconciliation_queue.overhead_ex) decide a bill
 --     that has either. A row on a holding job (jobs.metadata do_not_schedule
---     'true' or '1', in any case, so "TRUE" is a holding job here as it is in
---     Job Profit) is never on a job: it is unplaced, reason holding_job.
+--     'true' in any case, exactly Job Profit's rule in v_job_profit, so "TRUE"
+--     is a holding job and '1' is not) is never on a job: it is unplaced,
+--     reason holding_job.
 --   * A bill with neither: Bills to place status not_job_related goes whole
 --     to overhead / not job related; otherwise a bill whose Xero job link is a
 --     real job is on that job (the job profit engine reads it the same way);
@@ -120,7 +121,7 @@ AS $$
            COALESCE(a.person_placed, false) AS person_placed,
            CASE WHEN b.job_id IS NULL THEN 'none'
                 WHEN xj.id IS NULL THEN 'unknown_job'
-                WHEN lower(COALESCE(xj.metadata ->> 'do_not_schedule', '')) IN ('true', '1') THEN 'holding'
+                WHEN lower(COALESCE(xj.metadata ->> 'do_not_schedule', '')) = 'true' THEN 'holding'
                 ELSE 'job' END AS xero_link
       FROM bills b
       -- The bill's allocation rows, summed per bill (so no bill is counted
@@ -131,7 +132,7 @@ AS $$
                sum(f.amount_ex_gst) FILTER (WHERE f.hold) AS hold_rows_ex,
                bool_or(f.automation_source IN ('manual_queue', 'manual_split', 'agent_ai')) AS person_placed
           FROM (SELECT f.amount_ex_gst, f.automation_source,
-                       lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) IN ('true', '1') AS hold
+                       lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) = 'true' AS hold
                   FROM public.job_materials_facts f
                   LEFT JOIN public.jobs j ON j.id = f.job_id
                  WHERE f.kind = 'actual'
