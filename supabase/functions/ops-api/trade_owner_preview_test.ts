@@ -58,3 +58,13 @@ Deno.test('non-owner cannot query target data and the selector stays in the owne
   const result = await tradePreviewContext(client,owner)
   assertEquals('trades' in result ? result.trades.map((r:any)=>r.id) : [],[trade.id])
 })
+
+Deno.test('mixed office/trade profile can be previewed without changing its role', async () => {
+  const henry = {...trade,role:'ops_manager',invoice_type:'per_metre'}
+  const profile = await readTradePreviewProfile(clientFor([henry]),owner,trade.id)
+  assertEquals(profile.role,'ops_manager')
+  assertEquals(profile.invoice_type,'per_metre')
+  await assertRejects(() => readTradePreviewProfile(clientFor([{...henry,invoice_type:null}]),owner,trade.id),TradePreviewError)
+  const selector = await tradePreviewContext(clientFor([henry]),owner)
+  assertEquals('trades' in selector ? selector.trades.map((p:any)=>p.id) : [],[trade.id])
+})

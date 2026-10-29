@@ -759,6 +759,9 @@ export async function saveRunningInvoiceDraft(
   const notes = body?.notes != null ? body.notes : (incoming.notes || "");
   const builder = {
     version: 1,
+    // Persist identity only; current own group prices/acceptance are re-read before use.
+    ...(Array.isArray(incoming.groupIds) && incoming.groupIds.length ? { groupIds:
+      [...new Set(incoming.groupIds.map(String).filter((id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)))].slice(0, 100) } : {}),
     jobCards: merged.cards,
     invRows: Array.isArray(incoming.invRows) ? incoming.invRows : [],
     invLumpLines: Array.isArray(incoming.invLumpLines)

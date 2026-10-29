@@ -1434,6 +1434,46 @@ export async function readGroupWorkOrderMyShare(
   });
 }
 
+/** Outstanding own group claims, including older work, for the normal invoice. */
+export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
+  if (!(await groupFeatureOn(client))) return { enabled: false, groups: [] };
+  if (!caller.orgId) throw new GroupWorkOrderError("group_org_required", "Your organisation could not be checked.", 403);
+  const memberships = await rowsOf(client.from("group_work_order_participants")
+    .select("group_id").eq("user_id", caller.userId), "load your group work orders");
+  const ids = [...new Set(memberships.map(row => String(row.group_id)))];
+  if (!ids.length) return { enabled: true, groups: [] };
+  const groups = await rowsOf(client.from("group_work_orders")
+    .select("id, job_id, work_order_id, status, split_frozen_at")
+    .eq("org_id", caller.orgId).in("id", ids).neq("status", "void"), "load your group work orders");
+  if (!groups.length) return { enabled: true, groups: [] };
+  const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
+  const jobs = await rowsOf(client.from("jobs").select("id, job_number, client_name, site_suburb, type")
+    .eq("org_id", caller.orgId).in("id", jobIds), "load your group jobs");
+  // A non-draft, non-rejected line already holds the share. Never offer it twice.
+  const claims = await rowsOf(client.from("trade_invoice_lines")
+    .select("job_id, invoice:trade_invoices!inner(user_id, status)")
+    .eq("line_type", GROUP_SHARE_LINE_TYPE).eq("invoice.user_id", caller.userId)
+    .in("job_id", jobIds), "check your submitted group shares");
+  const claimed = new Set(claims.filter(row => {
+    const invoice = Array.isArray(row.invoice) ? row.invoice[0] : row.invoice;
+    return invoice && !GROUP_FENCE_RELEASED_INVOICE_STATUSES.includes(invoice.status);
+  }).map(row => String(row.job_id)));
+  const result = [];
+  // Sequential reads bound database fan-out; every price still uses the participant guard.
+  for (const group of groups) {
+    if (claimed.has(String(group.job_id))) continue;
+    const job = jobs.find(row => String(row.id) === String(group.job_id));
+    if (!job) continue;
+    const share = await readGroupWorkOrderMyShare(client, caller, { group_id: group.id });
+    const projection = share.awaiting === "ready"
+      ? (await readSplit(client, String(group.id), false)).find(row => String(row.user_id) === caller.userId)
+      : null;
+    result.push({ ...share, projected_my_share: projection ? Number(projection.share_ex) : null, job_id: group.job_id, job_number: job.job_number,
+      client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
+  }
+  return { enabled: true, group_job_ids: jobIds, groups: result };
+}
+
 async function readSplit(
   client: any,
   groupId: string,
