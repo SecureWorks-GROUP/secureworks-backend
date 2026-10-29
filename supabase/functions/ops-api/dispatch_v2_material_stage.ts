@@ -27,6 +27,9 @@
 //     by itself: "Awaiting payment" when we pay first, "Quote received" when
 //     we are on account (only while the replies switch is on).
 //   * An empty box with nothing sent is "Order materials".
+//   * An "Order confirmed" box with no date for the current order (no date
+//     of its own, none asked for in the newest order email) is waiting on
+//     the supplier for a date, not on us to book the install.
 //
 // A purchase order with no box (a v1 Dispatch order or one made elsewhere) has
 // no stage of its own: it is read from the order's status.
@@ -88,11 +91,23 @@ export function dispatchMaterialStageRank(key: string): number {
   return STAGE_KEYS.indexOf(key);
 }
 
+// What a supplier box knows about its current order, for the waiting on and
+// next step lines (contract section 3c). Left out, the two functions below
+// answer as they always have (a purchase order, an older caller).
+export type DispatchMaterialStageContext = {
+  // The box has a date for the current order: its own date, or the date the
+  // newest order email asked for.
+  hasDate: boolean;
+};
+
 // Who the stage is waiting on. Order confirmed is ours until the install is
-// booked (tell the client, book the crew), then the supplier's.
+// booked (tell the client, book the crew), then the supplier's. An Order
+// confirmed box with no date for the current order waits on the supplier for
+// one: an install cannot be booked without it (rule 7).
 export function dispatchMaterialWaitingOn(
   key: string,
   installBooked: boolean,
+  context?: DispatchMaterialStageContext,
 ): DispatchMaterialWaitingOn {
   switch (key) {
     case "order_materials":
@@ -101,6 +116,7 @@ export function dispatchMaterialWaitingOn(
     case "ready":
       return "us";
     case "order_confirmed":
+      if (context && !context.hasDate) return "supplier";
       return installBooked ? "supplier" : "us";
     case "sent":
     case "manufacturing":
@@ -116,6 +132,7 @@ export function dispatchMaterialTodo(
   key: string,
   supplierName: string | null,
   installBooked: boolean,
+  context?: DispatchMaterialStageContext,
 ): string | null {
   const s = supplierName || "the supplier";
   switch (key) {
@@ -128,6 +145,7 @@ export function dispatchMaterialTodo(
     case "awaiting_payment":
       return `Pay ${s}`;
     case "order_confirmed":
+      if (context && !context.hasDate) return `Waiting on ${s} for a date`;
       return installBooked
         ? `Waiting on ${s} for the materials`
         : "Book the install and tell the client";
@@ -555,6 +573,11 @@ export function dispatchV2BoxStage(
   const installBooked = !!input.installDay;
   const supplierName = textOrNull(box.supplier_name);
   const set = shown.source === "set";
+  // Rule 7: a date for the current order is the box's own date or the date
+  // the newest order email asked for.
+  const context: DispatchMaterialStageContext = {
+    hasDate: !!boxDate || !!newestSent?.requested_date,
+  };
   return {
     key: shown.key,
     label: dispatchMaterialStageLabel(shown.key),
@@ -565,8 +588,8 @@ export function dispatchV2BoxStage(
     box_date: boxDate,
     box_date_confirmed: !!boxDate && !!box.delivery_date_confirmed_at,
     unsent_line_changes: unsent,
-    waiting_on: dispatchMaterialWaitingOn(shown.key, installBooked),
-    todo: dispatchMaterialTodo(shown.key, supplierName, installBooked),
+    waiting_on: dispatchMaterialWaitingOn(shown.key, installBooked, context),
+    todo: dispatchMaterialTodo(shown.key, supplierName, installBooked, context),
     held_by_payment: shown.held_by_payment === true,
     reply: shown.reply ?? null,
     // Worked out again with the stage shown, so a delivered box never holds

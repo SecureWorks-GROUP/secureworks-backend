@@ -23,6 +23,8 @@ import {
 } from "./dispatch_v2_payment.ts";
 import {
   dispatchMaterialStageOf,
+  dispatchMaterialTodo,
+  dispatchMaterialWaitingOn,
   dispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
 import { dispatchArrival, dispatchArrivalRead } from "./dispatch_board.ts";
@@ -1522,4 +1524,115 @@ Deno.test("reply: Mark paid on a box a reply moved confirms the order", async ()
     orderFor(answer.arrival.arrival, SUP.lysaght).material_stage_source,
     "payment",
   );
+});
+
+// ── A6: Order confirmed with no date waits on the supplier ──────────────────
+
+Deno.test("no date: Order confirmed with no date for the order waits on the supplier for one", () => {
+  const noDate = { hasDate: false };
+  for (const installBooked of [false, true]) {
+    assertEquals(
+      dispatchMaterialWaitingOn("order_confirmed", installBooked, noDate),
+      "supplier",
+    );
+    assertEquals(
+      dispatchMaterialTodo("order_confirmed", "Lysaght", installBooked, noDate),
+      "Waiting on Lysaght for a date",
+    );
+  }
+  // With a date, or with no context (a purchase order, an older caller): as
+  // before.
+  for (const context of [{ hasDate: true }, undefined]) {
+    assertEquals(dispatchMaterialWaitingOn("order_confirmed", false, context), "us");
+    assertEquals(
+      dispatchMaterialTodo("order_confirmed", "Lysaght", false, context),
+      "Book the install and tell the client",
+    );
+    assertEquals(dispatchMaterialWaitingOn("order_confirmed", true, context), "supplier");
+    assertEquals(
+      dispatchMaterialTodo("order_confirmed", "Lysaght", true, context),
+      "Waiting on Lysaght for the materials",
+    );
+  }
+  // Only Order confirmed changes.
+  assertEquals(dispatchMaterialTodo("awaiting_payment", "Lysaght", false, noDate), "Pay Lysaght");
+  assertEquals(dispatchMaterialWaitingOn("sent", false, noDate), "supplier");
+});
+
+Deno.test("no date: a paid box with no date waits on the supplier; a date of either kind books the install", () => {
+  const paid = box(BOX.lysaght, SUP.lysaght, "Lysaght", {
+    paid_at: PAID_AT,
+    paid_by_email: SHAUN.email,
+  });
+  const view = dispatchV2BoxStage({
+    box: paid,
+    emails: [sentEmail(EMAIL.lysaght, SUP.lysaght)],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals([view.key, view.waiting_on, view.todo], [
+    "order_confirmed",
+    "supplier",
+    "Waiting on Lysaght for a date",
+  ]);
+  // The date the order email asked for counts.
+  const asked = dispatchV2BoxStage({
+    box: paid,
+    emails: [sentEmail(EMAIL.lysaght, SUP.lysaght, { delivery_date: "2026-11-05" })],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals([asked.waiting_on, asked.todo], ["us", "Book the install and tell the client"]);
+  // So does the box's own date (not confirmed).
+  const own = dispatchV2BoxStage({
+    box: { ...paid, delivery_date: "2026-11-05", delivery_date_set_at: PAID_AT },
+    emails: [sentEmail(EMAIL.lysaght, SUP.lysaght)],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals(own.todo, "Book the install and tell the client");
+  // A box date from before the newest send is an earlier order's: no date.
+  const old = dispatchV2BoxStage({
+    box: { ...paid, delivery_date: "2026-11-05", delivery_date_set_at: BEFORE_SEND },
+    emails: [sentEmail(EMAIL.lysaght, SUP.lysaght)],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals(old.todo, "Waiting on Lysaght for a date");
+});
+
+Deno.test("no date: however the box got to Order confirmed, with an install booked too", () => {
+  const picked = box(BOX.stratco, SUP.stratco, "Stratco WA", {
+    material_stage: "order_confirmed",
+    material_stage_set_at: PAID_AT,
+    material_stage_set_by_email: SHAUN.email,
+  });
+  const view = dispatchV2BoxStage({
+    box: picked,
+    emails: [sentEmail(EMAIL.stratco, SUP.stratco)],
+    lines: [],
+    terms: "on_account",
+    installDay: "2026-11-09",
+  });
+  assertEquals([view.key, view.source, view.waiting_on, view.todo], [
+    "order_confirmed",
+    "set",
+    "supplier",
+    "Waiting on Stratco WA for a date",
+  ]);
+});
+
+Deno.test("no date: Mark paid on a box with no date leaves it off the waiting-on-us list", async () => {
+  const tables = fixture();
+  const { client } = makeClient(tables);
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+  });
+  assertEquals(answer.box.material_stage, "order_confirmed");
+  const lysaght = orderFor(answer.arrival.arrival, SUP.lysaght);
+  assertEquals([lysaght.waiting_on, lysaght.todo], [
+    "supplier",
+    "Waiting on Lysaght for a date",
+  ]);
+  assert(!answer.arrival.arrival.waiting_on_us.some((line: string) => line.includes("Book the install")));
 });
