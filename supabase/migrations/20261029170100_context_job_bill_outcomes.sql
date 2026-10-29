@@ -18,7 +18,15 @@
 --     xero_invoice_id, invoice_number, supplier, bill_status, bill_state,
 --     held_reason, change_hash (CFO's evidence_hash: a payment never moves it),
 --     overhead_part, not_job_related_mark,
---     where_counted  here | elsewhere | here_and_elsewhere | no_job | held | unknown
+--     where_counted  here | elsewhere | here_and_elsewhere | no_job | trade_app |
+--                    held | unknown (trade_app: a trade-app mirror bill a person
+--                    placed here; its cost counts through the trade app's lines,
+--                    never as this bill, and here.reason says
+--                    mirror_bill_person_placed)
+--     bill_state     CFO's, passed on: unknown, voided, trade_mirror, held,
+--                    not_job_related, overhead, not_counted, over_counted (more
+--                    counted than the bill: never "in part"), counted_in_full,
+--                    counted_in_part
 --     here           {xero_linked, placed_by, counts, reason, holding_job}
 --     other_jobs     [{job_id, job_number, xero_linked, placed_by, counts,
 --                      reason, holding_job}], job number then id order (C)
@@ -102,6 +110,7 @@ AS $fn$
                'where_counted', CASE
                   WHEN b.bill_state = 'unknown' OR b.here_unknown OR b.here IS NULL THEN 'unknown'
                   WHEN b.bill_state = 'held' THEN 'held'
+                  WHEN b.bill_state = 'trade_mirror' THEN 'trade_app'
                   WHEN b.here_counted AND b.other_counted THEN 'here_and_elsewhere'
                   WHEN b.here_counted THEN 'here'
                   WHEN b.other_counted THEN 'elsewhere'
@@ -117,4 +126,4 @@ $fn$;
 REVOKE ALL ON FUNCTION public.context_job_bill_outcomes(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_job_bill_outcomes(uuid) TO service_role;
 COMMENT ON FUNCTION public.context_job_bill_outcomes(uuid) IS
-  'Context H7 read, INT-10 (20261029170100): for one job, the supplier bills on it (its Xero link or an actual allocation row) with where CFO''s cfo_bill_cost_outcomes says each bill''s cost counts, and no amount at all. contract_version is the producer''s (cfo-bill-cost-outcome-v1), shape context-job-bill-outcomes-v1. where_counted here, elsewhere, here_and_elsewhere, no_job, held (F1, JP-21: counts held on every job, never shown as settled) or unknown (never 0). change_hash is CFO''s evidence_hash: a payment never moves it. Read only, service role only.';
+  'Context H7 read, INT-10 (20261029170100): for one job, the supplier bills on it (its Xero link or an actual allocation row) with where CFO''s cfo_bill_cost_outcomes says each bill''s cost counts, and no amount at all. contract_version is the producer''s (cfo-bill-cost-outcome-v1), shape context-job-bill-outcomes-v1. where_counted here, elsewhere, here_and_elsewhere, no_job, trade_app (a trade-app mirror a person placed: counted through the trade lines, never as this bill), held (F1, JP-21: counts held on every job, never shown as settled) or unknown (never 0). bill_state is CFO''s, over_counted included. change_hash is CFO''s evidence_hash: a payment never moves it. Read only, service role only.';

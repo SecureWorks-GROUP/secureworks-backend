@@ -138,10 +138,21 @@ the bill on that job and `v_job_profit` reads the job; `not_counted` with a
 not-job-related installer bill, a labour part not yet confirmed, voided, not
 approved, a legacy job, an expected row on another job hiding the Xero link);
 `unknown` when it cannot be read, never 0. A bill marked not job related that
-the engine still counts reads `bill_state` `held` (F1, JP-21). The
-`evidence_hash` is led by the contract version; a payment does not move it
-(AUTHORISED and PAID are one class), a changed total, line, credit, status
-class, allocation row or overhead does. Context's job card reads it through
+the engine still counts reads `bill_state` `held` (F1, JP-21). A bill counted
+for more than its ex GST total (counted parts plus any overhead part: 1200
+counted on a 1000 bill, two 700 placements on one) reads `over_counted`, never
+`counted_in_part`; less reads `counted_in_part`, equal `counted_in_full`, all
+compared as `v_bill_allocation_balance` balances a bill (the remainder within
+half a cent). A trade-app mirror bill is left out unless a person placed it on a
+job: that row reads `not_counted`, reason `mirror_bill_person_placed`,
+`bill_state` `trade_mirror`, because its cost counts through the trade lines.
+The `evidence_hash` is led by the contract version; a payment does not move it
+(AUTHORISED and PAID are one class), a changed total, line, tax-inclusive flag
+(`LineAmountTypes`, which the engine reads), credit, status class, allocation
+row or overhead does. A DRAFT bill linked to a job reads `not_counted`,
+`bill_not_approved`, as the engine treats it. Context's job card reads it through
 `context_job_bill_outcomes(job)` (`20261029170100`), which carries no amount;
 ops-api `job_overview` serves that as `bills` and refuses any other contract
-version or any amount (`job_bill_outcomes_read.ts`).
+version or any amount (`job_bill_outcomes_read.ts`); a placed mirror reads
+`where_counted` `trade_app` there. The one-job timing read for the 8 s API
+limit is `scripts/explain-context-job-bill-outcomes-one-job.sql` (read only).

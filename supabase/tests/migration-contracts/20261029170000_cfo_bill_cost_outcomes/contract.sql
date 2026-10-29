@@ -11,9 +11,14 @@ BEGIN;
 
 \ir h7_fixtures.sql
 
+-- The two load-bearing checks below record a failure here instead of stopping,
+-- so the break proof can show that each one catches its own break; the block
+-- after them raises them together.
+CREATE TEMP TABLE h7_contract_failures (n serial, msg text) ON COMMIT DROP;
+
 -- ── 1. Agreement with the engine (first, so a break of it is named as such): never claims a placement it does not count ─
 DO $$
-DECLARE bad record; r record;
+DECLARE bad record;
 BEGIN
   -- counted exactly when the engine has an actual row of the bill on the job
   -- and Job Profit reads that job.
@@ -26,10 +31,59 @@ BEGIN
            AND EXISTS (SELECT 1 FROM public.v_job_profit p WHERE p.job_id = o.job_id))
    LIMIT 1;
   IF FOUND THEN
-    RAISE EXCEPTION 'outcome %/% claims a placement the engine does not count (or hides one it does): %',
-      bad.xero_invoice_id, bad.job_number, bad.counts;
+    INSERT INTO h7_contract_failures (msg) VALUES (format(
+      'outcome %s/%s claims a placement the engine does not count (or hides one it does): %s',
+      bad.xero_invoice_id, bad.job_number, bad.counts));
   END IF;
+END $$;
 
+-- ── 1b. Over-counting is its own state, never "in part" ─────────────────────
+-- 1200 counted on a 1000 bill, two 700 placements on one 1000 bill, and a 700
+-- part plus a 400 overhead part: each is more than the bill ex GST.
+DO $$
+DECLARE c record;
+BEGIN
+  FOR c IN
+    SELECT o.xero_invoice_id, o.job_number, o.bill_state
+      FROM public.cfo_bill_cost_outcomes o
+     WHERE o.xero_invoice_id IN ('H7-OVER1', 'H7-OVER2', 'H7-OVER3')
+     ORDER BY o.xero_invoice_id COLLATE "C", o.job_number COLLATE "C"
+  LOOP
+    IF c.bill_state = 'counted_in_part' THEN
+      INSERT INTO h7_contract_failures (msg) VALUES (format(
+        'over-counting read as counted_in_part: %s/%s', c.xero_invoice_id, c.job_number));
+    ELSIF c.bill_state IS DISTINCT FROM 'over_counted' THEN
+      INSERT INTO h7_contract_failures (msg) VALUES (format(
+        'over-counted bill %s/%s reads %s', c.xero_invoice_id, c.job_number, c.bill_state));
+    END IF;
+  END LOOP;
+  IF (SELECT count(*) FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id IN ('H7-OVER1', 'H7-OVER2', 'H7-OVER3')) <> 4 THEN
+    INSERT INTO h7_contract_failures (msg) VALUES ('over-counted bills are not all listed');
+  END IF;
+  -- Below the bill is in part, equal is in full: the comparison is the one
+  -- v_bill_allocation_balance balances a bill with.
+  IF EXISTS (SELECT 1 FROM public.cfo_bill_cost_outcomes o
+               JOIN public.v_bill_allocation_balance a ON a.xero_invoice_id = o.xero_invoice_id
+              WHERE o.xero_invoice_id LIKE 'H7-%' AND o.bill_counted_jobs > 0
+                AND o.bill_state IN ('over_counted', 'counted_in_full', 'counted_in_part')
+                AND o.bill_state IS DISTINCT FROM CASE
+                      WHEN a.remainder_ex < -0.005 THEN 'over_counted'
+                      WHEN abs(a.remainder_ex) <= 0.005 THEN 'counted_in_full'
+                      ELSE 'counted_in_part' END) THEN
+    INSERT INTO h7_contract_failures (msg) VALUES ('a bill state disagrees with the allocation balance');
+  END IF;
+END $$;
+
+DO $$
+DECLARE f text;
+BEGIN
+  SELECT string_agg(msg, '; ' ORDER BY n) INTO f FROM h7_contract_failures;
+  IF f IS NOT NULL THEN RAISE EXCEPTION 'H7 contract: %', f; END IF;
+END $$;
+
+DO $$
+DECLARE bad record; r record;
+BEGIN
   -- Every bill and job the engine counts is listed.
   SELECT e.document_id, e.job_id INTO bad
     FROM public.v_job_cost_events e
@@ -83,7 +137,12 @@ BEGIN
     ('H7-MISS',    'H7-J1',   'counted',     'engine_reads_allocation_rows',     'unknown',         'person'),
     ('H7-NULLAMT', 'H7-J2',   'unknown',     'amount_unreadable',                'unknown',         'person'),
     ('H7-CRED',    'H7-J1',   'counted',     'engine_reads_xero_lines',          'counted_in_full', 'xero_link'),
-    ('H7-HOLDB',   'H7-HOLD', 'counted',     'engine_reads_allocation_rows',     'counted_in_full', 'person')
+    ('H7-HOLDB',   'H7-HOLD', 'counted',     'engine_reads_allocation_rows',     'counted_in_full', 'person'),
+    ('H7-OVER1',   'H7-J3',   'counted',     'engine_reads_allocation_rows',     'over_counted',    'person'),
+    ('H7-OVER2',   'H7-J3',   'counted',     'engine_reads_allocation_rows',     'over_counted',    'person'),
+    ('H7-OVER2',   'H7-J4',   'counted',     'engine_reads_allocation_rows',     'over_counted',    'person'),
+    ('H7-OVER3',   'H7-J3',   'counted',     'engine_reads_allocation_rows',     'over_counted',    'person'),
+    ('H7-MIRP',    'H7-J3',   'not_counted', 'mirror_bill_person_placed',        'trade_mirror',    'person')
   ) AS t(bill, job, counts, reason, bill_state, placed_by) LOOP
     SELECT * INTO o FROM public.cfo_bill_cost_outcomes v
      WHERE v.xero_invoice_id = c.bill AND v.job_number = c.job;
@@ -98,11 +157,22 @@ BEGIN
     END IF;
   END LOOP;
 
-  -- No other rows: the mirror and the expected-kind row on J2 have none.
+  -- No other rows: the mirror no person placed and the expected-kind row on
+  -- J2 have none.
   SELECT count(*) INTO n FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id LIKE 'H7-%';
-  IF n <> 25 THEN RAISE EXCEPTION 'outcome rows: % (expected 25)', n; END IF;
+  IF n <> 30 THEN RAISE EXCEPTION 'outcome rows: % (expected 30)', n; END IF;
   IF EXISTS (SELECT 1 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-MIR') THEN
-    RAISE EXCEPTION 'a trade-app mirror bill is listed';
+    RAISE EXCEPTION 'a trade-app mirror bill no person placed is listed';
+  END IF;
+  -- A mirror a person placed is shown, named, and carries no counted amount;
+  -- only mirrors are mirror rows.
+  SELECT * INTO o FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-MIRP';
+  IF NOT o.mirror_bill OR o.counted_ex IS NOT NULL OR o.bill_counted_jobs <> 0 THEN
+    RAISE EXCEPTION 'H7-MIRP: mirror % counted % jobs %', o.mirror_bill, o.counted_ex, o.bill_counted_jobs;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.cfo_bill_cost_outcomes
+              WHERE xero_invoice_id LIKE 'H7-%' AND mirror_bill AND xero_invoice_id <> 'H7-MIRP') THEN
+    RAISE EXCEPTION 'a bill that is not a trade-app mirror reads as one';
   END IF;
   IF EXISTS (SELECT 1 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-XL' AND job_number = 'H7-J2') THEN
     RAISE EXCEPTION 'an expected-kind row is listed as a placement';
@@ -177,6 +247,16 @@ BEGIN
    WHERE xero_invoice_id = 'H7-SAME';
   SELECT evidence_hash INTO h1 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-SAME';
   IF h1 = h0 THEN RAISE EXCEPTION 'a changed line did not move the hash'; END IF;
+
+  -- Flipping the lines between tax exclusive and inclusive moves it, totals
+  -- and lines unchanged: the engine reads an Inclusive line less its tax.
+  SELECT evidence_hash INTO h0 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-CRED';
+  UPDATE public.xero_invoices SET raw_json = raw_json || '{"LineAmountTypes": "Inclusive"}' WHERE xero_invoice_id = 'H7-CRED';
+  SELECT evidence_hash INTO h1 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-CRED';
+  IF h1 = h0 THEN RAISE EXCEPTION 'a LineAmountTypes flip did not move the hash'; END IF;
+  UPDATE public.xero_invoices SET raw_json = raw_json || '{"LineAmountTypes": "Exclusive"}' WHERE xero_invoice_id = 'H7-CRED';
+  SELECT evidence_hash INTO h1 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-CRED';
+  IF h1 IS DISTINCT FROM h0 THEN RAISE EXCEPTION 'flipping LineAmountTypes back did not restore the hash'; END IF;
 
   -- A changed overhead part moves it.
   SELECT evidence_hash INTO h0 FROM public.cfo_bill_cost_outcomes WHERE xero_invoice_id = 'H7-OH2';

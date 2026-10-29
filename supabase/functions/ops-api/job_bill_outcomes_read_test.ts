@@ -139,6 +139,34 @@ Deno.test("no amount: a number or a money key anywhere refuses the answer, never
   assertEquals(amountIn(answer()), null);
 });
 
+Deno.test("over-counting and a placed trade-app mirror pass on by name, never as in part or as this bill's cost", () => {
+  const r = validateJobBillOutcomes(answer({
+    bills: [
+      bill({ xero_invoice_id: "x-over", bill_state: "over_counted" }),
+      bill({
+        xero_invoice_id: "x-mirror",
+        bill_state: "trade_mirror",
+        where_counted: "trade_app",
+        here: {
+          xero_linked: false,
+          placed_by: "person",
+          counts: "not_counted",
+          reason: "mirror_bill_person_placed",
+          holding_job: false,
+        },
+      }),
+      bill({ xero_invoice_id: "x-odd", bill_state: "mostly_counted" }),
+    ],
+  }));
+  assert(r.ok);
+  assertEquals(r.value.bills.map((b) => [b.bill_state, b.where_counted]), [
+    ["over_counted", "here"],
+    ["trade_mirror", "trade_app"],
+    ["unknown", "here"],
+  ]);
+  assertEquals(r.value.bills[1].here?.reason, "mirror_bill_person_placed");
+});
+
 Deno.test("unknown stays unknown: an unknown code or a bill with no placement here never reads as counted here", () => {
   const r = validateJobBillOutcomes(answer({
     bills: [

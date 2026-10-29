@@ -11,9 +11,10 @@
 -- v_job_cost_events (the rows v_job_profit sums), so the outcome cannot claim a
 -- placement the engine does not make, whatever the engine's rules become.
 --
--- cfo_bill_cost_outcomes: one row per supplier bill (Xero ACCPAY, trade-app
--- mirrors left out: their cost is the trade lines) and job that the bill is
--- placed on or counted on:
+-- cfo_bill_cost_outcomes: one row per supplier bill (Xero ACCPAY; a trade-app
+-- mirror's cost is its trade lines, so a mirror is left out except where a
+-- person put an allocation row of it on a job, which is shown, never counted)
+-- and job that the bill is placed on or counted on:
 --   * the bill's own Xero job link (xero_invoices.job_id);
 --   * an allocation row (job_materials_facts, kind actual) on that job;
 --   * any job the engine counts the bill's cost on (defensive: today every
@@ -35,12 +36,16 @@
 --   (rows on another job or a split), xero_link_read_through_overhead,
 --   xero_link_hidden_by_other_row (a row that is not an actual cost row, on
 --   another job, stops the engine reading the Xero link: CFO to look at),
---   (not_counted); bill_copy_missing, amount_unreadable,
+--   mirror_bill_person_placed (a person put a trade-app mirror bill on the job:
+--   the engine counts a mirror only through the trade lines), (not_counted);
+--   bill_copy_missing, amount_unreadable,
 --   engine_reason_unknown (unknown).
 --
 -- bill_state (per bill, the same on each of its rows), first that applies:
 --   unknown          no stored copy, no readable total, or any row unknown
 --   voided           VOIDED or DELETED in Xero
+--   trade_mirror     a trade-app mirror bill a person placed on a job: its cost
+--                    counts through the trade app's lines, never as this bill
 --   held             a "not job related" mark while the engine still counts the
 --                    bill on a job (F1, JP-21: an open money rule). held_reason
 --                    not_job_related_mark_on_counted_bill. Neither side is
@@ -48,9 +53,16 @@
 --   not_job_related  marked not job related and counted on no job
 --   overhead         the whole bill is an overhead part, counted on no job
 --   not_counted      counted on no job
+--   over_counted     counted on jobs, and those parts plus any overhead part
+--                    are more than the bill ex GST (1200 counted on a 1000 bill,
+--                    two 700 placements on one): never "in part"
 --   counted_in_full  counted on jobs, and those parts plus any overhead part
 --                    equal the bill ex GST to the cent
---   counted_in_part  counted on a job, but not the whole bill
+--   counted_in_part  counted on a job, and those parts plus any overhead part
+--                    are less than the bill ex GST
+-- The three compare as v_bill_allocation_balance balances a bill: the bill ex
+-- GST rounded to the cent, less the counted parts and the overhead part, within
+-- half a cent.
 --
 -- placed_by (descriptive only, never decides counts): xero_link, person
 --   (manual_queue/manual_split with a stored actor), unrecorded (a person
@@ -60,7 +72,8 @@
 -- evidence_hash (D22, JP-20, working rule "take CFO's recommendation": CFO's
 -- proposal in #1134): md5 of one jsonb array whose first element is the
 -- contract version. It covers the bill's status class, total ex GST, lines,
--- credit applied, each row (job, counts, reason, sources, placed amount),
+-- whether the lines are tax inclusive (LineAmountTypes: the engine reads an
+-- Inclusive line as LineAmount less TaxAmount), credit applied, each row (job, counts, reason, sources, placed amount),
 -- overhead and queue status. A payment does not move it: AUTHORISED and PAID
 -- are one class, and amount_due, amount_paid and fully_paid_on are not read.
 -- A changed total, line, credit, status class, row or overhead does. A
@@ -84,7 +97,7 @@ WITH bill AS (
 ),
 -- The engine's own mirror test (v_job_cost_events.trade_mirror_bill).
 mirror AS (
-  SELECT x.xero_invoice_id
+  SELECT DISTINCT x.xero_invoice_id
   FROM public.xero_invoices x
   WHERE x.invoice_type = 'ACCPAY'
     AND (
@@ -170,6 +183,7 @@ row0 AS (
       WHEN b.job_id = p.job_id THEN 'xero_link'
     END AS placed_by,
     COALESCE(public.job_cost_installer_bill(b.line_items), false) AS installer,
+    (m.xero_invoice_id IS NOT NULL) AS mirror_bill,
     COALESCE(bl.by_rows, false) AS blocked_by_rows,
     COALESCE(bl.by_any_row, false) AS blocked_by_any_row,
     COALESCE(q.overhead_ex, 0) > 0 AS has_overhead,
@@ -186,13 +200,16 @@ row0 AS (
   LEFT JOIN blocker bl ON bl.xero_invoice_id = p.xero_invoice_id
   LEFT JOIN public.materials_reconciliation_queue q ON q.xero_invoice_id = p.xero_invoice_id
   LEFT JOIN eng e ON e.xero_invoice_id = p.xero_invoice_id AND e.job_id = p.job_id
-  WHERE NOT EXISTS (SELECT 1 FROM mirror m WHERE m.xero_invoice_id = p.xero_invoice_id)
+  LEFT JOIN mirror m ON m.xero_invoice_id = p.xero_invoice_id
+  -- A mirror is listed only where a person placed it (and never counted).
+  WHERE m.xero_invoice_id IS NULL OR f.source IN ('manual_queue', 'manual_split')
 ),
 row1 AS (
   SELECT r.*,
     CASE
       WHEN r.engine_counts AND r.legacy_job THEN 'not_counted'
       WHEN r.engine_counts THEN 'counted'
+      WHEN r.mirror_bill THEN 'not_counted'
       WHEN r.amount_unreadable OR NOT r.bill_known THEN 'unknown'
       WHEN r.bill_status IN ('VOIDED', 'DELETED') THEN 'not_counted'
       WHEN r.engine_held_unconfirmed OR r.engine_held_not_job_related THEN 'not_counted'
@@ -205,6 +222,7 @@ row1 AS (
       WHEN r.engine_counts AND r.legacy_job THEN 'job_outside_job_profit'
       WHEN r.engine_counts AND r.engine_via_lines THEN 'engine_reads_xero_lines'
       WHEN r.engine_counts THEN 'engine_reads_allocation_rows'
+      WHEN r.mirror_bill THEN 'mirror_bill_person_placed'
       WHEN r.amount_unreadable THEN 'amount_unreadable'
       WHEN NOT r.bill_known THEN 'bill_copy_missing'
       WHEN r.bill_status IN ('VOIDED', 'DELETED') THEN 'bill_voided'
@@ -247,6 +265,7 @@ judged AS (
       ELSE COALESCE(b.status, 'missing')
     END AS status_class,
     b.line_items,
+    b.raw_json ->> 'LineAmountTypes' AS line_amount_types,
     CASE
       WHEN b.raw_json IS NULL OR COALESCE(b.total, 0) <= 0 OR b.sub_total IS NULL THEN NULL
       WHEN (jsonb_typeof(b.raw_json -> 'CreditNotes') = 'array'
@@ -264,12 +283,15 @@ judged AS (
     CASE
       WHEN NOT r.bill_known OR b.sub_total IS NULL OR s.any_unknown THEN 'unknown'
       WHEN b.status IN ('VOIDED', 'DELETED') THEN 'voided'
+      WHEN r.mirror_bill THEN 'trade_mirror'
       WHEN q.status = 'not_job_related' AND s.counted_jobs > 0 THEN 'held'
       WHEN q.status = 'not_job_related' THEN 'not_job_related'
       WHEN s.counted_jobs = 0 AND COALESCE(q.overhead_ex, 0) > 0
            AND abs(round(b.sub_total, 2) - round(q.overhead_ex, 2)) <= 0.005 THEN 'overhead'
       WHEN s.counted_jobs = 0 THEN 'not_counted'
-      WHEN abs(round(b.sub_total, 2) - s.counted_gross_ex - round(COALESCE(q.overhead_ex, 0), 2)) <= 0.005 THEN 'counted_in_full'
+      -- v_bill_allocation_balance's own comparison (remainder within half a cent).
+      WHEN round(b.sub_total, 2) - s.counted_gross_ex - COALESCE(q.overhead_ex, 0) < -0.005 THEN 'over_counted'
+      WHEN abs(round(b.sub_total, 2) - s.counted_gross_ex - COALESCE(q.overhead_ex, 0)) <= 0.005 THEN 'counted_in_full'
       ELSE 'counted_in_part'
     END AS bill_state
   FROM row1 r
@@ -296,6 +318,7 @@ SELECT
   CASE WHEN j.bill_state = 'held' THEN 'not_job_related_mark_on_counted_bill' END AS held_reason,
   (j.overhead_ex > 0) AS overhead_part,
   COALESCE(j.queue_status = 'not_job_related', false) AS not_job_related_mark,
+  j.mirror_bill,
   j.counted_jobs::integer AS bill_counted_jobs,
   -- CFO's amounts. Never in the Context-facing read.
   CASE WHEN j.counts = 'counted' THEN j.counted_ex END AS counted_ex,
@@ -309,6 +332,7 @@ SELECT
     j.status_class,
     j.bill_ex,
     j.line_items,
+    j.line_amount_types,
     -- Credit the engine applies: none known and none shown are the same
     -- (job_cost_credit_share reads 0 for both), so a prepayment landing in
     -- AmountCredited never moves the hash.
@@ -320,6 +344,6 @@ SELECT
 FROM judged j;
 
 COMMENT ON VIEW public.cfo_bill_cost_outcomes IS
-  'Job profit H7, INT-12 (20261029170000): one row per supplier bill (Xero ACCPAY, trade-app mirrors left out) and job it is Xero-linked to, has an actual allocation row on, or is counted on. counts counted (v_job_cost_events has an actual row of the bill on the job and v_job_profit reads the job), not_counted (readable, engine counts none of it here; reason names why) or unknown (the reason cannot be read; never 0). Whether a placement counts is read from the engine, never re-derived. bill_state unknown, voided, held (a not-job-related mark while the engine counts the bill: F1, JP-21, held_reason not_job_related_mark_on_counted_bill), not_job_related, overhead, not_counted, counted_in_full or counted_in_part. placed_by is descriptive only. evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-bill-cost-outcome-v1; a payment does not move it (AUTHORISED and PAID one class; D22 working rule, CFO''s recommendation), a changed total, line, credit, status class, row or overhead does. No history. Amounts are CFO''s: context_job_bill_outcomes drops them. Read only, service role only.';
+  'Job profit H7, INT-12 (20261029170000): one row per supplier bill (Xero ACCPAY; trade-app mirrors left out unless a person placed one) and job it is Xero-linked to, has an actual allocation row on, or is counted on. counts counted (v_job_cost_events has an actual row of the bill on the job and v_job_profit reads the job), not_counted (readable, engine counts none of it here; reason names why) or unknown (the reason cannot be read; never 0). Whether a placement counts is read from the engine, never re-derived. bill_state unknown, voided, trade_mirror (a trade-app mirror a person placed: shown, reason mirror_bill_person_placed, never counted), held (a not-job-related mark while the engine counts the bill: F1, JP-21, held_reason not_job_related_mark_on_counted_bill), not_job_related, overhead, not_counted, over_counted (counted parts plus overhead above the bill ex GST), counted_in_full or counted_in_part (below it), compared as v_bill_allocation_balance balances a bill. placed_by is descriptive only. evidence_hash is md5 of a fixed jsonb array led by the contract version cfo-bill-cost-outcome-v1; a payment does not move it (AUTHORISED and PAID one class; D22 working rule, CFO''s recommendation), a changed total, line, tax-inclusive flag (LineAmountTypes), credit, status class, row or overhead does. No history. Amounts are CFO''s: context_job_bill_outcomes drops them. Read only, service role only.';
 REVOKE ALL ON public.cfo_bill_cost_outcomes FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.cfo_bill_cost_outcomes TO service_role;

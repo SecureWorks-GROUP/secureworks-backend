@@ -252,8 +252,10 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
 - `bills`: `context_job_bill_outcomes` (`20261029170100`): the supplier bills
   placed on this job (its Xero link or an actual allocation row) and where
   Finance's engine counts each one's cost (`where_counted` here, elsewhere,
-  here_and_elsewhere, no_job, held or unknown; `here` and `other_jobs` with
-  `counts` and `reason`), from CFO's `cfo_bill_cost_outcomes`. No amount: an
+  here_and_elsewhere, no_job, trade_app (a trade-app mirror a person placed,
+  reason `mirror_bill_person_placed`), held or unknown; `here` and
+  `other_jobs` with `counts` and `reason`; CFO's `bill_state`, `over_counted`
+  when more is counted than the bill), from CFO's `cfo_bill_cost_outcomes`. No amount: an
   answer with a number or a money key, or on a contract version other than
   `cfo-bill-cost-outcome-v1`, is refused whole (`amount_present`,
   `contract_mismatch`). Null when the read failed, never an empty list;

@@ -22,6 +22,7 @@ DECLARE
   v jsonb; b jsonb; c record; got text[]; want text[];
   j1 constant uuid := 'c7000000-0000-4000-8000-000000000001';
   j2 constant uuid := 'c7000000-0000-4000-8000-000000000002';
+  j3 constant uuid := 'c7000000-0000-4000-8000-000000000005';
 BEGIN
   -- ── the producer's version, on the consumer's answer ──
   v := public.context_job_bill_outcomes(j1);
@@ -34,7 +35,8 @@ BEGIN
   END IF;
 
   -- ── no amount anywhere ──
-  FOREACH v IN ARRAY ARRAY[public.context_job_bill_outcomes(j1), public.context_job_bill_outcomes(j2)] LOOP
+  FOREACH v IN ARRAY ARRAY[public.context_job_bill_outcomes(j1), public.context_job_bill_outcomes(j2),
+                           public.context_job_bill_outcomes(j3)] LOOP
     IF jsonb_path_exists(v, 'strict $.** ? (@.type() == "number")') THEN
       RAISE EXCEPTION 'the Context read carries an amount: a number in %', v;
     END IF;
@@ -114,6 +116,25 @@ BEGIN
   END LOOP;
   SELECT e INTO b FROM jsonb_array_elements(v -> 'bills') e WHERE e ->> 'xero_invoice_id' = 'H7-UNREC';
   IF b -> 'here' ->> 'placed_by' <> 'unrecorded' THEN RAISE EXCEPTION 'J2 H7-UNREC placed_by: %', b; END IF;
+
+  -- ── seen from J3: over-counting passed on by name, a placed mirror shown ──
+  v := public.context_job_bill_outcomes(j3);
+  SELECT array_agg(e ->> 'xero_invoice_id' ORDER BY o) INTO got FROM jsonb_array_elements(v -> 'bills') WITH ORDINALITY t(e, o);
+  want := ARRAY['H7-MIRP', 'H7-OVER1', 'H7-OVER2', 'H7-OVER3'];
+  IF got IS DISTINCT FROM want THEN RAISE EXCEPTION 'J3 bills: %', got; END IF;
+  FOR c IN SELECT * FROM (VALUES
+    ('H7-MIRP', 'trade_app', 'not_counted', 'mirror_bill_person_placed', 'trade_mirror'),
+    ('H7-OVER1', 'here', 'counted', 'engine_reads_allocation_rows', 'over_counted'),
+    ('H7-OVER2', 'here_and_elsewhere', 'counted', 'engine_reads_allocation_rows', 'over_counted'),
+    ('H7-OVER3', 'here', 'counted', 'engine_reads_allocation_rows', 'over_counted')
+  ) AS t(bill, where_counted, counts, reason, bill_state) LOOP
+    SELECT e INTO b FROM jsonb_array_elements(v -> 'bills') e WHERE e ->> 'xero_invoice_id' = c.bill;
+    IF b ->> 'where_counted' IS DISTINCT FROM c.where_counted OR b -> 'here' ->> 'counts' IS DISTINCT FROM c.counts
+       OR b -> 'here' ->> 'reason' IS DISTINCT FROM c.reason OR b ->> 'bill_state' IS DISTINCT FROM c.bill_state THEN
+      RAISE EXCEPTION 'J3: % reads % % % % (expected % % % %)', c.bill, b ->> 'where_counted', b -> 'here' ->> 'counts',
+        b -> 'here' ->> 'reason', b ->> 'bill_state', c.where_counted, c.counts, c.reason, c.bill_state;
+    END IF;
+  END LOOP;
 
   -- ── a job with no bills: an empty list, never a failure, the same version ──
   v := public.context_job_bill_outcomes('c7000000-0000-4000-8000-0000000000ff');

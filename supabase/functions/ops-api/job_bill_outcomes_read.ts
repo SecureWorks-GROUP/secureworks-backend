@@ -12,6 +12,15 @@
 // refused (`contract_mismatch`): producer and consumer move together. A failed
 // read is null with a code, never an empty list, and a code this reader does
 // not know reads as unknown, never as "counts here".
+//
+// bill_state is CFO's, passed on as it stands (cfo-bill-cost-outcome-v1):
+// unknown, voided, trade_mirror, held, not_job_related, overhead, not_counted,
+// over_counted, counted_in_full, counted_in_part. over_counted is more counted
+// (parts plus any overhead part) than the bill ex GST, such as 1200 on a 1000
+// bill or two 700 placements on one: never read it as "in part". trade_mirror
+// is a trade-app mirror bill a person placed on a job: where_counted reads
+// trade_app and here.reason mirror_bill_person_placed, because its cost counts
+// through the trade app's lines, never as this bill.
 
 export const BILL_OUTCOME_CONTRACT_VERSION = "cfo-bill-cost-outcome-v1";
 export const BILL_OUTCOME_SHAPE = "context-job-bill-outcomes-v1";
@@ -21,6 +30,7 @@ export const WHERE_COUNTED = [
   "elsewhere",
   "here_and_elsewhere",
   "no_job",
+  "trade_app",
   "held",
   "unknown",
 ] as const;
@@ -52,12 +62,26 @@ export interface BillPlacement {
   holding_job: boolean | null;
 }
 
+export const BILL_STATES = [
+  "unknown",
+  "voided",
+  "trade_mirror",
+  "held",
+  "not_job_related",
+  "overhead",
+  "not_counted",
+  "over_counted",
+  "counted_in_full",
+  "counted_in_part",
+] as const;
+export type BillState = typeof BILL_STATES[number];
+
 export interface JobBill {
   xero_invoice_id: string;
   invoice_number: string | null;
   supplier: string | null;
   bill_status: string | null;
-  bill_state: string | null;
+  bill_state: BillState;
   held_reason: string | null;
   change_hash: string | null;
   overhead_part: boolean | null;
@@ -170,7 +194,10 @@ export function validateJobBillOutcomes(
       invoice_number: str(b?.invoice_number),
       supplier: str(b?.supplier),
       bill_status: str(b?.bill_status),
-      bill_state: str(b?.bill_state),
+      // A state this reader does not know reads as unknown, never as counted.
+      bill_state: (BILL_STATES as readonly string[]).includes(b?.bill_state)
+        ? b.bill_state as BillState
+        : "unknown",
       held_reason: str(b?.held_reason),
       change_hash: str(b?.change_hash),
       overhead_part: bool(b?.overhead_part),
