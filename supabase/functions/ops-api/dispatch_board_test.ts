@@ -1008,3 +1008,57 @@ Deno.test("arrival: a delivered ASAP order carries no flag and is not counted as
   assertEquals(arrival.orders[0].flag, null);
   assertEquals([arrival.counts.late, arrival.counts.asap_waiting], [0, 0]);
 });
+
+// ── Piece C: the earliest install day ──────────────────────────────────────
+
+Deno.test("arrival: every open order confirmed and no install booked gives the earliest install as one line", () => {
+  // Fixed days (not TODAY) so the weekdays are known: Wed 4/11 is the last
+  // delivery, Thu 5/11 the install.
+  const arrival = dispatchArrival({
+    today: "2026-10-30",
+    installDay: null,
+    boxes: [
+      { supplier_id: "s1", supplier_name: "Stratco", position: 0, delivery_date: "2026-11-02", delivery_date_confirmed_at: "2026-10-01T00:00:00Z" },
+      { supplier_id: "s2", supplier_name: "Metroll", position: 1, delivery_date: "2026-11-04", delivery_date_confirmed_at: "2026-10-01T00:00:00Z" },
+    ],
+    sentEmails: ["s1", "s2"].map((supplier_id) => ({
+      supplier_id,
+      status: "sent",
+      sent_at: "2026-09-30T00:00:00Z",
+    })),
+    orders: [],
+  });
+  assertEquals(arrival.earliest_install, { day: "2026-11-05", after_day: "2026-11-04" });
+  // Each box still says its own next step.
+  assertEquals(
+    arrival.orders.map((o) => o.todo),
+    ["Book the install and tell the client", "Book the install and tell the client"],
+  );
+  assertEquals(arrival.waiting_on_us, [
+    "All materials by Wed 4/11. Book the install from Thu 5/11 and tell the client",
+  ]);
+});
+
+Deno.test("arrival: no earliest install while an order has no confirmed date, or once the install is booked", () => {
+  const boxes = [
+    { supplier_id: "s1", supplier_name: "Stratco", position: 0, delivery_date: "2026-11-02", delivery_date_confirmed_at: "2026-10-01T00:00:00Z" },
+    // A date nobody confirmed.
+    { supplier_id: "s2", supplier_name: "Metroll", position: 1, delivery_date: "2026-11-04" },
+  ];
+  const sentEmails = ["s1", "s2"].map((supplier_id) => ({
+    supplier_id,
+    status: "sent",
+    sent_at: "2026-09-30T00:00:00Z",
+  }));
+  const unconfirmed = dispatchArrival({ today: "2026-10-30", installDay: null, boxes, sentEmails, orders: [] });
+  assertEquals(unconfirmed.earliest_install, null);
+  assert(!unconfirmed.waiting_on_us.some((line) => line.startsWith("All materials")));
+  const booked = dispatchArrival({
+    today: "2026-10-30",
+    installDay: "2026-11-10",
+    boxes: [{ ...boxes[0] }],
+    sentEmails: [sentEmails[0]],
+    orders: [],
+  });
+  assertEquals(booked.earliest_install, null);
+});

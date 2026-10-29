@@ -52,6 +52,7 @@ import {
   dispatchV2FulfilmentOf,
 } from "./dispatch_v2_emails.ts";
 import {
+  DISPATCH_BOOK_INSTALL_TODO,
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
   type DispatchMaterialStageReply,
@@ -60,9 +61,14 @@ import {
   type DispatchMaterialWaitingOn,
   dispatchMaterialWaitingOn,
   dispatchPoMaterialStage,
+  dispatchShortDay,
   dispatchV2BoxStage,
   type DispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
+import {
+  type DispatchEarliestInstall,
+  dispatchEarliestInstall,
+} from "./dispatch_v2_working_days.ts";
 import {
   type DispatchV2Accounts,
   dispatchV2AccountsOf,
@@ -805,8 +811,15 @@ export type DispatchArrival = {
   // At least one order, every one with a confirmed date on or before the
   // install day (or simply confirmed, with no install booked yet).
   all_confirmed_in_time: boolean;
-  // The next thing to do on each order waiting on us, in box order.
+  // The next thing to do on each order waiting on us, in box order. With an
+  // earliest install day known, the orders' "Book the install and tell the
+  // client" lines become one line naming the day (piece C).
   waiting_on_us: string[];
+  // The earliest day to book the install (dispatch_v2_working_days.ts): the
+  // next WA working day after the last open order's confirmed date. Null
+  // when an install is already booked, or while any open order has no
+  // confirmed date.
+  earliest_install: DispatchEarliestInstall | null;
 };
 
 export type DispatchArrivalPayment = {
@@ -1058,6 +1071,14 @@ export function dispatchArrival(
   const open = entries.filter((e) => e.material_stage !== "delivered");
   const onUs = entries.filter((e) => e.waiting_on === "us");
   const unpaid = entries.filter((e) => e.payment?.blocks_job_move === true);
+  const earliest = installDay ? null : dispatchEarliestInstall({
+    today: input.today,
+    orders: entries.map((e) => ({
+      open: e.material_stage !== "delivered",
+      date: e.delivery_date,
+      confirmed: e.date_confirmed,
+    })),
+  });
   return {
     today: input.today,
     install_day: installDay,
@@ -1086,8 +1107,34 @@ export function dispatchArrival(
       entries.every((e) =>
         e.date_confirmed && e.flag !== "after_install"
       ),
-    waiting_on_us: onUs.map((e) => e.todo).filter((t): t is string => !!t),
+    waiting_on_us: dispatchWaitingOnUs(
+      onUs.map((e) => e.todo).filter((t): t is string => !!t),
+      earliest,
+    ),
+    earliest_install: earliest,
   };
+}
+
+// The orders' next steps waiting on us. With an earliest install day known,
+// every "Book the install and tell the client" becomes a single line, in the
+// place of the first one, naming the day, for example "All materials by
+// Wed 4/11. Book the install from Thu 5/11 and tell the client".
+function dispatchWaitingOnUs(
+  todos: string[],
+  earliest: DispatchEarliestInstall | null,
+): string[] {
+  if (!earliest || !todos.includes(DISPATCH_BOOK_INSTALL_TODO)) return todos;
+  const by = earliest.after_day
+    ? `All materials by ${dispatchShortDay(earliest.after_day)}.`
+    : "All materials are in.";
+  const line =
+    `${by} Book the install from ${dispatchShortDay(earliest.day)} and tell the client`;
+  const out: string[] = [];
+  for (const todo of todos) {
+    if (todo !== DISPATCH_BOOK_INSTALL_TODO) out.push(todo);
+    else if (!out.includes(line)) out.push(line);
+  }
+  return out;
 }
 
 // ── One board row ───────────────────────────────────────────────────────────

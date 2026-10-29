@@ -119,6 +119,11 @@ export type DispatchMaterialStageContext = {
 };
 
 // "Mon 2/11" for 2026-11-02: the short day the next-step lines use.
+// The next step on a confirmed order when no install is booked yet. The
+// board swaps it for one line with the earliest install day once every open
+// order has a confirmed date (dispatch_board.ts, piece C).
+export const DISPATCH_BOOK_INSTALL_TODO = "Book the install and tell the client";
+
 export function dispatchShortDay(day: string): string {
   const [y, m, d] = day.split("-").map(Number);
   const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
@@ -185,7 +190,7 @@ export function dispatchMaterialTodo(
       if (context && !context.hasDate) return `Waiting on ${s} for a date`;
       return installBooked
         ? `Waiting on ${s} for the materials`
-        : "Book the install and tell the client";
+        : DISPATCH_BOOK_INSTALL_TODO;
     case "manufacturing":
       return `${s} is making it`;
     case "ready":
