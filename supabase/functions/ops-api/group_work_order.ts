@@ -32,6 +32,7 @@
 
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
+import { calculateTradeInvoiceMoney, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
 import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 
 export const GROUP_WORK_ORDER_FLAG = "group_work_order_v1";
@@ -715,7 +716,7 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
 }
 
 const GROUP_COLUMNS =
-  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at";
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex";
 
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(
@@ -961,6 +962,7 @@ export async function createGroupWorkOrder(
     job_id: jobId,
     work_order_id: workOrderId,
     status: "open",
+    pay_basis: "all_in_12_6_v1",
     share_token: token,
     created_by: caller.userId,
   }).select(
@@ -1403,7 +1405,7 @@ export async function readGroupWorkOrderMyShare(
   if (awaiting !== "needs_hours") {
     const workOrder = await loadWorkOrder(client, String(group.work_order_id));
     try {
-      pot = potFromWorkOrder(workOrder);
+      pot = group.approved_budget_ex != null ? Number(group.approved_budget_ex) : potFromWorkOrder(workOrder);
     } catch (error) {
       if (
         !(error instanceof GroupWorkOrderError) ||
@@ -1424,7 +1426,7 @@ export async function readGroupWorkOrderMyShare(
     );
     myShare = shares[0] ? Number(shares[0].share_ex) : null;
   }
-  return participantShareResponse({
+  const response = participantShareResponse({
     groupId: String(group.id),
     clientSigned: view.signed,
     ownHours,
@@ -1432,6 +1434,39 @@ export async function readGroupWorkOrderMyShare(
     myShareEx: myShare,
     awaiting,
   });
+  if (group.pay_basis === "all_in_12_6_v1") {
+    Object.assign(response, {pay_basis: group.pay_basis, budget_includes_super: true});
+    if (myShare != null) {
+      const pay = await allInSharePay(client, group, myShare);
+      Object.assign(response, {my_budget: myShare, my_share: pay.invoice_ex, my_cash_pay: pay.cash_pay, my_super: pay.super_amount, budget_remainder: pay.budget_remainder});
+    }
+  }
+  return response;
+}
+
+async function allInSharePay(client: any, group: Record<string, unknown>, budget: number) {
+  const { data, error } = await client.rpc("group_work_order_share_pay", {p_group_id: group.id, p_budget_ex: budget});
+  throwQuery(error, "check pay and super within your group allocation");
+  if (!data || !(Number(data.invoice_ex) >= 0)) throw new GroupWorkOrderError("group_share_amount_invalid", "Your group allocation could not be checked.", 503);
+  const canonical = calculateTradeInvoiceMoney({grossEarned: Number(data.invoice_ex), gstOn:false, earningsDate:new Date().toISOString().slice(0,10)});
+  if (canonical.super_rate !== .12 || TRADE_INVOICE_WORKER_WITHHOLD_RATE !== .06 || Math.abs(Number(canonical.company_total_out) - Number(data.company_total_out)) > .001 || Math.abs(Number(canonical.net_pay)-Number(data.cash_pay)) > .001 || Math.abs(Number(canonical.super_amount)-Number(data.super_amount)) > .001) {
+    throw new GroupWorkOrderError("group_super_policy_changed", "The office needs to confirm this group's super policy before invoicing.",409);
+  }
+  return data as Record<string, any>;
+}
+
+export async function assertAllInGroupInvoiceStandalone(client: any, caller: GroupCaller, body: Record<string, any>) {
+  const extras = Array.isArray(body.extra_items) ? body.extra_items : [];
+  const shareItems = extras.filter(isGroupShareInvoiceItem);
+  if (!shareItems.length || !(await groupFeatureOn(client))) return;
+  for (const item of shareItems) {
+    const group = await resolveGroup(client,item);
+    if (group.pay_basis !== "all_in_12_6_v1") continue;
+    requireParticipant(await loadParticipants(client,String(group.id)),caller.userId);
+    if (extras.length !== 1 || Object.keys(body).some(key => !["extra_items","gst_on","notes"].includes(key))) {
+      throw new GroupWorkOrderError("group_share_separate_invoice", "Submit this group share with its own button. Other jobs and extras stay on your weekly invoice.",409);
+    }
+  }
 }
 
 /** Outstanding own group claims, including older work, for the normal invoice. */
@@ -1443,7 +1478,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
   const ids = [...new Set(memberships.map(row => String(row.group_id)))];
   if (!ids.length) return { enabled: true, groups: [] };
   const groups = await rowsOf(client.from("group_work_orders")
-    .select("id, job_id, work_order_id, status, split_frozen_at")
+    .select("id, job_id, work_order_id, status, split_frozen_at, pay_basis, approved_budget_ex")
     .eq("org_id", caller.orgId).in("id", ids).neq("status", "void"), "load your group work orders");
   if (!groups.length) return { enabled: true, groups: [] };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
@@ -1468,7 +1503,10 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     const projection = share.awaiting === "ready"
       ? (await readSplit(client, String(group.id), false)).find(row => String(row.user_id) === caller.userId)
       : null;
-    result.push({ ...share, projected_my_share: projection ? Number(projection.share_ex) : null, job_id: group.job_id, job_number: job.job_number,
+    const projectedBudget = projection ? Number(projection.share_ex) : null;
+    const pay = projectedBudget != null && group.pay_basis === "all_in_12_6_v1" ? await allInSharePay(client,group,projectedBudget) : null;
+    result.push({ ...share, projected_my_share: pay ? Number(pay.invoice_ex) : projectedBudget,
+      ...(pay ? {projected_my_budget: projectedBudget, projected_cash_pay: pay.cash_pay, projected_super: pay.super_amount, budget_remainder: pay.budget_remainder} : {}), job_id: group.job_id, job_number: job.job_number,
       client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
   }
   return { enabled: true, group_job_ids: jobIds, groups: result };
@@ -1851,7 +1889,9 @@ export async function readGroupWorkOrderOffice(
     client_signoff_method: view.signed ? view.signoff?.method : null,
     client_signoff_reason: view.signed ? view.signoff?.waiver_reason : null,
     client_signoff_actor: view.signed ? view.signoff?.captured_by_actor : null,
-    pot_total: workOrder
+    pay_basis: group.pay_basis || "gross_v1",
+    budget_includes_super: group.pay_basis === "all_in_12_6_v1",
+    pot_total: group.approved_budget_ex != null ? Number(group.approved_budget_ex) : workOrder
       ? moneyToCents(workOrder.agreed_labour_ex) == null
         ? null
         : centsToMoney(moneyToCents(workOrder.agreed_labour_ex) || 0)
@@ -2090,7 +2130,8 @@ export async function resolveGroupShareInvoiceExtra(
       "You have no share of this group. Check that your rate and hours are on the job.",
     );
   }
-  const shareEx = Number(mine.share_ex);
+  const shareBudget = Number(mine.share_ex);
+  const shareEx = group.pay_basis === "all_in_12_6_v1" ? Number((await allInSharePay(client,group,shareBudget)).invoice_ex) : shareBudget;
   if (!(shareEx > 0)) {
     throw new GroupWorkOrderError(
       "group_share_zero",

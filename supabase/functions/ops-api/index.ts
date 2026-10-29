@@ -772,6 +772,7 @@ import {
 } from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
+  assertAllInGroupInvoiceStandalone,
   assertGroupJobDraftUsesShare,
   assertGroupWorkOrderInvoiceFence,
   assertLegacyInvoiceNotOnGroupJob,
@@ -13207,6 +13208,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
+            await groupWorkOrderJson(assertAllInGroupInvoiceStandalone(client, {userId:tradeUser.id,orgId:tradeUser.orgId,role:tradeUser.role,isStaff:false},body))
             const { week_start, extra_items, notes: invoiceNotes, draft_id, manual_assignments } = body
             const weeklyShape = hasWeeklyWorkOrderInvoiceShape(body)
 

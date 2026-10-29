@@ -48,6 +48,7 @@ import {
   rateOnDay,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
+  assertAllInGroupInvoiceStandalone,
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
   removeGroupWorkOrderParticipant,
@@ -2206,4 +2207,15 @@ Deno.test("office approval with reason and actor clears sign-off; later hours in
   memory.rows("group_work_orders")[0].hours_changed_at = "2099-01-02T00:00:00Z";
   const after = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {group_id: GROUP});
   assertEquals(after.client_signed, false);
+});
+
+Deno.test("all-in group accepts one isolated share and refuses mixed weekly claims", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders")[0].pay_basis="all_in_12_6_v1";
+  const own={extra_items:[{type:"group share",group_id:GROUP}]};
+  await assertAllInGroupInvoiceStandalone(db.client(),trade(USER_A),own);
+  for(const extra of [{week_start:"2026-10-19"},{extra_items:[...own.extra_items,{type:"travel",quantity:1,rate:10}]},{manual_assignments:[{assignment_id:"a"}]},{final_deductions:[{amount:1}]},{extra_items:[...own.extra_items,...own.extra_items]}]) {
+    await assertRejects(()=>assertAllInGroupInvoiceStandalone(db.client(),trade(USER_A),{...own,...extra}),GroupWorkOrderError);
+  }
 });
