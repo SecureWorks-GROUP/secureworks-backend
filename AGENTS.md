@@ -1179,6 +1179,22 @@ door is `ops-api?action=job_overview` (GET, read only, transcript words never
 in the answer) and `request_job_story` (POST, the verified caller asks). Field
 contract: `docs/context/job-story-text.md`.
 
+Since `20261028190000` the story's money is the database's, never the model's:
+`context_job_story_book` writes fixed lines from Job Profit, the writer
+(`luna-story:v4`) may write no dollar amount outside a complete copied line, and
+the staff read returns the lines as `money` for the page to show word for word.
+Freshness is `context_job_story_full_hash` (card hash plus the book's digest).
+The sweep also wakes a story when `context_job_story_money_sig` moves from the
+story's `checks.money_sig`, keeps waking a finished job for 30 days after
+completion or its newest sign-off, and rewrites stories written without the
+book only while fewer than 10 requests are open. Two traps it closes: the
+sweep keeps every candidate before the lead rule (a capped list let refused
+leads hold its head and nothing was queued), and an `unchanged` finish moves
+`checks.money_sig` on (else a paid bill re-queues the job every tick). Book
+days always carry their year, so the clock never changes its words. Ship the
+writer first: the v3 writer never saves `money_sig`, so the sweep would keep
+rewriting its stories.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses

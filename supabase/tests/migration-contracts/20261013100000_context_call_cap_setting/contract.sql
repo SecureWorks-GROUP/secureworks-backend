@@ -371,7 +371,7 @@ BEGIN
  PERFORM pg_temp.cs_assert(adm ->> 'code' = 'vision_reserve' AND (adm ->> 'shared_calls_ceiling')::integer = 500,
   'the vision admission at 1,000 of 1,500 is its own share, not the cap: ' || adm::text);
  sb := public.context_job_story_budget();
- PERFORM pg_temp.cs_assert((sb ->> 'calls_left')::integer = 80 AND sb ->> 'reason' IS NULL, 'the story budget at 1,000 of 1,500 is its own 80: ' || sb::text);
+ PERFORM pg_temp.cs_assert((sb ->> 'calls_left')::integer = (public.context_job_story_text_policy() ->> 'calls_per_day')::integer AND sb ->> 'reason' IS NULL, 'the story budget at 1,000 of 1,500 is its own daily share: ' || sb::text);
  PERFORM pg_temp.cs_calls(1400);
  sb := public.context_job_story_budget();
  PERFORM pg_temp.cs_assert((sb ->> 'calls_left')::integer = 0 AND sb ->> 'reason' = 'live_reserve', 'the story stops at the ledger''s 1,400 line: ' || sb::text);

@@ -45,6 +45,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
+import { loadTranscriptionPrompt } from './vocabulary.ts'
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -191,7 +192,10 @@ serve(async (req) => {
   }
 
   if (!(await automationLaneEnabled(sb, "capture"))) return jsonResponse({ ok: false, reason: "capture_disabled" })
-  // 3. Call OpenAI Whisper API
+  // 3. Call OpenAI Whisper API, with our word list (staff, suppliers, products, suburbs) as its
+  //    prompt so names are spelled as our records spell them (vocabulary.ts). A failed read only
+  //    shortens the list.
+  const vocabulary = await loadTranscriptionPrompt(sb, DEFAULT_ORG_ID)
   let transcript_text: string
   try {
     const form = new FormData()
@@ -202,6 +206,7 @@ serve(async (req) => {
     form.append('file', audioBlob, `${source_id}.${ext}`)
     form.append('model', WHISPER_MODEL)
     form.append('response_format', 'json')
+    form.append('prompt', vocabulary.prompt)
     const whisperResp = await fetch(WHISPER_ENDPOINT, {
       method: 'POST',
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -275,6 +280,10 @@ serve(async (req) => {
         duration_seconds: input.duration_seconds || null,
         phone: input.phone || null,
         whisper_model: WHISPER_MODEL,
+        // Which word list the recording was transcribed with, for before/after measurement (TP-18).
+        whisper_prompt_version: 'vocabulary-v1',
+        whisper_prompt_chars: vocabulary.prompt.length,
+        whisper_prompt_reads_failed: vocabulary.failed,
         char_count: transcript_text.length,
         ghl_call_id: input.ghl_call_id || null,
         job_match_method: match_method,

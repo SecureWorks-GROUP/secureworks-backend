@@ -21,7 +21,8 @@ page shows no saved story (`job_overview` still serves every other part).
 ## Numbers
 
 `context_job_story_text_policy()` holds every number; change them only by
-migration: `calls_per_day` 80 (story model calls a Perth day),
+migration: `calls_per_day` 240 (story model calls a Perth day; 80 until
+`20261028190000`),
 `lease_minutes` 15, `min_rewrite_minutes` 10, `quiet_minutes` 15,
 `enqueue_per_call` 5, `max_attempts` 3, `retry_minutes` [30, 120],
 `digest` story-digest-v1, `writer` luna-story-writer.
@@ -55,6 +56,57 @@ decisions: a row a split, correct or confirm put on the job is on its card, one 
 decision took off is not, and that moves the timeline rows the digest reads. Meta
 `matching` and `person_placed` sit outside the digest. Contract:
 [job-card-events.md](job-card-events.md).
+
+## The Money block: story-book-v1 (`20261028190000`)
+
+`context_job_story_book(job, as_of)` writes the job's money as fixed plain
+lines from Job Profit (`v_job_profit`, `v_job_cost_events`,
+`v_job_revenue_events`, the engine the Job Profit screen reads): quoted;
+expected cost at the quote; invoiced and collected (ex GST) and by payer;
+owing now per invoice (Xero, inc GST, with its due day); labour, and crew
+invoices by crew member; materials, commission, other and total costs placed;
+priced orders not billed, unpriced orders, supplier invoices emailed with no
+bill placed; bills that probably belong to the job waiting in Bills to place;
+the Xero Project total (a cross-check, never counted as cost); the job work
+order; the margin, or "Margin: Unknown, because ..."; and, unless complete,
+one "Costs incomplete: ..." (or "Money incomplete: ...") line with counts and
+no dollar figure. `job_lines` holds the client sign-off. Figures are the
+engine's, formatted by `context_job_story_money_words`, never worked out
+there. Every number is in `context_job_story_book_policy()`.
+
+The writer sees it as `card.book` (writer input `story-writer-input-v2`) and
+may write no dollar amount outside a complete line copied from it
+(secureworks-jarvis `luna-story:v4`, problem `money_figure`); its Owing now
+lines and, once the money has started, its Costs incomplete line are required
+word for word. The staff read returns it as `money` and the job page shows it
+under the story word for word.
+
+Freshness then reads `context_job_story_full_hash(card)`: the md5 of the
+story-digest-v1 card hash and the book's `digest` (its words). The writer
+input and the staff read both use it, so the first apply reads every story
+stale once.
+
+`context_job_story_money_sig(job)` is the md5 of the raw rows the book is
+built from (Xero invoices and bills, placed bill rows, crew invoice lines on
+the job or on no job naming its number, with their invoice's status and Xero
+bill status, purchase orders, open bills suggested for the job, work orders,
+client sign-offs, Xero Projects, the job's work order and completion time).
+The writer saves it as `checks.money_sig`; a story saved without that key was
+written without the book. The claim keeps it in `claimed_state`, and an
+`unchanged` finish moves `checks.money_sig` on to it, so a change the book
+does not print (a bill paid) wakes the story once, not every tick.
+
+Days in the book carry their year and nothing says "overdue", so the clock
+alone never changes its words or its digest.
+
+Since `20261028190000` the sweep also: wakes on the money signature; keeps a
+complete, completed or archived job awake for 30 days after completion or its
+newest sign-off, without asking the lead rule (a finished job is no lead);
+keeps every candidate before asking the lead rule about the live ones, so a
+lead the rule refuses can never hold the head of the order; leaves a job alone
+for 24 hours (`failed_backoff_hours`) after a request for it closed `failed`;
+and rewrites a story written without the book only while fewer than 10
+requests are open.
 
 ## The queue
 
