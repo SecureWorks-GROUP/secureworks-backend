@@ -1473,22 +1473,42 @@ export async function assertAllInGroupInvoiceStandalone(client: any, caller: Gro
 export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
   if (!(await groupFeatureOn(client))) return { enabled: false, groups: [] };
   if (!caller.orgId) throw new GroupWorkOrderError("group_org_required", "Your organisation could not be checked.", 403);
-  const memberships = await rowsOf(client.from("group_work_order_participants")
-    .select("group_id").eq("user_id", caller.userId), "load your group work orders");
-  const ids = [...new Set(memberships.map(row => String(row.group_id)))];
-  if (!ids.length) return { enabled: true, groups: [] };
-  const groups = await rowsOf(client.from("group_work_orders")
-    .select("id, job_id, work_order_id, status, split_frozen_at, pay_basis, approved_budget_ex")
-    .eq("org_id", caller.orgId).in("id", ids).neq("status", "void"), "load your group work orders");
+  async function paged(make: () => any, what: string) {
+    const rows: Record<string,unknown>[] = [];
+    for (let offset=0;;offset+=500) {
+      const page=await rowsOf(make().range(offset,offset+499),what);
+      rows.push(...page); if(page.length<500) return rows;
+    }
+  }
+  const memberships = await paged(() => client.from("group_work_order_participants")
+    .select("group_id").eq("user_id",caller.userId).order("group_id"),"load your group work orders");
+  const allocations = await paged(() => client.from("job_assignments")
+    .select("job_id,status,role,is_ghost").eq("user_id",caller.userId).order("id"),"load your group allocations");
+  const memberIds=[...new Set(memberships.map(row=>String(row.group_id)))];
+  const assignedIds=[...new Set(allocations.filter(liveAssignment).map(row=>String(row.job_id || "")).filter(Boolean))];
+  const byId = new Map<string,Record<string,unknown>>();
+  for (const [field,ids] of [["id",memberIds],["job_id",assignedIds]] as const) {
+    for(let offset=0;offset<ids.length;offset+=100) {
+      const found=await rowsOf(client.from("group_work_orders")
+        .select("id, job_id, work_order_id, status, split_frozen_at, pay_basis, approved_budget_ex")
+        .eq("org_id",caller.orgId).in(field,ids.slice(offset,offset+100)).neq("status","void"),"load your group work orders");
+      for(const group of found) byId.set(String(group.id),group);
+    }
+  }
+  const groups=[...byId.values()];
   if (!groups.length) return { enabled: true, groups: [] };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
-  const jobs = await rowsOf(client.from("jobs").select("id, job_number, client_name, site_suburb, type")
-    .eq("org_id", caller.orgId).in("id", jobIds), "load your group jobs");
-  // A non-draft, non-rejected line already holds the share. Never offer it twice.
-  const claims = await rowsOf(client.from("trade_invoice_lines")
-    .select("job_id, invoice:trade_invoices!inner(user_id, status)")
-    .eq("line_type", GROUP_SHARE_LINE_TYPE).eq("invoice.user_id", caller.userId)
-    .in("job_id", jobIds), "check your submitted group shares");
+  const jobs: Record<string,unknown>[] = [], claims: Record<string,unknown>[] = [];
+  for(let offset=0;offset<jobIds.length;offset+=100) {
+    const batch=jobIds.slice(offset,offset+100);
+    jobs.push(...await rowsOf(client.from("jobs").select("id, job_number, client_name, site_suburb, type")
+      .eq("org_id",caller.orgId).in("id",batch),"load your group jobs"));
+    // A non-draft, non-rejected line already holds the share. Never offer it twice.
+    claims.push(...await rowsOf(client.from("trade_invoice_lines")
+      .select("job_id, invoice:trade_invoices!inner(user_id, status)")
+      .eq("line_type",GROUP_SHARE_LINE_TYPE).eq("invoice.user_id",caller.userId)
+      .in("job_id",batch),"check your submitted group shares"));
+  }
   const claimed = new Set(claims.filter(row => {
     const invoice = Array.isArray(row.invoice) ? row.invoice[0] : row.invoice;
     return invoice && !GROUP_FENCE_RELEASED_INVOICE_STATUSES.includes(invoice.status);
@@ -1499,6 +1519,14 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     if (claimed.has(String(group.job_id))) continue;
     const job = jobs.find(row => String(row.id) === String(group.job_id));
     if (!job) continue;
+    if (!memberIds.includes(String(group.id))) {
+      // Allocation grants discovery, never another participant's price or pay.
+      result.push({group_id:group.id,job_id:group.job_id,job_number:job.job_number,client_name:job.client_name,
+        site_suburb:job.site_suburb,job_type:job.type,pot_total:null,my_share:null,needs_hours:true,
+        client_signed:null,awaiting:group.split_frozen_at ? "awaiting_office" : "needs_join",
+        group_share_office_review_required:true});
+      continue;
+    }
     const share = await readGroupWorkOrderMyShare(client, caller, { group_id: group.id });
     const projection = share.awaiting === "ready"
       ? (await readSplit(client, String(group.id), false)).find(row => String(row.user_id) === caller.userId)
