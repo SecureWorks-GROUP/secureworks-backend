@@ -29,16 +29,23 @@
 // still runs (job numbers still match), it just knows no orders, and Accept
 // refuses with 503 orders_not_wired instead of guessing where to write.
 //
+// After Accept, the job's payment hold (contract section 3c, rule 8) is read
+// through the board's own dispatch_arrival read (dispatch_board.ts), so
+// Accept, the board and the materials panel use one payment rule.
+//
 // Nothing here writes suppliers.email (the 06:55 Xero sync owns it), Xero, a
 // job, a job status or an order email. The one write is the supplier box's
 // confirmed delivery date, and only when a person presses Accept.
 
 import {
   type ApprovedSupplierSender,
+  perthDay,
   supplierKeyOf,
   type V2Order,
 } from "./dispatch_v2_replies_rules.ts";
 import { dispatchV2FulfilmentOf } from "./dispatch_v2_emails.ts";
+import { dispatchArrivalRead, dispatchPaymentHold } from "./dispatch_board.ts";
+import type { DispatchV2Payment } from "./dispatch_v2_payment.ts";
 
 export type SourceRead<T> = { available: boolean; rows: T[] };
 
@@ -57,6 +64,17 @@ export type SetConfirmedDeliveryResult =
   | { ok: true; confirmed_delivery_date: string }
   | { ok: false; status: number; code: string; message: string };
 
+// The job's payment hold after Accept. hold: true while any pay-first box on
+// the job is unpaid, false when none is, null when the boxes or the account
+// list could not be read (read "failed"). box_payment is the accepted box's
+// payment object (null when not found or not read).
+export type PaymentHoldRead = {
+  read: "ok" | "failed";
+  hold: boolean | null;
+  suppliers: string[];
+  box_payment: DispatchV2Payment | null;
+};
+
 export interface DispatchRepliesSources {
   /** Sent orders (sent or send_unknown), newest first: those sent on or
    * after `sentSince`, plus every sent order on `jobIds`. */
@@ -74,6 +92,16 @@ export interface DispatchRepliesSources {
   setConfirmedDeliveryDate(
     input: SetConfirmedDeliveryInput,
   ): Promise<SetConfirmedDeliveryResult>;
+  /** After Accept: the job's payment hold and the accepted box's payment.
+   * Never throws: a failed read answers read "failed". Optional so an older
+   * stand-in still works; left out, Accept answers as it did before the
+   * payment step. */
+  paymentHold?(input: {
+    orgId: string;
+    jobId: string;
+    supplierId: string | null;
+    now: string;
+  }): Promise<PaymentHoldRead>;
 }
 
 // The supplier box's delivery_date_source for a date taken from a supplier's
@@ -298,6 +326,42 @@ export function postgrestDispatchRepliesSources(
         };
       }
       return { ok: true, confirmed_delivery_date: input.date };
+    },
+
+    async paymentHold(input) {
+      const failed: PaymentHoldRead = {
+        read: "failed",
+        hold: null,
+        suppliers: [],
+        box_payment: null,
+      };
+      try {
+        const today = perthDay(input.now) ?? input.now.slice(0, 10);
+        const read = await dispatchArrivalRead(
+          client,
+          input.jobId,
+          input.orgId,
+          today,
+        );
+        const hold = dispatchPaymentHold(read.arrival);
+        if (hold === null) return failed;
+        const entry = (read.arrival?.orders || []).find((o) =>
+          o.source === "supplier_box" && !!input.supplierId &&
+          o.supplier_id === input.supplierId
+        );
+        return {
+          read: "ok",
+          hold,
+          suppliers: read.arrival?.payment?.unpaid_suppliers ?? [],
+          box_payment: entry?.payment ?? null,
+        };
+      } catch (error) {
+        console.error(
+          "[dispatch_v2_replies] payment hold read failed:",
+          (error as Error)?.message ?? error,
+        );
+        return failed;
+      }
     },
   };
 }

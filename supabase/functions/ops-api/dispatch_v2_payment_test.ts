@@ -27,7 +27,12 @@ import {
   dispatchMaterialWaitingOn,
   dispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
-import { dispatchArrival, dispatchArrivalRead } from "./dispatch_board.ts";
+import {
+  dispatchArrival,
+  dispatchArrivalRead,
+  dispatchPaymentHold,
+} from "./dispatch_board.ts";
+import { postgrestDispatchRepliesSources } from "./dispatch_v2_replies_sources.ts";
 import {
   DISPATCH_V2_MARK_PAID_ACTION,
   DISPATCH_V2_PAYMENT_ACTIONS,
@@ -1635,4 +1640,104 @@ Deno.test("no date: Mark paid on a box with no date leaves it off the waiting-on
     "Waiting on Lysaght for a date",
   ]);
   assert(!answer.arrival.arrival.waiting_on_us.some((line: string) => line.includes("Book the install")));
+});
+
+// ── A7: hold the job move while a box is unpaid ─────────────────────────────
+
+// Only Stratco (on account) and Lysaght (pay first) on the job.
+function twoBoxes(): Record<string, Row[]> {
+  const tables = fixture();
+  tables.job_material_suppliers = tables.job_material_suppliers.filter((b) =>
+    b.id === BOX.stratco || b.id === BOX.lysaght
+  );
+  return tables;
+}
+
+Deno.test("hold: the Arrival line counts the unpaid boxes and names their suppliers", async () => {
+  const { client } = makeClient(twoBoxes());
+  const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+  assertEquals(read.arrival.counts.unpaid, 1);
+  assertEquals(read.arrival.counts.held_by_payment, 0);
+  assertEquals(read.arrival.payment, {
+    any_unpaid: true,
+    unpaid_suppliers: ["Lysaght"],
+  });
+  assertEquals(read.payment_hold, true);
+  assertEquals(dispatchPaymentHold(read.arrival), true);
+});
+
+Deno.test("hold: a held confirmed date is counted; paying every box lifts the hold", async () => {
+  const tables = twoBoxes();
+  tables.job_material_suppliers = tables.job_material_suppliers.map((b) =>
+    b.id === BOX.lysaght ? confirmedBox({ position: 1 }) : b
+  );
+  const { client } = makeClient(tables);
+  const before: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+  assertEquals([before.arrival.counts.unpaid, before.arrival.counts.held_by_payment], [1, 1]);
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+  });
+  assertEquals(answer.arrival.payment_hold, false);
+  assertEquals(answer.arrival.arrival.payment, {
+    any_unpaid: false,
+    unpaid_suppliers: [],
+  });
+  assertEquals(answer.arrival.arrival.counts.unpaid, 0);
+});
+
+Deno.test("hold: a delivered box never holds the job; Pay on lifts it too", async () => {
+  for (const extra of [
+    { material_stage: "delivered", material_stage_set_at: PAID_AT },
+    { pay_on: "pickup", pay_on_set_at: PAID_AT, pay_on_set_by_email: SHAUN.email },
+  ]) {
+    const tables = twoBoxes();
+    tables.job_material_suppliers = tables.job_material_suppliers.map((b) =>
+      b.id === BOX.lysaght ? { ...b, ...extra } : b
+    );
+    const { client } = makeClient(tables);
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    assertEquals(read.payment_hold, false);
+  }
+});
+
+Deno.test("hold: unknown when the account list or the Arrival line could not be read", async () => {
+  for (const table of ["dispatch_approved_supplier_emails", "job_material_suppliers"]) {
+    const { client } = makeClient(twoBoxes(), { fail: [table] });
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    assertEquals(read.payment_hold, null, table);
+    if (read.arrival) assertEquals(read.arrival.payment, null);
+  }
+  assertEquals(dispatchPaymentHold(null), null);
+});
+
+Deno.test("hold: Accept's payment read names the hold and the accepted box's payment", async () => {
+  const { client } = makeClient(twoBoxes());
+  const sources = postgrestDispatchRepliesSources(client);
+  const held = await sources.paymentHold!({
+    orgId: ORG,
+    jobId: JOB.fence,
+    supplierId: SUP.lysaght,
+    now: NOW,
+  });
+  assertEquals([held.read, held.hold, held.suppliers], ["ok", true, ["Lysaght"]]);
+  assertEquals(held.box_payment?.state, "unpaid");
+  // The on-account box: no payment needed, the job is still held by Lysaght.
+  const stratco = await sources.paymentHold!({
+    orgId: ORG,
+    jobId: JOB.fence,
+    supplierId: SUP.stratco,
+    now: NOW,
+  });
+  assertEquals([stratco.hold, stratco.box_payment?.state], [true, "not_needed"]);
+  // A failed read never throws: it says failed.
+  const { client: down } = makeClient(twoBoxes(), {
+    fail: ["dispatch_approved_supplier_email_links"],
+  });
+  const failed = await postgrestDispatchRepliesSources(down).paymentHold!({
+    orgId: ORG,
+    jobId: JOB.fence,
+    supplierId: SUP.lysaght,
+    now: NOW,
+  });
+  assertEquals(failed, { read: "failed", hold: null, suppliers: [], box_payment: null });
 });

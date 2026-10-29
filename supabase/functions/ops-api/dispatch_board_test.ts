@@ -576,7 +576,9 @@ Deno.test("arrival: solid when confirmed, ring when not, red when sent with no d
       ["Draft Co", "none", "not_sent", false],
     ],
   );
-  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, open: 5, on_us: 1, extra_open: 0 });
+  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, open: 5, on_us: 1, extra_open: 0, unpaid: 0, held_by_payment: 0 });
+  // No account list passed: the payment is unknown.
+  assertEquals(arrival.payment, null);
   assertEquals(arrival.all_confirmed_in_time, false);
   // The install day itself is in time.
   const onDay = dispatchArrival({

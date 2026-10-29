@@ -24,6 +24,7 @@ import {
 } from "./dispatch_v2_replies_store.ts";
 import type {
   DispatchRepliesSources,
+  PaymentHoldRead,
   SetConfirmedDeliveryInput,
 } from "./dispatch_v2_replies_sources.ts";
 import {
@@ -381,6 +382,19 @@ class FakeSources implements DispatchRepliesSources {
   wired = true;
   orders = baseOrders();
   writes: SetConfirmedDeliveryInput[] = [];
+  // The job's payment hold after Accept (the board's read in production).
+  // Nothing unpaid by default; a test may swap it or take it away.
+  holdReads: Array<{ jobId: string; supplierId: string | null }> = [];
+  hold: PaymentHoldRead = {
+    read: "ok",
+    hold: false,
+    suppliers: [],
+    box_payment: null,
+  };
+  paymentHold?: DispatchRepliesSources["paymentHold"] = (input) => {
+    this.holdReads.push({ jobId: input.jobId, supplierId: input.supplierId });
+    return Promise.resolve(this.hold);
+  };
   listOrders(_org: string, opts: { sentSince: string; jobIds?: string[] }) {
     if (!this.wired) return Promise.resolve({ available: false, rows: [] });
     return Promise.resolve({
@@ -1104,4 +1118,63 @@ Deno.test("presses from the terminal must name a person in users", async () => {
 Deno.test("an unknown action is refused", async () => {
   const t = setup();
   await refused(t.run("dispatch_v2_replies_nope"), 400, "unknown_action");
+});
+
+// ── Payment step, rule 8: the job move waits while a box is unpaid ──────────
+
+const UNPAID_BOX: any = { terms: "pay_first", state: "unpaid", holds_stage: true };
+
+Deno.test("accept: nothing unpaid keeps the offer and says there is no hold", async () => {
+  const t = await scanned();
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals(r.stage_move_offer.label, "Move to Order Confirmed?");
+  assertEquals([r.stage_move_held, r.payment_hold, r.box_payment], [null, false, null]);
+  // Read once, after the date was written, for the accepted order's box.
+  assertEquals(t.sources.holdReads, [{ jobId: J1, supplierId: S_STRATCO }]);
+});
+
+Deno.test("accept: an unpaid pay-first box withholds the offer and names the supplier", async () => {
+  const t = await scanned();
+  t.sources.hold = {
+    read: "ok",
+    hold: true,
+    suppliers: ["Stratco WA"],
+    box_payment: UNPAID_BOX,
+  };
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals(r.stage_move_offer, null);
+  assertEquals(r.stage_move_held, { reason: "unpaid", suppliers: ["Stratco WA"] });
+  assertEquals(r.payment_hold, true);
+  assertEquals(r.box_payment, UNPAID_BOX);
+  // The date is still saved and the job is not moved.
+  assertEquals(r.order.confirmed_delivery_date, "2026-10-27");
+  assertEquals(r.job_status_changed, false);
+});
+
+Deno.test("accept: a payment that cannot be read withholds the offer too", async () => {
+  const t = await scanned();
+  t.sources.hold = { read: "failed", hold: null, suppliers: [], box_payment: null };
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals(r.stage_move_offer, null);
+  assertEquals(r.stage_move_held, { reason: "payment_unknown", suppliers: [] });
+  assertEquals(r.payment_hold, null);
+});
+
+Deno.test("accept: no offer to hold on a repair job; an older stand-in answers as before", async () => {
+  const t = await scanned();
+  t.sources.hold = { read: "ok", hold: true, suppliers: ["Stratco WA"], box_payment: null };
+  t.store.jobs.find((j) => j.job_id === J1)!.type = "repair";
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals([r.stage_move_offer, r.stage_move_held, r.payment_hold], [null, null, true]);
+
+  const old = await scanned();
+  old.sources.paymentHold = undefined;
+  const s2 = old.store.suggestions.find((x) => x.order_id === O1)!;
+  const r2 = await old.run("dispatch_v2_suggestion_accept", { suggestion_id: s2.id });
+  assertEquals(r2.stage_move_offer.label, "Move to Order Confirmed?");
+  assertEquals([r2.stage_move_held, r2.payment_hold, r2.box_payment], [null, null, null]);
 });

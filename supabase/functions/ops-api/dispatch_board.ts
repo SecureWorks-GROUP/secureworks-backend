@@ -777,13 +777,39 @@ export type DispatchArrival = {
     open: number;
     on_us: number;
     extra_open: number;
+    // Pay-first boxes not paid yet (and not delivered), and boxes whose
+    // confirmed date the payment gate is holding (contract section 3c).
+    unpaid: number;
+    held_by_payment: number;
   };
+  // Whether any pay-first box is unpaid (rule 8: the job-wide "Move to Order
+  // Confirmed?" offer is withheld while it is). Null when the account list
+  // was not read: the payment is unknown and the screen keeps today's
+  // behaviour.
+  payment: DispatchArrivalPayment | null;
   // At least one order, every one with a confirmed date on or before the
   // install day (or simply confirmed, with no install booked yet).
   all_confirmed_in_time: boolean;
   // The next thing to do on each order waiting on us, in box order.
   waiting_on_us: string[];
 };
+
+export type DispatchArrivalPayment = {
+  any_unpaid: boolean;
+  // The unpaid boxes' supplier names, in box order.
+  unpaid_suppliers: string[];
+};
+
+/** The job-wide payment hold (rule 8): true while any pay-first box on the
+ * job is unpaid, false when none is, null when that is not known (the
+ * Arrival line or the account list could not be read). The board row, the
+ * dispatch_arrival read and Accept on a supplier reply all use this. */
+export function dispatchPaymentHold(
+  arrival: DispatchArrival | null | undefined,
+): boolean | null {
+  if (!arrival || !arrival.payment) return null;
+  return arrival.payment.any_unpaid;
+}
 
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -1008,6 +1034,7 @@ export function dispatchArrival(
   const confirmed = entries.filter((e) => e.date_confirmed);
   const open = entries.filter((e) => e.material_stage !== "delivered");
   const onUs = entries.filter((e) => e.waiting_on === "us");
+  const unpaid = entries.filter((e) => e.payment?.blocks_job_move === true);
   return {
     today: input.today,
     install_day: installDay,
@@ -1022,7 +1049,15 @@ export function dispatchArrival(
       open: open.length,
       on_us: onUs.length,
       extra_open: open.filter((e) => e.extra).length,
+      unpaid: unpaid.length,
+      held_by_payment: entries.filter((e) => e.held_by_payment).length,
     },
+    payment: input.accounts?.readOk
+      ? {
+        any_unpaid: unpaid.length > 0,
+        unpaid_suppliers: unpaid.map((e) => e.supplier_name || "a supplier"),
+      }
+      : null,
     all_confirmed_in_time: entries.length > 0 &&
       entries.every((e) =>
         e.date_confirmed && e.flag !== "after_install"
@@ -1062,6 +1097,9 @@ export type DispatchBoardRow = {
   // Whether the card is waiting on us, and what to do, in plain words: the
   // job's own step (order the materials, book the install) then each order's.
   waiting: DispatchBoardWaiting;
+  // True while any pay-first box is unpaid: the screen hides the job-wide
+  // "Move to Order Confirmed?" offer. Null when not known.
+  payment_hold: boolean | null;
 };
 
 export type DispatchBoardWaiting = {
@@ -1194,6 +1232,7 @@ export function dispatchBoardRow(
     moves: dispatchBoardMoves(stage),
     arrival,
     waiting: dispatchBoardWaiting(stage, arrival),
+    payment_hold: dispatchPaymentHold(arrival),
   };
 }
 
@@ -1831,6 +1870,8 @@ export async function dispatchArrivalRead(
     accounts_read: accounts?.readOk ? "ok" : "failed",
     // The matched supplier replies: failed = no reply moves.
     replies_read: replies.error ? "failed" : "ok",
+    // True while any pay-first box is unpaid; null when not known.
+    payment_hold: dispatchPaymentHold(arrival),
     // What the job is waiting on us for (null when it is not on the board).
     waiting: stage ? dispatchBoardWaiting(stage, arrival) : null,
   };
