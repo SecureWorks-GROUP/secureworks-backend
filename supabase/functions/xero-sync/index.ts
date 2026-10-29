@@ -264,7 +264,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'sync_supplier_credit_notes': {
         // Reads Xero only (TP-07 slice 1); off until xero_supplier_credit_notes_v1. Also runs inside sync_invoices.
         const { accessToken, tenantId } = await getToken(sb)
-        return json(await syncSupplierCreditNotes(sb, DEFAULT_ORG_ID, tenantId,
+        return json(await syncSupplierCreditNotes(sb as any, DEFAULT_ORG_ID, tenantId,
           (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers)))
       }
       case 'sync_bank_transactions':
