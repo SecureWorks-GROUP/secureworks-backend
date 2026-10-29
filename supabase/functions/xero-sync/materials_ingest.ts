@@ -154,6 +154,9 @@ export const HELD_QUEUE_REASONS = new Set<string>([
   "xero_link_conflict",
   "duplicate_document",
   "installer_confirm",
+  // A person undid the AI bill reader's placement (20261028173000): no
+  // automatic path places that bill again; a person does.
+  "ai_undone",
 ]);
 
 // Installer bills: any money line on subcontractor labour (306, 301). The same

@@ -1394,6 +1394,14 @@ import {
   markReconNotJobRelated as _markReconNotJobRelated,
   splitReconRow as _splitReconRow,
 } from './materials_recon.ts'
+// AI bill reader (20261028173000): staff doors over what the Jarvis reader did.
+import {
+  MaterialsAiError,
+  listMaterialsAiPlacements,
+  materialsAiStatus,
+  undoMaterialsAiPlacement,
+  updateMaterialsAiSettings,
+} from './materials_ai.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -9267,6 +9275,41 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           actor: receiptActor(requestActor, authMode),
           orgId: DEFAULT_ORG_ID,
         }))
+
+      // ── AI bill reader: what it placed, why, and one-click Undo ──
+      // The reader runs in Jarvis and writes only through materials_ai_apply.
+      // Undo takes back only the AI's own row and refuses once a person has
+      // changed the bill; an undone bill is never read by the AI again.
+      case 'materials_ai_status':
+      case 'materials_ai_placements':
+      case 'materials_ai_undo':
+      case 'materials_ai_settings': {
+        try {
+          if (action === 'materials_ai_status') return json(await materialsAiStatus(client))
+          if (action === 'materials_ai_placements') {
+            return json(await listMaterialsAiPlacements(client, {
+              view: url.searchParams.get('view'),
+              limit: Number(url.searchParams.get('limit')) || 100,
+              since: url.searchParams.get('since'),
+            }))
+          }
+          if (req.method !== 'POST') throw new ApiError('POST required', 405)
+          if (action === 'materials_ai_undo') {
+            return json(await undoMaterialsAiPlacement(client, {
+              placementId: body.placement_id ?? body.placementId ?? null,
+              actor: receiptActor(requestActor, authMode),
+              note: typeof body.note === 'string' ? body.note : null,
+            }))
+          }
+          return json(await updateMaterialsAiSettings(client, {
+            body,
+            actor: receiptActor(requestActor, authMode),
+          }))
+        } catch (err) {
+          if (err instanceof MaterialsAiError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
 
       case 'list_work_orders':
         if (url.searchParams.get('kind') === 'job') {
