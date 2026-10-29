@@ -576,7 +576,7 @@ Deno.test("arrival: solid when confirmed, ring when not, red when sent with no d
       ["Draft Co", "none", "not_sent", false],
     ],
   );
-  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, open: 5, on_us: 1, extra_open: 0, unpaid: 0, held_by_payment: 0 });
+  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, asap_waiting: 0, open: 5, on_us: 1, extra_open: 0, unpaid: 0, held_by_payment: 0 });
   // No account list passed: the payment is unknown.
   assertEquals(arrival.payment, null);
   assertEquals(arrival.all_confirmed_in_time, false);
@@ -951,4 +951,60 @@ Deno.test("dispatch_arrival: a staff read only", () => {
   assertEquals(refused.ok, false);
   assert(!LEAD_INSTALLER_READ_ACTIONS.has("dispatch_arrival"));
   assert(!AGENT_READ_ALLOWED_ACTIONS.has("dispatch_arrival"));
+});
+
+// ── Piece C: an ASAP order is waiting, not late ─────────────────────────────
+
+Deno.test("arrival: a sent ASAP order with no date is waiting, not late; Pick a date with no date is still red", () => {
+  const install = addDays(TODAY, 10);
+  const sent = (supplier_id: string, dateLine: string) => ({
+    supplier_id,
+    status: "sent",
+    sent_at: "2026-09-30T00:00:00Z",
+    body_text: `Hi Team, could we please order the following for delivery:\n\nDate: ${dateLine}\nAddress: 1 Test St\n`,
+  });
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: install,
+    boxes: [
+      { supplier_id: "s1", supplier_name: "Asap Co", position: 0 },
+      { supplier_id: "s2", supplier_name: "Picked Co", position: 1 },
+      // ASAP asked, but the date that came back is after the install: red.
+      { supplier_id: "s3", supplier_name: "Late Co", position: 2, delivery_date: addDays(TODAY, 12), delivery_date_confirmed_at: "2026-10-01T00:00:00Z" },
+      // Not sent yet: the box's own ASAP choice changes nothing.
+      { supplier_id: "s4", supplier_name: "Draft Co", position: 3, order_date_mode: "asap" },
+    ],
+    sentEmails: [sent("s1", "ASAP"), sent("s2", ""), sent("s3", "ASAP")],
+    orders: [],
+  });
+  assertEquals(
+    arrival.orders.map((o) => [o.supplier_name, o.date_mode, o.flag]),
+    [
+      ["Asap Co", "asap", "asap"],
+      ["Picked Co", "date", "no_date"],
+      ["Late Co", "asap", "after_install"],
+      ["Draft Co", "asap", "not_sent"],
+    ],
+  );
+  assertEquals(
+    [arrival.counts.late, arrival.counts.asap_waiting, arrival.all_confirmed_in_time],
+    [2, 1, false],
+  );
+});
+
+Deno.test("arrival: a delivered ASAP order carries no flag and is not counted as waiting", () => {
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: null,
+    boxes: [{ supplier_id: "s1", supplier_name: "Asap Co", position: 0, material_stage: "delivered", material_stage_set_at: "2026-10-02T00:00:00Z" }],
+    sentEmails: [{
+      supplier_id: "s1",
+      status: "sent",
+      sent_at: "2026-09-30T00:00:00Z",
+      body_text: "Hi Team,\n\nDate: ASAP\n",
+    }],
+    orders: [],
+  });
+  assertEquals(arrival.orders[0].flag, null);
+  assertEquals([arrival.counts.late, arrival.counts.asap_waiting], [0, 0]);
 });

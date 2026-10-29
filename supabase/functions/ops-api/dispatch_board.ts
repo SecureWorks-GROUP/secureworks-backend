@@ -703,6 +703,7 @@ export type DispatchArrivalMark = "solid" | "ring" | "none";
 export type DispatchArrivalFlag =
   | "not_sent"
   | "no_date"
+  | "asap"
   | "after_install"
   | null;
 
@@ -729,9 +730,11 @@ export type DispatchArrivalOrder = {
   box_date_set_by_email: string | null;
   // solid = confirmed date, ring = a date not confirmed, none = no date.
   mark: DispatchArrivalMark;
-  // The red cases: no date yet on a sent order, or a date after the install.
-  // not_sent is an order still being put together (no red). An extra order
-  // and a delivered order never carry a red flag.
+  // The red cases: no date yet on a sent "Pick a date" order, or a date
+  // after the install. not_sent is an order still being put together (no
+  // red). asap is a sent ASAP order with no date back yet (piece C): the
+  // supplier was not asked for a day, so it is waiting, not late (no red).
+  // An extra order and a delivered order never carry a red flag.
   flag: DispatchArrivalFlag;
   // Where the materials are at (dispatch_v2_material_stage.ts): the stage,
   // whether a person set it ('set'), it was worked out from the box
@@ -780,7 +783,10 @@ export type DispatchArrival = {
     orders: number;
     sent: number;
     confirmed: number;
+    // Red flags: no_date and after_install. An ASAP order is never late.
     late: number;
+    // Sent ASAP orders with no date back yet (flag asap, piece C).
+    asap_waiting: number;
     // Orders not delivered yet, those waiting on us, and the extra orders not
     // delivered yet.
     open: number;
@@ -847,7 +853,8 @@ function arrivalEntry(
   const delivered = base.material_stage === "delivered";
   let flag: DispatchArrivalFlag = null;
   if (!base.delivery_date) {
-    flag = base.order_sent ? (delivered ? null : "no_date") : "not_sent";
+    if (!base.order_sent) flag = "not_sent";
+    else if (!delivered) flag = base.date_mode === "asap" ? "asap" : "no_date";
   } else if (
     installDay && base.delivery_date > installDay && !base.extra && !delivered
   ) {
@@ -1062,6 +1069,7 @@ export function dispatchArrival(
       late: entries.filter((e) =>
         e.flag === "no_date" || e.flag === "after_install"
       ).length,
+      asap_waiting: entries.filter((e) => e.flag === "asap").length,
       open: open.length,
       on_us: onUs.length,
       extra_open: open.filter((e) => e.extra).length,
