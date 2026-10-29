@@ -29,6 +29,17 @@ BEGIN
    problems := problems || format('%s md5 %s', x.sig, coalesce(live, '<missing>'));
   END IF;
  END LOOP;
+ -- The two functions this migration added and this rollback drops: only its own body (or none,
+ -- a second run). A later body (job profit TP-13, 20261029160000) would be dropped without a word.
+ FOR x IN SELECT * FROM (VALUES
+  ('public.context_job_story_money_sig(uuid)', 'dea95169f891563e26f40b1c340897b9'),
+  ('public.context_job_story_book(uuid,timestamptz)', 'bd9484273117b728d1d7c021ea6ca4c1')
+ ) v(sig, own) LOOP
+  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
+  IF live IS NOT NULL AND live <> x.own THEN
+   problems := problems || format('%s md5 %s', x.sig, live);
+  END IF;
+ END LOOP;
  IF cardinality(problems) > 0 THEN
   RAISE EXCEPTION 'context_story_money_book_down_refused: %; a later body is live, roll that back first', array_to_string(problems, '; ');
  END IF;
