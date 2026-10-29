@@ -749,6 +749,7 @@ DECLARE pol jsonb := public.context_job_story_book_policy(); p record;
  v_lines text[] := '{}'; v_job_lines text[] := '{}'; v_reasons text[] := '{}'; v_cost_reasons integer := 0;
  v_txt text; v_n integer; v_amt numeric; v_why text; v_complete boolean; v_started boolean; v_incomplete text;
  v_likely_n integer; v_likely_ex numeric; v_priced_n integer; w record; s record;
+ v_lanes_unknown text[] := '{}'; v_expect_reason text;
 BEGIN
  IF p_job_id IS NULL OR NOT EXISTS (SELECT 1 FROM public.jobs jb WHERE jb.id = p_job_id) THEN
   RETURN NULL;
@@ -772,10 +773,25 @@ BEGIN
  v_lines := v_lines || CASE WHEN p.quoted_ex IS NOT NULL THEN 'Quoted: ' || public.context_job_story_money_words(p.quoted_ex) || ' ex GST.'
                             ELSE 'Quoted: no sent quote is on record.' END;
  IF p.expected_source IS NOT NULL THEN
-  v_lines := v_lines || ('Expected cost at the quote: ' || public.context_job_story_money_words(p.expected_cost_ex) || ' ex GST (labour '
-   || public.context_job_story_money_words(coalesce(p.expected_labour_ex, 0)) || ', materials '
-   || public.context_job_story_money_words(coalesce(p.expected_materials_ex, 0)) || ', commission '
-   || public.context_job_story_money_words(coalesce(p.expected_commission_ex, 0)) || ').');
+  -- TP-13 review: a lane the quote left unknown is "not known", never $0.00,
+  -- and the total is then partial (expected_cost_lane_missing). A lane the
+  -- quote fixed at zero still reads $0.00.
+  IF p.expected_labour_ex IS NULL THEN v_lanes_unknown := v_lanes_unknown || 'labour'::text; END IF;
+  IF p.expected_materials_ex IS NULL THEN v_lanes_unknown := v_lanes_unknown || 'materials'::text; END IF;
+  IF p.expected_commission_ex IS NULL THEN v_lanes_unknown := v_lanes_unknown || 'commission'::text; END IF;
+  v_lines := v_lines || ('Expected cost at the quote: '
+   || CASE WHEN cardinality(v_lanes_unknown) > 0 THEN 'at least ' ELSE '' END
+   || public.context_job_story_money_words(p.expected_cost_ex) || ' ex GST'
+   || CASE WHEN cardinality(v_lanes_unknown) > 0 THEN ', partial' ELSE '' END || ' (labour '
+   || coalesce(public.context_job_story_money_words(p.expected_labour_ex), 'not known') || ', materials '
+   || coalesce(public.context_job_story_money_words(p.expected_materials_ex), 'not known') || ', commission '
+   || coalesce(public.context_job_story_money_words(p.expected_commission_ex), 'not known') || ').');
+  IF cardinality(v_lanes_unknown) > 0 THEN
+   v_expect_reason := 'the expected cost at the quote is partial, its '
+    || CASE cardinality(v_lanes_unknown) WHEN 1 THEN v_lanes_unknown[1] || ' is'
+       WHEN 2 THEN v_lanes_unknown[1] || ' and ' || v_lanes_unknown[2] || ' are'
+       ELSE 'labour, materials and commission are' END || ' not known';
+  END IF;
  END IF;
 
  -- Invoiced, collected, by payer, owing now
@@ -914,22 +930,28 @@ BEGIN
    || ' emailed but its bill is not placed');
   v_cost_reasons := v_cost_reasons + 1;
  END IF;
- v_complete := coalesce(p.margin_ok, false) AND cardinality(v_reasons) = 0;
+ -- The expectation being partial does not touch the actual margin, so it is
+ -- named after the margin line is built and never makes it "so far"; it
+ -- still keeps the book from reading complete.
+ v_complete := coalesce(p.margin_ok, false) AND cardinality(v_reasons) = 0 AND v_expect_reason IS NULL;
  v_started := coalesce(p.invoice_count, 0) > 0 OR coalesce(p.actual_cost_events, 0) > 0 OR v_likely_n > 0 OR v_priced_n > 0
   OR coalesce(p.ordered_not_billed_count, 0) > 0 OR coalesce(p.invoice_emailed_count, 0) > 0 OR coalesce(p.draft_revenue_ex, 0) > 0;
  v_lines := v_lines || CASE WHEN coalesce(p.margin_ok, false) AND p.profit_ex IS NOT NULL
   THEN 'Margin: ' || public.context_job_story_money_words(p.profit_ex) || ' ex GST profit, ' || p.margin_pct::text || '% of invoiced'
-       || CASE WHEN v_complete THEN '.' ELSE ', on the costs placed so far.' END
+       || CASE WHEN cardinality(v_reasons) = 0 THEN '.' ELSE ', on the costs placed so far.' END
   ELSE 'Margin: Unknown, because ' || coalesce(v_reasons[1], CASE WHEN p.holding_job THEN 'this is a holding job, not a customer''s job'
                                                                ELSE 'Job Profit does not show one' END) || '.' END;
  IF NOT v_complete THEN
-  v_incomplete := CASE WHEN v_cost_reasons > 0 THEN 'Costs incomplete: ' ELSE 'Money incomplete: ' END
-   || coalesce(array_to_string(v_reasons, '; '), 'Job Profit does not show a margin') || '.';
-  IF cardinality(v_reasons) = 0 THEN
-   v_incomplete := 'Costs incomplete: Job Profit does not show a margin yet.';
+  IF cardinality(v_reasons) = 0 AND NOT coalesce(p.margin_ok, false) THEN
+   v_incomplete := 'Costs incomplete: Job Profit does not show a margin yet'
+    || CASE WHEN v_expect_reason IS NOT NULL THEN '; ' || v_expect_reason ELSE '' END || '.';
+  ELSE
+   v_incomplete := CASE WHEN v_cost_reasons > 0 THEN 'Costs incomplete: ' ELSE 'Money incomplete: ' END
+    || array_to_string(v_reasons || v_expect_reason, '; ') || '.';
   END IF;
   v_lines := v_lines || v_incomplete;
  END IF;
+ IF v_expect_reason IS NOT NULL THEN v_reasons := v_reasons || v_expect_reason; END IF;
 
  -- The job lines the writer reads beside the money: the client's sign-off
  SELECT sg.method, sg.happy, sg.created_at INTO s FROM public.job_client_signoffs sg
@@ -948,6 +970,7 @@ BEGIN
   'reason', CASE WHEN v_complete THEN 'complete' WHEN p.revenue_flag IS DISTINCT FROM 'ok' AND p.cost_flag IN ('ok', 'text_matched_lines') THEN p.revenue_flag
                  WHEN p.cost_flag NOT IN ('ok', 'text_matched_lines') THEN p.cost_flag
                  WHEN 'variation_not_invoiced' = ANY (coalesce(p.completeness, '{}'::text[])) THEN 'variation_not_invoiced'
+                 WHEN v_expect_reason IS NOT NULL AND cardinality(v_reasons) = 1 THEN 'expected_cost_lane_missing'
                  ELSE 'costs_waiting' END,
   'reasons', to_jsonb(v_reasons),
   'lines', to_jsonb(v_lines),
@@ -961,7 +984,7 @@ BEGIN
   'money_sig', public.context_job_story_money_sig(p_job_id));
 END $fn$;
 COMMENT ON FUNCTION public.context_job_story_book(uuid, timestamptz) IS
- 'Story money book (20261028190000), job profit TP-13 (20261029160000): the job''s money in fixed plain lines from Job Profit (v_job_profit, v_job_cost_events, v_job_revenue_events, the engine Job Profit''s screen reads; figures are the engine''s, formatted, never worked out here): {version story-book-v1, job_id, source job_profit|none, complete, started (any invoice, cost, order or waiting bill), reason, reasons, lines, job_lines, incomplete_line, facts, digest, money_sig}. lines: quoted; expected cost at the quote; invoiced and collected (ex GST) and by payer; owing now per invoice (Xero, inc GST); labour, and crew invoices by crew member; materials, commission, other and total costs placed; priced orders not billed, unpriced orders, invoices emailed with no bill placed; bills that probably belong to the job waiting in Bills to place (open queue rows suggested for it); the Xero Project total (a cross-check); the job work order; the margin or "Unknown, because ..." (since TP-13 naming materials_below_quote, the order checks and variation_not_costed when they hold, and an agreed variation the invoices do not cover as money not billed, reason variation_not_invoiced); and, unless complete, one "Costs incomplete: ..." (or "Money incomplete: ...") line with counts and no dollar figure. complete: Job Profit shows a margin and nothing is waiting. job_lines: the client sign-off. digest: md5 of the words. Days are written with their year and nothing says overdue, so the clock alone never changes the words (p_as_of is kept for callers and changes nothing). NULL for an unknown job. Read only. Service role only.';
+ 'Story money book (20261028190000), job profit TP-13 (20261029160000): the job''s money in fixed plain lines from Job Profit (v_job_profit, v_job_cost_events, v_job_revenue_events, the engine Job Profit''s screen reads; figures are the engine''s, formatted, never worked out here): {version story-book-v1, job_id, source job_profit|none, complete, started (any invoice, cost, order or waiting bill), reason, reasons, lines, job_lines, incomplete_line, facts, digest, money_sig}. lines: quoted; expected cost at the quote; invoiced and collected (ex GST) and by payer; owing now per invoice (Xero, inc GST); labour, and crew invoices by crew member; materials, commission, other and total costs placed; priced orders not billed, unpriced orders, invoices emailed with no bill placed; bills that probably belong to the job waiting in Bills to place (open queue rows suggested for it); the Xero Project total (a cross-check); the job work order; the margin or "Unknown, because ..." (since TP-13 naming materials_below_quote, the order checks and variation_not_costed when they hold, and an agreed variation the invoices do not cover as money not billed, reason variation_not_invoiced); and, unless complete, one "Costs incomplete: ..." (or "Money incomplete: ...") line with counts and no dollar figure. complete: Job Profit shows a margin, nothing is waiting and the quote''s expected cost knows every lane. A lane the quote left unknown reads "not known", never $0.00, the expected total reads "at least ..., partial" and is named in reasons and the incomplete line (reason expected_cost_lane_missing); the margin, an actual figure, is shown unchanged. job_lines: the client sign-off. digest: md5 of the words. Days are written with their year and nothing says overdue, so the clock alone never changes the words (p_as_of is kept for callers and changes nothing). NULL for an unknown job. Read only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.context_job_story_money_sig(uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_job_story_money_sig(uuid) TO service_role;

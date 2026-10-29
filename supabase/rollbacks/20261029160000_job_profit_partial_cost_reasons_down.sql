@@ -35,7 +35,7 @@ BEGIN
   END LOOP;
   FOR v_fn IN SELECT * FROM (VALUES
     ('public.context_job_story_money_sig(uuid)', '4524fbe4a06a9b3eed8d51fb17c67c21'),
-    ('public.context_job_story_book(uuid,timestamptz)', '77beabfe6a0e8e8d06b364d1b7605483')
+    ('public.context_job_story_book(uuid,timestamptz)', 'a2c81762be68d8415b404633de975b9a')
   ) x(sig, md5_tp13) LOOP
     IF to_regprocedure(v_fn.sig) IS NULL
        OR (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid = to_regprocedure(v_fn.sig)) <> v_fn.md5_tp13 THEN

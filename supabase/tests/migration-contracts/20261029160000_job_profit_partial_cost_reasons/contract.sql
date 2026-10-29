@@ -327,6 +327,24 @@ BEGIN
   IF NOT (b -> 'lines') ? 'Margin: $900.00 ex GST profit, 45.0% of invoiced, on the costs placed so far.' THEN
     RAISE EXCEPTION 'tp13 reader: story book TP13-12 %', b -> 'lines';
   END IF;
+  -- A quote that left its commission lane unknown (TP13-22): the expected
+  -- total is partial, never a known $0.00, and the book is not complete; the
+  -- actual margin, which does not depend on the expectation, still stands.
+  b := public.context_job_story_book('d1300000-0000-4000-8000-000000000022');
+  IF b ->> 'complete' <> 'false' OR b ->> 'reason' <> 'expected_cost_lane_missing'
+     OR NOT (b -> 'lines') ? 'Expected cost at the quote: at least $1,200.00 ex GST, partial (labour $500.00, materials $700.00, commission not known).'
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(b -> 'lines') l WHERE l LIKE '%commission $0.00%')
+     OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(b -> 'lines') l WHERE l ~ '^Margin: \$900\.00 ex GST profit, [0-9.]+% of invoiced\.$')
+     OR b ->> 'incomplete_line' <> 'Money incomplete: the expected cost at the quote is partial, its commission is not known.'
+     OR NOT (b -> 'reasons') ? 'the expected cost at the quote is partial, its commission is not known' THEN
+    RAISE EXCEPTION 'tp13 reader: story book TP13-22 % % % %', b ->> 'complete', b ->> 'reason', b -> 'lines', b ->> 'incomplete_line';
+  END IF;
+  -- An explicit known zero (TP13-01's commission 0) reads as $0.00 and stays complete.
+  b := public.context_job_story_book('d1300000-0000-4000-8000-000000000001');
+  IF b ->> 'complete' <> 'true'
+     OR NOT (b -> 'lines') ? 'Expected cost at the quote: $1,200.00 ex GST (labour $500.00, materials $700.00, commission $0.00).' THEN
+    RAISE EXCEPTION 'tp13 reader: story book TP13-01 known zero % %', b ->> 'complete', b -> 'lines';
+  END IF;
   -- The clock stays out of the words: an order 45 days old reads exactly as
   -- one 10 days old.
   IF public.context_job_story_book('d1300000-0000-4000-8000-000000000012') ->> 'digest'
