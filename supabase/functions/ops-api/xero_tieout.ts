@@ -1,6 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 // ════════════════════════════════════════════════════════════
-// TP-01 XERO TIE-OUT: the staff read (20261029120000).
+// TP-01 XERO TIE-OUT: the staff read (20261029121500).
 //
 //   xero_tieout  GET  ?as_of=YYYY-MM-DD (default today, Perth)
 //                     &months=N (1..120, default 12)

@@ -1405,7 +1405,7 @@ import {
   undoMaterialsAiPlacement,
   updateMaterialsAiSettings,
 } from './materials_ai.ts'
-// TP-01 Xero tie-out (20261029120000): staff read, bills by month and bucket.
+// TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'

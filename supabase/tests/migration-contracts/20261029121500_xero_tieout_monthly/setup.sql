@@ -1,4 +1,4 @@
--- Prerequisites for 20261029120000_xero_tieout_monthly. Earlier registered
+-- Prerequisites for 20261029121500_xero_tieout_monthly. Earlier registered
 -- cases create the bills copy, the allocation rows, Bills to place, the jobs
 -- and the AI bill reader's trade-app mirror rule. The bank copy
 -- (20260316000004 and 20260317000001, never a registered case) is stubbed

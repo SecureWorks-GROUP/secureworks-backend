@@ -1,4 +1,4 @@
--- Contract for 20261029120000_xero_tieout_monthly (TP-01).
+-- Contract for 20261029121500_xero_tieout_monthly (TP-01).
 --
 -- Synthetic jobs and bills, no customer data, dated in 2031 so no other
 -- case's fixtures fall in the months read. Everything rolls back. The read is

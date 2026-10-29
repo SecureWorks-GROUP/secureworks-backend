@@ -76,8 +76,8 @@
 -- the gap is never understated; null when the total is 0; never below 0.
 -- last_6_months: the six calendar months ending with p_as_of's month.
 --
--- Never writes. Rollback: supabase/rollbacks/20261029120000_xero_tieout_monthly_down.sql
--- Contract: supabase/tests/migration-contracts/20261029120000_xero_tieout_monthly/
+-- Never writes. Rollback: supabase/rollbacks/20261029121500_xero_tieout_monthly_down.sql
+-- Contract: supabase/tests/migration-contracts/20261029121500_xero_tieout_monthly/
 
 CREATE OR REPLACE FUNCTION public.xero_tieout_monthly(p_as_of date DEFAULT NULL, p_months integer DEFAULT 12, p_org_id uuid DEFAULT NULL)
 RETURNS jsonb
@@ -339,6 +339,6 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) IS
-  'TP-01 Xero tie-out (20261029120000): by month, every AUTHORISED or PAID supplier bill dollar of 0 or more (ex GST) in our copy of Xero sorted into on a job, trade-app labour (already counted on jobs by the trade app), overhead / not job related (stock and vehicles not yet separated) or unplaced, with the unplaced share (rounded up, never below 0) and the last 6 months. A bill below 0 is shown only as negative_bill; rows (summed with their signs) and overhead parts above a bill that is not trade-app labour are shown as over_allocated; neither is in the total. parts_add_up checks the buckets against the bills read directly. p_org_id scopes every read to one org (null reads every org, a bill per org and Xero id). as_of picks the months only: allocations and Bills to place states are as of today. Supplier credit notes (TP-07) and spend money (TP-08) are not_yet_read with null amounts, never $0. Read only, aggregates only, service role only.';
+  'TP-01 Xero tie-out (20261029121500): by month, every AUTHORISED or PAID supplier bill dollar of 0 or more (ex GST) in our copy of Xero sorted into on a job, trade-app labour (already counted on jobs by the trade app), overhead / not job related (stock and vehicles not yet separated) or unplaced, with the unplaced share (rounded up, never below 0) and the last 6 months. A bill below 0 is shown only as negative_bill; rows (summed with their signs) and overhead parts above a bill that is not trade-app labour are shown as over_allocated; neither is in the total. parts_add_up checks the buckets against the bills read directly. p_org_id scopes every read to one org (null reads every org, a bill per org and Xero id). as_of picks the months only: allocations and Bills to place states are as of today. Supplier credit notes (TP-07) and spend money (TP-08) are not_yet_read with null amounts, never $0. Read only, aggregates only, service role only.';
 REVOKE ALL ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) TO service_role;
