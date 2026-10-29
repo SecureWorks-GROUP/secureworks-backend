@@ -4578,8 +4578,11 @@ A job's `margin` / `margin_pct` are published only when `margin_ok`; otherwise
 they are null with `margin_status: 'unknown'` and a worded `margin_reason`.
 `summary.avg_margin_pct` is revenue-weighted over margin-known customer jobs
 only, a holding job is in no summary figure, `total_bills` is placed costs
-only and `costs_complete` is false when any job is unknown. Tests:
-`job_profitability_test.ts`.
+only and `costs_complete` is false when any job is unknown. The action stays
+ungated, but the CFO-01 detail fields (`FULL_DETAIL_ROW_KEYS` /
+`FULL_DETAIL_SUMMARY_KEYS`) reach only staff and server callers
+(`reportingApiCallerSeesStaffDetail`); the public key and a trade JWT get the
+basic shape. Tests: `job_profitability_test.ts`, `reporting_staff_gate_test.ts`.
 
 ## Reattend Pack Photos Follow Curated `photo_source_scope`
 

@@ -20,10 +20,10 @@ import {
   sealedSesMoneyRefusal,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
-import { decideReportingStaffAuth } from './reporting_staff_gate.ts'
+import { decideReportingStaffAuth, reportingApiCallerSeesStaffDetail } from './reporting_staff_gate.ts'
 import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
-import { jobProfitabilityAction } from './job_profitability.ts'
+import { jobProfitabilityAction, type JobProfitabilityDetail } from './job_profitability.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -229,8 +229,19 @@ serve(async (req: Request) => {
     switch (action) {
       case 'dashboard_summary':
         return json(await dashboardSummary(sb))
-      case 'job_profitability':
-        return json(await jobProfitability(sb, url.searchParams))
+      case 'job_profitability': {
+        // Not gated. The CFO-01 detail fields go only to staff and server callers.
+        const fullDetail = await reportingApiCallerSeesStaffDetail({
+          xApiKey,
+          bearerToken,
+          apiKeyHeader: req.headers.get('apikey'),
+          sharedKey: validKey,
+          serviceKey: serviceCredential?.token ?? null,
+          agentServerKey,
+          sb,
+        })
+        return json(await jobProfitability(sb, url.searchParams, fullDetail ? 'full' : 'basic'))
+      }
       case 'marketing_summary':
         return json(await marketingSummary(sb))
       case 'trends':
@@ -818,8 +829,8 @@ async function getTargets(sb: any) {
 
 // Money from v_job_profit, the Job Profit engine (CFO-01 / R-22): an unknown
 // margin is null with a reason, never 0. See job_profitability.ts.
-async function jobProfitability(sb: any, params: URLSearchParams) {
-  return await jobProfitabilityAction(sb, params, DEFAULT_ORG_ID)
+async function jobProfitability(sb: any, params: URLSearchParams, detail: JobProfitabilityDetail) {
+  return await jobProfitabilityAction(sb, params, DEFAULT_ORG_ID, detail)
 }
 
 

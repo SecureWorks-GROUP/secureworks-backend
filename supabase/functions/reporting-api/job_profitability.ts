@@ -10,32 +10,45 @@
 // Every money figure here comes from v_job_profit, the engine the Job Profit
 // screen reads (ops-api job_profit / job_profit_list). Nothing is computed
 // from Xero Projects totals or contact-matched bills any more:
-//   - margin and margin_pct are the engine's, published only when margin_ok.
-//     Otherwise they are null, margin_status is 'unknown' and margin_reason
-//     says why in words (from completeness / cost_flag / revenue_flag).
-//   - bills is the costs placed on the job's own lines (the engine's
-//     actual_cost_ex). It is null when nothing is placed: no placed cost is
-//     Unknown, not $0.
+//   - margin and margin_pct are the engine's, published only when margin_ok
+//     and the engine gave both figures. Otherwise they are null, margin_status
+//     is 'unknown' and margin_reason says why in words.
+//   - bills is the costs placed on the job's own lines (actual_cost_ex), null
+//     when nothing is placed: Unknown, not $0.
+//   - committed_open_ex is null (committed_complete false) while any order is
+//     unpriced or has an emailed invoice with no bill: a partial committed sum
+//     is never shown as the whole.
 //   - summary.avg_margin_pct is revenue-weighted over margin-known customer
-//     jobs only (the same basis as job_profit_list?view=rollup). A holding job
-//     (costs parked on a bucket card) is in no summary figure; it is reported
-//     on its own under summary.holding_jobs.
+//     jobs only (the job_profit_list?view=rollup basis). A holding job is in no
+//     summary figure. A job missing from the engine is in no money sum either
+//     (its invoiced is null) and is counted in jobs_not_in_engine.
 //   - summary.total_bills is placed costs only; costs_complete is false when
-//     any customer job's margin is unknown. total_margin is the published
-//     profit of margin-known jobs, never invoiced minus a partial cost.
+//     any customer job's margin is unknown.
+//
+// Access: the action is not gated (AGENTS.md: only job_context and
+// job_intelligence are). The fields added by CFO-01 that carry extra money or
+// engine codes go only to staff (admin / owner / ops_manager) and server
+// callers (detail 'full', reporting_staff_gate.ts
+// reportingApiCallerSeesStaffDetail). Everyone else (the public SW_API_KEY, a
+// trade JWT) gets detail 'basic': the earlier key set, with the Unknown-not-zero
+// rule applied and the reason in words. The earlier keys (invoiced, bills,
+// margin, margin_pct, quote_value) were already readable by any signed-in user.
 //
 // Job selection (org, legacy, type, status, created from/to, limit, newest
 // first) is the same `jobs` read as before, so filters mean what they meant.
-// Every earlier output key is kept; data_source is kept as evidence presence
-// only and money_source names where the money came from.
 
 export const JOB_PROFITABILITY_MONEY_SOURCE = "v_job_profit";
 
+export type JobProfitabilityDetail = "full" | "basic";
+
 // Ids per v_job_profit read: keeps the PostgREST URL short.
 export const PROFIT_READ_CHUNK = 150;
+// v_job_profit reads in flight at once (bounded, never one per chunk).
+export const PROFIT_READ_CONCURRENCY = 3;
 
 export const JOB_PROFIT_VIEW_COLUMNS = [
   "job_id",
+  "org_id",
   "job_number",
   "work_type",
   "quoted_ex",
@@ -64,9 +77,9 @@ export const JOB_PROFIT_VIEW_COLUMNS = [
 ].join(", ");
 
 // The completeness codes that stop the engine publishing a margin (each one
-// sets margin_ok false in v_job_profit), in the order they are reported.
-// Other codes (text_matched_lines, open_purchase_orders, draft_revenue, ...)
-// are notes, not reasons the margin is unknown.
+// sets margin_ok false in v_job_profit), in the order they are reported, plus
+// this route's own two. Other codes (text_matched_lines, open_purchase_orders,
+// draft_revenue, ...) are notes, not reasons the margin is unknown.
 export const MARGIN_BLOCKING_REASONS: Record<string, string> = {
   missing_client_invoice: "no client invoice yet",
   no_cost_linked: "no cost linked to the job yet",
@@ -79,30 +92,65 @@ export const MARGIN_BLOCKING_REASONS: Record<string, string> = {
   materials_not_linked: "materials are owed but none is linked",
   no_labour_linked: "no labour linked",
   not_in_job_profit_engine: "the job is not in the Job Profit engine",
+  engine_reason_not_given:
+    "the Job Profit engine published no margin and gave no reason",
 };
 
-export const JOB_PROFITABILITY_LABELS = {
+// Row keys that only staff and server callers receive.
+export const FULL_DETAIL_ROW_KEYS = [
+  "expected_cost_ex",
+  "expected_source",
+  "committed_open_ex",
+  "committed_complete",
+  "ordered_not_billed_count",
+  "invoice_emailed_count",
+  "invoice_emailed_ex",
+  "actual_cost_ex",
+  "collected_ex",
+  "draft_revenue_ex",
+  "xero_project_expenses_ex",
+  "quoted_source",
+  "work_type",
+  "revenue_flag",
+  "cost_flag",
+  "completeness",
+] as const;
+
+// Summary keys that only staff and server callers receive.
+export const FULL_DETAIL_SUMMARY_KEYS = [
+  "margin_known_invoiced",
+  "margin_known_costs",
+  "holding_jobs",
+] as const;
+
+const BASE_LABELS = {
   money_source:
     "Every money figure is from v_job_profit, the same engine the Job Profit screen reads.",
   margin:
     "margin and margin_pct are the engine's profit_ex and margin_pct (ex GST, direct costs, no overhead). Null when the engine cannot publish a margin; margin_status is then 'unknown' and margin_reason says why. Never 0 for an unknown.",
   bills:
-    "Costs placed on the job's own lines so far (actual_cost_ex), ex GST. Null when nothing is placed: Unknown, not $0. Placed costs only, not the job's full cost.",
+    "Costs placed on the job's own lines so far, ex GST. Null when nothing is placed: Unknown, not $0. Placed costs only, not the job's full cost.",
   quote_value:
-    "The sent or accepted quote's value, ex GST (quoted_ex). Null when no quote was sent. Never the live price.",
-  expected_committed_actual:
-    "expected_cost_ex is fixed at the quote (null when none was fixed); committed_open_ex is priced open purchase orders (unpriced orders are counted in ordered_not_billed_count, never $0); actual_cost_ex is placed costs (same as bills).",
+    "The sent or accepted quote's value, ex GST. Null when no quote was sent. Never the live price.",
   data_source:
     "Evidence found for the job: xero_projects (a Xero Project named with the job number), invoice_match (an invoice or a cost line on the job) or none. It never decides a money figure.",
   avg_margin_pct:
-    "Revenue-weighted margin over margin-known customer jobs only (profit over invoiced of those jobs). Null when no job's margin is known. Not the business's margin while any job is unknown: read jobs_margin_unknown and unknown_reasons beside it.",
+    "Revenue-weighted margin over margin-known customer jobs only. Null when no job's margin is known. Not the business's margin while any job is unknown: read jobs_margin_unknown and unknown_reasons beside it.",
+  total_invoiced:
+    "Invoiced, ex GST, over customer jobs the engine has a row for. A job missing from the engine is in no sum (jobs_not_in_engine).",
   total_bills:
     "Placed costs only, summed over customer jobs. costs_complete is false when any customer job's margin is unknown, so this is not the full cost.",
   total_margin:
     "Published profit of margin-known customer jobs only. Null when none is known. Never invoiced minus a partial cost.",
   holding_jobs:
-    "Holding jobs (costs parked on a bucket card, not a customer's job) are in no summary figure; they are reported on their own here.",
-} as const;
+    "Holding jobs (costs parked on a bucket card, not a customer's job) are in no summary figure.",
+};
+
+const FULL_LABELS = {
+  ...BASE_LABELS,
+  expected_committed_actual:
+    "expected_cost_ex is fixed at the quote (null when none was fixed); committed_open_ex is priced open purchase orders, null with committed_complete false while any order is unpriced (ordered_not_billed_count) or has an emailed invoice with no bill (invoice_emailed_count); actual_cost_ex is placed costs (same as bills).",
+};
 
 type Num = number | null;
 
@@ -143,14 +191,10 @@ export function marginReasonCodes(profit: Record<string, unknown>): string[] {
 }
 
 export function marginReasonText(codes: string[]): string {
-  if (!codes.length) {
-    return "Unknown: the Job Profit engine did not publish a margin for this job";
-  }
   const words = codes.map((c) =>
     MARGIN_BLOCKING_REASONS[c] ?? c.replace(/_/g, " ")
   );
-  const text = words.join("; ");
-  return `Unknown: ${text}`;
+  return `Unknown: ${words.join("; ")}`;
 }
 
 function dataSourceOf(profit: Record<string, unknown> | null): string {
@@ -164,23 +208,34 @@ function dataSourceOf(profit: Record<string, unknown> | null): string {
   return evidence ? "invoice_match" : "none";
 }
 
-/** One output row: the job's identity from `jobs`, its money from v_job_profit. */
+/** One full-detail row: the job's identity from `jobs`, its money from v_job_profit. */
 export function jobProfitabilityRow(
   job: Record<string, any>,
   profit: Record<string, unknown> | null,
 ): Record<string, unknown> {
-  const marginOk = profit?.margin_ok === true;
+  const profitEx = profit ? num(profit.profit_ex, "profit_ex") : null;
+  const marginPct = profit ? num(profit.margin_pct, "margin_pct") : null;
+  const known = profit?.margin_ok === true && profitEx !== null &&
+    marginPct !== null;
   const placedEvents = profit
     ? num(profit.actual_cost_events, "actual_cost_events") ?? 0
     : 0;
   const placed = profit && placedEvents > 0
     ? num(profit.actual_cost_ex, "actual_cost_ex") ?? 0
     : null;
-  const codes = marginOk
-    ? []
-    : profit
-    ? marginReasonCodes(profit)
-    : ["not_in_job_profit_engine"];
+  let codes: string[] = [];
+  if (!known) {
+    codes = profit ? marginReasonCodes(profit) : ["not_in_job_profit_engine"];
+    if (!codes.length) codes = ["engine_reason_not_given"];
+  }
+  const orderedUnpriced = profit
+    ? num(profit.ordered_not_billed_count, "ordered_not_billed_count")
+    : null;
+  const emailedNoBill = profit
+    ? num(profit.invoice_emailed_count, "invoice_emailed_count")
+    : null;
+  const committedComplete = !!profit && (orderedUnpriced ?? 0) === 0 &&
+    (emailedNoBill ?? 0) === 0;
 
   return {
     id: job.id,
@@ -191,36 +246,32 @@ export function jobProfitabilityRow(
     quote_value: profit ? num(profit.quoted_ex, "quoted_ex") : null,
     invoiced: profit ? num(profit.invoiced_ex, "invoiced_ex") ?? 0 : null,
     bills: placed,
-    margin: marginOk ? num(profit!.profit_ex, "profit_ex") : null,
-    margin_pct: marginOk ? num(profit!.margin_pct, "margin_pct") : null,
+    margin: known ? profitEx : null,
+    margin_pct: known ? marginPct : null,
     data_source: dataSourceOf(profit),
-    // ── added (CFO-01 / R-22) ──
+    // ── added (CFO-01 / R-22), every caller ──
     money_source: JOB_PROFITABILITY_MONEY_SOURCE,
-    margin_status: marginOk ? "known" : "unknown",
-    margin_reason: marginOk ? null : marginReasonText(codes),
+    margin_status: known ? "known" : "unknown",
+    margin_reason: known ? null : marginReasonText(codes),
     margin_reason_codes: codes,
-    margin_ok: marginOk,
+    margin_ok: profit?.margin_ok === true,
     holding_job: profit?.holding_job === true,
-    work_type: profit?.work_type ?? null,
-    quoted_source: profit?.quoted_source ?? null,
+    bills_basis: "placed_costs_only",
+    // ── added (CFO-01 / R-22), staff and server callers only ──
     expected_cost_ex: profit
       ? num(profit.expected_cost_ex, "expected_cost_ex")
       : null,
     expected_source: profit?.expected_source ?? null,
-    committed_open_ex: profit
-      ? num(profit.committed_open_ex, "committed_open_ex")
+    committed_open_ex: committedComplete
+      ? num(profit!.committed_open_ex, "committed_open_ex")
       : null,
-    ordered_not_billed_count: profit
-      ? num(profit.ordered_not_billed_count, "ordered_not_billed_count")
-      : null,
-    invoice_emailed_count: profit
-      ? num(profit.invoice_emailed_count, "invoice_emailed_count")
-      : null,
+    committed_complete: committedComplete,
+    ordered_not_billed_count: orderedUnpriced,
+    invoice_emailed_count: emailedNoBill,
     invoice_emailed_ex: profit
       ? num(profit.invoice_emailed_ex, "invoice_emailed_ex")
       : null,
     actual_cost_ex: placed,
-    bills_basis: "placed_costs_only",
     collected_ex: profit ? num(profit.collected_ex, "collected_ex") : null,
     draft_revenue_ex: profit
       ? num(profit.draft_revenue_ex, "draft_revenue_ex")
@@ -228,6 +279,8 @@ export function jobProfitabilityRow(
     xero_project_expenses_ex: profit
       ? num(profit.xero_project_expenses_ex, "xero_project_expenses_ex")
       : null,
+    quoted_source: profit?.quoted_source ?? null,
+    work_type: profit?.work_type ?? null,
     revenue_flag: profit?.revenue_flag ?? null,
     cost_flag: profit?.cost_flag ?? null,
     completeness: Array.isArray(profit?.completeness)
@@ -236,15 +289,35 @@ export function jobProfitabilityRow(
   };
 }
 
+function withoutKeys(
+  obj: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!keys.includes(k)) out[k] = v;
+  }
+  return out;
+}
+
 /** The response body from the selected jobs and their v_job_profit rows. */
 export function buildJobProfitability(
   jobs: Record<string, any>[],
   profitRows: Record<string, unknown>[],
+  detail: JobProfitabilityDetail = "basic",
 ): Record<string, unknown> {
   const byJob = new Map<string, Record<string, unknown>>();
   for (const p of profitRows) {
     const id = String(p.job_id ?? "");
-    if (id && !byJob.has(id)) byJob.set(id, p);
+    if (!id) continue;
+    if (byJob.has(id)) {
+      // As ops-api job_profit: a second engine row for one job is a fault,
+      // never a pick.
+      throw new Error(
+        "job_profitability: v_job_profit returned more than one row for a job",
+      );
+    }
+    byJob.set(id, p);
   }
   const rows = jobs.map((job) =>
     jobProfitabilityRow(job, byJob.get(String(job.id)) ?? null)
@@ -257,6 +330,7 @@ export function buildJobProfitability(
   let knownCostC = 0;
   let known = 0;
   let unknown = 0;
+  let notInEngine = 0;
   const unknownReasons: Record<string, number> = {};
   const holding = {
     jobs: 0,
@@ -275,6 +349,8 @@ export function buildJobProfitability(
       holding.job_numbers.push(r.job_number ?? r.id);
       continue;
     }
+    // A job missing from the engine has invoiced and bills null: in no sum.
+    if (r.invoiced === null) notInEngine += 1;
     invoicedC += cents(r.invoiced as Num);
     placedC += cents(r.bills as Num);
     if (r.margin_status === "known") {
@@ -302,32 +378,86 @@ export function buildJobProfitability(
     return acc;
   }, {});
 
-  return {
-    jobs: rows,
-    summary: {
-      total_jobs: rows.length,
-      total_invoiced: fromCents(invoicedC),
-      total_bills: fromCents(placedC),
-      total_margin: known > 0 ? fromCents(knownProfitC) : null,
-      avg_margin_pct: avgMargin,
-      data_sources: dataSourceCounts,
-      xero_projects_matched:
-        rows.filter((r) => r.data_source === "xero_projects").length,
-      // ── added (CFO-01 / R-22) ──
-      money_source: JOB_PROFITABILITY_MONEY_SOURCE,
-      customer_jobs: known + unknown,
-      jobs_margin_known: known,
-      jobs_margin_unknown: unknown,
-      unknown_reasons: unknownReasons,
-      avg_margin_basis: "revenue_weighted_over_margin_known_customer_jobs",
-      margin_known_invoiced: known > 0 ? fromCents(knownInvoicedC) : null,
-      margin_known_costs: known > 0 ? fromCents(knownCostC) : null,
-      total_bills_basis: "placed_costs_only",
-      costs_complete: unknown === 0,
-      holding_jobs: holding,
-    },
-    labels: JOB_PROFITABILITY_LABELS,
+  const summary: Record<string, unknown> = {
+    total_jobs: rows.length,
+    total_invoiced: fromCents(invoicedC),
+    total_bills: fromCents(placedC),
+    total_margin: known > 0 ? fromCents(knownProfitC) : null,
+    avg_margin_pct: avgMargin,
+    data_sources: dataSourceCounts,
+    xero_projects_matched:
+      rows.filter((r) => r.data_source === "xero_projects").length,
+    // ── added (CFO-01 / R-22), every caller ──
+    money_source: JOB_PROFITABILITY_MONEY_SOURCE,
+    detail,
+    customer_jobs: known + unknown,
+    jobs_margin_known: known,
+    jobs_margin_unknown: unknown,
+    jobs_not_in_engine: notInEngine,
+    unknown_reasons: unknownReasons,
+    avg_margin_basis: "revenue_weighted_over_margin_known_customer_jobs",
+    total_bills_basis: "placed_costs_only",
+    costs_complete: unknown === 0,
+    holding_jobs_excluded: holding.jobs,
+    // ── added (CFO-01 / R-22), staff and server callers only ──
+    margin_known_invoiced: known > 0 ? fromCents(knownInvoicedC) : null,
+    margin_known_costs: known > 0 ? fromCents(knownCostC) : null,
+    holding_jobs: holding,
   };
+
+  if (detail === "full") {
+    return { jobs: rows, summary, labels: FULL_LABELS };
+  }
+  return {
+    jobs: rows.map((r) => withoutKeys(r, FULL_DETAIL_ROW_KEYS)),
+    summary: withoutKeys(summary, FULL_DETAIL_SUMMARY_KEYS),
+    labels: BASE_LABELS,
+  };
+}
+
+/** `limit`: whole number 1..5000, default 50. */
+export function jobProfitabilityLimit(raw: string | null): number {
+  const n = parseInt(raw ?? "", 10);
+  if (!Number.isFinite(n)) return 50;
+  return Math.min(Math.max(n, 1), 5000);
+}
+
+async function readProfitChunks(
+  sb: any,
+  orgId: string,
+  ids: string[],
+): Promise<Record<string, unknown>[]> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += PROFIT_READ_CHUNK) {
+    chunks.push(ids.slice(i, i + PROFIT_READ_CHUNK));
+  }
+  const results: Record<string, unknown>[][] = new Array(chunks.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < chunks.length) {
+      const at = next++;
+      const { data, error } = await sb
+        .from("v_job_profit")
+        .select(JOB_PROFIT_VIEW_COLUMNS)
+        .eq("org_id", orgId)
+        .in("job_id", chunks[at]);
+      if (error) {
+        throw new Error(
+          `job_profitability: v_job_profit read failed: ${
+            error.message ?? String(error)
+          }`,
+        );
+      }
+      results[at] = data || [];
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(PROFIT_READ_CONCURRENCY, chunks.length) },
+      worker,
+    ),
+  );
+  return results.flat();
 }
 
 /** Reads the selected jobs, then their v_job_profit rows, and builds the body. */
@@ -335,12 +465,13 @@ export async function jobProfitabilityAction(
   sb: any,
   params: URLSearchParams,
   orgId: string,
+  detail: JobProfitabilityDetail = "basic",
 ): Promise<Record<string, unknown>> {
   const dateFrom = params.get("from") || null;
   const dateTo = params.get("to") || null;
   const jobType = params.get("type") || null;
   const status = params.get("status") || null;
-  const limit = Math.min(parseInt(params.get("limit") || "50", 10) || 50, 5000);
+  const limit = jobProfitabilityLimit(params.get("limit"));
 
   let query = sb
     .from("jobs")
@@ -361,23 +492,7 @@ export async function jobProfitabilityAction(
 
   // A failed read fails the whole answer: a partial money answer is never returned.
   const ids = jobList.map((j) => j.id).filter(Boolean);
-  const profitRows: Record<string, unknown>[] = [];
-  for (let i = 0; i < ids.length; i += PROFIT_READ_CHUNK) {
-    const chunk = ids.slice(i, i + PROFIT_READ_CHUNK);
-    const { data, error } = await sb
-      .from("v_job_profit")
-      .select(JOB_PROFIT_VIEW_COLUMNS)
-      .eq("org_id", orgId)
-      .in("job_id", chunk);
-    if (error) {
-      throw new Error(
-        `job_profitability: v_job_profit read failed: ${
-          error.message ?? String(error)
-        }`,
-      );
-    }
-    profitRows.push(...(data || []));
-  }
+  const profitRows = ids.length ? await readProfitChunks(sb, orgId, ids) : [];
 
-  return buildJobProfitability(jobList, profitRows);
+  return buildJobProfitability(jobList, profitRows, detail);
 }

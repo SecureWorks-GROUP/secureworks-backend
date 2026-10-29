@@ -17,11 +17,16 @@ import {
   assert,
   assertEquals,
   assertRejects,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildJobProfitability,
+  FULL_DETAIL_ROW_KEYS,
+  FULL_DETAIL_SUMMARY_KEYS,
   jobProfitabilityAction,
+  jobProfitabilityLimit,
   PROFIT_READ_CHUNK,
+  PROFIT_READ_CONCURRENCY,
 } from "./job_profitability.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -123,12 +128,19 @@ const HOLDING = profit("5", {
 const JOBS = ["1", "2", "3", "4", "5"].map((id) => job(id));
 const PROFITS = [KNOWN, KNOWN_2, NO_COST, NO_MATERIALS, HOLDING];
 
+function full(
+  jobs: Record<string, unknown>[],
+  rows: Record<string, unknown>[],
+) {
+  return buildJobProfitability(jobs, rows, "full");
+}
+
 function rowOf(body: any, id: string) {
   return body.jobs.find((r: any) => r.id === id);
 }
 
 Deno.test("unknown cost: margin and margin_pct are null with a worded reason", () => {
-  const body: any = buildJobProfitability(JOBS, PROFITS);
+  const body: any = full(JOBS, PROFITS);
   const r = rowOf(body, "3");
   assertEquals(r.margin, null);
   assertEquals(r.margin_pct, null);
@@ -158,7 +170,7 @@ Deno.test("unknown cost: margin and margin_pct are null with a worded reason", (
 });
 
 Deno.test("known cost: the engine's profit and margin are published", () => {
-  const body: any = buildJobProfitability(JOBS, PROFITS);
+  const body: any = full(JOBS, PROFITS);
   const r = rowOf(body, "1");
   assertEquals(r.margin_status, "known");
   assertEquals(r.margin_reason, null);
@@ -170,7 +182,7 @@ Deno.test("known cost: the engine's profit and margin are published", () => {
 });
 
 Deno.test("average: over margin-known customer jobs only, unknowns never folded in as $0", () => {
-  const body: any = buildJobProfitability(JOBS, PROFITS);
+  const body: any = full(JOBS, PROFITS);
   const s = body.summary;
   // (3000 + 1000) / (10000 + 5000) = 26.7%. The old route's
   // (invoiced - bills) / invoiced over every row would read
@@ -199,7 +211,7 @@ Deno.test("average: over margin-known customer jobs only, unknowns never folded 
 });
 
 Deno.test("average: null (Unknown) when no job's margin is known, never 0", () => {
-  const body: any = buildJobProfitability([job("3"), job("4")], [
+  const body: any = full([job("3"), job("4")], [
     NO_COST,
     NO_MATERIALS,
   ]);
@@ -211,7 +223,7 @@ Deno.test("average: null (Unknown) when no job's margin is known, never 0", () =
 });
 
 Deno.test("holding job: in no summary figure, reported on its own", () => {
-  const body: any = buildJobProfitability(JOBS, PROFITS);
+  const body: any = full(JOBS, PROFITS);
   const s = body.summary;
   const h = rowOf(body, "5");
   assertEquals(h.holding_job, true);
@@ -224,7 +236,7 @@ Deno.test("holding job: in no summary figure, reported on its own", () => {
   });
   assert(s.total_invoiced < 100000);
   // only the holding job known: average stays Unknown
-  const only: any = buildJobProfitability([job("5"), job("3")], [
+  const only: any = full([job("5"), job("3")], [
     HOLDING,
     NO_COST,
   ]);
@@ -234,7 +246,7 @@ Deno.test("holding job: in no summary figure, reported on its own", () => {
 });
 
 Deno.test("a job missing from the engine is Unknown with a reason, not $0", () => {
-  const body: any = buildJobProfitability([job("9")], []);
+  const body: any = full([job("9")], []);
   const r = body.jobs[0];
   assertEquals(r.invoiced, null);
   assertEquals(r.bills, null);
@@ -243,10 +255,14 @@ Deno.test("a job missing from the engine is Unknown with a reason, not $0", () =
   assertEquals(r.margin_reason_codes, ["not_in_job_profit_engine"]);
   assertEquals(r.data_source, "none");
   assertEquals(body.summary.costs_complete, false);
+  // kept out of every money sum, and counted on its own
+  assertEquals(body.summary.total_invoiced, 0);
+  assertEquals(body.summary.jobs_not_in_engine, 1);
+  assertEquals(body.summary.unknown_reasons, { not_in_job_profit_engine: 1 });
 });
 
 Deno.test("keys: every earlier row and summary key is kept", () => {
-  const body: any = buildJobProfitability(JOBS, PROFITS);
+  const body: any = full(JOBS, PROFITS);
   for (
     const k of [
       "id",
@@ -280,7 +296,7 @@ Deno.test("keys: every earlier row and summary key is kept", () => {
 });
 
 Deno.test("data_source: evidence presence only", () => {
-  const body: any = buildJobProfitability(
+  const body: any = full(
     [job("1"), job("6"), job("7")],
     [
       KNOWN,
@@ -307,7 +323,7 @@ Deno.test("data_source: evidence presence only", () => {
 type Call = { table: string; ops: [string, unknown[]][] };
 
 function stubClient(
-  tables: Record<string, (call: Call) => { data: unknown; error: unknown }>,
+  tables: Record<string, (call: Call) => unknown>,
 ) {
   const calls: Call[] = [];
   return {
@@ -408,4 +424,190 @@ Deno.test("route: no jobs reads no money and returns an empty, honest summary", 
   assertEquals(body.summary.total_jobs, 0);
   assertEquals(body.summary.avg_margin_pct, null);
   assertEquals(body.summary.total_margin, null);
+});
+
+// ── round 2 (independent review of #1197) ──
+
+Deno.test("access: a basic (non-staff) caller gets the earlier keys plus the Unknown rule only", () => {
+  const body: any = buildJobProfitability(JOBS, PROFITS, "basic");
+  assertEquals(body.summary.detail, "basic");
+  for (const r of body.jobs) {
+    for (const k of FULL_DETAIL_ROW_KEYS) assert(!(k in r), `row leaks ${k}`);
+  }
+  for (const k of FULL_DETAIL_SUMMARY_KEYS) {
+    assert(!(k in body.summary), `summary leaks ${k}`);
+  }
+  // the Unknown-not-zero rule still applies to the earlier keys
+  const unknown = rowOf(body, "3");
+  assertEquals(unknown.margin, null);
+  assertEquals(unknown.margin_pct, null);
+  assertEquals(unknown.bills, null);
+  assertEquals(unknown.margin_status, "unknown");
+  assertEquals(unknown.margin_reason, "Unknown: no cost linked to the job yet");
+  assertEquals(body.summary.avg_margin_pct, 26.7);
+  assertEquals(body.summary.jobs_margin_unknown, 2);
+  assertEquals(body.summary.costs_complete, false);
+  assertEquals(body.summary.holding_jobs_excluded, 1);
+  assertEquals(
+    Object.keys(rowOf(body, "1")).sort(),
+    [
+      "bills",
+      "bills_basis",
+      "client_name",
+      "data_source",
+      "holding_job",
+      "id",
+      "invoiced",
+      "job_number",
+      "margin",
+      "margin_ok",
+      "margin_pct",
+      "margin_reason",
+      "margin_reason_codes",
+      "margin_status",
+      "money_source",
+      "quote_value",
+      "status",
+      "type",
+    ],
+  );
+});
+
+Deno.test("access: a full (staff or server) caller gets every detail field", () => {
+  const body: any = buildJobProfitability(JOBS, PROFITS, "full");
+  assertEquals(body.summary.detail, "full");
+  for (const k of FULL_DETAIL_ROW_KEYS) assert(k in body.jobs[0], `row ${k}`);
+  for (const k of FULL_DETAIL_SUMMARY_KEYS) {
+    assert(k in body.summary, `summary ${k}`);
+  }
+});
+
+Deno.test("access: the default detail is basic", () => {
+  const body: any = buildJobProfitability(JOBS, PROFITS);
+  assertEquals(body.summary.detail, "basic");
+  assert(!("expected_cost_ex" in body.jobs[0]));
+});
+
+Deno.test("committed: null and incomplete while any order is unpriced or emailed without a bill", () => {
+  const body: any = full(
+    [job("c1"), job("c2"), job("c3")],
+    [
+      profit("c1", { committed_open_ex: 0, ordered_not_billed_count: 2 }),
+      profit("c2", { committed_open_ex: 500, invoice_emailed_count: 1 }),
+      profit("c3", { committed_open_ex: 750 }),
+    ],
+  );
+  assertEquals(rowOf(body, "c1").committed_open_ex, null);
+  assertEquals(rowOf(body, "c1").committed_complete, false);
+  assertEquals(rowOf(body, "c2").committed_open_ex, null);
+  assertEquals(rowOf(body, "c2").committed_complete, false);
+  assertEquals(rowOf(body, "c3").committed_open_ex, 750);
+  assertEquals(rowOf(body, "c3").committed_complete, true);
+  const missing: any = full([job("c9")], []);
+  assertEquals(missing.jobs[0].committed_open_ex, null);
+  assertEquals(missing.jobs[0].committed_complete, false);
+});
+
+Deno.test("known: margin_ok with a null profit or margin is Unknown, never published", () => {
+  const body: any = full(
+    [job("k1"), job("k2")],
+    [
+      profit("k1", {
+        invoiced_ex: 1000,
+        margin_ok: true,
+        profit_ex: null,
+        margin_pct: 10,
+      }),
+      profit("k2", {
+        invoiced_ex: 1000,
+        margin_ok: true,
+        profit_ex: 100,
+        margin_pct: null,
+      }),
+    ],
+  );
+  for (const id of ["k1", "k2"]) {
+    const r = rowOf(body, id);
+    assertEquals(r.margin_status, "unknown");
+    assertEquals(r.margin, null);
+    assertEquals(r.margin_pct, null);
+    assertEquals(r.margin_reason_codes, ["engine_reason_not_given"]);
+    assertEquals(
+      r.margin_reason,
+      "Unknown: the Job Profit engine published no margin and gave no reason",
+    );
+  }
+  assertEquals(body.summary.jobs_margin_known, 0);
+  assertEquals(body.summary.avg_margin_pct, null);
+  assertEquals(body.summary.unknown_reasons, { engine_reason_not_given: 2 });
+});
+
+Deno.test("unknown with no code and no flag: engine_reason_not_given", () => {
+  const body: any = full([job("u1")], [
+    profit("u1", {
+      margin_ok: false,
+      completeness: [],
+      revenue_flag: "ok",
+      cost_flag: "ok",
+    }),
+  ]);
+  assertEquals(body.jobs[0].margin_reason_codes, ["engine_reason_not_given"]);
+});
+
+Deno.test("duplicate engine rows for one job fail loudly", () => {
+  assertThrows(
+    () => full([job("1")], [KNOWN, KNOWN]),
+    Error,
+    "more than one row for a job",
+  );
+});
+
+Deno.test("limit: clamped to 1..5000, default 50", () => {
+  assertEquals(jobProfitabilityLimit(null), 50);
+  assertEquals(jobProfitabilityLimit(""), 50);
+  assertEquals(jobProfitabilityLimit("abc"), 50);
+  assertEquals(jobProfitabilityLimit("0"), 1);
+  assertEquals(jobProfitabilityLimit("-20"), 1);
+  assertEquals(jobProfitabilityLimit("120"), 120);
+  assertEquals(jobProfitabilityLimit("999999"), 5000);
+});
+
+Deno.test("route: v_job_profit chunks run with bounded parallelism, results in job order", async () => {
+  const many = Array.from(
+    { length: PROFIT_READ_CHUNK * 7 + 3 },
+    (_, i) => job(`p${i}`),
+  );
+  let inFlight = 0;
+  let peak = 0;
+  const sb = stubClient({
+    jobs: () => ({ data: many, error: null }),
+    v_job_profit: async (call) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      const ids = call.ops.find(([op]) => op === "in")![1][1] as string[];
+      return { data: ids.map((id) => profit(id)), error: null };
+    },
+  });
+  const body: any = await jobProfitabilityAction(
+    sb,
+    new URLSearchParams({ limit: "5000" }),
+    ORG,
+    "full",
+  );
+  assertEquals(sb.calls.filter((c) => c.table === "v_job_profit").length, 8);
+  assertEquals(peak, PROFIT_READ_CONCURRENCY);
+  assertEquals(body.jobs.map((r: any) => r.id), many.map((j) => j.id));
+});
+
+Deno.test("route: the jobs read clamps limit", async () => {
+  const sb = stubClient({
+    jobs: () => ({ data: [], error: null }),
+    v_job_profit: () => ({ data: [], error: null }),
+  });
+  await jobProfitabilityAction(sb, new URLSearchParams({ limit: "-3" }), ORG);
+  assert(
+    sb.calls[0].ops.some(([op, args]) => op === "limit" && args[0] === 1),
+  );
 });
