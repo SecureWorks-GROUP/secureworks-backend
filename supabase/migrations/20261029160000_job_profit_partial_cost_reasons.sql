@@ -49,7 +49,8 @@
 --        expected_costs_freeze.ts, leaves an unknown lane out and the sum
 --        counts it 0, as before), so no reader's number moves; this marks it.
 --
--- The numbers are PROPOSALS (30 days, 14 days, 60 percent, $1.00).
+-- The numbers are PROPOSALS (30 days, 14 days, 70 percent, $1.00). 30 days, 14 days and
+-- 70 percent are ticket TP-13's own numbers (integrated-framework 02-tickets, TP-13).
 -- The new completeness codes are appended after holding_job, so every earlier
 -- code keeps its place; revenue_flag is unchanged (ok | missing_client_invoice).
 --
@@ -160,7 +161,7 @@ AS $$
     'version', 'tp13-v1',
     'po_no_bill_days', 30,
     'work_done_no_labour_days', 14,
-    'materials_below_quote_share', 0.6,
+    'materials_below_quote_share', 0.7,
     'variation_cover_tolerance_ex', 1.00,
     -- Which checks hide the margin (true) and which only name the gap (false).
     -- Every one is named in completeness either way. A later migration flips

@@ -7,7 +7,7 @@
 CREATE OR REPLACE FUNCTION public.job_profit_partial_cost_policy()
 RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
   SELECT jsonb_build_object('version', 'tp13-v1', 'po_no_bill_days', 30, 'work_done_no_labour_days', 14,
-                            'materials_below_quote_share', 0.6, 'variation_cover_tolerance_ex', 1.00,
+                            'materials_below_quote_share', 0.7, 'variation_cover_tolerance_ex', 1.00,
                             'holds_margin', jsonb_build_object('materials_below_quote', true, 'ordered_not_billed_over_30_days', false, 'po_no_bill_overdue', false,
                                                                'variation_not_costed', false, 'variation_not_invoiced', true))
 $$;

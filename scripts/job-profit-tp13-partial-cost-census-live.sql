@@ -38,7 +38,7 @@ set local statement_timeout = '30s';
 with params as (
   select 30 as po_no_bill_days,
          14 as work_done_no_labour_days,
-         0.6::numeric as materials_below_quote_share,
+         0.7::numeric as materials_below_quote_share,
          1.00::numeric as variation_cover_tolerance_ex,
          -- holds_margin as shipped
          true as materials_below_quote_holds,

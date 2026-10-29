@@ -67,7 +67,7 @@ reason and note that applies.
 | `unclassified_lines` | A trade line has no cost lane | Null |
 | `materials_not_linked` | Materials are owed (a fencing, patio, decking or combo job, or one whose expected cost or pricing carries materials) and none is linked | Null |
 | `no_labour_linked` | No labour cost is linked | Null |
-| `materials_below_quote` | Materials are placed, but less than 60% of the materials cost the quote fixed (`expected_materials_ex`): a bill is probably still to come | Null |
+| `materials_below_quote` | Materials are placed, but less than 70% of the materials cost the quote fixed (`expected_materials_ex`): a bill is probably still to come | Null |
 | `ordered_not_billed_over_30_days` | A sent order with no price was first sent 30 or more Perth days ago (the policy's limit) and still has no invoice or bill | Shown (named in `cost_flag` and Null only if the policy makes it hold) |
 | `po_no_bill_overdue` | A priced open order whose delivery day (else the Perth day it was created) is 30 or more days ago, or a supplier invoice emailed for an order 30 or more Perth days ago, still with no bill placed | Shown (named in `cost_flag` and Null only if the policy makes it hold) |
 | `variation_not_costed` | An agreed variation with money on it has no cost figure (`job_variations.cost_estimate` empty; 0 is a figure) | Shown (named in `cost_flag` and Null only if the policy makes it hold) |
@@ -107,7 +107,7 @@ so a later migration can flip one without rewriting the view:
 | `variation_not_invoiced` | Holds | Issuing the invoice clears it; with no sent quote it is `variation_invoice_unchecked` instead, which never holds |
 
 The numbers change only by migration: an order with no bill after 30 Perth
-days, no labour 14 Perth days after the work is done, materials below 60% of
+days, no labour 14 Perth days after the work is done, materials below 70% of
 the quote's, and $1.00 of tolerance on the variation cover. They are
 proposals. The Xero Project check is `xero_project_exceeds_line_costs`,
 unchanged.

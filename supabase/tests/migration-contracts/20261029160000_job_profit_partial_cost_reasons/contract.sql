@@ -10,7 +10,7 @@
 -- policy as shipped, and the profit it must publish when it may.
 --
 --   TP13-01  complete                                  margin 900
---   TP13-02  materials 450 of 700 (64%, above 60%)     margin 1,050
+--   TP13-02  materials 500 of 700 (71%, above 70%)     margin 1,000
 --   TP13-03  priced order, delivery 10 days ago        open_purchase_orders, margin shown
 --   TP13-04  quote 1,200 + variation 300, invoiced 2,000 (covered)   margin 900
 --   TP13-05  completed 5 days ago, no labour           no_labour_linked, not overdue
@@ -67,7 +67,7 @@ SELECT j.id, 'TP13-L-' || right(j.job_number, 2), 'BL-TP13-' || right(j.job_numb
 FROM public.jobs j WHERE j.job_number LIKE 'TP13-%' AND j.job_number NOT IN ('TP13-05', 'TP13-15', 'TP13-16')
 UNION ALL
 SELECT j.id, 'TP13-M-' || right(j.job_number, 2), 'BM-TP13-' || right(j.job_number, 2), 'TP13 Steel', 'materials', 'actual',
-       CASE j.job_number WHEN 'TP13-02' THEN 450 WHEN 'TP13-11' THEN 300 ELSE 600 END, 'high', date '2026-08-20', 'manual_queue'
+       CASE j.job_number WHEN 'TP13-02' THEN 500 WHEN 'TP13-11' THEN 300 ELSE 600 END, 'high', date '2026-08-20', 'manual_queue'
 FROM public.jobs j WHERE j.job_number LIKE 'TP13-%' AND j.job_number <> 'TP13-21';
 
 -- Orders (12, 13, 14, 25) and the not-yet-overdue controls (03, 24).
@@ -123,7 +123,7 @@ CREATE TEMP TABLE tp13_key (job_number text PRIMARY KEY, partial boolean, want_r
                             want_cost_flag text, want_profit numeric) ON COMMIT DROP;
 INSERT INTO tp13_key VALUES
   ('TP13-01', false, NULL,                              true,  'ok', 900),
-  ('TP13-02', false, NULL,                              true,  'ok', 1050),
+  ('TP13-02', false, NULL,                              true,  'ok', 1000),
   ('TP13-03', true,  'open_purchase_orders',            true,  'ok', 900),
   ('TP13-04', false, NULL,                              true,  'ok', 900),
   ('TP13-05', true,  'no_labour_linked',                false, 'no_labour_linked', NULL),
@@ -187,7 +187,7 @@ DO $$
 DECLARE p jsonb := public.job_profit_partial_cost_policy();
 BEGIN
   IF p IS DISTINCT FROM '{"version": "tp13-v1", "po_no_bill_days": 30, "work_done_no_labour_days": 14,
-       "materials_below_quote_share": 0.6, "variation_cover_tolerance_ex": 1.00,
+       "materials_below_quote_share": 0.7, "variation_cover_tolerance_ex": 1.00,
        "holds_margin": {"materials_below_quote": true, "ordered_not_billed_over_30_days": false, "po_no_bill_overdue": false,
                         "variation_not_costed": false, "variation_not_invoiced": true}}'::jsonb THEN
     RAISE EXCEPTION 'tp13 policy: %', p;
