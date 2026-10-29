@@ -352,7 +352,8 @@ export function postgrestDispatchRepliesSources(
         return {
           read: "ok",
           hold,
-          suppliers: read.arrival?.payment?.unpaid_suppliers ?? [],
+          // Every box holding the offer, not only those at Awaiting payment.
+          suppliers: read.arrival?.payment?.blocking_suppliers ?? [],
           box_payment: entry?.payment ?? null,
         };
       } catch (error) {

@@ -783,8 +783,8 @@ export type DispatchArrival = {
     open: number;
     on_us: number;
     extra_open: number;
-    // Pay-first boxes not paid yet (and not delivered), and boxes whose
-    // confirmed date the payment gate is holding (contract section 3c).
+    // Boxes to pay now (payment.to_pay), and boxes whose confirmed date the
+    // payment gate is holding (contract section 3c).
     unpaid: number;
     held_by_payment: number;
   };
@@ -802,8 +802,12 @@ export type DispatchArrival = {
 
 export type DispatchArrivalPayment = {
   any_unpaid: boolean;
-  // The unpaid boxes' supplier names, in box order.
+  // The boxes to pay now (payment.to_pay: unpaid and at Awaiting payment),
+  // supplier names in box order.
   unpaid_suppliers: string[];
+  // Every box holding the job-wide offer (payment.blocks_job_move), supplier
+  // names in box order. any_unpaid is true when this is not empty.
+  blocking_suppliers: string[];
 };
 
 /** The job-wide payment hold (rule 8): true while any pay-first box on the
@@ -1045,7 +1049,11 @@ export function dispatchArrival(
   const confirmed = entries.filter((e) => e.date_confirmed);
   const open = entries.filter((e) => e.material_stage !== "delivered");
   const onUs = entries.filter((e) => e.waiting_on === "us");
-  const unpaid = entries.filter((e) => e.payment?.blocks_job_move === true);
+  // Holding the job-wide offer (broad), and owed now (to pay).
+  const blocking = entries.filter((e) => e.payment?.blocks_job_move === true);
+  const toPay = entries.filter((e) => e.payment?.to_pay === true);
+  const names = (list: DispatchArrivalOrder[]) =>
+    list.map((e) => e.supplier_name || "a supplier");
   return {
     today: input.today,
     install_day: installDay,
@@ -1060,13 +1068,14 @@ export function dispatchArrival(
       open: open.length,
       on_us: onUs.length,
       extra_open: open.filter((e) => e.extra).length,
-      unpaid: unpaid.length,
+      unpaid: toPay.length,
       held_by_payment: entries.filter((e) => e.held_by_payment).length,
     },
     payment: input.accounts?.readOk
       ? {
-        any_unpaid: unpaid.length > 0,
-        unpaid_suppliers: unpaid.map((e) => e.supplier_name || "a supplier"),
+        any_unpaid: blocking.length > 0,
+        unpaid_suppliers: names(toPay),
+        blocking_suppliers: names(blocking),
       }
       : null,
     all_confirmed_in_time: entries.length > 0 &&

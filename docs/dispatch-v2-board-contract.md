@@ -584,7 +584,13 @@ Nothing merges to main until Shaun says "merge to main".
    you cannot book an install without a date. This applies to every Order
    confirmed box, however it got there.
 8. **The job-wide "Move to Order Confirmed?" offer is withheld** while any
-   pay-first box on the job is unpaid. That offer moves the whole job and
+   pay-first box on the job is unpaid, sent or not (broad on purpose: a box
+   not ordered yet still has to be paid before the job moves on). The "to
+   pay" list is narrower: only a pay-first box that is unpaid and shows
+   **Awaiting payment** is to pay (`payment.to_pay`), so a box not sent yet,
+   or still waiting on the supplier's reply, is not listed as money owed.
+   Mark paid and Pay on need a sent order for the box (409 `order_not_sent`
+   before): with nothing sent there is no order to pay for. That offer moves the whole job and
    texts the fencing or patio manager, so it must not run past the payment
    step. The rail move (`update_job_status`) itself is untouched: a person
    can still move the job by hand.
@@ -701,12 +707,17 @@ export type DispatchV2Payment = {
   earlier_order_pay_on_set_at: string | null;
   // The confirmed date is saved but the gate is holding the stage.
   holds_stage: boolean;
-  // Counts towards "any box unpaid" (pay first, unpaid, not delivered).
+  // Counts towards "any box unpaid" (pay first, unpaid, not delivered):
+  // holds the job-wide offer (rule 8), sent or not.
   blocks_job_move: boolean;
-  // What the screen may offer on this box.
-  can_mark_paid: boolean;      // pay first (or unknown terms) and not paid
+  // Money owed now: pay first, unpaid, and the box shows Awaiting payment.
+  // The "to pay" count and list use this (review fix, 30 Oct 2026).
+  to_pay: boolean;
+  // What the screen may offer on this box. Mark paid and Pay on both need a
+  // sent order for the box (the press answers 409 order_not_sent otherwise).
+  can_mark_paid: boolean;      // sent, pay first (or unknown terms), not paid; a Pay on tag still allows it (rule 6)
   can_undo_paid: boolean;      // a counting paid stamp is on the box
-  can_set_pay_on: boolean;     // always true for a supplier box
+  can_set_pay_on: boolean;     // sent, not paid, no counting tag (any terms); taking a tag off is always allowed
   // The stored stamps the presses guard on (raw, null = never set).
   guard: { paid_at: string | null; pay_on_set_at: string | null };
 };
@@ -837,6 +848,7 @@ and the `arrival` echoed by every write):
     "earlier_order_pay_on_set_at": null,
     "holds_stage": true,
     "blocks_job_move": true,
+    "to_pay": true,
     "can_mark_paid": true,
     "can_undo_paid": false,
     "can_set_pay_on": true,
@@ -863,12 +875,22 @@ and the `arrival` echoed by every write):
 ```json
 {
   "counts": { "unpaid": 1, "held_by_payment": 1, "asap_waiting": 1 },
-  "payment": { "any_unpaid": true, "unpaid_suppliers": ["Lysaght"] },
+  "payment": {
+    "any_unpaid": true,
+    "unpaid_suppliers": ["Lysaght"],
+    "blocking_suppliers": ["Lysaght", "Corner Hardware"]
+  },
   "earliest_install": { "day": "2026-11-05", "after_day": "2026-11-04" }
 }
 ```
 
 - `counts.late` no longer counts `asap` orders (C).
+- `counts.unpaid` and `payment.unpaid_suppliers` count only the boxes to pay
+  now (`payment.to_pay`: unpaid and at Awaiting payment).
+- `payment.blocking_suppliers` names every box holding the job-wide offer
+  (`payment.blocks_job_move`), sent or not; Accept's `stage_move_held.suppliers`
+  uses this list. In the example Corner Hardware is a pay-first box not sent
+  yet: it holds the offer but is not to pay.
 - `payment.any_unpaid` is true when any box has `payment.blocks_job_move`.
   `null` when the account list read failed (unknown): the screen then keeps
   today's behaviour.
@@ -965,6 +987,8 @@ Common errors: 400 `invalid_request` (bad body, before any read), 400
 - Writes `paid_at` = now, `paid_by`, `paid_by_email`. A stamp from an
   earlier order is replaced. A box already paid for the current order writes
   nothing: `"unchanged": true`.
+- 409 `order_not_sent` when the box has no sent order email (nothing to pay
+  for yet).
 - 409 `on_account` when the box's supplier is on the account list (no
   payment step; "Pay on" is still allowed). 409 `terms_unknown` is never
   returned: if the account list cannot be read the press is refused 500
@@ -998,7 +1022,8 @@ Common errors: 400 `invalid_request` (bad body, before any read), 400
 - `expected_set_at` (optional guard): `payment.guard.pay_on_set_at`.
   Changed since: 409 `pay_on_changed`.
 - Set writes `pay_on`, `pay_on_set_at` = now, `_by`, `_by_email`; null
-  clears all four. The same value already counting, or clearing an empty
+  clears all four. Setting a tag on a box with no sent order email is 409
+  `order_not_sent`; taking a tag off is always allowed. The same value already counting, or clearing an empty
   tag, writes nothing (`"unchanged": true`).
 - Events `dispatch_v2_pay_on_set` / `dispatch_v2_pay_on_cleared`,
   `detail_json { box_id, supplier_id, supplier, from, to, order_email_id,
