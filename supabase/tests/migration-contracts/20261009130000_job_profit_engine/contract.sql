@@ -208,18 +208,9 @@ INSERT INTO public.job_variations (job_id, variation_number, description, amount
   ('a7000000-0000-4000-8000-000000000001', 7, 'Rejected variation', 88, false, 'rejected', NULL, NULL, '2026-08-13T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000001', 8, 'Pending variation', 99, false, 'pending_approval', NULL, NULL, '2026-08-14T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000001', 9, 'Accepted then declined', 66, false, 'accepted', '2026-08-15T00:00:00Z', '2026-08-16T00:00:00Z', '2026-08-15T00:00:00Z');
--- The agreed ones (2, 3, 4) carry a cost figure: TP-13 (20261029160000) names
--- an agreed variation with none variation_not_costed and holds the margin.
--- job_variations.cost_estimate is production's column (20260322000010); the
--- TP-13 case's setup adds it to this stub before any contract runs.
-UPDATE public.job_variations SET cost_estimate = 10
-WHERE job_id = 'a7000000-0000-4000-8000-000000000001' AND variation_number IN (2, 3, 4);
 
--- PO-OPEN is dated two days before the run: an open order inside TP-13's 30
--- days (20261029160000), so the job still publishes a margin with the order
--- named open_purchase_orders. An older open order holds the margin.
 INSERT INTO public.purchase_orders (job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
-  ('a7000000-0000-4000-8000-000000000001', 'PO-OPEN', 'Fence Supplies', 'sent', 80, 88, now() - interval '2 days'),
+  ('a7000000-0000-4000-8000-000000000001', 'PO-OPEN', 'Fence Supplies', 'sent', 80, 88, '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000001', 'PO-DRAFT', 'Fence Supplies', 'draft', 500, 550, '2026-08-01T00:00:00Z');
 
 -- PO-BILLED: its bill BILL-S1 landed as a materials fact matched to the PO;

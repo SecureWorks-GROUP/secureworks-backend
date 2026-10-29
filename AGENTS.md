@@ -4861,18 +4861,25 @@ legacy insert), and only send-quote's own sources (`send-quote`,
 
 ## Job Profit Names A Probably Missing Cost, Never A Margin
 
-`v_job_profit` (TP-13, `20261029160000`) holds the margin and names the
-reason in `completeness` when a cost is probably missing: materials placed
-below 60% of the quote's (`materials_below_quote`), an order with no bill 30
-days on (`ordered_not_billed_over_30_days`, `po_no_bill_overdue`), an agreed
-variation with no cost figure or not invoiced (`variation_not_costed`,
-`variation_not_invoiced`). `work_done_no_labour_overdue` and
-`expected_cost_lane_missing` are named only. Never turn one into an estimate,
-and never re-derive one in a reader: read `completeness`, `cost_flag` and
-`margin_ok`. The numbers are in `job_profit_partial_cost_policy()`, changed
-only by migration. The time rules read the Perth day, so a margin can turn
-Unknown with no row changing. A later `v_job_profit` body keeps every column
-and every reason. Contract: `docs/job-profit-read-contract.md`.
+`v_job_profit` (TP-13, `20261029160000`) names in `completeness` every cost
+that is probably missing, and holds the margin only for the checks
+`job_profit_partial_cost_policy()->'holds_margin'` switches on. As shipped,
+`materials_below_quote` (always) and `variation_not_invoiced` (agreed
+variations not covered by the invoices, only when a sent quote exists) hold;
+the order checks (`ordered_not_billed_over_30_days`, `po_no_bill_overdue`)
+and `variation_not_costed` warn, because a person's bill placement records no
+order (`matched_po_id` null) and the trade app sends no variation cost, so a
+hold could never clear. `variation_invoice_unchecked`,
+`work_done_no_labour_overdue` and `expected_cost_lane_missing` only ever
+warn. Never turn one into an estimate, never guess which order a manual bill
+closes, and never re-derive one in a reader: read `completeness`, `cost_flag`
+and `margin_ok`. Every number and switch is in the policy, changed only by
+migration. A later `v_job_profit` body keeps every column, every reason and
+the `held` switches. As shipped no hold reads the clock, so the story money
+book's words never change on their own; if a migration makes an order check
+hold, `context_job_story_money_sig` already carries that state. The trade
+app's `estimated_cost` on a variation is the PRICE (it becomes `amount`),
+never `cost_estimate`. Contract: `docs/job-profit-read-contract.md`.
 
 ## Booking confirmation authority
 

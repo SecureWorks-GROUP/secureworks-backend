@@ -16,7 +16,5 @@ BEGIN
 END $$;
 
 -- Production columns (20260322000010 job_variations; 20260924140000 jobs).
-ALTER TABLE public.job_variations
-  ADD COLUMN IF NOT EXISTS cost_estimate numeric(12,2),
-  ADD COLUMN IF NOT EXISTS xero_invoice_id text;
+ALTER TABLE public.job_variations ADD COLUMN IF NOT EXISTS cost_estimate numeric(12,2);
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS completed_at timestamptz;
