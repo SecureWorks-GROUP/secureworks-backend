@@ -72,6 +72,9 @@ export type V2Order = {
   sent_internet_message_id: string | null;
   sent_conversation_id: string | null;
   confirmed_delivery_date: string | null;
+  // Delivery or pickup, from the order email's opening line (missing on an
+  // order read before this was added: delivery).
+  fulfilment?: "delivery" | "pickup" | null;
 };
 
 /** The job details the best guess may compare an email with. */
@@ -706,10 +709,16 @@ export function readDeliveryDate(
   };
 }
 
-/** The suggestion's words: "Stratco: delivery Tue 4 Nov". */
-export function suggestionLabel(supplierName: string | null, date: string) {
+/** The suggestion's words: "Stratco: delivery Tue 4 Nov", or for a pickup
+ * "Lysaght: pickup Mon 2 Nov". */
+export function suggestionLabel(
+  supplierName: string | null,
+  date: string,
+  fulfilment: "delivery" | "pickup" | null = null,
+) {
   const who = text(supplierName).trim() || "Supplier";
-  return `${who}: delivery ${dayLabel(date)}`;
+  const kind = fulfilment === "pickup" ? "pickup" : "delivery";
+  return `${who}: ${kind} ${dayLabel(date)}`;
 }
 
 // ── Which order: the four rungs ───────────────────────────────────────────

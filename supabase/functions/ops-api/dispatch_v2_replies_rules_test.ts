@@ -324,6 +324,14 @@ Deno.test("labels", () => {
     suggestionLabel(null, "2026-11-04"),
     "Supplier: delivery Wed 4 Nov",
   );
+  assertEquals(
+    suggestionLabel("Lysaght", "2026-11-02", "pickup"),
+    "Lysaght: pickup Mon 2 Nov",
+  );
+  assertEquals(
+    suggestionLabel("Lysaght", "2026-11-02", "delivery"),
+    "Lysaght: delivery Mon 2 Nov",
+  );
 });
 
 // ── The four rungs ────────────────────────────────────────────────────────

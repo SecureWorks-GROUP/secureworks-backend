@@ -314,6 +314,8 @@ Deno.test("sources: orders read sent emails only, with job number and the box's 
           sent_at: "2026-10-20T01:00:00Z",
           sent_internet_message_id: "<o1@x>",
           sent_conversation_id: "C1",
+          body_text:
+            "Hi Team, could we please order the following for pickup:\n\n1. 2 x posts",
         }],
       };
     }
@@ -344,6 +346,7 @@ Deno.test("sources: orders read sent emails only, with job number and the box's 
     sent_internet_message_id: "<o1@x>",
     sent_conversation_id: "C1",
     confirmed_delivery_date: "2026-10-27",
+    fulfilment: "pickup",
   });
   assertEquals(step(calls[0], "in"), [["status", ["sent", "send_unknown"]]]);
 });

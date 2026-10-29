@@ -19,8 +19,11 @@ import {
   dispatchV2DefaultCc,
   dispatchV2DeliveryDateText,
   dispatchV2EmptyDetailLines,
+  dispatchV2FulfilmentOf,
+  dispatchV2FulfilmentParam,
   dispatchV2LineText,
   dispatchV2MainSupplierId,
+  dispatchV2MentionsPickup,
   dispatchV2OrderableLines,
   dispatchV2PhotoFileName,
   dispatchV2SameLines,
@@ -150,6 +153,102 @@ Deno.test("email: an empty Date, Address or Contact is reported and found in the
   ]);
   const filled = built.body_text.replace("Date:", "Date: 5 November 2026");
   assertEquals(dispatchV2EmptyDetailLines(filled), ["address", "contact"]);
+});
+
+Deno.test("pickup: the opening line says pickup and there is no Address line", () => {
+  const built = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "fencing",
+    isMainSupplier: false,
+    lines: [PLINTHS],
+    deliveryDate: "2026-11-02",
+    fulfilment: "pickup",
+  });
+  const lines = built.body_text.split("\n");
+  assertEquals(
+    lines[0],
+    "Hi Team, could we please order the following for pickup:",
+  );
+  assert(!built.body_text.includes("Address:"));
+  assert(built.body_text.includes("Date: 2 November 2026"));
+  assertEquals(dispatchV2FulfilmentOf(built.body_text), "pickup");
+  // A pickup with no site address is not missing anything.
+  const bare = dispatchV2BuildEmail({
+    job: { job_number: "SWF-1" },
+    workType: "patio",
+    isMainSupplier: false,
+    lines: [PLINTHS],
+    deliveryDate: null,
+    fulfilment: "pickup",
+  });
+  assertEquals(bare.missing, ["date", "contact"]);
+  // Delivery (and no choice at all) keeps the Address line.
+  for (const fulfilment of ["delivery", null, undefined] as const) {
+    const d = dispatchV2BuildEmail({
+      job: JOB,
+      workType: "fencing",
+      isMainSupplier: false,
+      lines: [PLINTHS],
+      deliveryDate: "2026-11-02",
+      fulfilment,
+    });
+    assert(d.body_text.startsWith(
+      "Hi Team, could we please order the following for delivery:",
+    ));
+    assert(d.body_text.includes("Address: 12 Example Street, Clarkson"));
+    assertEquals(dispatchV2FulfilmentOf(d.body_text), "delivery");
+  }
+});
+
+Deno.test("pickup: read from the first non-empty line only", () => {
+  for (const first of [
+    "Hi Team, could we please order the following for pickup:",
+    "Hi Team, could we please order the following for pick up:",
+    "Hi Team, could we please order the following for Pick-up:",
+    "Hi, we will collect this order:",
+    "Ready for collection please",
+  ]) {
+    assertEquals(
+      dispatchV2FulfilmentOf(`${first}\n\n1. 2 x posts`),
+      "pickup",
+      first,
+    );
+  }
+  assertEquals(
+    dispatchV2FulfilmentOf("\n  \r\nHi Team, for pickup:\n1. x"),
+    "pickup",
+  );
+  // Pickup words further down do not count.
+  assertEquals(
+    dispatchV2FulfilmentOf(
+      "Hi Team, could we please order the following for delivery:\n\nNo pickup",
+    ),
+    "delivery",
+  );
+  assertEquals(dispatchV2FulfilmentOf(""), "delivery");
+  assertEquals(dispatchV2FulfilmentOf(null), "delivery");
+  // Words that only look like it.
+  assertEquals(
+    dispatchV2FulfilmentOf("Please recollect the pickups"),
+    "delivery",
+  );
+  assertEquals(
+    dispatchV2MentionsPickup("You can collect on 02/11 before 12pm"),
+    true,
+  );
+  assertEquals(dispatchV2MentionsPickup("Ready to pick up Monday"), true);
+  assertEquals(dispatchV2MentionsPickup("We can deliver Tue 27 Oct"), false);
+  assertEquals(dispatchV2MentionsPickup(null), false);
+});
+
+Deno.test("pickup: the make_email fulfilment value", () => {
+  assertEquals(dispatchV2FulfilmentParam("pickup"), "pickup");
+  assertEquals(dispatchV2FulfilmentParam("delivery"), "delivery");
+  assertEquals(dispatchV2FulfilmentParam(undefined), null);
+  assertEquals(dispatchV2FulfilmentParam(null), null);
+  for (const bad of ["Pickup", "collect", "", 1, true, {}]) {
+    assertEquals(dispatchV2FulfilmentParam(bad), undefined, String(bad));
+  }
 });
 
 Deno.test("text: the date, address, contact and one line read as the template asks", () => {

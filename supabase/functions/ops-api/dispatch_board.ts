@@ -47,6 +47,10 @@ import {
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows, fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
 import {
+  type DispatchV2Fulfilment,
+  dispatchV2FulfilmentOf,
+} from "./dispatch_v2_emails.ts";
+import {
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
   dispatchMaterialStageOf,
@@ -597,7 +601,7 @@ export const DISPATCH_BOARD_LINE_SELECT =
 // comes with the supplier order emails slice
 // (20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql).
 export const DISPATCH_BOARD_SENT_EMAIL_SELECT =
-  "id, job_id, supplier_id, status, sent_at, delivery_date";
+  "id, job_id, supplier_id, status, sent_at, delivery_date, body_text";
 
 export type DispatchBoardSentEmail = {
   id?: string | null;
@@ -607,16 +611,29 @@ export type DispatchBoardSentEmail = {
   sent_at?: string | null;
   // The delivery date the email asked for (its Date: line).
   delivery_date?: string | null;
+  // The body as sent: its opening line says delivery or pickup.
+  body_text?: string | null;
 };
 
-// Per supplier on one job: when its order email last went, and the date it
-// asked for.
+// Per supplier on one job: when its order email last went, the date it
+// asked for, and whether it was a delivery or a pickup.
 export function dispatchBoardSentBySupplier(
   emails: DispatchBoardSentEmail[] | null | undefined,
-): Map<string, { sent_at: string; requested_date: string | null }> {
+): Map<
+  string,
+  {
+    sent_at: string;
+    requested_date: string | null;
+    fulfilment: DispatchV2Fulfilment;
+  }
+> {
   const bySupplier = new Map<
     string,
-    { sent_at: string; requested_date: string | null }
+    {
+      sent_at: string;
+      requested_date: string | null;
+      fulfilment: DispatchV2Fulfilment;
+    }
   >();
   for (const email of emails || []) {
     if (token(email?.status) !== "sent") continue;
@@ -630,6 +647,7 @@ export function dispatchBoardSentBySupplier(
       requested_date: isDispatchDeliveryDate(email?.delivery_date)
         ? email.delivery_date as string
         : null,
+      fulfilment: dispatchV2FulfilmentOf(email?.body_text),
     });
   }
   return bySupplier;
@@ -701,6 +719,9 @@ export type DispatchArrivalOrder = {
   // An extra order: ordered (or still to be ordered) on or after the install
   // day, for example a flashing once the crew is on site.
   extra: boolean;
+  // Delivery or pickup, from the box's newest sent order email (its opening
+  // line). Null for an order not sent from Dispatch, and for a purchase order.
+  fulfilment: DispatchV2Fulfilment | null;
 };
 
 export type DispatchArrival = {
@@ -892,6 +913,7 @@ export function dispatchArrival(
       box_date_set_by_email: boxDate
         ? text(box.delivery_date_set_by_email)
         : null,
+      fulfilment: sent?.fulfilment ?? null,
       material_stage: stage.key,
       material_stage_source: stage.source,
       material_stage_set_at: stageSet ? text(box.material_stage_set_at) : null,
@@ -926,6 +948,7 @@ export function dispatchArrival(
       box_date_source: null,
       box_date_set_at: null,
       box_date_set_by_email: null,
+      fulfilment: null,
       material_stage: dispatchPoMaterialStage(order.status),
       material_stage_source: "order",
       material_stage_set_at: null,

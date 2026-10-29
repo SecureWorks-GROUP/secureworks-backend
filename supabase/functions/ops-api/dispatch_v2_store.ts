@@ -49,6 +49,8 @@ import {
   DISPATCH_V2_TEST_TO,
   dispatchV2BodyHtml,
   dispatchV2BuildEmail,
+  dispatchV2FulfilmentOf,
+  dispatchV2FulfilmentParam,
   dispatchV2BytesToBase64,
   dispatchV2CanSuggest,
   dispatchV2CheckPhoto,
@@ -541,6 +543,8 @@ export function projectDispatchV2Email(row: any, nowMs = Date.now()) {
     body_text: row?.body_text,
     edited: row?.body_text !== row?.built_body_text,
     delivery_date: row?.delivery_date ?? null,
+    // Delivery or pickup, read from the body's opening line.
+    fulfilment: dispatchV2FulfilmentOf(row?.body_text),
     is_main_supplier: row?.is_main_supplier === true,
     standing_lines_included: row?.standing_lines_included === true,
     line_count: (Array.isArray(row?.order_lines) ? row.order_lines : []).length,
@@ -651,10 +655,27 @@ export async function readDispatchV2Materials(
         sent_emails: boxEmails.filter((e) => e.status === "sent").map((e) =>
           projectDispatchV2Email(e, nowMs)
         ),
+        // Delivery or pickup: the open email's, else the newest sent one's,
+        // else null (nothing made yet: the screen shows Delivery).
+        fulfilment: boxFulfilment(open, boxEmails),
         material_stage: boxMaterialStage(box, boxEmails, lines, id),
       };
     }),
   };
+}
+
+// The box's delivery or pickup: the open email's opening line, else the
+// newest sent email's, else null.
+function boxFulfilment(open: any, boxEmails: any[]) {
+  if (open) return dispatchV2FulfilmentOf(open.body_text);
+  let newest: any = null;
+  for (const e of boxEmails) {
+    if (e.status !== "sent") continue;
+    if (!newest || String(e.sent_at ?? "") > String(newest.sent_at ?? "")) {
+      newest = e;
+    }
+  }
+  return newest ? dispatchV2FulfilmentOf(newest.body_text) : null;
 }
 
 // The box's material stage as the box shows it (dispatch_v2_material_stage.ts):
@@ -1748,6 +1769,8 @@ function noApprovedEmail(): never {
 // Make the held email for one supplier box, in the template, with To and CC
 // from the approved list plus the team mailbox. An open email for the box is
 // returned as it is (rebuild: true rebuilds it from the lines, losing edits).
+// fulfilment: "delivery" (the default) or "pickup" (no Address line). A
+// rebuild without one keeps the open email's, read from its opening line.
 export async function makeDispatchV2Email(
   client: any,
   body: any,
@@ -1759,6 +1782,10 @@ export async function makeDispatchV2Email(
   const deliveryDate = body?.delivery_date ?? null;
   if (deliveryDate !== null && !isDispatchV2Date(deliveryDate)) {
     badRequest("delivery_date must be a date (YYYY-MM-DD) or null");
+  }
+  const asked = dispatchV2FulfilmentParam(body?.fulfilment);
+  if (asked === undefined) {
+    badRequest('fulfilment must be "delivery" or "pickup"');
   }
   const rebuild = body?.rebuild === true;
   const info = await boxContext(client, job, supplierId, ctx);
@@ -1794,6 +1821,7 @@ export async function makeDispatchV2Email(
     isMainSupplier: info.isMain,
     lines: info.orderable,
     deliveryDate,
+    fulfilment: asked ?? (open ? dispatchV2FulfilmentOf(open.body_text) : null),
   });
   const to = (info.approved.to_emails || []).map((e: string) =>
     String(e).toLowerCase()

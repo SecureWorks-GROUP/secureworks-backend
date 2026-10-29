@@ -29,6 +29,12 @@
 //
 // Subject "Material Order Ref SWF-xxxxx". No sign-off, no PO number, no
 // prices, no internal notes. The job number is in the subject only.
+//
+// Delivery or pickup (Shaun, 29 Oct 2026: a Lysaght reply "you can collect on
+// 02/11" was suggested as a delivery). A pickup order opens "...order the
+// following for pickup:" and has no Address line. There is no column for it:
+// the email's own opening line is the record (dispatchV2FulfilmentOf), so an
+// email edited by hand to say pickup counts as a pickup too.
 
 // Every supplier order email goes out from this mailbox, through Outlook.
 export const DISPATCH_V2_FROM_MAILBOX = "admin@secureworkswa.com.au";
@@ -222,6 +228,39 @@ export function dispatchV2Subject(jobNumber: unknown): string {
   return number ? `Material Order Ref ${number}` : "Material Order Ref";
 }
 
+// ── Delivery or pickup ──────────────────────────────────────────────────────
+
+export type DispatchV2Fulfilment = "delivery" | "pickup";
+
+// Words that mean the supplier's yard, not our site: pickup, pick up,
+// pick-up, collect, collection.
+const PICKUP_WORDS_RE = /\bpick[\s-]?up\b|\bcollect(ion|ed|ing)?\b/i;
+
+/** Whether some text talks about a pickup (pickup / pick up / collect). */
+export function dispatchV2MentionsPickup(value: unknown): boolean {
+  return PICKUP_WORDS_RE.test(String(value ?? ""));
+}
+
+/** Delivery or pickup, read from an order email's opening line (the first
+ * line with words on it). Pickup when that line says pickup, pick up,
+ * pick-up, collect or collection; otherwise delivery. */
+export function dispatchV2FulfilmentOf(bodyText: unknown): DispatchV2Fulfilment {
+  const first = String(bodyText ?? "").split(/\r?\n/).find((line) =>
+    line.trim() !== ""
+  ) ?? "";
+  return dispatchV2MentionsPickup(first) ? "pickup" : "delivery";
+}
+
+/** A fulfilment from a request body: "delivery", "pickup", or null when
+ * not given. Anything else is undefined (the caller refuses it). */
+export function dispatchV2FulfilmentParam(
+  value: unknown,
+): DispatchV2Fulfilment | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (value === "delivery" || value === "pickup") return value;
+  return undefined;
+}
+
 // ── The body ────────────────────────────────────────────────────────────────
 
 export type DispatchV2BuiltLine = {
@@ -247,9 +286,12 @@ export function dispatchV2BuildEmail(input: {
   isMainSupplier: boolean;
   lines: any[];
   deliveryDate: string | null;
+  // Default delivery. A pickup has no Address line.
+  fulfilment?: DispatchV2Fulfilment | null;
 }): DispatchV2Built {
+  const pickup = input.fulfilment === "pickup";
   const dateText = dispatchV2DeliveryDateText(input.deliveryDate) ?? "";
-  const address = dispatchV2AddressText(input.job);
+  const address = pickup ? "" : dispatchV2AddressText(input.job);
   const contact = dispatchV2ContactText(input.job);
   const built: DispatchV2BuiltLine[] = (input.lines || []).map((line) => ({
     line_id: line?.id ? String(line.id) : null,
@@ -268,10 +310,12 @@ export function dispatchV2BuildEmail(input: {
   }
   const numbered = built.map((line, index) => `${index + 1}. ${line.text}`);
   const body = [
-    "Hi Team, could we please order the following for delivery:",
+    `Hi Team, could we please order the following for ${
+      pickup ? "pickup" : "delivery"
+    }:`,
     "",
     `Date: ${dateText}`.trimEnd(),
-    `Address: ${address}`.trimEnd(),
+    ...(pickup ? [] : [`Address: ${address}`.trimEnd()]),
     `Contact: ${contact}`.trimEnd(),
     "",
     "Materials Needed:",
@@ -283,7 +327,7 @@ export function dispatchV2BuildEmail(input: {
   ].join("\n");
   const missing: DispatchV2Built["missing"] = [];
   if (!dateText) missing.push("date");
-  if (!address) missing.push("address");
+  if (!pickup && !address) missing.push("address");
   if (!contact) missing.push("contact");
   return {
     subject: dispatchV2Subject(input.job?.job_number),

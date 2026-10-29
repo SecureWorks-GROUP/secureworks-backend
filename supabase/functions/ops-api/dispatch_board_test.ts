@@ -608,6 +608,35 @@ Deno.test("arrival: with no date on the box, the date our sent email asked for i
   assertEquals(order.sent_at, "2026-10-02T00:00:00Z");
 });
 
+Deno.test("arrival: a box says pickup when its newest sent email opened for pickup; a PO says nothing", () => {
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: addDays(TODAY, 10),
+    boxes: [
+      { supplier_id: "s1", supplier_name: "Lysaght" },
+      { supplier_id: "s2", supplier_name: "Stratco" },
+      { supplier_id: "s3", supplier_name: "Twinside" },
+    ],
+    sentEmails: [
+      { supplier_id: "s1", status: "sent", sent_at: "2026-09-30T00:00:00Z", delivery_date: addDays(TODAY, 4), body_text: "Hi Team, could we please order the following for delivery:\n1. x" },
+      { supplier_id: "s1", status: "sent", sent_at: "2026-10-02T00:00:00Z", delivery_date: addDays(TODAY, 6), body_text: "Hi Team, could we please order the following for pickup:\n1. x" },
+      { supplier_id: "s2", status: "sent", sent_at: "2026-10-02T00:00:00Z", delivery_date: addDays(TODAY, 6), body_text: "Hi Team, could we please order the following for delivery:\n1. x" },
+    ],
+    orders: [
+      { id: "po2", job_id: "j", supplier_id: "s9", supplier_name: "Xero Supplier", source: null, status: "draft", po_type: null, delivery_date: "2026-11-06", confirmed_delivery_date: null },
+    ],
+  });
+  assertEquals(
+    arrival.orders.map((o) => [o.key, o.fulfilment]),
+    [
+      ["box:s1", "pickup"],
+      ["box:s2", "delivery"],
+      ["box:s3", null],
+      ["po:po2", null],
+    ],
+  );
+});
+
 Deno.test("arrival: a box falls back to its v1 Dispatch order, other material orders are listed, cancelled and labour orders are not", () => {
   const arrival = dispatchArrival({
     today: TODAY,

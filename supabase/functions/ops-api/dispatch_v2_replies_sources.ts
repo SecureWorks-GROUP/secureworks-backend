@@ -38,6 +38,7 @@ import {
   supplierKeyOf,
   type V2Order,
 } from "./dispatch_v2_replies_rules.ts";
+import { dispatchV2FulfilmentOf } from "./dispatch_v2_emails.ts";
 
 export type SourceRead<T> = { available: boolean; rows: T[] };
 
@@ -80,7 +81,7 @@ export interface DispatchRepliesSources {
 export const DELIVERY_SOURCE_SUPPLIER_REPLY = "supplier_reply";
 
 const ORDER_SELECT =
-  "id, org_id, job_id, supplier_id, supplier_name, status, sent_at, sent_internet_message_id, sent_conversation_id";
+  "id, org_id, job_id, supplier_id, supplier_name, status, sent_at, sent_internet_message_id, sent_conversation_id, body_text";
 const SENT_STATUSES = ["sent", "send_unknown"];
 
 /** Postgres / PostgREST codes for "that table or column is not there". */
@@ -163,6 +164,8 @@ export function postgrestDispatchRepliesSources(
       sent_conversation_id: text(r.sent_conversation_id),
       confirmed_delivery_date: confirmed.get(`${r.job_id}:${r.supplier_id}`) ??
         null,
+      // Delivery or pickup, from the order email's opening line.
+      fulfilment: dispatchV2FulfilmentOf(r.body_text),
     }));
   }
 

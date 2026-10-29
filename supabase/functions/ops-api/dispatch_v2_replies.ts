@@ -56,6 +56,7 @@ import {
   type DispatchRepliesSources,
   SourceReadError,
 } from "./dispatch_v2_replies_sources.ts";
+import { dispatchV2MentionsPickup } from "./dispatch_v2_emails.ts";
 import { emailProviderKey } from "../_shared/evidence/outlook_mail.ts";
 
 export const DISPATCH_V2_REPLIES_READ_ACTIONS = [
@@ -322,7 +323,16 @@ async function suggestFor(
     return null;
   }
   const supplierName = order?.supplier_name ?? email.supplier_name;
-  const label = suggestionLabel(supplierName, email.delivery_date);
+  // A pickup when our order said pickup, or the supplier's own words do
+  // ("you can collect on 02/11"): Shaun, 29 Oct 2026.
+  const quote = (email.delivery_read as any)?.quote;
+  const pickup = order?.fulfilment === "pickup" ||
+    dispatchV2MentionsPickup(quote);
+  const label = suggestionLabel(
+    supplierName,
+    email.delivery_date,
+    pickup ? "pickup" : "delivery",
+  );
 
   const [prior] = await ctx.store.suggestionsForEmails(ctx.orgId, [email.id]);
   let row: SuggestionRow | null;
