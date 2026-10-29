@@ -3,8 +3,9 @@
 -- READ ONLY. Runs exactly what ops-api job_overview calls for one job,
 -- public.context_job_bill_outcomes(job), as the service role, under EXPLAIN
 -- (ANALYZE, BUFFERS). The job is the newest one Job Profit reads (legacy IS NOT
--- TRUE) that is not a holding job (metadata.do_not_schedule 'true' or '1', any
--- case, as the acceptance script reads it) and has a placed
+-- TRUE) that is not a holding job (the Job Profit engine's rule,
+-- v_job_profit.holding_job: lower(do_not_schedule) = 'true', as the acceptance
+-- script reads it) and has a placed
 -- bill: a Xero ACCPAY bill linked to it, or an actual allocation row
 -- (job_materials_facts, kind actual) of a bill on it. A job with no bills takes
 -- the cheap path and would understate the read. The job is chosen first, in its
@@ -25,7 +26,7 @@ SET LOCAL ROLE service_role;
 SELECT set_config('h7.job', COALESCE((
   SELECT j.id::text FROM public.jobs j
    WHERE j.legacy IS NOT TRUE
-     AND lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) NOT IN ('true', '1')
+     AND lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) <> 'true'
      AND (EXISTS (SELECT 1 FROM public.xero_invoices x
                    WHERE x.job_id = j.id AND x.invoice_type = 'ACCPAY')
           OR EXISTS (SELECT 1 FROM public.job_materials_facts f

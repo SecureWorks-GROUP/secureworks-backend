@@ -217,7 +217,42 @@ BEGIN
   END IF;
 END $$;
 RESET ROLE;
-UPDATE public.xero_invoices SET job_id = NULL, status = 'AUTHORISED' WHERE xero_invoice_id = 'H7-MIRP';
+UPDATE public.xero_invoices SET status = 'AUTHORISED' WHERE xero_invoice_id = 'H7-MIRP';
+-- (review, 29 Oct) a mirror whose state CFO cannot read gets no placement on its Xero job: here null, unknown
+UPDATE public.xero_invoices SET sub_total = NULL WHERE xero_invoice_id = 'H7-MIRP';
+SET LOCAL ROLE service_role;
+DO $$
+DECLARE b jsonb;
+BEGIN
+  SELECT e INTO b FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000001') -> 'bills') e
+   WHERE e ->> 'xero_invoice_id' = 'H7-MIRP';
+  IF b IS NULL OR b ->> 'bill_state' <> 'unknown' OR b -> 'here' <> 'null'::jsonb OR b ->> 'where_counted' <> 'unknown' THEN
+    RAISE EXCEPTION 'a mirror of unknown state on its Xero job was given a placement: %', coalesce(b::text, 'not listed');
+  END IF;
+END $$;
+RESET ROLE;
+UPDATE public.xero_invoices SET sub_total = 200 WHERE xero_invoice_id = 'H7-MIRP';
+-- (review, 29 Oct) one holding rule: the fallback's holding_job is the Job Profit engine's
+-- (v_job_profit.holding_job) for every value do_not_schedule may hold, and CFO's row agrees
+DO $$
+DECLARE v text; b jsonb; eng boolean; cfo boolean;
+BEGIN
+  FOREACH v IN ARRAY ARRAY['true', 'TRUE', '1', 'yes', 'false', '<absent>'] LOOP
+    UPDATE public.jobs SET metadata = CASE WHEN v = '<absent>' THEN COALESCE(metadata, '{}'::jsonb) - 'do_not_schedule'
+                                           ELSE COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('do_not_schedule', v) END
+     WHERE id = 'c7000000-0000-4000-8000-000000000001';
+    SELECT p.holding_job INTO eng FROM public.v_job_profit p WHERE p.job_id = 'c7000000-0000-4000-8000-000000000001';
+    SELECT c.holding_job INTO cfo FROM public.cfo_bill_cost_outcomes_scoped('c7000000-0000-4000-8000-000000000001') c
+     WHERE c.job_id = 'c7000000-0000-4000-8000-000000000001' LIMIT 1;
+    SELECT e INTO b FROM jsonb_array_elements(public.context_job_bill_outcomes('c7000000-0000-4000-8000-000000000001') -> 'bills') e
+     WHERE e ->> 'xero_invoice_id' = 'H7-MIRP';
+    IF eng IS NULL OR (b #>> '{here,holding_job}')::boolean IS DISTINCT FROM eng OR cfo IS DISTINCT FROM eng THEN
+      RAISE EXCEPTION 'do_not_schedule %: the fallback says holding %, CFO %, the engine %', v, b #>> '{here,holding_job}', cfo, eng;
+    END IF;
+  END LOOP;
+  UPDATE public.jobs SET metadata = COALESCE(metadata, '{}'::jsonb) - 'do_not_schedule' WHERE id = 'c7000000-0000-4000-8000-000000000001';
+END $$;
+UPDATE public.xero_invoices SET job_id = NULL WHERE xero_invoice_id = 'H7-MIRP';
 
 -- ── it reads CFO's scoped rule, and carries jit off ──
 DO $$

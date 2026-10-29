@@ -169,10 +169,23 @@ version or any amount (`job_bill_outcomes_read.ts`); a mirror bill reads
 `where_counted` `trade_app` there, both on a job a person placed it on and on
 its Xero-linked job where CFO's view lists no row (there `here` is
 `not_counted`, reason `mirror_bill_not_placed_here`; a voided mirror there
-has reason `bill_voided` and reads `no_job`, never a count), and each bill carries
+has reason `bill_voided` and reads `no_job`, never a count; one whose state CFO
+cannot read keeps `here` null and reads `unknown`), and each bill carries
 CFO's `mirror_bill` flag as given. The one-job timing read for the 8 s API limit is
 `scripts/explain-context-job-bill-outcomes-one-job.sql` (read only). INT-10's
 five-job acceptance, `scripts/int10-five-job-bill-outcomes-acceptance.sql` (read
-only, after both migrations apply), sets each placed bill's engine rows beside
-the card's read for five jobs chosen by a fixed shuffle of job ids, for a person
-to check against Xero.
+only, after both migrations apply), takes five jobs by a fixed shuffle of job
+ids and compares, both ways, the bills each card should list (placed on the
+job, or counted on it by the engine) with the bills it does list: a bill left
+out is `missing_from_card`, one listed that should not be is `extra_on_card`,
+every picked job always shows, and the one deliberate exclusion (a trade-app
+mirror no person placed on any job, which CFO's view lists nowhere) is its own
+step and is named on its row. Each row sets the engine rows beside the card's
+read for a person to check against Xero. `scripts/test-int10-acceptance-proof.sh`
+proves it on a disposable local database: the card as served has no failure,
+and a card that drops a bill, carries an extra one, lists nothing for a job or
+shows the excluded mirror is flagged by name. Both scripts treat a job as a
+holding job by the engine's own rule (`v_job_profit.holding_job`,
+`lower(do_not_schedule) = 'true'`), the rule CFO's view and the card read use
+too; Context's placement rules read `'true'` or `'1'`, and on a job set to
+`'1'` the two disagree (not measured on production).

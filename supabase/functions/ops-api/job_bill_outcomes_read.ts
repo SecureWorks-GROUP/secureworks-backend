@@ -23,7 +23,8 @@
 // placed it on, here.reason is mirror_bill_person_placed; on its Xero-linked
 // job where no person placed it (CFO's view has no row there), here is
 // not_counted with reason mirror_bill_not_placed_here. A voided mirror there
-// has reason bill_voided and reads no_job, never a count.
+// has reason bill_voided and reads no_job, never a count; one whose state
+// CFO cannot read keeps here null and reads unknown.
 
 export const BILL_OUTCOME_CONTRACT_VERSION = "cfo-bill-cost-outcome-v1";
 export const BILL_OUTCOME_SHAPE = "context-job-bill-outcomes-v1";
