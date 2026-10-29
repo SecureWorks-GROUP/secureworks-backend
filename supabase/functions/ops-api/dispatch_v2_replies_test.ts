@@ -616,6 +616,35 @@ Deno.test("scan: rung 1, same thread, with a delivery suggestion", async () => {
   assertEquals(s.state, "open");
 });
 
+Deno.test("scan: a pickup order gets a pickup suggestion", async () => {
+  const t = setup();
+  t.sources.orders[0].fulfilment = "pickup"; // our email opened "for pickup:"
+  t.store.events = MAIL.map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  await t.run("dispatch_v2_replies_scan");
+  const e = t.store.emails.find((x) => x.sequence_number === 101)!;
+  const s = t.store.suggestions.find((x) => x.email_id === e.id)!;
+  assertEquals(s.label, "Stratco WA: pickup Tue 27 Oct");
+});
+
+Deno.test("scan: a reply that says collect gets a pickup suggestion", async () => {
+  const t = setup();
+  t.store.events = MAIL.map((m) =>
+    m.seq === 101
+      ? {
+        ...m,
+        body: "Hi Shaun,\n\nYou can collect on Tue 27 Oct before 12pm.\n\nRegards",
+      }
+      : m
+  ).map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  await t.run("dispatch_v2_replies_scan");
+  const e = t.store.emails.find((x) => x.sequence_number === 101)!;
+  assertEquals(e.delivery_date, "2026-10-27");
+  const s = t.store.suggestions.find((x) => x.email_id === e.id)!;
+  assertEquals(s.label, "Stratco WA: pickup Tue 27 Oct");
+});
+
 Deno.test("scan: rung 1 also knows the thread from the captured copy of our sent email", async () => {
   const t = setup();
   t.sources.orders[1].sent_conversation_id = null; // O2: Outlook gave no thread id

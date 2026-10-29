@@ -1436,6 +1436,67 @@ Deno.test("make email: no approved email, no lines and a bad date are refused", 
   assertEquals(db.tables.dispatch_supplier_order_emails.length, 0);
 });
 
+Deno.test("make email: pickup says so, has no Address line and a rebuild keeps it", async () => {
+  const db = await fencingJob();
+  await refused(
+    makeEmail(db, JOB.fence, SUP.stratco, { fulfilment: "collect" }),
+    400,
+    "invalid_request",
+  );
+  assertEquals(db.tables.dispatch_supplier_order_emails.length, 0);
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    fulfilment: "pickup",
+  });
+  const email = made.email;
+  assert(email.body_text.startsWith(
+    "Hi Team, could we please order the following for pickup:",
+  ));
+  assert(!email.body_text.includes("Address:"));
+  assertEquals(email.fulfilment, "pickup");
+  assertEquals(made.missing.includes("address"), false);
+  // A rebuild with no choice keeps pickup.
+  const rebuilt = await makeEmail(db, JOB.fence, SUP.stratco, {
+    rebuild: true,
+  });
+  assertEquals(rebuilt.email.fulfilment, "pickup");
+  assert(!rebuilt.email.body_text.includes("Address:"));
+  // A rebuild that says delivery switches back and puts the address in.
+  const back = await makeEmail(db, JOB.fence, SUP.stratco, {
+    rebuild: true,
+    fulfilment: "delivery",
+  });
+  assertEquals(back.email.fulfilment, "delivery");
+  assert(back.email.body_text.startsWith(
+    "Hi Team, could we please order the following for delivery:",
+  ));
+  assert(back.email.body_text.includes("Address:"));
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: each box says delivery or pickup from its open email, else its newest sent one", async () => {
+  const db = await fencingJob();
+  const box = (read: any, id: string) =>
+    read.suppliers.find((s: any) => s.supplier_id === id);
+  let read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(box(read, SUP.stratco).fulfilment, null); // nothing made yet
+  await makeEmail(db, JOB.fence, SUP.stratco, { fulfilment: "pickup" });
+  await makeEmail(db, JOB.fence, SUP.metroll);
+  read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(box(read, SUP.stratco).fulfilment, "pickup");
+  assertEquals(box(read, SUP.stratco).open_email.fulfilment, "pickup");
+  assertEquals(box(read, SUP.metroll).fulfilment, "delivery");
+  // Once sent, the box keeps reading the sent email's opening line.
+  const row = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+    e.supplier_id === SUP.stratco
+  )!;
+  row.status = "sent";
+  row.sent_at = "2026-10-29T01:00:00.000Z";
+  read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(box(read, SUP.stratco).open_email, null);
+  assertEquals(box(read, SUP.stratco).fulfilment, "pickup");
+  assertEquals(box(read, SUP.stratco).sent_emails[0].fulfilment, "pickup");
+});
+
 Deno.test("save and discard: edits are kept and seen as edited; a stale stamp is refused", async () => {
   const db = await fencingJob();
   const email = (await makeEmail(db, JOB.fence, SUP.stratco)).email;

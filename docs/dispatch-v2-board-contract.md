@@ -125,6 +125,7 @@ ignore them** and read `board` only.
         "box_date_source": "by_hand",
         "box_date_set_at": "2026-10-22T03:00:00Z",
         "box_date_set_by_email": "shaun@...",
+        "fulfilment": "delivery",
         "mark": "solid",
         "flag": null
       }
@@ -168,6 +169,7 @@ Arrival order fields:
 | `box_id` | the supplier box's id (what `dispatch_v2_set_delivery_date` takes); null for a PO |
 | `box_date_source` | how the box's OWN date was set: `by_hand` or `supplier_reply`; null when the box has no date of its own (or for a PO) |
 | `box_date_set_at`, `box_date_set_by_email` | when and by whom the box's own date was last set; null as above. Send `box_date_set_at` back as `expected_set_at` |
+| `fulfilment` | `delivery` or `pickup`, read from the opening line of the box's newest sent order email (`for pickup:`); null for a PO or a box with nothing sent. The screen then says Delivery |
 | `mark` | `solid` (confirmed), `ring` (date, not confirmed), `none` (no date) |
 | `flag` | `no_date` (sent, no date yet: red), `after_install` (date after the install day: red), `not_sent` (still being put together, not red), or null |
 | `counts.late` | orders flagged `no_date` or `after_install` |
@@ -567,7 +569,8 @@ source; a confirmation needs a date and a person's email. Writers: Accept on
 a supplier reply (`dispatch_v2_suggestion_accept`, source `supplier_reply`)
 and the by-hand action in section 3a (source `by_hand`).
 
-The Arrival line also reads `dispatch_supplier_order_emails` (status `sent`),
+The Arrival line also reads `dispatch_supplier_order_emails` (status `sent`,
+with `body_text` for delivery or pickup, 29 Oct 2026),
 which comes with the supplier order emails slice
 (`20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql`, sibling
 branch). Until both migrations are applied, `board.reads.arrival` is `failed`

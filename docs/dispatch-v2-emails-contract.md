@@ -106,6 +106,7 @@ Only `dispatch_v2_send_email` sends anything, once per press.
   "body_text": "Hi Team, could we please order the following for delivery:\n\nDate: 4 November 2026\n...",
   "edited": false,
   "delivery_date": "2026-11-04",
+  "fulfilment": "delivery | pickup",
   "is_main_supplier": true,
   "standing_lines_included": true,
   "line_count": 4,
@@ -133,6 +134,7 @@ Fields that need explaining:
 - `edited` is true once the body differs from what the template built.
 - `empty_detail_lines` lists the Date, Address and Contact lines left blank. While any is blank, the send is refused.
 - `line_count` counts the standing lines too.
+- `fulfilment` is `pickup` when the body's first non-empty line mentions pickup, pick up, pick-up, collect or collection, else `delivery`. It is read from the body every time, so a hand edit to the opening line counts (see "Delivery or pickup" below).
 - If a send was claimed more than 2 minutes ago with no answer, the email reads as `send_unknown`.
 
 ### dispatch_v2_materials (GET)
@@ -165,7 +167,8 @@ Params: `job_id`. Returns the whole tab for one job.
       "lines": [Line],
       "photos": [Photo],
       "open_email": Email or null,
-      "sent_emails": [Email]
+      "sent_emails": [Email],
+      "fulfilment": "delivery | pickup | null"
     }
   ]
 }
@@ -176,6 +179,7 @@ Params: `job_id`. Returns the whole tab for one job.
 - `can_suggest` is true for a fencing or patio job with no lines yet.
 - `auto_fill` is true for a fencing job with no lines that was never filled from the scope. The screen then calls `dispatch_v2_suggest_draft` with `auto: true` on its own, once (Shaun, 26 Oct: the scope materials go on the list straight away, no button).
 - `scope_filled` is the job's fill record (`dispatch_v2_scope_fills`), or null. A list cleared by hand is not filled again on its own.
+- A box's `fulfilment` is its open email's, else its newest sent email's, else null (nothing made yet; the screen shows Delivery).
 
 ### dispatch_v2_supplier_search (GET)
 
@@ -369,7 +373,9 @@ A photo named on any email that is not discarded gives 409 `photo_on_email`. A p
 
 ### dispatch_v2_make_email (POST)
 
-Body: `{ "job_id", "supplier_id", "delivery_date": "YYYY-MM-DD or null", "rebuild": false }`.
+Body: `{ "job_id", "supplier_id", "delivery_date": "YYYY-MM-DD or null", "rebuild": false, "fulfilment": "delivery | pickup" }`.
+
+`fulfilment` is optional. Left out on a rebuild, the held email's own value is kept; left out on a new email, it is `delivery`.
 
 Makes the held email for one box:
 
@@ -404,13 +410,14 @@ The team mailbox depends on the job type:
 - `team_cc_open_question` is set for decking and other job types.
 - If the box already has an open email, it comes back unchanged: `{ "success": true, "unchanged": true, "email": Email }`.
 - `rebuild: true` on a held email rebuilds it from the lines and loses any edits. The answer then carries `rebuilt: true`.
+- Changing Delivery to Pickup (or back) on a held email needs `rebuild: true`: without it the held email comes back unchanged.
 
 Refusals:
 
 | Status | Code |
 |---|---|
 | 409 | `no_approved_email`, `no_lines_to_order`, `supplier_not_on_job`, `email_changed` (on a rebuild) |
-| 400 | `invalid_request` (a bad date) |
+| 400 | `invalid_request` (a bad date, or a `fulfilment` other than `delivery` or `pickup`) |
 
 **The body** follows `secureworks-wiki` `harness/ops/agents/soybean-legacy-import/client-message-templates.md`, material order email, exactly:
 
@@ -445,6 +452,20 @@ Rules for the body:
 - Long dashes become commas.
 - A line reads `<qty>[ <unit>] x <description>`, then its detail lines, `Profile:` and `Colour:`.
 - A blank Date, Address or Contact line stays as `Date:` so it is easy to see.
+- For a pickup the opening line reads `for pickup:` and there is no Address line at all, so the address is never `missing` (the Date line is then the pickup date).
+
+#### Delivery or pickup (Shaun, 29 Oct 2026)
+
+Lysaght's reply on SWR-261597 ("you can collect on 02/11 before 12pm") was suggested as "Lysaght: delivery Mon 2 Nov", but the order was a pickup, and nothing recorded that. There is no new column: the email body is the record. Its first non-empty line says `for pickup:` or `for delivery:`, so an order sent before this change (or edited by hand) reads the same way.
+
+Where it shows:
+
+| Place | What |
+|---|---|
+| `Email.fulfilment` | read from that email's body |
+| `dispatch_v2_materials` box `fulfilment` | open email's, else newest sent email's, else null |
+| Board Arrival `orders[].fulfilment` | the box's newest sent email; null for a PO or a box with nothing sent (see the board contract) |
+| Reply suggestions | the label reads `Lysaght: pickup Mon 2 Nov` when the order's sent body says pickup, or the reply sentence the date was read from mentions collect or pick up; else `Stratco: delivery Tue 3 Nov` |
 
 ### dispatch_v2_save_email (POST)
 
