@@ -19,7 +19,8 @@
 --   bills: one per bill, in invoice number then bill id order (C collation):
 --     xero_invoice_id, invoice_number, supplier, bill_status, bill_state,
 --     held_reason, change_hash (CFO's evidence_hash: a payment never moves it),
---     overhead_part, not_job_related_mark,
+--     overhead_part, not_job_related_mark, mirror_bill (CFO's: a trade-app
+--     mirror bill, shown only where a person placed it),
 --     where_counted  here | elsewhere | here_and_elsewhere | no_job | trade_app |
 --                    held | unknown (trade_app: a trade-app mirror bill a person
 --                    placed here; its cost counts through the trade app's lines,
@@ -67,6 +68,7 @@ AS $fn$
       min(o.evidence_hash) AS change_hash,
       bool_or(o.overhead_part) AS overhead_part,
       bool_or(o.not_job_related_mark) AS not_job_related_mark,
+      bool_or(o.mirror_bill) AS mirror_bill,
       bool_or(o.job_id = p_job AND o.counts = 'counted') AS here_counted,
       bool_or(o.job_id <> p_job AND o.counts = 'counted') AS other_counted,
       bool_or(o.job_id = p_job AND o.counts = 'unknown') AS here_unknown,
@@ -106,6 +108,7 @@ AS $fn$
                'change_hash', b.change_hash,
                'overhead_part', b.overhead_part,
                'not_job_related_mark', b.not_job_related_mark,
+               'mirror_bill', b.mirror_bill,
                'where_counted', CASE
                   WHEN b.bill_state = 'unknown' OR b.here_unknown OR b.here IS NULL THEN 'unknown'
                   WHEN b.bill_state = 'held' THEN 'held'

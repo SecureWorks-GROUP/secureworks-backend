@@ -39,6 +39,7 @@ function bill(over: Record<string, unknown> = {}) {
     change_hash: "h",
     overhead_part: false,
     not_job_related_mark: false,
+    mirror_bill: false,
     where_counted: "here",
     here: {
       xero_linked: true,
@@ -146,6 +147,7 @@ Deno.test("over-counting and a placed trade-app mirror pass on by name, never as
       bill({
         xero_invoice_id: "x-mirror",
         bill_state: "trade_mirror",
+        mirror_bill: true,
         where_counted: "trade_app",
         here: {
           xero_linked: false,
@@ -165,6 +167,7 @@ Deno.test("over-counting and a placed trade-app mirror pass on by name, never as
     ["unknown", "here"],
   ]);
   assertEquals(r.value.bills[1].here?.reason, "mirror_bill_person_placed");
+  assertEquals(r.value.bills.map((b) => b.mirror_bill), [false, true, false]);
 });
 
 Deno.test("unknown stays unknown: an unknown code or a bill with no placement here never reads as counted here", () => {

@@ -162,5 +162,10 @@ floor until the engine can be filtered), so the job read runs with
 `jit = off`: JIT compiling that plan costs seconds and saves nothing.
 ops-api `job_overview` serves that as `bills` and refuses any other contract
 version or any amount (`job_bill_outcomes_read.ts`); a placed mirror reads
-`where_counted` `trade_app` there. The one-job timing read for the 8 s API
-limit is `scripts/explain-context-job-bill-outcomes-one-job.sql` (read only).
+`where_counted` `trade_app` there, and each bill carries CFO's `mirror_bill`
+flag as given. The one-job timing read for the 8 s API limit is
+`scripts/explain-context-job-bill-outcomes-one-job.sql` (read only). INT-10's
+five-job acceptance, `scripts/int10-five-job-bill-outcomes-acceptance.sql` (read
+only, after both migrations apply), sets each placed bill's engine rows beside
+the card's read for five jobs chosen by a fixed shuffle of job ids, for a person
+to check against Xero.

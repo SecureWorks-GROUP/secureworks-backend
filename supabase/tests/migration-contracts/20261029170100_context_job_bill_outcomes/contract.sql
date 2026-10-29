@@ -135,6 +135,12 @@ BEGIN
         b -> 'here' ->> 'reason', b ->> 'bill_state', c.where_counted, c.counts, c.reason, c.bill_state;
     END IF;
   END LOOP;
+  -- mirror_bill is CFO's flag, passed on: true only on the placed mirror.
+  IF (SELECT array_agg(e ->> 'xero_invoice_id' ORDER BY e ->> 'xero_invoice_id' COLLATE "C")
+        FROM jsonb_array_elements(v -> 'bills') e WHERE (e ->> 'mirror_bill')::boolean) IS DISTINCT FROM ARRAY['H7-MIRP']
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(v -> 'bills') e WHERE jsonb_typeof(e -> 'mirror_bill') <> 'boolean') THEN
+    RAISE EXCEPTION 'J3 mirror_bill: %', v -> 'bills';
+  END IF;
 
   -- ── a job with no bills: an empty list, never a failure, the same version ──
   v := public.context_job_bill_outcomes('c7000000-0000-4000-8000-0000000000ff');

@@ -86,6 +86,8 @@ export interface JobBill {
   change_hash: string | null;
   overhead_part: boolean | null;
   not_job_related_mark: boolean | null;
+  // CFO's: a trade-app mirror bill (shown only where a person placed it).
+  mirror_bill: boolean | null;
   where_counted: WhereCounted;
   here: BillPlacement | null;
   other_jobs: BillPlacement[];
@@ -202,6 +204,7 @@ export function validateJobBillOutcomes(
       change_hash: str(b?.change_hash),
       overhead_part: bool(b?.overhead_part),
       not_job_related_mark: bool(b?.not_job_related_mark),
+      mirror_bill: bool(b?.mirror_bill),
       where_counted: where,
       here,
       other_jobs: Array.isArray(b?.other_jobs)

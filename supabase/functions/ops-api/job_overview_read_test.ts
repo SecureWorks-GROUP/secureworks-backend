@@ -633,6 +633,7 @@ const BILL_OUTCOMES = {
     change_hash: "abc",
     overhead_part: false,
     not_job_related_mark: false,
+    mirror_bill: false,
     where_counted: "here",
     here: {
       xero_linked: true,
