@@ -82,3 +82,108 @@ export function dispatchV2TermsFor(
   });
 }
 
+// ── Paid for the current order ──────────────────────────────────────────────
+//
+//   * Mark paid is a record only: it pays nobody, touches no Xero and sends
+//     nothing. It stamps who and when on the box (paid_at, paid_by_email,
+//     migration 20261029120100_dispatch_v2_box_paid.sql).
+//   * A paid stamp counts for the order it was marked against: only while it
+//     is newer than the box's newest order email (a second order to the same
+//     supplier reuses the box) and newer than a hand pick of Awaiting payment
+//     (picking Awaiting payment by hand re-opens the payment). A stamp that no
+//     longer counts is kept on the box and shown as an earlier order's.
+
+export type DispatchV2PaymentInput = {
+  terms: DispatchV2PaymentTerms;
+  paidAt: unknown;
+  paidByEmail: unknown;
+  // The box's newest sent order email (null = nothing sent yet).
+  newestSentAt: unknown;
+  // The stage a person picked on the box, and when.
+  storedStage: unknown;
+  storedStageAt: unknown;
+  // The stage the box finally shows (for blocks_job_move: a delivered box
+  // never holds the job up). Left out = not delivered.
+  materialStage?: string;
+};
+
+export type DispatchV2Payment = {
+  terms: DispatchV2PaymentTerms;
+  // not_needed: on account. unpaid: pay first, nothing counts. paid: a paid
+  // stamp counts for the current order. unknown: the terms are unknown.
+  state: "not_needed" | "unpaid" | "paid" | "unknown";
+  // A paid stamp counts for the current order.
+  paid: boolean;
+  // The counting stamp (null when none counts).
+  paid_at: string | null;
+  paid_by_email: string | null;
+  // A stamp on the box that belongs to an earlier order.
+  earlier_order_paid_at: string | null;
+  // Counts towards "a box on the job is unpaid": pay first, unpaid, not
+  // delivered.
+  blocks_job_move: boolean;
+  // What the screen may offer on this box.
+  can_mark_paid: boolean;
+  can_undo_paid: boolean;
+  // The stored stamps the presses guard on (raw, null = never set).
+  guard: { paid_at: string | null };
+};
+
+function stampText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function stampInstant(value: unknown): number | null {
+  const s = stampText(value);
+  if (!s) return null;
+  const ms = Date.parse(s);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Whether a stamp made at `stampAt` counts for the box's current order:
+ * newer than the newest send, and newer than a hand pick of Awaiting
+ * payment. */
+export function dispatchV2StampCounts(
+  stampAt: unknown,
+  input: Pick<
+    DispatchV2PaymentInput,
+    "newestSentAt" | "storedStage" | "storedStageAt"
+  >,
+): boolean {
+  const at = stampInstant(stampAt);
+  if (at === null) return false;
+  const sentAt = stampInstant(input.newestSentAt);
+  if (sentAt !== null && at <= sentAt) return false;
+  if (input.storedStage === "awaiting_payment") {
+    const pickedAt = stampInstant(input.storedStageAt);
+    if (pickedAt !== null && at <= pickedAt) return false;
+  }
+  return true;
+}
+
+/** The box's payment, by the rules above. */
+export function dispatchV2PaymentOf(
+  input: DispatchV2PaymentInput,
+): DispatchV2Payment {
+  const paidAt = stampText(input.paidAt);
+  const paidByEmail = stampText(input.paidByEmail);
+  const paid = !!paidAt && !!paidByEmail &&
+    dispatchV2StampCounts(paidAt, input);
+  let state: DispatchV2Payment["state"];
+  if (paid) state = "paid";
+  else if (input.terms === "on_account") state = "not_needed";
+  else if (input.terms === "pay_first") state = "unpaid";
+  else state = "unknown";
+  return {
+    terms: input.terms,
+    state,
+    paid,
+    paid_at: paid ? paidAt : null,
+    paid_by_email: paid ? paidByEmail : null,
+    earlier_order_paid_at: !paid && paidAt ? paidAt : null,
+    blocks_job_move: state === "unpaid" && input.materialStage !== "delivered",
+    can_mark_paid: input.terms !== "on_account" && !paid,
+    can_undo_paid: paid,
+    guard: { paid_at: paidAt },
+  };
+}

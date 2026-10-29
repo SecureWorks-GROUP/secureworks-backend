@@ -40,6 +40,8 @@ import {
   dispatchV2FulfilmentOf,
 } from "./dispatch_v2_emails.ts";
 import {
+  type DispatchV2Payment,
+  dispatchV2PaymentOf,
   type DispatchV2PaymentTerms,
 } from "./dispatch_v2_payment.ts";
 
@@ -141,13 +143,26 @@ export type DispatchMaterialStageInput = {
   unsentLineChanges: unknown[];
   // When the box's delivery date was confirmed (null = not confirmed).
   confirmedAt: unknown;
+  // The payment step (dispatch_v2_payment.ts, contract section 3c). Every
+  // one is optional: a caller that passes none gets exactly the rule above.
+  // The box's terms; left out = unknown.
+  terms?: DispatchV2PaymentTerms;
+  // The box's payment (dispatchV2PaymentOf), for the payment step.
+  payment?: DispatchV2Payment | null;
 };
 
 export type DispatchMaterialStageShown = {
   key: DispatchMaterialStageKey;
   // set = a person chose it and nothing newer happened; worked_out = read
-  // from the box.
-  source: "set" | "worked_out";
+  // from the box; payment = moved by Mark paid (contract section 3c).
+  source: "set" | "worked_out" | "payment";
+};
+
+// One candidate for the stage: what it is, the moment it happened and why.
+type StageCandidate = {
+  at: number;
+  key: DispatchMaterialStageKey;
+  source: DispatchMaterialStageShown["source"];
 };
 
 function instant(value: unknown): number | null {
@@ -165,17 +180,13 @@ function newest(values: unknown[] | null | undefined): number | null {
   return best;
 }
 
-/** The stage a supplier box shows, by the rules at the top of this file. */
-export function dispatchMaterialStageOf(
+// Step 1: whatever happened last. Each candidate with the moment it
+// happened; on the same moment a stage a person set wins, then a send, then a
+// line change.
+function lastThingThatHappened(
   input: DispatchMaterialStageInput,
-): DispatchMaterialStageShown {
-  // Each candidate with the moment it happened. On the same moment a stage a
-  // person set wins, then a send, then a line change.
-  const candidates: {
-    at: number;
-    key: DispatchMaterialStageKey;
-    source: "set" | "worked_out";
-  }[] = [];
+): StageCandidate {
+  const candidates: StageCandidate[] = [];
   const storedAt = instant(input.storedAt);
   if (isDispatchMaterialStage(input.stored) && storedAt !== null) {
     candidates.push({ at: storedAt, key: input.stored, source: "set" });
@@ -192,11 +203,7 @@ export function dispatchMaterialStageOf(
       source: "worked_out",
     });
   }
-  let shown: {
-    at: number;
-    key: DispatchMaterialStageKey;
-    source: "set" | "worked_out";
-  } = {
+  let shown: StageCandidate = {
     at: -Infinity,
     key: "order_materials",
     source: "worked_out",
@@ -204,6 +211,29 @@ export function dispatchMaterialStageOf(
   for (const c of candidates) {
     if (c.at > shown.at) shown = c;
   }
+  return shown;
+}
+
+// Step 2, the payment step (contract section 3c): a paid stamp that counts
+// for the current order is one more candidate, at its stamp time: Order
+// confirmed. The newest still wins, so a person's later pick beats it, and
+// on the same moment the earlier steps win.
+function paymentStep(
+  shown: StageCandidate,
+  payment: DispatchV2Payment | null | undefined,
+): StageCandidate {
+  if (!payment?.paid) return shown;
+  const at = instant(payment.paid_at);
+  if (at === null || at <= shown.at) return shown;
+  return { at, key: "order_confirmed", source: "payment" };
+}
+
+/** The stage a supplier box shows, by the rules at the top of this file. */
+export function dispatchMaterialStageOf(
+  input: DispatchMaterialStageInput,
+): DispatchMaterialStageShown {
+  let shown = lastThingThatHappened(input);
+  shown = paymentStep(shown, input.payment);
   const confirmedAt = instant(input.confirmedAt);
   if (
     confirmedAt !== null && confirmedAt > shown.at &&
@@ -301,7 +331,8 @@ export type DispatchV2BoxStage = {
   unsent_line_changes: string[];
   waiting_on: DispatchMaterialWaitingOn;
   todo: string | null;
-  payment: { terms: DispatchV2PaymentTerms };
+  // The payment step (dispatch_v2_payment.ts).
+  payment: DispatchV2Payment;
 };
 
 function textOrNull(value: unknown): string | null {
@@ -361,12 +392,22 @@ export function dispatchV2BoxStage(
     : null;
   const unsent = dispatchUnsentLineChanges(input.lines, supplierId);
   const terms: DispatchV2PaymentTerms = input.terms ?? "unknown";
+  const paymentInput = {
+    terms,
+    paidAt: box.paid_at,
+    paidByEmail: box.paid_by_email,
+    newestSentAt: newestSent?.sent_at ?? null,
+    storedStage: box.material_stage,
+    storedStageAt: box.material_stage_set_at,
+  };
   const shown = dispatchMaterialStageOf({
     stored: box.material_stage,
     storedAt: box.material_stage_set_at,
     sentAts,
     unsentLineChanges: unsent,
     confirmedAt: boxDate ? box.delivery_date_confirmed_at : null,
+    terms,
+    payment: dispatchV2PaymentOf(paymentInput),
   });
   const installBooked = !!input.installDay;
   const supplierName = textOrNull(box.supplier_name);
@@ -383,6 +424,8 @@ export function dispatchV2BoxStage(
     unsent_line_changes: unsent,
     waiting_on: dispatchMaterialWaitingOn(shown.key, installBooked),
     todo: dispatchMaterialTodo(shown.key, supplierName, installBooked),
-    payment: { terms },
+    // Worked out again with the stage shown, so a delivered box never holds
+    // the job up.
+    payment: dispatchV2PaymentOf({ ...paymentInput, materialStage: shown.key }),
   };
 }

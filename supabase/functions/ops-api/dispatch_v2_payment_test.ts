@@ -11,18 +11,63 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   dispatchV2AccountsOf,
+  dispatchV2PaymentOf,
   dispatchV2PaymentTerms,
   dispatchV2TermsFor,
 } from "./dispatch_v2_payment.ts";
-import { dispatchV2BoxStage } from "./dispatch_v2_material_stage.ts";
+import {
+  dispatchMaterialStageOf,
+  dispatchV2BoxStage,
+} from "./dispatch_v2_material_stage.ts";
 import { dispatchArrival, dispatchArrivalRead } from "./dispatch_board.ts";
+import {
+  DISPATCH_V2_MARK_PAID_ACTION,
+  DISPATCH_V2_PAYMENT_ACTIONS,
+  DISPATCH_V2_UNDO_PAID_ACTION,
+  type DispatchV2PaymentContext,
+  runDispatchV2PaymentAction,
+} from "./dispatch_v2_payment_write.ts";
+import { DispatchMaterialsError } from "./dispatch_materials_store.ts";
+
+// index.ts reads SUPABASE_URL and the service key into module constants, so
+// they are set before it is imported (a closed local port) and restored.
+const SERVICE_KEY = "test-service-role-key";
+const ROUTINE_KEY = "test-routine-key";
+const IMPORT_ENV: Record<string, string> = {
+  SUPABASE_URL: "http://127.0.0.1:9",
+  SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+};
+const index = await (async () => {
+  const saved = new Map(
+    Object.keys(IMPORT_ENV).map((n) => [n, Deno.env.get(n)]),
+  );
+  for (const [name, value] of Object.entries(IMPORT_ENV)) {
+    Deno.env.set(name, value);
+  }
+  try {
+    return await import("./index.ts");
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
+  }
+})();
+const {
+  _authorizeOpsApiAction,
+  _opsApiRequestHandlerForTest,
+  AGENT_READ_ALLOWED_ACTIONS,
+  LEAD_INSTALLER_READ_ACTIONS,
+} = index;
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const OTHER_ORG = "00000000-0000-0000-0000-0000000000ee";
 const TODAY = "2026-10-29";
+const NOW = "2026-10-29T03:00:00.000Z";
 type Row = Record<string, any>;
 
 function uuid(prefix: string, n: number): string {
@@ -50,6 +95,42 @@ const BOX = {
 };
 const EMAIL = { lysaght: uuid("f2", 1), stratco: uuid("f2", 2) };
 const SENT_AT = "2026-10-28T01:00:00.000Z";
+const SHAUN = { userId: uuid("d2", 1), email: "shaun@ops.test", orgId: ORG };
+
+// The supplier box's columns (20261014130000 + 20261023160000 + 20261023214200
+// + 20261028170000 + 20261029120100).
+const BOX_COLUMNS = new Set([
+  "id",
+  "org_id",
+  "job_id",
+  "supplier_id",
+  "supplier_name",
+  "position",
+  "created_at",
+  "created_by",
+  "created_by_email",
+  "is_main_supplier",
+  "delivery_date",
+  "delivery_date_source",
+  "delivery_date_set_at",
+  "delivery_date_set_by_email",
+  "delivery_date_confirmed_at",
+  "delivery_date_confirmed_by",
+  "delivery_date_confirmed_by_email",
+  "material_stage",
+  "material_stage_set_at",
+  "material_stage_set_by_email",
+  "paid_at",
+  "paid_by",
+  "paid_by_email",
+]);
+
+// The migrations' checks on the box, as Postgres would keep them.
+function boxChecksPass(row: Row): boolean {
+  // 20261029120100: a paid stamp always says by whom.
+  if ((row.paid_at == null) !== (row.paid_by_email == null)) return false;
+  return true;
+}
 
 function box(
   id: string,
@@ -76,6 +157,9 @@ function box(
     material_stage: null,
     material_stage_set_at: null,
     material_stage_set_by_email: null,
+    paid_at: null,
+    paid_by: null,
+    paid_by_email: null,
     ...extra,
   };
 }
@@ -133,7 +217,7 @@ function fixture(): Record<string, Row[]> {
       box(BOX.unlisted, SUP.unlisted, "Corner Hardware", { position: 2 }),
       box(BOX.retired, SUP.retired, "Old Supplier", { position: 3 }),
     ],
-    users: [],
+    users: [{ id: SHAUN.userId, email: SHAUN.email, org_id: ORG }],
     job_events: [],
     job_assignments: [],
     purchase_orders: [],
@@ -146,20 +230,64 @@ function fixture(): Record<string, Row[]> {
   };
 }
 
-type Options = { fail?: string[] };
+type Options = {
+  fail?: string[];
+  // Runs just before an update lands (a second person's press in between).
+  beforeUpdate?: (tables: Record<string, Row[]>) => void;
+  failEvents?: boolean;
+};
 
-// A PostgREST stand-in for the reads (and, from the presses' commits, the
-// box update and the audit insert). A table named in `fail` answers every
-// call with an error, as a missing table or a dropped connection would.
+// A PostgREST stand-in for the reads, the one box update and the audit
+// insert the presses make. It records every write; an update of any other
+// table throws. A table named in `fail` answers every call with an error, as
+// a missing table or a dropped connection would.
 function makeClient(tables: Record<string, Row[]>, options: Options = {}) {
+  const writes: Array<{ table: string; kind: string; row: Row }> = [];
   function from(table: string) {
     const filters: Array<(row: Row) => boolean> = [];
     let rowLimit: number | null = null;
+    let patch: Row | null = null;
+    let insertRow: Row | null = null;
     const orders: Array<[string, boolean]> = [];
     const failed = () => (options.fail || []).includes(table);
 
     const run = (): { data: any; error: any } => {
       if (failed()) return { data: null, error: { message: `${table} is down` } };
+      if (insertRow) {
+        if (table === "job_events" && options.failEvents) {
+          return { data: null, error: { message: "job_events is down" } };
+        }
+        (tables[table] ||= []).push(insertRow);
+        writes.push({ table, kind: "insert", row: insertRow });
+        return { data: null, error: null };
+      }
+      if (patch) {
+        if (table !== "job_material_suppliers") {
+          throw new Error(`unexpected update of ${table}`);
+        }
+        for (const key of Object.keys(patch)) {
+          if (!BOX_COLUMNS.has(key)) {
+            return {
+              data: null,
+              error: { code: "42703", message: `column ${key} does not exist` },
+            };
+          }
+        }
+        options.beforeUpdate?.(tables);
+        const hits = (tables[table] || []).filter((row) =>
+          filters.every((f) => f(row))
+        );
+        for (const row of hits) {
+          if (!boxChecksPass({ ...row, ...patch })) {
+            return { data: null, error: { code: "23514", message: "check violated" } };
+          }
+        }
+        for (const row of hits) {
+          Object.assign(row, patch);
+          writes.push({ table, kind: "update", row: { ...row } });
+        }
+        return { data: hits.map((r) => ({ ...r })), error: null };
+      }
       let rows = (tables[table] || []).filter((row) =>
         filters.every((f) => f(row))
       ).map((r) => ({ ...r }));
@@ -177,6 +305,8 @@ function makeClient(tables: Record<string, Row[]>, options: Options = {}) {
 
     const builder: any = {
       select: () => builder,
+      update: (p: Row) => ((patch = p), builder),
+      insert: (r: Row) => ((insertRow = r), builder),
       eq: (c: string, v: unknown) => (filters.push((row) => row[c] === v), builder),
       neq: (c: string, v: unknown) => (filters.push((row) => row[c] !== v), builder),
       is: (c: string, v: unknown) => (filters.push((row) => (row[c] ?? null) === v), builder),
@@ -205,7 +335,49 @@ function makeClient(tables: Record<string, Row[]>, options: Options = {}) {
     };
     return builder;
   }
-  return { client: { from } };
+  return { client: { from }, writes };
+}
+
+function ctx(
+  overrides: Partial<DispatchV2PaymentContext> = {},
+): DispatchV2PaymentContext {
+  return {
+    orgId: ORG,
+    actor: SHAUN,
+    via: "screen",
+    today: TODAY,
+    now: () => NOW,
+    ...overrides,
+  };
+}
+
+const press = (client: any, action: string, body: any, c = ctx()) =>
+  runDispatchV2PaymentAction(client, action, body, c) as Promise<any>;
+
+// A refused press: its HTTP status, its code and the rest of its body.
+async function refused(client: any, action: string, body: any, c = ctx()) {
+  const e = await assertRejects(
+    () => press(client, action, body, c),
+    DispatchMaterialsError,
+  ) as DispatchMaterialsError;
+  return { status: e.status, code: e.body.code, body: e.body as any };
+}
+
+function boxRow(tables: Record<string, Row[]>, id: string): Row {
+  return tables.job_material_suppliers.find((b) => b.id === id)!;
+}
+
+// The parts of a payment the rules decide, for short asserts.
+function paymentOf(input: Partial<Parameters<typeof dispatchV2PaymentOf>[0]>) {
+  return dispatchV2PaymentOf({
+    terms: "pay_first",
+    paidAt: null,
+    paidByEmail: null,
+    newestSentAt: SENT_AT,
+    storedStage: null,
+    storedStageAt: null,
+    ...input,
+  });
 }
 
 function orderFor(arrival: any, supplierId: string) {
@@ -337,5 +509,429 @@ Deno.test("terms: a failed account read gives unknown terms and never blanks the
     }
     // Today's stage, unchanged.
     assertEquals(orderFor(answer.arrival, SUP.lysaght).material_stage, "sent");
+  }
+});
+
+// ── A2: Mark paid and Undo paid ─────────────────────────────────────────────
+
+const PAID_AT = "2026-10-28T05:00:00.000Z";
+const BEFORE_SEND = "2026-10-27T05:00:00.000Z";
+
+Deno.test("paid: a pay-first box with no stamp is unpaid and holds the job up", () => {
+  const p = paymentOf({});
+  assertEquals(p.state, "unpaid");
+  assertEquals(p.paid, false);
+  assertEquals(p.blocks_job_move, true);
+  assertEquals(p.can_mark_paid, true);
+  assertEquals(p.can_undo_paid, false);
+  assertEquals(p.guard, { paid_at: null });
+  // A delivered box never holds the job up.
+  assertEquals(paymentOf({ materialStage: "delivered" }).blocks_job_move, false);
+});
+
+Deno.test("paid: a stamp after the newest send counts for the current order", () => {
+  const p = paymentOf({ paidAt: PAID_AT, paidByEmail: SHAUN.email });
+  assertEquals(p.state, "paid");
+  assertEquals([p.paid, p.paid_at, p.paid_by_email], [true, PAID_AT, SHAUN.email]);
+  assertEquals(p.earlier_order_paid_at, null);
+  assertEquals([p.blocks_job_move, p.can_mark_paid, p.can_undo_paid], [false, false, true]);
+  assertEquals(p.guard, { paid_at: PAID_AT });
+});
+
+Deno.test("paid: a stamp from before the newest send is an earlier order's", () => {
+  const p = paymentOf({ paidAt: BEFORE_SEND, paidByEmail: SHAUN.email });
+  assertEquals(p.state, "unpaid");
+  assertEquals(p.paid, false);
+  assertEquals(p.earlier_order_paid_at, BEFORE_SEND);
+  assertEquals(p.can_mark_paid, true);
+  // The guard is the raw stamp, so Mark paid again guards on what is stored.
+  assertEquals(p.guard, { paid_at: BEFORE_SEND });
+  // The same moment as the send does not count either.
+  assertEquals(paymentOf({ paidAt: SENT_AT, paidByEmail: SHAUN.email }).paid, false);
+});
+
+Deno.test("paid: picking Awaiting payment by hand after the stamp re-opens it", () => {
+  const p = paymentOf({
+    paidAt: PAID_AT,
+    paidByEmail: SHAUN.email,
+    storedStage: "awaiting_payment",
+    storedStageAt: "2026-10-28T06:00:00.000Z",
+  });
+  assertEquals([p.state, p.paid], ["unpaid", false]);
+  // A hand pick of any other stage leaves the stamp counting.
+  const other = paymentOf({
+    paidAt: PAID_AT,
+    paidByEmail: SHAUN.email,
+    storedStage: "ready",
+    storedStageAt: "2026-10-28T06:00:00.000Z",
+  });
+  assertEquals(other.paid, true);
+});
+
+Deno.test("paid: on account needs no payment; unknown terms say so", () => {
+  const onAccount = paymentOf({ terms: "on_account" });
+  assertEquals(onAccount.state, "not_needed");
+  assertEquals([onAccount.blocks_job_move, onAccount.can_mark_paid], [false, false]);
+  const unknown = paymentOf({ terms: "unknown" });
+  assertEquals(unknown.state, "unknown");
+  assertEquals([unknown.blocks_job_move, unknown.can_mark_paid], [false, true]);
+});
+
+Deno.test("paid: the stage shows Order confirmed from the payment, unless something newer happened", () => {
+  const paid = paymentOf({ paidAt: PAID_AT, paidByEmail: SHAUN.email });
+  const base = {
+    stored: null,
+    storedAt: null,
+    sentAts: [SENT_AT],
+    unsentLineChanges: [],
+    confirmedAt: null,
+  };
+  assertEquals(dispatchMaterialStageOf({ ...base, payment: paid }), {
+    key: "order_confirmed",
+    source: "payment",
+  });
+  // Unpaid: the send stands.
+  assertEquals(dispatchMaterialStageOf({ ...base, payment: paymentOf({}) }), {
+    key: "sent",
+    source: "worked_out",
+  });
+  // A person's later pick beats the payment.
+  assertEquals(
+    dispatchMaterialStageOf({
+      ...base,
+      stored: "ready",
+      storedAt: "2026-10-28T07:00:00.000Z",
+      payment: paid,
+    }),
+    { key: "ready", source: "set" },
+  );
+  // A new order sent after the stamp: the stamp is the earlier order's.
+  const view = dispatchV2BoxStage({
+    box: box(BOX.lysaght, SUP.lysaght, "Lysaght", {
+      paid_at: PAID_AT,
+      paid_by_email: SHAUN.email,
+    }),
+    emails: [
+      sentEmail(EMAIL.lysaght, SUP.lysaght),
+      sentEmail(uuid("f2", 3), SUP.lysaght, { sent_at: "2026-10-28T08:00:00.000Z" }),
+    ],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals([view.key, view.source], ["sent", "worked_out"]);
+  assertEquals(view.payment.earlier_order_paid_at, PAID_AT);
+  assertEquals(view.payment.state, "unpaid");
+});
+
+Deno.test("paid: Mark paid stamps the box, logs the press and moves it to Order confirmed", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: null,
+  });
+  assertEquals(answer.success, true);
+  assertEquals(answer.unchanged, false);
+  assertEquals(answer.job_status_changed, false);
+  assertEquals("audit_logged" in answer, false);
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals([row.paid_at, row.paid_by, row.paid_by_email], [NOW, SHAUN.userId, SHAUN.email]);
+  assertEquals(answer.box.material_stage, "order_confirmed");
+  assertEquals(answer.box.payment.state, "paid");
+  assertEquals(orderFor(answer.arrival.arrival, SUP.lysaght).material_stage_source, "payment");
+  // One box update and one audit line, nothing else.
+  assertEquals(writes.map((w) => `${w.kind}:${w.table}`), [
+    "update:job_material_suppliers",
+    "insert:job_events",
+  ]);
+  const event = tables.job_events[0];
+  assertEquals(event.event_type, "dispatch_v2_marked_paid");
+  assertEquals(event.user_id, SHAUN.userId);
+  assertEquals(event.detail_json, {
+    box_id: BOX.lysaght,
+    supplier_id: SUP.lysaght,
+    supplier: "Lysaght",
+    order_email_id: EMAIL.lysaght,
+    replaced_paid_at: null,
+    had_date: false,
+    stage_before: "sent",
+    stage_after: "order_confirmed",
+    via: "screen",
+    operator_email: SHAUN.email,
+  });
+  assertEquals(tables.jobs[0].status, "awaiting_supplier");
+
+  // A second press: already paid, nothing written.
+  const again = await press(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.lysaght });
+  assertEquals(again.unchanged, true);
+  assertEquals(writes.length, 2);
+});
+
+Deno.test("paid: Mark paid over an earlier order's stamp replaces it and says so", async () => {
+  const tables = fixture();
+  Object.assign(boxRow(tables, BOX.lysaght), {
+    paid_at: BEFORE_SEND,
+    paid_by_email: "old@ops.test",
+  });
+  const { client } = makeClient(tables);
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: BEFORE_SEND,
+  });
+  assertEquals(answer.unchanged, false);
+  assertEquals(boxRow(tables, BOX.lysaght).paid_at, NOW);
+  assertEquals(tables.job_events[0].detail_json.replaced_paid_at, BEFORE_SEND);
+});
+
+Deno.test("paid: an on-account box is refused with no write", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  const e = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.stratco });
+  assertEquals([e.status, e.code], [409, "on_account"]);
+  assertEquals(writes, []);
+});
+
+Deno.test("paid: a guard that no longer matches is refused with the box as it is now", async () => {
+  const tables = fixture();
+  Object.assign(boxRow(tables, BOX.lysaght), {
+    paid_at: PAID_AT,
+    paid_by_email: "someone@ops.test",
+  });
+  const { client, writes } = makeClient(tables);
+  const e: any = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: null,
+  });
+  assertEquals([e.status, e.code], [409, "paid_changed"]);
+  assertEquals(e.body.box.payment.paid_at, PAID_AT);
+  assertEquals(writes, []);
+});
+
+Deno.test("paid: a failed account read refuses the press before any write", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables, {
+    fail: ["dispatch_approved_supplier_emails"],
+  });
+  const e = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.lysaght });
+  assertEquals([e.status, e.code], [500, "dispatch_read_failed"]);
+  assertEquals(writes, []);
+});
+
+Deno.test("paid: a second press landing first is refused, not overwritten", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables, {
+    beforeUpdate: (t) =>
+      Object.assign(t.job_material_suppliers.find((b) => b.id === BOX.lysaght)!, {
+        paid_at: "2026-10-29T02:59:00.000Z",
+        paid_by_email: "other@ops.test",
+      }),
+  });
+  const e = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.lysaght });
+  assertEquals([e.status, e.code], [409, "paid_changed"]);
+  assertEquals(boxRow(tables, BOX.lysaght).paid_by_email, "other@ops.test");
+  assertEquals(writes.filter((w) => w.table === "job_events"), []);
+});
+
+Deno.test("paid: a failed audit insert keeps the write and says audit_logged false", async () => {
+  const tables = fixture();
+  const { client } = makeClient(tables, { failEvents: true });
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.lysaght });
+  assertEquals(answer.success, true);
+  assertEquals(answer.audit_logged, false);
+  assertEquals(boxRow(tables, BOX.lysaght).paid_at, NOW);
+});
+
+Deno.test("paid: the ops key names its person by operator_email", async () => {
+  const tables = fixture();
+  const { client } = makeClient(tables);
+  const terminal = ctx({
+    via: "terminal",
+    actor: { userId: null, email: null, orgId: null },
+  });
+  const missing = await refused(
+    client,
+    DISPATCH_V2_MARK_PAID_ACTION,
+    { box_id: BOX.lysaght },
+    terminal,
+  );
+  assertEquals([missing.status, missing.code], [400, "operator_required"]);
+  const stranger = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    operator_email: "nobody@ops.test",
+  }, terminal);
+  assertEquals([stranger.status, stranger.code], [400, "operator_required"]);
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    operator_email: "SHAUN@ops.test",
+  }, terminal);
+  assertEquals(answer.unchanged, false);
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals([row.paid_by, row.paid_by_email], [null, SHAUN.email]);
+  assertEquals(tables.job_events[0].detail_json.via, "terminal");
+});
+
+Deno.test("paid: bad requests and boxes off the job are refused", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  const bad = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: "nope" });
+  assertEquals([bad.status, bad.code], [400, "invalid_request"]);
+  const guard = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: "yesterday",
+  });
+  assertEquals(guard.status, 400);
+  const missing = await refused(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: uuid("c2", 99),
+  });
+  assertEquals([missing.status, missing.code], [404, "box_not_found"]);
+  const unknown = await refused(client, "dispatch_v2_pay_everyone", {
+    box_id: BOX.lysaght,
+  });
+  assertEquals(unknown.status, 400);
+  assertEquals(writes, []);
+});
+
+Deno.test("paid: Undo paid needs the stamp it undoes, takes it off and logs it", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  await press(client, DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.lysaght });
+  const noGuard = await refused(client, DISPATCH_V2_UNDO_PAID_ACTION, {
+    box_id: BOX.lysaght,
+  });
+  assertEquals([noGuard.status, noGuard.code], [400, "invalid_request"]);
+  const wrong = await refused(client, DISPATCH_V2_UNDO_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: PAID_AT,
+  });
+  assertEquals([wrong.status, wrong.code], [409, "paid_changed"]);
+  const answer = await press(client, DISPATCH_V2_UNDO_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: NOW,
+  });
+  assertEquals(answer.unchanged, false);
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals([row.paid_at, row.paid_by, row.paid_by_email], [null, null, null]);
+  assertEquals(answer.box.material_stage, "sent");
+  assertEquals(answer.box.payment.state, "unpaid");
+  const event = tables.job_events[1];
+  assertEquals(event.event_type, "dispatch_v2_paid_undone");
+  assertEquals(event.detail_json, {
+    box_id: BOX.lysaght,
+    supplier_id: SUP.lysaght,
+    supplier: "Lysaght",
+    undone_paid_at: NOW,
+    undone_paid_by_email: SHAUN.email,
+    stage_before: "order_confirmed",
+    stage_after: "sent",
+    via: "screen",
+    operator_email: SHAUN.email,
+  });
+  assertEquals(writes.length, 4);
+  // Nothing left to undo.
+  const again = await press(client, DISPATCH_V2_UNDO_PAID_ACTION, {
+    box_id: BOX.lysaght,
+    expected_paid_at: null,
+  });
+  assertEquals(again.unchanged, true);
+  assertEquals(writes.length, 4);
+});
+
+Deno.test("paid gate: staff only, on no allow-list", () => {
+  for (const action of DISPATCH_V2_PAYMENT_ACTIONS) {
+    const url = new URL(
+      `https://example.test/functions/v1/ops-api?action=${action}`,
+    );
+    for (const role of ["admin", "owner", "ops_manager"]) {
+      assertEquals(
+        _authorizeOpsApiAction({ url, authMode: "jwt", authUser: { role } }),
+        { ok: true },
+      );
+    }
+    for (
+      const authUser of [{ role: "installer" }, {
+        role: "lead_installer",
+        managedVerticals: ["fencing", "patio"],
+      }]
+    ) {
+      const call = _authorizeOpsApiAction({
+        url,
+        authMode: "jwt",
+        authUser,
+      }) as any;
+      assertEquals([call.ok, call.status, call.code], [
+        false,
+        403,
+        "operator_access_required",
+      ], `${action} ${authUser.role}`);
+    }
+    assert(!AGENT_READ_ALLOWED_ACTIONS.has(action));
+    assert(!LEAD_INSTALLER_READ_ACTIONS.has(action));
+  }
+});
+
+const ENV: Record<string, string> = {
+  ...IMPORT_ENV,
+  MAKESAFE_ROUTINE_KEY: ROUTINE_KEY,
+};
+
+Deno.test("paid gate: the routine key is refused, a GET is 405, and a bad id is 400 before any call", async () => {
+  const saved = new Map(Object.keys(ENV).map((n) => [n, Deno.env.get(n)]));
+  for (const [n, v] of Object.entries(ENV)) Deno.env.set(n, v);
+  const calls: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = ((input: Request | URL | string) => {
+    calls.push(input instanceof Request ? input.url : String(input));
+    return Promise.resolve(new Response("{}", { status: 500 }));
+  }) as typeof fetch;
+  try {
+    for (const action of DISPATCH_V2_PAYMENT_ACTIONS) {
+      const at = `https://example.invalid/ops-api?action=${action}`;
+      const body = JSON.stringify({
+        box_id: "nope",
+        expected_paid_at: null,
+        operator_email: SHAUN.email,
+      });
+      const routine = await _opsApiRequestHandlerForTest(
+        new Request(at, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": ROUTINE_KEY,
+          },
+          body,
+        }),
+      );
+      assertEquals(routine.status, 403, action);
+      await routine.body?.cancel();
+      const get = await _opsApiRequestHandlerForTest(
+        new Request(at, {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${SERVICE_KEY}`,
+          },
+        }),
+      );
+      assertEquals(get.status, 405, action);
+      await get.body?.cancel();
+      const bad = await _opsApiRequestHandlerForTest(
+        new Request(at, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${SERVICE_KEY}`,
+          },
+          body,
+        }),
+      );
+      assertEquals(bad.status, 400, action);
+      await bad.body?.cancel();
+    }
+    assertEquals(calls, []);
+  } finally {
+    globalThis.fetch = original;
+    for (const [n, v] of saved) {
+      if (v === undefined) Deno.env.delete(n);
+      else Deno.env.set(n, v);
+    }
   }
 });

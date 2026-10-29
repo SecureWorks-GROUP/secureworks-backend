@@ -53,6 +53,7 @@ import {
 import {
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
+  type DispatchMaterialStageShown,
   dispatchMaterialTodo,
   type DispatchMaterialWaitingOn,
   dispatchMaterialWaitingOn,
@@ -591,10 +592,13 @@ export type DispatchBoardSupplierBox = {
   material_stage?: string | null;
   material_stage_set_at?: string | null;
   material_stage_set_by_email?: string | null;
+  // Mark paid (migration 20261029120100_dispatch_v2_box_paid.sql).
+  paid_at?: string | null;
+  paid_by_email?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email";
 
 // The material lines in the boxes, only for the material stage: which lines
 // are still to be ordered, and when each last changed.
@@ -720,7 +724,8 @@ export type DispatchArrivalOrder = {
   // set it when a person did.
   material_stage: DispatchMaterialStageKey;
   material_stage_label: string;
-  material_stage_source: "set" | "worked_out" | "order";
+  // 'payment' = moved to Order confirmed by Mark paid (contract section 3c).
+  material_stage_source: DispatchMaterialStageShown["source"] | "order";
   material_stage_set_at: string | null;
   material_stage_set_by_email: string | null;
   // Who it is waiting on, and the next thing to do in plain words (null once
@@ -735,7 +740,8 @@ export type DispatchArrivalOrder = {
   fulfilment: DispatchV2Fulfilment | null;
   // The box's payment step (dispatch_v2_payment.ts, contract section 3c):
   // its terms (on_account, pay_first, or unknown when the account list read
-  // failed). Null for a purchase order with no box.
+  // failed), whether it is paid for the current order, and what the screen
+  // may offer. Null for a purchase order with no box.
   payment: DispatchV2BoxStage["payment"] | null;
 };
 

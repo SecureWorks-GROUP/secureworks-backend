@@ -983,3 +983,8 @@ ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|colum
 # which approved suppliers are on account. The board, dispatch_arrival and the
 # materials panel select it, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261029120000_dispatch_v2_on_account_suppliers.sql|column|dispatch_approved_supplier_emails.on_account
+# Mark paid on a supplier box: the board, dispatch_arrival, the materials panel
+# and the two presses select these columns.
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_at
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by_email
