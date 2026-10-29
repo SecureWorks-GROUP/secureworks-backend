@@ -1,0 +1,1 @@
+DROP TRIGGER trg_trade_invoice_lines_group_review_insert ON public.trade_invoice_lines;

@@ -9818,14 +9818,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               await markTradeInvoiceRetryable(
                 client,
                 String(reviewed.trade_invoice_id),
-                'Line review released this invoice, but the Xero push failed. It can be retried.',
+                'Line review released this invoice, but the Xero result is unconfirmed. Check Xero for an existing bill before retrying.',
               )
             } catch (markErr) {
               console.error('[ops-api] line review xero push retry mark failed:', (markErr as Error).message)
             }
             return json({
               ...reviewed,
-              xero_push: 'failed',
+              xero_push: 'unconfirmed',
               xero_push_error: (pushErr as Error)?.message || 'Xero push failed',
             })
           }
@@ -56190,7 +56190,10 @@ export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 // ── set_trade_rate: trade or ops sets hourly rate ──
 async function setTradeRate(client: any, authUserId: string | null, body: any) {
   const { user_id, hourly_rate } = body
-  const targetUserId = user_id || authUserId
+  if (authUserId && user_id && user_id !== authUserId) {
+    throw new ApiError('A trade can only update their own rate.', 403)
+  }
+  const targetUserId = authUserId || user_id
   if (!targetUserId) throw new Error('user_id required')
   if (!hourly_rate || hourly_rate <= 0) throw new Error('Valid hourly_rate required')
 
