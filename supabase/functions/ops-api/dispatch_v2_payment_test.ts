@@ -604,11 +604,13 @@ Deno.test("paid: the stage shows Order confirmed from the payment, unless someth
   assertEquals(dispatchMaterialStageOf({ ...base, payment: paid }), {
     key: "order_confirmed",
     source: "payment",
+    held_by_payment: false,
   });
   // Unpaid: the send stands.
   assertEquals(dispatchMaterialStageOf({ ...base, payment: paymentOf({}) }), {
     key: "sent",
     source: "worked_out",
+    held_by_payment: false,
   });
   // A person's later pick beats the payment.
   assertEquals(
@@ -618,7 +620,7 @@ Deno.test("paid: the stage shows Order confirmed from the payment, unless someth
       storedAt: "2026-10-28T07:00:00.000Z",
       payment: paid,
     }),
-    { key: "ready", source: "set" },
+    { key: "ready", source: "set", held_by_payment: false },
   );
   // A new order sent after the stamp: the stamp is the earlier order's.
   const view = dispatchV2BoxStage({
@@ -1045,6 +1047,7 @@ Deno.test("pay on: the stage shows Order confirmed from the tag; the payment ste
   assertEquals(dispatchMaterialStageOf({ ...base, payment: tagged }), {
     key: "order_confirmed",
     source: "payment",
+    held_by_payment: false,
   });
   // Materials ready picked after the tag; Mark paid pressed later on the day
   // of pickup: the box stays at Materials ready.
@@ -1064,7 +1067,7 @@ Deno.test("pay on: the stage shows Order confirmed from the tag; the payment ste
       storedAt: "2026-10-28T06:00:00.000Z",
       payment: both,
     }),
-    { key: "ready", source: "set" },
+    { key: "ready", source: "set", held_by_payment: false },
   );
 });
 
@@ -1218,4 +1221,127 @@ Deno.test("pay on: a bad value is refused, and a changed tag is refused with the
   assertEquals([changed.status, changed.code], [409, "pay_on_changed"]);
   assertEquals(changed.body.box.payment.pay_on, "pickup");
   assertEquals(writes, []);
+});
+
+// ── A4: the payment gate on a confirmed date ────────────────────────────────
+
+const CONFIRMED_AT = "2026-10-28T03:00:00.000Z";
+
+function confirmedBox(extra: Row = {}): Row {
+  return box(BOX.lysaght, SUP.lysaght, "Lysaght", {
+    delivery_date: "2026-11-05",
+    delivery_date_set_at: CONFIRMED_AT,
+    delivery_date_confirmed_at: CONFIRMED_AT,
+    ...extra,
+  });
+}
+
+Deno.test("gate: a confirmed date on an unpaid pay-first box lifts it only to Awaiting payment", () => {
+  const view = dispatchV2BoxStage({
+    box: confirmedBox(),
+    emails: [sentEmail(EMAIL.lysaght, SUP.lysaght)],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals([view.key, view.source], ["awaiting_payment", "worked_out"]);
+  assertEquals(view.held_by_payment, true);
+  // The date stays saved and shown.
+  assertEquals([view.box_date, view.box_date_confirmed], ["2026-11-05", true]);
+  assertEquals(view.payment.holds_stage, true);
+  assertEquals(view.todo, "Pay Lysaght");
+  assertEquals(view.waiting_on, "us");
+});
+
+Deno.test("gate: on account, paid, Pay on or unknown terms lift to Order confirmed as before", () => {
+  const sent = [sentEmail(EMAIL.lysaght, SUP.lysaght)];
+  for (const terms of ["on_account", "unknown"] as const) {
+    const view = dispatchV2BoxStage({ box: confirmedBox(), emails: sent, lines: [], terms });
+    assertEquals([view.key, view.payment.holds_stage], ["order_confirmed", false], terms);
+  }
+  const paid = dispatchV2BoxStage({
+    box: confirmedBox({ paid_at: PAID_AT, paid_by_email: SHAUN.email }),
+    emails: sent,
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals([paid.key, paid.payment.holds_stage], ["order_confirmed", false]);
+  const tagged = dispatchV2BoxStage({
+    box: confirmedBox({
+      pay_on: "delivery",
+      pay_on_set_at: TAGGED_AT,
+      pay_on_set_by_email: SHAUN.email,
+    }),
+    emails: sent,
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals([tagged.key, tagged.payment.holds_stage], ["order_confirmed", false]);
+});
+
+Deno.test("gate: a box already at Awaiting payment stays there and shows it is held", () => {
+  const shown = dispatchMaterialStageOf({
+    stored: "awaiting_payment",
+    storedAt: "2026-10-28T02:00:00.000Z",
+    sentAts: [SENT_AT],
+    unsentLineChanges: [],
+    confirmedAt: CONFIRMED_AT,
+    terms: "pay_first",
+  });
+  assertEquals(shown, {
+    key: "awaiting_payment",
+    source: "set",
+    held_by_payment: true,
+  });
+  // A stage past Order confirmed is never touched, so never held.
+  assertEquals(
+    dispatchMaterialStageOf({
+      stored: "manufacturing",
+      storedAt: "2026-10-28T02:00:00.000Z",
+      sentAts: [SENT_AT],
+      unsentLineChanges: [],
+      confirmedAt: CONFIRMED_AT,
+      terms: "pay_first",
+    }),
+    { key: "manufacturing", source: "set", held_by_payment: false },
+  );
+});
+
+Deno.test("gate: a caller of the old rule gets the old answer and shape", () => {
+  assertEquals(
+    dispatchMaterialStageOf({
+      stored: null,
+      storedAt: null,
+      sentAts: [SENT_AT],
+      unsentLineChanges: [],
+      confirmedAt: CONFIRMED_AT,
+    }),
+    { key: "order_confirmed", source: "worked_out" },
+  );
+});
+
+Deno.test("gate: the Arrival line and Mark paid agree with the gate", async () => {
+  const tables = fixture();
+  Object.assign(boxRow(tables, BOX.lysaght), {
+    delivery_date: "2026-11-05",
+    delivery_date_set_at: CONFIRMED_AT,
+    delivery_date_confirmed_at: CONFIRMED_AT,
+  });
+  const { client } = makeClient(tables);
+  const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+  const lysaght = orderFor(read.arrival, SUP.lysaght);
+  assertEquals(lysaght.material_stage, "awaiting_payment");
+  assertEquals(lysaght.held_by_payment, true);
+  assertEquals(lysaght.payment.holds_stage, true);
+  assertEquals(lysaght.delivery_date, "2026-11-05");
+  const answer = await press(client, DISPATCH_V2_MARK_PAID_ACTION, {
+    box_id: BOX.lysaght,
+  });
+  assertEquals(answer.box.material_stage, "order_confirmed");
+  assertEquals(answer.box.payment.holds_stage, false);
+  assertEquals(
+    orderFor(answer.arrival.arrival, SUP.lysaght).held_by_payment,
+    false,
+  );
+  assertEquals(tables.job_events[0].detail_json.had_date, true);
+  assertEquals(tables.job_events[0].detail_json.stage_before, "awaiting_payment");
 });

@@ -110,6 +110,9 @@ export type DispatchV2PaymentInput = {
   // The stage the box finally shows (for blocks_job_move: a delivered box
   // never holds the job up). Left out = not delivered.
   materialStage?: string;
+  // The payment gate is holding the box's stage (dispatchMaterialStageOf's
+  // held_by_payment). Left out = not held.
+  holdsStage?: boolean;
 };
 
 export type DispatchV2PayOn = "pickup" | "delivery";
@@ -138,6 +141,9 @@ export type DispatchV2Payment = {
   // A stamp on the box that belongs to an earlier order.
   earlier_order_paid_at: string | null;
   earlier_order_pay_on_set_at: string | null;
+  // A confirmed date is saved but the payment gate holds the stage at
+  // Awaiting payment.
+  holds_stage: boolean;
   // Counts towards "a box on the job is unpaid": pay first, unpaid, not
   // delivered.
   blocks_job_move: boolean;
@@ -217,6 +223,7 @@ export function dispatchV2PaymentOf(
     pay_on_set_by_email: tagged ? payOnSetByEmail : null,
     earlier_order_paid_at: !paid && paidAt ? paidAt : null,
     earlier_order_pay_on_set_at: !tagged && payOnSetAt ? payOnSetAt : null,
+    holds_stage: input.holdsStage === true,
     blocks_job_move: state === "unpaid" && input.materialStage !== "delivered",
     can_mark_paid: input.terms !== "on_account" && !paid,
     can_undo_paid: paid,

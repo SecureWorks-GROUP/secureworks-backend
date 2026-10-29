@@ -737,6 +737,14 @@ function boardFixture() {
       { id: "em1", job_id: jobId(3), supplier_id: "s1", status: "sent", sent_at: "2026-10-19T00:00:00Z", delivery_date: addDays(TODAY, 1) },
     ],
     purchase_orders: [],
+    // Stratco is on account (Shaun, 29 Oct 2026), so its confirmed date is
+    // not held by the payment gate.
+    dispatch_approved_supplier_emails: [
+      { id: "ap1", org_id: ORG_ID, name: "Stratco WA", active: true, on_account: true },
+    ],
+    dispatch_approved_supplier_email_links: [
+      { supplier_id: "s1", approved_id: "ap1", org_id: ORG_ID },
+    ],
   };
 }
 

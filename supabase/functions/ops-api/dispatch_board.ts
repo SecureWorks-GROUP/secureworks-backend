@@ -747,6 +747,9 @@ export type DispatchArrivalOrder = {
   // failed), whether it is paid for the current order, and what the screen
   // may offer. Null for a purchase order with no box.
   payment: DispatchV2BoxStage["payment"] | null;
+  // A confirmed date is saved but the payment gate holds the stage at
+  // Awaiting payment. Always false for a purchase order.
+  held_by_payment: boolean;
 };
 
 export type DispatchArrival = {
@@ -950,6 +953,7 @@ export function dispatchArrival(
         view.key === "order_materials" && unsent.length > 0,
       ),
       payment: view.payment,
+      held_by_payment: view.held_by_payment,
     }, installDay, view));
   }
 
@@ -981,6 +985,7 @@ export function dispatchArrival(
       // install's first day.
       extra: !!installDay && (perthDayOf(order.created_at) ?? "") >= installDay,
       payment: null,
+      held_by_payment: false,
     }, installDay));
   }
 

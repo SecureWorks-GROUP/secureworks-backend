@@ -710,6 +710,8 @@ function boxMaterialStage(
     source: view.source,
     set_at: box?.material_stage_set_at ?? null,
     set_by_email: view.set_by_email,
+    // A confirmed date is saved but the payment gate holds the stage.
+    held_by_payment: view.held_by_payment,
   };
 }
 

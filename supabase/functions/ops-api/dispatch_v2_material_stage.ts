@@ -20,7 +20,9 @@
 //     site).
 //   * A delivery date confirmed after that (typed and ticked, or accepted
 //     from a supplier reply) lifts an earlier stage to "Order confirmed". It
-//     never moves a later stage back.
+//     never moves a later stage back. The payment gate (contract section 3c):
+//     on a pay-first box with nothing paid, the date lifts it only as far as
+//     "Awaiting payment". The date stays saved; the box shows it is held.
 //   * An empty box with nothing sent is "Order materials".
 //
 // A purchase order with no box (a v1 Dispatch order or one made elsewhere) has
@@ -156,6 +158,10 @@ export type DispatchMaterialStageShown = {
   // set = a person chose it and nothing newer happened; worked_out = read
   // from the box; payment = moved by Mark paid (contract section 3c).
   source: "set" | "worked_out" | "payment";
+  // A confirmed date would have lifted the box to Order confirmed, but the
+  // payment gate holds it at Awaiting payment. Present only when the caller
+  // passed terms or payment, so a caller of the old rule gets the old shape.
+  held_by_payment?: boolean;
 };
 
 // One candidate for the stage: what it is, the moment it happened and why.
@@ -237,21 +243,48 @@ function paymentStep(
   return { at, key: "order_confirmed", source: "payment" };
 }
 
+// Whether the payment gate applies: a pay-first box with no paid stamp or
+// Pay on tag counting for the current order.
+function gatedByPayment(input: DispatchMaterialStageInput): boolean {
+  if (input.payment) return input.payment.state === "unpaid";
+  return input.terms === "pay_first";
+}
+
+// Step 4, the date lift with the payment gate. A confirmed date newer than
+// the winner lifts an earlier stage to Order confirmed; gated, only as far as
+// Awaiting payment.
+function dateLift(
+  shown: StageCandidate,
+  input: DispatchMaterialStageInput,
+): { key: DispatchMaterialStageKey; source: StageCandidate["source"]; held: boolean } {
+  const confirmedAt = instant(input.confirmedAt);
+  const lifts = confirmedAt !== null && confirmedAt > shown.at &&
+    dispatchMaterialStageRank(shown.key) <
+      dispatchMaterialStageRank("order_confirmed");
+  if (!lifts) return { key: shown.key, source: shown.source, held: false };
+  if (!gatedByPayment(input)) {
+    return { key: "order_confirmed", source: "worked_out", held: false };
+  }
+  if (
+    dispatchMaterialStageRank(shown.key) <
+      dispatchMaterialStageRank("awaiting_payment")
+  ) {
+    return { key: "awaiting_payment", source: "worked_out", held: true };
+  }
+  return { key: shown.key, source: shown.source, held: true };
+}
+
 /** The stage a supplier box shows, by the rules at the top of this file. */
 export function dispatchMaterialStageOf(
   input: DispatchMaterialStageInput,
 ): DispatchMaterialStageShown {
   let shown = lastThingThatHappened(input);
   shown = paymentStep(shown, input.payment);
-  const confirmedAt = instant(input.confirmedAt);
-  if (
-    confirmedAt !== null && confirmedAt > shown.at &&
-    dispatchMaterialStageRank(shown.key) <
-      dispatchMaterialStageRank("order_confirmed")
-  ) {
-    return { key: "order_confirmed", source: "worked_out" };
-  }
-  return { key: shown.key, source: shown.source };
+  const lifted = dateLift(shown, input);
+  const extended = input.terms !== undefined || input.payment != null;
+  return extended
+    ? { key: lifted.key, source: lifted.source, held_by_payment: lifted.held }
+    : { key: lifted.key, source: lifted.source };
 }
 
 // A purchase order's stage, from its status (a v1 Dispatch order or one made
@@ -340,6 +373,9 @@ export type DispatchV2BoxStage = {
   unsent_line_changes: string[];
   waiting_on: DispatchMaterialWaitingOn;
   todo: string | null;
+  // A confirmed date is saved but the payment gate holds the stage at
+  // Awaiting payment.
+  held_by_payment: boolean;
   // The payment step (dispatch_v2_payment.ts).
   payment: DispatchV2Payment;
 };
@@ -436,8 +472,13 @@ export function dispatchV2BoxStage(
     unsent_line_changes: unsent,
     waiting_on: dispatchMaterialWaitingOn(shown.key, installBooked),
     todo: dispatchMaterialTodo(shown.key, supplierName, installBooked),
+    held_by_payment: shown.held_by_payment === true,
     // Worked out again with the stage shown, so a delivered box never holds
-    // the job up.
-    payment: dispatchV2PaymentOf({ ...paymentInput, materialStage: shown.key }),
+    // the job up, and with whether the gate is holding the stage.
+    payment: dispatchV2PaymentOf({
+      ...paymentInput,
+      materialStage: shown.key,
+      holdsStage: shown.held_by_payment === true,
+    }),
   };
 }

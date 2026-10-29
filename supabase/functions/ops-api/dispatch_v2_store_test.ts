@@ -976,6 +976,27 @@ Deno.test("read: boxes, draft list, main supplier, team CC and the no-approved-e
   assertOnlyV2Writes(db);
 });
 
+Deno.test("read: the payment gate holds a pay-first box's confirmed date, as on the board", async () => {
+  const db = await fencingJob();
+  for (const box of db.tables.job_material_suppliers) {
+    Object.assign(box, {
+      delivery_date: "2026-11-05",
+      delivery_date_set_at: "2027-01-01T00:00:00.000Z",
+      delivery_date_confirmed_at: "2027-01-01T00:00:00.000Z",
+    });
+  }
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const [metroll, stratco] = read.suppliers;
+  // Metroll pays first: the date lifts it only to Awaiting payment.
+  assertEquals(metroll.material_stage.key, "awaiting_payment");
+  assertEquals(metroll.material_stage.held_by_payment, true);
+  assertEquals(metroll.payment.holds_stage, true);
+  // Stratco is on account: Order confirmed as before.
+  assertEquals(stratco.material_stage.key, "order_confirmed");
+  assertEquals(stratco.material_stage.held_by_payment, false);
+  assertOnlyV2Writes(db);
+});
+
 Deno.test("read: a make-safe job, another org's job and a bad id are refused", async () => {
   const db = makeDb();
   await refused(
