@@ -982,7 +982,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261021150000", "context_job_card_events"),
                       # Whole-job move / stretch: reschedule_job_bookings calls
                       # reschedule_job_assignments_v1 (job_bookings.ts).
-                      ("20261028150000", "reschedule_job_assignments")]:
+                      ("20261028150000", "reschedule_job_assignments"),
+                      # JP-24 slice 1: the quick-quote quote_revisions writer
+                      # inserts scope_revision_id (quote_scope_revision_link.ts).
+                      ("20261029123500", "quote_revisions_scope_revision_link")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
