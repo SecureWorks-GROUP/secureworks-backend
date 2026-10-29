@@ -1,25 +1,33 @@
--- TP-13 owner census: how many jobs would carry each partial-cost reason today, and
--- how much margin each would hide, before 20261029160000 is applied.
+-- TP-13 owner census, FINISHED jobs: how many finished jobs would carry each
+-- partial-cost reason today, and how much margin each would hide, before
+-- 20261029160000 is applied. A margin hidden on a finished job stays hidden: nothing
+-- new arrives to clear it. Its twin for live jobs is
+-- job-profit-tp13-partial-cost-census-live.sql (same columns).
 -- Read only: SELECTs on views and tables. Writes nothing. Totals only: no job ids,
 -- numbers, names or per-job amounts.
--- Sent as one request, the statements share one implicit transaction: it is made
--- read only and capped at 30 seconds, and the SELECT is the last statement, so its
--- rows are what returns.
+-- Sent as one request (supabase db query --linked -f <this file>), the statements
+-- share one implicit transaction: it is made read only and capped at 30 seconds, and
+-- the SELECT is the last statement, so its rows are what returns.
 --
 -- It reads the views as they stand before TP-13 (JP-12's v_job_profit,
 -- v_job_cost_events, v_job_revenue_events). It works each rule out the way the
 -- migration's view does, with the migration's numbers and switches copied into
 -- params (job_profit_partial_cost_policy() does not exist until the migration
--- runs), so change them together. A 42703 naming job_variations.cost_estimate or
--- jobs.completed_at means the column is absent, and the migration's own guard would
--- refuse to run as well.
+-- runs), so change them together, and change both census files together. A 42703
+-- naming job_variations.cost_estimate or jobs.completed_at means the column is
+-- absent, and the migration's own guard would refuse to run as well.
 --
--- scope:
---   live: not legacy, not a holding job (v_job_profit.holding_job), status not
---     archived, complete, completed, cancelled, lost or draft.
---   finished: not legacy, not a holding job, status complete, completed or archived.
---     A margin hidden here stays hidden: nothing new arrives to clear it.
--- Columns, per scope and reason:
+-- Scope finished: not legacy, not a holding job (v_job_profit.holding_job), status
+-- complete, completed or archived, AND COMPLETED SINCE 1 JULY 2026: jobs.completed_at
+-- on or after 2026-07-01 00:00 Perth (timestamptz '2026-07-01 00:00:00+08'). The
+-- floor is a fixed literal so a second run reads the same jobs, and it keeps the read
+-- inside the 30 seconds. One row, left_out_before_floor, counts the finished jobs it
+-- leaves out (completed before the floor, or with no completed_at), in jobs and
+-- fencing_jobs (by jobs.type), so none is dropped without a count; it reads jobs
+-- only, so it includes holding jobs.
+-- Columns, per reason:
+--   scope: the scope this file reads (one value per file, kept so the two files'
+--     rows line up).
 --   jobs / fencing_jobs: the jobs (fencing ones) the reason names.
 --   margin_shown_today: of those, how many show a margin today (margin_ok).
 --   margin_hidden_as_shipped: of those, how many TP-13 as shipped would turn to no
@@ -31,16 +39,15 @@
 --   profit_hidden_as_shipped_ex / profit_hidden_if_held_ex: the sum of today's
 --     profit_ex over those jobs, i.e. the margin that would no longer be shown.
 -- any_reason counts each job once; jobs_read is every job in the scope.
--- Two extra finished rows split the variation_not_invoiced holds the reviewer
--- proved can be wrong:
+-- Two extra rows split the variation_not_invoiced holds the reviewer proved can be
+-- wrong:
 --   variation_not_invoiced_quote_already_revised: the invoices cover the sent quote
 --     and the newest sent quote was sent after the newest agreed variation, so the
 --     quote probably already includes it.
 --   variation_not_invoiced_within_discount: the invoices fall short of quote plus
 --     variations by no more than params.discount_within_ex (a discount, not an
 --     unbilled variation). The limit is a proposal for the reading, not a policy.
--- Timing: v_job_profit over every live and finished job in one request has not been
--- measured; a 57014 means it needs splitting by scope.
+-- Timing: not measured on production; a 57014 means the 30 seconds were not enough.
 set transaction read only;
 set local statement_timeout = '30s';
 with params as (
@@ -59,9 +66,9 @@ with params as (
 ),
 scoped as (
   select j.id,
-         case when coalesce(j.status, '') in ('complete', 'completed', 'archived') then 'finished'
-              when coalesce(j.status, '') not in ('cancelled', 'lost', 'draft') then 'live'
-         end as scope
+         case when coalesce(j.status, '') in ('complete', 'completed', 'archived')
+                   and j.completed_at >= timestamptz '2026-07-01 00:00:00+08'
+              then 'finished' end as scope
   from public.jobs j
   where j.legacy is not true
 ),
@@ -158,9 +165,9 @@ rows as (
     (7, 'variation_invoice_unchecked', f.variation_invoice_unchecked, false, false),
     (8, 'expected_cost_lane_missing', f.expected_cost_lane_missing, false, false),
     (11, 'variation_not_invoiced_quote_already_revised',
-         f.scope = 'finished' and f.variation_not_invoiced and f.quote_already_revised, pa.variation_not_invoiced_holds, true),
+         f.variation_not_invoiced and f.quote_already_revised, pa.variation_not_invoiced_holds, true),
     (12, 'variation_not_invoiced_within_discount',
-         f.scope = 'finished' and f.variation_not_invoiced and f.within_discount, pa.variation_not_invoiced_holds, true)
+         f.variation_not_invoiced and f.within_discount, pa.variation_not_invoiced_holds, true)
   ) as r(ord, code, named, holds_as_shipped, can_hold)
 )
 select scope, ord, code,
@@ -172,7 +179,6 @@ select scope, ord, code,
        coalesce(sum(profit_ex) filter (where named and margin_ok and holds_as_shipped), 0) as profit_hidden_as_shipped_ex,
        case when bool_or(can_hold) then coalesce(sum(profit_ex) filter (where named and margin_ok and can_hold), 0) end as profit_hidden_if_held_ex
 from rows
-where ord < 11 or scope = 'finished'
 group by scope, ord, code
 union all
 select a.scope, 9, 'any_reason',
@@ -200,4 +206,13 @@ select f.scope, 10, 'jobs_read',
        null, null, null, null
 from flags f
 group by f.scope
-order by 1 desc, 2;
+union all
+select 'finished', 13, 'left_out_before_floor',
+       count(*),
+       count(*) filter (where j.type = 'fencing'),
+       null, null, null, null, null
+from public.jobs j
+where j.legacy is not true
+  and coalesce(j.status, '') in ('complete', 'completed', 'archived')
+  and (j.completed_at is null or j.completed_at < timestamptz '2026-07-01 00:00:00+08')
+order by 2;
