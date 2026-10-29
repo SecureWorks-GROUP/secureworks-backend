@@ -1021,6 +1021,7 @@ Deno.test("client sign-off gates the share, and the line is quantity 1 at the se
   assertEquals(line?.total_hours, 0);
   assertEquals(line?.source_work_order_id, null);
   assertEquals(line?.group_share_id, SHARE_A);
+  assertEquals(line?.office_review_status, "awaiting");
 });
 
 Deno.test("a freeze is an explicit snapshot, a held invoice is returned, and a paid invoice keeps the freeze", async () => {
@@ -1036,6 +1037,7 @@ Deno.test("a freeze is an explicit snapshot, a held invoice is returned, and a p
   });
   assertEquals(quoted?.unit_rate, 321.43);
   assertEquals(quoted?.group_share_id, null);
+  assertEquals(quoted?.office_review_status, "awaiting");
   assertEquals(memory.rows("group_work_orders")[0].split_frozen_at ?? null, null);
   assertEquals(memory.rows("group_work_order_shares").length, 0);
 
