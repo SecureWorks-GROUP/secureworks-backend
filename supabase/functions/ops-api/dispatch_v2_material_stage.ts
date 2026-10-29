@@ -30,6 +30,12 @@
 //   * An "Order confirmed" box with no date for the current order (no date
 //     of its own, none asked for in the newest order email) is waiting on
 //     the supplier for a date, not on us to book the install.
+//   * A pickup order (its newest order email says "for pickup") is "Picked
+//     up" at its last stage instead of "Delivered", and at "Materials ready"
+//     says "Materials ready to be picked up, Mon 2/11". A pickup on the
+//     install's first day skips "Materials ready" (the crew collects it on
+//     the way): the box says so (skips_ready) and the screen leaves that
+//     stage out of the box's strip and picker.
 //
 // A purchase order with no box (a v1 Dispatch order or one made elsewhere) has
 // no stage of its own: it is read from the order's status.
@@ -98,7 +104,31 @@ export type DispatchMaterialStageContext = {
   // The box has a date for the current order: its own date, or the date the
   // newest order email asked for.
   hasDate: boolean;
+  // Delivery or pickup, from the newest order email; null or left out = not
+  // known (nothing sent yet).
+  fulfilment?: DispatchV2Fulfilment | null;
+  // That date (YYYY-MM-DD), for the pickup wording.
+  date?: string | null;
 };
+
+// "Mon 2/11" for 2026-11-02: the short day the next-step lines use.
+export function dispatchShortDay(day: string): string {
+  const [y, m, d] = day.split("-").map(Number);
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
+    new Date(Date.UTC(y, m - 1, d)).getUTCDay()
+  ];
+  return `${weekday} ${d}/${m}`;
+}
+
+/** The stage's label on a box: "Picked up" instead of "Delivered" for a
+ * pickup order; every other stage as listed. */
+export function dispatchMaterialStageLabelFor(
+  key: string,
+  fulfilment?: DispatchV2Fulfilment | null,
+): string {
+  if (key === "delivered" && fulfilment === "pickup") return "Picked up";
+  return dispatchMaterialStageLabel(key);
+}
 
 // Who the stage is waiting on. Order confirmed is ours until the install is
 // booked (tell the client, book the crew), then the supplier's. An Order
@@ -152,6 +182,14 @@ export function dispatchMaterialTodo(
     case "manufacturing":
       return `${s} is making it`;
     case "ready":
+      if (context?.fulfilment === "pickup") {
+        return context.date && isDispatchDeliveryDate(context.date)
+          ? `Materials ready to be picked up, ${dispatchShortDay(context.date)}`
+          : "Materials ready to be picked up";
+      }
+      if (context?.fulfilment === "delivery") {
+        return `Arrange delivery from ${s}`;
+      }
       return `Arrange delivery or pickup from ${s}`;
     default:
       return null;
@@ -449,6 +487,8 @@ export type DispatchV2BoxStageInput = {
   terms?: DispatchV2PaymentTerms;
   // The install day the board shows (null = no install booked).
   installDay?: string | null;
+  // The install's first day, for skips_ready; left out = installDay.
+  installFirstDay?: string | null;
   // The job's matched supplier replies (the reply step); left out or null =
   // not read, no reply moves.
   replies?: any[] | null;
@@ -487,6 +527,10 @@ export type DispatchV2BoxStage = {
   held_by_payment: boolean;
   // The supplier reply that moved the box; null unless source is "reply".
   reply: DispatchMaterialStageReply | null;
+  // A pickup whose date (own or asked for) is the install's first day: the
+  // crew collects it on the way, so the screen leaves "Materials ready" out
+  // of this box's strip and picker.
+  skips_ready: boolean;
   // The payment step (dispatch_v2_payment.ts).
   payment: DispatchV2Payment;
 };
@@ -575,12 +619,19 @@ export function dispatchV2BoxStage(
   const set = shown.source === "set";
   // Rule 7: a date for the current order is the box's own date or the date
   // the newest order email asked for.
+  const date = boxDate || newestSent?.requested_date || null;
+  const fulfilment = newestSent?.fulfilment ?? null;
   const context: DispatchMaterialStageContext = {
-    hasDate: !!boxDate || !!newestSent?.requested_date,
+    hasDate: !!date,
+    fulfilment,
+    date,
   };
+  const firstDay = input.installFirstDay !== undefined
+    ? input.installFirstDay
+    : input.installDay;
   return {
     key: shown.key,
-    label: dispatchMaterialStageLabel(shown.key),
+    label: dispatchMaterialStageLabelFor(shown.key, fulfilment),
     source: shown.source,
     set_at: set ? textOrNull(box.material_stage_set_at) : null,
     set_by_email: set ? textOrNull(box.material_stage_set_by_email) : null,
@@ -592,6 +643,8 @@ export function dispatchV2BoxStage(
     todo: dispatchMaterialTodo(shown.key, supplierName, installBooked, context),
     held_by_payment: shown.held_by_payment === true,
     reply: shown.reply ?? null,
+    skips_ready: fulfilment === "pickup" && !!date && !!firstDay &&
+      date === firstDay,
     // Worked out again with the stage shown, so a delivered box never holds
     // the job up, and with whether the gate is holding the stage.
     payment: dispatchV2PaymentOf({

@@ -22,9 +22,11 @@ import {
   dispatchV2TermsFor,
 } from "./dispatch_v2_payment.ts";
 import {
+  dispatchMaterialStageLabelFor,
   dispatchMaterialStageOf,
   dispatchMaterialTodo,
   dispatchMaterialWaitingOn,
+  dispatchShortDay,
   dispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
 import {
@@ -1740,4 +1742,136 @@ Deno.test("hold: Accept's payment read names the hold and the accepted box's pay
     now: NOW,
   });
   assertEquals(failed, { read: "failed", hold: null, suppliers: [], box_payment: null });
+});
+
+// ── A8: pickup wording and install-day pickup ───────────────────────────────
+
+const PICKUP_BODY = "Hi, please have the following ready for pickup.\nDate: \n";
+const INSTALL_DAY = "2026-11-05";
+
+function pickupEmail(extra: Row = {}): Row {
+  return sentEmail(EMAIL.lysaght, SUP.lysaght, {
+    body_text: PICKUP_BODY,
+    delivery_date: INSTALL_DAY,
+    ...extra,
+  });
+}
+
+Deno.test("pickup: the short day, the Picked up label and the ready wording", () => {
+  assertEquals(dispatchShortDay("2026-11-02"), "Mon 2/11");
+  assertEquals(dispatchShortDay("2026-12-25"), "Fri 25/12");
+  assertEquals(dispatchMaterialStageLabelFor("delivered", "pickup"), "Picked up");
+  assertEquals(dispatchMaterialStageLabelFor("delivered", "delivery"), "Delivered");
+  assertEquals(dispatchMaterialStageLabelFor("delivered"), "Delivered");
+  assertEquals(dispatchMaterialStageLabelFor("ready", "pickup"), "Materials ready");
+  const pickup = { hasDate: true, fulfilment: "pickup" as const, date: "2026-11-02" };
+  assertEquals(
+    dispatchMaterialTodo("ready", "Lysaght", false, pickup),
+    "Materials ready to be picked up, Mon 2/11",
+  );
+  assertEquals(
+    dispatchMaterialTodo("ready", "Lysaght", false, { ...pickup, hasDate: false, date: null }),
+    "Materials ready to be picked up",
+  );
+  assertEquals(
+    dispatchMaterialTodo("ready", "Lysaght", false, { hasDate: true, fulfilment: "delivery" }),
+    "Arrange delivery from Lysaght",
+  );
+  // Not known (nothing sent) or no context: as before.
+  assertEquals(
+    dispatchMaterialTodo("ready", "Lysaght", false, { hasDate: false, fulfilment: null }),
+    "Arrange delivery or pickup from Lysaght",
+  );
+  assertEquals(dispatchMaterialTodo("ready", "Lysaght", false), "Arrange delivery or pickup from Lysaght");
+  // Ready waits on us either way.
+  assertEquals(dispatchMaterialWaitingOn("ready", false, pickup), "us");
+});
+
+Deno.test("pickup: a box at each stage, and skips_ready only on the install's first day", () => {
+  const at = (stage: string) =>
+    box(BOX.lysaght, SUP.lysaght, "Lysaght", {
+      material_stage: stage,
+      material_stage_set_at: PAID_AT,
+    });
+  const ready = dispatchV2BoxStage({
+    box: at("ready"),
+    emails: [pickupEmail()],
+    lines: [],
+    terms: "pay_first",
+    installDay: INSTALL_DAY,
+  });
+  assertEquals(ready.todo, "Materials ready to be picked up, Thu 5/11");
+  assertEquals(ready.skips_ready, true);
+  const delivered = dispatchV2BoxStage({
+    box: at("delivered"),
+    emails: [pickupEmail()],
+    lines: [],
+    terms: "pay_first",
+    installDay: INSTALL_DAY,
+  });
+  assertEquals([delivered.key, delivered.label], ["delivered", "Picked up"]);
+  // The install's first day decides, not the day the board shows.
+  const later = dispatchV2BoxStage({
+    box: at("ready"),
+    emails: [pickupEmail()],
+    lines: [],
+    terms: "pay_first",
+    installDay: "2026-11-06",
+    installFirstDay: INSTALL_DAY,
+  });
+  assertEquals(later.skips_ready, true);
+  // Another day, no install, or a delivery: no skip.
+  for (
+    const [email, installDay] of [
+      [pickupEmail({ delivery_date: "2026-11-04" }), INSTALL_DAY],
+      [pickupEmail(), null],
+      [sentEmail(EMAIL.lysaght, SUP.lysaght, { delivery_date: INSTALL_DAY }), INSTALL_DAY],
+    ] as Array<[Row, string | null]>
+  ) {
+    const view = dispatchV2BoxStage({
+      box: at("ready"),
+      emails: [email],
+      lines: [],
+      terms: "pay_first",
+      installDay,
+    });
+    assertEquals(view.skips_ready, false);
+  }
+  const delivery = dispatchV2BoxStage({
+    box: at("ready"),
+    emails: [sentEmail(EMAIL.lysaght, SUP.lysaght, { delivery_date: INSTALL_DAY })],
+    lines: [],
+    terms: "pay_first",
+  });
+  assertEquals(delivery.todo, "Arrange delivery from Lysaght");
+});
+
+Deno.test("pickup: the Arrival line carries the label and skips_ready from the install bookings", async () => {
+  const tables = fixture();
+  tables.dispatch_supplier_order_emails = [
+    pickupEmail(),
+    sentEmail(EMAIL.stratco, SUP.stratco),
+  ];
+  tables.job_material_suppliers = tables.job_material_suppliers.map((b) =>
+    b.id === BOX.lysaght
+      ? { ...b, material_stage: "delivered", material_stage_set_at: PAID_AT }
+      : b
+  );
+  tables.job_assignments = [{
+    id: uuid("a9", 1),
+    job_id: JOB.fence,
+    scheduled_date: INSTALL_DAY,
+    scheduled_end: null,
+    assignment_type: "install",
+    status: "scheduled",
+    is_ghost: false,
+    role: "lead",
+    confirmation_status: "confirmed",
+  }];
+  const { client } = makeClient(tables);
+  const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+  const lysaght = orderFor(read.arrival, SUP.lysaght);
+  assertEquals(lysaght.material_stage_label, "Picked up");
+  assertEquals(lysaght.skips_ready, true);
+  assertEquals(orderFor(read.arrival, SUP.stratco).skips_ready, false);
 });

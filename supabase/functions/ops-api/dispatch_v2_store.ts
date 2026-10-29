@@ -75,7 +75,11 @@ import {
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 import { dispatchV2BoxStage } from "./dispatch_v2_material_stage.ts";
 import { dispatchV2PaymentTerms } from "./dispatch_v2_payment.ts";
-import { loadDispatchV2MatchedReplies } from "./dispatch_board.ts";
+import {
+  loadDispatchInstall,
+  loadDispatchV2MatchedReplies,
+  perthDayOf,
+} from "./dispatch_board.ts";
 
 // ── The send seam ───────────────────────────────────────────────────────────
 
@@ -589,8 +593,8 @@ export async function readDispatchV2Materials(
     params.get("job_id") ?? params.get("jobId"),
     ctx,
   );
-  const [boxes, lines, photos, emails, scopeFill, replies] = await Promise
-    .all([
+  const [boxes, lines, photos, emails, scopeFill, replies, install] =
+    await Promise.all([
       readBoxes(client, job.id),
       readJobLines(client, job.id),
       readPhotos(client, job.id),
@@ -600,6 +604,15 @@ export async function readDispatchV2Materials(
       // A failed read never refuses the panel: no reply moves, as on the
       // board.
       loadDispatchV2MatchedReplies(client, [job.id], "dispatch_v2_materials"),
+      // The install, as the board reads it: for skips_ready (a pickup on the
+      // install's first day). A failed read never refuses the panel: no box
+      // skips Materials ready.
+      loadDispatchInstall(
+        client,
+        job.id,
+        perthDayOf(nowIso(ctx)) ?? nowIso(ctx).slice(0, 10),
+        "dispatch_v2_materials",
+      ),
     ]);
   const supplierIds = boxes.map((b) => String(b.supplier_id));
   const [contacts, approved, testDone] = await Promise.all([
@@ -655,6 +668,8 @@ export async function readDispatchV2Materials(
           onAccount: entry ? entry.on_account === true : null,
         }),
         replies: replies.error ? [] : replies.data,
+        installDay: install?.day ?? null,
+        installFirstDay: install?.first_day ?? null,
       });
       return {
         supplier_id: id,
@@ -723,6 +738,9 @@ function boxMaterialStage(
     held_by_payment: view.held_by_payment,
     // The matched supplier reply that moved the box (source "reply").
     reply: view.reply,
+    // A pickup on the install's first day: leave Materials ready out of the
+    // box's strip and picker.
+    skips_ready: view.skips_ready,
   };
 }
 

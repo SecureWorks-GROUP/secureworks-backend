@@ -193,6 +193,19 @@ const SCHEMA: Record<string, string[]> = {
     "created_at",
     "created_by_email",
   ],
+  // The install, for skips_ready (dispatch_board.ts loadDispatchInstall).
+  job_assignments: [
+    "id",
+    "org_id",
+    "job_id",
+    "scheduled_date",
+    "scheduled_end",
+    "assignment_type",
+    "status",
+    "is_ghost",
+    "role",
+    "confirmation_status",
+  ],
   // The reply step (dispatch_board.ts loadDispatchV2MatchedReplies).
   feature_flags: ["flag_name", "enabled"],
   dispatch_v2_supplier_emails: [
@@ -375,6 +388,7 @@ function seed(): Record<string, Row[]> {
     dispatch_v2_scope_fills: [],
     feature_flags: [],
     dispatch_v2_supplier_emails: [],
+    job_assignments: [],
   };
 }
 
@@ -1056,6 +1070,52 @@ Deno.test("read: a matched supplier reply moves the box on, as on the board", as
   assertEquals(metroll.material_stage.key, "awaiting_payment");
   assertEquals(metroll.material_stage.source, "reply");
   assertEquals(metroll.material_stage.reply.email_id, "00000000-0000-0000-0000-0000000b0001");
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: a pickup on the install's first day skips Materials ready, as on the board", async () => {
+  const db = await fencingJob();
+  const sentAt = "2026-10-28T01:00:00.000Z";
+  const columns = SCHEMA.dispatch_supplier_order_emails;
+  const email: Row = Object.fromEntries(columns.map((c) => [c, null]));
+  Object.assign(email, {
+    id: "00000000-0000-0000-0000-0000000e0002",
+    org_id: ORG,
+    job_id: JOB.fence,
+    supplier_id: SUP.metroll,
+    status: "sent",
+    body_text: "Hi, please have the following ready for pickup.",
+    delivery_date: "2026-11-05",
+    sent_at: sentAt,
+    created_at: sentAt,
+    updated_at: sentAt,
+    to_emails: [],
+    cc_emails: [],
+    order_lines: [],
+    photo_ids: [],
+    sent_to_emails: [],
+    sent_cc_emails: [],
+  });
+  db.tables.dispatch_supplier_order_emails.push(email);
+  // No install booked: no skip.
+  const before = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(before.suppliers[0].material_stage.skips_ready, false);
+  db.tables.job_assignments.push({
+    id: "00000000-0000-0000-0000-0000000a0001",
+    org_id: ORG,
+    job_id: JOB.fence,
+    scheduled_date: "2026-11-05",
+    scheduled_end: null,
+    assignment_type: "install",
+    status: "scheduled",
+    is_ghost: false,
+    role: "lead",
+    confirmation_status: "confirmed",
+  });
+  const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(after.suppliers[0].fulfilment, "pickup");
+  assertEquals(after.suppliers[0].material_stage.skips_ready, true);
+  assertEquals(after.suppliers[1].material_stage.skips_ready, false);
   assertOnlyV2Writes(db);
 });
 

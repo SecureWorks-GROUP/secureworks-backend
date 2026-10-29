@@ -761,6 +761,9 @@ export type DispatchArrivalOrder = {
   // The matched supplier reply that moved the box (source "reply"); null
   // otherwise, and for a purchase order.
   material_stage_reply: DispatchMaterialStageReply | null;
+  // A pickup on the install's first day: the screen leaves Materials ready
+  // out of the box's strip and picker. Always false for a purchase order.
+  skips_ready: boolean;
 };
 
 export type DispatchArrival = {
@@ -910,6 +913,8 @@ export function dispatchArrival(
     sentEmails?: DispatchBoardSentEmail[];
     lines?: any[];
     installDay: string | null;
+    // The install's first day (skips_ready); left out = installDay.
+    installFirstDay?: string | null;
     today: string;
     accounts?: DispatchV2Accounts | null;
     // The job's matched supplier replies; left out or null = no reply moves.
@@ -940,6 +945,7 @@ export function dispatchArrival(
       lines: input.lines,
       terms: dispatchV2TermsFor(input.accounts, supplierId),
       installDay,
+      installFirstDay: input.installFirstDay,
       replies: input.replies,
     });
     const sent = view.newest_sent;
@@ -995,6 +1001,7 @@ export function dispatchArrival(
       payment: view.payment,
       held_by_payment: view.held_by_payment,
       material_stage_reply: view.reply,
+      skips_ready: view.skips_ready,
     }, installDay, view));
   }
 
@@ -1028,6 +1035,7 @@ export function dispatchArrival(
       payment: null,
       held_by_payment: false,
       material_stage_reply: null,
+      skips_ready: false,
     }, installDay));
   }
 
@@ -1190,6 +1198,7 @@ export function dispatchBoardRow(
       sentEmails: ctx.sentByJob.get(id) || [],
       lines: ctx.linesByJob?.get(id) || [],
       installDay: install?.day ?? null,
+      installFirstDay: install?.first_day ?? null,
       today: ctx.today,
       accounts: ctx.accounts ?? null,
       replies: ctx.repliesByJob?.get(id) || [],
@@ -1536,6 +1545,37 @@ export async function loadDispatchBoardExtras(
   };
 }
 
+/** One job's install (the board's install rule), for a read that is not the
+ * board: the materials panel's skips_ready. Null when the bookings read
+ * failed; never rejects, logged here. */
+export async function loadDispatchInstall(
+  client: any,
+  jobId: string,
+  today: string,
+  label: string,
+): Promise<DispatchBoardInstall | null> {
+  const bookings = await safeRead<DispatchInstallBooking>(() =>
+    fetchAllRows<DispatchInstallBooking>(
+      () =>
+        client.from("job_assignments")
+          .select(
+            "id, job_id, scheduled_date, scheduled_end, assignment_type, status, is_ghost, role, confirmation_status",
+          )
+          .eq("job_id", jobId),
+      `${label}.bookings`,
+      "id",
+    )
+  );
+  if (bookings.error) {
+    console.error(
+      `[dispatch] ${label} job_assignments read failed:`,
+      (bookings.error as Error)?.message ?? bookings.error,
+    );
+    return null;
+  }
+  return dispatchBoardInstall(bookings.data, today);
+}
+
 /** The matched supplier replies on these jobs, for the reply step. Read only
  * while the replies switch (feature_flags dispatch_v2_replies_v1) is on: off
  * means no reply is read and nothing moves by itself (an empty answer, not a
@@ -1851,6 +1891,7 @@ export async function dispatchArrivalRead(
       sentEmails: sent.data,
       lines: lines.data,
       installDay: install?.day ?? null,
+      installFirstDay: install?.first_day ?? null,
       today,
       accounts,
       replies: replies.error ? [] : replies.data,
