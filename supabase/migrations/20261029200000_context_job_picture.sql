@@ -56,6 +56,19 @@
 --    bill prompt prints only the eight today, so the prompt does not change
 --    until jarvis reads the new fields (TP-04 slice 2).
 --
+--    The eight keys are not dropped: they moved into context_job_picture,
+--    which this body calls, and the contract case checks each one by name and
+--    value. The output-key guard (INT-18) cannot see keys built in a helper,
+--    so it reads them as lost; these lines say why, once per key:
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs job_id
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs job_number
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs type
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs status
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs client
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs site
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs created
+--    -- output-key-guard: drop public.materials_ai_candidate_jobs scheduled
+--
 -- Not here: the message placer (jarvis luna-attribution-candidates.ts and the
 -- backend ladder), any write, any prompt change. Nothing writes Xero.
 --
