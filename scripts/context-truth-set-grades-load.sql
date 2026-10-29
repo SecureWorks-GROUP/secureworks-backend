@@ -23,7 +23,7 @@
 -- here and compared with the system's in context_truth_set_results (bills and messages were graded blind). It
 -- refuses: an answer for a position or item the draw does not hold; a draw not answered whole (a set loads whole or
 -- not at all); a draw whose rows disagree about a stratum's size; a job number that names no job or more than one;
--- a holding job (metadata.do_not_schedule) given as an answer, for a bill or a message; a split whose amounts do not
+-- a holding job (metadata.do_not_schedule read as lower(value) = 'true', as Job Profit reads it) given as an answer, for a bill or a message; a split whose amounts do not
 -- fit the bill; a bill that is no longer an ACCPAY bill in our Xero copy; a message that no longer exists; a story
 -- whose job or pinned written story no longer exists; and a system job the draw named that no longer exists.
 --
@@ -228,7 +228,7 @@ BEGIN
   problems := problems || format('position %s: job number %s names %s jobs (one is needed)', x.pos, x.jn, x.c);
  END LOOP;
  FOR x IN SELECT a.pos, j.job_number FROM truth_answers a, unnest(a.job_numbers) jn JOIN public.jobs j ON upper(j.job_number) = upper(jn)
-          WHERE coalesce(j.metadata ->> 'do_not_schedule', '') IN ('true', '1') ORDER BY a.pos LIMIT 20 LOOP
+          WHERE lower(coalesce(j.metadata ->> 'do_not_schedule', '')) = 'true' ORDER BY a.pos LIMIT 20 LOOP
   problems := problems || format('position %s: %s is a holding job, never the right job (answer non_job, no_job or unsure)', x.pos, x.job_number);
  END LOOP;
  UPDATE truth_answers a SET job_ids = ARRAY(SELECT (SELECT j.id FROM public.jobs j WHERE upper(j.job_number) = upper(jn))
