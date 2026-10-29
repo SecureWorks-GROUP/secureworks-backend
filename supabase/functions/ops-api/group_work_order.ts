@@ -1457,7 +1457,9 @@ async function allInSharePay(client: any, group: Record<string, unknown>, budget
 
 export async function assertAllInGroupInvoiceStandalone(client: any, caller: GroupCaller, body: Record<string, any>) {
   const extras = Array.isArray(body.extra_items) ? body.extra_items : [];
-  for (const item of extras.filter(isGroupShareInvoiceItem)) {
+  const shareItems = extras.filter(isGroupShareInvoiceItem);
+  if (!shareItems.length || !(await groupFeatureOn(client))) return;
+  for (const item of shareItems) {
     const group = await resolveGroup(client,item);
     if (group.pay_basis !== "all_in_12_6_v1") continue;
     requireParticipant(await loadParticipants(client,String(group.id)),caller.userId);
