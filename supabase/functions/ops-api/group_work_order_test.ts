@@ -48,6 +48,8 @@ import {
   rateOnDay,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
+  readMyGroupWorkOrders,
+  assertAllInGroupInvoiceStandalone,
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
   removeGroupWorkOrderParticipant,
@@ -525,10 +527,11 @@ class Memory {
 }
 
 class Query {
-  private filters: { op: "eq" | "in"; col: string; value: unknown }[] = [];
+  private filters: { op: "eq" | "in" | "neq"; col: string; value: unknown }[] = [];
   private op: "select" | "insert" | "upsert" | "update" | "delete" = "select";
   private payload: unknown = null;
   private one: "none" | "maybe" | "single" = "none";
+  private bounds: [number,number] | null = null;
 
   constructor(private memory: Memory, private table: string) {}
 
@@ -543,6 +546,9 @@ class Query {
     this.filters.push({ op: "in", col, value });
     return this;
   }
+  neq(col: string,value:unknown): this { this.filters.push({op:"neq",col,value}); return this; }
+  order(): this { return this; }
+  range(start:number,end:number): this { this.bounds=[start,end]; return this; }
   insert(row: unknown): this {
     this.op = "insert";
     this.payload = row;
@@ -582,6 +588,7 @@ class Query {
   private matches(row: Row): boolean {
     return this.filters.every((filter) => {
       if (filter.op === "eq") return row[filter.col] === filter.value;
+      if (filter.op === "neq") return row[filter.col] !== filter.value;
       return (filter.value as unknown[]).includes(row[filter.col]);
     });
   }
@@ -666,7 +673,8 @@ class Query {
       }
       return { data: null, error: null };
     }
-    const found = rows.filter((row) => this.matches(row));
+    let found = rows.filter((row) => this.matches(row));
+    if(this.bounds) found=found.slice(this.bounds[0],this.bounds[1]+1);
     if (this.one === "maybe") return { data: found[0] || null, error: null };
     if (this.one === "single") {
       return found[0]
@@ -2206,4 +2214,28 @@ Deno.test("office approval with reason and actor clears sign-off; later hours in
   memory.rows("group_work_orders")[0].hours_changed_at = "2099-01-02T00:00:00Z";
   const after = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {group_id: GROUP});
   assertEquals(after.client_signed, false);
+});
+
+Deno.test("all-in group accepts one isolated share and refuses mixed weekly claims", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders")[0].pay_basis="all_in_12_6_v1";
+  const own={extra_items:[{type:"group share",group_id:GROUP}]};
+  await assertAllInGroupInvoiceStandalone(db.client(),trade(USER_A),own);
+  for(const extra of [{week_start:"2026-10-19"},{extra_items:[...own.extra_items,{type:"travel",quantity:1,rate:10}]},{manual_assignments:[{assignment_id:"a"}]},{final_deductions:[{amount:1}]},{extra_items:[...own.extra_items,...own.extra_items]}]) {
+    await assertRejects(()=>assertAllInGroupInvoiceStandalone(db.client(),trade(USER_A),{...own,...extra}),GroupWorkOrderError);
+  }
+});
+
+Deno.test("allocated workers discover an unjoined group without reading its money",async()=>{
+ const db=new Memory(); seedSplit(db);
+ assertEquals((await readMyGroupWorkOrders(db.client(),trade(USER_C))).groups,[]);
+ db.rows("job_assignments").push({id:"new-assignment",job_id:JOB,user_id:USER_C,status:"scheduled",role:"crew",is_ghost:false});
+ const found=await readMyGroupWorkOrders(db.client(),trade(USER_C));
+ assertEquals(found.groups.length,1);
+ assertEquals(found.groups[0].awaiting,"needs_join");
+ assertEquals(found.groups[0].pot_total,null); assertEquals(found.groups[0].my_share,null);
+ assertEquals(found.group_job_ids,[JOB]);
+ db.rows("job_assignments").at(-1)!.is_ghost=true;
+ assertEquals((await readMyGroupWorkOrders(db.client(),trade(USER_C))).groups,[]);
 });
