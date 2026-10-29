@@ -76,6 +76,7 @@ export const PARTICIPANT_SHARE_KEYS = [
   "client_signed",
   "group_id",
   "awaiting",
+  "group_share_office_review_required",
 ] as const;
 
 /** What my-share is waiting on. A trade is not told another person's name. */
@@ -245,6 +246,7 @@ export function participantShareResponse(input: {
     client_signed: input.clientSigned,
     group_id: input.groupId,
     awaiting: input.awaiting,
+    group_share_office_review_required: true,
   };
   return response;
 }
@@ -553,7 +555,7 @@ const QUERY_FAULTS: {
   {
     needle: "group_client_signoff_required",
     code: "group_client_signoff_required",
-    message: "The client has to sign this job before the split can freeze.",
+    message: "Record client sign-off or an office override before the split can freeze.",
     status: 409,
   },
   {
@@ -793,7 +795,7 @@ function groupIsSigned(group: Record<string, unknown>): boolean {
   return group.status === "client_signed" || Boolean(group.client_signed_at);
 }
 
-async function groupFeatureOn(client: any): Promise<boolean> {
+export async function groupFeatureOn(client: any): Promise<boolean> {
   const { data, error } = await client.from("feature_flags").select("enabled")
     .eq("flag_name", GROUP_WORK_ORDER_FLAG).maybeSingle();
   if (error || data?.enabled !== true) return false;
@@ -1114,6 +1116,7 @@ type ShareView = {
   hoursByUser: Map<string, number>;
   awaiting: GroupAwaiting;
   signed: boolean;
+  signoff: Record<string, unknown> | null;
   needsHours: string[];
   needsRate: string[];
 };
@@ -1170,15 +1173,10 @@ function laterInstant(left: string | null, right: string | null): string | null 
 }
 
 /**
- * A group freeze counts a drawn signature only. The shared invoice helper
- * treats a newest revoked row as not signed. This check does not call that
- * helper. An office waiver still counts for the ordinary invoice gate. It
- * does not count here. The drawing has to be
- * dated after the later of each remaining hours row's created_at and
- * updated_at and the group's hours_changed_at, on a non-void group for
- * the job. hours_changed_at moves when hours are inserted, really
- * changed, or deleted, and when a participant is removed. An identical
- * re-save moves neither stamp. DEFAULT, owner to confirm.
+ * A group freeze counts a drawn signature or a reasoned, attributed office
+ * waiver (owner approved 27 October 2026). The newest revoked row fails.
+ * Either approval must postdate every hours change, including deletions
+ * and participant removal. An identical hours re-save does not invalidate it.
  */
 function signoffCounts(
   row: Record<string, unknown> | null,
@@ -1187,7 +1185,12 @@ function signoffCounts(
 ): boolean {
   if (!row) return false;
   const method = String(row.method || "");
-  if (method === "revoked" || method === "office_waiver") return false;
+  if (method === "revoked") return false;
+  if (method === "office_waiver") {
+    return String(row.waiver_reason || "").trim().length >= 3 &&
+      Boolean(String(row.captured_by_actor || "").trim()) &&
+      signedAfterHours(row.created_at, latestHoursAt);
+  }
   if (method !== "on_site" && method !== "share_link") return false;
   if (!row.signature_media_id) return false;
   if (row.happy === false) return false;
@@ -1316,7 +1319,7 @@ async function loadShareView(
       ),
       rowsOf(
         client.from("job_client_signoffs").select(
-          "id, method, happy, satisfaction_rating, created_at, signature_media_id",
+          "id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, captured_by_actor",
         ).eq("job_id", group.job_id),
         "load the client sign-off",
       ),
@@ -1376,7 +1379,7 @@ async function loadShareView(
   else if (group.split_frozen_at) awaiting = "frozen";
   else if (needsHours.length > 0) awaiting = "awaiting_others";
   else if (needsRate.length > 0) awaiting = "awaiting_rate";
-  return { hoursByUser, awaiting, signed, needsHours, needsRate };
+  return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate };
 }
 
 export async function readGroupWorkOrderMyShare(
@@ -1551,7 +1554,7 @@ async function countingSignoff(
   const [rows, minimum, latestHoursAt] = await Promise.all([
     rowsOf(
       client.from("job_client_signoffs").select(
-        "id, method, happy, satisfaction_rating, created_at, signature_media_id",
+        "id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, captured_by_actor",
       ).eq("job_id", jobId),
       "load the client sign-off",
     ),
@@ -1793,6 +1796,10 @@ export async function readGroupWorkOrderOffice(
     loadWorkOrder(client, String(group.work_order_id)),
     loadShareView(client, group, participants),
   ]);
+  const people = participants.length ? await rowsOf(
+    client.from("users").select("id, name").in("id", participants.map((p) => p.user_id)),
+    "load crew names",
+  ) : [];
   return {
     ok: true,
     group_id: group.id,
@@ -1800,6 +1807,10 @@ export async function readGroupWorkOrderOffice(
     status: group.status,
     client_signed: view.signed,
     split_frozen: Boolean(group.split_frozen_at),
+    awaiting: view.awaiting,
+    client_signoff_method: view.signed ? view.signoff?.method : null,
+    client_signoff_reason: view.signed ? view.signoff?.waiver_reason : null,
+    client_signoff_actor: view.signed ? view.signoff?.captured_by_actor : null,
     pot_total: workOrder
       ? moneyToCents(workOrder.agreed_labour_ex) == null
         ? null
@@ -1809,6 +1820,7 @@ export async function readGroupWorkOrderOffice(
     needs_rate: view.needsRate,
     participants: participants.map((row) => ({
       user_id: row.user_id,
+      name: people.find((p) => p.id === row.user_id)?.name || row.signature_name || null,
       signature_name: row.signature_name || null,
       crew_signed: Boolean(row.crew_signed_at),
     })),
@@ -2090,6 +2102,9 @@ export async function resolveGroupShareInvoiceExtra(
     wo_labour_deduction: null,
     wo_labour_lines: null,
     group_share_id: group.split_frozen_at ? mine.id : null,
+    // Group shares require an office check even when the wider rollout is off.
+    // This is a server-owned stamp, never an approval supplied by the trade.
+    office_review_status: "awaiting",
     _hoursFlag: null,
     _woProblems: null,
   };

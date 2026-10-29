@@ -94,7 +94,7 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   my_hours            — Completed assignments for a week with hours
 //   submit_trade_invoice — Build invoice + push to Xero as ACCPAY bill
 //   my_trade_invoices   — Trade's invoice history
-//   set_trade_rate      — Trade sets/updates their hourly rate
+//   set_trade_rate      — Retired trade write; rates are set by ops
 //   create_trade_alert  — Report on-site issue → ai_alerts (amber)
 //
 //   ── Trade Invoicing (Ops) ──
@@ -780,6 +780,7 @@ import {
   deleteGroupWorkOrderHours,
   freezeGroupWorkOrder,
   groupBody,
+  groupFeatureOn,
   GroupWorkOrderError,
   isGroupShareInvoiceItem,
   joinGroupWorkOrder,
@@ -9860,14 +9861,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               await markTradeInvoiceRetryable(
                 client,
                 String(reviewed.trade_invoice_id),
-                'Line review released this invoice, but the Xero push failed. It can be retried.',
+                'Line review released this invoice, but the Xero result is unconfirmed. Check Xero for an existing bill before retrying.',
               )
             } catch (markErr) {
               console.error('[ops-api] line review xero push retry mark failed:', (markErr as Error).message)
             }
             return json({
               ...reviewed,
-              xero_push: 'failed',
+              xero_push: 'unconfirmed',
               xero_push_error: (pushErr as Error)?.message || 'Xero push failed',
             })
           }
@@ -12922,6 +12923,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 query_note: share.query_note || null,
                 division: share.division || null,
                 group_share_id: share.group_share_id || null,
+                office_review_status: 'awaiting',
                 source_work_order_id: null,
                 ...tradeInvoiceTimeEntryColumns(null),
               })),
@@ -14088,6 +14090,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   ? null
                   : (dbLine.source_work_order_id || null),
                 group_share_id: dbLine.group_share_id || null,
+                // Only the server-priced group lane adds this hold. Ordinary
+                // invoices retain the existing flag-controlled review policy.
+                office_review_status: isGroupShareInvoiceItem(dbLine) ? 'awaiting' : null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,
@@ -18610,6 +18615,7 @@ async function jobDetail(
 
   return {
     job: jobLite,
+    group_work_order_enabled: await groupFeatureOn(client),
     trade_time_entries: tradeTimeEntries.entries,
     trade_time_entries_error: tradeTimeEntries.error,
     trade_invoice_lines: tradeInvoiceLines,
@@ -45550,6 +45556,7 @@ async function tradeJobDetail(
 
   return {
     job: tradeSafeJob,
+    group_work_order_enabled: await groupFeatureOn(client),
     // Additive: the resolved tier and the quote fence, so the app can render the
     // right controls without re-deriving authority client-side.
     access_tier: accessDecision.tier,
@@ -56223,10 +56230,13 @@ async function myMoney(client: any, tradeUser: TradeAuthContext, params: URLSear
 export const _myMoneyForTest = myMoney
 export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 
-// ── set_trade_rate: trade or ops sets hourly rate ──
+// ── set_trade_rate: office sets rate; trade writes are refused ──
 async function setTradeRate(client: any, authUserId: string | null, body: any) {
   const { user_id, hourly_rate } = body
-  const targetUserId = user_id || authUserId
+  if (authUserId) {
+    throw new ApiError('Rates are set by the office. Contact the office to change your rate.', 403)
+  }
+  const targetUserId = user_id
   if (!targetUserId) throw new Error('user_id required')
   if (!hourly_rate || hourly_rate <= 0) throw new Error('Valid hourly_rate required')
 

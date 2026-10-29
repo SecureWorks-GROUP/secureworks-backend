@@ -1,3 +1,9 @@
+## Office sign-off update, 27 October 2026
+
+Owner supersedes the earlier no-waiver default: a reasoned, attributed office override now counts for a group. It uses the existing staff-only `waive_client_signoff` action and append-only `job_client_signoffs` with method `office_waiver`. It does not fabricate a drawing or satisfaction rating. It must be newer than the latest hours change; a later revoke still wins. The group read exposes the method/reason/actor to office only. The screen shows the office override separately. No automatic freeze, invoice or payment is triggered.
+
+Both office and trade job-detail responses now supply `group_work_order_enabled` from the live feature flag, failing closed if unreadable, so enabled cards can actually appear.
+
 # Group work orders and client job sign-off
 
 Backend contract for the trade app and the office. Schema:
