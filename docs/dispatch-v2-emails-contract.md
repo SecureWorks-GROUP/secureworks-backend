@@ -441,7 +441,7 @@ Please confirm when you can, thank you.
 Rules for the body:
 
 - The subject is `Material Order Ref <job number>`. The job number is not repeated in the body.
-- There is no sign-off, and the Outlook signature is left off (`signature: none`).
+- The body has no sign-off of its own. Shaun's signature is added by send-outlook-email (`signature: shaun` from admin@: Kind regards, the logo, Shaun Lee, Operations Coordinator, 0489 267 771, admin@secureworkswa.com.au), on the real send and the TEST copy alike.
 - Long dashes become commas.
 - A line reads `<qty>[ <unit>] x <description>`, then its detail lines, `Profile:` and `Colour:`.
 - A blank Date, Address or Contact line stays as `Date:` so it is easy to see.
@@ -508,7 +508,7 @@ A failed test gives 502 `test_send_refused` or `test_send_unknown`.
 **Real send.** A test copy first is optional (Shaun, 26 Oct; the old `test_send_first` refusal is gone). Then:
 
 1. The email is claimed (`status: sending`), so only one press can send it.
-2. ops-api posts to `send-outlook-email` from admin@ with `capture_thread_ids: true` and `signature: none`, and with no `job_id`, so it is not filed as a client email.
+2. ops-api posts to `send-outlook-email` from admin@ with `capture_thread_ids: true` and `signature: shaun`, and with no `job_id`, so it is not filed as a client email.
 3. On success it records the `sent_*` columns, sets `status: sent`, and locks the lines that went (`job_material_lines.dispatch_order_email_id`).
 
 ```json
@@ -664,7 +664,7 @@ Two v1 interactions to know about:
 
 - **Decking team CC.** Decking copies patios@ for now, and every decking email says it is open. Other job types (miscellaneous, insurance that is not a repair) get no team CC and say so. Shaun to rule.
 - **Seven approved suppliers have no Xero contact linked** (Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication, Unique Laser), so they show `can_add: false` until Shaun names the right contact. Mackson and Palram were ruled and are linked in the seed.
-- **Signature (decided).** Order emails go with no Outlook signature: Shaun's template has no sign-off (ruled 23 Oct 2026).
+- **Signature (decided, changed 29 Oct 2026).** Order emails carry Shaun's signature (`signature: shaun`). Shaun, 29 Oct 2026, after the first real sends went out bare: "Emails have no signature!! Always use my sign". This replaces the 23 Oct ruling of no signature.
 - **One open email per box.** A second order to the same supplier on the same job waits until the first is sent or discarded.
 - **Ids not checked against live Outlook.** That the draft gives `internetMessageId` and `conversationId` before sending is from Graph's documentation; it has not been tried against live Outlook (no sends from this build). The first send will show it. `graph_message_id` may change in Sent Items: match on the conversation id or the Message-ID.
 - **Records written per send.** send-outlook-email also writes its usual `email_events` log row for each send. No `job_events` or `po_communications` row is written for a v2 send. The job's Emails panel shows the order only when admin@ mail capture picks it up.

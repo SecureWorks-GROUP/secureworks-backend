@@ -307,8 +307,8 @@ export function dispatchV2EmptyDetailLines(bodyText: string): string[] {
 }
 
 // The plain-text body as the HTML Outlook sends: every character escaped,
-// every line break kept. Nothing is added (no signature: the template has no
-// sign-off).
+// every line break kept. Nothing is added here: send-outlook-email appends
+// Shaun's signature (signature "shaun", see DispatchV2OutlookPayload).
 export function dispatchV2BodyHtml(bodyText: string): string {
   const escaped = String(bodyText)
     .replace(/&/g, "&amp;")
