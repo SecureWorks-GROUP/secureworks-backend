@@ -617,6 +617,34 @@ function noNetwork<T>(fn: () => Promise<T>): Promise<T> {
   });
 }
 
+// The H7 read as context_job_bill_outcomes answers it: no amount anywhere.
+const BILL_OUTCOMES = {
+  contract_version: "cfo-bill-cost-outcome-v1",
+  contract_versions_agree: true,
+  shape: "context-job-bill-outcomes-v1",
+  job_id: "J",
+  bills: [{
+    xero_invoice_id: "x-bill-1",
+    invoice_number: "B-1",
+    supplier: "Testvale Supplies",
+    bill_status: "AUTHORISED",
+    bill_state: "counted_in_full",
+    held_reason: null,
+    change_hash: "abc",
+    overhead_part: false,
+    not_job_related_mark: false,
+    where_counted: "here",
+    here: {
+      xero_linked: true,
+      placed_by: null,
+      counts: "counted",
+      reason: "engine_reads_xero_lines",
+      holding_job: false,
+    },
+    other_jobs: [],
+  }],
+};
+
 function fullClient(extra: Partial<Parameters<typeof fakeClient>[0]> = {}) {
   return fakeClient({
     rpc: {
@@ -628,6 +656,7 @@ function fullClient(extra: Partial<Parameters<typeof fakeClient>[0]> = {}) {
         { event_id: "ev-1", cause: "defect:no_identity" },
         { event_id: "ev-2", cause: "ambiguity:one_candidate" },
       ],
+      context_job_bill_outcomes: BILL_OUTCOMES,
       ...(extra.rpc ?? {}),
     },
     ...extra,
@@ -733,6 +762,53 @@ Deno.test("Matching: rows waiting for this job are counted, a cut page says more
     deps(),
   );
   assertEquals(notDeployed.sources.matching.state, "not_deployed");
+});
+
+Deno.test("H7 bills: where each bill counts reaches the card with no amount; a refused or failed read is null with a code, never no bills", async () => {
+  const client = fullClient();
+  const o: any = await jobOverviewAction(
+    client,
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals(
+    client.rpcs.find((r) => r.fn === "context_job_bill_outcomes")!.args,
+    { p_job: JOB },
+  );
+  assertEquals(o.bills.contract_version, "cfo-bill-cost-outcome-v1");
+  assertEquals(o.bills.bills.map((b: any) => [b.invoice_number, b.where_counted]), [["B-1", "here"]]);
+  assertEquals(o.sources.bills, { ok: true, state: "ok", count: 1 });
+
+  const refused = async (data: any) => {
+    const r: any = await jobOverviewAction(
+      fullClient({ rpc: { context_job_bill_outcomes: data } }),
+      new URLSearchParams(`jobId=${JOB}`),
+      deps(),
+    );
+    assertEquals(r.bills, null);
+    assertEquals(r.sources.job.ok, true, "the job still answers");
+    return r.sources.bills.code;
+  };
+  assertEquals(await refused({ ...BILL_OUTCOMES, contract_version: "cfo-bill-cost-outcome-v2" }), "contract_mismatch");
+  assertEquals(await refused({ ...BILL_OUTCOMES, contract_versions_agree: false }), "contract_mismatch");
+  assertEquals(
+    await refused({ ...BILL_OUTCOMES, bills: [{ ...BILL_OUTCOMES.bills[0], bill_ex: 900 }] }),
+    "amount_present",
+  );
+  assertEquals(await refused(null), "invalid_shape");
+
+  const missing: any = await jobOverviewAction(
+    fullClient({ rpcErrors: { context_job_bill_outcomes: { code: "PGRST202", message: "missing" } } }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals([missing.bills, missing.sources.bills.state], [null, "not_deployed"]);
+  const timeout: any = await jobOverviewAction(
+    fullClient({ rpcErrors: { context_job_bill_outcomes: { code: "57014", message: "timeout" } } }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals([timeout.bills, timeout.sources.bills.code], [null, "rpc_failed"]);
 });
 
 Deno.test("what Context cannot see stands on every card, even a failed one", async () => {

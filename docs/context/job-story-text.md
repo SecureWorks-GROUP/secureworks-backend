@@ -249,6 +249,15 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
   job and wait on a person, contact or not, at most 200 (`more` when cut), and
   how many of them the daily list leaves out (no contact, or never asked), so
   the card can link to Matching, Find by job. Null when the read failed, never 0.
+- `bills`: `context_job_bill_outcomes` (`20261029170100`): the supplier bills
+  placed on this job (its Xero link or an actual allocation row) and where
+  Finance's engine counts each one's cost (`where_counted` here, elsewhere,
+  here_and_elsewhere, no_job, held or unknown; `here` and `other_jobs` with
+  `counts` and `reason`), from CFO's `cfo_bill_cost_outcomes`. No amount: an
+  answer with a number or a money key, or on a contract version other than
+  `cfo-bill-cost-outcome-v1`, is refused whole (`amount_present`,
+  `contract_mismatch`). Null when the read failed, never an empty list;
+  `not_deployed` until the migration is applied.
 - `not_seen`: `[{key, text}]`, the sources Context cannot see for any job
   (`material_orders`, `crew_tasks_and_crm_notes`), on every answer until the
   change that starts capturing a source removes its line (`OVERVIEW_NOT_SEEN`).

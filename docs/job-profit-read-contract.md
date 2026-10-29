@@ -125,3 +125,23 @@ job cohort, not an accounting period.
 A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
 parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
 figure; `holding_jobs` reports it on its own so the parked cost stays visible.
+
+## Where a bill's cost counts (H7)
+
+`cfo_bill_cost_outcomes` (`20261029170000`, contract
+`cfo-bill-cost-outcome-v1`, service role only) has one row per supplier bill
+(Xero ACCPAY, trade-app mirrors left out) and job it is Xero-linked to, has an
+actual allocation row on, or is counted on. `counts` is read from the engine,
+never re-derived: `counted` only when `v_job_cost_events` has an actual row of
+the bill on that job and `v_job_profit` reads the job; `not_counted` with a
+`reason` (read through allocation rows, overhead, an unconfirmed or
+not-job-related installer bill, a labour part not yet confirmed, voided, not
+approved, a legacy job, an expected row on another job hiding the Xero link);
+`unknown` when it cannot be read, never 0. A bill marked not job related that
+the engine still counts reads `bill_state` `held` (F1, JP-21). The
+`evidence_hash` is led by the contract version; a payment does not move it
+(AUTHORISED and PAID are one class), a changed total, line, credit, status
+class, allocation row or overhead does. Context's job card reads it through
+`context_job_bill_outcomes(job)` (`20261029170100`), which carries no amount;
+ops-api `job_overview` serves that as `bills` and refuses any other contract
+version or any amount (`job_bill_outcomes_read.ts`).
