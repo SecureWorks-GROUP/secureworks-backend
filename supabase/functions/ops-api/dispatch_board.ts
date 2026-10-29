@@ -607,12 +607,15 @@ export type DispatchBoardSupplierBox = {
   pay_on?: string | null;
   pay_on_set_at?: string | null;
   pay_on_set_by_email?: string | null;
+  // The latest hand pick of Awaiting payment (migration
+  // 20261029120300_dispatch_v2_box_payment_reopened.sql).
+  payment_reopened_at?: string | null;
   // ASAP or Pick a date (migration 20261030120000_dispatch_v2_box_date_mode.sql).
   order_date_mode?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, order_date_mode";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at, order_date_mode";
 
 // The material lines in the boxes, only for the material stage: which lines
 // are still to be ordered, and when each last changed.
@@ -798,8 +801,8 @@ export type DispatchArrival = {
     open: number;
     on_us: number;
     extra_open: number;
-    // Pay-first boxes not paid yet (and not delivered), and boxes whose
-    // confirmed date the payment gate is holding (contract section 3c).
+    // Boxes to pay now (payment.to_pay), and boxes whose confirmed date the
+    // payment gate is holding (contract section 3c).
     unpaid: number;
     held_by_payment: number;
   };
@@ -824,8 +827,12 @@ export type DispatchArrival = {
 
 export type DispatchArrivalPayment = {
   any_unpaid: boolean;
-  // The unpaid boxes' supplier names, in box order.
+  // The boxes to pay now (payment.to_pay: unpaid and at Awaiting payment),
+  // supplier names in box order.
   unpaid_suppliers: string[];
+  // Every box holding the job-wide offer (payment.blocks_job_move), supplier
+  // names in box order. any_unpaid is true when this is not empty.
+  blocking_suppliers: string[];
 };
 
 /** The job-wide payment hold (rule 8): true while any pay-first box on the
@@ -1070,7 +1077,11 @@ export function dispatchArrival(
   const confirmed = entries.filter((e) => e.date_confirmed);
   const open = entries.filter((e) => e.material_stage !== "delivered");
   const onUs = entries.filter((e) => e.waiting_on === "us");
-  const unpaid = entries.filter((e) => e.payment?.blocks_job_move === true);
+  // Holding the job-wide offer (broad), and owed now (to pay).
+  const blocking = entries.filter((e) => e.payment?.blocks_job_move === true);
+  const toPay = entries.filter((e) => e.payment?.to_pay === true);
+  const names = (list: DispatchArrivalOrder[]) =>
+    list.map((e) => e.supplier_name || "a supplier");
   const earliest = installDay ? null : dispatchEarliestInstall({
     today: input.today,
     orders: entries.map((e) => ({
@@ -1094,13 +1105,14 @@ export function dispatchArrival(
       open: open.length,
       on_us: onUs.length,
       extra_open: open.filter((e) => e.extra).length,
-      unpaid: unpaid.length,
+      unpaid: toPay.length,
       held_by_payment: entries.filter((e) => e.held_by_payment).length,
     },
     payment: input.accounts?.readOk
       ? {
-        any_unpaid: unpaid.length > 0,
-        unpaid_suppliers: unpaid.map((e) => e.supplier_name || "a supplier"),
+        any_unpaid: blocking.length > 0,
+        unpaid_suppliers: names(toPay),
+        blocking_suppliers: names(blocking),
       }
       : null,
     all_confirmed_in_time: entries.length > 0 &&

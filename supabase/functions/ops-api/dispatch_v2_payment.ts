@@ -89,9 +89,12 @@ export function dispatchV2TermsFor(
 //     migration 20261029120100_dispatch_v2_box_paid.sql).
 //   * A paid stamp counts for the order it was marked against: only while it
 //     is newer than the box's newest order email (a second order to the same
-//     supplier reuses the box) and newer than a hand pick of Awaiting payment
-//     (picking Awaiting payment by hand re-opens the payment). A stamp that no
-//     longer counts is kept on the box and shown as an earlier order's.
+//     supplier reuses the box) and newer than the latest hand pick of
+//     Awaiting payment (picking Awaiting payment by hand re-opens the
+//     payment). The latest such pick is kept in payment_reopened_at, so a
+//     later hand pick of another stage does not make the old stamp count
+//     again. A stamp that no longer counts is kept on the box and shown as an
+//     earlier order's.
 
 export type DispatchV2PaymentInput = {
   terms: DispatchV2PaymentTerms;
@@ -107,6 +110,9 @@ export type DispatchV2PaymentInput = {
   // The stage a person picked on the box, and when.
   storedStage: unknown;
   storedStageAt: unknown;
+  // When a person last picked Awaiting payment by hand (migration
+  // 20261029120300_dispatch_v2_box_payment_reopened.sql). Left out = never.
+  paymentReopenedAt?: unknown;
   // The stage the box finally shows (for blocks_job_move: a delivered box
   // never holds the job up). Left out = not delivered.
   materialStage?: string;
@@ -145,12 +151,21 @@ export type DispatchV2Payment = {
   // Awaiting payment.
   holds_stage: boolean;
   // Counts towards "a box on the job is unpaid": pay first, unpaid, not
-  // delivered.
+  // delivered. Broad on purpose (Shaun): any pay-first box not paid holds
+  // the job-wide "Move to Order Confirmed?" offer, sent or not.
   blocks_job_move: boolean;
-  // What the screen may offer on this box.
+  // Money is owed now: pay first, unpaid, and the box shows Awaiting
+  // payment. The "to pay" list and count use this, so a box not ordered
+  // yet, or still waiting on the supplier's reply, is not listed.
+  to_pay: boolean;
+  // What the screen may offer on this box. Both need a sent order for the
+  // box (Mark paid on an order never sent would jump it to Order
+  // confirmed). Mark paid: pay first (or unknown terms) and not paid; a Pay
+  // on tag can still be followed by Mark paid on the day (rule 6).
   can_mark_paid: boolean;
   can_undo_paid: boolean;
-  // Pay on pickup / delivery can be set on any supplier box, on account too.
+  // Pay on pickup / delivery: any terms, on account too, while not paid and
+  // not tagged. Taking a tag off (pay_on null) is always allowed.
   can_set_pay_on: boolean;
   // The stored stamps the presses guard on (raw, null = never set).
   guard: { paid_at: string | null; pay_on_set_at: string | null };
@@ -173,19 +188,23 @@ function stampInstant(value: unknown): number | null {
 }
 
 /** Whether a stamp made at `stampAt` counts for the box's current order:
- * newer than the newest send, and newer than a hand pick of Awaiting
- * payment. */
+ * newer than the newest send, and newer than the latest hand pick of
+ * Awaiting payment (payment_reopened_at, or the stored pick when the box's
+ * stored stage is still Awaiting payment, which covers a box re-opened
+ * before the column existed). */
 export function dispatchV2StampCounts(
   stampAt: unknown,
   input: Pick<
     DispatchV2PaymentInput,
-    "newestSentAt" | "storedStage" | "storedStageAt"
+    "newestSentAt" | "storedStage" | "storedStageAt" | "paymentReopenedAt"
   >,
 ): boolean {
   const at = stampInstant(stampAt);
   if (at === null) return false;
   const sentAt = stampInstant(input.newestSentAt);
   if (sentAt !== null && at <= sentAt) return false;
+  const reopenedAt = stampInstant(input.paymentReopenedAt);
+  if (reopenedAt !== null && at <= reopenedAt) return false;
   if (input.storedStage === "awaiting_payment") {
     const pickedAt = stampInstant(input.storedStageAt);
     if (pickedAt !== null && at <= pickedAt) return false;
@@ -249,6 +268,8 @@ export function dispatchV2PaymentOf(
   const payOnSetByEmail = payOn ? stampText(input.payOnSetByEmail) : null;
   const tagged = !!payOnSetAt && !!payOnSetByEmail &&
     dispatchV2StampCounts(payOnSetAt, input);
+  // A sent order for the box: the presses need one.
+  const sent = stampInstant(input.newestSentAt) !== null;
   let state: DispatchV2Payment["state"];
   if (paid) state = "paid";
   else if (tagged) state = payOn === "pickup" ? "pay_on_pickup" : "pay_on_delivery";
@@ -268,9 +289,10 @@ export function dispatchV2PaymentOf(
     earlier_order_pay_on_set_at: !tagged && payOnSetAt ? payOnSetAt : null,
     holds_stage: input.holdsStage === true,
     blocks_job_move: state === "unpaid" && input.materialStage !== "delivered",
-    can_mark_paid: input.terms !== "on_account" && !paid,
+    to_pay: state === "unpaid" && input.materialStage === "awaiting_payment",
+    can_mark_paid: sent && input.terms !== "on_account" && !paid,
     can_undo_paid: paid,
-    can_set_pay_on: true,
+    can_set_pay_on: sent && !paid && !tagged,
     guard: {
       paid_at: paidAt,
       // The raw stored stamp, so a guard always matches what is on the box.

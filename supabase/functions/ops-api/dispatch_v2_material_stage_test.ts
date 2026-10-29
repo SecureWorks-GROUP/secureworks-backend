@@ -107,6 +107,8 @@ const BOX_COLUMNS = new Set([
   "material_stage",
   "material_stage_set_at",
   "material_stage_set_by_email",
+  // 20261029120300_dispatch_v2_box_payment_reopened.sql
+  "payment_reopened_at",
 ]);
 
 // The stage migration's check: a stage from the list, always with when and by
@@ -829,6 +831,29 @@ Deno.test("set: pressing the same stage again stamps it again", async () => {
   const row = boxRow(tables, BOX.metroll);
   assertEquals(row.material_stage_set_at, NOW);
   assertEquals(row.material_stage_set_by_email, SHAUN.email);
+});
+
+Deno.test("set: picking Awaiting payment stamps the re-open; any other stage leaves it alone", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  await run(client, {
+    box_id: BOX.stratco,
+    material_stage: "manufacturing",
+    expected_set_at: null,
+  });
+  assertEquals(boxRow(tables, BOX.stratco).payment_reopened_at ?? null, null);
+  await run(client, {
+    box_id: BOX.metroll,
+    material_stage: "awaiting_payment",
+    expected_set_at: HUGO_SET_AT,
+  });
+  const metroll = boxRow(tables, BOX.metroll);
+  assertEquals([metroll.material_stage, metroll.payment_reopened_at], ["awaiting_payment", NOW]);
+  // Still one box update per press, no other table.
+  assertEquals(writes.filter((w) => w.kind === "update").map((w) => w.table), [
+    "job_material_suppliers",
+    "job_material_suppliers",
+  ]);
 });
 
 Deno.test("set: the ops key names its person by operator_email, via terminal", async () => {

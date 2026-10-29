@@ -170,6 +170,8 @@ const SCHEMA: Record<string, string[]> = {
     "pay_on_set_at",
     "pay_on_set_by",
     "pay_on_set_by_email",
+    // 20261029120300_dispatch_v2_box_payment_reopened.sql
+    "payment_reopened_at",
     // 20261030120000_dispatch_v2_box_date_mode.sql
     "order_date_mode",
     "order_date_mode_set_at",

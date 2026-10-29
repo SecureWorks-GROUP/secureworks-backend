@@ -11,12 +11,15 @@
 //     nothing. It stamps who and when on the box, and the box shows Order
 //     confirmed. A box already paid for the current order is left as it is.
 //     A supplier on account has no payment step: refused (409 on_account).
+//     A box with no sent order is refused (409 order_not_sent): there is no
+//     order to pay for yet.
 //   * Undo paid takes the stamp off. The box then shows what it would have
 //     shown without it (usually Awaiting payment).
 //   * Pay on pickup / Pay on delivery confirms the order without paying: the
 //     box shows Order confirmed exactly as Mark paid would, with a visible
-//     tag. Allowed on any box, on account included. Set to null it comes
-//     off. Mark paid can still be pressed later; both stamps are kept.
+//     tag. Allowed on any box, on account included, once its order is sent
+//     (409 order_not_sent before). Set to null it comes off, at any time.
+//     Mark paid can still be pressed later; both stamps are kept.
 //   * ASAP or Pick a date (piece C) sets the box's date choice for its next
 //     order email. It never touches a held or sent email (the next Make
 //     email uses it) and never clears a date already on the box.
@@ -250,6 +253,18 @@ async function boxAsShown(
   return { arrival, entry };
 }
 
+// Mark paid and Pay on need a sent order for the box: with nothing sent there
+// is no order to pay for, and the box would jump to Order confirmed.
+function refuseUnsent(box: any, entry: any) {
+  if (entry.order_sent) return;
+  refuse(
+    409,
+    "order_not_sent",
+    "This order has not been sent to the supplier yet",
+    { box: projectPaymentBox(box, entry) },
+  );
+}
+
 /** The box as the answer and a 409 show it: its stage and payment as the
  * board shows them (null when the Arrival read failed). */
 export function projectPaymentBox(box: any, entry: any | null) {
@@ -413,6 +428,7 @@ export async function markDispatchV2Paid(
   if (entry.payment.paid) {
     return await answer(client, box, ctx, { unchanged: true, arrival });
   }
+  refuseUnsent(box, entry);
 
   const now = ctx.now ? ctx.now() : new Date().toISOString();
   const updated = await writeBox(client, box, {
@@ -550,6 +566,7 @@ export async function setDispatchV2PayOn(
   ) {
     return await answer(client, box, ctx, { unchanged: true, arrival });
   }
+  if (target !== null) refuseUnsent(box, entry);
 
   const now = ctx.now ? ctx.now() : new Date().toISOString();
   const patch = target === null

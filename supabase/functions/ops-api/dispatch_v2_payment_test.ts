@@ -147,6 +147,7 @@ const BOX_COLUMNS = new Set([
   "pay_on_set_at",
   "pay_on_set_by",
   "pay_on_set_by_email",
+  "payment_reopened_at",
   "order_date_mode",
   "order_date_mode_set_at",
   "order_date_mode_set_by_email",
@@ -197,6 +198,7 @@ function box(
     pay_on_set_at: null,
     pay_on_set_by: null,
     pay_on_set_by_email: null,
+    payment_reopened_at: null,
     order_date_mode: null,
     order_date_mode_set_at: null,
     order_date_mode_set_by_email: null,
@@ -608,6 +610,39 @@ Deno.test("paid: picking Awaiting payment by hand after the stamp re-opens it", 
   assertEquals(other.paid, true);
 });
 
+Deno.test("paid: a re-opened payment stays open after another hand pick", () => {
+  // Paid at PAID_AT, Awaiting payment picked by hand at 06:00 (re-open),
+  // then Manufacturing picked by hand at 07:00. The 05:00 stamp must not
+  // count again.
+  const reopened = {
+    paidAt: PAID_AT,
+    paidByEmail: SHAUN.email,
+    paymentReopenedAt: "2026-10-28T06:00:00.000Z",
+    storedStage: "manufacturing",
+    storedStageAt: "2026-10-28T07:00:00.000Z",
+  };
+  const p = paymentOf(reopened);
+  assertEquals([p.state, p.paid, p.earlier_order_paid_at], ["unpaid", false, PAID_AT]);
+  // A Pay on tag from before the re-open stops counting the same way.
+  const tag = paymentOf({
+    ...reopened,
+    paidAt: null,
+    paidByEmail: null,
+    payOn: "pickup",
+    payOnSetAt: PAID_AT,
+    payOnSetByEmail: SHAUN.email,
+  });
+  assertEquals([tag.state, tag.pay_on, tag.earlier_order_pay_on_set_at], ["unpaid", null, PAID_AT]);
+  // Paid again after the re-open: counts.
+  const again = paymentOf({ ...reopened, paidAt: "2026-10-28T08:00:00.000Z" });
+  assertEquals([again.state, again.paid], ["paid", true]);
+  // A re-open from before the stamp changes nothing.
+  assertEquals(
+    paymentOf({ ...reopened, paymentReopenedAt: "2026-10-28T04:00:00.000Z" }).paid,
+    true,
+  );
+});
+
 Deno.test("paid: on account needs no payment; unknown terms say so", () => {
   const onAccount = paymentOf({ terms: "on_account" });
   assertEquals(onAccount.state, "not_needed");
@@ -1002,11 +1037,12 @@ Deno.test("pay on: a tag after the newest send counts and confirms the order wit
     SHAUN.email,
   ]);
   assertEquals(p.paid, false);
-  // Not unpaid, so it never holds the job up; Mark paid is still offered.
+  // Not unpaid, so it never holds the job up; Mark paid is still offered
+  // (rule 6). Pay on is not offered again while the tag counts.
   assertEquals([p.blocks_job_move, p.can_mark_paid, p.can_set_pay_on], [
     false,
     true,
-    true,
+    false,
   ]);
   assertEquals(p.guard, { paid_at: null, pay_on_set_at: TAGGED_AT });
   assertEquals(
@@ -1060,7 +1096,9 @@ Deno.test("pay on: allowed on account, where it shows the tag instead of not nee
     payOnSetByEmail: SHAUN.email,
   });
   assertEquals(p.state, "pay_on_delivery");
-  assertEquals([p.can_mark_paid, p.can_set_pay_on], [false, true]);
+  assertEquals([p.can_mark_paid, p.can_set_pay_on], [false, false]);
+  // Untagged on account, with a sent order: Pay on is offered.
+  assertEquals(paymentOf({ terms: "on_account" }).can_set_pay_on, true);
 });
 
 Deno.test("pay on: the stage shows Order confirmed from the tag; the payment step never moves a box back", () => {
@@ -1679,11 +1717,14 @@ function twoBoxes(): Record<string, Row[]> {
 Deno.test("hold: the Arrival line counts the unpaid boxes and names their suppliers", async () => {
   const { client } = makeClient(twoBoxes());
   const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
-  assertEquals(read.arrival.counts.unpaid, 1);
+  // Lysaght is sent with no reply yet: it holds the job-wide offer (broad)
+  // but is not "to pay" until it shows Awaiting payment.
+  assertEquals(read.arrival.counts.unpaid, 0);
   assertEquals(read.arrival.counts.held_by_payment, 0);
   assertEquals(read.arrival.payment, {
     any_unpaid: true,
-    unpaid_suppliers: ["Lysaght"],
+    unpaid_suppliers: [],
+    blocking_suppliers: ["Lysaght"],
   });
   assertEquals(read.payment_hold, true);
   assertEquals(dispatchPaymentHold(read.arrival), true);
@@ -1704,8 +1745,61 @@ Deno.test("hold: a held confirmed date is counted; paying every box lifts the ho
   assertEquals(answer.arrival.arrival.payment, {
     any_unpaid: false,
     unpaid_suppliers: [],
+    blocking_suppliers: [],
   });
   assertEquals(answer.arrival.arrival.counts.unpaid, 0);
+});
+
+Deno.test("to pay: only a pay-first box at Awaiting payment is to pay; a box never sent cannot be paid", () => {
+  // At Awaiting payment: to pay, and Mark paid offered.
+  const due = paymentOf({ materialStage: "awaiting_payment" });
+  assertEquals([due.state, due.to_pay, due.blocks_job_move, due.can_mark_paid], [
+    "unpaid",
+    true,
+    true,
+    true,
+  ]);
+  // Sent, waiting on the reply: holds the job (broad), not to pay yet.
+  const sent = paymentOf({ materialStage: "sent" });
+  assertEquals([sent.to_pay, sent.blocks_job_move, sent.can_mark_paid], [false, true, true]);
+  // Never sent: holds the job, not to pay, and nothing can be pressed.
+  const unsent = paymentOf({ newestSentAt: null, materialStage: "order_materials" });
+  assertEquals(
+    [unsent.state, unsent.to_pay, unsent.blocks_job_move, unsent.can_mark_paid, unsent.can_set_pay_on],
+    ["unpaid", false, true, false, false],
+  );
+  // Paid or on account: never to pay.
+  assertEquals(
+    paymentOf({ paidAt: PAID_AT, paidByEmail: SHAUN.email, materialStage: "awaiting_payment" }).to_pay,
+    false,
+  );
+  assertEquals(paymentOf({ terms: "on_account", materialStage: "awaiting_payment" }).to_pay, false);
+});
+
+Deno.test("to pay: Mark paid and Pay on are refused on a box with no sent order; taking a tag off is not", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  for (const [action, body] of [
+    [DISPATCH_V2_MARK_PAID_ACTION, { box_id: BOX.unlisted }],
+    [DISPATCH_V2_SET_PAY_ON_ACTION, { box_id: BOX.unlisted, pay_on: "pickup" }],
+  ] as const) {
+    const r = await refused(client, action, body);
+    assertEquals([r.status, r.code], [409, "order_not_sent"], action);
+    assertEquals(r.body.box.box_id, BOX.unlisted);
+  }
+  assertEquals(writes.length, 0);
+  // A tag left on a box with nothing sent can still be taken off.
+  tables.job_material_suppliers = tables.job_material_suppliers.map((b) =>
+    b.id === BOX.unlisted
+      ? { ...b, pay_on: "pickup", pay_on_set_at: PAID_AT, pay_on_set_by_email: SHAUN.email }
+      : b
+  );
+  const cleared = await press(client, DISPATCH_V2_SET_PAY_ON_ACTION, {
+    box_id: BOX.unlisted,
+    pay_on: null,
+  });
+  assertEquals([cleared.success, cleared.unchanged], [true, false]);
+  assertEquals(boxRow(tables, BOX.unlisted).pay_on, null);
 });
 
 Deno.test("hold: a delivered box never holds the job; Pay on lifts it too", async () => {
