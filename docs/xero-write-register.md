@@ -4,10 +4,12 @@ Every place in `supabase/functions` that can write to Xero, grouped into the row
 
 - **Source of truth:** `supabase/functions/_shared/xero_write_register.json`. This page is its human copy; the test checks the two agree.
 - **The test:** `supabase/functions/_shared/xero_write_register_test.ts` scans every non-test `.ts` file with the TypeScript parser (`_shared/xero_write_sites.ts`) for an `xeroPost` call, a direct PUT, POST or DELETE fetch to a Xero accounting URL, or a call to a xero-sync write action. It fails when a site appears that no row names, or a row names one that is gone. A site's key is `file :: enclosing function or case :: METHOD /Path`, so moving a line does not change it.
-- **Owner** is the accountable desk, not the code. Bookkeeping's own code calls none of these paths (P1).
+- **Owner** is the accountable desk, not the code. The original P1 read-only bookkeeping scope is retained historically; X15 records the separate owner-authorised tracking correction work of 28 October.
 - **Confirmed:** the CFO desk confirmed every row's owner and gate on 26 Oct (review on backend #1165, corrections applied). **Marnin approves the register.** A new row, or a change to who passes a gate, is a person's decision (P2, P12).
 - **Changes the books:** *draft only* means the write lands as a Xero DRAFT, which posts nothing until a person approves it in Xero. **Sends outside** marks a path that can send to a customer or supplier (a separate gate, P2).
 - **Not covered:** writes made outside `supabase/functions` (Jarvis, Railway) reach Xero only through these ops-api actions; Jarvis's own tool gates are INT-19.
+
+**28 October addition:** X15 is a distinct posted-bill tracking correction door, separately authorised by Marnin in the bookkeeping cleanup task. It does not inherit X9's draft-only claim. CFO confirmation of the new register row remains pending (`cfo_confirmed: false`); registration does not approve deployment or additional live operations. The 26 October confirmation above applies to X1–X14.
 
 ## The rows
 
@@ -27,8 +29,11 @@ Every place in `supabase/functions` that can write to Xero, grouped into the row
 | X12 | Edit a customer invoice, and email it after the edit | Bookkeeping | Staff session | yes | yes |
 | X13 | Find or create a trade's or supplier's Xero contact | CFO | Inside X6, X8 and X9 | no | no |
 | X14 | Have Xero email a paid invoice to the customer as a receipt (fencing and patio) **(new: found by INT-33, not in the first register)** | Bookkeeping (new row found by INT-33; the CFO desk takes it) | job_closeout_settings.receipt_sender_mode (off, dry_run, live); server key only (job_receipt_paid, job_receipt_catch_up, posted by xero-sync); one claim per invoice. Contract docs/job-receipt-v1.md. receipt_sender_mode going to live is a send gate for Marnin | no | yes |
+| X15 | Correct tracking on existing AUTHORISED/PAID supplier bills | Bookkeeping / CFO | Owner/admin in the default org or dedicated server secret; POST; confirm=true, tenant and snapshot checks; tracking-only preservation and readback | yes (division classification only) | no |
 
-**Over the SecureSuite MCP connector,** Jarvis adds its own yes only for X4 today. For the X2, X3, X5, X7 and X8 tools the Claude client's permission prompt is the only human gate, and that is intended: on 27 Oct 2026 Jan decided that agent tools which move money or write to Xero get no named-person yes, so INT-19's first PR (jarvis #267) is parked and will not merge.
+**Recorded 27 October, before X15:** Over the SecureSuite MCP connector, Jarvis added its own yes only for X4. For the X2, X3, X5, X7 and X8 tools the Claude client's permission prompt is the only human gate, and that is intended: on 27 Oct 2026 Jan decided that agent tools which move money or write to Xero get no named-person yes, so INT-19's first PR (jarvis #267) is parked and will not merge.
+
+X15 now has separate read-only preview and privileged apply tools. Apply requires `confirm=true`; it is included in the MCP write approval surface.
 
 ## Call sites
 
@@ -115,6 +120,12 @@ Every place in `supabase/functions` that can write to Xero, grouped into the row
 ### X14 · Have Xero email a paid invoice to the customer as a receipt (fencing and patio)
 
 - `ops-api/job_receipt.ts :: xeroReceiptEmailer :: POST /Invoices/{id}/Email`
+
+### X15 · Correct tracking on existing posted supplier bills
+
+- `ops-api/xero_bill_tracking_corrections.ts :: correctSupplierBillTracking :: POST /Invoices/{id}`
+- Preview does not write. Apply requires explicit confirmation and the exact preview hash; it cannot change amounts, tax, account codes, status or payments. Existing X9 draft guards remain intact.
+- Gate and limitations: [posted-bill tracking contract](xero-bill-tracking-corrections.md). No send, money movement, deployment or new token authority is granted by adding this row.
 
 ### Not writes
 
