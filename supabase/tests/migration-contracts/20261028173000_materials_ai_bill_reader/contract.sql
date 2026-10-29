@@ -13,6 +13,11 @@
 --   AI-PER  placed by a person.
 --   AI-RULE installer bill a rule placed on AI-J2 (installer_confirm).
 --
+-- Since 20261029093000 (TP-03, two keys) the AI places a bill on a job only
+-- when a hard clue agrees, so AI-INST, AI-MAT and AI-RULE carry their job's
+-- number in the bill reference; the hold for the second check is that
+-- migration's own contract.
+--
 -- Expected: the batch reads the open, unheld bills biggest first; an installer
 -- bill the AI places counts as labour (JP-12 replaced, owner 28 Oct 2026);
 -- below the bar a bill is left for a person; a held, mirrored, person-placed
@@ -48,6 +53,10 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
    '[{"Description": "Caps", "AccountCode": "310", "LineAmount": 70, "TaxAmount": 7}]', '{"LineAmountTypes": "Exclusive"}', NULL),
   ('00000000-0000-0000-0000-000000000001', 'AI-RULE', 'AIB-10008', 'ACCPAY', 'AUTHORISED', 'AI Installer', 400, 440, '2026-08-23',
    '[{"Description": "Install", "AccountCode": "306", "LineAmount": 400, "TaxAmount": 40}]', '{"LineAmountTypes": "Exclusive"}', NULL);
+
+-- The hard clue each AI placement below needs since 20261029093000.
+UPDATE public.xero_invoices SET reference = CASE xero_invoice_id WHEN 'AI-RULE' THEN 'AI-J2' ELSE 'AI-J1' END
+ WHERE xero_invoice_id IN ('AI-INST', 'AI-MAT', 'AI-RULE');
 
 INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status, suggestion_reason, suggested_job_id, suggested_job_number) VALUES
   ('AI-INST', 'AIB-10001', 'AI Installer', 600, 660, '2026-08-22', 'open', NULL, NULL, NULL),
