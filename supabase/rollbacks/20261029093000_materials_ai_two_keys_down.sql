@@ -1,5 +1,17 @@
 -- Down for 20261029093000_materials_ai_two_keys.sql.
 --
+-- WARNING: this rollback takes away the second-check protection. The restored
+-- 20261028173000 batch knows nothing of held_for_check or of a second check
+-- that disagreed: once reread_after_days has passed it reads such a bill again
+-- and can place it on the AI's confidence alone, with no hard clue. So when
+-- any bill that two keys held is still open in Bills to place (held now, or
+-- left for a person after the second check disagreed, was unsure or the reader
+-- was off), this rollback TURNS THE AI BILL READER OFF
+-- (materials_ai_settings.enabled = false, updated_by
+-- 'rollback:20261029093000') and says so in a WARNING. Turn it back on only
+-- after a person has decided those bills, or after 20261029093000 is applied
+-- again.
+--
 -- A bill still held for the second check goes back to "left for a person"
 -- (its queue row was never moved, so it is still open in Bills to place, and
 -- it had no cost row). Every placement the two-keys path made stays placed: a
@@ -8,6 +20,24 @@
 -- byte for byte, and the view, the helpers, the constraints and the columns
 -- go. agreed_keys, key_evidence and held_at are dropped with their columns:
 -- export materials_ai_placements first if they must be kept.
+
+DO $two_keys_down$
+DECLARE n integer;
+BEGIN
+  SELECT count(DISTINCT p.xero_invoice_id) INTO n
+    FROM public.materials_ai_placements p
+    JOIN public.materials_reconciliation_queue q ON q.xero_invoice_id = p.xero_invoice_id
+   WHERE p.held_at IS NOT NULL
+     AND p.outcome <> 'placed'
+     AND p.undone_at IS NULL
+     AND q.status = 'open';
+  IF n > 0 THEN
+    UPDATE public.materials_ai_settings
+       SET enabled = false, updated_at = now(), updated_by = 'rollback:20261029093000'
+     WHERE id AND enabled;
+    RAISE WARNING 'materials_ai_two_keys rollback: % bill(s) held by two keys are still open in Bills to place; the AI bill reader is now OFF (materials_ai_settings.enabled = false) so the restored batch cannot place them on one key. A person decides them before it is turned back on.', n;
+  END IF;
+END $two_keys_down$;
 
 UPDATE public.materials_ai_placements
    SET outcome = 'left_for_person', second_check_status = 'not_needed',

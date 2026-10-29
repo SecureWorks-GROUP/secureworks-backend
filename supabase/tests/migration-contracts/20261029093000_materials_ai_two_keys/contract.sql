@@ -299,6 +299,200 @@ BEGIN
   IF n <> 3 THEN RAISE EXCEPTION 'held bills not open: %', n; END IF;
 END $$;
 
+-- ── Review fixes (independent money review of e89fefc) ──
+--   TK-TWO    "SWF-29001 / SWP-29002", AI picks SWF-29001: no key, held.
+--   TK-JPO    "SWF-29001" plus another job's PO-1000321 in a line: no key, held.
+--   TK-DRX    "SWF-29001" plus another job's DRAFT PO: still disagrees, no key.
+--   TK-NOJOB  "SWF-29001" plus a PO with no job: no key.
+--   TK-LINKX  "SWF-29001", the bill linked to another job's PO: no key.
+--   TK-DIG    digits-only PO "29002" on SWF-29001, the bill says only
+--             "SWP-29002": no PO key for SWF-29001 (and the bill names another
+--             job); for SWP-29002 the job number is a key and the PO is not seen.
+--   TK-DIGOWN digits-only PO "29001" on SWF-29001, bill "SWF-29001": the job
+--             number is a key, the PO is not found inside it.
+--   TK-PODUP  PO-1000325 held by two jobs: no key.  TK-PODEAD: a cancelled
+--             twin of the PO does not count: PO key.
+--   TK-PODRAFT / TK-PONULL / TK-POQR: a draft, no-status or quote-request PO
+--             of the job gives no key.
+--   TK-POTAKEN / TK-POFACT: a PO linked to, or matched by the rules to,
+--             another bill gives no key.
+--   TK-CH2    supplier C-CH's only earlier bill on the job was placed by the AI
+--             (two keys, second check agreed): it does not vouch, held.
+--   TK-MU3    supplier C-MU billed SWF-29001 and SWP-29002 in the window: no key.
+--   TK-OW2    the person's bill of the supplier is a year and a half old: no key.
+--   TK-VD2    the person's bill of the supplier is voided in Xero: no key.
+--   TK-RL2    a rule placed the supplier's earlier bill (xero_ref_link): key.
+--   TK-QTY    "Qty 7341 posts" on legacy job 7341: never a job number.
+--   TK-HOLD   SWF-29009 is a holding job: no key, even with its number.
+--   TK-HOLD2  "SWF-29001 SWF-29009", AI picks SWF-29001: no key.
+--   TK-TWJ    "SWF-29005" where SWP-29005 also exists: no job number key.
+
+INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at, client_name, site_suburb) VALUES
+  ('b2000000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'SWF-29005', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z', 'Key Client Five', 'Keyvale'),
+  ('b2000000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'accepted', 'patio', 'SWP-29005', false, '{}', '{}', NULL, '2026-07-01T00:00:00Z', 'Key Client Six', 'Keydale'),
+  ('b2000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'SWF-29009', false, '{"do_not_schedule": true}', '{}', NULL, '2026-07-01T00:00:00Z', 'Holding', 'Nowhere'),
+  ('b2000000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', '7341', true, '{}', '{}', NULL, '2026-07-01T00:00:00Z', 'Key Legacy', 'Oldtown');
+
+INSERT INTO public.purchase_orders (id, po_number, job_id, supplier_name, subtotal, status, xero_bill_id) VALUES
+  ('b2000000-0000-4000-8000-0000000000b1', 'PO-1000321', 'b2000000-0000-4000-8000-000000000002', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000b2', 'PO-1000322', 'b2000000-0000-4000-8000-000000000002', 'Key Steel', 300, 'draft', NULL),
+  ('b2000000-0000-4000-8000-0000000000b3', 'PO-1000323', NULL, 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000b4', 'PO-1000324', 'b2000000-0000-4000-8000-000000000002', 'Key Steel', 300, 'billed', 'TK-LINKX'),
+  ('b2000000-0000-4000-8000-0000000000b5', '29002', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000b6', '29001', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000b7', 'PO-1000325', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000b8', 'PO-1000325', 'b2000000-0000-4000-8000-000000000003', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000b9', 'PO-1000326', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000ba', 'PO-1000326', 'b2000000-0000-4000-8000-000000000003', 'Key Steel', 300, 'cancelled', NULL),
+  ('b2000000-0000-4000-8000-0000000000bb', 'PO-1000327', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'draft', NULL),
+  ('b2000000-0000-4000-8000-0000000000bc', 'PO-1000328', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, NULL, NULL),
+  ('b2000000-0000-4000-8000-0000000000bd', 'PO-1000329', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'quote_requested', NULL),
+  ('b2000000-0000-4000-8000-0000000000be', 'PO-1000330', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'billed', 'TK-SOMEONE'),
+  ('b2000000-0000-4000-8000-0000000000bf', 'PO-1000331', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL);
+
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, reference, line_items, raw_json, job_id)
+SELECT '00000000-0000-0000-0000-000000000001', b.id, 'TKB-' || b.id, 'ACCPAY', b.st, 'Key ' || b.id, 200, 220, b.dt::date, b.ref,
+       b.lines::jsonb, '{"LineAmountTypes": "Exclusive"}', NULL
+  FROM (VALUES
+    ('TK-TWO', 'AUTHORISED', '2026-08-21', 'SWF-29001 / SWP-29002', '[{"Description": "Posts and beams", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-JPO', 'AUTHORISED', '2026-08-21', 'SWF-29001', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 100}, {"Description": "Beams PO-1000321", "AccountCode": "310", "LineAmount": 100}]'),
+    ('TK-DRX', 'AUTHORISED', '2026-08-21', 'SWF-29001', '[{"Description": "Beams PO-1000322", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-NOJOB', 'AUTHORISED', '2026-08-21', 'SWF-29001 PO-1000323', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-LINKX', 'AUTHORISED', '2026-08-21', 'SWF-29001', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-DIG', 'AUTHORISED', '2026-08-21', 'SWP-29002', '[{"Description": "Beams", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-DIGOWN', 'AUTHORISED', '2026-08-21', 'SWF-29001', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-PODUP', 'AUTHORISED', '2026-08-21', 'PO-1000325', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-PODEAD', 'AUTHORISED', '2026-08-21', 'PO-1000326', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-PODRAFT', 'AUTHORISED', '2026-08-21', 'PO-1000327', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-PONULL', 'AUTHORISED', '2026-08-21', 'PO-1000328', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-POQR', 'AUTHORISED', '2026-08-21', 'PO-1000329', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-POTAKEN', 'AUTHORISED', '2026-08-21', 'PO-1000330', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-POFACT', 'AUTHORISED', '2026-08-21', 'PO-1000331', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-POFACT-PRIOR', 'AUTHORISED', '2026-08-01', NULL, '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-CH1', 'AUTHORISED', '2026-08-10', NULL, '[{"Description": "Sand", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-CH2', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Sand", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-MU1', 'AUTHORISED', '2026-08-10', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-MU2', 'AUTHORISED', '2026-08-12', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-MU3', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-OW1', 'AUTHORISED', '2025-01-01', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-OW2', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-VD1', 'VOIDED', '2026-08-10', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-VD2', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-RL1', 'AUTHORISED', '2026-08-10', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-RL2', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Gravel", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-QTY', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Qty 7341 posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-HOLD', 'AUTHORISED', '2026-08-21', 'SWF-29009', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-HOLD2', 'AUTHORISED', '2026-08-21', 'SWF-29001 SWF-29009', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-TWJ', 'AUTHORISED', '2026-08-21', 'SWF-29005', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]')
+  ) b(id, st, dt, ref, lines);
+
+INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, xero_contact_id, sub_total, total, invoice_date, status)
+SELECT x.xero_invoice_id, x.invoice_number, x.contact_name,
+       CASE WHEN x.xero_invoice_id LIKE 'TK-CH%' THEN 'C-CH' WHEN x.xero_invoice_id LIKE 'TK-MU%' THEN 'C-MU'
+            WHEN x.xero_invoice_id LIKE 'TK-OW%' THEN 'C-OW' WHEN x.xero_invoice_id LIKE 'TK-VD%' THEN 'C-VD'
+            WHEN x.xero_invoice_id LIKE 'TK-RL%' THEN 'C-RL' ELSE 'C-' || x.xero_invoice_id END,
+       x.sub_total, x.total, x.invoice_date,
+       CASE WHEN x.xero_invoice_id IN ('TK-CH1', 'TK-MU1', 'TK-MU2', 'TK-OW1', 'TK-VD1', 'TK-RL1', 'TK-POFACT-PRIOR') THEN 'assigned' ELSE 'open' END
+  FROM public.xero_invoices x
+ WHERE x.xero_invoice_id IN ('TK-TWO', 'TK-JPO', 'TK-DRX', 'TK-NOJOB', 'TK-LINKX', 'TK-DIG', 'TK-DIGOWN', 'TK-PODUP', 'TK-PODEAD',
+                             'TK-PODRAFT', 'TK-PONULL', 'TK-POQR', 'TK-POTAKEN', 'TK-POFACT', 'TK-POFACT-PRIOR', 'TK-CH1', 'TK-CH2',
+                             'TK-MU1', 'TK-MU2', 'TK-MU3', 'TK-OW1', 'TK-OW2', 'TK-VD1', 'TK-VD2', 'TK-RL1', 'TK-RL2',
+                             'TK-QTY', 'TK-HOLD', 'TK-HOLD2', 'TK-TWJ');
+
+INSERT INTO public.job_materials_facts (xero_invoice_id, invoice_number, xero_contact_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, matched_po_id) VALUES
+  -- The AI's own placement, with two keys and an agreeing check: never a voucher.
+  ('TK-CH1', 'TKB-TK-CH1', 'C-CH', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 'materials', 'actual', 200, 'medium', 'agent_ai', '2026-08-10', NULL),
+  ('TK-MU1', 'TKB-TK-MU1', 'C-MU', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 'materials', 'actual', 200, 'high_manual', 'manual_queue', '2026-08-10', NULL),
+  ('TK-MU2', 'TKB-TK-MU2', 'C-MU', 'b2000000-0000-4000-8000-000000000002', 'SWP-29002', 'materials', 'actual', 200, 'high_manual', 'manual_queue', '2026-08-12', NULL),
+  ('TK-OW1', 'TKB-TK-OW1', 'C-OW', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 'materials', 'actual', 200, 'high_manual', 'manual_queue', '2025-01-01', NULL),
+  ('TK-VD1', 'TKB-TK-VD1', 'C-VD', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 'materials', 'actual', 200, 'high_manual', 'manual_queue', '2026-08-10', NULL),
+  ('TK-RL1', 'TKB-TK-RL1', 'C-RL', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 'materials', 'actual', 200, 'high', 'xero_ref_link', '2026-08-10', NULL),
+  ('TK-POFACT-PRIOR', 'TKB-TK-POFACT-PRIOR', 'C-TK-POFACT-PRIOR', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 'materials', 'actual', 200, 'high', 'po_deterministic', '2026-08-01', 'b2000000-0000-4000-8000-0000000000bf');
+INSERT INTO public.materials_ai_placements (xero_invoice_id, invoice_number, contact_name, amount_ex, decision, job_id, job_number, confidence, bar, reason, model, outcome, second_check_status, agreed_keys, created_at) VALUES
+  ('TK-CH1', 'TKB-TK-CH1', 'Key TK-CH1', 200, 'job', 'b2000000-0000-4000-8000-000000000001', 'SWF-29001', 0.95, 0.9, 'Sand.', 'test-model', 'placed', 'agreed',
+   ARRAY['ai_confidence', 'same_supplier', 'second_check'], '2026-10-28T10:00:00Z');
+
+DO $$
+DECLARE
+  c uuid;
+  v jsonb;
+  k jsonb;
+  j1 constant uuid := 'b2000000-0000-4000-8000-000000000001';
+  j2 constant uuid := 'b2000000-0000-4000-8000-000000000002';
+BEGIN
+  c := public.materials_ai_reserve_call('place', 'test-model', 6);
+  IF c IS NULL THEN RAISE EXCEPTION 'reserve: no call (review cases)'; END IF;
+
+  -- Fix 1: a clue pointing at another job.
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-TWO","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Posts."}');
+  IF v ->> 'outcome' <> 'held_for_check' OR v -> 'keys' <> '["ai_confidence"]'::jsonb THEN RAISE EXCEPTION 'TK-TWO apply: %', v; END IF;
+  IF (SELECT key_evidence ->> 'withheld' FROM public.materials_ai_placements WHERE id = (v ->> 'placement_id')::uuid) <> 'the bill also names SWP-29002' THEN
+    RAISE EXCEPTION 'TK-TWO evidence: %', (SELECT key_evidence FROM public.materials_ai_placements WHERE id = (v ->> 'placement_id')::uuid);
+  END IF;
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-JPO","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Posts."}');
+  IF v ->> 'outcome' <> 'held_for_check' OR v -> 'keys' <> '["ai_confidence"]'::jsonb THEN RAISE EXCEPTION 'TK-JPO apply: %', v; END IF;
+  k := public.materials_ai_hard_keys('TK-JPO', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'the bill also names PO-1000321 (SWP-29002)' THEN RAISE EXCEPTION 'TK-JPO keys: %', k; END IF;
+  IF public.materials_ai_hard_keys('TK-DRX', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-DRX: %', public.materials_ai_hard_keys('TK-DRX', j1); END IF;
+  k := public.materials_ai_hard_keys('TK-NOJOB', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' NOT LIKE '%PO-1000323 (no job)%' THEN RAISE EXCEPTION 'TK-NOJOB: %', k; END IF;
+  IF public.materials_ai_hard_keys('TK-LINKX', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-LINKX: %', public.materials_ai_hard_keys('TK-LINKX', j1); END IF;
+  k := public.materials_ai_hard_keys('TK-HOLD2', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'the bill also names SWF-29009' THEN RAISE EXCEPTION 'TK-HOLD2: %', k; END IF;
+
+  -- Fix 3: the PO key matches exactly.
+  k := public.materials_ai_hard_keys('TK-DIG', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ? 'purchase_order' THEN RAISE EXCEPTION 'TK-DIG on SWF-29001: %', k; END IF;
+  k := public.materials_ai_hard_keys('TK-DIG', j2);
+  IF k -> 'keys' <> '["job_number"]'::jsonb OR k -> 'evidence' ? 'withheld' THEN RAISE EXCEPTION 'TK-DIG on SWP-29002: %', k; END IF;
+  k := public.materials_ai_hard_keys('TK-DIGOWN', j1);
+  IF k -> 'keys' <> '["job_number"]'::jsonb THEN RAISE EXCEPTION 'TK-DIGOWN: %', k; END IF;
+  IF public.materials_ai_hard_keys('TK-PODUP', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-PODUP: %', public.materials_ai_hard_keys('TK-PODUP', j1); END IF;
+  k := public.materials_ai_hard_keys('TK-PODEAD', j1);
+  IF k -> 'keys' <> '["purchase_order"]'::jsonb OR k -> 'evidence' ->> 'purchase_order' <> 'PO-1000326 on the bill' THEN RAISE EXCEPTION 'TK-PODEAD: %', k; END IF;
+  IF public.materials_ai_hard_keys('TK-PODRAFT', j1) -> 'keys' <> '[]'::jsonb
+     OR public.materials_ai_hard_keys('TK-PONULL', j1) -> 'keys' <> '[]'::jsonb
+     OR public.materials_ai_hard_keys('TK-POQR', j1) -> 'keys' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'unissued PO gave a key: % % %', public.materials_ai_hard_keys('TK-PODRAFT', j1),
+      public.materials_ai_hard_keys('TK-PONULL', j1), public.materials_ai_hard_keys('TK-POQR', j1);
+  END IF;
+  IF public.materials_ai_hard_keys('TK-POTAKEN', j1) -> 'keys' <> '[]'::jsonb
+     OR public.materials_ai_hard_keys('TK-POFACT', j1) -> 'keys' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'a PO matched to another bill gave a key';
+  END IF;
+
+  -- Fix 2: same supplier only from a live person or rule placement, one job.
+  k := public.materials_ai_hard_keys('TK-CH2', j1);
+  IF k -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-CH2 (AI vouched): %', k; END IF;
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-CH2","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Sand again."}');
+  IF v ->> 'outcome' <> 'held_for_check' THEN RAISE EXCEPTION 'TK-CH2 apply: %', v; END IF;
+  k := public.materials_ai_hard_keys('TK-MU3', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'the supplier billed 2 live jobs within 180 days' THEN RAISE EXCEPTION 'TK-MU3: %', k; END IF;
+  IF public.materials_ai_hard_keys('TK-OW2', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-OW2: %', public.materials_ai_hard_keys('TK-OW2', j1); END IF;
+  IF public.materials_ai_hard_keys('TK-VD2', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-VD2: %', public.materials_ai_hard_keys('TK-VD2', j1); END IF;
+  k := public.materials_ai_hard_keys('TK-RL2', j1);
+  IF k -> 'keys' <> '["same_supplier"]'::jsonb OR k -> 'evidence' ->> 'same_supplier' <> 'TKB-TK-RL1 (xero_ref_link)' THEN RAISE EXCEPTION 'TK-RL2: %', k; END IF;
+  -- The same supplier on another job is no key for this one.
+  IF public.materials_ai_hard_keys('TK-RL2', j2) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-RL2 on SWP-29002'; END IF;
+
+  -- Fix 4: a bare number is never a job number.
+  k := public.materials_ai_hard_keys('TK-QTY', 'b2000000-0000-4000-8000-00000000000a');
+  IF k -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-QTY: %', k; END IF;
+
+  -- Fix 6: a holding job gets no key.
+  k := public.materials_ai_hard_keys('TK-HOLD', 'b2000000-0000-4000-8000-000000000009');
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'SWF-29009 is a holding job' THEN RAISE EXCEPTION 'TK-HOLD: %', k; END IF;
+
+  -- A job number another job shares the digits of is no key.
+  k := public.materials_ai_hard_keys('TK-TWJ', 'b2000000-0000-4000-8000-000000000005');
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'SWF-29005 shares its digits with SWP-29005' THEN RAISE EXCEPTION 'TK-TWJ: %', k; END IF;
+
+  -- Nothing on any of these bills was placed.
+  IF EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id IN ('TK-TWO', 'TK-JPO', 'TK-CH2')) THEN
+    RAISE EXCEPTION 'a held review-case bill was placed';
+  END IF;
+END $$;
+
 -- Read only, service role only.
 DO $$
 BEGIN

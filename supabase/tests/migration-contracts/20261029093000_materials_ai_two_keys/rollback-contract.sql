@@ -1,6 +1,8 @@
 -- After the down: the five functions are 20261028173000's bodies byte for
 -- byte, the held bill is left for a person, the keyed placement stays placed,
--- and the view, helpers, columns and constraints are gone.
+-- the view, helpers, columns and constraints are gone, and because two bills
+-- two keys held are still open (the restored batch would read them again and
+-- could place them on one key) the AI bill reader is off.
 \set ON_ERROR_STOP on
 DO $$
 DECLARE x record; live text;
@@ -34,6 +36,18 @@ BEGIN
   END IF;
   IF (SELECT outcome FROM public.materials_ai_placements WHERE xero_invoice_id = 'TK-RB-KEYED') <> 'placed' THEN
     RAISE EXCEPTION 'rollback: keyed placement moved';
+  END IF;
+  IF (SELECT enabled FROM public.materials_ai_settings WHERE id)
+     OR (SELECT updated_by FROM public.materials_ai_settings WHERE id) IS DISTINCT FROM 'rollback:20261029093000' THEN
+    RAISE EXCEPTION 'rollback: the reader is still on with held bills open';
+  END IF;
+  IF (SELECT outcome FROM public.materials_ai_placements WHERE xero_invoice_id = 'TK-RB-DIS') <> 'left_for_person'
+     OR (SELECT second_check_status FROM public.materials_ai_placements WHERE xero_invoice_id = 'TK-RB-DIS') <> 'disagreed' THEN
+    RAISE EXCEPTION 'rollback: disagreed row changed';
+  END IF;
+  -- With the reader off, no call can be reserved, so nothing reads the held bills.
+  IF public.materials_ai_reserve_call('place', 'test-model', 6) IS NOT NULL THEN
+    RAISE EXCEPTION 'rollback: a call was reserved with the reader off';
   END IF;
   PERFORM public.materials_ai_status();
   PERFORM public.materials_ai_second_check_due(5);

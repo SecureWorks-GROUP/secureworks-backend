@@ -19,3 +19,5 @@ ALTER TABLE public.job_materials_facts
   ADD COLUMN IF NOT EXISTS xero_contact_id text,
   ADD COLUMN IF NOT EXISTS invoice_number text,
   ADD COLUMN IF NOT EXISTS fact_date date;
+ALTER TABLE public.purchase_orders
+  ADD COLUMN IF NOT EXISTS xero_bill_id text;
