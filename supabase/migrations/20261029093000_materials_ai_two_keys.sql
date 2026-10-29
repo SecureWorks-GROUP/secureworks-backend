@@ -20,11 +20,13 @@
 --                   digits-only "39002" is never found in "SWP-39002"), or the
 --                   rules matched the bill to it; its number is held by no
 --                   other job and it is matched to no other bill;
---   same_supplier   the same Xero contact has a live bill placed on that job
---                   by a person or a rule (never the AI, checked or not, so
---                   AI placements cannot vouch for one another or outlive the
---                   person's row they rested on) within 180 days of the bill,
---                   and that supplier billed no other live job in that window.
+--   (same_supplier  NOT a key until TP-04. A live bill of the same Xero
+--                   contact placed on that job by a person or a rule, within
+--                   180 days, when that supplier billed no other live job in
+--                   the window, is recorded in key_evidence.supplier_history
+--                   only. The name stays reserved in agreed_keys.)
+-- A purchase order whose number has no letter prefix ("39002") gives no key:
+-- any standalone number on a bill would match it.
 -- Not yet: xero_project (no per-bill Xero Project tag is stored; TP-09 first
 -- checks whether Xero lists bills per project) and site_address (left for the
 -- shared job picture, TP-04). Both names are reserved in agreed_keys.
@@ -90,7 +92,8 @@ BEGIN
    'materials_reconciliation_queue.xero_contact_id', 'materials_reconciliation_queue.status',
    'job_materials_facts.xero_contact_id', 'job_materials_facts.job_id', 'job_materials_facts.automation_source',
    'job_materials_facts.matched_po_id', 'job_materials_facts.kind', 'xero_invoices.reference', 'xero_invoices.line_items',
-   'purchase_orders.po_number', 'purchase_orders.job_id', 'purchase_orders.status', 'jobs.job_number'] LOOP
+   'purchase_orders.po_number', 'purchase_orders.job_id', 'purchase_orders.status', 'purchase_orders.xero_bill_id',
+   'jobs.job_number', 'jobs.metadata', 'jobs.status', 'xero_invoices.invoice_date'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || split_part(t, '.', 1))
     AND a.attname = split_part(t, '.', 2) AND NOT a.attisdropped) THEN
    problems := problems || format('public.%s missing', t);
@@ -142,9 +145,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS materials_ai_placements_held_uidx
   ON public.materials_ai_placements (xero_invoice_id)
   WHERE outcome = 'held_for_check';
 COMMENT ON COLUMN public.materials_ai_placements.agreed_keys IS
-  'TP-03 (20261029093000): the keys that agreed on this decision. ai_confidence (the AI above the bar), then the hard clues that agreed with the chosen job (job_number, purchase_order, same_supplier; xero_project and site_address reserved for TP-09 / TP-04), then second_check when the blind second model agreed before the bill was placed. NULL on rows written before 20261029093000.';
+  'TP-03 (20261029093000): the keys that agreed on this decision. ai_confidence (the AI above the bar), then the hard clues that agreed with the chosen job (job_number, purchase_order; same_supplier, xero_project and site_address reserved for TP-04 / TP-09), then second_check when the blind second model agreed before the bill was placed. NULL on rows written before 20261029093000.';
 COMMENT ON COLUMN public.materials_ai_placements.key_evidence IS
-  'TP-03 (20261029093000): what each hard clue saw, by key (where the job number was written, which PO, which earlier bill of the same supplier), and withheld: why a clue gave no key (the bill also names another job, a holding job, digits another job shares, a supplier on several jobs).';
+  'TP-03 (20261029093000): what each hard clue saw, by key (where the job number was written, which PO, and supplier_history: an earlier bill of the same supplier placed on the job by a person or a rule, recorded but not a key until TP-04), and withheld: why a clue gave no key (the bill also names another job, a holding job, digits another job shares, a digits-only PO number, a supplier on several jobs).';
 COMMENT ON COLUMN public.materials_ai_placements.held_at IS
   'TP-03 (20261029093000): when the AI was above the bar with no hard clue and the bill was held for the blind second check instead of placed. Kept after the check decides it (placed, left_for_person or refused), so a row that was held first stays visible.';
 
@@ -180,6 +183,7 @@ DECLARE
   v_potext text;
   v_words text;
   v_hit text;
+  v_po text;
   v_num text;
   v_other text[];
   v_other_po text[];
@@ -276,12 +280,15 @@ BEGIN
 
   -- 2. An issued purchase order of that job, named on the bill or matched to
   --    it by the rules, whose number no other job holds and which no other bill
-  --    has been matched to.
+  --    has been matched to. A PO number with no letter prefix ("39002") gives
+  --    no key: any standalone number on a bill ("Item 39002 posts") would match
+  --    it. It is recorded in withheld instead.
   v_hit := NULL;
-  SELECT po.po_number || CASE WHEN EXISTS (SELECT 1 FROM public.job_materials_facts f
+  SELECT po.po_number,
+         po.po_number || CASE WHEN EXISTS (SELECT 1 FROM public.job_materials_facts f
                                             WHERE f.xero_invoice_id = p_bill AND f.matched_po_id = po.id)
                               THEN ' (matched by the rules)' ELSE ' on the bill' END
-    INTO v_hit
+    INTO v_po, v_hit
     FROM public.purchase_orders po
    WHERE po.job_id = v_job.id
      AND lower(po.status) = ANY (c_issued)
@@ -299,17 +306,24 @@ BEGIN
                        AND v_potext ~* ('(^|[^A-Za-z0-9])' || substring(btrim(po.po_number) from '^([A-Za-z]+)')
                                         || '[[:space:]#:.-]{0,3}' || substring(btrim(po.po_number) from '([0-9]+)$')
                                         || '($|[^A-Za-z0-9])')))))
-   ORDER BY po.po_number COLLATE "C"
+   ORDER BY (btrim(po.po_number) !~ '^[A-Za-z]'), po.po_number COLLATE "C"
    LIMIT 1;
-  IF v_hit IS NOT NULL THEN
+  IF v_hit IS NOT NULL AND btrim(v_po) ~ '^[A-Za-z]' THEN
     v_keys := v_keys || 'purchase_order'::text;
     v_ev := v_ev || jsonb_build_object('purchase_order', v_hit);
+  ELSIF v_hit IS NOT NULL THEN
+    v_withheld := v_withheld || ('PO ' || btrim(v_po) || ' is digits only');
   END IF;
 
-  -- 3. The same supplier: only when, within 180 days of the bill, the
-  --    supplier billed exactly one live job and that is this job, and a live
-  --    bill of theirs was placed there by a person or a rule. The AI's own
-  --    placements never vouch, so one AI placement cannot vouch for the next.
+  -- 3. The same supplier is a recorded clue, NOT a key, until TP-04 (owner's
+  --    reviewer, 29 Oct 2026): one person placement would let the AI place
+  --    every later bill of that supplier on that job, the job count sees only
+  --    placed rows (never the supplier's open or filed bills for other jobs),
+  --    and the AI already reads that supplier history, so it is not
+  --    independent of the AI's own reasoning. When, within 180 days of the
+  --    bill, the supplier billed exactly one live job, this one, and a person
+  --    or a rule placed a live bill of theirs there, it is kept in
+  --    key_evidence.supplier_history. The AI's own placements never count.
   SELECT q.xero_contact_id INTO v_contact FROM public.materials_reconciliation_queue q WHERE q.xero_invoice_id = p_bill;
   v_hit := NULL;
   IF NULLIF(btrim(COALESCE(v_contact, '')), '') IS NOT NULL AND v_date IS NOT NULL THEN
@@ -339,8 +353,7 @@ BEGIN
       v_withheld := v_withheld || ('the supplier billed ' || v_sup_jobs || ' live jobs within ' || c_window_days || ' days');
     END IF;
     IF v_hit IS NOT NULL THEN
-      v_keys := v_keys || 'same_supplier'::text;
-      v_ev := v_ev || jsonb_build_object('same_supplier', v_hit);
+      v_ev := v_ev || jsonb_build_object('supplier_history', v_hit || ', not a key until TP-04');
     END IF;
   END IF;
 
@@ -351,7 +364,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION public.materials_ai_hard_keys(text, uuid) IS
-  'AI bill two keys (20261029093000): the hard clues on one bill that agree with one job: {keys: [job_number, purchase_order, same_supplier], evidence: {key: what it saw, withheld: why a key was not given}}. No key at all for a holding or dead job, or when the bill also names another job number or another job''s purchase order. job_number: SW forms only, never a number another job shares the digits of. purchase_order: an issued PO (approved .. billed; never quote_requested, draft or no status) of this job, its number held by no other job, matched to no other bill. same_supplier: a live person or rule placement of the same Xero contact on this job within 180 days of the bill, when that supplier billed no other live job in the window; AI placements never vouch. Read only. Used by materials_ai_apply and v_materials_ai_placed_without_key. Service role only.';
+  'AI bill two keys (20261029093000): the hard clues on one bill that agree with one job: {keys: [job_number, purchase_order], evidence: {key: what it saw, supplier_history: recorded only, withheld: why a key was not given}}. No key at all for a holding or dead job, or when the bill also names another job number or another job''s purchase order. job_number: SW forms only, never a number another job shares the digits of. purchase_order: an issued PO (approved .. billed; never quote_requested, draft or no status) of this job whose number starts with letters (a digits-only number is withheld), held by no other job, matched to no other bill. same_supplier is not a key until TP-04: a live person or rule placement of the same Xero contact on this job within 180 days, when that supplier billed no other live job in the window, is recorded as supplier_history only; AI placements never count. Read only. Used by materials_ai_apply and v_materials_ai_placed_without_key. Service role only.';
 REVOKE ALL ON FUNCTION public.materials_ai_hard_keys(text, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.materials_ai_hard_keys(text, uuid) TO service_role;
 
@@ -923,10 +936,10 @@ SELECT p.id AS placement_id,
  WHERE p.outcome = 'placed'
    AND p.undone_at IS NULL
    AND p.second_check_status <> 'agreed'
-   AND NOT (COALESCE(p.agreed_keys, '{}'::text[]) && ARRAY['job_number', 'purchase_order', 'xero_project', 'site_address', 'same_supplier', 'second_check']::text[])
+   AND NOT (COALESCE(p.agreed_keys, '{}'::text[]) && ARRAY['job_number', 'purchase_order', 'xero_project', 'site_address', 'second_check']::text[])
    AND jsonb_array_length(public.materials_ai_hard_keys(p.xero_invoice_id, p.job_id) -> 'keys') = 0;
 COMMENT ON VIEW public.v_materials_ai_placed_without_key IS
-  'AI bill two keys (20261029093000): bills the AI placed on a job that are still placed, with no hard clue agreeing with that job (job number, PO, same supplier, read now with materials_ai_hard_keys) and no agreeing second check. They were placed live before TP-03 on the AI''s confidence alone; this migration does not move them. second_check_status shows whether a check is due, disagreed, or was never asked for. A person decides each (Undo in Bills to place). Read only, service role only.';
+  'AI bill two keys (20261029093000): bills the AI placed on a job that are still placed, with no hard clue agreeing with that job (job number or PO, read now with materials_ai_hard_keys; same supplier is not a key until TP-04) and no agreeing second check. They were placed live before TP-03 on the AI''s confidence alone; this migration does not move them. second_check_status shows whether a check is due, disagreed, or was never asked for. A person decides each (Undo in Bills to place). Read only, service role only.';
 REVOKE ALL ON public.v_materials_ai_placed_without_key FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.v_materials_ai_placed_without_key TO service_role;
 

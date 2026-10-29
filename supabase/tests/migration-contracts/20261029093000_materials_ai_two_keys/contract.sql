@@ -14,8 +14,9 @@
 --   TK-PO     "PO1000777" in the reference, PO-1000777 is on SWP-29002: placed
 --             at once, key purchase_order.
 --   TK-POX    a PO of SWF-29003 on the bill, AI picks SWP-29002: held.
---   TK-SUP    supplier C-SUP has a person-placed bill on SWF-29003: placed at
---             once, key same_supplier.
+--   TK-SUP    supplier C-SUP has a person-placed bill on SWF-29003: same
+--             supplier is not a key until TP-04, so held, the history kept in
+--             key_evidence.supplier_history.
 --   TK-SUPAI  supplier C-AI has only an unchecked AI placement on SWF-29003
 --             (TK-OLD, before two keys): it does not vouch, held.
 --   TK-BAR    held at 0.91; the bar rises to 0.95 before the check agrees:
@@ -227,12 +228,15 @@ BEGIN
   v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-POX","decision":"job","job_number":"SWP-29002","confidence":0.95,"reason":"Beams."}');
   IF v ->> 'outcome' <> 'held_for_check' THEN RAISE EXCEPTION 'TK-POX: %', v; END IF;
 
-  -- ── Same supplier already placed on the job by a person: placed at once ──
+  -- ── Same supplier already placed on the job by a person: recorded, not a
+  --    key until TP-04, so held ──
   v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-SUP","decision":"job","job_number":"SWF-29003","confidence":0.91,"reason":"Gravel again."}');
-  IF v ->> 'outcome' <> 'placed' OR v -> 'keys' <> '["ai_confidence", "same_supplier"]'::jsonb THEN RAISE EXCEPTION 'TK-SUP: %', v; END IF;
-  IF (SELECT key_evidence ->> 'same_supplier' FROM public.materials_ai_placements WHERE id = (v ->> 'placement_id')::uuid) <> 'TKB-TK-SUP-PRIOR (manual_queue)' THEN
-    RAISE EXCEPTION 'TK-SUP evidence';
+  IF v ->> 'outcome' <> 'held_for_check' OR v -> 'keys' <> '["ai_confidence"]'::jsonb THEN RAISE EXCEPTION 'TK-SUP: %', v; END IF;
+  IF (SELECT key_evidence ->> 'supplier_history' FROM public.materials_ai_placements WHERE id = (v ->> 'placement_id')::uuid)
+     IS DISTINCT FROM 'TKB-TK-SUP-PRIOR (manual_queue), not a key until TP-04' THEN
+    RAISE EXCEPTION 'TK-SUP evidence: %', (SELECT key_evidence FROM public.materials_ai_placements WHERE id = (v ->> 'placement_id')::uuid);
   END IF;
+  IF EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id = 'TK-SUP') THEN RAISE EXCEPTION 'TK-SUP placed'; END IF;
   -- An unchecked AI placement of the same supplier does not vouch.
   v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-SUPAI","decision":"job","job_number":"SWF-29003","confidence":0.95,"reason":"Sand again."}');
   IF v ->> 'outcome' <> 'held_for_check' THEN RAISE EXCEPTION 'TK-SUPAI: %', v; END IF;
@@ -288,15 +292,15 @@ BEGIN
                      'bills_to_place_open_ex', 'bar_history', 'held_for_check', 'held_for_check_ex', 'placed_keys', 'placed_before_two_keys']) THEN
     RAISE EXCEPTION 'status keys: %', v;
   END IF;
-  -- Held now: TK-TWIN, TK-POX, TK-SUPAI.
-  IF (v ->> 'held_for_check')::int <> 3 OR (v ->> 'held_for_check_ex')::numeric <> 1120 OR (v -> 'second_check' ->> 'held_due')::int <> 3
+  -- Held now: TK-TWIN, TK-POX, TK-SUP, TK-SUPAI.
+  IF (v ->> 'held_for_check')::int <> 4 OR (v ->> 'held_for_check_ex')::numeric <> 1500 OR (v -> 'second_check' ->> 'held_due')::int <> 4
      OR (v ->> 'held_then_left_for_person')::int <> 3 OR (v -> 'placed_keys' ->> 'job_number')::int <> 2
-     OR (v -> 'placed_keys' ->> 'purchase_order')::int <> 1 OR (v -> 'placed_keys' ->> 'same_supplier')::int <> 1
+     OR (v -> 'placed_keys' ->> 'purchase_order')::int <> 1 OR COALESCE((v -> 'placed_keys' ->> 'same_supplier')::int, 0) <> 0
      OR (v ->> 'placed_before_two_keys')::int < 3 THEN
     RAISE EXCEPTION 'status: %', v;
   END IF;
-  SELECT count(*) INTO n FROM public.materials_reconciliation_queue WHERE xero_invoice_id IN ('TK-TWIN', 'TK-POX', 'TK-SUPAI') AND status = 'open';
-  IF n <> 3 THEN RAISE EXCEPTION 'held bills not open: %', n; END IF;
+  SELECT count(*) INTO n FROM public.materials_reconciliation_queue WHERE xero_invoice_id IN ('TK-TWIN', 'TK-POX', 'TK-SUP', 'TK-SUPAI') AND status = 'open';
+  IF n <> 4 THEN RAISE EXCEPTION 'held bills not open: %', n; END IF;
 END $$;
 
 -- ── Review fixes (independent money review of e89fefc) ──
@@ -321,7 +325,10 @@ END $$;
 --   TK-MU3    supplier C-MU billed SWF-29001 and SWP-29002 in the window: no key.
 --   TK-OW2    the person's bill of the supplier is a year and a half old: no key.
 --   TK-VD2    the person's bill of the supplier is voided in Xero: no key.
---   TK-RL2    a rule placed the supplier's earlier bill (xero_ref_link): key.
+--   TK-RL2    a rule placed the supplier's earlier bill (xero_ref_link):
+--             recorded as supplier_history, still no key until TP-04.
+--   TK-DIGPO  a sent PO numbered only in digits ("29007") and "Item 29007
+--             posts" on the bill: no key, withheld; held through apply.
 --   TK-QTY    "Qty 7341 posts" on legacy job 7341: never a job number.
 --   TK-HOLD   SWF-29009 is a holding job: no key, even with its number.
 --   TK-HOLD2  "SWF-29001 SWF-29009", AI picks SWF-29001: no key.
@@ -348,7 +355,8 @@ INSERT INTO public.purchase_orders (id, po_number, job_id, supplier_name, subtot
   ('b2000000-0000-4000-8000-0000000000bc', 'PO-1000328', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, NULL, NULL),
   ('b2000000-0000-4000-8000-0000000000bd', 'PO-1000329', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'quote_requested', NULL),
   ('b2000000-0000-4000-8000-0000000000be', 'PO-1000330', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'billed', 'TK-SOMEONE'),
-  ('b2000000-0000-4000-8000-0000000000bf', 'PO-1000331', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL);
+  ('b2000000-0000-4000-8000-0000000000bf', 'PO-1000331', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL),
+  ('b2000000-0000-4000-8000-0000000000c1', '29007', 'b2000000-0000-4000-8000-000000000001', 'Key Steel', 300, 'sent', NULL);
 
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, reference, line_items, raw_json, job_id)
 SELECT '00000000-0000-0000-0000-000000000001', b.id, 'TKB-' || b.id, 'ACCPAY', b.st, 'Key ' || b.id, 200, 220, b.dt::date, b.ref,
@@ -383,7 +391,8 @@ SELECT '00000000-0000-0000-0000-000000000001', b.id, 'TKB-' || b.id, 'ACCPAY', b
     ('TK-QTY', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Qty 7341 posts", "AccountCode": "310", "LineAmount": 200}]'),
     ('TK-HOLD', 'AUTHORISED', '2026-08-21', 'SWF-29009', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
     ('TK-HOLD2', 'AUTHORISED', '2026-08-21', 'SWF-29001 SWF-29009', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
-    ('TK-TWJ', 'AUTHORISED', '2026-08-21', 'SWF-29005', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]')
+    ('TK-TWJ', 'AUTHORISED', '2026-08-21', 'SWF-29005', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 200}]'),
+    ('TK-DIGPO', 'AUTHORISED', '2026-08-21', NULL, '[{"Description": "Item 29007 posts", "AccountCode": "310", "LineAmount": 200}]')
   ) b(id, st, dt, ref, lines);
 
 INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, xero_contact_id, sub_total, total, invoice_date, status)
@@ -397,7 +406,7 @@ SELECT x.xero_invoice_id, x.invoice_number, x.contact_name,
  WHERE x.xero_invoice_id IN ('TK-TWO', 'TK-JPO', 'TK-DRX', 'TK-NOJOB', 'TK-LINKX', 'TK-DIG', 'TK-DIGOWN', 'TK-PODUP', 'TK-PODEAD',
                              'TK-PODRAFT', 'TK-PONULL', 'TK-POQR', 'TK-POTAKEN', 'TK-POFACT', 'TK-POFACT-PRIOR', 'TK-CH1', 'TK-CH2',
                              'TK-MU1', 'TK-MU2', 'TK-MU3', 'TK-OW1', 'TK-OW2', 'TK-VD1', 'TK-VD2', 'TK-RL1', 'TK-RL2',
-                             'TK-QTY', 'TK-HOLD', 'TK-HOLD2', 'TK-TWJ');
+                             'TK-QTY', 'TK-HOLD', 'TK-HOLD2', 'TK-TWJ', 'TK-DIGPO');
 
 INSERT INTO public.job_materials_facts (xero_invoice_id, invoice_number, xero_contact_id, job_id, job_number, lane, kind, amount_ex_gst, confidence, automation_source, fact_date, matched_po_id) VALUES
   -- The AI's own placement, with two keys and an agreeing check: never a voucher.
@@ -471,9 +480,21 @@ BEGIN
   IF public.materials_ai_hard_keys('TK-OW2', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-OW2: %', public.materials_ai_hard_keys('TK-OW2', j1); END IF;
   IF public.materials_ai_hard_keys('TK-VD2', j1) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-VD2: %', public.materials_ai_hard_keys('TK-VD2', j1); END IF;
   k := public.materials_ai_hard_keys('TK-RL2', j1);
-  IF k -> 'keys' <> '["same_supplier"]'::jsonb OR k -> 'evidence' ->> 'same_supplier' <> 'TKB-TK-RL1 (xero_ref_link)' THEN RAISE EXCEPTION 'TK-RL2: %', k; END IF;
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'supplier_history' IS DISTINCT FROM 'TKB-TK-RL1 (xero_ref_link), not a key until TP-04' THEN
+    RAISE EXCEPTION 'TK-RL2: %', k;
+  END IF;
   -- The same supplier on another job is no key for this one.
-  IF public.materials_ai_hard_keys('TK-RL2', j2) -> 'keys' <> '[]'::jsonb THEN RAISE EXCEPTION 'TK-RL2 on SWP-29002'; END IF;
+  IF public.materials_ai_hard_keys('TK-RL2', j2) -> 'keys' <> '[]'::jsonb OR public.materials_ai_hard_keys('TK-RL2', j2) -> 'evidence' ? 'supplier_history' THEN
+    RAISE EXCEPTION 'TK-RL2 on SWP-29002';
+  END IF;
+
+  -- A PO numbered only in digits is never a key: "Item 29007 posts" is not PO 29007.
+  k := public.materials_ai_hard_keys('TK-DIGPO', j1);
+  IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ? 'purchase_order' OR k -> 'evidence' ->> 'withheld' IS DISTINCT FROM 'PO 29007 is digits only' THEN
+    RAISE EXCEPTION 'TK-DIGPO: %', k;
+  END IF;
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-DIGPO","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Posts."}');
+  IF v ->> 'outcome' <> 'held_for_check' OR v -> 'keys' <> '["ai_confidence"]'::jsonb THEN RAISE EXCEPTION 'TK-DIGPO apply: %', v; END IF;
 
   -- Fix 4: a bare number is never a job number.
   k := public.materials_ai_hard_keys('TK-QTY', 'b2000000-0000-4000-8000-00000000000a');
@@ -488,7 +509,7 @@ BEGIN
   IF k -> 'keys' <> '[]'::jsonb OR k -> 'evidence' ->> 'withheld' <> 'SWF-29005 shares its digits with SWP-29005' THEN RAISE EXCEPTION 'TK-TWJ: %', k; END IF;
 
   -- Nothing on any of these bills was placed.
-  IF EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id IN ('TK-TWO', 'TK-JPO', 'TK-CH2')) THEN
+  IF EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id IN ('TK-TWO', 'TK-JPO', 'TK-CH2', 'TK-DIGPO')) THEN
     RAISE EXCEPTION 'a held review-case bill was placed';
   END IF;
 END $$;
