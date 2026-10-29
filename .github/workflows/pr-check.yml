@@ -304,7 +304,10 @@ jobs:
       # sent from (quote_revisions.scope_revision_id), stored only when the sent
       # document's own source hashes equal the one frozen row's (never a re-read
       # of the job after the send), null (unknown) otherwise, and never
-      # changing the send. The rule and the D21
+      # changing the send. Slice 1b: a Scope Engine producer may name the frozen
+      # row it rendered from (source_scope_revision_id on the send body); that
+      # row is stored only when it is this job's and frozen at the one bounded
+      # read the handler starts before any send await. The rule and the D21
       # pin (frozen text keeps scope line ids) are type-checked; the two writer
       # suites drive the real writers and import index.ts, so they take the
       # --no-check of the other index-importing steps.

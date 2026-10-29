@@ -152,7 +152,12 @@ import {
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
-import { quoteScopeRevisionIdForSend, type SentQuoteSourceHashes } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
+import {
+  quoteScopeRevisionIdForRelease,
+  startNamedScopeRevisionRead,
+  type NamedScopeRevisionRead,
+  type SentQuoteSourceHashes,
+} from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -3610,6 +3615,11 @@ type QuickQuoteRecordReleaseInput = {
   // captured by its producer before any await of the send. No caller has it
   // today (the PDF records no source hashes), so the link stores null.
   sent_source_hashes?: SentQuoteSourceHashes | null
+
+  // JP-24 slice 1b: the one bounded read of the frozen scope revision a Scope
+  // Engine producer names in the body (source_scope_revision_id), started
+  // before any send await. When present it decides the link on its own.
+  source_scope_revision?: Promise<NamedScopeRevisionRead> | null
 }
 
 async function recordReleasedQuoteRevision(
@@ -3745,8 +3755,11 @@ async function recordReleasedQuoteRevision(
     // may have been saved and refrozen since the quote was built). Null
     // (unknown) without it, or on any mismatch, ambiguity or failed read; the
     // lookup never throws and never changes the send.
-    const scopeRevisionId = await quoteScopeRevisionIdForSend(
-      sb, input.job_id, input.sent_source_hashes ?? null, { handler: ctx.handler },
+    const scopeRevisionId = await quoteScopeRevisionIdForRelease(
+      sb,
+      input.job_id,
+      { named: input.source_scope_revision ?? null, sent: input.sent_source_hashes ?? null },
+      { handler: ctx.handler },
     )
 
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
@@ -40527,6 +40540,9 @@ async function createMiscJob(client: any, body: any) {
 // ── Send Quick Quote Email to Client ──
 async function sendQuickQuoteEmail(client: any, body: any) {
   const { job_id, pdf_url } = body
+  // JP-24 slice 1b: read the producer-named frozen revision now, before any
+  // send await. Never rejects, never changes the send.
+  const sourceScopeRevisionRead = startNamedScopeRevisionRead(client, body?.source_scope_revision_id)
   if (!job_id) throw new Error('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
@@ -40764,6 +40780,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       released_via: 'ops-api/send_quick_quote_email',
       org_id: DEFAULT_ORG_ID,
       v2_inputs: v2InputsQq,
+      source_scope_revision: sourceScopeRevisionRead,
     }, { handler: 'ops-api/send_quick_quote_email', job_id })
 
     // N2 — see send-quote handlers. Structured body_preview so the extractor

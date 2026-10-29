@@ -9,9 +9,11 @@ import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.t
 import { canonicalJsonAndHash } from '../release_packet/canonicalize.ts'
 import { freezeScope } from './scope_freeze.ts'
 import {
+  quoteScopeRevisionIdForRelease,
   quoteScopeRevisionIdForSend,
   resolveQuoteScopeRevisionLink,
   sentQuoteSourceHashes,
+  startNamedScopeRevisionRead,
 } from './quote_scope_revision_link.ts'
 
 type Row = Record<string, unknown>
@@ -227,6 +229,93 @@ Deno.test('JP24-L14 the log line on a null carries ids and a reason only, no cus
   assertEquals(tag, '[quote-scope-revision-link]')
   assertEquals(body, { job_id: JOB, handler: 'send-quote/send', reason: 'pricing_hash_mismatch', read_revision_id: 'rev-frozen', stored: null })
   assert(!lines[0].includes('Test St') && !lines[0].includes('5500'), 'no scope or price text in the log')
+})
+
+// ── JP-24 slice 1b: the revision the producer names (source_scope_revision_id) ──
+
+const REV_A = '0b6f5a3e-2c1d-4e8f-9a7b-1c2d3e4f5a6b'
+const OTHER_JOB = 'a1b2c3d4-0000-4000-8000-000000000002'
+
+async function namedLink(c: any, raw: unknown, sentHashes: unknown = null, timeoutMs?: number) {
+  const named = startNamedScopeRevisionRead(c, raw, timeoutMs ? { timeoutMs } : {})
+  return quoteScopeRevisionIdForRelease(c, JOB, { named, sent: sentHashes as any }, { handler: 'test' })
+}
+
+Deno.test('JP24-L15 a named frozen revision of this job: its id, from one read of that row (id, job, status, hashes)', async () => {
+  const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow(REV_A, SCOPE, PRICING)] })
+  assertEquals(await namedLink(c, REV_A), REV_A)
+  assertEquals(await namedLink(c, REV_A.toUpperCase()), REV_A, 'an upper-case uuid names the same row')
+  assertEquals(c.reads[0], { table: 'scope_revisions', cols: 'id, job_id, status, scope_hash, pricing_hash', filters: [['id', REV_A]], limit: null })
+  assertEquals(c.reads.some((r) => r.table === 'jobs'), false, 'jobs is never read')
+})
+
+Deno.test('JP24-L16 named: another job\'s row, a superseded or draft row, a missing row: null', async () => {
+  for (const [label, rows] of [
+    ['another job', [await frozenRow(REV_A, SCOPE, PRICING, { job_id: OTHER_JOB })]],
+    ['superseded', [await frozenRow(REV_A, SCOPE, PRICING, { status: 'superseded' })]],
+    ['draft', [await frozenRow(REV_A, SCOPE, PRICING, { status: 'draft' })]],
+    ['missing', []],
+    ['malformed row', [await frozenRow(REV_A, SCOPE, PRICING, { scope_hash: 'not-hex' })]],
+  ] as Array<[string, Row[]]>) {
+    const c = makeClient({ jobs: [jobRow()], scope_revisions: rows })
+    assertEquals(await namedLink(c, REV_A), null, label)
+  }
+})
+
+Deno.test('JP24-L17 named: a malformed id is refused without a read, and never falls back to the provenance rule', async () => {
+  for (const raw of ['scope-rev-A', '', 42, {}, [REV_A], `${REV_A} `]) {
+    const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+    assertEquals(await namedLink(c, raw, await sent()), null, `raw=${JSON.stringify(raw)}`)
+    assertEquals(c.reads.length, 0, 'nothing is read for a malformed id')
+  }
+})
+
+Deno.test('JP24-L18 named: a failed, thrown or hung read is null, never a throw, cut off at the bound', async () => {
+  const rows = [await frozenRow(REV_A, SCOPE, PRICING)]
+  assertEquals(await namedLink(makeClient({ scope_revisions: rows }, { revisionsError: true }), REV_A), null)
+  assertEquals(await namedLink(makeClient({ scope_revisions: rows }, { throwOn: 'scope_revisions' }), REV_A), null)
+  const started = Date.now()
+  assertEquals(await namedLink(makeClient({ scope_revisions: rows }, { hangOn: 'scope_revisions' }), REV_A, null, 30), null)
+  assert(Date.now() - started < 2000, 'the bound cut the read off')
+})
+
+Deno.test('JP24-L19 named: the row is judged at the read; a later refreeze cannot move the link to another row', async () => {
+  const rowA = await frozenRow(REV_A, SCOPE, PRICING)
+  const c = makeClient({ jobs: [jobRow()], scope_revisions: [rowA] })
+  const named = startNamedScopeRevisionRead(c, REV_A)
+  await named
+  // Refreeze to B after the read: A superseded, B frozen with the same hashes.
+  rowA.status = 'superseded'
+  c.tables.scope_revisions.push({ ...rowA, id: 'rev-B', revision_number: 2, status: 'frozen' })
+  assertEquals(await quoteScopeRevisionIdForRelease(c, JOB, { named }, { handler: 'test' }), REV_A)
+  assertEquals(c.reads.length, 1, 'the frozen-row list is never read on the named path')
+})
+
+Deno.test('JP24-L20 no id named: the slice 1 provenance rule answers, unchanged', async () => {
+  for (const raw of [undefined, null]) {
+    const c = makeClient({ jobs: [jobRow()], scope_revisions: [await frozenRow('rev-frozen', SCOPE, PRICING)] })
+    assertEquals(await namedLink(c, raw), null, 'no provenance: null, nothing read')
+    assertEquals(c.reads.length, 0)
+    assertEquals(await namedLink(c, raw, await sent()), 'rev-frozen', 'provenance still links through the slice 1 rule')
+  }
+})
+
+Deno.test('JP24-L21 named: the null log line carries ids and a reason only, and never echoes a malformed id', async () => {
+  const lines: string[] = []
+  const orig = console.log
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')) }
+  try {
+    const c = makeClient({ scope_revisions: [await frozenRow(REV_A, SCOPE, PRICING, { job_id: OTHER_JOB })] })
+    assertEquals(await namedLink(c, REV_A), null)
+    assertEquals(await namedLink(c, 'Jane Citizen 0400 000 000'), null)
+  } finally {
+    console.log = orig
+  }
+  assertEquals(lines.length, 2)
+  const body = (l: string) => JSON.parse(l.slice(l.indexOf(' ') + 1))
+  assertEquals(body(lines[0]), { job_id: JOB, handler: 'test', reason: 'named_revision_other_job', named_revision_id: REV_A, stored: null })
+  assertEquals(body(lines[1]), { job_id: JOB, handler: 'test', reason: 'named_id_malformed', stored: null })
+  assert(!lines.join(' ').includes('Jane'), 'a malformed id is never logged')
 })
 
 // ── D21 regression pin ──────────────────────────────────────────────────────

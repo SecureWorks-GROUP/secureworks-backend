@@ -26,8 +26,10 @@
 //
 // Today no sent document carries that provenance: the /send PDF is rendered by
 // the scoping tool and stored with no source hashes, and the quick-quote PDF is
-// a caller-supplied pdf_url. So every send stores null (unknown) until the
-// producer of the sent document records its source hashes and passes them in.
+// a caller-supplied pdf_url. Slice 1b (bottom of this file) adds the producer
+// contract agreed with Sales: a Scope Engine producer names the frozen row it
+// rendered from as source_scope_revision_id on the send body. Until a producer
+// passes it (the legacy tools/fencing send never does), every send stores null.
 //
 // This lookup never blocks, delays past its own bound, or changes a customer
 // send. It runs after the email went. Every failure answers null and logs one
@@ -178,4 +180,149 @@ export async function quoteScopeRevisionIdForSend(
     return null
   }
   return link.scope_revision_id
+}
+
+// ── JP-24 slice 1b: the frozen revision the producer names ──
+//
+// Contract with Sales (PR #1207, comment 6497114720): a Scope Engine producer
+// freezes the scope, reads the frozen row back and renders the quote from that
+// sealed revision before any send, so it knows that row's id at render time.
+// It passes the id as `source_scope_revision_id` on the send body (send-quote
+// /send and /send-runs, and the ops-api quick quote).
+//
+// The consumer never takes a hash from the caller. It reads that one row
+// (id, job_id, status and the two hashes), once, bounded, started as soon as
+// the request body is parsed and before any send await. It accepts the row
+// only when it belongs to the job being sent and is `frozen` at that read, and
+// then stores that row's id. The row's own scope_hash and pricing_hash are the
+// sent document's provenance; checking them against the same row would be a
+// tautology, and checking them against the job's CURRENT frozen row (the slice 1
+// hash rule) is exactly the re-read the P2 review refused: a refreeze to B while
+// the send is in flight would turn A's quote into null, or into B's id when the
+// two hashes happen to match. So a named, accepted row is stored as itself.
+// Everything else (no id, a malformed id, another job's row, a row that is not
+// frozen, a missing row, a failed or slow read) stores null.
+
+export type NamedScopeRevision = {
+  id: string
+  job_id: string
+  scope_hash: string
+  pricing_hash: string
+}
+
+export type NamedScopeRevisionReason =
+  | 'named_revision_read'
+  | 'named_id_absent'
+  | 'named_id_malformed'
+  | 'named_revision_read_failed'
+  | 'named_revision_missing'
+  | 'named_revision_not_frozen'
+  | 'named_revision_row_malformed'
+  | 'named_revision_read_timed_out'
+  | 'named_revision_read_threw'
+
+export type NamedScopeRevisionRead =
+  | { revision: NamedScopeRevision; reason: 'named_revision_read'; named_id: string }
+  | { revision: null; reason: Exclude<NamedScopeRevisionReason, 'named_revision_read'>; named_id?: string }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** True when the send body names no revision at all (the legacy senders). */
+export function namedScopeRevisionAbsent(raw: unknown): boolean {
+  return raw === undefined || raw === null
+}
+
+async function readNamedScopeRevisionOnce(client: any, id: string): Promise<NamedScopeRevisionRead> {
+  try {
+    const { data, error } = await client.from('scope_revisions')
+      .select('id, job_id, status, scope_hash, pricing_hash')
+      .eq('id', id)
+      .maybeSingle()
+    if (error) return { revision: null, reason: 'named_revision_read_failed', named_id: id }
+    if (!data) return { revision: null, reason: 'named_revision_missing', named_id: id }
+    const row = data as Record<string, unknown>
+    if (row.id !== id || typeof row.job_id !== 'string' || !row.job_id
+        || typeof row.scope_hash !== 'string' || !HEX64.test(row.scope_hash)
+        || typeof row.pricing_hash !== 'string' || !HEX64.test(row.pricing_hash)) {
+      return { revision: null, reason: 'named_revision_row_malformed', named_id: id }
+    }
+    if (row.status !== 'frozen') return { revision: null, reason: 'named_revision_not_frozen', named_id: id }
+    return {
+      revision: { id, job_id: row.job_id, scope_hash: row.scope_hash, pricing_hash: row.pricing_hash },
+      reason: 'named_revision_read',
+      named_id: id,
+    }
+  } catch {
+    return { revision: null, reason: 'named_revision_read_threw', named_id: id }
+  }
+}
+
+/**
+ * Start the one bounded read of the revision a send body names. Call it with
+ * the raw body value as soon as the body is parsed, before any send await, and
+ * await the promise only at the quote_revisions insert. The promise never
+ * rejects. With no id it reads nothing.
+ */
+export function startNamedScopeRevisionRead(
+  client: any,
+  raw: unknown,
+  opts: { timeoutMs?: number } = {},
+): Promise<NamedScopeRevisionRead> {
+  if (namedScopeRevisionAbsent(raw)) return Promise.resolve({ revision: null, reason: 'named_id_absent' })
+  if (typeof raw !== 'string' || !UUID.test(raw)) {
+    return Promise.resolve({ revision: null, reason: 'named_id_malformed' })
+  }
+  const id = raw.toLowerCase()
+  const timeoutMs = opts.timeoutMs ?? QUOTE_SCOPE_REVISION_LINK_TIMEOUT_MS
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<NamedScopeRevisionRead>((resolve) => {
+    timer = setTimeout(() => resolve({ revision: null, reason: 'named_revision_read_timed_out', named_id: id }), timeoutMs)
+  })
+  return Promise.race([readNamedScopeRevisionOnce(client, id), timedOut])
+    .catch((): NamedScopeRevisionRead => ({ revision: null, reason: 'named_revision_read_threw', named_id: id }))
+    .finally(() => { if (timer !== undefined) clearTimeout(timer) })
+}
+
+/**
+ * What a quote_revisions writer stores. With a named revision (the promise from
+ * startNamedScopeRevisionRead) it stores that row's id only when the read
+ * accepted it and the row belongs to `jobId`; it never falls back to another
+ * rule. With none, the slice 1 rule over the sent document's provenance
+ * (quoteScopeRevisionIdForSend) answers. Never throws; logs one ids-only line
+ * whenever the named path answers null.
+ */
+export async function quoteScopeRevisionIdForRelease(
+  client: any,
+  jobId: string,
+  source: {
+    named?: Promise<NamedScopeRevisionRead> | null
+    sent?: SentQuoteSourceHashes | null
+  },
+  ctx: { handler: string },
+  opts: { timeoutMs?: number } = {},
+): Promise<string | null> {
+  let read: NamedScopeRevisionRead | null = null
+  try {
+    read = source.named ? await source.named : null
+  } catch {
+    read = { revision: null, reason: 'named_revision_read_threw' }
+  }
+  if (read === null || read.reason === 'named_id_absent') {
+    return quoteScopeRevisionIdForSend(client, jobId, source.sent ?? null, ctx, opts)
+  }
+  let reason: string = read.reason
+  if (read.revision) {
+    if (read.revision.job_id === jobId) return read.revision.id
+    reason = 'named_revision_other_job'
+  }
+  try {
+    console.log('[quote-scope-revision-link]', JSON.stringify({
+      job_id: jobId,
+      handler: ctx.handler,
+      reason,
+      ...(read.named_id ? { named_revision_id: read.named_id } : {}),
+      stored: null,
+    }))
+  } catch { /* logging never fails a send */ }
+  return null
 }
