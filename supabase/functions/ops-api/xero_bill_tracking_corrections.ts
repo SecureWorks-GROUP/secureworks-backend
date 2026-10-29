@@ -57,9 +57,16 @@ function snapshot(invoice: Row, omitTracking = false): Row {
 export async function billTrackingSnapshotHash(
   invoice: Row,
   tenantId: string,
+  changes: Row[],
 ): Promise<string> {
   const bytes = new TextEncoder().encode(
-    canonical({ tenantId, invoice: snapshot(invoice) }),
+    canonical({
+      tenantId,
+      invoice: snapshot(invoice),
+      changes: [...changes].sort((a, b) =>
+        canonical(a).localeCompare(canonical(b))
+      ),
+    }),
   );
   return Array.from(
     new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
@@ -134,14 +141,14 @@ function planInvoice(inv: Row, changes: Row[], categories: Row[]): Row {
     used.add(pair);
     const category = categories.find((c) =>
       c.TrackingCategoryID === change.tracking_category_id &&
-      c.Status === "ACTIVE"
+      c.Status === "ACTIVE" && c.Name === "Business Unit"
     );
     const option = category?.Options?.find((o: Row) =>
       o.TrackingOptionID === change.tracking_option_id && o.Status === "ACTIVE"
     );
     requireValue(
       category && option,
-      "Target category and option must be active in this tenant",
+      "Target must be an active Business Unit category and option in this tenant",
     );
     const line = planned.LineItems.find((l: Row) =>
       l.LineItemID === change.line_item_id
@@ -232,9 +239,8 @@ export async function correctSupplierBillTracking(
     "Expected tenant_id required",
   );
   requireValue(
-    Array.isArray(body.bills) && body.bills.length > 0 &&
-      body.bills.length <= 10,
-    "Batch requires 1–10 bills",
+    Array.isArray(body.bills) && body.bills.length === 1,
+    "Exactly one bill per request; persist its receipt before submitting the next",
   );
   requireValue(
     new Set(body.bills.map((b: Row) => b.xero_invoice_id)).size ===
@@ -305,11 +311,15 @@ export async function correctSupplierBillTracking(
       let operationKey: string | undefined;
       try {
         const before = await read(bill.xero_invoice_id);
-        const hash = await billTrackingSnapshotHash(before, tenantId);
+        const hash = await billTrackingSnapshotHash(
+          before,
+          tenantId,
+          bill.changes,
+        );
         if (body.mode === "apply") {
           requireValue(
             hash === bill.expected_snapshot_hash,
-            "Invoice changed since preview",
+            "Invoice or requested changes differ from preview",
             "SNAPSHOT_CONFLICT",
           );
         }
@@ -343,6 +353,7 @@ export async function correctSupplierBillTracking(
           await billTrackingSnapshotHash(
             await read(bill.xero_invoice_id),
             tenantId,
+            bill.changes,
           ) === hash,
           "Invoice changed during preflight",
           "SNAPSHOT_CONFLICT",
@@ -413,6 +424,7 @@ export async function correctSupplierBillTracking(
           expected_snapshot_hash: await billTrackingSnapshotHash(
             after,
             tenantId,
+            bill.changes,
           ),
         });
       } catch (error) {
@@ -444,7 +456,7 @@ export async function correctSupplierBillTracking(
         b.xero_invoice_id
       ),
       limitation:
-        "Fresh checks are not transactional Xero CAS; lock is isolate-local. No bank reconciliation or financial recoding performed.",
+        "Fresh checks are not transactional Xero CAS; lock is isolate-local. A timeout can leave this one bill unknown; read it before another attempt. No bank reconciliation or financial recoding performed.",
     };
   } finally {
     runningTenants.delete(tenantId);

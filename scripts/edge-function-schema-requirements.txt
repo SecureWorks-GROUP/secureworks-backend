@@ -971,3 +971,10 @@ ops-api|supabase/migrations/20261027120000_job_deposit_credit_note_flag.sql|colu
 ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_decisions
 ops-api|supabase/migrations/20261021150000_context_job_card_events.sql|function|context_job_card_events
 ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|function|reschedule_job_assignments_v1
+# Dispatch v2 material stages: the supplier box's own stage, read by the board,
+# the materials panel and the set press (dispatch_v2_material_stage_write.ts).
+# The materials panel's box read selects these columns, so ops-api must not
+# deploy ahead of the migration.
+ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage
+ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_at
+ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_by_email

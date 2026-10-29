@@ -353,6 +353,7 @@ import {
 import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 // Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
 import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
+import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_write.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -521,6 +522,7 @@ import {
   supabaseAttachmentReader,
 } from '../_shared/approved_send.ts'
 import { makeGhlCall } from '../_shared/approved_send_sms.ts'
+import { postGhlProxySendSms } from './ghl_proxy_send_sms.ts'
 import {
   approvedSendCredentialClass,
   makeForwardEmail,
@@ -7499,6 +7501,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw e
         }
       }
+      // Dispatch v2: set where a supplier order is at (its material stage) by
+      // hand: Order materials, Sent to supplier, Quote received, Awaiting
+      // payment, Order confirmed, Manufacturing, Materials ready, Delivered
+      // (docs/dispatch-v2-board-contract.md, section 3b;
+      // dispatch_v2_material_stage_write.ts). One press (POST), gated as the
+      // other Dispatch actions. Absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS. Writes the
+      // supplier box's three material stage columns and one job_events row: no
+      // send, no Xero, never a job stage or status.
+      case 'dispatch_v2_set_material_stage': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const materialStageActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2MaterialStageAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: materialStageActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            today: _perthTodayYmd(),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       // The supplier reply scan (pg_cron dispatch-v2-replies-scan, every 5
       // minutes, migration 20261023230100). Server key only. Does nothing while
       // feature flag dispatch_v2_replies_v1 is off. Reads captured mail and
@@ -9104,7 +9139,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
       case 'xero_correct_bill_tracking': {
-        if (req.method !== 'POST') return json({ ok: false, code: 'METHOD_NOT_ALLOWED' }, 405)
+        if (req.method !== 'POST') return json({ ok: false, code: 'METHOD_NOT_ALLOWED', error: 'POST required for bill tracking preview or apply' }, 405)
         const authorized = canCorrectBillTracking(authMode, authUser, serverSecretPresented, DEFAULT_ORG_ID)
         if (!authorized) return json({ ok: false, code: 'OWNER_OR_SERVER_REQUIRED' }, 403)
         try {
@@ -62690,6 +62725,12 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   deposit_reminder_day7: { channel: 'sms', template: "Hi {name}, your deposit for {service} is still outstanding (7 days). Please pay soon to secure your install date: {payment_url}" },
 }
 
+// The only client-update texts that may reach a customer. Every other trigger
+// stays off as a text (Captain 28 Oct 2026: "turn only the reschedule text
+// on"), including the automatic quote-acceptance and day-3 quote texts and the
+// deposit reminders; turning one on is its own decision.
+const CLIENT_UPDATE_SMS_TRIGGERS_ON = new Set(['install_rescheduled'])
+
 export async function sendClientUpdate(client: any, body: any) {
   const { job_id, comms_trigger, channel: overrideChannel, custom_message, template_vars, job_contact_id } = body
   if (!job_id || !comms_trigger) throw new Error('job_id and comms_trigger required')
@@ -62701,6 +62742,11 @@ export async function sendClientUpdate(client: any, body: any) {
 
   const tmpl = CLIENT_COMMS_TEMPLATES[comms_trigger]
   if (!tmpl && !custom_message) throw new ApiError(`Unknown comms_trigger: ${comms_trigger}. Valid triggers: ${Object.keys(CLIENT_COMMS_TEMPLATES).join(', ')}`, 400)
+
+  const channel = overrideChannel || tmpl?.channel || 'sms'
+  if (channel === 'sms' && comms_trigger === 'install_rescheduled' && custom_message) {
+    return { sent: false, reason: 'custom reschedule texts are not allowed' }
+  }
 
   // CP1 install_rescheduled: the new start day comes from the calendar drop.
   // Required so the message can say "Thursday the 2nd of July" server-side.
@@ -62799,38 +62845,41 @@ export async function sendClientUpdate(client: any, body: any) {
 
   // Append cross-sell footer for SMS — except install_rescheduled, whose wording
   // is approved verbatim and ends "Cheers, Shaun".
-  const channel = overrideChannel || tmpl?.channel || 'sms'
   if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }
 
   let sent = false
+  let failReason: string | null = null
   if (channel === 'sms') {
     // Send via GHL (use per-contact GHL ID if available)
     if (!contactGhlId) {
       return { sent: false, reason: 'No GHL contact ID — cannot send SMS' }
     }
-    try {
-      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      const smsRes = await fetch(ghlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
-        // the contact must be the job's or a live party on the same job's list.
-        body: JSON.stringify({ contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) }),
-      })
-      // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
-      // so only a body confirming success may record status='sent' — an in-band
-      // failure logged as sent would make the reschedule dedup above swallow the
-      // operator's retry.
-      const smsBody = await smsRes.json().catch(() => null)
-      if (smsRes.ok && smsBody?.success === true) {
-        sent = true
-      } else {
-        console.log('[ops-api] GHL SMS failed:', smsBody?.error || `HTTP ${smsRes.status}`)
+    if (!CLIENT_UPDATE_SMS_TRIGGERS_ON.has(comms_trigger)) {
+      failReason = `${comms_trigger} texts are switched off`
+    } else {
+      try {
+        // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
+        // so only a body confirming success may record status='sent' — an in-band
+        // failure logged as sent would make the reschedule dedup above swallow the
+        // operator's retry.
+        const sms = await postGhlProxySendSms({
+          supabaseUrl: SUPABASE_URL,
+          serviceKey: SUPABASE_SERVICE_KEY,
+          // A per-contact send names the job, so ghl-proxy's contact/job match runs:
+          // the contact must be the job's or a live party on the same job's list.
+          payload: { contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) },
+        })
+        sent = sms.sent
+        if (!sent) {
+          failReason = sms.reason
+          console.log('[ops-api] GHL SMS failed:', sms.reason)
+        }
+      } catch (e) {
+        failReason = (e as Error).message || 'SMS request failed'
+        console.log('[ops-api] GHL SMS failed:', failReason)
       }
-    } catch (e) {
-      console.log('[ops-api] GHL SMS failed:', (e as Error).message)
     }
   } else {
     // Send via Resend
@@ -62885,6 +62934,7 @@ export async function sendClientUpdate(client: any, body: any) {
     comms_trigger,
     comms_channel: channel,
     sent_at: sent ? new Date().toISOString() : null,
+    ...(failReason ? { failure_reason: failReason } : {}),
   })
 
   logBusinessEvent(client, {
@@ -62895,7 +62945,13 @@ export async function sendClientUpdate(client: any, body: any) {
     payload: { comms_trigger, channel, message_preview: message.slice(0, 100) },
   })
 
-  return { sent, channel, message_preview: message.slice(0, 200) }
+  return {
+    sent,
+    channel,
+    message_preview: message.slice(0, 200),
+    // JSON drops an undefined key, so a sent text answers exactly as before.
+    reason: !sent && failReason ? failReason : undefined,
+  }
 }
 
 

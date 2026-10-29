@@ -10,31 +10,29 @@ are refused. The expected Xero tenant UUID must match the live connection.
 
 Request: `{mode:"preview"|"apply", tenant_id, bills:[{xero_invoice_id,
 expected_snapshot_hash?, changes:[{line_item_id,tracking_category_id,
-tracking_option_id}]}], confirm?:true}`. Maximum ten bills, processed serially.
+tracking_option_id}]}], confirm?:true}`. Exactly one bill per request. A caller may orchestrate multiple requests serially, saving each result before starting the next.
 Preview accepts empty changes to discover complete raw lines and their immutable
 Xero IDs. Preview the intended changes before apply; apply requires the snapshot
-hash and explicit confirmation. Targets must be active tracking options in the
+hash and explicit confirmation. The hash binds the tenant, complete invoice snapshot and normalized exact change list. Empty discovery cannot authorise subsequent changes; preview the intended changes first. Targets must be active Business Unit tracking options in the
 connected tenant. All original line IDs and financial fields are preserved.
 
 Apply re-reads before submission, then reads Xero again to verify every original
-invoice field apart from tracking and provider update metadata. The first
-conflict, provider error, uncertain response or verification difference stops the
-batch. Results retain per-bill states and `not_attempted` IDs; a failed batch is
-never reported as fully applied. There is no automatic retry. On `unknown`, read
+invoice field apart from tracking and provider update metadata. Any conflict, provider error, uncertain response or verification difference stops
+this request. Results retain the bill state and `not_attempted` ID when applicable. There is no automatic retry. On `unknown`, read
 the invoice and compare it with the saved preview before preparing another change.
 
 ## Limits and release proof
 
 Xero offers no transactional compare-and-swap for these updates. The local guard
 does not serialize separate function isolates or humans editing Xero. Use one
-writer and a quiet editing window. No durable operation ledger is added here;
+writer and a quiet editing window. Only one bill can be affected by a lost response. No durable operation ledger is added here;
 save exact previews and returned receipts in the bookkeeping evidence record.
 The provider idempotency key is short-lived, not an accounting audit ledger.
 
 Local tests use provider-shaped fixtures. They establish validation, preservation,
 conflict refusal, readback checks and no-retry behavior, not live Xero semantics.
 Before broad production use, validate one authorised correction end to end,
-including preserved payment allocations, tax, total and project association.
+including preserved payment allocations, tax and total. Separately inspect project association, attachments and reconciliation in Xero; those are not proven by invoice API readback.
 Do not create synthetic bills in production. Locked periods remain provider-held.
 This door does not reconcile bank statements or resolve duplicate payables.
 Bills with nonzero rounding adjustments are rejected before submission because
@@ -45,8 +43,8 @@ representations are excluded from comparison; financial fields remain checked.
 Verification: `deno test --allow-env supabase/functions/ops-api/xero_bill_tracking_corrections_test.ts supabase/functions/ops-api/xero_accpay_books_test.ts`.
 
 The server has an 80-second elapsed-work budget, beginning before token acquisition.
-It checks before each bill and again immediately before a provider write. On expiry,
+It checks before the bill and again immediately before a provider write. On expiry,
 `stopped_reason: WORK_BUDGET_EXHAUSTED` and `not_attempted` identify bills that were
-not submitted; earlier receipts remain intact. Readback of an already-submitted
-bill still runs. This does not cancel an in-flight provider request, guarantee a
+not submitted; no later bills can exist in this request. Readback of an already-submitted
+bill still runs. A single-bill timeout can still leave an unknown outcome: stop, read the bill, reconcile against saved evidence, and never automatically retry. This does not cancel an in-flight provider request, guarantee a
 response before the caller timeout, or replace a durable batch ledger or Xero CAS.

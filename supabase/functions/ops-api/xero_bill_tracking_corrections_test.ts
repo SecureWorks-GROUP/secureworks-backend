@@ -56,7 +56,7 @@ function fixture(status = "PAID") {
         ? {
           TrackingCategories: [{
             TrackingCategoryID: id(4),
-            Name: "Division",
+            Name: "Business Unit",
             Status: categoryActive ? "ACTIVE" : "ARCHIVED",
             Options: [{
               TrackingOptionID: id(5),
@@ -154,14 +154,13 @@ Deno.test("changed target and missing immutable IDs prevent write", async () => 
     false,
   );
 });
-Deno.test("timeout has no retry and stops remaining bills", async () => {
+Deno.test("single-bill timeout has no retry and reports unknown", async () => {
   const f = fixture();
   const body = await applyInput(f);
-  body.bills.push({ ...body.bills[0], xero_invoice_id: id(20) });
   f.timeout();
   const r = await correctSupplierBillTracking(null, body, f.deps);
   assertEquals(r.results[0].state, "unknown");
-  assertEquals(r.not_attempted, [id(20)]);
+  assertEquals(r.not_attempted, []);
   assertEquals(f.writes, 1);
 });
 Deno.test("readback payment change is failure even when tracking succeeded", async () => {
@@ -264,10 +263,9 @@ Deno.test("second tracking category is preserved", async () => {
   );
   assertEquals(f.bill.LineItems[0].Tracking[0], existing);
 });
-Deno.test("provider validation failure stops batch despite HTTP-success-shaped response", async () => {
+Deno.test("provider validation failure is not success despite HTTP-success-shaped response", async () => {
   const f = fixture();
   const body = await applyInput(f);
-  body.bills.push({ ...body.bills[0], xero_invoice_id: id(20) });
   f.deps.xeroPost = async () => ({
     Invoices: [{
       ...structuredClone(f.bill),
@@ -279,7 +277,7 @@ Deno.test("provider validation failure stops batch despite HTTP-success-shaped r
   const result = await correctSupplierBillTracking(null, body, f.deps);
   assertEquals(result.ok, false);
   assertEquals(result.results[0].state, "verification_failed");
-  assertEquals(result.not_attempted, [id(20)]);
+  assertEquals(result.not_attempted, []);
 });
 
 Deno.test("four-decimal unit prices survive all reads and POST with precision opt-in", async () => {
@@ -368,12 +366,11 @@ Deno.test("elapsed budget before first bill prevents reads and writes", async ()
   assertEquals(f.writes, 0);
   assertEquals(result.ok, false);
 });
-Deno.test("preflight consuming budget cannot start a provider write or next bill", async () => {
+Deno.test("preflight consuming budget cannot start a provider write", async () => {
   const f = fixture();
   const body = await applyInput(f);
   let clock = 0;
   let reads = 0;
-  body.bills.push({ ...body.bills[0], xero_invoice_id: id(20) });
   const deps = {
     ...f.deps,
     nowMs: () => clock,
@@ -385,15 +382,14 @@ Deno.test("preflight consuming budget cannot start a provider write or next bill
   };
   const result = await correctSupplierBillTracking(null, body, deps);
   assertEquals(result.stopped_reason, "WORK_BUDGET_EXHAUSTED");
-  assertEquals(result.not_attempted, [id(1), id(20)]);
+  assertEquals(result.not_attempted, [id(1)]);
   assertEquals(result.results, []);
   assertEquals(f.writes, 0);
 });
-Deno.test("in-flight write reaching budget completes verification but starts no next bill", async () => {
+Deno.test("in-flight single-bill write reaching budget completes verification", async () => {
   const f = fixture();
   const body = await applyInput(f);
   let clock = 0;
-  body.bills.push({ ...body.bills[0], xero_invoice_id: id(20) });
   const deps = {
     ...f.deps,
     nowMs: () => clock,
@@ -405,8 +401,68 @@ Deno.test("in-flight write reaching budget completes verification but starts no 
   };
   const result = await correctSupplierBillTracking(null, body, deps);
   assertEquals(result.results[0].state, "verified");
-  assertEquals(result.stopped_reason, "WORK_BUDGET_EXHAUSTED");
-  assertEquals(result.not_attempted, [id(20)]);
+  assertEquals(result.stopped_reason, undefined);
+  assertEquals(result.not_attempted, []);
   assertEquals(f.writes, 1);
-  assertEquals(result.ok, false);
+  assertEquals(result.ok, true);
+});
+
+Deno.test("preview binds exact changes, including empty discovery, before any write", async () => {
+  for (const discovery of [false, true]) {
+    const f = fixture();
+    const original = structuredClone(f.body.bills[0].changes);
+    if (discovery) f.body.bills[0].changes = [];
+    const body = await applyInput(f);
+    body.bills[0].changes = discovery
+      ? original
+      : [{ ...original[0], line_item_id: id(3) }];
+    const result = await correctSupplierBillTracking(null, body, f.deps);
+    assertEquals(result.results[0].code, "SNAPSHOT_CONFLICT");
+    assertEquals(f.writes, 0);
+  }
+});
+Deno.test("equivalent change ordering retains the reviewed authorization", async () => {
+  const f = fixture();
+  f.body.bills[0].changes.push({
+    ...f.body.bills[0].changes[0],
+    line_item_id: id(3),
+  });
+  const body = await applyInput(f);
+  body.bills[0].changes.reverse();
+  assertEquals(
+    (await correctSupplierBillTracking(null, body, f.deps)).ok,
+    true,
+  );
+});
+Deno.test("multiple bills refuse before token acquisition or any provider activity", async () => {
+  const f = fixture();
+  f.body.bills.push({ ...f.body.bills[0], xero_invoice_id: id(20) });
+  let tokenCalls = 0;
+  await assertRejects(() =>
+    correctSupplierBillTracking(null, f.body, {
+      ...f.deps,
+      getToken: async () => {
+        tokenCalls++;
+        return await f.deps.getToken();
+      },
+    })
+  );
+  assertEquals(tokenCalls, 0);
+  assertEquals(f.writes, 0);
+});
+Deno.test("other tracking categories cannot be changed", async () => {
+  const f = fixture();
+  const get = f.deps.xeroGet;
+  f.deps.xeroGet = async (...args) => {
+    const result = await get(...args);
+    if (args[0] === "/TrackingCategories") {
+      result.TrackingCategories![0].Name = "Region";
+    }
+    return result;
+  };
+  assertEquals(
+    (await correctSupplierBillTracking(null, f.body, f.deps)).ok,
+    false,
+  );
+  assertEquals(f.writes, 0);
 });

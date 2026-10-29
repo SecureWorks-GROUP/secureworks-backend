@@ -13,15 +13,24 @@
 //
 // The plain rules, in business words:
 // - A job is on the board when its REAL pipeline status is Order Materials,
-//   Awaiting Supplier, Order Confirmed, Schedule Install or Scheduled
-//   (fencing, patio, decking). A repair is on it when its Repairs board stage
-//   is Materials or Scheduled. Nothing earlier, no make-safes, no other types.
-//   Dispatch's own v1 stage (job_dispatch_state) never decides this.
+//   Awaiting Supplier, Order Confirmed, Schedule Install, Scheduled, In
+//   Progress or Rectification (fencing, patio, decking). A repair is on it
+//   when its Repairs board stage is Materials or Scheduled. Nothing earlier,
+//   no make-safes, no other types. Dispatch's own v1 stage
+//   (job_dispatch_state) never decides this.
+// - In Progress and Rectification are on the board (Shaun, 27 Oct 2026)
+//   because that is where extra materials get ordered once a crew is on site:
+//   a flashing, a downpipe, a fix-up part. They stay Active for as long as the
+//   job is at that stage, whatever the install day.
 // - Archive is Dispatch's own and never changes the real status. A Scheduled
-//   job (or one already moved past Scheduled) goes to Archive the day after its
-//   last install day, Perth time. Archive shows the last 30 days; a search
-//   finds older ones.
+//   job (or one already moved past Rectification) goes to Archive the day
+//   after its last install day, Perth time. Archive shows the last 30 days; a
+//   search finds older ones.
 // - A Scheduled job with no install booked stays Active with a flag.
+// - Each supplier order on a card carries its material stage and who it is
+//   waiting on (dispatch_v2_material_stage.ts). A card is "waiting on us" when
+//   any order is, or when the job itself is (Order Materials with nothing
+//   ordered yet, Schedule Install).
 
 import { STATUS_LABELS } from "../_shared/stage-gate/job-state-machine.ts";
 import { insuranceRepairStage } from "./insurance_repairs_board.ts";
@@ -37,6 +46,16 @@ import {
   isDispatchDeliveryDate,
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows, fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
+import {
+  type DispatchMaterialStageKey,
+  dispatchMaterialStageLabel,
+  dispatchMaterialStageOf,
+  dispatchMaterialTodo,
+  type DispatchMaterialWaitingOn,
+  dispatchMaterialWaitingOn,
+  dispatchPoMaterialStage,
+  dispatchUnsentLineChanges,
+} from "./dispatch_v2_material_stage.ts";
 
 // ── The request ─────────────────────────────────────────────────────────────
 
@@ -71,17 +90,30 @@ export const DISPATCH_BOARD_STATUSES = [
   "order_confirmed",
   "schedule_install",
   "scheduled",
+  "in_progress",
+  "rectification",
 ] as const;
+
+// The two board stages a crew has already been on site for. A job here stays
+// Active whatever its install day, and its orders made from then on are
+// extra orders.
+export const DISPATCH_BOARD_ON_SITE_STATUSES = [
+  "in_progress",
+  "rectification",
+];
+
+function isOnSiteStage(stage: { track: string; key: string }): boolean {
+  return stage.track === "pipeline" &&
+    DISPATCH_BOARD_ON_SITE_STATUSES.includes(stage.key);
+}
 
 // The Repairs board stages the board shows, in order. These live in
 // jobs.metadata.repair_stage and are moved by `update_repair_stage`.
 export const DISPATCH_BOARD_REPAIR_STAGES = ["materials", "scheduled"] as const;
 
-// Every real status after Scheduled. A job here has left Dispatch's window;
-// it is only ever seen in Archive (by its install day).
+// Every real status after Rectification. A job here has left Dispatch's
+// window; it is only ever seen in Archive (by its install day).
 export const DISPATCH_BOARD_AFTER_STATUSES = [
-  "in_progress",
-  "rectification",
   "complete",
   "final_payment",
   "invoiced",
@@ -114,7 +146,7 @@ export const DISPATCH_BOARD_ARCHIVE_LOOKBACK_DAYS = 14;
 export const DISPATCH_BOARD_ARCHIVE_ID_LIMIT = 300;
 
 // The Active view's database filter, one flat PostgREST `or`: a job in one of
-// the five statuses, or a repair-family job (whose Repairs board stage is only
+// the seven statuses, or a repair-family job (whose Repairs board stage is only
 // known in code, below). The status floor and the make-safe filter of the v1
 // list still apply on top of this.
 export const DISPATCH_BOARD_ACTIVE_FILTER =
@@ -545,10 +577,20 @@ export type DispatchBoardSupplierBox = {
   delivery_date_source?: string | null;
   delivery_date_set_at?: string | null;
   delivery_date_set_by_email?: string | null;
+  // The material stage a person set (migration
+  // 20261028170000_dispatch_v2_material_stages.sql).
+  material_stage?: string | null;
+  material_stage_set_at?: string | null;
+  material_stage_set_by_email?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email";
+
+// The material lines in the boxes, only for the material stage: which lines
+// are still to be ordered, and when each last changed.
+export const DISPATCH_BOARD_LINE_SELECT =
+  "id, job_id, supplier_id, status, dispatch_order_email_id, purchase_order_id, created_at, updated_at";
 
 // The v2 supplier order emails that really went (status sent). A test copy to
 // admin@ is never status sent, so it never counts as an order sent. The table
@@ -640,8 +682,25 @@ export type DispatchArrivalOrder = {
   // solid = confirmed date, ring = a date not confirmed, none = no date.
   mark: DispatchArrivalMark;
   // The red cases: no date yet on a sent order, or a date after the install.
-  // not_sent is an order still being put together (no red).
+  // not_sent is an order still being put together (no red). An extra order
+  // and a delivered order never carry a red flag.
   flag: DispatchArrivalFlag;
+  // Where the materials are at (dispatch_v2_material_stage.ts): the stage,
+  // whether a person set it ('set'), it was worked out from the box
+  // ('worked_out') or read from a purchase order's status ('order'), and who
+  // set it when a person did.
+  material_stage: DispatchMaterialStageKey;
+  material_stage_label: string;
+  material_stage_source: "set" | "worked_out" | "order";
+  material_stage_set_at: string | null;
+  material_stage_set_by_email: string | null;
+  // Who it is waiting on, and the next thing to do in plain words (null once
+  // delivered).
+  waiting_on: DispatchMaterialWaitingOn;
+  todo: string | null;
+  // An extra order: ordered (or still to be ordered) on or after the install
+  // day, for example a flashing once the crew is on site.
+  extra: boolean;
 };
 
 export type DispatchArrival = {
@@ -653,10 +712,17 @@ export type DispatchArrival = {
     sent: number;
     confirmed: number;
     late: number;
+    // Orders not delivered yet, those waiting on us, and the extra orders not
+    // delivered yet.
+    open: number;
+    on_us: number;
+    extra_open: number;
   };
   // At least one order, every one with a confirmed date on or before the
   // install day (or simply confirmed, with no install booked yet).
   all_confirmed_in_time: boolean;
+  // The next thing to do on each order waiting on us, in box order.
+  waiting_on_us: string[];
 };
 
 function text(value: unknown): string | null {
@@ -670,18 +736,51 @@ function boxDateSource(
 }
 
 function arrivalEntry(
-  base: Omit<DispatchArrivalOrder, "mark" | "flag">,
+  base: Omit<
+    DispatchArrivalOrder,
+    "mark" | "flag" | "material_stage_label" | "waiting_on" | "todo"
+  >,
   installDay: string | null,
 ): DispatchArrivalOrder {
   const mark: DispatchArrivalMark = base.delivery_date
     ? (base.date_confirmed ? "solid" : "ring")
     : "none";
+  const delivered = base.material_stage === "delivered";
   let flag: DispatchArrivalFlag = null;
-  if (!base.delivery_date) flag = base.order_sent ? "no_date" : "not_sent";
-  else if (installDay && base.delivery_date > installDay) {
+  if (!base.delivery_date) {
+    flag = base.order_sent ? (delivered ? null : "no_date") : "not_sent";
+  } else if (
+    installDay && base.delivery_date > installDay && !base.extra && !delivered
+  ) {
     flag = "after_install";
   }
-  return { ...base, mark, flag };
+  const installBooked = !!installDay;
+  return {
+    ...base,
+    mark,
+    flag,
+    material_stage_label: dispatchMaterialStageLabel(base.material_stage),
+    waiting_on: dispatchMaterialWaitingOn(base.material_stage, installBooked),
+    todo: dispatchMaterialTodo(
+      base.material_stage,
+      base.supplier_name,
+      installBooked,
+    ),
+  };
+}
+
+// Whether an order is an extra: its newest send (or, not sent yet, today) is
+// on or after the install's first day. No install booked = never extra.
+function isExtraOrder(
+  installDay: string | null,
+  today: string,
+  lastSentAt: unknown,
+  stillToOrder: boolean,
+): boolean {
+  if (!installDay) return false;
+  const sentDay = perthDayOf(lastSentAt);
+  if (stillToOrder) return today >= installDay;
+  return !!sentDay && sentDay >= installDay;
 }
 
 function oldestFirst(a: any, b: any): number {
@@ -695,17 +794,33 @@ function oldestFirst(a: any, b: any): number {
 // then one per material order that sits under no box. A box's order is sent
 // when its v2 order email went (`sentEmails`); its date is the box's own
 // date, else the date that email asked for (never confirmed), else a v1
-// Dispatch order for the same supplier, so a v1 order still draws.
+// Dispatch order for the same supplier, so a v1 order still draws. A box date
+// set before the box's newest send belongs to an earlier order (an extra
+// order went since), so that send's asked-for date shows instead.
+//
+// Each entry also carries its material stage (dispatch_v2_material_stage.ts),
+// worked out from the box, its sends and `lines` (the job's material lines).
 export function dispatchArrival(
   input: {
     boxes: DispatchBoardSupplierBox[];
     orders: any[];
     sentEmails?: DispatchBoardSentEmail[];
+    lines?: any[];
     installDay: string | null;
     today: string;
   },
 ): DispatchArrival {
   const sentBySupplier = dispatchBoardSentBySupplier(input.sentEmails);
+  const sentAtsBySupplier = new Map<string, string[]>();
+  for (const email of input.sentEmails || []) {
+    if (token(email?.status) !== "sent") continue;
+    const id = String(email?.supplier_id ?? "");
+    const at = text(email?.sent_at);
+    if (!id || !at) continue;
+    const list = sentAtsBySupplier.get(id);
+    if (list) list.push(at);
+    else sentAtsBySupplier.set(id, [at]);
+  }
   const installDay = input.installDay;
   const orders = (input.orders || [])
     .filter(isDispatchDeliveryCounted)
@@ -725,7 +840,11 @@ export function dispatchArrival(
     );
     if (v1) used.add(String(v1.id));
     const sent = sentBySupplier.get(supplierId) || null;
-    const boxDate = isDispatchDeliveryDate(box.delivery_date)
+    const boxDateSetAt = Date.parse(String(box.delivery_date_set_at ?? ""));
+    const boxDateOlderThanSend = !!sent && Number.isFinite(boxDateSetAt) &&
+      Date.parse(sent.sent_at) > boxDateSetAt;
+    const boxDate = isDispatchDeliveryDate(box.delivery_date) &&
+        !boxDateOlderThanSend
       ? box.delivery_date
       : null;
     const v1Date = text(v1?.confirmed_delivery_date) ||
@@ -748,6 +867,15 @@ export function dispatchArrival(
     const sentByOrder = v1
       ? ORDER_SENT_STATUSES.has(token(v1.status))
       : false;
+    const unsent = dispatchUnsentLineChanges(input.lines, supplierId);
+    const stage = dispatchMaterialStageOf({
+      stored: box.material_stage,
+      storedAt: box.material_stage_set_at,
+      sentAts: sentAtsBySupplier.get(supplierId) || [],
+      unsentLineChanges: unsent,
+      confirmedAt: boxDate ? box.delivery_date_confirmed_at : null,
+    });
+    const stageSet = stage.source === "set";
     entries.push(arrivalEntry({
       key: `box:${supplierId}`,
       source: "supplier_box",
@@ -764,6 +892,18 @@ export function dispatchArrival(
       box_date_set_by_email: boxDate
         ? text(box.delivery_date_set_by_email)
         : null,
+      material_stage: stage.key,
+      material_stage_source: stage.source,
+      material_stage_set_at: stageSet ? text(box.material_stage_set_at) : null,
+      material_stage_set_by_email: stageSet
+        ? text(box.material_stage_set_by_email)
+        : null,
+      extra: isExtraOrder(
+        installDay,
+        input.today,
+        sent?.sent_at ?? null,
+        stage.key === "order_materials" && unsent.length > 0,
+      ),
     }, installDay));
   }
 
@@ -786,10 +926,19 @@ export function dispatchArrival(
       box_date_source: null,
       box_date_set_at: null,
       box_date_set_by_email: null,
+      material_stage: dispatchPoMaterialStage(order.status),
+      material_stage_source: "order",
+      material_stage_set_at: null,
+      material_stage_set_by_email: null,
+      // A purchase order is an extra when it was made on or after the
+      // install's first day.
+      extra: !!installDay && (perthDayOf(order.created_at) ?? "") >= installDay,
     }, installDay));
   }
 
   const confirmed = entries.filter((e) => e.date_confirmed);
+  const open = entries.filter((e) => e.material_stage !== "delivered");
+  const onUs = entries.filter((e) => e.waiting_on === "us");
   return {
     today: input.today,
     install_day: installDay,
@@ -801,11 +950,15 @@ export function dispatchArrival(
       late: entries.filter((e) =>
         e.flag === "no_date" || e.flag === "after_install"
       ).length,
+      open: open.length,
+      on_us: onUs.length,
+      extra_open: open.filter((e) => e.extra).length,
     },
     all_confirmed_in_time: entries.length > 0 &&
       entries.every((e) =>
         e.date_confirmed && e.flag !== "after_install"
       ),
+    waiting_on_us: onUs.map((e) => e.todo).filter((t): t is string => !!t),
   };
 }
 
@@ -837,7 +990,37 @@ export type DispatchBoardRow = {
   };
   moves: DispatchBoardMoves | null;
   arrival: DispatchArrival | null;
+  // Whether the card is waiting on us, and what to do, in plain words: the
+  // job's own step (order the materials, book the install) then each order's.
+  waiting: DispatchBoardWaiting;
 };
+
+export type DispatchBoardWaiting = {
+  on_us: boolean;
+  todo: string[];
+};
+
+// What a card is waiting on us for. The job's own step comes first: Order
+// Materials (or a repair's Materials) with nothing ordered yet, and Schedule
+// Install. Then each supplier order waiting on us. With no Arrival line (its
+// read failed) only the job's own step is known.
+export function dispatchBoardWaiting(
+  stage: DispatchBoardStage,
+  arrival: DispatchArrival | null,
+): DispatchBoardWaiting {
+  const todo: string[] = [];
+  const ordersStep = (stage.track === "pipeline" &&
+    stage.key === "order_materials") ||
+    (stage.track === "repairs" && stage.key === "materials");
+  if (ordersStep && arrival && arrival.counts.orders === 0) {
+    todo.push("Order the materials");
+  }
+  if (stage.track === "pipeline" && stage.key === "schedule_install") {
+    todo.push("Book the install");
+  }
+  if (arrival) todo.push(...arrival.waiting_on_us);
+  return { on_us: todo.length > 0, todo };
+}
 
 export type DispatchBoardContext = {
   view: DispatchBoardView;
@@ -853,6 +1036,9 @@ export type DispatchBoardContext = {
   boxesByJob: Map<string, DispatchBoardSupplierBox[]> | null;
   ordersByJob: Map<string, any[]> | null;
   sentByJob: Map<string, DispatchBoardSentEmail[]> | null;
+  // The boxes' material lines by job id (the material stage); null or left
+  // out = no lines.
+  linesByJob?: Map<string, any[]> | null;
 };
 
 // The board fields of one job for the view asked for, or null when the job is
@@ -890,6 +1076,7 @@ export function dispatchBoardRow(
       boxes: ctx.boxesByJob.get(id) || [],
       orders: ctx.ordersByJob.get(id) || [],
       sentEmails: ctx.sentByJob.get(id) || [],
+      lines: ctx.linesByJob?.get(id) || [],
       installDay: install?.day ?? null,
       today: ctx.today,
     })
@@ -922,11 +1109,15 @@ export function dispatchBoardRow(
       // failed bookings read never raises it.
       no_install_booked: stage.key === "scheduled" && stage.phase === "window" &&
         install !== null && !install.booked,
+      // Never on In Progress or Rectification: the crew has been, so a day
+      // gone by is expected there.
       install_date_passed: stage.phase === "window" &&
-        stage.key !== "scheduled" && !!install?.passed,
+        stage.key !== "scheduled" && !isOnSiteStage(stage) &&
+        !!install?.passed,
     },
     moves: dispatchBoardMoves(stage),
     arrival,
+    waiting: dispatchBoardWaiting(stage, arrival),
   };
 }
 
@@ -1030,6 +1221,9 @@ export function dispatchBoardSummary(
     reads,
     groups: dispatchBoardGroups(rows, request.view),
     total: rows.length,
+    // Cards waiting on us (the board's Waiting on us filter).
+    waiting_on_us: rows.filter((row) => row?.board?.waiting?.on_us === true)
+      .length,
   };
 }
 
@@ -1104,18 +1298,20 @@ export type DispatchBoardExtras = {
   boxes: ReadResult<DispatchBoardSupplierBox>;
   orders: ReadResult<any>;
   sent: ReadResult<DispatchBoardSentEmail>;
+  // Left out = no lines (stages read from the boxes and sends only).
+  lines?: ReadResult<any>;
 };
 
-// The four reads only the v2 board makes, for the jobs the list read
-// returned: stage change events (days in stage), and supplier boxes, orders
-// and sent order emails (the Arrival line). Each fails on its own and never
-// rejects.
+// The five reads only the v2 board makes, for the jobs the list read
+// returned: stage change events (days in stage), and supplier boxes, orders,
+// sent order emails and material lines (the Arrival line and its material
+// stages). Each fails on its own and never rejects.
 export async function loadDispatchBoardExtras(
   client: any,
   jobIds: string[],
 ): Promise<DispatchBoardExtras> {
   const ids = jobIds.map((id) => String(id));
-  const [events, boxes, orders, sent] = await Promise.all([
+  const [events, boxes, orders, sent, lines] = await Promise.all([
     safeRead<DispatchBoardStageEvent>(() =>
       fetchAllRowsInChunks<DispatchBoardStageEvent>(
         ids,
@@ -1162,6 +1358,17 @@ export async function loadDispatchBoardExtras(
         "id",
       )
     ),
+    safeRead<any>(() =>
+      fetchAllRowsInChunks<any>(
+        ids,
+        (chunk) =>
+          client.from("job_material_lines")
+            .select(DISPATCH_BOARD_LINE_SELECT)
+            .in("job_id", chunk),
+        "pipeline.dispatch_board_lines",
+        "id",
+      )
+    ),
   ]);
   for (
     const [label, result] of [
@@ -1169,6 +1376,7 @@ export async function loadDispatchBoardExtras(
       ["job_material_suppliers", boxes],
       ["purchase_orders", orders],
       ["dispatch_supplier_order_emails", sent],
+      ["job_material_lines", lines],
     ] as const
   ) {
     if (result.error) {
@@ -1178,7 +1386,7 @@ export async function loadDispatchBoardExtras(
       );
     }
   }
-  return { events, boxes, orders, sent };
+  return { events, boxes, orders, sent, lines };
 }
 
 // Apply the board to the list's rows: keep the rows on the view asked for,
@@ -1200,7 +1408,7 @@ export function applyDispatchBoard(
 ): { rows: any[]; summary: ReturnType<typeof dispatchBoardSummary> } {
   const { extras } = input;
   const arrivalOk = !extras.boxes.error && !extras.orders.error &&
-    !extras.sent.error;
+    !extras.sent.error && !extras.lines?.error;
   const ctx: DispatchBoardContext = {
     view: input.request.view,
     today: input.today,
@@ -1214,6 +1422,7 @@ export function applyDispatchBoard(
     boxesByJob: arrivalOk ? groupByJob(extras.boxes.data) : null,
     ordersByJob: arrivalOk ? groupByJob(extras.orders.data) : null,
     sentByJob: arrivalOk ? groupByJob(extras.sent.data) : null,
+    linesByJob: arrivalOk ? groupByJob(extras.lines?.data || []) : null,
   };
   const kept: any[] = [];
   for (const row of rows) {
@@ -1305,7 +1514,7 @@ export async function dispatchArrivalRead(
       "not_dispatch_work",
     );
   }
-  const [bookings, boxes, orders, sent] = await Promise.all([
+  const [bookings, boxes, orders, sent, lines] = await Promise.all([
     safeRead<DispatchInstallBooking>(() =>
       fetchAllRows<DispatchInstallBooking>(
         () =>
@@ -1349,27 +1558,43 @@ export async function dispatchArrivalRead(
         "id",
       )
     ),
+    safeRead<any>(() =>
+      fetchAllRows<any>(
+        () =>
+          client.from("job_material_lines")
+            .select(DISPATCH_BOARD_LINE_SELECT)
+            .eq("job_id", jobId),
+        "dispatch_arrival.lines",
+        "id",
+      )
+    ),
   ]);
   const install = bookings.error
     ? null
     : dispatchBoardInstall(bookings.data, today);
-  const arrivalOk = !boxes.error && !orders.error && !sent.error;
+  const arrivalOk = !boxes.error && !orders.error && !sent.error &&
+    !lines.error;
+  const stage = dispatchBoardStage(job);
+  const arrival = arrivalOk
+    ? dispatchArrival({
+      boxes: boxes.data,
+      orders: orders.data,
+      sentEmails: sent.data,
+      lines: lines.data,
+      installDay: install?.day ?? null,
+      today,
+    })
+    : null;
   return {
     job_id: jobId,
     job_number: job.job_number ?? null,
     work_type: workType,
-    stage: dispatchBoardStage(job),
+    stage,
     install,
     installs: bookings.error ? "failed" : "ok",
-    arrival: arrivalOk
-      ? dispatchArrival({
-        boxes: boxes.data,
-        orders: orders.data,
-        sentEmails: sent.data,
-        installDay: install?.day ?? null,
-        today,
-      })
-      : null,
+    arrival,
     arrival_read: arrivalOk ? "ok" : "failed",
+    // What the job is waiting on us for (null when it is not on the board).
+    waiting: stage ? dispatchBoardWaiting(stage, arrival) : null,
   };
 }

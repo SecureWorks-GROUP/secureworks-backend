@@ -77,6 +77,17 @@ case ",${UNKNOWN_ACTIONS:-}," in
     ;;
 esac
 
+# The tracking correction dispatch rejects GET with 405 before its provider
+# reads/writes. A POST is not a safe recognition probe for this write door.
+if [[ "$action" == "xero_correct_bill_tracking" ]]; then
+  if [[ "$method" == "GET" ]]; then
+    printf '%s\n' '{"ok":false,"code":"METHOD_NOT_ALLOWED","error":"POST required for bill tracking preview or apply"}'
+  else
+    printf '%s\n' '{"ok":true,"unsafe_probe_reached_write_door":true}'
+  fi
+  exit 0
+fi
+
 # Stands in for the real bound validation: runDeterministicIntake rejects a
 # max_sources outside 1..2000 before it reads or commits a sweep cursor, so an
 # unbounded replay probe is the only one that comes back with a report.
@@ -353,6 +364,11 @@ test_bounded_read_only_complete_manifest() {
 
   if ! grep -Fq $'GET\thttps://example.invalid/functions/v1/ops-api?action=makesafe_deterministic_intake_replay&max_sources=0' "$log"; then
     fail "$name" "deterministic replay was not probed with the refused max_sources=0 bound"
+    return
+  fi
+
+  if ! requested_action "$log" xero_correct_bill_tracking GET; then
+    fail "$name" "tracking correction did not use its safe GET refusal probe"
     return
   fi
 
