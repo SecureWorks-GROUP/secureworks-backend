@@ -300,6 +300,25 @@ jobs:
             supabase/functions/ops-api/job_bookings_test.ts \
             supabase/functions/ops-api/ghost_observer_auto_mirror_test.ts
 
+      # JP-24 slice 1: a sent quote records which frozen scope revision it was
+      # sent from (quote_revisions.scope_revision_id), stored only when the sent
+      # document's own source hashes equal the one frozen row's (never a re-read
+      # of the job after the send), null (unknown) otherwise, and never
+      # changing the send. Slice 1b: a Scope Engine producer may name the frozen
+      # row it rendered from (source_scope_revision_id on the send body); that
+      # row is stored only when it is this job's and frozen at the one bounded
+      # read the handler starts before any send await. The rule and the D21
+      # pin (frozen text keeps scope line ids) are type-checked; the two writer
+      # suites drive the real writers and import index.ts, so they take the
+      # --no-check of the other index-importing steps.
+      - name: Test the sent quote's frozen scope revision link
+        run: |
+          deno test --allow-env --allow-read \
+            supabase/functions/_shared/scope_freeze/quote_scope_revision_link_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/send-quote/index_test.ts \
+            supabase/functions/ops-api/quick_quote_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

@@ -32,6 +32,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import {
+  quoteScopeRevisionIdForRelease,
+  startNamedScopeRevisionRead,
+  type NamedScopeRevisionRead,
+  type SentQuoteSourceHashes,
+} from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
   currentQuoteForParty,
@@ -416,6 +422,19 @@ type RecordReleaseQuoteRevisionInput = {
   // reason (unknown adapter kind, etc.), we log [v2-augmentation-fail]
   // and INSERT V1-only — the V1 release-truth contract is preserved.
   v2_inputs?: Omit<V2AugmentationInput, 'release_id'> | null
+
+  // JP-24 slice 1: the provenance of the sent document, the hashes of the
+  // exact scope_json / pricing_json it was built from (sentQuoteSourceHashes),
+  // captured by its producer before any await of the send. No caller has it
+  // today (the PDF records no source hashes), so the link stores null.
+  sent_source_hashes?: SentQuoteSourceHashes | null
+
+  // JP-24 slice 1b: the one bounded read of the frozen scope revision the
+  // producer named in the send body (source_scope_revision_id), started before
+  // any send await (startNamedScopeRevisionRead). When present it decides the
+  // link on its own: that row's id when it is this job's and was frozen at the
+  // read, otherwise null. Legacy senders name none.
+  source_scope_revision?: Promise<NamedScopeRevisionRead> | null
 }
 
 async function recordReleasedQuoteRevision(
@@ -575,6 +594,18 @@ async function recordReleasedQuoteRevision(
       }
     }
 
+    // JP-24 slice 1: the frozen scope revision this send came from, bound only
+    // to the sent document's own provenance (never a re-read of the job, which
+    // may have been saved and refrozen since the quote was built). Null
+    // (unknown) without it, or on any mismatch, ambiguity or failed read; the
+    // lookup never throws and never changes the send.
+    const scopeRevisionId = await quoteScopeRevisionIdForRelease(
+      sb,
+      input.job_id,
+      { named: input.source_scope_revision ?? null, sent: input.sent_source_hashes ?? null },
+      { handler: ctx.handler },
+    )
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
         id: releaseId,
@@ -601,6 +632,7 @@ async function recordReleasedQuoteRevision(
         released_via: input.released_via,
         sent_at: sentAtIso,
         schema_version: '1.0',
+        scope_revision_id: scopeRevisionId,
         ...v2Cols,
       })
       .select('id')
@@ -670,6 +702,9 @@ async function recordReleasedQuoteRevision(
   }
 }
 
+// Test seam: the real writer, driven by send-quote/index_test.ts (JP-24 slice 1).
+export const _recordReleasedQuoteRevisionForTest = recordReleasedQuoteRevision
+
 if (import.meta.main) {
 serve(async (req: Request) => {
   const url = new URL(req.url)
@@ -720,7 +755,11 @@ serve(async (req: Request) => {
     // ── SEND QUOTE EMAIL ──
     if (path === 'send' && req.method === 'POST') {
       let xeroQuoteWarning: Record<string, unknown> | null = null
-      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
+      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior, source_scope_revision_id } = await req.json()
+      // JP-24 slice 1b: read the producer-named frozen revision now, before any
+      // send await; awaited only at the quote_revisions insert. Never rejects,
+      // never changes the send.
+      const sourceScopeRevisionRead = startNamedScopeRevisionRead(sb, source_scope_revision_id)
 
       if (!document_id) {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
@@ -1134,6 +1173,7 @@ serve(async (req: Request) => {
             released_via: 'send-quote/send',
             org_id: DEFAULT_ORG_ID,
             v2_inputs: v2Inputs,
+            source_scope_revision: sourceScopeRevisionRead,
           }, { handler: 'send-quote/send', job_id: doc.job_id })
 
           // N2 — body_preview carries a one-line structured summary so the
@@ -2448,6 +2488,10 @@ serve(async (req: Request) => {
       const requestBody = await req.json()
       const requestRefusal = sendRunsRequestRefusal(requestBody)
       if (requestRefusal) return jsonResponse(requestRefusal.body, requestRefusal.status, corsHeaders)
+      // JP-24 slice 1b: the run documents are rendered from the same sealed
+      // revision the producer names; read it now, before any send await. The
+      // link names the whole-job revision, not a run share of it.
+      const sourceScopeRevisionReadRuns = startNamedScopeRevisionRead(sb, requestBody.source_scope_revision_id)
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
@@ -3224,6 +3268,7 @@ serve(async (req: Request) => {
             released_via: 'send-quote/send-runs',
             org_id: DEFAULT_ORG_ID,
             v2_inputs: v2InputsRuns,
+            source_scope_revision: sourceScopeRevisionReadRuns,
           }, { handler: 'send-quote/send-runs', job_id: job.id })
         }
 
