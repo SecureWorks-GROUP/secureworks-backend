@@ -3180,7 +3180,16 @@ Deno.test('JP24-S8 send-quote writer, slice 1b: refreeze to B while the send is 
   }
 })
 
-Deno.test('JP24-S9 send-quote writer, slice 1b: a row of another job, a row not frozen, a missing row, a malformed id, a read error -> null; release row otherwise unchanged', async () => {
+Deno.test('JP24-S8b send-quote writer, slice 1b: refreeze to B after render but before the send arrives, A named -> A, never B', async () => {
+  const rowA = { ...(await jp24FrozenRow(JP24_REV_A, JP24_SCOPE_A, JP24_PRICING_A)), status: 'superseded' }
+  const rowB = await jp24FrozenRow(JP24_REV_B, JP24_SCOPE_B, JP24_PRICING_B, 2)
+  const sb = jp24Supabase({ jobs: { scope_json: JP24_SCOPE_B, pricing_json: JP24_PRICING_B }, revisions: [rowA, rowB] })
+  const r = await jp24Run(sb, jp24Input({ source_scope_revision: startNamedScopeRevisionRead(sb, JP24_REV_A) }))
+  assertEquals(r.scope_revision_id, JP24_REV_A)
+  assertEquals(r.reads.includes('jobs'), false)
+})
+
+Deno.test('JP24-S9 send-quote writer, slice 1b: a row of another job, a draft row, a missing row, a malformed id, a read error -> null; release row otherwise unchanged', async () => {
   const rowA = await jp24FrozenRow(JP24_REV_A, JP24_SCOPE_A, JP24_PRICING_A)
   const jobs = { scope_json: JP24_SCOPE_A, pricing_json: JP24_PRICING_A }
   const goodSb = jp24Supabase({ jobs, revisions: [rowA] })
@@ -3189,7 +3198,6 @@ Deno.test('JP24-S9 send-quote writer, slice 1b: a row of another job, a row not 
   const sentA = await jp24Hashes(JP24_SCOPE_A, JP24_PRICING_A)
   const cases: Array<[string, Record<string, unknown>, unknown, Record<string, unknown>?]> = [
     ['another job', { jobs, revisions: [{ ...rowA, job_id: JP24_OTHER_JOB }] }, JP24_REV_A],
-    ['superseded row', { jobs, revisions: [{ ...rowA, status: 'superseded' }] }, JP24_REV_A],
     ['draft row', { jobs, revisions: [{ ...rowA, status: 'draft' }] }, JP24_REV_A],
     ['missing row', { jobs, revisions: [] }, JP24_REV_A],
     ['malformed id', { jobs, revisions: [rowA] }, 'scope-rev-A'],

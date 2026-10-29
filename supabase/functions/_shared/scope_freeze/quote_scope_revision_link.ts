@@ -193,15 +193,20 @@ export async function quoteScopeRevisionIdForSend(
 // The consumer never takes a hash from the caller. It reads that one row
 // (id, job_id, status and the two hashes), once, bounded, started as soon as
 // the request body is parsed and before any send await. It accepts the row
-// only when it belongs to the job being sent and is `frozen` at that read, and
-// then stores that row's id. The row's own scope_hash and pricing_hash are the
+// only when it belongs to the job being sent and is sealed at that read
+// (`frozen`, or `superseded`: a sealed row a later refreeze replaced, whose
+// content the scope_revisions trigger keeps immutable), and then stores that
+// row's id. A quote rendered from A that reaches the consumer after a refreeze
+// to B was still rendered from A, so A is its provenance (the isolated JP-24
+// proof, 29 Oct: refreeze between render and /send stored null). A draft row
+// was never sealed and is refused. The row's own scope_hash and pricing_hash are the
 // sent document's provenance; checking them against the same row would be a
 // tautology, and checking them against the job's CURRENT frozen row (the slice 1
 // hash rule) is exactly the re-read the P2 review refused: a refreeze to B while
 // the send is in flight would turn A's quote into null, or into B's id when the
 // two hashes happen to match. So a named, accepted row is stored as itself.
 // Everything else (no id, a malformed id, another job's row, a row that is not
-// frozen, a missing row, a failed or slow read) stores null.
+// sealed, a missing row, a failed or slow read) stores null.
 
 export type NamedScopeRevision = {
   id: string
@@ -246,7 +251,9 @@ async function readNamedScopeRevisionOnce(client: any, id: string): Promise<Name
         || typeof row.pricing_hash !== 'string' || !HEX64.test(row.pricing_hash)) {
       return { revision: null, reason: 'named_revision_row_malformed', named_id: id }
     }
-    if (row.status !== 'frozen') return { revision: null, reason: 'named_revision_not_frozen', named_id: id }
+    if (row.status !== 'frozen' && row.status !== 'superseded') {
+      return { revision: null, reason: 'named_revision_not_frozen', named_id: id }
+    }
     return {
       revision: { id, job_id: row.job_id, scope_hash: row.scope_hash, pricing_hash: row.pricing_hash },
       reason: 'named_revision_read',
