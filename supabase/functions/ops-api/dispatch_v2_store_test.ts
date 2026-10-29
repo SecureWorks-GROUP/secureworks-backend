@@ -1523,6 +1523,8 @@ Deno.test("send: test copy to admin@ only, then the real send from admin@ record
   assert(sent[0].subject.startsWith("TEST ONLY: "));
   assert(sent[0].htmlBody.includes("tradewa@stratcowa.com.au"));
   assertEquals(sent[0].attachments.length, 1);
+  // The TEST copy carries Shaun's signature too, so it shows what goes out.
+  assertEquals(sent[0].signature, "shaun");
   assertEquals(test.email.status, "draft");
   assertEquals(test.email.sent, null);
   assertEquals(test.email.test.sent_to, "admin@secureworkswa.com.au");
@@ -1546,7 +1548,7 @@ Deno.test("send: test copy to admin@ only, then the real send from admin@ record
     "fencing@secureworkswa.com.au",
   ]);
   assertEquals(payload.subject, "Material Order Ref SWF-900001");
-  assertEquals(payload.signature, "none");
+  assertEquals(payload.signature, "shaun");
   assertEquals(payload.capture_thread_ids, true);
   assertEquals((payload as any).job_id, undefined);
   assertEquals(payload.attachments[0].contentType, "image/jpeg");

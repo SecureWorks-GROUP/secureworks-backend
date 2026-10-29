@@ -390,7 +390,7 @@ Deno.test("sender: posts to send-outlook-email with the key, no job_id; no answe
     cc: [],
     subject: "Material Order Ref SWF-1",
     htmlBody: "<div>x</div>",
-    signature: "none",
+    signature: "shaun",
     capture_thread_ids: true,
     attachments: [],
   });
@@ -400,7 +400,7 @@ Deno.test("sender: posts to send-outlook-email with the key, no job_id; no answe
   const sent = JSON.parse(String(seen[0].init?.body));
   assertEquals(sent.job_id, undefined);
   assertEquals(sent.capture_thread_ids, true);
-  assertEquals(sent.signature, "none");
+  assertEquals(sent.signature, "shaun");
 
   const dead = outlookDispatchV2Sender({
     supabaseUrl: "https://stub.invalid",

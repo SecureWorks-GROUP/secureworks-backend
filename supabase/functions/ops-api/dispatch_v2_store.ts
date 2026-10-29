@@ -87,8 +87,11 @@ export type DispatchV2OutlookPayload = {
   cc: string[];
   subject: string;
   htmlBody: string;
-  // The template has no sign-off, so the mailbox's signature is left off.
-  signature: "none";
+  // Shaun's signature on every order email, the real send and the TEST
+  // copy alike (Shaun, 29 Oct 2026: "Always use my sign"). send-outlook-email
+  // renders "shaun" from admin@ as Kind regards, the logo, Shaun Lee,
+  // Operations Coordinator, 0489 267 771 and admin@secureworkswa.com.au.
+  signature: "shaun";
   // Ask send-outlook-email for the sent message's ids.
   capture_thread_ids: true;
   attachments: { name: string; contentType: string; contentBytes: string }[];
@@ -2117,7 +2120,7 @@ export async function sendDispatchV2Email(
       cc: [],
       subject: marked.subject,
       htmlBody: dispatchV2BodyHtml(marked.body_text),
-      signature: "none",
+      signature: "shaun",
       capture_thread_ids: true,
       attachments,
     });
@@ -2183,7 +2186,7 @@ export async function sendDispatchV2Email(
     cc: realCc,
     subject: email.subject,
     htmlBody: dispatchV2BodyHtml(email.body_text),
-    signature: "none",
+    signature: "shaun",
     capture_thread_ids: true,
     attachments,
   });
