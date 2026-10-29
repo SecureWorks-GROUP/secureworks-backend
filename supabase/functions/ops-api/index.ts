@@ -1,3 +1,4 @@
+import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -4086,7 +4087,7 @@ async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
   // A genuinely absent profile carries no tenant, so it still fails closed.
   if (profileError) throw new ApiError('Trade profile lookup failed — please try again', 503)
   if (!profile?.org_id) throw new ApiError('Trade profile not found', 403)
-  return {
+  const caller: TradeAuthContext = {
     id: user.id,
     email: user.email || '',
     orgId: String(profile.org_id),
@@ -4094,6 +4095,14 @@ async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
     managedVerticals: _normalizeManagedVerticals(profile.managed_verticals),
     seeEverything: profile.trade_sees_all_jobs === true,
   }
+  const previewUrl = new URL(req.url)
+  if (previewUrl.searchParams.has(TRADE_PREVIEW_PARAM)) {
+    assertTradePreviewRead(previewUrl.searchParams.get('action'), req.method)
+    const target = await readTradePreviewProfile(client, caller, previewUrl.searchParams.get(TRADE_PREVIEW_PARAM) || '')
+    return { id: target.id, email: target.email || '', orgId: target.org_id, role: target.role,
+      managedVerticals: _normalizeManagedVerticals(target.managed_verticals), seeEverything: target.trade_sees_all_jobs === true }
+  }
+  return caller
 }
 
 // Pagination helper — Supabase limits to 1000 rows per request
@@ -5867,6 +5876,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     trustActorHeader: authMode !== 'jwt' && serverSecretPresented,
   })
 
+  // Resolve preview before dispatch, but keep requestActor as the real owner.
+  // The allow-list is action based: POST reads may run, GET-shaped writes may not.
+  if (_preAuthUrl.searchParams.has(TRADE_PREVIEW_PARAM)) {
+    try {
+      assertTradePreviewOwner(authUser, authMode)
+      assertTradePreviewRead(_preAuthUrl.searchParams.get('action'), req.method)
+      const target = await readTradePreviewProfile(sb(), authUser!, _preAuthUrl.searchParams.get(TRADE_PREVIEW_PARAM) || '')
+      console.log(JSON.stringify({ event: 'trade_owner_preview', actor: requestActor, subject_user_id: target.id, action: _preAuthUrl.searchParams.get('action'), read_only: true }))
+      // Existing per-action gates and projections see the trade's permissions.
+      if (_preAuthUrl.searchParams.get('action') !== 'trade_preview_context') {
+        authUser = { id: target.id, email: target.email || '', orgId: target.org_id, role: target.role,
+          managedVerticals: _normalizeManagedVerticals(target.managed_verticals), seeEverything: target.trade_sees_all_jobs === true }
+      }
+    } catch (error) {
+      const e = error instanceof TradePreviewError ? error : new TradePreviewError('Trade preview is unavailable.', 503)
+      console.log(JSON.stringify({ event: 'trade_owner_preview_refused', actor: requestActor, action: _preAuthUrl.searchParams.get('action'), code: e.code }))
+      return json({ error: e.message, code: e.code }, e.status)
+    }
+  }
+
   const actionAuthorization = _authorizeOpsApiAction({
     url: _preAuthUrl,
     authMode,
@@ -6095,6 +6124,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     auditBody = body
 
     const client = sb()
+    if (action === 'trade_preview_context') {
+      try { return json(await tradePreviewContext(client, authUser, url.searchParams.get('user_id'))) }
+      catch (e) { if (e instanceof TradePreviewError) return json({ error: e.message, code: e.code }, e.status); throw e }
+    }
+
     const contextLane = contextActionLane(action || '')
     if (contextLane && !(await automationLaneEnabled(client, contextLane))) {
       return json({ skipped: true, reason: 'automation_lane_disabled', lane: contextLane })

@@ -740,6 +740,7 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ops-api/group_work_order_test.ts \
+          supabase/functions/ops-api/trade_owner_preview_test.ts \
             supabase/functions/ops-api/trade_client_signoff_test.ts \
             supabase/functions/completion-pack/email_plan_test.ts \
             supabase/functions/completion-pack/client_signature_test.ts
