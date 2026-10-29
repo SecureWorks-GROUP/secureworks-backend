@@ -4,7 +4,7 @@
 -- case's fixtures fall in the months read. Everything rolls back. The read is
 -- called with a fixed as_of (2031-10-15), never the run's clock.
 --
---   TO-J1    a real job.   TO-HOLD  the holding job (do_not_schedule 'true').
+--   TO-J1    a real job.   TO-HOLD  the holding job (do_not_schedule 'TRUE', any case).
 --   TO-HOLD1 a holding job marked do_not_schedule '1', as the context layer reads it.
 --   Org 1 is ours; org 2 is another org, never read by an org-1 call.
 --   October 2031 bills (ex GST):
@@ -49,7 +49,7 @@ BEGIN;
 
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('b7000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'TO-J1', false, '{}', '{}', NULL, '2031-01-01T00:00:00Z'),
-  ('b7000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'TO-HOLD', false, '{"do_not_schedule": "true"}', '{}', NULL, '2031-01-01T00:00:00Z'),
+  ('b7000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'TO-HOLD', false, '{"do_not_schedule": "TRUE"}', '{}', NULL, '2031-01-01T00:00:00Z'),
   ('b7000000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'TO-HOLD1', false, '{"do_not_schedule": "1"}', '{}', NULL, '2031-01-01T00:00:00Z');
 
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id, synced_at) VALUES
@@ -306,6 +306,9 @@ BEGIN
   IF (b -> 'over_allocated' ->> 'bills')::int <> 3 OR (b -> 'over_allocated' ->> 'ex')::numeric <> 120.00
      OR (b -> 'over_allocated' ->> 'counted')::boolean THEN
     RAISE EXCEPTION 'March over allocated: %', b -> 'over_allocated';
+  END IF;
+  IF b -> 'over_allocated' ->> 'reads' NOT LIKE '%not trade-app labour%' OR b -> 'over_allocated' ->> 'reads' NOT LIKE '%summed with their signs%' THEN
+    RAISE EXCEPTION 'over_allocated must say what it reads: %', b -> 'over_allocated';
   END IF;
   -- The negative bill is shown only here; never in unplaced or the share.
   IF (b -> 'negative_bill' ->> 'bills')::int <> 1 OR (b -> 'negative_bill' ->> 'ex')::numeric <> -60.00

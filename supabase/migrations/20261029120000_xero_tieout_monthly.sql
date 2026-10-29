@@ -36,8 +36,8 @@
 --   * Allocation rows (job_materials_facts, kind actual) and a person's
 --     overhead part (materials_reconciliation_queue.overhead_ex) decide a bill
 --     that has either. A row on a holding job (jobs.metadata do_not_schedule
---     'true' or '1', as the context layer reads it) is never on a job: it is
---     unplaced, reason holding_job.
+--     'true' or '1', in any case, so "TRUE" is a holding job here as it is in
+--     Job Profit) is never on a job: it is unplaced, reason holding_job.
 --   * A bill with neither: Bills to place status not_job_related goes whole
 --     to overhead / not job related; otherwise a bill whose Xero job link is a
 --     real job is on that job (the job profit engine reads it the same way);
@@ -48,9 +48,13 @@
 --     installer_awaiting_confirmation.
 --   * Within a bill, overhead is placed first, then job rows, each capped at
 --     what is left of the bill; the rest is unplaced. over_allocated is, per
---     bill of 0 or more, job rows + holding-job rows + overhead part - bill,
---     when above 0: rows bigger than the bill, rows on a 0 bill and an overhead
---     part bigger than the bill all show there. It is outside the total.
+--     bill of 0 or more that is not trade-app labour and has rows or an
+--     overhead part, job rows + holding-job rows + overhead part - bill, when
+--     above 0: rows bigger than the bill, rows on a 0 bill and an overhead
+--     part bigger than the bill all show there. It is outside the total. A
+--     trade-app labour bill is read whole as trade labour and its rows are not
+--     read, so it is never over allocated here. Rows are summed with their
+--     signs, so a negative row on a bill offsets a positive one.
 --   * parts_add_up compares on_job + trade_app_labour + overhead + unplaced
 --     against the month's bills read directly from the copy (not through the
 --     allocation, Bills to place or job joins). Unplaced is each bill's
@@ -116,7 +120,7 @@ AS $$
            COALESCE(a.person_placed, false) AS person_placed,
            CASE WHEN b.job_id IS NULL THEN 'none'
                 WHEN xj.id IS NULL THEN 'unknown_job'
-                WHEN COALESCE(xj.metadata ->> 'do_not_schedule', '') IN ('true', '1') THEN 'holding'
+                WHEN lower(COALESCE(xj.metadata ->> 'do_not_schedule', '')) IN ('true', '1') THEN 'holding'
                 ELSE 'job' END AS xero_link
       FROM bills b
       -- The bill's allocation rows, summed per bill (so no bill is counted
@@ -127,7 +131,7 @@ AS $$
                sum(f.amount_ex_gst) FILTER (WHERE f.hold) AS hold_rows_ex,
                bool_or(f.automation_source IN ('manual_queue', 'manual_split', 'agent_ai')) AS person_placed
           FROM (SELECT f.amount_ex_gst, f.automation_source,
-                       COALESCE(j.metadata ->> 'do_not_schedule', '') IN ('true', '1') AS hold
+                       lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) IN ('true', '1') AS hold
                   FROM public.job_materials_facts f
                   LEFT JOIN public.jobs j ON j.id = f.job_id
                  WHERE f.kind = 'actual'
@@ -161,7 +165,9 @@ AS $$
                 WHEN queue_status = 'not_job_related' THEN 0
                 WHEN xero_link = 'job' AND NOT installer_gate THEN bill_ex
                 ELSE 0 END AS job_basis,
-           -- Everything the rows and the overhead part claim, above the bill.
+           -- Everything the rows (summed with their signs) and the overhead part
+           -- claim, above the bill. A trade-app labour bill is read whole and its
+           -- rows are not read, so it is never over allocated.
            CASE WHEN counted AND NOT mirror AND by_rows
                 THEN GREATEST(job_rows_ex + hold_rows_ex + overhead_part - bill_ex, 0)
                 ELSE 0 END AS over_ex
@@ -301,7 +307,8 @@ AS $$
             'installer_awaiting_confirmation', r.r_installer,
             'not_in_intake', r.r_not_in_intake,
             'rows_short_of_bill', r.r_short),
-          'over_allocated', jsonb_build_object('bills', r.over_bills, 'ex', r.over_ex, 'counted', false),
+          'over_allocated', jsonb_build_object('bills', r.over_bills, 'ex', r.over_ex, 'counted', false,
+            'reads', 'Per bill of 0 or more that is not trade-app labour: job rows + holding-job rows + overhead part - bill, when above 0. Rows are summed with their signs. A trade-app labour bill is read whole, so it is never over allocated.'),
           'negative_bill', jsonb_build_object('bills', r.neg_bills, 'ex', r.neg_ex, 'inc', r.neg_inc, 'counted', false),
           'parts_add_up', (r.on_job_ex + r.mirror_ex + r.overhead_ex + r.unplaced_ex = COALESCE(d.ex, 0)),
           'parts_check', 'on_job + trade_app_labour + overhead + unplaced against the bills read directly from the copy; unplaced is each bill''s remainder, so this catches a bill dropped or counted twice, not a mis-sorted dollar'),
@@ -332,6 +339,6 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) IS
-  'TP-01 Xero tie-out (20261029120000): by month, every AUTHORISED or PAID supplier bill dollar of 0 or more (ex GST) in our copy of Xero sorted into on a job, trade-app labour (already counted on jobs by the trade app), overhead / not job related (stock and vehicles not yet separated) or unplaced, with the unplaced share (rounded up, never below 0) and the last 6 months. A bill below 0 is shown only as negative_bill; rows and overhead parts above a bill are shown as over_allocated; neither is in the total. parts_add_up checks the buckets against the bills read directly. p_org_id scopes every read to one org (null reads every org, a bill per org and Xero id). as_of picks the months only: allocations and Bills to place states are as of today. Supplier credit notes (TP-07) and spend money (TP-08) are not_yet_read with null amounts, never $0. Read only, aggregates only, service role only.';
+  'TP-01 Xero tie-out (20261029120000): by month, every AUTHORISED or PAID supplier bill dollar of 0 or more (ex GST) in our copy of Xero sorted into on a job, trade-app labour (already counted on jobs by the trade app), overhead / not job related (stock and vehicles not yet separated) or unplaced, with the unplaced share (rounded up, never below 0) and the last 6 months. A bill below 0 is shown only as negative_bill; rows (summed with their signs) and overhead parts above a bill that is not trade-app labour are shown as over_allocated; neither is in the total. parts_add_up checks the buckets against the bills read directly. p_org_id scopes every read to one org (null reads every org, a bill per org and Xero id). as_of picks the months only: allocations and Bills to place states are as of today. Supplier credit notes (TP-07) and spend money (TP-08) are not_yet_read with null amounts, never $0. Read only, aggregates only, service role only.';
 REVOKE ALL ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) TO service_role;
