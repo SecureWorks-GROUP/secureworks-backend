@@ -290,3 +290,11 @@ response sets `prompt_google_review: true` and includes
 `my_group_work_orders` lists only the caller's participant groups in their organisation, including previous work dates. It returns current sign-off/readiness, approved pool and their own frozen or explicitly projected share, never other workers' amounts. Held shares are omitted. All owned group job IDs remain marked to replace ordinary labour cards. Failed reads fail the normal invoice closed.
 
 Trade > Pay > Weekly Invoice renders these claims inline. Finalise uses the existing guarded freeze; only a current frozen share can be selected. Selected shares join the normal invoice total and generate_trade_invoice extra_items, alongside ordinary work orders and extras. Existing server pricing, signature freshness, duplicate guards and mandatory office review remain authoritative. Save stores selected group identities in the existing draft builder; reloading validates them against fresh own group state before inclusion. No new migration, permission role, rate or pay formula.
+
+## Owner-confirmed all-inclusive budgets,29 October2026
+
+New groups explicitly use immutable pay_basis all_in_12_6_v1. Rate×hours apportions the total budget, includingcashpayandallsuper, rather than guaranteeing hourlypay. SQL group_work_order_share_pay is the trusted maximum-cents conversion to invoicegross under the unchanged12%total/6%workerwithhold policy. The invoice trigger validates its output. Existing groups retain gross_v1 until explicitly amended; a frozen budget/basis cannot change.
+
+An owner-approved group-budget amendment may override the sealed WO's old allowance with actor,time,reason and append-only approve_budget event. It does not rewrite the historical sealed WO. Zoo amendment authority: owner confirmed exactly2720exGST includingallpayandsuper in this Codex session.
+
+All-in shares submit one at a time as their own office-held invoice using the inline button in the NORMAL invoice screen. Server allows only one share and GST/notes; no week,ordinaryjobs,otherextras,finaldeductions or draft ID. This avoids mixing-rounding differences. Travel and ordinary work remain on the weekly invoice. Future canonical super policy mismatch fails closed foroffice confirmation; the immutable contract is never silently repriced.
