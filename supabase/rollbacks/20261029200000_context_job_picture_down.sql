@@ -5,15 +5,24 @@
 -- fields), and the job picture is dropped. Nothing else changed, so nothing
 -- else moves. The jarvis bill prompt prints only the eight keys, so it reads
 -- the same either way. Refuses when a later migration has since replaced the
--- candidate body: roll that one back first.
+-- candidate body or the job picture's body: roll that one back first. The
+-- helper may be absent (a second run of this rollback); any body it has must
+-- be this migration's, whatever its comment says.
 
 DO $guard$
-DECLARE live text;
+DECLARE live text; problems text[] := '{}';
 BEGIN
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.materials_ai_candidate_jobs(date,date)');
   IF live IS NULL OR live NOT IN ('f7b28babf31d9fb0e937e82e35745cf2', '191fff3225a1ac8c03f6e631cea025d2') THEN
-    RAISE EXCEPTION 'context_job_picture_down_preimage_mismatch: public.materials_ai_candidate_jobs(date,date) md5 %; roll the later migration back first',
-      coalesce(live, '<missing>');
+    problems := problems || format('%s md5 %s', 'public.materials_ai_candidate_jobs(date,date)', coalesce(live, '<missing>'));
+  END IF;
+  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_job_picture(uuid[],text[],text[])');
+  IF live IS NOT NULL AND live <> '1f3bea8abb27ea2d27b7e710185c738c' THEN
+    problems := problems || format('%s md5 %s', 'public.context_job_picture(uuid[],text[],text[])', live);
+  END IF;
+  IF cardinality(problems) > 0 THEN
+    RAISE EXCEPTION 'context_job_picture_down_preimage_mismatch: %; roll the later migration back first',
+      array_to_string(problems, '; ');
   END IF;
 END $guard$;
 

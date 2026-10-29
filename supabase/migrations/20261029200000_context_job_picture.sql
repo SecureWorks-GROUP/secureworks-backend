@@ -124,10 +124,11 @@ BEGIN
    problems := problems || format('public.%s missing', t);
   END IF;
  END LOOP;
- IF to_regprocedure('public.context_job_picture(uuid[],text[],text[])') IS NOT NULL
-    AND coalesce(obj_description(to_regprocedure('public.context_job_picture(uuid[],text[],text[])'), 'pg_proc'), '')
-        NOT LIKE 'Job picture (20261029200000)%' THEN
-  problems := problems || 'public.context_job_picture(uuid[],text[],text[]) exists and is not this migration''s'::text;
+ -- The helper: absent (first apply), or this migration's exact body (a
+ -- re-apply). Its comment is no proof: a later body may keep it.
+ SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_job_picture(uuid[],text[],text[])');
+ IF live IS NOT NULL AND live <> '1f3bea8abb27ea2d27b7e710185c738c' THEN
+  problems := problems || format('%s md5 %s', 'public.context_job_picture(uuid[],text[],text[])', live);
  END IF;
  IF cardinality(problems) > 0 THEN
   RAISE EXCEPTION 'context_job_picture_preimage_mismatch: %; read the live definitions before replacing them',

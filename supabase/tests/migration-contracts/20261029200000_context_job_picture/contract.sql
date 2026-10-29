@@ -275,4 +275,51 @@ BEGIN
   END IF;
 END $$;
 
+
+-- 8. A later helper body is never overwritten or dropped on its comment alone.
+-- The drifted body keeps this migration's comment, as a later migration that
+-- changes only the body would. A re-apply of this migration and its rollback
+-- must both refuse it, and leave it as it was.
+SAVEPOINT drift_up;
+CREATE OR REPLACE FUNCTION public.context_job_picture(p_job_ids uuid[], p_phone_keys text[] DEFAULT NULL,
+                                                      p_email_keys text[] DEFAULT NULL)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $f$ SELECT '[]'::jsonb $f$;
+DO $$ BEGIN
+  IF coalesce(obj_description('public.context_job_picture(uuid[],text[],text[])'::regprocedure, 'pg_proc'), '')
+     NOT LIKE 'Job picture (20261029200000)%' THEN
+    RAISE EXCEPTION 'job picture: the drifted helper must keep this migration''s comment';
+  END IF;
+END $$;
+\set ON_ERROR_STOP off
+\ir ../../../migrations/20261029200000_context_job_picture.sql
+\set ON_ERROR_STOP on
+\if :ERROR
+ROLLBACK TO SAVEPOINT drift_up;
+\else
+DO $$ BEGIN RAISE EXCEPTION 'job picture: the up migration overwrote a drifted helper whose comment was kept'; END $$;
+\endif
+
+SAVEPOINT drift_down;
+CREATE OR REPLACE FUNCTION public.context_job_picture(p_job_ids uuid[], p_phone_keys text[] DEFAULT NULL,
+                                                      p_email_keys text[] DEFAULT NULL)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $f$ SELECT '[]'::jsonb $f$;
+\set ON_ERROR_STOP off
+\ir ../../../rollbacks/20261029200000_context_job_picture_down.sql
+\set ON_ERROR_STOP on
+\if :ERROR
+ROLLBACK TO SAVEPOINT drift_down;
+\else
+DO $$ BEGIN RAISE EXCEPTION 'job picture: the down migration dropped a drifted helper'; END $$;
+\endif
+
+-- Both refusals changed nothing: this migration's helper is still there.
+DO $$ BEGIN
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.context_job_picture(uuid[],text[],text[])'))
+     IS DISTINCT FROM '1f3bea8abb27ea2d27b7e710185c738c' THEN
+    RAISE EXCEPTION 'job picture: a refused drift check left the helper changed';
+  END IF;
+END $$;
+
 ROLLBACK;
