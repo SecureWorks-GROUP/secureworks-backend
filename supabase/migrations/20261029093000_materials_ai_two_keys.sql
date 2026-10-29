@@ -38,7 +38,10 @@
 --   agrees    the database places the bill through materials_ai_apply's own
 --             path and checks (every refusal is re-read, the bar is re-read):
 --             the same audit row becomes placed, agreed_keys ai_confidence +
---             second_check;
+--             second_check. A bill whose amount or installer lines changed
+--             since it was held is not the bill the check saw: the held row
+--             is refused and keeps the amount held and checked, nothing is
+--             placed, and a fresh answer holds it again as it is now;
 --   disagrees (or answers unsure) the row becomes left_for_person with both
 --             answers on it (the AI's decision, job and reason; the second
 --             model's in second_check), and neither model reads that bill
@@ -71,7 +74,7 @@ BEGIN
  -- The replaced bodies: 20261028173000's, or this migration's (a re-apply).
  FOR x IN SELECT * FROM (VALUES
   ('public.materials_ai_bill_batch(integer)', ARRAY['0307862b6c8dcb905048b2fa54004fe3', '8cc46936782ac304a450ff8b19e6607b']),
-  ('public.materials_ai_apply(uuid,text,jsonb)', ARRAY['c5e9cf83e42c718ef2a0e02aa04859b7', 'ce5d1d8826f08bfa97ffdea255a942ad']),
+  ('public.materials_ai_apply(uuid,text,jsonb)', ARRAY['c5e9cf83e42c718ef2a0e02aa04859b7', '87a2272f379b9c41a72e232f872655b2']),
   ('public.materials_ai_second_check_due(integer)', ARRAY['79f05c206f49019b5c8362cef2f05004', '95c17ede87b0e897db0df4735915acf5']),
   ('public.materials_ai_record_second_check(uuid,jsonb)', ARRAY['fafe795a871710881f881d1863b64083', '7e5af5bb3c59ab8dc5c6012af32622d4']),
   ('public.materials_ai_status()', ARRAY['cbba1fe0ef404e5a6a363ba25175194b', '5e572ca27767186c91c353f086eb934c'])
@@ -590,6 +593,15 @@ BEGIN
   ELSIF EXISTS (SELECT 1 FROM public.job_materials_facts f WHERE f.xero_invoice_id = v_bill
                   AND f.automation_source IN ('manual_queue', 'manual_split', 'agent_ai')) THEN
     v_refusal := 'a person placed this bill';
+  -- The second check agreed with the bill as it was held: one that changed
+  -- since is not the bill it checked. The held row keeps what was held and
+  -- checked; a fresh answer holds it again, as it is now.
+  ELSIF v_held_id IS NOT NULL AND round(b.sub_total, 2) IS DISTINCT FROM v_held.amount_ex THEN
+    v_refusal := 'the bill changed from ' || COALESCE(v_held.amount_ex::text, 'no amount') || ' to '
+                 || round(b.sub_total, 2) || ' ex GST while it waited';
+  ELSIF v_held_id IS NOT NULL AND v_installer IS DISTINCT FROM v_held.installer THEN
+    v_refusal := 'the bill changed from ' || CASE WHEN v_held.installer THEN 'an installer bill to a materials bill'
+                 ELSE 'a materials bill to an installer bill' END || ' while it waited';
   END IF;
 
   IF v_refusal IS NULL AND v_kind = 'job' THEN

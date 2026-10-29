@@ -23,6 +23,11 @@
 --             left for a person.
 --   TK-CHG    held; a person places it before the check agrees: the person's
 --             placement stands, the held row is refused.
+--   TK-AMT    held at 300 ex; the bill becomes 450 ex before the check agrees:
+--             the held row is refused and keeps 300, nothing is placed; a
+--             fresh answer holds it again at 450 for a new blind check.
+--   TK-INS    held as materials; its line becomes an installer line before
+--             the check agrees: refused, nothing placed.
 --   TK-NJR    office bill filed not job related (not gated), key ai_confidence.
 --   TK-OLD    placed live before two keys, no clue: listed in
 --             v_materials_ai_placed_without_key.
@@ -66,7 +71,9 @@ SELECT '00000000-0000-0000-0000-000000000001', b.id, 'TKB-' || b.id, 'ACCPAY', '
     ('TK-CHG', 'Key Steel', 420, NULL, '[{"Description": "Bolts", "AccountCode": "310", "LineAmount": 420}]'),
     ('TK-NJR', 'Key Office', 30, NULL, '[{"Description": "Printer paper", "AccountCode": "400", "LineAmount": 30}]'),
     ('TK-OLDJ', 'Key Steel', 430, 'SWF-29003', '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 430}]'),
-    ('TK-OLDC', 'Key Steel', 440, NULL, '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 440}]')
+    ('TK-OLDC', 'Key Steel', 440, NULL, '[{"Description": "Posts", "AccountCode": "310", "LineAmount": 440}]'),
+    ('TK-AMT', 'Key Steel', 300, NULL, '[{"Description": "Fence posts", "AccountCode": "310", "LineAmount": 300}]'),
+    ('TK-INS', 'Key Steel', 460, NULL, '[{"Description": "Fence install", "AccountCode": "310", "LineAmount": 460}]')
   ) b(id, supplier, amount, ref, lines);
 
 INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, xero_contact_id, sub_total, total, invoice_date, status)
@@ -266,6 +273,46 @@ BEGIN
   SELECT count(*) AS n, min(automation_source) AS src, min(job_number) AS job INTO r FROM public.job_materials_facts WHERE xero_invoice_id = 'TK-CHG';
   IF r.n <> 1 OR r.src <> 'manual_queue' OR r.job <> 'SWP-29002' THEN RAISE EXCEPTION 'TK-CHG person row moved: % % %', r.n, r.src, r.job; END IF;
 
+  -- ── The bill's amount changes while it waits: refused, the held amount kept ──
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-AMT","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Posts."}');
+  IF v ->> 'outcome' <> 'held_for_check' THEN RAISE EXCEPTION 'TK-AMT apply: %', v; END IF;
+  pid := (v ->> 'placement_id')::uuid;
+  UPDATE public.xero_invoices SET sub_total = 450, total = 495,
+         line_items = '[{"Description": "Fence posts", "AccountCode": "310", "LineAmount": 450}]'
+   WHERE xero_invoice_id = 'TK-AMT';
+  UPDATE public.materials_reconciliation_queue SET sub_total = 450, total = 495 WHERE xero_invoice_id = 'TK-AMT';
+  v := public.materials_ai_record_second_check(pid, '{"decision":"job","job_number":"SWF-29001","model":"claude"}');
+  SELECT * INTO r FROM public.materials_ai_placements WHERE id = pid;
+  IF v ->> 'outcome' <> 'refused' OR r.amount_ex <> 300
+     OR r.refusal IS DISTINCT FROM 'after the second check agreed: the bill changed from 300.00 to 450.00 ex GST while it waited' THEN
+    RAISE EXCEPTION 'TK-AMT: % % %', v, r.amount_ex, r.refusal;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id = 'TK-AMT')
+     OR EXISTS (SELECT 1 FROM public.job_events WHERE event_type = 'materials_bill_assigned' AND detail_json ->> 'xero_invoice_id' = 'TK-AMT')
+     OR (SELECT status FROM public.materials_reconciliation_queue WHERE xero_invoice_id = 'TK-AMT') <> 'open' THEN
+    RAISE EXCEPTION 'TK-AMT placed after its amount changed';
+  END IF;
+  -- A fresh answer is held again at the new amount, for a new blind check.
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-AMT","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Posts."}');
+  IF v ->> 'outcome' <> 'held_for_check'
+     OR (SELECT amount_ex FROM public.materials_ai_placements WHERE id = (v ->> 'placement_id')::uuid) <> 450 THEN
+    RAISE EXCEPTION 'TK-AMT held again: %', v;
+  END IF;
+
+  -- ── A materials bill becomes an installer bill while it waits: refused ──
+  v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-INS","decision":"job","job_number":"SWF-29001","confidence":0.95,"reason":"Install."}');
+  IF v ->> 'outcome' <> 'held_for_check' THEN RAISE EXCEPTION 'TK-INS apply: %', v; END IF;
+  pid := (v ->> 'placement_id')::uuid;
+  UPDATE public.xero_invoices SET line_items = '[{"Description": "Fence install", "AccountCode": "306", "LineAmount": 460}]'
+   WHERE xero_invoice_id = 'TK-INS';
+  v := public.materials_ai_record_second_check(pid, '{"decision":"job","job_number":"SWF-29001","model":"claude"}');
+  SELECT * INTO r FROM public.materials_ai_placements WHERE id = pid;
+  IF v ->> 'outcome' <> 'refused' OR r.installer
+     OR r.refusal IS DISTINCT FROM 'after the second check agreed: the bill changed from a materials bill to an installer bill while it waited'
+     OR EXISTS (SELECT 1 FROM public.job_materials_facts WHERE xero_invoice_id = 'TK-INS') THEN
+    RAISE EXCEPTION 'TK-INS: % % %', v, r.installer, r.refusal;
+  END IF;
+
   -- ── Filing not job related is not gated, and names its one key ──
   v := public.materials_ai_apply(c, 'test-model', '{"xero_invoice_id":"TK-NJR","decision":"not_job_related","confidence":0.97,"reason":"Office paper."}');
   IF v ->> 'outcome' <> 'filed_not_job_related' OR v -> 'keys' <> '["ai_confidence"]'::jsonb THEN RAISE EXCEPTION 'TK-NJR: %', v; END IF;
@@ -292,15 +339,15 @@ BEGIN
                      'bills_to_place_open_ex', 'bar_history', 'held_for_check', 'held_for_check_ex', 'placed_keys', 'placed_before_two_keys']) THEN
     RAISE EXCEPTION 'status keys: %', v;
   END IF;
-  -- Held now: TK-TWIN, TK-POX, TK-SUP, TK-SUPAI.
-  IF (v ->> 'held_for_check')::int <> 4 OR (v ->> 'held_for_check_ex')::numeric <> 1500 OR (v -> 'second_check' ->> 'held_due')::int <> 4
+  -- Held now: TK-TWIN, TK-POX, TK-SUP, TK-SUPAI, and TK-AMT again at 450.
+  IF (v ->> 'held_for_check')::int <> 5 OR (v ->> 'held_for_check_ex')::numeric <> 1950 OR (v -> 'second_check' ->> 'held_due')::int <> 5
      OR (v ->> 'held_then_left_for_person')::int <> 3 OR (v -> 'placed_keys' ->> 'job_number')::int <> 2
      OR (v -> 'placed_keys' ->> 'purchase_order')::int <> 1 OR COALESCE((v -> 'placed_keys' ->> 'same_supplier')::int, 0) <> 0
      OR (v ->> 'placed_before_two_keys')::int < 3 THEN
     RAISE EXCEPTION 'status: %', v;
   END IF;
-  SELECT count(*) INTO n FROM public.materials_reconciliation_queue WHERE xero_invoice_id IN ('TK-TWIN', 'TK-POX', 'TK-SUP', 'TK-SUPAI') AND status = 'open';
-  IF n <> 4 THEN RAISE EXCEPTION 'held bills not open: %', n; END IF;
+  SELECT count(*) INTO n FROM public.materials_reconciliation_queue WHERE xero_invoice_id IN ('TK-TWIN', 'TK-POX', 'TK-SUP', 'TK-SUPAI', 'TK-AMT') AND status = 'open';
+  IF n <> 5 THEN RAISE EXCEPTION 'held bills not open: %', n; END IF;
 END $$;
 
 -- ── Review fixes (independent money review of e89fefc) ──
