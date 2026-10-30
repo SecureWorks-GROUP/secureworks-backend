@@ -10,7 +10,7 @@
 // JWT whose role claim is exactly service_role) or the exact server key.
 //
 // Body: {"mode": "poll" | "sweep" | "history" | "deep", "source": "<source_key>",
-// "from": ISO, "to": ISO (history, deep), "slice": ISO (deep: the plan's slice
+// "from": ISO, "to": ISO (history, deep, or fixed-window sweep), "slice": ISO (deep: the plan's slice
 // id, the time the slice was first posted), "wait": true}. Default mode poll. The
 // cron's HTTP call gives up after 5 seconds, so by default the run continues
 // in the background (EdgeRuntime.waitUntil) and the reply is 202; {"wait": true}
@@ -353,8 +353,8 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
       listGroupPosts: (id, t, topic) => graph.listGroupPosts(g, id, t, topic),
       listGroupThreadPage: (id, c, next) =>
         graph.listGroupThreadPage(g, id, c, next),
-      listGroupPostPage: (id, t, topic, next) =>
-        graph.listGroupPostPage(g, id, t, topic, next),
+      listGroupPostPage: (id, t, topic, next, rosterOnly) =>
+        graph.listGroupPostPage(g, id, t, topic, next, rosterOnly),
     },
     storeAttachments: (args) => storeEmailAttachments(attachmentDeps, args),
     hash: async (text) => (await sha256Hex(text)).slice(0, 16),
