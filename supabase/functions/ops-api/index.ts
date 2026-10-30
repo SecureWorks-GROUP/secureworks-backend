@@ -355,6 +355,7 @@ import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 // Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
 import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_write.ts'
+import { runDispatchV2PaymentAction } from './dispatch_v2_payment_write.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -7655,6 +7656,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await runDispatchV2MaterialStageAction(client, action, body, {
             orgId: DEFAULT_ORG_ID,
             actor: materialStageActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            today: _perthTodayYmd(),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2: the payment step on a supplier order
+      // (docs/dispatch-v2-board-contract.md, section 3c;
+      // dispatch_v2_payment_write.ts). Mark paid, Undo paid and Pay on
+      // pickup / delivery are a record only: they pay nobody, touch no Xero
+      // and send nothing. POST only, gated
+      // as the stage press above. Absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS. Each writes
+      // one supplier box and one job_events row: never a job stage or status.
+      case 'dispatch_v2_mark_paid':
+      case 'dispatch_v2_undo_paid':
+      case 'dispatch_v2_set_pay_on':
+      // ASAP or Pick a date on a supplier box (piece C): the same gate.
+      case 'dispatch_v2_set_date_mode': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const paymentActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2PaymentAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: paymentActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             today: _perthTodayYmd(),
           }))
@@ -18057,7 +18094,7 @@ async function pipeline(
   // v2 board only: stage change events and the Arrival line's reads. Starts
   // beside the enrichment wave and never rejects.
   const dispatchBoardExtrasRead = dispatchBoard
-    ? loadDispatchBoardExtras(client, dispatchJobIds)
+    ? loadDispatchBoardExtras(client, dispatchJobIds, DEFAULT_ORG_ID)
     : null
 
   if (jobIds.length > 0 || dispatchJobIds.length > 0) {

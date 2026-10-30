@@ -987,3 +987,28 @@ ops-api|supabase/migrations/20261029170100_context_job_bill_outcomes.sql|functio
 xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_notes
 xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_note_allocations
 xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|function|xero_supplier_credit_note_copy
+
+# Dispatch v2 payment step (docs/dispatch-v2-board-contract.md, section 3c):
+# which approved suppliers are on account. The board, dispatch_arrival and the
+# materials panel select it, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261029120000_dispatch_v2_on_account_suppliers.sql|column|dispatch_approved_supplier_emails.on_account
+# Mark paid on a supplier box: the board, dispatch_arrival, the materials panel
+# and the two presses select these columns.
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_at
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by_email
+# Pay on pickup / delivery on a supplier box: the board, dispatch_arrival, the
+# materials panel and the dispatch_v2_set_pay_on press select these columns.
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_at
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by_email
+# A re-opened payment on a supplier box: the dispatch_v2_set_material_stage
+# press writes it; the board, dispatch_arrival and the materials panel read it.
+ops-api|supabase/migrations/20261029120300_dispatch_v2_box_payment_reopened.sql|column|job_material_suppliers.payment_reopened_at
+# ASAP or Pick a date on a supplier box: the board, dispatch_arrival, the
+# materials panel, dispatch_v2_make_email and the dispatch_v2_set_date_mode
+# press select these columns.
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode_set_at
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode_set_by_email
