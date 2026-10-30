@@ -786,6 +786,7 @@ import {
   freezeGroupWorkOrder,
   officeApproveGroupHours,
   readyUnreleasedGroupInvoiceIds,
+  agentCreateGroupWorkOrder,
   groupBody,
   groupFeatureOn,
   GroupWorkOrderError,
@@ -12079,6 +12080,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // may store one. It cannot submit, authorise, pay, or create a Xero
       // bill. Not a profile-scoped trade action, and not on the read-only
       // agent or routine allow-lists.
+      // Grok Bots set up a group work order for named crew (owner, 30 Oct 2026).
+      // Agent key or a staff session; creates and adds crew only.
+      case 'agent_create_group_work_order': {
+        if (req.method !== 'POST') return json({ error: 'agent_create_group_work_order is POST only', code: 'method_not_allowed' }, 405)
+        const agentOk = authMode === 'api_key'
+        const staffOk = authMode === 'jwt' && _opsApiCallerIsStaffOperator(authMode, authUser)
+        if (!agentOk && !staffOk) {
+          return json({ ok: false, code: 'agent_or_staff_required', error: 'Only an agent key or office staff can set up a group work order here.' }, 403)
+        }
+        return await groupWorkOrderJson(agentCreateGroupWorkOrder(client, groupBody(body)))
+      }
       case 'agent_save_running_invoice_draft': {
         const agentOk = authMode === 'api_key'
         const staffOk = authMode === 'jwt' && _opsApiCallerIsStaffOperator(authMode, authUser)

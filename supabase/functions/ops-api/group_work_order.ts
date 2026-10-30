@@ -999,6 +999,81 @@ export async function createGroupWorkOrder(
   return publicGroupCard(data);
 }
 
+/**
+ * Owner, 30 Oct 2026: Grok Bots create group work orders "so that nithin hugo
+ * and henry can create group work orders for the boys". Agent door: opens the
+ * full employer-super group on a job's approved work order (or reuses the
+ * open one) and puts the named crew on it. requested_by_user_id is the staff
+ * member asking (office roles only) and is recorded as created_by. Every crew
+ * member must be allocated to the job. Pay comes from the work order, as for
+ * a group the crew start themselves; nothing is frozen, invoiced or sent.
+ */
+export async function agentCreateGroupWorkOrder(client: any, body: Record<string, unknown>) {
+  await assertGroupEnabled(client);
+  const jobId = String(body.job_id || "").trim();
+  if (!jobId) throw new GroupWorkOrderError("group_job_required", "Name the job.", 400);
+  const requesterId = String(body.requested_by_user_id || "").trim();
+  const crewIds = [...new Set((Array.isArray(body.crew_user_ids) ? body.crew_user_ids : []).map((v) => String(v || "").trim()).filter(Boolean))];
+  if (crewIds.length < 2) {
+    throw new GroupWorkOrderError("group_crew_required", "Name at least two crew for a group work order.", 400);
+  }
+  const people = await rowsOf(client.from("users").select("id, name, role, org_id").in("id", [requesterId, ...crewIds].filter(Boolean)), "load the crew");
+  const requester = people.find((u) => String(u.id) === requesterId);
+  if (!requester || !callerIsStaff(requester.role)) {
+    throw new GroupWorkOrderError("group_requester_not_office", "Say which office person is asking; only office staff can set up a group for the crew.", 403);
+  }
+  const job = await loadJob(client, jobId);
+  if (!job) throw new GroupWorkOrderError("group_job_not_found", "That job was not found.", 404);
+  const missing = crewIds.filter((id) => !people.some((u) => String(u.id) === id));
+  if (missing.length) throw new GroupWorkOrderError("group_crew_not_found", "A crew member was not found.", 404);
+  const notAllocated: string[] = [];
+  for (const id of crewIds) if (!(await callerAssigned(client, jobId, id))) notAllocated.push(id);
+  if (notAllocated.length) {
+    const names = notAllocated.map((id) => String(people.find((u) => String(u.id) === id)?.name || "A crew member"));
+    throw new GroupWorkOrderError("group_crew_not_allocated", `${names.join(", ")} ${names.length > 1 ? "are" : "is"} not allocated to this job. Allocate them first.`, 409);
+  }
+  const workOrderId = String(job.work_order_id || "");
+  if (!workOrderId) throw new GroupWorkOrderError("group_pot_missing", "This job has no job work order to split.");
+  let group = await loadGroupByJob(client, jobId);
+  let created = false;
+  if (group) {
+    if (group.status === "void") throw new GroupWorkOrderError("group_work_order_void", "This group work order has been voided.", 409);
+    if (String(group.work_order_id) !== workOrderId) {
+      throw new GroupWorkOrderError("group_work_order_exists", "This job already has a group on a different work order.", 409);
+    }
+  } else {
+    potFromWorkOrder(await loadWorkOrder(client, workOrderId));
+    await assertNoNormalPayOnJob(client, jobId);
+    const { data, error } = await client.from("group_work_orders").insert({
+      org_id: job.org_id || requester.org_id,
+      job_id: jobId,
+      work_order_id: workOrderId,
+      status: "open",
+      pay_basis: GROUP_PAY_BASIS_EMPLOYER_SUPER,
+      share_token: newShareToken(),
+      created_by: requesterId,
+    }).select("id, org_id, job_id, work_order_id, status, share_token, client_signed_at, split_frozen_at").single();
+    throwQuery(error, "open the group");
+    group = data;
+    created = true;
+  }
+  const on = await loadParticipants(client, String(group!.id));
+  const added: string[] = [];
+  for (const id of crewIds) {
+    if (on.some((row) => String(row.user_id) === id)) continue;
+    await insertParticipant(client, String(group!.id), id);
+    added.push(id);
+  }
+  const nameOf = (id: string) => String(people.find((u) => String(u.id) === id)?.name || "");
+  return {
+    ...publicGroupCard(group!),
+    created,
+    job_number: job.job_number ?? null,
+    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id) })),
+    note: "Group set up. Each crew member logs hours, approves the crew's hours and invoices their share in the trade app; the client signs on the phone or the office signs off.",
+  };
+}
+
 async function insertParticipant(client: any, groupId: string, userId: string) {
   const group = await loadGroupById(client, groupId);
   if (group?.split_frozen_at) {
