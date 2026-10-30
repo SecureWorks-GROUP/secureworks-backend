@@ -125,3 +125,67 @@ job cohort, not an accounting period.
 A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
 parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
 figure; `holding_jobs` reports it on its own so the parked cost stays visible.
+
+## Where a bill's cost counts (H7)
+
+`cfo_bill_cost_outcomes` (`20261029170000`, contract
+`cfo-bill-cost-outcome-v1`, service role only) has one row per supplier bill
+(Xero ACCPAY, trade-app mirrors left out) and job it is Xero-linked to, has an
+actual allocation row on, or is counted on. `counts` is read from the engine,
+never re-derived: `counted` only when `v_job_cost_events` has an actual row of
+the bill on that job and `v_job_profit` reads the job; `not_counted` with a
+`reason` (read through allocation rows, overhead, an unconfirmed or
+not-job-related installer bill, a labour part not yet confirmed, voided, not
+approved, a legacy job, an expected row on another job hiding the Xero link);
+`unknown` when it cannot be read, never 0. A bill marked not job related that
+the engine still counts reads `bill_state` `held` (F1, JP-21). A bill counted
+for more than its ex GST total (counted parts plus any overhead part: 1200
+counted on a 1000 bill, two 700 placements on one) reads `over_counted`, never
+`counted_in_part`; less reads `counted_in_part`, equal `counted_in_full`, all
+using `v_bill_allocation_balance`'s comparison (the remainder within half a
+cent) over the parts the engine counts, not every allocation row. So they agree
+with that view only where every allocation row is counted at its own amount: a
+whole row on the bill's own Xero job with a different amount, or a split with a
+legacy part plus overhead, can read `counted_in_full` or `counted_in_part` here
+while the view reads the bill over-allocated. A trade-app mirror bill is left out unless a person placed it on a
+job: that row reads `not_counted`, reason `mirror_bill_person_placed`,
+`bill_state` `trade_mirror`, because its cost counts through the trade lines.
+The `evidence_hash` is led by the contract version; a payment does not move it
+(AUTHORISED and PAID are one class), a changed total, line, tax-inclusive flag
+(`LineAmountTypes`, which the engine reads), credit, status class, allocation
+row or overhead does. A DRAFT bill linked to a job reads `not_counted`,
+`bill_not_approved`, as the engine treats it. Context's job card reads it through
+`context_job_bill_outcomes(job)` (`20261029170100`), which carries no amount.
+The rule is one function, `cfo_bill_cost_outcomes_scoped(job)`: the view is
+its call with null, and a job's call first finds that job's bills (its Xero
+links and actual allocation rows) and judges only those (and every other job
+they touch), giving exactly the view's rows for those bills (the contract
+compares both ways for every fixture job). A job with no bill skips the engine
+read. The engine's own shared parts still read every bill once per call (the
+floor until the engine can be filtered), so the job read runs with
+`jit = off`: JIT compiling that plan costs seconds and saves nothing.
+ops-api `job_overview` serves that as `bills` and refuses any other contract
+version or any amount (`job_bill_outcomes_read.ts`); a mirror bill reads
+`where_counted` `trade_app` there, both on a job a person placed it on and on
+its Xero-linked job where CFO's view lists no row (there `here` is
+`not_counted`, reason `mirror_bill_not_placed_here`; a voided mirror there
+has reason `bill_voided` and reads `no_job`, never a count; one whose state CFO
+cannot read keeps `here` null and reads `unknown`), and each bill carries
+CFO's `mirror_bill` flag as given. The one-job timing read for the 8 s API limit is
+`scripts/explain-context-job-bill-outcomes-one-job.sql` (read only). INT-10's
+five-job acceptance, `scripts/int10-five-job-bill-outcomes-acceptance.sql` (read
+only, after both migrations apply), takes five jobs by a fixed shuffle of job
+ids and compares, both ways, the bills each card should list (placed on the
+job, or counted on it by the engine) with the bills it does list: a bill left
+out is `missing_from_card`, one listed that should not be is `extra_on_card`,
+every picked job always shows, and the one deliberate exclusion (a trade-app
+mirror no person placed on any job, which CFO's view lists nowhere) is its own
+step and is named on its row. Each row sets the engine rows beside the card's
+read for a person to check against Xero. `scripts/test-int10-acceptance-proof.sh`
+proves it on a disposable local database: the card as served has no failure,
+and a card that drops a bill, carries an extra one, lists nothing for a job or
+shows the excluded mirror is flagged by name. Both scripts treat a job as a
+holding job by the engine's own rule (`v_job_profit.holding_job`,
+`lower(do_not_schedule) = 'true'`), the rule CFO's view and the card read use
+too; Context's placement rules read `'true'` or `'1'`, and on a job set to
+`'1'` the two disagree (not measured on production).

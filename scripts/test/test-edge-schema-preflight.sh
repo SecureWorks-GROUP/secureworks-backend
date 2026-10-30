@@ -985,7 +985,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261028150000", "reschedule_job_assignments"),
                       # TP-01 Xero tie-out: xero_tieout calls
                       # xero_tieout_monthly (xero_tieout.ts).
-                      ("20261029121500", "xero_tieout_monthly")]:
+                      ("20261029121500", "xero_tieout_monthly"),
+                      # H7 bill cost outcomes: job_overview's bills part
+                      # (job_bill_outcomes_read.ts) and CFO's view it reads.
+                      ("20261029170000", "cfo_bill_cost_outcomes"),
+                      ("20261029170100", "context_job_bill_outcomes")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
