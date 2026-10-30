@@ -983,6 +983,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Whole-job move / stretch: reschedule_job_bookings calls
                       # reschedule_job_assignments_v1 (job_bookings.ts).
                       ("20261028150000", "reschedule_job_assignments"),
+                      # TP-01 Xero tie-out: xero_tieout calls
+                      # xero_tieout_monthly (xero_tieout.ts).
+                      ("20261029121500", "xero_tieout_monthly"),
                       # H7 bill cost outcomes: job_overview's bills part
                       # (job_bill_outcomes_read.ts) and CFO's view it reads.
                       ("20261029170000", "cfo_bill_cost_outcomes"),
