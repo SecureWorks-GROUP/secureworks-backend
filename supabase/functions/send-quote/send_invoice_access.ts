@@ -46,7 +46,7 @@ export type SendInvoiceJobRow = {
 
 export type SendInvoiceAccessOk = {
   ok: true
-  invoice: SendInvoiceMirrorRow
+  invoice: SendInvoiceMirrorRow & { job_id: string }
   job: SendInvoiceJobRow | null
   steps: SendInvoiceAccessStep[]
 }
@@ -176,5 +176,5 @@ export async function authorizeSendInvoiceAccess(input: {
     return deny(steps, 409, { success: false, refusal, error: refusal.fact })
   }
 
-  return { ok: true, invoice, job, steps }
+  return { ok: true, invoice: { ...invoice, job_id: binding.job_id }, job, steps }
 }

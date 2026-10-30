@@ -3039,7 +3039,7 @@ async function jp24AtFixedClock<T>(fn: () => Promise<T>): Promise<T> {
   const fixed = RealDate.parse('2026-10-29T12:00:00.000Z')
   class FixedDate extends RealDate {
     constructor(...args: any[]) { if (args.length === 0) super(fixed); else super(...(args as [any])) }
-    static now() { return fixed }
+    static override now() { return fixed }
   }
   ;(globalThis as any).Date = FixedDate
   try { return await fn() } finally { (globalThis as any).Date = RealDate }

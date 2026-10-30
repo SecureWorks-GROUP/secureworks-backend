@@ -138,7 +138,7 @@ const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
 // ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
-function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
+function getClientReplyTo(jobType: string | null, jobNumber?: string | null): string {
   const dept = jobType === 'fencing' ? 'fencing' : 'patios'
   const tag = jobNumber ? `+${jobNumber}` : ''
   return `${dept}${tag}@secureworkswa.com.au`
@@ -198,7 +198,7 @@ function quotePricingGateError(pricingJsonRaw: any): string | null {
 }
 
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
-function logEmailToGHL(contactId: string | null, subject: string, recipient: string) {
+function logEmailToGHL(contactId: string | null | undefined, subject: string, recipient: string) {
   if (!contactId) return
   fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=add_note`, {
     method: 'POST',
@@ -1405,7 +1405,7 @@ serve(async (req: Request) => {
           // retired link must not open the client's quote.
           let liveQuery = sb
             .from('job_documents')
-            .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', share_token')
+            .select(`${QUOTE_PARTY_DOCUMENT_COLUMNS}, share_token`)
             .eq('job_id', supDoc.job_id)
             .eq('type', 'quote')
             .eq('sent_to_client', true)
@@ -1444,7 +1444,7 @@ serve(async (req: Request) => {
       // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
         let siblingQuery = sb.from('job_documents')
-          .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', quote_number, pdf_url, html_url, share_token')
+          .select(`${QUOTE_PARTY_DOCUMENT_COLUMNS}, quote_number, pdf_url, html_url, share_token`)
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
@@ -2242,7 +2242,11 @@ serve(async (req: Request) => {
         // ── Auto-start council process for patio jobs (fire-and-forget) ──
         let councilSubmissionId: string | null = null
         const isPatio = job?.type === 'patio' || job?.job_number?.startsWith('SWP')
-        if (isPatio) {
+        if (isPatio && job) {
+          // This projection currently omits a job email. Preserve its existing
+          // contact fallback without adding a new recipient lookup.
+          const councilJobEmail = 'client_email' in job && typeof job.client_email === 'string'
+            ? job.client_email : ''
           try {
             const councilRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=create_council_submission`, {
               method: 'POST',
@@ -2272,21 +2276,21 @@ serve(async (req: Request) => {
               body: JSON.stringify({
                 from: 'SecureWorks Group <approvals@secureworksgroup.app>',
                 reply_to: getClientReplyTo(job?.type, job?.job_number),
-                to: [job.client_email || doc.job_contacts?.client_email || ''],
+                to: [councilJobEmail || doc.job_contacts?.client_email || ''],
                 subject: `Your Patio Project - Next Steps & What We Need From You`,
                 html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
               }),
             })
             .then(() => {
               console.log(`[send-quote] Council kickoff email sent for ${job.job_number}`)
-              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', job.client_email || '')
+              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', councilJobEmail)
               // Record in po_communications for council thread
               if (councilSubmissionId) {
                 sb.from('po_communications').insert({
                   job_id: job.id,
                   direction: 'outbound',
                   from_email: 'approvals@secureworksgroup.app',
-                  to_email: job.client_email || '',
+                  to_email: councilJobEmail,
                   subject: 'Your Patio Project - Next Steps & What We Need From You',
                   body_text: 'House plans request sent to client on acceptance',
                   communication_type: 'council',
@@ -3625,7 +3629,12 @@ serve(async (req: Request) => {
 
       // Validate token
       const { data: doc } = await sb.from('job_documents').select('job_id, accepted_at, jobs(site_address, site_suburb)').eq('share_token', token).maybeSingle()
-      const addr = doc?.jobs ? [doc.jobs.site_address, doc.jobs.site_suburb].filter(Boolean).join(', ') : ''
+      // The job foreign key is a to-one join. Do not choose an arbitrary job
+      // if a malformed/ambiguous response ever returns a list instead.
+      const site: unknown = doc?.jobs
+      const addr = site && typeof site === 'object' && !Array.isArray(site)
+        ? [('site_address' in site ? site.site_address : null), ('site_suburb' in site ? site.site_suburb : null)].filter(Boolean).join(', ')
+        : ''
 
       return new Response(buildUploadPlansPage(token, jobId || doc?.job_id || '', addr), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
@@ -3820,7 +3829,9 @@ serve(async (req: Request) => {
       return jsonResponse({ ok: false, code: err.code, error: err.message, ...err.details }, err.status, corsHeaders)
     }
     console.error('Send-quote error:', err)
-    return jsonResponse({ error: err.message || 'Internal error' }, 500, corsHeaders)
+    const message = err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
+      ? err.message : ''
+    return jsonResponse({ error: message || 'Internal error' }, 500, corsHeaders)
   }
 })
 }
