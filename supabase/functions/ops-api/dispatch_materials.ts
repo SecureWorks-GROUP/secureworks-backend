@@ -9,6 +9,8 @@
 // dispatch_materials read, every write's answer and the Dispatch list's two
 // fields all call dispatchMaterialCounts, so they cannot disagree.
 
+import { isOfficeFixingLine } from "./scope_engine_materials.ts";
+
 // The only values ever stored on a line. Set by hand on the screen.
 export const DISPATCH_MATERIAL_STORED_STATUSES = [
   "not_reviewed",
@@ -577,6 +579,8 @@ export function readScopeMaterialRecord(scope: unknown): PatioScoperRecordRead {
       return { kind: "unreadable", reason: "source_line_id_repeated" };
     }
     seenIds.add(id);
+    // Preserve the existing supplier-routing rule from the merged Scope reader.
+    if (isOfficeFixingLine(line)) continue;
     const colour = typeof line.colour === "string" ? line.colour.trim() : "";
     items.push({
       description:

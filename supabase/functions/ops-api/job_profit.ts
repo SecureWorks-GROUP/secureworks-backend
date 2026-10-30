@@ -16,6 +16,7 @@
 // dispatch in index.ts (privileged ops key or an admin/owner session).
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
+import { readJobProfitOrderSources } from "./job_profit_order_sources.ts";
 import {
   type FrozenAcceptance,
   INSTALLER_RULE_PROBE,
@@ -472,6 +473,7 @@ export async function jobProfitAction(
       job: summary,
       trades: [...trades.values()].sort((a, b) => b.amount_ex - a.amount_ex),
       cost_events: costEvents,
+      material_order_sources: await readJobProfitOrderSources(client, summary.job_id, costEvents),
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       labels: JOB_PROFIT_LABELS,

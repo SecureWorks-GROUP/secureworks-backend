@@ -3202,3 +3202,38 @@ Deno.test("current fence producer: version 1.0 manifest retains exact IDs withou
   }]);
   assertEquals(result.revision, { n: null, frozen_id: null });
 });
+
+Deno.test("sealed manifests retain the merged office-fixings exclusion on both producer shapes", () => {
+  for (
+    const supplier of [{ supplier: "office" }, { supplierId: " office " }, {
+      supplier_id: "OFFICE",
+    }, { supplier: { id: "office" } }]
+  ) {
+    for (
+      const envelope of [{
+        tool: "patio-scoper",
+        version: "2.0",
+        supported: true,
+      }, { tool: "fencing", version: "1.0" }]
+    ) {
+      const record = readScopeMaterialRecord({
+        ...envelope,
+        lines: [{
+          id: "material-1",
+          description: "Post",
+          quantity: 2,
+          unit: "ea",
+        }, {
+          id: "office-1",
+          description: "Office kit",
+          quantity: 1,
+          unit: "kit",
+          ...supplier,
+        }],
+      });
+      assertEquals(record.kind, "lines");
+      if (record.kind !== "lines") return;
+      assertEquals(record.items.map((x) => x.source_line_id), ["material-1"]);
+    }
+  }
+});

@@ -9,7 +9,7 @@
 // Each case is a business outcome. The replay at the end counts wrong
 // assignments: a placement on a job other than the expected one, or any
 // placement where a person should decide. It must be 0.
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { deepStrictEqual as assertEquals } from "node:assert";
 import {
   buildAddressIndex,
   buildJobMaps,
@@ -54,7 +54,7 @@ function bill(over: Partial<PrematchBill> & { line?: string; account?: string; a
   };
 }
 
-type Expect = { kind: "job"; job: string; po: string | null } | { kind: "review" | "excluded" | "none" };
+type Expect = { kind: "job" | "proposal"; job: string; po: string | null } | { kind: "review" | "excluded" | "none" };
 type GoldCase = { name: string; bill: PrematchBill; pos: PrematchPO[]; expect: Expect };
 
 const GOLD: GoldCase[] = [
@@ -106,9 +106,11 @@ const GOLD: GoldCase[] = [
     pos: [DISPATCH_PO, { ...DISPATCH_PO, id: "po-d124", po_number: "PO-1000124", job_id: "j-patio" }], expect: { kind: "review" },
   },
 
-  // ── Left out: the crew-bill mirror (subcontractor labour) even with our PO number.
-  { name: "a crew bill on 306 quoting a Dispatch PO", bill: bill({ reference: "PO-1000123", account: "306", amount: 900 }), pos: [DISPATCH_PO], expect: { kind: "excluded" } },
-  { name: "a crew bill on 301 quoting a Dispatch PO", bill: bill({ line: "Install PO1000123", account: "301", amount: 900 }), pos: [DISPATCH_PO], expect: { kind: "excluded" } },
+  // Account codes identify installer bills, not proven native mirrors.
+  // The current pure matcher proposes these for review; the runner excludes
+  // native trade-invoice mirrors separately (test below). No automatic placement.
+  { name: "installer account306 proposes a job but never auto-assigns", bill: bill({ reference: "PO-1000123", account: "306", amount: 900 }), pos: [DISPATCH_PO], expect: { kind: "proposal", job: "SWF-261060", po: "po-d123" } },
+  { name: "installer account301 proposes a job but never auto-assigns", bill: bill({ line: "Install PO1000123", account: "301", amount: 900 }), pos: [DISPATCH_PO], expect: { kind: "proposal", job: "SWF-261060", po: "po-d123" } },
 
   // ── Not our PO number: a longer or shorter number, or no prefix, names nothing.
   { name: "a longer number PO-10001234", bill: bill({ reference: "PO-10001234" }), pos: [DISPATCH_PO], expect: { kind: "none" } },
@@ -123,10 +125,10 @@ const GOLD: GoldCase[] = [
 for (const c of GOLD) {
   Deno.test(`Dispatch PO gold set: ${c.name}`, () => {
     const d = decideBillPrematch(c.bill, ctx(c.pos));
-    if (c.expect.kind === "job") {
+    if (c.expect.kind === "job" || c.expect.kind === "proposal") {
       assertEquals(
         d.kind === "job" ? { kind: d.kind, confidence: d.confidence, job: d.job_number, po: d.po_id } : { kind: d.kind, reason: d.reason },
-        { kind: "job", confidence: "high", job: c.expect.job, po: c.expect.po },
+        { kind: "job", confidence: c.expect.kind === "job" ? "high" : "medium", job: c.expect.job, po: c.expect.po },
       );
     } else {
       assertEquals({ kind: d.kind, why: d.kind === "job" ? d.reason : "" }, { kind: c.expect.kind, why: "" });
@@ -166,4 +168,56 @@ Deno.test("a nightly run places a bill quoting a sent Dispatch PO on its job, ma
   const fact = store.job_materials_facts.find((f) => f.xero_invoice_id === "xinv-001")!;
   assertEquals([fact.job_id, fact.matched_po_id, fact.automation_source, fact.confidence], ["j-fence", "po-d123", "agent_prematch", "high"]);
   assertEquals(store.materials_reconciliation_queue.find((q) => q.id === "q-open-noref")!.status, "assigned");
+});
+
+Deno.test("a proven native trade-invoice mirror is excluded even when its bill names the sent Dispatch PO", async () => {
+  for (const account of ["306", "301"]) {
+    const seed = baseSeed();
+    seed.materials_reconciliation_queue = seed.materials_reconciliation_queue
+      .filter((q) => q.id === "q-open-noref").map((q) => ({
+        ...q,
+        xero_contact_id: "c-fww",
+        contact_name: "Fencing Wholesalers WA",
+      }));
+    seed.jobs = [{
+      id: "j-fence",
+      job_number: "SWF-261060",
+      status: "scheduled",
+      created_at: "2026-06-01",
+      site_address: null,
+      org_id: ORG,
+    }];
+    seed.purchase_orders = [{ ...DISPATCH_PO }];
+    seed.xero_invoices = [{
+      xero_invoice_id: "xinv-001",
+      invoice_number: "INV-552301",
+      status: "AUTHORISED",
+      reference: "PO1000123",
+      line_items: [{
+        Description: "Installer native invoice",
+        AccountCode: account,
+        LineAmount: 1000,
+      }],
+      job_id: null,
+    }];
+    seed.trade_invoices = [{ id: "native-invoice", xero_bill_id: "xinv-001" }];
+    seed.context_email_attachments = [];
+    seed.materials_bill_proposals = [];
+    const { client, store } = makeFakeClient(seed);
+    const out = await runBillPrematch(client, {
+      orgId: ORG,
+      nowIso: "2026-07-05T06:00:00.000Z",
+    });
+    assertEquals(out.assigned, 0);
+    assertEquals(
+      store.job_materials_facts.filter((f) => f.xero_invoice_id === "xinv-001"),
+      [],
+    );
+    assertEquals(
+      store.materials_bill_proposals.filter((f) =>
+        f.xero_invoice_id === "xinv-001"
+      ),
+      [],
+    );
+  }
 });
