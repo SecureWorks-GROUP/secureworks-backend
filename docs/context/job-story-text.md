@@ -108,6 +108,38 @@ for 24 hours (`failed_backoff_hours`) after a request for it closed `failed`;
 and rewrites a story written without the book only while fewer than 10
 requests are open.
 
+## Where each bill counts: story-bill-outcomes-v1 (`20261029170200`)
+
+`context_job_story_bill_outcomes(job)` is the card's `bill_outcomes` block: for
+each supplier bill placed on the job, where Finance's engine counts its cost,
+read through `context_job_bill_outcomes` (the H7 read) only, never re-derived.
+Per bill it carries `where_counted`, `reason` (CFO's code for this job;
+`held_reason` when held), `bill_state`, `mirror_bill`, `held_reason`,
+`other_jobs` (`job_number`, `counts`) and `outcome`: the where_counted value, or
+`unknown: <reason>` / `held: <reason>`. When where a bill counts is unknown the
+reason says why: the placement's own code when it is unknown here, else
+`bill_state_unknown`, `not_placed_here` or `where_counted_unknown`. It applies
+the ops-api reader's rules: another shape is `invalid_shape`, another contract
+version `contract_mismatch`, any number or money-named key `amount_present`, a
+failed read `read_failed`; each is a block with `status: refused`,
+`outcome: unknown: <code>` and no bills, never "no bills". It carries no
+amount. Bills are in invoice number then bill id order, C collation.
+
+The writer input, the staff read and the request attach it beside `book`, only
+when the job has a placed bill; a job with none has no key and hashes exactly
+as before. `context_job_story_card_hash` (story-digest-v1) is unchanged. For a
+card with the block, `context_job_story_full_hash` is
+story-digest-v1+story-book-v1+story-bills-v1 and folds in the block's `digest`
+(the bills less invoice number, supplier, Xero status and outcome words, so a
+payment never moves it). So the first apply reads every saved story on a job
+with a placed bill stale once. The sweep is unchanged: a stale read queues
+nothing, and the story is rewritten at its next wake (a bill placed or changed
+moves the money signature) or on a Rewrite press. No model call is made while
+`context_job_story_text_v1` is off. The staff read compares a card only when
+the job has a story: with none its status is `none` and `card_hash` null, and
+neither the card's bill block nor its hash is worked out, so a job page runs
+the bill read once (in the overview), not twice.
+
 ## The queue
 
 `context_job_story_requests`: at most one open request a job.
@@ -249,6 +281,18 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
   job and wait on a person, contact or not, at most 200 (`more` when cut), and
   how many of them the daily list leaves out (no contact, or never asked), so
   the card can link to Matching, Find by job. Null when the read failed, never 0.
+- `bills`: `context_job_bill_outcomes` (`20261029170100`): the supplier bills
+  placed on this job (its Xero link or an actual allocation row) and where
+  Finance's engine counts each one's cost (`where_counted` here, elsewhere,
+  here_and_elsewhere, no_job, trade_app (a trade-app mirror bill: reason
+  `mirror_bill_person_placed` on a job a person placed it on,
+  `mirror_bill_not_placed_here` on its Xero-linked job), held or unknown; `here` and
+  `other_jobs` with `counts` and `reason`; CFO's `bill_state`, `over_counted`
+  when more is counted than the bill), from CFO's `cfo_bill_cost_outcomes`. No amount: an
+  answer with a number or a money key, or on a contract version other than
+  `cfo-bill-cost-outcome-v1`, is refused whole (`amount_present`,
+  `contract_mismatch`). Null when the read failed, never an empty list;
+  `not_deployed` until the migration is applied.
 - `not_seen`: `[{key, text}]`, the sources Context cannot see for any job
   (`material_orders`, `crew_tasks_and_crm_notes`), on every answer until the
   change that starts capturing a source removes its line (`OVERVIEW_NOT_SEEN`).

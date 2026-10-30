@@ -19,6 +19,9 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 //   backfill_invoices  — One-time full invoice fetch (?year=2025 for batching)
 //   check_invoice_mirror: compare our invoice copy with Xero's open list now (also runs
 //                        hourly inside sync_invoices); see xero_mirror_check.ts
+//   sync_supplier_credit_notes: copy supplier credit notes (ACCPAYCREDIT) and their
+//                        allocations, read only; off until xero_supplier_credit_notes_v1
+//                        (also runs inside sync_invoices); see supplier_credit_notes.ts
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -34,6 +37,7 @@ import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '.
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
+import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
@@ -257,6 +261,12 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await syncBankBalances(sb))
       case 'sync_aged_payables':
         return json(await syncAgedPayables(sb))
+      case 'sync_supplier_credit_notes': {
+        // Reads Xero only (TP-07 slice 1); off until xero_supplier_credit_notes_v1. Also runs inside sync_invoices.
+        const { accessToken, tenantId } = await getToken(sb)
+        return json(await syncSupplierCreditNotes(sb as any, DEFAULT_ORG_ID, tenantId,
+          (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers)))
+      }
       case 'sync_bank_transactions':
         return json(await syncBankTransactions(sb))
       case 'ingest_materials': {
@@ -268,7 +278,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {
@@ -1205,6 +1215,19 @@ async function syncInvoices(sb: any) {
     console.error('[xero-sync] Settlement evidence capture failed:', e.message)
   }
 
+  // Supplier credit notes (TP-07 slice 1): off until xero_supplier_credit_notes_v1.
+  // Reads Xero only and copies ACCPAYCREDIT notes and their allocations; counts no
+  // money. A failure never breaks the sync; a cooldown is rethrown like the step above.
+  let supplierCreditNotes: unknown
+  try {
+    supplierCreditNotes = await syncSupplierCreditNotes(sb, DEFAULT_ORG_ID, tenantId,
+      (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    supplierCreditNotes = { ran: false, reason: 'error', error: e.message }
+    console.error('[xero-sync] Supplier credit note copy failed:', e.message)
+  }
+
   // ── Mirror check: does our copy owe the same as Xero? At most once an hour. ──
   // Last on purpose: it reads Xero's open list, heals our copy where Xero says money is
   // owed and the copy disagrees, and records the result for the Debt tab. It never
@@ -1216,11 +1239,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 

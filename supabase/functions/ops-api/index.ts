@@ -1407,6 +1407,8 @@ import {
   undoMaterialsAiPlacement,
   updateMaterialsAiSettings,
 } from './materials_ai.ts'
+// TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
+import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -9380,6 +9382,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof MaterialsAiError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      // ── TP-01 Xero tie-out: every bill dollar by month, on a job, in a
+      // named non-job bucket, or unplaced. Read only; staff by the front door
+      // (not in any trade, routine or agent-read list). Credit notes and spend
+      // are not_yet_read until TP-07 / TP-08, never $0.
+      case 'xero_tieout': {
+        try {
+          return json(await readXeroTieout(client, {
+            asOf: url.searchParams.get('as_of'),
+            months: url.searchParams.get('months'),
+            // Never substitute the server org for a JWT caller with a missing profile org.
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+          }))
+        } catch (err) {
+          if (err instanceof XeroTieoutError) throw new ApiError(err.message, err.status)
           throw err
         }
       }

@@ -16,7 +16,17 @@
 --     alone for a day; an unchanged check moves checks.money_sig on (no endless re-queue); a crew
 --     line on no job naming the job's number moves the signature.
 --  7. A second apply changes nothing; the rollback restores the 20261009100000 bodies.
+-- (With the story bill outcomes, 20261029170200, live, it is rolled back first and applied again last.)
 \set ON_ERROR_STOP on
+
+-- The story bill outcomes (20261029170200) replaced four of this migration's bodies (the freshness
+-- hash, the staff read, the request and the writer's input): when a full stack has it, it is rolled
+-- back for this contract, which proves this migration's own result, and applied again at the end
+-- (its own contract proves it).
+SELECT to_regprocedure('public.context_job_story_bill_outcomes(uuid)') IS NOT NULL AS story_bills_live \gset
+\if :story_bills_live
+\ir ../../../rollbacks/20261029170200_context_story_bill_outcomes_down.sql
+\endif
 
 CREATE FUNCTION pg_temp.mb_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF p_ok IS NOT TRUE THEN RAISE EXCEPTION 'story money book contract: %', p_msg; END IF; END $$;
@@ -312,3 +322,7 @@ END $$;
 \ir ../../../rollbacks/20261028190000_context_story_money_book_down.sql
 \ir ../../../migrations/20261028190000_context_story_money_book.sql
 ROLLBACK;
+
+\if :story_bills_live
+\ir ../../../migrations/20261029170200_context_story_bill_outcomes.sql
+\endif
