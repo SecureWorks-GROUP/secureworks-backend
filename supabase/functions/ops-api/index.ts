@@ -784,6 +784,7 @@ import {
   createGroupWorkOrder,
   deleteGroupWorkOrderHours,
   freezeGroupWorkOrder,
+  officeApproveGroupHours,
   groupBody,
   groupFeatureOn,
   GroupWorkOrderError,
@@ -11901,7 +11902,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'revoke_group_signoff':
       case 'void_group_work_order':
       case 'rekey_group_work_order':
-      case 'remove_group_work_order_participant': {
+      case 'remove_group_work_order_participant':
+      case 'office_approve_group_hours': {
         const officeCaller: GroupCaller = {
           userId: authUser?.id || '',
           orgId: authUser?.orgId || null,
@@ -11926,6 +11928,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             ? rekeyGroupWorkOrder(client, officeCaller, officeBody)
             : action === 'remove_group_work_order_participant'
             ? removeGroupWorkOrderParticipant(client, officeCaller, officeBody)
+            : action === 'office_approve_group_hours'
+            ? officeApproveGroupHours(client, officeCaller, officeBody)
             : readGroupWorkOrderOffice(client, officeCaller, officeBody),
         )
       }

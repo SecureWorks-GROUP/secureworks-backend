@@ -491,6 +491,24 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    needle: "group_office_approver_on_crew",
+    code: "group_office_approver_on_crew",
+    message: "You are on this crew, so someone else in the office has to approve its hours.",
+    status: 403,
+  },
+  {
+    needle: "group_office_approval_reason_required",
+    code: "group_office_approval_reason_required",
+    message: "Say why the office is approving the crew's hours.",
+    status: 400,
+  },
+  {
+    needle: "group_office_approval_no_hours",
+    code: "group_office_approval_no_hours",
+    message: "No hours are logged on this group yet.",
+    status: 409,
+  },
+  {
     needle: "group_split_busy",
     code: "group_split_busy",
     message: "The weekly invoice is busy, try again.",
@@ -724,7 +742,7 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
 }
 
 const GROUP_COLUMNS =
-  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex";
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by";
 
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(
@@ -1132,6 +1150,7 @@ type ShareView = {
   // Owner, 30 Oct 2026: on a full-employer-super group the crew approve each
   // other's hours on site before the shares are finalised.
   needsApproval: string[];
+  hoursOfficeApproved: boolean;
 };
 
 const CREW_APPROVAL_MESSAGE = "Every crew member has to approve the hours before the shares are finalised.";
@@ -1389,8 +1408,11 @@ async function loadShareView(
     minimum,
     latestHoursAt,
   );
-  // An approval counts only when it is newer than every hours change.
-  const needsApproval = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER
+  // An approval counts only when it is newer than every hours change. The
+  // office can approve for the whole crew (owner, 30 Oct 2026), on the same terms.
+  const hoursOfficeApproved = Boolean(group.hours_office_approved_at) &&
+    signedAfterHours(group.hours_office_approved_at, latestHoursAt);
+  const needsApproval = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !hoursOfficeApproved
     ? participants.filter((row) =>
       (hoursByUser.get(String(row.user_id)) || 0) > 0 &&
       !(row.crew_signed_at && signedAfterHours(row.crew_signed_at, latestHoursAt))
@@ -1402,7 +1424,7 @@ async function loadShareView(
   else if (needsHours.length > 0) awaiting = "awaiting_others";
   else if (needsRate.length > 0) awaiting = "awaiting_rate";
   else if (needsApproval.length > 0) awaiting = "awaiting_crew_approval";
-  return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate, needsApproval };
+  return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate, needsApproval, hoursOfficeApproved };
 }
 
 export async function readGroupWorkOrderMyShare(
@@ -1577,11 +1599,13 @@ async function readGroupCrewHours(client: any, caller: GroupCaller, group: Recor
       me: id === caller.userId,
       hours,
       approved: required ? hours > 0 && !view.needsApproval.includes(id) : Boolean(row.crew_signed_at),
+      approved_by_office: required && view.hoursOfficeApproved && hours > 0,
     };
   });
   const signoff = view.signed && view.signoff ? view.signoff : null;
   return {
     crew_approval_required: required,
+    hours_office_approved: required && view.hoursOfficeApproved,
     crew_hours: crewHours,
     my_hours_approved: crewHours.some((row) => row.me && row.approved),
     client_signoff: signoff ? {
@@ -2127,6 +2151,8 @@ export async function readGroupWorkOrderOffice(
       : null,
     needs_hours: view.needsHours,
     needs_rate: view.needsRate,
+    needs_approval: view.needsApproval,
+    hours_office_approved: view.hoursOfficeApproved,
     participants: participants.map((row) => ({
       user_id: row.user_id,
       name: people.find((p) => p.id === row.user_id)?.name || row.signature_name || null,
@@ -2162,6 +2188,32 @@ export async function unfreezeGroupWorkOrder(
       ? payload.stripped_invoice_ids
       : [],
   };
+}
+
+/**
+ * The office approves the crew's hours on their behalf (owner, 30 Oct 2026).
+ * Recorded on the group with a reason, never as a crew signature. Someone on
+ * the crew cannot approve their own group.
+ */
+export async function officeApproveGroupHours(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  await assertGroupEnabled(client);
+  assertOffice(caller);
+  if (!caller.userId) {
+    throw new GroupWorkOrderError("operator_access_required", "Sign in as yourself to approve the crew's hours.", 403);
+  }
+  const group = await resolveGroup(client, body);
+  const { data, error } = await client.rpc("office_approve_group_hours", {
+    p_group_id: group.id,
+    p_actor_user_id: caller.userId,
+    p_reason: String(body.reason || ""),
+  });
+  throwQuery(error, "approve the crew's hours");
+  const payload = asRecord(data);
+  return { ok: true, group_id: group.id, hours_office_approved: true, approved_at: payload.approved_at ?? null };
 }
 
 export async function freezeGroupWorkOrder(

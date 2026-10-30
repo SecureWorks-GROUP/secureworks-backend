@@ -28,6 +28,7 @@ import {
   createGroupWorkOrder,
   deleteGroupWorkOrderHours,
   draftClientLinkMessage,
+  officeApproveGroupHours,
   entryPointsMicro,
   findFenceProblem,
   freezeGroupWorkOrder,
@@ -128,6 +129,18 @@ class Memory {
     if (!group) throw new Error("group_work_order_not_found");
     if (fn === "unfreeze_group_work_order_split") {
       return this.unfreeze(group);
+    }
+    if (fn === "office_approve_group_hours") {
+      // Stand-in for the SQL function; the migration contract proves the real one.
+      const actor = String(args.p_actor_user_id || "");
+      if (String(args.p_reason || "").trim().length < 3) throw new Error("group_office_approval_reason_required");
+      if (group.split_frozen_at) throw new Error("group_split_frozen");
+      if (this.rows("group_work_order_participants").some((row) => row.group_id === groupId && row.user_id === actor)) {
+        throw new Error("group_office_approver_on_crew");
+      }
+      group.hours_office_approved_at = "2099-01-01T00:00:00Z";
+      group.hours_office_approved_by = actor;
+      return { group_id: groupId, approved_at: group.hours_office_approved_at };
     }
     if (fn === "remove_group_work_order_participant") {
       return this.removeParticipant(
@@ -2238,4 +2251,41 @@ Deno.test("allocated workers discover an unjoined group without reading its mone
  assertEquals(found.group_job_ids,[JOB]);
  db.rows("job_assignments").at(-1)!.is_ghost=true;
  assertEquals((await readMyGroupWorkOrders(db.client(),trade(USER_C))).groups,[]);
+});
+
+Deno.test("the office approves a full-super crew's hours for them; someone on the crew cannot; later hours undo it", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  db.rows("group_work_orders")[0].pay_basis = "all_in_12_v2";
+  db.rows("group_work_order_time_entries").push(
+    { id: "t-a", group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 8, created_at: "2026-10-20T08:00:00Z", updated_at: "2026-10-20T08:00:00Z" },
+    { id: "t-b", group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 8, created_at: "2026-10-20T08:00:00Z", updated_at: "2026-10-20T08:00:00Z" },
+  );
+  const before = await readGroupWorkOrderOffice(db.client(), trade("office-1", true), { group_id: GROUP });
+  assertEquals(before.needs_approval, [USER_A, USER_B].sort());
+  assertEquals(before.hours_office_approved, false);
+
+  // A plain trade cannot, and someone on the crew cannot even with an office role.
+  await assertRejects(() => officeApproveGroupHours(db.client(), trade("office-1"), { group_id: GROUP, reason: "Crew agreed by phone" }), GroupWorkOrderError);
+  const own = await officeApproveGroupHours(db.client(), trade(USER_A, true), { group_id: GROUP, reason: "Crew agreed by phone" })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(own?.code, "group_office_approver_on_crew");
+  const noReason = await officeApproveGroupHours(db.client(), trade("office-1", true), { group_id: GROUP, reason: " " })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(noReason?.code, "group_office_approval_reason_required");
+  assertEquals(db.rows("group_work_orders")[0].hours_office_approved_at, undefined);
+
+  const done = await officeApproveGroupHours(db.client(), trade("office-1", true), { group_id: GROUP, reason: "Crew agreed by phone" });
+  assertEquals(done.hours_office_approved, true);
+  const after = await readGroupWorkOrderOffice(db.client(), trade("office-1", true), { group_id: GROUP });
+  assertEquals(after.needs_approval, []);
+  assertEquals(after.hours_office_approved, true);
+  // Crew signatures are untouched: the office approval is not a crew signature.
+  assert(db.rows("group_work_order_participants").every((row) => !row.crew_signed_at));
+
+  // Any later hours change needs approving again.
+  db.rows("group_work_orders")[0].hours_changed_at = "2099-01-02T00:00:00Z";
+  const changed = await readGroupWorkOrderOffice(db.client(), trade("office-1", true), { group_id: GROUP });
+  assertEquals(changed.needs_approval, [USER_A, USER_B].sort());
+  assertEquals(changed.hours_office_approved, false);
 });
