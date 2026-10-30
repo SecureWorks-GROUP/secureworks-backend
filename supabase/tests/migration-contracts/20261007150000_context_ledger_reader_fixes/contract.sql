@@ -733,6 +733,11 @@ SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT N
 -- the story since: its down goes first, inside this transaction only.
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
 \endif
 SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset

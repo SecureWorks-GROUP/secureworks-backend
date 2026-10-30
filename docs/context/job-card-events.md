@@ -166,3 +166,22 @@ both cards.
 
 The migration adds no table, column, index or trigger, and writes no row. The
 reader stays at v8.
+
+### Off-job and unplaced consumers (CTX-T24, 30 October candidate)
+
+`20261030165500_context_offjob_person_placement` completes the bounded metadata
+read path: current hash-bound person decisions determine the locations named by
+`context_job_story_meta`, and decided rows leave `context_unplaced_for_job`.
+A message split onto the current job is not described as wholly elsewhere;
+unrelated messages are not offered as unplaced; changed evidence falls back to
+the original uncertain placement. The helper changes location only, not party
+identity, source rows, invoice links or costs. Missing/off activation retains
+old reads; this does not enable `context_ledger_person_placement_v1`.
+
+The raw story now says historical notes need review before rebuilding and marks
+`meta.ledger.review_required`; it still retains their keys and original sources.
+Record-only reader input remains ledger-free. Agent memory and booking-review
+consumers must propagate review and cannot treat that story as complete.
+Current decisions are used, as in the existing card; this is not a historical
+placement replay. Original-source privacy, remaining destination identity reads,
+full-volume performance and deployed/independent/operator acceptance stay open.

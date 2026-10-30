@@ -72,6 +72,11 @@ SELECT pg_temp.story_safety_check('after the down');
 INSERT INTO public.context_crm_message_times (ghl_message_id, contact_id, crm_at) VALUES ('rb40-kept', 'ct40rb', '2026-04-04 04:04Z');
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
 \endif
 \ir ../../../rollbacks/20261006040000_context_story_safety_down.sql
