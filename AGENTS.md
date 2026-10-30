@@ -1231,6 +1231,15 @@ P1a copy, and must widen the successor md5 lists and the `\if` re-apply
 guards in the L1, P1a, P1b, P4, L1b, L1c, L1d, L1e, L1f and L1g contracts, and
 roll L1g, L1f, L1e, L1d, L1c, L1b then P4 back first in L1's break-contract
 (each down refuses while a later body is live), exactly as P4 did for P1a.
+Unplaced stage 1 (`20261014170000`, comment `L1g plus unplaced stage 1`) and
+TP-04 (`20261029190000`) are the live successors of L1g; both are registered
+cases, and every earlier ladder chain rolls them back first through
+`20261029190000_context_ladder_holding_flag/roll_back_successors.sql`, so a
+newer slice adds its own down to the top of that file. A holding job is
+`lower(coalesce(metadata->>'do_not_schedule','')) = 'true'`, Job Profit's rule,
+in every ladder candidate rule since TP-04; never write `NOT IN ('true','1')`
+into a new one (`context_ladder_p1a` and the non-placement context readers
+still carry that old spelling).
 
 The writer check reads `metadata.written_as`, which the insert trigger now
 stamps BEFORE the ladder as well as after: a writer-supplied value never

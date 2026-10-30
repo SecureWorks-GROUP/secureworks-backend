@@ -6,11 +6,15 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
+-- The rules ladder may be either revision of stage 1: 58fcf93d4c82604822d4ca4b70cc4680
+-- is the body the migration file creates (read back from a database built from
+-- the repository, 29 Oct 2026, TP-04), 8051d55455b0d7d1cbce773f0d6ab3c6 the one
+-- this guard first named.
 DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['8051d55455b0d7d1cbce773f0d6ab3c6','0faf9b6362c35225b8eca7beba887d99']),
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['8051d55455b0d7d1cbce773f0d6ab3c6','58fcf93d4c82604822d4ca4b70cc4680','0faf9b6362c35225b8eca7beba887d99']),
   ('public.context_event_identity(public.business_events)',ARRAY['ec1f67645b889441791d433d5fe08339','cc484b96d670d401a3457347884f5371']),
   ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['75aea904fb88a526ee6aed68b4d592b9','5f9dbe883f0add7a6987f3ed265a08af']),
   ('public.context_bucket_status()',ARRAY['1ac0e031034928239810432d213ed77e','155104bfb08b8b3c2f98bdec089d4ee4'])

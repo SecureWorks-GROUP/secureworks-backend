@@ -978,3 +978,12 @@ ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|functi
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_at
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_by_email
+ops-api|supabase/migrations/20261029121500_xero_tieout_monthly.sql|function|xero_tieout_monthly
+# H7 bill cost outcomes (INT-12, INT-10): job_overview's bills part calls
+# context_job_bill_outcomes, which reads CFO's cfo_bill_cost_outcomes view (a
+# relation, so the table marker's to_regclass check finds it).
+ops-api|supabase/migrations/20261029170000_cfo_bill_cost_outcomes.sql|table|cfo_bill_cost_outcomes
+ops-api|supabase/migrations/20261029170100_context_job_bill_outcomes.sql|function|context_job_bill_outcomes
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_notes
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_note_allocations
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|function|xero_supplier_credit_note_copy
