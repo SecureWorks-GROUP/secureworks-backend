@@ -47,10 +47,12 @@ import {
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows, fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
 import {
+  type DispatchV2DateMode,
   type DispatchV2Fulfilment,
   dispatchV2FulfilmentOf,
 } from "./dispatch_v2_emails.ts";
 import {
+  DISPATCH_BOOK_INSTALL_TODO,
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
   type DispatchMaterialStageReply,
@@ -59,9 +61,14 @@ import {
   type DispatchMaterialWaitingOn,
   dispatchMaterialWaitingOn,
   dispatchPoMaterialStage,
+  dispatchShortDay,
   dispatchV2BoxStage,
   type DispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
+import {
+  type DispatchEarliestInstall,
+  dispatchEarliestInstall,
+} from "./dispatch_v2_working_days.ts";
 import {
   type DispatchV2Accounts,
   dispatchV2AccountsOf,
@@ -603,10 +610,12 @@ export type DispatchBoardSupplierBox = {
   // The latest hand pick of Awaiting payment (migration
   // 20261029120300_dispatch_v2_box_payment_reopened.sql).
   payment_reopened_at?: string | null;
+  // ASAP or Pick a date (migration 20261030120000_dispatch_v2_box_date_mode.sql).
+  order_date_mode?: string | null;
 };
 
 export const DISPATCH_BOARD_BOX_SELECT =
-  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at";
+  "id, job_id, supplier_id, supplier_name, position, created_at, delivery_date, delivery_date_confirmed_at, delivery_date_source, delivery_date_set_at, delivery_date_set_by_email, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at, order_date_mode";
 
 // The material lines in the boxes, only for the material stage: which lines
 // are still to be ordered, and when each last changed.
@@ -703,6 +712,7 @@ export type DispatchArrivalMark = "solid" | "ring" | "none";
 export type DispatchArrivalFlag =
   | "not_sent"
   | "no_date"
+  | "asap"
   | "after_install"
   | null;
 
@@ -729,9 +739,11 @@ export type DispatchArrivalOrder = {
   box_date_set_by_email: string | null;
   // solid = confirmed date, ring = a date not confirmed, none = no date.
   mark: DispatchArrivalMark;
-  // The red cases: no date yet on a sent order, or a date after the install.
-  // not_sent is an order still being put together (no red). An extra order
-  // and a delivered order never carry a red flag.
+  // The red cases: no date yet on a sent "Pick a date" order, or a date
+  // after the install. not_sent is an order still being put together (no
+  // red). asap is a sent ASAP order with no date back yet (piece C): the
+  // supplier was not asked for a day, so it is waiting, not late (no red).
+  // An extra order and a delivered order never carry a red flag.
   flag: DispatchArrivalFlag;
   // Where the materials are at (dispatch_v2_material_stage.ts): the stage,
   // whether a person set it ('set'), it was worked out from the box
@@ -767,6 +779,9 @@ export type DispatchArrivalOrder = {
   // A pickup on the install's first day: the screen leaves Materials ready
   // out of the box's strip and picker. Always false for a purchase order.
   skips_ready: boolean;
+  // ASAP or Pick a date (piece C): the newest sent email's Date line for a
+  // sent order, else the box's choice. Null for a purchase order.
+  date_mode: DispatchV2DateMode | null;
 };
 
 export type DispatchArrival = {
@@ -777,7 +792,10 @@ export type DispatchArrival = {
     orders: number;
     sent: number;
     confirmed: number;
+    // Red flags: no_date and after_install. An ASAP order is never late.
     late: number;
+    // Sent ASAP orders with no date back yet (flag asap, piece C).
+    asap_waiting: number;
     // Orders not delivered yet, those waiting on us, and the extra orders not
     // delivered yet.
     open: number;
@@ -796,8 +814,15 @@ export type DispatchArrival = {
   // At least one order, every one with a confirmed date on or before the
   // install day (or simply confirmed, with no install booked yet).
   all_confirmed_in_time: boolean;
-  // The next thing to do on each order waiting on us, in box order.
+  // The next thing to do on each order waiting on us, in box order. With an
+  // earliest install day known, the orders' "Book the install and tell the
+  // client" lines become one line naming the day (piece C).
   waiting_on_us: string[];
+  // The earliest day to book the install (dispatch_v2_working_days.ts): the
+  // next WA working day after the last open order's confirmed date. Null
+  // when an install is already booked, or while any open order has no
+  // confirmed date.
+  earliest_install: DispatchEarliestInstall | null;
 };
 
 export type DispatchArrivalPayment = {
@@ -848,7 +873,8 @@ function arrivalEntry(
   const delivered = base.material_stage === "delivered";
   let flag: DispatchArrivalFlag = null;
   if (!base.delivery_date) {
-    flag = base.order_sent ? (delivered ? null : "no_date") : "not_sent";
+    if (!base.order_sent) flag = "not_sent";
+    else if (!delivered) flag = base.date_mode === "asap" ? "asap" : "no_date";
   } else if (
     installDay && base.delivery_date > installDay && !base.extra && !delivered
   ) {
@@ -1009,6 +1035,9 @@ export function dispatchArrival(
       held_by_payment: view.held_by_payment,
       material_stage_reply: view.reply,
       skips_ready: view.skips_ready,
+      // What the supplier was asked (the newest sent order's Date line);
+      // the box's next-email mode while nothing was sent.
+      date_mode: view.sent_date_mode ?? view.date_mode,
     }, installDay, view));
   }
 
@@ -1043,6 +1072,7 @@ export function dispatchArrival(
       held_by_payment: false,
       material_stage_reply: null,
       skips_ready: false,
+      date_mode: null,
     }, installDay));
   }
 
@@ -1054,6 +1084,14 @@ export function dispatchArrival(
   const toPay = entries.filter((e) => e.payment?.to_pay === true);
   const names = (list: DispatchArrivalOrder[]) =>
     list.map((e) => e.supplier_name || "a supplier");
+  const earliest = installDay ? null : dispatchEarliestInstall({
+    today: input.today,
+    orders: entries.map((e) => ({
+      open: e.material_stage !== "delivered",
+      date: e.delivery_date,
+      confirmed: e.date_confirmed,
+    })),
+  });
   return {
     today: input.today,
     install_day: installDay,
@@ -1065,6 +1103,7 @@ export function dispatchArrival(
       late: entries.filter((e) =>
         e.flag === "no_date" || e.flag === "after_install"
       ).length,
+      asap_waiting: entries.filter((e) => e.flag === "asap").length,
       open: open.length,
       on_us: onUs.length,
       extra_open: open.filter((e) => e.extra).length,
@@ -1082,8 +1121,34 @@ export function dispatchArrival(
       entries.every((e) =>
         e.date_confirmed && e.flag !== "after_install"
       ),
-    waiting_on_us: onUs.map((e) => e.todo).filter((t): t is string => !!t),
+    waiting_on_us: dispatchWaitingOnUs(
+      onUs.map((e) => e.todo).filter((t): t is string => !!t),
+      earliest,
+    ),
+    earliest_install: earliest,
   };
+}
+
+// The orders' next steps waiting on us. With an earliest install day known,
+// every "Book the install and tell the client" becomes a single line, in the
+// place of the first one, naming the day, for example "All materials by
+// Wed 4/11. Book the install from Thu 5/11 and tell the client".
+function dispatchWaitingOnUs(
+  todos: string[],
+  earliest: DispatchEarliestInstall | null,
+): string[] {
+  if (!earliest || !todos.includes(DISPATCH_BOOK_INSTALL_TODO)) return todos;
+  const by = earliest.after_day
+    ? `All materials by ${dispatchShortDay(earliest.after_day)}.`
+    : "All materials are in.";
+  const line =
+    `${by} Book the install from ${dispatchShortDay(earliest.day)} and tell the client`;
+  const out: string[] = [];
+  for (const todo of todos) {
+    if (todo !== DISPATCH_BOOK_INSTALL_TODO) out.push(todo);
+    else if (!out.includes(line)) out.push(line);
+  }
+  return out;
 }
 
 // ── One board row ───────────────────────────────────────────────────────────

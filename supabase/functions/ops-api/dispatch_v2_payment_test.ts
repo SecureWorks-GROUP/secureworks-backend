@@ -22,11 +22,18 @@ import {
   dispatchV2TermsFor,
 } from "./dispatch_v2_payment.ts";
 import {
+  dispatchV2BuildEmail,
+  dispatchV2DateModeOf,
+  dispatchV2DateModeParam,
+  dispatchV2EmptyDetailLines,
+} from "./dispatch_v2_emails.ts";
+import {
   dispatchMaterialStageLabelFor,
   dispatchMaterialStageOf,
   dispatchMaterialTodo,
   dispatchMaterialWaitingOn,
   dispatchShortDay,
+  dispatchV2BoxDateMode,
   dispatchV2BoxStage,
 } from "./dispatch_v2_material_stage.ts";
 import {
@@ -38,6 +45,7 @@ import { postgrestDispatchRepliesSources } from "./dispatch_v2_replies_sources.t
 import {
   DISPATCH_V2_MARK_PAID_ACTION,
   DISPATCH_V2_PAYMENT_ACTIONS,
+  DISPATCH_V2_SET_DATE_MODE_ACTION,
   DISPATCH_V2_SET_PAY_ON_ACTION,
   DISPATCH_V2_UNDO_PAID_ACTION,
   type DispatchV2PaymentContext,
@@ -140,6 +148,9 @@ const BOX_COLUMNS = new Set([
   "pay_on_set_by",
   "pay_on_set_by_email",
   "payment_reopened_at",
+  "order_date_mode",
+  "order_date_mode_set_at",
+  "order_date_mode_set_by_email",
 ]);
 
 // The migrations' checks on the box, as Postgres would keep them.
@@ -188,6 +199,9 @@ function box(
     pay_on_set_by: null,
     pay_on_set_by_email: null,
     payment_reopened_at: null,
+    order_date_mode: null,
+    order_date_mode_set_at: null,
+    order_date_mode_set_by_email: null,
     ...extra,
   };
 }
@@ -899,8 +913,15 @@ Deno.test("paid: Undo paid needs the stamp it undoes, takes it off and logs it",
   assertEquals(writes.length, 4);
 });
 
+// Every press on a supplier box this module runs: the payment step and the
+// date choice (piece C) share one gate.
+const BOX_PRESS_ACTIONS = [
+  ...DISPATCH_V2_PAYMENT_ACTIONS,
+  DISPATCH_V2_SET_DATE_MODE_ACTION,
+];
+
 Deno.test("paid gate: staff only, on no allow-list", () => {
-  for (const action of DISPATCH_V2_PAYMENT_ACTIONS) {
+  for (const action of BOX_PRESS_ACTIONS) {
     const url = new URL(
       `https://example.test/functions/v1/ops-api?action=${action}`,
     );
@@ -947,7 +968,7 @@ Deno.test("paid gate: the routine key is refused, a GET is 405, and a bad id is 
     return Promise.resolve(new Response("{}", { status: 500 }));
   }) as typeof fetch;
   try {
-    for (const action of DISPATCH_V2_PAYMENT_ACTIONS) {
+    for (const action of BOX_PRESS_ACTIONS) {
       const at = `https://example.invalid/ops-api?action=${action}`;
       const body = JSON.stringify({
         box_id: "nope",
@@ -1968,4 +1989,190 @@ Deno.test("pickup: the Arrival line carries the label and skips_ready from the i
   assertEquals(lysaght.material_stage_label, "Picked up");
   assertEquals(lysaght.skips_ready, true);
   assertEquals(orderFor(read.arrival, SUP.stratco).skips_ready, false);
+});
+
+// ── C1: ASAP or Pick a date on each box ─────────────────────────────────────
+
+const ASAP_BODY = "Hi Team, could we please order the following for delivery:\n\nDate: ASAP\nAddress: 1 Test St\n";
+
+Deno.test("asap: the date mode from a body and from an email's Date line", () => {
+  assertEquals(dispatchV2DateModeParam("asap"), "asap");
+  assertEquals(dispatchV2DateModeParam("date"), "date");
+  assertEquals(dispatchV2DateModeParam(undefined), null);
+  assertEquals(dispatchV2DateModeParam(null), null);
+  assertEquals(dispatchV2DateModeParam("soon"), undefined);
+  assertEquals(dispatchV2DateModeOf(ASAP_BODY), "asap");
+  assertEquals(dispatchV2DateModeOf("Hi\r\nDate: asap \r\nAddress: x\r\n"), "asap");
+  assertEquals(dispatchV2DateModeOf("Hi\nDate: 4 November 2026\n"), "date");
+  assertEquals(dispatchV2DateModeOf("Hi\nDate:\n"), "date");
+  assertEquals(dispatchV2DateModeOf("Hi, no date line here"), "date");
+  assertEquals(dispatchV2DateModeOf(null), "date");
+});
+
+Deno.test("asap: the email says Date: ASAP, needs no date and can be sent", () => {
+  const job = {
+    job_number: "SWF-90101",
+    client_name: "Test Person",
+    client_phone: "0400 000 000",
+    site_address: "1 Test St",
+    site_suburb: "Balcatta",
+  };
+  const asap = dispatchV2BuildEmail({
+    job,
+    workType: "fencing",
+    isMainSupplier: false,
+    lines: [{ id: "l1", description: "Post", quantity: 2 }],
+    deliveryDate: null,
+    dateMode: "asap",
+  });
+  assert(asap.body_text.includes("\nDate: ASAP\n"));
+  assert(!asap.missing.includes("date"));
+  assertEquals(dispatchV2EmptyDetailLines(asap.body_text).includes("date"), false);
+  // Pick a date with no date: the Date line is empty, and the send is held.
+  const picked = dispatchV2BuildEmail({
+    job,
+    workType: "fencing",
+    isMainSupplier: false,
+    lines: [{ id: "l1", description: "Post", quantity: 2 }],
+    deliveryDate: null,
+    dateMode: "date",
+  });
+  assert(picked.missing.includes("date"));
+  assert(dispatchV2EmptyDetailLines(picked.body_text).includes("date"));
+});
+
+Deno.test("asap: a box's mode for its next email, and what its sent order asked", () => {
+  const SENT = "2026-10-28T01:00:00.000Z";
+  const BEFORE = "2026-10-27T01:00:00.000Z";
+  const AFTER = "2026-10-28T02:00:00.000Z";
+  const sentAsap = { date_mode: "asap" as const, sent_at: SENT };
+  const sentDate = { date_mode: "date" as const, sent_at: SENT };
+  // Nothing sent: the box's own choice.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "date", boxHasDate: false, newestSent: null }),
+    { mode: "date", derived: false, sent_mode: null },
+  );
+  // Sent ASAP, then the toggle set Pick a date after the send: the next
+  // email is Pick a date; the sent order still says ASAP.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "date", storedSetAt: AFTER, boxHasDate: false, newestSent: sentAsap }),
+    { mode: "date", derived: false, sent_mode: "asap" },
+  );
+  // The other way: sent Pick a date, then ASAP chosen after the send.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "asap", storedSetAt: AFTER, boxHasDate: false, newestSent: sentDate }),
+    { mode: "asap", derived: false, sent_mode: "date" },
+  );
+  // A choice from before the send, nothing under way since: the sent
+  // order's mode carries on.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: "date", storedSetAt: BEFORE, boxHasDate: false, newestSent: sentAsap }),
+    { mode: "asap", derived: false, sent_mode: "asap" },
+  );
+  // ...unless a next order is under way (an open email, or lines changed
+  // since the send): then the box's choice.
+  for (const extra of [{ openEmail: { body_text: "Date: ASAP\n" } }, { hasUnsentChanges: true }]) {
+    assertEquals(
+      dispatchV2BoxDateMode({ stored: "date", storedSetAt: BEFORE, boxHasDate: false, newestSent: sentAsap, ...extra }),
+      { mode: "date", derived: false, sent_mode: "asap" },
+    );
+  }
+  // A NULL choice after a send: the sent order's mode, derived.
+  assertEquals(
+    dispatchV2BoxDateMode({ stored: null, boxHasDate: false, newestSent: sentDate }),
+    { mode: "date", derived: true, sent_mode: "date" },
+  );
+  // A box made before piece C (NULL), nothing sent: date when it or its open
+  // email has a date, else ASAP.
+  const nul = { stored: null, newestSent: null };
+  assertEquals(dispatchV2BoxDateMode({ ...nul, boxHasDate: true }), { mode: "date", derived: true, sent_mode: null });
+  assertEquals(
+    dispatchV2BoxDateMode({ ...nul, boxHasDate: false, openEmail: { delivery_date: "2026-11-05" } }),
+    { mode: "date", derived: true, sent_mode: null },
+  );
+  assertEquals(
+    dispatchV2BoxDateMode({ ...nul, boxHasDate: false, openEmail: { body_text: "Date: 5 November 2026\n" } }),
+    { mode: "date", derived: true, sent_mode: null },
+  );
+  assertEquals(
+    dispatchV2BoxDateMode({ ...nul, boxHasDate: false, openEmail: { body_text: ASAP_BODY } }),
+    { mode: "asap", derived: true, sent_mode: null },
+  );
+  assertEquals(dispatchV2BoxDateMode({ ...nul, boxHasDate: false }), { mode: "asap", derived: true, sent_mode: null });
+});
+
+Deno.test("asap: the Arrival line carries each box's mode; a purchase order has none", () => {
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: null,
+    boxes: [
+      box(BOX.lysaght, SUP.lysaght, "Lysaght"),
+      box(BOX.stratco, SUP.stratco, "Stratco WA", { position: 1, order_date_mode: "date" }),
+    ],
+    sentEmails: [sentEmail(EMAIL.lysaght, SUP.lysaght, { body_text: ASAP_BODY })] as any,
+    orders: [{ id: uuid("p2", 1), source: "other", supplier_name: "Other Co", status: "sent" }],
+  });
+  assertEquals(arrival.orders.map((o) => [o.supplier_name, o.date_mode]), [
+    ["Lysaght", "asap"],
+    ["Stratco WA", "date"],
+    ["Other Co", null],
+  ]);
+});
+
+Deno.test("asap: the date choice press writes the box, logs it, and the same choice writes nothing", async () => {
+  const tables = fixture();
+  const { client, writes } = makeClient(tables);
+  const answer = await press(client, DISPATCH_V2_SET_DATE_MODE_ACTION, {
+    box_id: BOX.stratco,
+    date_mode: "date",
+  });
+  assertEquals([answer.success, answer.unchanged, answer.job_status_changed], [true, false, false]);
+  const row = boxRow(tables, BOX.stratco);
+  assertEquals(
+    [row.order_date_mode, row.order_date_mode_set_at, row.order_date_mode_set_by_email],
+    ["date", NOW, SHAUN.email],
+  );
+  assertEquals(writes.map((w) => `${w.kind}:${w.table}`), [
+    "update:job_material_suppliers",
+    "insert:job_events",
+  ]);
+  assertEquals(tables.job_events[0].event_type, "dispatch_v2_date_mode_set");
+  assertEquals(tables.job_events[0].detail_json, {
+    box_id: BOX.stratco,
+    supplier_id: SUP.stratco,
+    supplier: "Stratco WA",
+    from: null,
+    to: "date",
+    via: "screen",
+    operator_email: SHAUN.email,
+  });
+  // The order emails are never touched.
+  assertEquals(tables.dispatch_supplier_order_emails, fixture().dispatch_supplier_order_emails);
+  const again = await press(client, DISPATCH_V2_SET_DATE_MODE_ACTION, {
+    box_id: BOX.stratco,
+    date_mode: "date",
+  });
+  assertEquals(again.unchanged, true);
+  assertEquals(writes.length, 2);
+});
+
+Deno.test("asap: choosing ASAP keeps a date already on the box; a bad choice is refused", async () => {
+  const tables = fixture();
+  tables.job_material_suppliers = tables.job_material_suppliers.map((b) =>
+    b.id === BOX.lysaght ? confirmedBox({ order_date_mode: "date" }) : b
+  );
+  const { client } = makeClient(tables);
+  await press(client, DISPATCH_V2_SET_DATE_MODE_ACTION, {
+    box_id: BOX.lysaght,
+    date_mode: "asap",
+  });
+  const row = boxRow(tables, BOX.lysaght);
+  assertEquals([row.order_date_mode, row.delivery_date], ["asap", "2026-11-05"]);
+  for (const date_mode of [undefined, "soon", null]) {
+    const r = await refused(client, DISPATCH_V2_SET_DATE_MODE_ACTION, {
+      box_id: BOX.lysaght,
+      date_mode,
+    });
+    assertEquals([r.status, r.code], [400, "invalid_request"]);
+  }
 });

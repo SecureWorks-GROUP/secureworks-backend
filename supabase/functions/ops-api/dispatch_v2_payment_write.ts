@@ -20,9 +20,12 @@
 //     tag. Allowed on any box, on account included, once its order is sent
 //     (409 order_not_sent before). Set to null it comes off, at any time.
 //     Mark paid can still be pressed later; both stamps are kept.
+//   * ASAP or Pick a date (piece C) sets the box's date choice for its next
+//     order email. It never touches a held or sent email (the next Make
+//     email uses it) and never clears a date already on the box.
 //
-// What this touches: one job_material_suppliers row (the paid columns only)
-// and one job_events row (the audit line) per press. Never jobs, suppliers,
+// What this touches: one job_material_suppliers row (the paid, Pay on or date
+// choice columns only) and one job_events row (the audit line) per press. Never jobs, suppliers,
 // purchase_orders, the order emails, the reply tables, Xero, GHL, SMS or any
 // email. job_status_changed is always false.
 //
@@ -49,6 +52,9 @@ export const DISPATCH_V2_PAYMENT_ACTIONS = [
   DISPATCH_V2_UNDO_PAID_ACTION,
   DISPATCH_V2_SET_PAY_ON_ACTION,
 ] as const;
+// ASAP or Pick a date (piece C): the same gate and answer as the presses
+// above, so it is run by runDispatchV2PaymentAction too.
+export const DISPATCH_V2_SET_DATE_MODE_ACTION = "dispatch_v2_set_date_mode";
 
 export type DispatchV2PaymentContext = {
   orgId: string;
@@ -61,7 +67,7 @@ export type DispatchV2PaymentContext = {
 };
 
 const BOX_SELECT =
-  "id, org_id, job_id, supplier_id, supplier_name, material_stage, material_stage_set_at, paid_at, paid_by, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by, pay_on_set_by_email";
+  "id, org_id, job_id, supplier_id, supplier_name, material_stage, material_stage_set_at, paid_at, paid_by, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by, pay_on_set_by_email, order_date_mode, order_date_mode_set_at, order_date_mode_set_by_email";
 const JOB_SELECT =
   "id, org_id, type, status, job_number, ds_ses_family:metadata->>ses_family, ds_makesafe_family:metadata->>makesafe_job_family, ds_repair_stage:metadata->>repair_stage";
 
@@ -270,6 +276,8 @@ export function projectPaymentBox(box: any, entry: any | null) {
     material_stage: entry?.material_stage ?? null,
     material_stage_label: entry?.material_stage_label ?? null,
     payment: entry?.payment ?? null,
+    // ASAP or Pick a date as the board shows it (piece C).
+    date_mode: entry?.date_mode ?? null,
   };
 }
 
@@ -612,6 +620,64 @@ export async function setDispatchV2PayOn(
   });
 }
 
+/** POST {box_id | job_id + supplier_id, date_mode ('asap' | 'date'),
+ * operator_email (ops key)}. Sets the box's date choice for its next order
+ * email. The same choice already stored writes nothing. */
+export async function setDispatchV2DateMode(
+  client: any,
+  body: any,
+  ctx: DispatchV2PaymentContext,
+) {
+  if (!body || typeof body !== "object") badRequest("A JSON body is required");
+  const target = body.date_mode;
+  if (target !== "asap" && target !== "date") {
+    badRequest("date_mode must be asap or date");
+  }
+  const box = await loadBox(client, body, ctx);
+  await loadJob(client, String(box.job_id), ctx);
+  const operator = await resolveOperator(client, body, ctx);
+  if (box.order_date_mode === target) {
+    return await answer(client, box, ctx, { unchanged: true });
+  }
+  const now = ctx.now ? ctx.now() : new Date().toISOString();
+  const updated = await writeBox(
+    client,
+    box,
+    {
+      order_date_mode: target,
+      order_date_mode_set_at: now,
+      order_date_mode_set_by_email: operator.email,
+    },
+    "order_date_mode_set_at",
+    ctx,
+  );
+  if (!updated) {
+    await changedElsewhere(
+      client,
+      box,
+      "date_mode_changed",
+      "This order's date choice was changed somewhere else",
+      ctx,
+    );
+  }
+  const audited = await audit(
+    client,
+    updated,
+    operator,
+    "dispatch_v2_date_mode_set",
+    {
+      box_id: updated.id,
+      supplier_id: updated.supplier_id ?? null,
+      supplier: updated.supplier_name ?? null,
+      from: text(box.order_date_mode),
+      to: target,
+      via: ctx.via,
+      operator_email: operator.email,
+    },
+  );
+  return await answer(client, updated, ctx, { unchanged: false, audited });
+}
+
 export async function runDispatchV2PaymentAction(
   client: any,
   action: string,
@@ -625,6 +691,8 @@ export async function runDispatchV2PaymentAction(
       return await undoDispatchV2Paid(client, body, ctx);
     case DISPATCH_V2_SET_PAY_ON_ACTION:
       return await setDispatchV2PayOn(client, body, ctx);
+    case DISPATCH_V2_SET_DATE_MODE_ACTION:
+      return await setDispatchV2DateMode(client, body, ctx);
     default:
       refuse(400, "unknown_action", `Unknown action: ${action}`);
   }

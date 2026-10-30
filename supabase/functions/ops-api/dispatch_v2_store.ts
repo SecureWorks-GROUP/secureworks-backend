@@ -8,11 +8,13 @@
 //           order email list and its links
 //   writes  job_material_lines, job_material_suppliers, dispatch_material_photos,
 //           dispatch_supplier_order_emails, the private bucket
-//           dispatch-material-photos
+//           dispatch-material-photos, and one job_events row (the audit
+//           line, dispatch_v2_date_mode_set) when Make email changes a box's
+//           ASAP or Pick a date choice (piece C)
 //   sends   one email per real press of Send now (or Send test), through the
 //           injected sender (production: send-outlook-email, from admin@).
-// Never jobs, suppliers.email, purchase_orders, Xero, business_events,
-// job_events, GHL or any SMS.
+// Never jobs, suppliers.email, purchase_orders, Xero, business_events, GHL or
+// any SMS, and no other job_events row.
 //
 // v2 has no purchase orders. The v1 actions (dispatch_materials_*,
 // dispatch_order_*) are left as they were; the v2 screen calls these instead.
@@ -49,6 +51,8 @@ import {
   DISPATCH_V2_TEST_TO,
   dispatchV2BodyHtml,
   dispatchV2BuildEmail,
+  type DispatchV2DateMode,
+  dispatchV2DateModeParam,
   dispatchV2FulfilmentOf,
   dispatchV2FulfilmentParam,
   dispatchV2BytesToBase64,
@@ -73,7 +77,10 @@ import {
   dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
-import { dispatchV2BoxStage } from "./dispatch_v2_material_stage.ts";
+import {
+  dispatchV2BoxDateMode,
+  dispatchV2BoxStage,
+} from "./dispatch_v2_material_stage.ts";
 import { dispatchV2PaymentTerms } from "./dispatch_v2_payment.ts";
 import {
   loadDispatchInstall,
@@ -159,7 +166,7 @@ export const DISPATCH_V2_ACTIONS = [
 const LINE_SELECT =
   "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at";
 const BOX_SELECT =
-  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at";
+  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at, order_date_mode, order_date_mode_set_at, order_date_mode_set_by_email";
 const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
@@ -670,6 +677,7 @@ export async function readDispatchV2Materials(
         replies: replies.error ? [] : replies.data,
         installDay: install?.day ?? null,
         installFirstDay: install?.first_day ?? null,
+        openEmail: open ?? null,
       });
       return {
         supplier_id: id,
@@ -700,6 +708,17 @@ export async function readDispatchV2Materials(
         material_stage: boxMaterialStage(box, view),
         // The box's payment step (contract section 3c).
         payment: view.payment,
+        // ASAP or Pick a date (piece C). mode: for the box's next order
+        // email (the toggle). sent_mode: what the newest sent order asked
+        // (null when nothing was sent). derived: the box's own choice is
+        // NULL (made before piece C) and the mode was worked out.
+        date_mode: {
+          mode: view.date_mode,
+          sent_mode: view.sent_date_mode,
+          set_at: box.order_date_mode_set_at ?? null,
+          set_by_email: box.order_date_mode_set_by_email ?? null,
+          derived: view.date_mode_derived,
+        },
       };
     }),
   };
@@ -1796,6 +1815,15 @@ function noApprovedEmail(): never {
 // returned as it is (rebuild: true rebuilds it from the lines, losing edits).
 // fulfilment: "delivery" (the default) or "pickup" (no Address line). A
 // rebuild without one keeps the open email's, read from its opening line.
+// date_mode (piece C):
+//   - "asap" writes "Date: ASAP" and needs no delivery_date; "date" works as
+//     before. Either is saved on the box once the email has landed, with an
+//     audit line, when it changes the box's choice.
+//   - null: the box's own choice for its next email ("date" when a
+//     delivery_date is given). Nothing is saved.
+//   - left out (a screen from before piece C): exactly as before, the Date
+//     line is the delivery_date given, blank without one (the send is then
+//     refused). The box's choice is neither used nor saved.
 export async function makeDispatchV2Email(
   client: any,
   body: any,
@@ -1811,6 +1839,14 @@ export async function makeDispatchV2Email(
   const asked = dispatchV2FulfilmentParam(body?.fulfilment);
   if (asked === undefined) {
     badRequest('fulfilment must be "delivery" or "pickup"');
+  }
+  const modeSent = !!body && typeof body === "object" && "date_mode" in body;
+  const askedMode = dispatchV2DateModeParam(body?.date_mode);
+  if (askedMode === undefined) {
+    badRequest('date_mode must be "asap" or "date"');
+  }
+  if (askedMode === "asap" && deliveryDate !== null) {
+    badRequest("An ASAP order has no delivery_date: leave it out, or choose Pick a date");
   }
   const rebuild = body?.rebuild === true;
   const info = await boxContext(client, job, supplierId, ctx);
@@ -1840,6 +1876,20 @@ export async function makeDispatchV2Email(
     };
   }
 
+  // The Date line: the choice asked for; null asks for the box's own
+  // choice; left out keeps the behaviour from before piece C ("date").
+  let dateMode: DispatchV2DateMode = "date";
+  if (askedMode) {
+    dateMode = askedMode;
+  } else if (modeSent && deliveryDate === null) {
+    dateMode = dispatchV2BoxDateMode({
+      stored: info.box.order_date_mode,
+      storedSetAt: info.box.order_date_mode_set_at,
+      boxHasDate: !!info.box.delivery_date,
+      newestSent: null,
+      openEmail: open,
+    }).mode;
+  }
   const built = dispatchV2BuildEmail({
     job,
     workType: job.work_type,
@@ -1847,6 +1897,7 @@ export async function makeDispatchV2Email(
     lines: info.orderable,
     deliveryDate,
     fulfilment: asked ?? (open ? dispatchV2FulfilmentOf(open.body_text) : null),
+    dateMode,
   });
   const to = (info.approved.to_emails || []).map((e: string) =>
     String(e).toLowerCase()
@@ -1899,6 +1950,8 @@ export async function makeDispatchV2Email(
       rebuilt: true,
       email: projectDispatchV2Email(row, nowMs),
       missing: built.missing,
+      date_mode: dateMode,
+      date_mode_saved: await saveBoxDateMode(client, job.id, info.box, askedMode, ctx),
       team_cc_open_question: team.open_question,
     };
   }
@@ -1938,8 +1991,59 @@ export async function makeDispatchV2Email(
     success: true,
     email: projectDispatchV2Email(inserted, nowMs),
     missing: built.missing,
+    date_mode: dateMode,
+    date_mode_saved: await saveBoxDateMode(client, job.id, info.box, askedMode, ctx),
     team_cc_open_question: team.open_question,
   };
+}
+
+// Save the date choice a Make email was asked for on its box (piece C), so
+// the panel and the next email show it. Called only once the email has
+// landed. Answers:
+//   null    nothing to save (no choice asked for, or the box already says so)
+//   true    saved, with its audit line (dispatch_v2_date_mode_set)
+//   false   the box could not be written: the email stands, the box keeps
+//           its old choice, and the screen can set it with the toggle
+// A failed audit line is logged; the choice stays saved.
+async function saveBoxDateMode(
+  client: any,
+  jobId: string,
+  box: any,
+  mode: DispatchV2DateMode | null,
+  ctx: DispatchV2Context,
+): Promise<boolean | null> {
+  if (!mode || box.order_date_mode === mode) return null;
+  const { data, error } = await client.from("job_material_suppliers")
+    .update({
+      order_date_mode: mode,
+      order_date_mode_set_at: nowIso(ctx),
+      order_date_mode_set_by_email: ctx.actor.email,
+    })
+    .eq("id", box.id)
+    .eq("org_id", ctx.orgId)
+    .select("id");
+  if (error || !(Array.isArray(data) ? data[0] : data)) {
+    console.error("[dispatch_v2_store] box date choice write failed:", error);
+    return false;
+  }
+  const { error: auditError } = await client.from("job_events").insert({
+    job_id: jobId,
+    user_id: ctx.actor.userId,
+    event_type: "dispatch_v2_date_mode_set",
+    detail_json: {
+      box_id: box.id,
+      supplier_id: box.supplier_id ?? null,
+      supplier: box.supplier_name ?? null,
+      from: box.order_date_mode ?? null,
+      to: mode,
+      via: "make_email",
+      operator_email: ctx.actor.email,
+    },
+  });
+  if (auditError) {
+    console.error("[dispatch_v2_store] job_events insert failed:", auditError);
+  }
+  return true;
 }
 
 // Save edits to a held email: To, CC, subject, body and which photos go.

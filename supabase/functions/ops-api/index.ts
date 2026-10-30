@@ -7593,7 +7593,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // one supplier box and one job_events row: never a job stage or status.
       case 'dispatch_v2_mark_paid':
       case 'dispatch_v2_undo_paid':
-      case 'dispatch_v2_set_pay_on': {
+      case 'dispatch_v2_set_pay_on':
+      // ASAP or Pick a date on a supplier box (piece C): the same gate.
+      case 'dispatch_v2_set_date_mode': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
         }
