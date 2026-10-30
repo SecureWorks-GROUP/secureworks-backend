@@ -108,6 +108,38 @@ for 24 hours (`failed_backoff_hours`) after a request for it closed `failed`;
 and rewrites a story written without the book only while fewer than 10
 requests are open.
 
+## Where each bill counts: story-bill-outcomes-v1 (`20261029170200`)
+
+`context_job_story_bill_outcomes(job)` is the card's `bill_outcomes` block: for
+each supplier bill placed on the job, where Finance's engine counts its cost,
+read through `context_job_bill_outcomes` (the H7 read) only, never re-derived.
+Per bill it carries `where_counted`, `reason` (CFO's code for this job;
+`held_reason` when held), `bill_state`, `mirror_bill`, `held_reason`,
+`other_jobs` (`job_number`, `counts`) and `outcome`: the where_counted value, or
+`unknown: <reason>` / `held: <reason>`. When where a bill counts is unknown the
+reason says why: the placement's own code when it is unknown here, else
+`bill_state_unknown`, `not_placed_here` or `where_counted_unknown`. It applies
+the ops-api reader's rules: another shape is `invalid_shape`, another contract
+version `contract_mismatch`, any number or money-named key `amount_present`, a
+failed read `read_failed`; each is a block with `status: refused`,
+`outcome: unknown: <code>` and no bills, never "no bills". It carries no
+amount. Bills are in invoice number then bill id order, C collation.
+
+The writer input, the staff read and the request attach it beside `book`, only
+when the job has a placed bill; a job with none has no key and hashes exactly
+as before. `context_job_story_card_hash` (story-digest-v1) is unchanged. For a
+card with the block, `context_job_story_full_hash` is
+story-digest-v1+story-book-v1+story-bills-v1 and folds in the block's `digest`
+(the bills less invoice number, supplier, Xero status and outcome words, so a
+payment never moves it). So the first apply reads every saved story on a job
+with a placed bill stale once. The sweep is unchanged: a stale read queues
+nothing, and the story is rewritten at its next wake (a bill placed or changed
+moves the money signature) or on a Rewrite press. No model call is made while
+`context_job_story_text_v1` is off. The staff read compares a card only when
+the job has a story: with none its status is `none` and `card_hash` null, and
+neither the card's bill block nor its hash is worked out, so a job page runs
+the bill read once (in the overview), not twice.
+
 ## The queue
 
 `context_job_story_requests`: at most one open request a job.
