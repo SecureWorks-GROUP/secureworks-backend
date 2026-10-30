@@ -554,11 +554,15 @@ export function readScopeMaterialRecord(scope: unknown): PatioScoperRecordRead {
   }[] = [];
   const seenIds = new Set<string>();
   for (const line of record.lines) {
-    if (!line || typeof line !== "object") continue;
+    if (!line || typeof line !== "object") {
+      return { kind: "unreadable", reason: "source_line_invalid" };
+    }
     const description = typeof line.description === "string"
       ? line.description.trim()
       : "";
-    if (!description) continue;
+    if (!description) {
+      return { kind: "unreadable", reason: "source_line_description_missing" };
+    }
     const id = line.id;
     if (
       typeof id !== "string" || !id || id !== id.trim() ||

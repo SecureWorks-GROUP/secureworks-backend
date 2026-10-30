@@ -2091,7 +2091,6 @@ const PATIO_V2_SCOPE = {
       unit: "kit",
       colour: null,
     },
-    { id: "p-3", description: "  ", quantity: 4, unit: "ea" },
   ],
   expected: { materials: null, labour: 1200, sale: null },
   draft: { width: 6000 },
@@ -3162,6 +3161,22 @@ Deno.test("material suggestion pins accepted A after refreeze B and refuses miss
       );
     }
   }
+});
+
+Deno.test("sealed manifest with an unreadable item refuses instead of silently dropping its obligation", () => {
+  const broken = {
+    ...PATIO_V2_SCOPE,
+    lines: [...PATIO_V2_SCOPE.lines, {
+      id: "extra-required",
+      description: " ",
+      quantity: 4,
+      unit: "ea",
+    }],
+  };
+  assertEquals(readPatioScoperRecord(broken), {
+    kind: "unreadable",
+    reason: "source_line_description_missing",
+  });
 });
 
 Deno.test("current fence producer: version 1.0 manifest retains exact IDs without patio supported or revision fields", () => {
