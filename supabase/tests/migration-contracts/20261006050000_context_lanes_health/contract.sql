@@ -416,6 +416,11 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- Later CTX-T5 classification owns these two bodies; restore the original
+-- inside this transaction solely for the historical exact-body assertions.
+BEGIN;
+\ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
+
 -- 5. Shape and access: every replaced function service-role only, with a
 -- fixed search_path, SECURITY DEFINER where it was; the bodies pinned.
 DO $$
@@ -442,8 +447,11 @@ BEGIN
  THEN RAISE EXCEPTION 'lanes touched context_email_capture_status()'; END IF;
 END $$;
 
+ROLLBACK;
+
 -- 6. Re-apply is a no-op: same bodies, same ledger, no row touched.
 BEGIN;
+\ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 INSERT INTO public.context_email_attachments(provider_message_id,attachment_key,status,error_code)
  VALUES('email:lanes-2@x.example',repeat('d',64),'failed','graph_403');
 \ir ../../../migrations/20261006050000_context_lanes_health.sql
