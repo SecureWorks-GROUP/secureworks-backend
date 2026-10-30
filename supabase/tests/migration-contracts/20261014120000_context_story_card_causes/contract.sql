@@ -89,6 +89,10 @@ SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NUL
 \if :held_notes_live
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 \endif
+SELECT to_regprocedure('public.context_ledger_reader_events(uuid[])') IS NOT NULL AS reader_person_placement_live \gset
+\if :reader_person_placement_live
+\ir ../../../rollbacks/20261030154917_context_ledger_person_placement_down.sql
+\endif
 CREATE TEMP TABLE sc_md5 AS SELECT oid,md5(prosrc) h FROM pg_proc WHERE proname IN
  ('context_ledger_packet','context_job_story','context_job_story_held','context_job_record_value','context_job_quote_email_sends','context_job_story_payment_terms',
   'context_ledger_evidence_rows','context_ledger_cite','context_ledger_held_rows','context_story_message_text');

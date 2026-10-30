@@ -271,6 +271,11 @@ SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NUL
 \if :held_notes_live
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 \endif
+-- Reverse the later reader projection before the historical reader bodies, within this test's transaction.
+SELECT to_regprocedure('public.context_ledger_reader_events(uuid[])') IS NOT NULL AS reader_person_placement_live \gset
+\if :reader_person_placement_live
+\ir ../../../rollbacks/20261030154917_context_ledger_person_placement_down.sql
+\endif
 \ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
 \endif
 \ir ../../../rollbacks/20261012100000_context_held_messages_down.sql

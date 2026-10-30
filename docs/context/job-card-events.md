@@ -93,17 +93,40 @@ conversation section as failed in `diagnostics.sourceStatus`, with no purported
 current rows from that section. Other operational sections remain available.
 The standalone conversation endpoint's explicit partial-read contract is unchanged.
 
-## What it does not change
+## Reader candidate and its activation boundary
 
-The following still read `business_events.job_id`:
-- the reader's evidence (`context_ledger_evidence_rows`) and citation check;
-- the quote value;
-- the old-inbox mail rule;
-- the off-job and unplaced meta reads, so a split row may still be listed there;
-- the call transcript pairing.
+Migration `20261030154917_context_ledger_person_placement` adds a read-only
+projection behind `context_ledger_person_placement_v1`. Missing, disabled or
+unreadable settings preserve the prior reader. The migration does not enable
+the switch and refuses a pre-existing enabled setting or conflicting helpers.
 
-These reader/citation and remaining placement consumers keep CTX-T24 open.
-Local dossier tests are not deployed reader correctness or independent acceptance.
+When explicitly enabled after the required review and acceptance work:
+
+- Reader evidence and citations use the same hash-bound person decisions as
+  the card. Split evidence is available on each selected job; moved/unrelated
+  evidence cannot be cited on the old job. Source rows are never rewritten.
+- The decision time contributes to evidence landing time; the event time stays
+  its original time. As before, placement is current, not reconstructed as of a
+  historical date. Evidence cannot appear before its landing time.
+- Customer stamps do not travel to a different customer. Without a matching
+  destination CRM contact, customer roles become unknown in the projection;
+  known staff/supplier roles remain. A placement decision supplies placement
+  certainty, not financial allocation, customer identity or settlement proof.
+- Call/transcript pairing uses current placement. Retraction, duplicate,
+  writer, source-content, excerpt and closure checks remain in force.
+- Placed/unrelated person decisions remove rows from held candidates. A legacy
+  inbox match cannot resurrect a decided canonical copy on another job; all
+  existing source-pointer, provider-key, payload-pointer and sender/time copy
+  routes are checked.
+
+**CTX-T24 remains open.** The scheduler still uses original placement in its
+cheap evidence count: the new local reader sees four destination rows while
+the judge returns `no_evidence`. Both affected jobs' invalidation, preservation
+of obligations when their source moves, remaining off-job metadata and consistent
+destination identity across staff consumers still require integrated proof.
+Do not activate this candidate merely because its admission checks pass.
+Original independent reader grading, authorized rollout and real staff
+acceptance remain required. Quote values and money allocation are unchanged.
 
 Money is unchanged, as Finance's allocation contract (21 Oct 2026, copy at
 `/mnt/project-files/cio/cfo-allocation-20261021/`, sha256 `5f5bbd4b…7e1d`)

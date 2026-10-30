@@ -157,6 +157,7 @@ BEGIN
    PERFORM pg_temp.lg_assert(obj_description(to_regprocedure(f), 'pg_proc') LIKE 'Context ledger store%', f || ' comment is not the owner marker');
   END IF;
  END LOOP;
+ -- CTX-T24 adds service-only invoker projections/flag checks; do not grant them definer privileges.
  -- Store functions run as definer with a fixed path; per-row helpers carry no SET (they inline).
  -- (widened by story safety, 20261006040000: its two helpers of the legacy-mail rule,
  -- context_ledger_mail_rule_since and context_ledger_mail_copies, are plain SQL with no SET
@@ -167,7 +168,8 @@ BEGIN
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
     'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes',
-    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_ledger_row_unread') THEN
+    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_ledger_row_unread',
+    'context_ledger_person_placement_enabled', 'context_ledger_event_on_job', 'context_ledger_reader_events', 'context_ledger_mail_copy_blocks') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
