@@ -108,7 +108,7 @@ GRANT EXECUTE ON FUNCTION public.group_work_order_share_pay(uuid, numeric) TO se
 ALTER TABLE public.group_work_order_events DROP CONSTRAINT group_work_order_events_action_check;
 ALTER TABLE public.group_work_order_events ADD CONSTRAINT group_work_order_events_action_check
   CHECK (action IN ('freeze', 'unfreeze', 'revoke_signoff', 'void_group', 'rekey', 'remove_participant',
-    'approve_budget', 'amend_pay_basis', 'release'));
+    'approve_budget', 'amend_pay_basis', 'release', 'office_issue_invoices'));
 
 CREATE TABLE IF NOT EXISTS public.group_work_order_releases (
   group_id uuid PRIMARY KEY REFERENCES public.group_work_orders(id) ON DELETE RESTRICT,
@@ -599,3 +599,97 @@ BEGIN
 END; $$;
 REVOKE ALL ON FUNCTION public.amend_group_work_order_pay_basis(uuid, text, uuid, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.amend_group_work_order_pay_basis(uuid, text, uuid, text) TO service_role;
+
+-- ── 8. the office issues the crew's share invoices for them ─────────────────
+-- Owner, 30 Oct 2026: "fix it up on this side for all of them". On a full
+-- employer super group the office raises each crew member's share invoice at
+-- the current price instead of asking the crew to resubmit. A share that
+-- already has a live invoice is left alone, so running it twice issues nothing.
+-- Line details are copied from the group's own earlier share lines.
+
+CREATE OR REPLACE FUNCTION public.office_issue_group_share_invoices(
+  p_group_id uuid, p_owner_user_id uuid, p_reason text
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  g record; s record; src record;
+  v_reason text := btrim(coalesce(p_reason, ''));
+  v_issued jsonb := '[]'::jsonb; v_kept jsonb := '[]'::jsonb;
+  v_pay jsonb; v_invoice_ex numeric; v_super numeric; v_gst_on boolean; v_gst numeric;
+  v_name text; v_initials text; v_seq int; v_number text; v_invoice_id uuid;
+BEGIN
+  IF p_owner_user_id IS NULL OR NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = p_owner_user_id) THEN
+    RAISE EXCEPTION 'group_office_issue_owner_required' USING ERRCODE = '22023';
+  END IF;
+  IF length(v_reason) < 10 THEN RAISE EXCEPTION 'group_office_issue_reason_required' USING ERRCODE = '22023'; END IF;
+  SELECT * INTO g FROM public.group_work_orders WHERE id = p_group_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'group_work_order_not_found' USING ERRCODE = 'P0002'; END IF;
+  PERFORM public.group_work_order_lock_job(g.job_id);
+  SELECT * INTO g FROM public.group_work_orders WHERE id = p_group_id FOR UPDATE;
+  IF g.status = 'void' THEN RAISE EXCEPTION 'group_work_order_void' USING ERRCODE = '23514'; END IF;
+  IF EXISTS (SELECT 1 FROM public.group_work_order_releases WHERE group_id = g.id) THEN
+    RAISE EXCEPTION 'group_released' USING ERRCODE = '23514';
+  END IF;
+  IF g.pay_basis IS DISTINCT FROM 'all_in_12_v2' THEN
+    RAISE EXCEPTION 'group_office_issue_needs_employer_super' USING ERRCODE = '23514';
+  END IF;
+
+  SELECT l.job_id, l.job_number, l.client_name, l.site_address, l.division, l.job_work_order_id, i.org_id
+    INTO src
+  FROM public.trade_invoice_lines l
+  JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+  JOIN public.group_work_order_shares sh ON sh.id = l.group_share_id
+  WHERE sh.group_id = g.id
+  ORDER BY l.created_at DESC
+  LIMIT 1;
+  IF NOT FOUND THEN RAISE EXCEPTION 'group_office_issue_no_source_line' USING ERRCODE = '23514'; END IF;
+
+  FOR s IN SELECT * FROM public.group_work_order_shares WHERE group_id = g.id AND share_ex > 0 ORDER BY user_id LOOP
+    IF EXISTS (
+      SELECT 1 FROM public.trade_invoice_lines l JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+      WHERE l.group_share_id = s.id AND i.status NOT IN ('ops-reject', 'draft')
+    ) THEN
+      v_kept := v_kept || jsonb_build_object('user_id', s.user_id);
+      CONTINUE;
+    END IF;
+    v_pay := public.group_work_order_share_pay(g.id, s.share_ex);
+    v_invoice_ex := (v_pay->>'invoice_ex')::numeric;
+    v_super := (v_pay->>'super_amount')::numeric;
+    -- GST follows the trade's own most recent submitted invoice.
+    SELECT coalesce((SELECT i.gst_on FROM public.trade_invoices i
+                     WHERE i.user_id = s.user_id AND i.status <> 'draft'
+                     ORDER BY i.created_at DESC LIMIT 1), false) INTO v_gst_on;
+    v_gst := CASE WHEN v_gst_on THEN round(v_invoice_ex * 0.1, 2) ELSE 0 END;
+    -- Same number shape as the trade app: SW-INV-{initials}-{YYMMDD}-{seq}.
+    SELECT coalesce(u.name, 'XX') INTO v_name FROM public.users u WHERE u.id = s.user_id;
+    v_initials := left(array_to_string(ARRAY(
+      SELECT upper(left(w, 1)) FROM unnest(string_to_array(coalesce(v_name, 'XX'), ' ')) AS w), ''), 3);
+    SELECT count(*) + 1 INTO v_seq FROM public.trade_invoices WHERE user_id = s.user_id;
+    v_number := 'SW-INV-' || v_initials || '-' || to_char(now() AT TIME ZONE 'UTC', 'YYMMDD') || '-' || lpad(v_seq::text, 3, '0');
+
+    INSERT INTO public.trade_invoices (org_id, user_id, total_hours, total_breaks_minutes, subtotal_ex, gst, total_inc,
+      gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, invoice_source, invoice_number,
+      submitted_at, status, query_note)
+    VALUES (src.org_id, s.user_id, 0, 0, v_invoice_ex, v_gst, v_invoice_ex + v_gst,
+      v_gst_on, 0.12, v_super, v_invoice_ex, v_invoice_ex, 'employer_12_v2', 'hourly', v_number,
+      now(), 'pending_acknowledgment', left('Issued by the office for the crew: ' || v_reason, 2000))
+    RETURNING id INTO v_invoice_id;
+    INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, client_name, site_address, division,
+      job_work_order_id, line_type, description, quantity, unit, unit_rate, line_total_ex, total_hours, query_note,
+      group_share_id, office_review_status, acknowledgment_status)
+    VALUES (v_invoice_id, src.job_id, src.job_number, src.client_name, src.site_address, src.division,
+      src.job_work_order_id, 'group share', 'Group work order share for ' || coalesce(src.job_number, 'this job'), 1, 'ea',
+      v_invoice_ex, v_invoice_ex, 0,
+      'Group work order share. Server-priced from the sealed job work order. Not hours times rate.',
+      s.id, 'awaiting', 'pending');
+    v_issued := v_issued || jsonb_build_object('user_id', s.user_id, 'invoice_id', v_invoice_id,
+      'invoice_number', v_number, 'invoice_ex', v_invoice_ex, 'super_amount', v_super, 'gst', v_gst);
+  END LOOP;
+
+  INSERT INTO public.group_work_order_events (group_id, job_id, action, actor_user_id, detail)
+  VALUES (g.id, g.job_id, 'office_issue_invoices', p_owner_user_id,
+    jsonb_build_object('reason', v_reason, 'issued', v_issued, 'kept', v_kept));
+  RETURN jsonb_build_object('group_id', g.id, 'issued', v_issued, 'kept', v_kept,
+    'release', public.group_work_order_release_state(g.id));
+END; $$;
+REVOKE ALL ON FUNCTION public.office_issue_group_share_invoices(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.office_issue_group_share_invoices(uuid, uuid, text) TO service_role;

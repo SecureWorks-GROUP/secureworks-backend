@@ -15,7 +15,7 @@ DECLARE
   job uuid := 'f0310000-0000-4000-8000-000000000101';
   wo uuid := 'f0310000-0000-4000-8000-000000000301';
   grp uuid := 'f0310000-0000-4000-8000-000000000201';
-  r jsonb; v_state jsonb; v_claim jsonb; v_amend jsonb;
+  r jsonb; v_state jsonb; v_claim jsonb; v_amend jsonb; v_issue jsonb;
   inv_h uuid; inv_i uuid; inv_h2 uuid; inv_i2 uuid; inv_r2 uuid;
   refused boolean;
   shares numeric[];
@@ -98,6 +98,41 @@ BEGIN
   END IF;
   IF (SELECT count(*) FROM public.trade_invoices WHERE id IN (inv_h,inv_i)) <> 2 THEN
     RAISE EXCEPTION 'amendment deleted an original invoice';
+  END IF;
+
+  -- 6b. The office can issue every crew share for them instead of a resubmit
+  -- (owner, 30 Oct 2026). Checked here, then rolled back so step 7 onwards
+  -- still proves the crew path.
+  refused := false;
+  BEGIN PERFORM public.office_issue_group_share_invoices(grp, office, 'short');
+  EXCEPTION WHEN invalid_parameter_value THEN refused := true; END;
+  IF NOT refused THEN RAISE EXCEPTION 'office issue accepted without a reason'; END IF;
+  BEGIN
+    v_issue := public.office_issue_group_share_invoices(grp, office, 'Office issued the 12% shares for the crew');
+    IF jsonb_array_length(v_issue->'issued') <> 3
+       OR (SELECT count(*) FROM public.trade_invoices i
+           JOIN public.trade_invoice_lines l ON l.trade_invoice_id = i.id
+           JOIN public.group_work_order_shares sh ON sh.id = l.group_share_id
+           WHERE sh.group_id = grp AND i.status = 'pending_acknowledgment' AND i.super_basis = 'employer_12_v2'
+             AND i.net_pay = i.gross_earned AND l.line_total_ex = i.gross_earned) <> 3
+       OR (SELECT sum((x->>'invoice_ex')::numeric) FROM jsonb_array_elements(v_issue->'issued') x) <> 813.89 + 895.29 + 719.39
+       OR (SELECT sum((x->>'super_amount')::numeric) FROM jsonb_array_elements(v_issue->'issued') x) <> 97.67 + 107.43 + 86.33
+       OR NOT EXISTS (SELECT 1 FROM public.group_work_order_events WHERE group_id = grp AND action = 'office_issue_invoices' AND actor_user_id = office) THEN
+      RAISE EXCEPTION 'office did not issue the three 12%% shares: %', v_issue;
+    END IF;
+    IF jsonb_array_length(public.office_issue_group_share_invoices(grp, office, 'Office issued the 12% shares again')->'issued') <> 0 THEN
+      RAISE EXCEPTION 'a second office issue made more invoices';
+    END IF;
+    v_claim := public.claim_group_work_order_release(grp, 'user:'||office, office);
+    IF NOT (v_claim->>'claimed')::boolean OR (v_claim->'state'->>'allocated_ex')::numeric <> 2720 THEN
+      RAISE EXCEPTION 'office-issued crew was not released together: %', v_claim;
+    END IF;
+    RAISE EXCEPTION 'office_issue_proved';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'office_issue_proved' THEN RAISE; END IF;
+  END;
+  IF EXISTS (SELECT 1 FROM public.group_work_order_releases WHERE group_id = grp) THEN
+    RAISE EXCEPTION 'office issue proof was not rolled back';
   END IF;
 
   -- 7. A share on the new basis needs an employer-super invoice.
