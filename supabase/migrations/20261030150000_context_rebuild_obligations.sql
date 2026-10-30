@@ -51,7 +51,7 @@ BEGIN
    INSERT INTO public.context_ledger_transitions
     (item_id,generation_id,job_id,from_status,to_status,by,evidence,reason)
    VALUES (v_id,g.id,r.job_id,NULL,s.status,'rule:rebuild_seed',s.opened_by,
-     'Unresolved snapshot from generation ' || prior || '; not a new verification');
+     'Preserved from the previous reading without a new decision');
    seed_count := seed_count + 1;
   END LOOP;
   UPDATE public.context_ledger_generations SET checks = checks || jsonb_build_object('rebuild_seed',
