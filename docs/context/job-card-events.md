@@ -83,6 +83,16 @@ personDecisions: true })`:
 - A failed decisions read still lists the job's own rows and names the failure
   in `person_decisions_read_failed`. It is never read as "no decisions".
 
+The dossier's raw `events` section now uses that same person-decision read
+(CTX-T24 consumer slice). Moved and unrelated rows leave the original job;
+split rows appear on each selected job. Raw rows retain `person_placed` decision
+provenance, original source time in `occurred_at`, and load time in `loaded_at`.
+It does not infer a new customer identity or allocate money from a placement.
+If the placement read fails, the dossier reports the affected events or
+conversation section as failed in `diagnostics.sourceStatus`, with no purported
+current rows from that section. Other operational sections remain available.
+The standalone conversation endpoint's explicit partial-read contract is unchanged.
+
 ## What it does not change
 
 The following still read `business_events.job_id`:
@@ -90,9 +100,10 @@ The following still read `business_events.job_id`:
 - the quote value;
 - the old-inbox mail rule;
 - the off-job and unplaced meta reads, so a split row may still be listed there;
-- the call transcript pairing, and the ops-api dossier's own `business_events`
-  read (its conversation section reuses the job conversation, so that part
-  follows decisions).
+- the call transcript pairing.
+
+These reader/citation and remaining placement consumers keep CTX-T24 open.
+Local dossier tests are not deployed reader correctness or independent acceptance.
 
 Money is unchanged, as Finance's allocation contract (21 Oct 2026, copy at
 `/mnt/project-files/cio/cfo-allocation-20261021/`, sha256 `5f5bbd4b…7e1d`)

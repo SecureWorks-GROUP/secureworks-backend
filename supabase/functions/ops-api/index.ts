@@ -19870,12 +19870,16 @@ async function assembleJobDossier(client: any, body: any) {
   // by load time (job_conversation_timeline.ts). Each row's occurred_at is
   // that time; loaded_at is when it was loaded. Message rows carry who sent
   // them and who received them (party roles, B-6).
+  // CTX-T24: use the same current person placement as the conversation and
+  // card. Never fall back to an event's original job when decisions cannot
+  // be read; safeRead reports that section as failed, not known-empty.
   const eventsRead = await safeRead('business_events', async () => {
     const { rows, error } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: `${DOSSIER_EVENT_SELECT}, event_at, channel, direction`,
       limit: eventsLimit,
       since,
+      personDecisions: true,
     })
     if (error) throw new Error(error)
     return rows.map((r: any) => ({ ...dossierEventWithPartyRoles(r), occurred_at: eventSourceTime(r), loaded_at: r.occurred_at ?? null }))
@@ -19889,12 +19893,15 @@ async function assembleJobDossier(client: any, body: any) {
   // dossier still returns only the newest conversationLimit messages.
   const contactWindow = Math.max(conversationLimit, DOSSIER_CONTACT_WINDOW)
   const conversationRead = await safeRead('conversation', async () => {
-    const { messages } = await getJobConversation(client, {
+    const result = await getJobConversation(client, {
       job_id: jobId,
       limit: contactWindow,
       since,
     })
-    return messages || []
+    if ('person_decisions_read_failed' in result && result.person_decisions_read_failed) {
+      throw new Error(result.person_decisions_read_failed)
+    }
+    return result.messages || []
   })
   const conversationWindow = conversationRead.data
   conversationRead.data = conversationWindow.slice(0, conversationLimit)

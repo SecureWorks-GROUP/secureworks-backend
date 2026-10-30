@@ -122,6 +122,13 @@ function fakeClient(tables: Tables) {
   const reads: string[] = [];
   return {
     reads,
+    rpc(fn: string) {
+      return Promise.resolve(
+        fn === "context_job_card_decisions"
+          ? { data: [], error: null }
+          : { data: null, error: { message: "RPC outside fixture" } },
+      );
+    },
     from(table: string) {
       reads.push(table);
       let single = false;

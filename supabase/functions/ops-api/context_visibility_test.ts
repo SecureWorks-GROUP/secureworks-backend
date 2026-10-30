@@ -221,7 +221,9 @@ Deno.test("actual facts endpoint excludes historical rows and discloses bounded 
   assertEquals(result.coverage, "bounded_rows_only");
 });
 Deno.test("actual dossier excludes obsolete facts and their current evidence refs", async () => {
-  const result = await _assembleJobDossierForTest(client(), { job_id: "job" });
+  const result: any = await _assembleJobDossierForTest(client(), {
+    job_id: "job",
+  });
   assertEquals(result.facts, [active]);
   assertEquals(
     result.evidenceRefs.filter((r: any) => r.type === "fact").map((r: any) =>
@@ -246,7 +248,7 @@ Deno.test("view permanent null expiry remains visible, current temporary facts r
   };
   rows.push(future);
   try {
-    const result = await _assembleJobDossierForTest(client(), {
+    const result: any = await _assembleJobDossierForTest(client(), {
       job_id: "job",
     });
     assertEquals(result.facts, [active]);
