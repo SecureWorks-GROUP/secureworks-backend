@@ -97,3 +97,50 @@ canonical story/writer parity and service-only access. A bypassed projection
 must fail the negative contract; unknown preimage and exact rollback are tested.
 Required independent database/money review, authorized rollout, actual lost-note
 recovery, deployed source-to-card lag and reader/staff acceptance remain owed.
+
+## Bounded historical omission recovery (operator candidate, unreleased)
+
+A preservation rebuild alone cannot restore matters already absent from its live
+source generation. `scripts/context-recover-rebuild-items.sql` defines two
+session-local operator helpers, not permanent database APIs. Loading it performs
+no recovery. The operation requires an owned, leased building rebuild, the exact
+retired source generation, expected current live generation, and at most20exact
+item keys with UTC row-MD5 preimages. Only unresolved non-payment model notes are
+eligible. It copies their original identity/content/citations into the building
+generation and leaves the current live reading and all financial rows untouched.
+
+Preparation first invokes the normal preserving packet. Missing/changed source
+rows, invalid or moved opening citations, a later exact decision/supersession,
+a potentially duplicate same-kind obligation or related staff decision refuse
+the entire statement. A closed model payment from the same message does not
+replace a separately owed reply. Source messages and ledger rows are locked while
+checked. Changed retry manifests are refused; identical retries recheck sources
+without recreating closed items. The original source generation/key/hash and
+recovery transition are retained for audit.
+
+This is an operator recovery operation, not a generic historical-backlog replay.
+Do not hand its prepared run to an ordinary worker or call unguarded finish.
+`pg_temp.context_recover_rebuild_finish(request,meta)` repeats the source/staff
+checks under the same locks as the normal finish and requires the reader's
+financial witness still to match. It then invokes the ordinary finish and retains
+the recovery manifest under the reader checks. An intervening source/staff/money
+change prevents promotion; run a fresh read, do not override it. The helper does
+not change global mode, flags, models or budgets.
+
+Production still requires independent database/money review of this operation
+and its prerequisite migrations, normal owned-claim authority, a supported SQL
+execution route, a fresh read of the prepared packet and current source witnesses,
+and authorized rollout/recovery. The old development answer is NOT a substitute
+for that fresh read. A reviewable dry run must be enclosed in BEGIN/ROLLBACK;
+only an explicitly authorized operation may COMMIT. No real job or lease tokens
+are embedded in the repository. There is no production execution receipt yet.
+
+Local proof: `psql -X -v ON_ERROR_STOP=1 -f
+supabase/tests/context-recovery/recovery.sql` against the existing disposable
+migration-stack database.13synthetic scenarios/37assertions use the actual
+preparation, normal writer, guarded finish, current-generation read and rollback.
+They include a new customer reply closing only its own confirmation, later staff
+and financial changes, invalid source, exact-key recovery and retained provenance.
+These are intervening-change tests, not a parallel-session race proof, model
+quality, production restoration or independent acceptance. A deliberately ignored
+staff-decision check is detected by the same tests.
