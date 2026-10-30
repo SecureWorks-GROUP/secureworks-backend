@@ -26,6 +26,10 @@
 -- 15. A second apply changes nothing.
 -- Concurrent claims (SKIP LOCKED) are in concurrent.sh.
 \set ON_ERROR_STOP on
+SELECT md5(prosrc)='143a88acac3b0fd0e894f127eebed188' AS has_ledger_edit_refresh FROM pg_proc WHERE oid='public.context_job_story_enqueue_changed(integer)'::regprocedure \gset
+\if :has_ledger_edit_refresh
+\ir ../../../rollbacks/20261030184000_context_ledger_edit_story_refresh_down.sql
+\endif
 SELECT md5(prosrc)='f4c040642a58cf9e5c281c76d94abecb' AS requeue_after_story_contract FROM pg_proc WHERE oid='context_job_story_enqueue_changed(integer)'::regprocedure \gset
 \if :requeue_after_story_contract
 \ir ../../../rollbacks/20261030181200_context_story_requeue_recovery_down.sql
@@ -931,4 +935,8 @@ ROLLBACK;
 
 \if :requeue_after_story_contract
 \ir ../../../migrations/20261030181200_context_story_requeue_recovery.sql
+\endif
+
+\if :has_ledger_edit_refresh
+\ir ../../../migrations/20261030184000_context_ledger_edit_story_refresh.sql
 \endif
