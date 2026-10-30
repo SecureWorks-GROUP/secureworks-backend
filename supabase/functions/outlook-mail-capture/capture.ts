@@ -377,6 +377,7 @@ export interface MailReads {
     threadId: string,
     topic: string | null,
     next?: string | null,
+    rosterOnly?: boolean,
   ): Promise<GroupPostPage>;
 }
 
@@ -704,6 +705,18 @@ export async function runOutlookCapture(
   }
 
   let window: { fromMs: number; toMs: number } | null = null;
+  // Fixed-window sweeps resume across bounded calls. Scheduled callers must
+  // opt into this contract; this reader change alone does not change them.
+  // Legacy operator sweeps without a window retain their previous behavior.
+  if (req.mode === "sweep" && (req.from != null || req.to != null)) {
+    window = historyWindow(req, began);
+    if (!window || window.toMs - window.fromMs > POLICY.sweepWindowMs) {
+      return { outcome: "refused", code: "sweep_window_invalid" };
+    }
+    if (!req.source) {
+      return { outcome: "refused", code: "sweep_source_required" };
+    }
+  }
   if (req.mode === "history") {
     window = historyWindow(req, began);
     if (!window) return { outcome: "refused", code: "history_window_invalid" };
@@ -905,6 +918,8 @@ async function runSource(
   env: RunEnv,
 ): Promise<SourceResult> {
   const runSource = runSourceName(req.mode, s.source_key);
+  const resumable = isHistoryLike(req.mode) ||
+    (req.mode === "sweep" && env.window !== null);
   const nowMs = deps.now();
   const recent = await deps.latestRuns(runSource, 10);
   const running = recent.find((r) => r.status === "running");
@@ -941,7 +956,7 @@ async function runSource(
       skipIdsAt: new Set(),
       previousWindowTo: null,
     };
-  } else if (req.mode === "sweep") {
+  } else if (req.mode === "sweep" && !resumable) {
     start = {
       startMs: nowMs - POLICY.sweepWindowMs,
       skipBeforeMs: null,
@@ -972,7 +987,7 @@ async function runSource(
     const newest = recent.find((r) =>
       r.status !== "running" &&
       r.cursor?.history_to === historyKey!.history_to &&
-      (req.mode !== "deep" ||
+      ((req.mode !== "deep" && req.mode !== "sweep") ||
         (r.cursor?.history_from === historyKey!.history_from &&
           sliceOf(r.cursor) === (req.slice ?? null)))
     );
@@ -991,7 +1006,7 @@ async function runSource(
   // A group's history walk: resumed from the cursor, or a new first pass.
   const runStartIso = iso(nowMs);
   let walk: GroupWalk | null = null;
-  if (isHistoryLike(req.mode) && s.kind === "group") {
+  if (resumable && s.kind === "group") {
     walk = (resume ? groupWalkFrom(resume.cursor) : null) ?? {
       floor: iso(env.window!.fromMs),
       pass_started: runStartIso,
@@ -1123,12 +1138,12 @@ async function runSource(
     source: runSource,
     status: "running",
     window_from: iso(start.startMs),
-    ...(isHistoryLike(req.mode) ? progressFields() : {}),
+    ...(resumable ? progressFields() : {}),
   });
   let lastCheckpoint = nowMs;
   // A long history run saves its cursor on its running row as it goes.
   const checkpoint = async (): Promise<void> => {
-    if (!isHistoryLike(req.mode)) return;
+    if (!resumable) return;
     const t = deps.now();
     if (t - lastCheckpoint < POLICY.checkpointMs) return;
     lastCheckpoint = t;
@@ -1318,7 +1333,7 @@ async function runSource(
   const overBudget = (): boolean => {
     const spent = deps.now() - env.began;
     if (spent <= POLICY.budgetMs) return false;
-    return !isHistoryLike(req.mode) || counts.progressed > 0 ||
+    return !resumable || counts.progressed > 0 ||
       spent > POLICY.budgetMs + POLICY.progressGraceMs;
   };
 
@@ -1381,6 +1396,45 @@ async function runSource(
         from: string | null;
         receivedAt: string | null;
       }> = [];
+      // A live sweep must retain the whole thread's recipient evidence even
+      // when a reply and its outside party sit on different body pages. Read
+      // only ids/senders/times first, never retain all thread bodies. History
+      // keeps its existing path. An incomplete roster never licenses a guess.
+      if (req.mode === "sweep") {
+        let rosterUrl: string | null = null;
+        const rosterSeen = new Set<string>();
+        for (let page = 0; page < POLICY.groupHistoryMaxPages; page++) {
+          if (overBudget()) return false;
+          const key = rosterUrl ?? "";
+          if (rosterSeen.has(key)) {
+            throw new SourceStop("graph_page_cycle", "failed");
+          }
+          rosterSeen.add(key);
+          const got = await deps.mail.listGroupPostPage(
+            groupId,
+            th.id,
+            th.topic,
+            rosterUrl,
+            true,
+          );
+          counts.roster_pages = (counts.roster_pages ?? 0) + 1;
+          for (const p of got.items) {
+            roster.push({
+              graphId: p.graphId,
+              from: p.from ?? null,
+              receivedAt: p.receivedAt ?? null,
+            });
+          }
+          if (roster.length > 20_000) {
+            throw new SourceStop("graph_roster_too_large", "failed");
+          }
+          if (!got.next) break;
+          if (page === POLICY.groupHistoryMaxPages - 1) {
+            throw new SourceStop("graph_roster_page_limit", "failed");
+          }
+          rosterUrl = got.next;
+        }
+      }
       for (let page = 0; page < POLICY.groupHistoryMaxPages; page++) {
         const pageKey = postUrl ?? "";
         if (seen.has(pageKey)) {
@@ -1422,14 +1476,18 @@ async function runSource(
           counts.threads_gone = (counts.threads_gone ?? 0) + 1;
           return true;
         }
-        for (const p of got.items) {
-          roster.push({
-            graphId: p.graphId,
-            from: p.from ?? null,
-            receivedAt: p.receivedAt ?? null,
-          });
+        if (req.mode !== "sweep") {
+          for (const p of got.items) {
+            roster.push({
+              graphId: p.graphId,
+              from: p.from ?? null,
+              receivedAt: p.receivedAt ?? null,
+            });
+          }
         }
-        const threadPosts = roster.map((p) => ({ ...p }));
+        const threadPosts = req.mode === "sweep"
+          ? roster
+          : roster.map((p) => ({ ...p }));
         const inWindow = got.items.filter((p) => {
           const t = ms(p.receivedAt);
           return t !== null && t >= fromMs && t < toMs;
@@ -1572,11 +1630,12 @@ async function runSource(
     return false;
   };
 
-  // The group history walk (see GroupWalk). True when the window is finished.
+  // The fixed-window group walk (see GroupWalk). Sweep keeps its own limits.
   const walkGroupHistory = async (groupId: string): Promise<boolean> => {
+    const limits = req.mode === "sweep" ? "sweep" : "history";
     const budget = {
-      conversations: POLICY.groupMaxConversations.history,
-      posts: POLICY.groupMaxPosts.history,
+      conversations: POLICY.groupMaxConversations[limits],
+      posts: POLICY.groupMaxPosts[limits],
     };
     for (;;) {
       const floorMs = ms(walk!.floor)!;

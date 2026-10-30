@@ -139,9 +139,29 @@ service role, or the server key in `x-api-key`):
 | Mode | Reads | Run rows |
 |---|---|---|
 | `poll` | each selected source since its pair cursor (first run: 30 minutes back; caught up: 10 minutes overlap; backlog: exactly from the cursor) | `outlook_<key>` |
-| `sweep` | the last 48 hours of one or all sources; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
+| `sweep` | without dates, the last 48 hours of one or all sources; with both `from` and `to`, one selected source's fixed window of at most 48 hours, no older than 60 days, resumed after a partial/failed/abandoned run only when both bounds match; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
 | `history` | one source, `[from, to)`, at most 60 days back, `capture_mode: backfill`, only mail that names a live job's number or involves a live job's client email (captain ruling 24 Sep 2026, via `context_email_history_scope()`); a run cut by its time budget resumes on the next call with the same window end (`to`), a group by its conversation walk (W7) | `outlook_history_<key>` |
 | `deep` | one source, one slice `[from, to)` of any age after the hard floor (1 Jan 2025 Perth): a user mailbox at most 32 days, a group any length (walked as W7's history); `capture_mode: backfill` and `metadata.history_tier: deep`; only mail touching a monitored live job (`context_email_deep_scope()`: its number named, its builder's reference named, or its client's email among the outside addresses) received on or after that key's time (30 days before the first record of the oldest job carrying it; older is `skipped_before_job`); `slice` is the plan's slice id (the time the slice was first posted, ISO to the millisecond, UTC; `deep_slice_invalid` otherwise, `slice_needs_deep_mode` on any other mode), kept on the run's cursor as `deep_slice`; resumes only a run of the same slice: the exact same window (start and end) and the same slice id, so a later posting of the same window starts at its own start | `outlook_deep_history_<key>` |
+
+Fixed-window sweep continuation (CTX-T5, 30 October 2026 candidate): group
+bodies are read and checkpointed page by page, at the existing sweep limits
+(200 conversations / 2,000 posts per call). Captured rows remain `live`;
+history admission filters do not apply. Attachments still follow the existing
+retry and privacy rules. A lightweight whole-thread sender/time roster preserves
+recipient evidence across body pages and resume points. Its read is bounded to
+400 pages, 20,000 entries and 4 MiB per response; errors/limits leave the window
+unfinished with a code, never guessed recipients or a completed receipt.
+`counts.roster_pages` exposes the additional metadata reads.
+
+**This reader capability does not pace or resume cron by itself.** The current
+nightly caller still posts every source without dates. Before activation, its
+existing scheduled path must retain pending exact windows, post bounded work,
+retry failed/missing receipts, keep disabled/stalled lanes visible and aggregate
+whole-window misses across slices. No new cron or health-check installation is
+included here. Actual memory, Graph latency, backlog and source-to-card lag need
+post-release measurement; passing synthetic continuation tests does not close
+CTX-T5 or the 2-hour freshness requirement.
+
 | `deep` with `probe: true` | one source, any window after the hard floor: lists it lean and answers counts by Perth month and folder kind (a group: conversations by the month last delivered); writes nothing at all and needs no deep flag; `wait` is implied | none |
 
 User mailboxes are read whole (every folder, read or unread, Sent Items
