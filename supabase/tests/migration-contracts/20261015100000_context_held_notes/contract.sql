@@ -124,6 +124,10 @@ BEGIN
   UNION ALL SELECT 'story', public.context_job_story(a, now(), (cl ->> 'generation_id')::uuid);
  PERFORM pg_temp.hn_assert((SELECT count(*) FROM hn_off WHERE v IS NOT NULL) = 7, 'seven off answers');
 END $c$;
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; g uuid; r record; v jsonb;
@@ -273,6 +277,10 @@ ROLLBACK;
 BEGIN;
 -- A later financial scheduler has its own guarded body. Restore this migration's
 -- exact surface for its idempotence test only; ROLLBACK restores the full stack.
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 SELECT to_regprocedure('public.context_ledger_record_signature(uuid)') IS NOT NULL AS hn_has_financial_successor \gset
 \if :hn_has_financial_successor
 \ir ../../../rollbacks/20261030112226_context_ledger_financial_refresh_down.sql

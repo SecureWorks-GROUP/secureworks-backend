@@ -119,14 +119,30 @@ When explicitly enabled after the required review and acceptance work:
   existing source-pointer, provider-key, payload-pointer and sender/time copy
   routes are checked.
 
-**CTX-T24 remains open.** The scheduler still uses original placement in its
-cheap evidence count: the new local reader sees four destination rows while
-the judge returns `no_evidence`. Both affected jobs' invalidation, preservation
-of obligations when their source moves, remaining off-job metadata and consistent
-destination identity across staff consumers still require integrated proof.
-Do not activate this candidate merely because its admission checks pass.
-Original independent reader grading, authorized rollout and real staff
-acceptance remain required. Quote values and money allocation are unchanged.
+**CTX-T24 remains open.** The dependent local migration
+`20261030161813_context_placement_freshness` aligns the scheduler and saved-note
+citation read with this projection. A whole reading acknowledges the placement
+snapshot carried by its evidence packet; the store rejects a stale snapshot or
+an update that tries to acknowledge changed placement without a full reread.
+Previous recipients remain in the witness, so moves away and returns invalidate
+both jobs, including a donor with no evidence left. The existing backfill window,
+rollout, budget and backoff still apply; there is no new timer.
+
+A moved source does not settle or transfer an existing obligation. An unresolved
+historical note that is no longer source-supported remains stored and appears
+under What we do not know with its original key/text and a review explanation.
+The affected old job reports `placement_obligation_review`; the destination can
+continue reading independently. The record-only prompt remains ledger-free.
+Customer identity, quote values, cost allocation and payment authority do not
+come from placement.
+
+The local reader candidate is `luna-ledger:v8-finance1-placement1`, not deployed
+v8. Both migrations and that reader must be reviewed and released compatibly;
+the flag stays off pending the remaining acceptance. Synthetic SQL/reader/card
+proofs do not establish independent model quality, full-volume performance,
+source coverage/production lag, signed-in staff use or business acceptance.
+Remaining off-job metadata and destination identity across other staff consumers
+also need integrated proof. Do not activate on these local checks alone.
 
 Money is unchanged, as Finance's allocation contract (21 Oct 2026, copy at
 `/mnt/project-files/cio/cfo-allocation-20261021/`, sha256 `5f5bbd4b…7e1d`)

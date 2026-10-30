@@ -231,6 +231,10 @@ BEGIN;
 -- A later slice has replaced finish (20261012110000, the thin rebuild guard: this migration's body
 -- with a guard added to a build). This migration's own guard accepts only its pre-image and its own
 -- body, so that slice is rolled back first, inside this rolled-back transaction.
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 SELECT md5(p.prosrc) = '1695e52f99f56534a24166f6662ced35' AS pf_thin_rebuild_live
 FROM pg_proc p WHERE p.oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure \gset
 \if :pf_thin_rebuild_live
@@ -348,5 +352,5 @@ ROLLBACK;
 -- or the later body that keeps it word for word and adds the thin rebuild guard (20261012110000).
 DO $c$ BEGIN
  PERFORM pg_temp.pf_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure)
-  IN ('110174bcd355a82568fd7bc572d414f6', '1695e52f99f56534a24166f6662ced35'), 'context_ledger_finish is not this migration''s body');
+  IN ('110174bcd355a82568fd7bc572d414f6', '1695e52f99f56534a24166f6662ced35', '7f21d4665463c0e06eb731e3db63bf9a'), 'context_ledger_finish is not this migration''s body');
 END $c$;

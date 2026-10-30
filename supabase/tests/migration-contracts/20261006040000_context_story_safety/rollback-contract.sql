@@ -70,6 +70,10 @@ END $$;
 SELECT pg_temp.story_safety_check('after the down');
 -- a CRM time the table kept stays through a second run of the down
 INSERT INTO public.context_crm_message_times (ghl_message_id, contact_id, crm_at) VALUES ('rb40-kept', 'ct40rb', '2026-04-04 04:04Z');
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261006040000_context_story_safety_down.sql
 SELECT pg_temp.story_safety_check('after a second run of the down');
 DO $kept$

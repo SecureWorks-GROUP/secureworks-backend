@@ -59,6 +59,10 @@ END $c$;
 ROLLBACK;
 
 -- A second run of the down changes nothing.
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
 SELECT pg_temp.rb_restored();
 

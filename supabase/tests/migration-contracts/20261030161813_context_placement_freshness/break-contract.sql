@@ -1,0 +1,1 @@
+DO $$ DECLARE s text; BEGIN SELECT pg_get_functiondef('context_ledger_event_on_job(public.business_events,uuid)'::regprocedure) INTO s; IF position('r.job_id:=p_job;' in s)=0 THEN RAISE EXCEPTION 'fault anchor missing'; END IF; EXECUTE replace(s,'r.job_id:=p_job;','r.job_id:=e.job_id;'); END $$;

@@ -67,6 +67,10 @@ ROLLBACK;
 
 -- The down runs again cleanly (it accepts the bodies it restored).
 BEGIN;
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261007150000_context_ledger_reader_fixes_down.sql
 SELECT pg_temp.rb_restored();
 ROLLBACK;

@@ -58,6 +58,10 @@ BEGIN;
 CREATE TEMP TABLE lead_cutoff_down_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_job_record_loops', 'context_job_story', 'context_job_story_assemble', 'context_ledger_judge');
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
 DO $again$
 BEGIN
