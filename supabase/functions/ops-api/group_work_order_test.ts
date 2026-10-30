@@ -30,6 +30,7 @@ import {
   draftClientLinkMessage,
   officeApproveGroupHours,
   readyUnreleasedGroupInvoiceIds,
+  agentCreateGroupWorkOrder,
   entryPointsMicro,
   findFenceProblem,
   freezeGroupWorkOrder,
@@ -2324,4 +2325,36 @@ Deno.test("the sweep picks one unpushed share invoice from each ready, unrelease
   g.pay_basis = "all_in_12_v2";
   db.rows("feature_flags")[0].enabled = false;
   assertEquals(await readyUnreleasedGroupInvoiceIds(db.client()), []);
+});
+
+Deno.test("a Grok Bot sets up a group for named allocated crew on an office person's word", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  db.rows("group_work_orders").length = 0;
+  db.rows("group_work_order_participants").length = 0;
+  db.rows("users").push(
+    { id: "office-nithin", name: "Nithin", role: "ops_manager", org_id: ORG },
+    { id: USER_A, name: "Henry", role: "crew", org_id: ORG },
+    { id: USER_B, name: "Ryan", role: "crew", org_id: ORG },
+    { id: USER_C, name: "Sonny", role: "crew", org_id: ORG },
+  );
+  const code = (p: Promise<unknown>) => p.then(() => null, (e) => (e as GroupWorkOrderError).code);
+  assertEquals(await code(agentCreateGroupWorkOrder(db.client(), { job_id: JOB, requested_by_user_id: "office-nithin", crew_user_ids: [USER_A] })), "group_crew_required");
+  assertEquals(await code(agentCreateGroupWorkOrder(db.client(), { job_id: JOB, requested_by_user_id: USER_B, crew_user_ids: [USER_A, USER_B] })), "group_requester_not_office");
+  assertEquals(await code(agentCreateGroupWorkOrder(db.client(), { job_id: JOB, requested_by_user_id: "office-nithin", crew_user_ids: [USER_A, USER_C] })), "group_crew_not_allocated");
+  assertEquals(db.rows("group_work_orders").length, 0);
+
+  const made = await agentCreateGroupWorkOrder(db.client(), { job_id: JOB, requested_by_user_id: "office-nithin", crew_user_ids: [USER_A, USER_B] });
+  assertEquals(made.created, true);
+  assertEquals(db.rows("group_work_orders").length, 1);
+  assertEquals(db.rows("group_work_orders")[0].created_by, "office-nithin");
+  assertEquals(db.rows("group_work_orders")[0].pay_basis, "all_in_12_v2");
+  assertEquals(db.rows("group_work_order_participants").map((r) => r.user_id).sort(), [USER_A, USER_B].sort());
+  assertEquals(made.crew.map((c: any) => c.added), [true, true]);
+
+  // Asking again changes nothing.
+  const again = await agentCreateGroupWorkOrder(db.client(), { job_id: JOB, requested_by_user_id: "office-nithin", crew_user_ids: [USER_A, USER_B] });
+  assertEquals(again.created, false);
+  assertEquals(db.rows("group_work_orders").length, 1);
+  assertEquals(db.rows("group_work_order_participants").length, 2);
 });
