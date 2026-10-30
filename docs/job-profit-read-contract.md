@@ -189,3 +189,27 @@ holding job by the engine's own rule (`v_job_profit.holding_job`,
 `lower(do_not_schedule) = 'true'`), the rule CFO's view and the card read use
 too; Context's placement rules read `'true'` or `'1'`, and on a job set to
 `'1'` the two disagree (not measured on production).
+
+## Crew labour rule (20261030170000)
+
+Crew pay reaches a job from trade invoice lines, gross, once. On top of that,
+and only while `job_cost_employer_super_v1` is on, the company's super on each
+line is its own cost row (`trade_employer_super`, `lane_detail`
+`employer_super`, in the line's lane). It is never marked paid: super is paid to
+the fund separately.
+
+| Pay record | Job cost | Not job cost |
+|---|---|---|
+| Weekly hourly invoice, 6/6 split (from 19 Sep) | Line amounts + half the super | The worker's half (inside the line amount already) |
+| Weekly invoice, worker paid all super (28 Aug to 17 Sep) | Line amounts | Nothing more: the company paid no super |
+| Invoice with no super recorded (before 28 Aug) | Line amounts | Company super is unknown: no row, never 0 |
+| Group work order share (`group share`, full employer super) | Share + all its super | The group pool itself: it is the expected cost, never added to the shares |
+| Work order holder line | The holder's balance; each named crew member's own invoice | The deductions inside the holder line (already netted) |
+| Commission line | Commission lane, + its super | |
+| Commission advance (described as one) | Nothing: lane `advance`, never actual | Counts when the commission is earned |
+| Ute hire, loan and other payout deductions | Nothing | They live on the invoice, never on a line |
+
+Company super = super recorded on the invoice less what the worker gave up
+(submitted total less net pay). A work date puts a line in a period. It is not
+approval: `has_unapproved_trade` still flags a line whose invoice is not
+approved, pushed or paid.
