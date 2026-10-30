@@ -250,6 +250,9 @@ BEGIN
 END $$;
 ROLLBACK;
 
+BEGIN;
+\ir ../20261030144532_context_email_sweep_continuation/pre-sweep-poll.sql
+
 -- 5. The bodies are the ones the guard accepts on a re-apply, and B-1's poll
 -- caller is untouched.
 DO $$
@@ -260,6 +263,8 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.trigger_context_email_poll()'::regprocedure)<>'1430e54e4443b839865d3b4874793e15'
  THEN RAISE EXCEPTION 'w7 must leave B-1''s poll caller alone'; END IF;
 END $$;
+
+ROLLBACK;
 
 -- 6. A re-apply changes nothing.
 BEGIN;

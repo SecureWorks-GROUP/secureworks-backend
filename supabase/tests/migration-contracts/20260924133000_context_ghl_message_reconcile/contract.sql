@@ -250,6 +250,8 @@ FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
 SELECT md5(prosrc)<>'ecdec7c3bc7f09cb3ea23d35ac096cd2' AS c1d_lanes_moved
 FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure \gset
 \if :c1d_lanes_moved
+-- Restore the superseded health preimage inside this rollback-only proof.
+\ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 \ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
 \endif
 \ir ../../../rollbacks/20261002150000_context_email_reader_down.sql

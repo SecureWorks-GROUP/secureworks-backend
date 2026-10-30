@@ -1,3 +1,5 @@
+-- Restore the 6 October preimage before planting the original historical fault.
+\ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 -- Ship without the fix: the five status bodies back to the live ones of
 -- 6 Oct 2026 and EM2's ledger. The monitor-inbox handover, the retired cache
 -- copier and the agent action log alarm again; the contract must catch it.
