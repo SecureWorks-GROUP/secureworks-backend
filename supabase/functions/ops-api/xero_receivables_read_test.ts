@@ -896,19 +896,21 @@ for (const c of settlementCases) {
     assertEquals(f.calls[0].tenant, TENANT);
   });
 
-  Deno.test(`${c.kind} cannot return a payable record through point or list reads`, async () => {
+  Deno.test(`${c.kind} keeps payable records out of receivables lists and non-credit point reads`, async () => {
     const f = fixture({
       [c.collection]: [{ [c.idField]: ID, [c.typeField]: c.wrong }],
     });
-    await assertRejects(
-      () =>
-        readXeroSettlementRecord(noDatabase, {
-          record_type: c.kind,
-          record_id: ID,
-        }, f.deps),
-      XeroReceivablesReadError,
-      "not a receivables",
-    );
+    if (c.kind !== "credit_note") {
+      await assertRejects(
+        () =>
+          readXeroSettlementRecord(noDatabase, {
+            record_type: c.kind,
+            record_id: ID,
+          }, f.deps),
+        XeroReceivablesReadError,
+        "not a receivables",
+      );
+    }
     await assertRejects(
       () =>
         listXeroSettlementRecords(noDatabase, { record_type: c.kind }, f.deps),
@@ -917,6 +919,84 @@ for (const c of settlementCases) {
     );
   });
 }
+
+Deno.test("exact supplier credit read preserves original dates, lines and allocations as payable evidence", async () => {
+  const raw = {
+    CreditNoteID: ID,
+    Type: "ACCPAYCREDIT",
+    Status: "AUTHORISED",
+    Date: "/Date(1785542400000+0000)/",
+    UpdatedDateUTC: "/Date(1793318400000+0000)/",
+    Total: 110,
+    RemainingCredit: 55,
+    LineItems: [{
+      LineItemID: ID2,
+      Description: "Returned materials",
+      LineAmount: 100,
+      TaxAmount: 10,
+    }],
+    Allocations: [{
+      AllocationID: ID2,
+      Invoice: { InvoiceID: ID2, Type: "ACCPAY" },
+      Date: "2026-10-29",
+      AppliedAmount: 55,
+    }],
+    Payments: [],
+  };
+  const f = fixture({ CreditNotes: [raw] });
+  const result = await readXeroSettlementRecord(noDatabase, {
+    record_type: "credit_note",
+    record_id: ID,
+  }, f.deps);
+  assertStrictEquals(result.record, raw);
+  assertEquals(result.record_type, "credit_note");
+  assertEquals(result.ledger_side, "payable");
+  assertEquals(f.calls, [{
+    path: `/CreditNotes/${ID}`,
+    params: undefined,
+    tenant: TENANT,
+  }]);
+});
+
+Deno.test("exact customer credit remains receivable and unknown credit types are refused", async () => {
+  const f = fixture({
+    CreditNotes: [{ CreditNoteID: ID, Type: "ACCRECCREDIT" }],
+  });
+  const result = await readXeroSettlementRecord(noDatabase, {
+    record_type: "credit_note",
+    record_id: ID,
+  }, f.deps);
+  assertEquals(result.ledger_side, "receivable");
+  for (const Type of ["ACCPAY", "ACCPAYCREDIT-extra", null]) {
+    const bad = fixture({ CreditNotes: [{ CreditNoteID: ID, Type }] });
+    await assertRejects(
+      () =>
+        readXeroSettlementRecord(noDatabase, {
+          record_type: "credit_note",
+          record_id: ID,
+        }, bad.deps),
+      XeroReceivablesReadError,
+    );
+  }
+});
+
+Deno.test("supplier credit with contradictory invoice side is refused", async () => {
+  const f = fixture({
+    CreditNotes: [{
+      CreditNoteID: ID,
+      Type: "ACCPAYCREDIT",
+      Invoice: { InvoiceID: ID2, Type: "ACCREC" },
+    }],
+  });
+  await assertRejects(
+    () =>
+      readXeroSettlementRecord(noDatabase, {
+        record_type: "credit_note",
+        record_id: ID,
+      }, f.deps),
+    XeroReceivablesReadError,
+  );
+});
 
 Deno.test("settlement selector refuses injection, invalid UUID and caller tenant before auth", async () => {
   const f = fixture({});

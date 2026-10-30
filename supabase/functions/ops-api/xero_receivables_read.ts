@@ -646,8 +646,32 @@ export async function readXeroSettlementRecord(
     `/${config.collection}/${id}`,
   );
   const record = oneRecord(result, config.collection, config.idField, id);
-  requireReceivableSettlement(record, kind);
-  return { ok: true, record_type: kind, record, provenance };
+  // An exact credit-note identity may be a supplier credit. Keep the existing
+  // receivables list population unchanged; this door returns source evidence,
+  // never applies an allocation or turns a credit into cash/job cost.
+  const supplierCredit = kind === "credit_note" &&
+    record.Type === "ACCPAYCREDIT";
+  if (supplierCredit) {
+    if (
+      rawRecord(record.Invoice) && record.Invoice.Type !== undefined &&
+      record.Invoice.Type !== "ACCPAY"
+    ) {
+      throw new XeroReceivablesReadError(
+        "Xero supplier credit contains a contradictory invoice type",
+        502,
+        "XERO_RESPONSE_INVALID",
+      );
+    }
+  } else {
+    requireReceivableSettlement(record, kind);
+  }
+  return {
+    ok: true,
+    record_type: kind,
+    ledger_side: supplierCredit ? "payable" : "receivable",
+    record,
+    provenance,
+  };
 }
 
 export async function listXeroSettlementRecords(
