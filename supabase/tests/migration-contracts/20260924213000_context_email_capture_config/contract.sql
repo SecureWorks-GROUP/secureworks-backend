@@ -384,6 +384,8 @@ FROM pg_proc WHERE oid='public.context_email_capture_status_at(timestamptz)'::re
 \if :em1_status_moved
 -- Restore the later capture classification before historical rollback proof.
 \ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
+-- Restore the superseded health preimage inside this rollback-only proof.
+\ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 \ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
 \endif
 \ir ../../../migrations/20260924213000_context_email_capture_config.sql

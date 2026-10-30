@@ -153,14 +153,35 @@ recipient evidence across body pages and resume points. Its read is bounded to
 unfinished with a code, never guessed recipients or a completed receipt.
 `counts.roster_pages` exposes the additional metadata reads.
 
-**This reader capability does not pace or resume cron by itself.** The current
-nightly caller still posts every source without dates. Before activation, its
-existing scheduled path must retain pending exact windows, post bounded work,
-retry failed/missing receipts, keep disabled/stalled lanes visible and aggregate
-whole-window misses across slices. No new cron or health-check installation is
-included here. Actual memory, Graph latency, backlog and source-to-card lag need
-post-release measurement; passing synthetic continuation tests does not close
-CTX-T5 or the 2-hour freshness requirement.
+The coordinated caller migration `20261030144532` creates
+`email_sweep_continuation_v1` **off**. When enabled after compatible reader
+release, the existing nightly job records exact windows without sending 11
+simultaneous sweep requests. The existing poll tick dispatches at most one
+sweep request per five minutes, alongside its unchanged poll/history calls.
+Deep history retains its separate existing schedule. This bounds sweep fan-out,
+not total edge concurrency; deployed memory and latency remain to be measured.
+
+`context_email_sweep_windows` retains every requested window. Missing HTTP/run
+receipts retry, partial or abandoned runs never count as complete, exact matching
+successful reader receipts do, and three attempts without progress back off that
+source for 15 minutes so other sources get a turn. Later nights retain unfinished
+windows and fill intervening gaps in chunks no longer than 48 hours. Disabled or
+older-than-60-day windows stay visible and unfinished. The migration does not
+reset prior failed runs or alter source selection; no new cron is created.
+
+`context_email_sweep_status()` exposes pending/disabled/expired/stalled counts
+and private window receipts to the service role. The existing shared health read
+gets only aggregates. Sweep miss alarms sum reported counts across slices using
+the existing first-poll attribution rule; `receipt_gaps` retains abandoned-run
+uncertainty even after capture recovers. These are reported counts, not independent
+provider reconciliation. A recent successful slice cannot hide an older unfinished
+window. Rollback disables continuation, restores the previous callers/health and
+keeps queued records for recovery.
+
+No activation is included. Required independent database review, compatible edge
+and migration release, actual source completion, memory, Graph latency, backlog
+and source-to-card lag remain acceptance work. Passing synthetic continuation and
+SQL checks do not close CTX-T5 or the 2-hour freshness requirement.
 
 | `deep` with `probe: true` | one source, any window after the hard floor: lists it lean and answers counts by Perth month and folder kind (a group: conversations by the month last delivered); writes nothing at all and needs no deep flag; `wait` is implied | none |
 
