@@ -1,0 +1,1 @@
+-- Uses the registered story/ledger stack, no alternate schema.

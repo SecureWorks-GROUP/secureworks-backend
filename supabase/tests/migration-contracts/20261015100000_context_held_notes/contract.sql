@@ -277,6 +277,12 @@ SELECT to_regprocedure('public.context_ledger_record_signature(uuid)') IS NOT NU
 \if :hn_has_financial_successor
 \ir ../../../rollbacks/20261030112226_context_ledger_financial_refresh_down.sql
 \endif
+-- Likewise restore the later read-only invoice annotation only inside this
+-- historical reapply transaction. Its behavior is tested on the full stack above.
+SELECT to_regprocedure('public.context_job_story_note_current_invoice(jsonb,jsonb,timestamptz)') IS NOT NULL AS hn_has_invoice_successor \gset
+\if :hn_has_invoice_successor
+\ir ../../../rollbacks/20261030160000_context_note_current_invoice_down.sql
+\endif
 CREATE TEMP TABLE hn_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_held_notes_on', 'context_ledger_held_placed_copy',

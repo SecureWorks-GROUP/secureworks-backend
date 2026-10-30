@@ -60,3 +60,40 @@ constant signature must fail the financial-change test. The guarded rollback
 restores the exact prior judge and removes only the added APIs. Stop the caller
 and disable activation first. Required independent review and deployed proof
 remain owed; current signature fields do not imply complete financial coverage.
+
+## Current invoice facts beside preserved wording (30 October, unreleased)
+
+The actual-model development replay preserved both old keys but retained a
+present-tense owing claim inside the recipient dispute. Keeping the obligation
+is necessary; presenting an old financial assertion as current is wrong.
+
+Migration `20261030160000_context_note_current_invoice` changes the canonical
+`context_job_story_ledger` read, shared by the story assembler and writer input.
+For unresolved non-payment invoice matters it prefixes the exact same-job invoice
+record's status/balance and explicitly labels the preserved note as historical
+wording. The raw note stays byte-for-byte in `source_what`; stored rows, keys,
+citations, person locks, statuses, and closure predicates never change. Payment
+does not settle a confirmation request, recipient dispute, refund, or other
+separate matter. The existing payment-obligation rules remain untouched.
+
+`current_invoice_evidence` names the read's timestamp, exact invoice row, status,
+balance and match resolution. Match by the complete invoice number or application
+row ID only; no text/name/substring inference. Missing or ambiguous matches and
+null balances remain Unknown. Held or invalid citations do not borrow this job's
+financial evidence. This is the existing record snapshot, not a new provider
+fetch, bank-settlement signoff or job cost-close.
+
+The projection is live immediately upon an authorized migration, not behind the
+financial-refresh flag. A subsequent source correction changes the next common
+story read without a model rerun; the story hash changes so the existing writer
+can rewrite through its ordinary queue/budget. It does not restore notes absent
+from the live generation or prove queue/worker freshness. No caller or schema
+change is required. The guarded rollback restores the exact old read and drops
+only the helper, preserving all stored evidence.
+
+The registered contract covers paid/reopened/moved sources, separate obligation
+identity, unchanged raw rows, missing/ambiguous/null balances, held/person notes,
+canonical story/writer parity and service-only access. A bypassed projection
+must fail the negative contract; unknown preimage and exact rollback are tested.
+Required independent database/money review, authorized rollout, actual lost-note
+recovery, deployed source-to-card lag and reader/staff acceptance remain owed.
