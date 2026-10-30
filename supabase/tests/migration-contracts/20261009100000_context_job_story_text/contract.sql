@@ -1,3 +1,7 @@
+SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS restore_credit_20261009100000 \gset
+\if :restore_credit_20261009100000
+\ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
+\endif
 SELECT md5(prosrc) IN ('62392d8aab2f38362be4b2ddcfab1fbc','b2f762db966bf9f3417e759827705be2') AS has_story_oncost_refresh FROM pg_proc WHERE oid='context_job_story_money_sig(uuid)'::regprocedure \gset
 \if :has_story_oncost_refresh
 \ir ../../../rollbacks/20261030190230_context_story_oncost_refresh_down.sql
@@ -964,4 +968,8 @@ ROLLBACK;
 
 \if :has_story_oncost_refresh
 \ir ../../../migrations/20261030190230_context_story_oncost_refresh.sql
+\endif
+
+\if :restore_credit_20261009100000
+\ir ../../../migrations/20261031010000_context_story_credit_refresh.sql
 \endif
