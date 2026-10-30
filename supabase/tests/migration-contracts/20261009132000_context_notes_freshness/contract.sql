@@ -457,6 +457,10 @@ SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NUL
 -- Reverse the later reader projection before the historical reader bodies, within this test's transaction.
 SELECT to_regprocedure('public.context_ledger_reader_events(uuid[])') IS NOT NULL AS reader_person_placement_live \gset
 \if :reader_person_placement_live
+SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],timestamptz)'::regprocedure,'pg_proc'),'') LIKE '%staff placement identity (20261030170545)%' AS has_staff_identity_successor \gset
+\if :has_staff_identity_successor
+\ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
+\endif
 \ir ../../../rollbacks/20261030154917_context_ledger_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
@@ -475,6 +479,10 @@ SELECT to_regprocedure('public.context_ledger_event_locations(public.business_ev
 \ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261027140000_context_cost_check_person_splits_down.sql
+SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],timestamptz)'::regprocedure,'pg_proc'),'') LIKE '%staff placement identity (20261030170545)%' AS has_staff_identity_successor \gset
+\if :has_staff_identity_successor
+\ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
+\endif
 \ir ../../../rollbacks/20261021150000_context_job_card_events_down.sql
 \endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')

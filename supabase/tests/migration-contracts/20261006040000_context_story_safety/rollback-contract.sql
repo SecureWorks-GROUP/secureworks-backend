@@ -79,6 +79,10 @@ SELECT to_regprocedure('public.context_ledger_event_locations(public.business_ev
 \endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
 \endif
+SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],timestamptz)'::regprocedure,'pg_proc'),'') LIKE '%staff placement identity (20261030170545)%' AS has_staff_identity_successor \gset
+\if :has_staff_identity_successor
+\ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
+\endif
 \ir ../../../rollbacks/20261006040000_context_story_safety_down.sql
 SELECT pg_temp.story_safety_check('after a second run of the down');
 DO $kept$

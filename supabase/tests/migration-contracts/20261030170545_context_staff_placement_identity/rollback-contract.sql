@@ -1,0 +1,1 @@
+DO $$ BEGIN IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_record_messages(uuid[],timestamp with time zone)'::regprocedure) IS DISTINCT FROM 'f170d0c3f9d2703b57b52df7f7238e96' THEN RAISE EXCEPTION 'staff_identity_rollback_not_exact'; END IF; END $$;

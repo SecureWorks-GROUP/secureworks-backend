@@ -185,3 +185,15 @@ consumers must propagate review and cannot treat that story as complete.
 Current decisions are used, as in the existing card; this is not a historical
 placement replay. Original-source privacy, remaining destination identity reads,
 full-volume performance and deployed/independent/operator acceptance stay open.
+
+### Staff identity after a person moves evidence (CTX-T24)
+
+With `context_ledger_person_placement_v1` enabled, the staff message record uses
+the reader's existing identity projection for metadata. A move or split into a
+different customer's job does not transfer the source's customer identity.
+Customer labels remain on the original job or where the source CRM contact
+independently matches the destination. Independently identified staff remain
+staff. Source words, event times, original source IDs and card placement
+admission remain unchanged. Missing/off keeps prior behavior; no activation is
+part of this change. This is a local candidate requiring the existing review,
+release and actual staff-journey acceptance.

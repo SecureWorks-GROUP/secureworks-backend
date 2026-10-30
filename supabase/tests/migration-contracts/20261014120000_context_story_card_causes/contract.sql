@@ -100,6 +100,10 @@ SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NUL
 \endif
 SELECT to_regprocedure('public.context_ledger_reader_events(uuid[])') IS NOT NULL AS reader_person_placement_live \gset
 \if :reader_person_placement_live
+SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],timestamptz)'::regprocedure,'pg_proc'),'') LIKE '%staff placement identity (20261030170545)%' AS has_staff_identity_successor \gset
+\if :has_staff_identity_successor
+\ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
+\endif
 \ir ../../../rollbacks/20261030154917_context_ledger_person_placement_down.sql
 \endif
 CREATE TEMP TABLE sc_md5 AS SELECT oid,md5(prosrc) h FROM pg_proc WHERE proname IN
