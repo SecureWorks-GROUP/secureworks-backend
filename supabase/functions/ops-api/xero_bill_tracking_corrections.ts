@@ -98,6 +98,13 @@ function validateInvoice(inv: Row, id: string) {
     "Bills with nonzero or unsupported rounding adjustments require manual review",
     "ROUNDING_UNSUPPORTED",
   );
+  // A tracking-only POST drops an invoice-level address snapshot (seen on
+  // INV-1697, 30 Oct 2026). Refuse rather than silently lose it.
+  requireValue(
+    !Array.isArray(inv.InvoiceAddresses) || inv.InvoiceAddresses.length === 0,
+    "Invoices with an invoice-level address block require manual review",
+    "INVOICE_ADDRESS_UNSUPPORTED",
+  );
   const ids = inv.LineItems.map((l: Row) => l.LineItemID);
   requireValue(
     ids.every((id: any) => typeof id === "string" && uuid.test(id)) &&
