@@ -250,6 +250,8 @@ FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
 SELECT md5(prosrc)<>'ecdec7c3bc7f09cb3ea23d35ac096cd2' AS c1d_lanes_moved
 FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure \gset
 \if :c1d_lanes_moved
+-- Restore the later capture classification before historical rollback proof.
+\ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 \ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
 \endif
 \ir ../../../rollbacks/20261002150000_context_email_reader_down.sql
