@@ -21,6 +21,14 @@
 --   CN9  no status sent, allocated to BILL-A (never placed)
 BEGIN;
 
+-- TP-07 slice 2 (20261030060000) nets these credit notes into Job Profit and
+-- replaces the placement view. This contract is slice 1's, so it rolls slice
+-- 2 back first, inside this transaction: the ROLLBACK at the end puts it back.
+SELECT to_regclass('public.v_supplier_credit_allocations') IS NOT NULL AS cn_netting_live \gset
+\if :cn_netting_live
+\ir ../../../rollbacks/20261030060000_supplier_credit_netting_down.sql
+\endif
+
 INSERT INTO public.organisations (id, name) VALUES ('00000000-0000-0000-0000-000000000001', 'Synthetic org')
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO public.jobs (id, org_id, status, type, job_number) VALUES
