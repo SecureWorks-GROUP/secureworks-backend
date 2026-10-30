@@ -533,7 +533,8 @@ jobs:
             supabase/functions/ops-api/sales_booking_execution_read_test.ts \
             supabase/functions/ops-api/sales_booking_routes_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts \
-            supabase/functions/reporting-api/job_context_timeline_test.ts
+            supabase/functions/reporting-api/job_context_timeline_test.ts \
+            supabase/functions/reporting-api/team_activity_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still

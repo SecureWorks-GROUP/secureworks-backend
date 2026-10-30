@@ -13,7 +13,10 @@
 //   sweep    re-read of the last 48 hours; inserts are
 //            mail the poll missed (counts.sweep_misses) outlook_sweep_<key>
 //            and when each was received
-//            (cursor.miss_received_at)
+//            (cursor.miss_received_at). A sweep row left running is the
+//            lock that stops the next sweep of that source. The janitor
+//            (sweep_janitor.ts) closes it, failed / abandoned, after about
+//            two hours with no write, and a second pass writes nothing.
 //   history  bounded backfill of [from, to), at most 60
 //            days back, capture_mode backfill, only mail
 //            touching a live job (captain ruling 24 Sep) outlook_history_<key>
@@ -153,6 +156,7 @@ import {
   REF_PREFIX_FLOOR,
 } from "../_shared/makesafe_refs.ts";
 import type { AttachmentResult } from "./attachments.ts";
+import { abandonStuckOutlookSweeps } from "./sweep_janitor.ts";
 import type {
   AttachmentHome,
   FolderIds,
@@ -907,9 +911,29 @@ async function runSource(
   const runSource = runSourceName(req.mode, s.source_key);
   const nowMs = deps.now();
   const recent = await deps.latestRuns(runSource, 10);
+  // A sweep row left running is the lock. Close it only after about two
+  // hours with no write (updated_at). Poll and history still use the
+  // ten-minute stale window below.
+  if (req.mode === "sweep") {
+    await abandonStuckOutlookSweeps(
+      recent.map((r) => Object.assign(r, { source: runSource })),
+      nowMs,
+      (row) =>
+        deps.recordRun({
+          run_id: row.run_id,
+          source: row.source,
+          status: row.status,
+          error_code: row.error_code,
+        }),
+    );
+  }
   const running = recent.find((r) => r.status === "running");
   if (running) {
-    if (nowMs - (ms(running.updated_at) ?? 0) < POLICY.runningStaleMs) {
+    // A sweep still running here is inside the two-hour window: it stays the
+    // lock. Poll and history close after ten minutes without a write.
+    const stillLocked = req.mode === "sweep" ||
+      nowMs - (ms(running.updated_at) ?? 0) < POLICY.runningStaleMs;
+    if (stillLocked) {
       return {
         source_key: s.source_key,
         run_source: runSource,
