@@ -111,6 +111,12 @@ BEGIN
      OR (SELECT count(*) FROM public.xero_supplier_credit_note_allocations WHERE xero_credit_note_id = 'cccccccc-0000-4000-8000-000000000001') <> 1 THEN
     RAISE EXCEPTION 'supplier credit notes: an older Xero record overwrote a newer one (%)', r;
   END IF;
+  -- The same record again (equal UpdatedDateUTC) is written, and its list stays one list.
+  r := public.xero_supplier_credit_note_copy(org, pg_temp.cn_note('cccccccc-0000-4000-8000-000000000002', 'PAID', 220, 0),
+         jsonb_build_array(pg_temp.cn_alloc(b, 220)));
+  IF r <> 'written' OR (SELECT count(*) FROM public.xero_supplier_credit_note_allocations WHERE xero_credit_note_id = 'cccccccc-0000-4000-8000-000000000002') <> 1 THEN
+    RAISE EXCEPTION 'supplier credit notes: a replay of the same record answered % or doubled its list', r;
+  END IF;
   PERFORM public.xero_supplier_credit_note_copy(org, pg_temp.cn_note('cccccccc-0000-4000-8000-000000000004', 'AUTHORISED', 33, 33, '2026-10-03T00:00:00Z'),
          jsonb_build_array(pg_temp.cn_alloc(u, 1), pg_temp.cn_alloc(u, 2)));
   PERFORM public.xero_supplier_credit_note_copy(org, pg_temp.cn_note('cccccccc-0000-4000-8000-000000000004', 'AUTHORISED', 33, 33, '2026-10-04T00:00:00Z'), '[]');

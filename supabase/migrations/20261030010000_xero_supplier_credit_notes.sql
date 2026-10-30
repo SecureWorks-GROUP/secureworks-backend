@@ -30,7 +30,8 @@
 -- 3. xero_supplier_credit_note_copy(org, note, allocations): the only writer.
 --    One transaction: upserts the note and, when the list was returned,
 --    replaces that note's allocations with it. A record older than the stored
---    one (UpdatedDateUTC) changes nothing. Never invents a status or amount,
+--    one (UpdatedDateUTC) changes nothing, also when two copies of one note
+--    race: the upsert's own WHERE decides, against the committed copy. Never invents a status or amount,
 --    and never touches a note Xero did not return.
 -- 4. v_supplier_credit_placement: read only. Each live allocation lands on the
 --    job or jobs of the bill it reverses, by the bill's own placement in Job
@@ -189,8 +190,7 @@ AS $$
 DECLARE
   v_id text := NULLIF(btrim(COALESCE(p_note ->> 'xero_credit_note_id', '')), '');
   v_updated timestamptz := (p_note ->> 'xero_updated_at')::timestamptz;
-  v_stored timestamptz;
-  v_found boolean;
+  v_rows integer;
 BEGIN
   IF p_org_id IS NULL OR v_id IS NULL THEN
     RAISE EXCEPTION 'supplier_credit_note_refused: an org and a CreditNoteID are required';
@@ -205,14 +205,14 @@ BEGIN
     RAISE EXCEPTION 'supplier_credit_note_refused: % allocations are not a list', v_id;
   END IF;
 
-  SELECT n.xero_updated_at, true INTO v_stored, v_found
-    FROM public.xero_supplier_credit_notes n
-   WHERE n.org_id = p_org_id AND n.xero_credit_note_id = v_id
-   FOR UPDATE;
-  IF v_found AND v_stored IS NOT NULL AND v_updated IS NOT NULL AND v_updated < v_stored THEN
-    RETURN 'stale';
-  END IF;
-
+  -- Freshness is decided by the write itself, never by an earlier read: a
+  -- read cannot lock a note that is not there yet, so two first copies of one
+  -- note could both pass it, and the older could then overwrite the newer.
+  -- INSERT ... ON CONFLICT waits for a concurrent copy of the same note to
+  -- commit and then judges the WHERE against that copy, so an older record
+  -- updates nothing, whichever copy came first. The row lock the update takes
+  -- is held to commit, so the allocation list below is replaced by one copy
+  -- at a time, and only by a copy that wrote the note.
   INSERT INTO public.xero_supplier_credit_notes AS t (
     org_id, xero_credit_note_id, credit_note_type, credit_note_number, xero_contact_id, contact_name, reference,
     credit_note_date, status, line_amount_types, currency_code, sub_total, total_tax, total, remaining_credit,
@@ -240,7 +240,13 @@ BEGIN
     allocations_returned = EXCLUDED.allocations_returned,
     xero_updated_at = EXCLUDED.xero_updated_at,
     raw_json = EXCLUDED.raw_json,
-    synced_at = EXCLUDED.synced_at;
+    synced_at = EXCLUDED.synced_at
+  WHERE t.xero_updated_at IS NULL OR EXCLUDED.xero_updated_at IS NULL
+     OR EXCLUDED.xero_updated_at >= t.xero_updated_at;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  IF v_rows = 0 THEN
+    RETURN 'stale';
+  END IF;
 
   IF p_allocations IS NOT NULL THEN
     DELETE FROM public.xero_supplier_credit_note_allocations a
@@ -261,7 +267,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION public.xero_supplier_credit_note_copy(uuid, jsonb, jsonb) IS
-  'Supplier credit notes (20261030010000, TP-07 slice 1): the only writer of the credit note copy. One transaction: upserts the note Xero returned for that CreditNoteID and, when its record carried the Allocations list (allocations not null), replaces that note''s allocation rows with it. A record older than the stored one (Xero UpdatedDateUTC) changes nothing (stale). Refuses a note with no id, not ACCPAYCREDIT, or with no Xero record. Never writes a status or amount Xero did not send, and never touches another note. Service role only.';
+  'Supplier credit notes (20261030010000, TP-07 slice 1): the only writer of the credit note copy. One transaction: upserts the note Xero returned for that CreditNoteID and, when its record carried the Allocations list (allocations not null), replaces that note''s allocation rows with it. A record older than the stored one (Xero UpdatedDateUTC) changes neither the note nor its allocations (stale), including when two copies of one note race (the upsert itself judges freshness against the committed copy). Refuses a note with no id, not ACCPAYCREDIT, or with no Xero record. Never writes a status or amount Xero did not send, and never touches another note. Service role only.';
 REVOKE ALL ON FUNCTION public.xero_supplier_credit_note_copy(uuid, jsonb, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.xero_supplier_credit_note_copy(uuid, jsonb, jsonb) TO service_role;
 
