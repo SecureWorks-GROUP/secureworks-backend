@@ -481,7 +481,7 @@ async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: str
 // week_end / week_start / submitted_at / created_at: the money validator resolves
 // the statutory super rate from the earnings date. Without them every backfill
 // failed with SUPER_RATE_UNRESOLVED (2026-09-10).
-const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, week_start, week_end, submitted_at, created_at, pdf_backfill_attempts, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)'
+const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, subtotal_ex, gst, total_inc, week_start, week_end, submitted_at, created_at, pdf_backfill_attempts, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)'
 const TRADE_PDF_BACKFILL_MAX_ATTEMPTS = 3
 // ════════════════════════════════════════════════════════════
 // CONTACT ADDRESS SWEEP (2026-09-10)
@@ -1065,7 +1065,7 @@ async function syncInvoices(sb: any) {
           if (inv.Type === 'ACCPAY') {
             try {
               const { data: tradeInv } = await sb.from('trade_invoices')
-                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)')
+                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)')
                 .eq('xero_bill_id', inv.InvoiceID)
                 .maybeSingle()
               if (tradeInv) {
