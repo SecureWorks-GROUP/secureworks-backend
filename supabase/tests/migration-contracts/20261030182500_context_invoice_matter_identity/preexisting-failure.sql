@@ -1,0 +1,1 @@
+CREATE OR REPLACE FUNCTION public.context_job_story_assemble(p_job jsonb,p_record jsonb,p_ledger jsonb,p_meta jsonb,p_as_of timestamptz,p_since timestamptz DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$;

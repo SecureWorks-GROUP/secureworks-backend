@@ -50,6 +50,11 @@ SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],times
 \if :has_staff_identity_successor
 \ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
 \endif
+-- Unwind the later invoice-matter grouping before exercising this historical assembler.
+SELECT md5(prosrc)='ddab6cd2bf43ecf5c88fcf03b7ba0374' AS has_invoice_matter_successor FROM pg_proc WHERE oid='public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'::regprocedure \gset
+\if :has_invoice_matter_successor
+\ir ../../../rollbacks/20261030182500_context_invoice_matter_identity_down.sql
+\endif
 \ir ../../../rollbacks/20261021150000_context_job_card_events_down.sql
 \endif
 \ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
