@@ -785,6 +785,7 @@ import {
   deleteGroupWorkOrderHours,
   freezeGroupWorkOrder,
   officeApproveGroupHours,
+  readyUnreleasedGroupInvoiceIds,
   groupBody,
   groupFeatureOn,
   GroupWorkOrderError,
@@ -9999,7 +10000,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
         }
-        return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+        let issued: Record<string, unknown> = {}
+        let issueError: unknown = null
+        try { issued = await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)) } catch (e) { issueError = e }
+        // Ready full-super groups go to Xero as drafts with no office click
+        // (owner, 30 Oct 2026). A failure here never stops the work order sweep.
+        const groupReleases: unknown[] = []
+        try {
+          for (const invoiceId of await readyUnreleasedGroupInvoiceIds(client)) {
+            groupReleases.push({ invoice_id: invoiceId, ...(await releaseGroupCrewBills(client, invoiceId, 'group-release-sweep')) })
+          }
+        } catch (e) {
+          console.error('[ops-api] group release sweep failed:', (e as Error).message)
+          groupReleases.push({ error: 'group release sweep failed' })
+        }
+        if (issueError) throw issueError
+        return json({ ...issued, group_releases: groupReleases })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any

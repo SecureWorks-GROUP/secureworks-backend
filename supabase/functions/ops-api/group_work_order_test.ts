@@ -29,6 +29,7 @@ import {
   deleteGroupWorkOrderHours,
   draftClientLinkMessage,
   officeApproveGroupHours,
+  readyUnreleasedGroupInvoiceIds,
   entryPointsMicro,
   findFenceProblem,
   freezeGroupWorkOrder,
@@ -129,6 +130,9 @@ class Memory {
     if (!group) throw new Error("group_work_order_not_found");
     if (fn === "unfreeze_group_work_order_split") {
       return this.unfreeze(group);
+    }
+    if (fn === "group_work_order_release_state") {
+      return { ready: group.__ready === true, released: false };
     }
     if (fn === "office_approve_group_hours") {
       // Stand-in for the SQL function; the migration contract proves the real one.
@@ -2288,4 +2292,36 @@ Deno.test("the office approves a full-super crew's hours for them; someone on th
   const changed = await readGroupWorkOrderOffice(db.client(), trade("office-1", true), { group_id: GROUP });
   assertEquals(changed.needs_approval, [USER_A, USER_B].sort());
   assertEquals(changed.hours_office_approved, false);
+});
+
+Deno.test("the sweep picks one unpushed share invoice from each ready, unreleased full-super group only", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  const g = db.rows("group_work_orders")[0];
+  Object.assign(g, { pay_basis: "all_in_12_v2", split_frozen_at: "2026-10-29T10:00:00Z", __ready: true });
+  db.rows("group_work_order_shares").push({ id: "share-a", group_id: GROUP, user_id: USER_A }, { id: "share-b", group_id: GROUP, user_id: USER_B });
+  db.rows("trade_invoices").push(
+    { id: "inv-old", status: "ops-reject", xero_bill_id: null },
+    { id: "inv-a", status: "pending_acknowledgment", xero_bill_id: null },
+    { id: "inv-b", status: "pending_acknowledgment", xero_bill_id: null },
+  );
+  db.rows("trade_invoice_lines").push(
+    { trade_invoice_id: "inv-old", group_share_id: "share-a" },
+    { trade_invoice_id: "inv-a", group_share_id: "share-a" },
+    { trade_invoice_id: "inv-b", group_share_id: "share-b" },
+  );
+  assertEquals((await readyUnreleasedGroupInvoiceIds(db.client())).length, 1);
+  assert(["inv-a", "inv-b"].includes((await readyUnreleasedGroupInvoiceIds(db.client()))[0]));
+
+  g.__ready = false; // e.g. no current sign-off: the office has to tick it
+  assertEquals(await readyUnreleasedGroupInvoiceIds(db.client()), []);
+  g.__ready = true;
+  db.rows("group_work_order_releases").push({ group_id: GROUP });
+  assertEquals(await readyUnreleasedGroupInvoiceIds(db.client()), []);
+  db.rows("group_work_order_releases").length = 0;
+  g.pay_basis = "all_in_12_6_v1"; // older groups keep their office approval
+  assertEquals(await readyUnreleasedGroupInvoiceIds(db.client()), []);
+  g.pay_basis = "all_in_12_v2";
+  db.rows("feature_flags")[0].enabled = false;
+  assertEquals(await readyUnreleasedGroupInvoiceIds(db.client()), []);
 });

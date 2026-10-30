@@ -1655,6 +1655,46 @@ export async function claimGroupReleaseForInvoice(
   return { held: true, message: "Held for the whole crew. " + (sentence || "The group is not ready for payment."), hold: sentence ? [sentence] : [] };
 }
 
+/**
+ * Owner, 30 Oct 2026: "i dont want to have to click approve from admin. i just
+ * want it to release straight from trade into xero. unless it doesnt have
+ * client sign off then we can manually tick". A full employer-super group that
+ * is ready (every share in, sign-off current, pool reconciled, nothing
+ * queried) but not yet released, because its last share was not a crew
+ * submit (an office-issued share, or a sign-off given after the last submit),
+ * is released by the sweep. Returns one live, unpushed share invoice per such
+ * group; the caller pushes it, which claims the release under the job lock and
+ * sends every crew bill to Xero as a draft.
+ */
+export async function readyUnreleasedGroupInvoiceIds(client: any): Promise<string[]> {
+  if (!(await groupFeatureOn(client))) return [];
+  const groups = await rowsOf(client.from("group_work_orders")
+    .select("id, pay_basis, status, split_frozen_at")
+    .eq("pay_basis", GROUP_PAY_BASIS_EMPLOYER_SUPER).neq("status", "void"),
+    "load groups to release").then((rows) => rows.filter((g) => g.split_frozen_at));
+  if (!groups.length) return [];
+  const released = await rowsOf(client.from("group_work_order_releases").select("group_id")
+    .in("group_id", groups.map((g) => String(g.id))), "load group releases");
+  const done = new Set(released.map((r) => String(r.group_id)));
+  const ids: string[] = [];
+  for (const group of groups) {
+    if (done.has(String(group.id))) continue;
+    const { data: state, error } = await client.rpc("group_work_order_release_state", { p_group_id: group.id });
+    if (error || !state || state.ready !== true || state.released === true) continue;
+    const shares = await rowsOf(client.from("group_work_order_shares").select("id").eq("group_id", String(group.id)), "load group shares");
+    if (!shares.length) continue;
+    const lines = await rowsOf(client.from("trade_invoice_lines").select("trade_invoice_id")
+      .in("group_share_id", shares.map((s) => String(s.id))), "load group share lines");
+    const invoiceIds = [...new Set(lines.map((row) => String(row.trade_invoice_id)))];
+    if (!invoiceIds.length) continue;
+    const invoices = await rowsOf(client.from("trade_invoices").select("id, status, xero_bill_id")
+      .in("id", invoiceIds), "load group share invoices");
+    const live = invoices.find((inv) => !inv.xero_bill_id && inv.status === "pending_acknowledgment");
+    if (live) ids.push(String(live.id));
+  }
+  return ids;
+}
+
 /** Approved bills of the same released group that are not in Xero yet. */
 export async function releasedGroupSiblingInvoiceIds(client: any, invoiceId: string): Promise<string[] | null> {
   const own = await rowsOf(client.from("trade_invoice_lines").select("group_share_id").eq("trade_invoice_id", invoiceId).not("group_share_id", "is", null), "check the group release");
