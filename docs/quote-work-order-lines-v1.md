@@ -70,6 +70,25 @@ office too (`agreed_labour_missing`, docs/job-work-orders-v1.md).
 
 ## The lines
 
+### Original Scope demand identities (INT-23 / R-02)
+
+The staff `job_work_order` read returns `scope_identity` alongside `filled_from`.
+It reads only the exact scope revision the shown work order names, checks its
+job, frozen/superseded state and the SHA-256 of its exact stored scope bytes,
+then returns the original `scope_json.lines[].id` values in order. A missing
+revision/manifest, invalid or duplicate ID, failed read or mismatched hash leaves
+`scope_line_ids: null` with an explicit reason. It never falls back to the job's
+current scope, generates IDs, silently drops unidentified lines or replaces
+the existing work-order tasks. A valid empty manifest is distinct from a missing
+one. The existing row/event source precedence of `filled_from` is unchanged.
+
+This is the **named revision's demand manifest**, not a per-task allocation.
+Fence Scope lines explicitly exclude labour and surcharge; its derived labour
+tasks keep their existing positional `line_key` below. No material-to-labour
+correspondence is inferred from words, index or equal amounts. Individual task,
+order, invoice and actual-cost mappings still require their own source-backed
+links. This read does not change approval, seal content, money or any stored row.
+
 Each line is a `scope_items` entry of the job work order:
 
 `{line_key, source:"quote", basis, description, qty, unit, hours, rate, rate_unit, total, counted, flags[], needs_review, quote_cost_ex?}`

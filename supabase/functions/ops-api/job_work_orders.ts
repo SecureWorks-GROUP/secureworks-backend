@@ -65,6 +65,7 @@
 // (trade_invoice_lines.job_work_order_id); this module only reads them. Only
 // labour-lane lines count against the agreed labour; the rest are listed.
 
+import { readWorkOrderScopeIdentity } from "./job_work_order_scope_identity.ts";
 import {
   fillJobWorkOrderDraftFromQuote,
   JOB_WORK_ORDER_OPEN_STATUSES,
@@ -1586,6 +1587,11 @@ export async function readJobWorkOrder(
       ? await readFillEvents(client, job.id, shown.id)
       : [],
   );
+  const scopeIdentity = await readWorkOrderScopeIdentity(
+    client,
+    job.id,
+    filledFrom.scope_revision_id,
+  );
   const linked = lines.filter((l) => l.work_order_id);
   const before = lines.filter((l) => !l.work_order_id && l.counted);
   const invoiceLabour = labourByInvoice(lines);
@@ -1621,6 +1627,7 @@ export async function readJobWorkOrder(
     customer_variations: customerVariations.map(shapeCustomerVariation),
     quote_fill: quoteFill,
     filled_from: filledFrom,
+    scope_identity: scopeIdentity,
     needs_checking: jobWorkOrderNeedsChecking(
       live || draft,
       autoIssueOn,
