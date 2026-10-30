@@ -167,14 +167,17 @@ ROLLBACK;
 -- exactly its predecessor's plus its edits; while one is live only the
 -- rules-off ladder, the helpers and the classifier are checked here, and the
 -- re-apply is skipped (L1e's guard refuses to re-apply over a successor's body).
-SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') SIMILAR TO 'L1(f|g):%' AS l1f_live \gset
+-- Unplaced stage 1 (20261014170000) marks it 'L1g plus unplaced stage 1' and
+-- TP-04 (20261029190000) keeps that mark.
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') SIMILAR TO 'L1(f|g):%'
+ OR coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1g plus unplaced stage 1%' AS l1f_live \gset
 \if :l1f_live
 DO $$
 DECLARE f text; r text;
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_mismatch_rows()'::regprocedure)<>'69d68f016116576e6b6c8c773de8752e'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_event_writer_job(public.business_events)'::regprocedure)<>'cd36b092818e7607d114d1b3011b3bfd'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_event_writer_job(public.business_events)'::regprocedure) NOT IN ('cd36b092818e7607d114d1b3011b3bfd','9d29d9087ebb8765cc994174a960b6d4')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_is_guess(public.business_events)'::regprocedure)<>'1c87d88718cf014429170e3f1aaaa2aa'
  THEN RAISE EXCEPTION 'l1e: a body is not this migration''s'; END IF;
  FOREACH f IN ARRAY ARRAY['public.context_ladder_p1a(public.business_events,boolean)',
@@ -196,7 +199,7 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'d5af94a0f9320652116cc2b304021ab5'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_mismatch_rows()'::regprocedure)<>'69d68f016116576e6b6c8c773de8752e'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_event_writer_job(public.business_events)'::regprocedure)<>'cd36b092818e7607d114d1b3011b3bfd'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_event_writer_job(public.business_events)'::regprocedure) NOT IN ('cd36b092818e7607d114d1b3011b3bfd','9d29d9087ebb8765cc994174a960b6d4')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_is_guess(public.business_events)'::regprocedure)<>'1c87d88718cf014429170e3f1aaaa2aa'
  THEN RAISE EXCEPTION 'l1e: a body is not this migration''s'; END IF;
  -- Undoing the L1e edits gives back L1d's bodies byte for byte.

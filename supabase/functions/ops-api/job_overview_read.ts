@@ -23,6 +23,9 @@
 //   - matching    how many queued rows offer this job and wait on a person in
 //                 Matching (context_recon_job_items, contact or not), so the
 //                 card can link to Matching, Find by job;
+//   - bills       the supplier bills placed on this job and where Finance's
+//                 engine counts each one's cost (context_job_bill_outcomes, the
+//                 H7 read over CFO's cfo_bill_cost_outcomes), with no amount;
 //   - not_seen    the sources Context cannot see for any job, as standing
 //                 lines, until each is captured.
 //
@@ -47,6 +50,10 @@ import {
   StoryReadError,
 } from "./job_story_read.ts";
 import { RECON_JOB_ITEMS_PAGE } from "./context_job_reconciliation.ts";
+import {
+  type JobBillOutcomes,
+  validateJobBillOutcomes,
+} from "./job_bill_outcomes_read.ts";
 
 export const JOB_OVERVIEW_VERSION = "job-overview-v1";
 /** Messages returned, newest kept, oldest first. */
@@ -998,6 +1005,7 @@ export async function jobOverviewAction(
     mediaRead,
     scopeRead,
     matchingRead,
+    billsRead,
   ] = await Promise.all([
     part<any>("story", async () => {
       const read = await readJobStory(client, { jobId: job.id });
@@ -1189,6 +1197,38 @@ export async function jobOverviewAction(
       const matching = overviewMatching(data);
       return { data: matching, status: ok(matching.waiting) };
     }),
+    part<JobBillOutcomes>("bills", async () => {
+      const { data, error } = await client.rpc("context_job_bill_outcomes", {
+        p_job: job.id,
+      });
+      if (error) {
+        if (isMissingFunction(error)) {
+          return {
+            data: null,
+            status: {
+              ok: false,
+              state: "not_deployed" as const,
+              count: 0,
+              code: "not_deployed",
+            },
+          };
+        }
+        return {
+          data: null,
+          status: failed(
+            "rpc_failed",
+            sanitizedError("bill outcomes read failed", error),
+          ),
+        };
+      }
+      // Another contract version, a changed shape or any amount: the whole
+      // answer is refused, never trimmed and never read as "no bills".
+      const checked = validateJobBillOutcomes(data);
+      if (!checked.ok) {
+        return { data: null, status: failed(checked.code, checked.detail) };
+      }
+      return { data: checked.value, status: ok(checked.value.bills.length) };
+    }),
   ]);
 
   // The saved story: compared with the card just read (never built twice); a
@@ -1326,6 +1366,7 @@ export async function jobOverviewAction(
     },
     story_text: storyText.data,
     matching: matchingRead.data,
+    bills: billsRead.data,
     not_seen: OVERVIEW_NOT_SEEN.map((n) => ({ ...n })),
     sources: {
       job: header.status,
@@ -1340,6 +1381,7 @@ export async function jobOverviewAction(
       scope: scopeRead.status,
       story_text: storyText.status,
       matching: matchingRead.status,
+      bills: billsRead.status,
     },
   };
 }

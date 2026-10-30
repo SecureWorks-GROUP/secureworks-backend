@@ -553,6 +553,7 @@ jobs:
             supabase/functions/ops-api/job_state_card_test.ts \
             supabase/functions/ops-api/job_story_door_test.ts \
             supabase/functions/ops-api/job_overview_read_test.ts \
+            supabase/functions/ops-api/job_bill_outcomes_read_test.ts \
             supabase/functions/ops-api/context_scorecard_door_test.ts \
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/job_conversation_window_test.ts \
