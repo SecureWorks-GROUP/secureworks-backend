@@ -508,6 +508,9 @@ jobs:
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
+            supabase/functions/ops-api/xero_bill_tracking_corrections_test.ts \
+            supabase/functions/ops-api/xero_line_corrections_test.ts \
+            supabase/functions/ops-api/xero_record_reads_test.ts \
             supabase/functions/ops-api/xero_receivables_read_test.ts \
             supabase/functions/ops-api/xero_attachment_test.ts \
             supabase/functions/ops-api/xero_post_rate_limit_retry_test.ts \

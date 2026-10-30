@@ -1,6 +1,6 @@
 {
   "version": "xero-write-register-v1",
-  "about": "Every place in supabase/functions that can write to Xero, and the X row (Integrated Job Framework A4 4.2, INT-33) it belongs to. xero_write_register_test.ts scans the sources and fails when a write site appears that no row names, or a row names one that is gone. Owner is the accountable desk, not the code. A new row, or a change to who passes a gate, is a person's decision (P2, P12): the CFO desk confirmed X1-X14 on 26 Oct (backend #1165, after its corrections) and Marnin approves the register. X15 records separately owner-authorised 28 Oct tracking corrections, with CFO confirmation pending and no extra deployment authority. changes_books: yes, no, draft_only (a Xero DRAFT posts nothing until a person approves it in Xero) or yes_when_authorised. sends_outside: the path can send to a customer or supplier. Human copy: docs/xero-write-register.md.",
+  "about": "Every place in supabase/functions that can write to Xero, and the X row (Integrated Job Framework A4 4.2, INT-33) it belongs to. xero_write_register_test.ts scans the sources and fails when a write site appears that no row names, or a row names one that is gone. Owner is the accountable desk, not the code. A new row, or a change to who passes a gate, is a person's decision (P2, P12): the CFO desk confirmed X1-X14 on 26 Oct (backend #1165, after its corrections) and Marnin approves the register. X15 records separately owner-authorised 28 Oct tracking corrections, and X16 the 30 Oct line coding door, both with CFO confirmation pending and no extra deployment authority. changes_books: yes, no, draft_only (a Xero DRAFT posts nothing until a person approves it in Xero) or yes_when_authorised. sends_outside: the path can send to a customer or supplier. Human copy: docs/xero-write-register.md.",
   "read_at": "secureworks-backend 879ca60, 26 Oct 2026",
   "rows": [
     {
@@ -208,6 +208,19 @@
       "proposed": true,
       "call_sites": [
         "ops-api/xero_bill_tracking_corrections.ts :: correctSupplierBillTracking :: POST /Invoices/{id}"
+      ],
+      "changes_books": "yes",
+      "sends_outside": false
+    },
+    {
+      "id": "X16",
+      "write": "Correct Business Unit tracking and/or a line's account code on one posted invoice, bill, credit note, or spend/receive bank transaction",
+      "owner": "Bookkeeping / CFO",
+      "gate_today": "Owner/admin JWT in the default organisation or dedicated server secret; POST only; preview is read-only; apply requires confirm=true, matching tenant and current snapshot hash, active tracking IDs, and target accounts that are active, non-system, non-bank and in the same profit and loss class as the line's current account. Amounts, tax, dates, contact, payments, allocations and reconciliation state must read back unchanged. A 4xx refusal is reported only after an unchanged readback. Requested by Marnin on 30 Oct 2026 (connector upgrade); registration grants no deployment or broader live authority.",
+      "cfo_confirmed": false,
+      "proposed": true,
+      "call_sites": [
+        "ops-api/xero_line_corrections.ts :: correctXeroLineCoding :: POST {id}/{id}"
       ],
       "changes_books": "yes",
       "sends_outside": false

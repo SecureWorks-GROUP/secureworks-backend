@@ -27,7 +27,7 @@ function requireValue(
 ): asserts ok {
   if (!ok) throw new SupplierBillError(message, 409, code);
 }
-function canonical(value: any): string {
+export function canonical(value: any): string {
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
   if (value && typeof value === "object") {
     return "{" + Object.keys(value).sort().map((k) =>
@@ -112,7 +112,7 @@ function validateInvoice(inv: Row, id: string) {
     "Every line requires a unique immutable LineItemID",
   );
 }
-function trackingIdentity(items: any): string {
+export function trackingIdentity(items: any): string {
   return canonical(
     (items || []).map((t: Row) => ({
       category: t.TrackingCategoryID,

@@ -650,6 +650,8 @@ import {
   XeroPdfAttachError,
 } from './xero_attachment.ts'
 import { correctSupplierBillTracking, canCorrectBillTracking } from './xero_bill_tracking_corrections.ts'
+import { correctXeroLineCoding } from './xero_line_corrections.ts'
+import { getXeroAttachment, listXeroAttachments, readXeroHistory } from './xero_record_reads.ts'
 import { renderTradeInvoiceAuditPdf } from './trade_invoice_pdf.ts'
 import {
   attachSupplierBillPdf,
@@ -4312,6 +4314,22 @@ async function xeroGet(
   }
   if (!resp.ok) throw new Error(`Xero API ${path} failed (${resp.status}): ${await resp.text()}`)
   return resp.json()
+}
+
+// Xero attachment bytes for the read-only attachment door.
+async function xeroGetBinary(
+  path: string, accessToken: string, tenantId: string, accept: string
+): Promise<{ bytes: Uint8Array; contentType: string | null }> {
+  const resp = await xeroLegacyReadFetch(`${XERO_API_BASE}${path}`, {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Xero-tenant-id': tenantId,
+      'Accept': accept,
+    },
+  })
+  if (resp.status === 429) throw xeroRateLimitError(resp)
+  if (!resp.ok) throw new Error(`Xero API ${path} failed (${resp.status}): ${await resp.text()}`)
+  return { bytes: new Uint8Array(await resp.arrayBuffer()), contentType: resp.headers.get('content-type') }
 }
 
 // Xero writes dispatch once with the existing caller idempotency key.
@@ -9311,6 +9329,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (!authorized) return json({ ok: false, code: 'OWNER_OR_SERVER_REQUIRED' }, 403)
         try {
           return json(await correctSupplierBillTracking(client, body, { getToken, xeroGet, xeroPost, authorized }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'xero_correct_line_coding': {
+        if (req.method !== 'POST') return json({ ok: false, code: 'METHOD_NOT_ALLOWED', error: 'POST required for line correction preview or apply' }, 405)
+        const authorized = canCorrectBillTracking(authMode, authUser, serverSecretPresented, DEFAULT_ORG_ID)
+        if (!authorized) return json({ ok: false, code: 'OWNER_OR_SERVER_REQUIRED' }, 403)
+        try {
+          return json(await correctXeroLineCoding(client, body, { getToken, xeroGet, xeroPost, authorized }))
+        } catch (error) {
+          return supplierBillApiError(error)
+        }
+      }
+      case 'read_xero_history':
+      case 'list_xero_attachments':
+      case 'get_xero_attachment': {
+        const read = action === 'read_xero_history' ? readXeroHistory
+          : action === 'list_xero_attachments' ? listXeroAttachments
+          : getXeroAttachment
+        try {
+          return json(await read(client, url.searchParams, { getToken, xeroGet, xeroGetBinary }))
         } catch (error) {
           return supplierBillApiError(error)
         }
