@@ -553,6 +553,62 @@ Deno.test("a live run of the same source is busy; an abandoned one is closed", a
   assertEquals(w.runs[0].error_code, "abandoned");
 });
 
+Deno.test("a sweep still running inside two hours stays the lock", async () => {
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": [] } });
+  w.runs.push({
+    id: "live-sweep",
+    source: "outlook_sweep_nithin",
+    status: "running",
+    started_at: "2026-10-02T04:30:00Z",
+    updated_at: "2026-10-02T05:00:00Z",
+    window_to: null,
+    window_end_id: null,
+    cursor: null,
+  });
+  const r = await runOutlookCapture(deps(w), {
+    mode: "sweep",
+    source: "nithin",
+  });
+  assert(r.outcome === "ran");
+  assertEquals(r.sources[0].outcome, "busy");
+  assertEquals(w.runs.length, 1);
+  assertEquals(w.runs[0].status, "running");
+  assertEquals(w.runs[0].error_code, undefined);
+});
+
+Deno.test("a sweep stuck running with no write for over two hours is abandoned and the next sweep starts", async () => {
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": [] } });
+  w.runs.push({
+    id: "stuck-sweep",
+    source: "outlook_sweep_nithin",
+    status: "running",
+    started_at: "2026-10-02T03:00:00Z",
+    updated_at: "2026-10-02T03:00:00Z",
+    window_to: null,
+    window_end_id: null,
+    cursor: null,
+  });
+  const r = await runOutlookCapture(deps(w), {
+    mode: "sweep",
+    source: "nithin",
+  });
+  assert(r.outcome === "ran");
+  assertEquals(r.sources[0].outcome, "ran");
+  assertEquals(w.runs[0].status, "failed");
+  assertEquals(w.runs[0].error_code, "abandoned");
+  assertEquals(w.runs[1].source, "outlook_sweep_nithin");
+  assertEquals(w.runs[1].status, "succeeded");
+
+  // Idempotent: the closed row is not written again, and another sweep runs.
+  await runOutlookCapture(deps(w), { mode: "sweep", source: "nithin" });
+  assertEquals(w.runs[0].status, "failed");
+  assertEquals(w.runs[0].error_code, "abandoned");
+  assertEquals(
+    w.runs.filter((run) => run.error_code === "abandoned").length,
+    1,
+  );
+});
+
 Deno.test("sweep re-reads 48 hours; what the poll missed counts as sweep_misses", async () => {
   const box = [
     msg(1, "2026-10-01T08:00:00Z"),

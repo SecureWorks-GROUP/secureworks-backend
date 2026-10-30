@@ -78,6 +78,13 @@ Written only through `record_capture_run()` into `context_capture_runs`.
 
 - `succeeded`: the source finished. `partial`: cut short (time budget,
   throttling); the run did not finish. `failed`: an error, with `error_code`.
+  Status `abandoned` is not a status: a sweep the worker left `running` is
+  closed `failed` with `error_code` `abandoned`.
+- A `running` `outlook_sweep_<key>` row is the lock that stops the next sweep
+  of that source (`outcome: busy`). The reader closes it after about two
+  hours with no write (`updated_at`; a sweep does not rewrite the row while
+  it works). A second pass finds nothing still running and writes nothing.
+  Poll and history runs still close after ten minutes without a write.
 - A poll with pages left sets `cursor.backlog = true`.
 - A sweep puts the messages the poll missed in `counts.sweep_misses`, and
   when each was received in `cursor.miss_received_at` (the newest 100, oldest
