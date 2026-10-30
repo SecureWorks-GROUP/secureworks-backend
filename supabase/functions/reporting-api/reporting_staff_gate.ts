@@ -159,3 +159,43 @@ export async function decideReportingStaffAuth(input: {
     return { ok: false, ...REPORTING_STAFF_JWT_REQUIRED };
   }
 }
+
+// Detail level for an UNGATED action that also answers non-staff callers
+// (job_profitability, CFO-01): true only for a server secret (service role,
+// OPS_AGENT_SERVER_KEY) or a signed-in staff operator. The public SW_API_KEY,
+// a trade or other non-staff JWT, an unreadable profile and every error answer
+// false, so the caller gets the basic shape. It never refuses a request.
+export async function reportingApiCallerSeesStaffDetail(input: {
+  xApiKey: string | null;
+  bearerToken: string | null;
+  apiKeyHeader?: string | null;
+  sharedKey?: string | null;
+  serviceKey?: string | null;
+  agentServerKey?: string | null;
+  // deno-lint-ignore no-explicit-any
+  sb: any;
+}): Promise<boolean> {
+  if (reportingApiServerSecretPresented(input)) return true;
+  const bearer = input.bearerToken;
+  if (
+    !bearer ||
+    bearer === input.sharedKey ||
+    bearer === input.serviceKey ||
+    (input.agentServerKey && bearer === input.agentServerKey)
+  ) {
+    return false;
+  }
+  try {
+    const { data: { user }, error } = await input.sb.auth.getUser(bearer);
+    if (error || !user) return false;
+    const { data: profile, error: profileError } = await input.sb
+      .from("users")
+      .select("role")
+      .eq("id", user.id)
+      .maybeSingle();
+    if (profileError) return false;
+    return reportingApiStaffOperatorRole(profile?.role);
+  } catch (_e) {
+    return false;
+  }
+}

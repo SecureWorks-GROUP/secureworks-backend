@@ -11,6 +11,7 @@ import {
   REPORTING_STAFF_JWT_REQUIRED,
   REPORTING_STAFF_OPERATOR_REQUIRED,
   reportingApiActionNeedsStaffRole,
+  reportingApiCallerSeesStaffDetail,
   reportingApiServerSecretPresented,
   reportingApiStaffOperatorRole,
 } from "./reporting_staff_gate.ts";
@@ -333,4 +334,63 @@ Deno.test("missing users.role fails closed as 403, not staff", async () => {
     sb: makeAuthSb({ role: null }),
   })
   assertEquals(gateStatus(decision), 403)
+})
+
+// ── job_profitability detail level (CFO-01): never refuses, only narrows ──
+
+function seesDetail(input: {
+  xApiKey?: string | null
+  bearerToken?: string | null
+  apiKeyHeader?: string | null
+  role?: string | null
+  sb?: ReturnType<typeof makeAuthSb>
+}) {
+  return reportingApiCallerSeesStaffDetail({
+    xApiKey: input.xApiKey ?? null,
+    bearerToken: input.bearerToken ?? null,
+    apiKeyHeader: input.apiKeyHeader ?? null,
+    sharedKey: ENV.sharedKey,
+    serviceKey: ENV.serviceKey,
+    agentServerKey: ENV.agentServerKey,
+    sb: input.sb ?? makeAuthSb({ role: "role" in input ? input.role : "admin" }),
+  })
+}
+
+Deno.test("detail: a staff JWT sees the full job_profitability answer", async () => {
+  for (const role of ["admin", "owner", "ops_manager", "OWNER"]) {
+    assertEquals(await seesDetail({ bearerToken: VALID_JWT, role }), true, role)
+  }
+})
+
+Deno.test("detail: a trade or other non-staff JWT gets the basic answer", async () => {
+  for (const role of NON_STAFF_ROLES) {
+    assertEquals(await seesDetail({ bearerToken: VALID_JWT, role }), false, role)
+  }
+  assertEquals(await seesDetail({ bearerToken: VALID_JWT, role: null }), false)
+})
+
+Deno.test("detail: the public SW_API_KEY gets the basic answer, in either header", async () => {
+  const getUserCalls: string[] = []
+  const sb = makeAuthSb({ role: "admin", getUserCalls })
+  assertEquals(await seesDetail({ xApiKey: ENV.sharedKey, sb }), false)
+  assertEquals(await seesDetail({ bearerToken: ENV.sharedKey, sb }), false)
+  assertEquals(getUserCalls, [])
+})
+
+Deno.test("detail: server secrets see the full answer (Jarvis: SW_API_KEY + service Bearer)", async () => {
+  assertEquals(await seesDetail({ bearerToken: ENV.serviceKey }), true)
+  assertEquals(await seesDetail({ apiKeyHeader: ENV.serviceKey }), true)
+  assertEquals(await seesDetail({ xApiKey: ENV.agentServerKey }), true)
+  // Jarvis callEdgeHeaders for job_profitability: public key in x-api-key, the
+  // service-role JWT as Bearer.
+  assertEquals(
+    await seesDetail({ xApiKey: ENV.sharedKey, bearerToken: ENV.serviceKey }),
+    true,
+  )
+})
+
+Deno.test("detail: an invalid, throwing or missing session gets the basic answer", async () => {
+  assertEquals(await seesDetail({ bearerToken: INVALID_JWT }), false)
+  assertEquals(await seesDetail({ bearerToken: THROW_JWT }), false)
+  assertEquals(await seesDetail({}), false)
 })

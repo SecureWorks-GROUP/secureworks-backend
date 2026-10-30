@@ -254,7 +254,7 @@ const CEO_TOOLS = [
   },
   {
     name: 'get_job_profitability',
-    description: 'Get per-job P&L from Xero Projects. Shows revenue, costs, margin for each job.',
+    description: 'Per-job P&L from the Job Profit engine (v_job_profit): invoiced, placed costs, margin. A job whose costs are incomplete reads margin null with margin_reason (Unknown, never 0%); summary.avg_margin_pct covers only jobs_margin_known jobs, so read jobs_margin_unknown and unknown_reasons beside it. min_revenue is not applied by the route.',
     input_schema: {
       type: 'object',
       properties: {

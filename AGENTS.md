@@ -4575,6 +4575,24 @@ Tests: ops_api_operator_auth_test.ts.
 Do not gate any other reporting-api action. Tests:
 `reporting_staff_gate_test.ts`.
 
+## reporting-api `job_profitability` Reads v_job_profit; Unknown Is Null With A Reason
+
+`reporting-api?action=job_profitability` (Jarvis `sw_job_profitability` /
+`sw_analyse_profitability`, ops-ai and agent-runner `get_job_profitability`,
+the secureworks-ux Job P&L tab) takes every money figure from `v_job_profit`
+in `reporting-api/job_profitability.ts`, the engine the Job Profit screen
+reads. Do not bring back Xero Projects totals or contact-matched bills as a
+cost, `bills = 0` for a job with nothing placed, or an average over every row.
+A job's `margin` / `margin_pct` are published only when `margin_ok`; otherwise
+they are null with `margin_status: 'unknown'` and a worded `margin_reason`.
+`summary.avg_margin_pct` is revenue-weighted over margin-known customer jobs
+only, a holding job is in no summary figure, `total_bills` is placed costs
+only and `costs_complete` is false when any job is unknown. The action stays
+ungated, but the CFO-01 detail fields (`FULL_DETAIL_ROW_KEYS` /
+`FULL_DETAIL_SUMMARY_KEYS`) reach only staff and server callers
+(`reportingApiCallerSeesStaffDetail`); the public key and a trade JWT get the
+basic shape. Tests: `job_profitability_test.ts`, `reporting_staff_gate_test.ts`.
+
 ## Reattend Pack Photos Follow Curated `photo_source_scope`
 
 When a curated bind stamps `photo_source_scope=same_job_all_attendances`, it
