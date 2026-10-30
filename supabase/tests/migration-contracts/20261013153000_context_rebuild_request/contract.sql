@@ -463,9 +463,10 @@ BEGIN
   'the judge must stay stable SQL, security definer, search_path pinned: ' || to_jsonb(p)::text);
  PERFORM pg_temp.rr_assert(p.res = 'TABLE(job_id uuid, due boolean, kind text, reason text, priority integer, newest_evidence_at timestamp with time zone, '
   || 'evidence_rows integer, generation_id uuid, blocked_reason text)', 'the judge''s columns changed: ' || p.res);
- -- (held notes, 20261015100000, keeps this body and adds the held-note exemption to its moved citations)
- PERFORM pg_temp.rr_assert(p.m = ANY(ARRAY['92367db74677cd38612394056aac07fa', '2483ad58fdea93abcb1ca5f4d87658ee']),
-  'the live judge is not this migration''s or its held-notes successor''s: ' || p.m);
+ -- Held notes adds citation exemptions; financial refresh20261030112226 adds a
+ -- dormant source-change reason. Both retain this contract's request behavior.
+ PERFORM pg_temp.rr_assert(p.m = ANY(ARRAY['92367db74677cd38612394056aac07fa', '2483ad58fdea93abcb1ca5f4d87658ee', '484fbb9ba08a6167b3fc5a7f78898ecd']),
+  'the live judge is not this migration''s or its documented successors'' bodies: ' || p.m);
  c := obj_description(to_regprocedure(judge), 'pg_proc');
  PERFORM pg_temp.rr_assert(c LIKE 'Context ledger store (20261006013000), story safety (20261006040000): (scoping pipeline, 20261009133000) '
   || '(finished wake, 20261012093500) (rebuild request, 20261013153000) %Earlier (finished wake): The owner''s 12 Oct 2026 ruling: %Earlier (scoping pipeline): %'

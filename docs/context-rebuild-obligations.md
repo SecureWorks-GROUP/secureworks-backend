@@ -42,3 +42,21 @@ notes already lost by an older rebuild. The observed fence case still needs a
 source-backed recovery from its preserved prior generation, without restoring
 paid debt. Invalid/moved prior sources are surfaced as a refusal; automated
 placement correction and recovery are not proved by this API.
+
+## Financial change scheduling candidate (30 October, unreleased)
+
+Migration20261030112226 adds a service-only record packet containing the
+record-only story and its existing record-sig-v1/money-sig-v1 source witness in
+one statement snapshot. A reader persists the witness with successful output.
+The separate `context_ledger_financial_refresh_v1` flag, absent/off by default,
+lets the judge request a preserving whole rebuild when the current reading's
+witness differs. Financial change takes priority over a new-message partial
+update. Existing rollout, source-admission, budget, backoff and window rules
+remain. The migration neither enables the flag nor changes reader settings.
+
+Tests cover payment/reopen, cache touches, moved invoice effects on both jobs,
+snapshot witnesses, access restrictions and missing/off behavior. A planted
+constant signature must fail the financial-change test. The guarded rollback
+restores the exact prior judge and removes only the added APIs. Stop the caller
+and disable activation first. Required independent review and deployed proof
+remain owed; current signature fields do not imply complete financial coverage.

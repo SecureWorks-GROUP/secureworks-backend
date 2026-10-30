@@ -271,6 +271,12 @@ ROLLBACK;
 
 -- 4. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- A later financial scheduler has its own guarded body. Restore this migration's
+-- exact surface for its idempotence test only; ROLLBACK restores the full stack.
+SELECT to_regprocedure('public.context_ledger_record_signature(uuid)') IS NOT NULL AS hn_has_financial_successor \gset
+\if :hn_has_financial_successor
+\ir ../../../rollbacks/20261030112226_context_ledger_financial_refresh_down.sql
+\endif
 CREATE TEMP TABLE hn_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_held_notes_on', 'context_ledger_held_placed_copy',
