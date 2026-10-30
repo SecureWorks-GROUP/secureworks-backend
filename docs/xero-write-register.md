@@ -30,6 +30,7 @@ Every place in `supabase/functions` that can write to Xero, grouped into the row
 | X13 | Find or create a trade's or supplier's Xero contact | CFO | Inside X6, X8 and X9 | no | no |
 | X14 | Have Xero email a paid invoice to the customer as a receipt (fencing and patio) **(new: found by INT-33, not in the first register)** | Bookkeeping (new row found by INT-33; the CFO desk takes it) | job_closeout_settings.receipt_sender_mode (off, dry_run, live); server key only (job_receipt_paid, job_receipt_catch_up, posted by xero-sync); one claim per invoice. Contract docs/job-receipt-v1.md. receipt_sender_mode going to live is a send gate for Marnin | no | yes |
 | X15 | Correct tracking on existing AUTHORISED/PAID supplier bills | Bookkeeping / CFO | Owner/admin in the default org or dedicated server secret; POST; confirm=true, tenant and snapshot checks; tracking-only preservation and readback | yes (division classification only) | no |
+| X16 | Correct tracking and/or line account code on one posted invoice, bill, credit note or spend/receive bank transaction | Bookkeeping / CFO | Owner/admin in the default org or dedicated server secret; POST; confirm=true, tenant and snapshot checks; same-class active P&L account only; amounts, tax, payments, allocations and reconciliation preserved and read back | yes (classification only) | no |
 
 **Recorded 27 October, before X15:** Over the SecureSuite MCP connector, Jarvis added its own yes only for X4. For the X2, X3, X5, X7 and X8 tools the Claude client's permission prompt is the only human gate, and that is intended: on 27 Oct 2026 Jan decided that agent tools which move money or write to Xero get no named-person yes, so INT-19's first PR (jarvis #267) is parked and will not merge.
 
@@ -126,6 +127,12 @@ X15 now has separate read-only preview and privileged apply tools. Apply require
 - `ops-api/xero_bill_tracking_corrections.ts :: correctSupplierBillTracking :: POST /Invoices/{id}`
 - Preview does not write. Apply requires explicit confirmation and the exact preview hash; it cannot change amounts, tax, account codes, status or payments. Existing X9 draft guards remain intact.
 - Gate and limitations: [posted-bill tracking contract](xero-bill-tracking-corrections.md). No send, money movement, deployment or new token authority is granted by adding this row.
+
+### X16 · Correct line coding on posted invoices, credit notes and bank transactions
+
+- `ops-api/xero_line_corrections.ts :: correctXeroLineCoding :: POST {id}/{id}`
+- One record per request: an AUTHORISED/PAID invoice (ACCPAY or ACCREC) or credit note, or an AUTHORISED SPEND/RECEIVE bank transaction. Changes are Business Unit tracking and/or the line's account code, never amounts, tax, dates, contact, status, payments or reconciliation.
+- Gate and limitations: [line coding contract](xero-line-corrections.md). No send, money movement, deployment or new token authority is granted by adding this row.
 
 ### Not writes
 

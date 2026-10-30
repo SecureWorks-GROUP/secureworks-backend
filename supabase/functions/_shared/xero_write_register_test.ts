@@ -65,9 +65,9 @@ Deno.test("every Xero write site in supabase/functions is on the register, and e
   assert(sites.length >= 40, `only ${sites.length} sites found`);
 });
 
-Deno.test("the register's rows are X1 to X15, each with an owner and a gate, each key on one row", () => {
+Deno.test("the register's rows are X1 to X16, each with an owner and a gate, each key on one row", () => {
   const ids = REGISTER.rows.map((r: any) => r.id);
-  assertEquals(ids, Array.from({ length: 15 }, (_, i) => `X${i + 1}`));
+  assertEquals(ids, Array.from({ length: 16 }, (_, i) => `X${i + 1}`));
   const seen = new Set<string>();
   for (const row of REGISTER.rows) {
     assert(String(row.write || "").length > 0, `${row.id} write`);
