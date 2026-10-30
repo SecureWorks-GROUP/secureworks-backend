@@ -83,8 +83,10 @@ profit or invoice amount is written by this module.
 
 The existing `list_xero_settlement_records` and `read_xero_settlement_record`
 already read raw Xero records directly, rather than a stored settlement table.
-They remain available unchanged for direct inspection; the new contract is the
-shared stored-evidence interpretation beside them, not another bank matcher.
+They remain available for direct inspection (the exact credit-note read also
+admits supplier credits: `docs/xero-supplier-credit-read.md`); the new contract
+is the shared stored-evidence interpretation beside them, not another bank
+matcher.
 
 ## Real-data proof, 14 October 2026
 
