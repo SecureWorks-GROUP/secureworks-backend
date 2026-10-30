@@ -1,3 +1,8 @@
+-- Remove the known later signature extension before exercising TP-13's rollback.
+SELECT md5(prosrc)='b2f762db966bf9f3417e759827705be2' AS tp13_break_has_oncost FROM pg_proc WHERE oid='public.context_job_story_money_sig(uuid)'::regprocedure \gset
+\if :tp13_break_has_oncost
+\ir ../../../rollbacks/20261030190230_context_story_oncost_refresh_down.sql
+\endif
 -- Break: put back the engine without the TP-13 rules (20261020181800's body)
 -- and the story book as 20261028190000 wrote it, through this migration's own
 -- down file, then put the policy back as shipped, so only the rules are
