@@ -84,6 +84,15 @@ END; $$;
 REVOKE ALL ON FUNCTION public.group_work_order_pay_for_basis(text, numeric) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.group_work_order_pay_for_basis(text, numeric) TO service_role;
 
+-- share_pay keeps every output key: it now returns group_work_order_pay_for_basis(), which builds them.
+-- output-key-guard: drop public.group_work_order_share_pay pay_basis
+-- output-key-guard: drop public.group_work_order_share_pay budget_ex
+-- output-key-guard: drop public.group_work_order_share_pay invoice_ex
+-- output-key-guard: drop public.group_work_order_share_pay cash_pay
+-- output-key-guard: drop public.group_work_order_share_pay super_amount
+-- output-key-guard: drop public.group_work_order_share_pay company_contribution
+-- output-key-guard: drop public.group_work_order_share_pay company_total_out
+-- output-key-guard: drop public.group_work_order_share_pay budget_remainder
 CREATE OR REPLACE FUNCTION public.group_work_order_share_pay(p_group_id uuid, p_budget_ex numeric)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE v_basis text;
