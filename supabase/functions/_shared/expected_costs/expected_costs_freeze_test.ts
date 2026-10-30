@@ -30,7 +30,7 @@ import {
 // ── In-memory mock Supabase client ──────────────────────────────────────────
 
 type Row = Record<string, unknown>
-type Tables = { jobs: Row[]; scope_revisions: Row[] }
+type Tables = { jobs: Row[]; scope_revisions: Row[]; job_documents: Row[]; run_acceptances: Row[]; quote_revisions: Row[]; job_variations: Row[] }
 
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`
@@ -39,7 +39,7 @@ function deepCopy<T>(v: T): T {
   return JSON.parse(JSON.stringify(v))
 }
 
-type Filter = { col: string; val: unknown; op: 'eq' | 'is' | 'in' | 'lte' }
+type Filter = { col: string; val: unknown; op: 'eq' | 'is' | 'in' | 'lte' | 'not_is' }
 
 class MockChain {
   table: string
@@ -50,14 +50,16 @@ class MockChain {
   orderBy: { col: string; ascending: boolean } | null = null
   limitN: number | null = null
   method: 'select' | 'insert' | 'update' | null = null
+  wantsCount = false
 
   constructor(table: string, state: Tables) {
     this.table = table
     this.state = state
   }
 
-  select(_cols: string) {
+  select(_cols: string, options?: { count?: string }) {
     if (this.method == null) this.method = 'select'
+    this.wantsCount = options?.count === 'exact'
     return this
   }
   insert(payload: Row) {
@@ -76,6 +78,11 @@ class MockChain {
   }
   is(col: string, val: unknown) {
     this.filters.push({ col, val, op: 'is' })
+    return this
+  }
+  not(col: string, op: string, val: unknown) {
+    if (op !== 'is') throw new Error('unsupported fixture filter')
+    this.filters.push({ col, val, op: 'not_is' })
     return this
   }
   in(col: string, val: unknown[]) {
@@ -122,6 +129,7 @@ class MockChain {
   private _match(r: Row): boolean {
     return this.filters.every((f) => {
       if (f.op === 'is' && f.val === null) return r[f.col] == null
+      if (f.op === 'not_is' && f.val === null) return r[f.col] != null
       if (f.op === 'in') return Array.isArray(f.val) && (f.val as unknown[]).includes(r[f.col])
       if (f.op === 'lte') {
         const v = r[f.col]
@@ -135,8 +143,9 @@ class MockChain {
     return rows.filter((r) => this._match(r))
   }
 
-  private _doSelect(kind: 'array' | 'single' | 'maybeSingle'): { data: any; error: any } {
+  private _doSelect(kind: 'array' | 'single' | 'maybeSingle'): { data: any; error: any; count?: number } {
     let rows = this._filterRows(this.state[this.table as keyof Tables])
+    const count = rows.length
     if (this.orderBy) {
       const { col, ascending } = this.orderBy
       rows = rows.slice().sort((a, b) => {
@@ -154,7 +163,7 @@ class MockChain {
       if (rows.length > 1) return { data: null, error: { message: 'multiple rows' } }
       return { data: rows[0] ? deepCopy(rows[0]) : null, error: null }
     }
-    return { data: rows.map(deepCopy), error: null }
+    return { data: rows.map(deepCopy), error: null, ...(this.wantsCount ? { count } : {}) }
   }
 
   private _doInsert(kind: 'array' | 'single' | 'maybeSingle'): { data: any; error: any } {
@@ -203,6 +212,10 @@ function makeMockClient(seed?: Partial<Tables>) {
   const state: Tables = {
     jobs: deepCopy(seed?.jobs ?? []),
     scope_revisions: deepCopy(seed?.scope_revisions ?? []),
+    job_documents: deepCopy(seed?.job_documents ?? []),
+    run_acceptances: deepCopy(seed?.run_acceptances ?? []),
+    quote_revisions: deepCopy(seed?.quote_revisions ?? []),
+    job_variations: deepCopy(seed?.job_variations ?? []),
   }
   return {
     from(table: string) {
@@ -507,3 +520,118 @@ Deno.test('job not found → structured error', async () => {
 Deno.test('lane enum is exactly the three cost lanes', () => {
   assertEquals([...EXPECTED_LANES].sort(), ['commission', 'labour', 'materials'])
 })
+
+
+// D1 / JP-24 source identity: the accepted release names A even when B was
+// frozen more recently, or has identical prices but a different scope.
+async function acceptedFixture() {
+  const a = await seedFrozenRevision('accepted-job', FROZEN_PRICING, { status: 'superseded' })
+  const b = await seedFrozenRevision('accepted-job', LIVE_PRICING, { frozen_at: '2026-07-05T01:30:00.000Z' })
+  const scope = { lines: [{ id: 'material-1' }, { id: 'labour-1' }] }
+  Object.assign(a, { scope_canonical_text: JSON.stringify(scope), scope_hash: await jsonHash(scope) })
+  Object.assign(b, { scope_canonical_text: JSON.stringify(scope), scope_hash: await jsonHash(scope) })
+  const client = makeMockClient({
+    jobs: [seedJob({ id: 'accepted-job', pricing_json: LIVE_PRICING })],
+    scope_revisions: [a, b],
+    job_documents: [{ id: 'accepted-doc', job_id: 'accepted-job', type: 'quote', accepted_at: ACCEPTED_AT }],
+    quote_revisions: [{ job_id: 'accepted-job', job_document_id: 'accepted-doc', scope_revision_id: a.id, sent_at: BEFORE_ACCEPT }],
+  })
+  return { client, a, b }
+}
+const quoteInput = { job_id: 'accepted-job', now_iso: FROZE_AT, quote_acceptance: true }
+
+Deno.test('declared accepted A wins over newer B, duplicate releases and retry preserve A', async () => {
+  const { client, a } = await acceptedFixture()
+  client._state.quote_revisions.push(deepCopy(client._state.quote_revisions[0]))
+  const result = await freezeExpectedCostsOnAcceptance(client, quoteInput)
+  assert(result.ok && result.snapshot)
+  assertEquals(result.scope_revision_id, a.id)
+  const baseline = deepCopy(client._state.jobs[0].expected_costs) as any
+  assertEquals(baseline.lanes.materials.amount_ex_gst, 500)
+  assertEquals(baseline.lanes.labour.amount_ex_gst, 200)
+  assertEquals(baseline.lanes.commission.amount_ex_gst, 150)
+  assertEquals(await freezeExpectedCostsOnAcceptance(client, quoteInput), {
+    ok: true, snapshot: false, reason: 'already_frozen', existing_confidence: 'frozen_revision',
+  })
+  assertEquals(client._state.jobs[0].expected_costs, baseline)
+})
+
+Deno.test('equal-price different-scope revision cannot replace the accepted row identity', async () => {
+  const { client, a } = await acceptedFixture()
+  const b = client._state.scope_revisions[1]
+  b.pricing_canonical_text = a.pricing_canonical_text
+  b.pricing_hash = a.pricing_hash
+  b.scope_canonical_text = JSON.stringify({ lines: [{ id: 'other-line' }] })
+  b.scope_hash = await jsonHash(JSON.parse(b.scope_canonical_text as string))
+  const result = await freezeExpectedCostsOnAcceptance(client, quoteInput)
+  assert(result.ok && result.snapshot)
+  assertEquals(result.scope_revision_id, a.id)
+})
+
+Deno.test('all accepted parties bound to A retain the same whole-job baseline, never multiply shares', async () => {
+  const { client, a } = await acceptedFixture()
+  client._state.job_documents.push({ id: 'neighbour-doc', job_id: 'accepted-job', type: 'quote', accepted_at: ACCEPTED_AT })
+  client._state.quote_revisions.push({ job_id: 'accepted-job', job_document_id: 'neighbour-doc', scope_revision_id: a.id, sent_at: BEFORE_ACCEPT })
+  client._state.run_acceptances.push({ job_id: 'accepted-job', job_document_id: 'neighbour-doc', status: 'accepted' })
+  const result = await freezeExpectedCostsOnAcceptance(client, quoteInput)
+  assert(result.ok && result.snapshot)
+  assertEquals((client._state.jobs[0].expected_costs as any).lanes.materials.amount_ex_gst, 500)
+})
+
+for (const [name, mutate] of Object.entries<(s: Tables) => void>({
+  'mixed bound and unbound releases': s => { s.quote_revisions.push({ ...s.quote_revisions[0], scope_revision_id: null }) },
+  'different named revisions': s => { s.quote_revisions.push({ ...s.quote_revisions[0], scope_revision_id: s.scope_revisions[1].id }) },
+  'accepted party missing its release': s => { s.job_documents.push({ id: 'other-doc', job_id: 'accepted-job', type: 'quote', accepted_at: ACCEPTED_AT }) },
+  'run accepted without document identity': s => { s.run_acceptances.push({ job_id: 'accepted-job', status: 'accepted', job_document_id: null }) },
+  'party not accepted': s => { s.run_acceptances.push({ job_id: 'accepted-job', status: 'pending', job_document_id: 'pending-doc' }) },
+  'accepted variation': s => { s.job_variations.push({ job_id: 'accepted-job', accepted_at: ACCEPTED_AT, status: 'accepted' }) },
+  'invoiced variation': s => { s.job_variations.push({ job_id: 'accepted-job', accepted_at: null, status: 'invoiced' }) },
+  'wrong job revision': s => { s.scope_revisions[0].job_id = 'another-job' },
+  'missing named revision': s => { s.scope_revisions.shift() },
+  'post-accept revision': s => { s.scope_revisions[0].frozen_at = AFTER_ACCEPT },
+  'draft revision': s => { s.scope_revisions[0].status = 'draft' },
+  'tampered scope': s => { s.scope_revisions[0].scope_canonical_text = '{"lines":[]}' },
+  'tampered pricing': s => { s.scope_revisions[0].pricing_hash = '0'.repeat(64) },
+  'unparseable pricing': s => { s.scope_revisions[0].pricing_canonical_text = 'broken' },
+  'no accepted document': s => { s.job_documents[0].accepted_at = null },
+  'no job acceptance': s => { s.jobs[0].accepted_at = null },
+})) {
+  Deno.test(`declared quote source ${name}: no guessed baseline and no live fallback`, async () => {
+    const { client } = await acceptedFixture()
+    mutate(client._state)
+    const result = await freezeExpectedCostsOnAcceptance(client, quoteInput)
+    assert(result.ok && !result.snapshot)
+    assertEquals(result.reason, 'accepted_quote_source_unproven')
+    assertEquals(client._state.jobs[0].expected_costs, null)
+    assertEquals(client._state.jobs[0].expected_frozen_at, null)
+  })
+}
+
+Deno.test('legacy quotes with no declared binding retain CP1 time resolver and do not claim binding', async () => {
+  const { client, b } = await acceptedFixture()
+  client._state.quote_revisions[0].scope_revision_id = null
+  const result = await freezeExpectedCostsOnAcceptance(client, quoteInput)
+  assert(result.ok && result.snapshot)
+  assertEquals(result.scope_revision_id, b.id)
+})
+
+for (const table of ['job_documents', 'run_acceptances', 'job_variations', 'quote_revisions', 'scope_revisions']) {
+  for (const fault of ['failed', ...(table === 'scope_revisions' ? [] : ['truncated', 'missing-count'])]) {
+    Deno.test(`${table} ${fault}: declared quote read cannot freeze a partial or failed source`, async () => {
+      const { client } = await acceptedFixture()
+      const from = client.from.bind(client)
+      client.from = (name: string) => {
+        if (name !== table) return from(name)
+        const result = fault === 'failed' ? { data: null, error: { message: 'planted read failure' } }
+          : { data: [], error: null, ...(fault === 'truncated' ? { count: 2 } : {}) }
+        const q: any = new Proxy({}, { get: (_t, key) => key === 'then'
+          ? (resolve: any) => Promise.resolve(result).then(resolve)
+          : () => q })
+        return q
+      }
+      const result = await freezeExpectedCostsOnAcceptance(client, quoteInput)
+      assert(!result.ok || !result.snapshot)
+      assertEquals(client._state.jobs[0].expected_costs, null)
+    })
+  }
+}

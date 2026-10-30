@@ -1930,7 +1930,7 @@ serve(async (req: Request) => {
         // and write-once, so calling from both acceptance sites is safe.
         if (jobStatus === 'accepted' && doc.job_id) {
           try {
-            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id })
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline (run flow)', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
@@ -2041,7 +2041,7 @@ serve(async (req: Request) => {
         // once the whole job is accepted, matching the accepted_at write above.
         if (newStatus === 'accepted') {
           try {
-            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id })
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)

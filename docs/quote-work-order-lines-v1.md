@@ -254,3 +254,21 @@ and returns:
 - 400 `job_id_required`, before any query, when `job_id` is missing or is not a job id
   (uuid). A job number is not accepted.
 - 404 `job_not_found` for an unknown job.
+
+## D1 acceptance-cost source candidate, 30 October 2026
+
+The send-quote acceptance paths pass `quote_acceptance: true` to the write-once
+expected-cost helper. When released accepted documents declare a scope revision,
+the helper requires a complete, unambiguous chain to that exact row, verifies its
+job, lifecycle and canonical scope/pricing hashes, then pins those costs. A newer
+draft frozen while sending cannot replace the sent revision. Missing reads,
+mixed bindings, unaccepted parties and unresolved accepted variations leave the
+baseline unset; they never manufacture zero costs or select a nearby revision.
+An already stored baseline is unchanged. Quotes with no declared binding retain
+the existing CP1 resolver and remain unproven by the JP-23 acceptance reader.
+
+This is a local unreleased candidate. Historical JP-23 writer/release holds are
+not waived. Money/database review and coupled Scope producer/consumer proof are
+still required. It does not change this document's work-order fill resolver or
+prove order/crew/actual-cost line continuity. No backfill, migration, send or
+financial-policy change is included.
