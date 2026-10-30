@@ -32,7 +32,7 @@
 
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
-import { calculateTradeInvoiceMoney, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
+import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
 import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 
 export const GROUP_WORK_ORDER_FLAG = "group_work_order_v1";
@@ -51,6 +51,13 @@ export const GROUP_SHARE_LINE_TYPE = "group share";
  * does not freeze and does not hold the share. A non-draft line other
  * than ops-reject does.
  */
+// Owner, 30 Oct 2026: new groups pay full 12% super inside each share.
+export const GROUP_PAY_BASIS_EMPLOYER_SUPER = "all_in_12_v2";
+const ALL_IN_BASES = ["all_in_12_6_v1", GROUP_PAY_BASIS_EMPLOYER_SUPER];
+function isAllInBasis(basis: unknown): boolean {
+  return ALL_IN_BASES.includes(String(basis || ""));
+}
+
 export const GROUP_FENCE_RELEASED_INVOICE_STATUSES = [
   "draft",
   "ops-reject",
@@ -86,6 +93,7 @@ export type GroupAwaiting =
   | "awaiting_signoff"
   | "awaiting_others"
   | "awaiting_rate"
+  | "awaiting_crew_approval"
   | "ready"
   | "frozen";
 
@@ -962,7 +970,7 @@ export async function createGroupWorkOrder(
     job_id: jobId,
     work_order_id: workOrderId,
     status: "open",
-    pay_basis: "all_in_12_6_v1",
+    pay_basis: GROUP_PAY_BASIS_EMPLOYER_SUPER,
     share_token: token,
     created_by: caller.userId,
   }).select(
@@ -1121,7 +1129,12 @@ type ShareView = {
   signoff: Record<string, unknown> | null;
   needsHours: string[];
   needsRate: string[];
+  // Owner, 30 Oct 2026: on a full-employer-super group the crew approve each
+  // other's hours on site before the shares are finalised.
+  needsApproval: string[];
 };
+
+const CREW_APPROVAL_MESSAGE = "Every crew member has to approve the hours before the shares are finalised.";
 
 function signedAfterHours(signedAt: unknown, latestHoursAt: string | null): boolean {
   if (!latestHoursAt) return true;
@@ -1321,7 +1334,7 @@ async function loadShareView(
       ),
       rowsOf(
         client.from("job_client_signoffs").select(
-          "id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, captured_by_actor",
+          "id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, captured_by_actor, signed_name",
         ).eq("job_id", group.job_id),
         "load the client sign-off",
       ),
@@ -1376,12 +1389,20 @@ async function loadShareView(
     minimum,
     latestHoursAt,
   );
+  // An approval counts only when it is newer than every hours change.
+  const needsApproval = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER
+    ? participants.filter((row) =>
+      (hoursByUser.get(String(row.user_id)) || 0) > 0 &&
+      !(row.crew_signed_at && signedAfterHours(row.crew_signed_at, latestHoursAt))
+    ).map((row) => String(row.user_id)).sort()
+    : [];
   let awaiting: GroupAwaiting = "ready";
   if (!signed) awaiting = "awaiting_signoff";
   else if (group.split_frozen_at) awaiting = "frozen";
   else if (needsHours.length > 0) awaiting = "awaiting_others";
   else if (needsRate.length > 0) awaiting = "awaiting_rate";
-  return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate };
+  else if (needsApproval.length > 0) awaiting = "awaiting_crew_approval";
+  return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate, needsApproval };
 }
 
 export async function readGroupWorkOrderMyShare(
@@ -1434,7 +1455,7 @@ export async function readGroupWorkOrderMyShare(
     myShareEx: myShare,
     awaiting,
   });
-  if (group.pay_basis === "all_in_12_6_v1") {
+  if (isAllInBasis(group.pay_basis)) {
     Object.assign(response, {pay_basis: group.pay_basis, budget_includes_super: true});
     if (myShare != null) {
       const pay = await allInSharePay(client, group, myShare);
@@ -1448,25 +1469,189 @@ async function allInSharePay(client: any, group: Record<string, unknown>, budget
   const { data, error } = await client.rpc("group_work_order_share_pay", {p_group_id: group.id, p_budget_ex: budget});
   throwQuery(error, "check pay and super within your group allocation");
   if (!data || !(Number(data.invoice_ex) >= 0)) throw new GroupWorkOrderError("group_share_amount_invalid", "Your group allocation could not be checked.", 503);
-  const canonical = calculateTradeInvoiceMoney({grossEarned: Number(data.invoice_ex), gstOn:false, earningsDate:new Date().toISOString().slice(0,10)});
-  if (canonical.super_rate !== .12 || TRADE_INVOICE_WORKER_WITHHOLD_RATE !== .06 || Math.abs(Number(canonical.company_total_out) - Number(data.company_total_out)) > .001 || Math.abs(Number(canonical.net_pay)-Number(data.cash_pay)) > .001 || Math.abs(Number(canonical.super_amount)-Number(data.super_amount)) > .001) {
+  const employer = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER;
+  const canonical = calculateTradeInvoiceMoney({grossEarned: Number(data.invoice_ex), gstOn:false, earningsDate:new Date().toISOString().slice(0,10), superBasis: employer ? TRADE_INVOICE_EMPLOYER_SUPER_BASIS : null});
+  if (canonical.super_rate !== .12 || (!employer && TRADE_INVOICE_WORKER_WITHHOLD_RATE !== .06) || Math.abs(Number(canonical.company_total_out) - Number(data.company_total_out)) > .001 || Math.abs(Number(canonical.net_pay)-Number(data.cash_pay)) > .001 || Math.abs(Number(canonical.super_amount)-Number(data.super_amount)) > .001) {
     throw new GroupWorkOrderError("group_super_policy_changed", "The office needs to confirm this group's super policy before invoicing.",409);
   }
   return data as Record<string, any>;
 }
 
-export async function assertAllInGroupInvoiceStandalone(client: any, caller: GroupCaller, body: Record<string, any>) {
+/** Refuses an all-in share mixed with other work; says which super basis prices it. */
+export async function assertAllInGroupInvoiceStandalone(client: any, caller: GroupCaller, body: Record<string, any>): Promise<{ superBasis: typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS | null }> {
   const extras = Array.isArray(body.extra_items) ? body.extra_items : [];
   const shareItems = extras.filter(isGroupShareInvoiceItem);
-  if (!shareItems.length || !(await groupFeatureOn(client))) return;
+  let superBasis: typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS | null = null;
+  if (!shareItems.length || !(await groupFeatureOn(client))) return { superBasis };
   for (const item of shareItems) {
     const group = await resolveGroup(client,item);
-    if (group.pay_basis !== "all_in_12_6_v1") continue;
+    if (!isAllInBasis(group.pay_basis)) continue;
+    if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER) superBasis = TRADE_INVOICE_EMPLOYER_SUPER_BASIS;
     requireParticipant(await loadParticipants(client,String(group.id)),caller.userId);
     if (extras.length !== 1 || Object.keys(body).some(key => !["extra_items","gst_on","notes"].includes(key))) {
       throw new GroupWorkOrderError("group_share_separate_invoice", "Submit this group share with its own button. Other jobs and extras stay on your weekly invoice.",409);
     }
   }
+  return { superBasis };
+}
+
+
+const HOLD_WORDS: Record<string, string> = {
+  signoff_not_current: "a current sign-off",
+  shares_not_final: "the shares to be finalised",
+  pool_not_reconciled: "an office check of the pool",
+  share_amount_mismatch: "an office check of a share",
+  share_duplicate: "an office check of a share",
+  participant_without_share: "an office check of the crew",
+  no_positive_share: "an office check of the crew",
+  group_void: "an office check",
+};
+
+function nameList(names: string[]): string {
+  return names.length <= 1 ? names.join("") : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+}
+
+/** One plain sentence: who the crew's pay is waiting on. */
+export function groupHoldSentence(state: Record<string, any>, nameOf: (userId: string) => string): string {
+  const people = Array.isArray(state.people) ? state.people : [];
+  const invoice = people.filter((p: any) => p.state === "not_invoiced").map((p: any) => nameOf(String(p.user_id)));
+  const review = people.filter((p: any) => p.state === "submitted" || p.state === "queried").map((p: any) => nameOf(String(p.user_id)));
+  const parts: string[] = [];
+  if (invoice.length) parts.push(nameList(invoice) + " to invoice");
+  if (review.length) parts.push("the office to approve " + nameList(review));
+  for (const reason of Array.isArray(state.reasons) ? state.reasons : []) {
+    const words = HOLD_WORDS[String(reason)];
+    if (words && !parts.includes(words)) parts.push(words);
+  }
+  return parts.length ? "Waiting on " + nameList(parts) + "." : "";
+}
+
+/** Crew names and status for a participant. Never another trade's money. */
+async function readGroupCrewStatus(client: any, caller: GroupCaller, groupId: string) {
+  const { data: state, error } = await client.rpc("group_work_order_release_state", { p_group_id: groupId });
+  if (error || !state || !Array.isArray(state.people)) {
+    // The status is help, not a gate: a failed read shows no crew line and
+    // the server still holds payment.
+    return {};
+  }
+  const ids = state.people.map((p: any) => String(p.user_id));
+  const users = ids.length
+    ? await rowsOf(client.from("users").select("id, name").in("id", ids), "load your crew's names")
+    : [];
+  const nameOf = (id: string) => {
+    const full = String(users.find((u) => String(u.id) === id)?.name || "").trim();
+    return full ? full.split(/\s+/)[0] : "A crew member";
+  };
+  const released = state.released === true;
+  return {
+    crew_status: state.people.filter((p: any) => p.state !== "no_share").map((p: any) => ({
+      name: nameOf(String(p.user_id)),
+      me: String(p.user_id) === caller.userId,
+      state: released ? "released" : String(p.state),
+    })),
+    release: {
+      released,
+      ready: state.ready === true,
+      signoff: state.signoff === "client" || state.signoff === "office" ? state.signoff : null,
+      total: Number(state.total || 0),
+      invoiced: Number(state.invoiced || 0),
+      approved: Number(state.approved || 0),
+      hold: released ? [] : [groupHoldSentence(state, nameOf)].filter(Boolean),
+    },
+  };
+}
+
+/** Every crew member's hours and approval, and the sign-off. Hours only, never rates or pay. */
+async function readGroupCrewHours(client: any, caller: GroupCaller, group: Record<string, unknown>) {
+  const participants = await loadParticipants(client, String(group.id));
+  const view = await loadShareView(client, group, participants);
+  const ids = participants.map((row) => String(row.user_id));
+  const users = ids.length ? await rowsOf(client.from("users").select("id, name").in("id", ids), "load your crew's names") : [];
+  const required = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER;
+  const crewHours = participants.map((row) => {
+    const id = String(row.user_id);
+    const full = String(users.find((u) => String(u.id) === id)?.name || "").trim();
+    const hours = Math.round((view.hoursByUser.get(id) || 0) * 100) / 100;
+    return {
+      name: full ? full.split(/\s+/)[0] : "A crew member",
+      me: id === caller.userId,
+      hours,
+      approved: required ? hours > 0 && !view.needsApproval.includes(id) : Boolean(row.crew_signed_at),
+    };
+  });
+  const signoff = view.signed && view.signoff ? view.signoff : null;
+  return {
+    crew_approval_required: required,
+    crew_hours: crewHours,
+    my_hours_approved: crewHours.some((row) => row.me && row.approved),
+    client_signoff: signoff ? {
+      kind: signoff.method === "office_waiver" ? "office" : "client",
+      name: signoff.method === "office_waiver" ? null : (signoff.signed_name ?? null),
+      at: signoff.created_at ?? null,
+      happy: signoff.happy ?? null,
+    } : null,
+  };
+}
+
+/**
+ * Records the crew's payment release for a group share bill before any Xero
+ * call. Not ready, or not readable, holds the bill.
+ */
+export async function claimGroupReleaseForInvoice(
+  client: any,
+  lines: Record<string, unknown>[],
+  actor: string,
+): Promise<{ held: false } | { held: true; message: string; hold: string[] }> {
+  const shareIds = [...new Set(lines.map((line) => line.group_share_id).filter(Boolean).map(String))];
+  if (!shareIds.length) return { held: false };
+  const shares = await rowsOf(client.from("group_work_order_shares").select("id, group_id").in("id", shareIds), "check the group release");
+  if (shares.length !== shareIds.length) {
+    throw new GroupWorkOrderError("group_release_unreadable", "The group payment release could not be checked. This bill is held.", 503);
+  }
+  const allGroupIds = [...new Set(shares.map((row) => String(row.group_id)))];
+  const groups = await rowsOf(client.from("group_work_orders").select("id, pay_basis").in("id", allGroupIds), "check the group release");
+  // Older gross groups ride on weekly invoices and keep their per-share
+  // office review; the whole-crew release is for all-in groups, which are
+  // always invoiced on their own.
+  const groupIds = groups.filter((row) => isAllInBasis(row.pay_basis)).map((row) => String(row.id));
+  if (!groupIds.length) return { held: false };
+  if (groupIds.length !== 1 || allGroupIds.length !== 1) {
+    throw new GroupWorkOrderError("group_release_unreadable", "This bill mixes group work and cannot be released. The office needs to check it.", 503);
+  }
+  const userId = /^user:([0-9a-f-]{36})$/i.exec(actor)?.[1] || null;
+  const { data, error } = await client.rpc("claim_group_work_order_release", { p_group_id: groupIds[0], p_actor: actor, p_actor_user_id: userId });
+  if (error || !data) {
+    throw new GroupWorkOrderError("group_release_unreadable", "The group payment release could not be checked. This bill is held.", 503);
+  }
+  if (data.claimed === true) return { held: false };
+  const state = data.state || {};
+  const ids = Array.isArray(state.people) ? state.people.map((p: any) => String(p.user_id)) : [];
+  const users = ids.length ? await rowsOf(client.from("users").select("id, name").in("id", ids), "load the crew's names") : [];
+  const sentence = groupHoldSentence(state, (id) => String(users.find((u) => String(u.id) === id)?.name || "a crew member").trim());
+  return { held: true, message: "Held for the whole crew. " + (sentence || "The group is not ready for payment."), hold: sentence ? [sentence] : [] };
+}
+
+/** Approved bills of the same released group that are not in Xero yet. */
+export async function releasedGroupSiblingInvoiceIds(client: any, invoiceId: string): Promise<string[] | null> {
+  const own = await rowsOf(client.from("trade_invoice_lines").select("group_share_id").eq("trade_invoice_id", invoiceId).not("group_share_id", "is", null), "check the group release");
+  if (!own.length) return null;
+  const share = await rowsOf(client.from("group_work_order_shares").select("group_id").eq("id", String(own[0].group_share_id)), "check the group release");
+  if (!share.length) return null;
+  const groupId = String(share[0].group_id);
+  const released = await rowsOf(client.from("group_work_order_releases").select("group_id").eq("group_id", groupId), "check the group release");
+  if (!released.length) return null;
+  const allShares = await rowsOf(client.from("group_work_order_shares").select("id").eq("group_id", groupId), "check the group release");
+  const lines = await rowsOf(client.from("trade_invoice_lines")
+    .select("trade_invoice_id, invoice:trade_invoices!inner(id, status, xero_bill_id)")
+    .in("group_share_id", allShares.map((row) => String(row.id))), "check the group release");
+  const ids = new Set<string>();
+  for (const row of lines) {
+    const invoice = Array.isArray(row.invoice) ? row.invoice[0] : row.invoice;
+    if (invoice && String(invoice.id) !== invoiceId && !invoice.xero_bill_id && ["approved", "acknowledged"].includes(String(invoice.status))) {
+      ids.add(String(invoice.id));
+    }
+  }
+  return [...ids];
 }
 
 /** Outstanding own group claims, including older work, for the normal invoice. */
@@ -1490,7 +1675,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
   for (const [field,ids] of [["id",memberIds],["job_id",assignedIds]] as const) {
     for(let offset=0;offset<ids.length;offset+=100) {
       const found=await rowsOf(client.from("group_work_orders")
-        .select("id, job_id, work_order_id, status, split_frozen_at, pay_basis, approved_budget_ex")
+        .select("id, org_id, job_id, work_order_id, status, split_frozen_at, pay_basis, approved_budget_ex")
         .eq("org_id",caller.orgId).in(field,ids.slice(offset,offset+100)).neq("status","void"),"load your group work orders");
       for(const group of found) byId.set(String(group.id),group);
     }
@@ -1505,18 +1690,23 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
       .eq("org_id",caller.orgId).in("id",batch),"load your group jobs"));
     // A non-draft, non-rejected line already holds the share. Never offer it twice.
     claims.push(...await rowsOf(client.from("trade_invoice_lines")
-      .select("job_id, invoice:trade_invoices!inner(user_id, status)")
+      .select("job_id, office_review_status, invoice:trade_invoices!inner(id, invoice_number, user_id, status)")
       .eq("line_type",GROUP_SHARE_LINE_TYPE).eq("invoice.user_id",caller.userId)
       .in("job_id",batch),"check your submitted group shares"));
   }
-  const claimed = new Set(claims.filter(row => {
+  const claimed = new Map<string, Record<string, unknown>>();
+  for (const row of claims) {
     const invoice = Array.isArray(row.invoice) ? row.invoice[0] : row.invoice;
-    return invoice && !GROUP_FENCE_RELEASED_INVOICE_STATUSES.includes(invoice.status);
-  }).map(row => String(row.job_id)));
+    if (invoice && !GROUP_FENCE_RELEASED_INVOICE_STATUSES.includes(invoice.status)) {
+      claimed.set(String(row.job_id), { invoice_id: invoice.id, invoice_number: invoice.invoice_number, status: invoice.status, review: row.office_review_status ?? null });
+    }
+  }
   const result = [];
   // Sequential reads bound database fan-out; every price still uses the participant guard.
   for (const group of groups) {
-    if (claimed.has(String(group.job_id))) continue;
+    const submitted = claimed.get(String(group.job_id)) || null;
+    // Paid shares live in Pay history; a share without a membership is not ours.
+    if (submitted && (submitted.status === "paid" || !memberIds.includes(String(group.id)))) continue;
     const job = jobs.find(row => String(row.id) === String(group.job_id));
     if (!job) continue;
     if (!memberIds.includes(String(group.id))) {
@@ -1532,8 +1722,9 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
       ? (await readSplit(client, String(group.id), false)).find(row => String(row.user_id) === caller.userId)
       : null;
     const projectedBudget = projection ? Number(projection.share_ex) : null;
-    const pay = projectedBudget != null && group.pay_basis === "all_in_12_6_v1" ? await allInSharePay(client,group,projectedBudget) : null;
-    result.push({ ...share, projected_my_share: pay ? Number(pay.invoice_ex) : projectedBudget,
+    const pay = projectedBudget != null && isAllInBasis(group.pay_basis) ? await allInSharePay(client,group,projectedBudget) : null;
+    const crew = { ...await readGroupCrewStatus(client, caller, String(group.id)), ...await readGroupCrewHours(client, caller, group) };
+    result.push({ ...share, ...(submitted ? { submitted } : {}), ...crew, projected_my_share: pay ? Number(pay.invoice_ex) : projectedBudget,
       ...(pay ? {projected_my_budget: projectedBudget, projected_cash_pay: pay.cash_pay, projected_super: pay.super_amount, budget_remainder: pay.budget_remainder} : {}), job_id: group.job_id, job_number: job.job_number,
       client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
   }
@@ -1764,7 +1955,7 @@ export async function captureGroupClientSignoff(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   requireParticipant(participants, caller.userId);
-  return await storeClientSignature(client, group, {
+  const signed = await storeClientSignature(client, group, {
     name: signerName(body.signer_name || body.signature_name),
     png: parseSignature(body.signature_png, true) || "",
     method: "on_site",
@@ -1774,6 +1965,16 @@ export async function captureGroupClientSignoff(
     happy: happyFlag(body.happy),
     rating: optionalRating(body.satisfaction_rating),
   });
+  const ratings = body.ratings && typeof body.ratings === "object" ? body.ratings as Record<string, unknown> : null;
+  if (ratings) {
+    await submitGroupWorkOrderFeedback(client, {
+      ...ratings,
+      share_token: group.share_token,
+      submitted_via: "on_site",
+      free_text: body.note,
+    });
+  }
+  return signed;
 }
 
 export async function submitGroupWorkOrderFeedback(
@@ -1918,7 +2119,7 @@ export async function readGroupWorkOrderOffice(
     client_signoff_reason: view.signed ? view.signoff?.waiver_reason : null,
     client_signoff_actor: view.signed ? view.signoff?.captured_by_actor : null,
     pay_basis: group.pay_basis || "gross_v1",
-    budget_includes_super: group.pay_basis === "all_in_12_6_v1",
+    budget_includes_super: isAllInBasis(group.pay_basis),
     pot_total: group.approved_budget_ex != null ? Number(group.approved_budget_ex) : workOrder
       ? moneyToCents(workOrder.agreed_labour_ex) == null
         ? null
@@ -1972,6 +2173,10 @@ export async function freezeGroupWorkOrder(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   if (!caller.isStaff) requireParticipant(participants, caller.userId);
+  if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !group.split_frozen_at &&
+    (await loadShareView(client, group, participants)).needsApproval.length > 0) {
+    throw new GroupWorkOrderError("group_crew_approval_required", CREW_APPROVAL_MESSAGE, 409);
+  }
   const { error } = await client.rpc("freeze_group_work_order_split", {
     p_group_id: group.id,
   });
@@ -2149,6 +2354,11 @@ export async function resolveGroupShareInvoiceExtra(
       "Submit your hours on this group before invoicing your share.",
     );
   }
+  // The first share invoice freezes the split, so it waits for the crew too.
+  if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !group.split_frozen_at &&
+    (await loadShareView(client, group, await loadParticipants(client, String(group.id)))).needsApproval.length > 0) {
+    throw new GroupWorkOrderError("group_crew_approval_required", CREW_APPROVAL_MESSAGE, 409);
+  }
   // Quote only. The line trigger freezes in the same statement as the insert.
   const shares = await readSplit(client, String(group.id), false);
   const mine = shares.find((row) => String(row.user_id) === input.userId);
@@ -2159,7 +2369,7 @@ export async function resolveGroupShareInvoiceExtra(
     );
   }
   const shareBudget = Number(mine.share_ex);
-  const shareEx = group.pay_basis === "all_in_12_6_v1" ? Number((await allInSharePay(client,group,shareBudget)).invoice_ex) : shareBudget;
+  const shareEx = isAllInBasis(group.pay_basis) ? Number((await allInSharePay(client,group,shareBudget)).invoice_ex) : shareBudget;
   if (!(shareEx > 0)) {
     throw new GroupWorkOrderError(
       "group_share_zero",

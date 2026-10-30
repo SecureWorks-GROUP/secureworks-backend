@@ -65,9 +65,24 @@ export type TradeInvoiceMoney = {
   trade_payable: number;
   total_inc: number;
   company_total_out: number;
+  // Group shares only (owner, 30 Oct 2026): the company pays all 12% super
+  // inside the share, so nothing is withheld and net pay equals gross.
+  super_basis?: TradeInvoiceSuperBasis | null;
   // Absent or null on every invoice that carries no recurring deduction.
   recurring_deduction?: TradeInvoiceRecurringDeduction | null;
 };
+
+export const TRADE_INVOICE_EMPLOYER_SUPER_BASIS = "employer_12_v2";
+export type TradeInvoiceSuperBasis = typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS;
+
+export function resolveTradeInvoiceSuperBasis(value: unknown): TradeInvoiceSuperBasis | null {
+  if (value === null || value === undefined) return null;
+  if (value === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) return value;
+  throw new TradeInvoiceMoneyError(
+    "MONEY_SPLIT_INVALID",
+    "Trade invoice super basis is not recognised and cannot be pushed to Xero",
+  );
+}
 
 export type TradeInvoiceXeroLine = Record<string, unknown> & {
   Description?: string;
@@ -216,7 +231,9 @@ export function calculateTradeInvoiceMoney(input: {
   grossEarned: unknown;
   gstOn: unknown;
   earningsDate: unknown;
+  superBasis?: unknown;
 }): TradeInvoiceMoney {
+  const superBasis = resolveTradeInvoiceSuperBasis(input.superBasis);
   const grossEarned = Number(input.grossEarned);
   if (!Number.isFinite(grossEarned) || grossEarned < 0) {
     throw new TradeInvoiceMoneyError(
@@ -242,7 +259,9 @@ export function calculateTradeInvoiceMoney(input: {
   }
 
   const gross = round2(grossEarned);
-  const split = tradeInvoiceCurrentPayableSplit(gross, superRate);
+  const split = superBasis
+    ? employerSuperSplit(gross, superRate)
+    : tradeInvoiceCurrentPayableSplit(gross, superRate);
   // GST remains 10% of the original contractor supply (gross earned). Super is
   // a split of that amount, not an extra taxable amount. total_inc stays the
   // GST-inclusive supply face (gross + GST), not company total out.
@@ -260,6 +279,18 @@ export function calculateTradeInvoiceMoney(input: {
     trade_payable: round2(split.net_pay + gstAmount),
     total_inc: round2(gross + gstAmount),
     company_total_out: split.company_total_out,
+    ...(superBasis ? { super_basis: superBasis } : {}),
+  };
+}
+
+function employerSuperSplit(gross: number, superRate: number) {
+  const superAmount = round2(gross * superRate);
+  return {
+    super_amount: superAmount,
+    worker_withhold: 0,
+    company_contribution: superAmount,
+    net_pay: gross,
+    company_total_out: round2(gross + superAmount),
   };
 }
 
@@ -378,6 +409,7 @@ export function validatePersistedTradeInvoiceMoney(
   const gstAmount = requiredNumber(record, "gst");
   const totalInc = requiredNumber(record, "total_inc");
   const subtotalEx = requiredNumber(record, "subtotal_ex");
+  const superBasis = resolveTradeInvoiceSuperBasis(record.super_basis);
   const earningsDate = record.week_end ?? record.week_start ??
     record.submitted_at ?? record.created_at;
   const statutoryRate = resolveSuperGuaranteeRate(earningsDate);
@@ -396,7 +428,9 @@ export function validatePersistedTradeInvoiceMoney(
     Math.abs(superRate - statutoryRate) > 0.000001 ||
     !closeMoney(gross, subtotalEx) ||
     !closeMoney(superAmount, round2(gross * superRate)) ||
-    !netPayMatchesKnownPayableSplit(gross, superAmount, netPay, superRate) ||
+    (superBasis
+      ? !closeMoney(netPay, gross)
+      : !netPayMatchesKnownPayableSplit(gross, superAmount, netPay, superRate)) ||
     !closeMoney(
       gstAmount,
       record.gst_on ? round2(gross * TRADE_INVOICE_GST_RATE) : 0,
@@ -425,6 +459,7 @@ export function validatePersistedTradeInvoiceMoney(
     trade_payable: round2(netPay + gstAmount),
     total_inc: round2(totalInc),
     company_total_out: derived.company_total_out,
+    ...(superBasis ? { super_basis: superBasis } : {}),
   }, persistedTradeInvoiceRecurringDeduction(record));
 }
 
@@ -624,6 +659,17 @@ export function formatTradeInvoiceSuperWithheldDescription(
   tradeName?: unknown,
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
+  if (money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) {
+    return [
+      `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
+      `Submitted total ${moneyLabel(money.gross_earned)}. Super remittance ${
+        moneyLabel(money.super_amount)
+      } paid by the company on top, inside the group share. Nothing withheld. Amount payable ${
+        moneyLabel(money.net_pay)
+      }.`,
+      `Paid to the super fund separately. Not part of the amount payable to ${name}`,
+    ].join("\n");
+  }
   return [
     `Superannuation Guarantee ${
       rateLabel(money.super_rate)
