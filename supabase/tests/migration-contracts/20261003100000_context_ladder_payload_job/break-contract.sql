@@ -2,6 +2,8 @@
 -- a contact rule places a row on another job than the one its payload names,
 -- and the revision store then refuses it. The contract must catch it. A
 -- registered successors (L1g 20261006035000, L1f 20261006020000, L1e 20261005170000, L1d 20261005090000, then L1c 20261004200000) are rolled back first, as L1b's down requires.
+-- TP-04 (20261029190000) and unplaced stage 1 (20261014170000) come off first.
+\ir ../20261029190000_context_ladder_holding_flag/roll_back_successors.sql
 SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1g:%' AS l1g_live \gset
 \if :l1g_live
 \ir ../../../rollbacks/20261006035000_context_ladder_held_live_job_down.sql

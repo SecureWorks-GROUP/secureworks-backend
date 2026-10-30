@@ -82,18 +82,19 @@ BEGIN
  END LOOP;
 END $$;
 
--- 2. Grants: service_role only.
+-- 2. Grants: service_role only. Unplaced stage 1 (20261014170000) widened
+-- context_event_identity and marks it 'B0, widened by unplaced stage 1'.
 DO $$
 DECLARE f text; bad text[]:='{}';
 BEGIN
  FOR f IN SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-  WHERE n.nspname='public' AND obj_description(p.oid,'pg_proc') LIKE 'B0:%' LOOP
+  WHERE n.nspname='public' AND obj_description(p.oid,'pg_proc') ~ '^B0(:|, widened by unplaced stage 1 )' LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') THEN bad:=bad||(f||' reachable by anon or authenticated'); END IF;
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN bad:=bad||(f||' not executable by service_role'); END IF;
  END LOOP;
  IF cardinality(bad)>0 THEN RAISE EXCEPTION 'b0 grants: %',array_to_string(bad,'; '); END IF;
- IF (SELECT count(*) FROM pg_proc p WHERE obj_description(p.oid,'pg_proc') LIKE 'B0:%')<>18 THEN
-  RAISE EXCEPTION 'b0: expected 18 B0 functions, found %',(SELECT count(*) FROM pg_proc p WHERE obj_description(p.oid,'pg_proc') LIKE 'B0:%');
+ IF (SELECT count(*) FROM pg_proc p WHERE obj_description(p.oid,'pg_proc') ~ '^B0(:|, widened by unplaced stage 1 )')<>18 THEN
+  RAISE EXCEPTION 'b0: expected 18 B0 functions, found %',(SELECT count(*) FROM pg_proc p WHERE obj_description(p.oid,'pg_proc') ~ '^B0(:|, widened by unplaced stage 1 )');
  END IF;
  -- The jobs indexes use built-in expressions only, so a jobs write by any role
  -- never needs EXECUTE on a B0 function.
