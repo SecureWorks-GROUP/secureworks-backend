@@ -1,4 +1,4 @@
-SELECT md5(prosrc)='62392d8aab2f38362be4b2ddcfab1fbc' AS has_story_oncost_refresh FROM pg_proc WHERE oid='context_job_story_money_sig(uuid)'::regprocedure \gset
+SELECT md5(prosrc) IN ('62392d8aab2f38362be4b2ddcfab1fbc','b2f762db966bf9f3417e759827705be2') AS has_story_oncost_refresh FROM pg_proc WHERE oid='context_job_story_money_sig(uuid)'::regprocedure \gset
 \if :has_story_oncost_refresh
 \ir ../../../rollbacks/20261030190230_context_story_oncost_refresh_down.sql
 \endif

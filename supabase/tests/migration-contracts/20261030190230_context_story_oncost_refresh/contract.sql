@@ -48,6 +48,19 @@ BEGIN
   PERFORM pg_temp.oncost_assert('case '||k||' other job does not move signature',context_job_story_money_sig(j)=s0);
   DELETE FROM trade_invoice_lines WHERE id=line;DELETE FROM trade_invoices WHERE id=i;
  END LOOP;
+ -- Composition must retain TP-13 variation freshness alongside native on-costs.
+ IF to_regprocedure('public.job_profit_partial_cost_policy()') IS NOT NULL THEN
+  s0:=context_job_story_money_sig(j);i:=gen_random_uuid();
+  INSERT INTO job_variations(id,job_id,variation_number,description,amount,gst_included,status,accepted_at,cost_estimate,created_at)
+  VALUES(i,j,1,'Synthetic extra panel',330,true,'accepted','2026-10-20',NULL,'2026-10-19');
+  s1:=context_job_story_money_sig(j);r0:=context_ledger_record_signature(j);
+  PERFORM pg_temp.oncost_assert('accepted variation retained alongside oncost',s1<>s0);
+  UPDATE job_variations SET cost_estimate=0 WHERE id=i;
+  PERFORM pg_temp.oncost_assert('variation cost correction moves story',context_job_story_money_sig(j)<>s1);
+  PERFORM pg_temp.oncost_assert('variation cost correction moves reader',context_ledger_record_signature(j)<>r0);
+  DELETE FROM job_variations WHERE id=i;
+  PERFORM pg_temp.oncost_assert('variation removal restores original signature',context_job_story_money_sig(j)=s0);
+ END IF;
  PERFORM pg_temp.oncost_assert('service role only',has_function_privilege('service_role','context_job_story_money_sig(uuid)','EXECUTE') AND NOT has_function_privilege('anon','context_job_story_money_sig(uuid)','EXECUTE') AND NOT has_function_privilege('authenticated','context_job_story_money_sig(uuid)','EXECUTE'));
 END $test$;
 SELECT count(*) AS assertions FROM oncost_checks;

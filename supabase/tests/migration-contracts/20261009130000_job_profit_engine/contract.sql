@@ -69,7 +69,9 @@ BEGIN;
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('a7000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP-FENCE', false, '{}',
    '{"totalExGST": 999, "totalCostEstimate": 1, "labourCostEstimate": 1}',
-   '{"lanes": {"labour": {"amount_ex_gst": 250}, "materials": {"amount_ex_gst": 150}, "commission": {"amount_ex_gst": 90}}}',
+   -- Materials 140 (not 150) so the placed 100 stays above TP-13's 70 percent share
+   -- (20261029160000); the total, 490, is unchanged.
+   '{"lanes": {"labour": {"amount_ex_gst": 250}, "materials": {"amount_ex_gst": 140}, "commission": {"amount_ex_gst": 100}}}',
    '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'JP-PROJ', false, '{}',
    '{"totalExGST": 1400, "totalCostEstimate": 1, "labourCostEstimate": 1, "materialCostEstimate": 1}', NULL,
