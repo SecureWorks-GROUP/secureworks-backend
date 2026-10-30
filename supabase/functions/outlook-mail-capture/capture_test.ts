@@ -17,6 +17,7 @@ import {
   type AudienceResolveOutcome,
   type CaptureDeps,
   type CaptureOutcome,
+  type CaptureResult,
   type DeepGate,
   type DeepScope,
   deepWindow,
@@ -30,6 +31,7 @@ import {
   sweepMissList,
 } from "./capture.ts";
 import { GraphReadError } from "./graph.ts";
+import { handleCapture } from "./handler.ts";
 
 const NOW = Date.parse("2026-10-02T06:00:00Z");
 const FOLDERS = {
@@ -352,6 +354,63 @@ function msg(n: number, at: string, extra: Partial<Msg> = {}): Msg {
 function lastRun(w: World, source: string) {
   return w.runs.filter((r) => r.source === source).at(-1)!;
 }
+
+Deno.test("HTTP queue drives all four real capture modes to terminal receipts with one canonical email", async () => {
+  const w = world({
+    mailboxes: {
+      "nithin@secureworkswa.com.au": [msg(901, "2026-10-02T05:50:00Z", {
+        from: "sam.sample@example.net",
+        subject: "SWP-990001 source evidence",
+      })],
+    },
+    deepScope: deepScope({
+      clientEmails: { "sam.sample@example.net": "2026-10-01T00:00:00Z" },
+    }),
+  });
+  const background: Promise<unknown>[] = [];
+  const handlerDeps = {
+    env: (name: string) => name === "SW_API_KEY" ? "fixture-only" : undefined,
+    createSupabase: () => ({}),
+    waitUntil: (p: Promise<unknown>) => background.push(p),
+  };
+  const responses = await Promise.all(
+    ["poll", "history", "sweep", "deep"].map((mode) =>
+      handleCapture(
+        new Request("https://fixture.invalid/capture", {
+          method: "POST",
+          headers: {
+            "x-api-key": "fixture-only",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            mode,
+            source: "nithin",
+            from: "2026-10-01T06:00:00Z",
+            to: "2026-10-02T06:00:00Z",
+          }),
+        }),
+        handlerDeps,
+        (_live, request) => runOutlookCapture(deps(w), request),
+      )
+    ),
+  );
+  assertEquals(responses.map((r) => r.status), [202, 202, 202, 202]);
+  const outcomes = await Promise.all(background);
+  assertEquals(
+    outcomes.map((r) => (r as CaptureResult).outcome),
+    Array(4).fill("ran"),
+  );
+  assertEquals(w.runs.map((r) => r.source), [
+    "outlook_nithin",
+    "outlook_history_nithin",
+    "outlook_sweep_nithin",
+    "outlook_deep_history_nithin",
+  ]);
+  assertEquals(w.runs.map((r) => r.status), Array(4).fill("succeeded"));
+  assertEquals(w.keys.size, 1, "all modes share the canonical source identity");
+  assertEquals(new Set(w.captured.map((r) => r.provider_message_id)).size, 1);
+  assertEquals(w.captured.length, 4, "no accepted mode is skipped by queueing");
+});
 
 Deno.test("idle unless email_reader_v1, email_capture_v2 and the capture lane are on; reads nothing", async () => {
   for (
