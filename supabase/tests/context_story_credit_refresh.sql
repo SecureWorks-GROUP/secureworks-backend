@@ -34,7 +34,7 @@ BEGIN
  s1:=context_job_story_money_sig(j);
  PERFORM pg_temp.prove('original copy RPC moves story signature',s1<>s0);
  PERFORM pg_temp.prove('unrelated job unchanged',context_job_story_money_sig(otherj)=other0);
- PERFORM pg_temp.prove('freshness migration does not invent netting',(SELECT actual_cost_ex FROM v_job_profit WHERE job_id=j)=cost0);
+ PERFORM pg_temp.prove('freshness follows installed credit layer without changing its rule',(SELECT actual_cost_ex FROM v_job_profit WHERE job_id=j)=cost0-CASE WHEN to_regclass('public.v_supplier_credit_allocations') IS NOT NULL THEN 50 ELSE 0 END);
  -- Source clock touches must not keep a reader in a permanent refresh loop.
  PERFORM xero_supplier_credit_note_copy(org,n||'{"xero_updated_at":"2026-10-02T01:00:00Z"}',a);
  PERFORM pg_temp.prove('identical provider reread is quiet',context_job_story_money_sig(j)=s1);

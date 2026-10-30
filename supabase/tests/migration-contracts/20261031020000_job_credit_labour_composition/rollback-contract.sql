@@ -1,0 +1,2 @@
+DO $$ BEGIN IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass)) IS DISTINCT FROM 'f45a40c35bd23b6ca51d550ff7c1d200' THEN RAISE EXCEPTION 'combined down lost original labour view';END IF;IF to_regclass('public.v_supplier_credit_allocations') IS NULL THEN RAISE EXCEPTION 'combined down lost credit source';END IF;END $$;
+\ir ../../../rollbacks/20261031020000_job_credit_labour_composition_down.sql

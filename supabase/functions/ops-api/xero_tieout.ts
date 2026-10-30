@@ -19,8 +19,11 @@
 // as_of picks the months shown and nothing else: allocation rows and Bills to
 // place states are read as they are today.
 //
-// Supplier credit notes (TP-07) and spend money (TP-08) come back as
-// not_yet_read with null amounts, never $0. Staff only: the action is not in
+// Spend money (TP-08) comes back as not_yet_read with a null amount, never $0.
+// Supplier credit notes (TP-07) do too until xero-sync has finished a full
+// read of the org's credit notes; after it each month carries its credit
+// notes beside the bills total, never netted from it (20261030060000). Staff
+// only: the action is not in
 // any trade, routine or agent-read list, so the ops-api front door admits only
 // the staff operator set (admin, owner, ops_manager) or the server key.
 // Never writes.
