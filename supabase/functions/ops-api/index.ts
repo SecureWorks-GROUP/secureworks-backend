@@ -57870,6 +57870,19 @@ export async function createTradeVariationRequest(
   return tradeResult
 }
 
+// job_variations.cost_estimate is OUR cost of a variation, ex GST (the quote
+// builder writes its cost total there; Job Profit's variation_not_costed reads
+// it). 0 is a figure, a variation that costs nothing extra, so it is kept; only
+// a missing, blank or unreadable value is null. The trade app's
+// estimated_cost is the variation's PRICE (it becomes amount), never its cost,
+// so it is not read here.
+export function variationCostEstimate(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
 async function createVariation(
   client: any,
   body: any,
@@ -57904,7 +57917,7 @@ async function createVariation(
     description,
     amount: cost,
     reason: reason || null,
-    cost_estimate: cost_estimate ? Number(cost_estimate) : null,
+    cost_estimate: variationCostEstimate(cost_estimate),
     photo_url: photo_url || null,
     status: needsApproval ? 'pending_approval' : 'auto_approved',
     needs_approval: needsApproval,

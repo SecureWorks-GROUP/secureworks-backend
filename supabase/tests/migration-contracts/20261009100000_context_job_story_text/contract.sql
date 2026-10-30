@@ -30,14 +30,20 @@
 -- The story money book (20261028190000) replaced seven of these bodies after this migration (the
 -- policy at 240 calls a day, the staff read, the request, the sweep and the writer's input): when a
 -- full stack has it, it is rolled back for this contract, which proves this migration's own result,
--- and applied again at the end (its own contract proves it). The story bill outcomes
--- (20261029170200) replaced four of the money book's bodies in turn, so it is rolled back first and
--- applied again last.
+-- and applied again at the end (its own contract proves it).
+-- Job profit TP-13 (20261029160000) replaced the money book's signature and book after it, so when
+-- the stack has TP-13 it is rolled back first and applied again last. The story bill outcomes
+-- (20261029170200) replaced four of the money book's bodies in turn, so it is rolled back before
+-- TP-13 and applied again after it.
 SELECT to_regprocedure('public.context_job_story_bill_outcomes(uuid)') IS NOT NULL AS story_bills_live \gset
 \if :story_bills_live
 \ir ../../../rollbacks/20261029170200_context_story_bill_outcomes_down.sql
 \endif
 SELECT to_regprocedure('public.context_job_story_book(uuid,timestamptz)') IS NOT NULL AS money_book_live \gset
+SELECT to_regprocedure('public.job_profit_partial_cost_policy()') IS NOT NULL AS tp13_live \gset
+\if :tp13_live
+\ir ../../../rollbacks/20261029160000_job_profit_partial_cost_reasons_down.sql
+\endif
 \if :money_book_live
 \ir ../../../rollbacks/20261028190000_context_story_money_book_down.sql
 \endif
@@ -919,6 +925,9 @@ ROLLBACK;
 
 \if :money_book_live
 \ir ../../../migrations/20261028190000_context_story_money_book.sql
+\endif
+\if :tp13_live
+\ir ../../../migrations/20261029160000_job_profit_partial_cost_reasons.sql
 \endif
 \if :story_bills_live
 \ir ../../../migrations/20261029170200_context_story_bill_outcomes.sql

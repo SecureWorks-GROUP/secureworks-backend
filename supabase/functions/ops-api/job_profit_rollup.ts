@@ -69,6 +69,7 @@ const ROLLUP_COLUMNS = [
   "profit_ex",
   "revenue_verified_paid",
   "cost_flag",
+  "completeness",
   "holding_job",
 ].join(", ");
 
@@ -76,6 +77,17 @@ const ROLLUP_COLUMNS = [
 // nothing more on the cost side (text-matched trade lines are linked, only by
 // job number rather than id).
 const COMPLETE_COST_FLAGS = new Set(["ok", "text_matched_lines"]);
+
+// TP-13 (20261029160000): an expected cost the quote fixed with a lane left
+// unknown is partial (expected_cost_ex counts the missing lane as 0), so it is
+// never compared with actual cost either.
+const EXPECTED_PARTIAL_REASON = "expected_cost_lane_missing";
+
+function expectedComparable(row: Record<string, unknown>): boolean {
+  if (!COMPLETE_COST_FLAGS.has(String(row.cost_flag ?? ""))) return false;
+  const completeness = Array.isArray(row.completeness) ? row.completeness : [];
+  return !completeness.includes(EXPECTED_PARTIAL_REASON);
+}
 
 type Bucket = {
   jobs: number;
@@ -152,7 +164,7 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
       (invoiced ?? 0n);
   }
   if (expected !== null) {
-    if (COMPLETE_COST_FLAGS.has(String(row.cost_flag ?? ""))) {
+    if (expectedComparable(row)) {
       bucket.expected = (bucket.expected ?? 0n) + expected;
       bucket.jobs_with_expected += 1;
       bucket.actual_on_expected = (bucket.actual_on_expected ?? 0n) +

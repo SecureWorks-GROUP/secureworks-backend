@@ -753,6 +753,46 @@ Deno.test("rollup: expected vs actual counts only jobs whose actual cost is comp
   assertEquals(partialOnly.totals.actual_cost_on_expected_ex, null);
 });
 
+Deno.test("rollup: an expected cost with a lane unknown is never compared (TP-13)", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    work_type: "fencing",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: null,
+    invoiced_ex: 5000,
+    collected_ex: 0,
+    quoted_ex: 5000,
+    actual_cost_ex: 2700,
+    profit_ex: 2300,
+    revenue_verified_paid: false,
+    holding_job: false,
+    cost_flag: "ok",
+    completeness: [],
+    ...over,
+  });
+  const body = (await jobProfitListAction(
+    fakeClient({
+      v_job_profit: [
+        // commission lane unknown at the quote: 1200 is labour plus materials only
+        row({
+          job_id: "lane-missing",
+          expected_cost_ex: 1200,
+          completeness: ["expected_cost_lane_missing"],
+        }),
+        row({ job_id: "whole", expected_cost_ex: 2500 }),
+      ],
+    }),
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  assertEquals(body.totals.jobs_with_expected, 1);
+  assertEquals(body.totals.expected_cost_ex, 2500);
+  assertEquals(body.totals.actual_cost_on_expected_ex, 2700);
+  assertEquals(body.totals.jobs_with_expected_not_comparable, 1);
+  assertEquals(body.totals.expected_cost_not_comparable_ex, 1200);
+  // the margin is the engine's: both jobs published one
+  assertEquals(body.totals.jobs_with_margin, 2);
+});
+
 Deno.test("rollup: a group with no publishable job reads profit and margin as Unknown, not 0", async () => {
   const row = (over: Record<string, unknown>) => ({
     status: "complete",

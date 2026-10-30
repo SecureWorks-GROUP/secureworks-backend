@@ -67,17 +67,59 @@ reason and note that applies.
 | `unclassified_lines` | A trade line has no cost lane | Null |
 | `materials_not_linked` | Materials are owed (a fencing, patio, decking or combo job, or one whose expected cost or pricing carries materials) and none is linked | Null |
 | `no_labour_linked` | No labour cost is linked | Null |
+| `materials_below_quote` | Materials are placed, but less than 70% of the materials cost the quote fixed (`expected_materials_ex`): a bill is probably still to come | Null |
+| `ordered_not_billed_over_30_days` | A sent order with no price was first sent 30 or more Perth days ago (the policy's limit) and still has no invoice or bill | Shown (named in `cost_flag` and Null only if the policy makes it hold) |
+| `po_no_bill_overdue` | A priced open order whose delivery day (else the Perth day it was created) is 30 or more days ago, or a supplier invoice emailed for an order 30 or more Perth days ago, still with no bill placed | Shown (named in `cost_flag` and Null only if the policy makes it hold) |
+| `variation_not_costed` | An agreed variation with money on it has no cost figure (`job_variations.cost_estimate` empty; 0 is a figure) | Shown (named in `cost_flag` and Null only if the policy makes it hold) |
 | `text_matched_lines` | A trade line was matched to the job by text, not by job id | Shown |
 | `xero_project_linked_by_contact_only` | The job's Xero Project is linked by contact, not by name, so it gives no project figure | Shown |
 | `unapproved_trade_charges` | A trade charge is on an invoice not yet approved | Shown |
 | `open_purchase_orders` | `committed_open_ex` is above zero | Shown |
 | `ordered_not_billed` | A sent order with no price has no invoice or bill yet | Shown |
-| `ordered_not_billed_over_30_days` | Such an order was first sent 30 or more days ago | Shown |
 | `invoice_emailed_bill_not_placed` | A supplier emailed an invoice for an order, and no bill is linked to that order (it may be on the job unlinked) | Shown |
 | `draft_revenue` | `draft_revenue_ex` is above zero | Shown |
 | `holding_job` | A holding job, not a customer's job | Shown |
+| `variation_not_invoiced` | An agreed variation, and the job's invoices fall short of the sent quote plus its agreed variations by more than $1. Which invoice bills a variation is not recorded, so the totals decide | Null (the policy can make it a warning) |
+| `variation_invoice_unchecked` | An agreed variation on a job with no sent quote (repairs priced in the quote builder among them), so nothing can show whether it is invoiced | Shown |
+| `work_done_no_labour_overdue` | The job was completed (`jobs.completed_at`) or first signed off by the client (`job_client_signoffs`) 14 or more Perth days ago and no labour is placed. `no_labour_linked` already holds the margin; this names the overdue case | Null (by `no_labour_linked`) |
+| `expected_cost_lane_missing` | The quote fixed an expected cost but left a lane (labour, materials or commission) unknown, so `expected_cost_ex` is partial: the unknown lane counts as 0 in the sum. The figure is unchanged; the rollup does not compare it with actual cost | Shown |
 
-The last eight appear in `completeness` only.
+From `xero_project_linked_by_contact_only` to `holding_job`, and the last four,
+appear in `completeness` only. `cost_flag` takes the first cost reason in the
+order of this table. `materials_below_quote` and, while they hold, the next
+three sit after `no_labour_linked`, so a job whose `cost_flag` was one of the
+reasons above them keeps it; a job that read `ok` or `text_matched_lines` may
+now read one of them. `revenue_flag` stays `ok` or `missing_client_invoice`.
+
+## Partial-cost checks (TP-13)
+
+A cost probably missing is a named reason, never a margin: it is never turned
+into an estimate, and expected, committed and actual stay separate figures.
+Every check is named in `completeness`. Which checks also hide the margin is
+`job_profit_partial_cost_policy() -> holds_margin` (migration 20261029160000),
+so a later migration can flip one without rewriting the view:
+
+| Check | As shipped | Why |
+|---|---|---|
+| `materials_below_quote` | Holds | Placing the missing bill clears it. Its switch can make it warn, for a job whose materials really came in under quote |
+| `po_no_bill_overdue`, `ordered_not_billed_over_30_days` | Warn | A person's bill placement records no order (`materials_recon.ts` writes `matched_po_id` null), so a placed bill never closes its order and a hold could never clear |
+| `variation_not_costed` | Warn | The variation writer dropped a cost of 0 until the same change, and the trade app sends no cost (its `estimated_cost` is the price) |
+| `variation_not_invoiced` | Holds | Issuing the invoice clears it; with no sent quote it is `variation_invoice_unchecked` instead, which never holds |
+
+The numbers change only by migration: an order with no bill after 30 Perth
+days, no labour 14 Perth days after the work is done, materials below 70% of
+the quote's, and $1.00 of tolerance on the variation cover. They are
+proposals. The Xero Project check is `xero_project_exceeds_line_costs`,
+unchanged.
+
+The story money book (`context_job_story_book`) names the cost checks that hold
+in its margin line and an uncovered variation as money not billed (`reason`
+`variation_not_invoiced`, "Money incomplete"). As shipped no hold depends on
+the clock, so a day passing never changes a story's words. A check that
+depends on the clock and holds would; for that case
+`context_job_story_money_sig` carries the order checks' state while the policy
+makes one hold, so the sweep rewrites the story on the day an order turns
+overdue. The signature also carries the job's variations.
 
 ## Xero Project rule
 
@@ -111,8 +153,8 @@ Each of `totals`, `by_type[]`, `by_month[]` and `holding_jobs` carries:
 | `jobs` | Jobs in the group |
 | `invoiced_ex`, `collected_ex`, `actual_cost_ex` | Summed over every job in the group |
 | `quoted_ex`, `jobs_with_quote`, `invoiced_on_quoted_ex` | Sent-quote value, how many jobs have one, and what those same jobs invoiced |
-| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost: only jobs whose actual cost is complete (`cost_flag` `ok` or `text_matched_lines`) |
-| `jobs_with_expected_not_comparable`, `expected_cost_not_comparable_ex` | Jobs with an expected cost whose actual cost is still partial (no cost linked, materials not linked, labour missing, unclassified or incomplete lines, a Xero Project above its lines), and their expected cost. Not compared |
+| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost: only jobs whose actual cost is complete (`cost_flag` `ok` or `text_matched_lines`) and whose expected cost names every lane (no `expected_cost_lane_missing`) |
+| `jobs_with_expected_not_comparable`, `expected_cost_not_comparable_ex` | Jobs with an expected cost whose actual cost is still partial (no cost linked, materials not linked, labour missing, unclassified or incomplete lines, a Xero Project above its lines, a TP-13 cost reason), or whose expected cost left a lane unknown, and their expected cost. Not compared |
 | `jobs_with_margin` | How many jobs in the group the engine published a profit for; 0 when none |
 | `profit_ex`, `margin_pct`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published. Null (Unknown) when `jobs_with_margin` is 0, never 0 |
 | `revenue_verified_paid_jobs` | Jobs whose sales invoices are all paid in Xero |
