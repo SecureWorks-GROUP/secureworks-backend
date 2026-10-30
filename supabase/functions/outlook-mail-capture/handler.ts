@@ -399,6 +399,13 @@ function logResult(result: CaptureResult): void {
 
 const MODES: Mode[] = ["poll", "sweep", "history", "deep"];
 
+// Requests share an Edge worker's memory. Serialising sources inside one run
+// does not stop separate HTTP requests retaining bodies/attachments together.
+// Queue only the small request descriptions; create the client and read mail
+// when its turn starts. This is per isolate, not a distributed lease or a
+// completion receipt: a worker shutdown still needs the durable caller's retry.
+let captureTail: Promise<void> = Promise.resolve();
+
 export async function handleCapture(
   req: Request,
   deps: HandlerDeps,
@@ -437,10 +444,21 @@ export async function handleCapture(
     ...(typeof body.slice === "string" ? { slice: body.slice } : {}),
   };
 
+  const previous = captureTail;
+  const queuedAt = (deps.now ?? Date.now)();
+  let release!: () => void;
+  captureTail = new Promise<void>((resolve) => release = resolve);
+
   const execute = async (): Promise<
     CaptureResult | { outcome: "error"; code: string }
   > => {
+    await previous;
     try {
+      console.log(
+        `[outlook-mail-capture] mode=${mode} queue_wait_ms=${
+          Math.max(0, (deps.now ?? Date.now)() - queuedAt)
+        }`,
+      );
       const result = await run(liveCaptureDeps(deps), request);
       logResult(result);
       return result;
@@ -448,6 +466,8 @@ export async function handleCapture(
       const c = safeCode(error);
       console.error(`[outlook-mail-capture] run failed code=${c}`);
       return { outcome: "error", code: c };
+    } finally {
+      release();
     }
   };
 
