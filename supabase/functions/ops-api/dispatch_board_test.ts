@@ -576,7 +576,9 @@ Deno.test("arrival: solid when confirmed, ring when not, red when sent with no d
       ["Draft Co", "none", "not_sent", false],
     ],
   );
-  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, open: 5, on_us: 1, extra_open: 0 });
+  assertEquals(arrival.counts, { orders: 5, sent: 4, confirmed: 2, late: 2, open: 5, on_us: 1, extra_open: 0, unpaid: 0, held_by_payment: 0 });
+  // No account list passed: the payment is unknown.
+  assertEquals(arrival.payment, null);
   assertEquals(arrival.all_confirmed_in_time, false);
   // The install day itself is in time.
   const onDay = dispatchArrival({
@@ -737,6 +739,14 @@ function boardFixture() {
       { id: "em1", job_id: jobId(3), supplier_id: "s1", status: "sent", sent_at: "2026-10-19T00:00:00Z", delivery_date: addDays(TODAY, 1) },
     ],
     purchase_orders: [],
+    // Stratco is on account (Shaun, 29 Oct 2026), so its confirmed date is
+    // not held by the payment gate.
+    dispatch_approved_supplier_emails: [
+      { id: "ap1", org_id: ORG_ID, name: "Stratco WA", active: true, on_account: true },
+    ],
+    dispatch_approved_supplier_email_links: [
+      { supplier_id: "s1", approved_id: "ap1", org_id: ORG_ID },
+    ],
   };
 }
 
@@ -792,7 +802,7 @@ Deno.test("pipeline v2 Active: only board jobs, each with its card fields", asyn
 
   assertEquals(result.board.version, "v2");
   assertEquals(result.board.view, "active");
-  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "ok", deposits: "ok", arrival: "ok" });
+  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "ok", deposits: "ok", arrival: "ok", accounts: "ok", replies: "ok" });
   const counts = Object.fromEntries(result.board.groups.map((g: any) => [g.key, g.count]));
   assertEquals(counts.order_materials, 1);
   assertEquals(counts.scheduled, 2);
@@ -875,7 +885,7 @@ Deno.test("pipeline v2: failed side reads are said, and never hide a job", async
   });
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
   assertEquals(result.total, 5);
-  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed" });
+  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed", accounts: "ok", replies: "ok" });
   const ordering = rowFor(result, 1)!.board;
   assertEquals(ordering.arrival, null);
   assertEquals(ordering.days_in_stage, null);

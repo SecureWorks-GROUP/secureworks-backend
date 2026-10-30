@@ -20,13 +20,47 @@
 //     site).
 //   * A delivery date confirmed after that (typed and ticked, or accepted
 //     from a supplier reply) lifts an earlier stage to "Order confirmed". It
-//     never moves a later stage back.
+//     never moves a later stage back. The payment gate (contract section 3c):
+//     on a pay-first box with nothing paid, the date lifts it only as far as
+//     "Awaiting payment". The date stays saved; the box shows it is held.
+//   * A supplier reply matched to the box's newest order moves a Sent box on
+//     by itself: "Awaiting payment" when we pay first, "Quote received" when
+//     we are on account (only while the replies switch is on).
 //   * An empty box with nothing sent is "Order materials".
+//   * An "Order confirmed" box with no date for the current order (no date
+//     of its own, none asked for in the newest order email) is waiting on
+//     the supplier for a date, not on us to book the install.
+//   * A pickup order (its newest order email says "for pickup") is "Picked
+//     up" at its last stage instead of "Delivered", and at "Materials ready"
+//     says "Materials ready to be picked up, Mon 2/11". A pickup on the
+//     install's first day skips "Materials ready" (the crew collects it on
+//     the way): the box says so (skips_ready) and the screen leaves that
+//     stage out of the box's strip and picker.
 //
 // A purchase order with no box (a v1 Dispatch order or one made elsewhere) has
 // no stage of its own: it is read from the order's status.
 //
-// Nothing here reads or writes the database.
+// One function, dispatchV2BoxStage, turns a supplier box and its order
+// emails into everything a box shows (the stage, who it waits on, the next
+// step and the payment). The board (dispatch_board.ts) and the materials
+// panel (dispatch_v2_store.ts) both call it, so the two can never disagree.
+//
+// Nothing here reads or writes the database: the local preview stand-in
+// imports this file as it is.
+
+import { isDispatchDeliveryDate } from "./dispatch_deliveries.ts";
+import {
+  type DispatchV2Fulfilment,
+  dispatchV2FulfilmentOf,
+} from "./dispatch_v2_emails.ts";
+import {
+  type DispatchV2Payment,
+  dispatchV2PaymentOf,
+  type DispatchV2PaymentTerms,
+  dispatchV2ReplyAt,
+  dispatchV2ReplyStage,
+  dispatchV2ReplyTiedToOrder,
+} from "./dispatch_v2_payment.ts";
 
 export type DispatchMaterialWaitingOn = "us" | "supplier" | "nobody";
 
@@ -63,11 +97,47 @@ export function dispatchMaterialStageRank(key: string): number {
   return STAGE_KEYS.indexOf(key);
 }
 
+// What a supplier box knows about its current order, for the waiting on and
+// next step lines (contract section 3c). Left out, the two functions below
+// answer as they always have (a purchase order, an older caller).
+export type DispatchMaterialStageContext = {
+  // The box has a date for the current order: its own date, or the date the
+  // newest order email asked for.
+  hasDate: boolean;
+  // Delivery or pickup, from the newest order email; null or left out = not
+  // known (nothing sent yet).
+  fulfilment?: DispatchV2Fulfilment | null;
+  // That date (YYYY-MM-DD), for the pickup wording.
+  date?: string | null;
+};
+
+// "Mon 2/11" for 2026-11-02: the short day the next-step lines use.
+export function dispatchShortDay(day: string): string {
+  const [y, m, d] = day.split("-").map(Number);
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
+    new Date(Date.UTC(y, m - 1, d)).getUTCDay()
+  ];
+  return `${weekday} ${d}/${m}`;
+}
+
+/** The stage's label on a box: "Picked up" instead of "Delivered" for a
+ * pickup order; every other stage as listed. */
+export function dispatchMaterialStageLabelFor(
+  key: string,
+  fulfilment?: DispatchV2Fulfilment | null,
+): string {
+  if (key === "delivered" && fulfilment === "pickup") return "Picked up";
+  return dispatchMaterialStageLabel(key);
+}
+
 // Who the stage is waiting on. Order confirmed is ours until the install is
-// booked (tell the client, book the crew), then the supplier's.
+// booked (tell the client, book the crew), then the supplier's. An Order
+// confirmed box with no date for the current order waits on the supplier for
+// one: an install cannot be booked without it (rule 7).
 export function dispatchMaterialWaitingOn(
   key: string,
   installBooked: boolean,
+  context?: DispatchMaterialStageContext,
 ): DispatchMaterialWaitingOn {
   switch (key) {
     case "order_materials":
@@ -76,6 +146,7 @@ export function dispatchMaterialWaitingOn(
     case "ready":
       return "us";
     case "order_confirmed":
+      if (context && !context.hasDate) return "supplier";
       return installBooked ? "supplier" : "us";
     case "sent":
     case "manufacturing":
@@ -91,6 +162,7 @@ export function dispatchMaterialTodo(
   key: string,
   supplierName: string | null,
   installBooked: boolean,
+  context?: DispatchMaterialStageContext,
 ): string | null {
   const s = supplierName || "the supplier";
   switch (key) {
@@ -103,12 +175,21 @@ export function dispatchMaterialTodo(
     case "awaiting_payment":
       return `Pay ${s}`;
     case "order_confirmed":
+      if (context && !context.hasDate) return `Waiting on ${s} for a date`;
       return installBooked
         ? `Waiting on ${s} for the materials`
         : "Book the install and tell the client";
     case "manufacturing":
       return `${s} is making it`;
     case "ready":
+      if (context?.fulfilment === "pickup") {
+        return context.date && isDispatchDeliveryDate(context.date)
+          ? `Materials ready to be picked up, ${dispatchShortDay(context.date)}`
+          : "Materials ready to be picked up";
+      }
+      if (context?.fulfilment === "delivery") {
+        return `Arrange delivery from ${s}`;
+      }
       return `Arrange delivery or pickup from ${s}`;
     default:
       return null;
@@ -126,13 +207,48 @@ export type DispatchMaterialStageInput = {
   unsentLineChanges: unknown[];
   // When the box's delivery date was confirmed (null = not confirmed).
   confirmedAt: unknown;
+  // The payment step (dispatch_v2_payment.ts, contract section 3c). Every
+  // one is optional: a caller that passes none gets exactly the rule above.
+  // The box's terms; left out = unknown.
+  terms?: DispatchV2PaymentTerms;
+  // The box's payment (dispatchV2PaymentOf), for the payment step.
+  payment?: DispatchV2Payment | null;
+  // The reply step (contract section 3c): the box's newest sent order email
+  // and the job's matched supplier replies (dispatch_v2_supplier_emails rows:
+  // id, state, order_id, received_at, matched_at, rung). Left out = no
+  // replies read, no reply moves.
+  newestSent?: { id: string | null; sent_at: string } | null;
+  replies?: any[] | null;
+};
+
+// The supplier reply that moved a box (source "reply").
+export type DispatchMaterialStageReply = {
+  email_id: string;
+  received_at: string | null;
+  rung: string | null;
 };
 
 export type DispatchMaterialStageShown = {
   key: DispatchMaterialStageKey;
   // set = a person chose it and nothing newer happened; worked_out = read
-  // from the box.
-  source: "set" | "worked_out";
+  // from the box; payment = moved by Mark paid or Pay on; reply = moved by a
+  // matched supplier reply (contract section 3c).
+  source: "set" | "worked_out" | "payment" | "reply";
+  // A confirmed date would have lifted the box to Order confirmed, but the
+  // payment gate holds it at Awaiting payment. Present only when the caller
+  // passed terms or payment, so a caller of the old rule gets the old shape.
+  held_by_payment?: boolean;
+  // The reply that moved the box; null unless source is "reply". Present
+  // only when the caller passed replies.
+  reply?: DispatchMaterialStageReply | null;
+};
+
+// One candidate for the stage: what it is, the moment it happened and why.
+type StageCandidate = {
+  at: number;
+  key: DispatchMaterialStageKey;
+  source: DispatchMaterialStageShown["source"];
+  reply?: DispatchMaterialStageReply;
 };
 
 function instant(value: unknown): number | null {
@@ -150,17 +266,13 @@ function newest(values: unknown[] | null | undefined): number | null {
   return best;
 }
 
-/** The stage a supplier box shows, by the rules at the top of this file. */
-export function dispatchMaterialStageOf(
+// Step 1: whatever happened last. Each candidate with the moment it
+// happened; on the same moment a stage a person set wins, then a send, then a
+// line change.
+function lastThingThatHappened(
   input: DispatchMaterialStageInput,
-): DispatchMaterialStageShown {
-  // Each candidate with the moment it happened. On the same moment a stage a
-  // person set wins, then a send, then a line change.
-  const candidates: {
-    at: number;
-    key: DispatchMaterialStageKey;
-    source: "set" | "worked_out";
-  }[] = [];
+): StageCandidate {
+  const candidates: StageCandidate[] = [];
   const storedAt = instant(input.storedAt);
   if (isDispatchMaterialStage(input.stored) && storedAt !== null) {
     candidates.push({ at: storedAt, key: input.stored, source: "set" });
@@ -177,11 +289,7 @@ export function dispatchMaterialStageOf(
       source: "worked_out",
     });
   }
-  let shown: {
-    at: number;
-    key: DispatchMaterialStageKey;
-    source: "set" | "worked_out";
-  } = {
+  let shown: StageCandidate = {
     at: -Infinity,
     key: "order_materials",
     source: "worked_out",
@@ -189,15 +297,138 @@ export function dispatchMaterialStageOf(
   for (const c of candidates) {
     if (c.at > shown.at) shown = c;
   }
-  const confirmedAt = instant(input.confirmedAt);
+  return shown;
+}
+
+// Step 2, the payment step (contract section 3c): a paid stamp or a Pay on
+// tag that counts for the current order is one more candidate, at its stamp
+// time (the newer one when both count): Order confirmed. The newest still
+// wins, so a person's later pick beats it, and on the same moment the earlier
+// steps win. Forward only: a box already at Order confirmed or past it stays
+// where it is (Mark paid pressed on the day of pickup never pulls a box back
+// from Materials ready).
+function paymentStep(
+  shown: StageCandidate,
+  payment: DispatchV2Payment | null | undefined,
+): StageCandidate {
+  if (!payment) return shown;
   if (
-    confirmedAt !== null && confirmedAt > shown.at &&
-    dispatchMaterialStageRank(shown.key) <
+    dispatchMaterialStageRank(shown.key) >=
       dispatchMaterialStageRank("order_confirmed")
   ) {
-    return { key: "order_confirmed", source: "worked_out" };
+    return shown;
   }
-  return { key: shown.key, source: shown.source };
+  const at = newest([payment.paid_at, payment.pay_on_set_at]);
+  if (at === null || at <= shown.at) return shown;
+  return { at, key: "order_confirmed", source: "payment" };
+}
+
+// Step 3, the reply step (contract section 3c): a Sent box with nothing paid
+// or tagged, and a reply tied to its newest order that arrived after the
+// moment it was sent, moves on by itself: Awaiting payment (pay first) or
+// Quote received (on account). The earliest such reply is the one named.
+// Never from any other stage (forward only), never with unknown terms. A date
+// confirmed after the send but before the reply came in already says more
+// than the reply does, so the date lift (step 4) decides instead: a later
+// reply never pulls an on-account box back from Order confirmed to Quote
+// received.
+function replyStep(
+  shown: StageCandidate,
+  input: DispatchMaterialStageInput,
+): StageCandidate {
+  if (shown.key !== "sent") return shown;
+  const payment = input.payment;
+  if (payment && (payment.paid || payment.pay_on)) return shown;
+  const target = dispatchV2ReplyStage(
+    input.terms ?? payment?.terms ?? "unknown",
+  );
+  if (!target) return shown;
+  let earliest: { at: number; reply: any } | null = null;
+  for (const reply of input.replies || []) {
+    if (!dispatchV2ReplyTiedToOrder(reply, input.newestSent ?? null)) continue;
+    const at = instant(dispatchV2ReplyAt(reply));
+    if (at === null || at <= shown.at) continue;
+    if (!earliest || at < earliest.at) earliest = { at, reply };
+  }
+  if (!earliest) return shown;
+  const confirmedAt = instant(input.confirmedAt);
+  if (
+    confirmedAt !== null && confirmedAt > shown.at && confirmedAt < earliest.at
+  ) {
+    return shown;
+  }
+  return {
+    at: earliest.at,
+    key: target,
+    source: "reply",
+    reply: {
+      email_id: String(earliest.reply.id),
+      received_at: dispatchV2ReplyAt(earliest.reply),
+      rung: typeof earliest.reply.rung === "string" ? earliest.reply.rung : null,
+    },
+  };
+}
+
+// Whether the payment gate applies: a pay-first box with no paid stamp or
+// Pay on tag counting for the current order.
+function gatedByPayment(input: DispatchMaterialStageInput): boolean {
+  if (input.payment) return input.payment.state === "unpaid";
+  return input.terms === "pay_first";
+}
+
+// Step 4, the date lift with the payment gate. A confirmed date newer than
+// the winner lifts an earlier stage to Order confirmed; gated, only as far as
+// Awaiting payment.
+function dateLift(
+  shown: StageCandidate,
+  input: DispatchMaterialStageInput,
+): StageCandidate & { held: boolean } {
+  const confirmedAt = instant(input.confirmedAt);
+  const lifts = confirmedAt !== null && confirmedAt > shown.at &&
+    dispatchMaterialStageRank(shown.key) <
+      dispatchMaterialStageRank("order_confirmed");
+  if (!lifts) return { ...shown, held: false };
+  if (!gatedByPayment(input)) {
+    return {
+      at: confirmedAt,
+      key: "order_confirmed",
+      source: "worked_out",
+      held: false,
+    };
+  }
+  if (
+    dispatchMaterialStageRank(shown.key) <
+      dispatchMaterialStageRank("awaiting_payment")
+  ) {
+    return {
+      at: confirmedAt,
+      key: "awaiting_payment",
+      source: "worked_out",
+      held: true,
+    };
+  }
+  return { ...shown, held: true };
+}
+
+/** The stage a supplier box shows, by the rules at the top of this file. */
+export function dispatchMaterialStageOf(
+  input: DispatchMaterialStageInput,
+): DispatchMaterialStageShown {
+  let shown = lastThingThatHappened(input);
+  shown = paymentStep(shown, input.payment);
+  shown = replyStep(shown, input);
+  const lifted = dateLift(shown, input);
+  const answer: DispatchMaterialStageShown = {
+    key: lifted.key,
+    source: lifted.source,
+  };
+  if (input.terms !== undefined || input.payment != null) {
+    answer.held_by_payment = lifted.held;
+  }
+  if (input.replies !== undefined) {
+    answer.reply = lifted.source === "reply" ? lifted.reply ?? null : null;
+  }
+  return answer;
 }
 
 // A purchase order's stage, from its status (a v1 Dispatch order or one made
@@ -241,4 +472,186 @@ export function dispatchUnsentLineChanges(
     out.push(at || "1970-01-01T00:00:00.000Z");
   }
   return out;
+}
+
+// ── One supplier box, as the board and the materials panel show it ─────────
+
+export type DispatchV2BoxStageInput = {
+  // The job_material_suppliers row (the columns the readers select).
+  box: any;
+  // The box's order emails. Only status "sent" ones count as sent.
+  emails: any[] | null | undefined;
+  // The job's material lines (only this box's supplier's are used).
+  lines: any[] | null | undefined;
+  // The box's payment terms (dispatch_v2_payment.ts); left out = unknown.
+  terms?: DispatchV2PaymentTerms;
+  // The install day the board shows (null = no install booked).
+  installDay?: string | null;
+  // The install's first day, for skips_ready; left out = installDay.
+  installFirstDay?: string | null;
+  // The job's matched supplier replies (the reply step); left out or null =
+  // not read, no reply moves.
+  replies?: any[] | null;
+};
+
+export type DispatchV2BoxNewestSent = {
+  // The order email's id (what a supplier reply's order_id names); null only
+  // for a row read without its id.
+  id: string | null;
+  sent_at: string;
+  // The date that email asked for (its Date: line), if any.
+  requested_date: string | null;
+  // Delivery or pickup, from that email's opening line.
+  fulfilment: DispatchV2Fulfilment;
+};
+
+export type DispatchV2BoxStage = {
+  key: DispatchMaterialStageKey;
+  label: string;
+  source: DispatchMaterialStageShown["source"];
+  // Who set the stage, when a person did (source "set"); else null.
+  set_at: string | null;
+  set_by_email: string | null;
+  // The box's newest sent order email, null when none went.
+  newest_sent: DispatchV2BoxNewestSent | null;
+  // The box's own delivery date for the current order: a date set before the
+  // newest send belongs to an earlier order, so it is left out (null).
+  box_date: string | null;
+  box_date_confirmed: boolean;
+  // Lines still to be ordered and when each last changed.
+  unsent_line_changes: string[];
+  waiting_on: DispatchMaterialWaitingOn;
+  todo: string | null;
+  // A confirmed date is saved but the payment gate holds the stage at
+  // Awaiting payment.
+  held_by_payment: boolean;
+  // The supplier reply that moved the box; null unless source is "reply".
+  reply: DispatchMaterialStageReply | null;
+  // A pickup whose date (own or asked for) is the install's first day: the
+  // crew collects it on the way, so the screen leaves "Materials ready" out
+  // of this box's strip and picker.
+  skips_ready: boolean;
+  // The payment step (dispatch_v2_payment.ts).
+  payment: DispatchV2Payment;
+};
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** The box's newest sent order email (status sent, newest sent_at). */
+export function dispatchV2NewestSent(
+  emails: any[] | null | undefined,
+): DispatchV2BoxNewestSent | null {
+  let best: any = null;
+  let bestAt: number | null = null;
+  for (const email of emails || []) {
+    if (String(email?.status ?? "").trim().toLowerCase() !== "sent") continue;
+    const at = instant(email?.sent_at);
+    if (at === null) continue;
+    if (bestAt === null || at > bestAt) {
+      best = email;
+      bestAt = at;
+    }
+  }
+  if (!best) return null;
+  return {
+    id: best.id ? String(best.id) : null,
+    sent_at: String(best.sent_at),
+    requested_date: isDispatchDeliveryDate(best.delivery_date)
+      ? best.delivery_date
+      : null,
+    fulfilment: dispatchV2FulfilmentOf(best.body_text),
+  };
+}
+
+/** Everything one supplier box shows, by the rules at the top of this file.
+ * The board's Arrival line and the materials panel both call this. */
+export function dispatchV2BoxStage(
+  input: DispatchV2BoxStageInput,
+): DispatchV2BoxStage {
+  const box = input.box || {};
+  const supplierId = String(box.supplier_id ?? "");
+  const emails = (input.emails || []).filter((e: any) =>
+    String(e?.supplier_id ?? supplierId) === supplierId
+  );
+  const sentAts = emails
+    .filter((e: any) =>
+      String(e?.status ?? "").trim().toLowerCase() === "sent"
+    )
+    .map((e: any) => e?.sent_at)
+    .filter((at: unknown): at is string => instant(at) !== null);
+  const newestSent = dispatchV2NewestSent(emails);
+  // A box date set before the newest send belongs to an earlier order.
+  const dateSetAt = instant(box.delivery_date_set_at);
+  const dateOlderThanSend = !!newestSent && dateSetAt !== null &&
+    (instant(newestSent.sent_at) as number) > dateSetAt;
+  const boxDate = isDispatchDeliveryDate(box.delivery_date) &&
+      !dateOlderThanSend
+    ? box.delivery_date as string
+    : null;
+  const unsent = dispatchUnsentLineChanges(input.lines, supplierId);
+  const terms: DispatchV2PaymentTerms = input.terms ?? "unknown";
+  const paymentInput = {
+    terms,
+    paidAt: box.paid_at,
+    paidByEmail: box.paid_by_email,
+    payOn: box.pay_on,
+    payOnSetAt: box.pay_on_set_at,
+    payOnSetByEmail: box.pay_on_set_by_email,
+    newestSentAt: newestSent?.sent_at ?? null,
+    storedStage: box.material_stage,
+    storedStageAt: box.material_stage_set_at,
+    paymentReopenedAt: box.payment_reopened_at,
+  };
+  const shown = dispatchMaterialStageOf({
+    stored: box.material_stage,
+    storedAt: box.material_stage_set_at,
+    sentAts,
+    unsentLineChanges: unsent,
+    confirmedAt: boxDate ? box.delivery_date_confirmed_at : null,
+    terms,
+    payment: dispatchV2PaymentOf(paymentInput),
+    newestSent,
+    replies: input.replies || [],
+  });
+  const installBooked = !!input.installDay;
+  const supplierName = textOrNull(box.supplier_name);
+  const set = shown.source === "set";
+  // Rule 7: a date for the current order is the box's own date or the date
+  // the newest order email asked for.
+  const date = boxDate || newestSent?.requested_date || null;
+  const fulfilment = newestSent?.fulfilment ?? null;
+  const context: DispatchMaterialStageContext = {
+    hasDate: !!date,
+    fulfilment,
+    date,
+  };
+  const firstDay = input.installFirstDay !== undefined
+    ? input.installFirstDay
+    : input.installDay;
+  return {
+    key: shown.key,
+    label: dispatchMaterialStageLabelFor(shown.key, fulfilment),
+    source: shown.source,
+    set_at: set ? textOrNull(box.material_stage_set_at) : null,
+    set_by_email: set ? textOrNull(box.material_stage_set_by_email) : null,
+    newest_sent: newestSent,
+    box_date: boxDate,
+    box_date_confirmed: !!boxDate && !!box.delivery_date_confirmed_at,
+    unsent_line_changes: unsent,
+    waiting_on: dispatchMaterialWaitingOn(shown.key, installBooked, context),
+    todo: dispatchMaterialTodo(shown.key, supplierName, installBooked, context),
+    held_by_payment: shown.held_by_payment === true,
+    reply: shown.reply ?? null,
+    skips_ready: fulfilment === "pickup" && !!date && !!firstDay &&
+      date === firstDay,
+    // Worked out again with the stage shown, so a delivered box never holds
+    // the job up, and with whether the gate is holding the stage.
+    payment: dispatchV2PaymentOf({
+      ...paymentInput,
+      materialStage: shown.key,
+      holdsStage: shown.held_by_payment === true,
+    }),
+  };
 }

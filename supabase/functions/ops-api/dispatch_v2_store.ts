@@ -73,11 +73,13 @@ import {
   dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
+import { dispatchV2BoxStage } from "./dispatch_v2_material_stage.ts";
+import { dispatchV2PaymentTerms } from "./dispatch_v2_payment.ts";
 import {
-  dispatchMaterialStageLabel,
-  dispatchMaterialStageOf,
-  dispatchUnsentLineChanges,
-} from "./dispatch_v2_material_stage.ts";
+  loadDispatchInstall,
+  loadDispatchV2MatchedReplies,
+  perthDayOf,
+} from "./dispatch_board.ts";
 
 // ── The send seam ───────────────────────────────────────────────────────────
 
@@ -157,12 +159,15 @@ export const DISPATCH_V2_ACTIONS = [
 const LINE_SELECT =
   "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at";
 const BOX_SELECT =
-  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email";
+  "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at";
 const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, approved_email_id, work_type, is_main_supplier, standing_lines_included, status, team_cc_email, to_emails, cc_emails, subject, body_text, built_body_text, delivery_date, order_lines, photo_ids, test_sent_at, test_sent_to, test_sent_by_email, send_claimed_at, sent_at, sent_by_email, sent_from_mailbox, sent_to_emails, sent_cc_emails, sent_internet_message_id, sent_conversation_id, sent_graph_message_id, last_error, created_at, created_by_email, updated_at, updated_by_email";
-const APPROVED_SELECT = "id, name, used_for, to_emails, cc_emails, active";
+// on_account: migration 20261029120000_dispatch_v2_on_account_suppliers.sql
+// (the payment step, dispatch_v2_payment.ts).
+const APPROVED_SELECT =
+  "id, name, used_for, to_emails, cc_emails, active, on_account";
 const JOB_SELECT =
   "id, org_id, job_number, type, client_name, client_phone, site_address, site_suburb, " +
   DISPATCH_FAMILY_PROJECTION.join(", ");
@@ -517,6 +522,8 @@ function projectApproved(entry: any) {
     used_for: entry.used_for,
     to: entry.to_emails || [],
     cc: entry.cc_emails || [],
+    // On account (no payment step) or pay first (dispatch_v2_payment.ts).
+    on_account: entry.on_account === true,
   };
 }
 
@@ -586,13 +593,27 @@ export async function readDispatchV2Materials(
     params.get("job_id") ?? params.get("jobId"),
     ctx,
   );
-  const [boxes, lines, photos, emails, scopeFill] = await Promise.all([
-    readBoxes(client, job.id),
-    readJobLines(client, job.id),
-    readPhotos(client, job.id),
-    readJobEmails(client, job.id),
-    readScopeFill(client, job.id),
-  ]);
+  const [boxes, lines, photos, emails, scopeFill, replies, install] =
+    await Promise.all([
+      readBoxes(client, job.id),
+      readJobLines(client, job.id),
+      readPhotos(client, job.id),
+      readJobEmails(client, job.id),
+      readScopeFill(client, job.id),
+      // The matched supplier replies (the reply step, the board's read too).
+      // A failed read never refuses the panel: no reply moves, as on the
+      // board.
+      loadDispatchV2MatchedReplies(client, [job.id], "dispatch_v2_materials"),
+      // The install, as the board reads it: for skips_ready (a pickup on the
+      // install's first day). A failed read never refuses the panel: no box
+      // skips Materials ready.
+      loadDispatchInstall(
+        client,
+        job.id,
+        perthDayOf(nowIso(ctx)) ?? nowIso(ctx).slice(0, 10),
+        "dispatch_v2_materials",
+      ),
+    ]);
   const supplierIds = boxes.map((b) => String(b.supplier_id));
   const [contacts, approved, testDone] = await Promise.all([
     readContacts(client, supplierIds, ctx),
@@ -611,6 +632,8 @@ export async function readDispatchV2Materials(
     test_send_done: testDone,
     main_supplier_id: mainId,
     main_supplier_ticked: boxes.some((b) => b.is_main_supplier === true),
+    // The matched supplier replies read: failed = no reply moves.
+    replies_read: replies.error ? "failed" : "ok",
     can_suggest: dispatchV2CanSuggest(job.work_type, lines.length),
     // The screen fills a fencing job from the scope on its own when it opens
     // and this is true: no lines and never filled before.
@@ -632,6 +655,22 @@ export async function readDispatchV2Materials(
       const entry = approved.get(id) ?? null;
       const boxEmails = emails.filter((e) => String(e.supplier_id) === id);
       const open = boxEmails.find((e) => OPEN_EMAIL_STATUSES.includes(e.status));
+      // The same rule the board's Arrival line uses (dispatchV2BoxStage).
+      // The approved list read above only keeps active entries, and a failed
+      // read refuses the whole panel, so the terms are always known here.
+      const view = dispatchV2BoxStage({
+        box,
+        emails: boxEmails,
+        lines,
+        terms: dispatchV2PaymentTerms({
+          readOk: true,
+          linked: !!entry,
+          onAccount: entry ? entry.on_account === true : null,
+        }),
+        replies: replies.error ? [] : replies.data,
+        installDay: install?.day ?? null,
+        installFirstDay: install?.first_day ?? null,
+      });
       return {
         supplier_id: id,
         name: contact?.is_active && contact?.name ? contact.name : box.supplier_name,
@@ -658,7 +697,9 @@ export async function readDispatchV2Materials(
         // Delivery or pickup: the open email's, else the newest sent one's,
         // else null (nothing made yet: the screen shows Delivery).
         fulfilment: boxFulfilment(open, boxEmails),
-        material_stage: boxMaterialStage(box, boxEmails, lines, id),
+        material_stage: boxMaterialStage(box, view),
+        // The box's payment step (contract section 3c).
+        payment: view.payment,
       };
     }),
   };
@@ -678,44 +719,28 @@ function boxFulfilment(open: any, boxEmails: any[]) {
   return newest ? dispatchV2FulfilmentOf(newest.body_text) : null;
 }
 
-// The box's material stage as the box shows it (dispatch_v2_material_stage.ts):
-// the stage, whether a person set it or it was worked out from the box, and
-// the stamp the set press guards on (material_stage_set_at, null = never set).
-// A delivery date confirmed before the box's newest send belongs to an earlier
-// order, so it does not lift the stage (the board's rule too).
+// The box's material stage as the box shows it, from dispatchV2BoxStage (the
+// board's rule too, dispatch_v2_material_stage.ts): the stage, whether a
+// person set it or it was worked out from the box, and the stamp the set
+// press guards on (material_stage_set_at, null = never set).
 function boxMaterialStage(
   box: any,
-  boxEmails: any[],
-  lines: any[],
-  supplierId: string,
+  view: ReturnType<typeof dispatchV2BoxStage>,
 ) {
-  const sentAts = boxEmails.filter((e) => e.status === "sent").map((e) =>
-    e.sent_at
-  );
-  const newestSent = Math.max(
-    -Infinity,
-    ...sentAts.map((at: unknown) => Date.parse(String(at ?? ""))).filter(
-      Number.isFinite,
-    ),
-  );
-  const dateSetAt = Date.parse(String(box?.delivery_date_set_at ?? ""));
-  const dateIsCurrent = !Number.isFinite(dateSetAt) || dateSetAt >= newestSent;
-  const shown = dispatchMaterialStageOf({
-    stored: box?.material_stage,
-    storedAt: box?.material_stage_set_at,
-    sentAts,
-    unsentLineChanges: dispatchUnsentLineChanges(lines, supplierId),
-    confirmedAt: dateIsCurrent ? box?.delivery_date_confirmed_at : null,
-  });
   return {
     box_id: box?.id ?? null,
-    key: shown.key,
-    label: dispatchMaterialStageLabel(shown.key),
-    source: shown.source,
+    key: view.key,
+    label: view.label,
+    source: view.source,
     set_at: box?.material_stage_set_at ?? null,
-    set_by_email: shown.source === "set"
-      ? box?.material_stage_set_by_email ?? null
-      : null,
+    set_by_email: view.set_by_email,
+    // A confirmed date is saved but the payment gate holds the stage.
+    held_by_payment: view.held_by_payment,
+    // The matched supplier reply that moved the box (source "reply").
+    reply: view.reply,
+    // A pickup on the install's first day: leave Materials ready out of the
+    // box's strip and picker.
+    skips_ready: view.skips_ready,
   };
 }
 

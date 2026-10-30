@@ -960,7 +960,13 @@ async function loadOpenSuggestion(ctx: DispatchV2RepliesContext, body: any) {
 
 /** POST {suggestion_id, order_id?}: Accept. Sets the order's confirmed
  * delivery date. Never the job's stage or status: the answer carries
- * stage_move_offer for the screen to ASK about (update_job_status). */
+ * stage_move_offer for the screen to ASK about (update_job_status).
+ *
+ * The payment step (contract section 3c, rule 8): that offer moves the whole
+ * job and texts the fencing or patio manager, so it is withheld while any
+ * pay-first box on the job is unpaid (stage_move_held reason "unpaid"), or
+ * while that cannot be read (reason "payment_unknown"). The answer also
+ * carries payment_hold and the accepted box's payment (box_payment). */
 export async function acceptSuggestion(
   body: any,
   ctx: DispatchV2RepliesContext,
@@ -1009,7 +1015,23 @@ export async function acceptSuggestion(
   }
   await ctx.store.supersedeOpenForOrder(ctx.orgId, order.order_id, s.id, now);
   const [job] = await ctx.store.jobsByIds(ctx.orgId, [s.job_id]);
-  const offer = stageMoveOffer(job ?? null);
+  const payment = ctx.sources.paymentHold
+    ? await ctx.sources.paymentHold({
+      orgId: ctx.orgId,
+      jobId: s.job_id,
+      supplierId: order.supplier_id,
+      now,
+    })
+    : null;
+  let offer = stageMoveOffer(job ?? null);
+  let held: { reason: "unpaid" | "payment_unknown"; suppliers: string[] } |
+    null = null;
+  if (offer && payment && payment.hold !== false) {
+    held = payment.hold === true
+      ? { reason: "unpaid", suppliers: payment.suppliers }
+      : { reason: "payment_unknown", suppliers: [] };
+    offer = null;
+  }
   await ctx.store.logJobEvent(
     s.job_id,
     operator.userId,
@@ -1038,6 +1060,12 @@ export async function acceptSuggestion(
     stage_move_offer: offer
       ? { ...offer, job_id: s.job_id, action: "update_job_status" }
       : null,
+    // Why the offer was withheld (rule 8); null when it was not.
+    stage_move_held: held,
+    // True while any pay-first box on the job is unpaid; null when unknown.
+    payment_hold: payment ? payment.hold : null,
+    // The accepted box's payment object (dispatch_v2_payment.ts).
+    box_payment: payment ? payment.box_payment : null,
   };
 }
 
