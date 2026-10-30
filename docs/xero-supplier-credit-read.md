@@ -2,7 +2,7 @@
 
 `GET ops-api?action=read_xero_settlement_record&record_type=credit_note&record_id=<Xero UUID>` now accepts either Xero credit-note type: `ACCRECCREDIT` (customer) or `ACCPAYCREDIT` (supplier). It returns `ledger_side: receivable|payable` alongside the unchanged raw provider record and provenance. The existing SecureSuite tool uses this same door without new arguments.
 
-This unblocks Bookkeeping's known supplier-credit IDs from AgedPayables, previously rejected with409 `NOT_ACCREC_SETTLEMENT`. The exact-ID route preserves original dates, updated date, status, lines, allocations and their invoice identities/amounts, remaining credit, currency, tax and payment records. It does not infer which accounting period an allocation belongs to from the credit's document date, or assign a job from a division tag.
+This unblocks Bookkeeping's known supplier-credit IDs from AgedPayables, previously rejected with 409 `NOT_ACCREC_SETTLEMENT`. The exact-ID route preserves original dates, updated date, status, lines, allocations and their invoice identities/amounts, remaining credit, currency, tax and payment records. It does not infer which accounting period an allocation belongs to from the credit's document date, or assign a job from a division tag.
 
 Scope is deliberately bounded: `list_xero_settlement_records` still lists receivables only, so existing receipt consumers do not silently gain supplier credits in their population. Payment, overpayment and prepayment reads retain their receivables restriction. Wrong/missing/duplicate IDs and unknown types are refused. Existing staff authentication, tenant selection, provider GET, cooldown and provenance behavior are unchanged; no cache/business write, provider POST, new key or permission change is introduced.
 
