@@ -1,5 +1,11 @@
 # Email capture: sources, reader, run rows and health (slices EM1, EM2, EM3)
 
+## Same-worker execution and recovery
+
+The HTTP handler runs one capture at a time within an Edge worker. Authenticated, valid poll, history, sweep and deep requests wait in admission order before creating their client or reading mail; a failed run releases the next one. The existing 202 response still means accepted, never completed. Probes and `wait: true` calls wait for their own result. This avoids overlapping retained message/attachment bodies in the same worker without refusing the regular history or sweep calls behind a poll.
+
+This in-memory ordering is not durable and does not coordinate different workers. A worker shutdown can abandon accepted requests before a run receipt exists. The durable fixed-window sweep queue retains and retries missing receipts; history/deep keep their existing progress/no-run handling. No cursor, source flag, schedule, provider policy or completion threshold changes. Live memory, queue wait, source completion and source-to-card lag still need measurement after release; sequential execution alone is not a whole-system freshness guarantee.
+
 Design: `email.md` (context build plan, rank 4), slice EM1 of INTEGRATION.md
 Wave 3E. Migration `supabase/migrations/20260924213000_context_email_capture_config.sql`,
 rollback in `supabase/rollbacks/`, contract in
