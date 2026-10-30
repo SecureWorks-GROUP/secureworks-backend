@@ -7,12 +7,29 @@
 // money figure here: every number on the response comes from v_job_profit,
 // v_job_cost_events or v_job_revenue_events, so Jarvis, the ops API and the
 // finance tab cannot disagree. view=rollup sums those same v_job_profit rows
-// in job_profit_rollup.ts. Read only. Field contract for the dashboard:
+// in job_profit_rollup.ts. The one exception is `patio_expected`
+// (job_profit_patio_expected.ts): the patio scoper's own expected figures for
+// its frozen revision, set beside the engine's actuals and never fed back
+// into them. Read only. Field contract for the dashboard:
 // docs/job-profit-read-contract.md (JOB_PROFIT_LABELS carries the same
 // meanings on every response). The admin/owner gate lives at the
 // dispatch in index.ts (privileged ops key or an admin/owner session).
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
+import {
+  type FrozenAcceptance,
+  INSTALLER_RULE_PROBE,
+  lastSaveHashes,
+  NO_REVISION_BINDING,
+  PATIO_EXPECTED_SCOPE_PROJECTION,
+  PATIO_FROZEN_REVISION_COLUMNS,
+  PATIO_LAST_SAVE_HASH_COLUMNS,
+  patioExpectedVersusActual,
+} from "./job_profit_patio_expected.ts";
+import {
+  JOB_ACCEPTANCE_NOT_TRUE,
+  readRevisionAcceptance,
+} from "./job_profit_revision_binding.ts";
 
 export const JOB_PROFIT_LABELS = {
   profit:
@@ -377,7 +394,7 @@ export async function jobProfitAction(
   }
   const summary = rows[0];
 
-  const [costs, revenue] = await Promise.all([
+  const [costs, revenue, patioScope, patioFrozen] = await Promise.all([
     client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq(
       "job_id",
       summary.job_id,
@@ -386,6 +403,17 @@ export async function jobProfitAction(
       "job_id",
       summary.job_id,
     ).order("invoice_date", { ascending: true }).limit(2000),
+    // Projected paths only: scope_json can be megabytes of media.
+    client.from("jobs").select(PATIO_EXPECTED_SCOPE_PROJECTION).eq(
+      "id",
+      summary.job_id,
+    ).limit(1),
+    // The job's frozen patio revision (earlier ones are superseded).
+    client.from("scope_revisions").select(PATIO_FROZEN_REVISION_COLUMNS).eq(
+      "job_id",
+      summary.job_id,
+    ).eq("status", "frozen").eq("tool_kind", "patio")
+      .order("revision_number", { ascending: false }).limit(1),
   ]);
   if (costs.error) {
     return {
@@ -447,8 +475,87 @@ export async function jobProfitAction(
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       labels: JOB_PROFIT_LABELS,
+      ...(await patioExpectedPart(client, patioScope, patioFrozen, summary)),
     },
   };
+}
+
+// Present only for a patio scoper 2.0 job, or when its scope could not be
+// read; every other job's response is unchanged.
+async function patioExpectedPart(
+  client: any,
+  current: { data: any[] | null; error: { message: string } | null },
+  frozen: { data: any[] | null; error: { message: string } | null },
+  summary: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const failed = current.error
+    ? `job scope read failed: ${current.error.message}`
+    : frozen.error
+    ? `frozen scope read failed: ${frozen.error.message}`
+    : null;
+  if (failed) {
+    return { patio_expected: { status: "unreadable", error: failed } };
+  }
+  const cur = current.data?.[0] ?? null;
+  const frz = frozen.data?.[0] ?? null;
+  // Only a patio job with a frozen row needs the whole last save, to compare
+  // it with the frozen row by hash. A failed read leaves freshness unchecked
+  // (flagged), never assumed.
+  let hashes = null;
+  if (frz && (cur?.ptool === "patio-scoper" || frz.tool_kind === "patio")) {
+    const full = await client.from("jobs").select(PATIO_LAST_SAVE_HASH_COLUMNS)
+      .eq("id", summary.job_id).limit(1);
+    if (!full.error) hashes = await lastSaveHashes(full.data?.[0] ?? null);
+  }
+  // JP-12: only an engine that has the installer rule can say an installer
+  // bill was confirmed. Asked for a patio job only; an error is not known.
+  let installerCheck: boolean | null = null;
+  if (frz || cur?.ptool === "patio-scoper") {
+    const probe = await client.rpc(INSTALLER_RULE_PROBE, { p_line_items: [] });
+    installerCheck = !probe.error && probe.data === false ? true : null;
+  }
+  // A freeze is not an acceptance: only recorded acceptance on the job lets
+  // the frozen revision be compared with actuals. Found evidence counts even
+  // if the other read failed; a failed read with none found is not known.
+  let acceptance: FrozenAcceptance | null = null;
+  if (frz) {
+    const [docs, runs] = await Promise.all([
+      client.from("job_documents").select("id").eq("job_id", summary.job_id)
+        .eq("type", "quote").not("accepted_at", "is", null).limit(1),
+      client.from("run_acceptances").select("id").eq("job_id", summary.job_id)
+        .eq("status", "accepted").limit(1),
+    ]);
+    acceptance = !docs.error && (docs.data?.length ?? 0) > 0
+      ? { accepted: true, source: "job_documents.accepted_at" }
+      : !runs.error && (runs.data?.length ?? 0) > 0
+      ? { accepted: true, source: "run_acceptances" }
+      : docs.error || runs.error
+      ? { accepted: null, source: null }
+      : { accepted: false, source: null };
+  }
+  // Whether that acceptance is this frozen revision's: read from the chain
+  // accepted document -> released quote_revisions row -> scope_revision_id
+  // (JP-23 slice 2). It can only narrow job acceptance. Until the send link
+  // (slice 1) exists every job reads not known, and nothing is compared.
+  const revisionAcceptance = !frz
+    ? NO_REVISION_BINDING
+    : acceptance?.accepted === true
+    ? await readRevisionAcceptance(
+      client,
+      String(summary.job_id),
+      typeof frz.id === "string" ? frz.id : null,
+    )
+    : JOB_ACCEPTANCE_NOT_TRUE;
+  const result = patioExpectedVersusActual(
+    cur,
+    frz,
+    summary,
+    hashes,
+    installerCheck,
+    acceptance,
+    revisionAcceptance,
+  );
+  return result ? { patio_expected: result } : {};
 }
 
 /** ops-api `job_profit_list`: the engine's rows, filtered. */
