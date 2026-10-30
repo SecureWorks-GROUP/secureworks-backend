@@ -190,6 +190,11 @@ export async function renderDispatchOrderPdf(
     doc.text(item, MARGIN + 2, y);
     if (line.quantity !== null && line.quantity !== undefined) {
       doc.text(formatDispatchQuantity(line.quantity), COL_QTY_X, y);
+    } else {
+      // No quantity yet: say so in the column, never leave it blank.
+      doc.setFontSize(8);
+      doc.text("To confirm", COL_QTY_X, y);
+      doc.setFontSize(10.5);
     }
     if (unit.length > 0 && unit[0]) doc.text(unit, COL_UNIT_X, y);
     y += height;

@@ -110,11 +110,17 @@ export function formatDispatchQuantity(quantity: number): string {
   return String(Math.round(quantity * 1000) / 1000);
 }
 
-// "18 sheets Colorbond sheet 2.1 m". A line with no quantity prints its item
-// alone; quantity and unit print as stored.
+// "18 sheets Colorbond sheet 2.1 m". A line with no quantity says its
+// quantity is to confirm (a scope can leave a quantity unknown, SQ-29), so
+// the supplier never reads the item alone as a whole order; quantity and
+// unit print as stored.
+export const DISPATCH_QUANTITY_TO_CONFIRM = "quantity to confirm";
+
 export function dispatchOrderLineText(line: DispatchOrderLine): string {
   const item = String(line.description ?? "").trim();
-  if (line.quantity === null || line.quantity === undefined) return item;
+  if (line.quantity === null || line.quantity === undefined) {
+    return `${item} (${DISPATCH_QUANTITY_TO_CONFIRM})`;
+  }
   const unit = line.unit ? ` ${line.unit.trim()}` : "";
   return `${formatDispatchQuantity(line.quantity)}${unit} ${item}`;
 }

@@ -138,6 +138,12 @@ const SCHEMA: Record<string, string[]> = {
     "updated_by",
     "created_by_email",
     "updated_by_email",
+    // Scope provenance, migration 20261019200000 (applied before the
+    // ops-api that reads it).
+    "source_kind",
+    "source_version_id",
+    "source_version",
+    "source_line_id",
   ],
   job_dispatch_workings: [
     "job_id",

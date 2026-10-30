@@ -20,6 +20,8 @@ import {
   dispatchMaterialCountsByJob,
   dispatchMaterialDisplayStatus,
   flattenDispatchOrderLine,
+  patioQuoteMaterialItems,
+  readPatioScoperRecord,
 } from "./dispatch_materials.ts";
 import {
   DISPATCH_MATERIALS_ACTIONS,
@@ -27,6 +29,10 @@ import {
   DispatchMaterialsError,
   runDispatchMaterialsAction,
 } from "./dispatch_materials_store.ts";
+import {
+  FENCE_SCOPE_CHANGE_UNCHECKED,
+  FENCE_SCOPE_CHANGED_SINCE_FROZEN,
+} from "./dispatch_fence_scope_lines.ts";
 
 // index.ts reads SUPABASE_URL and the service key into module constants, so
 // they are set before it is imported (a closed local port: any real database
@@ -117,6 +123,21 @@ function job(id: string, overrides: Row = {}): Row {
   };
 }
 
+function patioRevision(
+  jobId: string,
+  revision: number,
+  status: string,
+  scope: unknown,
+): Row {
+  return {
+    id: uuid("e2", revision + jobId.charCodeAt(jobId.length - 1)),
+    job_id: jobId,
+    revision_number: revision,
+    status,
+    scope_canonical_text: JSON.stringify(scope),
+  };
+}
+
 function seed(): Record<string, Row[]> {
   return {
     jobs: [
@@ -140,6 +161,12 @@ function seed(): Record<string, Row[]> {
         },
       }),
       job(JOB.repair, { type: "repair" }),
+    ],
+    // Patio suggestions read the latest frozen revision, never jobs.scope_json.
+    scope_revisions: [
+      patioRevision(JOB.patio, 1, "frozen", PATIO_SCOPE),
+      patioRevision(JOB.patioNoScope, 1, "frozen", { config: {} }),
+      patioRevision(JOB.patioPricingOnly, 1, "frozen", { config: {} }),
     ],
     suppliers: [
       {
@@ -407,8 +434,27 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
         row.purchase_order_id ??= null;
         row.created_at ??= now;
         row.updated_at ??= now;
+        for (
+          const key of [
+            "source_kind",
+            "source_version_id",
+            "source_version",
+            "source_line_id",
+          ]
+        ) row[key] ??= null;
         if (existing.some((r) => r.id === row.id)) {
           return violation("23505", "job_material_lines_pkey");
+        }
+        // job_material_lines_source_line_once (migration 20261019200000).
+        if (
+          row.source_line_id !== null &&
+          existing.some((r) =>
+            r.job_id === row.job_id &&
+            r.source_version_id === row.source_version_id &&
+            r.source_line_id === row.source_line_id
+          )
+        ) {
+          return violation("23505", "job_material_lines_source_line_once");
         }
       }
       if (name === "job_dispatch_workings") {
@@ -662,10 +708,12 @@ Deno.test("rule: ready counts In stock only, never a line on an order; no line i
   assertEquals(byJob.get("c"), undefined);
 });
 
-Deno.test("rule: the suggestion is offered on a patio job with no line only", () => {
+Deno.test("rule: the suggestion is offered on a patio or fencing job with no line only", () => {
   assertEquals(dispatchCanSuggest("patio", 0), true);
   assertEquals(dispatchCanSuggest("patio", 1), false);
-  for (const type of ["fencing", "repair", "decking", "makesafe"]) {
+  assertEquals(dispatchCanSuggest("fencing", 0), true);
+  assertEquals(dispatchCanSuggest("fencing", 1), false);
+  for (const type of ["repair", "decking", "makesafe"]) {
     assertEquals(dispatchCanSuggest(type, 0), false);
   }
 });
@@ -808,7 +856,8 @@ Deno.test("read: 400 for a missing or malformed id, 404 for another organisation
     ctx(),
   ) as any;
   assertEquals(answer.work_type, "fencing");
-  assertEquals(answer.can_suggest, false);
+  // Offered on a fence with no lines; the press itself answers no_frozen_scope.
+  assertEquals(answer.can_suggest, true);
 });
 
 Deno.test("read: a repair-family job stored as makesafe is allowed, as a repair", async () => {
@@ -1105,6 +1154,7 @@ Deno.test("save line: insert; the same id twice is one row; the answer is the re
     display_status: "not_reviewed",
     purchase_order_id: null,
     source: "manual",
+    source_version: null,
     position: 1,
     updated_at: answer.line.updated_at,
   });
@@ -1545,11 +1595,20 @@ Deno.test("suggest: a patio scope shaped like SWP-26701 adds the four lines, cle
     assert(!("unit_price" in stored) && !("notes" in stored));
     assert(!/[—×]/.test(stored.description));
   }
-  // The scope is read once, for this job, and the pricing never.
+  // The frozen revision is read once and gives the lines. The live scope is
+  // read once, for this one job, only to warn on a post-freeze edit (here it
+  // matches, so no warning); the pricing never.
+  assertEquals(answer.scope_revision_number, 1);
+  assertEquals(answer.held, []);
+  assertEquals(answer.scope_supplier, null);
   const jobReads = db.requests.filter((r) => r.table === "jobs");
-  assert(jobReads.every((r) => !r.select.includes("pricing_json")));
+  assert(jobReads.every((r) => !/pricing_json/.test(r.select)));
   assertEquals(
-    jobReads.filter((r) => r.select.includes("scope_json")).length,
+    jobReads.filter((r) => /scope_json/.test(r.select)).map((r) => r.select),
+    ["id, scope_json"],
+  );
+  assertEquals(
+    db.requests.filter((r) => r.table === "scope_revisions").length,
     1,
   );
   assertOnlyOwnWrites(db);
@@ -1598,11 +1657,59 @@ Deno.test("suggest: two presses at once add the scope lines once; the second is 
   assertEquals((await read(db, JOB.patio)).counts, { total: 4, ready: 0 });
 });
 
-Deno.test("suggest: not a patio job 409, even with a patio-shaped scope; supplier not on the job 409", async () => {
+Deno.test("suggest: three presses at the same instant all pass the no-lines read, and the line key lets one set in", async () => {
+  const db = await jobWithSuppliers();
+  const settled = await Promise.allSettled([
+    SUP.steel,
+    SUP.sheets,
+    SUP.steel,
+  ].map((supplierId) =>
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: supplierId,
+    })
+  ));
+  // Every press reached the insert: the race got past the read and was
+  // stopped by the key on the line id (fixed by job and place), not by luck.
+  const lineInserts = db.requests.filter((r) =>
+    r.kind === "insert" && r.table === "job_material_lines"
+  );
+  assertEquals(lineInserts.length, 3);
+  const won = settled.filter((r) => r.status === "fulfilled");
+  const lost = settled.filter((r) => r.status === "rejected");
+  assertEquals(won.length, 1);
+  assertEquals(lost.length, 2);
+  for (const loss of lost) {
+    const error = (loss as PromiseRejectedResult).reason;
+    assert(error instanceof DispatchMaterialsError);
+    assertEquals(error.status, 409);
+    assertEquals(error.body.code, "lines_exist");
+  }
+  // One set, under one supplier, nothing partial from the losers.
+  const stored = db.tables.job_material_lines.filter((l) =>
+    l.job_id === JOB.patio
+  );
+  assertEquals(stored.length, 4);
+  assertEquals(new Set(stored.map((l) => l.supplier_id)).size, 1);
+  assertEquals(stored.map((l) => l.position).sort(), [1, 2, 3, 4]);
+});
+
+Deno.test("suggest: a repair job 409; a fence with no frozen scope 409; supplier not on the job 409", async () => {
   const db = await jobWithSuppliers(JOB.fence);
+  // The fence job carries a patio-shaped live scope_json and no frozen
+  // revision: the live working copy is never read for a fence.
   await refused(
     call(db, "dispatch_materials_suggest", {
       job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_frozen_scope",
+  );
+  const repair = await jobWithSuppliers(JOB.repair);
+  await refused(
+    call(repair, "dispatch_materials_suggest", {
+      job_id: JOB.repair,
       supplier_id: SUP.steel,
     }),
     409,
@@ -1664,6 +1771,428 @@ Deno.test("suggest: a scope the extractor cannot read is 409 scope_unreadable, n
     "scope_unreadable",
   );
   assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("suggest patio: the latest frozen revision is read; a newer draft and the live scope are not", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: { config: {} } } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", { config: {} }),
+    patioRevision(JOB.patio, 2, "frozen", PATIO_SCOPE),
+    patioRevision(JOB.patio, 3, "draft", { config: {} }),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.scope_revision_number, 2);
+  assertEquals(answer.added, 4);
+  // The live scope's lines differ from the frozen revision's: warned, and the
+  // lines still come from the frozen revision.
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("suggest patio: no live scope, or a failed live read, says the change could not be checked", async () => {
+  for (const mode of ["no_live_scope", "read_fails"] as const) {
+    const initial = seed();
+    initial.jobs = initial.jobs.map((row) =>
+      row.id === JOB.patio
+        ? {
+          ...row,
+          // A live scope equal to the frozen one: only the failed read can
+          // make this "could not be checked".
+          scope_json: mode === "read_fails" ? PATIO_SCOPE : null,
+        }
+        : row
+    );
+    initial.scope_revisions = [
+      patioRevision(JOB.patio, 1, "frozen", PATIO_SCOPE),
+    ];
+    const db = makeDb(initial);
+    await call(db, "dispatch_materials_add_supplier", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    if (mode === "read_fails") {
+      const real = db.client.from;
+      db.client.from = (table: string) => {
+        const builder = real(table);
+        if (table !== "jobs") return builder;
+        const select = builder.select;
+        builder.select = (columns: string, ...rest: any[]) =>
+          columns === "id, scope_json"
+            ? {
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: null,
+                    error: { code: "XX000", message: "forced" },
+                  }),
+                }),
+              }),
+            }
+            : select.call(builder, columns, ...rest);
+        return builder;
+      };
+    }
+    const answer = await call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    assertEquals(answer.added, 4, mode);
+    assertEquals(answer.held, [FENCE_SCOPE_CHANGE_UNCHECKED], mode);
+  }
+});
+
+// A patio tool scope carries its quote under `_pricing_json`. Shaped like the
+// SWP-261283 frozen revision (made-up quantities): labour and every price are
+// left out, and a pricing basis unit (LM, nested, stock) is never a quantity's
+// unit, because 44 sheets priced by the metre is not 44 metres.
+const PATIO_QUOTE_SCOPE = {
+  ...PATIO_SCOPE,
+  _pricing_json: {
+    line_items: [
+      {
+        description: "Posts 90x90x2",
+        quantity: 4,
+        unit: "nested",
+        category: "steel",
+        cost_price: 40,
+        sell_price: 60,
+        total_cost: 160,
+        total_sell: 240,
+        supplier_name: null,
+      },
+      {
+        description: "SpanPlus 330 Sheets — last sheet cut",
+        quantity: 44,
+        unit: "LM",
+        category: "roofing",
+        cost_price: 22,
+        sell_price: 33,
+        total_cost: 4743.2,
+        total_sell: 7114.8,
+        supplier_name: "Bondor",
+      },
+      {
+        description: "Riser Beam 100×50×2",
+        quantity: 1,
+        unit: "stock",
+        category: "steel",
+        cost_price: 90,
+        total_cost: 90,
+      },
+      {
+        description: "Downpipe Clips 95x45mm",
+        quantity: 4,
+        unit: "",
+        category: "rainwater",
+        cost_price: 3,
+        total_cost: 12,
+      },
+      {
+        description: "Fixings (screws, anchors)",
+        quantity: 68.9,
+        unit: "sqm",
+        category: "fixings",
+        cost_price: 2,
+        total_cost: 137.8,
+      },
+      {
+        description: "Labour",
+        quantity: 64,
+        unit: "hrs",
+        category: "labour",
+        cost_price: 70,
+        total_cost: 4480,
+      },
+    ],
+  },
+};
+
+Deno.test("patio quote items: labour dropped, no price kept, pricing units cleared", () => {
+  assertEquals(patioQuoteMaterialItems(PATIO_QUOTE_SCOPE), [
+    { description: "Posts 90x90x2", quantity: 4, unit: null },
+    {
+      description: "SpanPlus 330 Sheets — last sheet cut",
+      quantity: 44,
+      unit: null,
+    },
+    { description: "Riser Beam 100×50×2", quantity: 1, unit: null },
+    { description: "Downpipe Clips 95x45mm", quantity: 4, unit: "" },
+    { description: "Fixings (screws, anchors)", quantity: 68.9, unit: "sqm" },
+  ]);
+  // A quote stored as a JSON string reads the same.
+  assertEquals(
+    patioQuoteMaterialItems({
+      _pricing_json: JSON.stringify(PATIO_QUOTE_SCOPE._pricing_json),
+    })?.length,
+    5,
+  );
+  // No quote list: null, so the caller falls back to the scope extractor.
+  assertEquals(patioQuoteMaterialItems(PATIO_SCOPE), null);
+  assertEquals(
+    patioQuoteMaterialItems({ _pricing_json: { line_items: [] } }),
+    null,
+  );
+  assertEquals(patioQuoteMaterialItems({ _pricing_json: "not json" }), null);
+  assertEquals(patioQuoteMaterialItems(null), null);
+});
+
+Deno.test("suggest patio: a frozen quote list gives every material line, with no price and no labour", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: PATIO_QUOTE_SCOPE } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_QUOTE_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 5);
+  assertEquals(
+    answer.lines.map((l: Row) => [l.description, l.quantity, l.unit, l.status]),
+    [
+      ["Posts 90x90x2", 4, null, "not_reviewed"],
+      ["SpanPlus 330 Sheets, last sheet cut", 44, null, "not_reviewed"],
+      ["Riser Beam 100x50x2", 1, null, "not_reviewed"],
+      ["Downpipe Clips 95x45mm", 4, null, "not_reviewed"],
+      ["Fixings (screws, anchors)", 68.9, "sqm", "not_reviewed"],
+    ],
+  );
+  assertEquals(answer.held, []);
+  for (const stored of db.tables.job_material_lines) {
+    assert(!("unit_price" in stored) && !("notes" in stored));
+    assert(!/Labour/.test(stored.description));
+  }
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("suggest patio: a live quote list edited after the freeze is warned on", async () => {
+  const initial = seed();
+  const edited = structuredClone(PATIO_QUOTE_SCOPE);
+  edited._pricing_json.line_items[1].quantity = 46;
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: edited } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_QUOTE_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 5);
+  assertEquals(
+    answer.lines.find((l: Row) => /SpanPlus/.test(l.description)).quantity,
+    44,
+  );
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
+});
+
+Deno.test("suggest patio: no frozen revision is 409 no_frozen_scope, even with a live scope; nothing written", async () => {
+  const initial = seed();
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "draft", PATIO_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_frozen_scope",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("suggest patio: a frozen revision that is not JSON is 409 scope_unreadable", async () => {
+  const initial = seed();
+  initial.scope_revisions = [{
+    ...patioRevision(JOB.patio, 1, "frozen", {}),
+    scope_canonical_text: "{not json",
+  }];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_unreadable",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+// ── SQ-29: the patio scoper's sealed record ────────────────────────────────
+
+const PATIO_V2_SCOPE = {
+  tool: "patio-scoper",
+  version: "2.0",
+  revision: {
+    n: 3,
+    scopeRevisionId: "rev-3",
+    parentRevisionId: "rev-2",
+    frozenId: "frz-abc",
+    catalogueRevisionId: "cat-9",
+    sealedAt: "2026-10-20T09:00:00Z",
+    outputsAgree: true,
+  },
+  family: "flat",
+  supported: true,
+  lines: [
+    { id: "p-1", description: "SpanPlus 330 sheet", quantity: 22, unit: "ea", colour: "Monument" },
+    { id: "p-2", description: "Gutter fixing kit", quantity: null, unit: "kit", colour: null },
+    { id: "p-3", description: "  ", quantity: 4, unit: "ea" },
+  ],
+  expected: { materials: null, labour: 1200, sale: null },
+  draft: { width: 6000 },
+  savedAt: "2026-10-20T09:01:00Z",
+  // An old-shape quote list beside the record must never be read instead.
+  _pricing_json: {
+    line_items: [{ description: "Old list line", quantity: 9, unit: "ea" }],
+  },
+};
+
+Deno.test("SQ-29 record: lines with colour, an unknown quantity kept null, revision named", () => {
+  const read = readPatioScoperRecord(PATIO_V2_SCOPE);
+  assertEquals(read.kind, "lines");
+  if (read.kind !== "lines") return;
+  assertEquals(read.revision, { n: 3, frozen_id: "frz-abc" });
+  assertEquals(read.items, [
+    { description: "SpanPlus 330 sheet, Monument", quantity: 22, unit: "ea" },
+    { description: "Gutter fixing kit", quantity: null, unit: "kit" },
+  ]);
+  assertEquals(readPatioScoperRecord({ ...PATIO_V2_SCOPE, supported: false }), {
+    kind: "unsupported",
+    family: "flat",
+    revision: { n: 3, frozen_id: "frz-abc" },
+  });
+  assertEquals(
+    readPatioScoperRecord({ ...PATIO_V2_SCOPE, supported: undefined }).kind,
+    "unreadable",
+  );
+  assertEquals(
+    readPatioScoperRecord({ ...PATIO_V2_SCOPE, lines: "x" }).kind,
+    "unreadable",
+  );
+  assertEquals(readPatioScoperRecord(PATIO_QUOTE_SCOPE).kind, "not_v2");
+  assertEquals(
+    readPatioScoperRecord({ ...PATIO_V2_SCOPE, version: "1.4" }).kind,
+    "not_v2",
+  );
+});
+
+Deno.test("SQ-29 suggest: the sealed record's lines are the order, an unknown quantity stays null, the revision is named", async () => {
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: PATIO_V2_SCOPE } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_V2_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 2);
+  assertEquals(
+    answer.lines.map((l: Row) => [l.description, l.quantity, l.unit, l.status]),
+    [
+      ["SpanPlus 330 sheet, Monument", 22, "ea", "not_reviewed"],
+      ["Gutter fixing kit", null, "kit", "not_reviewed"],
+    ],
+  );
+  assertEquals(answer.scope_revision_number, 1);
+  assertEquals(answer.scope_revision_n, 3);
+  assertEquals(answer.scope_frozen_id, "frz-abc");
+  assertEquals(answer.held, []);
+  for (const stored of db.tables.job_material_lines) {
+    assert(!/Old list line/.test(stored.description));
+  }
+  assertOnlyOwnWrites(db);
+});
+
+Deno.test("SQ-29 suggest: an unsupported family is 409 scope_family_unsupported; nothing written", async () => {
+  const unsupported = { ...PATIO_V2_SCOPE, supported: false };
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: unsupported } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", unsupported),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_family_unsupported",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("SQ-29 suggest: a live record edited after the freeze is warned on", async () => {
+  const edited = structuredClone(PATIO_V2_SCOPE);
+  edited.lines[1].quantity = 2;
+  const initial = seed();
+  initial.jobs = initial.jobs.map((row) =>
+    row.id === JOB.patio ? { ...row, scope_json: edited } : row
+  );
+  initial.scope_revisions = [
+    patioRevision(JOB.patio, 1, "frozen", PATIO_V2_SCOPE),
+  ];
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.lines[1].quantity, null);
+  assertEquals(answer.held, [FENCE_SCOPE_CHANGED_SINCE_FROZEN]);
 });
 
 // ── Working out and sketch ──────────────────────────────────────────────────
@@ -1996,8 +2525,8 @@ Deno.test("list: an empty Dispatch answer still says dispatch_materials ok", asy
 
 // ── Who may call ────────────────────────────────────────────────────────────
 
-Deno.test("gate: the seven actions are staff only: a trade or division manager is refused, and no allow-list names them", () => {
-  assertEquals(DISPATCH_MATERIALS_ACTIONS.length, 7);
+Deno.test("gate: the eight actions are staff only: a trade or division manager is refused, and no allow-list names them", () => {
+  assertEquals(DISPATCH_MATERIALS_ACTIONS.length, 8);
   for (const action of DISPATCH_MATERIALS_ACTIONS) {
     const url = new URL(
       `https://example.test/functions/v1/ops-api?action=${action}`,
@@ -2110,4 +2639,439 @@ Deno.test("gate: the privileged key reaches the actions; a write by GET is 405 a
     assertEquals((await bad.json()).code, "invalid_request");
     assertEquals(calls, []);
   });
+});
+
+// ── The fence suggestion, from the frozen scope ─────────────────────────────
+
+// Fence case A's panel geometry (a real job, no job number), as frozen revisions 2 and 3,
+// with a newer draft revision 4 that must never be read.
+function fenceRevision(revision: number, status: string, runs: Row[]): Row {
+  return {
+    id: uuid("e1", revision),
+    job_id: JOB.fence,
+    revision_number: revision,
+    status,
+    scope_canonical_text: JSON.stringify({
+      tool: "fence-designer",
+      job: {
+        profile: "Ridgeside",
+        colour: "Woodland Grey",
+        supplier: "SUPPLIER-A",
+        runs,
+      },
+    }),
+  };
+}
+const FENCE_CASE_A_RUN = {
+  length: 20,
+  panels: [
+    ...Array.from({ length: 8 }, () => ({ height: 1800, retaining: 150 })),
+    { height: 1800, retaining: 0 },
+  ],
+};
+
+async function fenceJobWithRevisions(revisions: Row[]) {
+  const initial = seed();
+  initial.scope_revisions = revisions;
+  const db = makeDb(initial);
+  await call(db, "dispatch_materials_add_supplier", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  return db;
+}
+
+Deno.test("suggest fence: the latest frozen revision gives 9 panel kits and 8 plinths, not_reviewed, no price; a newer draft is ignored", async () => {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(2, "frozen", [{ panels: [{ height: 1800, retaining: 0 }] }]),
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+    fenceRevision(4, "draft", [{ panels: [{ height: 2100, retaining: 600 }] }]),
+  ]);
+  assertEquals((await read(db, JOB.fence)).can_suggest, true);
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 3);
+  assertEquals(answer.scope_revision_number, 3);
+  assertEquals(answer.scope_supplier, "SUPPLIER-A");
+  assert(answer.held.length > 0);
+  assertEquals(
+    answer.lines.map((
+      l: Row,
+    ) => [l.description, l.quantity, l.unit, l.status, l.source]),
+    [
+      [
+        "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2700 mm post",
+        8,
+        "panels",
+        "not_reviewed",
+        "scope",
+      ],
+      [
+        "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2400 mm post",
+        1,
+        "panels",
+        "not_reviewed",
+        "scope",
+      ],
+      [
+        "Retaining plinth 150 mm, Woodland Grey",
+        8,
+        "each",
+        "not_reviewed",
+        "scope",
+      ],
+    ],
+  );
+  for (const stored of db.tables.job_material_lines) {
+    assert(!("unit_price" in stored));
+    assertEquals(stored.supplier_id, SUP.steel);
+  }
+  // The frozen revision is read; of the live scope only the runs are
+  // projected (to warn on a post-freeze edit), and the pricing never.
+  // This job's live scope has no fence runs, so nothing can be compared: the
+  // person is told it could not be checked, never that it is unchanged.
+  assert(!answer.held.includes(FENCE_SCOPE_CHANGED_SINCE_FROZEN));
+  assert(answer.held.includes(FENCE_SCOPE_CHANGE_UNCHECKED));
+  const revisionReads = db.requests.filter((r) =>
+    r.table === "scope_revisions"
+  );
+  assertEquals(revisionReads.length, 1);
+  assert(
+    revisionReads[0].filters.some(([op, col, v]) =>
+      op === "eq" && col === "status" && v === "frozen"
+    ),
+  );
+  assert(
+    db.requests.filter((r) => r.table === "jobs").every((r) =>
+      !r.select.includes("pricing_json") &&
+      (!r.select.includes("scope_json") ||
+        r.select === "id, live_runs:scope_json->job->runs")
+    ),
+  );
+  assertOnlyOwnWrites(db);
+  assertEquals((await read(db, JOB.fence)).counts, { total: 3, ready: 0 });
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "lines_exist",
+  );
+});
+
+Deno.test("suggest fence: live runs edited after the freeze add the warning to held; equal runs add none", async () => {
+  const revisions = [fenceRevision(3, "frozen", [FENCE_CASE_A_RUN])];
+  for (
+    const [liveRuns, warned] of [
+      [
+        [{ ...FENCE_CASE_A_RUN, panels: FENCE_CASE_A_RUN.panels.slice(1) }],
+        true,
+      ],
+      [[FENCE_CASE_A_RUN], false],
+    ] as const
+  ) {
+    const db = await fenceJobWithRevisions(revisions);
+    const fence = db.tables.jobs.find((row) => row.id === JOB.fence)!;
+    fence.scope_json = { job: { runs: structuredClone(liveRuns) } };
+    const answer = await call(db, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    });
+    // The lines still come from the frozen revision either way.
+    assertEquals(answer.added, 3);
+    assertEquals(
+      answer.held.includes(FENCE_SCOPE_CHANGED_SINCE_FROZEN),
+      warned,
+    );
+  }
+});
+
+Deno.test("suggest fence: a live scope with no runs says it could not be checked; the live read is scoped to the job's org", async () => {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const fence = db.tables.jobs.find((row) => row.id === JOB.fence)!;
+  fence.scope_json = { job: {} };
+  const answer = await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 3);
+  assert(answer.held.includes(FENCE_SCOPE_CHANGE_UNCHECKED));
+  assert(!answer.held.includes(FENCE_SCOPE_CHANGED_SINCE_FROZEN));
+  const liveReads = db.requests.filter((r) =>
+    r.table === "jobs" && r.select === "id, live_runs:scope_json->job->runs"
+  );
+  assertEquals(liveReads.length, 1);
+  assert(
+    liveReads[0].filters.some(([op, col]) => op === "eq" && col === "org_id"),
+  );
+});
+
+Deno.test("suggest fence: an unreadable frozen scope is 409 scope_unreadable and writes nothing", async () => {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(1, "frozen", [{ panels: [{ height: 1650, retaining: 0 }] }]),
+  ]);
+  await refused(
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_unreadable",
+  );
+  const broken = await fenceJobWithRevisions([
+    { ...fenceRevision(1, "frozen", []), scope_canonical_text: "{not json" },
+  ]);
+  await refused(
+    call(broken, "dispatch_materials_suggest", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "scope_unreadable",
+  );
+  assertEquals(db.tables.job_material_lines, []);
+  assertEquals(broken.tables.job_material_lines, []);
+});
+
+// ── Scope provenance and the variation press (S3, S7 materials) ─────────────
+
+const FENCE_PLUS_TWO_RUN = {
+  length: 24,
+  panels: Array.from({ length: 10 }, () => ({ height: 1800, retaining: 150 })),
+};
+const FENCE_MINUS_TWO_RUN = {
+  length: 16,
+  panels: [
+    ...Array.from({ length: 6 }, () => ({ height: 1800, retaining: 150 })),
+    { height: 1800, retaining: 0 },
+  ],
+};
+const KIT_2700 =
+  "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2700 mm post";
+const KIT_2400 =
+  "Ridgeside fence panel kit, Woodland Grey, 1800 mm sheet, 2400 mm post";
+const PLINTH = "Retaining plinth 150 mm, Woodland Grey";
+
+async function fenceJobSuggestedAt(revisions: Row[]) {
+  const db = await fenceJobWithRevisions(revisions);
+  await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  return db;
+}
+
+Deno.test("provenance: the suggest press records the frozen revision and a material key on every fence line", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const stored = db.tables.job_material_lines;
+  assertEquals(stored.length, 3);
+  for (const row of stored) {
+    assertEquals(row.source, "scope");
+    assertEquals(row.source_kind, "fence_scope_revision");
+    assertEquals(row.source_version_id, uuid("e1", 3));
+    assertEquals(row.source_version, "3");
+    assert(row.source_line_id.length <= 100);
+  }
+  assertEquals(new Set(stored.map((row) => row.source_line_id)).size, 3);
+  assertEquals(
+    (await read(db, JOB.fence)).lines.map((l: Row) => l.source_version),
+    ["3", "3", "3"],
+  );
+});
+
+Deno.test("provenance: a patio suggestion records the patio revision", async () => {
+  const db = await jobWithSuppliers();
+  await call(db, "dispatch_materials_suggest", {
+    job_id: JOB.patio,
+    supplier_id: SUP.steel,
+  });
+  const stored = db.tables.job_material_lines;
+  assertEquals(stored.length, 4);
+  for (const row of stored) {
+    assertEquals(row.source_kind, "patio_scope_revision");
+    assertEquals(row.source_version_id, patioRevision(JOB.patio, 1, "", {}).id);
+    assertEquals(row.source_version, "1");
+    assert(row.source_line_id.startsWith("m:"));
+  }
+});
+
+Deno.test("variation: a newer frozen fence scope adds only the difference, names the new revision, and leaves edited lines alone", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  // A person edits the 2700 kit line before the scope changes.
+  const kit = db.tables.job_material_lines.find((r) =>
+    r.description === KIT_2700
+  )!;
+  kit.quantity = 9;
+  const before = structuredClone(db.tables.job_material_lines);
+  // Freezing revision 5 supersedes revision 3, as scope_freeze does.
+  db.tables.scope_revisions.find((r) => r.revision_number === 3)!.status =
+    "superseded";
+  db.tables.scope_revisions.push(
+    fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
+  );
+
+  const answer = await call(db, "dispatch_materials_suggest_changes", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.taken_from_revision_number, 3);
+  assertEquals(answer.scope_revision_number, 5);
+  assertEquals(answer.up_to_date, false);
+  assertEquals(
+    answer.lines.map((l: Row) => [
+      l.description,
+      l.quantity,
+      l.status,
+      l.source,
+      l.source_version,
+      l.purchase_order_id,
+    ]),
+    [
+      [KIT_2700, 2, "not_reviewed", "scope", "5", null],
+      [PLINTH, 2, "not_reviewed", "scope", "5", null],
+    ],
+  );
+  assertEquals(answer.changes.removed, [
+    { description: KIT_2400, unit: "panels", before: 1, after: 0 },
+  ]);
+  assertEquals(answer.changes.reduce, []);
+  assertEquals(answer.changes.unchecked, []);
+  assertEquals(answer.counts, { total: 5, ready: 0 });
+  // The three earlier lines are untouched, the person's 9 included.
+  assertEquals(db.tables.job_material_lines.slice(0, 3), before);
+  for (const row of db.tables.job_material_lines.slice(3)) {
+    assertEquals(row.source_version_id, uuid("e1", 5));
+    assert(!("unit_price" in row));
+  }
+  assertOnlyOwnWrites(db);
+
+  // A second press on the same revision adds nothing and writes nothing.
+  const writes = db.writes().length;
+  const again = await call(db, "dispatch_materials_suggest_changes", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(again.added, 0);
+  assertEquals(again.up_to_date, true);
+  assertEquals(again.taken_from_revision_number, 5);
+  assertEquals(db.writes().length, writes);
+});
+
+Deno.test("variation: a scope that only shrinks adds nothing and lists the reductions for a person", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  db.tables.scope_revisions.push(
+    fenceRevision(4, "frozen", [FENCE_MINUS_TWO_RUN]),
+  );
+  const writes = db.writes().length;
+  const answer = await call(db, "dispatch_materials_suggest_changes", {
+    job_id: JOB.fence,
+    supplier_id: SUP.steel,
+  });
+  assertEquals(answer.added, 0);
+  assertEquals(answer.up_to_date, false);
+  assertEquals(answer.changes.reduce, [
+    { description: KIT_2700, unit: "panels", before: 8, after: 6 },
+    { description: PLINTH, unit: "each", before: 8, after: 6 },
+  ]);
+  assertEquals(answer.changes.removed, []);
+  assertEquals(db.writes().length, writes);
+});
+
+Deno.test("variation: two presses at once add the difference once", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  db.tables.scope_revisions.push(
+    fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
+  );
+  const results = await Promise.allSettled(
+    [0, 1].map(() =>
+      call(db, "dispatch_materials_suggest_changes", {
+        job_id: JOB.fence,
+        supplier_id: SUP.steel,
+      })
+    ),
+  );
+  assertEquals(db.tables.job_material_lines.length, 5);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      assertEquals((result.reason as any).body.code, "changes_already_taken");
+    }
+  }
+  assert(results.some((r) => r.status === "fulfilled" && r.value.added === 2));
+});
+
+Deno.test("variation: refused with no scope lines, unrecorded provenance, a missing base revision, or a repair job", async () => {
+  const empty = await jobWithSuppliers();
+  await addLine(empty, line(1));
+  await refused(
+    call(empty, "dispatch_materials_suggest_changes", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_scope_lines",
+  );
+
+  const unrecorded = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  unrecorded.tables.job_material_lines[0].source_line_id = null;
+  unrecorded.tables.job_material_lines[1].source_version = null;
+  await refused(
+    call(unrecorded, "dispatch_materials_suggest_changes", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "source_not_recorded",
+  );
+
+  const lost = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  // The base revision can only be read while frozen or superseded.
+  lost.tables.scope_revisions[0].status = "draft";
+  lost.tables.scope_revisions.push(
+    fenceRevision(5, "frozen", [FENCE_PLUS_TWO_RUN]),
+  );
+  const writes = lost.writes().length;
+  await refused(
+    call(lost, "dispatch_materials_suggest_changes", {
+      job_id: JOB.fence,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "base_scope_missing",
+  );
+  assertEquals(lost.writes().length, writes);
+
+  await refused(
+    call(empty, "dispatch_materials_suggest_changes", {
+      job_id: JOB.repair,
+      supplier_id: SUP.steel,
+    }),
+    409,
+    "no_suggestion_for_work_type",
+  );
+});
+
+Deno.test("fake: a second line naming the same revision and material key is refused by the unique index", async () => {
+  const db = await fenceJobSuggestedAt([
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const copy = { ...db.tables.job_material_lines[0], id: line(9) };
+  const { error } = await db.client.from("job_material_lines").insert(copy);
+  assertEquals(error?.code, "23505");
 });

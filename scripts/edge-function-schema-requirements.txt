@@ -988,3 +988,13 @@ send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_lin
 send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
 ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
 ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
+# 20261019200000 records which frozen scope revision and material a scope line
+# came from: every dispatch_materials read selects the four columns, and
+# dispatch_materials_suggest / _suggest_changes write them, so ops-api must not
+# deploy ahead of it (a missing column is a 400 on every materials read).
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_kind
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_version_id
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_version
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_line_id
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|index|job_material_lines_source_line_once
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|constraint|job_material_lines_source_shape
