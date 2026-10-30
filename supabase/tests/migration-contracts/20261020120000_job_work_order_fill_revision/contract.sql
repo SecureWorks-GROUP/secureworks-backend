@@ -24,9 +24,15 @@ BEGIN
     (v_other, '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'WOR-2');
   INSERT INTO public.scope_revisions (id, job_id, revision_number, status) VALUES
     (v_rev, v_job, 2, 'frozen'),
-    (v_rev_old, v_job, 1, 'superseded'),
+    (v_rev_old, v_job, 1, 'frozen'),
     (v_rev_draft, v_job, 3, 'draft'),
     (v_rev_other, v_other, 1, 'frozen');
+  -- The full stack includes JP-24's lifecycle guard: superseded revisions
+  -- must first be frozen, then name their successor in the same update.
+  UPDATE public.scope_revisions
+    SET status = 'superseded', superseded_at = '2026-10-20T00:00:00Z',
+        superseded_by_scope_revision_id = v_rev
+    WHERE id = v_rev_old;
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
   IF v_wo IS NULL THEN RAISE EXCEPTION 'fill revision contract: the accepted job opened no draft'; END IF;
 

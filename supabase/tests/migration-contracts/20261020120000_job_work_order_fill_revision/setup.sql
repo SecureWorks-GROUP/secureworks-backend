@@ -16,5 +16,7 @@ CREATE TABLE IF NOT EXISTS public.scope_revisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE RESTRICT,
   revision_number int NOT NULL DEFAULT 1,
-  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'frozen', 'superseded'))
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'frozen', 'superseded')),
+  superseded_at timestamptz,
+  superseded_by_scope_revision_id uuid
 );
