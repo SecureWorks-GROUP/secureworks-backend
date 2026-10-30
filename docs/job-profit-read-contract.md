@@ -201,3 +201,16 @@ holding job by the engine's own rule (`v_job_profit.holding_job`,
 `lower(do_not_schedule) = 'true'`), the rule CFO's view and the card read use
 too; Context's placement rules read `'true'` or `'1'`, and on a job set to
 `'1'` the two disagree (not measured on production).
+
+## Employer-super consumer classification
+
+The existing Group WO employer-super source is `trade_employer_super`.
+`job_profit.timeline` labels it `employer_super`, never `supplier_bill`.
+Its original source/line identity, date (including null), `is_actual`, amount,
+and unpaid status pass through unchanged. A cash invoice payment does not
+settle the employer obligation. Advance-related events stay nonactual.
+The `trades` totals continue to show trade charges only; employer-super
+obligations are shown separately. No new cost formula is calculated by the
+API or screen. Missing super records do not establish zero or cost-close.
+The source producer and its feature activation remain owned by Group WO;
+this consumer compatibility change does not activate that feature.

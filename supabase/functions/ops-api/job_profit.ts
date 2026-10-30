@@ -16,7 +16,7 @@ import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 
 export const JOB_PROFIT_LABELS = {
   profit:
-    "Gross profit on direct costs (trade labour, materials, commission and other direct lines), ex GST. No overhead share. Trade labour is the trade's charge; the company's super share is not added.",
+    "Gross profit on direct costs (trade labour, materials, commission and other direct lines), ex GST. No overhead share. Trade charges and recorded employer-super obligations are separate cost events. Only events marked actual count; missing on-cost evidence does not establish zero or cost-close.",
   quoted_ex:
     "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent. Never the live price. quoted_source names the quote it came from.",
   expected_cost_ex:
@@ -77,6 +77,7 @@ export type TimelineEntry = {
   date: string | null;
   kind:
     | "trade_charge"
+    | "employer_super"
     | "supplier_bill"
     | "materials_fact"
     | "purchase_order"
@@ -103,6 +104,7 @@ export type TimelineEntry = {
 
 const COST_KIND: Record<string, TimelineEntry["kind"]> = {
   trade_line: "trade_charge",
+  trade_employer_super: "employer_super",
   supplier_bill: "supplier_bill",
   materials_fact: "materials_fact",
   po_committed: "purchase_order",
@@ -113,7 +115,8 @@ const COST_KIND: Record<string, TimelineEntry["kind"]> = {
 /** Timeline kind of a cost event. An unknown purchase order state is still a purchase order, never a supplier bill. */
 export function costEventKind(source: unknown): TimelineEntry["kind"] {
   const s = String(source ?? "");
-  return COST_KIND[s] ?? (s.startsWith("po_") ? "purchase_order" : "supplier_bill");
+  return COST_KIND[s] ??
+    (s.startsWith("po_") ? "purchase_order" : "supplier_bill");
 }
 
 function num(v: unknown): number | null {
