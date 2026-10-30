@@ -24,6 +24,9 @@ export const DISPATCH_THREAD_ROWS_LOG_AT = 500;
 // ── Order lines ─────────────────────────────────────────────────────────────
 
 export type DispatchOrderLine = {
+  source_version_id?: string;
+  source_line_id?: string | null;
+  source_kind?: string | null;
   line_id: string;
   description: string;
   quantity: number | null;
@@ -63,6 +66,13 @@ export function dispatchOrderableLines(
 export function dispatchOrderLine(line: any): DispatchOrderLine {
   return {
     line_id: String(line?.id ?? ""),
+    ...(line?.source_version_id
+      ? {
+        source_version_id: line.source_version_id,
+        source_line_id: line.source_line_id ?? null,
+        source_kind: line.source_kind ?? null,
+      }
+      : {}),
     description: String(line?.description ?? ""),
     quantity: numberOrNull(line?.quantity),
     unit: typeof line?.unit === "string" && line.unit.trim() ? line.unit : null,

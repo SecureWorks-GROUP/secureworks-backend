@@ -59,7 +59,7 @@ export const DISPATCH_MATERIALS_LIST_SELECT =
 export const DISPATCH_MATERIAL_SUPPLIER_SELECT =
   "supplier_id, supplier_name, position, created_at";
 export const DISPATCH_MATERIAL_LINE_SELECT =
-  "id, job_id, supplier_id, description, quantity, unit, status, purchase_order_id, source, position, updated_at, source_kind, source_version, source_line_id";
+  "id, job_id, supplier_id, description, quantity, unit, status, purchase_order_id, source, position, updated_at, source_kind, source_version_id, source_version, source_line_id";
 export const DISPATCH_SUPPLIER_CONTACT_SELECT =
   "id, org_id, name, email, is_active";
 export const DISPATCH_WORKINGS_SELECT =
@@ -191,6 +191,13 @@ export function projectDispatchMaterialLine(
     // The frozen revision a scope line was taken from, as shown to people.
     // Null on a hand-added line or one taken before 20261019200000.
     source_version: row?.source_version ?? null,
+    ...(row?.source_version_id
+      ? {
+        source_version_id: row.source_version_id,
+        source_line_id: row.source_line_id ?? null,
+        source_kind: row.source_kind ?? null,
+      }
+      : {}),
     position: row?.position,
     updated_at: row?.updated_at,
   };
@@ -474,23 +481,51 @@ export function patioQuoteMaterialItems(
 // family has no quote or order, so nothing is offered to order from it. The
 // record names its revision by `revision.n` and `revision.frozenId`. A v2
 // record is never read through the older readers: its shape is not theirs.
-export type PatioScoperRevision = { n: number | null; frozen_id: string | null };
+export type PatioScoperRevision = {
+  n: number | null;
+  frozen_id: string | null;
+};
 
 export type PatioScoperRecordRead =
   | { kind: "not_v2" }
   | { kind: "unreadable"; reason: string }
-  | { kind: "unsupported"; family: string | null; revision: PatioScoperRevision }
+  | {
+    kind: "unsupported";
+    family: string | null;
+    revision: PatioScoperRevision;
+  }
   | {
     kind: "lines";
-    items: { description: string; quantity: unknown; unit: unknown }[];
+    items: {
+      description: string;
+      quantity: unknown;
+      unit: unknown;
+      source_line_id: string;
+    }[];
     revision: PatioScoperRevision;
   };
 
 export function readPatioScoperRecord(scope: unknown): PatioScoperRecordRead {
+  if (
+    !scope || typeof scope !== "object" ||
+    (scope as Record<string, unknown>).tool !== "patio-scoper"
+  ) return { kind: "not_v2" };
+  return readScopeMaterialRecord(scope);
+}
+
+// Current Scope producers seal their own material identities. These are not
+// the description-derived keys used by older scopes without a line manifest.
+export function readScopeMaterialRecord(scope: unknown): PatioScoperRecordRead {
   if (!scope || typeof scope !== "object") return { kind: "not_v2" };
   const record = scope as Record<string, any>;
-  if (record.tool !== "patio-scoper") return { kind: "not_v2" };
-  if (!/^2(\.|$)/.test(String(record.version ?? ""))) return { kind: "not_v2" };
+  if (record.tool !== "patio-scoper" && record.tool !== "fencing") {
+    return { kind: "not_v2" };
+  }
+  const fenceManifest = record.tool === "fencing" &&
+    Object.hasOwn(record, "lines");
+  if (!fenceManifest && !/^2(\.|$)/.test(String(record.version ?? ""))) {
+    return { kind: "not_v2" };
+  }
   const rev = record.revision && typeof record.revision === "object"
     ? record.revision
     : {};
@@ -505,27 +540,48 @@ export function readPatioScoperRecord(scope: unknown): PatioScoperRecordRead {
       : null;
     return { kind: "unsupported", family, revision };
   }
-  if (record.supported !== true) {
+  if (!fenceManifest && record.supported !== true) {
     return { kind: "unreadable", reason: "supported_missing" };
   }
   if (!Array.isArray(record.lines)) {
     return { kind: "unreadable", reason: "lines_missing" };
   }
-  const items: { description: string; quantity: unknown; unit: unknown }[] =
-    [];
+  const items: {
+    description: string;
+    quantity: unknown;
+    unit: unknown;
+    source_line_id: string;
+  }[] = [];
+  const seenIds = new Set<string>();
   for (const line of record.lines) {
     if (!line || typeof line !== "object") continue;
     const description = typeof line.description === "string"
       ? line.description.trim()
       : "";
     if (!description) continue;
+    const id = line.id;
+    if (
+      typeof id !== "string" || !id || id !== id.trim() ||
+      id.length > DISPATCH_SCOPE_LINE_KEY_MAX
+    ) {
+      return {
+        kind: "unreadable",
+        reason: "source_line_id_missing_or_invalid",
+      };
+    }
+    if (seenIds.has(id)) {
+      return { kind: "unreadable", reason: "source_line_id_repeated" };
+    }
+    seenIds.add(id);
     const colour = typeof line.colour === "string" ? line.colour.trim() : "";
     items.push({
-      description: colour && !description.toLowerCase().includes(colour.toLowerCase())
-        ? `${description}, ${colour}`
-        : description,
+      description:
+        colour && !description.toLowerCase().includes(colour.toLowerCase())
+          ? `${description}, ${colour}`
+          : description,
       quantity: line.quantity ?? null,
       unit: line.unit ?? null,
+      source_line_id: id,
     });
   }
   return { kind: "lines", items, revision };
@@ -545,6 +601,7 @@ export function cleanSuggestedDescription(value: unknown): string {
 }
 
 export type DispatchSuggestedLine = {
+  source_line_id?: string;
   description: string;
   quantity: number | null;
   unit: string | null;
@@ -570,6 +627,9 @@ export function dispatchSuggestedLines(items: any[]): DispatchSuggestedLine[] {
       description,
       quantity: quantity.ok ? quantity.value : null,
       unit: unit.ok ? unit.value : null,
+      ...(typeof item.source_line_id === "string"
+        ? { source_line_id: item.source_line_id }
+        : {}),
     });
   }
   return out;
@@ -612,6 +672,7 @@ export function dispatchKeyedScopeLines(
 ): Array<DispatchSuggestedLine & { key: string }> {
   const seen = new Map<string, number>();
   return lines.map((line) => {
+    if (line.source_line_id) return { ...line, key: line.source_line_id };
     const base = dispatchScopeMaterialKey(line);
     const count = (seen.get(base) ?? 0) + 1;
     seen.set(base, count);

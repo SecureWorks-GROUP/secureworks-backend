@@ -5,6 +5,8 @@
 // keeps the migration's keys and checks, the two Dispatch list fields on
 // `pipeline&dispatch=1`, and who may call. Supplier and job names here are
 // made up.
+import { createHash } from "node:crypto";
+
 import {
   assert,
   assertEquals,
@@ -22,6 +24,7 @@ import {
   flattenDispatchOrderLine,
   patioQuoteMaterialItems,
   readPatioScoperRecord,
+  readScopeMaterialRecord,
 } from "./dispatch_materials.ts";
 import {
   DISPATCH_MATERIALS_ACTIONS,
@@ -135,6 +138,9 @@ function patioRevision(
     revision_number: revision,
     status,
     scope_canonical_text: JSON.stringify(scope),
+    scope_hash: createHash("sha256").update(JSON.stringify(scope)).digest(
+      "hex",
+    ),
   };
 }
 
@@ -1832,10 +1838,11 @@ Deno.test("suggest patio: no live scope, or a failed live read, says the change 
             ? {
               eq: () => ({
                 eq: () => ({
-                  maybeSingle: async () => ({
-                    data: null,
-                    error: { code: "XX000", message: "forced" },
-                  }),
+                  maybeSingle: () =>
+                    Promise.resolve({
+                      data: null,
+                      error: { code: "XX000", message: "forced" },
+                    }),
                 }),
               }),
             }
@@ -2070,8 +2077,20 @@ const PATIO_V2_SCOPE = {
   family: "flat",
   supported: true,
   lines: [
-    { id: "p-1", description: "SpanPlus 330 sheet", quantity: 22, unit: "ea", colour: "Monument" },
-    { id: "p-2", description: "Gutter fixing kit", quantity: null, unit: "kit", colour: null },
+    {
+      id: "p-1",
+      description: "SpanPlus 330 sheet",
+      quantity: 22,
+      unit: "ea",
+      colour: "Monument",
+    },
+    {
+      id: "p-2",
+      description: "Gutter fixing kit",
+      quantity: null,
+      unit: "kit",
+      colour: null,
+    },
     { id: "p-3", description: "  ", quantity: 4, unit: "ea" },
   ],
   expected: { materials: null, labour: 1200, sale: null },
@@ -2089,8 +2108,18 @@ Deno.test("SQ-29 record: lines with colour, an unknown quantity kept null, revis
   if (read.kind !== "lines") return;
   assertEquals(read.revision, { n: 3, frozen_id: "frz-abc" });
   assertEquals(read.items, [
-    { description: "SpanPlus 330 sheet, Monument", quantity: 22, unit: "ea" },
-    { description: "Gutter fixing kit", quantity: null, unit: "kit" },
+    {
+      description: "SpanPlus 330 sheet, Monument",
+      quantity: 22,
+      unit: "ea",
+      source_line_id: "p-1",
+    },
+    {
+      description: "Gutter fixing kit",
+      quantity: null,
+      unit: "kit",
+      source_line_id: "p-2",
+    },
   ]);
   assertEquals(readPatioScoperRecord({ ...PATIO_V2_SCOPE, supported: false }), {
     kind: "unsupported",
@@ -3074,4 +3103,87 @@ Deno.test("fake: a second line naming the same revision and material key is refu
   const copy = { ...db.tables.job_material_lines[0], id: line(9) };
   const { error } = await db.client.from("job_material_lines").insert(copy);
   assertEquals(error?.code, "23505");
+});
+
+Deno.test("sealed Scope manifest: missing, duplicated or padded source IDs refuse instead of generating keys", () => {
+  for (const ids of [["", "p-2"], ["p-1", "p-1"], [" p-1", "p-2"]]) {
+    const scope = {
+      ...PATIO_V2_SCOPE,
+      lines: PATIO_V2_SCOPE.lines.slice(0, 2).map((line, i) => ({
+        ...line,
+        id: ids[i],
+      })),
+    };
+    assertEquals(readPatioScoperRecord(scope).kind, "unreadable");
+  }
+});
+
+Deno.test("material suggestion pins accepted A after refreeze B and refuses missing A without fallback", async () => {
+  for (const missing of [false, true]) {
+    const initial = seed();
+    const a = patioRevision(JOB.patio, 1, "superseded", PATIO_V2_SCOPE);
+    const b = patioRevision(JOB.patio, 2, "frozen", {
+      ...PATIO_V2_SCOPE,
+      lines: [{
+        id: "b-1",
+        description: "Unaccepted alternative",
+        quantity: 10,
+        unit: "ea",
+      }],
+    });
+    initial.jobs.find((j) => j.id === JOB.patio)!.expected_costs = {
+      scope_revision_id: a.id,
+    };
+    initial.scope_revisions = missing ? [b] : [a, b];
+    const db = makeDb(initial);
+    await call(db, "dispatch_materials_add_supplier", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    });
+    if (missing) {
+      const error = await assertRejects(
+        () =>
+          call(db, "dispatch_materials_suggest", {
+            job_id: JOB.patio,
+            supplier_id: SUP.steel,
+          }),
+        DispatchMaterialsError,
+      );
+      assertEquals(error.body.code, "base_scope_missing");
+      assertEquals(db.tables.job_material_lines.length, 0);
+    } else {
+      const answer = await call(db, "dispatch_materials_suggest", {
+        job_id: JOB.patio,
+        supplier_id: SUP.steel,
+      });
+      assertEquals(
+        answer.lines.map((x: Row) => [x.source_version_id, x.source_line_id]),
+        [[a.id, "p-1"], [a.id, "p-2"]],
+      );
+    }
+  }
+});
+
+Deno.test("current fence producer: version 1.0 manifest retains exact IDs without patio supported or revision fields", () => {
+  const result = readScopeMaterialRecord({
+    tool: "fencing",
+    version: "1.0",
+    job: {},
+    lines: [{
+      id: "scope-post-a",
+      description: "Post",
+      quantity: 2,
+      unit: "ea",
+      category: "steel",
+    }],
+  });
+  assertEquals(result.kind, "lines");
+  if (result.kind !== "lines") return;
+  assertEquals(result.items, [{
+    source_line_id: "scope-post-a",
+    description: "Post",
+    quantity: 2,
+    unit: "ea",
+  }]);
+  assertEquals(result.revision, { n: null, frozen_id: null });
 });

@@ -94,6 +94,7 @@ const SCHEMA: Record<string, string[]> = {
     "metadata",
     "scope_json",
     "pricing_json",
+    "expected_costs",
     "updated_at",
   ],
   suppliers: [

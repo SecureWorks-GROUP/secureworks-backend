@@ -157,7 +157,11 @@ A contact with no email can be chosen; nothing is blocked.
 
 ### `dispatch_materials_suggest` `{ job_id, supplier_id }`
 
-Since 19 Oct 2026 the scope is the job's latest **frozen** `scope_revisions`
+The initial suggestion reads the exact `jobs.expected_costs.scope_revision_id`
+when present, including its superseded row after a later freeze. A missing named
+row refuses `base_scope_missing` and never substitutes a newer revision. Without
+that recorded binding, the older latest-frozen suggestion remains an unproven
+commercial source, not acceptance evidence. The source is a `scope_revisions`
 row (`scope_canonical_text`, the same scoper JSON), never the live
 `jobs.scope_json` (a draft revision can sit after the frozen one). No frozen
 revision is 409 `no_frozen_scope`; text that is not JSON is 409
@@ -337,3 +341,30 @@ before and after the deploy and record both figures here.
 - `OPS_AGENT_SERVER_KEY` is classified as the server key today
   (`_resolveOpsApiAuthIntent`), so the "agent read list" refusal is proved by the
   eight actions' absence from `AGENT_READ_ALLOWED_ACTIONS`.
+
+### D1 / INT-23 consumer identity correction (30 October, local candidate)
+
+Current Scope fence saves `tool: "fencing", version: "1.0", lines[]` without
+patio's `supported` field. Patio uses its 2.x sealed record. When a producer
+manifest is present, Dispatch preserves its exact IDs, validates uniqueness and
+nonblank/unpadded IDs within the existing 100-character column limit, and
+checks the frozen row's job, status and SHA-256 of stored scope bytes before
+writing. It does not replace producer IDs with description-derived keys.
+Legacy scopes without a manifest retain their material-key representation;
+that is not original producer-line identity proof.
+
+The material response exposes `source_version_id`, `source_line_id` and
+`source_kind` when recorded. The order writer carries those fields from stored
+material rows into both `purchase_orders.line_items` and the unsent
+`job_order_emails.order_lines` snapshot. Hand-entered provenance is not accepted
+by the material edit endpoint. Missing source is not reconstructed from words.
+
+The explicit variation action retains its existing revision-difference rule:
+positive deltas/new items enter as not reviewed; reductions/removals need a
+person. It never alters existing ordered lines or the accepted cost baseline.
+A variation suggestion is not commercial acceptance or approval to send.
+
+The proof uses synthetic local PostgreSQL/PostgREST with captured providers.
+It does not prove the final Scope UI, a staff journey, invoice allocations,
+per-line expected costs or job cost completeness. Original schema/release holds
+on the composed PRs remain; this candidate has not been deployed.
