@@ -1,0 +1,1 @@
+-- Existing story money-book queue and saved-story schema are registered prerequisites.

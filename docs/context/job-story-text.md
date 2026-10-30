@@ -324,3 +324,7 @@ time only. `job_quote_values` still selects stamped-sent documents. Consequently
 an emailed document absent from that value read shows with an unknown amount;
 an attachment-only revision remains attachment evidence, not a fabricated
 current quote. These limits keep the six-job default-switch acceptance open.
+
+### Automatic rewrite after a successful recovery (TP-16)
+
+Migration `20261030181200_context_story_requeue_recovery` keeps the existing failure-backoff period, but only a failed request at or after the current successful story's `written_at` suppresses a subsequent changed-source rewrite. An older failure has been superseded by that successful story. Equal timestamps remain suppressed because their ordering is not proven. Rewrite age, quiet period, monitored-job rules, queue limits, open-request deduplication, feature switch and service-only access are unchanged. No records, schedules or policy settings are changed by this migration. The down migration restores the exact prior body and comment; both directions reject unrecognized function bodies. This is not release or live acceptance evidence.

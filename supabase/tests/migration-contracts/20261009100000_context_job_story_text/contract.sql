@@ -26,6 +26,11 @@
 -- 15. A second apply changes nothing.
 -- Concurrent claims (SKIP LOCKED) are in concurrent.sh.
 \set ON_ERROR_STOP on
+SELECT md5(prosrc)='f4c040642a58cf9e5c281c76d94abecb' AS requeue_after_story_contract FROM pg_proc WHERE oid='context_job_story_enqueue_changed(integer)'::regprocedure \gset
+\if :requeue_after_story_contract
+\ir ../../../rollbacks/20261030181200_context_story_requeue_recovery_down.sql
+\endif
+
 
 -- The story money book (20261028190000) replaced seven of these bodies after this migration (the
 -- policy at 240 calls a day, the staff read, the request, the sweep and the writer's input): when a
@@ -922,4 +927,8 @@ ROLLBACK;
 \endif
 \if :story_bills_live
 \ir ../../../migrations/20261029170200_context_story_bill_outcomes.sql
+\endif
+
+\if :requeue_after_story_contract
+\ir ../../../migrations/20261030181200_context_story_requeue_recovery.sql
 \endif

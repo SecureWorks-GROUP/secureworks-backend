@@ -18,6 +18,11 @@
 --  7. A second apply changes nothing; the rollback restores the 20261009100000 bodies.
 -- (With the story bill outcomes, 20261029170200, live, it is rolled back first and applied again last.)
 \set ON_ERROR_STOP on
+SELECT md5(prosrc)='f4c040642a58cf9e5c281c76d94abecb' AS requeue_after_money_contract FROM pg_proc WHERE oid='context_job_story_enqueue_changed(integer)'::regprocedure \gset
+\if :requeue_after_money_contract
+\ir ../../../rollbacks/20261030181200_context_story_requeue_recovery_down.sql
+\endif
+
 
 -- The story bill outcomes (20261029170200) replaced four of this migration's bodies (the freshness
 -- hash, the staff read, the request and the writer's input): when a full stack has it, it is rolled
@@ -325,4 +330,8 @@ ROLLBACK;
 
 \if :story_bills_live
 \ir ../../../migrations/20261029170200_context_story_bill_outcomes.sql
+\endif
+
+\if :requeue_after_money_contract
+\ir ../../../migrations/20261030181200_context_story_requeue_recovery.sql
 \endif
