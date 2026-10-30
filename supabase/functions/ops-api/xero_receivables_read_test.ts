@@ -1131,3 +1131,192 @@ Deno.test("online invoice read refuses a missing, plain-http or unexpected link"
     XeroReceivablesReadError,
   );
 });
+
+Deno.test("supplier-credit list preserves raw source and selects only explicit payable credits", async () => {
+  const raw = {
+    CreditNoteID: ID,
+    Type: "ACCPAYCREDIT",
+    Status: "DRAFT",
+    Date: "/Date(1785542400000+0000)/",
+    UpdatedDateUTC: "/Date(1793318400000+0000)/",
+    CurrencyCode: "USD",
+    CurrencyRate: 0.65,
+    LineAmountTypes: "Exclusive",
+    SubTotal: 100,
+    TotalTax: 10,
+    Total: 110,
+    RemainingCredit: 55,
+    LineItems: [{ LineItemID: ID2, LineAmount: 100, TaxAmount: 10 }],
+    Allocations: [{
+      AllocationID: ID2,
+      Invoice: { InvoiceID: ID2 },
+      Amount: 55,
+      Date: "2026-10-30",
+    }],
+    Payments: [{ PaymentID: ID2, Amount: 5 }],
+    ProviderFutureField: true,
+  };
+  const f = fixture({ CreditNotes: [raw] });
+  const result = await listXeroSettlementRecords(noDatabase, {
+    record_type: "credit_note",
+    ledger_side: "payable",
+    page: 2,
+    page_size: 1,
+  }, f.deps);
+  assertStrictEquals(result.records[0], raw);
+  assertEquals(result.ledger_side, "payable");
+  assertEquals(result.pagination.next_page, 3);
+  assertEquals(result.pagination.traversal_complete, false);
+  assertEquals(f.calls, [{
+    path: "/CreditNotes",
+    tenant: TENANT,
+    params: {
+      where: 'Type=="ACCPAYCREDIT"',
+      page: "2",
+      pageSize: "1",
+      order: "CreditNoteID ASC",
+    },
+  }]);
+});
+
+Deno.test("explicit receivable and omitted side preserve existing query for every settlement kind", async () => {
+  for (const c of settlementCases) {
+    const f = fixture({
+      [c.collection]: [{ [c.idField]: ID, [c.typeField]: c.type }],
+    });
+    const original = await listXeroSettlementRecords(noDatabase, {
+      record_type: c.kind,
+    }, f.deps);
+    const explicit = await listXeroSettlementRecords(noDatabase, {
+      record_type: c.kind,
+      ledger_side: "receivable",
+    }, f.deps);
+    assertEquals(explicit, original);
+    assertEquals(f.calls[0], f.calls[1]);
+    assertEquals(original.ledger_side, "receivable");
+  }
+});
+
+Deno.test("supplier-credit pagination retains empty-page exhaustion and traversal-bound uncertainty", async () => {
+  const full = fixture({
+    CreditNotes: [{ CreditNoteID: ID, Type: "ACCPAYCREDIT" }],
+  });
+  const atLimit = await listXeroSettlementRecords(noDatabase, {
+    record_type: "credit_note",
+    ledger_side: "payable",
+    page: 1_000_000,
+    page_size: 1,
+  }, full.deps);
+  assertEquals(atLimit.pagination.traversal_limit_reached, true);
+  assertEquals(atLimit.pagination.traversal_complete, false);
+  const empty = fixture({ CreditNotes: [] });
+  const exhausted = await listXeroSettlementRecords(
+    noDatabase,
+    new URLSearchParams({
+      record_type: "credit_note",
+      ledger_side: "payable",
+      page: "3",
+      page_size: "1",
+    }),
+    empty.deps,
+  );
+  assertEquals(exhausted.ledger_side, "payable");
+  assertEquals(exhausted.pagination.next_page, null);
+  assertEquals(exhausted.pagination.end_of_results_observed, true);
+  // Observing one empty page does not prove earlier pages were all read.
+  assertEquals(exhausted.pagination.traversal_complete, false);
+  assertEquals(
+    exhausted.pagination.limitations.some((s: string) =>
+      s.includes("not a snapshot")
+    ),
+    true,
+  );
+});
+
+Deno.test("supplier-credit list refuses mixed or unknown sides instead of silently filtering source rows", async () => {
+  for (
+    const row of [
+      { CreditNoteID: ID2, Type: "ACCRECCREDIT" },
+      { CreditNoteID: ID2, Type: "ACCPAY" },
+      { CreditNoteID: ID2 },
+      { CreditNoteID: ID2, Type: "ACCPAYCREDIT", Invoice: { Type: "ACCREC" } },
+    ]
+  ) {
+    const f = fixture({
+      CreditNotes: [{ CreditNoteID: ID, Type: "ACCPAYCREDIT" }, row],
+    });
+    const error = await assertRejects(
+      () =>
+        listXeroSettlementRecords(noDatabase, {
+          record_type: "credit_note",
+          ledger_side: "payable",
+        }, f.deps),
+      XeroReceivablesReadError,
+      "contradictory record type",
+    );
+    assertEquals(error.status, 502);
+  }
+});
+
+Deno.test("supplier-credit list keeps duplicate, missing identity and page-size checks", async () => {
+  for (
+    const rows of [
+      [{ CreditNoteID: ID, Type: "ACCPAYCREDIT" }, {
+        CreditNoteID: ID.toUpperCase(),
+        Type: "ACCPAYCREDIT",
+      }],
+      [{ Type: "ACCPAYCREDIT" }],
+    ]
+  ) {
+    const f = fixture({ CreditNotes: rows });
+    await assertRejects(
+      () =>
+        listXeroSettlementRecords(noDatabase, {
+          record_type: "credit_note",
+          ledger_side: "payable",
+        }, f.deps),
+      XeroReceivablesReadError,
+      "missing or duplicate",
+    );
+  }
+  const f = fixture({
+    CreditNotes: [{ CreditNoteID: ID, Type: "ACCPAYCREDIT" }, {
+      CreditNoteID: ID2,
+      Type: "ACCPAYCREDIT",
+    }],
+  });
+  await assertRejects(
+    () =>
+      listXeroSettlementRecords(noDatabase, {
+        record_type: "credit_note",
+        ledger_side: "payable",
+        page_size: 1,
+      }, f.deps),
+    XeroReceivablesReadError,
+    "exceeded",
+  );
+});
+
+Deno.test("invalid supplier selectors and payable non-credit reads fail before token or provider access", async () => {
+  const params = [
+    { record_type: "credit_note", ledger_side: "all" },
+    { record_type: "credit_note", ledger_side: "ACCPAYCREDIT" },
+    { record_type: "credit_note", ledger_side: "" },
+    ...["payment", "prepayment", "overpayment"].map((record_type) => ({
+      record_type,
+      ledger_side: "payable",
+    })),
+    new URLSearchParams(
+      "record_type=credit_note&ledger_side=receivable&ledger_side=payable",
+    ),
+  ];
+  for (const query of params) {
+    const f = fixture({ CreditNotes: [] });
+    await assertRejects(
+      () => listXeroSettlementRecords(noDatabase, query, f.deps),
+      XeroReceivablesReadError,
+    );
+    assertEquals(f.tokenReads(), 0);
+    assertEquals(f.calls.length, 0);
+  }
+});
