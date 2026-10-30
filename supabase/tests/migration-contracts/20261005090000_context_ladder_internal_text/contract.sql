@@ -184,7 +184,7 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(publi
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_text_role(public.business_events)'::regprocedure)<>'e7327d108966e2bcb9d2eb48e3086a55'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_about_job(public.business_events)'::regprocedure)<>'aa53618f6c82998a821b8f7439c75e60'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_about_job(public.business_events)'::regprocedure) NOT IN ('aa53618f6c82998a821b8f7439c75e60','550176dbcdf545efa3c4703e160aec96')
   OR coalesce(obj_description('public.context_internal_text_role(public.business_events)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1d:%'
   OR coalesce(obj_description('public.context_internal_about_job(public.business_events)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1d:%'
  THEN RAISE EXCEPTION 'l1d: a helper is not this migration''s'; END IF;
@@ -196,7 +196,7 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'e11321e9d986be1e83f05e95f3efc36c'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'90c038b5f48677af4598e475e2583572'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_text_role(public.business_events)'::regprocedure)<>'e7327d108966e2bcb9d2eb48e3086a55'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_about_job(public.business_events)'::regprocedure)<>'aa53618f6c82998a821b8f7439c75e60'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_about_job(public.business_events)'::regprocedure) NOT IN ('aa53618f6c82998a821b8f7439c75e60','550176dbcdf545efa3c4703e160aec96')
  THEN RAISE EXCEPTION 'l1d: a body is not this migration''s'; END IF;
  -- Putting L1c's two rules back gives back L1c's bodies byte for byte.
  IF md5(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),

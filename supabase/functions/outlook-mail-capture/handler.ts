@@ -10,7 +10,7 @@
 // JWT whose role claim is exactly service_role) or the exact server key.
 //
 // Body: {"mode": "poll" | "sweep" | "history" | "deep", "source": "<source_key>",
-// "from": ISO, "to": ISO (history, deep), "slice": ISO (deep: the plan's slice
+// "from": ISO, "to": ISO (history, deep, or fixed-window sweep), "slice": ISO (deep: the plan's slice
 // id, the time the slice was first posted), "wait": true}. Default mode poll. The
 // cron's HTTP call gives up after 5 seconds, so by default the run continues
 // in the background (EdgeRuntime.waitUntil) and the reply is 202; {"wait": true}
@@ -353,8 +353,8 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
       listGroupPosts: (id, t, topic) => graph.listGroupPosts(g, id, t, topic),
       listGroupThreadPage: (id, c, next) =>
         graph.listGroupThreadPage(g, id, c, next),
-      listGroupPostPage: (id, t, topic, next) =>
-        graph.listGroupPostPage(g, id, t, topic, next),
+      listGroupPostPage: (id, t, topic, next, rosterOnly) =>
+        graph.listGroupPostPage(g, id, t, topic, next, rosterOnly),
     },
     storeAttachments: (args) => storeEmailAttachments(attachmentDeps, args),
     hash: async (text) => (await sha256Hex(text)).slice(0, 16),
@@ -399,6 +399,13 @@ function logResult(result: CaptureResult): void {
 
 const MODES: Mode[] = ["poll", "sweep", "history", "deep"];
 
+// Requests share an Edge worker's memory. Serialising sources inside one run
+// does not stop separate HTTP requests retaining bodies/attachments together.
+// Queue only the small request descriptions; create the client and read mail
+// when its turn starts. This is per isolate, not a distributed lease or a
+// completion receipt: a worker shutdown still needs the durable caller's retry.
+let captureTail: Promise<void> = Promise.resolve();
+
 export async function handleCapture(
   req: Request,
   deps: HandlerDeps,
@@ -437,10 +444,21 @@ export async function handleCapture(
     ...(typeof body.slice === "string" ? { slice: body.slice } : {}),
   };
 
+  const previous = captureTail;
+  const queuedAt = (deps.now ?? Date.now)();
+  let release!: () => void;
+  captureTail = new Promise<void>((resolve) => release = resolve);
+
   const execute = async (): Promise<
     CaptureResult | { outcome: "error"; code: string }
   > => {
+    await previous;
     try {
+      console.log(
+        `[outlook-mail-capture] mode=${mode} queue_wait_ms=${
+          Math.max(0, (deps.now ?? Date.now)() - queuedAt)
+        }`,
+      );
       const result = await run(liveCaptureDeps(deps), request);
       logResult(result);
       return result;
@@ -448,6 +466,8 @@ export async function handleCapture(
       const c = safeCode(error);
       console.error(`[outlook-mail-capture] run failed code=${c}`);
       return { outcome: "error", code: c };
+    } finally {
+      release();
     }
   };
 

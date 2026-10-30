@@ -13,6 +13,12 @@
 --   AI-PER  placed by a person.
 --   AI-RULE installer bill a rule placed on AI-J2 (installer_confirm).
 --
+-- Since 20261029093000 (TP-03, two keys) the AI places a bill on a job only
+-- when a hard clue agrees, so AI-INST, AI-MAT and AI-RULE name a sent
+-- purchase order of their job in the bill reference (AI-J1 and AI-J2 are not
+-- SW job numbers, so the job number cannot be the clue); the hold for the
+-- second check is that migration's own contract.
+--
 -- Expected: the batch reads the open, unheld bills biggest first; an installer
 -- bill the AI places counts as labour (JP-12 replaced, owner 28 Oct 2026);
 -- below the bar a bill is left for a person; a held, mirrored, person-placed
@@ -48,6 +54,14 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
    '[{"Description": "Caps", "AccountCode": "310", "LineAmount": 70, "TaxAmount": 7}]', '{"LineAmountTypes": "Exclusive"}', NULL),
   ('00000000-0000-0000-0000-000000000001', 'AI-RULE', 'AIB-10008', 'ACCPAY', 'AUTHORISED', 'AI Installer', 400, 440, '2026-08-23',
    '[{"Description": "Install", "AccountCode": "306", "LineAmount": 400, "TaxAmount": 40}]', '{"LineAmountTypes": "Exclusive"}', NULL);
+
+-- The hard clue each AI placement below needs since 20261029093000.
+INSERT INTO public.purchase_orders (id, po_number, job_id, supplier_name, subtotal, status) VALUES
+  ('a1000000-0000-4000-8000-0000000000b1', 'PO-7000001', 'a1000000-0000-4000-8000-000000000001', 'AI Steel', 2000, 'sent'),
+  ('a1000000-0000-4000-8000-0000000000b2', 'PO-7000002', 'a1000000-0000-4000-8000-000000000002', 'AI Installer', 400, 'sent'),
+  ('a1000000-0000-4000-8000-0000000000b3', 'PO-7000003', 'a1000000-0000-4000-8000-000000000001', 'AI Installer', 600, 'sent');
+UPDATE public.xero_invoices SET reference = CASE xero_invoice_id WHEN 'AI-RULE' THEN 'PO-7000002' WHEN 'AI-INST' THEN 'PO-7000003' ELSE 'PO-7000001' END
+ WHERE xero_invoice_id IN ('AI-INST', 'AI-MAT', 'AI-RULE');
 
 INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, contact_name, sub_total, total, invoice_date, status, suggestion_reason, suggested_job_id, suggested_job_number) VALUES
   ('AI-INST', 'AIB-10001', 'AI Installer', 600, 660, '2026-08-22', 'open', NULL, NULL, NULL),

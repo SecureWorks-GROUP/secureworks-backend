@@ -30,6 +30,7 @@ import {
   _setTestClientFactory,
 } from "../monitor-ses-makesafes/index.ts";
 import { _resetGraphTokenCache } from "../_shared/graph_client.ts";
+import { resolveRequestActor } from "../_shared/request_actor.ts";
 
 const SES = "ses@secureworkswa.com.au";
 const SWWA = "swwa@secureworkswa.com.au";
@@ -782,13 +783,20 @@ Deno.test("the poll answers before a slow Group read finishes: the read and the 
   const seen: string[] = [];
   const scanCalls = () =>
     seen.filter((url) => url.includes("action=scan_ses_makesafes")).length;
-  const fetchStub = (input: string | URL | Request) => {
+  const scanActors: ReturnType<typeof resolveRequestActor>[] = [];
+  const fetchStub = (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     seen.push(url);
     if (url.includes("login.microsoftonline.com")) {
       return Promise.resolve(json({ access_token: "tok", expires_in: 3600 }));
     }
     if (url.includes("action=scan_ses_makesafes")) {
+      scanActors.push(resolveRequestActor({
+        headers: new Headers(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        ),
+        trustActorHeader: true,
+      }));
       return Promise.resolve(json({}));
     }
     if (url.includes("/groups?$filter=")) {
@@ -816,7 +824,7 @@ Deno.test("the poll answers before a slow Group read finishes: the read and the 
   };
   _setTestClientFactory(() => sb);
   _resetGraphTokenCache();
-  let timer = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const answered = await Promise.race([
       _handler(
@@ -850,6 +858,11 @@ Deno.test("the poll answers before a slow Group read finishes: the read and the 
     releaseGroupRead(json({ value: [{ id: GROUP }] }));
     await Promise.all(registered);
     assertEquals(scanCalls(), 1);
+    assertEquals(scanActors, [{
+      actor: "monitor-ses-makesafes",
+      source: "header",
+      missing: false,
+    }]);
     assert(
       seen.findIndex((url) => url.includes(`/groups/${GROUP}/`)) <
         seen.findIndex((url) => url.includes("action=scan_ses_makesafes")),

@@ -26,6 +26,18 @@ with identical values. The composer adds:
 The last four blocks were added by F1b (`20260924152100_context_status_f1b.sql`,
 INTEGRATION X22), the foundation owner's second slice.
 
+Capture classification (`20261030192929`, CTX-T5/F1):
+`capture_sources.policy.ignored_capture_event_types` names `ai.canary_result`.
+These are AI evaluation results, excluded from both business-capture last-seen
+and rate calculations. The exclusion is by event type, never by source name:
+a mixed writer's recent test results cannot hide stopped business messages.
+Other event types, including unknown or null types, remain eligible. Existing
+capture-mode exclusions, limits, flags, handovers and alarms are unchanged.
+Evaluation health is separate; absence of a canary-only source here is neither
+a passing evaluation nor proof every declared business source is connected.
+This migration performs no event, schedule, flag or financial writes. Reverse
+with its matching guarded down migration; original bodies and ACLs are retained.
+
 Rules for the owning slices:
 
 - Replace only your own sub-function, with `CREATE OR REPLACE`, keeping

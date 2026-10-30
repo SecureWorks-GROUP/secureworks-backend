@@ -1,0 +1,1 @@
+DO $$ DECLARE v text:=pg_get_viewdef('public.v_job_cost_events'::regclass);BEGIN EXECUTE 'CREATE OR REPLACE VIEW public.v_job_cost_events AS '||replace(v, '''trade_employer_super''::text AS source', '''unexpected_super''::text AS source');END $$;

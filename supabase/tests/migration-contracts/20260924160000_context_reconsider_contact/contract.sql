@@ -445,7 +445,7 @@ DROP TABLE p1b_before;
 \else
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure)<>'5f9dbe883f0add7a6987f3ed265a08af'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_eligible(public.business_events,uuid)'::regprocedure)<>'375857877700389aa8f6f730095b8800'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_created_reconsider()'::regprocedure)<>'2e199e27d38730e95bd5f2b0b8a9b165'
  THEN RAISE EXCEPTION 'P1b: a later slice changed a P1b body'; END IF;

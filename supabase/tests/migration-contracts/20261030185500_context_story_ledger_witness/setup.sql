@@ -1,0 +1,1 @@
+-- Current story, ledger and staff edit prerequisites; synthetic fixtures only.

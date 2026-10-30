@@ -677,6 +677,38 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cos
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
 
+# reporting-api job_profitability (CFO-01 / R-22) reads its money from the same
+# engine. The table line pins the JP-12 body (installer_bill_unconfirmed in
+# margin_ok); each column line names the migration that first published it.
+reporting-api|supabase/migrations/20261020181800_job_cost_allocation_rows.sql|table|v_job_profit
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.job_id
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.org_id
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.job_number
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.work_type
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.quoted_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.quoted_source
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.expected_source
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.expected_cost_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.committed_open_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.actual_cost_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.actual_cost_events
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.xero_project_expenses_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.xero_project_count
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.invoiced_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.draft_revenue_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.collected_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.invoice_count
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.profit_ex
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.margin_pct
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.revenue_flag
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.cost_flag
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.completeness
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.margin_ok
+reporting-api|supabase/migrations/20261009130000_job_profit_engine.sql|column|v_job_profit.holding_job
+reporting-api|supabase/migrations/20261019120000_job_profit_commitments_truthful.sql|column|v_job_profit.ordered_not_billed_count
+reporting-api|supabase/migrations/20261019120000_job_profit_commitments_truthful.sql|column|v_job_profit.invoice_emailed_count
+reporting-api|supabase/migrations/20261019120000_job_profit_commitments_truthful.sql|column|v_job_profit.invoice_emailed_ex
+
 # The deterministic intake stamps each case with its adapter id; the Ambrose
 # adapter is refused on every case insert until this migration admits it. The
 # constraint name is unchanged, so the ledger version is what proves it landed.
@@ -998,3 +1030,37 @@ ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql
 ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_line_id
 ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|index|job_material_lines_source_line_once
 ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|constraint|job_material_lines_source_shape
+ops-api|supabase/migrations/20261029121500_xero_tieout_monthly.sql|function|xero_tieout_monthly
+# H7 bill cost outcomes (INT-12, INT-10): job_overview's bills part calls
+# context_job_bill_outcomes, which reads CFO's cfo_bill_cost_outcomes view (a
+# relation, so the table marker's to_regclass check finds it).
+ops-api|supabase/migrations/20261029170000_cfo_bill_cost_outcomes.sql|table|cfo_bill_cost_outcomes
+ops-api|supabase/migrations/20261029170100_context_job_bill_outcomes.sql|function|context_job_bill_outcomes
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_notes
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_note_allocations
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|function|xero_supplier_credit_note_copy
+
+# Dispatch v2 payment step (docs/dispatch-v2-board-contract.md, section 3c):
+# which approved suppliers are on account. The board, dispatch_arrival and the
+# materials panel select it, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261029120000_dispatch_v2_on_account_suppliers.sql|column|dispatch_approved_supplier_emails.on_account
+# Mark paid on a supplier box: the board, dispatch_arrival, the materials panel
+# and the two presses select these columns.
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_at
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by
+ops-api|supabase/migrations/20261029120100_dispatch_v2_box_paid.sql|column|job_material_suppliers.paid_by_email
+# Pay on pickup / delivery on a supplier box: the board, dispatch_arrival, the
+# materials panel and the dispatch_v2_set_pay_on press select these columns.
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_at
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by
+ops-api|supabase/migrations/20261029120200_dispatch_v2_box_pay_on.sql|column|job_material_suppliers.pay_on_set_by_email
+# A re-opened payment on a supplier box: the dispatch_v2_set_material_stage
+# press writes it; the board, dispatch_arrival and the materials panel read it.
+ops-api|supabase/migrations/20261029120300_dispatch_v2_box_payment_reopened.sql|column|job_material_suppliers.payment_reopened_at
+# ASAP or Pick a date on a supplier box: the board, dispatch_arrival, the
+# materials panel, dispatch_v2_make_email and the dispatch_v2_set_date_mode
+# press select these columns.
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode_set_at
+ops-api|supabase/migrations/20261030120000_dispatch_v2_box_date_mode.sql|column|job_material_suppliers.order_date_mode_set_by_email

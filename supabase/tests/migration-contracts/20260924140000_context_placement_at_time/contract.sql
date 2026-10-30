@@ -526,7 +526,7 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
   <>'32365101d23dde1695707a0bddff640b' THEN RAISE EXCEPTION 'P1a: ladder entry is neither P1a''s nor P4''s'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_jobs_at(text,timestamptz)'::regprocedure)<>'911811b617fa760f5ddf847fb1ab853d'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure)<>'2bc8e76f14fda242eb6e4d414e93fefa'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure) NOT IN ('2bc8e76f14fda242eb6e4d414e93fefa','88d0aa3f8bdbb2800d66954b5655f0dd')
  THEN RAISE EXCEPTION 'P1a: a later slice changed the two-argument candidate set'; END IF;
 END $$;
 \endif

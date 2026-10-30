@@ -21,6 +21,7 @@ import {
   ApiError,
   createVariationForCaller,
   type TradeAuthContext,
+  variationCostEstimate,
 } from "./index.ts";
 
 const ORG = "org-1";
@@ -496,4 +497,58 @@ Deno.test("a trade call with no body is still refused as missing fields", async 
   );
   assertEquals(err.status, 400);
   assertEquals(client.inserts.length, 0);
+});
+
+// TP-13: Job Profit reads job_variations.cost_estimate to tell an agreed
+// variation with no cost figure (variation_not_costed) from one costed at 0.
+Deno.test("cost estimate: 0 is stored as 0, not dropped to null", async () => {
+  const client = makeClient(baseTables([]));
+  await createVariationForCaller(
+    client,
+    { job_id: JOB, description: "Re-hang gate", amount: 120, cost_estimate: 0 },
+    "api_key",
+    null,
+  );
+  const [row] = variationRows(client);
+  assertEquals(row.cost_estimate, 0);
+  assertEquals(row.amount, 120);
+});
+
+Deno.test("cost estimate: a figure is kept, a missing or blank one is null", () => {
+  assertEquals(variationCostEstimate(0), 0);
+  assertEquals(variationCostEstimate("0"), 0);
+  assertEquals(variationCostEstimate("85.50"), 85.5);
+  assertEquals(variationCostEstimate(40), 40);
+  assertEquals(variationCostEstimate(undefined), null);
+  assertEquals(variationCostEstimate(null), null);
+  assertEquals(variationCostEstimate(""), null);
+  assertEquals(variationCostEstimate("  "), null);
+  assertEquals(variationCostEstimate("abc"), null);
+  assertEquals(variationCostEstimate(Number.NaN), null);
+  assertEquals(variationCostEstimate(true), null);
+});
+
+Deno.test("cost estimate: a trade's estimated_cost is the price, never copied into the cost", async () => {
+  const client = makeClient(baseTables([liveAssignment]));
+  await createVariationForCaller(
+    client,
+    { job_id: JOB, description: "Extra post", estimated_cost: 50 },
+    "jwt",
+    trade(),
+  );
+  const [row] = variationRows(client);
+  assertEquals(row.amount, 50);
+  assertEquals(row.cost_estimate, null);
+});
+
+Deno.test("cost estimate: a trade that sends cost_estimate 0 keeps it", async () => {
+  const client = makeClient(baseTables([liveAssignment]));
+  await createVariationForCaller(
+    client,
+    { job_id: JOB, description: "Extra post", estimated_cost: 50, cost_estimate: 0 },
+    "jwt",
+    trade(),
+  );
+  const [row] = variationRows(client);
+  assertEquals(row.cost_estimate, 0);
 });

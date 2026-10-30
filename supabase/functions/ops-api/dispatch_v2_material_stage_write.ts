@@ -17,8 +17,13 @@
 //     is still at this stage" after a newer send or line moved the box on.
 //   * It never moves the job's own stage or status, and never sends anything.
 //
+//   * Picking Awaiting payment re-opens the payment (contract 3c rule 5): it
+//     also stamps payment_reopened_at, so a paid stamp or Pay on tag made
+//     before it stops counting, whatever stage is picked after it.
+//
 // What this touches: one job_material_suppliers row (the three material stage
-// columns only) and one job_events row (the audit line). Never jobs,
+// columns, and payment_reopened_at on a pick of Awaiting payment) and one
+// job_events row (the audit line). Never jobs,
 // suppliers, purchase_orders, the order emails, the reply tables, Xero, GHL,
 // SMS or any email.
 //
@@ -273,12 +278,14 @@ export async function setDispatchV2MaterialStage(
   // people pressing at once cannot quietly overwrite each other. Pressing the
   // same stage again re-stamps it: that is how a person says "still at this
   // stage" over a newer send or line the box would otherwise show.
+  const patch: Record<string, unknown> = {
+    material_stage: want.stage,
+    material_stage_set_at: now,
+    material_stage_set_by_email: operator.email,
+  };
+  if (want.stage === "awaiting_payment") patch.payment_reopened_at = now;
   let update = client.from("job_material_suppliers")
-    .update({
-      material_stage: want.stage,
-      material_stage_set_at: now,
-      material_stage_set_by_email: operator.email,
-    })
+    .update(patch)
     .eq("id", box.id)
     .eq("org_id", ctx.orgId);
   update = box.material_stage_set_at

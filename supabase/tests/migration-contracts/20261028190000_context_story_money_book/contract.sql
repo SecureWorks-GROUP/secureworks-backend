@@ -1,3 +1,15 @@
+SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS restore_credit_20261028190000 \gset
+\if :restore_credit_20261028190000
+\ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
+\endif
+SELECT md5(prosrc) IN ('62392d8aab2f38362be4b2ddcfab1fbc','b2f762db966bf9f3417e759827705be2') AS has_story_oncost_refresh FROM pg_proc WHERE oid='context_job_story_money_sig(uuid)'::regprocedure \gset
+\if :has_story_oncost_refresh
+\ir ../../../rollbacks/20261030190230_context_story_oncost_refresh_down.sql
+\endif
+SELECT to_regprocedure('public.context_job_story_ledger_sig(uuid)') IS NOT NULL AS has_story_ledger_witness \gset
+\if :has_story_ledger_witness
+\ir ../../../rollbacks/20261030185500_context_story_ledger_witness_down.sql
+\endif
 -- Contract for 20261028190000_context_story_money_book: the job story's Money block.
 -- Every fixture write is rolled back; ids, names and numbers are made up.
 --  1. Shape: the new functions with this migration's comment, service role only; the seven
@@ -16,7 +28,26 @@
 --     alone for a day; an unchanged check moves checks.money_sig on (no endless re-queue); a crew
 --     line on no job naming the job's number moves the signature.
 --  7. A second apply changes nothing; the rollback restores the 20261009100000 bodies.
+-- (With the story bill outcomes, 20261029170200, live, it is rolled back first and applied again last.)
 \set ON_ERROR_STOP on
+SELECT md5(prosrc)='143a88acac3b0fd0e894f127eebed188' AS has_ledger_edit_refresh FROM pg_proc WHERE oid='public.context_job_story_enqueue_changed(integer)'::regprocedure \gset
+\if :has_ledger_edit_refresh
+\ir ../../../rollbacks/20261030184000_context_ledger_edit_story_refresh_down.sql
+\endif
+SELECT md5(prosrc)='f4c040642a58cf9e5c281c76d94abecb' AS requeue_after_money_contract FROM pg_proc WHERE oid='context_job_story_enqueue_changed(integer)'::regprocedure \gset
+\if :requeue_after_money_contract
+\ir ../../../rollbacks/20261030181200_context_story_requeue_recovery_down.sql
+\endif
+
+
+-- The story bill outcomes (20261029170200) replaced four of this migration's bodies (the freshness
+-- hash, the staff read, the request and the writer's input): when a full stack has it, it is rolled
+-- back for this contract, which proves this migration's own result, and applied again at the end
+-- (its own contract proves it).
+SELECT to_regprocedure('public.context_job_story_bill_outcomes(uuid)') IS NOT NULL AS story_bills_live \gset
+\if :story_bills_live
+\ir ../../../rollbacks/20261029170200_context_story_bill_outcomes_down.sql
+\endif
 
 CREATE FUNCTION pg_temp.mb_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF p_ok IS NOT TRUE THEN RAISE EXCEPTION 'story money book contract: %', p_msg; END IF; END $$;
@@ -312,3 +343,27 @@ END $$;
 \ir ../../../rollbacks/20261028190000_context_story_money_book_down.sql
 \ir ../../../migrations/20261028190000_context_story_money_book.sql
 ROLLBACK;
+
+\if :story_bills_live
+\ir ../../../migrations/20261029170200_context_story_bill_outcomes.sql
+\endif
+
+\if :requeue_after_money_contract
+\ir ../../../migrations/20261030181200_context_story_requeue_recovery.sql
+\endif
+
+\if :has_ledger_edit_refresh
+\ir ../../../migrations/20261030184000_context_ledger_edit_story_refresh.sql
+\endif
+
+\if :has_story_ledger_witness
+\ir ../../../migrations/20261030185500_context_story_ledger_witness.sql
+\endif
+
+\if :has_story_oncost_refresh
+\ir ../../../migrations/20261030190230_context_story_oncost_refresh.sql
+\endif
+
+\if :restore_credit_20261028190000
+\ir ../../../migrations/20261031010000_context_story_credit_refresh.sql
+\endif

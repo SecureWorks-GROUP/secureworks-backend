@@ -971,6 +971,14 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch v2: the supplier box's material stage
                       # (dispatch_v2_material_stage_write.ts).
                       ("20261028170000", "dispatch_v2_material_stages"),
+                      # Dispatch v2 payment step: on account or pay first
+                      # (dispatch_v2_payment.ts).
+                      ("20261029120000", "dispatch_v2_on_account_suppliers"),
+                      ("20261029120100", "dispatch_v2_box_paid"),
+                      ("20261029120200", "dispatch_v2_box_pay_on"),
+                      ("20261029120300", "dispatch_v2_box_payment_reopened"),
+                      # ASAP or Pick a date on a supplier box.
+                      ("20261030120000", "dispatch_v2_box_date_mode"),
                       # Deposit advance: the move switch and the per-job
                       # move and flag state (job_deposit_advance.ts).
                       ("20261026160000", "job_deposit_advance"),
@@ -989,7 +997,14 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # JP-24 slice 1: the quick-quote quote_revisions writer
                       # inserts scope_revision_id (quote_scope_revision_link.ts).
                       ("20261029123500", "quote_revisions_scope_revision_link"),
-                      ("20261019200000", "dispatch_material_line_provenance")]:
+                      ("20261019200000", "dispatch_material_line_provenance"),
+                      # TP-01 Xero tie-out: xero_tieout calls
+                      # xero_tieout_monthly (xero_tieout.ts).
+                      ("20261029121500", "xero_tieout_monthly"),
+                      # H7 bill cost outcomes: job_overview's bills part
+                      # (job_bill_outcomes_read.ts) and CFO's view it reads.
+                      ("20261029170000", "cfo_bill_cost_outcomes"),
+                      ("20261029170100", "context_job_bill_outcomes")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

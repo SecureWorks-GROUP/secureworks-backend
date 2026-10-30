@@ -1231,6 +1231,15 @@ P1a copy, and must widen the successor md5 lists and the `\if` re-apply
 guards in the L1, P1a, P1b, P4, L1b, L1c, L1d, L1e, L1f and L1g contracts, and
 roll L1g, L1f, L1e, L1d, L1c, L1b then P4 back first in L1's break-contract
 (each down refuses while a later body is live), exactly as P4 did for P1a.
+Unplaced stage 1 (`20261014170000`, comment `L1g plus unplaced stage 1`) and
+TP-04 (`20261029190000`) are the live successors of L1g; both are registered
+cases, and every earlier ladder chain rolls them back first through
+`20261029190000_context_ladder_holding_flag/roll_back_successors.sql`, so a
+newer slice adds its own down to the top of that file. A holding job is
+`lower(coalesce(metadata->>'do_not_schedule','')) = 'true'`, Job Profit's rule,
+in every ladder candidate rule since TP-04; never write `NOT IN ('true','1')`
+into a new one (`context_ladder_p1a` and the non-placement context readers
+still carry that old spelling).
 
 The writer check reads `metadata.written_as`, which the insert trigger now
 stamps BEFORE the ladder as well as after: a writer-supplied value never
@@ -4565,6 +4574,24 @@ Tests: ops_api_operator_auth_test.ts.
 `operator_access_required`; service-role and `OPS_AGENT_SERVER_KEY` still pass.
 Do not gate any other reporting-api action. Tests:
 `reporting_staff_gate_test.ts`.
+
+## reporting-api `job_profitability` Reads v_job_profit; Unknown Is Null With A Reason
+
+`reporting-api?action=job_profitability` (Jarvis `sw_job_profitability` /
+`sw_analyse_profitability`, ops-ai and agent-runner `get_job_profitability`,
+the secureworks-ux Job P&L tab) takes every money figure from `v_job_profit`
+in `reporting-api/job_profitability.ts`, the engine the Job Profit screen
+reads. Do not bring back Xero Projects totals or contact-matched bills as a
+cost, `bills = 0` for a job with nothing placed, or an average over every row.
+A job's `margin` / `margin_pct` are published only when `margin_ok`; otherwise
+they are null with `margin_status: 'unknown'` and a worded `margin_reason`.
+`summary.avg_margin_pct` is revenue-weighted over margin-known customer jobs
+only, a holding job is in no summary figure, `total_bills` is placed costs
+only and `costs_complete` is false when any job is unknown. The action stays
+ungated, but the CFO-01 detail fields (`FULL_DETAIL_ROW_KEYS` /
+`FULL_DETAIL_SUMMARY_KEYS`) reach only staff and server callers
+(`reportingApiCallerSeesStaffDetail`); the public key and a trade JWT get the
+basic shape. Tests: `job_profitability_test.ts`, `reporting_staff_gate_test.ts`.
 
 ## Reattend Pack Photos Follow Curated `photo_source_scope`
 

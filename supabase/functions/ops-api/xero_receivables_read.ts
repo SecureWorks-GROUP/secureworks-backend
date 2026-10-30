@@ -646,8 +646,32 @@ export async function readXeroSettlementRecord(
     `/${config.collection}/${id}`,
   );
   const record = oneRecord(result, config.collection, config.idField, id);
-  requireReceivableSettlement(record, kind);
-  return { ok: true, record_type: kind, record, provenance };
+  // An exact credit-note identity may be a supplier credit. Keep the existing
+  // receivables list population unchanged; this door returns source evidence,
+  // never applies an allocation or turns a credit into cash/job cost.
+  const supplierCredit = kind === "credit_note" &&
+    record.Type === "ACCPAYCREDIT";
+  if (supplierCredit) {
+    if (
+      rawRecord(record.Invoice) && record.Invoice.Type !== undefined &&
+      record.Invoice.Type !== "ACCPAY"
+    ) {
+      throw new XeroReceivablesReadError(
+        "Xero supplier credit contains a contradictory invoice type",
+        502,
+        "XERO_RESPONSE_INVALID",
+      );
+    }
+  } else {
+    requireReceivableSettlement(record, kind);
+  }
+  return {
+    ok: true,
+    record_type: kind,
+    ledger_side: supplierCredit ? "payable" : "receivable",
+    record,
+    provenance,
+  };
 }
 
 export async function listXeroSettlementRecords(
@@ -655,9 +679,20 @@ export async function listXeroSettlementRecords(
   params: Params,
   deps: ReadDeps,
 ) {
-  validateKeys(params, ["record_type", "page", "page_size"]);
+  validateKeys(params, ["record_type", "ledger_side", "page", "page_size"]);
   const kind = settlementKind(params);
   const config = SETTLEMENTS[kind];
+  const ledgerSide = read(params, "ledger_side") ?? "receivable";
+  if (ledgerSide !== "receivable" && ledgerSide !== "payable") {
+    throw new XeroReceivablesReadError(
+      "ledger_side must be receivable or payable",
+    );
+  }
+  if (ledgerSide === "payable" && kind !== "credit_note") {
+    throw new XeroReceivablesReadError(
+      "payable listing is supported only for credit_note",
+    );
+  }
   const page = positiveInteger(read(params, "page"), "page", 1, 1_000_000);
   const pageSize = positiveInteger(
     read(params, "page_size"),
@@ -665,7 +700,10 @@ export async function listXeroSettlementRecords(
     100,
     100,
   );
-  const where = config.types.map((type) => `${config.typeField}=="${type}"`)
+  // Default consumers keep their original receivables population. Supplier
+  // credits require an explicit side; never mix both in one accounting page.
+  const types = ledgerSide === "payable" ? ["ACCPAYCREDIT"] : config.types;
+  const where = types.map((type) => `${config.typeField}=="${type}"`)
     .join(" OR ");
   const { result, provenance } = await providerRead(
     client,
@@ -688,7 +726,21 @@ export async function listXeroSettlementRecords(
   }
   const seen = new Set<string>();
   for (const row of rows) {
-    requireReceivableSettlement(row, kind);
+    if (ledgerSide === "payable") {
+      if (
+        row.Type !== "ACCPAYCREDIT" ||
+        (rawRecord(row.Invoice) && row.Invoice.Type !== undefined &&
+          row.Invoice.Type !== "ACCPAY")
+      ) {
+        throw new XeroReceivablesReadError(
+          "Xero supplier-credit page contains a contradictory record type",
+          502,
+          "XERO_RESPONSE_INVALID",
+        );
+      }
+    } else {
+      requireReceivableSettlement(row, kind);
+    }
     const id = typeof row[config.idField] === "string"
       ? String(row[config.idField]).toLowerCase()
       : "";
@@ -704,6 +756,7 @@ export async function listXeroSettlementRecords(
   return {
     ok: true,
     record_type: kind,
+    ledger_side: ledgerSide,
     records: rows,
     pagination: pagination(page, pageSize, rows.length),
     provenance,

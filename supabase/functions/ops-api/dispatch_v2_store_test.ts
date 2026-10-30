@@ -90,6 +90,9 @@ const L = (n: number) => uuid("e1", n);
 const SHAUN = { userId: uuid("d1", 1), email: "shaun@ops.test", orgId: ORG };
 
 const SCHEMA: Record<string, string[]> = {
+  // Make email writes one audit line here when it changes a box's date
+  // choice (piece C); nothing else in the store writes it.
+  job_events: ["id", "job_id", "user_id", "event_type", "detail_json", "created_at"],
   jobs: [
     "id",
     "org_id",
@@ -161,6 +164,21 @@ const SCHEMA: Record<string, string[]> = {
     "material_stage",
     "material_stage_set_at",
     "material_stage_set_by_email",
+    // 20261029120100_dispatch_v2_box_paid.sql
+    "paid_at",
+    "paid_by",
+    "paid_by_email",
+    // 20261029120200_dispatch_v2_box_pay_on.sql
+    "pay_on",
+    "pay_on_set_at",
+    "pay_on_set_by",
+    "pay_on_set_by_email",
+    // 20261029120300_dispatch_v2_box_payment_reopened.sql
+    "payment_reopened_at",
+    // 20261030120000_dispatch_v2_box_date_mode.sql
+    "order_date_mode",
+    "order_date_mode_set_at",
+    "order_date_mode_set_by_email",
   ],
   dispatch_approved_supplier_emails: [
     "id",
@@ -174,6 +192,8 @@ const SCHEMA: Record<string, string[]> = {
     "approved_on",
     "created_at",
     "updated_at",
+    // 20261029120000_dispatch_v2_on_account_suppliers.sql
+    "on_account",
   ],
   dispatch_approved_supplier_email_links: [
     "supplier_id",
@@ -181,6 +201,31 @@ const SCHEMA: Record<string, string[]> = {
     "org_id",
     "created_at",
     "created_by_email",
+  ],
+  // The install, for skips_ready (dispatch_board.ts loadDispatchInstall).
+  job_assignments: [
+    "id",
+    "org_id",
+    "job_id",
+    "scheduled_date",
+    "scheduled_end",
+    "assignment_type",
+    "status",
+    "is_ghost",
+    "role",
+    "confirmation_status",
+  ],
+  // The reply step (dispatch_board.ts loadDispatchV2MatchedReplies).
+  feature_flags: ["flag_name", "enabled"],
+  dispatch_v2_supplier_emails: [
+    "id",
+    "org_id",
+    "job_id",
+    "state",
+    "order_id",
+    "received_at",
+    "matched_at",
+    "rung",
   ],
   dispatch_v2_scope_fills: [
     "job_id",
@@ -259,6 +304,8 @@ const V2_WRITABLE = new Set([
   "dispatch_supplier_order_emails",
   "dispatch_v2_scope_fills",
   "storage",
+  // Only the date choice audit line (checked in assertOnlyV2Writes).
+  "job_events",
 ]);
 
 function job(id: string, over: Row = {}): Row {
@@ -295,6 +342,7 @@ function seed(): Record<string, Row[]> {
     to_emails: [],
     cc_emails: [],
     active: true,
+    on_account: false,
     approved_by: "Shaun",
     approved_on: "2026-10-23",
     ...over,
@@ -324,6 +372,8 @@ function seed(): Record<string, Row[]> {
         used_for: "fencing+patio",
         to_emails: ["tradewa@stratcowa.com.au"],
         cc_emails: ["tony.bacich@stratcowa.com.au"],
+        // We have an account with Stratco (the payment step, section 3c).
+        on_account: true,
       }),
       approved(APPROVED.metroll, "Metroll", {
         used_for: "patio",
@@ -347,6 +397,10 @@ function seed(): Record<string, Row[]> {
     dispatch_material_photos: [],
     dispatch_supplier_order_emails: [],
     dispatch_v2_scope_fills: [],
+    feature_flags: [],
+    dispatch_v2_supplier_emails: [],
+    job_assignments: [],
+    job_events: [],
   };
 }
 
@@ -583,6 +637,8 @@ function makeDb(initial = seed()) {
           row.created_at ??= new Date().toISOString();
           if (table === "job_material_suppliers") {
             row.is_main_supplier ??= false;
+            // The column default (20261030120000): new boxes start on ASAP.
+            row.order_date_mode ??= "asap";
           }
           if (table === "dispatch_supplier_order_emails") {
             row.cc_emails ??= [];
@@ -913,6 +969,9 @@ function assertOnlyV2Writes(db: ReturnType<typeof makeDb>) {
   for (const w of db.writes()) {
     assert(V2_WRITABLE.has(w.table), `wrote ${w.kind} ${w.table}`);
   }
+  for (const e of db.tables.job_events) {
+    assertEquals(e.event_type, "dispatch_v2_date_mode_set", "no other job_events row");
+  }
   assertEquals(
     db.tables.suppliers.map((s) => s.email),
     seed().suppliers.map((s) => s.email),
@@ -951,6 +1010,129 @@ Deno.test("read: boxes, draft list, main supplier, team CC and the no-approved-e
   assertEquals(stratco.lines.map((l: any) => l.id), [L(1), L(2), L(4)]);
   assertEquals(stratco.lines[0].profile, "Neetascreen");
   assertEquals(read.suppliers[2].send_blocked.code, "no_approved_email");
+  // The payment step's terms (contract section 3c): Stratco is on account,
+  // Metroll pays first, and a supplier with no approved entry pays first too.
+  assertEquals(stratco.approved_email.on_account, true);
+  assertEquals(read.suppliers[0].approved_email.on_account, false);
+  assertEquals(
+    read.suppliers.map((s: any) => s.payment.terms),
+    ["pay_first", "on_account", "pay_first"],
+  );
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: the payment gate holds a pay-first box's confirmed date, as on the board", async () => {
+  const db = await fencingJob();
+  for (const box of db.tables.job_material_suppliers) {
+    Object.assign(box, {
+      delivery_date: "2026-11-05",
+      delivery_date_set_at: "2027-01-01T00:00:00.000Z",
+      delivery_date_confirmed_at: "2027-01-01T00:00:00.000Z",
+    });
+  }
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const [metroll, stratco] = read.suppliers;
+  // Metroll pays first: the date lifts it only to Awaiting payment.
+  assertEquals(metroll.material_stage.key, "awaiting_payment");
+  assertEquals(metroll.material_stage.held_by_payment, true);
+  assertEquals(metroll.payment.holds_stage, true);
+  // Stratco is on account: Order confirmed as before.
+  assertEquals(stratco.material_stage.key, "order_confirmed");
+  assertEquals(stratco.material_stage.held_by_payment, false);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: a matched supplier reply moves the box on, as on the board", async () => {
+  const db = await fencingJob();
+  const sentAt = "2026-10-28T01:00:00.000Z";
+  const emailId = "00000000-0000-0000-0000-0000000e0001";
+  const columns = SCHEMA.dispatch_supplier_order_emails;
+  const email: Row = Object.fromEntries(columns.map((c) => [c, null]));
+  Object.assign(email, {
+    id: emailId,
+    org_id: ORG,
+    job_id: JOB.fence,
+    supplier_id: SUP.metroll,
+    status: "sent",
+    body_text: "Hi, please deliver the following.",
+    sent_at: sentAt,
+    created_at: sentAt,
+    updated_at: sentAt,
+    to_emails: [],
+    cc_emails: [],
+    order_lines: [],
+    photo_ids: [],
+    sent_to_emails: [],
+    sent_cc_emails: [],
+  });
+  db.tables.dispatch_supplier_order_emails.push(email);
+  db.tables.dispatch_v2_supplier_emails.push({
+    id: "00000000-0000-0000-0000-0000000b0001",
+    org_id: ORG,
+    job_id: JOB.fence,
+    state: "matched",
+    order_id: emailId,
+    received_at: "2026-10-28T04:00:00.000Z",
+    matched_at: "2026-10-28T04:01:00.000Z",
+    rung: "thread",
+  });
+  // Switch off: no reply is read, Metroll stays at Sent.
+  const off = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(off.replies_read, "ok");
+  assertEquals(off.suppliers[0].material_stage.key, "sent");
+  // Switch on: Metroll pays first, so the reply moves it to Awaiting payment.
+  db.tables.feature_flags.push({ flag_name: "dispatch_v2_replies_v1", enabled: true });
+  const on = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const metroll = on.suppliers[0];
+  assertEquals(metroll.material_stage.key, "awaiting_payment");
+  assertEquals(metroll.material_stage.source, "reply");
+  assertEquals(metroll.material_stage.reply.email_id, "00000000-0000-0000-0000-0000000b0001");
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: a pickup on the install's first day skips Materials ready, as on the board", async () => {
+  const db = await fencingJob();
+  const sentAt = "2026-10-28T01:00:00.000Z";
+  const columns = SCHEMA.dispatch_supplier_order_emails;
+  const email: Row = Object.fromEntries(columns.map((c) => [c, null]));
+  Object.assign(email, {
+    id: "00000000-0000-0000-0000-0000000e0002",
+    org_id: ORG,
+    job_id: JOB.fence,
+    supplier_id: SUP.metroll,
+    status: "sent",
+    body_text: "Hi, please have the following ready for pickup.",
+    delivery_date: "2026-11-05",
+    sent_at: sentAt,
+    created_at: sentAt,
+    updated_at: sentAt,
+    to_emails: [],
+    cc_emails: [],
+    order_lines: [],
+    photo_ids: [],
+    sent_to_emails: [],
+    sent_cc_emails: [],
+  });
+  db.tables.dispatch_supplier_order_emails.push(email);
+  // No install booked: no skip.
+  const before = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(before.suppliers[0].material_stage.skips_ready, false);
+  db.tables.job_assignments.push({
+    id: "00000000-0000-0000-0000-0000000a0001",
+    org_id: ORG,
+    job_id: JOB.fence,
+    scheduled_date: "2026-11-05",
+    scheduled_end: null,
+    assignment_type: "install",
+    status: "scheduled",
+    is_ghost: false,
+    role: "lead",
+    confirmation_status: "confirmed",
+  });
+  const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(after.suppliers[0].fulfilment, "pickup");
+  assertEquals(after.suppliers[0].material_stage.skips_ready, true);
+  assertEquals(after.suppliers[1].material_stage.skips_ready, false);
   assertOnlyV2Writes(db);
 });
 
@@ -1471,6 +1653,214 @@ Deno.test("make email: pickup says so, has no Address line and a rebuild keeps i
   ));
   assert(back.email.body_text.includes("Address:"));
   assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: a new box starts on ASAP, says Date: ASAP and saves nothing new", async () => {
+  const db = await fencingJob();
+  const box = () =>
+    db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  assertEquals(box().order_date_mode, "asap");
+  // The helper sends a date unless told not to. A new screen sends
+  // date_mode: null (the box's own choice) and no date.
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    delivery_date: null,
+    date_mode: null,
+  });
+  assert(made.email.body_text.includes("\nDate: ASAP\n"));
+  assertEquals(made.date_mode, "asap");
+  assertEquals(made.date_mode_saved, null);
+  assertEquals(made.missing.includes("date"), false);
+  assertEquals(made.email.delivery_date, null);
+  // Already ASAP: the box is not written, no audit line.
+  assertEquals(box().order_date_mode_set_at ?? null, null);
+  assertEquals(db.tables.job_events.length, 0);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const stratco = read.suppliers.find((s: any) => s.supplier_id === SUP.stratco);
+  assertEquals(stratco.date_mode, {
+    mode: "asap",
+    sent_mode: null,
+    set_at: null,
+    set_by_email: null,
+    derived: false,
+  });
+  // An explicit "asap" on a box already on ASAP saves nothing either.
+  const again = await makeEmail(db, JOB.fence, SUP.metroll, {
+    delivery_date: null,
+    date_mode: "asap",
+  });
+  assertEquals([again.date_mode, again.date_mode_saved], ["asap", null]);
+  assertEquals(db.tables.job_events.length, 0);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: an older screen with no choice and no date keeps the blank Date line", async () => {
+  const db = await fencingJob();
+  const box = () =>
+    db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  // The box is on ASAP, but date_mode is left out: exactly as before piece C.
+  assertEquals(box().order_date_mode, "asap");
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, { delivery_date: null });
+  assertEquals(made.date_mode, "date");
+  assertEquals(made.date_mode_saved, null);
+  assert(!made.email.body_text.includes("Date: ASAP"));
+  assert(made.missing.includes("date"), "the send is refused without a date");
+  // The box's choice is neither used nor saved.
+  assertEquals([box().order_date_mode, box().order_date_mode_set_at ?? null], ["asap", null]);
+  assertEquals(db.tables.job_events.length, 0);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: a changed choice is saved on the box after the email lands, with an audit line", async () => {
+  const db = await fencingJob();
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    date_mode: "date",
+    delivery_date: "2026-11-04",
+  });
+  assertEquals(made.date_mode_saved, true);
+  // The order of writes: the email row first, then the box's choice, then
+  // the audit line. The box write is scoped to the org.
+  const writes = db.writes();
+  const emailAt = writes.findIndex((w) =>
+    w.table === "dispatch_supplier_order_emails" && w.kind === "insert"
+  );
+  const boxAt = writes.findLastIndex((w) =>
+    w.table === "job_material_suppliers" && w.kind === "update"
+  );
+  const auditAt = writes.findIndex((w) => w.table === "job_events");
+  assert(emailAt >= 0 && emailAt < boxAt && boxAt < auditAt, JSON.stringify(writes));
+  assert(
+    writes[boxAt].filters.some(([op, c, v]) => op === "eq" && c === "org_id" && v === ORG),
+    "the box write carries the org",
+  );
+  assertEquals(db.tables.job_events.length, 1);
+  const event = db.tables.job_events[0];
+  assertEquals(event.job_id, JOB.fence);
+  assertEquals(event.event_type, "dispatch_v2_date_mode_set");
+  assertEquals(
+    [event.detail_json.from, event.detail_json.to, event.detail_json.via],
+    ["asap", "date", "make_email"],
+  );
+  assertEquals(event.detail_json.supplier_id, SUP.stratco);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: when the email cannot be made, the box keeps its choice", async () => {
+  const db = await fencingJob();
+  db.failures.add("insert:dispatch_supplier_order_emails");
+  await assertRejects(() =>
+    makeEmail(db, JOB.fence, SUP.stratco, { date_mode: "date", delivery_date: "2026-11-04" })
+  );
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  assertEquals([box.order_date_mode, box.order_date_mode_set_at ?? null], ["asap", null]);
+  assertEquals(db.tables.job_events.length, 0);
+});
+
+Deno.test("read: the toggle shows the next email's mode; sent_mode shows what was sent", async () => {
+  const db = await fencingJob();
+  const find = async () =>
+    (await get(db, "dispatch_v2_materials", { job_id: JOB.fence })).suppliers
+      .find((s: any) => s.supplier_id === SUP.stratco).date_mode;
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  const sendIt = () => {
+    const row = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+      e.supplier_id === SUP.stratco && e.status !== "sent"
+    )!;
+    row.status = "sent";
+    row.sent_at = "2026-10-29T01:00:00.000Z";
+    // As a real send does: the box's lines now belong to the sent order.
+    for (const line of db.tables.job_material_lines) {
+      if (line.supplier_id === SUP.stratco) line.dispatch_order_email_id = row.id;
+    }
+  };
+  // Sent ASAP, then Pick a date chosen after the send.
+  await makeEmail(db, JOB.fence, SUP.stratco, { delivery_date: null, date_mode: null });
+  sendIt();
+  let mode = await find();
+  assertEquals([mode.mode, mode.sent_mode], ["asap", "asap"]);
+  box.order_date_mode = "date";
+  box.order_date_mode_set_at = "2026-10-29T02:00:00.000Z";
+  mode = await find();
+  assertEquals([mode.mode, mode.sent_mode, mode.derived], ["date", "asap", false]);
+  // A choice from before the send, nothing made since: the sent mode carries on.
+  box.order_date_mode_set_at = "2026-10-28T02:00:00.000Z";
+  mode = await find();
+  assertEquals([mode.mode, mode.sent_mode], ["asap", "asap"]);
+});
+
+Deno.test("read: sent Pick a date, then ASAP chosen after the send", async () => {
+  const db = await fencingJob();
+  const find = async () =>
+    (await get(db, "dispatch_v2_materials", { job_id: JOB.fence })).suppliers
+      .find((s: any) => s.supplier_id === SUP.stratco).date_mode;
+  await makeEmail(db, JOB.fence, SUP.stratco, { date_mode: "date", delivery_date: "2026-11-04" });
+  const row = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+    e.supplier_id === SUP.stratco
+  )!;
+  row.status = "sent";
+  row.sent_at = "2026-10-29T01:00:00.000Z";
+  for (const line of db.tables.job_material_lines) {
+    if (line.supplier_id === SUP.stratco) line.dispatch_order_email_id = row.id;
+  }
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  box.order_date_mode_set_at = "2026-10-28T02:00:00.000Z"; // set before the send
+  let mode = await find();
+  assertEquals([mode.mode, mode.sent_mode], ["date", "date"]);
+  box.order_date_mode = "asap";
+  box.order_date_mode_set_at = "2026-10-29T02:00:00.000Z";
+  mode = await find();
+  assertEquals([mode.mode, mode.sent_mode], ["asap", "date"]);
+});
+
+Deno.test("make email: Pick a date with a date writes it and saves the choice on the box", async () => {
+  const db = await fencingJob();
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    date_mode: "date",
+    delivery_date: "2026-11-04",
+  });
+  assert(!made.email.body_text.includes("Date: ASAP"));
+  assertEquals(made.date_mode, "date");
+  assertEquals(made.date_mode_saved, true);
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  assertEquals(box.order_date_mode, "date");
+  assert(box.order_date_mode_set_at);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: an older screen that sends only a date gets Pick a date", async () => {
+  const db = await fencingJob();
+  const made = await makeEmail(db, JOB.fence, SUP.stratco, {
+    delivery_date: "2026-11-04",
+  });
+  assertEquals(made.date_mode, "date");
+  assertEquals(made.email.delivery_date, "2026-11-04");
+});
+
+Deno.test("make email: ASAP with a date, or a bad choice, is refused before anything is made", async () => {
+  const db = await fencingJob();
+  await refused(
+    makeEmail(db, JOB.fence, SUP.stratco, { date_mode: "asap", delivery_date: "2026-11-04" }),
+    400,
+    "invalid_request",
+  );
+  await refused(
+    makeEmail(db, JOB.fence, SUP.stratco, { date_mode: "soon", delivery_date: null }),
+    400,
+    "invalid_request",
+  );
+  assertEquals(db.tables.dispatch_supplier_order_emails.length, 0);
+});
+
+Deno.test("read: a box made before ASAP existed reads as Pick a date when it has a date", async () => {
+  const db = await fencingJob();
+  const box = db.tables.job_material_suppliers.find((b) => b.supplier_id === SUP.stratco)!;
+  box.order_date_mode = null;
+  const before = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const find = (read: any) => read.suppliers.find((s: any) => s.supplier_id === SUP.stratco);
+  assertEquals([find(before).date_mode.mode, find(before).date_mode.derived], ["asap", true]);
+  box.delivery_date = "2026-11-04";
+  box.delivery_date_set_at = "2026-10-28T01:00:00.000Z";
+  const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals([find(after).date_mode.mode, find(after).date_mode.derived], ["date", true]);
 });
 
 Deno.test("read: each box says delivery or pickup from its open email, else its newest sent one", async () => {

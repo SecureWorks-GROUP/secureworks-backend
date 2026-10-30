@@ -1,4 +1,5 @@
-// Narrow posted-bill correction door. No approval, payment, tax or account edits.
+// Narrow posted-invoice correction door for supplier bills (ACCPAY) and customer
+// invoices (ACCREC). No approval, payment, tax or account edits.
 // Xero has no transactional compare-and-swap: fresh reads detect, not prevent,
 // external concurrent changes. Keep this separate from the draft-only writer.
 import {
@@ -75,8 +76,8 @@ export async function billTrackingSnapshotHash(
 }
 function validateInvoice(inv: Row, id: string) {
   requireValue(
-    inv?.InvoiceID === id && inv.Type === "ACCPAY",
-    "Exact ACCPAY invoice required",
+    inv?.InvoiceID === id && ["ACCPAY", "ACCREC"].includes(inv.Type),
+    "Exact ACCPAY or ACCREC invoice required",
   );
   requireValue(
     ["AUTHORISED", "PAID"].includes(inv.Status),
@@ -199,7 +200,7 @@ function writePayload(planned: Row): Row {
   ];
   return {
     InvoiceID: planned.InvoiceID,
-    Type: "ACCPAY",
+    Type: planned.Type,
     LineAmountTypes: planned.LineAmountTypes,
     LineItems: planned.LineItems.map((line: Row) =>
       Object.fromEntries(

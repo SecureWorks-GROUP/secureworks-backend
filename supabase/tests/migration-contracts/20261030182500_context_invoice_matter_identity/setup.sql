@@ -1,0 +1,1 @@
+-- Uses existing pure story assembler; no provider or customer fixture required.

@@ -30,6 +30,62 @@ function recorder(respond: (url: string) => Response) {
 const ok = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200 });
 
+Deno.test("sweep roster reads only recipient evidence; incomplete or oversized responses fail visibly", async () => {
+  const next =
+    "https://graph.microsoft.com/v1.0/groups/G/threads/T/posts?skiptoken=fixture";
+  const { deps, calls } = recorder(() =>
+    ok({
+      value: [{
+        id: "P",
+        sender: { emailAddress: { address: "client@example.net" } },
+        receivedDateTime: "2026-10-02T05:00:00Z",
+        body: { content: "must not be retained" },
+      }],
+      "@odata.nextLink": next,
+    })
+  );
+  const page = await graph.listGroupPostPage(
+    deps,
+    "G",
+    "T",
+    "Topic",
+    null,
+    true,
+  );
+  assertEquals(page.items, [{
+    graphId: "P",
+    from: "client@example.net",
+    receivedAt: "2026-10-02T05:00:00Z",
+    folderKind: "group",
+  }]);
+  assertEquals(page.next, next);
+  const request = new URL(calls[0].url);
+  assertEquals(calls[0].method, "GET");
+  assertEquals(
+    request.searchParams.get("$select"),
+    "id,from,sender,receivedDateTime",
+  );
+  assertEquals(request.searchParams.has("$expand"), false);
+  await graph.listGroupPostPage(deps, "G", "T", "Topic", page.next, true);
+  assertEquals(calls[1].url, next);
+  const malformed = recorder(() => ok({ "@odata.nextLink": next }));
+  await assertRejects(
+    () => graph.listGroupPostPage(malformed.deps, "G", "T", null, null, true),
+    graph.GraphReadError,
+    "graph_bad_json",
+  );
+  const oversized = recorder(() =>
+    new Response("{}", {
+      headers: { "Content-Length": String(4 * 1024 * 1024 + 1) },
+    })
+  );
+  await assertRejects(
+    () => graph.listGroupPostPage(oversized.deps, "G", "T", null, null, true),
+    graph.GraphReadError,
+    "graph_roster_too_large",
+  );
+});
+
 Deno.test("every read is a GET to Graph asking for immutable ids and text bodies", async () => {
   const { deps, calls } = recorder((url) => {
     if (url.includes("/mailFolders/")) return ok({ id: "F" });

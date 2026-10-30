@@ -1,5 +1,9 @@
 # The saved job story and the job overview read
 
+## Source coverage qualifier (CTX-T20, 30 October 2026 candidate)
+
+Agent `job_story` and story-dossier responses add `source_coverage` (`context-source-coverage-v1`), sharing the existing staff Overview standing gaps from `context_source_gaps.ts`. These gaps are partial declarations, not an all-account capture/freshness measurement. The internal `readJobStory` result and the exact card passed to saved-story comparison remain unchanged; this presentation metadata must not invalidate or alter a stored story. No new source fetch, database mutation, reader activation or access is introduced. Zero unread placed evidence is not complete capture.
+
 Migration `20261009100000_context_job_story_text.sql` (rollback in
 `supabase/rollbacks/`, contract case under
 `supabase/tests/migration-contracts/20261009100000_context_job_story_text/`)
@@ -107,6 +111,38 @@ lead the rule refuses can never hold the head of the order; leaves a job alone
 for 24 hours (`failed_backoff_hours`) after a request for it closed `failed`;
 and rewrites a story written without the book only while fewer than 10
 requests are open.
+
+## Where each bill counts: story-bill-outcomes-v1 (`20261029170200`)
+
+`context_job_story_bill_outcomes(job)` is the card's `bill_outcomes` block: for
+each supplier bill placed on the job, where Finance's engine counts its cost,
+read through `context_job_bill_outcomes` (the H7 read) only, never re-derived.
+Per bill it carries `where_counted`, `reason` (CFO's code for this job;
+`held_reason` when held), `bill_state`, `mirror_bill`, `held_reason`,
+`other_jobs` (`job_number`, `counts`) and `outcome`: the where_counted value, or
+`unknown: <reason>` / `held: <reason>`. When where a bill counts is unknown the
+reason says why: the placement's own code when it is unknown here, else
+`bill_state_unknown`, `not_placed_here` or `where_counted_unknown`. It applies
+the ops-api reader's rules: another shape is `invalid_shape`, another contract
+version `contract_mismatch`, any number or money-named key `amount_present`, a
+failed read `read_failed`; each is a block with `status: refused`,
+`outcome: unknown: <code>` and no bills, never "no bills". It carries no
+amount. Bills are in invoice number then bill id order, C collation.
+
+The writer input, the staff read and the request attach it beside `book`, only
+when the job has a placed bill; a job with none has no key and hashes exactly
+as before. `context_job_story_card_hash` (story-digest-v1) is unchanged. For a
+card with the block, `context_job_story_full_hash` is
+story-digest-v1+story-book-v1+story-bills-v1 and folds in the block's `digest`
+(the bills less invoice number, supplier, Xero status and outcome words, so a
+payment never moves it). So the first apply reads every saved story on a job
+with a placed bill stale once. The sweep is unchanged: a stale read queues
+nothing, and the story is rewritten at its next wake (a bill placed or changed
+moves the money signature) or on a Rewrite press. No model call is made while
+`context_job_story_text_v1` is off. The staff read compares a card only when
+the job has a story: with none its status is `none` and `card_hash` null, and
+neither the card's bill block nor its hash is worked out, so a job page runs
+the bill read once (in the overview), not twice.
 
 ## The queue
 
@@ -249,6 +285,18 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
   job and wait on a person, contact or not, at most 200 (`more` when cut), and
   how many of them the daily list leaves out (no contact, or never asked), so
   the card can link to Matching, Find by job. Null when the read failed, never 0.
+- `bills`: `context_job_bill_outcomes` (`20261029170100`): the supplier bills
+  placed on this job (its Xero link or an actual allocation row) and where
+  Finance's engine counts each one's cost (`where_counted` here, elsewhere,
+  here_and_elsewhere, no_job, trade_app (a trade-app mirror bill: reason
+  `mirror_bill_person_placed` on a job a person placed it on,
+  `mirror_bill_not_placed_here` on its Xero-linked job), held or unknown; `here` and
+  `other_jobs` with `counts` and `reason`; CFO's `bill_state`, `over_counted`
+  when more is counted than the bill), from CFO's `cfo_bill_cost_outcomes`. No amount: an
+  answer with a number or a money key, or on a contract version other than
+  `cfo-bill-cost-outcome-v1`, is refused whole (`amount_present`,
+  `contract_mismatch`). Null when the read failed, never an empty list;
+  `not_deployed` until the migration is applied.
 - `not_seen`: `[{key, text}]`, the sources Context cannot see for any job
   (`material_orders`, `crew_tasks_and_crm_notes`), on every answer until the
   change that starts capturing a source removes its line (`OVERVIEW_NOT_SEEN`).
@@ -276,3 +324,33 @@ time only. `job_quote_values` still selects stamped-sent documents. Consequently
 an emailed document absent from that value read shows with an unknown amount;
 an attachment-only revision remains attachment evidence, not a fabricated
 current quote. These limits keep the six-job default-switch acceptance open.
+
+### Automatic rewrite after a successful recovery (TP-16)
+
+Migration `20261030181200_context_story_requeue_recovery` keeps the existing failure-backoff period, but only a failed request at or after the current successful story's `written_at` suppresses a subsequent changed-source rewrite. An older failure has been superseded by that successful story. Equal timestamps remain suppressed because their ordering is not proven. Rewrite age, quiet period, monitored-job rules, queue limits, open-request deduplication, feature switch and service-only access are unchanged. No records, schedules or policy settings are changed by this migration. The down migration restores the exact prior body and comment; both directions reject unrecognized function bodies. This is not release or live acceptance evidence.
+
+
+### Invoice balances and separate unresolved matters (TP-15/TP-16 candidate)
+
+Migration `20261030182500_context_invoice_matter_identity` preserves an open ledger item's own key and loop when the matching money record closes on payment but the item closes on a reply, record, document, person or an unknown condition. Sharing an invoice does not make those obligations equivalent. Only an explicitly payment-closing item keeps the existing invoice-loop grouping. This applies to issued/part-paid/overdue/draft invoice records; uninvoiced-balance (R8), non-invoice/non-money grouping and candidate promotion are unchanged, preserving the original complaint-first and not-yet-due rules. This repairs the synthetic partially-paid correction where the recipient issue and confirmation request otherwise appeared only inside the invoice explanation and were truncated by downstream consumers. No stored note, money amount, closure status or permission changes. Both directions check exact assembler body identities and rollback restores the earlier grouping. Local contract and source-to-story proof do not authorize release or establish financial completeness.
+
+
+### Corrections inside the current reading (TP-16 candidate)
+
+Migration `20261030184000_context_ledger_edit_story_refresh` makes the existing automatic sweep notice ledger items created or updated after the current story was checked, within the current live generation and the same job. Actual staff add, close, reopen and dispute operations previously made the served story stale without making a rewrite due. Generation, invoice and money signals remain; an old generation's edits do not queue the current story. Existing time limits, failed-request backoff, monitoring, cap and duplicate protection remain. An unchanged source rendering uses the existing no-model finish to acknowledge the claim; this is not permission to change costs, sources or staff records. Both migration directions guard exact function bodies. Production source-to-card timing and concurrent-correction acceptance remain separate from the local fixture proof.
+
+
+### Corrections committed while a story is being written (TP-15/TP-16 candidate)
+
+The timestamp signal above is insufficient when a staff transaction begins before the writer claims a job but commits after its input read: PostgreSQL transaction timestamps can precede the story check despite newer committed contents. Migration `20261030185500_context_story_ledger_witness` adds a separate service-only content witness over the current generation's ledger items. Stable key ordering and UTC dates make it independent of row order and session timezone; creation/update touch times are excluded. The existing financial reader record signature is unchanged, avoiding feedback from generated notes into financial rereads.
+
+The claim captures the witness. Save and unchanged-finish store that claimed value, never the current save-time value or a caller-supplied value. A later content change therefore remains due even with an older timestamp. Missing/invalid legacy witnesses backfill under the existing open-request allowance; a no-change claim can fill the witness without a model call. Existing rewrite floor, failure backoff, cap, monitoring, switches and request deduplication remain. The served-card hash still determines whether story words are fresh; the witness is queue bookkeeping, not proof of complete source capture or financial truth.
+
+The migration checks all four predecessor function bodies before changing any, creates the service-only helper and replaces the functions in one atomic block. Repeat application recognizes only the full resulting set. Rollback checks the full set, restores predecessors, then drops the helper without CASCADE. Tests include the actual staff edit and save/unchanged paths, older timestamps, pending-request and save retries, no-model backfill, malformed checks, forged witnesses, timezone stability, feature-off and failure delay. The two-session worker/model/readback proof is in the owning Context project's `verify/evidence/20261030-story-concurrent-correction/`. All proof is synthetic local development, not an independent review, signed-in staff trial or live release.
+
+
+### Native employer-super inputs refresh both consumers (TP-13/TP-16 candidate)
+
+Migration `20261030190230_context_story_oncost_refresh` extends the existing crew-invoice contribution to `context_job_story_money_sig` with `subtotal_ex`, `super_amount` and `net_pay`. These are the native header inputs used by the existing Group WO employer-super producer; the migration does not calculate pay, classify labour or change that producer. Previously restoring missing on-cost metadata changed the money book while leaving the story queue and `context_ledger_record_signature` unchanged. Direct job lines and the existing job-number/description fallback see their invoice's corrected fields; explicitly other-job lines remain excluded. Touch timestamps alone do not invalidate.
+
+Only this service-only signature body changes, with exact predecessor/result guards and guarded rollback. The existing queue/reader limits, rollout switches and success witnesses remain. On first rollout, jobs with crew headers may need one bounded reread/rewrite because their recorded signature predates these fields; an unchanged rendered story uses the existing no-model finish. The original source cost/credit/period/settlement acceptance still governs. Captured Bookkeeping r1 replay proves one missing-to-known company-super case, not all source shapes or a live release. The exact evidence is in the Context project's `verify/evidence/20261030-oncost-freshness/`.

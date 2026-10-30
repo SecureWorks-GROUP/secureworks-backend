@@ -261,6 +261,36 @@ export function dispatchV2FulfilmentParam(
   return undefined;
 }
 
+// ── ASAP or Pick a date ─────────────────────────────────────────────────────
+
+// Every supplier box has a date choice (contract section 3c, rule 10). ASAP:
+// the email's Date line says "Date: ASAP" and the send is allowed. Pick a
+// date: the Date line carries the day, and an empty one stops the send.
+export type DispatchV2DateMode = "asap" | "date";
+
+export const DISPATCH_V2_ASAP_DATE_TEXT = "ASAP";
+
+/** A date mode from a request body: "asap", "date", or null when not given.
+ * Anything else is undefined (the caller refuses it). */
+export function dispatchV2DateModeParam(
+  value: unknown,
+): DispatchV2DateMode | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (value === "asap" || value === "date") return value;
+  return undefined;
+}
+
+/** ASAP or Pick a date, read from an order email's Date line, exactly as
+ * pickup is read from its opening line: "Date: ASAP" (any case) is asap,
+ * anything else (a day, an empty line, no Date line) is date. A hand edit of
+ * the line changes what Dispatch thinks. */
+export function dispatchV2DateModeOf(bodyText: unknown): DispatchV2DateMode {
+  const match = String(bodyText ?? "").match(/^Date:[ \t]*(.*?)[ \t\r]*$/im);
+  return match && match[1].toUpperCase() === DISPATCH_V2_ASAP_DATE_TEXT
+    ? "asap"
+    : "date";
+}
+
 // ── The body ────────────────────────────────────────────────────────────────
 
 export type DispatchV2BuiltLine = {
@@ -288,9 +318,13 @@ export function dispatchV2BuildEmail(input: {
   deliveryDate: string | null;
   // Default delivery. A pickup has no Address line.
   fulfilment?: DispatchV2Fulfilment | null;
+  // Default "date". ASAP writes "Date: ASAP" and ignores deliveryDate.
+  dateMode?: DispatchV2DateMode | null;
 }): DispatchV2Built {
   const pickup = input.fulfilment === "pickup";
-  const dateText = dispatchV2DeliveryDateText(input.deliveryDate) ?? "";
+  const dateText = input.dateMode === "asap"
+    ? DISPATCH_V2_ASAP_DATE_TEXT
+    : dispatchV2DeliveryDateText(input.deliveryDate) ?? "";
   const address = pickup ? "" : dispatchV2AddressText(input.job);
   const contact = dispatchV2ContactText(input.job);
   const built: DispatchV2BuiltLine[] = (input.lines || []).map((line) => ({

@@ -256,6 +256,36 @@ SELECT pg_temp.hl_cases();
 ROLLBACK;
 
 -- F. Structure.
+-- A registered successor (unplaced stage 1 20261014170000, then TP-04
+-- 20261029190000, which changes only the holding predicate) replaces the
+-- rules ladder; while one is live only the untouched functions, the grants
+-- and the flag are checked here, and the re-apply is skipped (L1g's guard
+-- refuses to re-apply over a successor's body).
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1g plus unplaced stage 1%' AS l1g_successor_live \gset
+\if :l1g_successor_live
+DO $$
+DECLARE r text;
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'32365101d23dde1695707a0bddff640b'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb')
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
+ THEN RAISE EXCEPTION 'l1g: the rules-off ladder, the entry, the trigger, the timeline, the preview or P1b changed'; END IF;
+ IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1e:%'
+ THEN RAISE EXCEPTION 'l1g: the rules-off ladder must stay L1e'; END IF;
+ FOREACH r IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
+  IF has_function_privilege(r,'public.resolve_context_attribution(public.business_events,boolean,boolean)','EXECUTE')
+  THEN RAISE EXCEPTION 'l1g: % can call the private rules ladder',r; END IF;
+ END LOOP;
+ IF NOT has_function_privilege('service_role','public.resolve_context_attribution(public.business_events)','EXECUTE')
+  OR NOT has_function_privilege('service_role','public.context_attribution_preview(uuid,boolean)','EXECUTE')
+ THEN RAISE EXCEPTION 'l1g: the service role lost the ladder entry or the preview'; END IF;
+ IF (SELECT count(*) FROM public.feature_flags WHERE flag_name='context_unlinked_rules_v1' AND NOT enabled)<>1
+ THEN RAISE EXCEPTION 'l1g: the rules flag must stay off'; END IF;
+END $$;
+\else
 DO $$
 DECLARE r text;
 BEGIN
@@ -308,9 +338,9 @@ $b$))<>'0870431e8ec3ab2f2e123146298c9727'
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'32365101d23dde1695707a0bddff640b'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure)<>'f98da204718a4d5ac6395761a963ced4'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure)<>'5f9dbe883f0add7a6987f3ed265a08af'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
  THEN RAISE EXCEPTION 'l1g: the rules-off ladder, the entry, the trigger, the timeline, the preview or P1b changed'; END IF;
  IF coalesce(obj_description('public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1g:%'
   OR coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1e:%'
@@ -337,3 +367,4 @@ BEGIN
  THEN RAISE EXCEPTION 'l1g: re-apply changed the body or comment'; END IF;
 END $$;
 DROP TABLE l1g_before;
+\endif

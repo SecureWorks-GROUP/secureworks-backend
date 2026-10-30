@@ -8,10 +8,10 @@ import {
 } from "./xero_bill_tracking_corrections.ts";
 const id = (n: number) =>
   `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
-function fixture(status = "PAID") {
+function fixture(status = "PAID", type = "ACCPAY") {
   let bill: any = {
     InvoiceID: id(1),
-    Type: "ACCPAY",
+    Type: type,
     Status: status,
     LineAmountTypes: "Inclusive",
     Total: 110,
@@ -178,6 +178,26 @@ Deno.test("explicit confirmation, tenant and trusted authorization mandatory", a
     if (field === "authorized") f.deps.authorized = false;
     else body[field] = field === "confirm" ? false : id(50);
     await assertRejects(() => correctSupplierBillTracking(null, body, f.deps));
+    assertEquals(f.writes, 0);
+  }
+});
+Deno.test("paid customer invoice keeps its type, lines and payments while tracking changes", async () => {
+  const f = fixture("PAID", "ACCREC");
+  const body = await applyInput(f);
+  const result = await correctSupplierBillTracking(null, body, f.deps);
+  assertEquals(result.ok, true);
+  assertEquals(f.writes, 1);
+  assertEquals(f.captured.Invoices[0].Type, "ACCREC");
+  assertEquals(f.captured.Invoices[0].LineItems.length, 2);
+  assertEquals(f.bill.Payments[0].Amount, 110);
+  assertEquals(f.bill.LineItems[0].Tracking[0].Option, "PATIOS");
+});
+Deno.test("credit notes and other invoice types stay outside the door", async () => {
+  for (const type of ["ACCRECCREDIT", "ACCPAYCREDIT", "SPEND"]) {
+    const f = fixture("PAID", type);
+    const result = await correctSupplierBillTracking(null, f.body, f.deps);
+    assertEquals(result.ok, false);
+    assertEquals(result.results[0].code, "TRACKING_CORRECTION_INVALID");
     assertEquals(f.writes, 0);
   }
 });

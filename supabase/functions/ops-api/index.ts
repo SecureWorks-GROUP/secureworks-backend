@@ -361,6 +361,7 @@ import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 // Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
 import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_write.ts'
+import { runDispatchV2PaymentAction } from './dispatch_v2_payment_write.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -779,6 +780,8 @@ import {
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import {
   assertAllInGroupInvoiceStandalone,
+  claimGroupReleaseForInvoice,
+  releasedGroupSiblingInvoiceIds,
   assertGroupJobDraftUsesShare,
   assertGroupWorkOrderInvoiceFence,
   assertLegacyInvoiceNotOnGroupJob,
@@ -787,6 +790,9 @@ import {
   createGroupWorkOrder,
   deleteGroupWorkOrderHours,
   freezeGroupWorkOrder,
+  officeApproveGroupHours,
+  readyUnreleasedGroupInvoiceIds,
+  agentCreateGroupWorkOrder,
   groupBody,
   groupFeatureOn,
   GroupWorkOrderError,
@@ -1412,6 +1418,8 @@ import {
   undoMaterialsAiPlacement,
   updateMaterialsAiSettings,
 } from './materials_ai.ts'
+// TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
+import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -1947,7 +1955,7 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, recurring_deduction_label, recurring_deduction_amount')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, recurring_deduction_label, recurring_deduction_amount')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
@@ -2158,9 +2166,10 @@ function tradeInvoiceMoney(
   grossEarned: unknown,
   gstOn: unknown,
   earningsDate: unknown,
+  superBasis: unknown = null,
 ): TradeInvoiceMoney {
   try {
-    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate })
+    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis })
   } catch (error) {
     return tradeInvoiceMoneyApiError(error)
   }
@@ -2189,6 +2198,9 @@ function tradeInvoiceMoneyFields(money: TradeInvoiceMoney) {
     super_amount: money.super_amount,
     gross_earned: money.gross_earned,
     net_pay: money.net_pay,
+    // Only an employer-super group share carries the column, so ordinary
+    // invoices insert exactly as before.
+    ...(money.super_basis ? { super_basis: money.super_basis } : {}),
   }
 }
 
@@ -2380,19 +2392,63 @@ async function markTradeInvoiceRetryable(
   }
 }
 
-async function pushTradeInvoiceToXeroAction(client: any, body: any) {
+function reviewActorLabel(authUser: { id?: string | null } | null | undefined): string {
+  return authUser?.id ? `user:${authUser.id}` : 'ops-api'
+}
+
+// After a group release, every approved bill of that crew goes to Xero now.
+async function pushReleasedGroupSiblings(client: any, invoiceId: string, actor: string) {
+  const siblings = await releasedGroupSiblingInvoiceIds(client, invoiceId).catch((error) => groupWorkOrderApiError(error))
+  if (!siblings || !siblings.length) return null
+  const results: Record<string, unknown>[] = []
+  for (const id of siblings) {
+    try {
+      results.push({ invoice_id: id, xero_push: await pushTradeInvoiceToXeroAction(client, { invoice_id: id }, actor) })
+    } catch (error) {
+      await markTradeInvoiceRetryable(client, id, 'The crew was released together, but this bill\'s Xero result is unconfirmed. Check Xero for an existing bill before retrying.')
+        .catch((markErr) => console.error('[ops-api] group sibling retry mark failed:', (markErr as Error).message))
+      results.push({ invoice_id: id, xero_push: 'unconfirmed', xero_push_error: (error as Error)?.message || 'Xero push failed' })
+    }
+  }
+  return { crew_bills: results }
+}
+
+// The submission that completes a full-employer-super crew releases it and
+// sends every bill together. The trade's invoice is already saved, so a hold
+// or a Xero failure is reported, never thrown.
+async function releaseGroupCrewBills(client: any, invoiceId: string, actor: string) {
+  let own: unknown
+  try {
+    own = await pushTradeInvoiceToXeroAction(client, { invoice_id: invoiceId }, actor)
+  } catch (error) {
+    const holdBody = (error as ApiError)?.body as { code?: string; hold?: string[] } | undefined
+    if (holdBody?.code === 'group_release_held') return { released: false, hold: holdBody.hold || [] }
+    if (holdBody?.code === 'group_release_unreadable') return { released: false, hold: [] }
+    // Only a recorded release makes this a Xero problem; otherwise nothing moved.
+    if (!(await releasedGroupSiblingInvoiceIds(client, invoiceId).catch(() => null))) {
+      return { released: false, xero_push_error: (error as Error)?.message || 'Release not recorded' }
+    }
+    await markTradeInvoiceRetryable(client, invoiceId, 'The crew was released together, but this bill\'s Xero result is unconfirmed. Check Xero for an existing bill before retrying.')
+      .catch((markErr) => console.error('[ops-api] group release retry mark failed:', (markErr as Error).message))
+    own = 'unconfirmed'
+  }
+  // Once released, every crew bill goes, whatever happened to this one.
+  const crew = await pushReleasedGroupSiblings(client, invoiceId, actor).catch(() => null)
+  return { released: true, xero_push: own, ...(crew || {}) }
+}
+
+async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops-api:push_trade_invoice_to_xero') {
   const { invoice_id } = body
   if (!invoice_id) throw new ApiError('invoice_id required', 400)
 
   // Get the invoice + lines + user
-  const { data: inv } = await client.from('trade_invoices')
+  const readInvoice = () => client.from('trade_invoices')
     .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
     .eq('id', invoice_id)
     .maybeSingle()
+  let { data: inv } = await readInvoice()
   if (!inv) throw new ApiError('Invoice not found', 404)
-  if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
-    throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
-  }
+  const canEnterNow = canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)
 
   const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
     .select('*')
@@ -2403,9 +2459,40 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any) {
       code: 'office_review_unreadable',
     })
   }
+  // Only a submitted share may complete its crew's release; anything else
+  // that cannot be pushed is refused before the release is touched.
+  const hasGroupLines = (lines || []).some((line: any) => line.group_share_id)
+  if (!canEnterNow && !(hasGroupLines && inv.status === 'pending_acknowledgment' && !inv.xero_bill_id)) {
+    throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
+  }
+  // A group share is paid with its whole crew: the release is recorded under
+  // the job lock before any Xero call, or the bill is held. On a full
+  // employer-super group the release itself approves the crew's shares, so
+  // the lines are read again after it.
+  const groupRelease = await claimGroupReleaseForInvoice(client, lines || [], actor)
+    .catch((error) => groupWorkOrderApiError(error))
+  if (groupRelease.held) {
+    throw new ApiError(groupRelease.message, 409, { error: groupRelease.message, code: 'group_release_held', hold: groupRelease.hold })
+  }
+  let reviewLines = lines || []
+  if (hasGroupLines) {
+    const { data: reread, error: rereadErr } = await client.from('trade_invoice_lines').select('*').eq('trade_invoice_id', invoice_id)
+    if (rereadErr) {
+      throw new ApiError('The office review on this invoice could not be read.', 503, {
+        error: 'The office review on this invoice could not be read.',
+        code: 'office_review_unreadable',
+      })
+    }
+    reviewLines = reread || []
+    inv = (await readInvoice()).data
+    if (!inv) throw new ApiError('Invoice not found', 404)
+  }
+  if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
+    throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
+  }
   // A line still awaiting, queried or rejected holds the whole bill.
   // A null review status is a line from before the switch and may sync.
-  const retryHold = xeroSyncRefusal(lines || [])
+  const retryHold = xeroSyncRefusal(reviewLines)
   if (retryHold) {
     throw new ApiError(retryHold.error, 409, { error: retryHold.error, code: retryHold.code })
   }
@@ -2417,7 +2504,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any) {
   const tradeEmail = inv.user?.email || ''
   const cachedContactId: string | null = inv.user?.xero_contact_id || null
 
-  const distinctJobNums = [...new Set((lines || []).map((l: any) => l.job_number).filter(Boolean))].join(', ')
+  const distinctJobNums = [...new Set(reviewLines.map((l: any) => l.job_number).filter(Boolean))].join(', ')
   const reference = [tradeName, inv.invoice_number || 'TRADE', distinctJobNums].filter(Boolean).join(' | ')
 
   const paymentDays = inv.user?.payment_terms_days || 7
@@ -2429,7 +2516,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any) {
   // using the labour-vs-extras detection — same algorithm the line builder
   // below uses, just without the Tracking enrichment that needs accessToken.
   // A malformed-line-shape invoice throws here with zero side effects.
-  const retryLineAmounts = (lines || []).map((line: any) =>
+  const retryLineAmounts = reviewLines.map((line: any) =>
     persistedTradeInvoiceLineAmount(line)
   )
   const computedSubtotal = retryLineAmounts.reduce(
@@ -2460,7 +2547,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any) {
   // The auto-push code path (generate_trade_invoice) reads the request body directly, so it
   // never hit this. The retry path reads from trade_invoice_lines and must support both shapes
   // or it pushes $0 bills with empty descriptions for any "extras"-shape invoice.
-  const grossXeroLineItems = (lines || []).map((line: any, index: number) => {
+  const grossXeroLineItems = reviewLines.map((line: any, index: number) => {
     const recovered = retryLineAmounts[index]
     const isLabour = recovered.basis === 'hours_rate'
     const desc = isLabour
@@ -7614,6 +7701,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw e
         }
       }
+      // Dispatch v2: the payment step on a supplier order
+      // (docs/dispatch-v2-board-contract.md, section 3c;
+      // dispatch_v2_payment_write.ts). Mark paid, Undo paid and Pay on
+      // pickup / delivery are a record only: they pay nobody, touch no Xero
+      // and send nothing. POST only, gated
+      // as the stage press above. Absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS. Each writes
+      // one supplier box and one job_events row: never a job stage or status.
+      case 'dispatch_v2_mark_paid':
+      case 'dispatch_v2_undo_paid':
+      case 'dispatch_v2_set_pay_on':
+      // ASAP or Pick a date on a supplier box (piece C): the same gate.
+      case 'dispatch_v2_set_date_mode': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const paymentActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchV2PaymentAction(client, action, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: paymentActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            today: _perthTodayYmd(),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       // The supplier reply scan (pg_cron dispatch-v2-replies-scan, every 5
       // minutes, migration 20261023230100). Server key only. Does nothing while
       // feature flag dispatch_v2_replies_v1 is off. Reads captured mail and
@@ -9383,6 +9506,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
 
+      // ── TP-01 Xero tie-out: every bill dollar by month, on a job, in a
+      // named non-job bucket, or unplaced. Read only; staff by the front door
+      // (not in any trade, routine or agent-read list). Credit notes and spend
+      // are not_yet_read until TP-07 / TP-08, never $0.
+      case 'xero_tieout': {
+        try {
+          return json(await readXeroTieout(client, {
+            asOf: url.searchParams.get('as_of'),
+            months: url.searchParams.get('months'),
+            // Never substitute the server org for a JWT caller with a missing profile org.
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+          }))
+        } catch (err) {
+          if (err instanceof XeroTieoutError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
       case 'list_work_orders':
         if (url.searchParams.get('kind') === 'job') {
           return json(await runJobWorkOrder(() => listJobWorkOrders(client, url.searchParams)))
@@ -9894,7 +10035,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
         }
-        return json(await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)))
+        let issued: Record<string, unknown> = {}
+        let issueError: unknown = null
+        try { issued = await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)) } catch (e) { issueError = e }
+        // Ready full-super groups go to Xero as drafts with no office click
+        // (owner, 30 Oct 2026). A failure here never stops the work order sweep.
+        const groupReleases: unknown[] = []
+        try {
+          for (const invoiceId of await readyUnreleasedGroupInvoiceIds(client)) {
+            groupReleases.push({ invoice_id: invoiceId, ...(await releaseGroupCrewBills(client, invoiceId, 'group-release-sweep')) })
+          }
+        } catch (e) {
+          console.error('[ops-api] group release sweep failed:', (e as Error).message)
+          groupReleases.push({ error: 'group release sweep failed' })
+        }
+        if (issueError) throw issueError
+        return json({ ...issued, group_releases: groupReleases })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any
@@ -9925,9 +10081,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const reviewed = await runJobWorkOrder(() => reviewCrewInvoiceLine(client, body, officeJobWorkOrderActor(authMode, authUser)))
         if (reviewed.ready_for_xero_push && reviewed.trade_invoice_id) {
           try {
-            const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: reviewed.trade_invoice_id })
-            return json({ ...reviewed, xero_push: pushed })
+            const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: reviewed.trade_invoice_id }, reviewActorLabel(authUser))
+            const crew = await pushReleasedGroupSiblings(client, String(reviewed.trade_invoice_id), reviewActorLabel(authUser))
+            return json({ ...reviewed, xero_push: pushed, ...(crew ? { group_release: crew } : {}) })
           } catch (pushErr) {
+            const crewAfterFailure = await pushReleasedGroupSiblings(client, String(reviewed.trade_invoice_id), reviewActorLabel(authUser)).catch(() => null)
+            if (crewAfterFailure) (reviewed as Record<string, unknown>).group_release = crewAfterFailure
+            // Held for the crew is not a Xero outcome: nothing was sent.
+            const holdBody = (pushErr as ApiError)?.body as { code?: string; hold?: string[] } | undefined
+            if (holdBody?.code === 'group_release_held' || holdBody?.code === 'group_release_unreadable') {
+              return json({ ...reviewed, xero_push: 'held', group_hold: holdBody.hold || [], xero_push_error: (pushErr as Error).message })
+            }
             try {
               await markTradeInvoiceRetryable(
                 client,
@@ -10660,7 +10824,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true, invoice_id: rejInvId, status: 'ops-reject' })
       }
       case 'push_trade_invoice_to_xero': {
-        return json(await pushTradeInvoiceToXeroAction(client, body))
+        const pushed = await pushTradeInvoiceToXeroAction(client, body, reviewActorLabel(authUser))
+        const crew = await pushReleasedGroupSiblings(client, String(body.invoice_id), reviewActorLabel(authUser))
+        return json({ ...pushed, ...(crew ? { group_release: crew } : {}) })
       }
 
       case 'list_trade_invoice_lines': {
@@ -11787,7 +11953,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'revoke_group_signoff':
       case 'void_group_work_order':
       case 'rekey_group_work_order':
-      case 'remove_group_work_order_participant': {
+      case 'remove_group_work_order_participant':
+      case 'office_approve_group_hours': {
         const officeCaller: GroupCaller = {
           userId: authUser?.id || '',
           orgId: authUser?.orgId || null,
@@ -11812,6 +11979,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             ? rekeyGroupWorkOrder(client, officeCaller, officeBody)
             : action === 'remove_group_work_order_participant'
             ? removeGroupWorkOrderParticipant(client, officeCaller, officeBody)
+            : action === 'office_approve_group_hours'
+            ? officeApproveGroupHours(client, officeCaller, officeBody)
             : readGroupWorkOrderOffice(client, officeCaller, officeBody),
         )
       }
@@ -11945,6 +12114,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // may store one. It cannot submit, authorise, pay, or create a Xero
       // bill. Not a profile-scoped trade action, and not on the read-only
       // agent or routine allow-lists.
+      // Grok Bots set up a group work order for named crew (owner, 30 Oct 2026).
+      // Agent key or a staff session; creates and adds crew only.
+      case 'agent_create_group_work_order': {
+        if (req.method !== 'POST') return json({ error: 'agent_create_group_work_order is POST only', code: 'method_not_allowed' }, 405)
+        const agentOk = authMode === 'api_key'
+        const staffOk = authMode === 'jwt' && _opsApiCallerIsStaffOperator(authMode, authUser)
+        if (!agentOk && !staffOk) {
+          return json({ ok: false, code: 'agent_or_staff_required', error: 'Only an agent key or office staff can set up a group work order here.' }, 403)
+        }
+        return await groupWorkOrderJson(agentCreateGroupWorkOrder(client, groupBody(body)))
+      }
       case 'agent_save_running_invoice_draft': {
         const agentOk = authMode === 'api_key'
         const staffOk = authMode === 'jwt' && _opsApiCallerIsStaffOperator(authMode, authUser)
@@ -13242,7 +13422,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
-            await groupWorkOrderJson(assertAllInGroupInvoiceStandalone(client, {userId:tradeUser.id,orgId:tradeUser.orgId,role:tradeUser.role,isStaff:false},body))
+            const groupInvoiceBasis = await assertAllInGroupInvoiceStandalone(client, {userId:tradeUser.id,orgId:tradeUser.orgId,role:tradeUser.role,isStaff:false},body)
+              .catch((error) => groupWorkOrderApiError(error))
             const { week_start, extra_items, notes: invoiceNotes, draft_id, manual_assignments } = body
             const weeklyShape = hasWeeklyWorkOrderInvoiceShape(body)
 
@@ -13955,7 +14136,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // trade has a deduction that week.
             const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate),
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -14880,11 +15061,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
+            const groupCrewRelease = officeReviewHold && money.super_basis
+              ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
+              : null
             if (officeReviewHold) {
               return json({
                 success: true,
                 code: officeReviewHold.code,
                 office_review: 'held',
+                ...(groupCrewRelease ? { group_release: groupCrewRelease } : {}),
                 invoice_id: invoice.id,
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
@@ -17975,7 +18160,7 @@ async function pipeline(
   // v2 board only: stage change events and the Arrival line's reads. Starts
   // beside the enrichment wave and never rejects.
   const dispatchBoardExtrasRead = dispatchBoard
-    ? loadDispatchBoardExtras(client, dispatchJobIds)
+    ? loadDispatchBoardExtras(client, dispatchJobIds, DEFAULT_ORG_ID)
     : null
 
   if (jobIds.length > 0 || dispatchJobIds.length > 0) {
@@ -19719,12 +19904,16 @@ async function assembleJobDossier(client: any, body: any) {
   // by load time (job_conversation_timeline.ts). Each row's occurred_at is
   // that time; loaded_at is when it was loaded. Message rows carry who sent
   // them and who received them (party roles, B-6).
+  // CTX-T24: use the same current person placement as the conversation and
+  // card. Never fall back to an event's original job when decisions cannot
+  // be read; safeRead reports that section as failed, not known-empty.
   const eventsRead = await safeRead('business_events', async () => {
     const { rows, error } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: `${DOSSIER_EVENT_SELECT}, event_at, channel, direction`,
       limit: eventsLimit,
       since,
+      personDecisions: true,
     })
     if (error) throw new Error(error)
     return rows.map((r: any) => ({ ...dossierEventWithPartyRoles(r), occurred_at: eventSourceTime(r), loaded_at: r.occurred_at ?? null }))
@@ -19738,12 +19927,15 @@ async function assembleJobDossier(client: any, body: any) {
   // dossier still returns only the newest conversationLimit messages.
   const contactWindow = Math.max(conversationLimit, DOSSIER_CONTACT_WINDOW)
   const conversationRead = await safeRead('conversation', async () => {
-    const { messages } = await getJobConversation(client, {
+    const result = await getJobConversation(client, {
       job_id: jobId,
       limit: contactWindow,
       since,
     })
-    return messages || []
+    if ('person_decisions_read_failed' in result && result.person_decisions_read_failed) {
+      throw new Error(result.person_decisions_read_failed)
+    }
+    return result.messages || []
   })
   const conversationWindow = conversationRead.data
   conversationRead.data = conversationWindow.slice(0, conversationLimit)
@@ -56239,7 +56431,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 }
 
 // ── my_trade_invoices: invoice history for a trade ──
-const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note'
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note'
 
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
@@ -56358,7 +56550,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
     .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 
@@ -57888,6 +58080,19 @@ export async function createTradeVariationRequest(
   return tradeResult
 }
 
+// job_variations.cost_estimate is OUR cost of a variation, ex GST (the quote
+// builder writes its cost total there; Job Profit's variation_not_costed reads
+// it). 0 is a figure, a variation that costs nothing extra, so it is kept; only
+// a missing, blank or unreadable value is null. The trade app's
+// estimated_cost is the variation's PRICE (it becomes amount), never its cost,
+// so it is not read here.
+export function variationCostEstimate(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
 async function createVariation(
   client: any,
   body: any,
@@ -57922,7 +58127,7 @@ async function createVariation(
     description,
     amount: cost,
     reason: reason || null,
-    cost_estimate: cost_estimate ? Number(cost_estimate) : null,
+    cost_estimate: variationCostEstimate(cost_estimate),
     photo_url: photo_url || null,
     status: needsApproval ? 'pending_approval' : 'auto_approved',
     needs_approval: needsApproval,

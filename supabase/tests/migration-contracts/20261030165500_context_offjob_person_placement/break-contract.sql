@@ -1,0 +1,1 @@
+DO $$ DECLARE s text; BEGIN SELECT pg_get_functiondef('context_ledger_event_locations(public.business_events)'::regprocedure) INTO s; IF position('IF NOT public.context_ledger_person_placement_enabled()' in s)=0 THEN RAISE EXCEPTION 'fault anchor missing'; END IF; EXECUTE replace(s,'IF NOT public.context_ledger_person_placement_enabled()','IF true'); END $$;

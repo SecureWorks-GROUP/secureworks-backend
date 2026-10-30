@@ -1,0 +1,1 @@
+-- All prerequisites are registered earlier in the migration stack.

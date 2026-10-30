@@ -478,7 +478,9 @@ jobs:
             supabase/functions/ops-api/dispatch_install_write_test.ts \
             supabase/functions/ops-api/dispatch_offline_dry_run_test.ts \
             supabase/functions/ops-api/dispatch_board_test.ts \
-            supabase/functions/ops-api/dispatch_v2_material_stage_test.ts
+            supabase/functions/ops-api/dispatch_v2_material_stage_test.ts \
+            supabase/functions/ops-api/dispatch_v2_payment_test.ts \
+            supabase/functions/ops-api/dispatch_v2_working_days_test.ts
 
       # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
       # suggestions (rules, engine on an in-memory store, migration text).
@@ -550,7 +552,8 @@ jobs:
             supabase/functions/ops-api/sales_booking_execution_read_test.ts \
             supabase/functions/ops-api/sales_booking_routes_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts \
-            supabase/functions/reporting-api/job_context_timeline_test.ts
+            supabase/functions/reporting-api/job_context_timeline_test.ts \
+            supabase/functions/reporting-api/job_profitability_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
@@ -570,6 +573,7 @@ jobs:
             supabase/functions/ops-api/job_state_card_test.ts \
             supabase/functions/ops-api/job_story_door_test.ts \
             supabase/functions/ops-api/job_overview_read_test.ts \
+            supabase/functions/ops-api/job_bill_outcomes_read_test.ts \
             supabase/functions/ops-api/context_scorecard_door_test.ts \
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/job_conversation_window_test.ts \

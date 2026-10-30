@@ -1,0 +1,1 @@
+tp04 P1a timeline (two-argument): the holding flag is read wrong for JSON 1 (not holding, dropped), "1" (not holding, dropped), "TRUE" (holding, kept), "True" (holding, kept)
