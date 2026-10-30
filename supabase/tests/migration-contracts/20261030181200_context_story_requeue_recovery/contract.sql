@@ -1,3 +1,7 @@
+SELECT to_regprocedure('public.context_job_story_ledger_sig(uuid)') IS NOT NULL AS has_story_ledger_witness \gset
+\if :has_story_ledger_witness
+\ir ../../../rollbacks/20261030185500_context_story_ledger_witness_down.sql
+\endif
 \set ON_ERROR_STOP on
 \if :{?expect_legacy}
 \else
@@ -58,3 +62,7 @@ BEGIN
 END $proof$;
 SELECT jsonb_build_object('legacy',current_setting('test.requeue_legacy')::boolean,'checks',jsonb_agg(to_jsonb(requeue_checks))) FROM requeue_checks;
 ROLLBACK;
+
+\if :has_story_ledger_witness
+\ir ../../../migrations/20261030185500_context_story_ledger_witness.sql
+\endif

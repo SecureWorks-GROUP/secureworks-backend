@@ -1,3 +1,7 @@
+SELECT to_regprocedure('public.context_job_story_ledger_sig(uuid)') IS NOT NULL AS has_story_ledger_witness \gset
+\if :has_story_ledger_witness
+\ir ../../../rollbacks/20261030185500_context_story_ledger_witness_down.sql
+\endif
 -- Contract for 20261009100000_context_job_story_text: the saved job story.
 -- Every fixture write is rolled back; ids, names and numbers are made up.
 --  1. Shape: both tables with their exact columns, RLS on with no policy, the
@@ -939,4 +943,8 @@ ROLLBACK;
 
 \if :has_ledger_edit_refresh
 \ir ../../../migrations/20261030184000_context_ledger_edit_story_refresh.sql
+\endif
+
+\if :has_story_ledger_witness
+\ir ../../../migrations/20261030185500_context_story_ledger_witness.sql
 \endif
