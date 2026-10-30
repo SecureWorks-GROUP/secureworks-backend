@@ -984,3 +984,6 @@ ops-api|supabase/migrations/20261029121500_xero_tieout_monthly.sql|function|xero
 # relation, so the table marker's to_regclass check finds it).
 ops-api|supabase/migrations/20261029170000_cfo_bill_cost_outcomes.sql|table|cfo_bill_cost_outcomes
 ops-api|supabase/migrations/20261029170100_context_job_bill_outcomes.sql|function|context_job_bill_outcomes
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_notes
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|table|xero_supplier_credit_note_allocations
+xero-sync|supabase/migrations/20261030010000_xero_supplier_credit_notes.sql|function|xero_supplier_credit_note_copy
