@@ -13,6 +13,8 @@
 // No table write, no provider call, no model call. A failed read is unknown
 // with a code, never an empty story.
 
+import { storySourceCoverage } from "./context_source_gaps.ts";
+
 export const STORY_SECTIONS_VERSION = 5;
 
 const UUID_RE =
@@ -290,7 +292,7 @@ export async function buildStoryDossier(client: any, jobRow: any, body: any) {
       completed_at: jobRow.completed_at,
       updated_at: jobRow.updated_at,
     },
-    story: storyRead.story,
+    story: storyRead.story ? { ...storyRead.story, source_coverage: storySourceCoverage() } : null,
     client: clientRead.client,
     diagnostics: {
       ok: storyRead.status.ok && clientRead.status.ok,
@@ -329,7 +331,7 @@ export async function jobStoryAction(client: any, params: URLSearchParams) {
       502,
     );
   }
-  return read.story;
+  return { ...read.story, source_coverage: storySourceCoverage() };
 }
 
 /** GET client_story: job_id (or job_number), optional as_of. */

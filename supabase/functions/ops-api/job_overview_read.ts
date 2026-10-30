@@ -71,16 +71,8 @@ const TRANSCRIPT_EVENT = "call.transcript_completed";
  * until the source is captured, so a quiet card is never read as complete.
  * Remove a line only in the change that starts capturing that source.
  */
-export const OVERVIEW_NOT_SEEN = [
-  {
-    key: "material_orders",
-    text: "Material orders and deliveries are not recorded here.",
-  },
-  {
-    key: "crew_tasks_and_crm_notes",
-    text: "Crew tasks and GHL notes are not captured.",
-  },
-] as const;
+import { CONTEXT_NOT_SEEN } from "./context_source_gaps.ts";
+export const OVERVIEW_NOT_SEEN = CONTEXT_NOT_SEEN;
 
 /**
  * The Matching count from a context_recon_job_items answer: rows waiting on a

@@ -1,5 +1,9 @@
 # The saved job story and the job overview read
 
+## Source coverage qualifier (CTX-T20, 30 October 2026 candidate)
+
+Agent `job_story` and story-dossier responses add `source_coverage` (`context-source-coverage-v1`), sharing the existing staff Overview standing gaps from `context_source_gaps.ts`. These gaps are partial declarations, not an all-account capture/freshness measurement. The internal `readJobStory` result and the exact card passed to saved-story comparison remain unchanged; this presentation metadata must not invalidate or alter a stored story. No new source fetch, database mutation, reader activation or access is introduced. Zero unread placed evidence is not complete capture.
+
 Migration `20261009100000_context_job_story_text.sql` (rollback in
 `supabase/rollbacks/`, contract case under
 `supabase/tests/migration-contracts/20261009100000_context_job_story_text/`)
