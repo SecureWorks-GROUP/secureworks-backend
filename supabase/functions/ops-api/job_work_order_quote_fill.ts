@@ -234,6 +234,9 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
         .in("status", ["frozen", "superseded"])
         .limit(1));
     if (accepted) return use(accepted, "accepted_revision");
+    // An explicit accepted identity is authoritative even when its row is
+    // unavailable. A later freeze before acceptance is not a substitute.
+    return none();
   }
   const acceptedAt = typeof job?.accepted_at === "string" && job.accepted_at
     ? job.accepted_at

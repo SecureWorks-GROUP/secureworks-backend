@@ -494,6 +494,24 @@ Deno.test("no accepted revision: the draft is not filled, from a later revision 
   }
 });
 
+Deno.test("a missing named accepted revision does not fill from another quote frozen before acceptance", async () => {
+  const db = baseDb();
+  db.tables.jobs[0].accepted_at = "2026-10-11T00:00:00Z";
+  // The quote was rendered from A, then B froze before the acceptance arrived.
+  // A remains the explicit accepted identity, but its read now returns no row.
+  db.tables.scope_revisions = [laterRevision()];
+  const preview = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals([preview.quote.source, preview.quote.scope_revision_id, preview.quote.flags], [
+    null, null, ["no_accepted_quote"],
+  ]);
+  assertEquals(preview.result.lines, []);
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.reason, "no_accepted_quote");
+  assertEquals(db.tables.work_orders[0].scope_items, []);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
+  assertEquals(db.writes(), []);
+});
+
 Deno.test("an unreadable accepted revision is never replaced by another one", async () => {
   const db = baseDb();
   db.tables.jobs[0].accepted_at = ACCEPTED_AT;
