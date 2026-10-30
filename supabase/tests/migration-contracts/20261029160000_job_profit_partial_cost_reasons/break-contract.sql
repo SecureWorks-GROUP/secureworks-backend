@@ -1,3 +1,7 @@
+SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS break_has_credit \gset
+\if :break_has_credit
+\ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
+\endif
 -- Remove the known later signature extension before exercising TP-13's rollback.
 SELECT md5(prosrc)='b2f762db966bf9f3417e759827705be2' AS tp13_break_has_oncost FROM pg_proc WHERE oid='public.context_job_story_money_sig(uuid)'::regprocedure \gset
 \if :tp13_break_has_oncost

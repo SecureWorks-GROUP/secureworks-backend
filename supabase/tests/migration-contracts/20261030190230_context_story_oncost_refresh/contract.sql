@@ -1,3 +1,7 @@
+SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS restore_credit_20261030190230 \gset
+\if :restore_credit_20261030190230
+\ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
+\endif
 \set ON_ERROR_STOP on
 \if :{?expect_legacy}
 \else
@@ -68,4 +72,8 @@ ROLLBACK;
 \if :expect_legacy
 \else
 \ir ../../../migrations/20261030190230_context_story_oncost_refresh.sql
+\endif
+
+\if :restore_credit_20261030190230
+\ir ../../../migrations/20261031010000_context_story_credit_refresh.sql
 \endif

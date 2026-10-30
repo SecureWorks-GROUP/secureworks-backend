@@ -1,3 +1,7 @@
+SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS restore_credit_20261029160000 \gset
+\if :restore_credit_20261029160000
+\ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
+\endif
 -- Contract for 20261029160000_job_profit_partial_cost_reasons (TP-13).
 --
 -- Synthetic jobs, no customer data. Everything rolls back. A blind sample of
@@ -618,4 +622,8 @@ ROLLBACK;
 
 \if :tp13_restore_oncost
 \ir ../../../migrations/20261030190230_context_story_oncost_refresh.sql
+\endif
+
+\if :restore_credit_20261029160000
+\ir ../../../migrations/20261031010000_context_story_credit_refresh.sql
 \endif
