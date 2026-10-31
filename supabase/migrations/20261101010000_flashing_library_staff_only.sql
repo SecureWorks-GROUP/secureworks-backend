@@ -59,15 +59,21 @@ begin
 end;
 $$;
 
--- The stored author of a row in the caller's own org, for the update policy (a policy cannot read its own table: that
--- recurses). Security definer so it reads the stored row past row level security, as catalogue_prices_staff_load does;
--- search_path pinned; it answers only for the caller's own org, where created_by is already readable, and null else.
+-- The stored author of a row, for the update policy (a policy cannot read its own table: that recurses). Security
+-- definer so it reads the stored row past row level security, as catalogue_prices_staff_load does; search_path
+-- pinned. Because it reads past row level security, it applies the read policy's own test itself: it answers only to
+-- a caller in a scoping role (admin, ops_manager, estimator), for a row in the caller's own org, and null to anyone
+-- else. Crew and sales in the same org cannot read the table, so they get null for any id, as does another org.
 create or replace function public.flashing_library_author(p_org uuid, p_id uuid)
 returns uuid language sql stable security definer
 set search_path = public, pg_temp
 as $$
   select f.created_by from public.flashing_library f
-  where f.org_id = p_org and f.id = p_id and f.org_id = public.auth_org_id();
+  where f.org_id = p_org and f.id = p_id and f.org_id = public.auth_org_id()
+    and exists (
+      select 1 from public.users u
+      where u.id = auth.uid() and lower(u.role) in ('admin', 'ops_manager', 'estimator')
+    );
 $$;
 
 revoke all on function public.flashing_library_author(uuid, uuid) from public;
