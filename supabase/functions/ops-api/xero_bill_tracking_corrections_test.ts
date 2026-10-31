@@ -345,6 +345,24 @@ Deno.test("rounding adjustments reject before any provider write", async () => {
     true,
   );
 });
+Deno.test("invoice-level address block rejects before any provider write", async () => {
+  const f = fixture("AUTHORISED", "ACCREC");
+  f.bill.InvoiceAddresses = [{
+    InvoiceAddressType: "TO",
+    AddressLine1: "39 Resource Way",
+    City: "Malaga",
+  }];
+  const result = await correctSupplierBillTracking(null, f.body, f.deps);
+  assertEquals(result.results[0].code, "INVOICE_ADDRESS_UNSUPPORTED");
+  assertEquals(f.writes, 0);
+  const clean = fixture("AUTHORISED", "ACCREC");
+  clean.bill.InvoiceAddresses = [];
+  assertEquals(
+    (await correctSupplierBillTracking(null, await applyInput(clean), clean.deps))
+      .ok,
+    true,
+  );
+});
 Deno.test("provider update timestamps may change while financial readback remains strict", async () => {
   const f = fixture();
   f.bill.UpdatedDateUTC = "/Date(1000)/";
