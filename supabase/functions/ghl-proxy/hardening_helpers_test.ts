@@ -16,6 +16,7 @@ import {
   requestedBaseScopeHash,
   requiresBaseScopeCursor,
   scopeJsonHash,
+  scopeSaveIdentityFill,
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
 } from './hardening_helpers.ts'
@@ -312,3 +313,16 @@ function fakeSupabase(script: {
     },
   }
 }
+
+Deno.test('scope save fills empty customer fields and keeps what the office typed', () => {
+  const job = { client_name: 'Office Typed Name', client_phone: '', client_email: null, site_address: '1 Office St', site_suburb: undefined }
+  const meta = { client_name: 'Scoper Name', client_phone: '0400 000 000', client_email: 'c@example.test', site_address: '1 Office St', site_suburb: 'Joondalup', pricing_json: { x: 1 } }
+  const { fill, kept } = scopeSaveIdentityFill(job, meta)
+  assertEquals(fill, { client_phone: '0400 000 000', client_email: 'c@example.test', site_suburb: 'Joondalup' })
+  assertEquals(kept, { client_name: 'Scoper Name' })
+})
+
+Deno.test('scope save with no meta or blank typed values changes no customer field', () => {
+  assertEquals(scopeSaveIdentityFill({ client_name: '' }, null), { fill: {}, kept: {} })
+  assertEquals(scopeSaveIdentityFill({ client_name: '' }, { client_name: '  ' }), { fill: {}, kept: {} })
+})
