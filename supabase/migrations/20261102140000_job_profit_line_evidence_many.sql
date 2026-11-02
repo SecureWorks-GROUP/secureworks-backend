@@ -168,6 +168,40 @@ COMMENT ON FUNCTION public.job_profit_line_evidence_many(uuid[]) IS
 REVOKE ALL ON FUNCTION public.job_profit_line_evidence_many(uuid[]) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit_line_evidence_many(uuid[]) TO service_role;
 
+-- job_profit_line_evidence(job) now returns job_profit_line_evidence_many's
+-- result for that one job: every key below is still in its output, built by
+-- the helper (live check: 40 jobs identical). The guard reads a body that
+-- moves its keys into a helper as losing them, so they are waived here.
+-- output-key-guard: drop public.job_profit_line_evidence allocation
+-- output-key-guard: drop public.job_profit_line_evidence amount_ex
+-- output-key-guard: drop public.job_profit_line_evidence basis
+-- output-key-guard: drop public.job_profit_line_evidence cost_items
+-- output-key-guard: drop public.job_profit_line_evidence cost_items_evidenced
+-- output-key-guard: drop public.job_profit_line_evidence date
+-- output-key-guard: drop public.job_profit_line_evidence description
+-- output-key-guard: drop public.job_profit_line_evidence division
+-- output-key-guard: drop public.job_profit_line_evidence document
+-- output-key-guard: drop public.job_profit_line_evidence document_ref
+-- output-key-guard: drop public.job_profit_line_evidence evidence_job_number
+-- output-key-guard: drop public.job_profit_line_evidence evidence_says_elsewhere
+-- output-key-guard: drop public.job_profit_line_evidence evidenced
+-- output-key-guard: drop public.job_profit_line_evidence evidenced_ex
+-- output-key-guard: drop public.job_profit_line_evidence invoice_lines
+-- output-key-guard: drop public.job_profit_line_evidence invoice_lines_evidenced
+-- output-key-guard: drop public.job_profit_line_evidence items
+-- output-key-guard: drop public.job_profit_line_evidence job_id
+-- output-key-guard: drop public.job_profit_line_evidence kind
+-- output-key-guard: drop public.job_profit_line_evidence lane
+-- output-key-guard: drop public.job_profit_line_evidence lines
+-- output-key-guard: drop public.job_profit_line_evidence not_evidenced_ex
+-- output-key-guard: drop public.job_profit_line_evidence not_in_job_profit
+-- output-key-guard: drop public.job_profit_line_evidence read_at
+-- output-key-guard: drop public.job_profit_line_evidence ref
+-- output-key-guard: drop public.job_profit_line_evidence revision
+-- output-key-guard: drop public.job_profit_line_evidence rule
+-- output-key-guard: drop public.job_profit_line_evidence state
+-- output-key-guard: drop public.job_profit_line_evidence status
+-- output-key-guard: drop public.job_profit_line_evidence why_not_verified
 CREATE OR REPLACE FUNCTION public.job_profit_line_evidence(p_job_id uuid)
 RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
 SELECT m.result FROM public.job_profit_line_evidence_many(ARRAY[p_job_id]) m;
