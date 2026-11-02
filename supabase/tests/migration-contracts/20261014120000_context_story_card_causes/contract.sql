@@ -85,9 +85,26 @@ ROLLBACK;
 BEGIN;
 -- (held notes, 20261015100000) replaced the judge, the item check, the story's ledger read, the packet and
 -- the story since: its down goes first, inside this transaction only.
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
 \if :held_notes_live
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
+\endif
+SELECT to_regprocedure('public.context_ledger_reader_events(uuid[])') IS NOT NULL AS reader_person_placement_live \gset
+\if :reader_person_placement_live
+SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],timestamptz)'::regprocedure,'pg_proc'),'') LIKE '%staff placement identity (20261030170545)%' AS has_staff_identity_successor \gset
+\if :has_staff_identity_successor
+\ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
+\endif
+\ir ../../../rollbacks/20261030154917_context_ledger_person_placement_down.sql
 \endif
 CREATE TEMP TABLE sc_md5 AS SELECT oid,md5(prosrc) h FROM pg_proc WHERE proname IN
  ('context_ledger_packet','context_job_story','context_job_story_held','context_job_record_value','context_job_quote_email_sends','context_job_story_payment_terms',

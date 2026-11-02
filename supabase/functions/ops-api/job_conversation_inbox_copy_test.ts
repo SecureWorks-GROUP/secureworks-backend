@@ -287,6 +287,13 @@ function fakeClient(
   const reads: Array<{ table: string; filters: string[] }> = [];
   return {
     reads,
+    rpc(fn: string) {
+      return Promise.resolve(
+        fn === "context_job_card_decisions"
+          ? { data: [], error: null }
+          : { data: null, error: { message: "RPC outside fixture" } },
+      );
+    },
     from(table: string) {
       const filters: Array<(r: any) => boolean> = [];
       const names: string[] = [];

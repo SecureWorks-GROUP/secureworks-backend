@@ -1,5 +1,9 @@
 # The saved job story and the job overview read
 
+## Source coverage qualifier (CTX-T20, 30 October 2026 candidate)
+
+Agent `job_story` and story-dossier responses add `source_coverage` (`context-source-coverage-v1`), sharing the existing staff Overview standing gaps from `context_source_gaps.ts`. These gaps are partial declarations, not an all-account capture/freshness measurement. The internal `readJobStory` result and the exact card passed to saved-story comparison remain unchanged; this presentation metadata must not invalidate or alter a stored story. No new source fetch, database mutation, reader activation or access is introduced. Zero unread placed evidence is not complete capture.
+
 Migration `20261009100000_context_job_story_text.sql` (rollback in
 `supabase/rollbacks/`, contract case under
 `supabase/tests/migration-contracts/20261009100000_context_job_story_text/`)
@@ -320,3 +324,33 @@ time only. `job_quote_values` still selects stamped-sent documents. Consequently
 an emailed document absent from that value read shows with an unknown amount;
 an attachment-only revision remains attachment evidence, not a fabricated
 current quote. These limits keep the six-job default-switch acceptance open.
+
+### Automatic rewrite after a successful recovery (TP-16)
+
+Migration `20261030181200_context_story_requeue_recovery` keeps the existing failure-backoff period, but only a failed request at or after the current successful story's `written_at` suppresses a subsequent changed-source rewrite. An older failure has been superseded by that successful story. Equal timestamps remain suppressed because their ordering is not proven. Rewrite age, quiet period, monitored-job rules, queue limits, open-request deduplication, feature switch and service-only access are unchanged. No records, schedules or policy settings are changed by this migration. The down migration restores the exact prior body and comment; both directions reject unrecognized function bodies. This is not release or live acceptance evidence.
+
+
+### Invoice balances and separate unresolved matters (TP-15/TP-16 candidate)
+
+Migration `20261030182500_context_invoice_matter_identity` preserves an open ledger item's own key and loop when the matching money record closes on payment but the item closes on a reply, record, document, person or an unknown condition. Sharing an invoice does not make those obligations equivalent. Only an explicitly payment-closing item keeps the existing invoice-loop grouping. This applies to issued/part-paid/overdue/draft invoice records; uninvoiced-balance (R8), non-invoice/non-money grouping and candidate promotion are unchanged, preserving the original complaint-first and not-yet-due rules. This repairs the synthetic partially-paid correction where the recipient issue and confirmation request otherwise appeared only inside the invoice explanation and were truncated by downstream consumers. No stored note, money amount, closure status or permission changes. Both directions check exact assembler body identities and rollback restores the earlier grouping. Local contract and source-to-story proof do not authorize release or establish financial completeness.
+
+
+### Corrections inside the current reading (TP-16 candidate)
+
+Migration `20261030184000_context_ledger_edit_story_refresh` makes the existing automatic sweep notice ledger items created or updated after the current story was checked, within the current live generation and the same job. Actual staff add, close, reopen and dispute operations previously made the served story stale without making a rewrite due. Generation, invoice and money signals remain; an old generation's edits do not queue the current story. Existing time limits, failed-request backoff, monitoring, cap and duplicate protection remain. An unchanged source rendering uses the existing no-model finish to acknowledge the claim; this is not permission to change costs, sources or staff records. Both migration directions guard exact function bodies. Production source-to-card timing and concurrent-correction acceptance remain separate from the local fixture proof.
+
+
+### Corrections committed while a story is being written (TP-15/TP-16 candidate)
+
+The timestamp signal above is insufficient when a staff transaction begins before the writer claims a job but commits after its input read: PostgreSQL transaction timestamps can precede the story check despite newer committed contents. Migration `20261030185500_context_story_ledger_witness` adds a separate service-only content witness over the current generation's ledger items. Stable key ordering and UTC dates make it independent of row order and session timezone; creation/update touch times are excluded. The existing financial reader record signature is unchanged, avoiding feedback from generated notes into financial rereads.
+
+The claim captures the witness. Save and unchanged-finish store that claimed value, never the current save-time value or a caller-supplied value. A later content change therefore remains due even with an older timestamp. Missing/invalid legacy witnesses backfill under the existing open-request allowance; a no-change claim can fill the witness without a model call. Existing rewrite floor, failure backoff, cap, monitoring, switches and request deduplication remain. The served-card hash still determines whether story words are fresh; the witness is queue bookkeeping, not proof of complete source capture or financial truth.
+
+The migration checks all four predecessor function bodies before changing any, creates the service-only helper and replaces the functions in one atomic block. Repeat application recognizes only the full resulting set. Rollback checks the full set, restores predecessors, then drops the helper without CASCADE. Tests include the actual staff edit and save/unchanged paths, older timestamps, pending-request and save retries, no-model backfill, malformed checks, forged witnesses, timezone stability, feature-off and failure delay. The two-session worker/model/readback proof is in the owning Context project's `verify/evidence/20261030-story-concurrent-correction/`. All proof is synthetic local development, not an independent review, signed-in staff trial or live release.
+
+
+### Native employer-super inputs refresh both consumers (TP-13/TP-16 candidate)
+
+Migration `20261030190230_context_story_oncost_refresh` extends the existing crew-invoice contribution to `context_job_story_money_sig` with `subtotal_ex`, `super_amount` and `net_pay`. These are the native header inputs used by the existing Group WO employer-super producer; the migration does not calculate pay, classify labour or change that producer. Previously restoring missing on-cost metadata changed the money book while leaving the story queue and `context_ledger_record_signature` unchanged. Direct job lines and the existing job-number/description fallback see their invoice's corrected fields; explicitly other-job lines remain excluded. Touch timestamps alone do not invalidate.
+
+Only this service-only signature body changes, with exact predecessor/result guards and guarded rollback. The existing queue/reader limits, rollout switches and success witnesses remain. On first rollout, jobs with crew headers may need one bounded reread/rewrite because their recorded signature predates these fields; an unchanged rendered story uses the existing no-model finish. The original source cost/credit/period/settlement acceptance still governs. Captured Bookkeeping r1 replay proves one missing-to-known company-super case, not all source shapes or a live release. The exact evidence is in the Context project's `verify/evidence/20261030-oncost-freshness/`.

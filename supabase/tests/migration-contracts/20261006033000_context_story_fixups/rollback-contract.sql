@@ -30,6 +30,15 @@ BEGIN
   END IF;
  END LOOP;
 END $rb$;
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261006033000_context_story_fixups_down.sql
 DO $rb2$
 DECLARE x record; p record;

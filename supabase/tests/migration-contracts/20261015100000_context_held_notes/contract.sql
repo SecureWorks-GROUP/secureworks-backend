@@ -124,6 +124,15 @@ BEGIN
   UNION ALL SELECT 'story', public.context_job_story(a, now(), (cl ->> 'generation_id')::uuid);
  PERFORM pg_temp.hn_assert((SELECT count(*) FROM hn_off WHERE v IS NOT NULL) = 7, 'seven off answers');
 END $c$;
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; g uuid; r record; v jsonb;
@@ -271,6 +280,27 @@ ROLLBACK;
 
 -- 4. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- A later financial scheduler has its own guarded body. Restore this migration's
+-- exact surface for its idempotence test only; ROLLBACK restores the full stack.
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
+SELECT to_regprocedure('public.context_ledger_record_signature(uuid)') IS NOT NULL AS hn_has_financial_successor \gset
+\if :hn_has_financial_successor
+\ir ../../../rollbacks/20261030112226_context_ledger_financial_refresh_down.sql
+\endif
+-- Likewise restore the later read-only invoice annotation only inside this
+-- historical reapply transaction. Its behavior is tested on the full stack above.
+SELECT to_regprocedure('public.context_job_story_note_current_invoice(jsonb,jsonb,timestamptz)') IS NOT NULL AS hn_has_invoice_successor \gset
+\if :hn_has_invoice_successor
+\ir ../../../rollbacks/20261030160001_context_note_current_invoice_down.sql
+\endif
 CREATE TEMP TABLE hn_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_held_notes_on', 'context_ledger_held_placed_copy',

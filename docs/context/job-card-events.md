@@ -83,16 +83,66 @@ personDecisions: true })`:
 - A failed decisions read still lists the job's own rows and names the failure
   in `person_decisions_read_failed`. It is never read as "no decisions".
 
-## What it does not change
+The dossier's raw `events` section now uses that same person-decision read
+(CTX-T24 consumer slice). Moved and unrelated rows leave the original job;
+split rows appear on each selected job. Raw rows retain `person_placed` decision
+provenance, original source time in `occurred_at`, and load time in `loaded_at`.
+It does not infer a new customer identity or allocate money from a placement.
+If the placement read fails, the dossier reports the affected events or
+conversation section as failed in `diagnostics.sourceStatus`, with no purported
+current rows from that section. Other operational sections remain available.
+The standalone conversation endpoint's explicit partial-read contract is unchanged.
 
-The following still read `business_events.job_id`:
-- the reader's evidence (`context_ledger_evidence_rows`) and citation check;
-- the quote value;
-- the old-inbox mail rule;
-- the off-job and unplaced meta reads, so a split row may still be listed there;
-- the call transcript pairing, and the ops-api dossier's own `business_events`
-  read (its conversation section reuses the job conversation, so that part
-  follows decisions).
+## Reader candidate and its activation boundary
+
+Migration `20261030154917_context_ledger_person_placement` adds a read-only
+projection behind `context_ledger_person_placement_v1`. Missing, disabled or
+unreadable settings preserve the prior reader. The migration does not enable
+the switch and refuses a pre-existing enabled setting or conflicting helpers.
+
+When explicitly enabled after the required review and acceptance work:
+
+- Reader evidence and citations use the same hash-bound person decisions as
+  the card. Split evidence is available on each selected job; moved/unrelated
+  evidence cannot be cited on the old job. Source rows are never rewritten.
+- The decision time contributes to evidence landing time; the event time stays
+  its original time. As before, placement is current, not reconstructed as of a
+  historical date. Evidence cannot appear before its landing time.
+- Customer stamps do not travel to a different customer. Without a matching
+  destination CRM contact, customer roles become unknown in the projection;
+  known staff/supplier roles remain. A placement decision supplies placement
+  certainty, not financial allocation, customer identity or settlement proof.
+- Call/transcript pairing uses current placement. Retraction, duplicate,
+  writer, source-content, excerpt and closure checks remain in force.
+- Placed/unrelated person decisions remove rows from held candidates. A legacy
+  inbox match cannot resurrect a decided canonical copy on another job; all
+  existing source-pointer, provider-key, payload-pointer and sender/time copy
+  routes are checked.
+
+**CTX-T24 remains open.** The dependent local migration
+`20261030161813_context_placement_freshness` aligns the scheduler and saved-note
+citation read with this projection. A whole reading acknowledges the placement
+snapshot carried by its evidence packet; the store rejects a stale snapshot or
+an update that tries to acknowledge changed placement without a full reread.
+Previous recipients remain in the witness, so moves away and returns invalidate
+both jobs, including a donor with no evidence left. The existing backfill window,
+rollout, budget and backoff still apply; there is no new timer.
+
+A moved source does not settle or transfer an existing obligation. An unresolved
+historical note that is no longer source-supported remains stored and appears
+under What we do not know with its original key/text and a review explanation.
+The affected old job reports `placement_obligation_review`; the destination can
+continue reading independently. The record-only prompt remains ledger-free.
+Customer identity, quote values, cost allocation and payment authority do not
+come from placement.
+
+The local reader candidate is `luna-ledger:v8-finance1-placement1`, not deployed
+v8. Both migrations and that reader must be reviewed and released compatibly;
+the flag stays off pending the remaining acceptance. Synthetic SQL/reader/card
+proofs do not establish independent model quality, full-volume performance,
+source coverage/production lag, signed-in staff use or business acceptance.
+Remaining off-job metadata and destination identity across other staff consumers
+also need integrated proof. Do not activate on these local checks alone.
 
 Money is unchanged, as Finance's allocation contract (21 Oct 2026, copy at
 `/mnt/project-files/cio/cfo-allocation-20261021/`, sha256 `5f5bbd4b…7e1d`)
@@ -116,3 +166,34 @@ both cards.
 
 The migration adds no table, column, index or trigger, and writes no row. The
 reader stays at v8.
+
+### Off-job and unplaced consumers (CTX-T24, 30 October candidate)
+
+`20261030165500_context_offjob_person_placement` completes the bounded metadata
+read path: current hash-bound person decisions determine the locations named by
+`context_job_story_meta`, and decided rows leave `context_unplaced_for_job`.
+A message split onto the current job is not described as wholly elsewhere;
+unrelated messages are not offered as unplaced; changed evidence falls back to
+the original uncertain placement. The helper changes location only, not party
+identity, source rows, invoice links or costs. Missing/off activation retains
+old reads; this does not enable `context_ledger_person_placement_v1`.
+
+The raw story now says historical notes need review before rebuilding and marks
+`meta.ledger.review_required`; it still retains their keys and original sources.
+Record-only reader input remains ledger-free. Agent memory and booking-review
+consumers must propagate review and cannot treat that story as complete.
+Current decisions are used, as in the existing card; this is not a historical
+placement replay. Original-source privacy, remaining destination identity reads,
+full-volume performance and deployed/independent/operator acceptance stay open.
+
+### Staff identity after a person moves evidence (CTX-T24)
+
+With `context_ledger_person_placement_v1` enabled, the staff message record uses
+the reader's existing identity projection for metadata. A move or split into a
+different customer's job does not transfer the source's customer identity.
+Customer labels remain on the original job or where the source CRM contact
+independently matches the destination. Independently identified staff remain
+staff. Source words, event times, original source IDs and card placement
+admission remain unchanged. Missing/off keeps prior behavior; no activation is
+part of this change. This is a local candidate requiring the existing review,
+release and actual staff-journey acceptance.

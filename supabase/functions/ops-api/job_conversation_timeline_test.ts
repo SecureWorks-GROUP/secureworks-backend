@@ -49,7 +49,10 @@ function fakeClient(tables: Tables) {
   const queries: { table: string; ops: string[] }[] = [];
   return {
     queries,
-    rpc(_fn: string) {
+    rpc(fn: string) {
+      if (fn === "context_job_card_decisions") {
+        return Promise.resolve({ data: [], error: null });
+      }
       return Promise.resolve({
         data: null,
         error: { code: "57014", message: "not in fake" },
@@ -939,5 +942,98 @@ Deno.test("timeline: a failed decisions read names the error and keeps the job's
     assertEquals(got.rows.map((r) => r.id), ["own"]);
     assert(got.decisionsError);
     assertStringIncludes(got.error ?? "", "person decisions read failed");
+  }
+});
+
+// CTX-T24: invoke the actual dossier, not only the shared timeline helper.
+Deno.test("dossier follows moved, split and unrelated evidence without changing stored placement", async () => {
+  const A = "a0000000-0000-4000-8000-0000000000a4";
+  const B = "a0000000-0000-4000-8000-0000000000b4";
+  const rows = ["keep", "move", "split", "unrelated"].map((id, i) =>
+    bev(id, A, {
+      event_type: "supplier.email_in",
+      channel: "email",
+      direction: "inbound",
+      event_at: `2026-10-0${i + 1}T01:00:00Z`,
+      occurred_at: "2026-10-21T01:00:00Z",
+      payload: {
+        subject: id,
+        body: `Synthetic supplier message ${id}`,
+        from: "supplier@example.test",
+      },
+    })
+  );
+  const original = JSON.stringify(rows);
+  for (const jobId of [A, B]) {
+    const decisions = [
+      {
+        event_id: "move",
+        action: "correct",
+        placement: jobId === A ? "off" : "on",
+      },
+      { event_id: "split", action: "split", placement: "on" },
+      ...(jobId === A
+        ? [{ event_id: "unrelated", action: "unrelated", placement: "off" }]
+        : []),
+    ].map((d, i) => ({
+      ...d,
+      decision_id: i + 1,
+      decided_at: "2026-10-22T01:00:00Z",
+      decided_by: "staff",
+      other_job_numbers: ["SYNTHETIC"],
+    }));
+    const c = withDecisions({
+      jobs: [job(A, "SWP-SYN-A"), job(B, "SWP-SYN-B")],
+      business_events: rows,
+    }, { data: decisions, error: null });
+    const d: any = await _assembleJobDossierForTest(c, { job_id: jobId });
+    assertEquals(
+      d.events.map((e: any) => e.id),
+      jobId === A ? ["split", "keep"] : ["split", "move"],
+    );
+    assertEquals(
+      d.events.find((e: any) => e.id === "split").person_placed.action,
+      "split",
+    );
+    assertEquals(d.events[0].occurred_at, "2026-10-03T01:00:00Z");
+    assertEquals(d.events[0].loaded_at, "2026-10-21T01:00:00Z");
+    assertEquals(d.diagnostics.sourceStatus.businessEvents.ok, true);
+    assertEquals(
+      d.conversation.filter((e: any) => e.source_system === "business_events")
+        .map((e: any) => e.id).length,
+      2,
+    );
+    assertEquals(JSON.stringify(rows), original);
+  }
+});
+
+Deno.test("dossier never reports failed placement reads as an empty successful source", async () => {
+  const J = "a0000000-0000-4000-8000-0000000000a5";
+  for (
+    const answer of [{
+      data: null,
+      error: { message: "placement unavailable" },
+    }, { data: null, error: null }]
+  ) {
+    const c = withDecisions({
+      jobs: [job(J, "SWP-SYN-J")],
+      business_events: [bev("unverified-old-placement", J, {
+        event_type: "client.sms_in",
+        channel: "sms",
+        event_at: "2026-10-01T01:00:00Z",
+        occurred_at: "2026-10-02T01:00:00Z",
+        payload: { body: "Synthetic unresolved request" },
+      })],
+    }, answer);
+    const d: any = await _assembleJobDossierForTest(c, { job_id: J });
+    assertEquals(d.events, []);
+    assertEquals(d.diagnostics.sourceStatus.businessEvents.ok, false);
+    assertStringIncludes(
+      d.diagnostics.sourceStatus.businessEvents.error,
+      "person decisions read failed",
+    );
+    assertEquals(d.diagnostics.sourceStatus.conversation.ok, false);
+    assertEquals(d.conversation, []);
+    assertEquals(d.diagnostics.ok, false);
   }
 });

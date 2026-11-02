@@ -34,6 +34,20 @@ import {
 const JOB = "a0000000-0000-4000-8000-000000000001";
 const GEN = "9a000000-0000-4000-8000-000000000002";
 
+Deno.test("story door retains standing capture gaps without changing source obligations", async () => {
+  const raw = { version: "job-story-v1", loops: [{ what: "Unanswered promise" }], money: { owing: 123 }, meta: { ledger: { status: "live", unread_rows: 0 } } };
+  const before = JSON.stringify(raw);
+  const read = await buildStoryDossier(fakeClient({ rpc: { context_job_story: raw, context_client_story: CLIENT } }), { id: JOB }, {});
+  assertEquals(read.story.source_coverage.state, "partial");
+  assertEquals(read.story.source_coverage.not_seen.map((g: any) => g.key), ["material_orders", "crew_tasks_and_crm_notes"]);
+  assertEquals(read.story.loops, raw.loops);
+  assertEquals(read.story.money, raw.money);
+  assertEquals(JSON.stringify(raw), before);
+  const second = await buildStoryDossier(fakeClient({ rpc: { context_job_story: raw, context_client_story: CLIENT } }), { id: JOB }, {});
+  read.story.source_coverage.not_seen[0].text = "mutated fixture";
+  assert(second.story.source_coverage.not_seen[0].text !== "mutated fixture", "responses must not mutate the shared gap declarations");
+});
+
 const STORY = {
   version: "job-story-v1",
   job: { id: JOB, job_number: "SWF-T0001" },

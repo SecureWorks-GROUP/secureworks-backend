@@ -1,0 +1,1 @@
+CREATE OR REPLACE FUNCTION public.context_job_story_ledger(p_job_id uuid,p_generation_id uuid DEFAULT NULL,p_as_of timestamptz DEFAULT now()) RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$ SELECT '{}'::jsonb $$;

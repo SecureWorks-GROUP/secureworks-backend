@@ -360,6 +360,15 @@ ROLLBACK;
 
 -- 7. Re-applying the migration changes no body, comment or grant.
 BEGIN;
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 CREATE TEMP TABLE tr_fn AS
  SELECT p.oid, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c, p.proacl::text AS acl, p.prosecdef, p.proconfig::text AS cfg
  FROM pg_proc p WHERE p.oid IN ('public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure,
@@ -375,5 +384,5 @@ ROLLBACK;
 -- 8. Last, so a behaviour break above is reported by its behaviour: finish is this migration's body.
 DO $c$ BEGIN
  PERFORM pg_temp.tr_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure)
-  = '1695e52f99f56534a24166f6662ced35', 'context_ledger_finish is not this migration''s body');
+  IN ('1695e52f99f56534a24166f6662ced35', '7f21d4665463c0e06eb731e3db63bf9a'), 'context_ledger_finish is not this migration''s body');
 END $c$;

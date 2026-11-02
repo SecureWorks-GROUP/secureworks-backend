@@ -420,6 +420,15 @@ BEGIN
 END $covers$;
 -- (held notes, 20261015100000) replaced the judge, the item check, the story's ledger read, the packet and
 -- the story since: its down goes first, inside this transaction only.
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
 \if :held_notes_live
 \ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
@@ -463,9 +472,10 @@ BEGIN
   'the judge must stay stable SQL, security definer, search_path pinned: ' || to_jsonb(p)::text);
  PERFORM pg_temp.rr_assert(p.res = 'TABLE(job_id uuid, due boolean, kind text, reason text, priority integer, newest_evidence_at timestamp with time zone, '
   || 'evidence_rows integer, generation_id uuid, blocked_reason text)', 'the judge''s columns changed: ' || p.res);
- -- (held notes, 20261015100000, keeps this body and adds the held-note exemption to its moved citations)
- PERFORM pg_temp.rr_assert(p.m = ANY(ARRAY['92367db74677cd38612394056aac07fa', '2483ad58fdea93abcb1ca5f4d87658ee']),
-  'the live judge is not this migration''s or its held-notes successor''s: ' || p.m);
+ -- Held notes adds citation exemptions; financial refresh20261030112226 adds a
+ -- dormant source-change reason. Both retain this contract's request behavior.
+ PERFORM pg_temp.rr_assert(p.m = ANY(ARRAY['92367db74677cd38612394056aac07fa', '2483ad58fdea93abcb1ca5f4d87658ee', '484fbb9ba08a6167b3fc5a7f78898ecd', '1489c7d2bf2286ee436206761ee77e7d']),
+  'the live judge is not this migration''s or its documented successors'' bodies: ' || p.m);
  c := obj_description(to_regprocedure(judge), 'pg_proc');
  PERFORM pg_temp.rr_assert(c LIKE 'Context ledger store (20261006013000), story safety (20261006040000): (scoping pipeline, 20261009133000) '
   || '(finished wake, 20261012093500) (rebuild request, 20261013153000) %Earlier (finished wake): The owner''s 12 Oct 2026 ruling: %Earlier (scoping pipeline): %'

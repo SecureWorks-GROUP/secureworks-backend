@@ -127,6 +127,15 @@ BEGIN
   FROM public.context_ledger_generations g WHERE g.job_id = j;
  CREATE TEMP TABLE tr_notes ON COMMIT DROP AS SELECT count(*) AS n FROM public.context_ledger_items i WHERE i.job_id = j;
 END $c$;
+SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
+\if :placement_freshness_live
+-- Unwind the current metadata/review successor before testing an earlier body.
+SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
+\if :has_offjob_placement_successor
+\ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
+\endif
+\ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
+\endif
 \ir ../../../rollbacks/20261012110000_context_ledger_thin_rebuild_down.sql
 DO $c$
 DECLARE fin jsonb; j uuid := pg_temp.tr_id('f7800000', 2);

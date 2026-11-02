@@ -661,7 +661,10 @@ Deno.test("job profit timeline: ordered, invoice-emailed and committed orders (C
     ["2026-08-02", "purchase_order_ordered", null, false],
     ["2026-09-02", "purchase_order_invoice_emailed", 300, false],
   ]);
-  assert(!t.some((e) => e.kind === "cost_paid"), "no order is ever a paid cost");
+  assert(
+    !t.some((e) => e.kind === "cost_paid"),
+    "no order is ever a paid cost",
+  );
   assert(
     !t.some((e) => e.kind === "supplier_bill"),
     "no order state is shown as a supplier bill",
@@ -671,7 +674,10 @@ Deno.test("job profit timeline: ordered, invoice-emailed and committed orders (C
 Deno.test("costEventKind: an unknown po_ state is a purchase order, other unknowns stay supplier bills", () => {
   assertEquals(costEventKind("po_committed"), "purchase_order");
   assertEquals(costEventKind("po_ordered"), "purchase_order_ordered");
-  assertEquals(costEventKind("po_invoice_emailed"), "purchase_order_invoice_emailed");
+  assertEquals(
+    costEventKind("po_invoice_emailed"),
+    "purchase_order_invoice_emailed",
+  );
   assertEquals(costEventKind("po_something_new"), "purchase_order");
   assertEquals(costEventKind("supplier_bill"), "supplier_bill");
   assertEquals(costEventKind("materials_fact"), "materials_fact");
@@ -679,10 +685,22 @@ Deno.test("costEventKind: an unknown po_ state is a purchase order, other unknow
 });
 
 Deno.test("job profit labels name the CFO-12 commitment states", () => {
-  assert(JOB_PROFIT_LABELS.committed_open_ex.includes("never counted here as $0.00"));
-  assert(JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith("Ordered, not billed"));
-  assert(JOB_PROFIT_LABELS.invoice_emailed_count.startsWith("Invoice emailed, no bill matched to this order"));
-  assert(JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"));
+  assert(
+    JOB_PROFIT_LABELS.committed_open_ex.includes("never counted here as $0.00"),
+  );
+  assert(
+    JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith(
+      "Ordered, not billed",
+    ),
+  );
+  assert(
+    JOB_PROFIT_LABELS.invoice_emailed_count.startsWith(
+      "Invoice emailed, no bill matched to this order",
+    ),
+  );
+  assert(
+    JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"),
+  );
 });
 
 Deno.test("rollup: expected vs actual counts only jobs whose actual cost is complete", async () => {
@@ -751,6 +769,46 @@ Deno.test("rollup: expected vs actual counts only jobs whose actual cost is comp
   assertEquals(partialOnly.totals.jobs_with_expected, 0);
   assertEquals(partialOnly.totals.expected_cost_ex, null);
   assertEquals(partialOnly.totals.actual_cost_on_expected_ex, null);
+});
+
+Deno.test("rollup: an expected cost with a lane unknown is never compared (TP-13)", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    work_type: "fencing",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: null,
+    invoiced_ex: 5000,
+    collected_ex: 0,
+    quoted_ex: 5000,
+    actual_cost_ex: 2700,
+    profit_ex: 2300,
+    revenue_verified_paid: false,
+    holding_job: false,
+    cost_flag: "ok",
+    completeness: [],
+    ...over,
+  });
+  const body = (await jobProfitListAction(
+    fakeClient({
+      v_job_profit: [
+        // commission lane unknown at the quote: 1200 is labour plus materials only
+        row({
+          job_id: "lane-missing",
+          expected_cost_ex: 1200,
+          completeness: ["expected_cost_lane_missing"],
+        }),
+        row({ job_id: "whole", expected_cost_ex: 2500 }),
+      ],
+    }),
+    new URLSearchParams("view=rollup"),
+  )).body as any;
+  assertEquals(body.totals.jobs_with_expected, 1);
+  assertEquals(body.totals.expected_cost_ex, 2500);
+  assertEquals(body.totals.actual_cost_on_expected_ex, 2700);
+  assertEquals(body.totals.jobs_with_expected_not_comparable, 1);
+  assertEquals(body.totals.expected_cost_not_comparable_ex, 1200);
+  // the margin is the engine's: both jobs published one
+  assertEquals(body.totals.jobs_with_margin, 2);
 });
 
 Deno.test("rollup: a group with no publishable job reads profit and margin as Unknown, not 0", async () => {
@@ -846,4 +904,108 @@ Deno.test("rollup: a holding job is in no total, type or month, and is reported 
   assertEquals(body.holding_jobs.jobs, 1);
   assertEquals(body.holding_jobs.actual_cost_ex, 192604.7);
   assertEquals(body.holding_jobs.profit_ex, null);
+});
+
+Deno.test("employer super remains a separate unpaid obligation, not a supplier bill or trade cash", async () => {
+  const events = [
+    {
+      job_id: JOB,
+      source: "trade_line",
+      source_id: "share",
+      document_id: "bill",
+      party_id: "crew",
+      party: "Test crew",
+      lane: "labour",
+      amount_ex: 2428.57,
+      event_date: null,
+      is_actual: true,
+      paid: true,
+      paid_on: "2026-10-30",
+    },
+    {
+      job_id: JOB,
+      source: "trade_employer_super",
+      source_id: "share:employer_super",
+      document_id: "bill",
+      party_id: "crew",
+      party: "Test crew",
+      lane: "labour",
+      amount_ex: 291.43,
+      event_date: null,
+      is_actual: true,
+      paid: false,
+      paid_on: null,
+    },
+    {
+      job_id: JOB,
+      source: "trade_line",
+      source_id: "advance",
+      document_id: "advance-bill",
+      party_id: "crew",
+      party: "Test crew",
+      lane: "advance",
+      amount_ex: 2100,
+      event_date: "2026-10-30",
+      is_actual: false,
+      paid: true,
+      paid_on: "2026-10-30",
+    },
+    {
+      job_id: JOB,
+      source: "trade_employer_super",
+      source_id: "advance:employer_super",
+      document_id: "advance-bill",
+      party_id: "crew",
+      party: "Test crew",
+      lane: "advance",
+      amount_ex: 126,
+      event_date: "2026-10-30",
+      is_actual: false,
+      paid: false,
+      paid_on: null,
+    },
+  ];
+  const summary = {
+    job_id: JOB,
+    actual_cost_ex: 2720,
+    profit_ex: null,
+    margin_pct: null,
+    completeness: ["materials_not_linked"],
+  };
+  const out = await jobProfitAction(
+    fakeClient({ v_job_profit: [summary], v_job_cost_events: events }),
+    new URLSearchParams(`job_id=${JOB}`),
+  );
+  assertEquals(out.status, 200);
+  assertEquals(
+    out.body.job,
+    summary,
+    "engine totals and Unknown remain untouched",
+  );
+  const timeline = out.body.timeline as any[];
+  assertEquals(
+    timeline.filter((e) => e.source === "trade_employer_super").map(
+      (e) => [e.kind, e.counts, e.paid, e.date],
+    ),
+    [
+      ["employer_super", false, false, "2026-10-30"],
+      ["employer_super", true, false, null],
+    ],
+  );
+  assertEquals(
+    timeline.filter((e) => e.kind === "cost_paid").map((e) => e.amount_ex),
+    [2428.57],
+    "cash payment does not settle super or count an advance as earned cost",
+  );
+  assertEquals(
+    (out.body.trades as any[])[0].amount_ex,
+    2428.57,
+    "trade cash charges remain separate from employer obligation",
+  );
+  assertEquals(
+    out.body.cost_events,
+    events,
+    "original identity and counting fields retained",
+  );
+  assert(!JOB_PROFIT_LABELS.profit.includes("super share is not added"));
 });

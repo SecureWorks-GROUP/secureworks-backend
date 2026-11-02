@@ -19870,12 +19870,16 @@ async function assembleJobDossier(client: any, body: any) {
   // by load time (job_conversation_timeline.ts). Each row's occurred_at is
   // that time; loaded_at is when it was loaded. Message rows carry who sent
   // them and who received them (party roles, B-6).
+  // CTX-T24: use the same current person placement as the conversation and
+  // card. Never fall back to an event's original job when decisions cannot
+  // be read; safeRead reports that section as failed, not known-empty.
   const eventsRead = await safeRead('business_events', async () => {
     const { rows, error } = await readBusinessEventsBySourceTime(client, {
       jobId,
       select: `${DOSSIER_EVENT_SELECT}, event_at, channel, direction`,
       limit: eventsLimit,
       since,
+      personDecisions: true,
     })
     if (error) throw new Error(error)
     return rows.map((r: any) => ({ ...dossierEventWithPartyRoles(r), occurred_at: eventSourceTime(r), loaded_at: r.occurred_at ?? null }))
@@ -19889,12 +19893,15 @@ async function assembleJobDossier(client: any, body: any) {
   // dossier still returns only the newest conversationLimit messages.
   const contactWindow = Math.max(conversationLimit, DOSSIER_CONTACT_WINDOW)
   const conversationRead = await safeRead('conversation', async () => {
-    const { messages } = await getJobConversation(client, {
+    const result = await getJobConversation(client, {
       job_id: jobId,
       limit: contactWindow,
       since,
     })
-    return messages || []
+    if ('person_decisions_read_failed' in result && result.person_decisions_read_failed) {
+      throw new Error(result.person_decisions_read_failed)
+    }
+    return result.messages || []
   })
   const conversationWindow = conversationRead.data
   conversationRead.data = conversationWindow.slice(0, conversationLimit)
@@ -58035,6 +58042,19 @@ export async function createTradeVariationRequest(
   return tradeResult
 }
 
+// job_variations.cost_estimate is OUR cost of a variation, ex GST (the quote
+// builder writes its cost total there; Job Profit's variation_not_costed reads
+// it). 0 is a figure, a variation that costs nothing extra, so it is kept; only
+// a missing, blank or unreadable value is null. The trade app's
+// estimated_cost is the variation's PRICE (it becomes amount), never its cost,
+// so it is not read here.
+export function variationCostEstimate(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
 async function createVariation(
   client: any,
   body: any,
@@ -58069,7 +58089,7 @@ async function createVariation(
     description,
     amount: cost,
     reason: reason || null,
-    cost_estimate: cost_estimate ? Number(cost_estimate) : null,
+    cost_estimate: variationCostEstimate(cost_estimate),
     photo_url: photo_url || null,
     status: needsApproval ? 'pending_approval' : 'auto_approved',
     needs_approval: needsApproval,
