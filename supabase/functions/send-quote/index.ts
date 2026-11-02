@@ -34,6 +34,8 @@ import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outco
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import {
   quoteScopeRevisionIdForRelease,
+  quoteSendBuildSource,
+  sealedSendSource,
   startNamedScopeRevisionRead,
   type NamedScopeRevisionRead,
   type SentQuoteSourceHashes,
@@ -757,9 +759,9 @@ serve(async (req: Request) => {
       let xeroQuoteWarning: Record<string, unknown> | null = null
       const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior, source_scope_revision_id } = await req.json()
       // JP-24 slice 1b: read the producer-named frozen revision now, before any
-      // send await; awaited only at the quote_revisions insert. Never rejects,
-      // never changes the send.
-      const sourceScopeRevisionRead = startNamedScopeRevisionRead(sb, source_scope_revision_id)
+      // send await, with its frozen scope and pricing (D1 fix F1). The promise
+      // never rejects; it is judged below, before the email.
+      const sourceScopeRevisionRead = startNamedScopeRevisionRead(sb, source_scope_revision_id, { withFrozenBlobs: true })
 
       if (!document_id) {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
@@ -815,7 +817,16 @@ serve(async (req: Request) => {
       // this endpoint directly or replaying a stale document. Enforce it here.
       // Strict === false so fence/legacy quotes that never set the flag (undefined)
       // are NOT blocked — only an explicit validation failure blocks.
-      {
+      // D1 fix F1: a send that names sealed revision A builds the crew pack and
+      // the release record from A's own frozen scope and pricing, never from
+      // the live job (a save from another device after sealing changes only the
+      // live job). An unprovable named revision refuses below, before any
+      // email; legacy sends (no revision named) keep the live job.
+      const sealedSource = sealedSendSource(await sourceScopeRevisionRead, doc.job_id)
+      const sealedPricingJson = sealedSource.kind === 'sealed' ? sealedSource.pricing_json : null
+      if (sealedPricingJson && doc.jobs) doc.jobs.pricing_json = sealedPricingJson
+
+      if (sealedSource.kind !== 'refused') {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
       }
@@ -873,6 +884,16 @@ serve(async (req: Request) => {
           }
         }
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
+      }
+      // Judged after the claim so a retry of an already-published document
+      // still answers already_sent above. Nothing has been emailed yet.
+      if (sealedSource.kind === 'refused') {
+        console.log('[send-quote] sealed revision refused', JSON.stringify({
+          document_id, job_id: doc.job_id, code: sealedSource.body.code, reason: sealedSource.body.reason,
+        }))
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse(sealedSource.body, sealedSource.status, corsHeaders)
       }
       {
         const emailHtml = buildQuoteEmail({
@@ -1018,6 +1039,7 @@ serve(async (req: Request) => {
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
+      const packSource = quoteSendBuildSource(sealedSource, jobForPack)
       const persisted = await persistTradePackOnDocuments(sb, {
         documents: [{
           id: document_id,
@@ -1026,8 +1048,8 @@ serve(async (req: Request) => {
           claim_token: claimed.token,
         }],
         jobType: jobForPack.type || doc.jobs?.type,
-        scopeJson: jobForPack.scope_json,
-        pricingJson: jobForPack.pricing_json || doc.jobs?.pricing_json,
+        scopeJson: packSource.scope_json,
+        pricingJson: packSource.pricing_json || doc.jobs?.pricing_json,
         customer: {
           name: jobForPack.client_name ?? doc.jobs?.client_name,
           phone: jobForPack.client_phone ?? doc.jobs?.client_phone,
@@ -1061,6 +1083,7 @@ serve(async (req: Request) => {
           .select('job_number, type, pricing_json, client_name')
           .eq('id', doc.job_id)
           .single()
+        if (jobBefore && sealedPricingJson) jobBefore.pricing_json = sealedPricingJson
 
         // Conditional UPDATE returning affected rows — only this call's atomic
         // draft → quoted flip emits canonical release events. If a concurrent writer
@@ -1110,6 +1133,10 @@ serve(async (req: Request) => {
                 .eq('job_id', doc.job_id),
             ])
             if (fullJobRow) {
+              if (sealedSource.kind === 'sealed') {
+                fullJobRow.scope_json = sealedSource.scope_json
+                fullJobRow.pricing_json = sealedSource.pricing_json
+              }
               v2Inputs = {
                 job_id: doc.job_id,
                 version: doc.version || 1,
@@ -1168,7 +1195,7 @@ serve(async (req: Request) => {
               job_type: doc.jobs?.type || null,
               job_number: doc.jobs?.job_number || null,
             },
-            pricing_json: doc.jobs?.pricing_json || null,
+            pricing_json: quoteSendBuildSource(sealedSource, doc.jobs).pricing_json,
             pdf_url: doc.pdf_url || '',
             released_via: 'send-quote/send',
             org_id: DEFAULT_ORG_ID,
@@ -1240,6 +1267,8 @@ serve(async (req: Request) => {
           .select('id, ghl_opportunity_id, xero_contact_id, job_number, client_name, site_address, site_suburb, type, pricing_json')
           .eq('id', doc.job_id)
           .single()
+        // The GHL value and the Xero quote carry the price the customer was sent.
+        if (job && sealedPricingJson) job.pricing_json = sealedPricingJson
 
         // Push monetary value to GHL opportunity (non-blocking)
         if (GHL_API_TOKEN && job?.ghl_opportunity_id) {
@@ -2493,9 +2522,10 @@ serve(async (req: Request) => {
       const requestRefusal = sendRunsRequestRefusal(requestBody)
       if (requestRefusal) return jsonResponse(requestRefusal.body, requestRefusal.status, corsHeaders)
       // JP-24 slice 1b: the run documents are rendered from the same sealed
-      // revision the producer names; read it now, before any send await. The
-      // link names the whole-job revision, not a run share of it.
-      const sourceScopeRevisionReadRuns = startNamedScopeRevisionRead(sb, requestBody.source_scope_revision_id)
+      // revision the producer names; read it now, before any send await, with
+      // its frozen scope and pricing (D1 fix F1). The link names the whole-job
+      // revision, not a run share of it.
+      const sourceScopeRevisionReadRuns = startNamedScopeRevisionRead(sb, requestBody.source_scope_revision_id, { withFrozenBlobs: true })
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
@@ -2534,6 +2564,23 @@ serve(async (req: Request) => {
       // tenant access and before pricing, claims, documents, or provider sends.
       const scopeRefusal = sendRunsJobTypeRefusal(requestBody, job.type)
       if (scopeRefusal) return jsonResponse(scopeRefusal.body, scopeRefusal.status, corsHeaders)
+
+      // D1 fix F1: a send naming sealed revision A builds every run document,
+      // the crew packs and the release record from A's frozen scope and
+      // pricing, not from the live job. An unprovable named revision refuses
+      // here, before any claim or email.
+      {
+        const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
+        if (sealedRuns.kind === 'refused') {
+          console.log('[send-quote] send-runs sealed revision refused', JSON.stringify({
+            job_id: job.id, code: sealedRuns.body.code, reason: sealedRuns.body.reason,
+          }))
+          return jsonResponse(sealedRuns.body, sealedRuns.status, corsHeaders)
+        }
+        const runsSource = quoteSendBuildSource(sealedRuns, job)
+        job.scope_json = runsSource.scope_json
+        job.pricing_json = runsSource.pricing_json
+      }
 
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []

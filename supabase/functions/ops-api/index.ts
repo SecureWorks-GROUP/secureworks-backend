@@ -154,6 +154,8 @@ import {
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import {
   quoteScopeRevisionIdForRelease,
+  quoteSendBuildSource,
+  sealedSendSource,
   startNamedScopeRevisionRead,
   type NamedScopeRevisionRead,
   type SentQuoteSourceHashes,
@@ -40734,8 +40736,8 @@ async function createMiscJob(client: any, body: any) {
 async function sendQuickQuoteEmail(client: any, body: any) {
   const { job_id, pdf_url } = body
   // JP-24 slice 1b: read the producer-named frozen revision now, before any
-  // send await. Never rejects, never changes the send.
-  const sourceScopeRevisionRead = startNamedScopeRevisionRead(client, body?.source_scope_revision_id)
+  // send await, with its frozen pricing (D1 fix F1). Judged before the email.
+  const sourceScopeRevisionRead = startNamedScopeRevisionRead(client, body?.source_scope_revision_id, { withFrozenBlobs: true })
   if (!job_id) throw new Error('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
@@ -40753,7 +40755,14 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
   if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
 
-  const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
+  // D1 fix F1: a send naming sealed revision A quotes A's frozen price and
+  // records A's pricing on the release, never the live job's. An unprovable
+  // named revision refuses here, before the email.
+  const sealedSource = sealedSendSource(await sourceScopeRevisionRead, job_id)
+  if (sealedSource.kind === 'refused') throw new Error(sealedSource.body.error)
+  const sealedPricingJson = sealedSource.kind === 'sealed' ? sealedSource.pricing_json : null
+  const builtPricing = quoteSendBuildSource(sealedSource, job).pricing_json as any
+  const pricing = typeof builtPricing === 'string' ? JSON.parse(builtPricing || '{}') : (builtPricing || {})
 
   // ── Server-side pricing gate (mirrors send-quote quotePricingGateError) ──
   // Refuse to send a quote the scoping tool flagged as failing validation, or one
@@ -40874,6 +40883,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       client_name: string | null
       pricing_json: Record<string, unknown> | null
     }
+    if (sealedPricingJson) fresh.pricing_json = sealedPricingJson
     const freshPricing = (fresh.pricing_json ?? {}) as Record<string, unknown>
     const freshTotalIncGSTRaw = freshPricing.totalIncGST ?? freshPricing.total ?? freshPricing.grandTotal
     const totalIncGSTNum = typeof freshTotalIncGSTRaw === 'number' && Number.isFinite(freshTotalIncGSTRaw)

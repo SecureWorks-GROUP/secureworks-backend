@@ -3234,3 +3234,139 @@ Deno.test('JP24-S11 send-quote writer, slice 1b: each handler starts the named r
     assert(passed > start, `${label}: the read is handed to the release-row writer`)
   }
 })
+
+// ── D1 fix F1: a racing save between seal and send ──
+//
+// Business outcome: the scoper seals revision A and the customer PDF is
+// rendered from A. Before the server reaches the pack step another device
+// saves the job (save_scope writes jobs.scope_json / pricing_json = B; A stays
+// frozen). The crew trade pack and the release record must still be A's, so
+// the crew builds what the customer was quoted and Job Profit's expected cost
+// (bound to A) matches the record. Before the fix the pack and the release
+// pricing were built from the live job (B).
+//
+// Drives the real pieces the handlers call, in their order: the named read
+// with frozen blobs, sealedSendSource, quoteSendBuildSource, the real trade
+// pack writer and the real release-row writer. The last test pins that the
+// three handlers use exactly these, and judge the named read before the email.
+
+import {
+  quoteSendBuildSource,
+  sealedSendSource,
+} from '../_shared/scope_freeze/quote_scope_revision_link.ts'
+import { persistTradePackOnDocuments } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+
+const F1_SCOPE_A = { job: { siteAddress: '1 Test St', siteNotes: 'Rear fence only, 12.4 m' } }
+const F1_PRICING_A = { totalIncGST: 5500, totalExGST: 5000, gst: 500, line_items: [{ description: 'Colorbond fence', quantity: 12.4, unit: 'm', line_total_ex: 5000 }] }
+const F1_SCOPE_B = { job: { siteAddress: '1 Test St', siteNotes: 'Rear and side fence, 14 m' } }
+const F1_PRICING_B = { totalIncGST: 6050, totalExGST: 5500, gst: 550, line_items: [{ description: 'Colorbond fence', quantity: 14, unit: 'm', line_total_ex: 5500 }] }
+
+async function f1SealedRow(id: string, scope: unknown, pricing: unknown, extra: Record<string, unknown> = {}) {
+  const s = await canonicalJsonAndHash(scope)
+  const p = await canonicalJsonAndHash(pricing)
+  return {
+    id, job_id: JP24_JOB, revision_number: 1, status: 'frozen',
+    scope_canonical_text: s.canonical, scope_hash: s.hash,
+    pricing_canonical_text: p.canonical, pricing_hash: p.hash,
+    ...extra,
+  }
+}
+
+// The trade pack writer's one write: job_documents.update(...).eq().eq().select().maybeSingle().
+function f1PackSb() {
+  const written: any[] = []
+  const sb = {
+    from: (_t: string) => {
+      const q: any = {
+        update(p: any) { written.push(p.trade_pack_json); return q },
+        eq() { return q },
+        select() { return q },
+        async maybeSingle() { return { data: { id: 'doc-1' }, error: null } },
+      }
+      return q
+    },
+  }
+  return { sb, written }
+}
+
+async function f1Pack(scope: unknown, pricing: unknown) {
+  const { sb, written } = f1PackSb()
+  const r = await persistTradePackOnDocuments(sb, {
+    documents: [{ id: 'doc-1', quote_number: 'Q-1', sent_at: '2026-11-02T00:00:00.000Z', claim_token: 't' }],
+    jobType: 'fencing', scopeJson: scope, pricingJson: pricing,
+    customer: { name: 'CAP0 TEST', site_address: '1 Test St', site_suburb: 'Perth' },
+  })
+  assertEquals(r.wrote, 1)
+  return written[0]
+}
+
+// One send, as the /send handler runs it, against a job saved to B after A was sealed.
+async function f1SendAfterRacingSave(rowA: Record<string, unknown>) {
+  const sb = jp24Supabase({ jobs: { scope_json: F1_SCOPE_A, pricing_json: F1_PRICING_A }, revisions: [rowA] })
+  const named = startNamedScopeRevisionRead(sb, JP24_REV_A, { withFrozenBlobs: true })
+  // The racing save from another device: live job is now B, A stays frozen.
+  sb._state.jobs = { scope_json: F1_SCOPE_B, pricing_json: F1_PRICING_B }
+  const liveJob = sb._state.jobs
+  const sealed = sealedSendSource(await named, JP24_JOB)
+  if (sealed.kind === 'refused') return { sealed, pack: null, release: null }
+  const packSource = quoteSendBuildSource(sealed, liveJob)
+  const pack = await f1Pack(packSource.scope_json, packSource.pricing_json)
+  const release = await jp24Run(sb, jp24Input({
+    pricing_json: quoteSendBuildSource(sealed, liveJob).pricing_json,
+    source_scope_revision: Promise.resolve(await named),
+  }))
+  return { sealed, pack, release }
+}
+
+Deno.test('D1-F1a racing save between seal and send: crew pack and release record pricing are sealed A, not the live job B', async () => {
+  const { sealed, pack, release } = await f1SendAfterRacingSave(await f1SealedRow(JP24_REV_A, F1_SCOPE_A, F1_PRICING_A))
+  assertEquals(sealed.kind, 'sealed')
+  assertEquals(pack, await f1Pack(F1_SCOPE_A, F1_PRICING_A), 'the crew pack is the pack of A')
+  assert(JSON.stringify(pack) !== JSON.stringify(await f1Pack(F1_SCOPE_B, F1_PRICING_B)), 'and differs from the pack of B')
+  assertEquals(pack.quote_lines.map((l: any) => l.quantity), [12.4], 'the crew is told 12.4 m, what the customer was quoted')
+  assertEquals(release!.scope_revision_id, JP24_REV_A, 'the release record names A')
+  const manifest = release!.uploaded.join('')
+  assert(manifest.includes('5500') && !manifest.includes('6050'), 'the release manifest carries A\'s price, never B\'s')
+})
+
+Deno.test('D1-F1b the named revision cannot be proven: the send is refused before any email, with a reason', async () => {
+  const rowA = await f1SealedRow(JP24_REV_A, F1_SCOPE_A, F1_PRICING_A)
+  const cases: Array<[string, Record<string, unknown>, number, string]> = [
+    ['A replaced by a newer seal', { ...rowA, status: 'superseded' }, 409, 'sealed_revision_conflict'],
+    ['A belongs to another job', { ...rowA, job_id: JP24_OTHER_JOB }, 409, 'sealed_revision_conflict'],
+    ['A frozen text does not match its hash', { ...rowA, pricing_canonical_text: JSON.stringify(F1_PRICING_B) }, 409, 'sealed_revision_conflict'],
+  ]
+  for (const [label, row, status, code] of cases) {
+    const { sealed, pack } = await f1SendAfterRacingSave(row)
+    assertEquals(sealed.kind, 'refused', label)
+    if (sealed.kind !== 'refused') continue
+    assertEquals([sealed.status, sealed.body.code], [status, code], label)
+    assert(sealed.body.error.includes('Nothing was sent'), `${label}: the office is told nothing went out`)
+    assertEquals(pack, null, `${label}: no pack is built`)
+  }
+  const failedSb = jp24Supabase({ jobs: {}, revisions: [rowA], namedError: true })
+  const failed = sealedSendSource(await startNamedScopeRevisionRead(failedSb, JP24_REV_A, { withFrozenBlobs: true }), JP24_JOB)
+  assertEquals(failed.kind === 'refused' ? [failed.status, failed.body.code] : failed.kind, [503, 'sealed_revision_read_failed'])
+  assertEquals(sealedSendSource(await startNamedScopeRevisionRead(failedSb, 'not-a-uuid'), JP24_JOB).kind, 'refused')
+  // Legacy senders name nothing: unchanged, built from the live job.
+  const legacy = sealedSendSource(await startNamedScopeRevisionRead(failedSb, undefined), JP24_JOB)
+  assertEquals(legacy.kind, 'legacy')
+  assertEquals(quoteSendBuildSource(legacy, { scope_json: F1_SCOPE_B, pricing_json: F1_PRICING_B }).pricing_json, F1_PRICING_B)
+})
+
+Deno.test('D1-F1c every sender builds from quoteSendBuildSource and judges the named revision before the email', async () => {
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const ops = await Deno.readTextFile(new URL('../ops-api/index.ts', import.meta.url))
+  const send = src.slice(src.indexOf("if (path === 'send' && req.method === 'POST')"), src.indexOf('// ── QUOTE STATUS'))
+  assert(send.includes('startNamedScopeRevisionRead(sb, source_scope_revision_id, { withFrozenBlobs: true })'))
+  assert(send.indexOf("sealedSource.kind === 'refused'") < send.indexOf("fetch('https://api.resend.com/emails'"), '/send refuses before the email')
+  assert(send.includes('const packSource = quoteSendBuildSource(sealedSource, jobForPack)'))
+  assert(send.includes('scopeJson: packSource.scope_json,'), '/send packs the build source scope')
+  assert(send.includes('pricing_json: quoteSendBuildSource(sealedSource, doc.jobs).pricing_json,'), '/send release pricing from the build source')
+  const runs = src.slice(src.indexOf("if (path === 'send-runs' && req.method === 'POST')"))
+  assert(runs.includes("startNamedScopeRevisionRead(sb, requestBody.source_scope_revision_id, { withFrozenBlobs: true })"))
+  assert(runs.indexOf('quoteSendBuildSource(sealedRuns, job)') < runs.indexOf('const pj = typeof job.pricing_json'), '/send-runs swaps in A before anything is built')
+  assert(runs.indexOf("sealedRuns.kind === 'refused'") < runs.indexOf('claimJobSendRuns('), '/send-runs refuses before the claim and email')
+  const qq = ops.slice(ops.indexOf('async function sendQuickQuoteEmail('))
+  assert(qq.indexOf('quoteSendBuildSource(sealedSource, job)') < qq.indexOf("fetch('https://api.resend.com/emails'"), 'quick quote prices from A before the email')
+})

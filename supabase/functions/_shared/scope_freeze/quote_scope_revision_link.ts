@@ -201,13 +201,21 @@ export async function quoteScopeRevisionIdForSend(
 // the send is in flight would turn A's quote into null, or into B's id when the
 // two hashes happen to match. So a named, accepted row is stored as itself.
 // Everything else (no id, a malformed id, another job's row, a row that is not
-// frozen, a missing row, a failed or slow read) stores null.
+// frozen, a missing row, a failed or slow read) stores null. Since the D1 fix
+// (F1) the senders also judge the named read before the email
+// (sealedSendSource, bottom of this file): such a send is refused, so a null
+// link on the named path is only reachable by a caller that skips that step.
 
 export type NamedScopeRevision = {
   id: string
   job_id: string
   scope_hash: string
   pricing_hash: string
+  // Only with { withFrozenBlobs: true }: the revision's own frozen scope and
+  // pricing, parsed from its canonical texts and re-hashed to its stored
+  // hashes. The send builds the crew pack and the release record from these.
+  scope_json?: Record<string, unknown>
+  pricing_json?: Record<string, unknown>
 }
 
 export type NamedScopeRevisionReason =
@@ -232,10 +240,23 @@ export function namedScopeRevisionAbsent(raw: unknown): boolean {
   return raw === undefined || raw === null
 }
 
-async function readNamedScopeRevisionOnce(client: any, id: string): Promise<NamedScopeRevisionRead> {
+// A frozen canonical text parsed back, accepted only when it re-hashes to the
+// row's stored hash (the same canonicalJsonAndHash freeze_scope used).
+async function frozenBlobFromCanonicalText(text: unknown, hash: string): Promise<Record<string, unknown> | null> {
+  if (typeof text !== 'string' || !text) return null
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { return null }
+  if (!isPlainObjectWithKeys(parsed)) return null
+  const again = await canonicalJsonAndHash(parsed)
+  return again.hash === hash ? parsed : null
+}
+
+async function readNamedScopeRevisionOnce(client: any, id: string, withFrozenBlobs: boolean): Promise<NamedScopeRevisionRead> {
   try {
     const { data, error } = await client.from('scope_revisions')
-      .select('id, job_id, status, scope_hash, pricing_hash')
+      .select(withFrozenBlobs
+        ? 'id, job_id, status, scope_hash, pricing_hash, scope_canonical_text, pricing_canonical_text'
+        : 'id, job_id, status, scope_hash, pricing_hash')
       .eq('id', id)
       .maybeSingle()
     if (error) return { revision: null, reason: 'named_revision_read_failed', named_id: id }
@@ -247,11 +268,15 @@ async function readNamedScopeRevisionOnce(client: any, id: string): Promise<Name
       return { revision: null, reason: 'named_revision_row_malformed', named_id: id }
     }
     if (row.status !== 'frozen') return { revision: null, reason: 'named_revision_not_frozen', named_id: id }
-    return {
-      revision: { id, job_id: row.job_id, scope_hash: row.scope_hash, pricing_hash: row.pricing_hash },
-      reason: 'named_revision_read',
-      named_id: id,
+    const revision: NamedScopeRevision = { id, job_id: row.job_id, scope_hash: row.scope_hash, pricing_hash: row.pricing_hash }
+    if (withFrozenBlobs) {
+      const scope = await frozenBlobFromCanonicalText(row.scope_canonical_text, row.scope_hash)
+      const pricing = await frozenBlobFromCanonicalText(row.pricing_canonical_text, row.pricing_hash)
+      if (!scope || !pricing) return { revision: null, reason: 'named_revision_row_malformed', named_id: id }
+      revision.scope_json = scope
+      revision.pricing_json = pricing
     }
+    return { revision, reason: 'named_revision_read', named_id: id }
   } catch {
     return { revision: null, reason: 'named_revision_read_threw', named_id: id }
   }
@@ -266,7 +291,7 @@ async function readNamedScopeRevisionOnce(client: any, id: string): Promise<Name
 export function startNamedScopeRevisionRead(
   client: any,
   raw: unknown,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; withFrozenBlobs?: boolean } = {},
 ): Promise<NamedScopeRevisionRead> {
   if (namedScopeRevisionAbsent(raw)) return Promise.resolve({ revision: null, reason: 'named_id_absent' })
   if (typeof raw !== 'string' || !UUID.test(raw)) {
@@ -278,7 +303,7 @@ export function startNamedScopeRevisionRead(
   const timedOut = new Promise<NamedScopeRevisionRead>((resolve) => {
     timer = setTimeout(() => resolve({ revision: null, reason: 'named_revision_read_timed_out', named_id: id }), timeoutMs)
   })
-  return Promise.race([readNamedScopeRevisionOnce(client, id), timedOut])
+  return Promise.race([readNamedScopeRevisionOnce(client, id, opts.withFrozenBlobs === true), timedOut])
     .catch((): NamedScopeRevisionRead => ({ revision: null, reason: 'named_revision_read_threw', named_id: id }))
     .finally(() => { if (timer !== undefined) clearTimeout(timer) })
 }
@@ -325,4 +350,66 @@ export async function quoteScopeRevisionIdForRelease(
     }))
   } catch { /* logging never fails a send */ }
   return null
+}
+
+// ── D1 fix F1: everything a named send builds comes from the named revision ──
+//
+// Business rule: when the sender names sealed revision A, the customer PDF
+// (rendered by the producer from A), the crew trade pack, the release record's
+// pricing and the expected cost all come from A. A save_scope from another
+// device between sealing and sending only changes jobs.scope_json /
+// pricing_json (B); A stays frozen. So the send builds from A's own frozen
+// texts, never from the live job, and a racing save cannot reach the pack.
+//
+// When the named revision cannot be proven (malformed id, missing, another
+// job's row, superseded by a newer seal, a corrupt row, a failed or slow read)
+// the send is refused before any email, with a reason the office can act on.
+// Legacy senders name nothing and keep today's live-job behaviour.
+
+export type SealedSendSource =
+  | { kind: 'legacy' }
+  | { kind: 'sealed'; revision_id: string; scope_json: Record<string, unknown>; pricing_json: Record<string, unknown> }
+  | { kind: 'refused'; status: 400 | 409 | 503; body: { error: string; code: string; reason: string } }
+
+/**
+ * Decide what a send builds from, given the awaited result of
+ * startNamedScopeRevisionRead(..., { withFrozenBlobs: true }) and the job
+ * being sent. Pure; never throws.
+ */
+export function sealedSendSource(read: NamedScopeRevisionRead | null | undefined, jobId: string | null | undefined): SealedSendSource {
+  if (!read || read.reason === 'named_id_absent') return { kind: 'legacy' }
+  const rev = read.revision
+  if (rev && rev.job_id === jobId && rev.scope_json && rev.pricing_json) {
+    return { kind: 'sealed', revision_id: rev.id, scope_json: rev.scope_json, pricing_json: rev.pricing_json }
+  }
+  const reason = rev ? (rev.job_id !== jobId ? 'named_revision_other_job' : 'named_revision_row_malformed') : read.reason
+  if (reason === 'named_id_malformed') {
+    return { kind: 'refused', status: 400, body: {
+      error: 'source_scope_revision_id is not a revision id. Nothing was sent.',
+      code: 'sealed_revision_id_malformed', reason,
+    } }
+  }
+  if (reason === 'named_revision_read_failed' || reason === 'named_revision_read_timed_out' || reason === 'named_revision_read_threw') {
+    return { kind: 'refused', status: 503, body: {
+      error: 'Could not read the sealed quote revision this send names. Nothing was sent. Try again.',
+      code: 'sealed_revision_read_failed', reason,
+    } }
+  }
+  return { kind: 'refused', status: 409, body: {
+    error: 'The sealed quote revision this send names is not this job\'s current sealed revision (it was replaced, removed or belongs to another job). Nothing was sent. Reopen the quote, seal it again and resend.',
+    code: 'sealed_revision_conflict', reason,
+  } }
+}
+
+/**
+ * The scope and pricing a send builds its crew pack and release record from:
+ * the sealed revision's own frozen blobs when the send names one, otherwise
+ * (legacy senders) the live job's.
+ */
+export function quoteSendBuildSource(
+  sealed: SealedSendSource,
+  live: { scope_json?: unknown; pricing_json?: unknown } | null | undefined,
+): { scope_json: unknown; pricing_json: unknown } {
+  if (sealed.kind === 'sealed') return { scope_json: sealed.scope_json, pricing_json: sealed.pricing_json }
+  return { scope_json: live?.scope_json ?? null, pricing_json: live?.pricing_json ?? null }
 }
