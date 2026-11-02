@@ -61,11 +61,16 @@ PRIVATE bucket `context-email-attachments` (service role only). Opening one
 from a staff screen is a new access to that bucket and waits on the owner's
 word; until then the answer lists each file and says it cannot be opened yet.
 
-## Candidate release boundary (31 October 2026)
+## Who may open an original (owner decision Q27, 2 November 2026)
 
-This recovered1130 composition is separate from the financial release candidate.
-Q27 still requires an owner decision about original personal-mailbox access;
-the broad office-role route in this candidate is not authorized to deploy.
-P5/R2-5 file access remains held. No file bytes or signed links are served.
-Tests use synthetic messages, not personal mail. Historical isolated review
-of1130 does not cover this composition or its source-time correction.
+Marnin answered Q27 on 2 November 2026: "anyting to do with a job is fine work
+mailboxes shouldnt be used for personal stuff. so its all fine." Admins and
+managers may open the original text of every captured message, personal work
+mailboxes included. This viewer admits admin, owner and ops_manager logins and
+server keys; every other role, the shared browser key and the agent keys are
+refused. Crew and trade logins were not granted access and stay refused.
+
+The viewer trusts `users.role`. Release it with or after the users self-update
+guard (20261102010000), which stops a signed-in user from changing their own
+role. P5/R2-5 file access remains held: no file bytes or signed links are
+served. Tests use synthetic messages, not personal mail.
