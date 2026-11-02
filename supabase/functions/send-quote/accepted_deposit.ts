@@ -2,7 +2,8 @@
 // accepted, never from the live job.
 //
 // The accepted document's released quote_revisions row carries the pricing that
-// was sent (F1 makes it the named sealed revision). Reading jobs.pricing_json
+// was sent, frozen verbatim as pricing_snapshot_json.raw (build_minimal_manifest;
+// the same source send_acceptance_invoice reads for the deposit config). Reading jobs.pricing_json
 // instead meant a re-scope after sending (B) could price the deposit for a
 // customer who accepted A. When the released pricing cannot be read, the
 // deposit is held with a reason rather than guessed.
@@ -27,7 +28,7 @@ export async function readAcceptedRelease(
   let res: QueryResult
   try {
     res = await sb.from('quote_revisions')
-      .select('id, pricing_json, sent_at')
+      .select('id, pricing_snapshot_json, sent_at')
       .eq('job_document_id', documentId)
       .not('sent_at', 'is', null)
       .order('sent_at', { ascending: false })
@@ -38,9 +39,14 @@ export async function readAcceptedRelease(
   if (res?.error) return { ok: false, reason: 'release_read_failed' }
   const row = res?.data?.[0]
   if (!row) return { ok: false, reason: 'no_released_quote' }
-  let pricing = row.pricing_json
-  if (typeof pricing === 'string') {
-    try { pricing = JSON.parse(pricing) } catch { return { ok: false, reason: 'released_pricing_unreadable' } }
+  let snap = row.pricing_snapshot_json
+  let pricing: any
+  try {
+    if (typeof snap === 'string') snap = JSON.parse(snap)
+    pricing = snap?.raw
+    if (typeof pricing === 'string') pricing = JSON.parse(pricing)
+  } catch {
+    return { ok: false, reason: 'released_pricing_unreadable' }
   }
   if (!pricing || typeof pricing !== 'object' || Array.isArray(pricing)) {
     return { ok: false, reason: 'released_pricing_unreadable' }
