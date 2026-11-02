@@ -1014,3 +1014,32 @@ Deno.test("employer super remains a separate unpaid obligation, not a supplier b
   );
   assert(!JOB_PROFIT_LABELS.profit.includes("super share is not added"));
 });
+
+Deno.test("job_profit: line evidence comes with the figures; a failed read is unknown, never verified", async () => {
+  const tables = {
+    jobs: [{ id: JOB, job_number: "SWF-1" }],
+    v_job_profit: [{ job_id: JOB, job_number: "SWF-1", invoiced_ex: 1000, actual_cost_ex: 570, profit_ex: 430 }],
+    v_job_cost_events: [],
+    v_job_revenue_events: [],
+  };
+  const ok: any = fakeClient(tables);
+  const seen: unknown[] = [];
+  ok.rpc = (fn: string, args: unknown) => {
+    seen.push([fn, args]);
+    return Promise.resolve({ data: { status: "provisional", items: 3, evidenced: 1 }, error: null });
+  };
+  const r1 = await jobProfitAction(ok, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(r1.status, 200);
+  assertEquals((r1.body as any).line_evidence, { status: "provisional", items: 3, evidenced: 1 });
+  assertEquals(seen, [["job_profit_line_evidence", { p_job_id: JOB }]]);
+
+  const bad: any = fakeClient(tables);
+  bad.rpc = () => Promise.resolve({ data: null, error: { message: "timeout" } });
+  const r2 = await jobProfitAction(bad, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(r2.status, 200, "figures still return when the evidence read fails");
+  assertEquals((r2.body as any).line_evidence.status, "unknown");
+
+  const none: any = fakeClient(tables);
+  const r3 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals((r3.body as any).line_evidence.status, "unknown");
+});
