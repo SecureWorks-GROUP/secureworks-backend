@@ -73,7 +73,7 @@
 -- Rollback: supabase/rollbacks/20261029180000_scope_revisions_superseded_lock_down.sql
 -- restores the 20260504090757 body and drops the INSERT guard.
 
-BEGIN;
+-- (explicit BEGIN removed 2 Nov 2026: the deploy applies each migration in one transaction and refuses transaction control)
 
 DO $$
 DECLARE
@@ -195,4 +195,4 @@ CREATE TRIGGER trg_scope_revisions_insert_lifecycle
   FOR EACH ROW EXECUTE FUNCTION public.scope_revisions_insert_lifecycle();
 
 
-COMMIT;
+-- (explicit COMMIT removed, see above)
