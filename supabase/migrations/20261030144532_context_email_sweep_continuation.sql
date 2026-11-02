@@ -336,6 +336,13 @@ BEGIN
    IF (sweep_due AND NOT swept AND (since IS NULL OR since<sweep_at)) OR (bounded_sweeps AND EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from>=now_time-interval '60 days' AND w.window_to<now_time-sweep_grace)) THEN
     src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','sweep_incomplete','since',sweep_at,'last_status',last_sweep.status));
    END IF;
+   -- An unfinished window past the 60-day read limit can never be swept. It
+   -- stays visible under its own key, so it never hides a later real
+   -- sweep_incomplete and never clears by itself.
+   IF bounded_sweeps AND EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from<now_time-interval '60 days') THEN
+    src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','sweep_window_expired','since',
+     (SELECT min(w.window_from) FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from<now_time-interval '60 days')));
+   END IF;
   END IF;
   per_source:=per_source||jsonb_build_array(jsonb_build_object('line',line,'selected',selected,
    'pending_review',m.status='pending_review','last_seen',last_seen,'alarms',src_alarms));
