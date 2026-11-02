@@ -9,7 +9,7 @@
 -- No first live staff decision, placement activation, send or accounting change.
 -- Rollback refuses if any time-aware decision exists: reverting after adoption
 -- would silently remove its source-time protection. Do not delete such rows.
-BEGIN;
+-- No BEGIN/COMMIT: the deploy script runs each migration in one transaction.
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
 DO $guard$ BEGIN
@@ -281,4 +281,3 @@ DO $post$ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_source_at(business_events)'::regprocedure) IS DISTINCT FROM '8b40d559006f9a4241180b90852a5939' THEN RAISE EXCEPTION 'matching_time_postimage_mismatch';END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_source_time_hash(business_events)'::regprocedure) IS DISTINCT FROM '61c301d66ba259cb0052456fba0abb39' THEN RAISE EXCEPTION 'matching_time_postimage_mismatch';END IF;
 END $post$;
-COMMIT;

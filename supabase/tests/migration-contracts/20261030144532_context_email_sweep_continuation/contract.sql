@@ -118,7 +118,10 @@ BEGIN
  -- A current success must not hide that missing historical interval.
  UPDATE public.context_email_sweep_windows SET state='succeeded',completed_at=now() WHERE window_from>=now()-interval '60 days';
  s:=public.context_email_capture_status_at(now());
- PERFORM pg_temp.sweep_check(EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') al WHERE al->>'key'='sweep_incomplete'),'current success cannot hide earlier unfinished window');
+ PERFORM pg_temp.sweep_check(EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') al WHERE al->>'key'='sweep_window_expired'),'current success cannot hide earlier unfinished window');
+ -- The expired window has its own key, so it does not hold sweep_incomplete on
+ -- (release review C3): a later real stuck sweep still raises sweep_incomplete.
+ PERFORM pg_temp.sweep_check(NOT EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') al WHERE al->>'key'='sweep_incomplete'),'expired window does not hold sweep_incomplete on');
 END $$;
 SELECT jsonb_build_object('assertions',count(*),'result','PASS','scope','synthetic local SQL; no external HTTP') FROM pg_temp.sweep_assertions;
 ROLLBACK;

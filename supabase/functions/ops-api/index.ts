@@ -520,6 +520,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { MessageOriginalError, contextMessageOriginal } from './context_message_original.ts'
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
@@ -780,6 +781,7 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
+import { autoGroupPatioJobs, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
   claimGroupReleaseForInvoice,
@@ -8778,6 +8780,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Open the original (CTX-T23, design AC-M6): one captured message,
+      // read-only, staff front door, GET only. Serves no file bytes; call
+      // words are never returned. Contract: docs/context/message-original.md.
+      case 'context_message_original': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(await contextMessageOriginal(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof MessageOriginalError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Job story (story slice S2): the story of one job, its client's story,
       // and the done-definition scorecard. Staff front door (the default for an
       // action on no static, profile, routine or agent list), GET only,
@@ -10039,7 +10054,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         let issued: Record<string, unknown> = {}
         let issueError: unknown = null
+        // WO-6: open patio jobs with 2+ crew and no work order get their
+        // draft first, so this same sweep fills and issues it. Writes nothing
+        // while group_work_order_auto_patio_v1 is off; never throws.
+        const patioDrafts = await openMissingPatioWorkOrders(client)
         try { issued = await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)) } catch (e) { issueError = e }
+        // WO-6: then a group on every open patio job with a priced work order
+        // and 2+ crew. Same flag; never throws.
+        const patioGroups = await autoGroupPatioJobs(client)
         // Ready full-super groups go to Xero as drafts with no office click
         // (owner, 30 Oct 2026). A failure here never stops the work order sweep.
         const groupReleases: unknown[] = []
@@ -10052,7 +10074,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           groupReleases.push({ error: 'group release sweep failed' })
         }
         if (issueError) throw issueError
-        return json({ ...issued, group_releases: groupReleases })
+        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any

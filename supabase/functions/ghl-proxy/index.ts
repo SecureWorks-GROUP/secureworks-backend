@@ -93,6 +93,7 @@ import {
   scopeJsonHash,
   stalePreparedContactIds,
   verifiedJobStorageOrgId,
+  scopeSaveIdentityFill,
 } from './hardening_helpers.ts'
 import {
   authorizeFenceMintCaller,
@@ -2802,7 +2803,7 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       const { data: targetJob, error: targetError } = await sb.from('jobs')
-        .select('id, org_id, job_number, client_name, client_phone, client_email, site_address, scope_json, updated_at')
+        .select('id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, scope_json, updated_at')
         .eq('id', jobId)
         .single()
 
@@ -2931,6 +2932,10 @@ serve(async (req: Request) => {
         identityWarnings.push('phone_mismatch')
       }
 
+      const identityFill = scopeSaveIdentityFill(targetJob as Record<string, unknown>, meta)
+      const keptFields = Object.keys(identityFill.kept)
+      if (keptFields.length > 0) identityWarnings.push('kept_job_value')
+
       if (identityWarnings.length > 0) {
         await sb.from('job_events').insert({
           job_id: jobId,
@@ -2942,6 +2947,10 @@ serve(async (req: Request) => {
             incoming_ref: incomingIdentity.ref,
             target_client_name: targetJob.client_name || null,
             incoming_client: incomingIdentity.client,
+            // What the scoper typed where the job already held a different
+            // value; the job's value was kept.
+            kept_fields: keptFields,
+            typed: identityFill.kept,
           }
         })
       }
@@ -2954,11 +2963,9 @@ serve(async (req: Request) => {
 
       const update: Record<string, any> = { scope_json: scopeJson || {}, legacy: false }
       if (meta) {
-        if (meta.client_name) update.client_name = meta.client_name
-        if (meta.client_phone) update.client_phone = meta.client_phone
-        if (meta.client_email) update.client_email = meta.client_email
-        if (meta.site_address) update.site_address = meta.site_address
-        if (meta.site_suburb) update.site_suburb = meta.site_suburb
+        // Fill only what the job still holds empty; the updated_at check on
+        // the write below refuses the save if the office edits in between.
+        Object.assign(update, identityFill.fill)
         if (meta.pricing_json) update.pricing_json = meta.pricing_json
         if (meta.notes) update.notes = meta.notes
       }

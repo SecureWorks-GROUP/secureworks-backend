@@ -10,8 +10,8 @@ DECLARE x record; actual text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.trigger_context_email_poll()',ARRAY['1430e54e4443b839865d3b4874793e15','bf67f0c4e5604233590712b9662dceb8']),
-  ('public.trigger_context_email_sweep()',ARRAY['9e375b43beb7dc236b44dd5bd0b131d7','09da1a04c7c3400b2a2aad6e1f7b1b66']),
-  ('public.context_email_capture_status_at(timestamptz)',ARRAY['ee6f8e5d57e41fe8c2691b59d4b51856','6bd24146f34afca361b29dc2e6143517'])
+  ('public.trigger_context_email_sweep()',ARRAY['9e375b43beb7dc236b44dd5bd0b131d7','02e0c1fe63c60212865c955dc3997bb9']),
+  ('public.context_email_capture_status_at(timestamptz)',ARRAY['ee6f8e5d57e41fe8c2691b59d4b51856','18d69176f3a277af49ebb2cd6e4ae12e'])
  ) t(sig,accepted) LOOP
   SELECT md5(prosrc) INTO actual FROM pg_proc WHERE oid=to_regprocedure(x.sig);
   IF actual IS NULL OR NOT actual=ANY(x.accepted) THEN RAISE EXCEPTION 'email_sweep_preimage_mismatch: % %',x.sig,actual; END IF;
@@ -81,14 +81,15 @@ BEGIN
  END LOOP;
  -- A posted HTTP request is not proof of capture. Give it a bounded start/
  -- execution interval, then retry even when no run was ever created.
- IF EXISTS(SELECT 1 FROM public.context_email_sweep_windows WHERE last_posted_at>now()-interval '5 minutes') THEN
+ -- 4 minutes, just under the 5-minute tick, so tick jitter never skips a turn.
+ IF EXISTS(SELECT 1 FROM public.context_email_sweep_windows WHERE last_posted_at>now()-interval '4 minutes') THEN
   RETURN jsonb_build_object('outcome','busy','reason','recent_dispatch'); END IF;
  IF EXISTS(SELECT 1 FROM public.context_capture_runs WHERE source LIKE 'outlook_sweep_%' AND status='running' AND updated_at>now()-interval '10 minutes') THEN
   RETURN jsonb_build_object('outcome','busy','reason','reader_running'); END IF;
  SELECT q.* INTO p FROM public.context_email_sweep_windows q
  JOIN public.monitored_mailboxes m ON m.source_key=q.source_key AND m.enabled AND m.status='active' AND m.kind IN ('user','group')
  WHERE q.state<>'succeeded' AND q.window_from>=now()-interval '60 days' AND q.window_to<=now()
-  AND (q.last_posted_at IS NULL OR q.last_posted_at<=now()-CASE WHEN q.no_progress>=3 THEN interval '15 minutes' ELSE interval '5 minutes' END)
+  AND (q.last_posted_at IS NULL OR q.last_posted_at<=now()-CASE WHEN q.no_progress>=3 THEN interval '15 minutes' ELSE interval '4 minutes' END)
   AND NOT EXISTS(SELECT 1 FROM public.context_email_sweep_windows older WHERE older.source_key=q.source_key AND older.state<>'succeeded'
    AND older.window_from>=now()-interval '60 days' AND (older.window_to,older.window_from)<(q.window_to,q.window_from))
  ORDER BY q.last_posted_at ASC NULLS FIRST,q.window_to,q.source_key COLLATE "C" LIMIT 1 FOR UPDATE OF q;
@@ -204,7 +205,9 @@ BEGIN
   IF NOT coalesce(public.automation_lane_enabled('capture'),false) OR NOT pg_try_advisory_xact_lock(20261030,1453) THEN RETURN; END IF;
   FOR k IN SELECT m.source_key FROM public.monitored_mailboxes m WHERE m.enabled AND m.status='active' AND m.kind IN ('user','group') ORDER BY m.source_key LOOP
    SELECT max(window_to) INTO previous_to FROM public.context_email_sweep_windows WHERE source_key=k;
-   first_from:=least(coalesce(previous_to,target-interval '48 hours'),target-interval '48 hours');
+   -- Never older than 59 days: the tick and reader refuse windows past 60 days,
+   -- and an unreadable window would keep the line's alarm on forever.
+   first_from:=greatest(least(coalesce(previous_to,target-interval '48 hours'),target-interval '48 hours'),target-interval '59 days');
    INSERT INTO public.context_email_sweep_windows(source_key,window_from,window_to)
     SELECT k,s,least(s+interval '48 hours',target) FROM generate_series(first_from,target-interval '1 microsecond',interval '48 hours') s
     ON CONFLICT(source_key,window_from,window_to) DO NOTHING;
@@ -280,7 +283,7 @@ BEGIN
   IF bounded_sweeps THEN
    misses:=public.context_email_sweep_misses(m.source_key,now_time-miss_lookback,now_time);
    swept:=EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.window_to>=sweep_at AND w.state='succeeded')
-    AND NOT EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from<sweep_at);
+    AND NOT EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from<sweep_at AND w.window_from>=now_time-interval '60 days');
   ELSE
   misses:=CASE WHEN jsonb_typeof(miss_run.counts->'sweep_misses')='number' THEN (miss_run.counts->>'sweep_misses')::bigint ELSE 0 END;
   -- Lanes health (20261006050000): mail received before the source's first
@@ -330,8 +333,15 @@ BEGIN
    IF misses>0 THEN
     src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','email_poll_missed','since',miss_run.started_at,'sweep_misses',misses));
    END IF;
-   IF (sweep_due AND NOT swept AND (since IS NULL OR since<sweep_at)) OR (bounded_sweeps AND EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_to<now_time-sweep_grace)) THEN
+   IF (sweep_due AND NOT swept AND (since IS NULL OR since<sweep_at)) OR (bounded_sweeps AND EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from>=now_time-interval '60 days' AND w.window_to<now_time-sweep_grace)) THEN
     src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','sweep_incomplete','since',sweep_at,'last_status',last_sweep.status));
+   END IF;
+   -- An unfinished window past the 60-day read limit can never be swept. It
+   -- stays visible under its own key, so it never hides a later real
+   -- sweep_incomplete and never clears by itself.
+   IF bounded_sweeps AND EXISTS(SELECT 1 FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from<now_time-interval '60 days') THEN
+    src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','sweep_window_expired','since',
+     (SELECT min(w.window_from) FROM public.context_email_sweep_windows w WHERE w.source_key=m.source_key AND w.state<>'succeeded' AND w.window_from<now_time-interval '60 days')));
    END IF;
   END IF;
   per_source:=per_source||jsonb_build_array(jsonb_build_object('line',line,'selected',selected,

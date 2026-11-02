@@ -1004,7 +1004,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # H7 bill cost outcomes: job_overview's bills part
                       # (job_bill_outcomes_read.ts) and CFO's view it reads.
                       ("20261029170000", "cfo_bill_cost_outcomes"),
-                      ("20261029170100", "context_job_bill_outcomes")]:
+                      ("20261029170100", "context_job_bill_outcomes"),
+                      ("20261002150000", "context_email_reader"),
+                      ("20261006050000", "context_lanes_health"),
+                      ("20261006040000", "context_story_safety")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

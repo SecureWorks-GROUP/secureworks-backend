@@ -67,7 +67,7 @@ The actual-model development replay preserved both old keys but retained a
 present-tense owing claim inside the recipient dispute. Keeping the obligation
 is necessary; presenting an old financial assertion as current is wrong.
 
-Migration `20261030160000_context_note_current_invoice` changes the canonical
+Migration `20261030160001_context_note_current_invoice` changes the canonical
 `context_job_story_ledger` read, shared by the story assembler and writer input.
 For unresolved non-payment invoice matters it prefixes the exact same-job invoice
 record's status/balance and explicitly labels the preserved note as historical

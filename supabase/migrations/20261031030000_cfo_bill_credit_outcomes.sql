@@ -9,7 +9,7 @@
 -- Apply/rollback as part of the reviewed package, before any source-view down.
 -- Exact fingerprints reject unknown newer owner definitions; requalify, do not
 -- bypass them. CREATE OR REPLACE preserves ownership and execution grants.
-BEGIN;
+-- No BEGIN/COMMIT: the deploy script runs each migration in one transaction.
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
 DO $guard$ BEGIN
@@ -340,4 +340,3 @@ DO $post$ BEGIN
   RAISE EXCEPTION 'h7_credit_postimage_mismatch';
  END IF;
 END $post$;
-COMMIT;
