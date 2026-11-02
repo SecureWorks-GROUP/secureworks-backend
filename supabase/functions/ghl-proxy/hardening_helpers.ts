@@ -217,6 +217,35 @@ export function requiresBaseScopeCursor(
   return callerRequiresCursor && hasNonEmptyScope(currentScopeJson) && !expectedScopeHash
 }
 
+// Customer and site details a scope save may fill on its job. The scoping tool
+// re-reads the job and sends only the fields it saw empty, but the office can
+// type into the job between that read and this save. So a save fills a field
+// only while the job still holds it empty; a value the job already holds is
+// kept and reported, never overwritten (Scope Engine request, 31 Oct 2026).
+export const SCOPE_SAVE_IDENTITY_FIELDS = [
+  'client_name', 'client_phone', 'client_email', 'site_address', 'site_suburb',
+] as const
+
+export function scopeSaveIdentityFill(
+  job: Record<string, unknown>,
+  meta: Record<string, unknown> | null | undefined,
+): { fill: Record<string, unknown>; kept: Record<string, unknown> } {
+  const fill: Record<string, unknown> = {}
+  const kept: Record<string, unknown> = {}
+  if (!meta) return { fill, kept }
+  for (const field of SCOPE_SAVE_IDENTITY_FIELDS) {
+    const incoming = meta[field]
+    if (incoming === undefined || incoming === null || String(incoming).trim() === '') continue
+    const current = job[field]
+    if (current === undefined || current === null || String(current).trim() === '') {
+      fill[field] = incoming
+    } else if (String(current).trim() !== String(incoming).trim()) {
+      kept[field] = incoming
+    }
+  }
+  return { fill, kept }
+}
+
 export function classifyScopeCasReread(incomingScopeHash: string, rereadScopeHash: string): 'scope_concurrent_same_hash' | 'scope_hash_conflict' {
   return rereadScopeHash === incomingScopeHash ? 'scope_concurrent_same_hash' : 'scope_hash_conflict'
 }
