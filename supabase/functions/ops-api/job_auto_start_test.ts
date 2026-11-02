@@ -10,6 +10,7 @@ import {
   isWorkBooking,
   JOB_AUTO_START_SOURCE,
   jobAutoStartSweep,
+  loadJobAutoStartCandidates,
   perthToday,
   runJobAutoStartAction,
 } from "./job_auto_start.ts";
@@ -352,6 +353,115 @@ Deno.test("one failed move is recorded and the rest still move", async () => {
   assertEquals(calls, 2);
   assertEquals(out.moved_job_numbers, ["SWF-b"]);
   assertEquals(h.runs[0].outcome, "partial");
+});
+
+Deno.test("a repair whose stage moved but whose status move threw is recorded as moved", async () => {
+  const h = harness([
+    job("r6", [work(TODAY)], {
+      type: "repair",
+      status: "scheduled",
+      metadata: { repair_stage: "scheduled" },
+    }),
+  ]);
+  h.deps.moveJobStatus = () => Promise.reject(new Error("boom"));
+  const out: any = await jobAutoStartSweep(h.deps, LIVE);
+  assertEquals(h.stageMoves.length, 1);
+  assertEquals(out.results[0].action, "moved");
+  assertEquals(out.results[0].detail, "repair_stage_status_failed");
+  assertEquals(out.moved_job_numbers, ["SWF-r6"]);
+  assertEquals(h.runs[0].outcome, "ok");
+});
+
+/** A PostgREST stand-in that, like the server, never returns more than 1,000 rows. */
+function cappedClient(
+  tables: Record<string, any[]>,
+  failAt: { table: string; from: number } | null = null,
+) {
+  return {
+    from(table: string) {
+      let ids: string[] | null = null;
+      let ordered = false;
+      let range: [number, number] | null = null;
+      const builder: any = {
+        select: () => builder,
+        or: () => builder,
+        in: (_col: string, values: string[]) => {
+          ids = values;
+          return builder;
+        },
+        order: () => {
+          ordered = true;
+          return builder;
+        },
+        range: (from: number, to: number) => {
+          range = [from, to];
+          return builder;
+        },
+        then: (resolve: (v: any) => unknown) => {
+          if (failAt && failAt.table === table && range?.[0] === failAt.from) {
+            return resolve({ data: null, error: { message: "page failed" } });
+          }
+          let rows = (tables[table] ?? []).filter((r) =>
+            !ids || ids.includes(String(r.job_id ?? r.id))
+          );
+          if (ordered) {
+            rows = [...rows].sort((a, b) =>
+              String(a.id) < String(b.id) ? -1 : 1
+            );
+          }
+          if (range) rows = rows.slice(range[0], range[1] + 1);
+          return resolve({ data: rows.slice(0, 1000), error: null });
+        },
+      };
+      return builder;
+    },
+  };
+}
+
+Deno.test("the candidate read pages every booking past the 1,000 row cap", async () => {
+  const filler = Array.from({ length: 1200 }, (_, i) => ({
+    id: `a${String(i).padStart(5, "0")}`,
+    job_id: "busy",
+    ...work(YESTERDAY),
+  }));
+  const client = cappedClient({
+    jobs: [{
+      id: "busy",
+      job_number: "SWF-busy",
+      type: "fencing",
+      status: "scheduled",
+      metadata: {},
+    }],
+    makesafe_job_details: [],
+    job_assignments: [...filler, {
+      id: "z99999",
+      job_id: "busy",
+      ...work(TODAY),
+    }],
+  });
+  const candidates = await loadJobAutoStartCandidates(client);
+  assertEquals(candidates?.[0].bookings.length, 1201);
+  assertEquals(hasWorkBookingOn(candidates![0].bookings, TODAY), true);
+});
+
+Deno.test("a failed bookings page makes the candidate read fail", async () => {
+  const filler = Array.from({ length: 600 }, (_, i) => ({
+    id: `a${String(i).padStart(5, "0")}`,
+    job_id: "busy",
+    ...work(TODAY),
+  }));
+  const client = cappedClient({
+    jobs: [{
+      id: "busy",
+      job_number: "SWF-busy",
+      type: "fencing",
+      status: "scheduled",
+      metadata: {},
+    }],
+    makesafe_job_details: [],
+    job_assignments: filler,
+  }, { table: "job_assignments", from: 500 });
+  assertEquals(await loadJobAutoStartCandidates(client), null);
 });
 
 Deno.test("helpers: work bookings, booked today, lanes", () => {

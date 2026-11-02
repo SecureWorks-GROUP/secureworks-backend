@@ -41,7 +41,6 @@ import {
 
 export const JOB_AUTO_START_FLAG = "job_auto_start_v1";
 export const JOB_AUTO_START_SOURCE = "auto_schedule_start";
-export const JOB_AUTO_START_ACTIONS = ["job_auto_start_sweep"] as const;
 
 const SCHEDULED_STATUS = "scheduled";
 const IN_PROGRESS_STATUS = "in_progress";
@@ -56,6 +55,7 @@ const WATCHER_MARKERS = new Set(["observer", "ghost"]);
 const ID_CHUNK = 50;
 const JOB_PAGE_SIZE = 500;
 const JOB_PAGES_MAX = 10;
+const BOOKING_PAGE_SIZE = 500;
 
 /** Today's date (YYYY-MM-DD) in Perth, whatever the server clock's zone. */
 export function perthToday(now: Date): string {
@@ -276,12 +276,27 @@ async function moveOne(
     }
     if (!lane.move_status) return { action: "moved", detail: "repair_stage" };
   }
-  const moved = await deps.moveJobStatus({
+  const statusBody = {
     jobId: job.id,
     status: IN_PROGRESS_STATUS,
     source: JOB_AUTO_START_SOURCE,
     expected_statuses: [SCHEDULED_STATUS],
-  });
+  };
+  let moved: any;
+  if (lane.lane === "repair") {
+    try {
+      moved = await deps.moveJobStatus(statusBody);
+    } catch (e) {
+      console.error(
+        "[job_auto_start] repair stage moved, status move failed:",
+        job.id,
+        (e as Error)?.message ?? String(e),
+      );
+      return { action: "moved", detail: "repair_stage_status_failed" };
+    }
+  } else {
+    moved = await deps.moveJobStatus(statusBody);
+  }
   if (moved?.success === false) {
     // A repair whose stage already moved has moved on its board.
     return lane.lane === "repair"
@@ -337,26 +352,23 @@ export async function loadJobAutoStartCandidates(
   const bookings = new Map<string, any[]>();
   for (let i = 0; i < ids.length; i += ID_CHUNK) {
     const chunk = ids.slice(i, i + ID_CHUNK);
-    const [detailRead, bookingRead] = await Promise.all([
+    const [detailRead, bookingRows] = await Promise.all([
       client.from("makesafe_job_details").select("job_id, report_type").in(
         "job_id",
         chunk,
       ),
-      client.from("job_assignments")
-        .select(
-          "job_id, role, status, assignment_type, is_ghost, scheduled_date, scheduled_end",
-        )
-        .in("job_id", chunk),
+      readChunkBookings(client, chunk),
     ]);
-    if (detailRead.error || bookingRead.error) {
+    if (detailRead.error) {
       console.error(
-        "[job_auto_start] details or bookings read failed:",
-        (detailRead.error ?? bookingRead.error).message,
+        "[job_auto_start] details read failed:",
+        detailRead.error.message,
       );
       return null;
     }
+    if (!bookingRows) return null;
     for (const d of detailRead.data ?? []) details.set(String(d.job_id), d);
-    for (const b of bookingRead.data ?? []) {
+    for (const b of bookingRows) {
       const key = String(b.job_id);
       if (!bookings.has(key)) bookings.set(key, []);
       bookings.get(key)!.push(b);
@@ -367,6 +379,29 @@ export async function loadJobAutoStartCandidates(
     details: details.get(String(job.id)) ?? null,
     bookings: bookings.get(String(job.id)) ?? [],
   }));
+}
+
+/** Every booking on the chunk's jobs, paged past the row cap. Null when a page fails. */
+async function readChunkBookings(
+  client: any,
+  chunk: string[],
+): Promise<any[] | null> {
+  const rows: any[] = [];
+  for (let page = 0;; page++) {
+    const { data, error } = await client.from("job_assignments")
+      .select(
+        "id, job_id, role, status, assignment_type, is_ghost, scheduled_date, scheduled_end",
+      )
+      .in("job_id", chunk)
+      .order("id")
+      .range(page * BOOKING_PAGE_SIZE, (page + 1) * BOOKING_PAGE_SIZE - 1);
+    if (error) {
+      console.error("[job_auto_start] bookings read failed:", error.message);
+      return null;
+    }
+    rows.push(...(data ?? []));
+    if (!data || data.length < BOOKING_PAGE_SIZE) return rows;
+  }
 }
 
 export async function recordJobAutoStartRun(
