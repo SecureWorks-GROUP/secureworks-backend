@@ -24,6 +24,7 @@ import {
   runDispatchV2Action,
 } from "./dispatch_v2_store.ts";
 import { DispatchMaterialsError } from "./dispatch_materials_store.ts";
+import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
 
 // index.ts reads SUPABASE_URL and the service key into module constants, so
 // they are set before it is imported (a closed local port) and restored.
@@ -105,6 +106,23 @@ const SCHEMA: Record<string, string[]> = {
     "site_suburb",
     "metadata",
     "scope_json",
+    "pricing_json",
+    "expected_costs",
+  ],
+  // The acceptance chain Context's material-take rule reads (D1 fix F3).
+  job_documents: ["id", "job_id", "type", "accepted_at"],
+  run_acceptances: ["job_id", "status", "job_document_id"],
+  job_variations: ["job_id", "accepted_at", "status"],
+  quote_revisions: ["job_id", "job_document_id", "scope_revision_id", "sent_at"],
+  // The job's frozen scope revisions (T20).
+  scope_revisions: [
+    "id",
+    "job_id",
+    "status",
+    "revision_number",
+    "scope_hash",
+    "pricing_hash",
+    "scope_canonical_text",
   ],
   suppliers: [
     "id",
@@ -140,6 +158,11 @@ const SCHEMA: Record<string, string[]> = {
     "profile",
     "colour",
     "dispatch_order_email_id",
+    // The line's provenance (production migration 20261019200000).
+    "source_kind",
+    "source_version_id",
+    "source_version",
+    "source_line_id",
   ],
   job_material_suppliers: [
     "id",
@@ -237,6 +260,8 @@ const SCHEMA: Record<string, string[]> = {
     "filled_at",
     "filled_by",
     "filled_by_email",
+    // 20261102203000_dispatch_v2_scope_fill_revision.sql (T20)
+    "scope_revision_id",
   ],
   dispatch_material_photos: [
     "id",
@@ -321,6 +346,7 @@ function job(id: string, over: Row = {}): Row {
     site_suburb: "Exampleton",
     metadata: null,
     scope_json: null,
+    pricing_json: null,
     ...over,
   };
 }
@@ -397,6 +423,11 @@ function seed(): Record<string, Row[]> {
     dispatch_material_photos: [],
     dispatch_supplier_order_emails: [],
     dispatch_v2_scope_fills: [],
+    scope_revisions: [],
+    job_documents: [],
+    run_acceptances: [],
+    job_variations: [],
+    quote_revisions: [],
     feature_flags: [],
     dispatch_v2_supplier_emails: [],
     job_assignments: [],
@@ -477,6 +508,25 @@ function makeDb(initial = seed()) {
       if (!["not_reviewed", "to_order", "in_stock"].includes(row.status)) {
         return violation("23514", "job_material_lines_status_valid");
       }
+      // Production's provenance checks and index (20261019200000).
+      const kind = row.source_kind ?? null;
+      if (
+        kind !== null &&
+        !["quote_builder_version", "fence_scope_revision", "patio_scope_revision"]
+          .includes(kind)
+      ) return violation("23514", "job_material_lines_source_kind_valid");
+      if (
+        (kind === null) !== ((row.source_version_id ?? null) === null) ||
+        (row.source === "scope" && kind === "quote_builder_version") ||
+        ((row.source_line_id ?? null) !== null && (row.source_version_id ?? null) === null)
+      ) return violation("23514", "job_material_lines_source_shape");
+      if (
+        row.source_line_id != null &&
+        others.some((r) =>
+          r.job_id === row.job_id && r.source_version_id === row.source_version_id &&
+          r.source_line_id === row.source_line_id
+        )
+      ) return violation("23505", "job_material_lines_source_line_once");
     }
     if (table === "job_material_suppliers") {
       if (
@@ -551,6 +601,7 @@ function makeDb(initial = seed()) {
     let returning: string | null = null;
     let payload: any = null;
     let head = false;
+    let counted = false;
 
     const matches = (row: Row) =>
       request.filters.every(([op, column, value]) => {
@@ -617,9 +668,11 @@ function makeDb(initial = seed()) {
           return 0;
         });
         if (head) return { data: null, count: found.length, error: null };
+        const total = found.length;
         if (range) found = found.slice(range[0], range[1] + 1);
         if (limit !== null) found = found.slice(0, limit);
-        return finish(found.map((r) => project(r, request.select)));
+        const out = finish(found.map((r) => project(r, request.select)));
+        return counted && !out.error ? { ...out, count: total } : out;
       }
       if (request.kind === "insert") {
         const incoming = (Array.isArray(payload) ? payload : [payload]).map((
@@ -681,10 +734,11 @@ function makeDb(initial = seed()) {
     };
 
     const builder: any = {
-      select(columns: string, options?: { head?: boolean }) {
+      select(columns: string, options?: { head?: boolean; count?: string }) {
         if (request.kind === "select") request.select = columns;
         else returning = columns;
         if (options?.head) head = true;
+        if (options?.count) counted = true;
         return builder;
       },
       insert(value: any) {
@@ -893,6 +947,34 @@ async function refused(
   ) as DispatchMaterialsError;
   assertEquals([error.status, error.body.code], [status, code], error.message);
   return error;
+}
+
+// Freeze a job's scope as freeze_scope does (T20): one frozen scope_revisions
+// row whose hashes are the canonicalJsonAndHash of the job's scope_json and
+// pricing_json, and whose text is the canonical scope. A job with no pricing
+// gets a stand-in pricing blob first (freeze_scope refuses an empty one).
+async function seal(
+  db: ReturnType<typeof makeDb>,
+  jobId: string,
+  n = 1,
+  over: Row = {},
+): Promise<string> {
+  const row = db.tables.jobs.find((j: any) => j.id === jobId)!;
+  row.pricing_json ??= { fixture: "pricing" };
+  const scope = await canonicalJsonAndHash(row.scope_json);
+  const pricing = await canonicalJsonAndHash(row.pricing_json);
+  const id = uuid("f1", db.tables.scope_revisions.length + 1);
+  db.tables.scope_revisions.push({
+    id,
+    job_id: jobId,
+    status: "frozen",
+    revision_number: n,
+    scope_hash: scope.hash,
+    pricing_hash: pricing.hash,
+    scope_canonical_text: scope.canonical,
+    ...over,
+  });
+  return id;
 }
 
 async function addBox(
@@ -1272,6 +1354,7 @@ Deno.test("lines: into a box, between boxes and back to the draft list; stale st
 
 Deno.test("suggest: fills the draft list from the scope, leaves concrete bags out, and only once", async () => {
   const db = makeDb();
+  await seal(db, JOB.fence);
   const first = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
   assertEquals(first.added, 1);
   assertEquals(first.lines[0].supplier_id, null);
@@ -1308,6 +1391,7 @@ Deno.test("suggest: a fence tool scope fills panels and plinths with profile and
       }],
     },
   };
+  await seal(db, JOB.fence);
   const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
   assertEquals(out.added, 2);
   assertEquals(
@@ -1340,6 +1424,7 @@ function fenceScope(supplier: string) {
 Deno.test("auto fill: a fence scope naming its supplier fills that supplier's box, and never fills again", async () => {
   const db = makeDb();
   db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("stratco ");
+  const revision = await seal(db, JOB.fence);
   const before = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
   assertEquals(before.auto_fill, true);
   const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
@@ -1349,8 +1434,8 @@ Deno.test("auto fill: a fence scope naming its supplier fills that supplier's bo
     [2, "1800H standard width panels with 2400H posts", SUP.stratco],
   ]);
   assertEquals(db.tables.job_material_suppliers.map((b: any) => b.supplier_id), [SUP.stratco]);
-  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.job_id, f.auto, f.lines_added, f.supplier_id, f.scope_supplier]), [
-    [JOB.fence, true, 1, SUP.stratco, "stratco"],
+  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.job_id, f.auto, f.lines_added, f.supplier_id, f.scope_supplier, f.scope_revision_id]), [
+    [JOB.fence, true, 1, SUP.stratco, "stratco", revision],
   ]);
   const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
   assertEquals(after.auto_fill, false);
@@ -1370,6 +1455,7 @@ Deno.test("auto fill: a fence scope naming its supplier fills that supplier's bo
 Deno.test("auto fill: a supplier with no approved order email leaves the lines on the draft list, with a note", async () => {
   const db = makeDb();
   db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Paralink");
+  await seal(db, JOB.fence);
   const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
   assertEquals(out.supplier, null);
   assertEquals(out.lines.map((l: any) => l.supplier_id), [null]);
@@ -1380,6 +1466,7 @@ Deno.test("auto fill: a supplier with no approved order email leaves the lines o
   // An approved email no active supplier contact is linked to says so too.
   const db2 = makeDb();
   db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Unique Laser");
+  await seal(db2, JOB.fence);
   const out2 = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
   assertEquals(out2.supplier, null);
   assertEquals(out2.notes, [
@@ -1388,6 +1475,7 @@ Deno.test("auto fill: a supplier with no approved order email leaves the lines o
   // A scope with no supplier: the draft list, and no note about it.
   const db3 = makeDb();
   db3.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("");
+  await seal(db3, JOB.fence);
   const out3 = await call(db3, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
   assertEquals([out3.supplier, out3.notes], [null, []]);
 });
@@ -1397,6 +1485,7 @@ Deno.test("auto fill: fencing only, never over lines, and a box already there is
   await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio, auto: true }), 409, "no_auto_fill");
   assertEquals((await get(db, "dispatch_v2_materials", { job_id: JOB.patio })).auto_fill, false);
   db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Stratco");
+  await seal(db, JOB.fence);
   await addBox(db, JOB.fence, SUP.stratco);
   const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
   assertEquals(out.supplier.supplier_id, SUP.stratco);
@@ -1405,8 +1494,223 @@ Deno.test("auto fill: fencing only, never over lines, and a box already there is
   // A fence scope with nothing to order fills nothing and records nothing.
   const db2 = makeDb();
   db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = { tool: "fence", job: { supplier: "Stratco", runs: [], gates: [] } };
+  await seal(db2, JOB.fence);
   const empty = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
   assertEquals([empty.added, db2.tables.dispatch_v2_scope_fills.length, db2.tables.job_material_suppliers.length], [0, 0, 0]);
+});
+
+// ── T20: the fill reads the job's frozen scope revision ─────────────────────
+
+Deno.test("frozen: no frozen revision fills nothing and says why; the screen's own fill waits for one", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Stratco");
+  const err = await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "no_frozen_scope");
+  assertEquals(err.message, "This job has no frozen scope to suggest lines from");
+  const unfrozen = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(
+    [unfrozen.auto_fill, unfrozen.can_suggest, unfrozen.scope_seal],
+    [false, true, { state: "no_frozen_scope", revision_id: null, revision_number: null }],
+  );
+  // A draft revision is not frozen.
+  await seal(db, JOB.fence, 1, { status: "draft" });
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "no_frozen_scope");
+  assertEquals([db.tables.job_material_lines.length, db.tables.job_material_suppliers.length, db.tables.dispatch_v2_scope_fills.length], [0, 0, 0]);
+
+  const frozen = await seal(db, JOB.fence, 2);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.scope_seal, { state: "frozen", revision_id: frozen, revision_number: 2 });
+  assertEquals(read.auto_fill, true);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals([out.added, out.scope_revision, out.notes], [1, { id: frozen, revision_number: 2 }, []]);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("frozen: the lines come from the frozen revision, not a scope saved since, and the fill says so", async () => {
+  const db = makeDb();
+  const fence = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  fence.scope_json = fenceScope("Stratco");
+  const frozen = await seal(db, JOB.fence, 1);
+  // Saved again in the tool, not frozen again: three panels, and Metroll.
+  fence.scope_json = {
+    ...fenceScope("Metroll"),
+    job: { ...fenceScope("Metroll").job, runs: [{ name: "Rear", panels: [{ height: 1800, retaining: 0 }, { height: 1800, retaining: 0 }, { height: 1800, retaining: 0 }] }] },
+  };
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals(out.lines.map((l: any) => [l.quantity, l.supplier_id, l.scope_revision_id]), [[2, SUP.stratco, frozen]]);
+  assertEquals(out.notes, [
+    "The job's scope was changed after revision 1 was frozen. These lines come from revision 1: freeze the scope again to order the change.",
+  ]);
+});
+
+Deno.test("frozen: the latest frozen revision is used, and the accepted one wins over it", async () => {
+  const db = makeDb();
+  const fence = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  fence.scope_json = fenceScope("Stratco");
+  const first = await seal(db, JOB.fence, 1, { status: "superseded" });
+  fence.scope_json = fenceScope("Metroll");
+  const second = await seal(db, JOB.fence, 2);
+  const latest = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals([latest.scope_revision.id, latest.supplier?.supplier_id], [second, SUP.metroll]);
+
+  // The quote accepted revision 1: the order is revision 1's, even after the
+  // refreeze to revision 2 (Context's D1 fix F3).
+  const db2 = makeDb();
+  db2.tables.scope_revisions = structuredClone(db.tables.scope_revisions);
+  const job2 = db2.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  job2.scope_json = fence.scope_json;
+  job2.pricing_json = fence.pricing_json;
+  job2.expected_costs = { scope_revision_id: first };
+  const accepted = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals([accepted.scope_revision, accepted.supplier?.supplier_id], [{ id: first, revision_number: 1 }, SUP.stratco]);
+  assert(accepted.lines.every((l: any) => l.scope_revision_id === first && l.scope_revision_number === 1));
+
+  // An acceptance chain that cannot be proved orders nothing.
+  const db3 = makeDb();
+  db3.tables.scope_revisions = structuredClone(db.tables.scope_revisions);
+  const job3 = db3.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  job3.scope_json = fence.scope_json;
+  db3.tables.run_acceptances = [{ job_id: JOB.fence, status: "accepted", job_document_id: null }];
+  await refused(call(db3, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "accepted_quote_unproven");
+  assertEquals(db3.tables.job_material_lines, []);
+});
+
+Deno.test("frozen: a sealed record whose text is not what was sealed is never read", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.patio)!.scope_json = patioRecord();
+  await seal(db, JOB.patio);
+  const row = db.tables.scope_revisions[0];
+  row.scope_canonical_text = row.scope_canonical_text.replace("Trimdek", "Spandek");
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio }), 409, "scope_identity_unverified");
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("frozen: a failed revision read is unknown on the panel and refuses the fill, never fills from the job", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Stratco");
+  await seal(db, JOB.fence);
+  db.failures.add("select:scope_revisions");
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals([read.auto_fill, read.scope_seal.state], [false, "unknown"]);
+  const error = await assertRejects(
+    () => call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence }),
+    DispatchMaterialsError,
+  ) as DispatchMaterialsError;
+  assertEquals(error.status, 500);
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("frozen: every fence line carries the revision's id and number; the fill record names it", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = {
+    tool: "fence",
+    job: {
+      profile: "Neetascreen",
+      colour: "Paperbark",
+      supplier: "Stratco",
+      gates: [{ type: "pedestrian", width: 900, height: 1800 }],
+      runs: [{ name: "Rear", panels: [{ height: 1800, retaining: 150 }, { height: 1800, retaining: 0 }] }],
+    },
+  };
+  const revision = await seal(db, JOB.fence, 3);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assert(out.added > 2);
+  for (const line of out.lines) {
+    assertEquals([line.scope_revision_id, line.scope_revision_number, line.scope_line_id], [revision, 3, null]);
+  }
+  for (const stored of db.tables.job_material_lines) {
+    assertEquals(
+      [stored.source, stored.source_kind, stored.source_version_id, stored.source_version, stored.source_line_id],
+      ["scope", "fence_scope_revision", revision, "3", null],
+    );
+  }
+  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.auto, f.scope_revision_id, f.supplier_id]), [
+    [false, revision, SUP.stratco],
+  ]);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.scope_filled.scope_revision_id, revision);
+  assertEquals(read.scope_seal, null);
+  assert(read.suppliers[0].lines.every((l: any) => l.scope_revision_id === revision));
+  assertOnlyV2Writes(db);
+});
+
+// A Scope Engine patio record (scope-engine-v2 jobsystem.ts): its sealed
+// lines, each with the engine's id and, once the tool writes it, the supplier
+// its order put the line under.
+function patioRecord() {
+  return {
+    tool: "patio-scoper",
+    version: "2.0",
+    lines: [
+      { id: "SL-roof", description: "Trimdek roof sheet 4,600", quantity: 10, unit: "sheet", colour: "Surfmist", supplierId: "stratco", supplierName: "Stratco" },
+      { id: "SL-post", description: "100x100 SHS post 2,900", quantity: 3, unit: "length", colour: null, supplierId: "metroll", supplierName: "Metroll" },
+      { id: "SL-beam", description: "C150 beam 7,400", quantity: 2, unit: "length", colour: null, supplierId: "stratco", supplierName: "Stratco" },
+      { id: "SL-fix", description: "Tek screws 14g x 22", quantity: 200, unit: "each", colour: null, supplier: "office" },
+      { id: "SL-tbc", description: "Patioline gutter 7,400", quantity: null, unit: "length", colour: null, supplierId: "supplier-to-confirm", supplierName: "Supplier to confirm" },
+      { id: "SL-ready", description: "Concrete 20 MPa", quantity: 1, unit: "m3", colour: null, supplierId: "wa-ready-mix", supplierName: "Ready-mix concrete (Perth batching plant)" },
+      { id: "SL-old", description: "Downpipe 90mm", quantity: 2, unit: "length", colour: null },
+      { id: "SL-post", description: "Second line with the same engine id", quantity: 1, unit: "each", colour: null },
+    ],
+  };
+}
+
+Deno.test("frozen patio: lines go into the box of the supplier the engine's order names, with their engine ids", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.patio)!.scope_json = patioRecord();
+  const revision = await seal(db, JOB.patio, 8);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assertEquals(
+    out.lines.map((l: any) => [l.description, l.supplier_id, l.scope_line_id, l.scope_revision_id, l.scope_revision_number]),
+    [
+      ["Trimdek roof sheet 4,600", SUP.stratco, "SL-roof", revision, 8],
+      ["100x100 SHS post 2,900", SUP.metroll, "SL-post", revision, 8],
+      ["C150 beam 7,400", SUP.stratco, "SL-beam", revision, 8],
+      ["Patioline gutter 7,400", null, "SL-tbc", revision, 8],
+      ["Concrete 20 MPa", null, "SL-ready", revision, 8],
+      ["Downpipe 90mm", null, "SL-old", revision, 8],
+      // The engine id is kept once per fill (job_material_lines_source_line_once).
+      ["Second line with the same engine id", null, null, revision, 8],
+    ],
+  );
+  assert(db.tables.job_material_lines.every((l: any) => l.source_kind === "patio_scope_revision"));
+  assertEquals(db.tables.job_material_suppliers.map((b: any) => b.supplier_id), [SUP.stratco, SUP.metroll]);
+  // Split across boxes: no single box, and the notes say where the lines went.
+  assertEquals(out.supplier, null);
+  assertEquals(out.suppliers.map((b: any) => [b.supplier_id, b.lines]), [[SUP.stratco, 2], [SUP.metroll, 1]]);
+  assertEquals(out.notes, [
+    "The scope names Ready-mix concrete (Perth batching plant) as the supplier, which has no approved order email. Its 1 line is on the draft list: add a supplier and move it in.",
+    "2 lines went into the Stratco (WA) Pty Ltd box.",
+    "1 line went into the Metroll Perth box.",
+  ]);
+  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.supplier_id, f.scope_supplier, f.scope_revision_id]), [
+    [null, null, revision],
+  ]);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("frozen patio: lines sealed before the engine wrote a supplier stay on the draft list, as before", async () => {
+  const db = makeDb();
+  const record = patioRecord();
+  db.tables.jobs.find((j: any) => j.id === JOB.patio)!.scope_json = {
+    ...record,
+    lines: record.lines.map(({ supplierId: _id, supplierName: _name, ...rest }: any) => rest),
+  };
+  await seal(db, JOB.patio);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assertEquals(out.added, 7);
+  assertEquals([out.supplier, out.suppliers, out.notes], [null, [], []]);
+  assert(out.lines.every((l: any) => l.supplier_id === null));
+  assertEquals(db.tables.job_material_suppliers, []);
+  // The patio fill is a press, never on its own.
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio, auto: true }), 409, "no_auto_fill");
+});
+
+Deno.test("frozen patio: the catalogue's bd-metals and cmi ids find their approved order emails", async () => {
+  const { dispatchV2MatchScopeSupplier } = await import("./dispatch_v2_fence_scope.ts");
+  const approved = ["B&D Metals Group", "CMI (Combined Metal Industries)", "Lysaght", "Metroll Perth", "Stratco WA", "Bondor"];
+  assertEquals(
+    ["bd-metals", "cmi", "lysaght", "metroll", "stratco", "bondor", "wa-ready-mix"].map((id) => dispatchV2MatchScopeSupplier(id, approved)),
+    ["B&D Metals Group", "CMI (Combined Metal Industries)", "Lysaght", "Metroll Perth", "Stratco WA", "Bondor", null],
+  );
 });
 
 // ── Boxes and the main tick ─────────────────────────────────────────────────

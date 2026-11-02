@@ -1030,6 +1030,11 @@ ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql
 ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_line_id
 ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|index|job_material_lines_source_line_once
 ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|constraint|job_material_lines_source_shape
+# T20: Dispatch v2 fills a job's draft list from its frozen scope revision. The
+# fill inserts dispatch_v2_scope_fills.scope_revision_id and the materials read
+# selects it, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261102203000_dispatch_v2_scope_fill_revision.sql|column|dispatch_v2_scope_fills.scope_revision_id
+ops-api|supabase/migrations/20261102203000_dispatch_v2_scope_fill_revision.sql|constraint|dispatch_v2_scope_fills_scope_revision_id_fkey
 ops-api|supabase/migrations/20261029121500_xero_tieout_monthly.sql|function|xero_tieout_monthly
 # H7 bill cost outcomes (INT-12, INT-10): job_overview's bills part calls
 # context_job_bill_outcomes, which reads CFO's cfo_bill_cost_outcomes view (a

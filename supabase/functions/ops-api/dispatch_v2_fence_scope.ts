@@ -198,12 +198,17 @@ export function dispatchV2FenceLinesFromScope(
 // ── The scope's supplier ────────────────────────────────────────────────────
 //
 // The fence tool's supplier is typed free text ("RNR", "Fence supply centre",
-// "Strato"). It is matched to one of Shaun's approved order emails by name, so
+// "Strato"); a sealed patio line names the Scope Engine catalogue's supplier
+// (T20). Either is matched to one of Shaun's approved order emails by name, so
 // the filled lines can go straight into that supplier's box. A name that
 // matches none is left for a person: the lines stay on the draft list.
 
-// The short forms the scopes carry, to the approved email's name.
+// The short forms the scopes carry, to the approved email's name. The Scope
+// Engine's catalogue ids (a sealed patio line's supplierId) mostly match a name
+// as they are ("stratco", "metroll", "lysaght"); bd-metals and cmi do not.
 const SCOPE_SUPPLIER_ALIASES: Record<string, string> = {
+  bdmetals: "B&D Metals Group",
+  cmi: "CMI (Combined Metal Industries)",
   rnr: "R&R Fencing",
   randr: "R&R Fencing",
   strato: "Stratco WA",

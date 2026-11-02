@@ -154,7 +154,7 @@ function errorCode(error: any): string {
 
 // ── The job ─────────────────────────────────────────────────────────────────
 
-type DispatchJob = {
+export type DispatchJob = {
   id: string;
   org_id: string;
   job_number: string | null;
@@ -960,7 +960,7 @@ type ScopeOffer = {
   scoper_revision?: PatioScoperRevision | null;
 };
 
-async function readFrozenScope(
+export async function readFrozenScope(
   client: any,
   jobId: string,
   revisionId: string | null = null,
@@ -1395,7 +1395,7 @@ function scopeProvenance(offer: ScopeOffer, key: string) {
 // and orders nothing, never the newest frozen revision. Only a legacy chain
 // (nothing accepted yet, or no release names a revision) keeps the latest
 // frozen rule (null here).
-async function acceptedRevisionForMaterialTake(
+export async function acceptedRevisionForMaterialTake(
   client: any,
   job: DispatchJob,
 ): Promise<string | null> {

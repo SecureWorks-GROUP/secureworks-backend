@@ -76,6 +76,14 @@ import {
   dispatchV2MatchScopeSupplier,
   dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
+import {
+  readDispatchV2FrozenScope,
+  readDispatchV2LatestFrozen,
+} from "./dispatch_v2_sealed_scope.ts";
+import {
+  isScopeEnginePatioRecord,
+  scopeEngineSealedLines,
+} from "./scope_engine_materials.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 import {
   dispatchV2BoxDateMode,
@@ -163,8 +171,12 @@ export const DISPATCH_V2_ACTIONS = [
   ...DISPATCH_V2_WRITE_ACTIONS,
 ] as const;
 
+// source_kind, source_version_id, source_version, source_line_id: the line's
+// provenance (production migration 20261019200000); a scope fill writes the
+// sealed scope revision and the engine's own line there (T20).
 const LINE_SELECT =
-  "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at";
+  "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at, source_kind, source_version_id, source_version, source_line_id";
+const SCOPE_REVISION_KINDS = new Set(["fence_scope_revision", "patio_scope_revision"]);
 const BOX_SELECT =
   "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at, order_date_mode, order_date_mode_set_at, order_date_mode_set_by_email";
 const PHOTO_SELECT =
@@ -488,6 +500,15 @@ function lineLocked(row: any): boolean {
   return !!row?.dispatch_order_email_id || !!row?.purchase_order_id;
 }
 
+function scopeProvenance(row: any) {
+  const scope = SCOPE_REVISION_KINDS.has(String(row?.source_kind ?? ""));
+  return {
+    scope_revision_id: scope ? row?.source_version_id ?? null : null,
+    scope_revision_number: scope ? numberOrNull(row?.source_version) : null,
+    scope_line_id: scope ? row?.source_line_id ?? null : null,
+  };
+}
+
 export function projectDispatchV2Line(row: any) {
   return {
     id: row?.id,
@@ -502,6 +523,10 @@ export function projectDispatchV2Line(row: any) {
     status: row?.status,
     source: row?.source,
     position: row?.position,
+    // T20: the sealed scope revision a scope line was filled from (its id and
+    // number), and the engine's own id for the line (patio). Null on a line
+    // typed in, and on lines filled before T20.
+    ...scopeProvenance(row),
     // Set once the line went out on a sent order email; the line is locked.
     sent_on_email_id: row?.dispatch_order_email_id ?? null,
     locked: lineLocked(row),
@@ -621,6 +646,12 @@ export async function readDispatchV2Materials(
         "dispatch_v2_materials",
       ),
     ]);
+  // T20: the list fills only from a frozen scope revision. Read while the
+  // list is empty, when a fill can run. A failed read is unknown, never
+  // frozen, so the screen's own fill waits.
+  const seal = dispatchV2CanSuggest(job.work_type, lines.length)
+    ? await readDispatchV2LatestFrozen(client, job.id)
+    : null;
   const supplierIds = boxes.map((b) => String(b.supplier_id));
   const [contacts, approved, testDone] = await Promise.all([
     readContacts(client, supplierIds, ctx),
@@ -643,13 +674,20 @@ export async function readDispatchV2Materials(
     replies_read: replies.error ? "failed" : "ok",
     can_suggest: dispatchV2CanSuggest(job.work_type, lines.length),
     // The screen fills a fencing job from the scope on its own when it opens
-    // and this is true: no lines and never filled before.
-    auto_fill: job.work_type === "fencing" && lines.length === 0 && !scopeFill,
+    // and this is true: no lines, never filled before, and the job has a
+    // frozen scope revision (T20).
+    auto_fill: job.work_type === "fencing" && lines.length === 0 && !scopeFill &&
+      seal?.state === "frozen",
+    // The job's latest frozen scope revision, or why there is none (null when
+    // the list already has lines). The fill uses the accepted revision when
+    // the job has one.
+    scope_seal: seal,
     scope_filled: scopeFill
       ? {
         filled_at: scopeFill.filled_at,
         auto: scopeFill.auto === true,
         by: scopeFill.filled_by_email ?? null,
+        scope_revision_id: scopeFill.scope_revision_id ?? null,
       }
       : null,
     draft_list: {
@@ -1155,7 +1193,7 @@ async function suggestedLineId(jobId: string, index: number) {
 async function readScopeFill(client: any, jobId: string): Promise<any | null> {
   const { data, error } = await client.from("dispatch_v2_scope_fills")
     .select(
-      "job_id, auto, lines_added, supplier_id, scope_supplier, filled_at, filled_by_email",
+      "job_id, auto, lines_added, supplier_id, scope_supplier, filled_at, filled_by_email, scope_revision_id",
     )
     .eq("job_id", jobId)
     .maybeSingle();
@@ -1163,17 +1201,19 @@ async function readScopeFill(client: any, jobId: string): Promise<any | null> {
   return data ?? null;
 }
 
-// The supplier contact a fence scope's typed supplier means: the active
-// contact linked to the matching approved order email (the one named like it,
-// else the first by name). A name with no match says why in a note.
+// The supplier contact a scope's supplier means: the active contact linked to
+// the matching approved order email (the one named like it, else the first by
+// name). `names` are tried in order (a patio line's catalogue id, then its
+// name); `shown` is the name a note uses. No match says why in a note.
 async function resolveScopeSupplier(
   client: any,
-  scopeName: string | null,
+  names: string[],
+  shown: string,
   ctx: DispatchV2Context,
+  onList = "The lines are on the draft list: add a supplier and move them in.",
 ): Promise<{ contact: any | null; note: string | null }> {
-  if (!scopeName) return { contact: null, note: null };
-  const onList =
-    "The lines are on the draft list: add a supplier and move them in.";
+  const tried = names.filter((n) => typeof n === "string" && n.trim());
+  if (!tried.length) return { contact: null, note: null };
   const { data: entries, error } = await client
     .from("dispatch_approved_supplier_emails")
     .select("id, name")
@@ -1181,16 +1221,18 @@ async function resolveScopeSupplier(
     .eq("active", true);
   if (error) readFailed("approved emails read", error);
   const list: any[] = entries || [];
-  const name = dispatchV2MatchScopeSupplier(
-    scopeName,
-    list.map((e) => String(e.name)),
-  );
+  const approvedNames = list.map((e) => String(e.name));
+  let name: string | null = null;
+  for (const n of tried) {
+    name = dispatchV2MatchScopeSupplier(n, approvedNames);
+    if (name) break;
+  }
   const entry = name ? list.find((e) => String(e.name) === name) : null;
   if (!entry) {
     return {
       contact: null,
       note:
-        `The scope names ${scopeName} as the supplier, which has no approved order email. ${onList}`,
+        `The scope names ${shown} as the supplier, which has no approved order email. ${onList}`,
     };
   }
   const { data: links, error: linksError } = await client
@@ -1214,17 +1256,37 @@ async function resolveScopeSupplier(
     return {
       contact: null,
       note:
-        `The scope names ${scopeName} as the supplier, but no supplier contact is linked to its approved order email. ${onList}`,
+        `The scope names ${shown} as the supplier, but no supplier contact is linked to its approved order email. ${onList}`,
     };
   }
   return { contact: contacts[0], note: null };
 }
 
-// Fill the draft list from the scope. With auto (the screen's own fill when a
-// fencing job with no record is opened) it runs once per job, ever. On a
-// fence tool scope the lines go straight into the box of the supplier the
-// scope names, made if it is not there yet; otherwise they land on the draft
-// list.
+function linesWord(n: number): string {
+  return `${n} ${n === 1 ? "line" : "lines"}`;
+}
+
+// The line provenance a scope fill writes (columns from production migration
+// 20261019200000_dispatch_material_line_provenance, whose check allows these
+// two kinds for a scope line): the sealed revision and the engine's own line.
+function scopeRevisionKind(workType: string): "fence_scope_revision" | "patio_scope_revision" {
+  return workType === "fencing" ? "fence_scope_revision" : "patio_scope_revision";
+}
+
+type FillLine = DispatchSuggestedLine &
+  Partial<Pick<DispatchV2FenceLine, "detail" | "profile" | "colour">> & {
+    scope_line_id?: string | null;
+    supplier_key?: string | null;
+    supplier_name?: string | null;
+  };
+
+// Fill the draft list from the job's frozen scope revision (T20). With auto
+// (the screen's own fill when a fencing job with no record is opened) it runs
+// once per job, ever. A fence scope names one supplier; a sealed patio line
+// names its own. A supplier with an approved order email and a linked contact
+// gets its lines in its box, made if it is not there yet; every other line
+// lands on the draft list. Each line carries the revision's id and number and,
+// on a patio job, the engine's own line id.
 export async function suggestDispatchV2Draft(
   client: any,
   body: any,
@@ -1256,55 +1318,99 @@ export async function suggestDispatchV2Draft(
   if ((Number(count) || 0) > 0) {
     refuse(409, "lines_exist", "This job already has lines");
   }
-  // The scope only, never the pricing: with null pricing the extractor's
-  // quote-lines fallback cannot run, so no price can become a line.
-  const { data: scopeRow, error: scopeError } = await client.from("jobs")
-    .select("id, scope_json")
-    .eq("id", job.id)
-    .eq("org_id", ctx.orgId)
-    .maybeSingle();
-  if (scopeError) readFailed("scope read", scopeError);
+  // The job's frozen scope revision by Context's material-take rule
+  // (dispatch_v2_sealed_scope.ts: the accepted revision, else the latest
+  // frozen one), read from that row's own text. Never the job's working
+  // scope, and never the pricing: with null pricing the extractor's
+  // quote-lines fallback cannot run, so no price becomes a line.
+  const frozen = await readDispatchV2FrozenScope(client, job);
+  const sealedScope: any = frozen.scope;
+  const revision = { id: frozen.revision_id, revision_number: frozen.revision_number };
   // A fencing job scoped in the fence tool is read with the material ordering
-  // rules (panels, posts, plinths, gates). Anything else uses the older
-  // extractor, which reads the patio tool's layout.
+  // rules (panels, posts, plinths, gates). A Scope Engine patio record lists
+  // its sealed lines; anything else uses the older extractor (patio layout).
   const fence = job.work_type === "fencing"
-    ? dispatchV2FenceLinesFromScope(scopeRow?.scope_json ?? null)
+    ? dispatchV2FenceLinesFromScope(sealedScope)
     : null;
-  let suggested: Array<
-    DispatchSuggestedLine & Partial<Pick<DispatchV2FenceLine, "detail" | "profile" | "colour">>
-  >;
-  const notes: string[] = fence ? fence.notes : [];
+  let suggested: FillLine[];
+  const notes: string[] = [
+    ...(frozen.changed_since_frozen
+      ? [`The job's scope was changed after revision ${revision.revision_number} was frozen. These lines come from revision ${revision.revision_number}: freeze the scope again to order the change.`]
+      : []),
+    ...(fence ? fence.notes : []),
+  ];
   if (fence) {
     suggested = fence.lines;
   } else {
     let items: any[];
     try {
-      items = ctx.extractMaterialsFromScope(scopeRow?.scope_json ?? null, null);
+      items = isScopeEnginePatioRecord(sealedScope)
+        ? scopeEngineSealedLines(sealedScope.lines)
+        : ctx.extractMaterialsFromScope(sealedScope, null);
     } catch (error) {
       console.error("[dispatch_v2] scope could not be read:", error);
       refuse(409, "scope_unreadable", "The job's scope could not be read");
     }
-    suggested = dispatchSuggestedLines(
-      (items || []).filter((item) => dispatchV2SuggestionAllowed(item?.description)),
-    );
+    suggested = (items || [])
+      .filter((item) => dispatchV2SuggestionAllowed(item?.description))
+      .flatMap((item) => {
+        const [line] = dispatchSuggestedLines([item]);
+        return line
+          ? [{
+            ...line,
+            scope_line_id: typeof item?.scope_line_id === "string" ? item.scope_line_id : null,
+            supplier_key: typeof item?.supplier_id === "string" ? item.supplier_id : null,
+            supplier_name: typeof item?.supplier_name === "string" ? item.supplier_name : null,
+          }]
+          : [];
+      });
   }
   if (suggested.length === 0) {
-    return { success: true, added: 0, lines: [], notes, supplier: null };
+    return {
+      success: true,
+      added: 0,
+      lines: [],
+      notes,
+      supplier: null,
+      suppliers: [],
+      scope_revision: revision,
+    };
+  }
+  // The suppliers the scope names, in the order they first appear.
+  const fenceSupplier = fence ? dispatchV2ScopeSupplierName(sealedScope) : null;
+  const wanted = new Map<string, { names: string[]; shown: string; count: number }>();
+  if (fenceSupplier) {
+    wanted.set(fenceSupplier, { names: [fenceSupplier], shown: fenceSupplier, count: suggested.length });
+  }
+  if (!fence) {
+    for (const line of suggested) {
+      const key = line.supplier_key;
+      if (!key) continue;
+      const seen = wanted.get(key);
+      if (seen) seen.count += 1;
+      else {
+        wanted.set(key, {
+          names: line.supplier_name ? [key, line.supplier_name] : [key],
+          shown: line.supplier_name ?? key,
+          count: 1,
+        });
+      }
+    }
   }
   // The auto fill claims the job first, so two screens never both fill it.
-  const scopeSupplier = fence
-    ? dispatchV2ScopeSupplierName(scopeRow?.scope_json ?? null)
-    : null;
   const fill = {
     job_id: job.id,
     org_id: job.org_id,
     auto,
     lines_added: suggested.length,
     supplier_id: null as string | null,
-    scope_supplier: scopeSupplier,
+    scope_supplier: fence
+      ? fenceSupplier
+      : wanted.size === 1 ? [...wanted.values()][0].shown : null,
     filled_at: nowIso(ctx),
     filled_by: ctx.actor.userId,
     filled_by_email: ctx.actor.email,
+    scope_revision_id: revision.id,
   };
   if (auto) {
     const { error: claimError } = await client.from("dispatch_v2_scope_fills")
@@ -1320,50 +1426,79 @@ export async function suggestDispatchV2Draft(
       writeFailed("scope fill claim", claimError);
     }
   }
-  let box: { supplier_id: string; name: string } | null = null;
+  const boxes = new Map<string, { supplier_id: string; name: string }>();
   try {
-    if (fence) {
-      const found = await resolveScopeSupplier(client, scopeSupplier, ctx);
+    for (const [key, want] of wanted) {
+      const found = await resolveScopeSupplier(
+        client,
+        want.names,
+        want.shown,
+        ctx,
+        fence
+          ? undefined
+          : `Its ${linesWord(want.count)} ${want.count === 1 ? "is" : "are"} on the draft list: add a supplier and move ${want.count === 1 ? "it" : "them"} in.`,
+      );
       if (found.note) notes.push(found.note);
       if (found.contact) {
         const made = await readBox(client, job.id, String(found.contact.id)) ??
           (await insertBox(client, job, found.contact, ctx)).box;
-        box = {
+        boxes.set(key, {
           supplier_id: String(made.supplier_id),
           name: String(found.contact.name),
-        };
+        });
       }
     }
   } catch (error) {
     if (auto) await releaseScopeFill(client, job.id);
     throw error;
   }
-  fill.supplier_id = box?.supplier_id ?? null;
+  const boxOf = (line: FillLine) =>
+    fence
+      ? (fenceSupplier ? boxes.get(fenceSupplier) ?? null : null)
+      : (line.supplier_key ? boxes.get(line.supplier_key) ?? null : null);
+  const used = [...new Set(suggested.map((l) => boxOf(l)?.supplier_id ?? null))];
+  const single = used.length === 1 && used[0] !== null
+    ? [...boxes.values()].find((b) => b.supplier_id === used[0]) ?? null
+    : null;
+  fill.supplier_id = used.length === 1 ? used[0] : null;
   const now = nowIso(ctx);
   const ids = await Promise.all(
     suggested.map((_line, index) => suggestedLineId(job.id, index)),
   );
-  const rows = suggested.map((line, index) => ({
-    id: ids[index],
-    org_id: job.org_id,
-    job_id: job.id,
-    supplier_id: box?.supplier_id ?? null,
-    description: line.description,
-    quantity: line.quantity,
-    unit: line.unit,
-    detail: line.detail ?? null,
-    profile: line.profile ?? null,
-    colour: line.colour ?? null,
-    status: "not_reviewed",
-    source: "scope",
-    position: index + 1,
-    created_at: now,
-    updated_at: now,
-    created_by: ctx.actor.userId,
-    updated_by: ctx.actor.userId,
-    created_by_email: ctx.actor.email,
-    updated_by_email: ctx.actor.email,
-  }));
+  // An engine line id is kept once per fill: the index
+  // job_material_lines_source_line_once allows one line per id and revision.
+  const lineIds = new Set<string>();
+  const rows = suggested.map((line, index) => {
+    const own = line.scope_line_id && !lineIds.has(line.scope_line_id)
+      ? line.scope_line_id
+      : null;
+    if (own) lineIds.add(own);
+    return {
+      id: ids[index],
+      org_id: job.org_id,
+      job_id: job.id,
+      supplier_id: boxOf(line)?.supplier_id ?? null,
+      description: line.description,
+      quantity: line.quantity,
+      unit: line.unit,
+      detail: line.detail ?? null,
+      profile: line.profile ?? null,
+      colour: line.colour ?? null,
+      status: "not_reviewed",
+      source: "scope",
+      source_kind: scopeRevisionKind(job.work_type),
+      source_version_id: revision.id,
+      source_version: String(revision.revision_number),
+      source_line_id: own,
+      position: index + 1,
+      created_at: now,
+      updated_at: now,
+      created_by: ctx.actor.userId,
+      updated_by: ctx.actor.userId,
+      created_by_email: ctx.actor.email,
+      updated_by_email: ctx.actor.email,
+    };
+  });
   const { data: inserted, error: insertError } = await client
     .from("job_material_lines")
     .insert(rows)
@@ -1390,12 +1525,24 @@ export async function suggestDispatchV2Draft(
   }
   const out: any[] = Array.isArray(inserted) ? inserted : [];
   out.sort((a, b) => Number(a.position) - Number(b.position));
+  // Lines split between boxes: say where they went.
+  const suppliers = [...boxes.values()].map((b) => ({
+    ...b,
+    lines: rows.filter((r) => r.supplier_id === b.supplier_id).length,
+  })).filter((b) => b.lines > 0);
+  if (!single && suppliers.length) {
+    for (const b of suppliers) {
+      notes.push(`${linesWord(b.lines)} went into the ${b.name} box.`);
+    }
+  }
   return {
     success: true,
     added: out.length,
     lines: out.map(projectDispatchV2Line),
     notes,
-    supplier: box,
+    supplier: single,
+    suppliers,
+    scope_revision: revision,
   };
 }
 

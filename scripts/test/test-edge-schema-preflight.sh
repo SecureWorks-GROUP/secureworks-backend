@@ -971,6 +971,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch v2: the supplier box's material stage
                       # (dispatch_v2_material_stage_write.ts).
                       ("20261028170000", "dispatch_v2_material_stages"),
+                      # T20: the scope fill records the sealed scope revision
+                      # it read (dispatch_v2_store.ts).
+                      ("20261102203000", "dispatch_v2_scope_fill_revision"),
                       # Dispatch v2 payment step: on account or pay first
                       # (dispatch_v2_payment.ts).
                       ("20261029120000", "dispatch_v2_on_account_suppliers"),
