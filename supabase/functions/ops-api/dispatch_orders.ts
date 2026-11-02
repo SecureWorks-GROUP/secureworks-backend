@@ -24,6 +24,9 @@ export const DISPATCH_THREAD_ROWS_LOG_AT = 500;
 // ── Order lines ─────────────────────────────────────────────────────────────
 
 export type DispatchOrderLine = {
+  source_version_id?: string;
+  source_line_id?: string | null;
+  source_kind?: string | null;
   line_id: string;
   description: string;
   quantity: number | null;
@@ -63,6 +66,13 @@ export function dispatchOrderableLines(
 export function dispatchOrderLine(line: any): DispatchOrderLine {
   return {
     line_id: String(line?.id ?? ""),
+    ...(line?.source_version_id
+      ? {
+        source_version_id: line.source_version_id,
+        source_line_id: line.source_line_id ?? null,
+        source_kind: line.source_kind ?? null,
+      }
+      : {}),
     description: String(line?.description ?? ""),
     quantity: numberOrNull(line?.quantity),
     unit: typeof line?.unit === "string" && line.unit.trim() ? line.unit : null,
@@ -110,11 +120,17 @@ export function formatDispatchQuantity(quantity: number): string {
   return String(Math.round(quantity * 1000) / 1000);
 }
 
-// "18 sheets Colorbond sheet 2.1 m". A line with no quantity prints its item
-// alone; quantity and unit print as stored.
+// "18 sheets Colorbond sheet 2.1 m". A line with no quantity says its
+// quantity is to confirm (a scope can leave a quantity unknown, SQ-29), so
+// the supplier never reads the item alone as a whole order; quantity and
+// unit print as stored.
+export const DISPATCH_QUANTITY_TO_CONFIRM = "quantity to confirm";
+
 export function dispatchOrderLineText(line: DispatchOrderLine): string {
   const item = String(line.description ?? "").trim();
-  if (line.quantity === null || line.quantity === undefined) return item;
+  if (line.quantity === null || line.quantity === undefined) {
+    return `${item} (${DISPATCH_QUANTITY_TO_CONFIRM})`;
+  }
   const unit = line.unit ? ` ${line.unit.trim()}` : "";
   return `${formatDispatchQuantity(line.quantity)}${unit} ${item}`;
 }

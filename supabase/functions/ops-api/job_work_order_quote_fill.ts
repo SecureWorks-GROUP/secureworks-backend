@@ -14,12 +14,15 @@
 // - scope_items gets the builder's lines and agreed_labour_ex the quote's own
 //   labour figure. When the quote has none, agreed_labour_ex stays empty for
 //   the approver to set.
+// - The same write names the frozen scope revision the lines came from
+//   (quote_filled_scope_revision_id, 20261020120000).
 // - The same write stamps quote_filled_at, which marks the draft as the
 //   fill's own: only such a draft, never edited since (hand_edited_at, set by
 //   the database), is issued automatically (job_work_orders.ts,
 //   20261016120000_job_work_order_auto_issue.sql). A draft someone already
 //   edited by hand is filled without the stamp and waits for the approver.
 
+import { acceptedRevisionForOrders } from "../_shared/expected_costs/accepted_quote_cost_source.ts";
 import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
@@ -35,7 +38,7 @@ const UUID_RE =
 const MAX_FILLED_SCOPE_ITEMS = 200;
 
 const FILL_WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, hand_edited_at, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, quote_filled_scope_revision_id, hand_edited_at, created_at, updated_at";
 
 export class QuoteFillError extends Error {
   constructor(
@@ -104,6 +107,8 @@ export type QuoteFillOutcome = {
   work_order: any | null;
   scope_revision_id?: string | null;
   needs_review?: boolean;
+  /** With no_accepted_quote: why the accepted revision is Unknown (D1 F3). */
+  unproven_reason?: string;
 };
 
 const FILL_JOB_TYPES = new Set(["fencing", "patio"]);
@@ -234,6 +239,29 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
         .in("status", ["frozen", "superseded"])
         .limit(1));
     if (accepted) return use(accepted, "accepted_revision");
+    // An explicit accepted identity is authoritative even when its row is
+    // unavailable. A later freeze before acceptance is not a substitute.
+    return none();
+  }
+  // D1 fix F3: with no recorded accepted revision, the acceptance chain
+  // decides. A chain that names a released revision is used as accepted; an
+  // unproven chain (a failed or partial read included) fills nothing and
+  // says why, never the newest revision. Only a legacy chain keeps the time
+  // and latest-frozen rules below.
+  const chain = await acceptedRevisionForOrders(client, String(job.id));
+  if (chain.kind === "unknown") {
+    flags.push("accepted_quote_unproven", `accepted_quote_unproven:${chain.reason}`);
+    return none();
+  }
+  if (chain.kind === "bound") {
+    const [bound] = await readRevisions(client, (q) =>
+      q.eq("job_id", job.id)
+        .eq("id", chain.revision_id)
+        .in("status", ["frozen", "superseded"])
+        .limit(1));
+    if (bound) return use(bound, "accepted_revision");
+    flags.push("accepted_quote_unproven", "accepted_quote_unproven:accepted_revision_unavailable");
+    return none();
   }
   const acceptedAt = typeof job?.accepted_at === "string" && job.accepted_at
     ? job.accepted_at
@@ -398,11 +426,17 @@ export async function fillJobWorkOrderDraftFromQuote(
 
   const { quote, result } = await linesForJob(client, job);
   if (quote.source === null) {
+    const unproven = quote.flags.find((f) =>
+      f.startsWith("accepted_quote_unproven:")
+    );
     return {
       filled: false,
       reason: "no_accepted_quote",
       work_order: draft,
       scope_revision_id: null,
+      ...(unproven
+        ? { unproven_reason: unproven.slice("accepted_quote_unproven:".length) }
+        : {}),
     };
   }
   if (result.lines.length === 0) {
@@ -424,6 +458,13 @@ export async function fillJobWorkOrderDraftFromQuote(
   // special instructions, say), so such a draft is filled without it.
   if (!draft.hand_edited_at) {
     patch.quote_filled_at = new Date().toISOString();
+  }
+  // The revision the lines came from, on the row itself (Dispatch S6, R7;
+  // 20261020120000): also on a draft edited by hand, since its lines still
+  // come from this revision. A refill of a cleared draft may name a newer
+  // revision; the database allows the change only from a cleared draft.
+  if (quote.scope_revision_id && UUID_RE.test(quote.scope_revision_id)) {
+    patch.quote_filled_scope_revision_id = quote.scope_revision_id;
   }
   let update = client.from("work_orders").update(patch)
     .eq("id", draft.id)

@@ -17,6 +17,7 @@ import {
   autoIssueJobWorkOrders,
   backfillJobWorkOrders,
   createJobWorkOrder,
+  jobWorkOrderFilledFrom,
   readJobWorkOrder,
   tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
@@ -33,6 +34,8 @@ const REV_NEWER = "55555555-5555-4555-8555-555555555552";
 type Tables = Record<string, any[]>;
 
 function get(row: any, path: string) {
+  // PostgREST JSON text path (detail_json->>work_order_id) reads as a dot path.
+  if (path.includes("->>")) path = path.replace(/->>/g, ".");
   return path.split(".").reduce(
     (v, k) => (v == null ? v : (Array.isArray(v) ? v[0] : v)[k]),
     row,
@@ -46,8 +49,10 @@ class Query {
   private mode: "one" | "maybe" | null = null;
   private lim: number | null = null;
   private sorts: Array<{ col: string; ascending: boolean }> = [];
+  private exactCount = false;
   constructor(private db: FakeDb, private table: string) {}
-  select(_cols?: string) {
+  select(_cols?: string, opts?: { count?: string }) {
+    if (opts?.count === "exact") this.exactCount = true;
     return this;
   }
   insert(payload: any) {
@@ -153,6 +158,7 @@ class Query {
         ? { data: rows[0], error: null }
         : { data: null, error: { message: "not one" } };
     }
+    if (this.exactCount) return { data: rows, count: rows.length, error: null };
     return { data: rows, error: null };
   }
 }
@@ -339,8 +345,20 @@ Deno.test("an untouched draft is filled from the accepted quote on the staff rea
   ], [2, "hrs", 2, 80, 160, false, true]);
   assert(roots.flags.includes("outside_quote_labour"));
   assert(wo.scope_items.every((i: any) => i.source === "quote"));
+  // The revision the lines came from is stored on the row (R7), and the
+  // read says where it came from.
+  assertEquals(wo.quote_filled_scope_revision_id, REV_ACCEPTED);
+  assertEquals(r.filled_from, {
+    scope_revision_id: REV_ACCEPTED,
+    source: "work_order",
+    unreadable: false,
+  });
   // Stored, so the next read is a plain read.
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
+  assertEquals(
+    db.tables.work_orders[0].quote_filled_scope_revision_id,
+    REV_ACCEPTED,
+  );
   const again: any = await readJobWorkOrder(db, {
     jobId: JOB,
     fillFromQuote: true,
@@ -492,6 +510,24 @@ Deno.test("no accepted revision: the draft is not filled, from a later revision 
     assertEquals(db.tables.work_orders[0].agreed_labour_ex, null, label);
     assertEquals(db.writes(), [], label);
   }
+});
+
+Deno.test("a missing named accepted revision does not fill from another quote frozen before acceptance", async () => {
+  const db = baseDb();
+  db.tables.jobs[0].accepted_at = "2026-10-11T00:00:00Z";
+  // The quote was rendered from A, then B froze before the acceptance arrived.
+  // A remains the explicit accepted identity, but its read now returns no row.
+  db.tables.scope_revisions = [laterRevision()];
+  const preview = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals([preview.quote.source, preview.quote.scope_revision_id, preview.quote.flags], [
+    null, null, ["no_accepted_quote"],
+  ]);
+  assertEquals(preview.result.lines, []);
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.reason, "no_accepted_quote");
+  assertEquals(db.tables.work_orders[0].scope_items, []);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
+  assertEquals(db.writes(), []);
 });
 
 Deno.test("an unreadable accepted revision is never replaced by another one", async () => {
@@ -1464,4 +1500,135 @@ Deno.test("auto issue: a job moved past quoted with a frozen tool quote goes to 
       );
     }
   }
+});
+
+Deno.test("filled_from: a draft filled before the column existed reads its revision from the fill event", async () => {
+  const db = baseDb();
+  db.tables.work_orders[0].quote_filled_at = "2026-10-15T00:00:00Z";
+  db.tables.work_orders[0].hand_edited_at = "2026-10-15T01:00:00Z";
+  db.tables.job_events.push(
+    {
+      job_id: JOB,
+      event_type: "job_work_order_draft_filled_from_quote",
+      created_at: "2026-10-15T00:00:00Z",
+      detail_json: { work_order_id: DRAFT, scope_revision_id: REV_ACCEPTED },
+    },
+    {
+      job_id: JOB,
+      event_type: "job_work_order_draft_filled_from_quote",
+      created_at: "2026-10-16T00:00:00Z",
+      detail_json: {
+        work_order_id: "00000000-0000-4000-8000-0000000000ff",
+        scope_revision_id: "00000000-0000-4000-8000-0000000000fe",
+      },
+    },
+  );
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.filled_from, {
+    scope_revision_id: REV_ACCEPTED,
+    source: "fill_event",
+    unreadable: false,
+  });
+});
+
+Deno.test("filled_from: a stamped fill whose event was never written is unknown, not not filled", async () => {
+  const db = baseDb();
+  db.tables.work_orders[0].quote_filled_at = "2026-10-15T00:00:00Z";
+  db.tables.work_orders[0].hand_edited_at = "2026-10-15T01:00:00Z";
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.filled_from, {
+    scope_revision_id: null,
+    source: null,
+    unreadable: true,
+  });
+});
+
+Deno.test("filled_from: an unread fill event is unknown, never not filled", () => {
+  assertEquals(
+    jobWorkOrderFilledFrom({ id: DRAFT, quote_filled_scope_revision_id: null }, null),
+    { scope_revision_id: null, source: null, unreadable: true },
+  );
+  assertEquals(
+    jobWorkOrderFilledFrom({ id: DRAFT, quote_filled_scope_revision_id: null }, []),
+    { scope_revision_id: null, source: null, unreadable: false },
+  );
+  // The column wins over any event.
+  assertEquals(
+    jobWorkOrderFilledFrom(
+      { id: DRAFT, quote_filled_scope_revision_id: REV_ACCEPTED },
+      null,
+    ).source,
+    "work_order",
+  );
+});
+
+Deno.test("a cleared draft refilled after a newer revision is recorded names the newer revision (PR 1100 F1)", async () => {
+  const db = baseDb();
+  await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(
+    db.tables.work_orders[0].quote_filled_scope_revision_id,
+    REV_ACCEPTED,
+  );
+  // Staff clear the lines and the agreed labour; the job's accepted revision
+  // is then recorded as a newer one.
+  Object.assign(db.tables.work_orders[0], {
+    scope_items: [],
+    agreed_labour_ex: null,
+  });
+  db.tables.scope_revisions.push(laterRevision());
+  db.tables.jobs[0].expected_costs = { scope_revision_id: REV_NEWER };
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
+  assertEquals(r.quote_fill.filled, true);
+  assertEquals(r.quote_fill.scope_revision_id, REV_NEWER);
+  assertEquals(r.work_order.quote_filled_scope_revision_id, REV_NEWER);
+  assertEquals(r.filled_from.source, "work_order");
+});
+
+// ── D1 fix F3: a failed accepted-revision read at acceptance ──
+//
+// The quote was sent naming A and the customer accepted A. The scoper had
+// refrozen B (unsent) before the acceptance, so B is the newest revision frozen
+// at or before accepted_at. The expected-cost freeze at acceptance could not
+// prove the source (a read failed), so jobs.expected_costs stayed null. Before
+// the fix the work order then filled from B: B's lines and B's labour figure
+// went to the crew. Rule: Unknown never picks a different revision.
+const DOC_A = "66666666-6666-4666-8666-666666666661";
+function sentAAcceptedAfterRefreezeToB(db: FakeDb) {
+  db.tables.jobs[0].expected_costs = null;
+  db.tables.jobs[0].accepted_at = ACCEPTED_AT;
+  db.tables.scope_revisions[0].status = "superseded";
+  db.tables.scope_revisions.push({
+    ...laterRevision(),
+    frozen_at: "2026-10-08T00:00:00Z", // before the acceptance (9 Oct)
+  });
+  db.tables.job_documents = [{ id: DOC_A, job_id: JOB, type: "quote", accepted_at: ACCEPTED_AT }];
+  db.tables.run_acceptances = [];
+  db.tables.job_variations = [];
+  db.tables.quote_revisions = [{
+    job_id: JOB, job_document_id: DOC_A, scope_revision_id: REV_ACCEPTED, sent_at: "2026-10-06T00:00:00Z",
+  }];
+  return db;
+}
+
+Deno.test("D1-F3a a failed accepted-revision read: the work order is not filled from the newer revision B; it says Unknown and why", async () => {
+  const db = sentAAcceptedAfterRefreezeToB(baseDb());
+  db.failOn.add("select:job_documents");
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.quote.source, null);
+  assertEquals(p.quote.scope_revision_id, null, "no revision is picked");
+  assert(p.quote.flags.includes("accepted_quote_unproven:acceptance_chain_unreadable"), p.quote.flags.join(","));
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.reason, outcome.unproven_reason], [false, "no_accepted_quote", "acceptance_chain_unreadable"]);
+  const wo = db.tables.work_orders[0];
+  assertEquals([wo.scope_items, wo.agreed_labour_ex], [[], null], "the draft stays untouched: no B lines, no B labour");
+});
+
+Deno.test("D1-F3b once the read works, the chain's named revision A fills, never the newer B", async () => {
+  const db = sentAAcceptedAfterRefreezeToB(baseDb());
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.scope_revision_id], [true, REV_ACCEPTED]);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED, "A's labour figure, not B's 175");
 });

@@ -11,6 +11,11 @@ import {
   sendRunsJobTypeRefusal,
   sendRunsRequestRefusal,
 } from "./send_runs_request.ts";
+import {
+  quoteSendBuildSource,
+  sealedSendSource,
+  startNamedScopeRevisionRead,
+} from "../_shared/scope_freeze/quote_scope_revision_link.ts";
 
 Deno.test("send-runs rejects every explicit runs property rather than silently widening selection", () => {
   for (const runs of [["REAR"], [], null, undefined, "REAR"]) {
@@ -84,6 +89,9 @@ const prelude = new AsyncFunction(
   "quoteSendTenantAccess",
   "sendRunsRequestRefusal",
   "sendRunsJobTypeRefusal",
+  "startNamedScopeRevisionRead",
+  "sealedSendSource",
+  "quoteSendBuildSource",
   `${
     source.slice(start, end).replaceAll("refused!.", "refused.")
   } return jsonResponse({ reached_pricing: true }, 200, corsHeaders); }`,
@@ -131,6 +139,9 @@ async function runPrelude(
     quoteSendTenantAccess,
     sendRunsRequestRefusal,
     sendRunsJobTypeRefusal,
+    startNamedScopeRevisionRead,
+    sealedSendSource,
+    quoteSendBuildSource,
   );
   return { status: result.status, body: await result.json(), reads };
 }

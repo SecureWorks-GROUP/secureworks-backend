@@ -1,6 +1,6 @@
-// Same Deno URL dependency as the owning edge entrypoints.
+// Match the owning ops-api entrypoint pin; private SDK query types are version-specific.
 // deno-lint-ignore no-import-prefix
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
 import {
   type SettlementEvidence,
   xeroObject,

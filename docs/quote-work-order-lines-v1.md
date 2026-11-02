@@ -70,6 +70,25 @@ office too (`agreed_labour_missing`, docs/job-work-orders-v1.md).
 
 ## The lines
 
+### Original Scope demand identities (INT-23 / R-02)
+
+The staff `job_work_order` read returns `scope_identity` alongside `filled_from`.
+It reads only the exact scope revision the shown work order names, checks its
+job, frozen/superseded state and the SHA-256 of its exact stored scope bytes,
+then returns the original `scope_json.lines[].id` values in order. A missing
+revision/manifest, invalid or duplicate ID, failed read or mismatched hash leaves
+`scope_line_ids: null` with an explicit reason. It never falls back to the job's
+current scope, generates IDs, silently drops unidentified lines or replaces
+the existing work-order tasks. A valid empty manifest is distinct from a missing
+one. The existing row/event source precedence of `filled_from` is unchanged.
+
+This is the **named revision's demand manifest**, not a per-task allocation.
+Fence Scope lines explicitly exclude labour and surcharge; its derived labour
+tasks keep their existing positional `line_key` below. No material-to-labour
+correspondence is inferred from words, index or equal amounts. Individual task,
+order, invoice and actual-cost mappings still require their own source-backed
+links. This read does not change approval, seal content, money or any stored row.
+
 Each line is a `scope_items` entry of the job work order:
 
 `{line_key, source:"quote", basis, description, qty, unit, hours, rate, rate_unit, total, counted, flags[], needs_review, quote_cost_ex?}`
@@ -254,3 +273,21 @@ and returns:
 - 400 `job_id_required`, before any query, when `job_id` is missing or is not a job id
   (uuid). A job number is not accepted.
 - 404 `job_not_found` for an unknown job.
+
+## D1 acceptance-cost source candidate, 30 October 2026
+
+The send-quote acceptance paths pass `quote_acceptance: true` to the write-once
+expected-cost helper. When released accepted documents declare a scope revision,
+the helper requires a complete, unambiguous chain to that exact row, verifies its
+job, lifecycle and canonical scope/pricing hashes, then pins those costs. A newer
+draft frozen while sending cannot replace the sent revision. Missing reads,
+mixed bindings, unaccepted parties and unresolved accepted variations leave the
+baseline unset; they never manufacture zero costs or select a nearby revision.
+An already stored baseline is unchanged. Quotes with no declared binding retain
+the existing CP1 resolver and remain unproven by the JP-23 acceptance reader.
+
+This is a local unreleased candidate. Historical JP-23 writer/release holds are
+not waived. Money/database review and coupled Scope producer/consumer proof are
+still required. It does not change this document's work-order fill resolver or
+prove order/crew/actual-cost line continuity. No backfill, migration, send or
+financial-policy change is included.

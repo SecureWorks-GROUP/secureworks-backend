@@ -32,6 +32,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import {
+  quoteScopeRevisionIdForRelease,
+  quoteSendBuildSource,
+  sealedSendSource,
+  startNamedScopeRevisionRead,
+  type NamedScopeRevisionRead,
+  type SentQuoteSourceHashes,
+} from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
   currentQuoteForParty,
@@ -93,6 +101,7 @@ import {
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
+import { contactDepositFromRelease, depositHeldMessage, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -132,7 +141,7 @@ const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
 // ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
-function getClientReplyTo(jobType: string | null, jobNumber?: string): string {
+function getClientReplyTo(jobType: string | null, jobNumber?: string | null): string {
   const dept = jobType === 'fencing' ? 'fencing' : 'patios'
   const tag = jobNumber ? `+${jobNumber}` : ''
   return `${dept}${tag}@secureworkswa.com.au`
@@ -192,7 +201,7 @@ function quotePricingGateError(pricingJsonRaw: any): string | null {
 }
 
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
-function logEmailToGHL(contactId: string | null, subject: string, recipient: string) {
+function logEmailToGHL(contactId: string | null | undefined, subject: string, recipient: string) {
   if (!contactId) return
   fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=add_note`, {
     method: 'POST',
@@ -416,6 +425,19 @@ type RecordReleaseQuoteRevisionInput = {
   // reason (unknown adapter kind, etc.), we log [v2-augmentation-fail]
   // and INSERT V1-only — the V1 release-truth contract is preserved.
   v2_inputs?: Omit<V2AugmentationInput, 'release_id'> | null
+
+  // JP-24 slice 1: the provenance of the sent document, the hashes of the
+  // exact scope_json / pricing_json it was built from (sentQuoteSourceHashes),
+  // captured by its producer before any await of the send. No caller has it
+  // today (the PDF records no source hashes), so the link stores null.
+  sent_source_hashes?: SentQuoteSourceHashes | null
+
+  // JP-24 slice 1b: the one bounded read of the frozen scope revision the
+  // producer named in the send body (source_scope_revision_id), started before
+  // any send await (startNamedScopeRevisionRead). When present it decides the
+  // link on its own: that row's id when it is this job's and was frozen at the
+  // read, otherwise null. Legacy senders name none.
+  source_scope_revision?: Promise<NamedScopeRevisionRead> | null
 }
 
 async function recordReleasedQuoteRevision(
@@ -575,6 +597,18 @@ async function recordReleasedQuoteRevision(
       }
     }
 
+    // JP-24 slice 1: the frozen scope revision this send came from, bound only
+    // to the sent document's own provenance (never a re-read of the job, which
+    // may have been saved and refrozen since the quote was built). Null
+    // (unknown) without it, or on any mismatch, ambiguity or failed read; the
+    // lookup never throws and never changes the send.
+    const scopeRevisionId = await quoteScopeRevisionIdForRelease(
+      sb,
+      input.job_id,
+      { named: input.source_scope_revision ?? null, sent: input.sent_source_hashes ?? null },
+      { handler: ctx.handler },
+    )
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
         id: releaseId,
@@ -601,6 +635,7 @@ async function recordReleasedQuoteRevision(
         released_via: input.released_via,
         sent_at: sentAtIso,
         schema_version: '1.0',
+        scope_revision_id: scopeRevisionId,
         ...v2Cols,
       })
       .select('id')
@@ -670,6 +705,9 @@ async function recordReleasedQuoteRevision(
   }
 }
 
+// Test seam: the real writer, driven by send-quote/index_test.ts (JP-24 slice 1).
+export const _recordReleasedQuoteRevisionForTest = recordReleasedQuoteRevision
+
 if (import.meta.main) {
 serve(async (req: Request) => {
   const url = new URL(req.url)
@@ -720,7 +758,11 @@ serve(async (req: Request) => {
     // ── SEND QUOTE EMAIL ──
     if (path === 'send' && req.method === 'POST') {
       let xeroQuoteWarning: Record<string, unknown> | null = null
-      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior } = await req.json()
+      const { document_id, client_email: providedEmail, client_name: providedName, message, cc_emails, subject: customSubject, attachment_paths, scoper_name, supersede_prior, source_scope_revision_id } = await req.json()
+      // JP-24 slice 1b: read the producer-named frozen revision now, before any
+      // send await, with its frozen scope and pricing (D1 fix F1). The promise
+      // never rejects; it is judged below, before the email.
+      const sourceScopeRevisionRead = startNamedScopeRevisionRead(sb, source_scope_revision_id, { withFrozenBlobs: true })
 
       if (!document_id) {
         return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
@@ -776,7 +818,16 @@ serve(async (req: Request) => {
       // this endpoint directly or replaying a stale document. Enforce it here.
       // Strict === false so fence/legacy quotes that never set the flag (undefined)
       // are NOT blocked — only an explicit validation failure blocks.
-      {
+      // D1 fix F1: a send that names sealed revision A builds the crew pack and
+      // the release record from A's own frozen scope and pricing, never from
+      // the live job (a save from another device after sealing changes only the
+      // live job). An unprovable named revision refuses below, before any
+      // email; legacy sends (no revision named) keep the live job.
+      const sealedSource = sealedSendSource(await sourceScopeRevisionRead, doc.job_id)
+      const sealedPricingJson = sealedSource.kind === 'sealed' ? sealedSource.pricing_json : null
+      if (sealedPricingJson && doc.jobs) doc.jobs.pricing_json = sealedPricingJson
+
+      if (sealedSource.kind !== 'refused') {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
       }
@@ -834,6 +885,16 @@ serve(async (req: Request) => {
           }
         }
         return jsonResponse({ success: true, already_sent: true, view_url: viewUrl, share_token: doc.share_token, quote_number: doc.quote_number }, 200, corsHeaders)
+      }
+      // Judged after the claim so a retry of an already-published document
+      // still answers already_sent above. Nothing has been emailed yet.
+      if (sealedSource.kind === 'refused') {
+        console.log('[send-quote] sealed revision refused', JSON.stringify({
+          document_id, job_id: doc.job_id, code: sealedSource.body.code, reason: sealedSource.body.reason,
+        }))
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse(sealedSource.body, sealedSource.status, corsHeaders)
       }
       {
         const emailHtml = buildQuoteEmail({
@@ -979,6 +1040,7 @@ serve(async (req: Request) => {
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse({ error: 'Failed to persist quote trade pack' }, 500, corsHeaders)
       }
+      const packSource = quoteSendBuildSource(sealedSource, jobForPack)
       const persisted = await persistTradePackOnDocuments(sb, {
         documents: [{
           id: document_id,
@@ -987,8 +1049,8 @@ serve(async (req: Request) => {
           claim_token: claimed.token,
         }],
         jobType: jobForPack.type || doc.jobs?.type,
-        scopeJson: jobForPack.scope_json,
-        pricingJson: jobForPack.pricing_json || doc.jobs?.pricing_json,
+        scopeJson: packSource.scope_json,
+        pricingJson: packSource.pricing_json || doc.jobs?.pricing_json,
         customer: {
           name: jobForPack.client_name ?? doc.jobs?.client_name,
           phone: jobForPack.client_phone ?? doc.jobs?.client_phone,
@@ -1022,6 +1084,7 @@ serve(async (req: Request) => {
           .select('job_number, type, pricing_json, client_name')
           .eq('id', doc.job_id)
           .single()
+        if (jobBefore && sealedPricingJson) jobBefore.pricing_json = sealedPricingJson
 
         // Conditional UPDATE returning affected rows — only this call's atomic
         // draft → quoted flip emits canonical release events. If a concurrent writer
@@ -1071,6 +1134,10 @@ serve(async (req: Request) => {
                 .eq('job_id', doc.job_id),
             ])
             if (fullJobRow) {
+              if (sealedSource.kind === 'sealed') {
+                fullJobRow.scope_json = sealedSource.scope_json
+                fullJobRow.pricing_json = sealedSource.pricing_json
+              }
               v2Inputs = {
                 job_id: doc.job_id,
                 version: doc.version || 1,
@@ -1129,11 +1196,12 @@ serve(async (req: Request) => {
               job_type: doc.jobs?.type || null,
               job_number: doc.jobs?.job_number || null,
             },
-            pricing_json: doc.jobs?.pricing_json || null,
+            pricing_json: quoteSendBuildSource(sealedSource, doc.jobs).pricing_json,
             pdf_url: doc.pdf_url || '',
             released_via: 'send-quote/send',
             org_id: DEFAULT_ORG_ID,
             v2_inputs: v2Inputs,
+            source_scope_revision: sourceScopeRevisionRead,
           }, { handler: 'send-quote/send', job_id: doc.job_id })
 
           // N2 — body_preview carries a one-line structured summary so the
@@ -1200,6 +1268,8 @@ serve(async (req: Request) => {
           .select('id, ghl_opportunity_id, xero_contact_id, job_number, client_name, site_address, site_suburb, type, pricing_json')
           .eq('id', doc.job_id)
           .single()
+        // The GHL value and the Xero quote carry the price the customer was sent.
+        if (job && sealedPricingJson) job.pricing_json = sealedPricingJson
 
         // Push monetary value to GHL opportunity (non-blocking)
         if (GHL_API_TOKEN && job?.ghl_opportunity_id) {
@@ -1365,7 +1435,7 @@ serve(async (req: Request) => {
           // retired link must not open the client's quote.
           let liveQuery = sb
             .from('job_documents')
-            .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', share_token')
+            .select(`${QUOTE_PARTY_DOCUMENT_COLUMNS}, share_token`)
             .eq('job_id', supDoc.job_id)
             .eq('type', 'quote')
             .eq('sent_to_client', true)
@@ -1404,7 +1474,7 @@ serve(async (req: Request) => {
       // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
         let siblingQuery = sb.from('job_documents')
-          .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', quote_number, pdf_url, html_url, share_token')
+          .select(`${QUOTE_PARTY_DOCUMENT_COLUMNS}, quote_number, pdf_url, html_url, share_token`)
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
@@ -1890,7 +1960,7 @@ serve(async (req: Request) => {
         // and write-once, so calling from both acceptance sites is safe.
         if (jobStatus === 'accepted' && doc.job_id) {
           try {
-            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id })
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline (run flow)', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
@@ -1921,7 +1991,6 @@ serve(async (req: Request) => {
 
           // Create deposit invoices via ops-api for each party
           const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
-          const depositPercent = pj.deposit?.percent || 50
 
           // Get all contacts for this run
           const { data: contacts } = await sb.from('job_contacts')
@@ -1934,9 +2003,31 @@ serve(async (req: Request) => {
             if (!contact) continue
 
             const isClient = contact.is_primary
-            const depositAmount = quoteRunDepositAmount(run, isClient, depositPercent)
-
-            if (depositAmount <= 0) continue
+            // D1F-1: price the deposit from the version this party accepted,
+            // never the live job; hold it with a reason when that cannot be read.
+            const acceptedDocId = (ra as any).job_document_id || doc.id
+            const deposit = runDepositFromRelease(await readAcceptedRelease(sb, acceptedDocId), runLabel, isClient)
+            if (!deposit.ok) {
+              await insertCapturedEvidence(sb, {
+                event_type: 'quote.deposit_held.notify',
+                source: 'send-quote',
+                occurred_at: new Date().toISOString(),
+                recorded_at: new Date().toISOString(),
+                entity_type: 'job',
+                entity_id: doc.job_id,
+                job_id: job?.job_number || '',
+                payload: {
+                  message: depositHeldMessage(job?.job_number || '', contact.client_name || 'a party', deposit.reason),
+                  reason: deposit.reason,
+                  run_label: runLabel,
+                  job_contact_id: contact.id,
+                  job_document_id: acceptedDocId,
+                },
+                metadata: {},
+              }).then(() => {}, () => {})
+              continue
+            }
+            if (deposit.amount <= 0) continue
 
             try {
               await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
@@ -1945,8 +2036,9 @@ serve(async (req: Request) => {
                 body: JSON.stringify({
                   job_id: doc.job_id,
                   job_contact_id: contact.id,
-                  deposit_amount: depositAmount,
-                  deposit_percent: depositPercent,
+                  job_document_id: acceptedDocId,
+                  deposit_amount: deposit.amount,
+                  deposit_percent: deposit.percent,
                   run_label: runLabel,
                 }),
               })
@@ -2001,7 +2093,7 @@ serve(async (req: Request) => {
         // once the whole job is accepted, matching the accepted_at write above.
         if (newStatus === 'accepted') {
           try {
-            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id })
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
@@ -2163,21 +2255,38 @@ serve(async (req: Request) => {
             }
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing
+            let depositHeld: string | null = null
             if (doc.job_contact_id && doc.job_contacts) {
               invoiceBody.job_contact_id = doc.job_contact_id
-              // Calculate this contact's deposit from their exact quote value (not back-calculated share %)
-              let contactPortionIncGST
-              if (doc.job_contacts.quote_value_ex_gst != null) {
-                contactPortionIncGST = Number(doc.job_contacts.quote_value_ex_gst) * 1.10
+              // D1F-1: this contact's deposit comes from the version they accepted
+              // (their exact quote value, else their share of the accepted total),
+              // never the live job; held with a reason when that cannot be read.
+              const deposit = contactDepositFromRelease(await readAcceptedRelease(sb, doc.id), doc.job_contacts)
+              if (deposit.ok) {
+                invoiceBody.deposit_amount = deposit.amount
+                invoiceBody.deposit_percent = deposit.percent
               } else {
-                const sharePct = doc.job_contacts.share_percentage ?? 50
-                contactPortionIncGST = totalIncGST * (sharePct / 100)
+                depositHeld = deposit.reason
+                await insertCapturedEvidence(sb, {
+                  event_type: 'quote.deposit_held.notify',
+                  source: 'send-quote',
+                  occurred_at: new Date().toISOString(),
+                  recorded_at: new Date().toISOString(),
+                  entity_type: 'job',
+                  entity_id: job.id,
+                  job_id: job?.job_number || '',
+                  payload: {
+                    message: depositHeldMessage(job?.job_number || '', doc.job_contacts.client_name || 'a party', deposit.reason),
+                    reason: deposit.reason,
+                    job_contact_id: doc.job_contact_id,
+                    job_document_id: doc.id,
+                  },
+                  metadata: {},
+                }).then(() => {}, () => {})
               }
-              const depositPct = depositConfig.percent || 50
-              invoiceBody.deposit_amount = Math.round(contactPortionIncGST * (depositPct / 100) * 100) / 100
-              invoiceBody.deposit_percent = depositPct
             }
 
+            if (depositHeld) throw new Error(`deposit_held:${depositHeld}`)
             const depRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
               method: 'POST',
               headers: {
@@ -2202,7 +2311,11 @@ serve(async (req: Request) => {
         // ── Auto-start council process for patio jobs (fire-and-forget) ──
         let councilSubmissionId: string | null = null
         const isPatio = job?.type === 'patio' || job?.job_number?.startsWith('SWP')
-        if (isPatio) {
+        if (isPatio && job) {
+          // This projection currently omits a job email. Preserve its existing
+          // contact fallback without adding a new recipient lookup.
+          const councilJobEmail = 'client_email' in job && typeof job.client_email === 'string'
+            ? job.client_email : ''
           try {
             const councilRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=create_council_submission`, {
               method: 'POST',
@@ -2232,21 +2345,21 @@ serve(async (req: Request) => {
               body: JSON.stringify({
                 from: 'SecureWorks Group <approvals@secureworksgroup.app>',
                 reply_to: getClientReplyTo(job?.type, job?.job_number),
-                to: [job.client_email || doc.job_contacts?.client_email || ''],
+                to: [councilJobEmail || doc.job_contacts?.client_email || ''],
                 subject: `Your Patio Project - Next Steps & What We Need From You`,
                 html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
               }),
             })
             .then(() => {
               console.log(`[send-quote] Council kickoff email sent for ${job.job_number}`)
-              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', job.client_email || '')
+              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', councilJobEmail)
               // Record in po_communications for council thread
               if (councilSubmissionId) {
                 sb.from('po_communications').insert({
                   job_id: job.id,
                   direction: 'outbound',
                   from_email: 'approvals@secureworksgroup.app',
-                  to_email: job.client_email || '',
+                  to_email: councilJobEmail,
                   subject: 'Your Patio Project - Next Steps & What We Need From You',
                   body_text: 'House plans request sent to client on acceptance',
                   communication_type: 'council',
@@ -2263,12 +2376,15 @@ serve(async (req: Request) => {
 
         // Return Next Steps HTML page directly (not via redirect — this is fetched by JS, not loaded as a page)
         const address = [job?.site_address, job?.site_suburb].filter(Boolean).join(', ')
+        // D1F-1: with no invoice, show the deposit from the accepted version, not the live job.
+        const acceptedForPage = invoiceResult?.deposit_amount ? null : await readAcceptedRelease(sb, doc.id)
+        const acceptedDeposit = acceptedForPage?.ok ? (acceptedForPage.pricing.deposit || {}) : {}
         const nextStepsHtml = buildNextStepsPage({
           clientName: acceptorName,
           projectType: job?.type || 'project',
           address,
-          depositAmount: invoiceResult?.deposit_amount || depositConfig.total_deposit_inc_gst || 0,
-          depositDescription: depositConfig.description || '',
+          depositAmount: invoiceResult?.deposit_amount || acceptedDeposit.total_deposit_inc_gst || 0,
+          depositDescription: acceptedDeposit.description || depositConfig.description || '',
           paymentUrl: invoiceResult?.payment_url || '',
           invoiceNumber: invoiceResult?.invoice_number || job?.job_number || '',
           shareToken: token,
@@ -2448,6 +2564,11 @@ serve(async (req: Request) => {
       const requestBody = await req.json()
       const requestRefusal = sendRunsRequestRefusal(requestBody)
       if (requestRefusal) return jsonResponse(requestRefusal.body, requestRefusal.status, corsHeaders)
+      // JP-24 slice 1b: the run documents are rendered from the same sealed
+      // revision the producer names; read it now, before any send await, with
+      // its frozen scope and pricing (D1 fix F1). The link names the whole-job
+      // revision, not a run share of it.
+      const sourceScopeRevisionReadRuns = startNamedScopeRevisionRead(sb, requestBody.source_scope_revision_id, { withFrozenBlobs: true })
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
@@ -2486,6 +2607,23 @@ serve(async (req: Request) => {
       // tenant access and before pricing, claims, documents, or provider sends.
       const scopeRefusal = sendRunsJobTypeRefusal(requestBody, job.type)
       if (scopeRefusal) return jsonResponse(scopeRefusal.body, scopeRefusal.status, corsHeaders)
+
+      // D1 fix F1: a send naming sealed revision A builds every run document,
+      // the crew packs and the release record from A's frozen scope and
+      // pricing, not from the live job. An unprovable named revision refuses
+      // here, before any claim or email.
+      {
+        const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
+        if (sealedRuns.kind === 'refused') {
+          console.log('[send-quote] send-runs sealed revision refused', JSON.stringify({
+            job_id: job.id, code: sealedRuns.body.code, reason: sealedRuns.body.reason,
+          }))
+          return jsonResponse(sealedRuns.body, sealedRuns.status, corsHeaders)
+        }
+        const runsSource = quoteSendBuildSource(sealedRuns, job)
+        job.scope_json = runsSource.scope_json
+        job.pricing_json = runsSource.pricing_json
+      }
 
       const pj = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job.pricing_json || {})
       const runs = pj.runs || []
@@ -3224,6 +3362,7 @@ serve(async (req: Request) => {
             released_via: 'send-quote/send-runs',
             org_id: DEFAULT_ORG_ID,
             v2_inputs: v2InputsRuns,
+            source_scope_revision: sourceScopeRevisionReadRuns,
           }, { handler: 'send-quote/send-runs', job_id: job.id })
         }
 
@@ -3580,7 +3719,12 @@ serve(async (req: Request) => {
 
       // Validate token
       const { data: doc } = await sb.from('job_documents').select('job_id, accepted_at, jobs(site_address, site_suburb)').eq('share_token', token).maybeSingle()
-      const addr = doc?.jobs ? [doc.jobs.site_address, doc.jobs.site_suburb].filter(Boolean).join(', ') : ''
+      // The job foreign key is a to-one join. Do not choose an arbitrary job
+      // if a malformed/ambiguous response ever returns a list instead.
+      const site: unknown = doc?.jobs
+      const addr = site && typeof site === 'object' && !Array.isArray(site)
+        ? [('site_address' in site ? site.site_address : null), ('site_suburb' in site ? site.site_suburb : null)].filter(Boolean).join(', ')
+        : ''
 
       return new Response(buildUploadPlansPage(token, jobId || doc?.job_id || '', addr), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
@@ -3775,7 +3919,9 @@ serve(async (req: Request) => {
       return jsonResponse({ ok: false, code: err.code, error: err.message, ...err.details }, err.status, corsHeaders)
     }
     console.error('Send-quote error:', err)
-    return jsonResponse({ error: err.message || 'Internal error' }, 500, corsHeaders)
+    const message = err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
+      ? err.message : ''
+    return jsonResponse({ error: message || 'Internal error' }, 500, corsHeaders)
   }
 })
 }

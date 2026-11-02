@@ -936,6 +936,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Paid close-out review switch: the per-job
                       # review_opt_out columns (job_closeout.ts).
                       ("20261020093000", "job_review_opt_out"),
+                      # S6 (R7): the scope revision a job work order was
+                      # filled from (job_work_orders.ts).
+                      ("20261020120000", "job_work_order_fill_revision"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
@@ -991,6 +994,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Whole-job move / stretch: reschedule_job_bookings calls
                       # reschedule_job_assignments_v1 (job_bookings.ts).
                       ("20261028150000", "reschedule_job_assignments"),
+                      # JP-24 slice 1: the quick-quote quote_revisions writer
+                      # inserts scope_revision_id (quote_scope_revision_link.ts).
+                      ("20261029123500", "quote_revisions_scope_revision_link"),
+                      ("20261019200000", "dispatch_material_line_provenance"),
                       # TP-01 Xero tie-out: xero_tieout calls
                       # xero_tieout_monthly (xero_tieout.ts).
                       ("20261029121500", "xero_tieout_monthly"),

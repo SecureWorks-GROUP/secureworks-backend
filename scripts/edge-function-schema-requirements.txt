@@ -911,6 +911,8 @@ ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function
 ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_job_mail
 ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_recon_job_items
 
+ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|column|work_orders.quote_filled_scope_revision_id
+ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|trigger|work_orders.trg_work_orders_fill_revision_guard
 # Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
 # invoice; ops-api job_receipt.ts reads the switch and writes the claims.
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
@@ -1010,6 +1012,24 @@ ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|functi
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_at
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_by_email
+# JP-24 slice 1: both quote_revisions writers (send-quote recordReleasedQuoteRevision
+# and the ops-api quick-quote copy) INSERT scope_revision_id. A writer deployed
+# ahead of the column has that insert refused and loses the send's release row,
+# so neither function may deploy before the migration.
+send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
+send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
+ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
+ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
+# 20261019200000 records which frozen scope revision and material a scope line
+# came from: every dispatch_materials read selects the four columns, and
+# dispatch_materials_suggest / _suggest_changes write them, so ops-api must not
+# deploy ahead of it (a missing column is a 400 on every materials read).
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_kind
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_version_id
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_version
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_line_id
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|index|job_material_lines_source_line_once
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|constraint|job_material_lines_source_shape
 ops-api|supabase/migrations/20261029121500_xero_tieout_monthly.sql|function|xero_tieout_monthly
 # H7 bill cost outcomes (INT-12, INT-10): job_overview's bills part calls
 # context_job_bill_outcomes, which reads CFO's cfo_bill_cost_outcomes view (a
