@@ -539,22 +539,39 @@ export async function listGroupPostPage(
   threadId: string,
   topic: string | null,
   next?: string | null,
+  rosterOnly = false,
 ): Promise<GroupPostPage> {
+  const path = `${GRAPH}/groups/${enc(groupId)}/threads/${enc(threadId)}/posts`;
   const r = await getJson(
     deps,
     next ??
-      `${GRAPH}/groups/${enc(groupId)}/threads/${
-        enc(threadId)
-      }/posts?$select=id,from,sender,receivedDateTime,body,hasAttachments,conversationId,conversationThreadId&$expand=${
-        enc(
-          `singleValueExtendedProperties($filter=id eq '${INTERNET_ID_PROP}')`,
-        )
-      }`,
+      (rosterOnly
+        ? `${path}?$select=id,from,sender,receivedDateTime&$top=50`
+        : `${path}?$select=id,from,sender,receivedDateTime,body,hasAttachments,conversationId,conversationThreadId&$expand=${
+          enc(
+            `singleValueExtendedProperties($filter=id eq '${INTERNET_ID_PROP}')`,
+          )
+        }`),
+    rosterOnly
+      ? { maxBytes: 4 * 1024 * 1024, code: "graph_roster_too_large" }
+      : undefined,
   );
+  if (rosterOnly && !Array.isArray(r.value)) {
+    throw new GraphReadError("graph_bad_json", null);
+  }
   const items = ((Array.isArray(r.value) ? r.value : []) as Record<
     string,
     unknown
-  >[]).map((p) => postFromGraph(p, topic)).filter((p) => p.graphId);
+  >[]).map((p): OutlookMailItem =>
+    rosterOnly
+      ? {
+        graphId: String(p.id ?? ""),
+        from: addr(p.from) ?? addr(p.sender),
+        receivedAt: str(p.receivedDateTime),
+        folderKind: "group",
+      }
+      : postFromGraph(p, topic)
+  ).filter((p) => p.graphId);
   return { items, next: str(r["@odata.nextLink"]) };
 }
 

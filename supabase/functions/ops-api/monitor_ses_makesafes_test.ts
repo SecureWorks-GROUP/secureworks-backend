@@ -237,6 +237,11 @@ function fateWriterStub(existingChangeTypes: readonly string[] = []) {
   const upserted: Array<{ table: string; row: Record<string, unknown> }> = [];
   const existing = new Set(existingChangeTypes);
   const sb = {
+    rpc: (name: string, args: { lane: string }) => {
+      assertEquals(name, "automation_lane_enabled");
+      assertEquals(args, { lane: "capture" });
+      return Promise.resolve({ data: true, error: null });
+    },
     from: (table: string) => ({
       insert: (row: Record<string, unknown>) => {
         inserted.push({ table, row });

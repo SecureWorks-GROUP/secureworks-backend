@@ -1,5 +1,11 @@
 # Email capture: sources, reader, run rows and health (slices EM1, EM2, EM3)
 
+## Same-worker execution and recovery
+
+The HTTP handler runs one capture at a time within an Edge worker. Authenticated, valid poll, history, sweep and deep requests wait in admission order before creating their client or reading mail; a failed run releases the next one. The existing 202 response still means accepted, never completed. Probes and `wait: true` calls wait for their own result. This avoids overlapping retained message/attachment bodies in the same worker without refusing the regular history or sweep calls behind a poll.
+
+This in-memory ordering is not durable and does not coordinate different workers. A worker shutdown can abandon accepted requests before a run receipt exists. The durable fixed-window sweep queue retains and retries missing receipts; history/deep keep their existing progress/no-run handling. No cursor, source flag, schedule, provider policy or completion threshold changes. Live memory, queue wait, source completion and source-to-card lag still need measurement after release; sequential execution alone is not a whole-system freshness guarantee.
+
 Design: `email.md` (context build plan, rank 4), slice EM1 of INTEGRATION.md
 Wave 3E. Migration `supabase/migrations/20260924213000_context_email_capture_config.sql`,
 rollback in `supabase/rollbacks/`, contract in
@@ -111,6 +117,7 @@ with the number of sources raising them, never which one:
 | `email_backlog` | a source's last 3 finished polls all left pages behind |
 | `email_poll_missed` | a source's latest sweep that finished in the last 26 hours saved mail received at or after the source's first successful poll (that poll's `window_from`), summed per line. Mail from before it was never the poll's to read (the first sweep after a switch-on re-reads 48 hours). A listed `null` counts. The misses past the sweep's list are older than its oldest listed time: none counts when that time is before the first poll, all do otherwise; every miss in a list that cannot be read counts; a source with no successful poll raises none (lanes health, `20261006050000`) |
 | `sweep_incomplete` | from 03:00 Perth, a source has no sweep started at or after 02:00 Perth that succeeded (not expected on the night the flag or the source was switched on) |
+| `sweep_window_expired` | a source has an unfinished sweep window that started more than 60 days ago, past the reader's limit; that interval can no longer be swept. Kept separate from `sweep_incomplete` so it never hides a later real failure, and never clears by itself |
 
 Thresholds and the personal labels are published in the block's `policy`
 (`context_email_capture_policy()`, changed only by migration).
@@ -139,9 +146,50 @@ service role, or the server key in `x-api-key`):
 | Mode | Reads | Run rows |
 |---|---|---|
 | `poll` | each selected source since its pair cursor (first run: 30 minutes back; caught up: 10 minutes overlap; backlog: exactly from the cursor) | `outlook_<key>` |
-| `sweep` | the last 48 hours of one or all sources; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
+| `sweep` | without dates, the last 48 hours of one or all sources; with both `from` and `to`, one selected source's fixed window of at most 48 hours, no older than 60 days, resumed after a partial/failed/abandoned run only when both bounds match; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
 | `history` | one source, `[from, to)`, at most 60 days back, `capture_mode: backfill`, only mail that names a live job's number or involves a live job's client email (captain ruling 24 Sep 2026, via `context_email_history_scope()`); a run cut by its time budget resumes on the next call with the same window end (`to`), a group by its conversation walk (W7) | `outlook_history_<key>` |
 | `deep` | one source, one slice `[from, to)` of any age after the hard floor (1 Jan 2025 Perth): a user mailbox at most 32 days, a group any length (walked as W7's history); `capture_mode: backfill` and `metadata.history_tier: deep`; only mail touching a monitored live job (`context_email_deep_scope()`: its number named, its builder's reference named, or its client's email among the outside addresses) received on or after that key's time (30 days before the first record of the oldest job carrying it; older is `skipped_before_job`); `slice` is the plan's slice id (the time the slice was first posted, ISO to the millisecond, UTC; `deep_slice_invalid` otherwise, `slice_needs_deep_mode` on any other mode), kept on the run's cursor as `deep_slice`; resumes only a run of the same slice: the exact same window (start and end) and the same slice id, so a later posting of the same window starts at its own start | `outlook_deep_history_<key>` |
+
+Fixed-window sweep continuation (CTX-T5, 30 October 2026 candidate): group
+bodies are read and checkpointed page by page, at the existing sweep limits
+(200 conversations / 2,000 posts per call). Captured rows remain `live`;
+history admission filters do not apply. Attachments still follow the existing
+retry and privacy rules. A lightweight whole-thread sender/time roster preserves
+recipient evidence across body pages and resume points. Its read is bounded to
+400 pages, 20,000 entries and 4 MiB per response; errors/limits leave the window
+unfinished with a code, never guessed recipients or a completed receipt.
+`counts.roster_pages` exposes the additional metadata reads.
+
+The coordinated caller migration `20261030144532` creates
+`email_sweep_continuation_v1` **off**. When enabled after compatible reader
+release, the existing nightly job records exact windows without sending 11
+simultaneous sweep requests. The existing poll tick dispatches at most one
+sweep request per five minutes, alongside its unchanged poll/history calls.
+Deep history retains its separate existing schedule. This bounds sweep fan-out,
+not total edge concurrency; deployed memory and latency remain to be measured.
+
+`context_email_sweep_windows` retains every requested window. Missing HTTP/run
+receipts retry, partial or abandoned runs never count as complete, exact matching
+successful reader receipts do, and three attempts without progress back off that
+source for 15 minutes so other sources get a turn. Later nights retain unfinished
+windows and fill intervening gaps in chunks no longer than 48 hours. Disabled or
+older-than-60-day windows stay visible and unfinished. The migration does not
+reset prior failed runs or alter source selection; no new cron is created.
+
+`context_email_sweep_status()` exposes pending/disabled/expired/stalled counts
+and private window receipts to the service role. The existing shared health read
+gets only aggregates. Sweep miss alarms sum reported counts across slices using
+the existing first-poll attribution rule; `receipt_gaps` retains abandoned-run
+uncertainty even after capture recovers. These are reported counts, not independent
+provider reconciliation. A recent successful slice cannot hide an older unfinished
+window. Rollback disables continuation, restores the previous callers/health and
+keeps queued records for recovery.
+
+No activation is included. Required independent database review, compatible edge
+and migration release, actual source completion, memory, Graph latency, backlog
+and source-to-card lag remain acceptance work. Passing synthetic continuation and
+SQL checks do not close CTX-T5 or the 2-hour freshness requirement.
+
 | `deep` with `probe: true` | one source, any window after the hard floor: lists it lean and answers counts by Perth month and folder kind (a group: conversations by the month last delivered); writes nothing at all and needs no deep flag; `wait` is implied | none |
 
 User mailboxes are read whole (every folder, read or unread, Sent Items

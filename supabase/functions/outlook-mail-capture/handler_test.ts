@@ -7,7 +7,12 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { handleCapture, liveCaptureDeps, sameSecret } from "./handler.ts";
-import type { CaptureResult } from "./capture.ts";
+import type {
+  CaptureDeps,
+  CaptureRequest,
+  CaptureResult,
+  Mode,
+} from "./capture.ts";
 
 const SERVICE = "service-key-fixture";
 const SERVER = "server-key-fixture";
@@ -88,6 +93,110 @@ function req(
 }
 
 const idle: CaptureResult = { outcome: "idle", reason: "email_reader_v1_off" };
+
+Deno.test("mixed capture requests share one execution slot without dropping accepted work", async () => {
+  let active = 0, peak = 0, clients = 0;
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => release = resolve);
+  const background: Promise<unknown>[] = [];
+  const started: string[] = [], completed: string[] = [];
+  const modes: Mode[] = ["poll", "history", "sweep", "deep"];
+  const deps = {
+    env,
+    createSupabase: () => {
+      clients++;
+      return {};
+    },
+    waitUntil: (p: Promise<unknown>) => background.push(p),
+  };
+  const run = async (
+    _d: CaptureDeps,
+    request: CaptureRequest,
+  ): Promise<CaptureResult> => {
+    active++;
+    peak = Math.max(peak, active);
+    started.push(request.source!);
+    await barrier;
+    completed.push(request.source!);
+    active--;
+    return idle;
+  };
+  const responses = await Promise.all(
+    Array.from({ length: 11 }, (_, i) =>
+      handleCapture(
+        req({ "x-api-key": SERVER }, {
+          mode: modes[i % modes.length],
+          source: `fixture_${i}`,
+        }),
+        deps,
+        run,
+      )),
+  );
+  const beforeRelease = { started: started.length, clients, peak };
+  release();
+  await Promise.all(background);
+  assertEquals(responses.map((r) => r.status), Array(11).fill(202));
+  assertEquals(beforeRelease, { started: 1, clients: 1, peak: 1 });
+  assertEquals(peak, 1);
+  assertEquals(completed, Array.from({ length: 11 }, (_, i) => `fixture_${i}`));
+  assertEquals(started, completed);
+  assertEquals(active, 0);
+});
+
+Deno.test("a failed capture releases its slot for a waiting read-only probe", async () => {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => release = resolve);
+  const background: Promise<unknown>[] = [];
+  const started: string[] = [];
+  const deps = {
+    env,
+    createSupabase: () => ({}),
+    waitUntil: (p: Promise<unknown>) => background.push(p),
+  };
+  const run = async (
+    _d: CaptureDeps,
+    request: CaptureRequest,
+  ): Promise<CaptureResult> => {
+    started.push(request.source!);
+    if (!request.probe) {
+      await barrier;
+      throw Object.assign(new Error("fixture failure"), { code: "graph_503" });
+    }
+    return idle;
+  };
+  const first = await handleCapture(
+    req({ "x-api-key": SERVER }, { source: "first" }),
+    deps,
+    run,
+  );
+  assertEquals(first.status, 202);
+  const probe = handleCapture(
+    req({ "x-api-key": SERVER }, {
+      mode: "deep",
+      source: "probe",
+      probe: true,
+    }),
+    deps,
+    run,
+  );
+  const denied = await handleCapture(
+    req({}, { source: "unauthorised" }),
+    deps,
+    run,
+  );
+  assertEquals(denied.status, 401);
+  release();
+  const result = await probe;
+  await Promise.all(background);
+  assertEquals(result.status, 200);
+  assertEquals(started, ["first", "probe"]);
+  assertEquals(await background[0], { outcome: "error", code: "graph_503" });
+  assertEquals(
+    background.length,
+    1,
+    "the probe still waits instead of returning accepted",
+  );
+});
 
 Deno.test("only the service role or the exact server key may call", async () => {
   const deps = {

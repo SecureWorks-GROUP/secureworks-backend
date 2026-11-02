@@ -3191,6 +3191,7 @@ async function handler(req: Request): Promise<Response> {
         "Content-Type": "application/json",
         "x-api-key": SW_API_KEY,
         "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "x-sw-actor": "monitor-ses-makesafes",
       };
       const keepAlive = (promise: Promise<void>) =>
         edgeRuntime.waitUntil(promise);

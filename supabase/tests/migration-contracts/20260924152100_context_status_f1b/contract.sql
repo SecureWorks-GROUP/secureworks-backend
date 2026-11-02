@@ -236,6 +236,9 @@ END $$;
 ROLLBACK;
 
 BEGIN;
+-- Restore the later event-type classification for this historical policy
+-- equivalence proof only; rollback below restores the current implementation.
+\ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 -- 5. Every other source is judged exactly as F1 judged it: same sources, same
 -- measures, same alarms, plus alarm_exempt null; the policy gains only the two
 -- named lists.

@@ -17,6 +17,7 @@ import {
   type AudienceResolveOutcome,
   type CaptureDeps,
   type CaptureOutcome,
+  type CaptureResult,
   type DeepGate,
   type DeepScope,
   deepWindow,
@@ -30,6 +31,7 @@ import {
   sweepMissList,
 } from "./capture.ts";
 import { GraphReadError } from "./graph.ts";
+import { handleCapture } from "./handler.ts";
 
 const NOW = Date.parse("2026-10-02T06:00:00Z");
 const FOLDERS = {
@@ -77,6 +79,7 @@ interface World {
   listCalls: number;
   conversationPages: number;
   postReads: string[];
+  rosterReads: string[];
   now: number;
   tick: number;
   /** The deep load's gate (context_email_deep_enabled). */
@@ -114,6 +117,7 @@ function world(partial: Partial<World> = {}): World {
     listCalls: 0,
     conversationPages: 0,
     postReads: [],
+    rosterReads: [],
     now: NOW,
     tick: 0,
     deep: {
@@ -213,8 +217,21 @@ function groupMail(w: World): CaptureDeps["mail"] {
       if (next) return { items: [], next: null };
       return { items: await mail.listGroupThreads(groupId, conv), next: null };
     },
-    listGroupPostPage: async (groupId, thread, topic, next) => {
+    listGroupPostPage: async (groupId, thread, topic, next, rosterOnly) => {
       if (next) return { items: [], next: null };
+      if (rosterOnly) {
+        w.rosterReads.push(thread);
+        const g = Object.values(w.groups).find((x) => x.id === groupId)!;
+        return {
+          items: g.posts.filter((p) => p.thread === thread).map(({ post }) => ({
+            graphId: post.graphId,
+            from: post.from,
+            receivedAt: post.receivedAt,
+            folderKind: "group" as const,
+          })),
+          next: null,
+        };
+      }
       return {
         items: await mail.listGroupPosts(groupId, thread, topic),
         next: null,
@@ -337,6 +354,63 @@ function msg(n: number, at: string, extra: Partial<Msg> = {}): Msg {
 function lastRun(w: World, source: string) {
   return w.runs.filter((r) => r.source === source).at(-1)!;
 }
+
+Deno.test("HTTP queue drives all four real capture modes to terminal receipts with one canonical email", async () => {
+  const w = world({
+    mailboxes: {
+      "nithin@secureworkswa.com.au": [msg(901, "2026-10-02T05:50:00Z", {
+        from: "sam.sample@example.net",
+        subject: "SWP-990001 source evidence",
+      })],
+    },
+    deepScope: deepScope({
+      clientEmails: { "sam.sample@example.net": "2026-10-01T00:00:00Z" },
+    }),
+  });
+  const background: Promise<unknown>[] = [];
+  const handlerDeps = {
+    env: (name: string) => name === "SW_API_KEY" ? "fixture-only" : undefined,
+    createSupabase: () => ({}),
+    waitUntil: (p: Promise<unknown>) => background.push(p),
+  };
+  const responses = await Promise.all(
+    ["poll", "history", "sweep", "deep"].map((mode) =>
+      handleCapture(
+        new Request("https://fixture.invalid/capture", {
+          method: "POST",
+          headers: {
+            "x-api-key": "fixture-only",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            mode,
+            source: "nithin",
+            from: "2026-10-01T06:00:00Z",
+            to: "2026-10-02T06:00:00Z",
+          }),
+        }),
+        handlerDeps,
+        (_live, request) => runOutlookCapture(deps(w), request),
+      )
+    ),
+  );
+  assertEquals(responses.map((r) => r.status), [202, 202, 202, 202]);
+  const outcomes = await Promise.all(background);
+  assertEquals(
+    outcomes.map((r) => (r as CaptureResult).outcome),
+    Array(4).fill("ran"),
+  );
+  assertEquals(w.runs.map((r) => r.source), [
+    "outlook_nithin",
+    "outlook_history_nithin",
+    "outlook_sweep_nithin",
+    "outlook_deep_history_nithin",
+  ]);
+  assertEquals(w.runs.map((r) => r.status), Array(4).fill("succeeded"));
+  assertEquals(w.keys.size, 1, "all modes share the canonical source identity");
+  assertEquals(new Set(w.captured.map((r) => r.provider_message_id)).size, 1);
+  assertEquals(w.captured.length, 4, "no accepted mode is skipped by queueing");
+});
 
 Deno.test("idle unless email_reader_v1, email_capture_v2 and the capture lane are on; reads nothing", async () => {
   for (
@@ -1045,6 +1119,256 @@ function walkOf(run: RunRow) {
   >;
 }
 
+const FIXED_SWEEP = {
+  mode: "sweep" as const,
+  source: "fencing",
+  from: "2026-09-30T06:00:00.000Z",
+  to: "2026-10-02T06:00:00.000Z",
+};
+
+Deno.test("fixed sweep: a staff reply keeps the external recipient from another post page", async () => {
+  const own = gpost(
+    "OWN",
+    "2026-10-02T05:50:00Z",
+    "admin@secureworkswa.com.au",
+    "Enquiry",
+    "We will reply Friday.",
+  );
+  const external = gpost(
+    "CLIENT",
+    "2026-10-02T05:40:00Z",
+    "new.enquiry@example.net",
+    "Enquiry",
+    "Please confirm.",
+  );
+  const w = world({
+    sources: [FENCING],
+    groups: {
+      [FENCING.email]: {
+        id: "GRP-FENCING",
+        posts: [own, external].map((post) => ({
+          conv: "C",
+          thread: "T",
+          post,
+        })),
+      },
+    },
+  });
+  const d = deps(w);
+  d.mail.listGroupPostPage = async (_g, _t, _topic, next) => ({
+    items: next ? [external] : [own],
+    next: next ? null : "https://graph.microsoft.com/v1.0/next-post",
+  });
+  await runOutlookCapture(d, FIXED_SWEEP);
+  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
+  const reply = w.captured.find((c) =>
+    c.provider_message_id === "email:own@mail.example.org"
+  )!;
+  assertEquals(reply.event_type, "client.email_out");
+  assertEquals(
+    (reply.payload as Record<string, unknown>).email,
+    "new.enquiry@example.net",
+  );
+  assertEquals(
+    (reply.payload as Record<string, unknown>).audience_basis,
+    "group_thread",
+  );
+});
+
+function sweepGroup(n: number) {
+  const group = fencingGroup(n);
+  group.posts.forEach(({ post }, i) => {
+    post.receivedAt = new Date(NOW - (i + 1) * 60_000).toISOString();
+    // This sender has no live job: sweeps must not inherit history admission.
+    post.from = "new.enquiry@example.net";
+    post.hasAttachments = true;
+  });
+  return group;
+}
+
+Deno.test("fixed sweep: page walk resumes all 450 live emails across 200-conversation slices", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { [FENCING.email]: sweepGroup(450) },
+  });
+  const runs: typeof w.runs = [];
+  for (let i = 0; i < 3; i++) {
+    await runOutlookCapture(deps(w), FIXED_SWEEP);
+    runs.push(lastRun(w, "outlook_sweep_fencing"));
+    w.now += 5 * 60_000;
+  }
+  assertEquals(w.keys.size, 450);
+  assertEquals(w.captured.length, 450);
+  for (const [i, run] of runs.entries()) {
+    assertEquals(run.status, i < 2 ? "partial" : "succeeded");
+    assertEquals(run.counts!.conversations_read, i < 2 ? 200 : 50);
+    assertEquals(run.counts!.sweep_misses, i < 2 ? 200 : 50);
+    assertEquals(run.cursor!.history_from, FIXED_SWEEP.from);
+    assertEquals(run.cursor!.history_to, FIXED_SWEEP.to);
+  }
+  assertEquals(w.postReads.length, 450);
+  assertEquals(w.rosterReads.length, 450);
+  assert(
+    w.captured.every((c) =>
+      (c.metadata as Record<string, unknown>).capture_mode === "live"
+    ),
+  );
+  assertEquals(w.attachmentCalls.length, 450);
+  assert(w.attachmentRecheck.every(Boolean));
+});
+
+Deno.test("fixed sweep: failed and abandoned runs retain the exact window and cursor", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { [FENCING.email]: sweepGroup(250) },
+  });
+  await runOutlookCapture(deps(w), FIXED_SWEEP);
+  const first = lastRun(w, "outlook_sweep_fencing");
+  const reached = structuredClone(first.cursor);
+  w.now += 5 * 60_000;
+  w.onConversationList = () => {
+    throw new GraphReadError("graph_503", 503);
+  };
+  await runOutlookCapture(deps(w), FIXED_SWEEP);
+  const failed = lastRun(w, "outlook_sweep_fencing");
+  assertEquals(failed.status, "failed");
+  assertEquals(failed.cursor!.group, reached!.group);
+  w.onConversationList = undefined;
+  w.runs.push({
+    ...structuredClone(failed),
+    id: "sweep-killed",
+    status: "running",
+    started_at: new Date(w.now + 1).toISOString(),
+    updated_at: new Date(w.now + 1).toISOString(),
+  });
+  w.now += 15 * 60_000;
+  await runOutlookCapture(deps(w), FIXED_SWEEP);
+  assertEquals(
+    w.runs.find((r) => r.id === "sweep-killed")!.error_code,
+    "abandoned",
+  );
+  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
+  assertEquals(w.captured.length, 250);
+  assertEquals(w.keys.size, 250);
+});
+
+Deno.test("fixed sweep: changed lower bound cannot reuse a narrower window cursor", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { [FENCING.email]: sweepGroup(250) },
+  });
+  await runOutlookCapture(deps(w), {
+    ...FIXED_SWEEP,
+    from: "2026-10-02T02:30:00.000Z",
+  });
+  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "partial");
+  w.now += 5 * 60_000;
+  await runOutlookCapture(deps(w), FIXED_SWEEP);
+  const wider = lastRun(w, "outlook_sweep_fencing");
+  assertEquals(wider.counts!.conversations_read, 200);
+  assertEquals(wider.counts!.conversations_skipped, 0);
+  w.now += 5 * 60_000;
+  await runOutlookCapture(deps(w), FIXED_SWEEP);
+  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
+  assertEquals(w.keys.size, 250);
+});
+
+Deno.test("fixed sweep: budget-cut group capture makes progress until every live message is saved once", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { [FENCING.email]: sweepGroup(55) },
+    tick: 1_000,
+  });
+  let calls = 0;
+  do {
+    await runOutlookCapture(deps(w), FIXED_SWEEP);
+    calls++;
+    const run = lastRun(w, "outlook_sweep_fencing");
+    assert(run.counts!.progressed > 0);
+    if (run.status === "succeeded") break;
+    assertEquals(run.status, "partial");
+    w.now += 5 * 60_000;
+  } while (calls < 40);
+  assert(calls > 1 && calls < 40);
+  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
+  assertEquals(w.keys.size, 55);
+  assertEquals(w.captured.length, 55);
+});
+
+Deno.test("fixed sweep: unreadable or cyclic audience evidence cannot complete or skip the thread", async () => {
+  for (const cycle of [false, true]) {
+    const w = world({
+      sources: [FENCING],
+      groups: { [FENCING.email]: sweepGroup(2) },
+    });
+    const d = deps(w);
+    const read = d.mail.listGroupPostPage;
+    d.mail.listGroupPostPage = async (g, t, topic, next, rosterOnly) => {
+      if (rosterOnly) {
+        if (!cycle) throw new GraphReadError("graph_503", 503);
+        return {
+          items: [],
+          next: "https://graph.microsoft.com/v1.0/same-page",
+        };
+      }
+      return read(g, t, topic, next, rosterOnly);
+    };
+    await runOutlookCapture(d, FIXED_SWEEP);
+    const failed = lastRun(w, "outlook_sweep_fencing");
+    assertEquals(failed.status, "failed");
+    assertEquals(failed.error_code, cycle ? "graph_page_cycle" : "graph_503");
+    assertEquals(w.captured.length, 0);
+    assertEquals(walkOf(failed).before, null);
+    w.now += 5 * 60_000;
+    await runOutlookCapture(deps(w), FIXED_SWEEP);
+    assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
+    assertEquals(w.keys.size, 2);
+  }
+});
+
+Deno.test("fixed sweep: personal mailbox resumes after a budget stop without history filtering", async () => {
+  const box = Array.from(
+    { length: 6 },
+    (_, i) => msg(i, new Date(NOW - (10 - i) * 60_000).toISOString()),
+  );
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    tick: 30_000,
+  });
+  const req = { ...FIXED_SWEEP, source: "nithin" };
+  await runOutlookCapture(deps(w), req);
+  assertEquals(lastRun(w, "outlook_sweep_nithin").status, "partial");
+  for (
+    let i = 0;
+    i < 10 && lastRun(w, "outlook_sweep_nithin").status !== "succeeded";
+    i++
+  ) {
+    await runOutlookCapture(deps(w), req);
+  }
+  assertEquals(lastRun(w, "outlook_sweep_nithin").status, "succeeded");
+  assertEquals(w.keys.size, 6);
+  assertEquals(w.captured.length, 6);
+});
+
+Deno.test("fixed sweep: malformed, oversized, future, incomplete and sourceless windows refuse before capture", async () => {
+  for (
+    const req of [
+      { ...FIXED_SWEEP, from: "not-a-date" },
+      { ...FIXED_SWEEP, from: "2026-09-29T00:00:00Z" },
+      { ...FIXED_SWEEP, to: "2026-10-03T00:00:00Z" },
+      { ...FIXED_SWEEP, from: undefined },
+      { ...FIXED_SWEEP, to: undefined },
+      { ...FIXED_SWEEP, source: undefined },
+    ]
+  ) {
+    const w = world();
+    const result = await runOutlookCapture(deps(w), req);
+    assertEquals(result.outcome, "refused");
+    assertEquals(w.runs.length, 0);
+    assertEquals(w.listCalls, 0);
+  }
+});
+
 Deno.test("W7: a group history larger than one run resumes where the last run stopped; nothing is read twice", async () => {
   const w = world({
     sources: [FENCING],
@@ -1291,7 +1615,12 @@ Deno.test("W7: a long conversation checkpoints inside itself, so an abandoned ru
   const running: Array<unknown> = [];
   d.recordRun = async (row) => {
     if (row.status === "running" && row.run_id) {
-      running.push(((row.cursor as Record<string, unknown>)?.group as Record<string, unknown>)?.conv ?? null);
+      running.push(
+        ((row.cursor as Record<string, unknown>)?.group as Record<
+          string,
+          unknown
+        >)?.conv ?? null,
+      );
     }
     return await save(row);
   };
@@ -2035,7 +2364,10 @@ Deno.test("group mailbox audience: a mailbox copy of our own email that went to 
   assertEquals(w.resolveCalls.length, 1);
   const copy = w.resolveCalls[0];
   const copyPayload = copy.payload as Record<string, unknown>;
-  assertEquals(copy.provider_message_id, "email:gma-x-0001@secureworkswa.com.au");
+  assertEquals(
+    copy.provider_message_id,
+    "email:gma-x-0001@secureworkswa.com.au",
+  );
   assertEquals(copy.event_type, "client.email_out");
   assertEquals(copyPayload.folder_kind, "sent");
   assertEquals(copyPayload.email, "coordinator@builder.example");
