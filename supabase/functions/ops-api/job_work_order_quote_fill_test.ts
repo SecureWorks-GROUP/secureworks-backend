@@ -49,8 +49,10 @@ class Query {
   private mode: "one" | "maybe" | null = null;
   private lim: number | null = null;
   private sorts: Array<{ col: string; ascending: boolean }> = [];
+  private exactCount = false;
   constructor(private db: FakeDb, private table: string) {}
-  select(_cols?: string) {
+  select(_cols?: string, opts?: { count?: string }) {
+    if (opts?.count === "exact") this.exactCount = true;
     return this;
   }
   insert(payload: any) {
@@ -156,6 +158,7 @@ class Query {
         ? { data: rows[0], error: null }
         : { data: null, error: { message: "not one" } };
     }
+    if (this.exactCount) return { data: rows, count: rows.length, error: null };
     return { data: rows, error: null };
   }
 }
@@ -1582,4 +1585,50 @@ Deno.test("a cleared draft refilled after a newer revision is recorded names the
   assertEquals(r.quote_fill.scope_revision_id, REV_NEWER);
   assertEquals(r.work_order.quote_filled_scope_revision_id, REV_NEWER);
   assertEquals(r.filled_from.source, "work_order");
+});
+
+// ── D1 fix F3: a failed accepted-revision read at acceptance ──
+//
+// The quote was sent naming A and the customer accepted A. The scoper had
+// refrozen B (unsent) before the acceptance, so B is the newest revision frozen
+// at or before accepted_at. The expected-cost freeze at acceptance could not
+// prove the source (a read failed), so jobs.expected_costs stayed null. Before
+// the fix the work order then filled from B: B's lines and B's labour figure
+// went to the crew. Rule: Unknown never picks a different revision.
+const DOC_A = "66666666-6666-4666-8666-666666666661";
+function sentAAcceptedAfterRefreezeToB(db: FakeDb) {
+  db.tables.jobs[0].expected_costs = null;
+  db.tables.jobs[0].accepted_at = ACCEPTED_AT;
+  db.tables.scope_revisions[0].status = "superseded";
+  db.tables.scope_revisions.push({
+    ...laterRevision(),
+    frozen_at: "2026-10-08T00:00:00Z", // before the acceptance (9 Oct)
+  });
+  db.tables.job_documents = [{ id: DOC_A, job_id: JOB, type: "quote", accepted_at: ACCEPTED_AT }];
+  db.tables.run_acceptances = [];
+  db.tables.job_variations = [];
+  db.tables.quote_revisions = [{
+    job_id: JOB, job_document_id: DOC_A, scope_revision_id: REV_ACCEPTED, sent_at: "2026-10-06T00:00:00Z",
+  }];
+  return db;
+}
+
+Deno.test("D1-F3a a failed accepted-revision read: the work order is not filled from the newer revision B; it says Unknown and why", async () => {
+  const db = sentAAcceptedAfterRefreezeToB(baseDb());
+  db.failOn.add("select:job_documents");
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.quote.source, null);
+  assertEquals(p.quote.scope_revision_id, null, "no revision is picked");
+  assert(p.quote.flags.includes("accepted_quote_unproven:acceptance_chain_unreadable"), p.quote.flags.join(","));
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.reason, outcome.unproven_reason], [false, "no_accepted_quote", "acceptance_chain_unreadable"]);
+  const wo = db.tables.work_orders[0];
+  assertEquals([wo.scope_items, wo.agreed_labour_ex], [[], null], "the draft stays untouched: no B lines, no B labour");
+});
+
+Deno.test("D1-F3b once the read works, the chain's named revision A fills, never the newer B", async () => {
+  const db = sentAAcceptedAfterRefreezeToB(baseDb());
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.scope_revision_id], [true, REV_ACCEPTED]);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED, "A's labour figure, not B's 175");
 });

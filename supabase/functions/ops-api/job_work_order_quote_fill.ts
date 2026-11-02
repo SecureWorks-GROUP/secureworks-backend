@@ -22,6 +22,7 @@
 //   20261016120000_job_work_order_auto_issue.sql). A draft someone already
 //   edited by hand is filled without the stamp and waits for the approver.
 
+import { acceptedRevisionForOrders } from "../_shared/expected_costs/accepted_quote_cost_source.ts";
 import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
@@ -106,6 +107,8 @@ export type QuoteFillOutcome = {
   work_order: any | null;
   scope_revision_id?: string | null;
   needs_review?: boolean;
+  /** With no_accepted_quote: why the accepted revision is Unknown (D1 F3). */
+  unproven_reason?: string;
 };
 
 const FILL_JOB_TYPES = new Set(["fencing", "patio"]);
@@ -238,6 +241,26 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
     if (accepted) return use(accepted, "accepted_revision");
     // An explicit accepted identity is authoritative even when its row is
     // unavailable. A later freeze before acceptance is not a substitute.
+    return none();
+  }
+  // D1 fix F3: with no recorded accepted revision, the acceptance chain
+  // decides. A chain that names a released revision is used as accepted; an
+  // unproven chain (a failed or partial read included) fills nothing and
+  // says why, never the newest revision. Only a legacy chain keeps the time
+  // and latest-frozen rules below.
+  const chain = await acceptedRevisionForOrders(client, String(job.id));
+  if (chain.kind === "unknown") {
+    flags.push("accepted_quote_unproven", `accepted_quote_unproven:${chain.reason}`);
+    return none();
+  }
+  if (chain.kind === "bound") {
+    const [bound] = await readRevisions(client, (q) =>
+      q.eq("job_id", job.id)
+        .eq("id", chain.revision_id)
+        .in("status", ["frozen", "superseded"])
+        .limit(1));
+    if (bound) return use(bound, "accepted_revision");
+    flags.push("accepted_quote_unproven", "accepted_quote_unproven:accepted_revision_unavailable");
     return none();
   }
   const acceptedAt = typeof job?.accepted_at === "string" && job.accepted_at
@@ -403,11 +426,17 @@ export async function fillJobWorkOrderDraftFromQuote(
 
   const { quote, result } = await linesForJob(client, job);
   if (quote.source === null) {
+    const unproven = quote.flags.find((f) =>
+      f.startsWith("accepted_quote_unproven:")
+    );
     return {
       filled: false,
       reason: "no_accepted_quote",
       work_order: draft,
       scope_revision_id: null,
+      ...(unproven
+        ? { unproven_reason: unproven.slice("accepted_quote_unproven:".length) }
+        : {}),
     };
   }
   if (result.lines.length === 0) {

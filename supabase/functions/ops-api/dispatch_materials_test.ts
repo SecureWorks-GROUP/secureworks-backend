@@ -292,6 +292,7 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
     let singleMode: "single" | "maybe" | null = null;
     let returning: string | null = null;
     let countHead = false;
+    let exactCount = false;
     let payload: any = null;
 
     const matches = (row: Row) =>
@@ -309,6 +310,7 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
           return (value as unknown[]).map(String).includes(String(actual));
         }
         if (op === "is") return (actual ?? null) === value;
+        if (op === "not_is") return (actual ?? null) !== value;
         return true;
       });
 
@@ -403,6 +405,7 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
       if (request.kind !== "select" && returning === null) {
         return { data: null, error: null };
       }
+      if (exactCount) return { data: rows, count: rows.length, error: null };
       return { data: rows, error: null };
     };
 
@@ -484,6 +487,7 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
         if (request.kind === "select") request.select = columns;
         else returning = columns;
         if (options?.head) countHead = true;
+        if (options?.count === "exact") exactCount = true;
         return builder;
       },
       insert(value: any) {
@@ -521,7 +525,8 @@ function makeDb(initial: Record<string, Row[]> = seed()) {
       or() {
         return builder;
       },
-      not() {
+      not(column?: string, op?: string, value?: unknown) {
+        if (column && op === "is") request.filters.push(["not_is", column, value]);
         return builder;
       },
       order(column: string, options?: { ascending?: boolean }) {
@@ -3236,4 +3241,45 @@ Deno.test("sealed manifests retain the merged office-fixings exclusion on both p
       assertEquals(record.items.map((x) => x.source_line_id), ["material-1"]);
     }
   }
+});
+
+// ── D1 fix F3: a failed accepted-revision read at acceptance ──
+//
+// The quote was sent naming revision 2 (A) and accepted; revision 3 (B) was
+// frozen later and superseded A. The expected-cost freeze at acceptance could
+// not prove the source, so jobs.expected_costs has no revision. Before the fix
+// the first material take fell back to the latest frozen revision, B, and
+// ordered B's panels from the supplier. Rule: Unknown never picks a revision.
+async function fenceSentAThenRefrozenB() {
+  const db = await fenceJobWithRevisions([
+    fenceRevision(2, "superseded", [{ length: 2.4, panels: [{ height: 1800, retaining: 0 }] }]),
+    fenceRevision(3, "frozen", [FENCE_CASE_A_RUN]),
+  ]);
+  const doc = uuid("d0", 1);
+  db.tables.job_documents = [{ id: doc, job_id: JOB.fence, type: "quote", accepted_at: "2026-10-09T00:00:00Z" }];
+  db.tables.run_acceptances = [];
+  db.tables.job_variations = [];
+  db.tables.quote_revisions = [{
+    job_id: JOB.fence, job_document_id: doc, scope_revision_id: uuid("e1", 2), sent_at: "2026-10-06T00:00:00Z",
+  }];
+  return db;
+}
+
+Deno.test("D1-F3c a failed accepted-revision read: no supplier lines are taken from the newer revision B; refused with the reason", async () => {
+  const db = await fenceSentAThenRefrozenB();
+  db.failures.add("select:job_documents");
+  const error = await refused(
+    call(db, "dispatch_materials_suggest", { job_id: JOB.fence, supplier_id: SUP.steel }),
+    409,
+    "accepted_quote_unproven",
+  );
+  assert(error.message.includes("acceptance_chain_unreadable"), error.message);
+  assertEquals(db.tables.job_material_lines ?? [], [], "nothing is ordered");
+});
+
+Deno.test("D1-F3d once the read works, the take orders the accepted revision A, never the newer B", async () => {
+  const db = await fenceSentAThenRefrozenB();
+  const answer = await call(db, "dispatch_materials_suggest", { job_id: JOB.fence, supplier_id: SUP.steel });
+  assertEquals(answer.scope_revision_number, 2);
+  assertEquals(answer.lines.map((l: Row) => l.quantity), [1], "A's one panel, not B's nine");
 });

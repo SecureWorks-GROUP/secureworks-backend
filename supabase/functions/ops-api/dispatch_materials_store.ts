@@ -13,6 +13,7 @@
 // reads `error`. A failed read is never "nothing there".
 
 import { sha256HexOfText } from "../_shared/scope_freeze/get_scope_revision_for_viewer.ts";
+import { acceptedRevisionForOrders } from "../_shared/expected_costs/accepted_quote_cost_source.ts";
 
 import {
   FENCE_SCOPE_CHANGE_UNCHECKED,
@@ -1314,7 +1315,7 @@ export async function suggestDispatchMaterialLines(
     client,
     job,
     ctx,
-    job.accepted_scope_revision_id,
+    await acceptedRevisionForMaterialTake(client, job),
   );
   const suggested = offer.lines;
   if (suggested.length === 0) {
@@ -1386,6 +1387,29 @@ function scopeProvenance(offer: ScopeOffer, key: string) {
     source_version: String(offer.revision),
     source_line_id: key,
   };
+}
+
+// D1 fix F3: the revision a first material take orders from. The revision
+// recorded at acceptance wins; without one the acceptance chain decides. An
+// unproven chain (a failed or partial read included) refuses with its reason
+// and orders nothing, never the newest frozen revision. Only a legacy chain
+// (nothing accepted yet, or no release names a revision) keeps the latest
+// frozen rule (null here).
+async function acceptedRevisionForMaterialTake(
+  client: any,
+  job: DispatchJob,
+): Promise<string | null> {
+  if (job.accepted_scope_revision_id) return job.accepted_scope_revision_id;
+  const chain = await acceptedRevisionForOrders(client, job.id);
+  if (chain.kind === "bound") return chain.revision_id;
+  if (chain.kind === "unknown") {
+    throw new DispatchMaterialsError(
+      409,
+      "accepted_quote_unproven",
+      `The accepted quote's revision is Unknown (${chain.reason}), so no material lines were taken; take them by hand or retry once the acceptance record is readable`,
+    );
+  }
+  return null;
 }
 
 async function readFrozenOffer(

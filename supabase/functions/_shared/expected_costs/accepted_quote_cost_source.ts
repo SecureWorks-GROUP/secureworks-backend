@@ -60,3 +60,21 @@ export async function readAcceptedQuoteCostSource(client: any, jobId: string): P
     return unknown('acceptance_chain_unreadable')
   }
 }
+
+// ── D1 fix F3: which revision crew and supplier orders use ──
+//
+// Work orders and material orders are built from the accepted quote. When the
+// job has no recorded accepted revision (jobs.expected_costs.scope_revision_id
+// is null, for example because the read at acceptance failed or was partial)
+// they used to fall back to a time rule or the newest frozen revision, which
+// after a refreeze is B, not the accepted A. The rule now:
+//   * the acceptance chain names one released revision -> that one ('bound');
+//   * nothing was accepted yet, or no release names a revision (every send
+//     before Scope's producers name one) -> today's rules ('legacy');
+//   * anything else, including a failed or partial read -> 'unknown': the
+//     caller shows Unknown with the reason and picks no revision.
+export async function acceptedRevisionForOrders(client: any, jobId: string): Promise<AcceptedQuoteCostSource> {
+  const source = await readAcceptedQuoteCostSource(client, jobId)
+  if (source.kind === 'unknown' && source.reason === 'no_accepted_document') return { kind: 'legacy' }
+  return source
+}
