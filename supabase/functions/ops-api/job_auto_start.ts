@@ -1,18 +1,19 @@
 // deno-lint-ignore-file no-explicit-any
-// Scheduled -> In Progress on the first booked work day (captain, 2 Nov 2026: "all.
+// Scheduled -> In Progress on a booked work day (captain, 2 Nov 2026: "all.
 // even repairs"; a quick fix until the Trade App's Start press moves a job).
 //
-// At 6am Perth (pg_cron job-auto-start, 22:00 UTC the day before) every job sitting at
-// Scheduled whose FIRST booked work day on the calendar is today, Perth time, moves to
-// In Progress. Rules:
-//   - A work day is a live crew booking in job_assignments, the rows the Ops Dash
+// At 6am Perth (pg_cron job-auto-start, 22:00 UTC the day before) every job still at
+// Scheduled that has a work booking on the calendar today, Perth time, moves to In
+// Progress. Rules:
+//   - A work booking is a live crew booking in job_assignments, the rows the Ops Dash
 //     calendar paints: assignment_type install (or unset, which the calendar reads as
 //     install), never a ghost watcher row (is_ghost, role/type observer or ghost),
-//     never a meeting, reminder, follow-up or delivery, never a cancelled row. A
-//     completed booking still counts: the job had a work day then.
-//   - The first work day is the earliest scheduled_date of those rows. Only a job whose
-//     first work day IS today moves: one that started earlier and is still Scheduled is
-//     left alone (no catch-up), and so is one that starts later.
+//     never a meeting, reminder, follow-up or delivery, never a cancelled row.
+//   - A booking is on today when today is one of its painted days (job_bookings.ts
+//     paintedSpanDates: scheduled_date to scheduled_end, an interior weekend skipped).
+//     Earlier bookings do not matter: a job rebooked after older bookings were left on
+//     the calendar still moves on the day it is booked (SWF-261308, 2 Nov 2026).
+//   - No catch-up: a job with bookings only before today, or only after, stays put.
 //   - Fencing, patio and every other type that lives on jobs.status: Scheduled is
 //     jobs.status 'scheduled', In Progress is 'in_progress'. The move is ops-api
 //     updateJobStatus with expected_statuses ['scheduled'] (compare and set), so a job
@@ -32,6 +33,7 @@
 // unreadable is off. Each live run writes one job_auto_start_runs row: the Perth day,
 // how many moved and their job numbers, and what was skipped and why.
 
+import { paintedSpanDates } from "./job_bookings.ts";
 import {
   insuranceRepairStage,
   isInsuranceRepairFamily,
@@ -80,15 +82,30 @@ export function isWorkBooking(row: any): boolean {
   return /^\d{4}-\d{2}-\d{2}/.test(String(row.scheduled_date ?? ""));
 }
 
-/** The earliest work day among a job's bookings, or null when it has none. */
-export function firstWorkDay(rows: any[]): string | null {
-  let first: string | null = null;
+/** True when one of the job's work bookings covers `today` (YYYY-MM-DD). */
+export function hasWorkBookingOn(rows: any[], today: string): boolean {
+  return rows.some((row) =>
+    isWorkBooking(row) &&
+    paintedSpanDates(
+      String(row.scheduled_date).slice(0, 10),
+      row.scheduled_end ? String(row.scheduled_end).slice(0, 10) : null,
+    ).includes(today)
+  );
+}
+
+/** The days the job's work bookings fall on, for the run record of a job not moved. */
+function workDays(rows: any[]): string[] {
+  const days = new Set<string>();
   for (const row of rows) {
     if (!isWorkBooking(row)) continue;
-    const day = String(row.scheduled_date).slice(0, 10);
-    if (first === null || day < first) first = day;
+    for (
+      const d of paintedSpanDates(
+        String(row.scheduled_date).slice(0, 10),
+        row.scheduled_end ? String(row.scheduled_end).slice(0, 10) : null,
+      )
+    ) days.add(d);
   }
-  return first;
+  return [...days].sort();
 }
 
 /** Make-safe board cards: their column is not jobs.status (AGENTS.md, Release 12). */
@@ -184,16 +201,20 @@ export async function jobAutoStartSweep(
       results.push({ ...base, action: "skipped", detail: lane.reason });
       continue;
     }
-    const first = firstWorkDay(bookings);
-    if (first !== today) {
+    if (!hasWorkBookingOn(bookings, today)) {
+      const days = workDays(bookings);
       results.push({
         ...base,
-        action: first === null
+        action: days.length === 0
           ? "no_work_booking"
-          : first < today
-          ? "started_earlier"
-          : "starts_later",
-        detail: first,
+          : days[days.length - 1] < today
+          ? "booked_earlier_only"
+          : days[0] > today
+          ? "starts_later"
+          : "not_booked_today",
+        detail: days.length
+          ? { first: days[0], last: days[days.length - 1] }
+          : null,
       });
       continue;
     }
@@ -323,7 +344,7 @@ export async function loadJobAutoStartCandidates(
       ),
       client.from("job_assignments")
         .select(
-          "job_id, role, status, assignment_type, is_ghost, scheduled_date",
+          "job_id, role, status, assignment_type, is_ghost, scheduled_date, scheduled_end",
         )
         .in("job_id", chunk),
     ]);

@@ -9195,7 +9195,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
       }
-      // ── Scheduled -> In Progress on the first booked work day, 6am Perth (job_auto_start.ts;
+      // ── Scheduled -> In Progress on a booked work day, 6am Perth (job_auto_start.ts;
       // pg_cron job-auto-start). Server key only, POST only.
       case 'job_auto_start_sweep': {
         const autoStart = await runJobAutoStartAction(

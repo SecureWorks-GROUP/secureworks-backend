@@ -1,4 +1,4 @@
--- Scheduled -> In Progress on the first booked work day (captain, 2 Nov 2026: every job
+-- Scheduled -> In Progress on a booked work day (captain, 2 Nov 2026: every job
 -- type, "all. even repairs"; 6am Perth; no catch-up; no client text). A quick fix until
 -- the Trade App's Start press moves a job. The rules are ops-api job_auto_start.ts.
 --
@@ -21,7 +21,7 @@
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 VALUES
   ('job_auto_start_v1', true,
-   'At 6am Perth move every job at Scheduled whose first booked work day is today to In Progress (repairs: Repairs board scheduled -> on_site). No catch-up, no client text. ops-api job_auto_start.ts; pg_cron job-auto-start.')
+   'At 6am Perth move every job still at Scheduled that has a crew work booking today to In Progress (repairs: Repairs board scheduled -> on_site). No catch-up, no client text. ops-api job_auto_start.ts; pg_cron job-auto-start.')
 ON CONFLICT (flag_name) DO NOTHING;
 
 -- ── 2. The run log ───────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS job_auto_start_runs_run_on_idx
   ON public.job_auto_start_runs (run_on DESC, ran_at DESC);
 
 COMMENT ON TABLE public.job_auto_start_runs IS
-  'The 6am auto start (20261102140000): one row per live run of ops-api job_auto_start_sweep. run_on is the Perth day; outcome ok | partial (a move failed) | failed (candidates unreadable); moved_job_numbers lists the jobs moved to In Progress; detail.not_moved lists every other candidate and why (started_earlier, starts_later, no_work_booking, skipped, status_changed, ...). Written only by ops-api job_auto_start.ts.';
+  'The 6am auto start (20261102140000): one row per live run of ops-api job_auto_start_sweep. run_on is the Perth day; outcome ok | partial (a move failed) | failed (candidates unreadable); moved_job_numbers lists the jobs moved to In Progress; detail.not_moved lists every other candidate and why (booked_earlier_only, starts_later, not_booked_today, no_work_booking, skipped, status_changed, ...). Written only by ops-api job_auto_start.ts.';
 
 ALTER TABLE public.job_auto_start_runs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.job_auto_start_runs FROM PUBLIC, anon, authenticated;

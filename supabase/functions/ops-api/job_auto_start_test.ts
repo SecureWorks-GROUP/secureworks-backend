@@ -6,7 +6,7 @@ import {
   type AutoStartCandidate,
   type AutoStartDeps,
   autoStartLane,
-  firstWorkDay,
+  hasWorkBookingOn,
   isWorkBooking,
   JOB_AUTO_START_SOURCE,
   jobAutoStartSweep,
@@ -91,7 +91,7 @@ Deno.test("perthToday reads the Perth day, not the UTC day", () => {
   assertEquals(perthToday(new Date("2026-11-02T16:00:00Z")), "2026-11-03");
 });
 
-Deno.test("a job whose first work day is today moves to in_progress by compare and set", async () => {
+Deno.test("a job with a work booking today moves to in_progress by compare and set", async () => {
   const h = harness([job("1", [work(TODAY)])]);
   const out: any = await jobAutoStartSweep(h.deps, LIVE);
   assertEquals(h.statusMoves, [{
@@ -108,31 +108,44 @@ Deno.test("a job whose first work day is today moves to in_progress by compare a
   assertEquals(h.runs[0].moved_job_numbers, ["SWF-1"]);
 });
 
-Deno.test("a first work day yesterday or tomorrow does not move", async () => {
+Deno.test("bookings only yesterday, or only tomorrow, do not move (no catch-up)", async () => {
   const h = harness([
-    job("y", [work(YESTERDAY)]),
+    job("y", [work(YESTERDAY), work("2026-10-19")]),
     job("t", [work(TOMORROW)]),
+    job("gap", [work(YESTERDAY), work(TOMORROW)]),
   ]);
   const out: any = await jobAutoStartSweep(h.deps, LIVE);
   assertEquals(h.statusMoves, []);
   assertEquals(out.results.map((r: any) => r.action), [
-    "started_earlier",
+    "booked_earlier_only",
     "starts_later",
+    "not_booked_today",
   ]);
 });
 
-Deno.test("a multi-day job that started earlier and is still Scheduled is not caught up", async () => {
-  const h = harness([job("m", [work(YESTERDAY), work(TODAY), work(TOMORROW)])]);
-  await jobAutoStartSweep(h.deps, LIVE);
-  assertEquals(h.statusMoves, []);
-});
-
-Deno.test("a completed earlier booking still counts as the first work day", async () => {
+Deno.test("a multi-day job still at Scheduled with an earlier booking and one today moves", async () => {
+  // SWF-261308: bookings left on the calendar from 19 Oct, rebooked for today.
   const h = harness([
-    job("c", [work(YESTERDAY, { status: "complete" }), work(TODAY)]),
+    job("m", [
+      work("2026-10-19"),
+      work(YESTERDAY, { status: "complete" }),
+      work(TODAY),
+      work(TOMORROW),
+    ]),
   ]);
   await jobAutoStartSweep(h.deps, LIVE);
-  assertEquals(h.statusMoves, []);
+  assertEquals(h.statusMoves.length, 1);
+});
+
+Deno.test("one multi-day booking that spans today moves the job", async () => {
+  const h = harness([
+    job("s", [work(YESTERDAY, { scheduled_end: TOMORROW })]),
+    // Fri 30 Oct to Mon 2 Nov paints Fri and Mon only: Tue 3 Nov is outside it.
+    job("w", [work("2026-10-30", { scheduled_end: "2026-11-02" })]),
+  ]);
+  const out: any = await jobAutoStartSweep(h.deps, LIVE);
+  assertEquals(h.statusMoves.map((m) => m.jobId), ["s"]);
+  assertEquals(out.results[1].action, "booked_earlier_only");
 });
 
 Deno.test("a meeting, follow-up or ghost watcher row today is not a work day", async () => {
@@ -155,7 +168,7 @@ Deno.test("a meeting, follow-up or ghost watcher row today is not a work day", a
   );
 });
 
-Deno.test("an earlier visit that is not work does not stop today's first work day", async () => {
+Deno.test("an earlier visit that is not work does not matter", async () => {
   const h = harness([
     job("v", [work(YESTERDAY, { assignment_type: "meeting" }), work(TODAY)]),
   ]);
@@ -164,7 +177,7 @@ Deno.test("an earlier visit that is not work does not stop today's first work da
 });
 
 Deno.test("a cancelled booking is ignored", async () => {
-  // Cancelled yesterday, rebooked today: today is the first work day.
+  // Cancelled yesterday, rebooked today.
   const moves = harness([
     job("r", [work(YESTERDAY, { status: "cancelled" }), work(TODAY)]),
   ]);
@@ -341,15 +354,16 @@ Deno.test("one failed move is recorded and the rest still move", async () => {
   assertEquals(h.runs[0].outcome, "partial");
 });
 
-Deno.test("helpers: work bookings, first work day, lanes", () => {
+Deno.test("helpers: work bookings, booked today, lanes", () => {
   assertEquals(isWorkBooking(work(TODAY, { assignment_type: null })), true);
   assertEquals(
     isWorkBooking(work(TODAY, { assignment_type: "delivery" })),
     false,
   );
   assertEquals(isWorkBooking(work(TODAY, { status: null })), true);
-  assertEquals(firstWorkDay([work(TOMORROW), work(TODAY)]), TODAY);
-  assertEquals(firstWorkDay([]), null);
+  assertEquals(hasWorkBookingOn([work(TOMORROW), work(TODAY)], TODAY), true);
+  assertEquals(hasWorkBookingOn([work(TOMORROW)], TODAY), false);
+  assertEquals(hasWorkBookingOn([], TODAY), false);
   assertEquals(autoStartLane({ type: "fencing", status: "scheduled" }), {
     lane: "status",
   });
