@@ -483,9 +483,9 @@ Deno.test("deposit target: fencing to order materials, patio by council", () => 
   );
   assertEquals(
     depositPaidTargetStatus({ type: "patio", council_required: null }),
-    "approvals",
+    "order_materials",
   );
-  assertEquals(depositPaidTargetStatus({ type: "patio" }), "approvals");
+  assertEquals(depositPaidTargetStatus({ type: "patio" }), "order_materials");
   assertEquals(
     depositPaidTargetStatus({ type: "patio", council_required: false }),
     "order_materials",

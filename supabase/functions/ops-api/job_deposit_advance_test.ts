@@ -710,24 +710,28 @@ Deno.test("deposit paid: a job someone already moved on is never moved", async (
   assertEquals(moves.length, 1);
 });
 
-Deno.test("deposit paid: patio goes to Approvals when council is needed or undecided, no text", async () => {
-  for (const council of [true, null]) {
+Deno.test("deposit paid: patio goes to Approvals only when council is needed, no text", async () => {
+  const { db, deps, sms } = setup("live");
+  const job = addJob(db, { type: "patio", council_required: true });
+  addDeposit(db, job);
+  const r = await depositOnInvoiceChange(deps, { job_id: job.id });
+  assertEquals(r.action, "moved");
+  assertEquals(job.status, "approvals");
+  assertEquals(r.text, "not_order_materials");
+  assertEquals(sms.length, 0);
+});
+
+Deno.test("deposit paid: patio with council not needed or undecided goes to Order Materials and texts once", async () => {
+  for (const council of [false, null]) {
     const { db, deps, sms } = setup("live");
     const job = addJob(db, { type: "patio", council_required: council });
     addDeposit(db, job);
     const r = await depositOnInvoiceChange(deps, { job_id: job.id });
     assertEquals(r.action, "moved");
-    assertEquals(job.status, "approvals");
-    assertEquals(r.text, "not_order_materials");
-    assertEquals(sms.length, 0);
+    assertEquals(job.status, "order_materials");
+    assertEquals(r.text, "sent");
+    assertEquals(sms.length, 1);
   }
-  const { db, deps, sms } = setup("live");
-  const job = addJob(db, { type: "patio", council_required: false });
-  addDeposit(db, job);
-  const r = await depositOnInvoiceChange(deps, { job_id: job.id });
-  assertEquals(job.status, "order_materials");
-  assertEquals(r.text, "sent");
-  assertEquals(sms.length, 1);
 });
 
 Deno.test("deposit paid: dry_run moves and texts nothing and records once", async () => {

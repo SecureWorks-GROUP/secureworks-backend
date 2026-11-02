@@ -8,8 +8,8 @@ deposit, so nobody tracks each job by hand.
   itself): it moves to **Awaiting Deposit**.
 - Every paying party has a deposit invoice and every live deposit invoice is
   paid in full: it moves to **Order Materials**.
-  A patio job goes to **Approvals** instead while council is needed or not
-  decided.
+  A patio job goes to **Approvals** instead only when council is marked
+  needed; with council not needed or not decided it goes to Order Materials.
 
 This builds the 12 Aug ruling ("When Xero recognises the deposit as paid,
 fencing work moves from Awaiting Deposit to Order Materials"). Investigation:
@@ -81,8 +81,8 @@ Where it goes (`depositPaidTargetStatus`):
 | Job type | `council_required` | Moves to |
 | --- | --- | --- |
 | fencing | any | `order_materials` |
-| patio | `false` | `order_materials` |
-| patio | `true` or `null` (undecided) | `approvals` |
+| patio | `false` or `null` (undecided) | `order_materials` |
+| patio | `true` | `approvals` |
 
 After each run, xero-sync also posts `job_deposit_catch_up`. It makes the same
 paid move for every waiting card, which covers a deposit paid before the switch
@@ -284,7 +284,7 @@ they qualify under:
 - **Vicky Zhang (SWF-261369, fencing, INV-1749 paid 26 Oct)** moves from
   Accepted to Order Materials.
 - **Will Gethin (SWP-261126, patio, INV-1701 paid 23 Oct)** moves from Awaiting
-  Deposit to Approvals, or to Order Materials if council is recorded as not
+  Deposit to Order Materials, or to Approvals if council is recorded as
   needed.
 
 Both are recorded as `deposit_advance_dry_run` rows on the first `dry_run` run,
