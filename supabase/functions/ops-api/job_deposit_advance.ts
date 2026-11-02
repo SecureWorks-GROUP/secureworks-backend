@@ -14,8 +14,8 @@
 //   - depositOnInvoiceChange xero-sync calls job_deposit_paid when a client sales invoice of
 //                           a fencing or patio job changes: a job in accepted or
 //                           awaiting_deposit where every paying party has a deposit and
-//                           every live deposit invoice is paid in full moves to order_materials (patio: approvals while council is
-//                           needed or not decided), compare and set on those two statuses,
+//                           every live deposit invoice is paid in full moves to order_materials (patio: approvals only when council is
+//                           marked needed), compare and set on those two statuses,
 //                           source xero_deposit_paid; a job already moved on is checked for a
 //                           voided, no-longer-paid or credit-noted deposit, which is flagged
 //                           for a person.

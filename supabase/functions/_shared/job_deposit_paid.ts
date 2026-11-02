@@ -6,8 +6,8 @@
 //                                            path, or Xero's own sent flag)
 //   - accepted or
 //     awaiting_deposit  -> order_materials   when every live deposit invoice is paid in full
-//                                            (patio: -> approvals while council is needed
-//                                            or not decided)
+//                                            (patio: -> approvals only when council is
+//                                            marked needed)
 //
 // This module is the ONE answer to "is this job's deposit sent / paid?" for that flow. It
 // is pure: the reads, the switch and every write live in ops-api/job_deposit_advance.ts.
@@ -74,7 +74,7 @@ export interface DepositJob {
   type: string | null;
   status: string | null;
   deposit_invoice_id: string | null;
-  /** jobs.council_required: false = no council; true or null = needed or not decided. */
+  /** jobs.council_required: true = council needed; false or null = not needed or not decided. */
   council_required?: boolean | null;
 }
 
@@ -298,9 +298,9 @@ export function depositSentInXero(input: {
 
 /**
  * Where a paid deposit sends the job (captain answers 4 and 5): fencing to Order
- * Materials; patio to Approvals while council is needed or not decided
- * (council_required true or null, or anything unclear), to Order Materials only when
- * council_required is explicitly false. Null for any other job type.
+ * Materials; patio to Approvals only when council is marked needed
+ * (council_required explicitly true), otherwise to Order Materials (false, null or
+ * not decided). Null for any other job type.
  */
 export function depositPaidTargetStatus(
   job: Pick<DepositJob, "type" | "council_required">,
@@ -308,9 +308,9 @@ export function depositPaidTargetStatus(
   const type = text(job.type).toLowerCase();
   if (type === "fencing") return DEPOSIT_ORDER_MATERIALS_STATUS;
   if (type === "patio") {
-    return job.council_required === false
-      ? DEPOSIT_ORDER_MATERIALS_STATUS
-      : DEPOSIT_APPROVALS_STATUS;
+    return job.council_required === true
+      ? DEPOSIT_APPROVALS_STATUS
+      : DEPOSIT_ORDER_MATERIALS_STATUS;
   }
   return null;
 }
