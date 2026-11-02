@@ -10,8 +10,8 @@ DECLARE x record; actual text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.trigger_context_email_poll()',ARRAY['1430e54e4443b839865d3b4874793e15','bf67f0c4e5604233590712b9662dceb8']),
-  ('public.trigger_context_email_sweep()',ARRAY['9e375b43beb7dc236b44dd5bd0b131d7','09da1a04c7c3400b2a2aad6e1f7b1b66']),
-  ('public.context_email_capture_status_at(timestamptz)',ARRAY['ee6f8e5d57e41fe8c2691b59d4b51856','6bd24146f34afca361b29dc2e6143517'])
+  ('public.trigger_context_email_sweep()',ARRAY['9e375b43beb7dc236b44dd5bd0b131d7','02e0c1fe63c60212865c955dc3997bb9']),
+  ('public.context_email_capture_status_at(timestamptz)',ARRAY['ee6f8e5d57e41fe8c2691b59d4b51856','18d69176f3a277af49ebb2cd6e4ae12e'])
  ) t(sig,accepted) LOOP
   SELECT md5(prosrc) INTO actual FROM pg_proc WHERE oid=to_regprocedure(x.sig);
   IF actual IS NULL OR NOT actual=ANY(x.accepted) THEN RAISE EXCEPTION 'email_sweep_preimage_mismatch: % %',x.sig,actual; END IF;
