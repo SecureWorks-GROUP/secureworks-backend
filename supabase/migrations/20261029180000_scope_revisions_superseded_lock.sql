@@ -56,10 +56,19 @@
 --     was already edited through these holes is a read-only census for the
 --     owner's database access, not part of this migration.
 --
--- Pre-image guard: the live function body must be the 20260504090757 body
--- (md5 of prosrc e2bcfa102c4db84b414f334eb4f7dadf) or this migration's own
--- body (re-apply). Anything else means production carries a body this repo
--- has not seen, and the migration refuses rather than overwrite it.
+-- Pre-image guard: the live function body must be one of
+--   * the 20260504090757 body as written in this repo
+--     (md5 of prosrc e2bcfa102c4db84b414f334eb4f7dadf);
+--   * the body production carries (md5 c35dbe5d471b849865317409de30b089):
+--     the same 20260504090757 logic with its comment lines removed. Read from
+--     the production catalog on 2 Nov 2026 (pg_proc.prosrc, read-only) and
+--     compared statement by statement with the repo body: identical once the
+--     comment lines and their blank lines are dropped; plpgsql, not security
+--     definer, no proconfig, one trigger trg_scope_revisions_controlled_immutable
+--     (D1 review F2, verify/evidence/20261102-d1-fixes);
+--   * this migration's own body (re-apply, b5275b79eb979c9215db5b46315685f7).
+-- Anything else means production carries a body this repo has not seen, and
+-- the migration refuses rather than overwrite it.
 --
 -- Rollback: supabase/rollbacks/20261029180000_scope_revisions_superseded_lock_down.sql
 -- restores the 20260504090757 body and drops the INSERT guard.
@@ -76,7 +85,7 @@ BEGIN
   IF live_md5 IS NULL THEN
     RAISE EXCEPTION 'scope_revisions_superseded_lock: public.scope_revisions_controlled_immutable() is missing';
   END IF;
-  IF live_md5 NOT IN ('e2bcfa102c4db84b414f334eb4f7dadf', 'b5275b79eb979c9215db5b46315685f7') THEN
+  IF live_md5 NOT IN ('e2bcfa102c4db84b414f334eb4f7dadf', 'c35dbe5d471b849865317409de30b089', 'b5275b79eb979c9215db5b46315685f7') THEN
     RAISE EXCEPTION 'scope_revisions_superseded_lock: live scope_revisions_controlled_immutable body % is not the 20260504090757 body or this migration''s; read it before replacing it', live_md5;
   END IF;
 END $$;

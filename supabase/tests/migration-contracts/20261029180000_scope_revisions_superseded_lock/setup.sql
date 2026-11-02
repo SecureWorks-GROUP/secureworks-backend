@@ -39,7 +39,11 @@ ALTER TABLE public.scope_revisions
   ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
--- The 20260504090757 guard, byte for byte, only when no guard exists yet.
+-- The guard as production carries it, byte for byte (md5 of prosrc
+-- c35dbe5d471b849865317409de30b089, read from the production catalog on
+-- 2 Nov 2026): the 20260504090757 logic with its comment lines removed. The
+-- forward walk therefore proves the migration accepts and replaces the body
+-- it will meet on production (D1 review F2). Only when no guard exists yet.
 DO $setup$
 BEGIN
   IF to_regprocedure('public.scope_revisions_controlled_immutable()') IS NULL THEN
@@ -47,7 +51,6 @@ BEGIN
 CREATE OR REPLACE FUNCTION public.scope_revisions_controlled_immutable()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  -- Status transition rules first (cheapest checks).
   IF OLD.status = 'superseded' AND NEW.status IS DISTINCT FROM OLD.status THEN
     RAISE EXCEPTION 'scope_revisions: superseded is terminal (row %)', OLD.id
       USING errcode = '23514';
@@ -57,8 +60,6 @@ BEGIN
       USING errcode = '23514';
   END IF;
 
-  -- Once frozen, contract columns are locked. IS DISTINCT FROM is required so
-  -- nullable columns compare correctly when NEW.x is NULL.
   IF OLD.status = 'frozen' THEN
     IF NEW.id                     IS DISTINCT FROM OLD.id
        OR NEW.job_id              IS DISTINCT FROM OLD.job_id
@@ -80,7 +81,6 @@ BEGIN
         USING errcode = '23514';
     END IF;
 
-    -- Supersession backref + spine_event_id: NULL -> NOT NULL only.
     IF OLD.superseded_by_scope_revision_id IS NOT NULL
        AND NEW.superseded_by_scope_revision_id IS DISTINCT FROM OLD.superseded_by_scope_revision_id THEN
       RAISE EXCEPTION 'scope_revisions: superseded_by_scope_revision_id may only transition NULL -> NOT NULL (row %)', OLD.id
@@ -98,7 +98,6 @@ BEGIN
     END IF;
   END IF;
 
-  -- Sanity: a row cannot enter 'frozen' without frozen_at + sane hashes.
   IF (OLD.status IS DISTINCT FROM 'frozen') AND NEW.status = 'frozen' THEN
     IF NEW.frozen_at IS NULL THEN
       RAISE EXCEPTION 'scope_revisions: cannot transition to frozen without frozen_at (row %)', OLD.id
@@ -106,8 +105,6 @@ BEGIN
     END IF;
   END IF;
 
-  -- Sanity: superseded transition requires the supersession columns set in
-  -- the same UPDATE.
   IF (OLD.status = 'frozen') AND NEW.status = 'superseded' THEN
     IF NEW.superseded_by_scope_revision_id IS NULL OR NEW.superseded_at IS NULL THEN
       RAISE EXCEPTION 'scope_revisions: supersede requires superseded_by_scope_revision_id and superseded_at (row %)', OLD.id
@@ -123,3 +120,11 @@ $fn$;
     EXECUTE 'CREATE TRIGGER trg_scope_revisions_controlled_immutable BEFORE UPDATE ON public.scope_revisions FOR EACH ROW EXECUTE FUNCTION public.scope_revisions_controlled_immutable()';
   END IF;
 END $setup$;
+
+DO $check$
+BEGIN
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.scope_revisions_controlled_immutable()'::regprocedure)
+     NOT IN ('c35dbe5d471b849865317409de30b089', 'b5275b79eb979c9215db5b46315685f7') THEN
+    RAISE EXCEPTION 'superseded lock setup: the guard is not the production pre-image';
+  END IF;
+END $check$;
