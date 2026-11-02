@@ -443,8 +443,9 @@ WITH xl AS (
     ON e.xero_invoice_id = l.xero_invoice_id AND e.xero_line_item_id = l.line_item_id
   WHERE l.invoice_date >= p_from AND l.invoice_date < p_to
 ),
-candidates AS (
-  -- only a job whose every customer-invoice line in the window is evidenced can be verified
+candidates AS MATERIALIZED (
+  -- only a job whose every customer-invoice line in the window is evidenced can be verified;
+  -- MATERIALIZED so the per-job check below is never pushed under the GROUP BY
   SELECT x.invoice_job_id AS job_id
   FROM xl x WHERE x.invoice_type = 'ACCREC' AND x.invoice_job_id IS NOT NULL
   GROUP BY x.invoice_job_id
