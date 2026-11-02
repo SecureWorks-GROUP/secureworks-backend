@@ -481,6 +481,7 @@ export async function jobProfitAction(
       material_order_sources: await readJobProfitOrderSources(client, summary.job_id, costEvents),
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
+      line_evidence: await readJobLineEvidence(client, summary.job_id),
       labels: JOB_PROFIT_LABELS,
       ...(await patioExpectedPart(client, patioScope, patioFrozen, summary)),
     },
@@ -563,6 +564,41 @@ async function patioExpectedPart(
     revisionAcceptance,
   );
   return result ? { patio_expected: result } : {};
+}
+
+/**
+ * R57 (2 Nov 2026): every item in the job's figure with Bookkeeping's line
+ * evidence, and the job's status (verified only when every item is evidenced;
+ * otherwise provisional with why_not_verified). Read on its own so a failed
+ * read never hides the figures; a failure reads "unknown", never "verified".
+ */
+export async function readJobLineEvidence(
+  client: any,
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  if (typeof client?.rpc !== "function") {
+    return { status: "unknown", reason: "line evidence is not readable here" };
+  }
+  try {
+    const { data, error } = await client.rpc("job_profit_line_evidence", {
+      p_job_id: jobId,
+    });
+    if (error) {
+      return {
+        status: "unknown",
+        reason: `line evidence read failed: ${error.message}`,
+      };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return { status: "unknown", reason: "line evidence read returned nothing" };
+    }
+    return data as Record<string, unknown>;
+  } catch (e) {
+    return {
+      status: "unknown",
+      reason: `line evidence read failed: ${(e as Error).message}`,
+    };
+  }
 }
 
 /** ops-api `job_profit_list`: the engine's rows, filtered. */
