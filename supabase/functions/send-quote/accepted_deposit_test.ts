@@ -28,12 +28,15 @@ function fakeSb(rows: any[] | null, error: unknown = null, opts: { throws?: bool
 const releasedA = {
   id: 'rev-A',
   sent_at: '2026-10-30T01:00:00Z',
-  pricing_json: {
-    deposit: { percent: 50 },
-    totalIncGST: 8000,
-    runs: [{ run_label: 'R1', totals: { client_share_inc: 4000, neighbour_share_inc: 4000 } }],
+  pricing_snapshot_json: {
+    raw: {
+      deposit: { percent: 50 },
+      totalIncGST: 8000,
+      runs: [{ run_label: 'R1', totals: { client_share_inc: 4000, neighbour_share_inc: 4000 } }],
+    },
   },
 }
+const pricingA = releasedA.pricing_snapshot_json.raw
 
 Deno.test('reads the accepted document\'s newest sent version', async () => {
   const { sb, calls } = fakeSb([releasedA])
@@ -42,6 +45,8 @@ Deno.test('reads the accepted document\'s newest sent version', async () => {
   assertEquals(calls.includes('from:quote_revisions'), true)
   assertEquals(calls.includes('eq:job_document_id=doc-1'), true)
   assertEquals(calls.includes('not:sent_at is null'), true)
+  // The column that exists on quote_revisions (a wrong name fails the whole read live).
+  assertEquals(calls.includes('select:id, pricing_snapshot_json, sent_at'), true)
 })
 
 Deno.test('fence run deposit is priced from the accepted version, not the live job', async () => {
@@ -52,9 +57,11 @@ Deno.test('fence run deposit is priced from the accepted version, not the live j
   assertEquals(n.ok && n.amount, 2000)
 })
 
-Deno.test('a string pricing_json is read the same', async () => {
-  const { sb } = fakeSb([{ ...releasedA, pricing_json: JSON.stringify(releasedA.pricing_json) }])
-  const d = runDepositFromRelease(await readAcceptedRelease(sb, 'doc-1'), 'R1', true)
+Deno.test('a string snapshot, or a string raw inside it, is read the same', async () => {
+  const asString = fakeSb([{ ...releasedA, pricing_snapshot_json: JSON.stringify(releasedA.pricing_snapshot_json) }])
+  assertEquals(runDepositFromRelease(await readAcceptedRelease(asString.sb, 'doc-1'), 'R1', true).ok, true)
+  const rawString = fakeSb([{ ...releasedA, pricing_snapshot_json: { raw: JSON.stringify(pricingA) } }])
+  const d = runDepositFromRelease(await readAcceptedRelease(rawString.sb, 'doc-1'), 'R1', true)
   assertEquals(d.ok && d.amount, 2000)
 })
 
@@ -62,7 +69,8 @@ Deno.test('no sent version, a failed read or bad pricing holds the deposit', asy
   assertEquals(await readAcceptedRelease(fakeSb([]).sb, 'doc-1'), { ok: false, reason: 'no_released_quote' })
   assertEquals(await readAcceptedRelease(fakeSb(null, { message: 'x' }).sb, 'doc-1'), { ok: false, reason: 'release_read_failed' })
   assertEquals(await readAcceptedRelease(fakeSb(null, null, { throws: true }).sb, 'doc-1'), { ok: false, reason: 'release_read_failed' })
-  assertEquals(await readAcceptedRelease(fakeSb([{ id: 'r', pricing_json: '{bad' }]).sb, 'doc-1'), { ok: false, reason: 'released_pricing_unreadable' })
+  assertEquals(await readAcceptedRelease(fakeSb([{ id: 'r', pricing_snapshot_json: '{bad' }]).sb, 'doc-1'), { ok: false, reason: 'released_pricing_unreadable' })
+  assertEquals(await readAcceptedRelease(fakeSb([{ id: 'r', pricing_snapshot_json: {} }]).sb, 'doc-1'), { ok: false, reason: 'released_pricing_unreadable' })
   assertEquals(await readAcceptedRelease(fakeSb([releasedA]).sb, null), { ok: false, reason: 'no_accepted_document' })
   const held = runDepositFromRelease({ ok: false, reason: 'no_released_quote' }, 'R1', true)
   assertEquals(held, { ok: false, reason: 'no_released_quote' })
@@ -77,7 +85,7 @@ Deno.test('a run missing from the accepted version holds the deposit', async () 
 })
 
 Deno.test('a named party pays from their exact quote value, else their share of the accepted total', () => {
-  const rel = { ok: true as const, revisionId: 'rev-A', pricing: releasedA.pricing_json }
+  const rel = { ok: true as const, revisionId: 'rev-A', pricing: pricingA }
   assertEquals(contactDepositFromRelease(rel, { quote_value_ex_gst: 2000 }), { ok: true, amount: 1100, percent: 50, revisionId: 'rev-A' })
   assertEquals(contactDepositFromRelease(rel, { quote_value_ex_gst: null, share_percentage: 25 }), { ok: true, amount: 1000, percent: 50, revisionId: 'rev-A' })
   const noTotal = { ok: true as const, revisionId: 'r', pricing: { deposit: { percent: 40 } } }
