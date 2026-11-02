@@ -76,6 +76,14 @@ import {
   dispatchV2MatchScopeSupplier,
   dispatchV2ScopeSupplierName,
 } from "./dispatch_v2_fence_scope.ts";
+import {
+  checkDispatchV2SealedScope,
+  type DispatchV2SealCheck,
+} from "./dispatch_v2_sealed_scope.ts";
+import {
+  isScopeEnginePatioRecord,
+  scopeEngineSealedLines,
+} from "./scope_engine_materials.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 import {
   dispatchV2BoxDateMode,
@@ -163,8 +171,10 @@ export const DISPATCH_V2_ACTIONS = [
   ...DISPATCH_V2_WRITE_ACTIONS,
 ] as const;
 
+// scope_revision_id, scope_line_id: migration 20261102135500 (T20), the sealed
+// scope revision and the engine's own line a filled line came from.
 const LINE_SELECT =
-  "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at";
+  "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at, scope_revision_id, scope_line_id";
 const BOX_SELECT =
   "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at, order_date_mode, order_date_mode_set_at, order_date_mode_set_by_email";
 const PHOTO_SELECT =
@@ -502,6 +512,11 @@ export function projectDispatchV2Line(row: any) {
     status: row?.status,
     source: row?.source,
     position: row?.position,
+    // T20: the sealed scope revision a scope line was filled from, and the
+    // engine's own id for the line (patio). Null on a line typed in, and on
+    // lines filled before 20261102135500.
+    scope_revision_id: row?.scope_revision_id ?? null,
+    scope_line_id: row?.scope_line_id ?? null,
     // Set once the line went out on a sent order email; the line is locked.
     sent_on_email_id: row?.dispatch_order_email_id ?? null,
     locked: lineLocked(row),
@@ -621,6 +636,12 @@ export async function readDispatchV2Materials(
         "dispatch_v2_materials",
       ),
     ]);
+  // T20: the list fills only from the job's one sealed scope revision. Read
+  // while the list is empty, when a fill can run. A failed read is unknown,
+  // never sealed, so the screen's own fill waits.
+  const seal = dispatchV2CanSuggest(job.work_type, lines.length)
+    ? await checkDispatchV2SealedScope(client, job, { withScope: false })
+    : null;
   const supplierIds = boxes.map((b) => String(b.supplier_id));
   const [contacts, approved, testDone] = await Promise.all([
     readContacts(client, supplierIds, ctx),
@@ -643,13 +664,19 @@ export async function readDispatchV2Materials(
     replies_read: replies.error ? "failed" : "ok",
     can_suggest: dispatchV2CanSuggest(job.work_type, lines.length),
     // The screen fills a fencing job from the scope on its own when it opens
-    // and this is true: no lines and never filled before.
-    auto_fill: job.work_type === "fencing" && lines.length === 0 && !scopeFill,
+    // and this is true: no lines, never filled before, and the job's scope is
+    // sealed (T20).
+    auto_fill: job.work_type === "fencing" && lines.length === 0 && !scopeFill &&
+      seal?.kind === "sealed",
+    // The sealed scope revision a fill would read, or why there is none
+    // (null when the list already has lines).
+    scope_seal: projectSeal(seal),
     scope_filled: scopeFill
       ? {
         filled_at: scopeFill.filled_at,
         auto: scopeFill.auto === true,
         by: scopeFill.filled_by_email ?? null,
+        scope_revision_id: scopeFill.scope_revision_id ?? null,
       }
       : null,
     draft_list: {
@@ -721,6 +748,33 @@ export async function readDispatchV2Materials(
         },
       };
     }),
+  };
+}
+
+// The materials read's view of the job's sealed scope (T20).
+function projectSeal(seal: DispatchV2SealCheck | null) {
+  if (!seal) return null;
+  if (seal.kind === "sealed") {
+    return {
+      state: "sealed",
+      revision_id: seal.revision_id,
+      revision_number: seal.revision_number,
+      message: null,
+    };
+  }
+  if (seal.kind === "refused") {
+    return {
+      state: seal.code,
+      revision_id: seal.revision_id,
+      revision_number: null,
+      message: seal.message,
+    };
+  }
+  return {
+    state: "unknown",
+    revision_id: null,
+    revision_number: null,
+    message: "The job's sealed scope could not be read just now.",
   };
 }
 
@@ -1155,7 +1209,7 @@ async function suggestedLineId(jobId: string, index: number) {
 async function readScopeFill(client: any, jobId: string): Promise<any | null> {
   const { data, error } = await client.from("dispatch_v2_scope_fills")
     .select(
-      "job_id, auto, lines_added, supplier_id, scope_supplier, filled_at, filled_by_email",
+      "job_id, auto, lines_added, supplier_id, scope_supplier, filled_at, filled_by_email, scope_revision_id",
     )
     .eq("job_id", jobId)
     .maybeSingle();
