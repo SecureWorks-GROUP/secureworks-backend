@@ -1055,3 +1055,7 @@ ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|conte
 ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.status
 ops-api|supabase/migrations/20261006050000_context_lanes_health.sql|column|context_email_attachments.error_code
 ops-api|supabase/migrations/20261006040000_context_story_safety.sql|function|context_job_record_crm_time
+ops-api|supabase/migrations/20261102140000_job_auto_start.sql|table|job_auto_start_runs
+ops-api|supabase/migrations/20261102140000_job_auto_start.sql|column|job_auto_start_runs.moved_job_numbers
+ops-api|supabase/migrations/20261102140000_job_auto_start.sql|policy|job_auto_start_runs.job_auto_start_runs_service_role_all
+ops-api|supabase/migrations/20261102140000_job_auto_start.sql|function|trigger_job_auto_start
