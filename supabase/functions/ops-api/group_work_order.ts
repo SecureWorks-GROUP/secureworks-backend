@@ -291,6 +291,7 @@ export type FenceLine = {
   total_hours?: number | null;
   hourly_rate?: number | null;
   user_id?: string | null;
+  description?: string | null;
 };
 
 export function fenceLineType(line: FenceLine): string {
@@ -322,8 +323,23 @@ export function isGroupShareInvoiceItem(
   return raw === GROUP_SHARE_LINE_TYPE;
 }
 
+/**
+ * WO-6 (20261102120000): a flat office milestone fee (Nithin's "Council
+ * Approval" and "Materials Ordered" lines) billed as labour. It is not install
+ * labour and is not paid from the work order's labour, so it never blocks a
+ * group and a group never blocks it. Mirror of
+ * public.group_work_order_line_is_office_fee.
+ */
+export function isOfficeFeeLine(line: FenceLine): boolean {
+  if (fenceLineType(line) !== "labour") return false;
+  return /^\s*(council\s+approval|materials\s+ordered)\b/i.test(
+    String(line.description || ""),
+  );
+}
+
 export function isNormalWorkOrderPayLine(line: FenceLine): boolean {
   if (isGroupShareLine(line)) return false;
+  if (isOfficeFeeLine(line)) return false;
   const key = fenceLineType(line).replace(/ /g, "");
   return !NOT_PAY_KEYS.has(key);
 }
@@ -675,7 +691,7 @@ async function rowsOf(
   return Array.isArray(data) ? data as Record<string, unknown>[] : [];
 }
 
-function liveAssignment(row: Record<string, unknown>): boolean {
+export function liveAssignment(row: Record<string, unknown>): boolean {
   if (row.is_ghost === true) return false;
   if (String(row.role || "").toLowerCase() === "observer") return false;
   return String(row.status || "").toLowerCase() !== "cancelled";
@@ -882,10 +898,10 @@ function deviceLabel(value: unknown): string | null {
   return device.slice(0, 200);
 }
 
-async function assertNoNormalPayOnJob(client: any, jobId: string): Promise<void> {
+export async function assertNoNormalPayOnJob(client: any, jobId: string): Promise<void> {
   const lines = await rowsOf(
     client.from("trade_invoice_lines").select(
-      "job_id, line_type, group_share_id, source_work_order_id, trade_invoice_id",
+      "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoice_id",
     ).eq("job_id", jobId),
     "load pay on the job",
   );
@@ -2651,7 +2667,7 @@ export async function assertGroupWorkOrderInvoiceFence(
   if (jobIds.length === 0) return;
   const lines = await rowsOf(
     client.from("trade_invoice_lines").select(
-      "job_id, line_type, source_work_order_id, group_share_id, trade_invoice_id",
+      "job_id, line_type, description, source_work_order_id, group_share_id, trade_invoice_id",
     ).in("job_id", jobIds),
     "check existing claims",
   );
@@ -2675,6 +2691,7 @@ export async function assertGroupWorkOrderInvoiceFence(
     return {
       job_id: row.job_id == null ? null : String(row.job_id),
       line_type: row.line_type == null ? null : String(row.line_type),
+      description: row.description == null ? null : String(row.description),
       source_work_order_id: row.source_work_order_id == null
         ? null
         : String(row.source_work_order_id),
