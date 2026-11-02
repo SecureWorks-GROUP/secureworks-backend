@@ -101,6 +101,7 @@ import {
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
+import { contactDepositFromRelease, depositHeldMessage, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -1990,7 +1991,6 @@ serve(async (req: Request) => {
 
           // Create deposit invoices via ops-api for each party
           const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
-          const depositPercent = pj.deposit?.percent || 50
 
           // Get all contacts for this run
           const { data: contacts } = await sb.from('job_contacts')
@@ -2003,9 +2003,31 @@ serve(async (req: Request) => {
             if (!contact) continue
 
             const isClient = contact.is_primary
-            const depositAmount = quoteRunDepositAmount(run, isClient, depositPercent)
-
-            if (depositAmount <= 0) continue
+            // D1F-1: price the deposit from the version this party accepted,
+            // never the live job; hold it with a reason when that cannot be read.
+            const acceptedDocId = (ra as any).job_document_id || doc.id
+            const deposit = runDepositFromRelease(await readAcceptedRelease(sb, acceptedDocId), runLabel, isClient)
+            if (!deposit.ok) {
+              await insertCapturedEvidence(sb, {
+                event_type: 'quote.deposit_held.notify',
+                source: 'send-quote',
+                occurred_at: new Date().toISOString(),
+                recorded_at: new Date().toISOString(),
+                entity_type: 'job',
+                entity_id: doc.job_id,
+                job_id: job?.job_number || '',
+                payload: {
+                  message: depositHeldMessage(job?.job_number || '', contact.client_name || 'a party', deposit.reason),
+                  reason: deposit.reason,
+                  run_label: runLabel,
+                  job_contact_id: contact.id,
+                  job_document_id: acceptedDocId,
+                },
+                metadata: {},
+              }).then(() => {}, () => {})
+              continue
+            }
+            if (deposit.amount <= 0) continue
 
             try {
               await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
@@ -2014,8 +2036,9 @@ serve(async (req: Request) => {
                 body: JSON.stringify({
                   job_id: doc.job_id,
                   job_contact_id: contact.id,
-                  deposit_amount: depositAmount,
-                  deposit_percent: depositPercent,
+                  job_document_id: acceptedDocId,
+                  deposit_amount: deposit.amount,
+                  deposit_percent: deposit.percent,
                   run_label: runLabel,
                 }),
               })
@@ -2232,21 +2255,38 @@ serve(async (req: Request) => {
             }
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing
+            let depositHeld: string | null = null
             if (doc.job_contact_id && doc.job_contacts) {
               invoiceBody.job_contact_id = doc.job_contact_id
-              // Calculate this contact's deposit from their exact quote value (not back-calculated share %)
-              let contactPortionIncGST
-              if (doc.job_contacts.quote_value_ex_gst != null) {
-                contactPortionIncGST = Number(doc.job_contacts.quote_value_ex_gst) * 1.10
+              // D1F-1: this contact's deposit comes from the version they accepted
+              // (their exact quote value, else their share of the accepted total),
+              // never the live job; held with a reason when that cannot be read.
+              const deposit = contactDepositFromRelease(await readAcceptedRelease(sb, doc.id), doc.job_contacts)
+              if (deposit.ok) {
+                invoiceBody.deposit_amount = deposit.amount
+                invoiceBody.deposit_percent = deposit.percent
               } else {
-                const sharePct = doc.job_contacts.share_percentage ?? 50
-                contactPortionIncGST = totalIncGST * (sharePct / 100)
+                depositHeld = deposit.reason
+                await insertCapturedEvidence(sb, {
+                  event_type: 'quote.deposit_held.notify',
+                  source: 'send-quote',
+                  occurred_at: new Date().toISOString(),
+                  recorded_at: new Date().toISOString(),
+                  entity_type: 'job',
+                  entity_id: job.id,
+                  job_id: job?.job_number || '',
+                  payload: {
+                    message: depositHeldMessage(job?.job_number || '', doc.job_contacts.client_name || 'a party', deposit.reason),
+                    reason: deposit.reason,
+                    job_contact_id: doc.job_contact_id,
+                    job_document_id: doc.id,
+                  },
+                  metadata: {},
+                }).then(() => {}, () => {})
               }
-              const depositPct = depositConfig.percent || 50
-              invoiceBody.deposit_amount = Math.round(contactPortionIncGST * (depositPct / 100) * 100) / 100
-              invoiceBody.deposit_percent = depositPct
             }
 
+            if (depositHeld) throw new Error(`deposit_held:${depositHeld}`)
             const depRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
               method: 'POST',
               headers: {
@@ -2336,12 +2376,15 @@ serve(async (req: Request) => {
 
         // Return Next Steps HTML page directly (not via redirect — this is fetched by JS, not loaded as a page)
         const address = [job?.site_address, job?.site_suburb].filter(Boolean).join(', ')
+        // D1F-1: with no invoice, show the deposit from the accepted version, not the live job.
+        const acceptedForPage = invoiceResult?.deposit_amount ? null : await readAcceptedRelease(sb, doc.id)
+        const acceptedDeposit = acceptedForPage?.ok ? (acceptedForPage.pricing.deposit || {}) : {}
         const nextStepsHtml = buildNextStepsPage({
           clientName: acceptorName,
           projectType: job?.type || 'project',
           address,
-          depositAmount: invoiceResult?.deposit_amount || depositConfig.total_deposit_inc_gst || 0,
-          depositDescription: depositConfig.description || '',
+          depositAmount: invoiceResult?.deposit_amount || acceptedDeposit.total_deposit_inc_gst || 0,
+          depositDescription: acceptedDeposit.description || depositConfig.description || '',
           paymentUrl: invoiceResult?.payment_url || '',
           invoiceNumber: invoiceResult?.invoice_number || job?.job_number || '',
           shareToken: token,
