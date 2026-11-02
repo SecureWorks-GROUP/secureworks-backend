@@ -117,6 +117,7 @@ with the number of sources raising them, never which one:
 | `email_backlog` | a source's last 3 finished polls all left pages behind |
 | `email_poll_missed` | a source's latest sweep that finished in the last 26 hours saved mail received at or after the source's first successful poll (that poll's `window_from`), summed per line. Mail from before it was never the poll's to read (the first sweep after a switch-on re-reads 48 hours). A listed `null` counts. The misses past the sweep's list are older than its oldest listed time: none counts when that time is before the first poll, all do otherwise; every miss in a list that cannot be read counts; a source with no successful poll raises none (lanes health, `20261006050000`) |
 | `sweep_incomplete` | from 03:00 Perth, a source has no sweep started at or after 02:00 Perth that succeeded (not expected on the night the flag or the source was switched on) |
+| `sweep_window_expired` | a source has an unfinished sweep window that started more than 60 days ago, past the reader's limit; that interval can no longer be swept. Kept separate from `sweep_incomplete` so it never hides a later real failure, and never clears by itself |
 
 Thresholds and the personal labels are published in the block's `policy`
 (`context_email_capture_policy()`, changed only by migration).
