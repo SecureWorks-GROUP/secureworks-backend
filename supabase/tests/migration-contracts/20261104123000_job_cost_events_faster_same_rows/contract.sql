@@ -44,7 +44,7 @@ BEGIN
   -- A crew invoice line on P (250) and its own Xero bill, tracked to SW - PATIOS: the crew party of P is "c3 crew alpha".
   INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst, total_inc, invoice_number, xero_bill_id,
                                      gst_on, super_rate, gross_earned, super_amount, net_pay)
-  VALUES (ti, org, crew, '2026-08-24', 'approved', 250, 0, 250, 'SW-INV-C3T-1', 'b-c3crew', false, 0, 250, 0, 250);
+  VALUES (ti, org, crew, '2026-08-24', 'approved', 250, 0, 250, 'SW-INV-C3T-1', 'b-c3crew', false, 0.12, 250, 30.00, 250);
   INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, job_number, line_type, description, total_hours, hourly_rate, line_total_ex, line_date, created_at)
   VALUES (tl, ti, p, 'SWT-99001', 'labour', 'Labour', 5, 50, 250, '2026-08-25', '2026-08-30 01:00:00+00');
   INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, job_id, raw_json, line_items) VALUES
