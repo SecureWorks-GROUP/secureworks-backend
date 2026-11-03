@@ -653,11 +653,16 @@ jobs:
             supabase/functions/ghl-proxy/sms_capture_test.ts \
             supabase/functions/ghl-proxy/send_sms_response_test.ts
 
+      # C7: GHL text reactions are one client.sms_reaction row each (channel
+      # status, never read as the customer writing), and the operator's
+      # reaction repair (dry run reads only).
       - name: Test the 15-minute GHL message reconciler
         run: |
           deno test --allow-read \
             supabase/functions/ghl-message-reconcile/reconcile_test.ts \
-            supabase/functions/ghl-message-reconcile/handler_test.ts
+            supabase/functions/ghl-message-reconcile/handler_test.ts \
+            supabase/functions/ghl-message-reconcile/reaction_repair_test.ts \
+            supabase/functions/_shared/evidence/ghl_message_reaction_test.ts
 
       # Slice M4: the one-off GHL history load for live-job contacts (dry run by
       # default, backfill rows only, resume, the day's job count) and its link

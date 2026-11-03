@@ -474,3 +474,89 @@ export const R4_WEBHOOK = {
   body: R4_LIST_ITEM.body,
   dateAdded: R4_LIST_ITEM.dateAdded,
 };
+
+// ── C7 (3 Nov 2026): GHL text reactions, read live (read-only) on 3 Nov ──
+// Ids, contacts, conversations, times and our lines are the real ones from
+// the C7 census misses (verify/evidence/20261103-c7-capture); the customer's
+// number is a placeholder, and words that name a customer or a street are
+// replaced by neutral placeholder text.
+
+const RX1_CONTACT = "vx5DdOMcVIz9QJ6eSCor";
+const RX1_CONVERSATION = "9cUQpdqrIUzoqbFzBhdI";
+
+/** RX1's target: our staff text from 772 (staff words, no names). */
+export const RX1_TARGET_ITEM = {
+  id: "o6r7C1Sk23UdMcagy04d",
+  type: 2,
+  messageType: "TYPE_SMS",
+  direction: "outbound",
+  status: "delivered",
+  source: "app",
+  userId: "RgDWTnYL6zL3eJA6nLht",
+  from: "+61489267772",
+  to: "+61400000000",
+  body: "Sorry yes that was an automation apologies",
+  contactId: RX1_CONTACT,
+  conversationId: RX1_CONVERSATION,
+  dateAdded: "2026-10-27T01:19:52.726Z",
+};
+
+/** RX1: an iPhone tapback on RX1's target, as the conversation list gives it (type 45). */
+export const RX1_REACTION_ITEM = {
+  id: "aHJDV3bgOb5fof6NtlUa",
+  type: 45,
+  messageType: "TYPE_SMS_REACTION",
+  direction: "inbound",
+  status: "delivered",
+  altId: "SMf2e75d3e4350769e876654f774c7431c",
+  from: "+61400000000",
+  to: "+61489267772",
+  body: "Liked “Sorry yes that was an automation apologies”",
+  contactId: RX1_CONTACT,
+  conversationId: RX1_CONVERSATION,
+  dateAdded: "2026-10-27T01:20:23.529Z",
+};
+
+/** RX1 as a single-message read gives it: messageType empty, type 45. */
+export const RX1_REACTION_SINGLE_READ = {
+  ...RX1_REACTION_ITEM,
+  messageType: "",
+};
+
+const RX2_CONTACT = "u0tEQsKMgagGdCBWGb9c";
+const RX2_CONVERSATION = "kHFv38BLnQzWo3ZxmXdV";
+
+/** RX2's target: a booking text our tool sent from 771 (placeholder words). */
+export const RX2_TARGET_ITEM = {
+  id: "30TfoJaOxSXh2mSStvJN",
+  type: 2,
+  messageType: "TYPE_SMS",
+  direction: "outbound",
+  status: "delivered",
+  source: "app",
+  userId: "ERAycY7r6KZ8OA66WQCy",
+  from: "+61489267771",
+  to: "+61400000001",
+  body:
+    "Hi there,\n\nPlaceholder booking text for the RX2 fixture.\n\nCheers,\nOffice.",
+  contactId: RX2_CONTACT,
+  conversationId: RX2_CONVERSATION,
+  dateAdded: "2026-10-29T00:46:30.127Z",
+  meta: { marketplace: { appId: "69a41803c86f294a620b6499" } },
+};
+
+/** RX2: an Android emoji reaction on RX2's target (invisible marks round the emoji, spaces inside the quote). */
+export const RX2_REACTION_ITEM = {
+  id: "8KxP2j8bLGnZw8Vs8f5X",
+  type: 45,
+  messageType: "TYPE_SMS_REACTION",
+  direction: "inbound",
+  status: "delivered",
+  from: "+61400000001",
+  to: "+61489267771",
+  body:
+    "​\u{1F44D}​ to “ Hi there,\n\nPlaceholder booking text for the RX2 fixture.\n\nCheers,\nOffice. ”",
+  contactId: RX2_CONTACT,
+  conversationId: RX2_CONVERSATION,
+  dateAdded: "2026-10-29T07:50:51.200Z",
+};

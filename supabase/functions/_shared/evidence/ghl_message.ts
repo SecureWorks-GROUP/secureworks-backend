@@ -21,7 +21,11 @@
 //     one call record (slice T1, transcripts.md §2). It carries the provider's
 //     status, direction and duration as given and no words; a transcript is
 //     always a separate row for the same call (T2). Activity items are not
-//     written here; the caller counts them.
+//     written here; the caller counts them;
+//   * a text reaction (GHL TYPE_SMS_REACTION, type 45: a tapback such as
+//     Liked “<a text>”) is one client.sms_reaction row on channel status,
+//     keyed ghl:<id> like a text, never a new text (C7, 3 Nov 2026; see
+//     buildReactionRow for why).
 //
 // Pure: no I/O, no clock, no model call. The caller supplies the capture mode
 // and, for our own sends, the job id it verified.
@@ -51,6 +55,8 @@ export interface GhlMessageItem {
   id?: string | null;
   messageId?: string | null;
   messageType?: string | null;
+  /** GHL's numeric type: 2 a text, 45 a text reaction (a single-message read leaves messageType empty). */
+  type?: number | string | null;
   direction?: string | null;
   status?: string | null;
   body?: string | null;
@@ -114,6 +120,12 @@ export interface GhlCaptureContext {
   recipientRole?: RecipientRole | null;
   /** The job a crew or staff text is about. Recorded as metadata.about_job_id; the ladder places the row there as internal communication. */
   aboutJobId?: string | null;
+  /**
+   * The other items of the same conversation the caller holds (a page of the
+   * conversation list), so a text reaction can name the text it reacts to.
+   * Read only for a reaction; omitted, its target is recorded as not_in_hand.
+   */
+  inHand?: readonly GhlMessageItem[] | null;
 }
 
 export type GhlSkipReason =
@@ -213,6 +225,7 @@ export function buildGhlMessageRow(
 
   const kind = messageKind(item.messageType);
   if (CALL_KINDS.has(kind)) return buildCallRow(item, id, contactId, ctx);
+  if (isReactionItem(item)) return buildReactionRow(item, id, contactId, ctx);
   if (kind.startsWith("ACTIVITY")) {
     return { kind: "skip", reason: "skipped_activity" };
   }
@@ -469,6 +482,322 @@ function buildCallRow(
       event_at: eventAt,
       provider_message_id: `ghl:${id}`,
       channel: "call",
+      direction,
+      thread_key: null,
+      conversation_key: conversationId,
+      body_preview: read.slice(0, EXCERPT),
+      safe_summary: read.slice(0, 280),
+      privacy_classification: "staff_only",
+      retention_class: "7y_audit",
+      payload,
+      metadata: { capture_mode: ctx.captureMode },
+    },
+  };
+}
+
+// ── Text reactions: one row per GHL TYPE_SMS_REACTION item (C7, 3 Nov 2026) ──
+//
+// A reaction is the mark a phone puts on a text that already exists (an
+// iPhone tapback, an Android emoji reaction). GHL keeps it as its own item,
+// type 45, messageType TYPE_SMS_REACTION in the conversation list ("" from a
+// single-message read), whose body is the phone's fallback words:
+//   Liked “Sorry yes that was an automation apologies”      (iPhone)
+//   Loved “…”, Laughed at “…”, Emphasized “…”, Questioned “…”, Disliked “…”
+//   Removed a like from “…”                                 (iPhone, undone)
+//   <U+200B>👍<U+200B> to “ Hi …, … ”                         (Android)
+// It carries the contact, conversation, direction, our number and GHL's own
+// time, but never the id of the text it reacts to: only a copy of its words.
+// Read live on 3 Nov 2026 (13 items, 27 Oct to 3 Nov): every one inbound, a
+// customer reacting to one of our texts.
+//
+// The row (every door builds it here):
+//   * key ghl:<GHL message id>, contact, conversation_key and event_at as for
+//     a text, so the C7 census finds it by the source's own id;
+//   * event_type client.sms_reaction, channel status, the direction as given
+//     (no direction: no_direction, as for a text). Why status and not sms: a
+//     reaction is not a new text and must never read as the customer writing.
+//     Every reader that treats an inbound text as the customer writing keys on
+//     channel sms (or on client.reply / client.sms_in): the AI notes reader's
+//     public.context_ledger_message_kind (channel sms, email, call, note,
+//     document), so a status row is never evidence, never cited, cannot open,
+//     reopen or close a notes item and never makes a job due a read; the
+//     card's messages, open items and last exchange
+//     (context_job_record_messages, context_job_record_loops: channel sms or
+//     email), so a "Liked" never makes a reply owed; and the lead monitor. A
+//     reaction is at most a weak acknowledgement, kept on the job's record
+//     and out of every one of those reads;
+//   * the ladder places it like any worded row of its contact: the same rules
+//     as the text it reacts to, whose words it quotes (a job number in our
+//     text places the reaction on that job too). Read-only preview on 3 Nov
+//     2026: 13 of 13 would land where their reacted-to text sits (10 on a
+//     job, 3 on no job). The capture never names a job itself;
+//   * payload.body keeps the provider's words whole, as for every text;
+//     body_preview and safe_summary are capture's own short account: the mark
+//     and the text it is on, e.g.
+//       [Reaction 👍 (Liked) on our text ghl:o6r7C1Sk23UdMcagy04d: “Sorry yes…”]
+//   * payload.reaction: the mark (emoji, the provider's verb, removed), the
+//     quoted words (cut at 500) and the reacted-to text when the caller holds
+//     the conversation (inHand): exactly one earlier text of the same
+//     conversation whose words equal the quote after quotes and spaces are
+//     straightened (match quoted_text, reacted_to_key ghl:<id>). Several equal
+//     texts, none, no quote or nothing in hand are recorded as such, never
+//     guessed.
+
+/** GHL's numeric type for a text reaction. */
+const REACTION_TYPE = "45";
+
+/** business_events.event_type of a text reaction. */
+export const REACTION_EVENT_TYPE = "client.sms_reaction";
+
+/** A GHL text reaction: TYPE_SMS_REACTION, or type 45 with no messageType (single-message read). */
+export function isReactionItem(item: GhlMessageItem): boolean {
+  const kind = messageKind(item.messageType);
+  return kind === "SMSREACTION" ||
+    (kind === "" && String(item.type ?? "").trim() === REACTION_TYPE);
+}
+
+/** The iPhone tapback words and their marks. */
+const TAPBACK_MARKS: Record<string, string> = {
+  "liked": "👍",
+  "loved": "❤️",
+  "disliked": "👎",
+  "laughed at": "😂",
+  "emphasized": "‼️",
+  "emphasised": "‼️",
+  "questioned": "❓",
+};
+
+/** The iPhone words for a removed tapback ("Removed a like from"). */
+const REMOVED_MARKS: Record<string, string> = {
+  "like": "👍",
+  "heart": "❤️",
+  "dislike": "👎",
+  "laugh": "😂",
+  "exclamation": "‼️",
+  "question mark": "❓",
+};
+
+const PICTOGRAPH = /\p{Extended_Pictographic}/u;
+const INVISIBLE = /[​-‍⁠﻿]/g;
+
+/** One reaction as its fallback words say it. */
+export interface GhlReaction {
+  /** The mark: the emoji itself, or the tapback's emoji. Null when not recognised. */
+  emoji: string | null;
+  /** The provider's words before the quote, invisible characters removed ("Liked", "👍 to"). */
+  verb: string | null;
+  /** The phone took the mark back ("Removed a like from …"). */
+  removed: boolean;
+  /** The words of the text it is on, as quoted, trimmed. Null when there is no quote. */
+  quoted: string | null;
+}
+
+/** The mark and quote of a reaction body. Pure. */
+export function parseGhlReaction(body: string | null | undefined): GhlReaction {
+  const raw = String(body ?? "");
+  const open = raw.indexOf("“");
+  const close = raw.lastIndexOf("”");
+  let head = raw;
+  let quoted: string | null = null;
+  if (open >= 0 && close > open) {
+    head = raw.slice(0, open);
+    quoted = raw.slice(open + 1, close).trim() || null;
+  } else {
+    const straight = /^([^"]*)"([\s\S]*)"\s*$/.exec(raw);
+    if (straight) {
+      head = straight[1];
+      quoted = straight[2].trim() || null;
+    }
+  }
+  const verb = head.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
+  const lower = verb.toLowerCase();
+  const removed = /^removed\b/.test(lower);
+  const word = removed
+    ? lower.replace(/^removed\s+(an?\s+)?/, "").replace(/\s+from$/, "")
+    : lower.replace(/^reacted\s+/, "").replace(/\s+to$/, "");
+  const known = (removed ? REMOVED_MARKS : TAPBACK_MARKS)[word];
+  const mark = known ??
+    (PICTOGRAPH.test(word) ? word.replace(/\s+/g, "") : null);
+  return { emoji: mark, verb: verb || null, removed, quoted };
+}
+
+/** Words as the notes store compares them (context_ledger_text_norm): quotes straightened, spaces collapsed. */
+function compareText(value: string): string {
+  return value
+    .replace(/[‘’‚‛′]/g, "'")
+    .replace(/[“”„‟″]/g, '"')
+    .replace(/ /g, " ")
+    .replace(INVISIBLE, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The text a reaction is on, as far as the items in hand show it. */
+export type ReactionTarget =
+  | {
+    match: "quoted_text";
+    ghlMessageId: string;
+    direction: "inbound" | "outbound" | null;
+  }
+  | { match: "not_in_hand" | "no_quote" | "not_found" }
+  | { match: "several"; candidates: number };
+
+/**
+ * The one earlier text of the reaction's conversation (or contact, when an
+ * item names no conversation) whose words equal the quote. Pure; never
+ * guesses between equal texts.
+ */
+export function findReactionTarget(
+  reaction: GhlMessageItem,
+  quoted: string | null,
+  inHand: readonly GhlMessageItem[] | null | undefined,
+): ReactionTarget {
+  if (!quoted) return { match: "no_quote" };
+  if (!inHand) return { match: "not_in_hand" };
+  const selfId = text(reaction.messageId) ?? text(reaction.id);
+  const conversation = text(reaction.conversationId);
+  const contact = text(reaction.contactId);
+  const at = Date.parse(String(reaction.dateAdded ?? ""));
+  const want = compareText(quoted);
+  const hits = inHand.filter((m) => {
+    const id = text(m.messageId) ?? text(m.id);
+    if (!id || id === selfId || isReactionItem(m)) return false;
+    const kind = messageKind(m.messageType);
+    if (kind !== "SMS" && kind !== "MMS") return false;
+    const sameThread = conversation && text(m.conversationId)
+      ? text(m.conversationId) === conversation
+      : !!contact && text(m.contactId) === contact;
+    if (!sameThread) return false;
+    const when = Date.parse(String(m.dateAdded ?? ""));
+    if (Number.isFinite(at) && Number.isFinite(when) && when > at) {
+      return false;
+    }
+    return typeof m.body === "string" && compareText(m.body) === want;
+  });
+  if (hits.length === 0) return { match: "not_found" };
+  if (hits.length > 1) return { match: "several", candidates: hits.length };
+  const hit = hits[0];
+  const direction = String(hit.direction ?? "").toLowerCase();
+  return {
+    match: "quoted_text",
+    ghlMessageId: (text(hit.messageId) ?? text(hit.id))!,
+    direction: direction === "inbound" || direction === "outbound"
+      ? direction
+      : null,
+  };
+}
+
+/** The quote as the short account shows it. */
+const REACTION_EXCERPT = 120;
+
+function buildReactionRow(
+  item: GhlMessageItem,
+  id: string,
+  contactId: string,
+  ctx: GhlCaptureContext,
+): GhlMessageBuild {
+  const given = String(item.direction ?? "").toLowerCase();
+  if (given !== "inbound" && given !== "outbound") {
+    return { kind: "skip", reason: "no_direction" };
+  }
+  const direction: "inbound" | "outbound" = given;
+  const body = typeof item.body === "string" && item.body.trim()
+    ? item.body
+    : null;
+  const reaction = parseGhlReaction(body);
+  const target = findReactionTarget(item, reaction.quoted, ctx.inHand);
+  const targetKey = target.match === "quoted_text"
+    ? `ghl:${target.ghlMessageId}`
+    : null;
+
+  const mark = reaction.emoji ?? reaction.verb ?? "a mark";
+  // The provider's word beside its mark only when it adds one ("Liked"), not
+  // when the words already show the emoji ("👍 to") or the mark is unknown.
+  const said = reaction.emoji && reaction.verb && !reaction.removed &&
+      !reaction.verb.includes(reaction.emoji)
+    ? ` (${reaction.verb})`
+    : "";
+  const on = target.match === "quoted_text"
+    ? `${
+      target.direction === "outbound" ? "our text" : "the customer's text"
+    } ${targetKey}`
+    : "a text";
+  const oneLine = reaction.quoted?.replace(/\s+/g, " ") ?? null;
+  const quote = oneLine
+    ? `: “${
+      oneLine.length > REACTION_EXCERPT
+        ? `${oneLine.slice(0, REACTION_EXCERPT).trimEnd()}...`
+        : oneLine
+    }”`
+    : "";
+  const read = reaction.removed
+    ? `[Reaction ${mark} taken back from ${on}${quote}]`
+    : `[Reaction ${mark}${said} on ${on}${quote}]`;
+
+  // Our number: the one reacted to (inbound) or reacted from (outbound).
+  const numberOnItem = direction === "inbound" ? item.to : item.from;
+  const line = ourLineForNumber(text(ctx.ourNumber) ?? text(numberOnItem));
+  const eventAt = sourceTime(item.dateAdded);
+  const conversationId = text(item.conversationId);
+
+  const payload: Record<string, unknown> = {
+    ...(body
+      ? {
+        body,
+        text: body,
+        message: body,
+        message_text: body.slice(0, EXCERPT),
+      }
+      : { described_by_capture: true }),
+    channel: "status",
+    direction,
+    ghl_message_id: id,
+    ghl_contact_id: contactId,
+    ghl_message_type: item.messageType ?? null,
+    ghl_type: item.type ?? null,
+    conversation_key: conversationId,
+    conversation_id: conversationId,
+    sent_by_kind: sentBy(item, direction, ctx),
+    sent_by_user: direction === "inbound" ? null : text(item.userId),
+    line: line.line,
+    from_line: line.from_line,
+    our_number: line.our_number,
+    provider_source: text(item.source),
+    provider_status: text(item.status),
+    reaction: {
+      emoji: reaction.emoji,
+      verb: reaction.verb,
+      removed: reaction.removed,
+      quoted_text: reaction.quoted ? reaction.quoted.slice(0, EXCERPT) : null,
+      reacted_to_match: target.match,
+      reacted_to_key: targetKey,
+      reacted_to_ghl_message_id: target.match === "quoted_text"
+        ? target.ghlMessageId
+        : null,
+      reacted_to_direction: target.match === "quoted_text"
+        ? target.direction
+        : null,
+      ...(target.match === "several"
+        ? { reacted_to_candidates: target.candidates }
+        : {}),
+    },
+    event_at_source: eventAt ? "provider" : "missing",
+  };
+
+  return {
+    kind: "row",
+    row: {
+      event_type: REACTION_EVENT_TYPE,
+      source: ctx.source,
+      entity_type: "contact",
+      entity_id: contactId,
+      contact_id: contactId,
+      // Never a job from capture: the ladder places it (see above).
+      job_id: null,
+      match_method: "none",
+      event_at: eventAt,
+      provider_message_id: `ghl:${id}`,
+      channel: "status",
       direction,
       thread_key: null,
       conversation_key: conversationId,

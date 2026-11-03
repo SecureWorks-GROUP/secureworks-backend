@@ -665,6 +665,8 @@ export async function runGhlHistoryLoad(
         const built = buildGhlMessageRow(item as GhlMessageItem, {
           source: EVENT_SOURCE,
           captureMode: "backfill",
+          // The page, so a reaction can name the text it is on (C7).
+          inHand: items as GhlMessageItem[],
         });
         if (built.kind === "skip") {
           const key = (built.reason.startsWith("skipped_")

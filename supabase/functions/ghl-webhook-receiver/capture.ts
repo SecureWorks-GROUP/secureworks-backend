@@ -283,6 +283,8 @@ export async function targetedConversationRead(
     const built: GhlMessageBuild = buildGhlMessageRow(item, {
       source: RECEIVER_SOURCE,
       captureMode: "live",
+      // The messages read, so a reaction can name the text it is on (C7).
+      inHand: items,
     });
     if (built.kind === "skip") {
       read.skipped++;
