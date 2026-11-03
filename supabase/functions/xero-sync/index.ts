@@ -42,7 +42,7 @@ import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
-import { readAll, runBillPrematch } from './bill_prematch_run.ts'
+import { PREMATCH_ROWS_PER_RUN, readAll, runBillPrematch } from './bill_prematch_run.ts'
 import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 // serve is only started when this module is the process entrypoint so unit
@@ -269,8 +269,18 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'sync_bank_transactions':
         return json(await syncBankTransactions(sb))
+      case 'ingest_materials_recent':
+        // Scheduled every 15 minutes (xero-materials-ingest): the bills of the last 90 days, the
+        // window every new bill falls in. The pre-match runs on its own schedule.
+        return json(await ingestMaterialsActuals(sb, { windowDays: MATERIALS_RECENT_WINDOW_DAYS, prematch: false }))
+      case 'ingest_materials_all':
+        // Scheduled once a day (xero-materials-ingest-all): every bill, as the owner asked on 28 Oct.
+        return json(await ingestMaterialsActuals(sb, { windowDays: MATERIALS_WINDOW_DAYS, prematch: false }))
+      case 'bill_prematch':
+        // Scheduled every 15 minutes (xero-bill-prematch), a share of the open bills each run.
+        return json(await scheduledBillPrematch(sb))
       case 'ingest_materials': {
-        // Standalone materials-actuals ingest (also runs inside sync_invoices).
+        // Manual materials-actuals ingest with its pre-match (the schedules above split the two).
         const windowDays = parseInt(url.searchParams.get('window_days') || String(MATERIALS_WINDOW_DAYS), 10)
         const limitParam = url.searchParams.get('limit')
         const limit = limitParam ? parseInt(limitParam, 10) : null
@@ -278,7 +288,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, ingest_materials_recent, ingest_materials_all, bill_prematch, check_invoice_mirror' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {
@@ -1159,8 +1169,12 @@ async function syncInvoices(sb: any) {
     console.error('[xero-sync] Invoice evidence placement error:', (e as Error).message)
   }
 
-  // ── Materials-actuals ingestion (U3) — land supplier bills on jobs or queue ──
-  const materialsResult = await ingestMaterialsActuals(sb)
+  // ── Materials-actuals ingestion (U3) and the bill pre-match run on their own schedules ──
+  // (3 Nov 2026, migration 20261103170000: xero-materials-ingest, xero-bill-prematch and
+  // xero-materials-ingest-all). Inside this run, with every bill read (#1184), they used up the
+  // run's CPU time from 29 Oct: each run was stopped there, so the bank feed copy, the stale
+  // invoice re-check and settlement capture below never ran and no proposal was written after 31 Oct.
+  const materialsResult = { ran: false, reason: 'own_schedule' }
 
   // ── Bank-transactions sync (M9 data substrate) — early-enabled so real
   //    bank-feed SPEND lines accumulate for M9 receipt-pairing tolerances.
@@ -1523,10 +1537,12 @@ export async function matchUnlinkedInvoices(client: any) {
 // bill reader places the older bills too; 720 bills older than 90 days had
 // never reached a fact or Bills to place). Ten years is "all of them".
 const MATERIALS_WINDOW_DAYS = 3650
+// The scheduled 15-minute ingest reads the last 90 days; the daily run reads every bill.
+const MATERIALS_RECENT_WINDOW_DAYS = 90
 
 async function ingestMaterialsActuals(
   sb: any,
-  opts: { windowDays?: number; limit?: number | null; capped?: boolean; config?: MatchConfig } = {},
+  opts: { windowDays?: number; limit?: number | null; capped?: boolean; config?: MatchConfig; prematch?: boolean } = {},
 ) {
   const windowDays = opts.windowDays ?? MATERIALS_WINDOW_DAYS
   // No cap by default: every bill in the window is read each run. A manual
@@ -2010,6 +2026,8 @@ async function ingestMaterialsActuals(
       // starts the organisation-wide pre-match and its placements.
       prematch = opts.capped
         ? { ran: false, reason: 'capped_manual_run' }
+        : opts.prematch === false
+        ? { ran: false, reason: 'own_schedule' }
         : await runBillPrematch(sb, { orgId: DEFAULT_ORG_ID })
     } catch (e: any) {
       if (e instanceof XeroCooldownError) throw e
@@ -2033,6 +2051,33 @@ async function ingestMaterialsActuals(
     console.error('[materials] ingest failed:', (e as Error).message)
     return { success: false, error: (e as Error).message, ...result }
   }
+}
+
+
+// The scheduled bill pre-match (JP-06) on its own: a share of the open bills each run, new bills
+// first, the turn moving every 15 minutes. Logged like the ingest so a stopped run shows.
+async function scheduledBillPrematch(sb: any) {
+  let prematch: unknown
+  try {
+    prematch = await runBillPrematch(sb, {
+      orgId: DEFAULT_ORG_ID,
+      maxRows: PREMATCH_ROWS_PER_RUN,
+      turn: Math.floor(Date.now() / 900_000),
+    })
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    prematch = { ran: false, reason: 'error', error: (e as Error).message }
+    console.error('[materials] bill pre-match failed:', (e as Error).message)
+  }
+  await sb.from('webhook_log').insert({
+    org_id: DEFAULT_ORG_ID,
+    source: 'xero',
+    event_type: 'bill_prematch',
+    payload: { prematch },
+    status: 'processed',
+  }).then(() => undefined, () => undefined)
+  console.log(`[materials] bill pre-match: ${JSON.stringify(prematch)}`)
+  return { success: true, prematch }
 }
 
 
