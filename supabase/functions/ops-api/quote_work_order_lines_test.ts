@@ -10,6 +10,7 @@ import {
 import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
+  patioToolLabourLines,
   FENCE_LABOUR_COST_KEYS,
   fenceInstallDescription,
   QUOTE_LINE_FLAGS,
@@ -878,4 +879,48 @@ Deno.test("the cost keys read are the fence tool's own cost table keys", () => {
     Object.keys(FENCE_LABOUR_COST_KEYS).length,
   );
   for (const key of FENCE_LABOUR_COST_ITEM_KEYS) assert(key in COST_TABLE, key);
+});
+
+// Scope B4: the new patio tool (patio-scoper) seals its labour as lines in the
+// scope (draft.pricing.labourLines) and no pricing line items. A line's labour
+// is people x days x day rate when all three are entered, else its one figure,
+// the tool's own rule (patio/scoper/src/money.ts labourLineCost).
+Deno.test("new patio tool: each sealed labour line is a work order line, by the tool's own rule", () => {
+  const lines = patioToolLabourLines([
+    { id: "crew", work: "Build the patio", people: 2, days: 1.5, dayRate: 360, amount: 999 },
+    { id: "x1", work: "Bin hire run", people: null, days: null, dayRate: null, amount: 120.5 },
+    { id: "x2", work: "Still to price", people: 2, days: null, dayRate: 360, amount: null },
+    { id: "x3", work: "", people: null, days: null, dayRate: null, amount: null },
+  ]);
+  assertEquals(
+    lines.map((l) => [l.line_key, l.description, l.qty, l.unit, l.total]),
+    [
+      ["labour:tool:0", "Labour: Build the patio", 3, "trade days", 1080],
+      ["labour:tool:1", "Labour: Bin hire run", null, null, 120.5],
+      ["labour:tool:2", "Labour: Still to price", null, null, null],
+    ],
+  );
+  assertEquals(patioToolLabourLines(null), []);
+});
+
+Deno.test("new patio tool: no pricing line items, the sealed labour lines make the quote's labour figure", () => {
+  const toolLabourLines = [
+    { work: "Build the patio", people: 2, days: 3, dayRate: 380, amount: null },
+    { work: "Remove the old pergola", amount: 400 },
+  ];
+  const r = buildQuoteWorkOrderLines({ jobType: "patio", pricing: { labourCostEstimate: 2680 }, toolLabourLines });
+  assertEquals(r.agreed_labour_ex, 2680);
+  assertEquals(r.lines.map((l) => [l.total, l.counted, l.needs_review]), [[2280, true, false], [400, true, false]]);
+  assertEquals(r.flags, []);
+  const noFigure = buildQuoteWorkOrderLines({ jobType: "patio", pricing: {}, toolLabourLines });
+  assertEquals(noFigure.agreed_labour_ex, 2680, "with no labour figure in the pricing, the lines' sum");
+  const withRow = buildQuoteWorkOrderLines({
+    jobType: "patio",
+    pricing: { labourCostEstimate: 1080, line_items: [{ category: "labour", unit: "hrs", quantity: 24, cost_price: 45, description: "Labour" }] },
+    toolLabourLines,
+  });
+  assert(!withRow.lines.some((l) => l.line_key.startsWith("labour:tool:")), "a quote with its own labour row ignores the scope lines");
+  // The planted fault: the builder as it stood (no tool lines) finds nothing.
+  const asItStood = buildQuoteWorkOrderLines({ jobType: "patio", pricing: { labourCostEstimate: 2680 } });
+  assertEquals(asItStood.lines.length, 0);
 });
