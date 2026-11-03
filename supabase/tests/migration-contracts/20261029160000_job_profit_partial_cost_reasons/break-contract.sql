@@ -1,3 +1,10 @@
+-- 20261104080000 (expected cost missing) first: its down, then the stack's own v_job_profit back (this break runs in
+-- a disposable copy, so nothing is applied again).
+SELECT to_regprocedure('public.job_profit_expected_cost_missing(uuid)') IS NOT NULL AS a6x_break_20261029160000 \gset
+\if :a6x_break_20261029160000
+\ir ../../../rollbacks/20261104080000_job_profit_expected_cost_missing_down.sql
+\ir ../20261104080000_job_profit_expected_cost_missing/restore-preimage.sql
+\endif
 SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS break_has_credit \gset
 \if :break_has_credit
 \ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
