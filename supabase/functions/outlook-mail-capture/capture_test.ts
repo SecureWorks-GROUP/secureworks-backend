@@ -1324,7 +1324,7 @@ Deno.test("a partner's document sent through Xero, MYOB, QuickBooks or Buildertr
     msg(2, "2026-10-02T05:42:00Z", {
       from: "messaging-service@post.xero.com",
       subject: "Message from sam.sample@example.net regarding invoice INV-1789",
-      bodyText: "There is still a downpipe to be installed. Once done I will pay.",
+      bodyText: "The gate latch is still loose; I will pay when it is fixed.",
       headers: replyTo("sam.sample@example.net"),
     }),
     msg(3, "2026-10-02T05:43:00Z", {
@@ -1360,7 +1360,7 @@ Deno.test("a partner's document sent through Xero, MYOB, QuickBooks or Buildertr
     ["client.email_in", "ap@builder-accounts.example", "customer", "apps.myob.com"],
     ["supplier.email_in", "notifications@buildertrend.net", "automated", "buildertrend.net"],
   ]);
-  assert(String(w.captured[1].body_preview).includes("downpipe"));
+  assert(String(w.captured[1].body_preview).includes("gate latch"));
   assertEquals(lastRun(w, "outlook_nithin").counts!.skipped_noise, 2);
 });
 
