@@ -9,6 +9,7 @@ import {
 import { calculateTradeInvoiceMoney } from "./trade_invoice_money.ts";
 import { RETIRE_CREW_WORK_ORDERS_FLAG } from "./crew_invoice_job_work_order.ts";
 import {
+  applyOwnerCommand,
   getRunningInvoiceDraft,
   mergeApproved,
   RunningDraftError,
@@ -882,4 +883,251 @@ Deno.test("ops-api wires the three trade actions and keeps the agent action off 
       "GRANT EXECUTE ON FUNCTION public.persist_running_trade_invoice_draft_v1",
     ),
   );
+});
+
+Deno.test("the owner can delete an auto line, and a rebuild does not put it back or overwrite an edit", async () => {
+  const db = baseDb();
+  db.tables.job_assignments.push(assignment({ id: AS_HOURS, job_id: JOB }));
+  db.tables.job_assignments.push(assignment({
+    id: AS_PLAIN,
+    job_id: JOB_B,
+    jobs: jobEmbed(JOB_B),
+  }));
+  const first = await saveRunningInvoiceDraft(db, USER, saveBody(), "staff");
+  assertEquals(
+    keysOf((first.draft_builder as Row).jobCards as Row[]).includes(
+      "as:" + AS_HOURS,
+    ),
+    true,
+  );
+
+  const removed = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    saveBody({
+      draft_id: first.draft_id,
+      draft_builder: {
+        ...saveBody().draft_builder as Row,
+        manualLock: true,
+        dismissedKeys: ["as:" + AS_HOURS],
+        jobCards: [hoursCard({
+          assignment_id: AS_PLAIN,
+          job_id: JOB_B,
+          description: "Hugo changed the auto line",
+          hours: 4,
+          rate: 55,
+          owner_edited: true,
+        })],
+      },
+    }),
+    "staff",
+  );
+  const removedCards = (removed.draft_builder as Row).jobCards as Row[];
+  assertEquals(keysOf(removedCards).includes("as:" + AS_HOURS), false);
+  assertEquals(
+    ((removed.draft_builder as Row).dismissedKeys as string[]).includes(
+      "as:" + AS_HOURS,
+    ),
+    true,
+  );
+  assertEquals(removedCards[0].description, "Hugo changed the auto line");
+  assertEquals((removed.draft_builder as Row).manualLock, true);
+  assertEquals(
+    (lastRpc(db).args.p_lines as Row[]).some((line) =>
+      line.description === "Hugo changed the auto line"
+    ),
+    true,
+  );
+  assertEquals((lastRpc(db).args.p_invoice as Row).xero_bill_id, undefined);
+
+  const rebuilt = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    {
+      action: "sync_running_invoice_draft",
+      week_start: WEEK,
+      draft_builder: {
+        version: 1,
+        jobCards: [hoursCard({ description: "Auto rebuilt this line", hours: 9 })],
+        dismissedKeys: [],
+        weekStart: WEEK,
+        weekEnd: WEEK_END,
+      },
+    },
+    "auto",
+  );
+  const rebuiltCards = (rebuilt.draft_builder as Row).jobCards as Row[];
+  assertEquals(keysOf(rebuiltCards).includes("as:" + AS_HOURS), false);
+  const kept = rebuiltCards.find((card) => card.assignment_id === AS_PLAIN);
+  assertEquals(kept?.description, "Hugo changed the auto line");
+  assertEquals(kept?.hours, 4);
+  assertEquals((rebuilt.draft_builder as Row).manualLock, true);
+  assertEquals(
+    keysOf(rebuiltCards).includes("as:" + AS_PLAIN),
+    true,
+  );
+});
+
+Deno.test("an agent can delete and edit a line already on the owner's draft, and cannot do that to a send", async () => {
+  const db = baseDb();
+  db.tables.job_assignments.push(assignment({ id: AS_HOURS }));
+  await saveRunningInvoiceDraft(db, USER, saveBody(), "staff");
+  const saved = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    {
+      action: "agent_save_running_invoice_draft",
+      week_start: WEEK,
+      agent_label: "grok",
+      remove: ["as:" + AS_HOURS],
+      edits: [],
+      lines: [{
+        update: true,
+        assignment_id: AS_HOURS,
+        description: "too late",
+      }, {
+        job_id: JOB_B,
+        scheduled_date: "2026-10-22",
+        hours: 1,
+        rate: 40,
+        description: "Agent line",
+      }],
+    },
+    "agent",
+  );
+  assertEquals(saved.status, "draft");
+  assertEquals(saved.submitted, false);
+  assertEquals(saved.xero, false);
+  assertEquals(saved.removed, ["as:" + AS_HOURS]);
+  const cards = (saved.draft_builder as Row).jobCards as Row[];
+  assertEquals(keysOf(cards).includes("as:" + AS_HOURS), false);
+  assertEquals(
+    cards.some((card) => card.description === "Agent line"),
+    true,
+  );
+  assertEquals((saved.draft_builder as Row).manualLock, true);
+
+  const again = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    { action: "sync_running_invoice_draft", week_start: WEEK },
+    "auto",
+  );
+  assertEquals(
+    keysOf((again.draft_builder as Row).jobCards as Row[]).includes(
+      "as:" + AS_HOURS,
+    ),
+    false,
+  );
+
+  const restored = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    {
+      action: "agent_save_running_invoice_draft",
+      week_start: WEEK,
+      resync: true,
+      restore_removed: true,
+    },
+    "agent",
+  );
+  assertEquals(
+    keysOf((restored.draft_builder as Row).jobCards as Row[]).includes(
+      "as:" + AS_HOURS,
+    ),
+    true,
+  );
+  assertEquals(restored.xero, false);
+
+  const edited = applyOwnerCommand({
+    cards: [hoursCard()],
+    dismissed: [],
+    edits: [{
+      assignment_id: AS_HOURS,
+      description: "Assistant edited this",
+      amount: 60,
+    }],
+  });
+  assertEquals(edited.edited, ["as:" + AS_HOURS]);
+  assertEquals(edited.cards[0].description, "Assistant edited this");
+  assertEquals(edited.cards[0].rate, 60);
+  assertEquals(edited.cards[0].owner_edited, true);
+  const notReplaced = mergeApproved({
+    cards: edited.cards,
+    dismissed: edited.dismissed,
+    claimed: [],
+    suggested: [{
+      assignment_id: AS_HOURS,
+      description: "Auto rebuilt this line",
+      hours: 9,
+    }],
+  });
+  assertEquals(notReplaced.added, []);
+  assertEquals(notReplaced.cards[0].description, "Assistant edited this");
+  assertEquals(notReplaced.cards[0].hours, 2);
+});
+
+Deno.test("an agent edit or delete does not need a lines array, and it stays a draft", async () => {
+  const db = baseDb();
+  db.tables.job_assignments.push(assignment({ id: AS_HOURS }));
+  db.tables.job_assignments.push(assignment({
+    id: AS_PLAIN,
+    job_id: JOB_B,
+    jobs: jobEmbed(JOB_B),
+  }));
+  await saveRunningInvoiceDraft(db, USER, saveBody(), "staff");
+
+  const edited = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    {
+      action: "agent_save_running_invoice_draft",
+      week_start: WEEK,
+      edits: [{
+        assignment_id: AS_HOURS,
+        description: "Edited without lines",
+        hours: 3,
+      }],
+    },
+    "agent",
+  );
+  assertEquals(edited.status, "draft");
+  assertEquals(edited.submitted, false);
+  assertEquals(edited.xero, false);
+  assertEquals(edited.edited, ["as:" + AS_HOURS]);
+  assertEquals("lines" in (edited as Row), false);
+  const editedCard = ((edited.draft_builder as Row).jobCards as Row[])
+    .find((card) => card.assignment_id === AS_HOURS);
+  assertEquals(editedCard?.description, "Edited without lines");
+  assertEquals(editedCard?.hours, 3);
+  assertEquals((lastRpc(db).args.p_invoice as Row).status, "draft");
+  assertEquals((lastRpc(db).args.p_invoice as Row).xero_bill_id, undefined);
+
+  const removed = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    {
+      action: "agent_save_running_invoice_draft",
+      week_start: WEEK,
+      remove: ["as:" + AS_HOURS, { assignment_id: AS_PLAIN }],
+    },
+    "agent",
+  );
+  assertEquals(removed.status, "draft");
+  assertEquals(removed.submitted, false);
+  assertEquals(removed.xero, false);
+  assertEquals(removed.removed, ["as:" + AS_HOURS, "as:" + AS_PLAIN]);
+  assertEquals(
+    keysOf((removed.draft_builder as Row).jobCards as Row[]).includes(
+      "as:" + AS_HOURS,
+    ),
+    false,
+  );
+  assertEquals(
+    keysOf((removed.draft_builder as Row).jobCards as Row[]).includes(
+      "as:" + AS_PLAIN,
+    ),
+    false,
+  );
+  assertEquals((lastRpc(db).args.p_invoice as Row).xero_bill_id, undefined);
 });
