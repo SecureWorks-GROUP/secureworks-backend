@@ -127,6 +127,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest } from './ghl_email_note.ts'
+import { moveJobStatusOnAcceptance } from './acceptance_status_move.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -1971,7 +1972,7 @@ serve(async (req: Request) => {
 
         // Get job data
         const { data: job } = await sb.from('jobs')
-          .select('id, job_number, client_name, type, pricing_json, site_address, site_suburb, ghl_contact_id')
+          .select('id, status, job_number, client_name, type, pricing_json, site_address, site_suburb, ghl_contact_id')
           .eq('id', doc.job_id).single()
 
         const pj = typeof job?.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job?.pricing_json || {})
@@ -2005,8 +2006,18 @@ serve(async (req: Request) => {
           metadata: {},
         }).then(() => {}, () => {})
 
-        // Update overall job status
-        await sb.from('jobs').update({ status: jobStatus, ...(jobStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}) }).eq('id', doc.job_id)
+        // Update overall job status, recording the board move (S13: quoted to accepted or partially accepted)
+        await moveJobStatusOnAcceptance(sb, {
+          jobId: doc.job_id,
+          jobName: job?.job_number || job?.client_name || '',
+          priorStatus: job?.status ?? null,
+          newStatus: jobStatus,
+          acceptedAtIso: new Date().toISOString(),
+          documentId: doc.id,
+          amount: Number(pj?.totalIncGST) || null,
+          handler: 'send-quote/accept-run',
+          nowIso: new Date().toISOString(),
+        }, (event) => safeBusinessEventInsert(sb, event, { handler: 'send-quote/accept-run', job_id: doc.job_id }))
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
         // baseline the first time this job reaches 'accepted'. Best-effort +
@@ -2117,7 +2128,7 @@ serve(async (req: Request) => {
         // Get full job data for notifications + invoicing
         const { data: job } = await sb
           .from('jobs')
-          .select('id, ghl_opportunity_id, ghl_contact_id, job_number, client_name, type, pricing_json, site_address, site_suburb')
+          .select('id, status, ghl_opportunity_id, ghl_contact_id, job_number, client_name, type, pricing_json, site_address, site_suburb')
           .eq('id', doc.job_id)
           .single()
 
@@ -2150,13 +2161,19 @@ serve(async (req: Request) => {
           }
         }
 
-        await sb
-          .from('jobs')
-          .update({
-            status: newStatus,
-            ...(newStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}),
-          })
-          .eq('id', doc.job_id)
+        // The status, with the board move recorded (S13: quoted to accepted, the sold move, or partially accepted).
+        const acceptedPricing = typeof job?.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job?.pricing_json || {})
+        await moveJobStatusOnAcceptance(sb, {
+          jobId: doc.job_id,
+          jobName: job?.job_number || job?.client_name || '',
+          priorStatus: job?.status ?? null,
+          newStatus,
+          acceptedAtIso: new Date().toISOString(),
+          documentId: doc.id,
+          amount: Number(acceptedPricing?.totalIncGST) || null,
+          handler: 'send-quote/accept',
+          nowIso: new Date().toISOString(),
+        }, (event) => safeBusinessEventInsert(sb, event, { handler: 'send-quote/accept', job_id: doc.job_id }))
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
         // baseline the first time this job is fully accepted. Best-effort +
