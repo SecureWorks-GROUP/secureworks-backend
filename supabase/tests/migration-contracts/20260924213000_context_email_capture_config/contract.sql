@@ -383,6 +383,8 @@ SELECT md5(prosrc)<>'78aefd4a54766e3e4967373e46fb934a' AS em1_status_moved
 FROM pg_proc WHERE oid='public.context_email_capture_status_at(timestamptz)'::regprocedure \gset
 \if :em1_status_moved
 -- Restore the later capture classification before historical rollback proof.
+-- C1 capture lanes (20261103230000) replace both capture bodies after CTX-T5: they come off first.
+\ir ../20261030192929_context_capture_excludes_evaluation/roll_back_successors.sql
 \ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 -- Restore the superseded health preimage inside this rollback-only proof.
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
