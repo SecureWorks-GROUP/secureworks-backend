@@ -1,4 +1,4 @@
--- 20261104090000 contract (finish line C2). Proves, against real PostgreSQL:
+-- 20261104102000 contract (finish line C2). Proves, against real PostgreSQL:
 --   1. the surface: the trigger fires before the ladder's insert trigger, both new functions and the register are
 --      service role only, the register refuses a malformed entry;
 --   2. context_not_job_sender names a register entry (exact address before its domain, a subdomain under a domain

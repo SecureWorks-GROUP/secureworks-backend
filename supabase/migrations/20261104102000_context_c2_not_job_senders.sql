@@ -1,3 +1,6 @@
+-- Renumbered from 20261104090000 on 3 Nov 2026 (CIO chat): that version is already applied in production by
+-- 20261104090000_job_cost_crew_and_placement_division (#1297). The in-body tag "(20261104090000)" and its notice are
+-- kept so the rehearsed md5 of context_bucket_reason_detail stays exact.
 -- (finish line C2, 3 Nov 2026) Customer-lane messages from people who are not customers say who they are, and a text that
 -- names its GHL contact only as its entity gets that contact.
 --
@@ -40,7 +43,7 @@
 --     (identity_unread, identity_conflict and the contact reasons), a live site (no_identity_site), a platform
 --     sender, a supplier event and our own mail still come first.
 -- No row is changed by this migration: existing rows change only when re-decided (the reviewed re-run for row C2).
--- Rollback: supabase/rollbacks/20261104090000_context_c2_not_job_senders_down.sql.
+-- Rollback: supabase/rollbacks/20261104102000_context_c2_not_job_senders_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 

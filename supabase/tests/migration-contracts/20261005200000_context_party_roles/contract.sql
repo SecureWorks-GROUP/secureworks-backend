@@ -219,7 +219,7 @@ BEGIN
  WHERE t.tgrelid='public.business_events'::regclass AND NOT t.tgisinternal AND t.tgname LIKE 'context\_%' AND (t.tgtype & 2)=2;
  -- The reconciliation hold (20261020140000) adds a BEFORE UPDATE trigger that sorts
 -- first, so a held placement is put back before party roles re-stamps the row.
--- The entity contact fill (20261104090000) adds a BEFORE INSERT trigger that sorts first, so the ladder reads the
+-- The entity contact fill (20261104102000) adds a BEFORE INSERT trigger that sorts first, so the ladder reads the
 -- contact a writer named only as its entity.
 IF t IS DISTINCT FROM ARRAY['context_attribute_business_event','context_party_roles_business_event']::text[]
    AND t IS DISTINCT FROM ARRAY['context_aa_recon_hold_decided','context_attribute_business_event','context_party_roles_business_event']::text[]

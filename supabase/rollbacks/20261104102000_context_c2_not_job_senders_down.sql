@@ -1,4 +1,4 @@
--- Undo 20261104090000_context_c2_not_job_senders: context_bucket_reason_detail is the 20260924183000 definition again, word
+-- Undo 20261104102000_context_c2_not_job_senders: context_bucket_reason_detail is the 20260924183000 definition again, word
 -- for word (md5(prosrc) 78cad84dc555a47155e6bc614bbba3b8), so a message with no job, no customer and no live site ends as
 -- no_identity whoever sent it; the trigger context_a0_entity_contact and its function context_entity_contact_fill, and
 -- context_not_job_sender, are dropped. context_sender_register is dropped when empty; a register with rows is kept (it is
