@@ -67,11 +67,12 @@ function fakeClient(
 
 const JOB = "a7000000-0000-4000-8000-000000000001";
 
-Deno.test("only the ops key or an admin/owner session may read job profit", () => {
+Deno.test("only the ops key or an admin, owner or office-staff session may read job profit", () => {
   assert(jobProfitCallerAllowed("api_key", null));
   assert(jobProfitCallerAllowed("jwt", "admin"));
   assert(jobProfitCallerAllowed("jwt", "Owner"));
-  for (const role of ["ops_manager", "lead_installer", "trade", "", null]) {
+  assert(jobProfitCallerAllowed("jwt", "ops_manager"));
+  for (const role of ["lead_installer", "trade", "crew", "estimator", "", null]) {
     assert(
       !jobProfitCallerAllowed("jwt", role),
       `role ${role} must be refused`,

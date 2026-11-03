@@ -66,17 +66,20 @@ export const JOB_PROFIT_LABELS = {
 } as const;
 
 /**
- * Deliberately strict, like the other money surfaces: a server key (the
- * service key or the agent server key, both auth mode api_key) or an
- * admin/owner session. ops_manager, trades and the routine are refused.
+ * A server key (the service key or the agent server key, both auth mode
+ * api_key), or an admin, owner or office-staff (ops_manager) session. Marnin,
+ * 3 Nov 2026 (call B): "yes office staff can see job profit in ops dash or
+ * thorugh agents asking". Trades, crew, estimators, the routine and the agent
+ * read key are refused.
  */
+export const JOB_PROFIT_SESSION_ROLES: readonly string[] = ["admin", "owner", "ops_manager"];
 export function jobProfitCallerAllowed(
   authMode: string,
   role: string | null | undefined,
 ): boolean {
   if (authMode === "api_key") return true;
   const r = String(role || "").toLowerCase();
-  return authMode === "jwt" && (r === "admin" || r === "owner");
+  return authMode === "jwt" && JOB_PROFIT_SESSION_ROLES.includes(r);
 }
 
 export type JobProfitResult = { status: number; body: Record<string, unknown> };
