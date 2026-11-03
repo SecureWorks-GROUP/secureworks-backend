@@ -17,6 +17,19 @@
 //      double-pay fence), and so is a job whose group is frozen or void.
 // Crew = live allocations (no ghost, observer or cancelled row) of anyone who
 // is not office admin. Never throws: every job comes back with a reason.
+//
+// V8 (job-profit INBOX, 3 Nov 2026): the same two steps for fencing jobs,
+// behind their own flag GROUP_WORK_ORDER_AUTO_FENCE_FLAG, added off. The pay
+// rule for fencing is the owner's G5 call ("on jobs with 2+ crew, pay the
+// work order's labour as one group pool split by hours x rate, keep
+// hours-only for solo"), not decided on 3 Nov, so nothing changes until he
+// switches it on. The patio steps read only patio jobs and only the patio
+// flag, whatever the fence flag says. One fence-only guard: a fence work order
+// whose quote names priced labour outside the pool (a labour line flagged
+// outside_quote_labour, e.g. SWF-261459: pool $0.35, $1,200 of labour outside
+// it) gets no group by itself (labour_outside_pool); the office decides.
+// A fence lead's fixed-price "work order" line is normal pay and blocks a
+// group, as hours do (group_work_order_line_is_normal_pay).
 
 import {
   assertNoNormalPayOnJob,
@@ -27,12 +40,37 @@ import {
   newShareToken,
 } from "./group_work_order.ts";
 import { JOB_WORK_ORDER_OPEN_STATUSES } from "./job_work_order_quote_fill.ts";
+import { QUOTE_LINE_FLAGS } from "./quote_work_order_lines.ts";
 
 export const GROUP_WORK_ORDER_AUTO_PATIO_FLAG = "group_work_order_auto_patio_v1";
+export const GROUP_WORK_ORDER_AUTO_FENCE_FLAG = "group_work_order_auto_fence_v1";
 export const PATIO_AUTO_GROUP_MIN_CREW = 2;
 export const PATIO_AUTO_GROUP_LIMIT = 50;
 /** Office admins are allocated to jobs to watch them, not to install. */
 const NOT_CREW_ROLES: ReadonlySet<string> = new Set(["admin"]);
+
+/** One job type the sweep can group, with its own switch. */
+type AutoGroupKind = {
+  jobType: "patio" | "fencing";
+  flag: string;
+  /** Refuse a group when the quote names priced labour outside the pool. */
+  refuseLabourOutsidePool: boolean;
+  logTag: string;
+};
+
+const PATIO: AutoGroupKind = {
+  jobType: "patio",
+  flag: GROUP_WORK_ORDER_AUTO_PATIO_FLAG,
+  refuseLabourOutsidePool: false,
+  logTag: "[patio-auto-group]",
+};
+
+const FENCE: AutoGroupKind = {
+  jobType: "fencing",
+  flag: GROUP_WORK_ORDER_AUTO_FENCE_FLAG,
+  refuseLabourOutsidePool: true,
+  logTag: "[fence-auto-group]",
+};
 
 export type PatioAutoGroupReason =
   | "group_created"
@@ -40,6 +78,7 @@ export type PatioAutoGroupReason =
   | "already_grouped"
   | "too_few_crew"
   | "crew_paid_by_hours_already"
+  | "labour_outside_pool"
   | "group_frozen"
   | "group_void"
   | "group_failed";
@@ -63,6 +102,24 @@ async function flagOn(client: any, flag: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * V8: the work order's quote names priced labour its pool does not hold (a
+ * line the quote fill flagged outside_quote_labour, with a total). A group
+ * paid from that pool would leave the line's labour out. Mirror of
+ * public.group_work_order_labour_outside_pool (20261103100000).
+ */
+export function labourOutsidePool(scopeItems: unknown): boolean {
+  if (!Array.isArray(scopeItems)) return false;
+  return scopeItems.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const flags = (item as Record<string, unknown>).flags;
+    const total = (item as Record<string, unknown>).total;
+    return Array.isArray(flags) &&
+      flags.includes(QUOTE_LINE_FLAGS.outsideQuoteLabour) &&
+      typeof total === "number" && total > 0;
+  });
 }
 
 /** Distinct crew allocated to each job, by the live-allocation rule. */
@@ -105,15 +162,34 @@ async function readCrew(client: any, jobIds: string[]) {
 }
 
 /** Step 1: open the missing draft for open patio jobs with 2+ crew. */
-export async function openMissingPatioWorkOrders(client: any) {
-  if (!(await flagOn(client, GROUP_WORK_ORDER_AUTO_PATIO_FLAG))) {
+export function openMissingPatioWorkOrders(client: any) {
+  return openMissingWorkOrders(client, PATIO);
+}
+
+/** V8 step 1 for fencing, behind group_work_order_auto_fence_v1 (added off). */
+export function openMissingFenceWorkOrders(client: any) {
+  return openMissingWorkOrders(client, FENCE);
+}
+
+/** Step 2: a group on every open patio job with a priced work order and 2+ crew. */
+export function autoGroupPatioJobs(client: any) {
+  return autoGroupJobs(client, PATIO);
+}
+
+/** V8 step 2 for fencing, behind group_work_order_auto_fence_v1 (added off). */
+export function autoGroupFenceJobs(client: any) {
+  return autoGroupJobs(client, FENCE);
+}
+
+async function openMissingWorkOrders(client: any, kind: AutoGroupKind) {
+  if (!(await flagOn(client, kind.flag))) {
     return { switched_on: false, opened: 0, results: [] as unknown[] };
   }
   const results: { job_id: string; job_number: string | null; opened: boolean; code?: string }[] = [];
   try {
     const { data: jobs, error } = await client.from("jobs").select(
       "id, job_number, status, type",
-    ).eq("type", "patio").in("status", [...JOB_WORK_ORDER_OPEN_STATUSES]).limit(500);
+    ).eq("type", kind.jobType).in("status", [...JOB_WORK_ORDER_OPEN_STATUSES]).limit(500);
     if (error) throw new Error("jobs unreadable");
     const ids = (jobs || []).map((j: any) => String(j.id));
     if (ids.length === 0) return { switched_on: true, opened: 0, results };
@@ -141,23 +217,22 @@ export async function openMissingPatioWorkOrders(client: any) {
       });
     }
   } catch (e) {
-    console.error("[patio-auto-group] open drafts failed:", (e as Error)?.message);
+    console.error(kind.logTag, "open drafts failed:", (e as Error)?.message);
   }
   return { switched_on: true, opened: results.filter((r) => r.opened).length, results };
 }
 
-/** Step 2: a group on every open patio job with a priced work order and 2+ crew. */
-export async function autoGroupPatioJobs(client: any) {
+async function autoGroupJobs(client: any, kind: AutoGroupKind) {
   const empty = { switched_on: false, created: 0, crew_added: 0, results: [] as PatioAutoGroupResult[] };
-  if (!(await flagOn(client, GROUP_WORK_ORDER_AUTO_PATIO_FLAG))) return empty;
+  if (!(await flagOn(client, kind.flag))) return empty;
   if (!(await groupFeatureOn(client))) return empty;
   const results: PatioAutoGroupResult[] = [];
   try {
     const { data: wos, error } = await client.from("work_orders").select(
-      "id, job_id, agreed_labour_ex, sealed_content_hash, approved_by, jobs:job_id!inner(id, org_id, job_number, type, status, work_order_id)",
+      "id, job_id, agreed_labour_ex, sealed_content_hash, approved_by, scope_items, jobs:job_id!inner(id, org_id, job_number, type, status, work_order_id)",
     ).eq("kind", "job").eq("status", "approved").gt("agreed_labour_ex", 0)
       .not("sealed_content_hash", "is", null)
-      .eq("jobs.type", "patio").in("jobs.status", [...JOB_WORK_ORDER_OPEN_STATUSES])
+      .eq("jobs.type", kind.jobType).in("jobs.status", [...JOB_WORK_ORDER_OPEN_STATUSES])
       .limit(500);
     if (error) throw new Error("work orders unreadable");
     const live = (wos || []).filter((w: any) =>
@@ -178,11 +253,15 @@ export async function autoGroupPatioJobs(client: any) {
       const base = { job_id: jobId, job_number: job.job_number ?? null, crew: people.length };
       const group = (groups || []).find((g: any) => String(g.job_id) === jobId);
       if (group) {
-        const r = await topUpCrew(client, group, people);
+        const r = await topUpCrew(client, group, people, kind);
         if (r) results.push({ ...base, ...r });
         continue;
       }
       if (people.length < PATIO_AUTO_GROUP_MIN_CREW) continue;
+      if (kind.refuseLabourOutsidePool && labourOutsidePool(wo.scope_items)) {
+        results.push({ ...base, reason: "labour_outside_pool" });
+        continue;
+      }
       try {
         await assertNoNormalPayOnJob(client, jobId);
       } catch (e) {
@@ -215,16 +294,16 @@ export async function autoGroupPatioJobs(client: any) {
       const { error: crewError } = await client.from("group_work_order_participants").insert(
         people.map((userId) => ({ group_id: groupId, user_id: userId })),
       );
-      if (crewError) console.error("[patio-auto-group] crew not added:", groupId, crewError.message);
+      if (crewError) console.error(kind.logTag, "crew not added:", groupId, crewError.message);
       await logEvent(client, jobId, "group_work_order_auto_created", {
         group_id: groupId,
         work_order_id: String(wo.id),
         crew: people.length,
-      });
+      }, kind);
       results.push({ ...base, reason: "group_created", group_id: groupId, added: crewError ? 0 : people.length });
     }
   } catch (e) {
-    console.error("[patio-auto-group] sweep failed:", (e as Error)?.message);
+    console.error(kind.logTag, "sweep failed:", (e as Error)?.message);
   }
   return {
     switched_on: true,
@@ -239,6 +318,7 @@ async function topUpCrew(
   client: any,
   group: Record<string, unknown>,
   people: string[],
+  kind: AutoGroupKind,
 ): Promise<Pick<PatioAutoGroupResult, "reason" | "group_id" | "added" | "code"> | null> {
   const groupId = String(group.id);
   if (group.status === "void") return null;
@@ -257,11 +337,17 @@ async function topUpCrew(
   await logEvent(client, String(group.job_id), "group_work_order_auto_crew_added", {
     group_id: groupId,
     added: add.length,
-  });
+  }, kind);
   return { reason: "crew_added", group_id: groupId, added: add.length };
 }
 
-async function logEvent(client: any, jobId: string, eventType: string, detail: Record<string, unknown>) {
+async function logEvent(
+  client: any,
+  jobId: string,
+  eventType: string,
+  detail: Record<string, unknown>,
+  kind: AutoGroupKind,
+) {
   try {
     const { error } = await client.from("job_events").insert({
       job_id: jobId,
@@ -269,8 +355,8 @@ async function logEvent(client: any, jobId: string, eventType: string, detail: R
       user_id: null,
       detail_json: detail,
     });
-    if (error) console.error("[patio-auto-group] event not logged:", eventType, error.message);
+    if (error) console.error(kind.logTag, "event not logged:", eventType, error.message);
   } catch (e) {
-    console.error("[patio-auto-group] event not logged:", eventType, (e as Error)?.message);
+    console.error(kind.logTag, "event not logged:", eventType, (e as Error)?.message);
   }
 }

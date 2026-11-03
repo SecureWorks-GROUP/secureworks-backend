@@ -1,9 +1,13 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine } from "./group_work_order.ts";
 import {
+  autoGroupFenceJobs,
   autoGroupPatioJobs,
   crewByJob,
+  GROUP_WORK_ORDER_AUTO_FENCE_FLAG,
   GROUP_WORK_ORDER_AUTO_PATIO_FLAG,
+  labourOutsidePool,
+  openMissingFenceWorkOrders,
   openMissingPatioWorkOrders,
 } from "./patio_auto_group.ts";
 
@@ -205,4 +209,185 @@ Deno.test("missing work orders: open patio jobs with 2+ crew get a draft", async
   const out = await openMissingPatioWorkOrders(fake.client());
   assertEquals(out.results.map((r: any) => r.job_id), ["f"]);
   assertEquals(fake.rpcs, [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "f", p_origin: "backfill" } }]);
+});
+
+// ── V8 fence groups (job-profit INBOX 3 Nov 2026), switched off ─────────────
+// Fixtures follow live records read 3 Nov 2026 (read only):
+// - SWF-261370: Alyx (crew) and Henry (ops_manager, who claims fence work
+//   orders himself, so he installs); approved, sealed work order, labour
+//   $535.00 = install $385.00 + plinths $150.00; removal $137.50 is counted
+//   as materials by the quote, so it is outside labour but not labour the
+//   quote prices as labour.
+// - SWF-261459: three crew; the fence tool's labour is $0.35 (one panel)
+//   while the quote prices $480 + $720 of labour outside it
+//   (outside_quote_labour).
+// - SWF-26968: the lead billed "Work order $650.00. Less labour: Sonny 3h x
+//   $35 ..." (SW-INV-A-261011-029), a fixed-price work-order claim.
+// - SW-INV-JC-261030-015 (V1): a solo fence job, hours only.
+function fenceWorld(fenceOn: boolean) {
+  const fake = new Fake();
+  fake.rows("feature_flags").push(
+    { flag_name: "group_work_order_v1", enabled: true },
+    { flag_name: GROUP_WORK_ORDER_AUTO_PATIO_FLAG, enabled: true },
+    { flag_name: GROUP_WORK_ORDER_AUTO_FENCE_FLAG, enabled: fenceOn },
+  );
+  fake.rows("users").push(
+    { id: "alyx", role: "crew" },
+    { id: "henry", role: "ops_manager" },
+    { id: "sonny", role: "crew" },
+    { id: "kim", role: "crew" },
+    { id: "isaac", role: "lead_installer" },
+    { id: "ryan", role: "crew" },
+    { id: "jan", role: "admin" },
+  );
+  const item = (description: string, basis: string, total: number | null, counted: boolean, flags: string[] = []) =>
+    ({ description, basis, total, counted, flags, needs_review: flags.length > 0 && basis !== "removal" });
+  const add = (id: string, type: string, labour: number, scope: Row[], crew: string[]) => {
+    const j = { id, org_id: "org", job_number: id.toUpperCase(), type, status: "scheduled", work_order_id: `wo-${id}` };
+    fake.rows("jobs").push(j);
+    fake.rows("work_orders").push({
+      id: `wo-${id}`, job_id: id, kind: "job", status: "approved", agreed_labour_ex: labour,
+      sealed_content_hash: "h", approved_by: null, scope_items: scope, jobs: j,
+    });
+    for (const u of crew) fake.rows("job_assignments").push({ job_id: id, user_id: u, status: "scheduled" });
+  };
+  add("swf-261370", "fencing", 535, [
+    item("Install Trimclad fence (5 panels)", "fence_install", 385, true),
+    item("Install retaining plinths", "fence_plinths", 150, true),
+    item("Remove Hardie fence", "removal", 137.5, false, ["quote_counted_as_materials"]),
+  ], ["alyx", "henry", "jan"]);
+  add("swf-261459", "fencing", 0.35, [
+    item("Install Ridgeside fence (1 panel)", "fence_install", 0.35, true),
+    item("Front fence replant 3 posts and reassure fence", "quote_labour_line", 480, false, ["saved_as_material", "outside_quote_labour"]),
+    item("Back fence replant post and reassemble fence", "quote_labour_line", 720, false, ["saved_as_material", "outside_quote_labour"]),
+    item("Concrete per bag", "quote_extra", null, false, ["labour_or_material_unknown"]),
+  ], ["alyx", "henry", "sonny"]);
+  add("swf-26968", "fencing", 650, [item("Install Colorbond fence (4 panels)", "fence_install", 650, true)], ["henry", "sonny", "kim"]);
+  add("swf-solo", "fencing", 787.5, [item("Install fence", "fence_install", 787.5, true)], ["alyx"]);
+  // A patio job in the same world: a priced work order and 2 crew. Its quote
+  // has a labour line outside the pool; patio groups as it did before V8.
+  add("swp-1", "patio", 2160, [
+    item("Labour - 2 trades x 3 days", "quote_labour_line", 2160, true),
+    item("Gutter rework", "quote_labour_line", 240, false, ["outside_quote_labour"]),
+  ], ["isaac", "ryan"]);
+  fake.rows("trade_invoices").push({ id: "inv-a-261011-029", status: "paid" });
+  fake.rows("trade_invoice_lines").push({
+    job_id: "swf-26968", line_type: "work order", trade_invoice_id: "inv-a-261011-029",
+    description: "Work order $650.00.\nLess labour: Sonny 3h x $35 = $105.00\nKim 8h x $30 = $240.00.",
+  });
+  return fake;
+}
+
+Deno.test("labour outside the pool: only a priced line the quote keeps out of its labour", () => {
+  // SWF-261459's two custom labour lines.
+  assert(labourOutsidePool([
+    { basis: "fence_install", total: 0.35, counted: true, flags: [] },
+    { basis: "quote_labour_line", total: 480, counted: false, flags: ["saved_as_material", "outside_quote_labour"] },
+  ]));
+  // SWF-261370: removal counted as materials by the quote is not this case.
+  assertEquals(labourOutsidePool([
+    { basis: "fence_install", total: 385, counted: true, flags: [] },
+    { basis: "removal", total: 137.5, counted: false, flags: ["quote_counted_as_materials"] },
+  ]), false);
+  // An unpriced line has no labour to lose; no scope or a bad shape is no.
+  assertEquals(labourOutsidePool([{ basis: "quote_labour_line", total: null, flags: ["outside_quote_labour"] }]), false);
+  assertEquals(labourOutsidePool([{ basis: "quote_labour_line", total: 0, flags: ["outside_quote_labour"] }]), false);
+  assertEquals(labourOutsidePool(null), false);
+  assertEquals(labourOutsidePool("[]"), false);
+  assertEquals(labourOutsidePool([null, 3, { flags: "outside_quote_labour", total: 5 }]), false);
+});
+
+Deno.test("fence switch off (as the migration adds it): no fence draft or group; patio exactly as before", async () => {
+  const off = fenceWorld(false);
+  const fence = await autoGroupFenceJobs(off.client());
+  assertEquals(fence, { switched_on: false, created: 0, crew_added: 0, results: [] });
+  assertEquals((await openMissingFenceWorkOrders(off.client())).switched_on, false);
+  assertEquals(off.rpcs.length, 0);
+  // Patio: the one priced patio job with 2 crew is grouped, nothing else.
+  const patio = await autoGroupPatioJobs(off.client());
+  assertEquals(patio.results.map((r) => [r.job_id, r.reason]), [["swp-1", "group_created"]]);
+  assertEquals(off.rows("group_work_orders").map((g) => g.job_id), ["swp-1"]);
+  assertEquals(off.rows("group_work_order_participants").map((p) => p.user_id).sort(), ["isaac", "ryan"]);
+
+  // A missing fence flag row reads as off too.
+  const missing = fenceWorld(true);
+  missing.tables.feature_flags = missing.rows("feature_flags").filter((f) => f.flag_name !== GROUP_WORK_ORDER_AUTO_FENCE_FLAG);
+  assertEquals((await autoGroupFenceJobs(missing.client())).switched_on, false);
+  assertEquals(missing.rows("group_work_orders").length, 0);
+});
+
+Deno.test("fence switch on: 2+ crew on a priced fence work order get a group; named reasons for the rest", async () => {
+  const fake = fenceWorld(true);
+  const out = await autoGroupFenceJobs(fake.client());
+  assertEquals(out.switched_on, true);
+  const by = Object.fromEntries(out.results.map((r) => [r.job_id, r]));
+  // SWF-261370: Alyx and Henry; the watching admin is left out.
+  assertEquals(by["swf-261370"].reason, "group_created");
+  assertEquals(by["swf-261370"].crew, 2);
+  // SWF-261459: the $0.35 pool would leave $1,200 of quoted labour out.
+  assertEquals(by["swf-261459"].reason, "labour_outside_pool");
+  // SWF-26968: the lead's fixed-price work-order claim is pay already.
+  assertEquals(by["swf-26968"].reason, "crew_paid_by_hours_already");
+  assertEquals(by["swf-26968"].code, "group_open_blocked_by_work_order_claim");
+  // Solo stays hours only; the patio job is not the fence sweep's.
+  assertEquals(by["swf-solo"], undefined);
+  assertEquals(by["swp-1"], undefined);
+  assertEquals(out.created, 1);
+
+  const groups = fake.rows("group_work_orders");
+  assertEquals(groups.length, 1);
+  assertEquals(groups[0].job_id, "swf-261370");
+  assertEquals(groups[0].work_order_id, "wo-swf-261370"); // pool = the work order's $535.00 labour
+  assertEquals(groups[0].pay_basis, "all_in_12_v2");
+  assertEquals(groups[0].status, "open");
+  assertEquals(fake.rows("group_work_order_participants").map((p) => p.user_id).sort(), ["alyx", "henry"]);
+  assertEquals(fake.rows("job_events").map((e) => [e.job_id, e.event_type]), [["swf-261370", "group_work_order_auto_created"]]);
+
+  // Fence switch on does not change the patio sweep's result.
+  const patio = await autoGroupPatioJobs(fake.client());
+  assertEquals(patio.results.map((r) => [r.job_id, r.reason]), [["swp-1", "group_created"]]);
+
+  // Next fence sweep: nothing new; a crew member allocated later joins.
+  assertEquals((await autoGroupFenceJobs(fake.client())).created, 0);
+  fake.rows("job_assignments").push({ job_id: "swf-261370", user_id: "sonny", status: "scheduled" });
+  const topped = await autoGroupFenceJobs(fake.client());
+  assertEquals(topped.results.find((r) => r.job_id === "swf-261370")?.reason, "crew_added");
+  assertEquals(fake.rows("group_work_order_participants").filter((p) => p.group_id === groups[0].id).length, 3);
+});
+
+Deno.test("fence switch on, patio switch off: fencing only", async () => {
+  const fake = fenceWorld(true);
+  fake.rows("feature_flags").find((f) => f.flag_name === GROUP_WORK_ORDER_AUTO_PATIO_FLAG)!.enabled = false;
+  assertEquals((await autoGroupPatioJobs(fake.client())).switched_on, false);
+  await autoGroupFenceJobs(fake.client());
+  assertEquals(fake.rows("group_work_orders").map((g) => g.job_id), ["swf-261370"]);
+  // The group feature switch still governs both.
+  const groupsOff = fenceWorld(true);
+  groupsOff.rows("feature_flags")[0].enabled = false;
+  assertEquals((await autoGroupFenceJobs(groupsOff.client())).switched_on, false);
+  assertEquals(groupsOff.rows("group_work_orders").length, 0);
+});
+
+Deno.test("fence missing work orders: open fence jobs with 2+ crew get a draft; patio jobs are not the fence step's", async () => {
+  const fake = fenceWorld(true);
+  fake.rows("jobs").push(
+    { id: "swf-26091", job_number: "SWF-26091", type: "fencing", status: "rectification" },
+    { id: "swf-quoted", job_number: "SWF-Q", type: "fencing", status: "quoted" },
+    { id: "swf-one", job_number: "SWF-ONE", type: "fencing", status: "scheduled" },
+    { id: "swp-new", job_number: "SWP-NEW", type: "patio", status: "scheduled" },
+  );
+  for (const j of ["swf-26091", "swf-quoted", "swp-new"]) {
+    fake.rows("job_assignments").push({ job_id: j, user_id: "alyx", status: "scheduled" }, { job_id: j, user_id: "henry", status: "scheduled" });
+  }
+  fake.rows("job_assignments").push({ job_id: "swf-one", user_id: "alyx", status: "scheduled" }, { job_id: "swf-one", user_id: "jan", status: "scheduled" });
+  const out = await openMissingFenceWorkOrders(fake.client());
+  assertEquals(out.results.map((r: any) => r.job_id), ["swf-26091"]);
+  assertEquals(fake.rpcs, [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "swf-26091", p_origin: "backfill" } }]);
+
+  // Off, the same world opens nothing.
+  const off = fenceWorld(false);
+  off.rows("jobs").push({ id: "swf-26091", job_number: "SWF-26091", type: "fencing", status: "rectification" });
+  off.rows("job_assignments").push({ job_id: "swf-26091", user_id: "alyx", status: "scheduled" }, { job_id: "swf-26091", user_id: "henry", status: "scheduled" });
+  await openMissingFenceWorkOrders(off.client());
+  assertEquals(off.rpcs.length, 0);
 });
