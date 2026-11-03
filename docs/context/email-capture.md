@@ -200,8 +200,11 @@ id property, so it and a member's copy are one row. One email is one row keyed
 
 Who sent it (`_shared/evidence/outlook_mail.ts`, partner lists in
 `_shared/evidence/outlook_partners.ts`): ours, council (gov.au), supplier (a
-domain of `suppliers.email` or of Dispatch's active approved supplier order
-addresses, `dispatch_approved_supplier_emails`), customer (a builder's sender
+domain of `suppliers.email`, of Dispatch's active approved supplier order
+addresses, `dispatch_approved_supplier_emails`, or of `SUPPLIER_SENDER_DOMAINS`,
+suppliers we buy from whose Xero contact carries no email: the nightly Xero
+supplier sync rewrites `suppliers.email` from the contact, and purchase orders
+go to it, so a no-reply address cannot live there), customer (a builder's sender
 in `makesafe_companies.sender_patterns`, or anyone else) or automated
 (platform, no-reply, auto-submitted, list mail). Automated mail is saved only
 when it names exactly one of our references (`skipped_noise` otherwise). A
@@ -211,14 +214,22 @@ own invoice, quote, credit note, receipt, remittance or a customer's message
 about our invoice: it is saved as that organisation's mail, `payload.email` its
 Reply-To and `payload.sent_via` the platform; with no Reply-To (a group post)
 it is saved as automated supplier mail; a copy of our own document (Reply-To
-ours) stays `skipped_noise`. On an owner mailbox (`owner_privacy`) our own
+ours) stays `skipped_noise`. A lead source's notice of a new customer lead
+(`LEAD_NOTICE_SENDERS`: a "Stratco lead allocation" from
+`no-reply@stratco.com.au`) is saved as `client.email_in` from a customer with
+`payload.lead_source` and `payload.lead_ref` (the source's lead number, the
+number Sales keys on the GHL opportunity's allocation field), on no job unless
+the ladder finds one it names; other mail from that address stays noise. On an
+owner mailbox (`owner_privacy`) our own
 human-sent mail is saved only with job evidence (D-EM3): one of our references,
 a builder's reference (`payload.builder_refs`) or a job's client email among
 its recipients (`skipped_private` otherwise); tool-marked mail and our own
 system's notices from a no-reply address of ours are always saved. The C7 rule
 proofs of 3 Nov 2026 (context-system `verify/evidence/20261103-c7-capture/`)
 found 29 partner documents, 6 supplier auto-replies and bounces and 3 builder
-emails in one week dropped as noise before these rules.
+emails in one week dropped as noise before these rules, and, on the rule
+deployed after them, 7 Stratco lead allocations and 3 order emails from a
+supplier with no email on its record.
 
 Attachments: file attachments up to 15 MB each, 10 files and 30 MB per email,
 go to the PRIVATE bucket `context-email-attachments`, one row each in
