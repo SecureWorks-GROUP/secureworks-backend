@@ -1713,6 +1713,138 @@ Deno.test("frozen patio: the catalogue's bd-metals and cmi ids find their approv
   );
 });
 
+// ── S08: the list follows a newer sealed revision ───────────────────────────
+
+// Seal the job's scope again as freeze_scope does: the earlier frozen
+// revision becomes superseded, the new one is frozen.
+async function sealAgain(db: ReturnType<typeof makeDb>, jobId: string, n: number) {
+  for (const r of db.tables.scope_revisions) {
+    if (r.job_id === jobId && r.status === "frozen") r.status = "superseded";
+  }
+  return await seal(db, jobId, n);
+}
+
+Deno.test("S08: a newer sealed revision refills the list when nothing went out; typed lines stay; the read warns first", async () => {
+  const db = makeDb();
+  const fence = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  fence.scope_json = fenceScope("Stratco");
+  const first = await seal(db, JOB.fence, 1);
+  const filled = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals(filled.lines.map((l: any) => [l.quantity, l.scope_revision_number]), [[2, 1]]);
+  await addLine(db, JOB.fence, 9, { description: "Gate hinge we always add" });
+  const up = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(up.scope_changed, null);
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "lines_exist");
+
+  // The scope is changed in the tool and sealed again as revision 2.
+  fence.scope_json = {
+    ...fenceScope("Stratco"),
+    job: { ...fenceScope("Stratco").job, runs: [{ name: "Rear", panels: [{ height: 1800, retaining: 0 }, { height: 1800, retaining: 0 }, { height: 1800, retaining: 0 }] }] },
+  };
+  const second = await sealAgain(db, JOB.fence, 2);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.scope_changed, {
+    lines_revision_numbers: [1],
+    revision_id: second,
+    revision_number: 2,
+    can_refill: true,
+    message: "Scope changed since these lines: they came from revision 1, and the order now follows revision 2. Press Fill from the scope to refill them from revision 2.",
+  });
+  // The screen never refills on its own.
+  assertEquals(read.auto_fill, false);
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true }), 409, "already_filled");
+  db.tables.dispatch_v2_scope_fills = [];
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true }), 409, "lines_exist");
+  assertEquals(db.tables.job_material_lines.filter((l: any) => l.source_version_id === second), []);
+
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals([out.added, out.scope_revision, out.refilled], [1, { id: second, revision_number: 2 }, { from_revision_numbers: [1], replaced: 1 }]);
+  assertEquals(out.notes[0], "Refilled from revision 2: the 1 line from revision 1 was replaced.");
+  const lines = db.tables.job_material_lines;
+  assertEquals(
+    lines.map((l: any) => [l.description, l.quantity, l.source_version_id ?? null]).sort((a: any, b: any) => String(a[0]).localeCompare(String(b[0]))),
+    [
+      ["1800H standard width panels with 2400H posts", 3, second],
+      ["Gate hinge we always add", 1, null],
+    ],
+  );
+  assert(!lines.some((l: any) => l.source_version_id === first), "no line from revision 1 is left");
+  // The fill record (taken off above) is written again, naming revision 2.
+  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.scope_revision_id, f.lines_added, f.auto]), [[second, 1, false]]);
+  const after = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals([after.scope_changed, after.scope_filled.scope_revision_id], [null, second]);
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "lines_exist");
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("S08: a line that went out on an order is never changed; the read and the press say the scope changed", async () => {
+  const db = makeDb();
+  const fence = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  fence.scope_json = fenceScope("Stratco");
+  await seal(db, JOB.fence, 1);
+  await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  // The panel line went out on a sent order email.
+  const sent = db.tables.job_material_lines[0];
+  sent.dispatch_order_email_id = uuid("ee", 1);
+  const before = structuredClone(db.tables.job_material_lines);
+  fence.scope_json = { ...fenceScope("Stratco"), job: { ...fenceScope("Stratco").job, colour: "Monument" } };
+  const second = await sealAgain(db, JOB.fence, 2);
+  const words = "Scope changed since these lines: they came from revision 1, and the order now follows revision 2. An order already went out from these lines, so they were not refilled. Check that order against revision 2.";
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.scope_changed, {
+    lines_revision_numbers: [1],
+    revision_id: second,
+    revision_number: 2,
+    can_refill: false,
+    message: words,
+  });
+  const err = await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "scope_changed");
+  assertEquals(err.message, words);
+  assertEquals(db.tables.job_material_lines, before);
+  // A line on a purchase order is held the same way.
+  const db2 = makeDb();
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Stratco");
+  await seal(db2, JOB.fence, 1);
+  await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  db2.tables.job_material_lines[0].purchase_order_id = uuid("ef", 1);
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = { ...fenceScope("Stratco"), job: { ...fenceScope("Stratco").job, colour: "Monument" } };
+  await sealAgain(db2, JOB.fence, 2);
+  await refused(call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence }), 409, "scope_changed");
+  assertEquals(db2.tables.job_material_lines[0].source_version, "1");
+});
+
+Deno.test("S08 patio: the refill takes the newer revision's engine lines into their boxes; lines typed in are kept", async () => {
+  const db = makeDb();
+  const patio = db.tables.jobs.find((j: any) => j.id === JOB.patio)!;
+  patio.scope_json = patioRecord();
+  const eight = await seal(db, JOB.patio, 8);
+  const first = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assertEquals(first.added, 7);
+  await addLine(db, JOB.patio, 9, { description: "Silicone we always add" });
+  const record = patioRecord();
+  patio.scope_json = {
+    ...record,
+    lines: record.lines.map((l: any) => l.id === "SL-roof" ? { ...l, quantity: 12 } : l),
+  };
+  const nine = await sealAgain(db, JOB.patio, 9);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assertEquals([out.added, out.refilled], [7, { from_revision_numbers: [8], replaced: 7 }]);
+  const scopeLines = db.tables.job_material_lines.filter((l: any) => l.source === "scope");
+  assert(scopeLines.every((l: any) => l.source_version_id === nine && l.source_version === "9"));
+  assert(!db.tables.job_material_lines.some((l: any) => l.source_version_id === eight));
+  assertEquals(
+    scopeLines.filter((l: any) => l.source_line_id === "SL-roof").map((l: any) => [l.quantity, l.supplier_id]),
+    [[12, SUP.stratco]],
+  );
+  assertEquals(db.tables.job_material_lines.filter((l: any) => l.source !== "scope").map((l: any) => l.description), ["Silicone we always add"]);
+  // The boxes the first fill made are reused, never made twice.
+  assertEquals(db.tables.job_material_suppliers.map((b: any) => b.supplier_id), [SUP.stratco, SUP.metroll]);
+  // The job's one fill record now names revision 9.
+  assertEquals(db.tables.dispatch_v2_scope_fills.map((f: any) => [f.scope_revision_id, f.lines_added]), [[nine, 7]]);
+  assertEquals((await get(db, "dispatch_v2_materials", { job_id: JOB.patio })).scope_changed, null);
+  assertOnlyV2Writes(db);
+});
+
 // ── Boxes and the main tick ─────────────────────────────────────────────────
 
 Deno.test("boxes: add flags a supplier with no approved email; an occupied box cannot be removed", async () => {
