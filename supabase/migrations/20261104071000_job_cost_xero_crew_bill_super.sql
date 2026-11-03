@@ -18,13 +18,13 @@
 -- 110 are crew-app mirror bills; of the other 2, Israel's 28 Aug bill states no contribution and is not carried
 -- as a bill line; Aydan's is the one this changes.
 --
--- Guard: v_job_cost_events must be the definition this was written against (md5 39e06b2299b75009b38571015725eb91,
--- pg_get_viewdef(..., true)); after the change it must be 8f9de7093e1998941320e088eab39ff0. Re-running it is a no-op (also
+-- Guard: v_job_cost_events must be the definition this was written against (md5 32c422a8d90aecf6924fc0a84d4569fe,
+-- pg_get_viewdef(..., true)); after the change it must be cd749fcbe09bedde4a277f6da3ade6fd. Re-running it is a no-op (also
 -- once a later migration of this set, 20261104070000 to 20261104072000, has changed the view).
 -- Rollback: supabase/rollbacks/20261104071000_job_cost_xero_crew_bill_super_down.sql (embeds the exact earlier definition).
 -- Rehearsed 3 Nov 2026 on production, rolled back (CIO helper, Claude): 4 jobs, +50.40 (Aydan Belcher 24 Oct):
 -- SWP-261336 9,464.78 to 9,476.48, SWP-261043 +11.70, SWF-261413 4,700.67 to 4,714.17, SWP-26195 11,107.96 to
--- 11,121.46. Margins shown 355 to 355.
+-- 11,121.46. Margins shown 354 to 354.
 
 SET LOCAL lock_timeout = '5s';
 
@@ -148,11 +148,11 @@ UNION ALL
 $n4$;
 BEGIN
   v_def := pg_get_viewdef('public.v_job_cost_events'::regclass, true);
-  IF md5(v_def) IN ('8f9de7093e1998941320e088eab39ff0', '25143b7d28aae47cd44a16323fa99389') THEN
+  IF md5(v_def) IN ('cd749fcbe09bedde4a277f6da3ade6fd', '366599ce55b0e0430d45ee9e6e04c315') THEN
     RAISE NOTICE 'v_job_cost_events already has 20261104071000 (or a later change of this set)';
     RETURN;
   END IF;
-  IF md5(v_def) <> '39e06b2299b75009b38571015725eb91' THEN
+  IF md5(v_def) <> '32c422a8d90aecf6924fc0a84d4569fe' THEN
     RAISE EXCEPTION 'v_job_cost_events is not the definition this migration was written against (md5 %)', md5(v_def);
   END IF;
   IF (length(v_def) - length(replace(v_def, o1, ''))) / length(o1) <> 1 THEN
@@ -172,7 +172,7 @@ BEGIN
   END IF;
   v_def := replace(v_def, o4, n4);
   EXECUTE 'CREATE OR REPLACE VIEW public.v_job_cost_events AS ' || v_def;
-  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '8f9de7093e1998941320e088eab39ff0' THEN
+  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> 'cd749fcbe09bedde4a277f6da3ade6fd' THEN
     RAISE EXCEPTION 'v_job_cost_events after the change is not the rehearsed definition (md5 %)', md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
   END IF;
 END

@@ -601,7 +601,9 @@ jobs:
       # UserReplied: the staff-reply workflow post is that doorbell too; it
       # ignores any posted conversation id and reads the newest conversation.
       # Gap plan B-4: invoice evidence on its job. xero-sync's recent-row
-      # step is off until its flag and writes nothing on a partial read.
+      # step always moves rows whose invoice has a job to that job (B3: a
+      # payment follows its invoice's link); the reference matcher's plan
+      # stays off until its flag and writes nothing on a partial read.
       - name: Test Xero invoice evidence placement
         run: |
           deno test --allow-read --allow-env \

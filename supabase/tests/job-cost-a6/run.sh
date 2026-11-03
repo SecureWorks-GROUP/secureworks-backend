@@ -22,14 +22,13 @@ DB=job_cost_a6_contract
 URL="${ADMIN%/*}/$DB"
 M="$REPO/supabase/migrations"; RB="$REPO/supabase/rollbacks"; MC="$REPO/supabase/tests/migration-contracts"
 MIGS=(20261104070000_job_cost_follows_ledger_split_lines 20261104071000_job_cost_xero_crew_bill_super 20261104072000_job_cost_credit_at_note_ex_gst)
-MD5=(7f7837be26bf12f131bd86c84ab6ea55 39e06b2299b75009b38571015725eb91 8f9de7093e1998941320e088eab39ff0 25143b7d28aae47cd44a16323fa99389)
+MD5=(33d1c54d5a288fe496b5b863a1ec1d4c 32c422a8d90aecf6924fc0a84d4569fe cd749fcbe09bedde4a277f6da3ade6fd 366599ce55b0e0430d45ee9e6e04c315)
 q() { psql "$URL" -X -q -v ON_ERROR_STOP=1 "$@"; }
 md5() { q -Atc "select md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))"; }
 want() { local got; got=$(md5); [ "$got" = "$1" ] || { echo "FAIL: $2: md5 $got, want $1" >&2; exit 1; }; echo "ok: $2"; }
 fresh() {
   psql "$ADMIN" -X -q -c "DROP DATABASE IF EXISTS $DB WITH (FORCE)" -c "CREATE DATABASE $DB" >/dev/null 2>&1
   q -f "$HERE/setup.sql" >/dev/null
-  q -c "CREATE TABLE public.contract_a6_preimage (object text PRIMARY KEY, definition text NOT NULL)" >/dev/null
 }
 forward() { for i in 0 1 2; do q -1 -f "$M/${MIGS[$i]}.sql" >/dev/null; done; }
 contracts() { for m in "${MIGS[@]}"; do echo "contract ${m:0:14}: $(q -At -f "$MC/$m/contract.sql")"; done; }
@@ -43,7 +42,7 @@ grep -qF "$(cat "$MC/${MIGS[0]}/preexisting-failure.expected")" <<< "$out" || { 
 echo "ok: 20261104070000 refuses a definition it was not written against"
 
 fresh
-want "${MD5[0]}" "setup prints production's 20261103224500 definition"
+want "${MD5[0]}" "setup prints production's 20261104063000 (A4 V8) definition"
 for i in 0 1 2; do q -1 -f "$M/${MIGS[$i]}.sql" >/dev/null; want "${MD5[$((i + 1))]}" "${MIGS[$i]} applied"; done
 for i in 0 1 2; do q -1 -f "$M/${MIGS[$i]}.sql" >/dev/null 2>&1; want "${MD5[3]}" "${MIGS[$i]} re-run is a no-op"; done
 contracts

@@ -76,18 +76,36 @@ function fakeClient(opts: {
 
 const NOW = new Date("2026-10-05T00:00:00Z");
 
-Deno.test("flag off (or unreadable): nothing is read or written", async () => {
+// B3 (3 Nov 2026): INV-1688's payment of 28 Oct was recorded while the invoice had no job; the
+// invoice was linked at 11:34Z and the payment stayed on no job, because the flag was off and
+// nothing ran. Rows whose invoice now has a job follow it whatever the flag says.
+Deno.test("flag off (or unreadable): rows whose invoice has a job follow it; nothing is matched, guessed or queued", async () => {
   for (const flag of [false, "error"] as const) {
-    const sb = fakeClient({ flag });
-    assertEquals(await placeRecentInvoiceEvidence(sb, NOW), { ran: false, reason: "flag_off" });
-    assertEquals(sb.calls.length, 0);
+    const sb = fakeClient({ flag, failTable: "jobs", dry: { to_write: 5, unlinked_invoices: [INV], by_class: { invoice_job: 2, reference_unique: 1, review_candidates: 2 } } });
+    const result = await placeRecentInvoiceEvidence(sb, NOW);
+    assertEquals(result.ran && result.mode, "own_job");
+    const place = sb.calls.filter((c) => c.name === "context_xero_evidence_place");
+    assertEquals(place.map((c) => c.args.p_dry_run), [true, false]);
+    // An empty plan: the SQL can then place only rows whose invoice has its own job.
+    assertEquals(place[1].args.p_plan, { matches: [], candidates: [] });
+    assertEquals(place[1].args.p_since, "2026-09-21T00:00:00.000Z");
+    assertEquals(result.ran && result.plan, { matches: 0, candidates: 0 }, "the matcher's inputs were never read");
   }
 });
 
-Deno.test("attribution lane off: nothing written", async () => {
-  const sb = fakeClient({ flag: true, lane: false });
-  assertEquals(await placeRecentInvoiceEvidence(sb, NOW), { ran: false, reason: "attribution_lane_off" });
-  assertEquals(sb.calls.filter((c) => c.name === "context_xero_evidence_place").length, 0);
+Deno.test("flag off: no row whose invoice has a job means only the dry run", async () => {
+  const sb = fakeClient({ flag: false, dry: { to_write: 1, unlinked_invoices: [INV], by_class: { no_candidate: 1, review_candidates: 1 } } });
+  const result = await placeRecentInvoiceEvidence(sb, NOW);
+  assertEquals([result.ran, result.ran && result.mode, result.ran && result.written], [true, "own_job", null]);
+  assertEquals(sb.calls.filter((c) => c.name === "context_xero_evidence_place").map((c) => c.args.p_dry_run), [true]);
+});
+
+Deno.test("attribution lane off: nothing written, flag on or off", async () => {
+  for (const flag of [true, false]) {
+    const sb = fakeClient({ flag, lane: false, dry: { to_write: 3, unlinked_invoices: [], by_class: { invoice_job: 3 } } });
+    assertEquals(await placeRecentInvoiceEvidence(sb, NOW), { ran: false, reason: "attribution_lane_off" });
+    assertEquals(sb.calls.filter((c) => c.name === "context_xero_evidence_place").length, 0);
+  }
 });
 
 Deno.test("nothing to place: only the dry run is called", async () => {
@@ -103,6 +121,7 @@ Deno.test("nothing to place: only the dry run is called", async () => {
 Deno.test("an unlinked invoice gets the matcher's plan, then one real call", async () => {
   const sb = fakeClient({ flag: true, dry: { to_write: 0, unlinked_invoices: [INV], by_class: { no_candidate: 1 } } });
   const result = await placeRecentInvoiceEvidence(sb, NOW);
+  assertEquals(result.ran && result.mode, "full");
   const place = sb.calls.filter((c) => c.name === "context_xero_evidence_place");
   assertEquals(place.length, 2);
   assertEquals(place[1].args.p_dry_run, false);

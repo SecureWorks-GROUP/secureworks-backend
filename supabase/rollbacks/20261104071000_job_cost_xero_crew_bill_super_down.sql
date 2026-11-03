@@ -1,17 +1,17 @@
 -- Rollback of 20261104071000_job_cost_xero_crew_bill_super: v_job_cost_events back to its exact earlier definition
--- (md5 39e06b2299b75009b38571015725eb91), then the objects that migration added. Refuses unless the view is the
--- 20261104071000 definition (md5 8f9de7093e1998941320e088eab39ff0): roll back later changes first. Re-running it is a no-op.
+-- (md5 32c422a8d90aecf6924fc0a84d4569fe), then the objects that migration added. Refuses unless the view is the
+-- 20261104071000 definition (md5 cd749fcbe09bedde4a277f6da3ade6fd): roll back later changes first. Re-running it is a no-op.
 
 SET LOCAL lock_timeout = '5s';
 
 DO $down$
 DECLARE v text := md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
 BEGIN
-  IF v = '39e06b2299b75009b38571015725eb91' THEN
+  IF v = '32c422a8d90aecf6924fc0a84d4569fe' THEN
     RAISE NOTICE 'v_job_cost_events is already the definition before 20261104071000';
     RETURN;
   END IF;
-  IF v <> '8f9de7093e1998941320e088eab39ff0' THEN
+  IF v <> 'cd749fcbe09bedde4a277f6da3ade6fd' THEN
     RAISE EXCEPTION 'v_job_cost_events is not the 20261104071000 definition (md5 %); roll back later changes first', v;
   END IF;
   EXECUTE $def$CREATE OR REPLACE VIEW public.v_job_cost_events AS
@@ -163,6 +163,9 @@ BEGIN
                 CASE
                     WHEN NOT job_cost_installer_bill(bl.line_items) THEN 'not_installer'::text
                     WHEN bl.placed_by = 'bookkeeping_evidence'::text THEN 'confirmed'::text
+                    WHEN bl.placed_by = 'bill_line_job_number'::text AND (EXISTS ( SELECT 1
+                       FROM feature_flags ff
+                      WHERE ff.flag_name = 'job_cost_installer_line_job_number_v1'::text AND ff.enabled)) THEN 'confirmed'::text
                     WHEN (EXISTS ( SELECT 1
                        FROM job_materials_facts f
                       WHERE f.xero_invoice_id = bl.xero_invoice_id AND f.job_id = bl.job_id AND (f.automation_source = ANY (ARRAY['manual_queue'::text, 'agent_ai'::text])))) THEN 'confirmed'::text
@@ -183,6 +186,7 @@ BEGIN
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN ev.job_id
+                            WHEN tj.job_id IS NOT NULL THEN tj.job_id
                             ELSE x.job_id
                         END AS job_id,
                         CASE
@@ -190,6 +194,7 @@ BEGIN
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN 'bookkeeping_evidence'::text
+                            WHEN tj.job_id IS NOT NULL THEN 'bill_line_job_number'::text
                             ELSE 'xero_invoices.job_id'::text
                         END AS placed_by,
                     x.invoice_date,
@@ -224,6 +229,16 @@ BEGIN
                             WHEN (x.raw_json ->> 'LineAmountTypes'::text) = 'Inclusive'::text THEN COALESCE(job_profit_num(li.value -> 'LineAmount'::text), 0::numeric) - COALESCE(job_profit_num(li.value -> 'TaxAmount'::text), 0::numeric)
                             ELSE COALESCE(job_profit_num(li.value -> 'LineAmount'::text), 0::numeric)
                         END) <= 0.005
+                     LEFT JOIN LATERAL ( SELECT job_cost_bill_line_job_id(li.value ->> 'Description'::text) AS job_id
+                          WHERE (x.job_id IS NULL OR hj.id IS NOT NULL) AND NOT (EXISTS ( SELECT 1
+                                   FROM v_bookkeeping_line_evidence_current e
+                                  WHERE e.xero_invoice_id = x.xero_invoice_id AND e.xero_line_item_id = (li.value ->> 'LineItemID'::text))) AND NOT (EXISTS ( SELECT 1
+                                   FROM materials_reconciliation_queue q
+                                  WHERE q.xero_invoice_id = x.xero_invoice_id AND q.status = 'not_job_related'::text))) tn ON true
+                     LEFT JOIN LATERAL ( SELECT tn.job_id
+                          WHERE tn.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
+                                   FROM trade t_tn
+                                  WHERE t_tn.job_id = tn.job_id AND t_tn.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_tn.party)) || '%'::text))))) tj ON true
                   WHERE x.invoice_type = 'ACCPAY'::text AND (x.status = ANY (ARRAY['AUTHORISED'::text, 'PAID'::text])) AND NOT (EXISTS ( SELECT 1
                            FROM trade_mirror_bill m
                           WHERE m.xero_invoice_id = x.xero_invoice_id)) AND NOT (EXISTS ( SELECT 1
@@ -319,7 +334,7 @@ BEGIN
                    FROM trade_mirror_bill m
                   WHERE m.xero_invoice_id = f.xero_invoice_id)) AND NOT (EXISTS ( SELECT 1
                    FROM bill_line b
-                  WHERE b.xero_invoice_id = f.xero_invoice_id AND b.job_id = f.job_id)) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND ((EXISTS ( SELECT 1
+                  WHERE b.xero_invoice_id = f.xero_invoice_id AND (b.job_id = f.job_id OR b.placed_by <> 'xero_invoices.job_id'::text AND f.job_id = x.job_id))) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND ((EXISTS ( SELECT 1
                    FROM v_bookkeeping_line_evidence_current e
                   WHERE e.xero_invoice_id = f.xero_invoice_id AND e.evidenced AND e.job_id IS NOT NULL AND e.job_id <> f.job_id)) OR (EXISTS ( SELECT 1
                    FROM bill_part p2
@@ -829,7 +844,7 @@ UNION ALL
     po.match_method,
     po.incomplete_invoice
    FROM po$def$;
-  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '39e06b2299b75009b38571015725eb91' THEN
+  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '32c422a8d90aecf6924fc0a84d4569fe' THEN
     RAISE EXCEPTION 'v_job_cost_events after the rollback is not the earlier definition (md5 %)', md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
   END IF;
 END

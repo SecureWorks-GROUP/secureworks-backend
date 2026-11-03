@@ -19,16 +19,16 @@
 -- whole-bill job, or a do-not-schedule holder) and only while the parts add up to the Xero line as we hold it.
 -- Parts of super withheld from pay are never cost (rule 2). Every other line keeps its source_id.
 --
--- Guard: v_job_cost_events must be the definition this was written against (md5 7f7837be26bf12f131bd86c84ab6ea55,
--- pg_get_viewdef(..., true)); after the change it must be 39e06b2299b75009b38571015725eb91. Re-running it is a no-op (also
+-- Guard: v_job_cost_events must be the definition this was written against (md5 33d1c54d5a288fe496b5b863a1ec1d4c,
+-- pg_get_viewdef(..., true)); after the change it must be 32c422a8d90aecf6924fc0a84d4569fe. Re-running it is a no-op (also
 -- once a later migration of this set, 20261104070000 to 20261104072000, has changed the view).
 -- Rollback: supabase/rollbacks/20261104070000_job_cost_follows_ledger_split_lines_down.sql (embeds the exact earlier definition).
--- Rehearsed 3 Nov 2026 on production, rolled back (CIO helper, Claude): this file alone moves no job (the split
+-- Rehearsed 3 Nov 2026 on production on A4 V8's definition, rolled back (CIO helper, Claude): this file alone moves no job (the split
 -- lines are not loaded yet). With the current ledger files' 458 split parts loaded through bookkeeping_evidence_
 -- add_parts (the released files' sha256; 94 lines, 4 job parts not withheld super): 4 jobs, +240.00 total cost:
 -- SWP-261180 1,272.68 to 975.29 and SWP-261043 2,872.31 to 3,169.70 (Ampelite W207077 581.75 / 297.39);
 -- SWP-26595 19,651.01 to 19,771.01 and SWP-26100 1,662.41 to 1,782.41 (Energy Wise INV-9419, 120.00 each; the
--- Job Profit total rises 240.00, so no job it shows carried that line). Margins shown 355 to 355.
+-- Job Profit total rises 240.00, so no job it shows carried that line). Margins shown 354 to 354.
 
 SET LOCAL lock_timeout = '5s';
 
@@ -145,6 +145,7 @@ $n2$;
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN ev.job_id
+                            WHEN tj.job_id IS NOT NULL THEN tj.job_id
                             ELSE x.job_id
                         END AS job_id,$o3$;
   n3 text := $n3$                        CASE
@@ -158,12 +159,14 @@ $n2$;
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN ev.job_id
+                            WHEN tj.job_id IS NOT NULL THEN tj.job_id
                             ELSE x.job_id
                         END AS job_id,$n3$;
   o4 text := $o4$                        CASE
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN 'bookkeeping_evidence'::text
+                            WHEN tj.job_id IS NOT NULL THEN 'bill_line_job_number'::text
                             ELSE 'xero_invoices.job_id'::text
                         END AS placed_by,$o4$;
   n4 text := $n4$                        CASE
@@ -171,6 +174,7 @@ $n2$;
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN 'bookkeeping_evidence'::text
+                            WHEN tj.job_id IS NOT NULL THEN 'bill_line_job_number'::text
                             ELSE 'xero_invoices.job_id'::text
                         END AS placed_by,$n4$;
   o5 text := $o5$                    li.n,
@@ -204,12 +208,12 @@ $n7$;
                                   WHERE e.xero_invoice_id = f.xero_invoice_id AND e.evidenced AND e.job_id IS NOT NULL AND e.job_id <> f.job_id)) OR (EXISTS ( SELECT 1
                                    FROM bill_part p2
                                   WHERE p2.xero_invoice_id = f.xero_invoice_id AND p2.job_id <> f.job_id)))))) AND NOT (EXISTS ( SELECT 1$n8$;
-  o9 text := $o9$                  WHERE b.xero_invoice_id = f.xero_invoice_id AND b.job_id = f.job_id)) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND (EXISTS ( SELECT 1
+  o9 text := $o9$                  WHERE b.xero_invoice_id = f.xero_invoice_id AND (b.job_id = f.job_id OR b.placed_by <> 'xero_invoices.job_id'::text AND f.job_id = x.job_id))) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND (EXISTS ( SELECT 1
                    FROM v_bookkeeping_line_evidence_current e
                   WHERE e.xero_invoice_id = f.xero_invoice_id AND e.evidenced AND e.job_id IS NOT NULL AND e.job_id <> f.job_id)) AND NOT (EXISTS ( SELECT 1
                    FROM v_bookkeeping_line_evidence_current e2
                   WHERE e2.xero_invoice_id = f.xero_invoice_id AND e2.evidenced AND e2.job_id = f.job_id)))$o9$;
-  n9 text := $n9$                  WHERE b.xero_invoice_id = f.xero_invoice_id AND b.job_id = f.job_id)) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND ((EXISTS ( SELECT 1
+  n9 text := $n9$                  WHERE b.xero_invoice_id = f.xero_invoice_id AND (b.job_id = f.job_id OR b.placed_by <> 'xero_invoices.job_id'::text AND f.job_id = x.job_id))) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND ((EXISTS ( SELECT 1
                    FROM v_bookkeeping_line_evidence_current e
                   WHERE e.xero_invoice_id = f.xero_invoice_id AND e.evidenced AND e.job_id IS NOT NULL AND e.job_id <> f.job_id)) OR (EXISTS ( SELECT 1
                    FROM bill_part p2
@@ -224,11 +228,11 @@ $o11$;
 $n11$;
 BEGIN
   v_def := pg_get_viewdef('public.v_job_cost_events'::regclass, true);
-  IF md5(v_def) IN ('39e06b2299b75009b38571015725eb91', '8f9de7093e1998941320e088eab39ff0', '25143b7d28aae47cd44a16323fa99389') THEN
+  IF md5(v_def) IN ('32c422a8d90aecf6924fc0a84d4569fe', 'cd749fcbe09bedde4a277f6da3ade6fd', '366599ce55b0e0430d45ee9e6e04c315') THEN
     RAISE NOTICE 'v_job_cost_events already has 20261104070000 (or a later change of this set)';
     RETURN;
   END IF;
-  IF md5(v_def) <> '7f7837be26bf12f131bd86c84ab6ea55' THEN
+  IF md5(v_def) <> '33d1c54d5a288fe496b5b863a1ec1d4c' THEN
     RAISE EXCEPTION 'v_job_cost_events is not the definition this migration was written against (md5 %)', md5(v_def);
   END IF;
   IF (length(v_def) - length(replace(v_def, o1, ''))) / length(o1) <> 1 THEN
@@ -276,7 +280,7 @@ BEGIN
   END IF;
   v_def := replace(v_def, o11, n11);
   EXECUTE 'CREATE OR REPLACE VIEW public.v_job_cost_events AS ' || v_def;
-  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '39e06b2299b75009b38571015725eb91' THEN
+  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '32c422a8d90aecf6924fc0a84d4569fe' THEN
     RAISE EXCEPTION 'v_job_cost_events after the change is not the rehearsed definition (md5 %)', md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
   END IF;
 END

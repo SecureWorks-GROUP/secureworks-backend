@@ -14,15 +14,16 @@
 --   * a bill's credit rows are rounded as a running total (each row's cents = rounded running total less the
 --     rounded running total before it), so one bill's rows add up to the credit's own cents.
 --
--- Guard: v_job_cost_events must be the definition this was written against (md5 8f9de7093e1998941320e088eab39ff0,
--- pg_get_viewdef(..., true)); after the change it must be 25143b7d28aae47cd44a16323fa99389. Re-running it is a no-op (also
+-- Guard: v_job_cost_events must be the definition this was written against (md5 cd749fcbe09bedde4a277f6da3ade6fd,
+-- pg_get_viewdef(..., true)); after the change it must be 366599ce55b0e0430d45ee9e6e04c315. Re-running it is a no-op (also
 -- once a later migration of this set, 20261104070000 to 20261104072000, has changed the view).
 -- Rollback: supabase/rollbacks/20261104072000_job_cost_credit_at_note_ex_gst_down.sql (embeds the exact earlier definition).
 -- Rehearsed 3 Nov 2026 on production, rolled back (CIO helper, Claude): 8 jobs move by one cent, net -0.04, each
 -- onto its credit notes' own ex-GST share (8 of 8 checked by hand): SWMS-26893 253.37 to 253.36 (Bunnings
--- 2435/01472242), SW1895, SWF-26033, SWF-261132, SWF-261600, SWF-26179, SWF-26824, SWF-26997. Margins 355 to 355.
--- All three together: 15 jobs, total job cost (v_job_profit) 778,077.27 to 778,367.63; v_job_cost_events actual
--- 789,002.90 to 789,293.25.
+-- 2435/01472242), SW1895, SWF-26033, SWF-261132, SWF-261600, SWF-26179, SWF-26824, SWF-26997. Margins 354 to 354.
+-- All three together on 20261104063000 (A4 V8): 15 jobs, total job cost (v_job_profit) 778,111.81 to 778,402.17;
+-- v_job_cost_events actual 789,037.44 to 789,327.79. Each rule moves the same jobs by the same amounts as on the
+-- definition before A4 V8 (rehearsed both ways).
 
 SET LOCAL lock_timeout = '5s';
 
@@ -131,11 +132,11 @@ $o6$;
 $n6$;
 BEGIN
   v_def := pg_get_viewdef('public.v_job_cost_events'::regclass, true);
-  IF md5(v_def) IN ('25143b7d28aae47cd44a16323fa99389') THEN
+  IF md5(v_def) IN ('366599ce55b0e0430d45ee9e6e04c315') THEN
     RAISE NOTICE 'v_job_cost_events already has 20261104072000 (or a later change of this set)';
     RETURN;
   END IF;
-  IF md5(v_def) <> '8f9de7093e1998941320e088eab39ff0' THEN
+  IF md5(v_def) <> 'cd749fcbe09bedde4a277f6da3ade6fd' THEN
     RAISE EXCEPTION 'v_job_cost_events is not the definition this migration was written against (md5 %)', md5(v_def);
   END IF;
   IF (length(v_def) - length(replace(v_def, o1, ''))) / length(o1) <> 1 THEN
@@ -163,7 +164,7 @@ BEGIN
   END IF;
   v_def := replace(v_def, o6, n6);
   EXECUTE 'CREATE OR REPLACE VIEW public.v_job_cost_events AS ' || v_def;
-  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '25143b7d28aae47cd44a16323fa99389' THEN
+  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '366599ce55b0e0430d45ee9e6e04c315' THEN
     RAISE EXCEPTION 'v_job_cost_events after the change is not the rehearsed definition (md5 %)', md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
   END IF;
 END

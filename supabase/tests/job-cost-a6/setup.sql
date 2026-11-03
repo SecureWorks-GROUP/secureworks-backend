@@ -1,8 +1,8 @@
 -- Job Profit A6 cost rules: the production surface v_job_cost_events reads, as read from production on
 -- 3 Nov 2026 (column names and types from pg_attribute; functions and the two views from pg_get_functiondef and
 -- pg_get_viewdef). Two views are tables here (v_trade_charge_resolved, v_invoice_line_completeness): the cost
--- view reads only their columns. The registered migration-contracts stack cannot carry this: it holds the
--- 31 Oct cost view, not the 2 to 3 Nov definitions these migrations are guarded on.
+-- view reads only their columns. The cost view is production's 20261103224500 definition with 20261104063000
+-- (A4 V8) applied, the definition these migrations are guarded on (md5 33d1c54d5a288fe496b5b863a1ec1d4c).
 \set ON_ERROR_STOP on
 SET client_min_messages = warning;
 DO $$ BEGIN
@@ -808,6 +808,24 @@ CREATE VIEW public.v_supplier_credit_allocations AS
     COALESCE(from_note AND credit_on_bill_inc > bill_total, false) AS exceeds_bill,
     COALESCE(from_note AND credit_on_bill_inc <= bill_total, false) AS counts_from_credit_note
    FROM candidate c;
+-- 20261104063000 (A4 V8): the job a bill line's own text names, as that migration creates it.
+CREATE OR REPLACE FUNCTION public.job_cost_bill_line_job_id(p_text text)
+RETURNS uuid LANGUAGE sql STABLE PARALLEL SAFE AS $fn$
+  SELECT CASE WHEN pg_catalog.count(DISTINCT t.job_number) OPERATOR(pg_catalog.=) 1
+               AND pg_catalog.count(DISTINCT j.id) OPERATOR(pg_catalog.=) 1
+              THEN (pg_catalog.array_agg(j.id) FILTER (WHERE j.id IS NOT NULL))[1] END
+  FROM (SELECT CASE WHEN m[1] IS NULL THEN 'SW' OPERATOR(pg_catalog.||) m[2]
+                    ELSE 'SW' OPERATOR(pg_catalog.||) m[1] OPERATOR(pg_catalog.||) '-' OPERATOR(pg_catalog.||) m[2] END AS job_number
+          FROM pg_catalog.regexp_matches(pg_catalog.upper(COALESCE(p_text, '')),
+                                         '(?<![A-Z0-9])SW(MS|[A-Z])?[ \t]*[-=:]?[ \t]*([0-9]{4,6})(?![0-9])', 'g') AS m) t
+  LEFT JOIN public.jobs j
+    ON pg_catalog.upper(j.job_number) OPERATOR(pg_catalog.=) t.job_number
+   AND pg_catalog.lower(COALESCE(j.metadata OPERATOR(pg_catalog.->>) 'do_not_schedule', '')) OPERATOR(pg_catalog.<>) 'true'
+$fn$;
+COMMENT ON FUNCTION public.job_cost_bill_line_job_id(text) IS
+  'A4 V8 20261104063000: the job a supplier or subcontractor bill line''s own text names (SWF-26177, SWF26177, SWF 26177, SWF -26177, SWMS-261321, SW1346; never inside a longer word or number), when the text names exactly one job number and exactly one job that is not the holding job carries it; else NULL. Used by v_job_cost_events.bill_line.';
+REVOKE ALL ON FUNCTION public.job_cost_bill_line_job_id(text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.job_cost_bill_line_job_id(text) TO service_role;
 CREATE VIEW public.v_job_cost_events AS
  WITH trade_mirror_bill AS (
          SELECT x.xero_invoice_id
@@ -947,6 +965,9 @@ CREATE VIEW public.v_job_cost_events AS
                 CASE
                     WHEN NOT job_cost_installer_bill(bl.line_items) THEN 'not_installer'::text
                     WHEN bl.placed_by = 'bookkeeping_evidence'::text THEN 'confirmed'::text
+                    WHEN bl.placed_by = 'bill_line_job_number'::text AND (EXISTS ( SELECT 1
+                       FROM feature_flags ff
+                      WHERE ff.flag_name = 'job_cost_installer_line_job_number_v1'::text AND ff.enabled)) THEN 'confirmed'::text
                     WHEN (EXISTS ( SELECT 1
                        FROM job_materials_facts f
                       WHERE f.xero_invoice_id = bl.xero_invoice_id AND f.job_id = bl.job_id AND (f.automation_source = ANY (ARRAY['manual_queue'::text, 'agent_ai'::text])))) THEN 'confirmed'::text
@@ -960,12 +981,14 @@ CREATE VIEW public.v_job_cost_events AS
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN ev.job_id
+                            WHEN tj.job_id IS NOT NULL THEN tj.job_id
                             ELSE x.job_id
                         END AS job_id,
                         CASE
                             WHEN (x.job_id IS NULL OR hj.id IS NOT NULL) AND ev.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
                                FROM trade t_ev
                               WHERE t_ev.job_id = ev.job_id AND t_ev.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_ev.party)) || '%'::text)))) THEN 'bookkeeping_evidence'::text
+                            WHEN tj.job_id IS NOT NULL THEN 'bill_line_job_number'::text
                             ELSE 'xero_invoices.job_id'::text
                         END AS placed_by,
                     x.invoice_date,
@@ -993,6 +1016,16 @@ CREATE VIEW public.v_job_cost_events AS
                         END) WITH ORDINALITY li(value, n)
                      LEFT JOIN jobs hj ON hj.id = x.job_id AND lower(COALESCE(hj.metadata ->> 'do_not_schedule'::text, ''::text)) = 'true'::text
                      LEFT JOIN bill_ev ev ON ev.xero_invoice_id = x.xero_invoice_id AND ev.xero_line_item_id = (li.value ->> 'LineItemID'::text)
+                     LEFT JOIN LATERAL ( SELECT job_cost_bill_line_job_id(li.value ->> 'Description'::text) AS job_id
+                          WHERE (x.job_id IS NULL OR hj.id IS NOT NULL) AND NOT (EXISTS ( SELECT 1
+                                   FROM v_bookkeeping_line_evidence_current e
+                                  WHERE e.xero_invoice_id = x.xero_invoice_id AND e.xero_line_item_id = (li.value ->> 'LineItemID'::text))) AND NOT (EXISTS ( SELECT 1
+                                   FROM materials_reconciliation_queue q
+                                  WHERE q.xero_invoice_id = x.xero_invoice_id AND q.status = 'not_job_related'::text))) tn ON true
+                     LEFT JOIN LATERAL ( SELECT tn.job_id
+                          WHERE tn.job_id IS NOT NULL AND (NOT job_cost_installer_bill(x.line_items) OR NOT (EXISTS ( SELECT 1
+                                   FROM trade t_tn
+                                  WHERE t_tn.job_id = tn.job_id AND t_tn.is_actual AND lower(COALESCE(x.contact_name, ''::text)) ~~ (('%'::text || lower(t_tn.party)) || '%'::text))))) tj ON true
                   WHERE x.invoice_type = 'ACCPAY'::text AND (x.status = ANY (ARRAY['AUTHORISED'::text, 'PAID'::text])) AND NOT (EXISTS ( SELECT 1
                            FROM trade_mirror_bill m
                           WHERE m.xero_invoice_id = x.xero_invoice_id)) AND NOT (EXISTS ( SELECT 1
@@ -1088,7 +1121,7 @@ CREATE VIEW public.v_job_cost_events AS
                    FROM trade_mirror_bill m
                   WHERE m.xero_invoice_id = f.xero_invoice_id)) AND NOT (EXISTS ( SELECT 1
                    FROM bill_line b
-                  WHERE b.xero_invoice_id = f.xero_invoice_id AND b.job_id = f.job_id)) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND (EXISTS ( SELECT 1
+                  WHERE b.xero_invoice_id = f.xero_invoice_id AND (b.job_id = f.job_id OR b.placed_by <> 'xero_invoices.job_id'::text AND f.job_id = x.job_id))) AND NOT ((COALESCE(f.automation_source, ''::text) <> ALL (ARRAY['manual_queue'::text, 'manual_split'::text])) AND (EXISTS ( SELECT 1
                    FROM v_bookkeeping_line_evidence_current e
                   WHERE e.xero_invoice_id = f.xero_invoice_id AND e.evidenced AND e.job_id IS NOT NULL AND e.job_id <> f.job_id)) AND NOT (EXISTS ( SELECT 1
                    FROM v_bookkeeping_line_evidence_current e2
@@ -1599,7 +1632,7 @@ UNION ALL
     po.incomplete_invoice
    FROM po;
 DO $$ BEGIN
-  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '7f7837be26bf12f131bd86c84ab6ea55' THEN
-    RAISE EXCEPTION 'setup: v_job_cost_events does not render as production''s 20261103224500 definition (md5 %)', md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
+  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true)) <> '33d1c54d5a288fe496b5b863a1ec1d4c' THEN
+    RAISE EXCEPTION 'setup: v_job_cost_events does not render as production''s 20261104063000 (A4 V8) definition (md5 %)', md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true));
   END IF;
 END $$;
