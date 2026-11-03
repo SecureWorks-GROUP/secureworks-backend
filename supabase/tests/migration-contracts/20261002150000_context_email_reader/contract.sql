@@ -1,8 +1,8 @@
 -- EM2/EM3 behaviour contract: the email reader's database side. The input
 -- rows between the ROWS markers are exactly what the TypeScript builder
--- (_shared/evidence/outlook_mail.ts) produces for the synthetic fixtures in
--- outlook_mail_fixtures.ts; outlook_mail_contract_rows_test.ts fails if they
--- drift. Every fixture write is rolled back.
+-- (_shared/evidence/outlook_mail.ts) produced for the synthetic fixtures in
+-- outlook_mail_fixtures.ts when they were copied; nothing checks that they
+-- still match. Every fixture write is rolled back.
 
 BEGIN;
 -- 1. Shape and access: flags off, ledger locked to the service role, helpers

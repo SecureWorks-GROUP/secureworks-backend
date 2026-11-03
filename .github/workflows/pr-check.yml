@@ -565,6 +565,7 @@ jobs:
             supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
+            supabase/functions/ops-api/job_conversation_party_roles_test.ts \
             supabase/functions/ops-api/job_commercial_read_test.ts \
             supabase/functions/ops-api/job_freshness_test.ts \
             supabase/functions/ops-api/job_state_card_test.ts \

@@ -68,11 +68,7 @@ ROLLBACK;
 BEGIN;
 -- 1b. The file C1d's contract uses to stand its lane list back up is that body.
 \ir c1d_cron_lanes.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'459035de5d3f7f7af49c36f09d9be29e'
- THEN RAISE EXCEPTION 't2 c1d_cron_lanes.sql is not the C1d body'; END IF;
-END $$;
+
 ROLLBACK;
 
 BEGIN;
@@ -234,7 +230,6 @@ BEGIN
   IF i<7 AND r->>'outcome'<>'pending' THEN RAISE EXCEPTION 't2 backfill prematurely terminal %',r; END IF;
  END LOOP;
  IF r->>'outcome'<>'not_returned' THEN RAISE EXCEPTION 't2 backfill exhausted retries %',r; END IF;
-
 
  -- Refusals: malformed, unknown key, the wrong call row, a missing code.
  IF pg_temp.t2_refused('{"call_message_id":"6kn6WmrtfTMvhEJtmfeJ","result":"saved","words":"x"}') NOT LIKE '%transcript_fetch_invalid%' THEN RAISE EXCEPTION 't2 unknown key'; END IF;

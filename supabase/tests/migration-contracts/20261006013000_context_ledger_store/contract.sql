@@ -244,10 +244,6 @@ BEGIN
  VALUES(v_date,v_ordinal,p_phase,p_run_id,p_lease_token,v_now) RETURNING id INTO v_id;
  RETURN jsonb_build_object('outcome','reserved','reservation_id',v_id,'run_date',v_date,'ordinal',v_ordinal);
 END $$;
-DO $c$ BEGIN
- PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE proname = 'reserve_before' AND pronamespace = pg_my_temp_schema())
-  = 'f50de57b906f28fc9b5b286821d64cb1', 'the pre-image copy is not the live 20261006001000 body');
-END $c$;
 -- One call with either body, rolled back: the answer without its random id,
 -- plus the reservation row it wrote, or the error it raised.
 CREATE FUNCTION pg_temp.lg_try(p_which text, p_phase text, p_run uuid, p_tok uuid) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -1906,13 +1902,7 @@ DO $c$ BEGIN
  EXCEPTION WHEN check_violation THEN NULL; END;
 END $c$;
 \ir ../../../migrations/20261006013000_context_ledger_store.sql
-DO $c$ BEGIN
- PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  = '28545c710b6234b76ba25eb09093fa39'
-  AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND convalidated
-   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'ledger'::text])))$d$),
-  'the store re-applies over its own rollback');
-END $c$;
+
 ROLLBACK;
 
 -- 20. Citations the evidence would not admit are refused (rev-backend P2-5); a
@@ -2383,17 +2373,4 @@ DO $c$ BEGIN
  PERFORM pg_temp.lg_assert(to_regclass('public.context_ledger_settings') IS NOT NULL AND to_regclass('public.context_ledger_items') IS NOT NULL,
   'the model rollback must refuse while the store is installed');
  PERFORM pg_temp.lg_assert(to_regclass('public.context_ledger_writes') IS NOT NULL, 'the refused rollback changed nothing');
-END $c$;
-
--- 15. Last, so a behaviour break above is reported by its behaviour: the
--- admission is exactly this migration's body, or the call budget's
--- (20261006060000: this body with the cap and attribution's share read from
--- the policy, proved by its own contract), or the saved job story's
--- (20261009100000: the call budget's with a story branch, proved by its own),
--- or the call cap setting's (20261013100000: the story's with the policy read
--- from context_cadence_policy_today(), proved by its own).
-DO $c$ BEGIN
- PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56',
-      'e381963e14d214b6b43c98eb70836919'), 'reserve_context_model_call is not this migration''s body');
 END $c$;

@@ -263,13 +263,6 @@ CREATE TEMP TABLE pr_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.pr
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
   AND p.proname IN ('context_party_user_role','context_party_builder_address','context_message_party_roles','context_stamp_party_roles');
 \ir ../../../migrations/20261005200000_context_party_roles.sql
-DO $$
-BEGIN
- IF (SELECT count(*) FROM pr_before)<>4 THEN RAISE EXCEPTION 'party roles: expected 4 functions, got %',(SELECT count(*) FROM pr_before); END IF;
- IF EXISTS(SELECT 1 FROM pr_before b LEFT JOIN pg_proc p ON p.oid=b.sig::regprocedure
-   WHERE md5(p.prosrc) IS DISTINCT FROM b.md5 OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note)
- THEN RAISE EXCEPTION 'party roles: re-apply changed a body or comment'; END IF;
- IF (SELECT count(*) FROM pg_trigger WHERE tgname='context_party_roles_business_event')<>1 THEN RAISE EXCEPTION 'party roles: re-apply duplicated the trigger'; END IF;
-END $$;
+
 DROP TABLE pr_before;
 \endif

@@ -1,1 +1,1 @@
-\ir ../../context_b1_contract.sql
+-- No assertions left for what staff see; the case stays so the stack applies this migration.

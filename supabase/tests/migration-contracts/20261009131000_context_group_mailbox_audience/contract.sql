@@ -3,8 +3,8 @@
 -- written straight in (session_replication_role replica) so each states exactly what the email reader
 -- saved; the relabels then run as production runs them, the party-roles trigger included. The rows
 -- between the ROWS markers are exactly what the TypeScript builder (_shared/evidence/outlook_mail.ts)
--- produces for the synthetic fixtures in outlook_mail_fixtures.ts;
--- outlook_mail_audience_contract_rows_test.ts fails if they drift.
+-- produced for the synthetic fixtures in outlook_mail_fixtures.ts when they were copied; nothing
+-- checks that they still match.
 --
 --  1. Shape: the four functions, their markers, grants, security and path; the topic.
 --  2. The reader's resolver: a copy of our own email meeting the row another copy saved relabels it

@@ -1,7 +1,7 @@
 // Slice B0: the ONE fixture table for the placement keys and the token rule,
-// shared by the TypeScript twin (job_refs.ts, job_refs_test.ts), the SQL
-// helpers (the 20260924183000_context_unlinked_census migration contract, whose
-// FIXTURES block job_refs_contract_rows_test.ts proves identical to this file)
+// for the TypeScript twin (job_refs.ts) and the SQL helpers (the
+// 20260924183000_context_unlinked_census migration contract, whose FIXTURES
+// block was copied from this file; nothing checks that the copy still matches)
 // and the money track (money.md M7: one token rule, one CI fixture table).
 //
 // Strings come from the named rows in adminbucket.md, email.md and money.md

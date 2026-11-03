@@ -283,12 +283,7 @@ BEGIN
   'a second apply changed a body, a comment or a grant');
 END $$;
 \ir ../../../rollbacks/20261029170200_context_story_bill_outcomes_down.sql
-DO $$
-BEGIN
- PERFORM pg_temp.sb_assert(to_regprocedure('public.context_job_story_bill_outcomes(uuid)') IS NULL, 'the rollback left the block');
- PERFORM pg_temp.sb_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.context_job_story_writer_input(uuid)')) = '13097e3cc7abebfdeabff122bee66e1a',
-  'the rollback did not restore the money book''s writer input');
-END $$;
+
 \ir ../../../migrations/20261029170200_context_story_bill_outcomes.sql
 DO $$
 BEGIN

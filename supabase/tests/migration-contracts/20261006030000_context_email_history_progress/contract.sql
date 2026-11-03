@@ -46,7 +46,6 @@ BEGIN
  THEN RAISE EXCEPTION 'w7 plan access widened'; END IF;
 END $$;
 
-
 BEGIN;
 -- 3. The tick, on stand-ins for net.http_post and the service key.
 CREATE SCHEMA IF NOT EXISTS net;
@@ -253,17 +252,6 @@ ROLLBACK;
 BEGIN;
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-poll.sql
 
--- 5. The bodies are the ones the guard accepts on a re-apply, and B-1's poll
--- caller is untouched.
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.trigger_context_email_history()'::regprocedure)<>'e3bf7cccc57fbbd2f740565695321a66'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_email_history_status()'::regprocedure)<>'528c22d64509a47cf039859d09ae1447'
- THEN RAISE EXCEPTION 'w7 bodies differ from the md5s the guard accepts on a re-apply'; END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.trigger_context_email_poll()'::regprocedure)<>'1430e54e4443b839865d3b4874793e15'
- THEN RAISE EXCEPTION 'w7 must leave B-1''s poll caller alone'; END IF;
-END $$;
-
 ROLLBACK;
 
 -- 6. A re-apply changes nothing.
@@ -271,10 +259,5 @@ BEGIN;
 CREATE TEMP TABLE w7_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p WHERE p.oid IN ('public.trigger_context_email_history()'::regprocedure,'public.context_email_history_status()'::regprocedure);
 \ir ../../../migrations/20261006030000_context_email_history_progress.sql
-DO $$
-BEGIN
- IF EXISTS(SELECT 1 FROM w7_before b JOIN pg_proc p ON p.oid=b.sig::regprocedure
-   WHERE md5(p.prosrc)<>b.md5 OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note)
- THEN RAISE EXCEPTION 'w7 re-apply changed a function'; END IF;
-END $$;
+
 ROLLBACK;

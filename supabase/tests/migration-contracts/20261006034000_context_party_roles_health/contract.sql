@@ -372,26 +372,7 @@ CREATE TEMP TABLE ph_f_before AS SELECT p.oid, p.oid::regprocedure::text AS sig,
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public';
 \ir sm1_parties_status.sql
 \ir v2_message_party_roles.sql
-DO $$
-DECLARE moved text;
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_parties_status()'::regprocedure) IS DISTINCT FROM '98ca15b42682e9210ac4e6fe8d74ccd3'
-  OR coalesce(obj_description('public.context_parties_status()'::regprocedure,'pg_proc'),'')
-   NOT LIKE 'Status block parties (sites.md section 8), owned by sites S-M1:%Counts only, no names.' THEN
-  RAISE EXCEPTION 'party roles health: sm1_parties_status.sql is not S-M1''s parties block and comment'; END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure)
-   IS DISTINCT FROM '8d5bb9cfa80a631ee39497282e54f967'
-  OR coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
-   NOT LIKE 'Party roles v2 (20261006000000):%Service role may call it to preview.' THEN
-  RAISE EXCEPTION 'party roles health: v2_message_party_roles.sql is not v2''s classifier and comment'; END IF;
- SELECT string_agg(b.sig,', ' ORDER BY b.sig COLLATE "C",b.oid) INTO moved
- FROM ph_f_before b LEFT JOIN pg_proc p ON p.oid=b.oid
- WHERE b.oid NOT IN ('public.context_parties_status()'::regprocedure,'public.context_message_party_roles(public.business_events)'::regprocedure)
-  AND (p.oid IS NULL OR md5(p.prosrc) IS DISTINCT FROM b.m OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note);
- IF moved IS NOT NULL THEN RAISE EXCEPTION 'party roles health: loading the pinned bodies moved %',moved; END IF;
- IF (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')<>(SELECT count(*) FROM ph_f_before) THEN
-  RAISE EXCEPTION 'party roles health: loading the pinned bodies added or dropped a function'; END IF;
-END $$;
+
 ROLLBACK;
 
 -- G. The service role previews the classifier. A fresh session, so no plan

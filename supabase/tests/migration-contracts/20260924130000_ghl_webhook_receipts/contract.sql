@@ -6,9 +6,9 @@
 --    real writer capture_business_event and the live ladder: they pass the live
 --    channel and direction CHECKs, keys make every edit and transition its own
 --    row, retries land once, and placement is the ladder's alone.
--- The input rows between the ROWS markers are exactly what the receiver's
--- builder produces (ghl-webhook-receiver/c1c_contract_rows.ts);
--- receiver_c1c_test.ts fails if they drift. Contact and GHL ids are the
+-- The input rows between the ROWS markers are what the receiver's builder
+-- produced (ghl-webhook-receiver/c1c_contract_rows.ts) when they were copied;
+-- nothing checks that they still match. Contact and GHL ids are the
 -- design's where it records them, placeholders otherwise; job ids and job
 -- numbers are synthetic. Row labels only. Every fixture write is rolled back.
 BEGIN;
