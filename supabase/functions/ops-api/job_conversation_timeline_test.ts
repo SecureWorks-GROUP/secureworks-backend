@@ -575,6 +575,33 @@ Deno.test("timeline: a GHL message in the CRM cache and as its event row shows o
   assertEquals(messages[1].who, "the customer to us");
 });
 
+Deno.test("timeline: our own tool's copy of a text, placed on its twin's job, shows once, as the twin (C2)", async () => {
+  const J = "a0000000-0000-4000-8000-000000998806";
+  const client = fakeClient({
+    jobs: [job(J, "SWF-998806", { status: "scheduled" })],
+    business_events: [bev("row-twin", J, {
+      event_type: "client.sms_out",
+      source: "ghl-proxy",
+      channel: "sms",
+      direction: "outbound",
+      event_at: "2026-10-02T01:04:00.000Z",
+      occurred_at: "2026-10-02T01:04:00.000Z",
+      payload: { body: "Your fence is booked for Thursday 7am." },
+    }), bev("row-copy", J, {
+      event_type: "client.sms_out",
+      source: "mcp_agent",
+      occurred_at: "2026-10-02T01:04:01.000Z",
+      payload: { message_preview: "Your fence is booked for Thursday 7am." },
+      metadata: { placement_copy_of: "row-twin", placement_rule: "twin_copy" },
+    })],
+  });
+  const { messages }: any = await _getJobConversationForTest(client, {
+    job_id: J,
+    limit: 20,
+  });
+  assertEquals(messages.map((m: any) => m.source_ref), ["row-twin"]);
+});
+
 // ── a person's decisions (CTX-T22) ───────────────────────────────────────────
 
 function withDecisions(tables: Tables, answer: { data: any; error: any }) {

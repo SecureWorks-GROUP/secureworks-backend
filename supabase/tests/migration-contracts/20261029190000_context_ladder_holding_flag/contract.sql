@@ -162,7 +162,14 @@ BEGIN;
 SELECT pg_temp.tp04_cases();
 ROLLBACK;
 
--- C. Structure.
+-- C. Structure. A registered successor that replaces the rules ladder (C2
+-- known contacts, 20261104095000) comes off first, inside this transaction.
+BEGIN;
+SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)')),'')
+ ='f9cd8d311bf00a92f7b708ff2d2dc8a7' AS c2k_live \gset
+\if :c2k_live
+\ir ../../../rollbacks/20261104095000_context_known_contact_placement_down.sql
+\endif
 DO $$
 DECLARE x record; problems text[]:='{}'; src text; r text;
 BEGIN
@@ -217,3 +224,4 @@ BEGIN
  THEN RAISE EXCEPTION 'tp04: re-apply changed a body, comment or grant'; END IF;
 END $$;
 DROP TABLE tp04_before;
+ROLLBACK;

@@ -552,7 +552,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, compareConversationNewestFirst, isPlacementCopy, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -19674,7 +19674,7 @@ async function getJobConversation(client: any, body: any) {
   try {
     const { rows: bev, error: bevErr, decisionsError } = await readBusinessEventsBySourceTime(client, {
       jobId,
-      select: TIMELINE_MESSAGE_COLUMNS,
+      select: `${TIMELINE_MESSAGE_COLUMNS}, copy_of:metadata->>placement_copy_of`,
       limit,
       since: sinceFilter,
       until,
@@ -19683,7 +19683,9 @@ async function getJobConversation(client: any, body: any) {
     })
     if (decisionsError) personDecisionsReadFailed = decisionsError
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
-    for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
+    // C2 known contacts (20261104095000): our own tool's copy of a text sits on
+    // its twin's job and is shown once, as the twin.
+    for (const r of bev) if (!isPlacementCopy(r)) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
   }
