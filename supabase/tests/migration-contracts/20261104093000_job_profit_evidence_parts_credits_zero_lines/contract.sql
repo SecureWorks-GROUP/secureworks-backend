@@ -7,6 +7,13 @@
 BEGIN;
 SET LOCAL statement_timeout = '60s';
 
+-- 20261104200500 (A2 credits follow their documents) sits on this migration's functions and on v_job_profit: unwind
+-- it inside this transaction (the ROLLBACK at the end puts it back) so the checks below meet this migration's rule.
+SELECT md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::regprocedure))='b9114d87ccc74b6171bbb51d92be69b4' AS test_has_a2_credits \gset
+\if :test_has_a2_credits
+\ir ../../../rollbacks/20261104200500_job_profit_credits_follow_their_documents_down.sql
+\endif
+
 ALTER VIEW public.v_job_cost_events RENAME TO v_job_cost_events_a2_aside;
 ALTER VIEW public.v_job_profit RENAME TO v_job_profit_a2_aside;
 ALTER VIEW public.v_bookkeeping_line_parts_current RENAME TO v_bookkeeping_line_parts_current_a2_aside;

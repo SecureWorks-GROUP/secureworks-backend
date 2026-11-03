@@ -3,6 +3,12 @@
 -- first, and applied again at the end.
 -- 20261104110000 (patio bound revision) sits on top of it: when the stack has it, its down runs first, and it is
 -- applied again after 20261104080000 at the end.
+-- 20261104200500 (A2 credits follow their documents) sits on top of 20261104110000: when the stack has it, its down
+-- runs first, and it is applied again after 20261104110000 at the end.
+SELECT md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::regprocedure))='b9114d87ccc74b6171bbb51d92be69b4' AS a2c_live_20261009100000 \gset
+\if :a2c_live_20261009100000
+\ir ../../../rollbacks/20261104200500_job_profit_credits_follow_their_documents_down.sql
+\endif
 SELECT to_regclass('public.v_job_profit_patio_scope_binding') IS NOT NULL AS a6p_live_20261009100000 \gset
 \if :a6p_live_20261009100000
 \ir ../../../rollbacks/20261104110000_job_profit_patio_bound_revision_down.sql
@@ -995,4 +1001,8 @@ ROLLBACK;
 \if :a6p_live_20261009100000
 \ir ../20261104110000_job_profit_patio_bound_revision/setup.sql
 \ir ../../../migrations/20261104110000_job_profit_patio_bound_revision.sql
+\endif
+\if :a2c_live_20261009100000
+\ir ../20261104200500_job_profit_credits_follow_their_documents/setup.sql
+\ir ../../../migrations/20261104200500_job_profit_credits_follow_their_documents.sql
 \endif
