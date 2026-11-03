@@ -195,10 +195,12 @@ reference or line text carries `supplier_ref` (a supplier order, quote or invoic
 from its replies) or `job_number` (our job number, as `SWP-261309`, `SWP261309` or `SWP 261309`), and, decided
 3 Nov 2026 09:44Z, `po_number` (our PO number as words, `PO-298035` or `PO 298035`, or run together,
 `PO298035`, `PO#298035`, never the digits alone; on the bill or on the supplier's PDF of it) or `site_address`
-(the job's site address on the supplier's PDF, keyed by the context placer's `context_address_key`, when it
-matches exactly one order of that supplier). The supplier's PDF of a bill is a PDF that came in by email (never
-one we sent), whose file name and text both carry the bill's number and whose text names the bill's supplier,
-read by the document text or vision reader. The same supplier and the same
+(the job's site address in the bill's own number, reference or lines, decided 10:26Z, or on the supplier's PDF,
+keyed by the context placer's `context_address_key`, when it matches exactly one order of that supplier). The
+supplier's PDF of a bill is a PDF that came in by email from that supplier (never one we sent; the sender's address
+carries the supplier's name), whose file name and text both carry the bill's number and whose text names the bill's
+supplier. Its text is what the document text reader or, for a scan, the vision reader already extracted; a scan
+neither could read has no text and its bill waits. The same supplier and the same
 amount alone never link. Purchase orders have no saved refs and Dispatch v2 emails have no order number, so
 `supplier_ref` applies only to v2 orders and `po_number` only to purchase orders. A bill links to one order:
 one that names two orders links neither and is listed under that order's `unclear_bills` with a reason

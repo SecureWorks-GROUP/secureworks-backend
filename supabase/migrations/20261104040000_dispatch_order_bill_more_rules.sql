@@ -1,22 +1,28 @@
--- B4 follow-up (CIO decision 3 Nov 2026 09:44Z, under the owner's authority; DSP-05 extended): two more ways a
--- supplier bill links to a Dispatch order, on top of 20261104010000's (a) a supplier ref saved for the order and
--- (b) our job number:
+-- B4 follow-up (CIO decisions 3 Nov 2026 09:44Z and 10:26Z, under the owner's authority; DSP-05 extended): two
+-- more ways a supplier bill links to a Dispatch order, on top of 20261104010000's (a) a supplier ref saved for the
+-- order and (b) our job number:
 --   (c) po_number: our own PO number on the bill (its number, reference or lines) or on the supplier's PDF of the
 --       bill when we hold its text. Purchase orders only: a Dispatch v2 order email has no order number. Read the
 --       way bill_prematch.ts reads a PO named on a bill: the PO number as whole words ("PO-298035", "PO 298035"),
 --       or its letters and digits with up to three of space, #, :, . or - between ("PO298035", "PO#298035"); never
 --       the digits alone; a PO number shorter than 5 characters or without a digit is never read.
---   (d) site_address: the job's site address on the supplier's PDF of the bill, keyed as the context placer keys
---       an address (context_address_key on the job's site address, context_address_mentions on the PDF text, typed
---       street addresses only), when it matches exactly one open order of that supplier.
+--   (d) site_address: the job's site address in the bill's own number, reference or lines, or on the supplier's
+--       PDF of the bill, keyed as the context placer keys an address (context_address_key on the job's site
+--       address, context_address_mentions on the text, typed street addresses only), when it matches exactly one
+--       open order of that supplier (an order in v_dispatch_orders: sent, or a purchase order not draft or
+--       cancelled).
 -- Not allowed (decided): the same supplier and the same amount alone.
 --
--- "The supplier's PDF of the bill": a PDF that came in by email (context_email_attachments, its email inbound,
--- never one we sent or sent each other), whose file name and text both carry the bill's number (its longest run
--- of 5 or more digits, leading zeros dropped), and whose text names the bill's supplier (the supplier name key,
--- whole words), with text saved by the document text reader (context_document_texts, text layer) or the vision
--- reader (context_document_vision_reads). On 3 Nov 2026 the only such PDF for a bill on a Dispatch order
--- (Metroll 1059031) is a scan with no text; 1496 of the 2315 read PDFs are ones we sent, so those never count.
+-- "The supplier's PDF of the bill": a PDF that came in by email from that supplier (context_email_attachments:
+-- its email inbound, never one we sent or sent each other, and its sender's address carrying a word of 5 or more
+-- letters of the supplier's name, as perth.metroll.com.au does), whose file name and text both carry the bill's
+-- number (its longest run of 5 or more digits, leading zeros dropped), and whose text names the bill's supplier
+-- (the supplier name key, whole words). Its text is what our document readers already extracted: the text layer
+-- (context_document_texts) or, for a scan, the vision read (context_document_vision_reads), both written as
+-- document.text_extracted events. A scan neither reader could read has no text, and its bill waits. On 3 Nov 2026
+-- the only such PDF for a bill on a Dispatch order (Metroll 1059031) is a scan neither reader could read; 1496 of
+-- the 2315 read PDFs are ones we sent, so those never count. The suppliers table's email is not used: it is not
+-- the supplier's address for every supplier.
 --
 -- Every link still names one order: a bill naming two orders, by any rule, links to neither. An order's own
 -- number (a saved ref or a PO number) picks its order when nothing else on the bill points at another job; two
@@ -40,7 +46,7 @@ DO $guard$
 DECLARE
   v text := md5(pg_get_viewdef('public.v_dispatch_order_bills'::regclass, true));
 BEGIN
-  IF v NOT IN ('b383b75b2c114c37758060a5e5493f3f', 'e55fe723cb6efdfd96c4e06ebb026f2f') THEN
+  IF v NOT IN ('b383b75b2c114c37758060a5e5493f3f', '4bb5ce8ad2c5a57cf3d34df0e3c8bfd6') THEN
     RAISE EXCEPTION 'v_dispatch_order_bills is not the 20261104010000 definition (md5 %); refusing', v;
   END IF;
 END $guard$;
@@ -109,7 +115,8 @@ WITH orders AS MATERIALIZED (
 ), pdf_docs AS MATERIALIZED (
   -- PDFs that came in by email and that we hold text for, keyed by each run of 5 or more digits in the file name
   -- (leading zeros dropped). A PDF we sent (our quote, order or invoice) is never a supplier's.
-  SELECT d.event_id, ltrim(k.m[1], '0') AS doc_key
+  SELECT d.event_id, ltrim(k.m[1], '0') AS doc_key,
+         regexp_replace(lower(coalesce(m.payload ->> 'from', m.payload ->> 'from_email', '')), '[^a-z0-9]+', '', 'g') AS sender
     FROM (SELECT t.source_id, t.event_id FROM public.context_document_texts t
            WHERE t.source_kind = 'email_attachment' AND t.outcome = 'saved' AND t.event_id IS NOT NULL
           UNION
@@ -124,8 +131,14 @@ WITH orders AS MATERIALIZED (
     FROM supplier_pairs sp
     CROSS JOIN LATERAL unnest(ARRAY[sp.contact_key, sp.name_key, sp.record_key]) k(key)
    WHERE length(k.key) >= 3
+), supplier_words AS MATERIALIZED (
+  -- The same names' words of 5 or more letters, which the supplier's own email address carries.
+  SELECT DISTINCT n.xero_invoice_id, lower(w.word) AS word
+    FROM supplier_names n
+    CROSS JOIN LATERAL regexp_split_to_table(n.name_words, ' ') w(word)
+   WHERE length(w.word) >= 5 AND w.word ~ '^[A-Z]+$'
 ), pdf_found AS MATERIALIZED (
-  -- Each such PDF of a paired bill: its file name carries the bill's key and so does its text.
+  -- Each such PDF of a paired bill sent by that supplier: its file name carries the bill's key and so does its text.
   SELECT t.xero_invoice_id, t.event_id, t.doc_text,
          ' ' || btrim(regexp_replace(t.doc_text, '[^A-Z0-9]+', ' ', 'g')) || ' ' AS doc_words
     FROM (
@@ -135,6 +148,8 @@ WITH orders AS MATERIALIZED (
         JOIN public.business_events e ON e.id = pd.event_id
        WHERE bt.bill_key IS NOT NULL
          AND (e.payload ->> 'text') ~ ('(?<![0-9])0*' || bt.bill_key || '(?![0-9])')
+         AND EXISTS (SELECT 1 FROM supplier_words w
+                      WHERE w.xero_invoice_id = bt.xero_invoice_id AND position(w.word IN pd.sender) > 0)
     ) t
 ), pdf_texts AS MATERIALIZED (
   -- The supplier's PDF of each paired bill: one of those whose text names the bill's supplier.
@@ -145,6 +160,13 @@ WITH orders AS MATERIALIZED (
                   WHERE n.xero_invoice_id = f.xero_invoice_id
                     AND position(' ' || n.name_words || ' ' IN f.doc_words) > 0)
    GROUP BY f.xero_invoice_id
+), bill_sites AS MATERIALIZED (
+  -- (d) every typed street address in the bill's own number, reference and lines, keyed as the context placer keys it.
+  SELECT bt.xero_invoice_id, array_agg(DISTINCT m.address_key) AS site_keys
+    FROM bill_texts bt
+    CROSS JOIN LATERAL public.context_address_mentions(bt.bill_text) m
+   WHERE m.typed AND m.address_key IS NOT NULL
+   GROUP BY bt.xero_invoice_id
 ), pdf_sites AS MATERIALIZED (
   -- (d) every typed street address on the bill's PDF, keyed as the context placer keys it.
   SELECT p.xero_invoice_id, array_agg(DISTINCT m.address_key) AS site_keys
@@ -153,9 +175,10 @@ WITH orders AS MATERIALIZED (
    WHERE m.typed AND m.address_key IS NOT NULL
    GROUP BY p.xero_invoice_id
 ), pairs AS (
-  SELECT sp.*, bt.bill_text, bt.bill_words, pt.pdf_text, pt.pdf_words, ps.site_keys
+  SELECT sp.*, bt.bill_text, bt.bill_words, bs.site_keys AS bill_site_keys, pt.pdf_text, pt.pdf_words, ps.site_keys
     FROM supplier_pairs sp
     JOIN bill_texts bt ON bt.xero_invoice_id = sp.xero_invoice_id
+    LEFT JOIN bill_sites bs ON bs.xero_invoice_id = sp.xero_invoice_id
     LEFT JOIN pdf_texts pt ON pt.xero_invoice_id = sp.xero_invoice_id
     LEFT JOIN pdf_sites ps ON ps.xero_invoice_id = sp.xero_invoice_id
 ), named AS (
@@ -169,6 +192,7 @@ WITH orders AS MATERIALIZED (
          coalesce(p.po_words IS NOT NULL AND p.pdf_text IS NOT NULL AND (position(p.po_words IN p.pdf_words) > 0
                                       OR (p.po_pattern IS NOT NULL AND p.pdf_text ~ p.po_pattern)), false) AS po_on_pdf,
          -- Every rule test is true or false, never unknown: an unknown would let a disagreeing bill through.
+         coalesce(p.site_key IS NOT NULL AND p.site_key = ANY (p.bill_site_keys), false) AS site_on_bill,
          coalesce(p.site_key IS NOT NULL AND p.site_key = ANY (p.site_keys), false) AS site_on_pdf
     FROM pairs p
     LEFT JOIN LATERAL (
@@ -186,9 +210,9 @@ WITH orders AS MATERIALIZED (
 ), hits AS (
   SELECT n.*,
          (n.matched_ref IS NOT NULL OR n.po_on_bill OR n.po_on_pdf) AS picks,
-         (n.names_job OR n.site_on_pdf) AS places
+         (n.names_job OR n.site_on_bill OR n.site_on_pdf) AS places
     FROM named n
-   WHERE n.matched_ref IS NOT NULL OR n.names_job OR n.po_on_bill OR n.po_on_pdf OR n.site_on_pdf
+   WHERE n.matched_ref IS NOT NULL OR n.names_job OR n.po_on_bill OR n.po_on_pdf OR n.site_on_bill OR n.site_on_pdf
 ), per_bill AS (
   SELECT h.xero_invoice_id,
          count(*) AS orders_named,
@@ -230,7 +254,7 @@ SELECT j.order_kind,
        concat_ws('+', CASE WHEN j.matched_ref IS NOT NULL THEN 'supplier_ref' END,
                       CASE WHEN j.names_job THEN 'job_number' END,
                       CASE WHEN j.po_on_bill OR j.po_on_pdf THEN 'po_number' END,
-                      CASE WHEN j.site_on_pdf THEN 'site_address' END) AS rule,
+                      CASE WHEN j.site_on_bill OR j.site_on_pdf THEN 'site_address' END) AS rule,
        j.matched_ref,
        j.ref_saved_via,
        CASE WHEN j.names_job THEN j.job_number END AS matched_job_number,
@@ -238,18 +262,18 @@ SELECT j.order_kind,
        j.not_linked_reason,
        j.orders_named::integer AS orders_named,
        CASE WHEN j.po_on_bill OR j.po_on_pdf THEN j.order_label END AS matched_po_number,
-       CASE WHEN j.site_on_pdf THEN j.site_key END AS matched_site_address,
-       concat_ws('+', CASE WHEN j.matched_ref IS NOT NULL OR j.names_job OR j.po_on_bill THEN 'bill' END,
+       CASE WHEN j.site_on_bill OR j.site_on_pdf THEN j.site_key END AS matched_site_address,
+       concat_ws('+', CASE WHEN j.matched_ref IS NOT NULL OR j.names_job OR j.po_on_bill OR j.site_on_bill THEN 'bill' END,
                       CASE WHEN j.po_on_pdf OR j.site_on_pdf THEN 'supplier_pdf' END) AS matched_in
   FROM judged j;
 COMMENT ON VIEW public.v_dispatch_order_bills IS
-  'B4 20261104010000, rules (c) and (d) 20261104040000: each live supplier bill (ACCPAY, AUTHORISED or PAID) of a Dispatch order''s supplier that carries, for that order, (a) a supplier ref saved for it, (b) its job number, (c) its PO number (bill or supplier PDF) or (d) its job''s site address on the supplier PDF (context_address_key). rule lists what matched (supplier_ref, job_number, po_number, site_address, joined by +). linked: the bill names this order only (an order''s own number picks it when the job agrees); otherwise not_linked_reason (several_order_numbers, other_order_ref, job_disagrees, several_jobs_named, several_orders_on_job). Never same supplier and amount alone. Linked by rule, never by a person; places no bill and adds no money. Read only; service role only.';
+  'B4 20261104010000, rules (c) and (d) 20261104040000: each live supplier bill (ACCPAY, AUTHORISED or PAID) of a Dispatch order''s supplier that carries, for that order, (a) a supplier ref saved for it, (b) its job number, (c) its PO number (bill or supplier PDF) or (d) its job''s site address on the bill or the supplier PDF (context_address_key). rule lists what matched (supplier_ref, job_number, po_number, site_address, joined by +). linked: the bill names this order only (an order''s own number picks it when the job agrees); otherwise not_linked_reason (several_order_numbers, other_order_ref, job_disagrees, several_jobs_named, several_orders_on_job). Never same supplier and amount alone. Linked by rule, never by a person; places no bill and adds no money. Read only; service role only.';
 
 DO $after$
 DECLARE
   v text := md5(pg_get_viewdef('public.v_dispatch_order_bills'::regclass, true));
 BEGIN
-  IF v <> 'e55fe723cb6efdfd96c4e06ebb026f2f' THEN
+  IF v <> '4bb5ce8ad2c5a57cf3d34df0e3c8bfd6' THEN
     RAISE EXCEPTION 'v_dispatch_order_bills after the change is not the reviewed definition (md5 %)', v;
   END IF;
 END $after$;

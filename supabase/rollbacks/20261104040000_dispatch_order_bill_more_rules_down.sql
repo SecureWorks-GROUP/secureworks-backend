@@ -240,7 +240,7 @@ BEGIN
     RAISE NOTICE 'v_dispatch_order_bills is already the 20261104010000 definition';
     RETURN;
   END IF;
-  IF v <> 'e55fe723cb6efdfd96c4e06ebb026f2f' THEN
+  IF v <> '4bb5ce8ad2c5a57cf3d34df0e3c8bfd6' THEN
     RAISE EXCEPTION 'v_dispatch_order_bills is not the 20261104040000 definition (md5 %); refusing', v;
   END IF;
   DROP VIEW public.v_dispatch_order_bills;
