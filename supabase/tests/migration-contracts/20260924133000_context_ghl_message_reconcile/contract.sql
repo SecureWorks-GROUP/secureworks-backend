@@ -258,6 +258,8 @@ FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure \gset
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 \ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
 \endif
+-- B4 rules (c) and (d) (20261104040000) read the email reader's attachments: they come off first.
+\ir ../20261104040000_dispatch_order_bill_more_rules/roll_back_if_live.sql
 \ir ../../../rollbacks/20261002150000_context_email_reader_down.sql
 \ir ../../../rollbacks/20260924210000_context_ghl_retry_status_down.sql
 -- Likewise T2 (20261002100000) adds its own job to the lane list C1d pins.

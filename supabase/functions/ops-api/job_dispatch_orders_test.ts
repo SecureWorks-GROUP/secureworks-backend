@@ -129,3 +129,25 @@ Deno.test("links that cannot be read are unknown, never not billed, and the rest
     assertEquals(body.job.profit_ex, 4727.27);
   }
 });
+
+Deno.test("a purchase order billed under our PO number on the supplier's PDF reads billed, with the rule and where it was found", async () => {
+  const PO = "b4100000-0000-4000-8000-000000000022";
+  const body = await dispatchOrders(job({
+    v_dispatch_orders: [{
+      order_kind: "purchase_order", order_id: PO, job_id: JOB, supplier_name: "R&R Fencing", order_status: "sent",
+      ordered_at: "2026-09-10T01:00:00Z", order_label: "PO-302382",
+    }],
+    v_dispatch_order_bills: [{
+      ...cmiBill(), order_id: PO, xero_invoice_id: "bill-rr", invoice_number: "INV-87293", bill_contact_name: "R&R FENCING",
+      bill_sub_total: 1570.73, rule: "po_number", matched_ref: null, matched_po_number: "PO-302382", matched_in: "supplier_pdf",
+    }],
+    v_job_cost_events: [{ job_id: JOB, source: "supplier_bill", document_id: "bill-rr", is_actual: true, amount_ex: 1570.73 }],
+  }));
+  const d = body.dispatch_orders;
+  assertEquals([d.ordered, d.billed, d.not_billed], [1, 1, 0]);
+  const [po] = d.orders;
+  assertEquals([po.order_kind, po.order_label, po.state], ["purchase_order", "PO-302382", "billed"]);
+  assertEquals(po.bills.map((b: any) => [b.invoice_number, b.rule, b.matched_po_number, b.matched_in, b.cost_on_this_job]), [
+    ["INV-87293", "po_number", "PO-302382", "supplier_pdf", true],
+  ]);
+});
