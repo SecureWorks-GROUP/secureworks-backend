@@ -20,6 +20,13 @@
 --   CN8  DRAFT, allocated to BILL-A          (never placed)
 --   CN9  no status sent, allocated to BILL-A (never placed)
 BEGIN;
+-- 20261104063000 (A4 V8) moved v_job_cost_events and cfo_bill_cost_outcomes_scoped on to production's
+-- definitions and then its own: unwind it first, back to the stack's own definitions.
+SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass))='537d32fdd676ac53fb7625b2e6d2f286' AS test_has_bill_line_job_number \gset
+\if :test_has_bill_line_job_number
+\ir ../../../rollbacks/20261104063000_job_cost_bill_line_job_number_down.sql
+\ir ../20261104063000_job_cost_bill_line_job_number/restore-preimage.sql
+\endif
 SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass))='92d9a2923438e6a1da601e2179ae34e3' AS test_has_credit_labour_composition \gset
 \if :test_has_credit_labour_composition
 \ir ../../../rollbacks/20261031020000_job_credit_labour_composition_down.sql
