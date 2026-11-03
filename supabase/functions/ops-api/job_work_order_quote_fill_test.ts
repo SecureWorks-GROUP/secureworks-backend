@@ -1632,3 +1632,55 @@ Deno.test("D1-F3b once the read works, the chain's named revision A fills, never
   assertEquals([outcome.filled, outcome.scope_revision_id], [true, REV_ACCEPTED]);
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED, "A's labour figure, not B's 175");
 });
+
+// Scope B4 (owner, 3 Nov 2026): the patio crew work order is the accepted
+// labour, trades x days x day rate. An older patio quote (SWP-261640 shape:
+// no labour row, labourCostEstimate 0) kept it only in the sealed scope.
+function olderPatioQuoteDb() {
+  const db = baseDb();
+  db.tables.jobs[0].type = "patio";
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    line_items: [{ category: "steel", description: "Posts 90x90x2", quantity: 4, cost_price: 582.2, total_cost: 582.2 }],
+    labourCostEstimate: 0,
+  });
+  db.tables.scope_revisions[0].scope_canonical_text = JSON.stringify({
+    pricing: { labour: { days: "1.5", sell: "2640", trades: "2", dayRate: "360" } },
+  });
+  return db;
+}
+
+Deno.test("older patio quote: the work order takes trades x days x day rate from the sealed scope and waits for Shaun", async () => {
+  const db = olderPatioQuoteDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assertEquals(r.issued, false, "never issued automatically");
+  assertEquals(calls, []);
+  assertEquals(wo.status, "draft");
+  assertEquals(wo.agreed_labour_ex, 1080);
+  assertEquals(wo.quote_filled_at, undefined, "not stamped as the quote's own");
+  const line = wo.scope_items.find((i: any) => i.line_key === "labour:scope");
+  assertEquals(
+    [line.description, line.total, line.counted, line.needs_review],
+    ["Labour: 2 trades x 1.5 days at $360/day", 1080, true, true],
+  );
+  assert(line.flags.includes("labour_from_scope_config"));
+});
+
+Deno.test("a patio quote with its own labour row ignores the scope figure", async () => {
+  const db = olderPatioQuoteDb();
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    line_items: [{ category: "labour", unit: "hrs", quantity: 24, cost_price: 45, description: "Labour: 2 trades x 1.5 days" }],
+    labourCostEstimate: 1080,
+  });
+  db.tables.scope_revisions[0].scope_canonical_text = JSON.stringify({
+    pricing: { labour: { days: "9", trades: "9", dayRate: "999" } },
+  });
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.filled, true);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 1080);
+  assert(wo.quote_filled_at, "the quote's own labour is stamped as before");
+  assert(!wo.scope_items.some((i: any) => i.line_key === "labour:scope"));
+});

@@ -26,6 +26,7 @@ import { acceptedRevisionForOrders } from "../_shared/expected_costs/accepted_qu
 import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
+  QUOTE_LINE_FLAGS,
   QUOTE_RESULT_FLAGS,
   type QuoteCostTable,
   type QuoteWorkOrderLines,
@@ -165,7 +166,18 @@ async function readJobForQuote(client: any, jobId: string) {
 }
 
 const REVISION_COLUMNS =
-  "id, revision_number, status, frozen_at, pricing_canonical_text";
+  "id, revision_number, status, frozen_at, pricing_canonical_text, scope_canonical_text";
+
+/** The sealed scope's own patio labour {trades, days, dayRate}, or null. */
+function scopeLabourOf(scopeText: unknown): unknown {
+  if (typeof scopeText !== "string" || !scopeText) return null;
+  try {
+    const scope = JSON.parse(scopeText);
+    return scope?.pricing?.labour ?? null;
+  } catch {
+    return null;
+  }
+}
 
 async function readRevisions(
   client: any,
@@ -201,11 +213,13 @@ async function readRevisions(
 // draft is not filled: the office fills it by hand.
 async function readAcceptedQuote(client: any, job: any): Promise<{
   pricing: Record<string, any> | null;
+  scopeLabour?: unknown;
   quote: JobQuoteWorkOrderLines["quote"];
 }> {
   const flags: string[] = [];
   const none = () => ({
     pricing: null,
+    scopeLabour: null,
     quote: {
       source: null,
       scope_revision_id: null,
@@ -221,6 +235,7 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
     }
     return {
       pricing,
+      scopeLabour: scopeLabourOf(revision.scope_canonical_text),
       quote: {
         source,
         scope_revision_id: String(revision.id),
@@ -338,7 +353,7 @@ async function linesForJob(
   client: any,
   job: any,
 ): Promise<JobQuoteWorkOrderLines> {
-  const { pricing, quote } = await readAcceptedQuote(client, job);
+  const { pricing, scopeLabour, quote } = await readAcceptedQuote(client, job);
   // No accepted quote, nothing to price: the cost table is not read.
   const table = pricing && String(job.type || "") === "fencing"
     ? await readFenceLabourCostTable(
@@ -352,6 +367,7 @@ async function linesForJob(
     pricing,
     costTable: table.rates,
     ratesChangedSinceQuote: table.changedSinceQuote,
+    scopeLabour,
   });
   // The quote's and the result's review flags ride on every line, so they
   // stay on the stored draft for the approver (scope_items past description,
@@ -456,7 +472,13 @@ export async function fillJobWorkOrderDraftFromQuote(
   }
   // The database refuses this stamp on a draft edited by hand (its
   // special instructions, say), so such a draft is filled without it.
-  if (!draft.hand_edited_at) {
+  // Labour taken from the scope's trades x days x day rate (an older patio
+  // quote with no labour in its pricing) is never stamped either, so it is
+  // never issued automatically: the approver (Shaun) checks it first.
+  const labourFromScope = result.lines.some((l) =>
+    l.flags.includes(QUOTE_LINE_FLAGS.labourFromScopeConfig)
+  );
+  if (!draft.hand_edited_at && !labourFromScope) {
     patch.quote_filled_at = new Date().toISOString();
   }
   // The revision the lines came from, on the row itself (Dispatch S6, R7;
