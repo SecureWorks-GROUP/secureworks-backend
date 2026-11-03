@@ -36,10 +36,12 @@
 BEGIN;
 -- 20261104070000 to 20261104072000 (A6 cost rules) sit on 20261104063000 (A4 V8): unwind them first, back to the
 -- A4 V8 definition, then A4 V8 below.
--- 20261104090000 and 20261104091000 (A3 division) sit on the A6 cost rules: unwind them first (each is a no-op
--- when it is not applied).
+-- 20261104090000 and 20261104091000 (A3 division) sit on the A6 cost rules: unwind them first.
+SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='abdc05a69d139d79aebbb8a3cebfae03' AS test_has_a3_division \gset
+\if :test_has_a3_division
 \ir ../../../rollbacks/20261104091000_job_revenue_credit_division_down.sql
 \ir ../../../rollbacks/20261104090000_job_cost_crew_and_placement_division_down.sql
+\endif
 SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='366599ce55b0e0430d45ee9e6e04c315' AS test_has_a6_cost_rules \gset
 \if :test_has_a6_cost_rules
 \ir ../../../rollbacks/20261104072000_job_cost_credit_at_note_ex_gst_down.sql
