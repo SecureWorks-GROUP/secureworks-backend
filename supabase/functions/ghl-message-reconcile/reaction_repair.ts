@@ -40,8 +40,8 @@ import {
 } from "./reconcile.ts";
 
 export const REPAIR = {
-  /** How far back `since` may reach (the census's own limit). */
-  maxAgeMs: 40 * 86_400_000,
+  /** How far back `since` may reach: July to October and a margin (the finish line's period). */
+  maxAgeMs: 140 * 86_400_000,
   maxConversations: 50,
   listPageLimit: 50,
   messagePageLimit: 50,

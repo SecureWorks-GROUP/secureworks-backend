@@ -403,7 +403,7 @@ Deno.test("C7 repair: switched off, it reads nothing", async () => {
   assertEquals(ghl.calls, []);
 });
 
-Deno.test("C7 repair: the request is refused when since is missing, in the future or older than 40 days, or the conversation list is malformed", () => {
+Deno.test("C7 repair: the request is refused when since is missing, in the future or older than 140 days, or the conversation list is malformed", () => {
   const ok = parseRepairRequest({ since: "2026-10-26T16:00:00Z" }, NOW);
   assert(ok.ok);
   assertEquals(ok.request.dryRun, true, "dry run unless exactly false");
@@ -417,7 +417,7 @@ Deno.test("C7 repair: the request is refused when since is missing, in the futur
     [{}, "since_required"],
     [{ since: "not a time" }, "since_required"],
     [{ since: "2026-11-04T00:00:00Z" }, "since_in_future"],
-    [{ since: "2026-09-20T00:00:00Z" }, "since_too_old"],
+    [{ since: "2026-06-01T00:00:00Z" }, "since_too_old"],
     [
       { since: "2026-10-26T16:00:00Z", conversations: [] },
       "conversations_invalid",

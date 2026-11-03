@@ -170,7 +170,7 @@ Reactions skipped before this change are saved by the reconciler's
 ```
 POST /functions/v1/ghl-message-reconcile   (service key)
 {"action": "reaction_repair",
- "since": "2026-09-24T00:00:00Z",          # at most 40 days back
+ "since": "2026-07-01T00:00:00Z",          # at most 140 days back
  "conversations": [{"contact_id": "…", "conversation_id": "…"}],  # optional, up to 50
  "next": "<cursor from the previous answer>",                     # optional, sweep only
  "dry_run": false}                                                # omit for a dry run

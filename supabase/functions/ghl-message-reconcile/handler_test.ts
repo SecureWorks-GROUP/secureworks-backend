@@ -438,7 +438,7 @@ Deno.test("C7 reaction repair door: a malformed request is refused with its code
   const old = await handleReconcile(
     post({ Authorization: `Bearer ${SERVICE}` }, {
       action: "reaction_repair",
-      since: "2026-09-01T00:00:00Z",
+      since: "2026-06-01T00:00:00Z",
     }),
     deps,
   );
