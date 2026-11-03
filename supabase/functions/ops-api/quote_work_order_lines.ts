@@ -124,6 +124,9 @@ export const QUOTE_LINE_FLAGS = {
   outsideQuoteLabour: "outside_quote_labour",
   labourSplitUnverified: "labour_split_unverified",
   labourUnverified: "labour_unverified",
+  /** Older patio quote: no labour row or figure in its pricing, so the
+   *  labour is the sealed scope's own trades x days x day rate. */
+  labourFromScopeConfig: "labour_from_scope_config",
 } as const;
 
 export const QUOTE_RESULT_FLAGS = {
@@ -532,6 +535,33 @@ function extraLines(items: Record<string, any>[]): QuoteWorkOrderLine[] {
 
 // ── The builder ─────────────────────────────────────────────────────────────
 
+/** One labour line from a patio scope's {trades, days, dayRate}; null unless
+ *  all three are positive numbers. It always asks the approver to look. */
+export function patioScopeLabourLine(
+  scopeLabour: unknown,
+): QuoteWorkOrderLine | null {
+  const l = asObject(scopeLabour);
+  const trades = positive(l.trades);
+  const days = positive(l.days);
+  const dayRate = positive(l.dayRate ?? l.day_rate);
+  if (trades === null || days === null || dayRate === null) return null;
+  return {
+    line_key: "labour:scope",
+    source: "quote",
+    basis: "quote_labour_line",
+    description: `Labour: ${trades} trades x ${days} days at $${dayRate}/day`,
+    qty: round2(trades * days),
+    unit: "trade days",
+    hours: null,
+    rate: dayRate,
+    rate_unit: "day",
+    total: round2(trades * days * dayRate),
+    counted: true,
+    flags: [QUOTE_LINE_FLAGS.labourFromScopeConfig],
+    needs_review: true,
+  };
+}
+
 export function buildQuoteWorkOrderLines(input: {
   jobType: unknown;
   pricing: unknown;
@@ -540,13 +570,16 @@ export function buildQuoteWorkOrderLines(input: {
    *  change time is unknown): lines priced from them cannot reproduce the
    *  quote. */
   ratesChangedSinceQuote?: readonly string[];
+  /** The sealed revision's own patio labour (scope pricing.labour). Used
+   *  only when the quote's pricing has no labour row and no labour figure. */
+  scopeLabour?: unknown;
 }): QuoteWorkOrderLines {
   const jobType = jobTypeOf(input.jobType);
   const pricing = asObject(input.pricing);
   const items = lineItems(pricing);
   const changed = new Set(input.ratesChangedSinceQuote ?? []);
   const flags: string[] = [];
-  const quoteLabour = positive(pricing.labourCostEstimate) ??
+  let quoteLabour = positive(pricing.labourCostEstimate) ??
     positive(asObject(pricing.internal).labour);
 
   // The base lines are the ones the quote's labour figure is built from:
@@ -573,6 +606,16 @@ export function buildQuoteWorkOrderLines(input: {
       ),
     );
     base = extras.filter((l) => labourRowKeys.has(l.line_key));
+    // Owner, 3 Nov 2026: the patio crew work order is the accepted labour,
+    // trades x days x day rate. Older patio quotes kept it only in the scope.
+    const fromScope = base.length === 0 && quoteLabour === null
+      ? patioScopeLabourLine(input.scopeLabour)
+      : null;
+    if (fromScope) {
+      extras.push(fromScope);
+      base = [fromScope];
+      quoteLabour = fromScope.total;
+    }
   }
   const extraLabour = extras.filter((l) =>
     l.basis === "quote_labour_line" && !base.includes(l)
