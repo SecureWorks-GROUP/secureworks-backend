@@ -258,6 +258,8 @@ FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure \gset
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 \ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
 \endif
+-- B4 rules (e) and (f) (20261104233000) replace that view again: they come off before (c) and (d).
+\ir ../20261104233000_dispatch_order_bill_saved_numbers/roll_back_if_live.sql
 -- B4 rules (c) and (d) (20261104040000) read the email reader's attachments: they come off first.
 \ir ../20261104040000_dispatch_order_bill_more_rules/roll_back_if_live.sql
 \ir ../../../rollbacks/20261002150000_context_email_reader_down.sql

@@ -151,3 +151,34 @@ Deno.test("a purchase order billed under our PO number on the supplier's PDF rea
     ["INV-87293", "po_number", "PO-302382", "supplier_pdf", true],
   ]);
 });
+
+Deno.test("rules (e) and (f): a bill tied by our own records reads billed, with its rule and where it was found", async () => {
+  const PO = "b4200000-0000-4000-8000-000000000021";
+  const body = await dispatchOrders(job({
+    v_dispatch_orders: [ORDERS[1], {
+      order_kind: "purchase_order", order_id: PO, job_id: JOB, supplier_name: "R&R Fencing", order_status: "confirmed",
+      ordered_at: "2026-09-10T23:34:54Z", order_label: "PO-294460",
+    }],
+    v_dispatch_order_bills: [
+      {
+        ...cmiBill(), order_id: PO, xero_invoice_id: "bill-rr", invoice_number: "INV-86846", bill_contact_name: "R&R FENCING",
+        bill_sub_total: 1058, rule: "bill_number", matched_ref: null, matched_in: "order",
+      },
+      {
+        ...cmiBill(), order_id: METROLL_ORDER, xero_invoice_id: "bill-met", invoice_number: "1059031",
+        bill_contact_name: "Metroll Perth", bill_sub_total: 2442.73, rule: "job_number", matched_ref: null,
+        matched_job_number: "SWP-261309", matched_in: "pdf_email",
+      },
+    ],
+    v_job_cost_events: [
+      { job_id: JOB, source: "supplier_bill", document_id: "bill-rr", is_actual: true, amount_ex: 1058 },
+      { job_id: JOB, source: "supplier_bill", document_id: "bill-met", is_actual: true, amount_ex: 2442.73 },
+    ],
+  }));
+  const d = body.dispatch_orders;
+  assertEquals([d.ordered, d.billed, d.not_billed], [2, 2, 0]);
+  assertEquals(d.orders.flatMap((o: any) => o.bills.map((b: any) => [o.order_label, b.invoice_number, b.rule, b.matched_job_number, b.matched_in, b.cost_on_this_job])), [
+    ["Material Order Ref SWP-261309", "1059031", "job_number", "SWP-261309", "pdf_email", true],
+    ["PO-294460", "INV-86846", "bill_number", null, "order", true],
+  ]);
+});

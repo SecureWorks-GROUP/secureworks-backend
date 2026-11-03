@@ -201,7 +201,7 @@ figure; `holding_jobs` reports it on its own so the parked cost stays visible.
 
 `job_profit` answers `dispatch_orders`: the job's Dispatch orders and the supplier bills linked to each, read
 from `v_dispatch_orders` and `v_dispatch_order_bills` (migration `20261104010000`, service role only; code
-`job_dispatch_orders.ts`; rules (c) and (d) from migration `20261104040000`). An order is a Dispatch v2
+`job_dispatch_orders.ts`; rules (c) and (d) from migration `20261104040000`, (e) and (f) from `20261104233000`). An order is a Dispatch v2
 supplier order email that went out (`sent` or `send_unknown`) or a purchase order that is not a draft or
 cancelled.
 
@@ -225,12 +225,23 @@ one that names two orders links neither and is listed under that order's `unclea
 an order's own number (saved ref or PO number) picks its order when nothing else on the bill points at another
 job.
 
+Two more, from migration `20261104233000` (3 Nov 2026), for bills that carry nothing of ours but that our own records
+tie to the order: `bill_number` (purchase orders only: the bill's own number written on the purchase order's
+reference or notes, where the office records the supplier's quote or invoice number, as `R&R INV-86846` or
+`Lysaght quote KEW/231967 received`; read as written on the bill, its letters, then 5 or more digits, then at most
+one letter, so `INV-86846` never matches `INV-86846a`; a number of digits alone needs 6 or more and is never read
+inside an amount; it picks its order like a saved ref) and `job_number` found in `pdf_email` (Dispatch v2 orders
+only: our job number in the subject and body of the emails that carry the supplier's PDF of the bill, the supplier's
+own email from the domain the order went to, or ours, such as a forward to finance@ asking to pay it, never a
+customer's; those words must name exactly one job number; the PDF's own text is not needed, so a scan no reader can
+read still links; it places like a job number on the bill).
+
 | Field | Meaning |
 |---|---|
 | `status`, `reason` | `ok`, or `unknown` with a reason when the orders or links cannot be read. Unknown is never "not billed": `ordered`, `billed` and `not_billed` are then null |
 | `ordered`, `billed`, `not_billed` | Counts of orders; billed = at least one bill linked |
 | `orders[]` | `order_kind` (`dispatch_v2_email` or `purchase_order`), `order_id`, `supplier`, `order_label` (the email subject or PO number), `order_status`, `ordered_at`, `state` (`billed` or `not_billed`), `bills[]`, `unclear_bills[]` |
-| `bills[]` | `invoice_number`, `supplier`, `bill_date`, `bill_status`, `bill_sub_total_ex` (the bill's own amount, ex GST), `rule` (every rule that matched, joined by `+`, in the order `supplier_ref`, `job_number`, `po_number`, `site_address`), `matched_ref`, `matched_job_number`, `matched_po_number`, `matched_site_address` (the address key), `matched_in` (`bill`, `supplier_pdf` or `bill+supplier_pdf`), `cost_on_this_job` (Job Profit counts the bill on this job) |
+| `bills[]` | `invoice_number`, `supplier`, `bill_date`, `bill_status`, `bill_sub_total_ex` (the bill's own amount, ex GST), `rule` (every rule that matched, joined by `+`, in the order `supplier_ref`, `job_number`, `po_number`, `site_address`, `bill_number`), `matched_ref`, `matched_job_number`, `matched_po_number`, `matched_site_address` (the address key), `matched_in` (where it was found, joined by `+` in this order: `bill`, `supplier_pdf`, `pdf_email`, `order`), `cost_on_this_job` (Job Profit counts the bill on this job) |
 
 No price goes on an order and a link moves nothing: it places no bill, writes no row, and changes no figure
 in `job`, `cost_events`, `ordered_not_billed_count` or any rollup. `ordered_not_billed_count` still counts
