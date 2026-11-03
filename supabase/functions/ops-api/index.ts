@@ -757,6 +757,7 @@ import {
   type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
+import { loadWorkOrderClaimCheck, withClaimWarnings } from './work_order_claim_check.ts'
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
   crewWorkOrderCreateRefusal,
@@ -10872,6 +10873,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           review_state: reviewStateFromOfficeStatus(line.office_review_status),
         }))
 
+        // V16: office-only warning on a line claiming "Work order $X" when the
+        // job's live labour differs from the largest claim or 2+ leads claimed.
+        // Never blocks; a failed read is said on the claim line, never clean.
+        if (_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          const claimRead = await loadWorkOrderClaimCheck(client, tilJobId)
+          return json({
+            lines: withClaimWarnings(enrichedLines, claimRead),
+            work_order_claim_check: claimRead.check,
+            work_order_claim_check_error: claimRead.error,
+          })
+        }
         return json({ lines: enrichedLines })
       }
 
