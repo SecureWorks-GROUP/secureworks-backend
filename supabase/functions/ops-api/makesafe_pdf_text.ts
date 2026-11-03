@@ -112,8 +112,12 @@ async function inflate(
     if (typeof DS !== "function") return null;
     const stream = new DS(format);
     const writer = stream.writable.getWriter();
-    writer.write(bytes);
-    writer.close();
+    // A corrupt stream rejects the write and the close as well as the read.
+    // Unhandled, those two rejections stop the whole worker (Deno "event loop
+    // error: TypeError: corrupt deflate stream"), after this function has
+    // already returned; the read below reports the failure.
+    writer.write(bytes).catch(() => {});
+    writer.close().catch(() => {});
     const out: Uint8Array[] = [];
     const reader = stream.readable.getReader();
     // Bound the work so a pathological stream can't run away.

@@ -131,6 +131,19 @@ export function liveDeps(deps: HandlerDeps): ReaderDeps {
       }
       return data.run_id;
     },
+    async closeStaleRuns() {
+      // This reader's runs still running after the stale window: a worker
+      // that stopped never closed them (20261104180000). Never throws.
+      try {
+        const { data, error } = await supabase.rpc(
+          "close_stale_context_document_text_runs",
+        );
+        if (error) return { error: "close_stale_failed" };
+        return { closed: Number(data?.closed ?? 0) || 0 };
+      } catch {
+        return { error: "close_stale_threw" };
+      }
+    },
     async dueDocuments(limit) {
       const { data, error } = await supabase.rpc("context_document_text_due", {
         p_limit: limit,
@@ -227,7 +240,7 @@ function logRun(result: RunResult): void {
     console.log(
       `[context-document-text] run=${result.run_id} status=${result.status} error=${
         result.error_code ?? "-"
-      } selected=${c.selected} requested=${c.requested} saved=${c.saved} duplicate=${c.duplicate} live=${c.live_saved} backfill=${c.backfill_saved} no_job=${c.no_job_saved} no_text_layer=${c.no_text_layer} image=${c.image} not_supported=${c.not_supported} no_file=${c.no_file} errors=${c.errors} relisted_jobs=${c.relisted_jobs}`,
+      } selected=${c.selected} requested=${c.requested} saved=${c.saved} duplicate=${c.duplicate} live=${c.live_saved} backfill=${c.backfill_saved} no_job=${c.no_job_saved} no_text_layer=${c.no_text_layer} image=${c.image} not_supported=${c.not_supported} no_file=${c.no_file} errors=${c.errors} relisted_jobs=${c.relisted_jobs} stale_runs_closed=${c.stale_runs_closed}`,
     );
   } else {
     console.log(`[context-document-text] ${result.outcome}`);

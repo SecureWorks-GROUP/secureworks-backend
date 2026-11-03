@@ -36,15 +36,22 @@
 //     words of a supplier bill name job numbers and addresses the ladder would
 //     otherwise follow). It wakes no read and lists no job.
 //   * A request may raise one PDF's size limit (up to request_max_pdf_bytes,
-//     20 MB); pages and characters keep their limits. Before a read above the
-//     5 MB default the reader records an attempt (large_read_started), so a
-//     file that stops the worker backs off and ends failed instead of being
-//     taken again every run.
+//     20 MB); pages and characters keep their limits.
+//
+// A file that stops the worker (20261104180000): before it downloads and reads
+// any PDF the reader records the attempt (read_started), so a file that stops
+// the worker backs off and ends failed:read_started after the usual 5 tries
+// instead of being taken again every run. The writer counts the mark and the
+// read's outcome as one attempt. Each run also closes, as failed:run_stale,
+// any earlier run of this reader still marked running after the stale window
+// (a worker that stopped never closes its own run).
 //
 // Logs and results carry ids, counts and codes only, never words.
 
 export const FLAG = "context_document_text_v1";
 export const ACTOR = "workflow:context-document-text";
+/** The attempt mark recorded before a PDF is downloaded and read. */
+export const READ_STARTED = "read_started";
 
 /** The thresholds the reader takes from context_document_text_policy(). */
 export interface ReaderPolicy {
@@ -158,6 +165,9 @@ export interface ReaderDeps {
     source: string,
   ): Promise<{ id: string; status: string; started_at: string } | null>;
   recordRun(run: Record<string, unknown>): Promise<string>;
+  /** Close this reader's runs still running after the stale window
+   * (close_stale_context_document_text_runs, 20261104180000). */
+  closeStaleRuns(): Promise<{ closed?: number; error?: string }>;
   dueDocuments(limit: number): Promise<DueDocument[]>;
   /** Requested documents due a read (context_document_text_requested_due). */
   requestedDocuments(limit: number): Promise<DueDocument[]>;
@@ -545,6 +555,17 @@ export async function processDocument(
       code: where.code,
     });
   }
+  // A download or read may stop the worker (on 30 Oct 2026 a corrupt PDF did,
+  // every run, before anything was recorded). Record the attempt first: the
+  // document then backs off (15 min, 1 h, 6 h, 24 h) and ends
+  // failed:read_started instead of being taken again every run. The writer
+  // counts this mark and the outcome below as one attempt (20261104180000).
+  const started = await deps.record({
+    ...base,
+    result: "error",
+    code: READ_STARTED,
+  });
+  if (started.error) return { outcome: "record_failed", code: started.error };
   const got = await deps.download(where.bucket, where.path);
   if (!got.ok) {
     if (got.missing) {
@@ -563,18 +584,6 @@ export async function processDocument(
       outcome: "too_large",
       code: "pdf_too_large",
     });
-  }
-  if (got.bytes.byteLength > LIMITS.maxPdfBytes) {
-    // A read above the default limit may stop the worker. Record the attempt
-    // first: a file that does backs off (15 min, 1 h, 6 h, 24 h) and ends
-    // failed:large_read_started instead of being taken again every run.
-    const started = await deps.record({
-      ...base,
-      result: "error",
-      code: "large_read_started",
-      sha256: sha,
-    });
-    if (started.error) return { outcome: "record_failed", code: started.error };
   }
   const pdf = await deps.extract(got.bytes, { maxBytes: limit });
   const text = readableText(pdf);
@@ -646,6 +655,7 @@ export function emptyCounts(): Record<string, number> {
     errors: 0,
     record_failed: 0,
     relisted_jobs: 0,
+    stale_runs_closed: 0,
   };
 }
 
@@ -728,6 +738,9 @@ export async function runDocumentText(deps: ReaderDeps): Promise<RunResult> {
   ) {
     return { outcome: "run_in_progress", run_id: latest.id };
   }
+  // A run whose worker stopped is never closed by it: close every such run
+  // first (failed:run_stale), so each run row ends closed.
+  const stale = await deps.closeStaleRuns();
   const runId = await deps.recordRun({
     source: policy.run_source,
     status: "running",
@@ -737,6 +750,12 @@ export async function runDocumentText(deps: ReaderDeps): Promise<RunResult> {
   const documents: { source_id: string; outcome: string; code?: string }[] = [];
   let status: "succeeded" | "partial" | "failed" = "succeeded";
   let errorCode: string | null = null;
+  if (stale.error) {
+    status = "partial";
+    errorCode = codePart(stale.error);
+  } else {
+    counts.stale_runs_closed = stale.closed ?? 0;
+  }
   try {
     const due = await documentsDue(deps, policy.batch_limit);
     if (due.requestedError) {

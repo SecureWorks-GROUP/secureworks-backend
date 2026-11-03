@@ -272,3 +272,34 @@ Deno.test("a raised size limit reads a PDF over 5 MB, never past 20 MB; the defa
   const capped = await extractPdfText(huge, { maxBytes: 50_000_000 });
   assertEquals(capped.note, "pdf_too_large");
 });
+
+Deno.test("a corrupt Flate stream in a PDF pdf.js cannot open returns pdf_parse_failed and leaves no stray rejection", async () => {
+  // The shape that stopped the document text reader from 30 Oct 2026: no xref (pdf.js indexes
+  // every object, then gives up), so the stream fallback inflates a stream that is not valid
+  // deflate. The write and close of that DecompressionStream reject too; before the fix those
+  // rejections were unhandled and Deno stopped the worker just after this call returned.
+  const junk = new Uint8Array(64).map((_, i) => (i * 37 + 11) & 0xff);
+  junk[0] = 0x78; // a zlib header, then bytes that are not deflate
+  junk[1] = 0x9c;
+  const pdf = concat(
+    enc(`%PDF-1.4\n1 0 obj\n<< /Length ${junk.length} /Filter /FlateDecode >>\nstream\n`),
+    junk,
+    enc("\nendstream\nendobj\n"),
+  );
+  let stray: unknown = null;
+  const onRejection = (e: PromiseRejectionEvent) => {
+    stray = e.reason;
+    e.preventDefault();
+  };
+  globalThis.addEventListener("unhandledrejection", onRejection);
+  try {
+    const r = await extractPdfText(pdf);
+    assertEquals(r.mode, "none");
+    assertEquals(r.note, "pdf_parse_failed");
+    // Let any rejected stream promise surface before judging.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } finally {
+    globalThis.removeEventListener("unhandledrejection", onRejection);
+  }
+  assertEquals(stray, null);
+});
