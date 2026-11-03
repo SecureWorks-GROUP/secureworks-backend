@@ -606,6 +606,13 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/xero-sync/invoice_evidence_place_test.ts
+      # Finish line B3: a builder invoice raised straight in Xero (claim and PO, no
+      # job number) links at arrival only when one job of its trade is left.
+      - name: Test the builder reference invoice link
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/xero-sync/builder_reference_match_test.ts \
+            supabase/functions/xero-sync/match_unlinked_strategy2_test.ts
 
       # The email reader (EM2) and its group history walk (W7): cursor
       # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,
