@@ -179,6 +179,7 @@ Params: `job_id`. Returns the whole tab for one job.
 - `can_suggest` is true for a fencing or patio job with no lines yet.
 - `auto_fill` is true for a fencing job with no lines that was never filled from the scope. The screen then calls `dispatch_v2_suggest_draft` with `auto: true` on its own, once (Shaun, 26 Oct: the scope materials go on the list straight away, no button).
 - `scope_filled` is the job's fill record (`dispatch_v2_scope_fills`), or null. A list cleared by hand is not filled again on its own.
+- `scope_changed` (S08) is null, or the list's scope lines came from an older sealed revision than the one the order follows now (the fill's rule: the accepted revision, else the latest frozen one): `{ "lines_revision_numbers": [1], "revision_id", "revision_number": 4, "can_refill": true, "message" }`. `can_refill` is true when none of those lines went out (no sent order email, no purchase order); the message then says to press Fill from the scope. When one went out, `can_refill` is false and the message says the scope changed since these lines, naming the newer revision, and that the order that went out should be checked against it. A revision that cannot be read is null here, never a guess.
 - A box's `fulfilment` is its open email's, else its newest sent email's, else null (nothing made yet; the screen shows Delivery).
 
 ### dispatch_v2_supplier_search (GET)
@@ -279,7 +280,9 @@ Body: `{ "job_id", "id", "expected_updated_at" }`. Returns `{ "success": true }`
 
 ### dispatch_v2_suggest_draft (POST)
 
-Body: `{ "job_id", "auto"? }`. Fills the draft list from the job's scope. It works only on fencing and patio jobs that have no lines yet.
+Body: `{ "job_id", "auto"? }`. Fills the draft list from the job's scope. It works only on fencing and patio jobs that have no lines yet, or (S08, the press only, never `auto`) whose scope lines came from an older sealed revision than the one the order follows now.
+
+A refill takes the newer revision's lines in the same way as a first fill, then takes the older scope lines off. It runs only while none of those older lines went out on a sent order email or sits on a purchase order: otherwise it is refused `scope_changed`, with the plain words naming both revisions, and no line changes. Lines typed in by hand are never touched, and lines filled before T20 (no revision named) are left as they are. A refill's line ids name its revision. The answer adds `refilled: { "from_revision_numbers": [1], "replaced": 1 }`, and the first note says what was replaced. The job's fill record is updated to the refill's revision.
 
 On a fencing job scoped in the fence tool, the lines go straight into the box of the supplier the scope names, made if it is not there yet. The scope's supplier is typed text ("RNR", "Fence supply centre", "Strato"), matched to an approved order email by name (`dispatchV2MatchScopeSupplier`), then to the active supplier contact linked to it. A name with no approved email, or no linked contact, leaves the lines on the draft list with a note saying so.
 
@@ -296,7 +299,7 @@ The line ids are fixed by the job and the line's place, so a second press cannot
 
 Returns `{ "success": true, "added": 3, "lines": [Line], "notes": [string], "supplier": { "supplier_id", "name" } or null }`.
 
-Refusals, all 409: `no_suggestion_for_work_type`, `lines_exist`, `scope_unreadable`, and with `auto`: `no_auto_fill`, `already_filled`.
+Refusals, all 409: `no_suggestion_for_work_type`, `lines_exist` (the scope lines already follow the order's revision, or every line was typed in), `scope_unreadable`, `scope_changed` (S08: newer revision, but a line went out), `scope_lines_mixed` (lines from both the newer and an older revision), `lines_changed` (two refills at once), and with `auto`: `no_auto_fill`, `already_filled`.
 
 ### dispatch_v2_add_supplier (POST)
 

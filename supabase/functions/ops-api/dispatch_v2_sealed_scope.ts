@@ -117,3 +117,55 @@ export async function readDispatchV2LatestFrozen(
     revision_number: Number(data.revision_number),
   };
 }
+
+// S08: the revision the order follows now, by the same rule as the fill (the
+// accepted revision, else the latest frozen one), without reading its text.
+// The materials read compares the revision its scope lines came from with
+// this one. Any read that fails, or an acceptance chain that cannot be proved,
+// is null (not known), so the panel never warns on a guess and never refuses.
+export async function readDispatchV2OrderRevision(
+  client: any,
+  job: { id: string; org_id: string; job_number: string | null; work_type: string },
+): Promise<{ revision_id: string; revision_number: number } | null> {
+  try {
+    const { data: row, error } = await client.from("jobs")
+      .select("id, accepted_scope_revision_id:expected_costs->>scope_revision_id")
+      .eq("id", job.id)
+      .eq("org_id", job.org_id)
+      .maybeSingle();
+    if (error) {
+      console.error("[dispatch_v2] order revision read failed:", error);
+      return null;
+    }
+    const accepted = typeof row?.accepted_scope_revision_id === "string" &&
+        row.accepted_scope_revision_id
+      ? row.accepted_scope_revision_id
+      : null;
+    const revisionId = await acceptedRevisionForMaterialTake(client, {
+      ...job,
+      accepted_scope_revision_id: accepted,
+    });
+    if (!revisionId) {
+      const latest = await readDispatchV2LatestFrozen(client, job.id);
+      return latest.state === "frozen"
+        ? { revision_id: latest.revision_id, revision_number: latest.revision_number }
+        : null;
+    }
+    const { data, error: revisionError } = await client.from("scope_revisions")
+      .select("id, revision_number")
+      .eq("job_id", job.id)
+      .eq("id", revisionId)
+      .in("status", ["frozen", "superseded"])
+      .maybeSingle();
+    if (revisionError) {
+      console.error("[dispatch_v2] order revision read failed:", revisionError);
+      return null;
+    }
+    return data && typeof data.id === "string"
+      ? { revision_id: data.id, revision_number: Number(data.revision_number) }
+      : null;
+  } catch (error) {
+    console.error("[dispatch_v2] order revision not known:", error);
+    return null;
+  }
+}
