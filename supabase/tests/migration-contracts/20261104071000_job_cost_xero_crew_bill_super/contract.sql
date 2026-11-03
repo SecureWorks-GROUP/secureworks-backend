@@ -73,8 +73,10 @@ BEGIN
 
   -- A crew-app mirror bill stays out: its super is the crew invoice's.
   INSERT INTO public.users (id, org_id, name) VALUES ('a6000000-0000-4000-8000-000000000001', org, 'Synthetic A6 crew');
-  INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst, total_inc, invoice_number, xero_bill_id)
-  VALUES (gen_random_uuid(), org, 'a6000000-0000-4000-8000-000000000001', '2026-10-19', 'approved', 100, 0, 100, 'SW-INV-T-1', 'b-mirror');
+  INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst, total_inc, invoice_number, xero_bill_id,
+                                     gst_on, super_rate, gross_earned, super_amount, net_pay, super_basis)
+  VALUES (gen_random_uuid(), org, 'a6000000-0000-4000-8000-000000000001', '2026-10-19', 'approved', 100, 0, 100, 'SW-INV-T-1', 'b-mirror',
+          false, 0.12, 100, 12, 100, 'employer_12_v2');
   INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, job_id, raw_json, line_items) VALUES
     (org, 'b-mirror', 'SW-INV-T-1', 'ACCPAY', 'PAID', 'Crew Person', 94, 94, '2026-10-26', NULL, '{"LineAmountTypes": "Exclusive"}',
      '[{"LineItemID": "l-m1", "Description": "Crew Person\nA6-A | SW - PATIOS", "AccountCode": "306", "LineAmount": 100, "TaxAmount": 0},
