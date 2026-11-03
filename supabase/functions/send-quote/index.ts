@@ -102,6 +102,7 @@ import {
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
+import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -2128,6 +2129,23 @@ serve(async (req: Request) => {
         const newStatus = everyQuotePartyAccepted(snapshot.documents, snapshot.acceptances)
           ? 'accepted'
           : 'partially_accepted'
+
+        // B1 follow-on: the job carries the price the customer accepted (accepted_job_price.ts), set before the
+        // status, the expected-cost baseline, the acceptance event, the GHL note and the deposit read it. One quote
+        // party only; a quote sent before #1271 has no released row and keeps the job's price as it is.
+        if (!isMultiContact && job) {
+          const priced = await setJobPriceToAcceptedQuote(sb, { job_id: doc.job_id, document_id: doc.id, job_pricing: job.pricing_json })
+          if (priced.updated) {
+            job.pricing_json = priced.pricing
+            await sb.from('job_events').insert({
+              job_id: doc.job_id,
+              event_type: 'job_price_from_accepted_quote',
+              detail_json: { document_id: doc.id, quote_number: doc.quote_number || null, quote_revision_id: priced.revisionId },
+            })
+          } else if (priced.reason !== 'already_the_accepted_price') {
+            console.warn('[accept] job price not set from the accepted quote:', JSON.stringify({ job_id: doc.job_id, document_id: doc.id, reason: priced.reason }))
+          }
+        }
 
         await sb
           .from('jobs')
