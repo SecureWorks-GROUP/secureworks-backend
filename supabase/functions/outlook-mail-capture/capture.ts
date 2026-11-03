@@ -412,7 +412,10 @@ export interface CaptureDeps {
   captureLaneOn(): Promise<boolean>;
   /** Selected sources: enabled and status active. */
   sources(): Promise<SourceRow[]>;
+  /** Supplier domains: suppliers.email and Dispatch's approved supplier order addresses. */
   supplierDomains(): Promise<Set<string>>;
+  /** Builder senders (makesafe_companies.sender_patterns): addresses or domains. */
+  builderSenders(): Promise<Set<string>>;
   jobClientEmails(): Promise<Set<string>>;
   /** Live jobs (captain ruling 24 Sep): their job numbers (upper case) and client emails. */
   historyScope(): Promise<
@@ -760,6 +763,7 @@ export async function runOutlookCapture(
   }
 
   const supplierDomains = await deps.supplierDomains();
+  const builderSenders = await deps.builderSenders();
   const jobClientEmails = await deps.jobClientEmails();
   const scope = req.mode === "history" ? await deps.historyScope() : null;
   const deepScope = req.mode === "deep" ? await deps.deepScope() : null;
@@ -778,6 +782,7 @@ export async function runOutlookCapture(
         began,
         window,
         supplierDomains,
+        builderSenders,
         jobClientEmails,
         scope,
         deepScope,
@@ -799,6 +804,7 @@ interface RunEnv {
   began: number;
   window: { fromMs: number; toMs: number } | null;
   supplierDomains: Set<string>;
+  builderSenders: Set<string>;
   jobClientEmails: Set<string>;
   scope: { jobNumbers: Set<string>; clientEmails: Set<string> } | null;
   deepScope: DeepScope | null;
@@ -1209,6 +1215,7 @@ async function runSource(
       source: EVENT_SOURCE,
       captureMode,
       supplierDomains: env.supplierDomains,
+      builderSenders: env.builderSenders,
       jobClientEmails: env.jobClientEmails,
       builderRefPrefixes: env.prefixes,
       ...(req.mode === "deep" ? { historyTier: "deep" as const } : {}),

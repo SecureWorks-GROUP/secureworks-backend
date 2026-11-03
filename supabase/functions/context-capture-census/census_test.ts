@@ -67,6 +67,7 @@ function fakeReads(over: Partial<CensusReads> = {}): CensusReads {
     postItem: none,
     explainContext: async () => ({
       supplierDomains: new Set<string>(),
+      builderSenders: new Set<string>(),
       jobClientEmails: new Set<string>(),
       prefixes: [],
     }),
@@ -657,4 +658,130 @@ Deno.test("server check: a service-role key the platform honours is accepted eve
     await serverCredentialCheck(env, async () => "accepted")(new Headers()),
     false,
   );
+});
+
+Deno.test("email_explain reads like the reader: a supplier's Xero document, Dispatch's supplier bounce, a builder's no-reply mail and a post naming its job in the thread topic are rows; platform news stays noise", async () => {
+  const msgs: Record<string, Record<string, unknown>> = {
+    xero_doc: {
+      from: "messaging-service@post.xero.com",
+      subject: "Invoice INV-77001 from Steel Supply for SECUREWORKS WA",
+      headers: [{
+        name: "Reply-To",
+        value: "Steel Supply <sales@steelsupply.example>",
+      }],
+    },
+    xero_news: {
+      from: "noreply@send.xero.com",
+      subject: "Dive into the latest",
+      headers: [],
+    },
+    bounce: {
+      from: "postmaster@orders.roofing.example",
+      subject: "Undeliverable: URGENT PICKUP - JOB SWP-261-283",
+      headers: [{ name: "Auto-Submitted", value: "auto-replied" }],
+    },
+    builder: {
+      from: "noreply@builder.example",
+      subject: "Please check attached bookings schedule",
+      headers: [],
+    },
+  };
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes("login.microsoftonline.com")) {
+      return new Response(
+        JSON.stringify({ access_token: "t", expires_in: 3600 }),
+      );
+    }
+    if (url.includes("/groups?")) {
+      return new Response(JSON.stringify({ value: [{ id: "G1" }] }));
+    }
+    if (url.includes("/threads/T1?")) {
+      return new Response(
+        JSON.stringify({ topic: "Gate hinge for SWF-990123" }),
+      );
+    }
+    if (url.includes("/threads/T1/posts/")) {
+      return new Response(JSON.stringify({
+        id: "P1",
+        from: { emailAddress: { address: "noreply@mailer.example" } },
+        receivedDateTime: "2026-11-02T00:00:00Z",
+        body: { contentType: "text", content: "Delivered." },
+      }));
+    }
+    const id = /\/messages\/([^?]+)\?/.exec(url)?.[1] ?? "";
+    const m = msgs[id];
+    return new Response(JSON.stringify({
+      id,
+      internetMessageId: `<${id}@x>`,
+      subject: m.subject,
+      from: { emailAddress: { address: m.from } },
+      toRecipients: [{
+        emailAddress: { address: "admin@secureworkswa.com.au" },
+      }],
+      receivedDateTime: "2026-11-02T00:00:00Z",
+      uniqueBody: { contentType: "text", content: "Attached." },
+      internetMessageHeaders: m.headers,
+    }));
+  }) as typeof fetch;
+  const env: Record<string, string> = {
+    MICROSOFT_TENANT_ID: "t",
+    MICROSOFT_CLIENT_ID: "c",
+    MICROSOFT_CLIENT_SECRET: "s",
+  };
+  const tables: Record<string, unknown[]> = {
+    monitored_mailboxes: SOURCES,
+    // Dispatch's approved order addresses; a shared mail domain names nobody.
+    dispatch_approved_supplier_emails: [{
+      to_emails: ["orders@orders.roofing.example"],
+      cc_emails: ["someone@bigpond.com"],
+    }],
+    makesafe_companies: [{ sender_patterns: ["builder.example"] }],
+  };
+  const query = (rows: unknown[]) => {
+    const q: Record<string, unknown> = {
+      eq: () => q,
+      order: async () => ({ data: rows, error: null }),
+      then: (ok: (v: unknown) => unknown, bad: (e: unknown) => unknown) =>
+        Promise.resolve({ data: rows, error: null }).then(ok, bad),
+    };
+    return q;
+  };
+  const supabase = {
+    from: (t: string) => ({ select: () => query(tables[t] ?? []) }),
+    rpc: async (fn: string) => ({
+      data: fn === "context_email_supplier_domains"
+        ? ["steelsupply.example"]
+        : [],
+      error: null,
+    }),
+  };
+  const reads = liveCensusReads({
+    env: (n) => env[n],
+    fetch: fetchFn,
+    supabase,
+    now: () => NOW,
+  });
+  const r = await runCensus(reads, {
+    lane: "email_explain",
+    items: [
+      ...Object.keys(msgs).map((id) => ({
+        mailbox: "admin@secureworkswa.com.au",
+        id,
+      })),
+      { mailbox: "fencing@secureworkswa.com.au", id: "P1", thread_id: "T1" },
+    ],
+  });
+  const verdicts = Object.fromEntries(
+    (r.items as Array<Record<string, unknown>>).map((
+      x,
+    ) => [x.id, [x.verdict, x.sender_kind]]),
+  );
+  assertEquals(verdicts, {
+    xero_doc: ["row", "supplier"],
+    xero_news: ["skipped_noise", "automated"],
+    bounce: ["row", "supplier"],
+    builder: ["row", "customer"],
+    P1: ["row", "automated"],
+  });
 });

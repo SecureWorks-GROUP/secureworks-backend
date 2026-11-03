@@ -134,6 +134,7 @@ export interface SourceRow {
 
 export interface ExplainContext {
   supplierDomains: ReadonlySet<string>;
+  builderSenders: ReadonlySet<string>;
   jobClientEmails: ReadonlySet<string>;
   prefixes: readonly string[];
 }
@@ -685,6 +686,7 @@ async function explain(
         source: "outlook-mail-capture",
         captureMode: "live",
         supplierDomains: ctx.supplierDomains,
+        builderSenders: ctx.builderSenders,
         jobClientEmails: ctx.jobClientEmails,
         builderRefPrefixes: ctx.prefixes,
       });

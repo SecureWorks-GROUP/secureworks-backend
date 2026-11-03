@@ -198,6 +198,28 @@ conversations, threads and posts; a post's key comes from its internet message
 id property, so it and a member's copy are one row. One email is one row keyed
 `email:<internet message id>` however many mailboxes saw it.
 
+Who sent it (`_shared/evidence/outlook_mail.ts`, partner lists in
+`_shared/evidence/outlook_partners.ts`): ours, council (gov.au), supplier (a
+domain of `suppliers.email` or of Dispatch's active approved supplier order
+addresses, `dispatch_approved_supplier_emails`), customer (a builder's sender
+in `makesafe_companies.sender_patterns`, or anyone else) or automated
+(platform, no-reply, auto-submitted, list mail). Automated mail is saved only
+when it names exactly one of our references (`skipped_noise` otherwise). A
+platform's document address (Xero `messaging-service@post.xero.com`, MYOB
+AccountRight, QuickBooks, Buildertrend notifications) sends one organisation's
+own invoice, quote, credit note, receipt, remittance or a customer's message
+about our invoice: it is saved as that organisation's mail, `payload.email` its
+Reply-To and `payload.sent_via` the platform; with no Reply-To (a group post)
+it is saved as automated supplier mail; a copy of our own document (Reply-To
+ours) stays `skipped_noise`. On an owner mailbox (`owner_privacy`) our own
+human-sent mail is saved only with job evidence (D-EM3): one of our references,
+a builder's reference (`payload.builder_refs`) or a job's client email among
+its recipients (`skipped_private` otherwise); tool-marked mail and our own
+system's notices from a no-reply address of ours are always saved. The C7 rule
+proofs of 3 Nov 2026 (context-system `verify/evidence/20261103-c7-capture/`)
+found 29 partner documents, 6 supplier auto-replies and bounces and 3 builder
+emails in one week dropped as noise before these rules.
+
 Attachments: file attachments up to 15 MB each, 10 files and 30 MB per email,
 go to the PRIVATE bucket `context-email-attachments`, one row each in
 `context_email_attachments` (service role only; `stored` or a `skipped_*`

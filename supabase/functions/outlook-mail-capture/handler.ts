@@ -27,6 +27,11 @@ import {
   REF_PREFIX_FLOOR,
   type RefPrefixClient,
 } from "../_shared/makesafe_refs.ts";
+import {
+  loadTradingPartners,
+  type PartnerClient,
+  PartnerReadError,
+} from "../_shared/evidence/outlook_partners.ts";
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import {
   ATTACHMENT_POLICY,
@@ -140,6 +145,16 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
   let prefixes: Promise<string[] | null> | null = null;
   const loadPrefixes = () =>
     prefixes ??= loadRefPrefixes(supabase as RefPrefixClient).catch(() => null);
+  // Suppliers and builders, read once per call; a failed read stops the run.
+  let partners: ReturnType<typeof loadTradingPartners> | null = null;
+  const loadPartners = () =>
+    (partners ??= loadTradingPartners(supabase as unknown as PartnerClient))
+      .catch((e) => {
+        partners = null;
+        throw dbError(
+          e instanceof PartnerReadError ? e.code : "suppliers_unreadable",
+        );
+      });
   const g: graph.GraphDeps = {
     fetch: fetchFn,
     token: graph.graphTokenSource(deps.env, fetchFn),
@@ -225,11 +240,10 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
       return (data ?? []) as SourceRow[];
     },
     async supplierDomains() {
-      const { data, error } = await supabase.rpc(
-        "context_email_supplier_domains",
-      );
-      if (error) throw dbError("suppliers_unreadable");
-      return textSet(data);
+      return (await loadPartners()).supplierDomains;
+    },
+    async builderSenders() {
+      return (await loadPartners()).builderSenders;
     },
     async jobClientEmails() {
       const { data, error } = await supabase.rpc(
