@@ -681,6 +681,7 @@ ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_order_bills
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|column|v_dispatch_order_bills.linked
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|column|v_dispatch_order_bills.rule
+ops-api|supabase/migrations/20261104040000_dispatch_order_bill_more_rules.sql|column|v_dispatch_order_bills.matched_in
 
 # reporting-api job_profitability (CFO-01 / R-22) reads its money from the same
 # engine. The table line pins the JP-12 body (installer_bill_unconfirmed in

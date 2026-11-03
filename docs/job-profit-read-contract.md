@@ -184,25 +184,34 @@ figure; `holding_jobs` reports it on its own so the parked cost stays visible.
 
 `job_profit` answers `dispatch_orders`: the job's Dispatch orders and the supplier bills linked to each, read
 from `v_dispatch_orders` and `v_dispatch_order_bills` (migration `20261104010000`, service role only; code
-`job_dispatch_orders.ts`). An order is a Dispatch v2 supplier order email that went out (`sent` or
-`send_unknown`) or a purchase order that is not a draft or cancelled.
+`job_dispatch_orders.ts`; rules (c) and (d) from migration `20261104040000`). An order is a Dispatch v2
+supplier order email that went out (`sent` or `send_unknown`) or a purchase order that is not a draft or
+cancelled.
 
 A supplier bill (Xero ACCPAY, AUTHORISED or PAID) links to an order by the owner's rule of 3 Nov 2026, by
 itself, never by a person: the bill's supplier is the order's supplier (the supplier record's Xero contact, or
 the names agree once company words are dropped: "Metroll" and "Metroll Perth"), and the bill's number,
 reference or line text carries `supplier_ref` (a supplier order, quote or invoice number saved for that order
-from its replies) or `job_number` (our job number, as `SWP-261309`, `SWP261309` or `SWP 261309`). Purchase
-orders have no saved refs, so only `job_number` applies to them. A bill links to one order: one that names two
-orders links neither and is listed under that order's `unclear_bills` with a reason (`several_saved_refs`,
-`other_order_ref`, `job_disagrees`, `several_jobs_named`, `several_orders_on_job`); a saved ref picks its
-order when the job agrees.
+from its replies) or `job_number` (our job number, as `SWP-261309`, `SWP261309` or `SWP 261309`), and, decided
+3 Nov 2026 09:44Z, `po_number` (our PO number as words, `PO-298035` or `PO 298035`, or run together,
+`PO298035`, `PO#298035`, never the digits alone; on the bill or on the supplier's PDF of it) or `site_address`
+(the job's site address on the supplier's PDF, keyed by the context placer's `context_address_key`, when it
+matches exactly one order of that supplier). The supplier's PDF of a bill is a PDF that came in by email (never
+one we sent), whose file name and text both carry the bill's number and whose text names the bill's supplier,
+read by the document text or vision reader. The same supplier and the same
+amount alone never link. Purchase orders have no saved refs and Dispatch v2 emails have no order number, so
+`supplier_ref` applies only to v2 orders and `po_number` only to purchase orders. A bill links to one order:
+one that names two orders links neither and is listed under that order's `unclear_bills` with a reason
+(`several_order_numbers`, `other_order_ref`, `job_disagrees`, `several_jobs_named`, `several_orders_on_job`);
+an order's own number (saved ref or PO number) picks its order when nothing else on the bill points at another
+job.
 
 | Field | Meaning |
 |---|---|
 | `status`, `reason` | `ok`, or `unknown` with a reason when the orders or links cannot be read. Unknown is never "not billed": `ordered`, `billed` and `not_billed` are then null |
 | `ordered`, `billed`, `not_billed` | Counts of orders; billed = at least one bill linked |
 | `orders[]` | `order_kind` (`dispatch_v2_email` or `purchase_order`), `order_id`, `supplier`, `order_label` (the email subject or PO number), `order_status`, `ordered_at`, `state` (`billed` or `not_billed`), `bills[]`, `unclear_bills[]` |
-| `bills[]` | `invoice_number`, `supplier`, `bill_date`, `bill_status`, `bill_sub_total_ex` (the bill's own amount, ex GST), `rule` (`supplier_ref`, `job_number` or `supplier_ref+job_number`), `matched_ref`, `matched_job_number`, `cost_on_this_job` (Job Profit counts the bill on this job) |
+| `bills[]` | `invoice_number`, `supplier`, `bill_date`, `bill_status`, `bill_sub_total_ex` (the bill's own amount, ex GST), `rule` (every rule that matched, joined by `+`, in the order `supplier_ref`, `job_number`, `po_number`, `site_address`), `matched_ref`, `matched_job_number`, `matched_po_number`, `matched_site_address` (the address key), `matched_in` (`bill`, `supplier_pdf` or `bill+supplier_pdf`), `cost_on_this_job` (Job Profit counts the bill on this job) |
 
 No price goes on an order and a link moves nothing: it places no bill, writes no row, and changes no figure
 in `job`, `cost_events`, `ordered_not_billed_count` or any rollup. `ordered_not_billed_count` still counts

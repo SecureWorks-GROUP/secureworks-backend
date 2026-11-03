@@ -3,8 +3,9 @@
 //
 // An order is a Dispatch v2 supplier order email that went out, or a purchase order that is not a draft or
 // cancelled (v_dispatch_orders). A supplier bill links to an order by the owner's rule, in SQL
-// (v_dispatch_order_bills, migration 20261104010000): the bill is from the order's supplier and carries a
-// supplier ref saved for that order or our job number. This file only reads those two views and sets each
+// (v_dispatch_order_bills, migrations 20261104010000 and 20261104040000): the bill is from the order's supplier
+// and carries a supplier ref saved for that order, our job number, our PO number (on the bill or the supplier's
+// PDF of it), or the job's site address on that PDF when it matches one order of that supplier. This file only reads those two views and sets each
 // linked bill beside the job's own cost events, so staff see whether Job Profit counts that bill on this job.
 // Read only: no bill is placed, no figure is computed, and nothing here changes a Job Profit total.
 
@@ -13,7 +14,8 @@ const MAX_ROWS = 500;
 const ORDER_COLUMNS = "order_kind, order_id, job_id, supplier_name, order_status, ordered_at, order_label";
 const BILL_COLUMNS =
   "order_id, job_id, xero_invoice_id, invoice_number, bill_contact_name, bill_status, bill_date, bill_sub_total, " +
-  "supplier_match, rule, matched_ref, matched_job_number, linked, not_linked_reason";
+  "supplier_match, rule, matched_ref, matched_job_number, linked, not_linked_reason, matched_po_number, " +
+  "matched_site_address, matched_in";
 
 export type DispatchOrderState = "billed" | "not_billed";
 
@@ -27,6 +29,10 @@ export interface DispatchOrderBill {
   rule: string;
   matched_ref: string | null;
   matched_job_number: string | null;
+  matched_po_number: string | null;
+  matched_site_address: string | null;
+  // Where the bill carried it: "bill" (its number, reference or lines), "supplier_pdf", or both.
+  matched_in: string | null;
   cost_on_this_job: boolean;
 }
 
@@ -111,6 +117,9 @@ export async function readJobDispatchOrders(
         rule: String(b.rule),
         matched_ref: b.matched_ref ?? null,
         matched_job_number: b.matched_job_number ?? null,
+        matched_po_number: b.matched_po_number ?? null,
+        matched_site_address: b.matched_site_address ?? null,
+        matched_in: b.matched_in ?? null,
         cost_on_this_job: countedHere.has(String(b.xero_invoice_id)),
       })),
       unclear_bills: named.filter((b: any) => b.linked !== true).map((b: any) => ({
