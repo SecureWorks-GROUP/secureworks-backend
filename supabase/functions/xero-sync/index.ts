@@ -29,7 +29,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
-import { catchUpTradeBillStatusFromMirror, shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
+import { catchUpTradeBillStatusFromMirror, shouldBackfillTradeBillPdf, tradeBillAdjustmentsPatch, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceRecurringDeductionXeroLine, isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
@@ -1065,10 +1065,19 @@ async function syncInvoices(sb: any) {
           if (inv.Type === 'ACCPAY') {
             try {
               const { data: tradeInv } = await sb.from('trade_invoices')
-                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)')
+                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, users:user_id(name)')
                 .eq('xero_bill_id', inv.InvoiceID)
                 .maybeSingle()
               if (tradeInv) {
+                // V10: what Xero pays and every change the office made to the
+                // bill in Xero (trade_bill_status.ts). Its own write, so a
+                // refused reading never holds back the paid status below.
+                const adjustments = tradeBillAdjustmentsPatch(inv, tradeInv)
+                if (adjustments) {
+                  const { error: adjustErr } = await sb.from('trade_invoices').update(adjustments).eq('id', tradeInv.id)
+                  if (adjustErr) console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' Xero changes write failed:', adjustErr.message)
+                  else console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' Xero pays ' + adjustments.xero_bill_total + ', changes ' + adjustments.xero_adjustments_ex)
+                }
                 const patch = tradeBillStatusPatch(inv, tradeInv)
                 if (patch) {
                   const { error: patchErr } = await sb.from('trade_invoices').update(patch).eq('id', tradeInv.id)

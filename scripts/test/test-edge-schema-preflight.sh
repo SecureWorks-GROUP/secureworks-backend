@@ -1010,7 +1010,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261029170100", "context_job_bill_outcomes"),
                       ("20261002150000", "context_email_reader"),
                       ("20261006050000", "context_lanes_health"),
-                      ("20261006040000", "context_story_safety")]:
+                      ("20261006040000", "context_story_safety"),
+                      # Group WO V10: what Xero pays on a crew bill and the
+                      # office's changes, on the trade invoice reads.
+                      ("20261103140000", "trade_invoice_xero_adjustments")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

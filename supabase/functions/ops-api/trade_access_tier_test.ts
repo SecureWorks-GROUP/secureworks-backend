@@ -2881,6 +2881,35 @@ Deno.test("my_money: totals by month and FY, paid state from Xero, one bad split
   assertEquals(paid.paid_at, "2026-08-10");
 });
 
+// Group WO field-ready V10: the office adds lines to a crew bill in Xero after
+// our push. my_money is what the crew member reads as their pay, so it must be
+// what Xero pays, each change named. Rows are Anthony's real invoices with the
+// changes xero-sync records from their Xero bills (copy read 3 Nov 2026).
+Deno.test("my_money: pay is what Xero pays after the office's own lines, each named (V10)", async () => {
+  const t = woodvaleSeed();
+  t.users.push({ id: "u-anthony", org_id: ORG_A, name: "Anthony", role: "crew", trade_tier: 1, invoice_type: "hourly", trade_details: {} });
+  const money = (gross: number, superAmount: number, net: number) => ({ subtotal_ex: gross, gross_earned: gross, gst: 0, gst_on: false, super_rate: 0.12, super_amount: superAmount, net_pay: net, total_inc: gross });
+  t.trade_invoices = [
+    // SW-INV-A-261015-020: paid 16 Oct, Xero 581.68 after "Back payment on over payment" -50.00 (712).
+    { id: "ti-a-020", user_id: "u-anthony", invoice_number: "SW-INV-A-261015-020", week_start: "2026-10-05", week_end: "2026-10-11", status: "paid", xero_bill_status: "PAID", paid_at: "2026-10-16", amount_paid: 581.68, ...money(672, 80.64, 631.68), created_at: "2026-10-15T11:33:14Z",
+      xero_bill_total: 581.68, xero_adjustments_ex: -50, xero_adjustment_lines: [{ description: "Back payment on over payment", amount: -50, account_code: "712", kind: "office_line" }] },
+    // SW-INV-A-261101-023: open, Xero 234.26 after "Repay Over payment" -50.00 (712).
+    { id: "ti-a-023", user_id: "u-anthony", invoice_number: "SW-INV-A-261101-023", week_start: "2026-10-26", week_end: "2026-11-01", status: "pushed_to_xero", xero_bill_status: "AUTHORISED", amount_paid: 0, ...money(302.4, 36.29, 284.26), created_at: "2026-11-01T13:36:26Z",
+      xero_bill_total: 234.26, xero_adjustments_ex: -50, xero_adjustment_lines: [{ description: "Repay Over payment", amount: -50, account_code: "712", kind: "office_line" }] },
+  ];
+  const me = { id: "u-anthony", email: "anthony@example.test", orgId: ORG_A, role: "crew", managedVerticals: [] as string[] };
+  const res = await _myMoneyForTest(makeClient(t), me as any, new URLSearchParams({ today: "2026-11-03" }));
+  const open: any = res.invoices.find((r: any) => r.id === "ti-a-023");
+  assertEquals(open.payable, 234.26, "owed what Xero will pay");
+  assertEquals(open.outstanding, 234.26);
+  assertEquals(open.xero_adjustments.lines.map((l: any) => [l.description, l.amount]), [["Repay Over payment", -50]]);
+  const paid: any = res.invoices.find((r: any) => r.id === "ti-a-020");
+  assertEquals(paid.payable, 581.68);
+  assertEquals(paid.xero_pays, 581.68);
+  assertEquals(res.month.outstanding, 234.26);
+  assertEquals(res.fytd.paid_total, 581.68);
+});
+
 Deno.test("presentTradeInvoiceSafe: a bad split row is returned flagged instead of throwing", () => {
   const out = _presentTradeInvoiceSafeForTest({ id: "x", super_amount: 999, gross_earned: null, net_pay: null, total_inc: 500 });
   assertEquals(out.id, "x");
