@@ -615,6 +615,14 @@ jobs:
           deno test --allow-read --allow-env \
             supabase/functions/outlook-mail-capture/
 
+      # Finish line row C7: the read-only capture census (source ids and
+      # times for every monitored mailbox and the GHL location; GETs only,
+      # never words; admin/owner or a server credential), over fake reads.
+      - name: Test the capture census
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/context-capture-census/
+
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
