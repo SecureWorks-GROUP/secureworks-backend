@@ -46,6 +46,7 @@ import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { PREMATCH_ROWS_PER_RUN, readAll, runBillPrematch } from './bill_prematch_run.ts'
 import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
+import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenceCandidates } from './builder_reference_match.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
@@ -1346,6 +1347,8 @@ async function invoiceMirrorCheck(sb: any, force: boolean) {
 // in Xero (job_id is null) and attempts to auto-link them to jobs.
 //
 // Strategy 1: Reference field contains a job number (SWP-25029, etc.)
+// Strategy 1b: No job number, but the builder's claim and PO name one job of the
+//              invoice's trade (builder_reference_match.ts); several → flag
 // Strategy 2: Contact name matches a single job's client_name exactly
 // Strategy 3: Multiple client_name matches → flag for manual review
 // ════════════════════════════════════════════════════════════
@@ -1359,8 +1362,9 @@ export async function matchUnlinkedInvoices(client: any) {
     // Invoices with no job_id, newest first, customer invoices ahead of the
     // 1,600-odd unlinked supplier bills. With no order the old 100-row cap was
     // filled by years-old bills and this week's invoices never reached here.
+    // Customer invoices also bring their date and lines for the builder reference rule.
     const unlinkedQuery = (type: string, cap: number) => client.from('xero_invoices')
-      .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token')
+      .select(`id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token${type === 'ACCREC' ? ', invoice_date, line_items' : ''}`)
       .is('job_id', null)
       .eq('invoice_type', type)
       .not('status', 'in', '("VOIDED","DELETED")')
@@ -1377,6 +1381,12 @@ export async function matchUnlinkedInvoices(client: any) {
     })
 
     if (unlinked.length === 0) return { matched: 0, flagged: 0 }
+
+    // One candidate read for every customer invoice in this pass. A failed read
+    // links nothing by the builder rule; every other strategy runs as before.
+    const builderRef = await loadBuilderReferenceCandidates(client, unlinkedSales || [])
+    if (!builderRef.ready) console.error('[xero-sync] builder reference candidates unavailable:', builderRef.error)
+    const builderRefResult = { ready: builderRef.ready, linked: 0, flagged: 0, error: builderRef.error ?? null }
 
     for (const inv of unlinked) {
       const ref = inv.reference || ''
@@ -1434,6 +1444,76 @@ export async function matchUnlinkedInvoices(client: any) {
           }
 
           matched++
+          continue
+        }
+      }
+
+      // Strategy 1b: the builder's claim and PO (finish line B3). A customer invoice
+      // with no job number, dated from 1 Jul 2026, links only to the one job left
+      // after the trade and status checks. Otherwise its candidates go to a person
+      // and the contact-name match is skipped: the builder's own reference already
+      // says which jobs it can be. No builder reference or no candidate: as before.
+      if (builderRef.ready && inv.invoice_type === 'ACCREC') {
+        const decision = decideBuilderReference(inv, builderRef.rows)
+        if (decision.outcome === 'link') {
+          const refusal = await sealedSesXeroLinkRefusal(
+            client,
+            inv,
+            decision.job_id,
+            'xero-sync/unlinked builder reference match',
+          )
+          if (refusal) {
+            refusals.push(refusal)
+            continue
+          }
+
+          const { data: linked, error: linkErr } = await client.from('xero_invoices')
+            .update({ job_id: decision.job_id, updated_at: new Date().toISOString() })
+            .eq('id', inv.id)
+            .is('job_id', null)
+            .select('id')
+          if (linkErr) {
+            console.error(`[xero-sync] builder reference link failed for invoice ${inv.invoice_number}:`, linkErr.message)
+            continue
+          }
+          if (!linked || linked.length === 0) continue
+
+          if (await automationLaneEnabled(client, 'capture')) {
+            await insertCapturedEvidence(client, {
+              event_type: 'invoice.auto_linked',
+              source: 'xero-sync',
+              entity_type: 'invoice',
+              entity_id: inv.xero_invoice_id,
+              job_id: decision.job_id,
+              match_method: 'direct_reference',
+              event_at: new Date().toISOString(),
+              channel: 'system', direction: 'system',
+              payload: {
+                invoice_number: inv.invoice_number,
+                job_number: decision.job_number,
+                method: 'builder_reference',
+                rule: decision.evidence.rule,
+                evidence: decision.evidence,
+              },
+            }).then(() => undefined, () => undefined)
+          }
+
+          matched++
+          builderRefResult.linked++
+          continue
+        }
+
+        if (decision.outcome === 'person') {
+          // One item per invoice, ever: once a person has resolved or dismissed it,
+          // the 15-minute sync does not raise it again.
+          const annotation = builderReferenceAnnotation(inv, decision, DEFAULT_ORG_ID)
+          const { data: existingAnn } = await client.from('ai_annotations')
+            .select('id').eq('source_ref', annotation.source_ref).limit(1)
+          if (!existingAnn || existingAnn.length === 0) {
+            await client.from('ai_annotations').insert(annotation).then(() => undefined, () => undefined)
+          }
+          flagged++
+          builderRefResult.flagged++
           continue
         }
       }
@@ -1542,8 +1622,8 @@ export async function matchUnlinkedInvoices(client: any) {
       // These could be direct Xero invoices not related to SW jobs
     }
 
-    console.log(`[xero-sync] Invoice matching: ${matched} auto-linked, ${flagged} flagged for review, ${refusals.length} sealed SES links refused`)
-    return { matched, flagged, refused: refusals.length, refusals }
+    console.log(`[xero-sync] Invoice matching: ${matched} auto-linked (${builderRefResult.linked} by builder reference), ${flagged} flagged for review, ${refusals.length} sealed SES links refused`)
+    return { matched, flagged, refused: refusals.length, refusals, builder_reference: builderRefResult }
   } catch (e: any) {
     console.error('[xero-sync] Invoice matching degraded:', (e as Error).message)
     return {
