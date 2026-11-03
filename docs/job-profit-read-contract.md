@@ -296,6 +296,24 @@ API or screen. Missing super records do not establish zero or cost-close.
 The source producer and its feature activation remain owned by Group WO;
 this consumer compatibility change does not activate that feature.
 
+A crew bill raised straight in Xero (no crew-app record) can state the company super on its super line
+("Company contribution $50.40"). Since 20261104071000 each placed line of that bill carries its share of
+it (line amount x contribution / the bill's other lines), source `bill_employer_super`, on the line's job
+and lane, unpaid, behind the same `job_cost_employer_super_v1` switch. `job_profit.timeline` labels it
+`employer_super`. The super line itself, the worker's share withheld from pay and paid to the fund, is
+never a cost on any bill. Crew-app mirror bills stay out, so a crew invoice's super is only ever its own.
+
+## Split lines and supplier credits (A6, 3 Nov 2026)
+
+- A Xero line Bookkeeping's ledger splits across jobs is one `cost_events` row per part (20261104070000):
+  source `supplier_bill`, `source_id` `<bill>:<line>:part<k>`, match `bookkeeping_evidence`, at the part's
+  amount. Parts are used only while complete and adding up to the Xero line as we hold it, and only where
+  the ledger's line evidence is (no office whole-bill job). An AI whole-bill fact stands aside whenever the
+  ledger places any line or part of that bill on another job; a person's split still outranks the ledger.
+- A supplier credit is taken at the credit note's own ex-GST rate (its sub total over its total), the bill's
+  rate only when our copy does not hold the note (20261104072000). One bill's credit rows are rounded as a
+  running total, so they add up to the credit's own cents.
+
 ### Context money-book completeness (TP-13 / TP-17 composition, 31 Oct 2026)
 
 A warning permits the agreed provisional margin; it is not evidence that costs or invoicing are complete. The story money book names `variation_not_costed` and `variation_invoice_unchecked`, sets `complete=false` and shows the corresponding Costs/Money incomplete line while retaining the actual margin on costs placed so far. An explicit variation cost of zero remains known. The signature combines existing TP-13 variation inputs with the later native employer-on-cost inputs; both known definitions have guarded, reversible composition. No cost, invoice, policy or payment row is changed.

@@ -3,7 +3,7 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { JOB_PROFIT_LABELS, jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from "./job_profit.ts";
+import { costEventKind, JOB_PROFIT_LABELS, jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from "./job_profit.ts";
 
 // A recording PostgREST stand-in: each from() answers from `tables` and logs
 // the filters it was given.
@@ -651,6 +651,12 @@ Deno.test("rollup: a holding job is in no total, type or month, and is reported 
   assertEquals(body.holding_jobs.jobs, 1);
   assertEquals(body.holding_jobs.actual_cost_ex, 192604.7);
   assertEquals(body.holding_jobs.profit_ex, null);
+});
+
+Deno.test("a Xero crew bill's company super is employer super on the timeline, never a supplier bill", () => {
+  assertEquals(costEventKind("bill_employer_super"), "employer_super");
+  assertEquals(costEventKind("trade_employer_super"), "employer_super");
+  assertEquals(costEventKind("supplier_bill"), "supplier_bill");
 });
 
 Deno.test("employer super remains a separate unpaid obligation, not a supplier bill or trade cash", async () => {

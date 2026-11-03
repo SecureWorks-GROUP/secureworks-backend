@@ -203,6 +203,14 @@ BEGIN
   END IF;
 END $$;
 
+-- 20261104070000 to 20261104072000 (A6 cost rules) sit on this migration; the checks above hold with them in. Unwind
+-- them inside this transaction (the ROLLBACK at the end puts them back) so the second run meets its own definition.
+SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='366599ce55b0e0430d45ee9e6e04c315' AS test_has_a6_cost_rules \gset
+\if :test_has_a6_cost_rules
+\ir ../../../rollbacks/20261104072000_job_cost_credit_at_note_ex_gst_down.sql
+\ir ../../../rollbacks/20261104071000_job_cost_xero_crew_bill_super_down.sql
+\ir ../../../rollbacks/20261104070000_job_cost_follows_ledger_split_lines_down.sql
+\endif
 -- A second run changes nothing.
 \ir ../../../migrations/20261104063000_job_cost_bill_line_job_number.sql
 DO $$
