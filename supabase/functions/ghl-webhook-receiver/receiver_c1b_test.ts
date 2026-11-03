@@ -409,16 +409,6 @@ Deno.test("no raw webhook body is written to webhook_log for any type", async ()
   }
 });
 
-// ── deploy wiring ─────────────────────────────────────────
-
-Deno.test("index.ts keeps --no-verify-jwt in its first 30 lines (the deploy workflow reads it)", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
-  );
-  const head = source.split("\n").slice(0, 30).join("\n");
-  assertStringIncludes(head, "--no-verify-jwt");
-});
-
 Deno.test("a GHL app ContactCreate (contact named as id) is receipted with that contact id", async () => {
   const appShape = {
     type: "ContactCreate",

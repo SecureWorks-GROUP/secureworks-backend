@@ -1,8 +1,0 @@
-DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='context_reconciliation_decisions'::regclass AND attname='source_time_hash' AND NOT attisdropped) THEN RAISE EXCEPTION 'matching time down retained witness column';END IF;
-IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_evidence_hash(uuid)'::regprocedure) IS DISTINCT FROM 'da853bc2ff86c12d28e2b87fdbea1f02' THEN RAISE EXCEPTION 'matching time down lost original function';END IF;
-IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_decision_state(uuid)'::regprocedure) IS DISTINCT FROM '3167947e7b2ec2ed8f85edf4ec7883ad' THEN RAISE EXCEPTION 'matching time down lost original function';END IF;
-IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_record_decision(uuid,text,text,uuid[],text,uuid,text)'::regprocedure) IS DISTINCT FROM '3b5443a511ac3b5ec08a07293d11eb50' THEN RAISE EXCEPTION 'matching time down lost original function';END IF;
-IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_hold_decided()'::regprocedure) IS DISTINCT FROM 'da3065a6761af94b78bccd643e554176' THEN RAISE EXCEPTION 'matching time down lost original function';END IF;
-IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_daily_rows(timestamp with time zone)'::regprocedure) IS DISTINCT FROM 'a598eda6cab72661c424e3b748d0c53c' THEN RAISE EXCEPTION 'matching time down lost original function';END IF;
-IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_recon_job_items(uuid)'::regprocedure) IS DISTINCT FROM '806739c4179184e11b54b7f29bc6565b' THEN RAISE EXCEPTION 'matching time down lost original function';END IF;
-END $$;

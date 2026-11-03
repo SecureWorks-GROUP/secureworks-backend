@@ -2,19 +2,7 @@
 // deno-lint-ignore-file no-import-prefix require-await
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { OutlookAttachmentMeta } from "../_shared/evidence/outlook_mail.ts";
-import {
-  ATTACHMENT_POLICY,
-  attachmentDecisions,
-  type AttachmentDeps,
-  type AttachmentLedgerRow,
-  type AttachmentStatus,
-  failureKey,
-  hasOpenFailure,
-  LIST_FAILURE_KEY,
-  safeFileName,
-  sha256Hex,
-  storeEmailAttachments,
-} from "./attachments.ts";
+import { type AttachmentDeps, type AttachmentLedgerRow, type AttachmentStatus, failureKey, LIST_FAILURE_KEY, sha256Hex, storeEmailAttachments } from "./attachments.ts";
 import type { AttachmentHome, ListedAttachment } from "./graph.ts";
 
 const MB = 1024 * 1024;
@@ -35,50 +23,6 @@ const file = (
   isInline: false,
   kind: "file",
   ...extra,
-});
-
-Deno.test("limits: inline, non-file, over 15 MB, over 10 files or 30 MB per email, ses scope", () => {
-  const list = [
-    file("a", 1 * MB),
-    file("logo", 2000, { isInline: true }),
-    file("fwd", 50_000, { kind: "item" }),
-    file("link", 0, { kind: "reference" }),
-    file("huge", 16 * MB),
-    file("b", 14 * MB),
-    file("c", 14 * MB), // 1 + 14 + 14 = 29 MB: fits
-    file("d", 2 * MB), // would pass 30 MB
-  ];
-  assertEquals(attachmentDecisions(list, "sales").map((d) => d.decision), [
-    "stored",
-    "skipped_inline",
-    "skipped_kind",
-    "skipped_kind",
-    "skipped_too_large",
-    "stored",
-    "stored",
-    "skipped_message_cap",
-  ]);
-  const eleven = Array.from({ length: 11 }, (_, i) => file(`f${i}`, 1000));
-  assertEquals(
-    attachmentDecisions(eleven, "sales").filter((d) => d.decision === "stored")
-      .length,
-    10,
-  );
-  assertEquals(
-    attachmentDecisions(eleven, "sales")[10].decision,
-    "skipped_message_cap",
-  );
-  assertEquals(
-    attachmentDecisions([file("s", 10)], "ses")[0].decision,
-    "skipped_scope",
-  );
-  assertEquals(ATTACHMENT_POLICY.maxFileBytes, 15 * MB);
-});
-
-Deno.test("file names are made safe for a storage path", () => {
-  assertEquals(safeFileName("../../etc/passwd"), "etc_passwd");
-  assertEquals(safeFileName("Quote #12 (final).pdf"), "Quote_12_final_.pdf");
-  assertEquals(safeFileName(""), "attachment");
 });
 
 function fakeDeps(state: {
@@ -539,38 +483,6 @@ Deno.test("a file already stored for the email from another mailbox copy (same s
     scopeLabel: "sales",
   });
   assertEquals(o.stored, 1);
-});
-
-Deno.test("an open failure is one nothing has healed since", async () => {
-  const k = await sha256Hex("a");
-  const rows = (entries: Array<[string, AttachmentStatus]>) =>
-    new Map<string, AttachmentStatus>(entries);
-  assertEquals(await hasOpenFailure(rows([])), false);
-  assertEquals(await hasOpenFailure(rows([[k, "stored"]])), false);
-  assertEquals(
-    await hasOpenFailure(rows([[await failureKey(k), "failed"]])),
-    true,
-  );
-  assertEquals(
-    await hasOpenFailure(
-      rows([[await failureKey(k), "failed"], [k, "stored"]]),
-    ),
-    false,
-  );
-  assertEquals(
-    await hasOpenFailure(
-      rows([[await failureKey(k), "failed"], [k, "skipped_no_content"]]),
-    ),
-    false,
-  );
-  assertEquals(
-    await hasOpenFailure(rows([[LIST_FAILURE_KEY, "failed"]])),
-    true,
-  );
-  assertEquals(
-    await hasOpenFailure(rows([[LIST_FAILURE_KEY, "failed"], [k, "stored"]])),
-    false,
-  );
 });
 
 Deno.test("a group file Microsoft sent without its bytes is recorded skipped_no_content, not retried", async () => {

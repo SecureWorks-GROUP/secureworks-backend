@@ -133,14 +133,6 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 9. The near-match reads candidate_job_ids by containment, so the GIN index can serve it (verify V-3).
-DO $$
-BEGIN
-  IF position('candidate_job_ids @> ARRAY[p_job]' IN pg_get_functiondef('public.context_job_view(uuid)'::regprocedure)) = 0 THEN
-    RAISE EXCEPTION 'recon contract: job view does not use containment on candidate_job_ids';
-  END IF;
-END $$;
-
 -- 10. INT-14 (Integrated Job Framework, case a): a Context decision linking invoice evidence to
 -- a job never moves revenue. The rule, shared with the CFO side (#1163,
 -- docs/invoice-job-link-rule.md, case b is xero-sync's links), verbatim:

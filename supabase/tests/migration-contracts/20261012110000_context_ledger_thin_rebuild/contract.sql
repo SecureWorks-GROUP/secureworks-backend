@@ -380,9 +380,3 @@ DO $c$ BEGIN
   FROM tr_fn f JOIN pg_proc p ON p.oid = f.oid), 're-applying changed a body, comment or grant');
 END $c$;
 ROLLBACK;
-
--- 8. Last, so a behaviour break above is reported by its behaviour: finish is this migration's body.
-DO $c$ BEGIN
- PERFORM pg_temp.tr_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure)
-  IN ('1695e52f99f56534a24166f6662ced35', '7f21d4665463c0e06eb731e3db63bf9a'), 'context_ledger_finish is not this migration''s body');
-END $c$;

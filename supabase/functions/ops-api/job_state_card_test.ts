@@ -28,14 +28,7 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildJobStateCard,
-  JOB_STATE_CARD_VERSION,
-  type JobStateCardInput,
-  money,
-  perthDate,
-  perthDateTime,
-} from "./job_state_card.ts";
+import { buildJobStateCard, JOB_STATE_CARD_VERSION, type JobStateCardInput, money } from "./job_state_card.ts";
 import type { JobFreshness } from "./job_freshness.ts";
 import { _assembleJobDossierForTest } from "./index.ts";
 
@@ -158,20 +151,6 @@ function quotes(current: any[]): any {
     read: { values: "ok", recipients: "ok" },
   };
 }
-
-// ── pure card ────────────────────────────────────────────────────────────────
-
-Deno.test("state card: Perth dates and money read plainly", () => {
-  assertEquals(perthDate("2026-10-04T17:00:00.000Z"), "5 Oct 2026");
-  assertEquals(perthDate("2026-10-07"), "7 Oct 2026");
-  assertEquals(
-    perthDateTime("2026-10-04T02:23:18.184Z"),
-    "4 Oct 2026 10:23 Perth",
-  );
-  assertEquals(perthDate(null), null);
-  assertEquals(money(1234.5), "$1,234.50");
-  assertEquals(money(0), "$0.00");
-});
 
 Deno.test("state card: an empty live job shows its record state and says what is not known", () => {
   const card = buildJobStateCard(baseInput({

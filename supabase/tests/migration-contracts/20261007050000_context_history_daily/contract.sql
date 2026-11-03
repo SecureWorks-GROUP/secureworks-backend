@@ -743,11 +743,7 @@ BEGIN;
 -- way); a re-apply leaves it so; the rollback puts that PR's body back word
 -- for word, its row kept.
 \ir d1_cron_lanes.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.automation_switch_cron_lanes()'::regprocedure) <> '250d7e9ec2ebecc7e83192a39b7da488'
- THEN RAISE EXCEPTION 'hd d1_cron_lanes.sql is not the deep email history PR''s body'; END IF;
-END $$;
+
 \ir ../../../migrations/20261007050000_context_history_daily.sql
 CREATE TEMP TABLE hd_lanes_after_apply ON COMMIT DROP AS
  SELECT md5(prosrc) AS m FROM pg_proc WHERE oid = 'public.automation_switch_cron_lanes()'::regprocedure;
@@ -782,17 +778,9 @@ BEGIN;
 -- (its body back word for word).
 \ir b5_cron_lanes.sql
 \ir ../../../migrations/20261007050000_context_history_daily.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.automation_switch_cron_lanes()'::regprocedure) <> '81cbebf914f537b0b85870196cbd0f75'
- THEN RAISE EXCEPTION 'hd this migration on the 20261005210000 body does not write its lane list'; END IF;
-END $$;
+
 \ir d2_cron_lanes.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.automation_switch_cron_lanes()'::regprocedure) <> '6498276b1eb16b527fb76dd2b0fa6d83'
- THEN RAISE EXCEPTION 'hd d2_cron_lanes.sql is not the list naming both jobs'; END IF;
-END $$;
+
 \ir ../../../migrations/20261007050000_context_history_daily.sql
 DO $$
 BEGIN

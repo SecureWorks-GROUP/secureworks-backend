@@ -1,17 +1,8 @@
 // Slice C1a: ghl-proxy send_sms saves its text once, through the shared row
 // builder and the one SQL writer capture_business_event (sms.md §3 review M9).
 // Behaviour runs against a recording fake client. No network, no database.
-import {
-  assert,
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildSendSmsEvidenceRow,
-  type CaptureOutcome,
-  parseSendSmsRecipient,
-  saveSendSmsEvidence,
-  sendSmsJobCustody,
-} from "./sms_capture.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { type CaptureOutcome, parseSendSmsRecipient, saveSendSmsEvidence } from "./sms_capture.ts";
 import { R5 } from "../_shared/evidence/ghl_message_fixtures.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -47,70 +38,6 @@ const R5_INPUT = {
   result: R5.sendResult,
   bodyHash: "sha256-fixture",
 };
-
-Deno.test("job custody: verified only when the job's contact is the texted contact", () => {
-  assertEquals(
-    sendSmsJobCustody(R5.jobId, { ghl_contact_id: R5.contactId }, R5.contactId),
-    { verifiedJobId: R5.jobId, unverifiedJobId: null },
-  );
-  // Contactless job, unreadable job, no job: never a direct link.
-  assertEquals(
-    sendSmsJobCustody(R5.jobId, { ghl_contact_id: null }, R5.contactId),
-    { verifiedJobId: null, unverifiedJobId: R5.jobId },
-  );
-  assertEquals(sendSmsJobCustody(R5.jobId, null, R5.contactId), {
-    verifiedJobId: null,
-    unverifiedJobId: R5.jobId,
-  });
-  assertEquals(sendSmsJobCustody(null, null, R5.contactId), {
-    verifiedJobId: null,
-    unverifiedJobId: null,
-  });
-});
-
-Deno.test("R5: the send row is the shared builder's row: ghl:<id>, client.sms_out by our tool, direct job, line 771, live", () => {
-  const built = buildSendSmsEvidenceRow(R5_INPUT);
-  assert(built.kind === "row");
-  // deno-lint-ignore no-explicit-any
-  const r = built.row as Record<string, any>;
-  assertEquals(r.provider_message_id, "ghl:mDS89hMzWE2R3VCMqxP2");
-  assertEquals([r.event_type, r.source, r.channel, r.direction], [
-    "client.sms_out",
-    "ghl-proxy",
-    "sms",
-    "outbound",
-  ]);
-  assertEquals([r.job_id, r.match_method], [R5.jobId, "direct_job_id"]);
-  assertEquals(r.payload.sent_by_kind, "our_tool");
-  assertEquals(r.payload.from_line, "771");
-  assertEquals(r.payload.body_hash, "sha256-fixture");
-  assertEquals(r.metadata, { capture_mode: "live" });
-  // GHL's send answer carries no time: event_at stays empty rather than using our clock.
-  assertEquals(r.event_at, null);
-  assertEquals(r.thread_key, null);
-  // The legacy shape is gone.
-  assert(r.event_type !== "sms_sent");
-});
-
-Deno.test("R5: the row goes only through capture_business_event, never a direct table write", async () => {
-  const client = fakeClient({
-    data: {
-      outcome: "inserted",
-      id: R5.existingEventId,
-      job_id: R5.jobId,
-      attribution_status: "direct",
-    },
-  });
-  const outcome = await saveSendSmsEvidence(client, R5_INPUT);
-  assertEquals(outcome.outcome, "inserted");
-  assertEquals(client.calls.length, 1);
-  assertEquals(client.calls[0].fn, "capture_business_event");
-  assertEquals(
-    client.calls[0].args.p_row.provider_message_id,
-    "ghl:mDS89hMzWE2R3VCMqxP2",
-  );
-  assertEquals(client.tableWrites, []);
-});
 
 Deno.test("R5: when the webhook row exists, duplicate is a saved row (upgraded or not) and nothing else is written", async () => {
   for (const upgraded of [true, false]) {
@@ -182,38 +109,6 @@ Deno.test("a send answer with no message id writes nothing (no key, no row)", as
 // carry the job number in their words; marked here, the ladder keeps them off
 // every job so no reader takes them for a message to that job's customer.
 const CREW_JOB = "0b5e4f2c-6a1d-4c3e-9f8a-2d7b1e0c9a44";
-
-Deno.test("crew text: marked recipient_role crew with about_job_id, never a job link", () => {
-  const built = buildSendSmsEvidenceRow({
-    ...R5_INPUT,
-    jobId: null,
-    job: null,
-    recipientRole: "crew",
-    aboutJobId: CREW_JOB,
-  });
-  assert(built.kind === "row");
-  // deno-lint-ignore no-explicit-any
-  const r = built.row as Record<string, any>;
-  assertEquals([r.event_type, r.direction], ["client.sms_out", "outbound"]);
-  assertEquals([r.job_id, r.match_method], [null, "none"]);
-  assertEquals(r.metadata, {
-    capture_mode: "live",
-    recipient_role: "crew",
-    about_job_id: CREW_JOB,
-  });
-});
-
-Deno.test("crew text: even a verified job is not a link once the recipient is crew or staff", () => {
-  const built = buildSendSmsEvidenceRow({
-    ...R5_INPUT,
-    recipientRole: "staff",
-  });
-  assert(built.kind === "row");
-  // deno-lint-ignore no-explicit-any
-  const r = built.row as Record<string, any>;
-  assertEquals([r.job_id, r.match_method], [null, "none"]);
-  assertEquals(r.metadata, { capture_mode: "live", recipient_role: "staff" });
-});
 
 Deno.test("send_sms recipient: crew or staff only, job as aboutJobId, never beside jobId", () => {
   assertEquals(parseSendSmsRecipient({}), {

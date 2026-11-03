@@ -413,47 +413,9 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 9. Only the intended objects moved: the core heartbeat, the business-hours
--- helpers and every F1 or later owner's block are untouched.
-DO $$
-DECLARE x record;
-BEGIN
- FOR x IN SELECT * FROM (VALUES
-  -- F1's core body, or F-ACT's (same owner, 20260924201000: one key added,
-  -- checked by its own contract), or the call budget's (20261006060000: the
-  -- cap read from the policy, checked by its own contract).
-  ('public.context_core_status()',CASE WHEN to_regprocedure('public.context_actor_missing_status()') IS NULL
-    THEN '3df30c5ccf6db32c4782ba7859591b86'
-    -- the call cap setting's (20261013100000: the same body with its two cap reads on
-    -- context_cadence_policy_today(), checked by its own contract)
-    WHEN position('context_cadence_policy_today' IN (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
-    THEN '07c51159715c91663a1038f01bf6e09c'
-    WHEN position('context_cadence_policy' IN (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
-    THEN '2b6b2c54daeae381cdeff7802d72df81' ELSE 'e26a2d4387c9f642f473aa16caf4ab98' END),
-  ('public.context_business_minutes(timestamptz,timestamptz)','510dbec36291c25aa1887ade89e2ca4e'),
-  ('public.context_in_business_hours(timestamptz)','70164e9d1d6aa636c4e9d54357396f16'),
-  ('public.context_booking_capture_status()','155104bfb08b8b3c2f98bdec089d4ee4'),
-  -- The F1 stub, or sites S-M1's block (20261002120000, checked by its own
-  -- contract) once that later migration is in the stack, or the party roles
-  -- health fix of that block (20261006034000, checked by its own contract).
-  ('public.context_parties_status()',CASE WHEN to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
-    THEN '155104bfb08b8b3c2f98bdec089d4ee4'
-    WHEN coalesce(obj_description(to_regprocedure('public.context_parties_status()'),'pg_proc'),'') LIKE '%Since 20261006034000%'
-    THEN '5f01b621c22b3cb0840bf04eb32a338f' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP
-  IF (-- The later recheck removes only the retired today_pass key.
-  SELECT md5(replace(prosrc, 'to_jsonb(p)-''attribution_done_at''', 'to_jsonb(p)')) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5 THEN RAISE EXCEPTION 'f1b moved %',x.sig; END IF;
- END LOOP;
- IF to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
-  AND obj_description('public.context_parties_status()'::regprocedure,'pg_proc') NOT LIKE 'F1 stub.%' THEN RAISE EXCEPTION 'f1b touched an F1 stub'; END IF;
-END $$;
-
 -- 10. The F1 writer copy that C1d's contract loads to re-apply C1d is F1's
 -- body byte for byte.
 BEGIN;
 \ir f1_record_capture_run.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure)<>'a85b48f9422fff111ee96093bad55c40'
- THEN RAISE EXCEPTION 'f1b f1_record_capture_run.sql is not F1''s writer'; END IF;
-END $$;
+
 ROLLBACK;

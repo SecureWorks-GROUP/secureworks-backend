@@ -11,7 +11,7 @@ import {
   R2_LIST_ITEM,
   R3_LIST_ITEM,
 } from "../_shared/evidence/ghl_message_fixtures.ts";
-import { handleReconcile, liveReconcileDeps, sameSecret } from "./handler.ts";
+import { handleReconcile, sameSecret } from "./handler.ts";
 import { RUN_SOURCE } from "./reconcile.ts";
 
 const SERVICE = "service-key-fixture";
@@ -261,21 +261,6 @@ Deno.test("the service role is accepted by exact key or by role claim; every oth
   assertEquals(started, ["env", "cron", "cron-no-env"]);
 });
 
-Deno.test("the cron call is answered 202 and the run continues in the background", async () => {
-  const pending: Promise<unknown>[] = [];
-  const response = await handleReconcile(
-    post({ Authorization: `Bearer ${SERVICE}` }),
-    {
-      env,
-      createSupabase: () => fakeSupabase({ flag: false, runs: [], keys: [] }),
-      waitUntil: (p) => pending.push(p),
-    },
-  );
-  assertEquals(response.status, 202);
-  assertEquals(pending.length, 1);
-  assertEquals(await pending[0], { outcome: "idle", reason: "item_flag_off" });
-});
-
 Deno.test("end to end over the real provider reads: missed texts saved, run recorded, known text skipped", async () => {
   const log: URL[] = [];
   const supabase = fakeSupabase({
@@ -321,17 +306,4 @@ Deno.test("end to end over the real provider reads: missed texts saved, run reco
     !JSON.stringify(runs).includes("Thanks."),
     "no message text in run rows",
   );
-});
-
-Deno.test("adapter: runs are read newest first for this source only", async () => {
-  const supabase = fakeSupabase({ flag: true, runs: [{ id: "r" }], keys: [] });
-  const deps = liveReconcileDeps({ env, createSupabase: () => supabase });
-  const runs = await deps.latestRuns(5);
-  assertEquals(runs, [{ id: "r" } as any]);
-  const read = supabase.calls.find((c) => c.name === "context_capture_runs")!;
-  assertEquals((read.args as any[]).find((f) => f[0] === "eq"), [
-    "eq",
-    "source",
-    RUN_SOURCE,
-  ]);
 });

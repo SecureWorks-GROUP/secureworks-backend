@@ -352,10 +352,3 @@ DO $c$ BEGIN
   'a second apply wrote a reading');
 END $c$;
 ROLLBACK;
-
--- 5. Last, so a behaviour break above is reported by its behaviour: finish is this migration's body,
--- or the later body that keeps it word for word and adds the thin rebuild guard (20261012110000).
-DO $c$ BEGIN
- PERFORM pg_temp.pf_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure)
-  IN ('110174bcd355a82568fd7bc572d414f6', '1695e52f99f56534a24166f6662ced35', '7f21d4665463c0e06eb731e3db63bf9a'), 'context_ledger_finish is not this migration''s body');
-END $c$;

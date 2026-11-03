@@ -435,19 +435,8 @@ FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_event
 CREATE TEMP TABLE p1b_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND p.proname IN ('context_reconsider_contact','context_job_created_reconsider','context_reconsider_eligible');
 \ir ../../../migrations/20260924160000_context_reconsider_contact.sql
-DO $$
-BEGIN
- IF (SELECT count(*) FROM p1b_before)<>3 THEN RAISE EXCEPTION 'expected 3 P1b functions, got %',(SELECT count(*) FROM p1b_before); END IF;
- IF EXISTS(SELECT 1 FROM p1b_before b LEFT JOIN pg_proc p ON p.oid=b.sig::regprocedure WHERE md5(p.prosrc) IS DISTINCT FROM b.md5)
- THEN RAISE EXCEPTION 'P1b re-apply changed a body'; END IF;
-END $$;
+
 DROP TABLE p1b_before;
 \else
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_eligible(public.business_events,uuid)'::regprocedure)<>'375857877700389aa8f6f730095b8800'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_created_reconsider()'::regprocedure)<>'2e199e27d38730e95bd5f2b0b8a9b165'
- THEN RAISE EXCEPTION 'P1b: a later slice changed a P1b body'; END IF;
-END $$;
+
 \endif

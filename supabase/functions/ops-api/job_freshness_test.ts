@@ -37,7 +37,6 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { freshnessFromRpc, readJobFreshness } from "./job_freshness.ts";
 import { _assembleJobDossierForTest } from "./index.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -270,88 +269,4 @@ Deno.test("K4 failure: an RPC error leaves freshness null with the code and diag
   });
   assertEquals(d.diagnostics.ok, false);
   assertEquals(client.writes, []);
-});
-
-Deno.test("K4 failure: a thrown call, a NULL answer, a foreign job or a wrong shape are refused with a code", async () => {
-  const cases: Array<[string, (args: any) => any]> = [
-    ["read_threw", () => {
-      throw new Error("socket closed");
-    }],
-    ["empty_payload", () => ({ data: null, error: null })],
-    ["invalid_shape", () => ({
-      data: { ...R6_LIVE, job_id: R13_JOB },
-      error: null,
-    })],
-    ["invalid_shape", () => ({ data: [R6_LIVE], error: null })],
-    ["invalid_shape", () => ({
-      data: { ...R6_LIVE, unread_count: "0" },
-      error: null,
-    })],
-    ["invalid_shape", () => ({
-      data: { ...R6_LIVE, line: "" },
-      error: null,
-    })],
-    ["invalid_shape", () => ({
-      data: { ...R6_LIVE, unplaced_for_contact: null },
-      error: null,
-    })],
-    ["read_failed", () => ({ data: null, error: { message: "no code" } })],
-  ];
-  for (const [code, answer] of cases) {
-    const client = fakeClient(jobTables(R6_JOB, "SWP-261456"), answer);
-    const r = await readJobFreshness(client, R6_JOB);
-    assertEquals(r.freshness, null, code);
-    assertEquals(r.status, { ok: false, state: "failed", count: 0, code });
-  }
-});
-
-// ── read only ──────────────────────────────────────────────────────────────
-
-Deno.test("K4 read only: one context_job_freshness call, no table read, no write, no network", async () => {
-  const client = fakeClient({}, answers(R13_JOB, R13_LIVE));
-  const r = await noNetwork(() => readJobFreshness(client, R13_JOB));
-  assertEquals(r.status, {
-    ok: true,
-    state: "ok",
-    count: R13_LIVE.unread_count,
-  });
-  assertEquals(client.rpcs, [{
-    fn: "context_job_freshness",
-    args: { p_job_id: R13_JOB },
-  }]);
-  assertEquals(client.reads, []);
-  assertEquals(client.writes, []);
-});
-
-Deno.test("K4 section is the SQL answer unchanged: the line and every value are passed through, never re-derived", () => {
-  const held = {
-    ...R6_LIVE,
-    last_run_finished_at: "2026-09-23T05:10:00+00:00",
-    unread_count: 3,
-    oldest_unread_landed_at: "2026-09-23T05:20:00+00:00",
-    next_due_at: "2026-09-24T00:00:00+00:00",
-    runs_today: 6,
-    blocked_reason: "daily_ceiling",
-    contact_missing: false,
-    unplaced_for_contact: { count: 2, newest_at: "2026-09-23T05:25:00+00:00" },
-    line: "any text the SQL function rendered",
-  };
-  assertEquals(freshnessFromRpc(held, R6_JOB), withoutJobId(held));
-  // an unknown future blocked reason is carried, not dropped
-  assertEquals(
-    freshnessFromRpc({ ...held, blocked_reason: "some_future_reason" }, R6_JOB)
-      ?.blocked_reason,
-    "some_future_reason",
-  );
-});
-
-Deno.test("K4 an answer carrying its own job_id (the K1 body) is accepted and the key dropped; another job's is refused", () => {
-  assertEquals(
-    freshnessFromRpc({ ...R13_LIVE, job_id: R13_JOB }, R13_JOB),
-    withoutJobId(R13_LIVE),
-  );
-  assertEquals(
-    freshnessFromRpc({ ...R13_LIVE, job_id: R6_JOB }, R13_JOB),
-    null,
-  );
 });

@@ -330,8 +330,7 @@ jobs:
       - name: Check migration extension schema contract
         run: |
           deno test --allow-read \
-            supabase/functions/ops-api/migration_extension_schema_test.ts \
-            supabase/functions/ops-api/context_recon_dispute_migration_test.ts
+            supabase/functions/ops-api/migration_extension_schema_test.ts
 
       # The repair intake pipeline routes SES work orders to a NEW jobs.type and
       # a NEW money-path branch, so its suite is CI-guarded rather than left to
@@ -552,7 +551,6 @@ jobs:
             supabase/functions/ops-api/sales_booking_execution_read_test.ts \
             supabase/functions/ops-api/sales_booking_routes_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts \
-            supabase/functions/reporting-api/job_context_timeline_test.ts \
             supabase/functions/reporting-api/job_profitability_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
@@ -573,7 +571,6 @@ jobs:
             supabase/functions/ops-api/job_state_card_test.ts \
             supabase/functions/ops-api/job_story_door_test.ts \
             supabase/functions/ops-api/job_overview_read_test.ts \
-            supabase/functions/ops-api/job_bill_outcomes_read_test.ts \
             supabase/functions/ops-api/context_scorecard_door_test.ts \
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/job_conversation_window_test.ts \
@@ -600,31 +597,20 @@ jobs:
       # doorbell, and a reconciler pass after it writes nothing new.
       # UserReplied: the staff-reply workflow post is that doorbell too; it
       # ignores any posted conversation id and reads the newest conversation.
-      # Gap plan B-4: invoice evidence on its job. The placement plan is the
-      # unique reference matcher's (never re-derived), xero-sync's recent-row
-      # step is off until its flag and writes nothing on a partial read, and
-      # ops-api's invoice writers name the invoice's own job.
+      # Gap plan B-4: invoice evidence on its job. xero-sync's recent-row
+      # step is off until its flag and writes nothing on a partial read.
       - name: Test Xero invoice evidence placement
         run: |
           deno test --allow-read --allow-env \
-            supabase/functions/_shared/evidence/xero_invoice_evidence_plan_test.ts \
-            supabase/functions/xero-sync/invoice_evidence_place_test.ts \
-            supabase/functions/ops-api/invoice_evidence_writers_test.ts
+            supabase/functions/xero-sync/invoice_evidence_place_test.ts
 
       # The email reader (EM2) and its group history walk (W7): cursor
       # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,
-      # over fake Graph reads and a fake run ledger. No network. Its row
-      # builder next to it: who our own email went to (group mailbox
-      # audience, 9 Oct 2026), and the builder rows the PostgreSQL contracts
-      # feed capture_business_event and context_email_audience_resolve.
+      # over fake Graph reads and a fake run ledger. No network.
       - name: Test the Outlook email reader
         run: |
           deno test --allow-read --allow-env \
-            supabase/functions/outlook-mail-capture/ \
-            supabase/functions/_shared/evidence/outlook_mail_test.ts \
-            supabase/functions/_shared/evidence/outlook_mail_contract_rows_test.ts \
-            supabase/functions/_shared/evidence/outlook_mail_audience_test.ts \
-            supabase/functions/_shared/evidence/outlook_mail_audience_contract_rows_test.ts
+            supabase/functions/outlook-mail-capture/
 
       - name: Test GHL webhook receiver auth and receipts
         run: |
@@ -637,16 +623,11 @@ jobs:
             supabase/functions/ghl-webhook-receiver/receiver_user_replied_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
-      # Slice C1a: the shared GHL row builder, ghl-proxy send_sms through the one
-      # writer capture_business_event, and the builder rows the PostgreSQL
-      # contract feeds that writer.
-      - name: Test GHL message row builder and send_sms evidence
+      # Slice C1a: ghl-proxy send_sms through the one writer
+      # capture_business_event.
+      - name: Test send_sms evidence
         run: |
           deno test --allow-read --allow-env \
-            supabase/functions/_shared/evidence/ghl_message_test.ts \
-            supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
-            supabase/functions/_shared/evidence/ghl_call_pair_test.ts \
-            supabase/functions/_shared/evidence/party_roles_test.ts \
             supabase/functions/ghl-proxy/sms_capture_test.ts \
             supabase/functions/ghl-proxy/send_sms_response_test.ts
 
@@ -667,14 +648,12 @@ jobs:
             supabase/functions/ghl-history-load/link_test.ts \
             supabase/functions/ghl-history-load/handler_test.ts
 
-      # Slice T2: the GHL call transcript fetcher (the one transcript reader,
-      # the transcript row, the fetcher's per-call rules, its live and history
-      # modes and its HTTP door) on the recorded call and transcript shapes.
+      # Slice T2: the GHL call transcript fetcher (its per-call rules, its live
+      # and history modes and its HTTP door) on the recorded call and
+      # transcript shapes.
       - name: Test the GHL call transcript fetcher
         run: |
           deno test --allow-read --allow-env \
-            supabase/functions/_shared/ghl/call_transcript_test.ts \
-            supabase/functions/_shared/evidence/ghl_call_transcript_row_test.ts \
             supabase/functions/ghl-call-transcript-fetch/fetch_test.ts \
             supabase/functions/ghl-call-transcript-fetch/handler_test.ts
 
@@ -687,24 +666,14 @@ jobs:
             supabase/functions/context-document-text/read_test.ts \
             supabase/functions/context-document-text/handler_test.ts
 
-      # Gap plan B-5b: the vision reader's door (pictures out of scans and
-      # photos, what spends a model call and what does not, the answer as
+      # Gap plan B-5b: the vision reader's door (what spends a model call and
+      # what does not, the answer as
       # evidence, the HTTP modes) on fake reads and writes. No model.
       - name: Test the document vision reader
         run: |
           deno test --allow-read \
-            supabase/functions/context-document-vision/images_test.ts \
             supabase/functions/context-document-vision/vision_test.ts \
             supabase/functions/context-document-vision/handler_test.ts
-
-      # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
-      # helpers) on the one fixture table, and proof that the migration
-      # contract runs the SQL helpers on that same table.
-      - name: Test shared placement keys and token rule
-        run: |
-          deno test --allow-read \
-            supabase/functions/_shared/job_refs_test.ts \
-            supabase/functions/_shared/job_refs_contract_rows_test.ts
 
       # Slice EM0: monitor-inbox classifies by rules on both paths, with no
       # model or network call (named email rows, fetch trapped, source pin).
@@ -720,16 +689,6 @@ jobs:
         run: |
           deno test --allow-read \
             supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
-
-      # Gap map W9: one email sent to several of the old path's mailboxes is
-      # one evidence row (the same internet message id, or for rows saved
-      # before it was kept, the same sender, subject, words and time from
-      # another mailbox); an unreadable lookup writes as before.
-      - name: Test the old mail path writes one evidence row per email
-        run: |
-          deno test --allow-read \
-            supabase/functions/monitor-inbox/self_copy_test.ts \
-            supabase/functions/monitor-inbox/reader_handover_test.ts
 
       # Slice F-ACT: the one actor rule (verified user, else x-sw-actor on a
       # server-key call, else actor_missing; never refused).

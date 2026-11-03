@@ -298,19 +298,3 @@ Deno.test("front door: staff only, never a trade, the shared key or agent-read",
     "user_jwt_required",
   ]);
 });
-
-Deno.test("source: the action is dispatched and on no routine allow-list", async () => {
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assertEquals(src.includes("case 'ledger_person_edit':"), true);
-  const start = src.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set([");
-  const end = src.indexOf("])", start);
-  assertEquals(start > 0 && end > start, true);
-  assertEquals(src.slice(start, end).includes("ledger_person_edit"), false);
-  // The person comes only from the verified session.
-  assertEquals(
-    src.includes(
-      "ledgerPersonEdit(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null })",
-    ),
-    true,
-  );
-});

@@ -1,8 +1,8 @@
 // The rows the C1c PostgreSQL contract feeds capture_business_event
 // (supabase/tests/migration-contracts/20260924130000_ghl_webhook_receipts/contract.sql),
 // built exactly as the receiver builds them from the recorded named-row
-// fixtures. receiver_c1c_test.ts fails when the contract's lines drift from
-// this; regenerate them with:
+// fixtures. Nothing checks that the contract's lines still match this;
+// regenerate them with:
 //   deno run --allow-read supabase/functions/ghl-webhook-receiver/c1c_contract_rows.ts
 // Test support only: nothing in the deployed receiver imports this file.
 import {

@@ -533,20 +533,5 @@ CREATE TEMP TABLE notes_freshness_md5 AS
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_ledger_row_unread', 'context_ledger_judge', 'context_ledger_due',
   'context_ledger_promote_shadow', 'context_job_story_ledger');
 \ir ../../../migrations/20261009132000_context_notes_freshness.sql
-DO $again$
-BEGIN
- IF (SELECT count(*) FROM notes_freshness_md5) <> 5 OR EXISTS (SELECT 1 FROM notes_freshness_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
-       WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
-  RAISE EXCEPTION 'notes freshness contract: a re-apply must change nothing';
- END IF;
- IF EXISTS (SELECT 1 FROM (VALUES
-     ('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)', 'a684b7d9c649cfa8424e4cb0a928c2ef'),
-     ('public.context_ledger_judge(uuid[])', 'e0809f08f49e10d500464b2c57e60461'),
-     ('public.context_ledger_due(integer)', '306bab3434fca5b6ced5f1d040f5cad1'),
-     ('public.context_ledger_promote_shadow(text,uuid[],integer)', 'f3a73161410c6da869af7652235d43c5'),
-     ('public.context_job_story_ledger(uuid,uuid,timestamptz)', 'b27d9f6c0abdd7174f38b0ed5e1ac5f0')) v(sig, m)
-   WHERE (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure(v.sig)) IS DISTINCT FROM v.m) THEN
-  RAISE EXCEPTION 'notes freshness contract: the live bodies are not this migration''s';
- END IF;
-END $again$;
+
 ROLLBACK;

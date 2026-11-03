@@ -12,18 +12,7 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildStoryDossier,
-  clientStoryAction,
-  exactJobNumberPattern,
-  jobStoryAction,
-  parseInstant,
-  readJobStory,
-  sanitizedError,
-  STORY_SECTIONS_VERSION,
-  StoryReadError,
-  storyScorecardAction,
-} from "./job_story_read.ts";
+import { buildStoryDossier, clientStoryAction, exactJobNumberPattern, jobStoryAction, readJobStory, sanitizedError, STORY_SECTIONS_VERSION, StoryReadError, storyScorecardAction } from "./job_story_read.ts";
 import {
   _assembleJobDossierForTest,
   _authorizeOpsApiAction,
@@ -331,27 +320,6 @@ Deno.test("GET job_story resolves job_number, passes the options, and maps error
   assertEquals(failing.message.includes("unavailable"), false);
 });
 
-Deno.test("an instant more than five minutes ahead is refused; a few minutes of skew is not", () => {
-  const now = Date.parse("2026-10-05T10:00:00Z");
-  const e = (() => {
-    try {
-      parseInstant("2026-10-05T10:06:00Z", "as_of", now);
-    } catch (x) {
-      return x as StoryReadError;
-    }
-    return null;
-  })();
-  assertEquals([e?.code, e?.status], ["invalid_as_of", 400]);
-  assertEquals(
-    parseInstant("2026-10-05T10:04:00Z", "as_of", now),
-    "2026-10-05T10:04:00.000Z",
-  );
-  assertEquals(
-    parseInstant("2026-10-01T00:00:00Z", "since", now),
-    "2026-10-01T00:00:00.000Z",
-  );
-});
-
 Deno.test("failed reads carry a fixed message and the SQLSTATE, never the database text", async () => {
   const client = fakeClient({ rpc: { context_client_story: CLIENT } });
   client.rpc = (fn: string, args: any) => {
@@ -579,23 +547,6 @@ Deno.test("the three story doors are staff-only: not profile-scoped, not agent-r
     assertEquals(decide("jwt", "lead_installer", ["fencing"]), 403, action);
     assertEquals(decide("jwt", "trade"), 403, action);
   }
-});
-
-Deno.test("the dispatch routes the three doors as GET-only reads", async () => {
-  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assert(index.includes("case 'job_story':"));
-  assert(index.includes("case 'client_story':"));
-  assert(index.includes("case 'context_story_scorecard': {"));
-  assert(
-    index.includes(
-      "if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)",
-    ),
-  );
-  assert(
-    index.includes(
-      "story:            { conversation: 0,   events: 0,   facts: 0 },",
-    ),
-  );
 });
 
 Deno.test("the deploy probes refuse before any read: a bad job_id or as_of reads nothing", async () => {

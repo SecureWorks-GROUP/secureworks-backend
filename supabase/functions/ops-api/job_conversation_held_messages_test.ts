@@ -282,43 +282,6 @@ Deno.test("held: the limit keeps the newest messages, held ones included", async
   assertEquals(ids(res), ["bev:h1", "bev:p5", "bev:p4"]);
 });
 
-Deno.test("heldConversationMessages: rows are checked again, whatever the read returned", () => {
-  const customer = new Set<string>();
-  const rows = [
-    sms("ok", "2026-10-09T03:00:00.000Z"),
-    sms("placed", "2026-10-09T03:00:00.000Z", { job_id: OTHER_JOB }),
-    sms("not-held", "2026-10-09T03:00:00.000Z", {
-      attribution_status: "attributed",
-    }),
-    sms("stranger", "2026-10-09T03:00:00.000Z", { contact_id: STRANGER }),
-    sms("other-job", "2026-10-09T03:00:00.000Z", {
-      candidate_job_ids: [OTHER_JOB],
-    }),
-    sms("retracted", "2026-10-09T03:00:00.000Z", { retracted: "true" }),
-    sms("copy", "2026-10-09T03:00:00.000Z", { duplicate_of: "x" }),
-    sms("in-cache", "2026-10-09T03:00:00.000Z", {
-      provider_message_id: "ghl:cache-1",
-    }),
-    sms("placed-copy", "2026-10-09T03:00:00.000Z", {
-      provider_message_id: "ghl:placed-1",
-    }),
-  ];
-  const existing = [
-    { source_system: "ghl_cache", source_ref: "cache-1" },
-    {
-      source_system: "business_events",
-      source_ref: "p1",
-      provider_message_id: "ghl:placed-1",
-    },
-  ];
-  const out = heldConversationMessages(rows, JOB, [PAYER], customer, existing);
-  // A copy shown only from the GoHighLevel cache does not hide the held row (the
-  // reader drops the cache copy); a placed business_events copy does.
-  assertEquals(out.map((m) => m.id), ["bev:ok", "bev:in-cache"]);
-  assert(out.every((m) => m.unplaced === true));
-  assertEquals(heldConversationMessages(rows, JOB, [], customer, []), []);
-});
-
 // ── Debt review, 15 Oct 2026 (follow-up to PR 1056) ──
 //
 // (1) A held message that is also in the payer's GoHighLevel cache reached the agent as

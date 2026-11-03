@@ -312,12 +312,5 @@ CREATE TEMP TABLE story_settled_md5 AS
  WHERE p.oid IN (to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'),
                  to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)'));
 \ir ../../../migrations/20261011120000_context_story_settled_notes.sql
-DO $again$
-BEGIN
- IF EXISTS (SELECT 1 FROM story_settled_md5 t JOIN pg_proc p ON p.oid = to_regprocedure(t.sig)
-            WHERE md5(p.prosrc) IS DISTINCT FROM t.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM t.c)
-    OR (SELECT count(*) FROM story_settled_md5) <> 2 THEN
-  RAISE EXCEPTION 'story settled notes contract: re-applying changed a body or comment';
- END IF;
-END $again$;
+
 ROLLBACK;

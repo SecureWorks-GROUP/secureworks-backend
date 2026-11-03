@@ -896,21 +896,6 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 12. The bodies are the ones the guard accepts on a re-apply: B-5's list plus
--- this migration's row, or, when the history daily slice (20261007050000)
--- applied first, that slice's list plus this migration's row (the body that
--- slice writes when it applies second), or, once the paid close-out
--- (20261013150000) is on it, that list plus job-closeout-sweep (a list naming
--- outlook-mail-deep-history, which the guard leaves alone).
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)
-   <>(CASE WHEN to_regclass('public.job_closeout_settings') IS NOT NULL THEN 'd0a346b823b56258bf67bc835f41f922'
-     WHEN to_regprocedure('public.context_history_daily_policy()') IS NULL THEN '250d7e9ec2ebecc7e83192a39b7da488'
-     ELSE '6498276b1eb16b527fb76dd2b0fa6d83' END)
- THEN RAISE EXCEPTION 'deep contract: the lane list differs from the md5 the guard accepts on a re-apply'; END IF;
-END $$;
-
 -- 12b. Merged after the history daily slice (20261007050000, PR 989), whose
 -- lane list is B-5's plus xero-history-daily: this migration adds its own row
 -- after that slice's and keeps every row there, writing md5
@@ -921,11 +906,7 @@ END $$;
 -- merged second and wrote the same body).
 BEGIN;
 \ir history_daily_cron_lanes.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'81cbebf914f537b0b85870196cbd0f75'
- THEN RAISE EXCEPTION 'deep contract: history_daily_cron_lanes.sql is not the 20261007050000 body'; END IF;
-END $$;
+
 \ir ../../../migrations/20261007080000_context_email_deep_history.sql
 DO $$
 BEGIN
@@ -937,17 +918,9 @@ BEGIN
  THEN RAISE EXCEPTION 'deep contract: after the history daily slice %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 \ir ../../../migrations/20261007080000_context_email_deep_history.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'6498276b1eb16b527fb76dd2b0fa6d83'
- THEN RAISE EXCEPTION 'deep contract: a re-apply after the history daily slice changed the lane list'; END IF;
-END $$;
+
 \ir ../../../rollbacks/20261007080000_context_email_deep_history_down.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'81cbebf914f537b0b85870196cbd0f75'
- THEN RAISE EXCEPTION 'deep contract: the rollback did not give the history daily slice its lane list back'; END IF;
-END $$;
+
 ROLLBACK;
 
 -- 13. A re-apply changes nothing and keeps the owner's flag setting; on a

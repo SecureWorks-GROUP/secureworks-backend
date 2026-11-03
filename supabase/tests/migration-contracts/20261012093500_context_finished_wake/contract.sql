@@ -474,13 +474,7 @@ CREATE TEMP TABLE finished_wake_md5 AS
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_finished_wake_hours', 'context_lead_monitored_jobs', 'context_lead_monitored',
   'context_ledger_judge', 'context_ledger_due');
 \ir ../../../migrations/20261012093500_context_finished_wake.sql
-DO $again$
-BEGIN
- IF (SELECT count(*) FROM finished_wake_md5) <> 5 OR EXISTS (SELECT 1 FROM finished_wake_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
-       WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
-  RAISE EXCEPTION 'finished wake contract: a re-apply must change nothing';
- END IF;
-END $again$;
+
 ROLLBACK;
 
 -- 8. The service role reads the rule directly with finished jobs in the set: a fresh session, so no

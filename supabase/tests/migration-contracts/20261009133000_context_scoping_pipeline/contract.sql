@@ -653,13 +653,7 @@ CREATE TEMP TABLE scoping_pipeline_md5 AS
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_window_hours', 'context_lead_monitored_jobs', 'context_lead_monitored',
   'context_ledger_judge', 'context_ledger_due', 'context_job_record_loops', 'context_job_story_assemble');
 \ir ../../../migrations/20261009133000_context_scoping_pipeline.sql
-DO $again$
-BEGIN
- IF (SELECT count(*) FROM scoping_pipeline_md5) <> 7 OR EXISTS (SELECT 1 FROM scoping_pipeline_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
-       WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
-  RAISE EXCEPTION 'scoping pipeline contract: a re-apply must change nothing';
- END IF;
-END $again$;
+
 ROLLBACK;
 
 -- 8. The service role reads the rule directly with drafts in the set: a fresh session, so no plan

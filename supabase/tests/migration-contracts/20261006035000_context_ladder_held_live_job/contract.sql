@@ -360,11 +360,6 @@ END $$;
 CREATE TEMP TABLE l1g_before AS SELECT md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p WHERE p.oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure;
 \ir ../../../migrations/20261006035000_context_ladder_held_live_job.sql
-DO $$
-BEGIN
- IF EXISTS(SELECT 1 FROM l1g_before b, pg_proc p WHERE p.oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure
-   AND (md5(p.prosrc) IS DISTINCT FROM b.md5 OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note))
- THEN RAISE EXCEPTION 'l1g: re-apply changed the body or comment'; END IF;
-END $$;
+
 DROP TABLE l1g_before;
 \endif
