@@ -101,7 +101,7 @@ import {
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
-import { contactDepositFromRelease, depositHeldMessage, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
+import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -1665,7 +1665,7 @@ serve(async (req: Request) => {
 
       const { data: doc, error } = await sb
         .from('job_documents')
-        .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst)')
+        .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key)')
         .eq('share_token', token)
         .eq('sent_to_client', true)
         .single()
@@ -2239,11 +2239,19 @@ serve(async (req: Request) => {
         }
 
         // Auto-create + send deposit invoice via send_acceptance_invoice
-        // For multi-contact: create per-contact deposit invoice using their share
+        // For multi-contact: create per-contact deposit invoice using their share.
+        // D1F-1/D1F-2: a named party's deposit comes from the version they accepted
+        // (a neighbour's from their share of it, never their live contact value);
+        // held with a reason when that cannot be read or matched.
+        const partyDeposit = job?.id && doc.job_contact_id && doc.job_contacts
+          ? await namedPartyDeposit(sb, doc)
+          : null
         // A party whose quoted share is $0 (a neighbour paid for the only gate, say)
         // owes no deposit: 0 is a real answer, never read as "missing".
-        const partyPaysNothing = !!(doc.job_contact_id && doc.job_contacts &&
-          doc.job_contacts.quote_value_ex_gst != null && Number(doc.job_contacts.quote_value_ex_gst) === 0)
+        const partyPaysNothing = neighbourLetter(doc.job_contacts?.contact_label)
+          ? partyDeposit?.ok === true && partyDeposit.amount === 0
+          : !!(doc.job_contact_id && doc.job_contacts &&
+            doc.job_contacts.quote_value_ex_gst != null && Number(doc.job_contacts.quote_value_ex_gst) === 0)
         if (job?.id && !partyPaysNothing) {
           try {
             const invoiceBody: any = {
@@ -2256,12 +2264,9 @@ serve(async (req: Request) => {
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing
             let depositHeld: string | null = null
-            if (doc.job_contact_id && doc.job_contacts) {
+            if (partyDeposit) {
               invoiceBody.job_contact_id = doc.job_contact_id
-              // D1F-1: this contact's deposit comes from the version they accepted
-              // (their exact quote value, else their share of the accepted total),
-              // never the live job; held with a reason when that cannot be read.
-              const deposit = contactDepositFromRelease(await readAcceptedRelease(sb, doc.id), doc.job_contacts)
+              const deposit = partyDeposit
               if (deposit.ok) {
                 invoiceBody.deposit_amount = deposit.amount
                 invoiceBody.deposit_percent = deposit.percent

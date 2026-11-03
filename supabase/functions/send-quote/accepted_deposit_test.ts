@@ -2,6 +2,7 @@ import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts'
 import {
   contactDepositFromRelease,
   depositHeldMessage,
+  namedPartyDeposit,
   readAcceptedRelease,
   runDepositFromRelease,
 } from './accepted_deposit.ts'
@@ -46,7 +47,7 @@ Deno.test('reads the accepted document\'s newest sent version', async () => {
   assertEquals(calls.includes('eq:job_document_id=doc-1'), true)
   assertEquals(calls.includes('not:sent_at is null'), true)
   // The column that exists on quote_revisions (a wrong name fails the whole read live).
-  assertEquals(calls.includes('select:id, pricing_snapshot_json, sent_at'), true)
+  assertEquals(calls.includes('select:id, pricing_snapshot_json, contacts_snapshot_json, sent_at'), true)
 })
 
 Deno.test('fence run deposit is priced from the accepted version, not the live job', async () => {
@@ -97,4 +98,90 @@ Deno.test('the held message names the job, the party and the reason in plain wor
     depositHeldMessage('SWF-261507', 'Jo Smith', 'no_released_quote'),
     'SWF-261507 deposit invoice for Jo Smith not created: no sent version of the accepted quote was found. Raise it from the accepted quote by hand.',
   )
+})
+
+// D1F-2. A read-only database of fixed rows: eq / is / not filters, newest first.
+function rowsDb(tables: Record<string, any[]>) {
+  return {
+    from(table: string) {
+      let rows = [...(tables[table] || [])]
+      const q: any = {
+        select: () => q,
+        eq: (c: string, v: unknown) => { rows = rows.filter((r) => r[c] === v); return q },
+        is: (c: string, v: unknown) => { rows = rows.filter((r) => (r[c] ?? null) === v); return q },
+        not: (c: string, _op: string, v: unknown) => { rows = rows.filter((r) => (r[c] ?? null) !== v); return q },
+        order: (c: string, o: any) => {
+          rows.sort((a, b) => (a[c] < b[c] ? -1 : 1) * (o?.ascending ? 1 : -1))
+          return q
+        },
+        limit: (n: number) => { rows = rows.slice(0, n); return q },
+        then: (ok: any, bad: any) => Promise.resolve({ data: rows, error: null }).then(ok, bad),
+      }
+      return q
+    },
+  }
+}
+
+// The quote sent on 14 Jul for one shared fence: owner A (quote value $2,340.00
+// ex GST) and neighbours B and C, prepared together as documents 1, 2 and 3; the
+// owner's send recorded the release. Shares inc GST: B $2,574.00, C $1,914.58.
+// Deposit 50%. So C owes $957.29 and the owner $1,287.00.
+const sentQuote = {
+  job_documents: [
+    { id: 'doc-A', job_id: 'job-1', type: 'quote', version: 1, run_label: null, job_contacts: { contact_label: 'A' } },
+    { id: 'doc-B', job_id: 'job-1', type: 'quote', version: 2, run_label: null, job_contacts: { contact_label: 'B' } },
+    { id: 'doc-C', job_id: 'job-1', type: 'quote', version: 3, run_label: null, job_contacts: { contact_label: 'C' } },
+  ],
+  quote_revisions: [{
+    id: 'rev-1',
+    job_document_id: 'doc-A',
+    sent_at: '2026-07-14T02:11:03Z',
+    pricing_snapshot_json: {
+      raw: {
+        totalIncGST: 7062.58,
+        deposit: { percent: 50 },
+        neighbour_splits: {
+          method: 'flat_percent',
+          neighbours: [
+            { id: 'nb-1', name: 'Bea Neighbour', portion_inc_gst: 2574 },
+            { id: 'nb-2', name: 'Cal Neighbour', portion_inc_gst: 1914.58 },
+          ],
+        },
+      },
+    },
+    contacts_snapshot_json: [{ id: 'c-A', label: 'A' }, { id: 'c-B', label: 'B' }, { id: 'c-C', label: 'C' }],
+  }],
+}
+
+Deno.test('a neighbour whose contact value changed after sending pays from their share of the accepted quote', async () => {
+  // C's contact value was edited to $2,000 ex GST after the quote went out.
+  const d = await namedPartyDeposit(rowsDb(sentQuote), {
+    id: 'doc-C', job_id: 'job-1', version: 3, job_contact_id: 'c-C',
+    job_contacts: { contact_label: 'C', quote_value_ex_gst: 2000, share_percentage: 50 },
+  })
+  assertEquals(d, { ok: true, amount: 957.29, percent: 50, revisionId: 'rev-1' })
+})
+
+Deno.test('a neighbour who cannot be matched to a share of the accepted quote is held with the reason', async () => {
+  const held = { ok: false as const, reason: 'neighbour_share_unmatched' }
+  // Their party key names no share on the accepted quote.
+  assertEquals(await namedPartyDeposit(rowsDb(sentQuote), {
+    id: 'doc-B', job_id: 'job-1', version: 2, job_contact_id: 'c-B',
+    job_contacts: { contact_label: 'B', source_party_key: 'nb-7', quote_value_ex_gst: 2340 },
+  }), held)
+  // The accepted quote's contacts (A, B, C) and its shares (one) disagree.
+  const oneShare = structuredClone(sentQuote)
+  oneShare.quote_revisions[0].pricing_snapshot_json.raw.neighbour_splits.neighbours.pop()
+  assertEquals(await namedPartyDeposit(rowsDb(oneShare), {
+    id: 'doc-B', job_id: 'job-1', version: 2, job_contact_id: 'c-B',
+    job_contacts: { contact_label: 'B', quote_value_ex_gst: 2340 },
+  }), held)
+})
+
+Deno.test("the owner's deposit on a whole-quote document is unchanged", async () => {
+  const d = await namedPartyDeposit(rowsDb(sentQuote), {
+    id: 'doc-A', job_id: 'job-1', version: 1, job_contact_id: 'c-A',
+    job_contacts: { contact_label: 'A', quote_value_ex_gst: 2340, share_percentage: 50 },
+  })
+  assertEquals(d, { ok: true, amount: 1287, percent: 50, revisionId: 'rev-1' })
 })
