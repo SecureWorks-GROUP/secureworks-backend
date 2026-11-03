@@ -14,7 +14,10 @@
 // types and codes; never a subject, address, body or file. Logs carry the lane
 // and counts only.
 
-import { verifyServiceCredential } from "../_shared/service_credential.ts";
+import {
+  type LegacyKeyProbe,
+  verifyServiceCredential,
+} from "../_shared/service_credential.ts";
 import {
   type CensusReads,
   CensusRefusal,
@@ -42,12 +45,24 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-/** The server-credential check, as every internal function makes it. */
+/**
+ * The server-credential check. A legacy service-role key is accepted by its
+ * `role` claim, as for the cron callers of ops-api and monitor-ses-makesafes:
+ * the key a server caller holds need not equal the key the platform injects
+ * into this function, and verifyServiceCredential still asks the platform
+ * whether that key is honoured before trusting it (a refused or unknown claim
+ * is never accepted).
+ */
 export function serverCredentialCheck(
   env: (name: string) => string | undefined,
+  probe?: LegacyKeyProbe,
 ): (headers: Headers) => Promise<boolean> {
   return async (headers) =>
-    (await verifyServiceCredential(headers, { env })) !== null;
+    (await verifyServiceCredential(headers, {
+      env,
+      legacy: "service_role_claim",
+      ...(probe ? { probe } : {}),
+    })) !== null;
 }
 
 export async function handleCensus(

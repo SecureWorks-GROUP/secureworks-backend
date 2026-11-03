@@ -14,7 +14,11 @@ import {
   readerKey,
   runCensus,
 } from "./census.ts";
-import { COMPANY_ORG_ID, handleCensus } from "./handler.ts";
+import {
+  COMPANY_ORG_ID,
+  handleCensus,
+  serverCredentialCheck,
+} from "./handler.ts";
 import { liveCensusReads } from "./reads.ts";
 
 const NOW = Date.parse("2026-11-03T12:00:00Z");
@@ -618,5 +622,39 @@ Deno.test("the live reads only GET Graph and GHL, with immutable ids, and never 
   );
   assert(
     calls.some((c) => c.url.includes("/conversations/k1/messages?limit=100")),
+  );
+});
+
+Deno.test("server check: a service-role key the platform honours is accepted even when it differs from the injected key; a refused or unknown claim is not", async () => {
+  const b64 = (o: unknown) =>
+    btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(
+      /\//g,
+      "_",
+    );
+  const held = `${b64({ alg: "HS256" })}.${b64({ role: "service_role" })}.sig`;
+  const anon = `${b64({ alg: "HS256" })}.${b64({ role: "anon" })}.sig`;
+  const env = (name: string) =>
+    name === "SUPABASE_SERVICE_ROLE_KEY" ? "the-injected-key" : undefined;
+  const headers = (token: string) =>
+    new Headers({ apikey: token, authorization: `Bearer ${token}` });
+  assertEquals(
+    await serverCredentialCheck(env, async () => "accepted")(headers(held)),
+    true,
+  );
+  assertEquals(
+    await serverCredentialCheck(env, async () => "rejected")(headers(held)),
+    false,
+  );
+  assertEquals(
+    await serverCredentialCheck(env, async () => "unknown")(headers(held)),
+    false,
+  );
+  assertEquals(
+    await serverCredentialCheck(env, async () => "accepted")(headers(anon)),
+    false,
+  );
+  assertEquals(
+    await serverCredentialCheck(env, async () => "accepted")(new Headers()),
+    false,
   );
 });
