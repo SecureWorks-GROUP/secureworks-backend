@@ -1,11 +1,11 @@
--- Rollback of 20261103193000: v_job_profit back to the 20261103171500 definition (md5 4ab42d7d..., embedded below
--- exactly as read from production on 3 Nov 2026), so collected counts amount_paid only again.
+-- Rollback of 20261103210000: v_job_profit back to the 20261103200000 definition (md5 986aefcd..., embedded below
+-- exactly as read from production on 3 Nov 2026 after #1272), so collected counts amount_paid only again.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL TimeZone = 'UTC';
 DO $down$
 BEGIN
   IF strpos(pg_get_viewdef('public.v_job_profit'::regclass, true), 'Overpayments') = 0 THEN
-    RAISE NOTICE 'v_job_profit does not carry the 20261103193000 change; nothing to undo';
+    RAISE NOTICE 'v_job_profit does not carry the 20261103210000 change; nothing to undo';
     RETURN;
   END IF;
   EXECUTE $old_def$CREATE OR REPLACE VIEW public.v_job_profit AS
@@ -21,15 +21,27 @@ BEGIN
            FROM v_job_revenue_events e
           GROUP BY e.job_id
         ), collected AS (
-         SELECT x.job_id,
+         SELECT COALESCE(x.job_id, inv_ev.job_id) AS job_id,
             sum(
                 CASE
                     WHEN COALESCE(x.total, 0::numeric) <> 0::numeric THEN x.amount_paid * x.sub_total / x.total
                     ELSE x.amount_paid
                 END) AS collected_ex
            FROM xero_invoices x
-          WHERE x.invoice_type = 'ACCREC'::text AND x.job_id IS NOT NULL AND (x.status = ANY (ARRAY['AUTHORISED'::text, 'PAID'::text]))
-          GROUP BY x.job_id
+             LEFT JOIN LATERAL ( SELECT
+                        CASE
+                            WHEN count(*) > 0 AND count(*) = count(e.job_id) AND count(DISTINCT e.job_id) = 1 THEN (array_agg(e.job_id))[1]
+                            ELSE NULL::uuid
+                        END AS job_id
+                   FROM jsonb_array_elements(
+                        CASE
+                            WHEN jsonb_typeof(x.line_items) = 'array'::text THEN x.line_items
+                            ELSE '[]'::jsonb
+                        END) l(value)
+                     LEFT JOIN v_bookkeeping_line_evidence_current e ON e.xero_invoice_id = x.xero_invoice_id AND e.xero_line_item_id = (l.value ->> 'LineItemID'::text) AND e.allocation = 'job'::text AND e.evidenced AND e.job_id IS NOT NULL
+                  WHERE COALESCE(job_profit_num(l.value -> 'LineAmount'::text), 0::numeric) <> 0::numeric) inv_ev ON x.job_id IS NULL
+          WHERE x.invoice_type = 'ACCREC'::text AND COALESCE(x.job_id, inv_ev.job_id) IS NOT NULL AND (x.status = ANY (ARRAY['AUTHORISED'::text, 'PAID'::text]))
+          GROUP BY (COALESCE(x.job_id, inv_ev.job_id))
         ), super_unknown_lines AS (
          SELECT til.id::text AS line_id
            FROM trade_invoice_lines til
@@ -734,8 +746,8 @@ BEGIN
     invoice_emailed_count,
     invoice_emailed_ex
    FROM flagged f;$old_def$;
-  IF md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> '4ab42d7dda7e77b8e3dfc984833a5265' THEN
-    RAISE EXCEPTION 'v_job_profit after undo is not the 20261103171500 definition (md5 %)', md5(pg_get_viewdef('public.v_job_profit'::regclass, true));
+  IF md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> '986aefcd415e62150ea7376a1c21fc17' THEN
+    RAISE EXCEPTION 'v_job_profit after undo is not the 20261103200000 definition (md5 %)', md5(pg_get_viewdef('public.v_job_profit'::regclass, true));
   END IF;
 END
 $down$;

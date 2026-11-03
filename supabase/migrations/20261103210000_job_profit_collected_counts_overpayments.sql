@@ -9,11 +9,11 @@
 --
 -- Change: in the collected CTE, amount_paid becomes amount_paid plus the AppliedAmount of the invoice's Overpayments
 -- and Prepayments. Everything else in the view is byte for byte the live definition.
--- Guard: v_job_profit must be the 20261103171500 definition (md5 4ab42d7d..., pg_get_viewdef(..., true), UTC).
--- Rehearsed on production 3 Nov 07:29Z (rolled back): 2 of 2,008 jobs change, collected only (SWP-26320 6,645.80 to
--- 6,910.20, SW1797 5,748.77 to 5,793.00); profit, invoiced and margin unchanged; md5 after ae9981a2...; the undo
--- returns 4ab42d7d.
--- Rollback: supabase/rollbacks/20261103193000_job_profit_collected_counts_overpayments_down.sql
+-- Guard: v_job_profit must be the 20261103200000 definition (md5 986aefcd..., pg_get_viewdef(..., true), UTC; A3 #1272).
+-- Rehearsed on production 3 Nov 07:43Z on the #1272 view (rolled back): 2 of 2,008 jobs change, collected only (SWP-26320
+-- 6,645.80 to 6,910.20, SW1797 5,748.77 to 5,793.00); profit, invoiced and margin unchanged; md5 after 44c5f76f...;
+-- the undo returns 986aefcd.
+-- Rollback: supabase/rollbacks/20261103210000_job_profit_collected_counts_overpayments_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 SET LOCAL TimeZone = 'UTC';
@@ -36,14 +36,14 @@ BEGIN
     RAISE NOTICE 'v_job_profit already counts overpayment and prepayment allocations as collected';
     RETURN;
   END IF;
-  IF md5(v_def) <> '4ab42d7dda7e77b8e3dfc984833a5265' THEN
+  IF md5(v_def) <> '986aefcd415e62150ea7376a1c21fc17' THEN
     RAISE EXCEPTION 'v_job_profit is not the definition this migration was written against (md5 %)', md5(v_def);
   END IF;
   IF (length(v_def) - length(replace(v_def, v_old, ''))) / length(v_old) <> 1 THEN
     RAISE EXCEPTION 'v_job_profit: the collected rule is not there exactly once';
   END IF;
   EXECUTE 'CREATE OR REPLACE VIEW public.v_job_profit AS ' || replace(v_def, v_old, v_new);
-  IF md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> 'ae9981a2bfeed9e88cb9f270a4c8bf2f' THEN
+  IF md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> '44c5f76f8fe56c656faee0fc1286a89b' THEN
     RAISE EXCEPTION 'v_job_profit after the change is not the rehearsed definition (md5 %)', md5(pg_get_viewdef('public.v_job_profit'::regclass, true));
   END IF;
 END
