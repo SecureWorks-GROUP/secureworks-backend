@@ -17,6 +17,7 @@
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 import { readJobProfitOrderSources } from "./job_profit_order_sources.ts";
+import { readJobDispatchOrders } from "./job_dispatch_orders.ts";
 import {
   type FrozenAcceptance,
   INSTALLER_RULE_PROBE,
@@ -61,6 +62,8 @@ export const JOB_PROFIT_LABELS = {
     "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
   rollup_expected_vs_actual:
     "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines) and whose expected cost names every lane (no expected_cost_lane_missing). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
+  dispatch_orders:
+    "Dispatch orders on the job (each supplier order email sent from Dispatch, and each purchase order that is not a draft or cancelled) with the supplier bills linked to each by rule, never by a person: the bill is from the order's supplier and carries a supplier ref saved for that order or our job number. ordered, billed and not_billed are counts of orders. A linked bill's amount is the bill's own, ex GST; cost_on_this_job says whether Job Profit counts that bill on this job. A link never places a bill or changes any total. unclear_bills name this order and another, so neither is linked. status unknown: the orders or links could not be read; never read that as not billed.",
   holding_jobs:
     "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;
@@ -482,6 +485,7 @@ export async function jobProfitAction(
       trades: [...trades.values()].sort((a, b) => b.amount_ex - a.amount_ex),
       cost_events: costEvents,
       material_order_sources: await readJobProfitOrderSources(client, summary.job_id, costEvents),
+      dispatch_orders: await readJobDispatchOrders(client, summary.job_id, costEvents),
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       line_evidence: await readJobLineEvidence(client, summary.job_id),
