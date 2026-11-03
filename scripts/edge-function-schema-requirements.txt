@@ -21,6 +21,9 @@
 # Add a complete requirement set in the same PR as schema-dependent edge code.
 # This manifest never applies SQL. It only drives a read-only production check.
 
+context-capture-census|supabase/migrations/20260924213000_context_email_capture_config.sql|column|monitored_mailboxes.source_key
+context-capture-census|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_supplier_domains
+context-capture-census|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_job_client_emails
 ops-api|supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql|table|makesafe_intake_hugo_notifications
 ops-api|supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql|column|makesafe_intake_hugo_notifications.case_id
 ops-api|supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql|column|makesafe_intake_hugo_notifications.source_post_ids
