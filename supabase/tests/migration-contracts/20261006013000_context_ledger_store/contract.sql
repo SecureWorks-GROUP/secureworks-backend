@@ -677,7 +677,8 @@ BEGIN
  PERFORM pg_temp.lg_assert((SELECT run_id = run.id AND kind = 'backfill' FROM public.context_ledger_generations WHERE id = (r ->> 'generation_id')::uuid),
   'the building generation names its run');
  PERFORM pg_temp.lg_assert(public.context_ledger_claim(a, 'backfill', pg_temp.lg_today()) = '{"outcome":"busy"}', 'second claim is busy');
- -- A building generation whose run lost its lease is failed, and the job backs off.
+ -- A building generation whose run lost its lease is failed, and the job backs off
+ -- (since 20261104010000, with no model call reserved: 15 minutes, not counted).
  UPDATE public.context_extraction_runs SET lease_expires_at = now() - interval '1 minute' WHERE id = run.id;
  r2 := public.context_ledger_claim(a, 'backfill', pg_temp.lg_today());
  PERFORM pg_temp.lg_assert(r2 ->> 'outcome' = 'not_due' AND r2 ->> 'reason' = 'backoff', 'lapsed build backs off: ' || r2::text);
@@ -698,14 +699,17 @@ BEGIN
  PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_generations WHERE job_id = b) = 1, 'update made a generation');
  PERFORM pg_temp.lg_assert(public.context_ledger_claim(b, 'update', pg_temp.lg_today()) = '{"outcome":"busy"}', 'a running update run is busy');
  -- A crashed update (its run lost its lease) is closed at the next claim and
- -- counts toward the backoff; the live reading it was updating stays (rev-backend N1).
+ -- backs the job off; the live reading it was updating stays (rev-backend N1).
+ -- Since 20261104010000 a lapse with no model call reserved (as here) is a 15 minute
+ -- hold that is not counted, so it never escalates.
  UPDATE public.context_extraction_runs SET lease_expires_at = now() - interval '1 minute' WHERE id = (r ->> 'run_id')::uuid;
  r2 := public.context_ledger_claim(b, 'update', pg_temp.lg_today());
  PERFORM pg_temp.lg_assert(r2 ->> 'outcome' = 'not_due' AND r2 ->> 'reason' = 'backoff', 'a lapsed update backs off: ' || r2::text);
  PERFORM pg_temp.lg_assert((SELECT status = 'failed' AND error = 'lease_expired' AND lease_expires_at IS NULL AND finished_at IS NOT NULL
    FROM public.context_extraction_runs WHERE id = (r ->> 'run_id')::uuid)
-  AND (SELECT f.failures FROM public.context_ledger_failures(ARRAY[b]) f) = 1
-  AND (SELECT status FROM public.context_ledger_generations WHERE id = gl) = 'live', 'a lapsed update run is failed and counted, the live reading kept');
+  AND (SELECT f.failures = 0 AND f.backoff_until BETWEEN now() + interval '14 minutes' AND now() + interval '16 minutes'
+   FROM public.context_ledger_failures(ARRAY[b]) f)
+  AND (SELECT status FROM public.context_ledger_generations WHERE id = gl) = 'live', 'a lapsed update run is failed and held 15 minutes, not counted, the live reading kept');
 END $c$;
 ROLLBACK;
 
