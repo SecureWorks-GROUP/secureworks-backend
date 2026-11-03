@@ -131,6 +131,8 @@ export type TimelineEntry = {
 const COST_KIND: Record<string, TimelineEntry["kind"]> = {
   trade_line: "trade_charge",
   trade_employer_super: "employer_super",
+  // The company super a crew bill raised straight in Xero states (20261104071000).
+  bill_employer_super: "employer_super",
   supplier_bill: "supplier_bill",
   materials_fact: "materials_fact",
   po_committed: "purchase_order",
