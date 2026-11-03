@@ -113,6 +113,37 @@ Deno.test("INV-1805: gutter work whose claim and PO sit on the repair job links 
   assertEquals(linkedTo(d), "SWR-261499");
 });
 
+// ── B3's two payment misses: Ambrose invoices raised before their job card ──
+// matchUnlinkedInvoices re-reads every unlinked customer invoice on each 15-minute sync, so an
+// invoice raised before its card links at the first sync after the card is made, and the
+// payment of 28 Oct arrives on an invoice already on its job.
+
+const SWR_261574 = job({
+  job_number: "SWR-261574", type: "repair", status: "processing", builder: "acg", created_at: "2026-10-13T08:01:59Z",
+  refs: { details_external_ref: "ACG-20305206PO-2030520605", external_ref: "ACG-20305206PO-2030520605", builder_claim_ref: "ACG-20305206", builder_po_number: "PO-2030520605", builder_work_order_number: "ACG-20305206PO-2030520605" },
+});
+const SWMS_261588 = job({
+  job_number: "SWMS-261588", type: "makesafe", status: "processing", builder: "acg", created_at: "2026-10-15T05:18:55Z",
+  refs: { details_external_ref: "ACG-20333978PO-2033397801", external_ref: "ACG-20333978PO-2033397801" },
+});
+const INV_1688 = inv({ reference: "20305206-05", invoice_date: "2026-10-15", text: "Deposit (50% of $8,745.00 ex GST)\nMaterials Deposit\nPO 20305206-05\n5 Example Road" });
+const INV_1709 = inv({ reference: "20333978-01", invoice_date: "2026-10-14", text: "Make safe: attended site and collected 5 panels of temp fencing (temp fence pickup). Job 20333978 | 8A Example Rise" });
+
+Deno.test("INV-1688: an Ambrose deposit raised before its job card links to SWR-261574 at the first sync after the card", () => {
+  assertEquals(decideBuilderReference(INV_1688, []).outcome, "no_candidate");
+  const d = decideBuilderReference(INV_1688, [SWR_261574]);
+  assertEquals(linkedTo(d), "SWR-261574");
+  assert(d.outcome === "link" && d.evidence.invoice_trade === "works");
+});
+
+Deno.test("INV-1709: an Ambrose temp fence pickup reads as make-safe and links to SWMS-261588, not to a person", () => {
+  assertEquals(invoiceTrade(INV_1709), "makesafe");
+  assertEquals(decideBuilderReference(INV_1709, []).outcome, "no_candidate");
+  const d = decideBuilderReference(INV_1709, [SWMS_261588]);
+  assertEquals(linkedTo(d), "SWMS-261588");
+  assert(d.outcome === "link" && d.evidence.invoice_trade === "makesafe" && d.evidence.step === "unique");
+});
+
 // ── The 3 Nov test's four wrong links: never the make-safe card ──
 
 const EARLIER_WRONG: Array<{ name: string; invoice: BuilderRefInvoice; card: BuilderRefJob[]; works: BuilderRefJob }> = [
@@ -295,6 +326,11 @@ Deno.test("Trades: tracking first, line words decide insurance work, job type be
   assertEquals(invoiceTrade(inv({ reference: "MLB-1", text: "Fencing - External: sliding gate", tracking: [{ Option: "SW - FENCING" }] })), "works");
   assertEquals(invoiceTrade(inv({ reference: "MLB-1", text: "Strip and replace downpipe", tracking: MAKESAFE })), "mixed");
   assertEquals(invoiceTrade(inv({ reference: "X", text: "Labour", tracking: [] })), "unknown");
+  // Temporary fencing is make-safe gear: its words are never works words (INV-1709).
+  assertEquals(invoiceTrade(inv({ reference: "X", text: "collected 5 panels of temp fencing (temp fence pickup)" })), "makesafe");
+  assertEquals(invoiceTrade(inv({ reference: "X", text: "Temporary fencing - 10 panels, temporary fence gates" })), "makesafe");
+  assertEquals(invoiceTrade(inv({ reference: "X", text: "Fencing - External: supply and install Colorbond; remove temp fencing" })), "mixed");
+  assertEquals(invoiceTrade(inv({ reference: "X", text: "Fencing - External: supply and install Colorbond fence" })), "works");
   assertEquals(jobTrade({ type: "repair", job_number: "SWF-261359" }), "works");
   assertEquals(jobTrade({ type: "insurance", job_number: "SWMS-26931" }), "any");
   assertEquals(jobTrade({ type: null, job_number: "SWMS-1" }), "makesafe");
@@ -391,6 +427,25 @@ Deno.test("Matcher: a builder reference link writes only the job, guarded, and r
   assertEquals([ev.event_type, ev.job_id, ev.match_method, ev.payload.method, ev.payload.rule], ["invoice.auto_linked", "job-SWF-261360", "direct_reference", "builder_reference", BUILDER_REFERENCE_RULE]);
   assertEquals(ev.payload.evidence.candidates.map((c: any) => [c.job_number, c.kept]), [["SWF-261360", true], ["SWMS-261163", false]]);
   assert(!calls.some((c) => c.table === "jobs" && c.filters.some((f) => f.op === "ilike")), "contact-name match not consulted");
+});
+
+Deno.test("Matcher: a builder reference link closes that invoice's open item for a person, and nothing else", async () => {
+  const { client, calls } = fakeClient({ sales: [SALE_1775], candidates: { data: [SWMS_261163, SWF_261360], error: null } });
+  await matchUnlinkedInvoices(client);
+  const close = calls.filter((c) => c.table === "ai_annotations" && c.update);
+  assertEquals(close.length, 1);
+  const u = close[0].update! as { status: string; resolved_by: string; resolved_at: unknown; resolution: { value: string; text: string; job_id: string } };
+  assertEquals([u.status, u.resolved_by, u.resolution.value, u.resolution.job_id], ["resolved", "auto", "auto_linked", "job-SWF-261360"]);
+  assert(typeof u.resolved_at === "string" && !/—/.test(u.resolution.text), u.resolution.text);
+  assertEquals(close[0].filters, [{ op: "eq", args: ["source_ref", "sync:unlinked:xero-1775"] }, { op: "eq", args: ["status", "active"] }]);
+
+  // No link (a person decides, or another writer linked it first): no item is closed.
+  const person = fakeClient({ sales: [{ ...SALE_1775, reference: "MLB-27580", line_items: [{ Description: "make-safe attendance", Tracking: MAKESAFE }] }], candidates: { data: SIBLINGS, error: null } });
+  await matchUnlinkedInvoices(person.client);
+  assertEquals(person.calls.filter((c) => c.table === "ai_annotations" && c.update).length, 0);
+  const lost = fakeClient({ sales: [SALE_1775], candidates: { data: [SWMS_261163, SWF_261360], error: null }, linkWrite: "lost" });
+  await matchUnlinkedInvoices(lost.client);
+  assertEquals(lost.calls.filter((c) => c.table === "ai_annotations" && c.update).length, 0);
 });
 
 Deno.test("Matcher: several candidates become one person's item and no contact-name guess", async () => {
