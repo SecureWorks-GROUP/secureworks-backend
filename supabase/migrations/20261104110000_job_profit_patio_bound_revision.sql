@@ -57,6 +57,11 @@
 -- Three of them lose materials_below_quote from completeness with margin still withheld for other reasons
 -- (SWP-261180, SWP-261349, SWP-26344). 75 jobs' named document changed (wording, or a new reason). The rollback gave
 -- back all 2,008 rows exactly. (This paragraph was added after the rehearsal; the SQL is the rehearsed SQL.)
+--
+-- job_profit_expected_cost_missing no longer builds the new patio tool's cost figures itself: it reads them from
+-- job_profit_patio_revision_pricing, the one reader v_job_profit uses. Those were internal figures, never its output:
+-- output-key-guard: drop public.job_profit_expected_cost_missing labourCostEstimate
+-- output-key-guard: drop public.job_profit_expected_cost_missing materialCostEstimate
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 -- The view's text carries a timestamp, which prints in the session's time zone; the md5 guards are taken in UTC.
