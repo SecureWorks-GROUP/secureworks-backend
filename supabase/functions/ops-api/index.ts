@@ -1552,6 +1552,7 @@ import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { readAllOpenInvoices, sentToContactOf, summarizeOpenInvoices } from './invoice_read_truth.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
+import { depositInvoiceLines } from './deposit_invoice_lines.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -39347,7 +39348,10 @@ async function createInvoice(
 ) {
   const { job_id, jobId, contact_name, contactName, xero_contact_id, job_contact_id,
           line_items, lineItems, due_date, dueDate, reference,
-          xero_status, send_email } = body
+          xero_status, send_email, line_amount_types } = body
+  // Lines are ex GST (Xero adds 10%) unless the caller sends them inc GST: the deposit invoice does, so its total is
+  // the deposit to the cent (deposit_invoice_lines.ts, B2).
+  const lineAmountTypes: 'Inclusive' | 'Exclusive' = line_amount_types === 'Inclusive' ? 'Inclusive' : 'Exclusive'
   const sesContext = internal.ses
 
   const items = line_items || lineItems
@@ -39627,7 +39631,7 @@ async function createInvoice(
       Contact: resolvedContactId
         ? { ContactID: resolvedContactId }
         : { Name: contact },
-      LineAmountTypes: 'Exclusive',
+      LineAmountTypes: lineAmountTypes,
       LineItems: xeroLineItems,
       Reference: ref,
       DueDate: xeroDueDate,
@@ -39737,8 +39741,9 @@ async function createInvoice(
 
   // Immediately record in xero_invoices so future queries see it
   // (don't wait for xero-sync which runs every 2 hours)
-  const invTotal = xeroInv?.Total ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0) * 1.1
-  const invSubTotal = xeroInv?.SubTotal ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0)
+  const lineSum = items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0)
+  const invTotal = xeroInv?.Total ?? (lineAmountTypes === 'Inclusive' ? lineSum : lineSum * 1.1)
+  const invSubTotal = xeroInv?.SubTotal ?? (lineAmountTypes === 'Inclusive' ? Math.round((lineSum - lineSum / 11) * 100) / 100 : lineSum)
   if (xeroInvId) {
     // Loop 1B-a-apply: stamp the eleven traceability columns added by
     // migration 20260506101511_loop_1b_a_traceability. Eight columns come
@@ -41495,28 +41500,16 @@ async function createDepositInvoice(client: any, body: any) {
   refParts.push(`DEP${depositPercent}`)
   const reference = refParts.join('-')
 
-  // Deposit is inc GST — Xero adds GST, so we need ex GST amount
-  const depositExGst = Math.round((depositAmountIncGst / 1.1) * 100) / 100
-
-  const lineItems: any[] = [{
-    description,
-    quantity: 1,
-    unit_price: depositExGst,
-    account_code: accountCodeForJob(job.type),
-  }]
-
-  // Extra line items (council fees, etc.) — each has amount_inc_gst
+  // The deposit and any extras go inc GST (deposit_invoice_lines.ts), so Xero's total is the deposit to the cent
+  // (B2): an ex-GST line, round(inc / 1.1), with GST added on top missed about 1 in 11 inc-GST amounts by a cent.
   const extras = body.extra_line_items || []
-  for (const extra of extras) {
-    if (extra.amount_inc_gst > 0 && extra.description) {
-      lineItems.push({
-        description: extra.description,
-        quantity: 1,
-        unit_price: Math.round((extra.amount_inc_gst / 1.1) * 100) / 100,
-        account_code: accountCodeForJob(job.type),
-      })
-    }
-  }
+  const depositLines = depositInvoiceLines({
+    depositIncGst: depositAmountIncGst,
+    description,
+    accountCode: accountCodeForJob(job.type),
+    extras,
+  })
+  const lineItems: any[] = depositLines.line_items
 
   // Create Xero invoice as a draft by default so Shaun can review before sending.
   const invoiceResult = await createInvoice(client, {
@@ -41524,6 +41517,7 @@ async function createDepositInvoice(client: any, body: any) {
     xero_contact_id: invoiceContactId,
     contact_name: invoiceContactName,
     line_items: lineItems,
+    line_amount_types: depositLines.line_amount_types,
     reference,
     xero_status: body.xero_status || 'DRAFT',
     send_email: body.send_email !== false, // default: send

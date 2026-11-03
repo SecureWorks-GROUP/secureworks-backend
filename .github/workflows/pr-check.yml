@@ -272,11 +272,12 @@ jobs:
       # full moves it to Order Materials (patio: Approvals unless no council), the
       # switch (dry_run moves and texts nothing), the once-only client text and the
       # flag after a void or refund. Every write and SMS is a fake.
-      - name: Test the deposit advance rule, moves, text and flag
+      - name: Test the deposit advance rule, moves, text and flag, and the deposit invoice's lines (B2, to the cent)
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/_shared/job_deposit_paid_test.ts \
-            supabase/functions/ops-api/job_deposit_advance_test.ts
+            supabase/functions/ops-api/job_deposit_advance_test.ts \
+            supabase/functions/ops-api/deposit_invoice_lines_test.ts
 
       - name: Test the call transcription word list
         run: |
