@@ -791,3 +791,125 @@ Deno.test("job_profit: line evidence comes with the figures; a failed read is un
   const r3 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
   assertEquals((r3.body as any).line_evidence.status, "unknown");
 });
+
+// When each trade charged (finish line A5, owner ask 1, coordinator spot-check
+// 3 Nov 2026 18:02Z). SWF-261099 as production holds it: the cost view dates
+// all three crew lines by the pay week's start (12 Oct); the crew invoices say
+// trade one submitted $140 worked 12 Oct and $80 worked 13 Oct on 18 Oct, and
+// trade two submitted $70 with no work date on 22 Oct (Perth days).
+const TL = (n: number) => `c1000000-0000-4000-8000-00000000000${n}`;
+function tradeLineEvent(n: number, party: string, amount: number, over: Record<string, unknown> = {}) {
+  return {
+    job_id: JOB, source: "trade_line", source_id: TL(n), document_id: `ti-${party}`,
+    event_date: "2026-10-12", lane: "labour", party_id: party, party: `Trade ${party}`,
+    amount_ex: amount, is_actual: true, paid: false, paid_on: null, ...over,
+  };
+}
+function swf261099(dateErrors: Record<string, string> = {}) {
+  return fakeClient({
+    jobs: [{ id: JOB, job_number: "SWF-261099" }],
+    v_job_profit: [{ job_id: JOB, job_number: "SWF-261099", actual_labour_ex: 290, actual_cost_ex: 290 }],
+    v_job_cost_events: [
+      tradeLineEvent(1, "b353f39a", 140),
+      tradeLineEvent(2, "b353f39a", 80),
+      tradeLineEvent(3, "f9a9e835", 70),
+    ],
+    v_job_revenue_events: [],
+    trade_invoice_lines: [
+      { id: TL(1), work_date: "2026-10-12", line_date: null, trade_invoices: { submitted_at: "2026-10-18T06:21:28.254+00:00" } },
+      { id: TL(2), work_date: "2026-10-13", line_date: null, trade_invoices: { submitted_at: "2026-10-18T06:21:28.254+00:00" } },
+      { id: TL(3), work_date: null, line_date: null, trade_invoices: { submitted_at: "2026-10-22T12:43:48.421+00:00" } },
+    ],
+  }, dateErrors);
+}
+
+Deno.test("job_profit: each trade's first and last charge are the days it submitted them, with the day worked (SWF-261099)", async () => {
+  const c = swf261099();
+  const out = await jobProfitAction(c, new URLSearchParams("job_number=SWF-261099"));
+  assertEquals(out.status, 200);
+  const body = out.body as any;
+  assertEquals(body.trade_charge_dates, { status: "ok" });
+  assertEquals(body.trades, [
+    {
+      party_id: "b353f39a", party: "Trade b353f39a", amount_ex: 220, lines: 2,
+      first: "2026-10-12", last: "2026-10-12", // the cost event dates, unchanged
+      first_charge: { submitted_on: "2026-10-18", work_date: "2026-10-12", line_date: null },
+      last_charge: { submitted_on: "2026-10-18", work_date: "2026-10-13", line_date: null },
+    },
+    {
+      party_id: "f9a9e835", party: "Trade f9a9e835", amount_ex: 70, lines: 1,
+      first: "2026-10-12", last: "2026-10-12",
+      first_charge: { submitted_on: "2026-10-22", work_date: null, line_date: null },
+      last_charge: { submitted_on: "2026-10-22", work_date: null, line_date: null },
+    },
+  ]);
+  // Each line carries its own dates; its money, lane and cost event date are untouched.
+  const lines = body.cost_events.filter((e: any) => e.source === "trade_line");
+  assertEquals(lines.map((e: any) => [e.amount_ex, e.event_date, e.lane, e.submitted_on, e.work_date]), [
+    [140, "2026-10-12", "labour", "2026-10-18", "2026-10-12"],
+    [80, "2026-10-12", "labour", "2026-10-18", "2026-10-13"],
+    [70, "2026-10-12", "labour", "2026-10-22", null],
+  ]);
+  assertEquals(body.job.actual_labour_ex, 290, "the engine row is passed through untouched");
+  // The money timeline dates each trade charge by the day it was submitted.
+  const tl = body.timeline.filter((t: any) => t.kind === "trade_charge");
+  assertEquals(tl.map((t: any) => [t.date, t.work_date, t.amount_ex]), [
+    ["2026-10-18", "2026-10-12", 140],
+    ["2026-10-18", "2026-10-13", 80],
+    ["2026-10-22", null, 70],
+  ]);
+  // One read of the crew invoice lines, by the job's own trade line ids only.
+  const read = c.calls.filter((x) => x.table === "trade_invoice_lines");
+  assertEquals(read.length, 1);
+  assertEquals(read[0].ops.find(([op]) => op === "in")![1], ["id", [TL(1), TL(2), TL(3)]]);
+});
+
+Deno.test("job_profit: a job whose lines have no work date says so; a line's own day is kept apart; Perth days", async () => {
+  const c = fakeClient({
+    jobs: [{ id: JOB, job_number: "SWP-261183" }],
+    v_job_profit: [{ job_id: JOB, job_number: "SWP-261183" }],
+    v_job_cost_events: [
+      tradeLineEvent(4, "p1", 80, { event_date: "2026-09-21" }),
+      tradeLineEvent(5, "p2", 50, { event_date: "2026-09-18" }),
+      // A draft line: not actual, never submitted.
+      tradeLineEvent(6, "p2", 30, { event_date: "2026-09-21", is_actual: false, document_status: "draft" }),
+    ],
+    v_job_revenue_events: [],
+    trade_invoice_lines: [
+      // 16:30Z on 21 Sep is 00:30 on 22 Sep in Perth.
+      { id: TL(4), work_date: null, line_date: null, trade_invoices: { submitted_at: "2026-09-21T16:30:00+00:00" } },
+      { id: TL(5), work_date: null, line_date: "2026-09-18", trade_invoices: [{ submitted_at: "2026-09-25T01:00:00+00:00" }] },
+      { id: TL(6), work_date: null, line_date: null, trade_invoices: { submitted_at: null } },
+    ],
+  });
+  const body = (await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`))).body as any;
+  assertEquals(body.trades.map((t: any) => [t.party_id, t.lines, t.first_charge, t.last_charge]), [
+    ["p1", 1, { submitted_on: "2026-09-22", work_date: null, line_date: null }, { submitted_on: "2026-09-22", work_date: null, line_date: null }],
+    ["p2", 1, { submitted_on: "2026-09-25", work_date: null, line_date: "2026-09-18" }, { submitted_on: "2026-09-25", work_date: null, line_date: "2026-09-18" }],
+  ], "the draft line is in no trade total and no first or last charge");
+  const draft = body.cost_events.find((e: any) => e.source_id === TL(6));
+  assertEquals([draft.submitted_on, draft.work_date, draft.event_date], [null, null, "2026-09-21"]);
+  const tl = body.timeline.filter((t: any) => t.kind === "trade_charge");
+  assertEquals(tl.map((t: any) => [t.date, t.submitted_on, t.line_date]), [
+    ["2026-09-21", null, null], // never submitted: its cost event date, as before
+    ["2026-09-22", "2026-09-22", null],
+    ["2026-09-25", "2026-09-25", "2026-09-18"],
+  ]);
+});
+
+Deno.test("job_profit: a failed crew invoice dates read leaves every date out and says so; no trade line, no read", async () => {
+  const bad = swf261099({ trade_invoice_lines: "permission denied" });
+  const out = await jobProfitAction(bad, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(out.status, 200, "the figures still show");
+  const body = out.body as any;
+  assertEquals(body.trade_charge_dates.status, "unknown");
+  assert(body.trade_charge_dates.reason.includes("permission denied"));
+  assertEquals(body.trades.map((t: any) => "first_charge" in t), [false, false]);
+  assertEquals(body.cost_events.filter((e: any) => "submitted_on" in e).length, 0);
+  assertEquals(body.timeline.filter((t: any) => t.kind === "trade_charge").map((t: any) => t.date), ["2026-10-12", "2026-10-12", "2026-10-12"]);
+
+  const none = fakeClient({ v_job_profit: [{ job_id: JOB }], v_job_cost_events: [], v_job_revenue_events: [] });
+  const r2 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals((r2.body as any).trade_charge_dates, { status: "none" });
+  assertEquals(none.calls.some((x) => x.table === "trade_invoice_lines"), false);
+});
