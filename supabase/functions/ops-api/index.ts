@@ -781,7 +781,7 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
-import { autoGroupPatioJobs, openMissingPatioWorkOrders } from './patio_auto_group.ts'
+import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
   claimGroupReleaseForInvoice,
@@ -10058,10 +10058,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // draft first, so this same sweep fills and issues it. Writes nothing
         // while group_work_order_auto_patio_v1 is off; never throws.
         const patioDrafts = await openMissingPatioWorkOrders(client)
+        // V8: the same for fencing jobs, behind group_work_order_auto_fence_v1
+        // (added off; the fence pay rule is the owner's G5 call). Never throws.
+        const fenceDrafts = await openMissingFenceWorkOrders(client)
         try { issued = await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)) } catch (e) { issueError = e }
         // WO-6: then a group on every open patio job with a priced work order
         // and 2+ crew. Same flag; never throws.
         const patioGroups = await autoGroupPatioJobs(client)
+        // V8: fencing groups, same fence flag; never throws.
+        const fenceGroups = await autoGroupFenceJobs(client)
         // Ready full-super groups go to Xero as drafts with no office click
         // (owner, 30 Oct 2026). A failure here never stops the work order sweep.
         const groupReleases: unknown[] = []
@@ -10074,7 +10079,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           groupReleases.push({ error: 'group release sweep failed' })
         }
         if (issueError) throw issueError
-        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups })
+        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups, fence_drafts: fenceDrafts, fence_groups: fenceGroups })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any
