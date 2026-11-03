@@ -19,7 +19,7 @@
 -- unchanged, so a retry over an existing seed still refuses a source that moved since that seed.
 -- Everything else is byte for byte the live definition.
 -- Guard: the live function must be the definition this was written against (md5 24a30037...).
--- Rollback: supabase/rollbacks/20261104011000_context_rebuild_seed_leaves_out_gone_sources_down.sql.
+-- Rollback: supabase/rollbacks/20261104034000_context_rebuild_seed_leaves_out_gone_sources_down.sql.
 SET LOCAL lock_timeout = '5s';
 
 DO $mig$
@@ -30,7 +30,7 @@ DECLARE
   v_old1 text := $o$   ORDER BY opened_at, item_key COLLATE "C" FOR SHARE LOOP
    INSERT INTO public.context_ledger_items$o$;
   v_new1 text := $n$   ORDER BY opened_at, item_key COLLATE "C" FOR SHARE LOOP
-   -- (20261104011000) an item whose opening source no longer resolves (its booking row deleted, its mail
+   -- (20261104034000) an item whose opening source no longer resolves (its booking row deleted, its mail
    -- moved off the job) is left out of the seed and named in rebuild_seed.left_out, not carried to refuse
    -- the rebuild below for ever. The whole-history reading writes it again from what remains. A person's
    -- own item is always carried.
@@ -56,8 +56,8 @@ DECLARE
     'left_out',left_out)), updated_at = now()$n$;
 BEGIN
   SELECT pg_get_functiondef('public.context_ledger_rebuild_packet(uuid,uuid)'::regprocedure) INTO v_def;
-  IF md5(v_def) = 'fc80fa222fedfedf96b38309031d18c4' THEN
-    RAISE NOTICE 'context_ledger_rebuild_packet already carries 20261104011000';
+  IF md5(v_def) = 'e92f16f62fc0c7517aed5df36fcbe316' THEN
+    RAISE NOTICE 'context_ledger_rebuild_packet already carries 20261104034000';
     RETURN;
   END IF;
   IF md5(v_def) <> '24a300377b1e4f4c01f36fda9b2099c8' THEN
@@ -77,11 +77,11 @@ BEGIN
   v_def := replace(v_def, v_old2, v_new2);
   EXECUTE v_def;
   SELECT pg_get_functiondef('public.context_ledger_rebuild_packet(uuid,uuid)'::regprocedure) INTO v_def;
-  IF md5(v_def) <> 'fc80fa222fedfedf96b38309031d18c4' THEN
+  IF md5(v_def) <> 'e92f16f62fc0c7517aed5df36fcbe316' THEN
     RAISE EXCEPTION 'context_ledger_rebuild_packet after the change is not the rehearsed definition (md5 %)', md5(v_def);
   END IF;
 END
 $mig$;
 
 COMMENT ON FUNCTION public.context_ledger_rebuild_packet(uuid,uuid) IS
- 'TP-16 (20261030150000), 20261104011000: leased rebuild preparation, preserving unresolved item identities and closure predicates before reading. Idempotent seed, same-generation packet, source-invalid refusal, no live note or settings edits. Additive/dormant until a separately accepted reader calls it. A seed is not verification or closure. A carried item whose opening source no longer resolves (cite and held cite both refuse it) is left out of the first seed and named in checks.rebuild_seed.left_out (item_key, item_type, status, code, table); a person-locked item is always carried. A retry over an existing seed still refuses a source that moved since.';
+ 'TP-16 (20261030150000), 20261104034000: leased rebuild preparation, preserving unresolved item identities and closure predicates before reading. Idempotent seed, same-generation packet, source-invalid refusal, no live note or settings edits. Additive/dormant until a separately accepted reader calls it. A seed is not verification or closure. A carried item whose opening source no longer resolves (cite and held cite both refuse it) is left out of the first seed and named in checks.rebuild_seed.left_out (item_key, item_type, status, code, table); a person-locked item is always carried. A retry over an existing seed still refuses a source that moved since.';

@@ -101,7 +101,7 @@ BEGIN
  PERFORM set_config('session_replication_role','replica',true);
  UPDATE public.business_events SET job_id=other_job WHERE id=ev;
  PERFORM set_config('session_replication_role','origin',true);
- -- Since 20261104011000 a fresh seed leaves the moved notes out and names them (checks.rebuild_seed.left_out),
+ -- Since 20261104034000 a fresh seed leaves the moved notes out and names them (checks.rebuild_seed.left_out),
  -- never copying them as certain; the person's correction is still carried.
  packet := public.context_ledger_rebuild_packet(run_id,token);
  PERFORM pg_temp.rb_assert(NOT EXISTS(SELECT 1 FROM public.context_ledger_items WHERE generation_id=new_gen AND NOT person_locked),'moved source copied into a fresh seed');

@@ -1,4 +1,4 @@
--- Undo 20261104010000_context_ledger_failures_lease_no_call: context_ledger_failures counts every
+-- Undo 20261104033000_context_ledger_failures_lease_no_call: context_ledger_failures counts every
 -- lease_expired notes run again, with or without a model call (md5 d660f50592ef542e5e4205dc3a4ef7ba).
 SET LOCAL lock_timeout = '5s';
 
@@ -11,10 +11,10 @@ BEGIN
     RAISE NOTICE 'context_ledger_failures is already the old definition';
     RETURN;
   END IF;
-  IF md5(v_def) <> '131250979ba19a939a75bfbd05f5e05e' THEN
-    RAISE EXCEPTION 'context_ledger_failures is not the 20261104010000 definition (md5 %)', md5(v_def);
+  IF md5(v_def) <> '6b6b5abf87d633a0ac8d583766e55909' THEN
+    RAISE EXCEPTION 'context_ledger_failures is not the 20261104033000 definition (md5 %)', md5(v_def);
   END IF;
-  -- The exact definition before 20261104010000 (md5 d660f50592ef542e5e4205dc3a4ef7ba), as pg_get_functiondef printed it.
+  -- The exact definition before 20261104033000 (md5 d660f50592ef542e5e4205dc3a4ef7ba), as pg_get_functiondef printed it.
   EXECUTE $old_def$CREATE OR REPLACE FUNCTION public.context_ledger_failures(p_job_ids uuid[])
  RETURNS TABLE(job_id uuid, failures integer, last_failure_at timestamp with time zone, backoff_until timestamp with time zone, failed_builds integer, needs_person boolean)
  LANGUAGE sql

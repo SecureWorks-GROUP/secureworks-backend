@@ -1,4 +1,4 @@
--- Undo 20261104011000_context_rebuild_seed_leaves_out_gone_sources: the rebuild packet carries every
+-- Undo 20261104034000_context_rebuild_seed_leaves_out_gone_sources: the rebuild packet carries every
 -- open item again and refuses the rebuild when one's source is gone
 -- (md5 24a300377b1e4f4c01f36fda9b2099c8). Jobs with such a note then fail every rebuild again.
 SET LOCAL lock_timeout = '5s';
@@ -12,10 +12,10 @@ BEGIN
     RAISE NOTICE 'context_ledger_rebuild_packet is already the old definition';
     RETURN;
   END IF;
-  IF md5(v_def) <> 'fc80fa222fedfedf96b38309031d18c4' THEN
-    RAISE EXCEPTION 'context_ledger_rebuild_packet is not the 20261104011000 definition (md5 %)', md5(v_def);
+  IF md5(v_def) <> 'e92f16f62fc0c7517aed5df36fcbe316' THEN
+    RAISE EXCEPTION 'context_ledger_rebuild_packet is not the 20261104034000 definition (md5 %)', md5(v_def);
   END IF;
-  -- The exact definition before 20261104011000 (md5 24a300377b1e4f4c01f36fda9b2099c8), as pg_get_functiondef printed it.
+  -- The exact definition before 20261104034000 (md5 24a300377b1e4f4c01f36fda9b2099c8), as pg_get_functiondef printed it.
   EXECUTE $old_def$CREATE OR REPLACE FUNCTION public.context_ledger_rebuild_packet(p_run_id uuid, p_lease_token uuid)
  RETURNS jsonb
  LANGUAGE plpgsql

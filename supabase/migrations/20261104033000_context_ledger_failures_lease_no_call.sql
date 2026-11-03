@@ -21,7 +21,7 @@
 -- Changes: the `runs` filter, a `lapse` CTE, last_failure_at and backoff_until as the later of the old
 -- answer and the lapse (plus 15 minutes); everything else is byte for byte the live definition.
 -- Guard: the live function must be the definition this was written against (md5 d660f505...).
--- Rollback: supabase/rollbacks/20261104010000_context_ledger_failures_lease_no_call_down.sql.
+-- Rollback: supabase/rollbacks/20261104033000_context_ledger_failures_lease_no_call_down.sql.
 SET LOCAL lock_timeout = '5s';
 
 DO $mig$
@@ -30,10 +30,10 @@ DECLARE
   v_old0 text := $o$   AND coalesce(r.error, '') NOT LIKE 'released:%'
  ),$o$;
   v_new0 text := $n$   AND coalesce(r.error, '') NOT LIKE 'released:%'
-   -- (20261104010000) a lease that lapsed with no model call reserved for the run is not counted (lapse below)
+   -- (20261104033000) a lease that lapsed with no model call reserved for the run is not counted (lapse below)
    AND NOT (coalesce(r.error, '') = 'lease_expired' AND NOT EXISTS (SELECT 1 FROM public.context_model_call_reservations m WHERE m.run_id = r.id))
  ),
- lapse AS (  -- (20261104010000) the newest such lapse since the newest success: the last failed read's time
+ lapse AS (  -- (20261104033000) the newest such lapse since the newest success: the last failed read's time
              -- and a 15 minute hold, never a count, so it never escalates
   SELECT r.job_id, max(r.finished_at) AS at
   FROM public.context_extraction_runs r JOIN ids ON ids.id = r.job_id
@@ -52,8 +52,8 @@ DECLARE
   v_new4 text := $n$ FROM ids LEFT JOIN streak st ON st.job_id = ids.id LEFT JOIN fb ON fb.job_id = ids.id LEFT JOIN lapse lp ON lp.job_id = ids.id$n$;
 BEGIN
   SELECT pg_get_functiondef('public.context_ledger_failures(uuid[])'::regprocedure) INTO v_def;
-  IF md5(v_def) = '131250979ba19a939a75bfbd05f5e05e' THEN
-    RAISE NOTICE 'context_ledger_failures already carries 20261104010000';
+  IF md5(v_def) = '6b6b5abf87d633a0ac8d583766e55909' THEN
+    RAISE NOTICE 'context_ledger_failures already carries 20261104033000';
     RETURN;
   END IF;
   IF md5(v_def) <> 'd660f50592ef542e5e4205dc3a4ef7ba' THEN
@@ -81,11 +81,11 @@ BEGIN
   v_def := replace(v_def, v_old4, v_new4);
   EXECUTE v_def;
   SELECT pg_get_functiondef('public.context_ledger_failures(uuid[])'::regprocedure) INTO v_def;
-  IF md5(v_def) <> '131250979ba19a939a75bfbd05f5e05e' THEN
+  IF md5(v_def) <> '6b6b5abf87d633a0ac8d583766e55909' THEN
     RAISE EXCEPTION 'context_ledger_failures after the change is not the rehearsed definition (md5 %)', md5(v_def);
   END IF;
 END
 $mig$;
 
 COMMENT ON FUNCTION public.context_ledger_failures(uuid[]) IS
- 'Context ledger store (20261006013000), 20261104010000: per job, consecutive failed ledger runs since the newest success (status failed, or done with error checks_failed; runs released with error released:<code> never count), the backoff they earn from the last one (1: 2 hours, 2: 8 hours, 3: the next Perth midnight, 4 or more: 7 days), and consecutive check-failed builds by the current settings reader (a shadow whose checks.passed is false; a live or retired reading breaks the run). needs_person when three in a row failed their checks. Read by the judge and the scorecard. Service role only. A run closed lease_expired with no model call reserved for it (context_model_call_reservations.run_id) is not counted either: it spent nothing and the lapse was the worker''s, not the job''s; the newest such lapse since the newest success is the job''s last_failure_at and holds it 15 minutes from it (backoff_until is the later of the two), which never escalates.';
+ 'Context ledger store (20261006013000), 20261104033000: per job, consecutive failed ledger runs since the newest success (status failed, or done with error checks_failed; runs released with error released:<code> never count), the backoff they earn from the last one (1: 2 hours, 2: 8 hours, 3: the next Perth midnight, 4 or more: 7 days), and consecutive check-failed builds by the current settings reader (a shadow whose checks.passed is false; a live or retired reading breaks the run). needs_person when three in a row failed their checks. Read by the judge and the scorecard. Service role only. A run closed lease_expired with no model call reserved for it (context_model_call_reservations.run_id) is not counted either: it spent nothing and the lapse was the worker''s, not the job''s; the newest such lapse since the newest success is the job''s last_failure_at and holds it 15 minutes from it (backoff_until is the later of the two), which never escalates.';
