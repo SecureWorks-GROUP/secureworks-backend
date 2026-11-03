@@ -206,6 +206,11 @@ END $$;
 -- 20261104070000 to 20261104072000 (A6 cost rules) sit on this migration; the checks above hold with them in. Unwind
 -- them inside this transaction (the ROLLBACK at the end puts them back) so the second run meets its own definition.
 -- 20261104090000 and 20261104091000 (A3 division) sit on the A6 cost rules: unwind them first.
+-- 20261104123000 (C3 one-job speed-up) sits on the A3 division definitions: unwind it first.
+SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='b48997c55913ce3c90e3a3c947533fd3' AS test_has_c3_fast \gset
+\if :test_has_c3_fast
+\ir ../../../rollbacks/20261104123000_job_cost_events_faster_same_rows_down.sql
+\endif
 SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='abdc05a69d139d79aebbb8a3cebfae03' AS test_has_a3_division \gset
 \if :test_has_a3_division
 \ir ../../../rollbacks/20261104091000_job_revenue_credit_division_down.sql
