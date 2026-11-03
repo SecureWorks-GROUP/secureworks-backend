@@ -233,6 +233,8 @@ function deps(w: World): CaptureDeps {
     captureLaneOn: async () => w.lane,
     sources: async () => w.sources,
     supplierDomains: async () => new Set(["steelsupply.example"]),
+    builderSenders: async () =>
+      new Set(["builder.example", "mailer.one@portal.example"]),
     jobClientEmails: async () => new Set(["sam.sample@example.net"]),
     historyScope: async () => ({
       jobNumbers: new Set(["SWP-990001"]),
@@ -1307,6 +1309,117 @@ Deno.test("every mode writes the builder references an email names; the prefix f
       .builder_ref_prefixes_floor_only,
     1,
   );
+});
+
+// C7 rule proofs (3 Nov 2026): job mail the reader dropped as noise or as
+// owner-private mail in one live week, rebuilt here with made-up parties.
+Deno.test("a partner's document sent through Xero, MYOB, QuickBooks or Buildertrend is saved as that partner's mail; platform news and a copy of our own document are not", async () => {
+  const replyTo = (v: string) => ({ "reply-to": v });
+  const box = [
+    msg(1, "2026-10-02T05:41:00Z", {
+      from: "messaging-service@post.xero.com",
+      subject: "Invoice INV-77001 from Steel Supply for SECUREWORKS WA",
+      headers: replyTo("Steel Supply <orders@steelsupply.example>"),
+    }),
+    msg(2, "2026-10-02T05:42:00Z", {
+      from: "messaging-service@post.xero.com",
+      subject: "Message from sam.sample@example.net regarding invoice INV-1789",
+      bodyText: "The gate latch is still loose; I will pay when it is fixed.",
+      headers: replyTo("sam.sample@example.net"),
+    }),
+    msg(3, "2026-10-02T05:43:00Z", {
+      from: "accountright@apps.myob.com",
+      subject: "Remittance advice",
+      headers: replyTo("ap@builder-accounts.example"),
+    }),
+    msg(4, "2026-10-02T05:44:00Z", {
+      from: "notifications@buildertrend.net",
+      subject: "Bill payment made on job '6 - Warranty - 190 Sample Ave'",
+      headers: replyTo("no-reply@buildertrend.net"),
+    }),
+    msg(5, "2026-10-02T05:45:00Z", {
+      from: "noreply@send.xero.com",
+      subject: "Dive into the latest from Xero",
+      headers: { "list-unsubscribe": "<mailto:u@send.xero.com>" },
+    }),
+    msg(6, "2026-10-02T05:46:00Z", {
+      from: "messaging-service@post.xero.com",
+      subject: "Invoice INV-1790 from SecureWorks WA for Sam Sample",
+      headers: replyTo("accounts@secureworkswa.com.au"),
+    }),
+  ];
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  const saved = w.captured.map((r) => {
+    const p = r.payload as Record<string, unknown>;
+    return [r.event_type, p.email, p.sender_kind, p.sent_via];
+  });
+  assertEquals(saved, [
+    ["supplier.email_in", "orders@steelsupply.example", "supplier", "post.xero.com"],
+    ["client.email_in", "sam.sample@example.net", "customer", "post.xero.com"],
+    ["client.email_in", "ap@builder-accounts.example", "customer", "apps.myob.com"],
+    ["supplier.email_in", "notifications@buildertrend.net", "automated", "buildertrend.net"],
+  ]);
+  assert(String(w.captured[1].body_preview).includes("gate latch"));
+  assertEquals(lastRun(w, "outlook_nithin").counts!.skipped_noise, 2);
+});
+
+Deno.test("a known supplier's or builder's machine mail is saved (a bounce of our job email, a bookings schedule); other machine mail naming no job is not", async () => {
+  const box = [
+    msg(1, "2026-10-02T05:41:00Z", {
+      from: "postmaster@steelsupply.example",
+      subject: "Undeliverable: URGENT PICKUP - JOB SWP-261-283",
+      headers: { "auto-submitted": "auto-replied" },
+    }),
+    msg(2, "2026-10-02T05:42:00Z", {
+      from: "noreply@builder.example",
+      subject: "Please check attached bookings schedule",
+    }),
+    msg(3, "2026-10-02T05:43:00Z", {
+      from: "mailer.one@portal.example",
+      subject: "Work order issued",
+    }),
+    msg(4, "2026-10-02T05:44:00Z", {
+      from: "no-reply@app.example",
+      subject: "Your one-time code is 198252",
+    }),
+  ];
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  assertEquals(
+    w.captured.map((r) => [r.event_type, (r.payload as Record<string, unknown>).email]),
+    [
+      ["supplier.email_in", "postmaster@steelsupply.example"],
+      ["client.email_in", "noreply@builder.example"],
+      ["client.email_in", "mailer.one@portal.example"],
+    ],
+  );
+  assertEquals(lastRun(w, "outlook_nithin").counts!.skipped_noise, 1);
+});
+
+Deno.test("owner mailbox: our own mail naming a builder's reference, and our system's notices, are saved; our own mail naming no job is not (D-EM3)", async () => {
+  const owner: SourceRow = {
+    email: "marnin@secureworkswa.com.au",
+    source_key: "marnin",
+    kind: "user",
+    scope_label: "owner",
+    owner_privacy: true,
+  };
+  const ours = (n: number, subject: string, from = "marnin@secureworkswa.com.au", to = ["someone@example.org"]) =>
+    msg(n, `2026-10-02T05:4${n}:00Z`, { from, to, subject, folderKind: "sent", parentFolderId: "F-sent" });
+  const box = [
+    ours(1, "Cheque details - 16 Sample Way (PO 20304569-06)", undefined, ["marnin@secureworkswa.com.au"]),
+    ours(2, "New Google Review", "noreply@mail.secureworkswa.com.au", ["marnin@secureworkswa.com.au"]),
+    ours(3, "Dinner on Friday"),
+  ];
+  const w = world({ sources: [owner], mailboxes: { "marnin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  assertEquals(w.captured.map((r) => (r.payload as Record<string, unknown>).subject), [
+    "Cheque details - 16 Sample Way (PO 20304569-06)",
+    "New Google Review",
+  ]);
+  assertEquals((w.captured[0].payload as Record<string, unknown>).builder_refs, ["PO-20304569"]);
+  assertEquals(lastRun(w, "outlook_marnin").counts!.skipped_private, 1);
 });
 
 // Group mailbox audience (9 Oct 2026): a group post lists no recipients, so

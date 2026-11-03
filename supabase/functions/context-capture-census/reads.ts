@@ -11,6 +11,11 @@ import {
   type RefPrefixClient,
 } from "../_shared/makesafe_refs.ts";
 import type { OutlookMailItem } from "../_shared/evidence/outlook_mail.ts";
+import {
+  loadTradingPartners,
+  type PartnerClient,
+  PartnerReadError,
+} from "../_shared/evidence/outlook_partners.ts";
 import { GRAPH, graphTokenSource } from "../outlook-mail-capture/graph.ts";
 import type {
   CensusReads,
@@ -310,11 +315,17 @@ export function liveCensusReads(deps: LiveDeps): CensusReads {
         }`,
       );
       const b = p.body as { content?: unknown; contentType?: unknown } | null;
+      // The reader takes a post's subject from its thread's topic.
+      const thread = await graph(
+        `${GRAPH}/groups/${enc(groupId)}/threads/${
+          enc(threadId)
+        }?$select=topic`,
+      );
       return {
         graphId: String(p.id ?? postId),
         internetMessageId: internetId(p),
         conversationId: str(p.conversationId),
-        subject: null,
+        subject: str(thread.topic),
         from: addr(p.from) ?? addr(p.sender),
         to: [],
         cc: [],
@@ -328,15 +339,20 @@ export function liveCensusReads(deps: LiveDeps): CensusReads {
       };
     },
     async explainContext(): Promise<ExplainContext> {
-      const sup = await sb.rpc("context_email_supplier_domains");
-      if (sup.error) throw new ReadError("suppliers_unreadable");
+      const partners = await loadTradingPartners(sb as unknown as PartnerClient)
+        .catch((e) => {
+          throw new ReadError(
+            e instanceof PartnerReadError ? e.code : "suppliers_unreadable",
+          );
+        });
       const jobs = await sb.rpc("context_email_job_client_emails");
       if (jobs.error) throw new ReadError("job_emails_unreadable");
       const prefixes = await loadRefPrefixes(sb as RefPrefixClient).catch(() =>
         null
       );
       return {
-        supplierDomains: textSet(sup.data),
+        supplierDomains: partners.supplierDomains,
+        builderSenders: partners.builderSenders,
         jobClientEmails: textSet(jobs.data),
         prefixes: prefixes ?? [...REF_PREFIX_FLOOR],
       };
