@@ -676,6 +676,11 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_pro
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cost_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
+# B4: job_profit's dispatch_orders reads the Dispatch order and bill link views.
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_orders
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_order_bills
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|column|v_dispatch_order_bills.linked
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|column|v_dispatch_order_bills.rule
 
 # reporting-api job_profitability (CFO-01 / R-22) reads its money from the same
 # engine. The table line pins the JP-12 body (installer_bill_unconfirmed in

@@ -27,7 +27,7 @@ carry no money.
 
 | Action | Returns |
 |---|---|
-| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `cost_events`, `revenue_events`, `timeline`, `labels` |
+| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `labels` |
 | `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
 
@@ -179,6 +179,34 @@ job cohort, not an accounting period.
 A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
 parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
 figure; `holding_jobs` reports it on its own so the parked cost stays visible.
+
+## Dispatch orders and their bills (B4)
+
+`job_profit` answers `dispatch_orders`: the job's Dispatch orders and the supplier bills linked to each, read
+from `v_dispatch_orders` and `v_dispatch_order_bills` (migration `20261104010000`, service role only; code
+`job_dispatch_orders.ts`). An order is a Dispatch v2 supplier order email that went out (`sent` or
+`send_unknown`) or a purchase order that is not a draft or cancelled.
+
+A supplier bill (Xero ACCPAY, AUTHORISED or PAID) links to an order by the owner's rule of 3 Nov 2026, by
+itself, never by a person: the bill's supplier is the order's supplier (the supplier record's Xero contact, or
+the names agree once company words are dropped: "Metroll" and "Metroll Perth"), and the bill's number,
+reference or line text carries `supplier_ref` (a supplier order, quote or invoice number saved for that order
+from its replies) or `job_number` (our job number, as `SWP-261309`, `SWP261309` or `SWP 261309`). Purchase
+orders have no saved refs, so only `job_number` applies to them. A bill links to one order: one that names two
+orders links neither and is listed under that order's `unclear_bills` with a reason (`several_saved_refs`,
+`other_order_ref`, `job_disagrees`, `several_jobs_named`, `several_orders_on_job`); a saved ref picks its
+order when the job agrees.
+
+| Field | Meaning |
+|---|---|
+| `status`, `reason` | `ok`, or `unknown` with a reason when the orders or links cannot be read. Unknown is never "not billed": `ordered`, `billed` and `not_billed` are then null |
+| `ordered`, `billed`, `not_billed` | Counts of orders; billed = at least one bill linked |
+| `orders[]` | `order_kind` (`dispatch_v2_email` or `purchase_order`), `order_id`, `supplier`, `order_label` (the email subject or PO number), `order_status`, `ordered_at`, `state` (`billed` or `not_billed`), `bills[]`, `unclear_bills[]` |
+| `bills[]` | `invoice_number`, `supplier`, `bill_date`, `bill_status`, `bill_sub_total_ex` (the bill's own amount, ex GST), `rule` (`supplier_ref`, `job_number` or `supplier_ref+job_number`), `matched_ref`, `matched_job_number`, `cost_on_this_job` (Job Profit counts the bill on this job) |
+
+No price goes on an order and a link moves nothing: it places no bill, writes no row, and changes no figure
+in `job`, `cost_events`, `ordered_not_billed_count` or any rollup. `ordered_not_billed_count` still counts
+purchase orders only.
 
 ## Where a bill's cost counts (H7)
 
