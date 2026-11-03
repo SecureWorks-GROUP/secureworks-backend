@@ -3,9 +3,11 @@
 //
 // An order is a Dispatch v2 supplier order email that went out, or a purchase order that is not a draft or
 // cancelled (v_dispatch_orders). A supplier bill links to an order by the owner's rule, in SQL
-// (v_dispatch_order_bills, migrations 20261104010000 and 20261104040000): the bill is from the order's supplier
-// and carries a supplier ref saved for that order, our job number, our PO number (on the bill or the supplier's
-// PDF of it), or the job's site address on the bill or that PDF when it matches one order of that supplier. This file only reads those two views and sets each
+// (v_dispatch_order_bills, migrations 20261104010000, 20261104040000 and 20261104233000): the bill is from the
+// order's supplier and carries a supplier ref saved for that order, our job number, our PO number (on the bill or the
+// supplier's PDF of it), or the job's site address on the bill or that PDF when it matches one order of that supplier;
+// or our records tie it: the bill's own number written on our purchase order, or our job number in the words of the
+// emails that carry the supplier's PDF of the bill. This file only reads those two views and sets each
 // linked bill beside the job's own cost events, so staff see whether Job Profit counts that bill on this job.
 // Read only: no bill is placed, no figure is computed, and nothing here changes a Job Profit total.
 
@@ -31,7 +33,8 @@ export interface DispatchOrderBill {
   matched_job_number: string | null;
   matched_po_number: string | null;
   matched_site_address: string | null;
-  // Where the bill carried it: "bill" (its number, reference or lines), "supplier_pdf", or both.
+  // Where it was found, joined by "+": "bill" (its number, reference or lines), "supplier_pdf", "pdf_email" (the
+  // emails that carry the supplier's PDF), "order" (our purchase order's reference or notes).
   matched_in: string | null;
   cost_on_this_job: boolean;
 }
