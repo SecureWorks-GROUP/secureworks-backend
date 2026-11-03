@@ -183,11 +183,25 @@ BEGIN
  PERFORM pg_temp.c2k_flag(false);
 END $$;
 
+-- A registered successor that replaces the helper (C2 place, 20261104202000:
+-- a contact with no job then is set aside as not about a job) comes off
+-- first, inside each transaction.
 BEGIN;
+SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_empty_row_job(public.business_events)')),'')
+ ='1769c9e93e3ebefc25416781bb5a94e6' AS c2p_live \gset
+\if :c2p_live
+\ir ../../../rollbacks/20261104202000_context_c2_empty_no_job_reason_down.sql
+\endif
 SELECT pg_temp.c2k_cases();
 ROLLBACK;
 
 -- E. Structure.
+BEGIN;
+SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_empty_row_job(public.business_events)')),'')
+ ='1769c9e93e3ebefc25416781bb5a94e6' AS c2p_live \gset
+\if :c2p_live
+\ir ../../../rollbacks/20261104202000_context_c2_empty_no_job_reason_down.sql
+\endif
 DO $$
 DECLARE x record; problems text[]:='{}'; r text;
 BEGIN
@@ -230,3 +244,4 @@ BEGIN
  THEN RAISE EXCEPTION 'c2k: re-apply changed a body, comment or grant'; END IF;
 END $$;
 DROP TABLE c2k_before;
+ROLLBACK;
