@@ -188,7 +188,7 @@ END $$;
 -- first, inside each transaction.
 BEGIN;
 SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_empty_row_job(public.business_events)')),'')
- ='1769c9e93e3ebefc25416781bb5a94e6' AS c2p_live \gset
+ ='b057fc7da940afe25833028d511594b5' AS c2p_live \gset
 \if :c2p_live
 \ir ../../../rollbacks/20261104202000_context_c2_empty_no_job_reason_down.sql
 \endif
@@ -198,7 +198,7 @@ ROLLBACK;
 -- E. Structure.
 BEGIN;
 SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_empty_row_job(public.business_events)')),'')
- ='1769c9e93e3ebefc25416781bb5a94e6' AS c2p_live \gset
+ ='b057fc7da940afe25833028d511594b5' AS c2p_live \gset
 \if :c2p_live
 \ir ../../../rollbacks/20261104202000_context_c2_empty_no_job_reason_down.sql
 \endif

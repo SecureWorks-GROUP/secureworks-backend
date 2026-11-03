@@ -13,10 +13,15 @@
 -- reasons), but context_empty_row_job (20261104095000) leaves an empty row
 -- "empty", so C2 counts it as neither placed nor marked.
 --
--- Changed: context_empty_row_job, its last branch only (no_candidate_at_time).
--- It asks context_bucket_reason with the contact it found and returns
--- copy_status admin_bucket with that reason when the message's own keys agree
--- (the four-argument timeline with its phone and email, every basis):
+-- Changed: context_empty_row_job, two branches.
+-- 1. A copy our own tool logged follows its twin only onto a job that can be a
+--    customer's (context_job_real: numbered, not a test, not holding). Read
+--    19:58Z: 5 copies would follow a twin its writer had put on the holding
+--    record SWF-PDF-BUCKET; the contact's own jobs now decide them.
+-- 2. The last branch (no_candidate_at_time) asks context_bucket_reason with
+--    the contact it found and returns copy_status admin_bucket with that
+--    reason when the message's own keys agree (the four-argument timeline
+--    with its phone and email, every basis):
 --   contact_no_jobs  - no job of the contact's and none carrying its phone or
 --                      email, any contact's or contactless;
 --   before_any_job   - none of those existed at the message time and the
@@ -27,12 +32,12 @@
 -- such a row aside with copy_reason as its bucket_reason (the path a copy of
 -- a set-aside twin takes). Any other reason (only finished work, a job hint
 -- taken off, an error) leaves the row empty with its named rule as before.
--- Nothing is placed by this change and nothing is guessed: a row with any job
--- at its time, several jobs, a finished job beside, a shared phone or email
--- or no contact is decided exactly as before.
+-- Nothing new is placed and nothing is guessed: a row with any job at its
+-- time, several jobs, a finished job beside, a shared phone or email or no
+-- contact is decided exactly as before.
 -- Every other character of the body is the live body (20261104095000).
 -- md5(prosrc), old -> new:
---   public.context_empty_row_job(public.business_events)  130b29784228b2542306f5c0e5a5f0e7 -> 1769c9e93e3ebefc25416781bb5a94e6
+--   public.context_empty_row_job(public.business_events)  130b29784228b2542306f5c0e5a5f0e7 -> b057fc7da940afe25833028d511594b5
 --
 -- Not changed: the ladder, the hand run (context_redecide_one already writes
 -- an empty row the ladder sets aside: outcome set_aside), P1b (a new job
@@ -51,7 +56,7 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_empty_row_job(public.business_events)');
- IF live IS NULL OR live NOT IN ('130b29784228b2542306f5c0e5a5f0e7','1769c9e93e3ebefc25416781bb5a94e6') THEN
+ IF live IS NULL OR live NOT IN ('130b29784228b2542306f5c0e5a5f0e7','b057fc7da940afe25833028d511594b5') THEN
   problems:=problems||format('context_empty_row_job md5 %s',coalesce(live,'<missing>'));
  END IF;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)');
@@ -136,7 +141,10 @@ BEGIN
    AND x.event_type IN ('client.sms_out','client.email_out','sms_sent','client_comms.sent')
    AND NOT (coalesce(x.metadata,'{}'::jsonb) ? 'placement_copy_of')
    AND position(left(pv,40) IN coalesce(public.context_event_text(x),''))>0;
-  IF cardinality(tw_jobs)=1 THEN
+  -- C2 place (20261104202000): only onto a job that can be a customer's
+  -- (numbered, not a test, not holding). A twin its writer put on a holding
+  -- or test record is not followed; the contact's own jobs decide below.
+  IF cardinality(tw_jobs)=1 AND public.context_job_real(tw_jobs[1]) THEN
    RETURN QUERY SELECT tw_jobs[1],'twin_copy',NULL::uuid[],c,c_by,tw_first,NULL::text,NULL::text;
    RETURN;
   ELSIF coalesce(cardinality(tw_jobs),0)=0 AND cardinality(tw_reasons)=1 AND tw_other=0 THEN
@@ -211,14 +219,14 @@ BEGIN
 END $function$
 ;
 COMMENT ON FUNCTION public.context_empty_row_job(public.business_events) IS
- 'C2 known contacts (20261104095000): for a customer message with no words (the finish line''s message kinds in the customer lane; never crew or staff traffic), who it is with (the row''s contact, else the recipient our own tool wrote in payload.to_contact_id or payload.contact_id, else exactly one contact for its email or phone key) and its job: a copy our own tool logged of a message the CRM also captured (same recipient, same first 40 characters, within 10 minutes, another source) follows its twin (twin_copy: the one job its twins sit on, or the not-about-a-job reason its twin was set aside with); else the contact''s one real job at the message time with no finished job beside it (empty_single_open), the one job of its business line (empty_single_line) or stage 1''s ranking (empty_ranked_open). Anything else is set aside with a named rule and its candidates: empty_several, empty_recent_other_job, empty_identity_conflict, empty_no_real_job, empty_after_job, no_candidate_at_time, no_contact. Never guesses; computes, never writes. No row for any other row. Read by resolve_context_attribution. Service role only. C2 place (20261104202000): a known contact''s message with no job then and no finished job in the aftercare window (no_candidate_at_time) is set aside as not about a job with the reason a worded message gets there (context_bucket_reason with the contact; returned as copy_status admin_bucket and copy_reason) when the message''s own keys agree: contact_no_jobs (no job of the contact''s and none carrying its phone or email) or before_any_job (none existed then and the first came more than 60 days later). Any other reason leaves it empty with the named rule.';
+ 'C2 known contacts (20261104095000): for a customer message with no words (the finish line''s message kinds in the customer lane; never crew or staff traffic), who it is with (the row''s contact, else the recipient our own tool wrote in payload.to_contact_id or payload.contact_id, else exactly one contact for its email or phone key) and its job: a copy our own tool logged of a message the CRM also captured (same recipient, same first 40 characters, within 10 minutes, another source) follows its twin (twin_copy: the one job its twins sit on, or the not-about-a-job reason its twin was set aside with); else the contact''s one real job at the message time with no finished job beside it (empty_single_open), the one job of its business line (empty_single_line) or stage 1''s ranking (empty_ranked_open). Anything else is set aside with a named rule and its candidates: empty_several, empty_recent_other_job, empty_identity_conflict, empty_no_real_job, empty_after_job, no_candidate_at_time, no_contact. Never guesses; computes, never writes. No row for any other row. Read by resolve_context_attribution. Service role only. C2 place (20261104202000): a copy follows its twin only onto a job that can be a customer''s (context_job_real); a known contact''s message with no job then and no finished job in the aftercare window (no_candidate_at_time) is set aside as not about a job with the reason a worded message gets there (context_bucket_reason with the contact; returned as copy_status admin_bucket and copy_reason) when the message''s own keys agree: contact_no_jobs (no job of the contact''s and none carrying its phone or email) or before_any_job (none existed then and the first came more than 60 days later). Any other reason leaves it empty with the named rule.';
 REVOKE ALL ON FUNCTION public.context_empty_row_job(public.business_events) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_empty_row_job(public.business_events) TO service_role;
 
 -- 2. Post-check: the body is this migration's.
 DO $post$
 BEGIN
- IF (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_empty_row_job(public.business_events)'))<>'1769c9e93e3ebefc25416781bb5a94e6' THEN
+ IF (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_empty_row_job(public.business_events)'))<>'b057fc7da940afe25833028d511594b5' THEN
   RAISE EXCEPTION 'context_c2_empty_no_job_reason: the helper is not this migration''s body';
  END IF;
 END $post$;

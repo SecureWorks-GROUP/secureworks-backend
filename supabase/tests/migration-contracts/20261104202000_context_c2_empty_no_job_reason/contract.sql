@@ -12,6 +12,8 @@
 --      job carrying the message's phone (another contact's or contactless),
 --      a job hint taken off.
 --   C. Unchanged: one job (placed), several jobs, a worded message, rules off.
+--      A copy our own tool logged follows its twin only onto a customer's job:
+--      a twin on a holding record is not followed (the contact's job decides).
 --   D. Stored rows: the hand run sets an old empty row aside once
 --      (set_aside, then unchanged); the bucket re-run keeps it; a new job
 --      inside its lead window places it (P1b).
@@ -57,8 +59,8 @@ END $$;
 CREATE FUNCTION pg_temp.c2p_cases() RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
  at constant timestamptz:='2026-09-20 02:00Z';
- j_one uuid; j_later uuid; j_near uuid; j_done uuid; j_key uuid; j_two_a uuid; j_two_b uuid; j_new uuid;
- e public.business_events; r text; n int;
+ j_one uuid; j_later uuid; j_near uuid; j_done uuid; j_key uuid; j_two_a uuid; j_two_b uuid; j_new uuid; j_hold uuid; j_own uuid;
+ e public.business_events; tw public.business_events; r text; n int;
 BEGIN
  j_one:=pg_temp.c2p_job('SWF-997701','c2p-contact-one','scheduled','2026-09-01Z');
  j_later:=pg_temp.c2p_job('SWF-997702','c2p-contact-later','quoted',at+interval '90 days');
@@ -116,6 +118,24 @@ BEGIN
  INSERT INTO public.business_events(event_type,source,channel,direction,occurred_at,event_at,payload)
  VALUES('client.call_complete','ghl-webhook-receiver','call','inbound',at,at,'{}') RETURNING * INTO e;
  PERFORM pg_temp.c2p_expect('no contact',e,NULL,'empty','no_contact',NULL);
+ -- Our own tool's copy of a text whose twin its writer put on a holding record: not followed onto it.
+ j_own:=pg_temp.c2p_job('SWF-997709','c2pCopyHoldContact1','scheduled','2026-09-01Z');
+ j_hold:=gen_random_uuid();
+ INSERT INTO public.jobs(id,org_id,job_number,status,type,site_address,created_at,metadata)
+ VALUES(j_hold,'00000000-0000-0000-0000-000000000001','SWF-HOLD-997710','archived','fencing','1 Holding Way, Perth WA 6000','2026-01-01Z','{"do_not_schedule":"true"}');
+ INSERT INTO public.business_events(event_type,source,channel,direction,occurred_at,event_at,contact_id,payload)
+ VALUES('client.sms_out','ghl-proxy','sms','outbound',at,at,'c2pCopyHoldContact1','{"body":"Hi Jo, your patio quote is attached, call us with questions."}') RETURNING * INTO tw;
+ UPDATE public.business_events SET job_id=j_hold,attribution_status='direct' WHERE id=tw.id;
+ INSERT INTO public.business_events(event_type,source,entity_type,occurred_at,payload)
+ VALUES('client.sms_out','mcp_agent','unknown',at+interval '1 second',
+  '{"message_preview":"Hi Jo, your patio quote is attached, call us with questions.","to_contact_id":"c2pCopyHoldContact1","tool":"sw_send_sms"}') RETURNING * INTO e;
+ PERFORM pg_temp.c2p_expect('twin on a holding record',e,j_own,'empty','empty_single_open',NULL);
+ -- The same twin on the contact's own job: the copy follows it, as before.
+ UPDATE public.business_events SET job_id=j_own,attribution_status='single_open' WHERE id=tw.id;
+ INSERT INTO public.business_events(event_type,source,entity_type,occurred_at,payload)
+ VALUES('client.sms_out','mcp_agent','unknown',at+interval '2 seconds',
+  '{"message_preview":"Hi Jo, your patio quote is attached, call us with questions.","to_contact_id":"c2pCopyHoldContact1","tool":"sw_send_sms"}') RETURNING * INTO e;
+ PERFORM pg_temp.c2p_expect('twin on the customer''s job',e,j_own,'empty','twin_copy',NULL);
 
  ------------------------------------------------------------ D. stored rows
  -- A row stored before this change (rules off) is set aside by the hand run, once.
@@ -150,7 +170,7 @@ ROLLBACK;
 DO $$
 DECLARE problems text[]:='{}'; r text; sig constant text:='public.context_empty_row_job(public.business_events)';
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(sig)) IS DISTINCT FROM '1769c9e93e3ebefc25416781bb5a94e6' THEN problems:=problems||'helper md5'::text; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(sig)) IS DISTINCT FROM 'b057fc7da940afe25833028d511594b5' THEN problems:=problems||'helper md5'::text; END IF;
  IF coalesce(obj_description(to_regprocedure(sig),'pg_proc'),'') NOT LIKE 'C2 known contacts (20261104095000)%C2 place (20261104202000)%' THEN problems:=problems||'helper comment'::text; END IF;
  FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
   IF has_function_privilege(r,sig,'EXECUTE') THEN problems:=problems||format('%s can call the helper',r); END IF;

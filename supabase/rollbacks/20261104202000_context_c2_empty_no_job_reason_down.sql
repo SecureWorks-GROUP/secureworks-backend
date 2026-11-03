@@ -9,7 +9,7 @@ DO $guard$
 DECLARE live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_empty_row_job(public.business_events)');
- IF live IS NULL OR live NOT IN ('1769c9e93e3ebefc25416781bb5a94e6','130b29784228b2542306f5c0e5a5f0e7') THEN
+ IF live IS NULL OR live NOT IN ('b057fc7da940afe25833028d511594b5','130b29784228b2542306f5c0e5a5f0e7') THEN
   RAISE EXCEPTION 'context_c2_empty_no_job_reason_down_mismatch: context_empty_row_job md5 %',coalesce(live,'<missing>');
  END IF;
 END $guard$;
