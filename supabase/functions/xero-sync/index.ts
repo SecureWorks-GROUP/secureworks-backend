@@ -1170,7 +1170,7 @@ async function syncInvoices(sb: any) {
   }
 
   // ── Materials-actuals ingestion (U3) and the bill pre-match run on their own schedules ──
-  // (3 Nov 2026, migration 20261103160000: xero-materials-ingest, xero-bill-prematch and
+  // (3 Nov 2026, migration 20261103170000: xero-materials-ingest, xero-bill-prematch and
   // xero-materials-ingest-all). Inside this run, with every bill read (#1184), they used up the
   // run's CPU time from 29 Oct: each run was stopped there, so the bank feed copy, the stale
   // invoice re-check and settlement capture below never ran and no proposal was written after 31 Oct.

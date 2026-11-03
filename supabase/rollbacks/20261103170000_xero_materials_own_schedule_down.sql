@@ -1,4 +1,4 @@
--- Rollback of 20261103160000: remove the three bills schedules and put the trigger back to its
+-- Rollback of 20261103170000: remove the three bills schedules and put the trigger back to its
 -- 20261102080000 definition (two actions). The xero-sync code must be rolled back with it, or the
 -- bills step runs nowhere.
 SET LOCAL lock_timeout = '5s';

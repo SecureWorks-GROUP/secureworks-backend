@@ -10,7 +10,7 @@
 --   xero-materials-ingest-all  40 18 * * *       action=ingest_materials_all     (every bill, 02:40 Perth)
 -- Same trigger and lane as 20261102080000 (xero-supplier-credit-sync, xero-invoice-mirror-check):
 -- the helper gains three allowed actions; each schedule stops with the capture lane.
--- Rollback: supabase/rollbacks/20261103160000_xero_materials_own_schedule_down.sql
+-- Rollback: supabase/rollbacks/20261103170000_xero_materials_own_schedule_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -42,7 +42,7 @@ BEGIN
     timeout_milliseconds := 120000);
 END $fn$;
 COMMENT ON FUNCTION public.trigger_xero_sync_action(text) IS
-  '20261103160000: posts one of the scheduled xero-sync actions run outside sync_invoices (sync_supplier_credit_notes, check_invoice_mirror, ingest_materials_recent, ingest_materials_all, bill_prematch) with the service key and a 120 s timeout, for their pg_cron jobs. Each used to run only inside sync_invoices, which the edge runtime stopped before or while reaching them.';
+  '20261103170000: posts one of the scheduled xero-sync actions run outside sync_invoices (sync_supplier_credit_notes, check_invoice_mirror, ingest_materials_recent, ingest_materials_all, bill_prematch) with the service key and a 120 s timeout, for their pg_cron jobs. Each used to run only inside sync_invoices, which the edge runtime stopped before or while reaching them.';
 REVOKE ALL ON FUNCTION public.trigger_xero_sync_action(text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.trigger_xero_sync_action(text) TO service_role, postgres;
 
