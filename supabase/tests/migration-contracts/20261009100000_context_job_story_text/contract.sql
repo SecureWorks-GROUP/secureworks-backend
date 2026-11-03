@@ -1,6 +1,12 @@
 -- 20261104080000 (expected cost missing) put production's v_job_profit in place (its setup) and added a column
 -- after TP-13's last: when a full stack has it, it is rolled back and the stack's own definition put back
 -- first, and applied again at the end.
+-- 20261104110000 (patio bound revision) sits on top of it: when the stack has it, its down runs first, and it is
+-- applied again after 20261104080000 at the end.
+SELECT to_regclass('public.v_job_profit_patio_scope_binding') IS NOT NULL AS a6p_live_20261009100000 \gset
+\if :a6p_live_20261009100000
+\ir ../../../rollbacks/20261104110000_job_profit_patio_bound_revision_down.sql
+\endif
 SELECT to_regprocedure('public.job_profit_expected_cost_missing(uuid)') IS NOT NULL AS a6x_live_20261009100000 \gset
 \if :a6x_live_20261009100000
 \ir ../../../rollbacks/20261104080000_job_profit_expected_cost_missing_down.sql
@@ -985,4 +991,8 @@ ROLLBACK;
 \if :a6x_live_20261009100000
 \ir ../20261104080000_job_profit_expected_cost_missing/setup.sql
 \ir ../../../migrations/20261104080000_job_profit_expected_cost_missing.sql
+\endif
+\if :a6p_live_20261009100000
+\ir ../20261104110000_job_profit_patio_bound_revision/setup.sql
+\ir ../../../migrations/20261104110000_job_profit_patio_bound_revision.sql
 \endif
