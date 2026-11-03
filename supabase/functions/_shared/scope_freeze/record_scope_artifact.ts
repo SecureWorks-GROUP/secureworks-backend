@@ -48,6 +48,10 @@ export type ArtifactType =
   // is gable).
   | 'render_gutter_detail'
   | 'render_ridge_detail'
+  // Added 2026-10-26 (20261026051700_customer_3d_model_artifact.sql): the
+  // customer 3D page's model, JSON geometry and colours only, served by
+  // send-quote's `model` route behind customer_3d_page_v1.
+  | 'customer_model'
 
 export const ARTIFACT_TYPES: ReadonlyArray<ArtifactType> = [
   'render_hero', 'render_front', 'render_side', 'render_site_plan',
@@ -55,6 +59,7 @@ export const ARTIFACT_TYPES: ReadonlyArray<ArtifactType> = [
   'quote_pdf', 'per_contact_pdf', 'work_order_pdf', 'material_order_pdf',
   'model_glb', 'drawing',
   'render_gutter_detail', 'render_ridge_detail',
+  'customer_model',
 ]
 
 export function isArtifactType(v: unknown): v is ArtifactType {
@@ -66,7 +71,13 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'image/jpeg',
   'application/pdf',
   'model/gltf-binary',
+  'application/json',
 ])
+
+// JSON is allowed for the customer model only, and a customer model is JSON only:
+// the bucket's other types stay binary renders and documents.
+const JSON_ONLY_ARTIFACT_TYPES: ReadonlySet<ArtifactType> = new Set(['customer_model'])
+const MAX_JSON_ARTIFACT_BYTES = 2 * 1024 * 1024
 
 // Mirror of the bucket-level 25 MB cap from the applied migration. Enforced
 // here so a 26 MB upload fails fast with a structured error before bytes
@@ -81,6 +92,7 @@ const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
   'image/jpeg': 'jpg',
   'application/pdf': 'pdf',
   'model/gltf-binary': 'glb',
+  'application/json': 'json',
 }
 
 export type RecordScopeArtifactInput = {
@@ -168,6 +180,9 @@ export async function recordScopeArtifact(
   if (typeof input.content_type !== 'string' || !ALLOWED_CONTENT_TYPES.has(input.content_type)) {
     return { ok: false, error: { code: 'invalid_content_type', provided: String(input.content_type) } }
   }
+  if (JSON_ONLY_ARTIFACT_TYPES.has(input.artifact_type) !== (input.content_type === 'application/json')) {
+    return { ok: false, error: { code: 'invalid_content_type', provided: input.content_type } }
+  }
   if (typeof input.sha256 !== 'string' || !SHA256_RE.test(input.sha256)) {
     return { ok: false, error: { code: 'invalid_sha256_format', provided: String(input.sha256) } }
   }
@@ -187,6 +202,18 @@ export async function recordScopeArtifact(
   }
   if (bytes.length > MAX_ARTIFACT_BYTES) {
     return { ok: false, error: { code: 'bytes_too_large', size_bytes: bytes.length, limit: MAX_ARTIFACT_BYTES } }
+  }
+
+  if (input.content_type === 'application/json') {
+    if (bytes.length > MAX_JSON_ARTIFACT_BYTES) {
+      return { ok: false, error: { code: 'bytes_too_large', size_bytes: bytes.length, limit: MAX_JSON_ARTIFACT_BYTES } }
+    }
+    try {
+      const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+    } catch (e) {
+      return { ok: false, error: { code: 'invalid_input', field: 'content_base64', message: `JSON artefact did not parse: ${(e as Error)?.message ?? e}` } }
+    }
   }
 
   const server_sha256 = await sha256HexOf(bytes)

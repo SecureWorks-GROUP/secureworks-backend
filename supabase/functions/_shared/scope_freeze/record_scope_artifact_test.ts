@@ -508,3 +508,39 @@ Deno.test('recordScopeArtifact — multiple artefacts of same type are allowed (
   assertNotEquals(a.scope_artifact_id, b.scope_artifact_id)
   assertEquals(c._state.scope_artifacts.length, 2)
 })
+
+// ── customer_model (20261026051700) ────────────────────────────────────────
+
+async function jsonInput(artifact_type: ArtifactType, text: string, content_type = 'application/json') {
+  const bytes = new TextEncoder().encode(text)
+  return { scope_revision_id: 'rev-frozen', artifact_type, content_type, content_base64: await bytesToBase64(bytes), sha256: await sha256Hex(bytes) }
+}
+
+Deno.test('recordScopeArtifact — customer_model stores a JSON object as .json', async () => {
+  const c = makeMock({ scope_revisions: [FROZEN_REV] })
+  const r = await recordScopeArtifact(c, await jsonInput('customer_model', '{"what":"patio","shapes":[]}'))
+  assert(r.ok, JSON.stringify(r))
+  if (!r.ok) return
+  assertEquals(r.content_type, 'application/json')
+  assert(r.storage_path.endsWith('.json'), r.storage_path)
+  assertEquals(c._state.storage_uploads[0].contentType, 'application/json')
+})
+
+Deno.test('recordScopeArtifact — customer_model is JSON only, and JSON is customer_model only', async () => {
+  const c = makeMock({ scope_revisions: [FROZEN_REV] })
+  const png = makeTinyPng()
+  const asPng = await recordScopeArtifact(c, { scope_revision_id: 'rev-frozen', artifact_type: 'customer_model', content_type: 'image/png', content_base64: await bytesToBase64(png), sha256: await sha256Hex(png) })
+  assertEquals(asPng.ok ? null : asPng.error.code, 'invalid_content_type')
+  const renderAsJson = await recordScopeArtifact(c, await jsonInput('render_hero', '{"a":1}'))
+  assertEquals(renderAsJson.ok ? null : renderAsJson.error.code, 'invalid_content_type')
+  assertEquals(c._state.storage_uploads.length, 0)
+})
+
+Deno.test('recordScopeArtifact — customer_model refuses text that is not a JSON object', async () => {
+  const c = makeMock({ scope_revisions: [FROZEN_REV] })
+  for (const text of ['not json', '[1,2]', 'null']) {
+    const r = await recordScopeArtifact(c, await jsonInput('customer_model', text))
+    assertEquals(r.ok ? null : r.error.code, 'invalid_input', text)
+  }
+  assertEquals(c._state.storage_uploads.length, 0)
+})
