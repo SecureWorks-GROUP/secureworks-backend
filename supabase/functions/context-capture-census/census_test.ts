@@ -660,7 +660,7 @@ Deno.test("server check: a service-role key the platform honours is accepted eve
   );
 });
 
-Deno.test("email_explain reads like the reader: a supplier's Xero document, Dispatch's supplier bounce, a builder's no-reply mail and a post naming its job in the thread topic are rows; platform news stays noise", async () => {
+Deno.test("email_explain reads like the reader: a supplier's Xero document, Dispatch's supplier bounce, a builder's no-reply mail, a Stratco lead allocation, a no-email supplier's order mail and a post naming its job in the thread topic are rows; platform news and other lead-source mail stay noise", async () => {
   const msgs: Record<string, Record<string, unknown>> = {
     xero_doc: {
       from: "messaging-service@post.xero.com",
@@ -683,6 +683,24 @@ Deno.test("email_explain reads like the reader: a supplier's Xero document, Disp
     builder: {
       from: "noreply@builder.example",
       subject: "Please check attached bookings schedule",
+      headers: [],
+    },
+    stratco_lead: {
+      from: "no-reply@stratco.com.au",
+      subject: "Stratco lead allocation - 990402",
+      headers: [],
+    },
+    stratco_other: {
+      from: "no-reply@stratco.com.au",
+      subject: "Our summer range is here",
+      headers: [{
+        name: "List-Unsubscribe",
+        value: "<mailto:x@stratco.com.au>",
+      }],
+    },
+    fans_order: {
+      from: "donotreply@fansonline.com.au",
+      subject: "Your order has been shipped",
       headers: [],
     },
   };
@@ -782,6 +800,9 @@ Deno.test("email_explain reads like the reader: a supplier's Xero document, Disp
     xero_news: ["skipped_noise", "automated"],
     bounce: ["row", "supplier"],
     builder: ["row", "customer"],
+    stratco_lead: ["row", "customer"],
+    stratco_other: ["skipped_noise", "automated"],
+    fans_order: ["row", "supplier"],
     P1: ["row", "automated"],
   });
 });

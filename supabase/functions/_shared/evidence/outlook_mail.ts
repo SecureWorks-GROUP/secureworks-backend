@@ -26,6 +26,13 @@
 //     and with no Reply-To (a group post) it is saved as automated supplier
 //     mail. A copy of our own document (Reply-To ours) stays platform mail.
 //     (C7 rule proofs, 3 Nov 2026: 29 such emails in one week were dropped.)
+//   * a lead source's notice of a new customer lead allocated to us
+//     (LEAD_NOTICE_SENDERS: a Stratco lead allocation from Stratco's national
+//     no-reply address) is a lead, not noise: saved as client.email_in from a
+//     customer, with payload.lead_source and payload.lead_ref (the source's
+//     own lead number), on no job unless the ladder finds one it names. Other
+//     mail from that address stays noise. (C7 rule proofs, 3 Nov 2026: 7 in
+//     one week were dropped.)
 //   * owner mailboxes (owner_privacy): our own human-sent mail is captured
 //     only when it names one of our references or a builder's reference, or
 //     goes to a job's client email (D-EM3). Tool-marked mail and our own
@@ -193,6 +200,51 @@ export const PLATFORM_DOCUMENT_SENDERS: ReadonlySet<string> = new Set([
   "notifications@buildertrend.net",
 ]);
 const TO_TAG = /^(patios|fencing)\+([a-z0-9-]{3,40})@secureworkswa\.com\.au$/;
+
+/** One lead source's allocation notice: its sender address, what marks the notice, where its lead number is. */
+export interface LeadNoticeRule {
+  /** payload.lead_source. */
+  source: string;
+  /** The subject or the words say it is a lead allocated to us. */
+  notice: RegExp;
+  /** The source's own lead number (first group). */
+  ref: RegExp;
+}
+
+/**
+ * Lead sources that tell us of a new customer lead by machine-sent mail,
+ * keyed by their exact sender address. Stratco (national) allocates leads to
+ * its installers from no-reply@stratco.com.au: "Stratco lead allocation -
+ * 234402", "<name> you have been allocated a Stratco lead. The lead reference
+ * number is 234402." (55 such notices reached admin@ from August to 3 Nov
+ * 2026, every one with that subject.) Stratco WA, the supplier, mails from
+ * stratcowa.com.au and is on the supplier list.
+ */
+export const LEAD_NOTICE_SENDERS: ReadonlyMap<string, LeadNoticeRule> = new Map(
+  [[
+    "no-reply@stratco.com.au",
+    {
+      source: "stratco",
+      notice: /\bstratco lead allocation\b|\ballocated a stratco lead\b/i,
+      ref:
+        /\b(?:stratco lead allocation\s*[-:#]\s*|lead reference number is\s*#?\s*)(\d{4,10})\b/i,
+    },
+  ]],
+);
+
+/** A lead source's allocation notice: its source and lead number (null when not named); null when not a notice. */
+export function leadNotice(
+  from: string | null,
+  subject: string,
+  words: string,
+): { source: string; ref: string | null } | null {
+  const a = emailAddress(from);
+  const rule = a ? LEAD_NOTICE_SENDERS.get(a) : undefined;
+  if (!rule) return null;
+  const text = `${subject}\n${words}`;
+  if (!rule.notice.test(text)) return null;
+  return { source: rule.source, ref: rule.ref.exec(text)?.[1] ?? null };
+}
 
 /** Lower-case bare address of "Name <a@b>" or "a@b"; null when not an address. */
 export function emailAddress(raw: string | null | undefined): string | null {
@@ -554,6 +606,7 @@ export function buildOutlookMailRow(
   let counterpart: string | null;
   let audienceBasis: AudienceBasis | null = null;
   let sentVia: string | null = null;
+  let lead: { source: string; ref: string | null } | null = null;
   if (kind === "ours") {
     // Who our email went to. Its own outside recipient decides; recorded
     // recipients that are all ours make it internal. A group post carries no
@@ -596,7 +649,13 @@ export function buildOutlookMailRow(
     direction = "inbound";
     counterpart = from;
     const document = platformDocument(from, item.headers);
-    if (document) {
+    lead = leadNotice(from, subject, words);
+    if (lead) {
+      // A new customer lead from its lead source: the customer's mail, placed
+      // like any other by what it names.
+      kind = "customer";
+      eventType = "client.email_in";
+    } else if (document) {
       // One organisation's own document, sent through its platform.
       sentVia = document.platform;
       counterpart = document.party ?? from;
@@ -675,6 +734,10 @@ export function buildOutlookMailRow(
   }
   if (tag) payload.to_tag = tag;
   if (sentVia) payload.sent_via = sentVia;
+  if (lead) {
+    payload.lead_source = lead.source;
+    if (lead.ref) payload.lead_ref = lead.ref;
+  }
   if (builderRefs.length) payload.builder_refs = builderRefs;
   if (audienceBasis) payload.audience_basis = audienceBasis;
   const metadata: Record<string, unknown> = keyFromInternet
