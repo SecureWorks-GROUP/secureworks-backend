@@ -1,8 +1,13 @@
 -- Rolls back the registered successors of the L1g rules ladder that are live,
 -- newest first, so an earlier ladder contract can roll its own chain back:
--- TP-04's holding flag (20261029190000), then unplaced stage 1
--- (20261014170000). Each runs only while its body is live, so this is a no-op
--- on a stack that holds neither.
+-- C2 known contacts (20261104095000), TP-04's holding flag (20261029190000),
+-- then unplaced stage 1 (20261014170000). Each runs only while its body is
+-- live, so this is a no-op on a stack that holds none.
+SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)')),'')
+ ='f9cd8d311bf00a92f7b708ff2d2dc8a7' AS c2k_successor_live \gset
+\if :c2k_successor_live
+\ir ../../../rollbacks/20261104095000_context_known_contact_placement_down.sql
+\endif
 SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)')),'')
  ='2ccef791fca954bfe1fcbb4e0de5f8a2' AS tp04_successor_live \gset
 \if :tp04_successor_live

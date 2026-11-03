@@ -501,6 +501,17 @@ export function whoToWhom(m: any): string {
  * address (or the party roles stamp says the customer); a text or call on the
  * job's customer thread counts unless it is labelled otherwise.
  */
+/**
+ * True for a row the placement ladder marked as our own tool's copy of a
+ * message also captured from the CRM (metadata.placement_copy_of, the twin's
+ * id; C2 known contacts, 20261104095000). The copy sits on the twin's job so
+ * the count of placed messages is right; the conversation shows the message
+ * once, as the twin. Reads the select alias copy_of, else the metadata.
+ */
+export function isPlacementCopy(r: any): boolean {
+  return Boolean(r?.copy_of ?? r?.metadata?.placement_copy_of);
+}
+
 export function countsAsCustomerContact(m: any): boolean {
   if (!m) return false;
   const channel = String(m.channel ?? "");

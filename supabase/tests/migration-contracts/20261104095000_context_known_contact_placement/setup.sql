@@ -1,0 +1,1 @@
+-- No new prerequisites: the five replaced bodies and the tables they read are already in the registered stack (stage 1 from its own case, 20261014170000; TP-04 from 20261029190000).
