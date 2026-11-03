@@ -64,8 +64,12 @@ interface Calls {
   extracts: number;
   extractLimits: (number | undefined)[];
   captures: Record<string, unknown>[];
+  /** The outcome writes: every record but the read_started mark. */
   records: ReadRecord[];
+  /** Every write and step in order: "mark", "download", "extract", "capture", "record:<result>". */
+  writes: string[];
   runs: Record<string, unknown>[];
+  staleCloses: number;
   relists: { source: string; since: string; priority: number }[];
 }
 
@@ -81,6 +85,7 @@ function fakeDeps(opts: {
   flag?: boolean;
   lane?: boolean;
   latest?: { id: string; status: string; started_at: string } | null;
+  stale?: { closed?: number; error?: string };
   dueThrows?: boolean;
   clock?: () => number;
 } = {}): { deps: ReaderDeps; calls: Calls } {
@@ -90,7 +95,9 @@ function fakeDeps(opts: {
     extractLimits: [],
     captures: [],
     records: [],
+    writes: [],
     runs: [],
+    staleCloses: 0,
     relists: [],
   };
   let n = 0;
@@ -101,6 +108,10 @@ function fakeDeps(opts: {
     laneOn: () => Promise.resolve(opts.lane ?? true),
     policy: () => Promise.resolve(POLICY),
     latestRun: () => Promise.resolve(opts.latest ?? null),
+    closeStaleRuns() {
+      calls.staleCloses++;
+      return Promise.resolve(opts.stale ?? { closed: 0 });
+    },
     recordRun(run) {
       calls.runs.push(run);
       return Promise.resolve(
@@ -125,17 +136,20 @@ function fakeDeps(opts: {
     },
     download(bucket, path) {
       calls.downloads.push(`${bucket}/${path}`);
+      calls.writes.push("download");
       return Promise.resolve(
         opts.download?.(bucket, path) ?? { ok: true, bytes: PDF_BYTES },
       );
     },
     extract(_bytes, o) {
       calls.extracts++;
+      calls.writes.push("extract");
       calls.extractLimits.push(o?.maxBytes);
       return Promise.resolve(opts.extract ?? textPdf());
     },
     capture(row) {
       calls.captures.push(row);
+      calls.writes.push("capture");
       return Promise.resolve(
         opts.capture?.(row) ??
           {
@@ -145,7 +159,9 @@ function fakeDeps(opts: {
       );
     },
     record(rec) {
-      calls.records.push(rec);
+      const mark = rec.result === "error" && rec.code === "read_started";
+      calls.writes.push(mark ? "mark" : `record:${rec.result}`);
+      if (!mark) calls.records.push(rec);
       return Promise.resolve(opts.record?.(rec) ?? { outcome: rec.result });
     },
     relistBackfill(source, since, priority) {
@@ -418,17 +434,19 @@ Deno.test("requested: a raised limit reads a 5.4 MB PDF after recording the atte
   const raised = fakeDeps({ download: () => ({ ok: true, bytes }), extract: textPdf(QUOTE_WORDS, 3) });
   const step = await processDocument({ ...quote, max_pdf_bytes: 20_000_000 }, REQ_POLICY, raised.deps);
   assertEquals(step.outcome, "saved");
-  assertEquals(raised.calls.records.map((r) => [r.result, r.code ?? null]), [["error", "large_read_started"], ["saved", null]]);
+  assertEquals(raised.calls.writes, ["mark", "download", "extract", "capture", "record:saved"]);
+  assertEquals(raised.calls.records.map((r) => [r.result, r.code ?? null]), [["saved", null]]);
   assertEquals(raised.calls.records[0].sha256, sha);
   assertEquals(raised.calls.extractLimits, [20_000_000]);
-  assertEquals(raised.calls.records[1].page_count, 3);
+  assertEquals(raised.calls.records[0].page_count, 3);
   // A failed attempt record stops before the read.
   const blocked = fakeDeps({ download: () => ({ ok: true, bytes }), record: () => ({ error: "document_text_source_not_found" }) });
   assertEquals((await processDocument({ ...quote, max_pdf_bytes: 20_000_000 }, REQ_POLICY, blocked.deps)).outcome, "record_failed");
   assertEquals(blocked.calls.extracts, 0);
+  assertEquals(blocked.calls.downloads.length, 0);
 });
 
-Deno.test("requested: the size limit never passes the policy or 20 MB, and a PDF under 5 MB records no extra attempt", async () => {
+Deno.test("requested: the size limit never passes the policy or 20 MB, and a PDF under 5 MB records one attempt, as every PDF does", async () => {
   assertEquals(pdfByteLimit(doc(), REQ_POLICY), 5_000_000);
   assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 4_000_000 }), REQ_POLICY), 5_000_000);
   assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), REQ_POLICY), 12_000_000);
@@ -438,6 +456,7 @@ Deno.test("requested: the size limit never passes the policy or 20 MB, and a PDF
   assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), POLICY), 5_000_000);
   const small = fakeDeps();
   await processDocument(doc({ max_pdf_bytes: 20_000_000 }), REQ_POLICY, small.deps);
+  assertEquals(small.calls.writes, ["mark", "download", "extract", "capture", "record:saved"]);
   assertEquals(small.calls.records.map((r) => r.result), ["saved"]);
   assertEquals(small.calls.extractLimits, [20_000_000]);
 });
@@ -449,4 +468,81 @@ Deno.test("requested: preview shows requested documents first and marks a read o
     [true, 20_000_000, "storage:context-email-attachments"],
     [false, null, "storage:job-documents"],
   ]);
+});
+
+// ── A file that stops the worker (20261104180000) ──────────────────────
+
+Deno.test("stop: every PDF records its attempt before the download; a worker that stops mid-read leaves that attempt", async () => {
+  // The read never returns, as when the worker stopped on 2612d4d2 (30 Oct to 3 Nov 2026).
+  const { deps, calls } = fakeDeps();
+  const hung: ReaderDeps = {
+    ...deps,
+    extract(bytes, o) {
+      void deps.extract(bytes, o);
+      return new Promise<PdfText>(() => {});
+    },
+  };
+  void processDocument(doc(), POLICY, hung);
+  // The content hash is an async digest: give it a moment.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(calls.writes, ["mark", "download", "extract"]);
+  assertEquals(calls.records.length, 0);
+});
+
+Deno.test("stop: a read that finishes writes its mark, then exactly one outcome", async () => {
+  const saved = fakeDeps();
+  assertEquals((await processDocument(doc(), POLICY, saved.deps)).outcome, "saved");
+  assertEquals(saved.calls.writes, ["mark", "download", "extract", "capture", "record:saved"]);
+  const scan = fakeDeps({ extract: { text: "", rawText: "", charCount: 0, mode: "none", note: "no_text_layer", pageCount: 2 } });
+  assertEquals((await processDocument(doc(), POLICY, scan.deps)).outcome, "no_text_layer");
+  assertEquals(scan.calls.writes, ["mark", "download", "extract", "record:no_text_layer"]);
+  const gone = fakeDeps({ download: () => ({ ok: false, code: "missing", missing: true }) });
+  assertEquals((await processDocument(doc(), POLICY, gone.deps)).outcome, "no_file");
+  assertEquals(gone.calls.writes, ["mark", "download", "record:no_file"]);
+  const flaky = fakeDeps({ download: () => ({ ok: false, code: "storage_error", missing: false }) });
+  assertEquals((await processDocument(doc(), POLICY, flaky.deps)).outcome, "error");
+  assertEquals(flaky.calls.writes, ["mark", "download", "record:error"]);
+  assertEquals(flaky.calls.records[0].code, "download_storage_error");
+});
+
+Deno.test("stop: photos, other kinds and links outside our storage are recorded at once, with no mark", async () => {
+  const photo = fakeDeps();
+  await processDocument(doc({ file_name: "site.jpg", pdf_url: null, storage_url: `${JOB}/site.jpg` }), POLICY, photo.deps);
+  assertEquals(photo.calls.writes, ["record:no_text_layer"]);
+  const other = fakeDeps();
+  await processDocument(doc({ file_name: "plan.dwg", pdf_url: null, storage_url: `${JOB}/plan.dwg` }), POLICY, other.deps);
+  assertEquals(other.calls.writes, ["record:not_supported"]);
+  const foreign = fakeDeps();
+  await processDocument(doc({ pdf_url: "https://example.com/q.pdf", storage_url: "https://example.com/q.pdf" }), POLICY, foreign.deps);
+  assertEquals(foreign.calls.writes, ["record:no_file"]);
+});
+
+Deno.test("stop: a mark the writer refuses stops before the download", async () => {
+  const { deps, calls } = fakeDeps({ record: () => ({ error: "document_text_source_not_found" }) });
+  const step = await processDocument(doc(), POLICY, deps);
+  assertEquals(step, { outcome: "record_failed", code: "document_text_source_not_found" });
+  assertEquals(calls.downloads.length, 0);
+  assertEquals(calls.extracts, 0);
+});
+
+Deno.test("stale: each run first closes this reader's runs left running, and counts them", async () => {
+  const closed = fakeDeps({
+    stale: { closed: 360 },
+    latest: { id: "old", status: "running", started_at: "2026-10-04T23:40:00Z" },
+  });
+  const run = await runDocumentText(closed.deps);
+  if (run.outcome !== "ran") throw new Error(run.outcome);
+  assertEquals(closed.calls.staleCloses, 1);
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts.stale_runs_closed, 360);
+  assertEquals(closed.calls.runs.at(-1)?.status, "succeeded");
+  // A run still inside its window is left alone: nothing closed, nothing read.
+  const busy = fakeDeps({ latest: { id: "now", status: "running", started_at: "2026-10-04T23:55:00Z" } });
+  assertEquals((await runDocumentText(busy.deps)).outcome, "run_in_progress");
+  assertEquals(busy.calls.staleCloses, 0);
+  // A closing that fails is named on the run, and the documents are still read.
+  const failing = fakeDeps({ stale: { error: "close_stale_failed" } });
+  const run2 = await runDocumentText(failing.deps);
+  if (run2.outcome !== "ran") throw new Error(run2.outcome);
+  assertEquals([run2.status, run2.error_code, run2.counts.saved], ["partial", "close_stale_failed", 1]);
 });

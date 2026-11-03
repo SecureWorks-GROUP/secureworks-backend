@@ -271,7 +271,8 @@ BEGIN
  r:=pg_temp.q_rec(jsonb_build_object('source_kind','email_attachment','source_id',a,'job_id',live_job,'fingerprint',fp_new,'file_kind','pdf',
   'result','no_text_layer','code','no_text_layer','sha256',repeat('5',64),'page_count',3));
  SELECT * INTO t FROM public.context_document_texts WHERE source_id=a;
- IF t.outcome<>'no_text_layer' OR t.attempts<>2 OR t.source_fingerprint<>fp_new OR t.page_count<>3 THEN RAISE EXCEPTION 'requests: raised read record %',row_to_json(t); END IF;
+ -- One attempt: from 20261104183000 the writer counts the mark and its outcome as one (2 before it).
+ IF t.outcome<>'no_text_layer' OR t.attempts<>1 OR t.source_fingerprint<>fp_new OR t.page_count<>3 THEN RAISE EXCEPTION 'requests: raised read record %',row_to_json(t); END IF;
  IF EXISTS(SELECT 1 FROM public.context_document_text_requested_due(100) s WHERE s.source_id=a)
  THEN RAISE EXCEPTION 'requests: a terminal raised read is due again'; END IF;
  DELETE FROM public.context_document_text_requests WHERE source_id=a;
