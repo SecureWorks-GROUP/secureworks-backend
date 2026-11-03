@@ -583,8 +583,8 @@ Deno.test("R10 — Codex stale-snapshot regression: a failed first attempt leave
   // exactly what the second call computed (not bleed-through from the first).
 
   // Attempt 1 — Resend failure path. We model "Resend failure" by simply NOT
-  // calling the helper at all (the production code only calls
-  // recordReleasedQuoteRevision inside `if (transitioned)`, which requires
+  // calling the helper at all (the production code calls
+  // recordReleasedQuoteRevision only after the send is published, which requires
   // Resend success). State A: zero rows, zero uploads.
   const sbAttempt1 = makeQuoteRevSupabase({ uploadOk: true, insertReturns: 'ok', insertedId: 'rev-attempt1' })
   // (No call.) Verify the helper state is untouched by the "failure":
@@ -3369,4 +3369,74 @@ Deno.test('D1-F1c every sender builds from quoteSendBuildSource and judges the n
   assert(runs.indexOf("sealedRuns.kind === 'refused'") < runs.indexOf('claimJobSendRuns('), '/send-runs refuses before the claim and email')
   const qq = ops.slice(ops.indexOf('async function sendQuickQuoteEmail('))
   assert(qq.indexOf('quoteSendBuildSource(sealedSource, job)') < qq.indexOf("fetch('https://api.resend.com/emails'"), 'quick quote prices from A before the email')
+})
+
+// ── B1 (3 Nov 2026): every send records its revision; the document names it ──
+
+function linkSupabase(rev: Record<string, unknown> | null, doc: { id: string; quote_revision_id: string | null }) {
+  const state = { updates: [] as Record<string, unknown>[], doc }
+  return {
+    from(table: string) {
+      const filters: Array<[string, string, unknown]> = []
+      let patch: Record<string, unknown> | null = null
+      const q: any = {
+        select() { return q },
+        eq(c: string, v: unknown) { filters.push(['eq', c, v]); return q },
+        is(c: string, v: unknown) { filters.push(['is', c, v]); return q },
+        update(p: Record<string, unknown>) { patch = p; return q },
+        async maybeSingle() {
+          if (table !== 'quote_revisions') throw new Error(`unexpected read on ${table}`)
+          const hit = rev && filters.every(([, c, v]) => (rev as any)[c] === v)
+          return { data: hit ? { ...rev } : null, error: null }
+        },
+        then(onF: any, onR: any) {
+          if (table !== 'job_documents' || !patch) return Promise.reject(new Error(`unexpected write on ${table}`)).then(onF, onR)
+          const match = filters.every(([op, c, v]) => op === 'is' ? (state.doc as any)[c] === v : (state.doc as any)[c] === v)
+          if (match) { Object.assign(state.doc, patch); state.updates.push(patch) }
+          return Promise.resolve({ data: match ? [{ id: state.doc.id }] : [], error: null }).then(onF, onR)
+        },
+      }
+      return q
+    },
+    _state: state,
+  } as any
+}
+
+Deno.test("B1 a sent quote document names the revision released for it, and only that one", async () => {
+  const { _linkQuoteDocumentToRevisionForTest: link } = await import('./index.ts')
+  const ctx = { handler: 'send-quote/send', job_id: 'job-b1' }
+  const released = { id: 'rev-b1', job_document_id: 'doc-b1', sent_at: '2026-11-03T07:00:00Z' }
+
+  const sb = linkSupabase(released, { id: 'doc-b1', quote_revision_id: null })
+  assertEquals(await link(sb, { document_id: 'doc-b1', revision_id: 'rev-b1' }, ctx), true)
+  assertEquals(sb._state.doc.quote_revision_id, 'rev-b1')
+
+  // Another document's revision (a (job_id, version) conflict answers the existing row's id): not linked.
+  const other = linkSupabase({ ...released, job_document_id: 'doc-other' }, { id: 'doc-b1', quote_revision_id: null })
+  assertEquals(await link(other, { document_id: 'doc-b1', revision_id: 'rev-b1' }, ctx), false)
+  assertEquals(other._state.doc.quote_revision_id, null)
+
+  // A link already set is never moved.
+  const set = linkSupabase(released, { id: 'doc-b1', quote_revision_id: 'rev-earlier' })
+  assertEquals(await link(set, { document_id: 'doc-b1', revision_id: 'rev-b1' }, ctx), false)
+  assertEquals(set._state.doc.quote_revision_id, 'rev-earlier')
+
+  // A revision not found: nothing written.
+  const none = linkSupabase(null, { id: 'doc-b1', quote_revision_id: null })
+  assertEquals(await link(none, { document_id: 'doc-b1', revision_id: 'rev-b1' }, ctx), false)
+  assertEquals(none._state.updates.length, 0)
+})
+
+Deno.test("B1 /send records the released revision on every send, a re-send on a quoted job too, and links the document", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
+  const sendStart = src.indexOf("if (path === 'send' && req.method === 'POST')")
+  const sendRuns = src.indexOf("if (path === 'send-runs' && req.method === 'POST')")
+  const send = src.slice(sendStart, sendRuns)
+  const published = send.indexOf("publishQuoteDocumentSendOrRevert(")
+  const record = send.indexOf("releasedRevisionId = await recordReleasedQuoteRevision(")
+  const linked = send.indexOf("linkQuoteDocumentToRevision(sb, { document_id: doc.id, revision_id: releasedRevisionId }")
+  const firstSendOnly = send.indexOf("if (transitioned) {")
+  assert(published > 0 && record > published, 'recorded only after the send is published')
+  assert(linked > record, 'the document is linked to the revision just recorded')
+  assert(firstSendOnly > linked, 'recorded and linked before (not inside) the first-send-only events')
 })
