@@ -206,7 +206,9 @@ export function dispatchV2LineText(line: any): string {
       Number.isFinite(line.quantity)
     ? line.quantity
     : null;
-  const unit = cleanLine(line?.unit);
+  // A fence scope line keeps Shaun's wording ("9 x 1800H ... panels"): its unit is written on the line for the
+  // record (finish line B3: the sealed line's unit), never printed on the order.
+  const unit = line?.source_kind === "fence_scope_revision" ? "" : cleanLine(line?.unit);
   const head = quantity === null
     ? description
     : `${formatQuantity(quantity)}${unit ? ` ${unit}` : ""} x ${description}`;
