@@ -38,6 +38,7 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
+import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
@@ -267,6 +268,21 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await syncSupplierCreditNotes(sb as any, DEFAULT_ORG_ID, tenantId,
           (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers)))
       }
+      case 'sync_customer_allocations': {
+        // Reads Xero only: re-reads into our copy each sales invoice whose credit note,
+        // overpayment or prepayment allocations our copy lacks. Also runs hourly inside
+        // sync_invoices; this skips the hourly gate.
+        const { accessToken, tenantId } = await getToken(sb)
+        const result = await syncCustomerAllocations(sb, DEFAULT_ORG_ID, tenantId,
+          (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers),
+          (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId, {}),
+          undefined, depositStampHook(sb), true)
+        await sb.from('webhook_log').insert({
+          org_id: DEFAULT_ORG_ID, source: 'xero', event_type: 'sync_customer_allocations',
+          payload: result, status: 'processed',
+        })
+        return json(result)
+      }
       case 'sync_bank_transactions':
         return json(await syncBankTransactions(sb))
       case 'ingest_materials_recent':
@@ -288,7 +304,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, ingest_materials_recent, ingest_materials_all, bill_prematch, check_invoice_mirror' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, ingest_materials_recent, ingest_materials_all, bill_prematch, check_invoice_mirror, sync_customer_allocations' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {
@@ -708,6 +724,19 @@ async function logJobPaymentReceived(sb: any, jobId: string, inv: any) {
     if (captureError && captureError.code !== '23505') console.error('[xero-sync] payment evidence failed:', captureError.message)
   }
   console.log(`[xero-sync] Job ${jobId} fully paid — payment event logged`)
+}
+
+// The deposit stamp for an invoice re-read by id: one that moves from AUTHORISED to
+// PAID is exactly the deposit the incremental list's If-Modified-Since window can
+// pass over. Counts go to the run summary when one is given.
+function depositStampHook(sb: any, counts?: { stamps: number; contradictions: number }) {
+  return async (_invoiceId: string, payload: any) => {
+    const verified = payload?.Invoices?.[0] ?? null
+    if (!verified || !depositStampRelevant(verified)) return
+    const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
+    if (counts && stamped?.action === 'stamped') counts.stamps++
+    else if (counts && stamped?.action === 'contradiction_logged') counts.contradictions++
+  }
 }
 
 async function syncInvoices(sb: any) {
@@ -1200,6 +1229,7 @@ async function syncInvoices(sb: any) {
   let reconciled = 0
   let reconciliationError: Record<string, unknown> | null = null
   let reconciliationSummary: Record<string, unknown> | null = null
+  const stampCounts = { stamps: 0, contradictions: 0 }
   try {
     // A token failure here is a run-wide fact and still stops reconciliation.
     const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
@@ -1208,15 +1238,7 @@ async function syncInvoices(sb: any) {
       DEFAULT_ORG_ID,
       (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at2, tid2, {}),
       undefined,
-      // An invoice that reconciles from AUTHORISED to PAID is exactly the
-      // deposit the incremental loop's If-Modified-Since window can pass over.
-      async (_invoiceId: string, payload: any) => {
-        const verified = payload?.Invoices?.[0] ?? null
-        if (!verified || !depositStampRelevant(verified)) return
-        const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
-        if (stamped?.action === 'stamped') depositStamps++
-        else if (stamped?.action === 'contradiction_logged') depositStampContradictions++
-      },
+      depositStampHook(sb, stampCounts),
     )
     reconciled = summary.reconciled
     reconciliationSummary = { ...summary }
@@ -1226,6 +1248,24 @@ async function syncInvoices(sb: any) {
     reconciliationError = { error: e.message }
     console.error('[xero-sync] Reconciliation error:', (e as Error).message)
   }
+
+  // ── Customer allocations (A4 V27): at most once an hour, re-read each sales invoice
+  //    whose credit note, overpayment or prepayment allocations in Xero our copy lacks
+  //    (customer_allocations.ts). Reads Xero only; a failure never breaks the sync.
+  let customerAllocations: unknown
+  try {
+    const { accessToken: at3, tenantId: tid3 } = await getToken(sb)
+    customerAllocations = await syncCustomerAllocations(sb, DEFAULT_ORG_ID, tid3,
+      (path, params, headers) => xeroGet(path, at3, tid3, params, headers),
+      (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at3, tid3, {}),
+      undefined, depositStampHook(sb, stampCounts))
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    customerAllocations = { ran: false, reason: 'error', error: e.message }
+    console.error('[xero-sync] Customer allocation check failed:', e.message)
+  }
+  depositStamps += stampCounts.stamps
+  depositStampContradictions += stampCounts.contradictions
 
   // Independent payment/batch modification cursor. This capture never calls a
   // provider write or changes invoice amounts, attribution, debt or job state.
@@ -1265,11 +1305,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
