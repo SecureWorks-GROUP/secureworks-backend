@@ -43,6 +43,24 @@ const CHUNK = 100;
 // A run's write budget; the rest carries to the next sync (every 15 minutes).
 export const PREMATCH_MAX_PROPOSAL_WRITES = 150;
 export const PREMATCH_MAX_ASSIGNS = 25;
+/**
+ * The most open bills one scheduled pre-match run decides (3 Nov 2026). With every bill read (#1184) the list grew to
+ * about 1,600 rows and the run inside sync_invoices was stopped for CPU time every time, so no proposal was written
+ * after 31 Oct. A run now decides the bills with no proposal yet first (new bills are never kept waiting), then its
+ * turn of the rest, so the whole list is still gone over every few runs.
+ */
+export const PREMATCH_ROWS_PER_RUN = 300;
+
+/** The order a run decides its open bills in: bills with no proposal first, then the others from this run's turn on. */
+export function prematchTurn(hasProposal: boolean[], maxRows: number | null | undefined, turn: number): { order: number[]; waiting: number } {
+  const fresh: number[] = [], seen: number[] = [];
+  hasProposal.forEach((has, i) => (has ? seen : fresh).push(i));
+  if (!maxRows || fresh.length + seen.length <= maxRows) return { order: [...fresh, ...seen], waiting: 0 };
+  const share = Math.max(1, maxRows - fresh.length);
+  const start = seen.length ? (Math.abs(Math.trunc(turn)) * share) % seen.length : 0;
+  const order = [...fresh, ...seen.slice(start), ...seen.slice(0, start)].slice(0, maxRows);
+  return { order, waiting: fresh.length + seen.length - order.length };
+}
 
 export interface BillPrematchResult {
   ran: boolean;
@@ -56,6 +74,9 @@ export interface BillPrematchResult {
   assign_refused: number;
   deferred: number;
   errors: number;
+  /** Open bills decided this run, and those left for a later run's turn (PREMATCH_ROWS_PER_RUN). */
+  rows_decided: number;
+  rows_waiting_turn: number;
 }
 
 export async function readAll<T>(build: () => any): Promise<T[] | null> {
@@ -204,7 +225,7 @@ function proposalRow(
 
 export async function runBillPrematch(
   sb: any,
-  opts: { orgId: string; nowIso?: string; maxProposalWrites?: number; maxAssigns?: number },
+  opts: { orgId: string; nowIso?: string; maxProposalWrites?: number; maxAssigns?: number; maxRows?: number | null; turn?: number },
 ): Promise<BillPrematchResult> {
   const now = opts.nowIso || new Date().toISOString();
   const maxWrites = opts.maxProposalWrites ?? PREMATCH_MAX_PROPOSAL_WRITES;
@@ -220,6 +241,8 @@ export async function runBillPrematch(
     assign_refused: 0,
     deferred: 0,
     errors: 0,
+    rows_decided: 0,
+    rows_waiting_turn: 0,
   };
 
   // Open rows and their bills.
@@ -370,8 +393,11 @@ export async function runBillPrematch(
     return !error;
   };
 
-  // 3. Decide, keep, and place the confident ones.
-  for (let i = 0; i < live.length; i++) {
+  // 3. Decide, keep, and place the confident ones: new bills first, then this run's turn of the rest.
+  const turn = prematchTurn(bills.map((b) => liveProposal.has(b.xero_invoice_id)), opts.maxRows, opts.turn ?? 0);
+  result.rows_decided = turn.order.length;
+  result.rows_waiting_turn = turn.waiting;
+  for (const i of turn.order) {
     const q = live[i];
     const bill = bills[i];
     const d = decideBillPrematch(bill, {
