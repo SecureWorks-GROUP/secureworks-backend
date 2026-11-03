@@ -269,7 +269,7 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'32365101d23dde1695707a0bddff640b'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb')
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb','454ced32a1213e2c28d7d41d37263df5')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
  THEN RAISE EXCEPTION 'l1g: the rules-off ladder, the entry, the trigger, the timeline, the preview or P1b changed'; END IF;
@@ -338,7 +338,7 @@ $b$))<>'0870431e8ec3ab2f2e123146298c9727'
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'32365101d23dde1695707a0bddff640b'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb')
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb','454ced32a1213e2c28d7d41d37263df5')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
  THEN RAISE EXCEPTION 'l1g: the rules-off ladder, the entry, the trigger, the timeline, the preview or P1b changed'; END IF;

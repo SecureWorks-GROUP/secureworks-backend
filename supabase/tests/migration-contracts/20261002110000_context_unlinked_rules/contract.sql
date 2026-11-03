@@ -746,7 +746,7 @@ BEGIN
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 'service_role cannot execute %',f; END IF;
  END LOOP;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_jobs_at(text,timestamptz)'::regprocedure)<>'911811b617fa760f5ddf847fb1ab853d'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure) NOT IN ('2bc8e76f14fda242eb6e4d414e93fefa','88d0aa3f8bdbb2800d66954b5655f0dd')
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure) NOT IN ('2bc8e76f14fda242eb6e4d414e93fefa','88d0aa3f8bdbb2800d66954b5655f0dd','e14de55f5ca63ec5a81a7e3a420a0a15')
  THEN RAISE EXCEPTION 'p4: P1a''s two-argument candidate set changed'; END IF;
  -- P1a's ladder body moved verbatim: undoing the retirement filter and preview guard gives back
  -- P1a's live body byte for byte. A registered successor (L1b 20261003100000,
