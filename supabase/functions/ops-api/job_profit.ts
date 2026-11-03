@@ -39,7 +39,9 @@ export const JOB_PROFIT_LABELS = {
   quoted_ex:
     "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent. Never the live price. quoted_source names the quote it came from.",
   expected_cost_ex:
-    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. Null when no cost was fixed at a quote, including a quote sent with no cost figures. Never a live pricing estimate.",
+    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision, sent_quote_revision or frozen_scope_revision (a sealed patio scope). Null when no cost was fixed at a quote or sealed scope, including a quote sent with no cost figures; then expected_cost_missing names the document that would fix it. Never a live pricing estimate.",
+  expected_cost_missing:
+    "Only when expected_cost_ex is null: the document that would fix this job's expected cost and who holds it, as {code, document, holder}. A builder's works order, a make-safe invoice or the job's own bills set what we are paid or what we spent, never the expected cost, so builder jobs name the costing document they lack.",
   actual_cost_ex:
     "Actual cost from the job's own lines only: trade charges, supplier bills and materials facts linked to the job (cost_basis is always line_level; line_level_cost_ex is the same figure). Never a Xero Project total.",
   xero_project_expenses_ex:

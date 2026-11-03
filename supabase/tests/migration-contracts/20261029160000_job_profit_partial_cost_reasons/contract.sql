@@ -1,3 +1,11 @@
+-- 20261104080000 (expected cost missing) put production's v_job_profit in place (its setup) and added a column
+-- after TP-13's last: when a full stack has it, it is rolled back and the stack's own definition put back
+-- first, and applied again at the end.
+SELECT to_regprocedure('public.job_profit_expected_cost_missing(uuid)') IS NOT NULL AS a6x_live_20261029160000 \gset
+\if :a6x_live_20261029160000
+\ir ../../../rollbacks/20261104080000_job_profit_expected_cost_missing_down.sql
+\ir ../20261104080000_job_profit_expected_cost_missing/restore-preimage.sql
+\endif
 SELECT to_regprocedure('public.context_job_story_credit_sig(uuid)') IS NOT NULL AS restore_credit_20261029160000 \gset
 \if :restore_credit_20261029160000
 \ir ../../../rollbacks/20261031010000_context_story_credit_refresh_down.sql
@@ -626,4 +634,9 @@ ROLLBACK;
 
 \if :restore_credit_20261029160000
 \ir ../../../migrations/20261031010000_context_story_credit_refresh.sql
+\endif
+
+\if :a6x_live_20261029160000
+\ir ../20261104080000_job_profit_expected_cost_missing/setup.sql
+\ir ../../../migrations/20261104080000_job_profit_expected_cost_missing.sql
 \endif
