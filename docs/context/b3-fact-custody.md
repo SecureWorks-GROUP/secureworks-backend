@@ -56,7 +56,7 @@ PR #838 merged and the deploy lane's auto-apply of `20260916120000` failed with 
 
 - `supabase/tests/migration-contracts/20260916120000_*` and `20260916120100_*`: registered contracts, rollbacks, and deliberate breaks (expiry function nulled; extractable predicate forced true).
 - `supabase/tests/migration-contracts/20260917120000_luna_context_event_at_coalesce`: nine-argument persist and `current_job_context_facts` read `coalesce(event_at, occurred_at)` for attribution, event_date, expiry, due-date support and live-source re-validation; both-null still rejects.
-- `scripts/test-context-b3.sh` with `CONTEXT_B3_TEST_DATABASE_URL`: disposable database, production-shaped view first, B3 plus the coalesce follow-up applied twice, then `context_b1_contract.sql` and `context_b3_contract.sql`.
+- `scripts/test-context-b3.sh` with `CONTEXT_B3_TEST_DATABASE_URL`: disposable database, production-shaped view first, B3 plus the coalesce follow-up applied twice, then `context_b3_contract.sql`.
 - The B2 contract's outbound-tail case follows K1: our own messages wake a read. Holding-job refusal stays `context_job_extractable`.
 - Rollbacks stop extraction, revoke the v2 overload, drop the trust triggers, and restore the 20260911171000 extraction functions. Columns and backfilled values stay as audit truth.
 

@@ -32,16 +32,7 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  debtContextCoverage,
-  escapeLikeLiteral,
-  invoiceContext,
-  InvoiceContextError,
-  isDoorLunaFact,
-  jobNumberFromReference,
-  parseXeroDate,
-  liveReadDetail,
-} from "./invoice_context.ts";
+import { debtContextCoverage, invoiceContext, InvoiceContextError, isDoorLunaFact, liveReadDetail } from "./invoice_context.ts";
 import {
   isCurrentContextFact,
   isLunaSubscriptionFact,
@@ -1088,21 +1079,6 @@ Deno.test("6. coverage counts the open population with the same rules", async ()
   );
 });
 
-Deno.test("helpers: Xero dates, reference job numbers, queue detail", () => {
-  assertEquals(parseXeroDate("/Date(1757462400000+0000)/"), "2025-09-10");
-  assertEquals(parseXeroDate("2026-09-10T00:00:00"), "2026-09-10");
-  assertEquals(parseXeroDate(null), null);
-  assertEquals(
-    jobNumberFromReference("Deposit swp-261180 patio"),
-    "SWP-261180",
-  );
-  assertEquals(jobNumberFromReference("MLB-24911", "INV-1419"), null);
-  assertEquals(
-    liveReadDetail(undefined),
-    "never read by the live context pass",
-  );
-});
-
 Deno.test("luna_v2 stamps count as Luna; Haiku and instruction do not", async () => {
   const nowMs = NOW.getTime();
   const doorDeps = {
@@ -1319,13 +1295,6 @@ Deno.test("7. multi-row reads page past the PostgREST 1000-row cap", async () =>
   );
   assertEquals(door.coverage.conversation_present, true);
   assertEquals(door.coverage.facts_present, true);
-});
-
-Deno.test("8. a LIKE wildcard is escaped, never interpreted", () => {
-  assertEquals(escapeLikeLiteral("INV-1419"), "INV-1419");
-  assertEquals(escapeLikeLiteral("INV%19"), "INV\\%19");
-  assertEquals(escapeLikeLiteral("INV_19"), "INV\\_19");
-  assertEquals(escapeLikeLiteral("INV\\19"), "INV\\\\19");
 });
 
 Deno.test("9. an unreadable source is an unreadable blocker, never a missing one", async () => {

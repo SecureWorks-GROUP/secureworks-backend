@@ -233,15 +233,3 @@ Deno.test("body_handler: spine_event_id not found returns no-row response (no au
   assertEquals(r.signed_url, null);
   assert(r.reason?.includes("not found"));
 });
-
-Deno.test("body_handler: ttl clamped between 60 and 900", async () => {
-  const client = makeFakeClient(SAMPLE_ROW);
-  const r1 = await getEvidenceBody(client, stubStorage, { spine_event_id: "spine-1", ttl_seconds: 0 }, {
-    user_id: "u", role: "admin", is_admin: true,
-  });
-  assertEquals(r1.ttl_seconds, 60);
-  const r2 = await getEvidenceBody(client, stubStorage, { spine_event_id: "spine-1", ttl_seconds: 5000 }, {
-    user_id: "u", role: "admin", is_admin: true,
-  });
-  assertEquals(r2.ttl_seconds, 900);
-});

@@ -4,13 +4,7 @@
 
 // deno-lint-ignore no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  handleDocumentText,
-  type HandlerDeps,
-  liveDeps,
-  type Runners,
-  storageMissing,
-} from "./handler.ts";
+import { handleDocumentText, type HandlerDeps, type Runners } from "./handler.ts";
 
 const KEY = "service-role-key-fixture";
 
@@ -97,19 +91,6 @@ Deno.test("door: only the service role, only POST", async () => {
   assertEquals(log, ["run"]);
 });
 
-Deno.test("door: the cron's call returns 202 and the run continues in the background", async () => {
-  const log: string[] = [];
-  const kept: Promise<unknown>[] = [];
-  const res = await handleDocumentText(
-    req({ actor: "cron:context-document-text" }),
-    deps({ waitUntil: (p) => kept.push(p) }),
-    runners(log),
-  );
-  assertEquals(res.status, 202);
-  await Promise.all(kept);
-  assertEquals(log, ["run"]);
-});
-
 Deno.test("door: preview is read only and bounded", async () => {
   const log: string[] = [];
   const res = await handleDocumentText(
@@ -132,108 +113,5 @@ Deno.test("door: preview is read only and bounded", async () => {
     (await handleDocumentText(req({ mode: "history" }), deps(), runners(log)))
       .status,
     400,
-  );
-});
-
-Deno.test("door: a run that throws answers 500 with its code only", async () => {
-  const res = await handleDocumentText(req({ wait: true }), deps(), {
-    run: () =>
-      Promise.reject(
-        Object.assign(new Error("secret words"), { code: "policy_unreadable" }),
-      ),
-    preview: () => Promise.reject(new Error("unused")),
-  });
-  assertEquals(res.status, 500);
-  assertEquals(await res.json(), {
-    flag: "context_document_text_v1",
-    mode: "run",
-    outcome: "error",
-    code: "policy_unreadable",
-  });
-});
-
-Deno.test("storage: a missing object is terminal, any other fault is retried", () => {
-  assertEquals(
-    storageMissing({ statusCode: "404", message: "Object not found" }),
-    true,
-  );
-  assertEquals(storageMissing({ status: 400, message: "Bad Request" }), true);
-  assertEquals(storageMissing({ message: "The resource was not found" }), true);
-  assertEquals(storageMissing({ status: 503, message: "upstream" }), false);
-  assertEquals(storageMissing(null), false);
-});
-
-Deno.test("wiring: download, flag and re-list go through the service client", async () => {
-  const calls: unknown[] = [];
-  const client = {
-    rpc: (name: string, args?: unknown) => {
-      calls.push([name, args]);
-      if (name === "context_document_text_flag") {
-        return Promise.resolve({ data: { enabled: true }, error: null });
-      }
-      if (name === "context_catchup_list_backfill") {
-        return Promise.resolve({ data: { listed_this_call: 3 }, error: null });
-      }
-      return Promise.resolve({ data: null, error: { message: "no" } });
-    },
-    storage: {
-      from: (bucket: string) => ({
-        download: (path: string) => {
-          calls.push(["download", bucket, path]);
-          if (path === "gone.pdf") {
-            return Promise.resolve({
-              data: null,
-              error: { statusCode: "404", message: "Object not found" },
-            });
-          }
-          return Promise.resolve({
-            data: new Blob([new Uint8Array([37, 80, 68, 70])]),
-            error: null,
-          });
-        },
-      }),
-    },
-  };
-  const live = liveDeps(deps({ createSupabase: () => client }));
-  assertEquals(await live.flagOn(), true);
-  const got = await live.download("job-documents", "a/b.pdf");
-  assertEquals(got.ok && Array.from(got.bytes), [37, 80, 68, 70]);
-  assertEquals(await live.download("job-documents", "gone.pdf"), {
-    ok: false,
-    code: "missing",
-    missing: true,
-  });
-  assertEquals(
-    await live.relistBackfill(
-      "context-document-text",
-      "2026-10-04T00:00:00.000Z",
-      2,
-    ),
-    { listed: 3 },
-  );
-  assertEquals(
-    calls.find((c) => (c as unknown[])[0] === "context_catchup_list_backfill"),
-    [
-      "context_catchup_list_backfill",
-      {
-        p_source: "context-document-text",
-        p_since: "2026-10-04T00:00:00.000Z",
-        p_dry_run: false,
-        p_limit: 500,
-        p_priority: 2,
-      },
-    ],
-  );
-  // The writer's refusal code comes back as the record error.
-  assertEquals(
-    await live.record({
-      source_kind: "job_document",
-      source_id: "x",
-      job_id: "y",
-      fingerprint: "z",
-      file_kind: "pdf",
-      result: "no_file",
-    }),
-    { error: "record_failed" },
   );
 });

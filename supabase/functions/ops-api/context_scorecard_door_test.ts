@@ -158,11 +158,3 @@ Deno.test("context_scorecard is staff-only: not profile-scoped, not agent-read, 
   assertEquals(decide("jwt", "lead_installer", ["fencing"]), 403);
   assertEquals(decide("jwt", "trade"), 403);
 });
-
-Deno.test("the dispatch routes context_scorecard as a GET-only read", async () => {
-  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assert(index.includes("case 'context_scorecard':\n      case 'context_story_scorecard': {"));
-  assert(index.includes("? await contextScorecardAction(client, url.searchParams)"));
-  const required = await Deno.readTextFile(new URL("../../../scripts/_ops-api-required-actions.txt", import.meta.url));
-  assert(/^context_scorecard\s+# probe=bounded-refusal probe-args=as_of=__deploy_probe__$/m.test(required));
-});

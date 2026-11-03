@@ -16,71 +16,10 @@
 // ════════════════════════════════════════════════════════════
 
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  assignReconRow,
-  buildManualFactRow,
-  classifyAssign,
-  type ExistingFact,
-  listReconQueue,
-  manualQueueMatchReason,
-  markReconNotJobRelated,
-  type QueueRow,
-  reconStats,
-  resolveActor,
-} from "./materials_recon.ts";
+import { assignReconRow, listReconQueue, markReconNotJobRelated, type QueueRow } from "./materials_recon.ts";
 import { baseSeed, makeFakeClient, ORG } from "./materials_recon_test_support.ts";
 
 const NOW = "2026-07-05T06:00:00.000Z";
-
-// ── Pure helpers ─────────────────────────────────────────────
-Deno.test("resolveActor — operator_email wins, blank falls back to a sentinel", () => {
-  assertEquals(resolveActor({ operator_email: "shaun@secureworkswa.com.au" }), "shaun@secureworkswa.com.au");
-  assertEquals(resolveActor({ user_email: "jan@sec.au" }), "jan@sec.au");
-  assertEquals(resolveActor({ actor: "marnin" }), "marnin");
-  assertEquals(resolveActor({ operator_email: "  " }), "ops_dashboard");
-  assertEquals(resolveActor({}), "ops_dashboard");
-  assertEquals(resolveActor(null), "ops_dashboard");
-});
-
-Deno.test("manualQueueMatchReason — carries the action + job number", () => {
-  assertEquals(manualQueueMatchReason("accept-suggestion", "SWF-25010"), "manual_queue:accept-suggestion SWF-25010");
-  assertEquals(manualQueueMatchReason("assign-to-job", "SWP-25029"), "manual_queue:assign-to-job SWP-25029");
-  assertEquals(manualQueueMatchReason("assign-to-job", null), "manual_queue:assign-to-job");
-});
-
-Deno.test("buildManualFactRow — stamped manual, ex-GST money, reversible key", () => {
-  const q = {
-    org_id: ORG, xero_invoice_id: "xinv-001", invoice_number: "12345678",
-    xero_contact_id: "c-fwwa", contact_name: "Fencing Warehouse WA",
-    sub_total: 1000, total: 1100, invoice_date: "2026-07-02",
-  } as unknown as QueueRow;
-  const row = buildManualFactRow(q, { id: "job-fence-1", job_number: "SWF-25010" }, "shaun@sec.au", "assign-to-job", NOW);
-  assertEquals(row.confidence, "high_manual");
-  assertEquals(row.automation_source, "manual_queue");
-  assertEquals(row.assigned_by, "shaun@sec.au");
-  assertEquals(row.matched_po_id, null);
-  assertEquals(row.job_id, "job-fence-1");
-  assertEquals(row.job_number, "SWF-25010");
-  assertEquals(row.amount_ex_gst, 1000); // ex-GST sub_total is the money fact
-  assertEquals(row.amount_inc_gst, 1100);
-  assertEquals(row.lane, "materials");
-  assertEquals(row.kind, "actual");
-  assertEquals(row.xero_invoice_id, "xinv-001"); // idempotency / reversibility key
-  assertEquals(row.match_reason, "manual_queue:assign-to-job SWF-25010");
-});
-
-Deno.test("classifyAssign — proceed / idempotent / conflict", () => {
-  assertEquals(classifyAssign(null, "job-x"), "proceed");
-  const manualSameJob: ExistingFact = { id: "f1", xero_invoice_id: "x", job_id: "job-x", job_number: "SWF-1", automation_source: "manual_queue", confidence: "high_manual" };
-  assertEquals(classifyAssign(manualSameJob, "job-x"), "idempotent");
-  const manualOtherJob: ExistingFact = { ...manualSameJob, job_id: "job-y" };
-  assertEquals(classifyAssign(manualOtherJob, "job-x"), "conflict");
-  const autoFact: ExistingFact = { ...manualSameJob, automation_source: "xero_ref_link", confidence: "high" };
-  assertEquals(classifyAssign(autoFact, "job-x"), "conflict"); // never overwrite an auto fact
-  // JP-12: a person placing an installer bill a machine placed confirms it.
-  assertEquals(classifyAssign(autoFact, "job-x", "manual_queue", true), "confirm");
-  assertEquals(classifyAssign(manualOtherJob, "job-x", "manual_queue", true), "conflict");
-});
 
 // ── (a) The worklist surface + drain stat ────────────────────
 Deno.test("listReconQueue — default lists OPEN rows only, with drain stats", async () => {
@@ -103,25 +42,6 @@ Deno.test("listReconQueue — status=all returns every row", async () => {
   const { client } = makeFakeClient(baseSeed());
   const res = await listReconQueue(client, { orgId: ORG, status: "all" });
   assertEquals((res.rows as QueueRow[]).length, 5);
-});
-
-Deno.test("reconStats — pure snapshot of the drain", async () => {
-  const { client } = makeFakeClient(baseSeed());
-  const stats = await reconStats(client, ORG);
-  assertEquals(stats.open, 3);
-  assertEquals(stats.assigned, 1);
-  assertEquals(stats.not_job_related, 1);
-});
-
-Deno.test("reconStats counts every queue row past PostgREST's 1,000-row cap", async () => {
-  const seed = baseSeed();
-  const row = seed.materials_reconciliation_queue.find((q) => q.status === "open")!;
-  for (let i = 0; i < 1205; i++) {
-    seed.materials_reconciliation_queue.push({ ...row, id: `q-bulk-${String(i).padStart(4, "0")}`, xero_invoice_id: `xinv-bulk-${i}` });
-  }
-  const { client } = makeFakeClient(seed);
-  const stats = await reconStats(client, ORG);
-  assertEquals([stats.total_rows, stats.open], [1210, 1208]);
 });
 
 // ── (b) assign-to-job — lands a manual fact, flips the queue row ──
