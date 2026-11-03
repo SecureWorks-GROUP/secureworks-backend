@@ -25,6 +25,7 @@
 //  3. Trade: the invoice reads as make-safe or as works from its Xero tracking
 //     (Business Unit) and its line text; only jobs of that trade stay (job type,
 //     else prefix SWMS / SWR, SWF, SWP, SWB). Mixed or unclear text links nothing.
+//     Temporary fencing words are make-safe words only, never works words.
 //     Cancelled, lost, draft, holding and old-system jobs never stay, nor a
 //     finished job its other invoices already cover in full.
 //  4. One job left: link. Several: the one whose own PO is the invoice's PO
@@ -53,6 +54,10 @@ const MAKESAFE_TEXT =
   /make[\s-]?safe|temp(?:orary)?\.?\s*fenc|fence hire|roof report|assessment report|inspection report|drying equipment|dehumidif|air mover|moisture|mould|restoration|attendance|re-?attend|\btrades? x \d/i;
 const WORKS_TEXT =
   /remove (?:and|&|\/) ?(?:dispose|replace)|supply (?:and|&) install|replace|carpentry|fencing\s*[-(:]|\bgate|gutter|fascia|downpipe|cladding|deposit/i;
+// Temporary fencing is make-safe gear, so its words never count as works: Ambrose's INV-1709
+// "collected 5 panels of temp fencing (temp fence pickup)" read "fencing (" as a fence trade
+// heading and went to a person as both trades (B3, 3 Nov 2026).
+const TEMP_FENCE = /\btemp(?:orary)?\.?\s*fenc(?:e|es|ing)(?:\s+(?:panels?|gates?|hire))?/gi;
 
 const DEAD_STATUSES = new Set(["cancelled", "lost", "draft"]);
 const FINISHED_STATUSES = new Set(["complete", "invoiced", "final_payment", "archived"]);
@@ -177,7 +182,7 @@ export function invoiceTrade(invoice: BuilderRefInvoice): InvoiceTrade {
   }
   const text = `${lines.map((l) => l?.Description ?? "").join(" \n ")} \n ${invoice.reference ?? ""}`;
   const msText = MAKESAFE_TEXT.test(text);
-  const worksText = WORKS_TEXT.test(text);
+  const worksText = WORKS_TEXT.test(text.replace(TEMP_FENCE, " "));
   const msUnit = [...units].some((u) => MAKESAFE_UNITS.has(u));
   const worksUnit = [...units].some((u) => WORKS_UNITS.has(u));
   if (msUnit && worksUnit) return "mixed";

@@ -8,10 +8,17 @@
 // _shared/evidence/xero_invoice_evidence_plan.ts); otherwise the review queue
 // with candidate jobs. Older rows are the reviewed data file's, never this.
 //
-// Off until feature flag context_xero_evidence_place_v1 is on (missing or
-// unreadable is off) and only while the attribution lane is on. Any read
-// failure writes nothing: the matcher's guard needs the FULL job population, so
-// a partial read must never feed it. Never writes xero_invoices.
+// Two modes, both only while the attribution lane is on:
+//   own_job  always. Only rows whose invoice now has a job go to that job (an
+//            empty plan: nothing is matched, guessed or queued). A payment that
+//            arrived before its invoice was placed follows the invoice in the
+//            same sync pass that links it (finish line B3, 3 Nov 2026: INV-1688
+//            was linked at 11:34Z and its 28 Oct payment stayed on no job).
+//   full     with feature flag context_xero_evidence_place_v1 on (missing or
+//            unreadable is off): own_job plus the reference matcher's plan and
+//            the review queue.
+// Any read failure writes nothing: the matcher's guard needs the FULL job
+// population, so a partial read must never feed it. Never writes xero_invoices.
 
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 import {
@@ -29,6 +36,7 @@ export type InvoiceEvidencePlaceResult =
   | { ran: false; reason: string }
   | {
     ran: true;
+    mode: "own_job" | "full";
     since: string;
     by_class: Record<string, number>;
     plan: { matches: number; candidates: number } | null;
@@ -92,7 +100,7 @@ export async function loadXeroEvidenceMatcherInputs(sb: any): Promise<
 
 // deno-lint-ignore no-explicit-any
 export async function placeRecentInvoiceEvidence(sb: any, now = new Date()): Promise<InvoiceEvidencePlaceResult> {
-  if (!(await flagOn(sb))) return { ran: false, reason: "flag_off" };
+  const mode = (await flagOn(sb)) ? "full" : "own_job";
   if (!(await automationLaneEnabled(sb, "attribution"))) return { ran: false, reason: "attribution_lane_off" };
   const since = new Date(now.getTime() - XERO_EVIDENCE_PLACE_WINDOW_DAYS * 86_400_000).toISOString();
 
@@ -103,9 +111,11 @@ export async function placeRecentInvoiceEvidence(sb: any, now = new Date()): Pro
     p_limit: 2000,
   });
   if (dryError || !dry) return { ran: false, reason: "dry_run_failed" };
-  const unlinked: string[] = Array.isArray(dry.unlinked_invoices) ? dry.unlinked_invoices : [];
-  if (Number(dry.to_write ?? 0) === 0 && unlinked.length === 0) {
-    return { ran: true, since, by_class: dry.by_class ?? {}, plan: null, written: null };
+  // own_job: with an empty plan the real call can place only rows whose invoice has a job.
+  const unlinked: string[] = mode === "full" && Array.isArray(dry.unlinked_invoices) ? dry.unlinked_invoices : [];
+  const toWrite = mode === "full" ? Number(dry.to_write ?? 0) : Number(dry.by_class?.invoice_job ?? 0);
+  if (toWrite === 0 && unlinked.length === 0) {
+    return { ran: true, mode, since, by_class: dry.by_class ?? {}, plan: null, written: null };
   }
 
   let plan: XeroEvidencePlan = { matches: [], candidates: [] };
@@ -124,6 +134,7 @@ export async function placeRecentInvoiceEvidence(sb: any, now = new Date()): Pro
   if (realError || !real) return { ran: false, reason: "place_failed" };
   return {
     ran: true,
+    mode,
     since,
     by_class: real.by_class ?? {},
     plan: { matches: plan.matches.length, candidates: plan.candidates.length },

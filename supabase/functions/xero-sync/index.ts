@@ -1189,7 +1189,10 @@ async function syncInvoices(sb: any) {
   // ── Match unlinked invoices after sync ──
   const matchResult = await matchUnlinkedInvoices(sb)
 
-  // ── Invoice evidence onto its job (B-4): off until context_xero_evidence_place_v1 ──
+  // ── Invoice evidence onto its job (B-4) ──
+  // Rows about an invoice that now has a job go to that job in this pass, so a payment
+  // recorded before its invoice was linked follows the link above (B3). The reference
+  // matcher's plan and review queue stay off until context_xero_evidence_place_v1.
   // Moves only evidence rows; never links an invoice. A failure never breaks the sync.
   let invoiceEvidence: unknown
   try {
@@ -1497,6 +1500,19 @@ export async function matchUnlinkedInvoices(client: any) {
               },
             }).then(() => undefined, () => undefined)
           }
+
+          // The invoice is placed: an item an earlier pass raised for a person to place it is
+          // closed, so the Today list does not ask for a link that is already made.
+          await client.from('ai_annotations')
+            .update({
+              status: 'resolved',
+              resolved_at: new Date().toISOString(),
+              resolved_by: 'auto',
+              resolution: { value: 'auto_linked', text: `Linked to ${decision.job_number} by the builder reference rule`, job_id: decision.job_id },
+            })
+            .eq('source_ref', `sync:unlinked:${inv.xero_invoice_id}`)
+            .eq('status', 'active')
+            .then(() => undefined, () => undefined)
 
           matched++
           builderRefResult.linked++
