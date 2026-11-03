@@ -9406,14 +9406,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (!jobId) return json({ error: 'jobId required' }, 400)
         return json(await getJobFinancialsDetail(client, jobId))
       }
-      // ── Job profit engine (20261009130000) — read only, admin/owner only ──
+      // ── Job profit engine (20261009130000) — read only; admin, owner or office staff (call B, 3 Nov 2026) ──
       case 'job_profit':
       case 'job_profit_list': {
         if (!jobProfitCallerAllowed(authMode, authUser?.role)) {
           return json({
             ok: false,
             code: 'operator_access_required',
-            error: `${action} requires the privileged ops key or an admin/owner session`,
+            error: `${action} requires the privileged ops key or an admin, owner or office-staff session`,
           }, 403)
         }
         const out = action === 'job_profit'
