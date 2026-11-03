@@ -126,6 +126,7 @@ import {
   resolveSendInvoiceDelivery,
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
+import { ghlEmailNoteRequest } from './ghl_email_note.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -202,15 +203,14 @@ function quotePricingGateError(pricingJsonRaw: any): string | null {
 }
 
 // ── Log outbound email as a note on the GHL contact (fire-and-forget) ──
-function logEmailToGHL(contactId: string | null | undefined, subject: string, recipient: string) {
-  if (!contactId) return
+// With a job id, ghl-proxy also records the note on the job (job_events ghl_note_added).
+function logEmailToGHL(contactId: string | null | undefined, subject: string, recipient: string, jobId?: string | null) {
+  const request = ghlEmailNoteRequest({ contactId, jobId, subject, recipient })
+  if (!request) return
   fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=add_note`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
-    body: JSON.stringify({
-      contactId,
-      body: `Email sent: "${subject}" to ${recipient}`,
-    }),
+    body: JSON.stringify(request),
   }).then(() => {}, () => {})
 }
 
@@ -1036,8 +1036,7 @@ serve(async (req: Request) => {
             communication_type: 'client', sent_at: new Date().toISOString(),
             message_id: resendData.id, delivery_status: 'sent',
           }).then(() => {}, () => {})
-          // Log note to GHL contact
-          logEmailToGHL(doc.jobs?.ghl_contact_id, emailSubject, client_email)
+          // The GHL note goes after the send is recorded (below), naming the job.
         } else {
           const errData = await emailRes.json().catch(() => ({}))
           console.log('[send-quote] Resend failed:', JSON.stringify(errData))
@@ -1249,6 +1248,10 @@ serve(async (req: Request) => {
         if (releasedRevisionId) {
           await linkQuoteDocumentToRevision(sb, { document_id: doc.id, revision_id: releasedRevisionId }, { handler: 'send-quote/send', job_id: doc.job_id })
         }
+
+        // B1: log the email on the GHL contact once the send is recorded, naming the job, so ghl-proxy records
+        // the GHL update on the job (job_events ghl_note_added) after the send it belongs to.
+        logEmailToGHL(doc.jobs?.ghl_contact_id, emailSubject, client_email, doc.job_id)
 
         // Canonical release events — only when this UPDATE actually flipped the row.
         // Awaited via safeBusinessEventInsert so transient Supabase failures are logged as
