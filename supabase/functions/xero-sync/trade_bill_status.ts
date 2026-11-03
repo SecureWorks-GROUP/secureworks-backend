@@ -61,3 +61,40 @@ export function shouldBackfillTradeBillPdf(inv: any, current: TradeBillCurrent &
   if (RELEASED_TRADE_INVOICE_STATUSES.has(String(current?.status || ''))) return false
   return Array.isArray(inv.LineItems) && inv.LineItems.length > 0
 }
+
+// ── Catch-up from the Xero copy (Group WO field-ready check V12, 3 Nov 2026) ──
+// The status patch above runs only inside the incremental invoice loop, which
+// asks Xero for bills changed since the last run. A bill paid before that code
+// shipped (8 Sep), or one whose change fell outside the window, was never
+// patched: 17 crew bills since 1 Jul were PAID in Xero but not paid here.
+// The full backfill refreshes xero_invoices (raw_json) without touching
+// trade_invoices. This pass reads that copy, no Xero call, and applies the
+// same patch to every pushed trade bill that disagrees with it.
+export const TRADE_BILL_CATCHUP_LIMIT = 200
+
+export async function catchUpTradeBillStatusFromMirror(sb: any): Promise<{ checked: number; patched: number; failed: number }> {
+  const out = { checked: 0, patched: 0, failed: 0 }
+  const { data: rows, error } = await sb.from('trade_invoices')
+    .select('id, status, xero_bill_status, amount_paid, paid_at, xero_bill_id')
+    .not('xero_bill_id', 'is', null)
+    .not('status', 'in', '("paid","draft","failed","ops-reject")')
+    .limit(TRADE_BILL_CATCHUP_LIMIT)
+  if (error || !Array.isArray(rows) || rows.length === 0) return out
+  const ids = rows.map((r: any) => String(r.xero_bill_id))
+  const { data: mirror, error: mirrorError } = await sb.from('xero_invoices')
+    .select('xero_invoice_id, raw_json')
+    .in('xero_invoice_id', ids)
+  if (mirrorError || !Array.isArray(mirror)) return out
+  const byId = new Map(mirror.map((m: any) => [String(m.xero_invoice_id), m.raw_json]))
+  for (const row of rows) {
+    const raw = byId.get(String(row.xero_bill_id))
+    if (!raw || raw.Type !== 'ACCPAY') continue
+    out.checked++
+    const patch = tradeBillStatusPatch(raw, row)
+    if (!patch) continue
+    const { error: writeError } = await sb.from('trade_invoices').update(patch).eq('id', row.id).eq('status', row.status)
+    if (writeError) out.failed++
+    else out.patched++
+  }
+  return out
+}
