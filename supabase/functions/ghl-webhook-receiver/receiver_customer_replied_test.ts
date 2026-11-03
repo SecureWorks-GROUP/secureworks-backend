@@ -504,3 +504,65 @@ Deno.test("CustomerReplied with the capture lane off answers capture_disabled be
   assertEquals(gh.seen.length, 0);
   assertEquals(ghlReceipt(r).outcome, "capture_disabled");
 });
+
+// ── C7 (3 Nov 2026): a text reaction in the conversation the doorbell reads ──
+
+Deno.test("C7: the reply doorbell's read saves a text reaction as its own client.sms_reaction row, naming our text it is on", async () => {
+  const later = (minutes: number) =>
+    new Date(Date.parse(R9_TEXT.dateAdded) + minutes * 60_000).toISOString();
+  const ourText = {
+    id: "ourReplyRx0000000001",
+    messageType: "TYPE_SMS",
+    direction: "outbound",
+    status: "delivered",
+    from: "+61489267774",
+    to: "+61400000000",
+    body: "Placeholder reply for the C7 doorbell fixture.",
+    contactId: CONTACT,
+    conversationId: CONVERSATION,
+    dateAdded: later(1),
+  };
+  const reaction = {
+    id: "reactionRx0000000001",
+    type: 45,
+    messageType: "TYPE_SMS_REACTION",
+    direction: "inbound",
+    status: "delivered",
+    from: "+61400000000",
+    to: "+61489267774",
+    body: `Liked “${ourText.body}”`,
+    contactId: CONTACT,
+    conversationId: CONVERSATION,
+    dateAdded: later(2),
+  };
+  const store = new KeyedStore();
+  const gh = provider(
+    [reaction, ourText, ...CONVERSATION_ITEMS] as unknown as Row[],
+  );
+  const r = await run(
+    await post(CUSTOMER_REPLIED, "secret"),
+    "enforce",
+    { ...ON, capture: store.capture },
+    TOKEN,
+    gh.answer,
+  );
+  assertEquals(r.res.status, 200);
+  const g = ghlReceipt(r);
+  assertEquals(g.targeted_seen, 6);
+  assertEquals(g.targeted_inserted, 6);
+  assertEquals(g.targeted_skipped, 0, "a reaction is no longer skipped");
+  const saved = store.rows.get(`ghl:${reaction.id}`)!;
+  assertEquals(saved.event_type, "client.sms_reaction");
+  assertEquals(saved.channel, "status");
+  assertEquals(saved.source, "ghl-webhook-receiver");
+  assertEquals(saved.contact_id, CONTACT);
+  assertEquals(saved.conversation_key, CONVERSATION);
+  assertEquals(saved.job_id, null, "the ladder places it");
+  assertEquals((saved.metadata as Row).capture_mode, "live");
+  const rx = (saved.payload as Row).reaction as Row;
+  assertEquals(rx.reacted_to_key, `ghl:${ourText.id}`);
+  assertEquals(rx.reacted_to_direction, "outbound");
+  // Receipts and logs stay ids-only.
+  assertFalse(r.logs.includes(ourText.body));
+  assertFalse(JSON.stringify(g).includes(ourText.body));
+});

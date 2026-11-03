@@ -16,6 +16,12 @@
 // with {"wait": true} runs in the foreground and returns the run summary
 // (counts and codes only), which is what an end-to-end trace reads.
 //
+// {"action": "reaction_repair", "since": ISO, "conversations"?: [...],
+// "next"?: cursor, "dry_run"?: false} is the operator's one-off repair of GHL
+// text reactions skipped before they were captured (reaction_repair.ts; C7,
+// 3 Nov 2026). It always runs in the foreground; a dry run (the default)
+// reads only. Any other body is a plain run, as before.
+//
 // Logs carry codes and ids only, never message text.
 
 import {
@@ -33,6 +39,13 @@ import {
   runGhlMessageReconcile,
   type RunRow,
 } from "./reconcile.ts";
+import {
+  parseRepairRequest,
+  type RepairDeps,
+  type RepairRequest,
+  type RepairResult,
+  runGhlReactionRepair,
+} from "./reaction_repair.ts";
 
 export interface HandlerDeps {
   env(name: string): string | undefined;
@@ -198,10 +211,42 @@ function logResult(result: ReconcileResult): void {
   }
 }
 
+/**
+ * The reaction repair door: refuses a malformed request with 400 and its code,
+ * runs one bounded call in the foreground and answers ids, times and counts.
+ */
+async function handleReactionRepair(
+  body: Record<string, unknown>,
+  deps: HandlerDeps,
+  repair: (d: RepairDeps, r: RepairRequest) => Promise<RepairResult>,
+): Promise<Response> {
+  const parsed = parseRepairRequest(body, (deps.now ?? Date.now)());
+  if (!parsed.ok) return json({ error: parsed.code }, 400);
+  try {
+    const result = await repair(liveReconcileDeps(deps), parsed.request);
+    if (result.outcome === "ran") {
+      console.log(
+        `[ghl-message-reconcile] reaction_repair dry_run=${result.dry_run} complete=${result.complete} error=${
+          result.error_code ?? "-"
+        } seen=${result.counts.reactions_seen} existing=${result.counts.reactions_existing} to_write=${result.counts.reactions_to_write} inserted=${result.counts.inserted}`,
+      );
+    } else {
+      console.log(`[ghl-message-reconcile] reaction_repair ${result.outcome}`);
+    }
+    return json({ flag: ITEM_FLAG, action: "reaction_repair", ...result });
+  } catch (error) {
+    const c = error instanceof GhlProviderReadError ? error.code : code(error);
+    console.error(`[ghl-message-reconcile] reaction_repair failed code=${c}`);
+    return json({ outcome: "error", code: c }, 500);
+  }
+}
+
 export async function handleReconcile(
   req: Request,
   deps: HandlerDeps,
   run: (d: ReconcileDeps) => Promise<ReconcileResult> = runGhlMessageReconcile,
+  repair: (d: RepairDeps, r: RepairRequest) => Promise<RepairResult> =
+    runGhlReactionRepair,
 ): Promise<Response> {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   const serviceKey = deps.env("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -221,6 +266,12 @@ export async function handleReconcile(
     }
   } catch {
     // An empty or non-JSON body is a plain run request.
+  }
+
+  // C7 (3 Nov 2026): the operator's reaction repair. Always in the
+  // foreground; a dry run (the default) reads only.
+  if (body.action === "reaction_repair") {
+    return await handleReactionRepair(body, deps, repair);
   }
 
   const execute = async (): Promise<

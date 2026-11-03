@@ -22,6 +22,8 @@ import {
   R4_LIST_ITEM,
   R5,
   R7_LIST_ITEMS,
+  RX1_REACTION_ITEM,
+  RX1_TARGET_ITEM,
 } from "../_shared/evidence/ghl_message_fixtures.ts";
 import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
 import {
@@ -838,4 +840,69 @@ Deno.test("a failed save is retried by the next run and saved exactly once, thou
     "saved exactly once",
   );
   assertEquals(db.rows.length, 2);
+});
+
+Deno.test("C7: a text reaction the webhook missed is saved once as client.sms_reaction on its contact and conversation, naming the text it is on", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  ghl.add({
+    id: RX1_REACTION_ITEM.conversationId,
+    contactId: RX1_REACTION_ITEM.contactId,
+    messages: [RX1_REACTION_ITEM, RX1_TARGET_ITEM] as Msg[],
+  });
+  // The text and its reaction land in the same 15 minutes (as on 27 Oct).
+  db.clock = at("2026-10-27T01:33:00.000Z");
+  seedCompleteScan(db, "2026-10-27T01:18:00.000Z");
+  const result = await runGhlMessageReconcile(deps(ghl, db));
+  assert(result.outcome === "ran");
+  assertEquals(result.status, "succeeded");
+  assertEquals(result.counts.inserted, 2);
+  assertEquals(result.counts.skipped_unsupported_type, 0);
+  const reaction = rowFor(db, RX1_REACTION_ITEM.id)!;
+  assertEquals(reaction.event_type, "client.sms_reaction");
+  assertEquals(reaction.channel, "status");
+  assertEquals(reaction.source, EVENT_SOURCE);
+  assertEquals(reaction.contact_id, RX1_REACTION_ITEM.contactId);
+  assertEquals(reaction.conversation_key, RX1_REACTION_ITEM.conversationId);
+  assertEquals(reaction.event_at, RX1_REACTION_ITEM.dateAdded);
+  assertEquals(reaction.metadata, { capture_mode: "live" });
+  assertEquals(reaction.job_id, null, "the ladder places it");
+  const r = (reaction.payload as Record<string, unknown>).reaction as Record<
+    string,
+    unknown
+  >;
+  assertEquals(r.reacted_to_key, `ghl:${RX1_TARGET_ITEM.id}`);
+  assertEquals(r.reacted_to_match, "quoted_text");
+  assertEquals(rowFor(db, RX1_TARGET_ITEM.id)!.event_type, "client.sms_out");
+  // The next run reads it again in its overlap and writes nothing new.
+  db.clock = at("2026-10-27T01:48:00.000Z");
+  const again = await runGhlMessageReconcile(deps(ghl, db));
+  assert(again.outcome === "ran");
+  assertEquals(again.counts.inserted, 0);
+  assertEquals(db.rows.length, 2);
+});
+
+Deno.test("C7: a reaction whose text is older than the run's floor still names it (the whole page is in hand)", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  ghl.add({
+    id: RX1_REACTION_ITEM.conversationId,
+    contactId: RX1_REACTION_ITEM.contactId,
+    messages: [
+      RX1_REACTION_ITEM,
+      { ...RX1_TARGET_ITEM, dateAdded: "2026-10-26T22:00:00.000Z" },
+    ] as Msg[],
+  });
+  db.keys.add(`ghl:${RX1_TARGET_ITEM.id}`);
+  db.clock = at("2026-10-27T01:33:00.000Z");
+  seedCompleteScan(db, "2026-10-27T01:18:00.000Z");
+  const result = await runGhlMessageReconcile(deps(ghl, db));
+  assert(result.outcome === "ran");
+  assertEquals(result.counts.inserted, 1);
+  assertEquals(result.counts.items_older_than_floor, 1);
+  const r = (rowFor(db, RX1_REACTION_ITEM.id)!.payload as Record<
+    string,
+    unknown
+  >).reaction as Record<string, unknown>;
+  assertEquals(r.reacted_to_key, `ghl:${RX1_TARGET_ITEM.id}`);
 });

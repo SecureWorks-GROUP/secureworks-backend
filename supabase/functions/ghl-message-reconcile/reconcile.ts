@@ -339,7 +339,7 @@ export function parseScanState(cursor: unknown): ScanState | null {
   };
 }
 
-function providerFailure(error: unknown): ProviderFailure {
+export function providerFailure(error: unknown): ProviderFailure {
   const e = (error ?? {}) as Record<string, unknown>;
   return {
     code: typeof e.code === "string" ? e.code : undefined,
@@ -369,7 +369,7 @@ export function failureStopsRun(f: ProviderFailure): boolean {
   ].includes(f.code);
 }
 
-function stopCode(f: ProviderFailure): string {
+export function stopCode(f: ProviderFailure): string {
   if (f.status === 429 || f.providerStatus === 429) return "ghl_rate_limited";
   return safeCode(f.code ?? "provider_read_failed");
 }
@@ -537,6 +537,9 @@ export async function runGhlMessageReconcile(
         const built = buildGhlMessageRow(item as GhlMessageItem, {
           source: EVENT_SOURCE,
           captureMode: "live",
+          // The whole page, older-than-floor items included, so a reaction
+          // can name the text it is on (C7).
+          inHand: items as GhlMessageItem[],
         });
         if (built.kind === "skip") {
           const key = (built.reason.startsWith("skipped_")
