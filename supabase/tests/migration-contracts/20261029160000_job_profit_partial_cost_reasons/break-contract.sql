@@ -1,5 +1,10 @@
 -- 20261104080000 (expected cost missing) first: its down, then the stack's own v_job_profit back (this break runs in
 -- a disposable copy, so nothing is applied again).
+-- 20261104110000 (patio bound revision) sits on top of it: when the stack has it, its down runs first.
+SELECT to_regclass('public.v_job_profit_patio_scope_binding') IS NOT NULL AS a6p_break_20261029160000 \gset
+\if :a6p_break_20261029160000
+\ir ../../../rollbacks/20261104110000_job_profit_patio_bound_revision_down.sql
+\endif
 SELECT to_regprocedure('public.job_profit_expected_cost_missing(uuid)') IS NOT NULL AS a6x_break_20261029160000 \gset
 \if :a6x_break_20261029160000
 \ir ../../../rollbacks/20261104080000_job_profit_expected_cost_missing_down.sql
