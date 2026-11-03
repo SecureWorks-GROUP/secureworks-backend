@@ -128,7 +128,119 @@ export type TimelineEntry = {
   confidence: string | null;
   description: string | null;
   hours: number | null;
+  // A trade charge only, when its crew invoice was read (tradeChargeDates).
+  submitted_on?: string | null;
+  work_date?: string | null;
+  line_date?: string | null;
 };
+
+/**
+ * When a trade charged (finish line A5, owner ask 1, 3 Nov 2026). The cost
+ * view dates a crew invoice line by its line_date or else the pay week's
+ * start, which is not when the trade charged. These come from the crew
+ * invoice itself: submitted_on is the Perth day the trade submitted it
+ * (trade_invoices.submitted_at), work_date the day worked from the line's
+ * time entry, line_date the line's own day (a work order's completed or
+ * scheduled day, or the day typed). Dates only: no figure, lane or cost event
+ * date changes.
+ */
+export type TradeChargeDates = {
+  submitted_at: string | null;
+  submitted_on: string | null;
+  work_date: string | null;
+  line_date: string | null;
+};
+export type TradeChargeDatesRead = {
+  status: "ok" | "unknown" | "none";
+  reason?: string;
+  byLine: Map<string, TradeChargeDates>;
+};
+
+const TRADE_LINE_DATE_COLUMNS =
+  "id, work_date, line_date, trade_invoices(submitted_at)";
+const TRADE_LINE_DATE_CHUNK = 150;
+const PERTH_OFFSET_MS = 8 * 60 * 60 * 1000; // Perth keeps UTC+8 all year
+
+/** The Perth calendar day of a timestamp, or null. */
+export function perthDayOfTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  if (DATE_RE.test(value)) return value;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms)
+    ? new Date(ms + PERTH_OFFSET_MS).toISOString().slice(0, 10)
+    : null;
+}
+
+/**
+ * Reads the submitted day, work date and line date of every trade line among
+ * the job's cost events, by line id. A failed read is "unknown" and leaves
+ * every date out, so a date is never invented.
+ */
+export async function readTradeChargeDates(
+  client: any,
+  costEvents: any[],
+): Promise<TradeChargeDatesRead> {
+  const ids = [
+    ...new Set(
+      costEvents.filter((e) => e?.source === "trade_line" && e.source_id)
+        .map((e) => String(e.source_id)),
+    ),
+  ].filter((id) => UUID_RE.test(id));
+  const byLine = new Map<string, TradeChargeDates>();
+  if (!ids.length) return { status: "none", byLine };
+  for (let i = 0; i < ids.length; i += TRADE_LINE_DATE_CHUNK) {
+    const chunk = ids.slice(i, i + TRADE_LINE_DATE_CHUNK);
+    const { data, error } = await client.from("trade_invoice_lines")
+      .select(TRADE_LINE_DATE_COLUMNS).in("id", chunk);
+    if (error) {
+      return {
+        status: "unknown",
+        reason: `crew invoice dates read failed: ${error.message}`,
+        byLine: new Map(),
+      };
+    }
+    for (const r of data || []) {
+      const inv = Array.isArray(r.trade_invoices)
+        ? r.trade_invoices[0]
+        : r.trade_invoices;
+      const submittedAt = inv?.submitted_at ?? null;
+      byLine.set(String(r.id), {
+        submitted_at: submittedAt,
+        submitted_on: perthDayOfTimestamp(submittedAt),
+        work_date: r.work_date ?? null,
+        line_date: r.line_date ?? null,
+      });
+    }
+  }
+  return { status: "ok", byLine };
+}
+
+/** A trade line's dates onto its cost event; any other event is unchanged. */
+export function withTradeChargeDates(
+  costEvents: any[],
+  dates: TradeChargeDatesRead,
+): any[] {
+  return costEvents.map((e) => {
+    if (e?.source !== "trade_line") return e;
+    const d = dates.byLine.get(String(e.source_id));
+    return d ? { ...e, ...d } : e;
+  });
+}
+
+/** Charge order: submitted day, then the day worked (or the line's day); unknown last. */
+function chargeOrderKey(e: any): string {
+  return `${e.submitted_on ?? "9999-12-31"}|${
+    e.work_date ?? e.line_date ?? "9999-12-31"
+  }`;
+}
+
+function chargeWhen(e: any): Omit<TradeChargeDates, "submitted_at"> {
+  return {
+    submitted_on: e.submitted_on ?? null,
+    work_date: e.work_date ?? null,
+    line_date: e.line_date ?? null,
+  };
+}
 
 const COST_KIND: Record<string, TimelineEntry["kind"]> = {
   trade_line: "trade_charge",
@@ -169,8 +281,12 @@ export function buildJobProfitTimeline(
 ): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const e of costEvents) {
+    // A trade charge is dated by the day it was submitted, once its crew
+    // invoice is read; until then by its cost event date, as before.
+    const dated = e.source === "trade_line" && "submitted_on" in e;
     out.push({
-      date: e.event_date ?? null,
+      date: (dated ? e.submitted_on ?? e.event_date : e.event_date) ?? null,
+      ...(dated ? chargeWhen(e) : {}),
       kind: costEventKind(e.source),
       lane: e.lane ?? null,
       party: e.party ?? null,
@@ -446,7 +562,8 @@ export async function jobProfitAction(
     };
   }
 
-  const costEvents = costs.data || [];
+  const chargeDates = await readTradeChargeDates(client, costs.data || []);
+  const costEvents = withTradeChargeDates(costs.data || [], chargeDates);
   const revenueEvents = revenue.data || [];
   const trades = new Map<
     string,
@@ -457,8 +574,12 @@ export async function jobProfitAction(
       lines: number;
       first: string | null;
       last: string | null;
+      first_charge?: Omit<TradeChargeDates, "submitted_at">;
+      last_charge?: Omit<TradeChargeDates, "submitted_at">;
     }
   >();
+  const firstLine = new Map<string, any>();
+  const lastLine = new Map<string, any>();
   for (const e of costEvents) {
     if (e.source !== "trade_line" || !e.is_actual) continue;
     const key = e.party_id ? `id:${e.party_id}` : `line:${e.source_id}`;
@@ -473,6 +594,7 @@ export async function jobProfitAction(
       };
     t.amount_ex = round2(t.amount_ex + (num(e.amount_ex) ?? 0));
     t.lines += 1;
+    // first and last stay the cost event dates (unchanged for every reader).
     if (e.event_date && (!t.first || e.event_date < t.first)) {
       t.first = e.event_date;
     }
@@ -480,6 +602,22 @@ export async function jobProfitAction(
       t.last = e.event_date;
     }
     trades.set(key, t);
+    const f = firstLine.get(key);
+    if (!f || chargeOrderKey(e) < chargeOrderKey(f)) firstLine.set(key, e);
+    const l = lastLine.get(key);
+    if (!l || chargeOrderKey(e) > chargeOrderKey(l)) lastLine.set(key, e);
+  }
+  // first_charge and last_charge: when the trade charged, each from one line
+  // (the earliest and latest by submitted day, then day worked). Only when
+  // every line's crew invoice was read, so a date is never guessed.
+  if (chargeDates.status === "ok") {
+    for (const [key, t] of trades) {
+      const f = firstLine.get(key), l = lastLine.get(key);
+      if (f && "submitted_on" in f && l && "submitted_on" in l) {
+        t.first_charge = chargeWhen(f);
+        t.last_charge = chargeWhen(l);
+      }
+    }
   }
 
   return {
@@ -487,6 +625,9 @@ export async function jobProfitAction(
     body: {
       job: summary,
       trades: [...trades.values()].sort((a, b) => b.amount_ex - a.amount_ex),
+      trade_charge_dates: chargeDates.status === "unknown"
+        ? { status: "unknown", reason: chargeDates.reason }
+        : { status: chargeDates.status },
       cost_events: costEvents,
       material_order_sources: await readJobProfitOrderSources(client, summary.job_id, costEvents),
       dispatch_orders: await readJobDispatchOrders(client, summary.job_id, costEvents),

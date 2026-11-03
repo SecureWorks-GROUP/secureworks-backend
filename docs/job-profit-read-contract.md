@@ -27,7 +27,7 @@ carry no money.
 
 | Action | Returns |
 |---|---|
-| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `labels` |
+| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `trade_charge_dates` (below), `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `labels` |
 | `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
 
@@ -38,6 +38,23 @@ answers an empty `jobs` with `has_more` false, never an error. Totals come from
 
 The `type` filter matches `work_type`, not `jobs.type`: a job whose family is
 repair is listed as `repair` whatever its type. `work_subtype` is the family.
+
+## When each trade charged
+
+A crew invoice line's `event_date` in `v_job_cost_events` is its `line_date`
+or else the pay week's start, so it is not when the trade charged. `job_profit`
+reads each trade line's crew invoice (`trade_invoice_lines` by line id, with
+`trade_invoices.submitted_at`) and adds, on that line's `cost_events` row and
+its `timeline` entry: `submitted_on` (the Perth day the trade submitted it),
+`work_date` (the day worked, from the line's time entry) and `line_date` (the
+line's own day: a work order's completed or scheduled day, or the day typed).
+Each `trades` row gains `first_charge` and `last_charge`, each taken from one
+line: the earliest and latest by submitted day, then day worked (or line day).
+A trade charge's `timeline` date is its submitted day; a line never submitted
+keeps its cost event date. `trades.first` and `trades.last` stay the cost event
+dates. `trade_charge_dates.status` is `ok`, `none` (no trade line) or
+`unknown` with a `reason`: then no date is added and none is guessed. No
+figure, lane or cost event date changes.
 Legacy jobs have no row.
 
 ## Job fields
