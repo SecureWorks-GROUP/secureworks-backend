@@ -391,3 +391,38 @@ Deno.test("fence missing work orders: open fence jobs with 2+ crew get a draft; 
   await openMissingFenceWorkOrders(off.client());
   assertEquals(off.rpcs.length, 0);
 });
+
+// Owner, 3 Nov 2026: patio pay goes through the group work order (patio jobs
+// after Zoo). What the crew see: hours on a patio job are refused with the
+// reason; a patio job already paid by hours finishes on hours; commission and
+// the council fee still go through; switched off, nothing changes.
+Deno.test("patio pay only through the group: what the crew are told", async () => {
+  const { assertPatioPaysThroughGroup } = await import("./group_work_order.ts");
+  const world = (flagOn: boolean) => {
+    const fake = new Fake();
+    fake.rows("feature_flags").push({ flag_name: "patio_pay_group_only_v1", enabled: flagOn });
+    fake.rows("jobs").push(
+      { id: "p-new", type: "patio" }, { id: "p-grouped", type: "patio" },
+      { id: "p-legacy", type: "patio" }, { id: "fence", type: "fencing" },
+    );
+    fake.rows("group_work_orders").push({ job_id: "p-grouped", status: "open" });
+    // SWP-261283 shape: Henry's hours were billed and approved before the switch.
+    fake.rows("trade_invoice_lines").push({ job_id: "p-legacy", line_type: "labour", description: "Patio install", trade_invoice_id: "old", trade_invoices: { status: "approved" } });
+    return fake.client();
+  };
+  const hours = (job_id: string) => [{ job_id, line_type: "labour", description: "Framing" }];
+  const refused = async (client: any, lines: any[]) => {
+    try { await assertPatioPaysThroughGroup(client, lines); return null; } catch (e) { return e as any; }
+  };
+  const noWo = await refused(world(true), hours("p-new"));
+  assertEquals(noWo?.code, "patio_pay_group_only");
+  assertEquals(noWo?.status, 409);
+  assert(String(noWo?.message).includes("office has to set it first"));
+  const grouped = await refused(world(true), hours("p-grouped"));
+  assert(String(grouped?.message).includes("Log your hours on the group"));
+  assertEquals(await refused(world(true), hours("p-legacy")), null);
+  assertEquals(await refused(world(true), hours("fence")), null);
+  assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "commission", description: "Commission" }]), null);
+  assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "labour", description: "Council Approval" }]), null);
+  assertEquals(await refused(world(false), hours("p-new")), null);
+});

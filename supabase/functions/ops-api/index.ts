@@ -788,6 +788,7 @@ import {
   claimGroupReleaseForInvoice,
   releasedGroupSiblingInvoiceIds,
   assertGroupJobDraftUsesShare,
+  assertPatioPaysThroughGroup,
   assertGroupWorkOrderInvoiceFence,
   assertLegacyInvoiceNotOnGroupJob,
   captureGroupClientSignoff,
@@ -13085,6 +13086,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...plainExtras,
               ...(weeklyInvoice?.lines || []),
             ]).catch((error) => groupWorkOrderApiError(error))
+            await assertPatioPaysThroughGroup(client, [
+              ...plainLabour,
+              ...plainExtras,
+              ...(weeklyInvoice?.lines || []),
+            ]).catch((error) => groupWorkOrderApiError(error))
             const shareSources = [
               ...labourLines.filter((line: any) => draftShareShaped(line)),
               ...extras.filter((extra: any) => draftShareShaped(extra)),
@@ -14162,6 +14168,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ...extraLineItems,
               ],
             }).catch((error) => groupWorkOrderApiError(error))
+            // Owner, 3 Nov 2026: patio pay goes through the group work order.
+            await assertPatioPaysThroughGroup(client, [
+              ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+              ...extraLineItems,
+            ]).catch((error) => groupWorkOrderApiError(error))
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)

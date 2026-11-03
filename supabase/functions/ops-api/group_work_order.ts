@@ -1412,6 +1412,70 @@ export async function assertGroupJobDraftUsesShare(
   }
 }
 
+/**
+ * Owner, 3 Nov 2026: "all patio pay needs to go through [group work orders]
+ * from now", for patio jobs after Zoo. While patio_pay_group_only_v1 is on,
+ * ordinary pay (hours, a typed work order) on a patio job is refused; the
+ * crew log hours on the job's group and invoice their share. A patio job
+ * already paid by ordinary pay before (a live, non-draft invoice) finishes
+ * that way: it cannot switch half way. Commission, office fees, travel and
+ * materials are not pay here (isNormalWorkOrderPayLine). Off: no change.
+ */
+export const PATIO_PAY_GROUP_ONLY_FLAG = "patio_pay_group_only_v1";
+
+export async function assertPatioPaysThroughGroup(
+  client: any,
+  lines: readonly FenceLine[],
+  excludeInvoiceId: string | null = null,
+): Promise<void> {
+  const jobIds = [
+    ...new Set(
+      lines.filter((line) => isNormalWorkOrderPayLine(line) && line.job_id)
+        .map((line) => String(line.job_id)).filter(Boolean),
+    ),
+  ];
+  if (jobIds.length === 0) return;
+  const { data: flag, error: flagError } = await client.from("feature_flags")
+    .select("enabled").eq("flag_name", PATIO_PAY_GROUP_ONLY_FLAG).maybeSingle();
+  if (flagError || flag?.enabled !== true) return;
+  const jobs = await rowsOf(
+    client.from("jobs").select("id, type").in("id", jobIds),
+    "check the job type",
+  );
+  const patio = jobs.filter((j) => String(j.type || "") === "patio")
+    .map((j) => String(j.id));
+  if (patio.length === 0) return;
+  const prior = await rowsOf(
+    client.from("trade_invoice_lines").select(
+      "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoice_id, trade_invoices!inner(status)",
+    ).in("job_id", patio),
+    "check earlier pay on the job",
+  );
+  const groups = await rowsOf(
+    client.from("group_work_orders").select("job_id, status").in("job_id", patio),
+    "check group work orders",
+  );
+  for (const jobId of patio) {
+    const legacy = prior.some((row: any) =>
+      String(row.job_id) === jobId &&
+      String(row.trade_invoice_id || "") !== String(excludeInvoiceId || "") &&
+      !["draft", "ops-reject"].includes(String(row.trade_invoices?.status || "")) &&
+      isNormalWorkOrderPayLine(row)
+    );
+    if (legacy) continue;
+    const grouped = groups.some((g) =>
+      String(g.job_id) === jobId && String(g.status || "") !== "void"
+    );
+    throw new GroupWorkOrderError(
+      "patio_pay_group_only",
+      grouped
+        ? "Patio jobs are paid through the group work order. Log your hours on the group and invoice your share."
+        : "Patio jobs are paid through a group work order. This job has no work order amount yet, so the office has to set it first.",
+      409,
+    );
+  }
+}
+
 /** Drop assignments whose job has a non-void group. A row with no job stays. */
 export function withoutGroupJobAssignments<
   T extends { jobs?: { id?: unknown } | null },
