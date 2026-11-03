@@ -1684,3 +1684,68 @@ Deno.test("a patio quote with its own labour row ignores the scope figure", asyn
   assert(wo.quote_filled_at, "the quote's own labour is stamped as before");
   assert(!wo.scope_items.some((i: any) => i.line_key === "labour:scope"));
 });
+
+// Scope B4: the new patio tool (patio-scoper) seals no pricing line items. Its
+// labour is the sealed scope's labour lines (draft.pricing.labourLines: people
+// x days x day rate, or one figure for the line), and their sum is the quote's
+// labourCostEstimate (SWP-26248 Rev 10 shape, made-up figures). Without them
+// the fill found no line, wrote nothing and the crew work order never filled.
+function patioToolQuoteDb() {
+  const db = baseDb();
+  db.tables.jobs[0].type = "patio";
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    tool: "patio-scoper",
+    labourCostEstimate: 2680,
+    internal: { labour: 2680, materials: 5000 },
+  });
+  db.tables.scope_revisions[0].scope_canonical_text = JSON.stringify({
+    tool: "patio-scoper",
+    lines: [{ id: "post-1", description: "Post 90x90", quantity: 4, unit: "each" }],
+    draft: {
+      pricing: {
+        labour: 2680,
+        labourLines: [
+          { id: "crew", work: "Build the patio: footings, posts, frame, roof, gutter and flashings", people: 2, days: 3, dayRate: 380, amount: null },
+          { id: "x1", work: "Remove the old pergola", people: null, days: null, dayRate: null, amount: 400 },
+        ],
+      },
+    },
+  });
+  return db;
+}
+
+Deno.test("new patio tool: the work order fills with the sealed labour lines, the quote's labour is agreed, and it goes to the trades", async () => {
+  const db = patioToolQuoteDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals([r.reason, r.issued], ["issued", true]);
+  assertEquals(calls.length, 1);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 2680, "the quote's labourCostEstimate");
+  assert(wo.quote_filled_at, "stamped as the quote's own");
+  assert(wo.quote_filled_scope_revision_id, "names the sealed revision");
+  const labour = wo.scope_items.filter((i: any) => i.line_key.startsWith("labour:tool:"));
+  assertEquals(
+    labour.map((l: any) => [l.description, l.qty, l.unit, l.total, l.counted, l.needs_review]),
+    [
+      ["Labour: Build the patio: footings, posts, frame, roof, gutter and flashings", 6, "trade days", 2280, true, false],
+      ["Labour: Remove the old pergola", null, null, 400, true, false],
+    ],
+  );
+  for (const l of labour) assert(!/\$|\d+\/day/.test(l.description), `no rate in the words: ${l.description}`);
+  assert(!wo.scope_items.some((i: any) => i.line_key === "labour:scope"));
+});
+
+Deno.test("new patio tool: lines that do not make the quote's labour are kept, flagged, and the agreed labour stays the quote's", async () => {
+  const db = patioToolQuoteDb();
+  const pricing = JSON.parse(db.tables.scope_revisions[0].pricing_canonical_text);
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({ ...pricing, labourCostEstimate: 3000 });
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.filled, true);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 3000);
+  const labour = wo.scope_items.filter((i: any) => i.line_key.startsWith("labour:tool:"));
+  assertEquals(labour.length, 2);
+  assert(labour.every((l: any) => !l.counted && l.needs_review && l.flags.includes("labour_differs_from_quote")));
+});

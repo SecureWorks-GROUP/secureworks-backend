@@ -179,6 +179,17 @@ function scopeLabourOf(scopeText: unknown): unknown {
   }
 }
 
+/** The new patio tool's sealed labour lines (draft.pricing.labourLines), or null. */
+function toolLabourLinesOf(scopeText: unknown): unknown {
+  if (typeof scopeText !== "string" || !scopeText) return null;
+  try {
+    const scope = JSON.parse(scopeText);
+    return scope?.draft?.pricing?.labourLines ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function readRevisions(
   client: any,
   query: (q: any) => any,
@@ -214,12 +225,14 @@ async function readRevisions(
 async function readAcceptedQuote(client: any, job: any): Promise<{
   pricing: Record<string, any> | null;
   scopeLabour?: unknown;
+  toolLabourLines?: unknown;
   quote: JobQuoteWorkOrderLines["quote"];
 }> {
   const flags: string[] = [];
   const none = () => ({
     pricing: null,
     scopeLabour: null,
+    toolLabourLines: null,
     quote: {
       source: null,
       scope_revision_id: null,
@@ -236,6 +249,7 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
     return {
       pricing,
       scopeLabour: scopeLabourOf(revision.scope_canonical_text),
+      toolLabourLines: toolLabourLinesOf(revision.scope_canonical_text),
       quote: {
         source,
         scope_revision_id: String(revision.id),
@@ -353,7 +367,7 @@ async function linesForJob(
   client: any,
   job: any,
 ): Promise<JobQuoteWorkOrderLines> {
-  const { pricing, scopeLabour, quote } = await readAcceptedQuote(client, job);
+  const { pricing, scopeLabour, toolLabourLines, quote } = await readAcceptedQuote(client, job);
   // No accepted quote, nothing to price: the cost table is not read.
   const table = pricing && String(job.type || "") === "fencing"
     ? await readFenceLabourCostTable(
@@ -368,6 +382,7 @@ async function linesForJob(
     costTable: table.rates,
     ratesChangedSinceQuote: table.changedSinceQuote,
     scopeLabour,
+    toolLabourLines,
   });
   // The quote's and the result's review flags ride on every line, so they
   // stay on the stored draft for the approver (scope_items past description,
