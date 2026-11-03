@@ -425,4 +425,14 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "commission", description: "Commission" }]), null);
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "labour", description: "Council Approval" }]), null);
   assertEquals(await refused(world(false), hours("p-new")), null);
+  // The office is asked for a work order only when there is none; a failed
+  // ask still gives the crew the same refusal.
+  const asked: string[] = [];
+  const ask = (jobId: string) => (asked.push(jobId), Promise.reject(new Error("graph down")));
+  const withAsk = async (lines: any[]) => {
+    try { await assertPatioPaysThroughGroup(world(true), lines, null, ask); return null; } catch (e) { return e as any; }
+  };
+  assertEquals((await withAsk(hours("p-new")))?.code, "patio_pay_group_only");
+  assertEquals((await withAsk(hours("p-grouped")))?.code, "patio_pay_group_only");
+  assertEquals(asked, ["p-new"]);
 });

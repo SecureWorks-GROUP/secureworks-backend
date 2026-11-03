@@ -822,6 +822,7 @@ import {
   withoutGroupJobAssignments,
   type GroupCaller,
 } from './group_work_order.ts'
+import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
 import {
   approveCustomerVariation,
@@ -4197,6 +4198,22 @@ export type TradeAuthContext = {
 
 // Verify the Trade JWT and carry the server-owned authorization context used by
 // every Trade read. The browser never supplies tenant, role, or manager scope.
+// Owner, 3 Nov 2026: a crew member who cannot invoice a job for want of a
+// work order amount emails the job's team group so the office sets one.
+async function tradeDisplayName(client: any, trade: { id: string; email?: string }): Promise<string> {
+  const { data } = await client.from('users').select('name').eq('id', trade.id).maybeSingle()
+  return String(data?.name || trade.email || 'A crew member')
+}
+
+function askOfficeForWorkOrder(client: any, trade: { id: string; email?: string }) {
+  return async (jobId: string) => requestWorkOrderAmount(client, {
+    jobId,
+    crewName: await tradeDisplayName(client, trade),
+    crewEmail: trade.email || null,
+    reason: 'no_work_order_amount',
+  }, { sendEmail: sendOutlookWorkOrderRequest(SUPABASE_URL, SUPABASE_SERVICE_KEY) })
+}
+
 async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
   const authHeader = req.headers.get('Authorization')
   if (!authHeader?.startsWith('Bearer ')) {
@@ -9807,6 +9824,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // caller must be a dispatcher or a manager of the job's vertical. Wraps
       // createAssignment / updateAssignment (reassignment) with idempotency +
       // archived-job refusal. Wires to the trade app's reassign flow in Wave 2-3.
+      // Owner, 3 Nov 2026: a crew member who cannot find a job to invoice, or
+      // whose job has no work order amount, asks the office for one. One
+      // email to the job's team group (patios@ / fencing@) per job per day.
+      case 'request_work_order': {
+        const tradeUser = await authTrade(req, client)
+        if (req.method !== 'POST') return json({ error: 'request_work_order requires POST' }, 405)
+        const jobId = typeof body.job_id === 'string' && body.job_id ? body.job_id : null
+        const jobText = typeof body.job_text === 'string' ? body.job_text.trim() : ''
+        if (!jobId && !jobText) {
+          throw new ApiError('Say which job: pick it, or type the address or client', 422)
+        }
+        const team = typeof body.team === 'string' ? body.team : null
+        const result = await requestWorkOrderAmount(client, {
+          jobId,
+          jobText: jobText || null,
+          team,
+          crewName: await tradeDisplayName(client, tradeUser),
+          crewEmail: tradeUser.email || null,
+          reason: jobId ? 'no_work_order_amount' : 'cannot_find_job',
+        }, { sendEmail: sendOutlookWorkOrderRequest(SUPABASE_URL, SUPABASE_SERVICE_KEY) })
+        return json({ ok: result.status !== 'send_failed', ...result })
+      }
       case 'allocate_job': {
         const tradeUser = await authTrade(req, client)
         return json(await allocateJob(client, {
@@ -13090,7 +13129,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...plainLabour,
               ...plainExtras,
               ...(weeklyInvoice?.lines || []),
-            ]).catch((error) => groupWorkOrderApiError(error))
+            ], null, askOfficeForWorkOrder(client, tradeUser)).catch((error) => groupWorkOrderApiError(error))
             const shareSources = [
               ...labourLines.filter((line: any) => draftShareShaped(line)),
               ...extras.filter((extra: any) => draftShareShaped(extra)),
@@ -14172,7 +14211,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             await assertPatioPaysThroughGroup(client, [
               ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
               ...extraLineItems,
-            ]).catch((error) => groupWorkOrderApiError(error))
+            ], null, askOfficeForWorkOrder(client, tradeUser)).catch((error) => groupWorkOrderApiError(error))
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)

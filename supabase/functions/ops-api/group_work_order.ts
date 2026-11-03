@@ -1427,6 +1427,9 @@ export async function assertPatioPaysThroughGroup(
   client: any,
   lines: readonly FenceLine[],
   excludeInvoiceId: string | null = null,
+  // Called once before the refusal when the job has no work order amount, so
+  // the office can be asked to set one. Its failure never changes the 409.
+  onNoWorkOrderAmount: ((jobId: string) => Promise<unknown>) | null = null,
 ): Promise<void> {
   const jobIds = [
     ...new Set(
@@ -1466,6 +1469,11 @@ export async function assertPatioPaysThroughGroup(
     const grouped = groups.some((g) =>
       String(g.job_id) === jobId && String(g.status || "") !== "void"
     );
+    if (!grouped && onNoWorkOrderAmount) {
+      await onNoWorkOrderAmount(jobId).catch((e) =>
+        console.error("[patio-pay] work order request failed:", (e as Error)?.message)
+      );
+    }
     throw new GroupWorkOrderError(
       "patio_pay_group_only",
       grouped
