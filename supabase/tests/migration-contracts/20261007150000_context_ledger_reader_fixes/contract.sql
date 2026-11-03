@@ -722,6 +722,8 @@ ROLLBACK;
 
 -- 6. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (replaced by, 20261104050000, edited the write since: its down goes first, inside this transaction only)
+\ir roll_back_successors.sql
 -- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
 -- so the bodies snapshotted and re-applied below are this migration's own)
 SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
