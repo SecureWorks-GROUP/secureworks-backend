@@ -419,6 +419,8 @@ ROLLBACK;
 -- Later CTX-T5 classification owns these two bodies; restore the original
 -- inside this transaction solely for the historical exact-body assertions.
 BEGIN;
+-- C1 capture lanes (20261103230000) replace both capture bodies after CTX-T5: they come off first.
+\ir ../20261030192929_context_capture_excludes_evaluation/roll_back_successors.sql
 \ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 
@@ -452,6 +454,8 @@ ROLLBACK;
 
 -- 6. Re-apply is a no-op: same bodies, same ledger, no row touched.
 BEGIN;
+-- C1 capture lanes (20261103230000) replace both capture bodies after CTX-T5: they come off first.
+\ir ../20261030192929_context_capture_excludes_evaluation/roll_back_successors.sql
 \ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 INSERT INTO public.context_email_attachments(provider_message_id,attachment_key,status,error_code)

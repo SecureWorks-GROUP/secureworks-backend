@@ -71,6 +71,8 @@ BEGIN
  PERFORM pg_temp.capture_assert((SELECT prosecdef AND proconfig=ARRAY['search_path=public, pg_temp'] FROM pg_proc WHERE oid='public.context_source_freshness()'::regprocedure), 'freshness security configuration unchanged');
  PERFORM pg_temp.capture_assert((SELECT NOT prosecdef AND proconfig=ARRAY['search_path=pg_catalog'] FROM pg_proc WHERE oid='public.context_source_freshness_policy()'::regprocedure), 'policy security configuration unchanged');
 END $$;
+-- C1 capture lanes (20261103230000) replace both capture bodies after CTX-T5: they come off first.
+\ir roll_back_successors.sql
 -- No writes to source events or unrelated function bodies on idempotent reapply.
 CREATE TEMP TABLE capture_before AS SELECT md5(jsonb_agg(to_jsonb(e) ORDER BY id)::text) AS hash FROM public.business_events e;
 CREATE TEMP TABLE capture_functions AS SELECT oid,md5(pg_get_functiondef(oid)) AS hash,proacl FROM pg_proc WHERE pronamespace='public'::regnamespace;

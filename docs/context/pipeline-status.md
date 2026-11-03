@@ -177,6 +177,37 @@ writer that logs actions people or agents took rather than capturing
 evidence (`mcp_agent`) is listed with `alarm_exempt: action_log` and never
 alarms. Sources are listed in byte order.
 
+Capture lanes (C1, `20261103230000`, finish line row C1): seven record
+sources are read from their own tables, not `business_events`:
+`xero/bills` and `xero/invoices` (`xero_invoices` ACCPAY / ACCREC
+`created_at`), `xero/payments` (`xero_settlement_evidence.captured_at`; the
+copy rewrites every row at its daily full re-read), `quotes/sent`
+(`job_documents` quote `sent_at`), `bookings/crew` (`job_assignments`
+`created_at`, ghost observer seats left out), `documents/files`
+(`job_documents.created_at`) and `documents/photos` (`job_media.created_at`).
+Each, and calls (`ghl-call-transcript`), has a fixed quiet limit in business
+minutes in the policy's `quiet_limits` (with `reads`,
+`expected_gap_business_minutes`, `longest_gap_business_minutes` and its own
+`what_to_do`): measured on production over the 28 days to 3 Nov 2026, the
+limit is 1.25 times the longest gap, rounded up to 330 (half a business day):
+calls 990, bills 1320, invoices 1980, payments 1320, quotes 1980, bookings
+1650, files 1320, photos 1650. A record source is judged by its limit alone;
+calls are quiet by the rate rule or the limit, whichever comes first. A
+source with no row in the lookback is listed and not quiet (as F1b rules for
+a gated source before its first row). A quiet source raises the same
+`capture_quiet` alarm, with `lane` and `quiet_after_business_minutes`. Every
+source row carries `alarm_armed` (normally active or has a limit, and not
+exempt); lane members carry `lane`, limited ones `reads`,
+`expected_gap_business_minutes` and `quiet_after_business_minutes`. The block
+adds `lanes`: one line per owner lane in the policy's `lanes` (texts, calls,
+emails, xero, quotes, bookings, documents) with `sources`, `live` (every
+source listed, arrived in the lookback and not quiet), `alarm_armed`,
+`last_captured_at` (newest), `quiet_sources`, `unarmed_sources` and
+`missing_sources`. Record source names are reserved: no `business_events`
+writer may use them. The rate rule, its thresholds, exclusions, exemptions,
+flags and handovers are unchanged. Measured as `capture sources live with
+alarm: N of 7` by the context-system `verify/scripts/c1_capture.py`.
+
 `ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`, with
 the retry projection follow-up `20260924210000_context_ghl_retry_status.sql`):
 the item flag `ghl_message_capture_v2` (a missing row reads off) and the
@@ -338,5 +369,8 @@ the same fixtures, and pins `ready_jobs` to the candidates count),
 `supabase/tests/migration-contracts/20260924210000_context_ghl_retry_status`
 (the latest retry coordinate in the reconciler status block and composer), and
 `supabase/tests/migration-contracts/20260924152100_context_status_f1b`
-(F1b composer stubs, `window_end_id`, and the freshness source swap).
+(F1b composer stubs, `window_end_id`, and the freshness source swap), and
+`supabase/tests/migration-contracts/20261103230000_context_capture_quiet_lanes`
+(C1 record sources, quiet limits, `alarm_armed`, `lanes`; rollback, break and
+fail-closed proofs).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.
