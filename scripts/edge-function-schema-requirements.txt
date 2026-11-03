@@ -1080,3 +1080,14 @@ ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|conte
 ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.status
 ops-api|supabase/migrations/20261006050000_context_lanes_health.sql|column|context_email_attachments.error_code
 ops-api|supabase/migrations/20261006040000_context_story_safety.sql|function|context_job_record_crm_time
+# Group WO V10: what Xero pays on a crew bill and the office's changes to it.
+# ops-api selects the three columns on the trade invoice reads; xero-sync
+# writes them from the bill's lines.
+ops-api|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_bill_total
+ops-api|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustments_ex
+ops-api|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustment_lines
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_bill_total
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustments_ex
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustment_lines
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|constraint|trade_invoices_xero_adjustments_read_together
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|function|trade_invoice_xero_adjustments_tie
