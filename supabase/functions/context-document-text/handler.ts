@@ -36,8 +36,9 @@ export interface HandlerDeps {
   env(name: string): string | undefined;
   // deno-lint-ignore no-explicit-any
   createSupabase(): any;
-  /** The bounded PDF text layer extractor (ops-api/makesafe_pdf_text.ts). */
-  extract(bytes: Uint8Array): Promise<PdfText>;
+  /** The bounded PDF text layer extractor (ops-api/makesafe_pdf_text.ts);
+   * opts.maxBytes is a read request's raised size limit. */
+  extract(bytes: Uint8Array, opts?: { maxBytes?: number }): Promise<PdfText>;
   waitUntil?(p: Promise<unknown>): void;
   now?(): number;
 }
@@ -137,6 +138,16 @@ export function liveDeps(deps: HandlerDeps): ReaderDeps {
       if (error) raise("due_documents_unreadable");
       return (data ?? []) as DueDocument[];
     },
+    async requestedDocuments(limit) {
+      // Documents someone named (context_document_text_requests,
+      // 20261104130000), on their job or on no job.
+      const { data, error } = await supabase.rpc(
+        "context_document_text_requested_due",
+        { p_limit: limit },
+      );
+      if (error) raise("requested_unreadable");
+      return (data ?? []) as DueDocument[];
+    },
     async download(bucket, path): Promise<Download> {
       try {
         const { data, error } = await supabase.storage.from(bucket).download(
@@ -155,7 +166,7 @@ export function liveDeps(deps: HandlerDeps): ReaderDeps {
         return { ok: false, code: "transport", missing: false };
       }
     },
-    extract: (bytes) => deps.extract(bytes),
+    extract: (bytes, opts) => deps.extract(bytes, opts),
     async capture(row): Promise<CaptureOutcome> {
       try {
         const { data, error } = await supabase.rpc("capture_business_event", {
@@ -216,7 +227,7 @@ function logRun(result: RunResult): void {
     console.log(
       `[context-document-text] run=${result.run_id} status=${result.status} error=${
         result.error_code ?? "-"
-      } selected=${c.selected} saved=${c.saved} duplicate=${c.duplicate} live=${c.live_saved} backfill=${c.backfill_saved} no_text_layer=${c.no_text_layer} image=${c.image} not_supported=${c.not_supported} no_file=${c.no_file} errors=${c.errors} relisted_jobs=${c.relisted_jobs}`,
+      } selected=${c.selected} requested=${c.requested} saved=${c.saved} duplicate=${c.duplicate} live=${c.live_saved} backfill=${c.backfill_saved} no_job=${c.no_job_saved} no_text_layer=${c.no_text_layer} image=${c.image} not_supported=${c.not_supported} no_file=${c.no_file} errors=${c.errors} relisted_jobs=${c.relisted_jobs}`,
     );
   } else {
     console.log(`[context-document-text] ${result.outcome}`);

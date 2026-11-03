@@ -31,6 +31,11 @@ import {
  * document block. Below this an email is treated as a scanned/low-text PDF. */
 export const PDF_TEXT_MIN_CHARS = 200;
 export const PDF_TEXT_MAX_BYTES = 5_000_000;
+/** The most a caller may raise the size limit to for one named document (the
+ * document text reader's read requests, 20261104130000). Pages and characters
+ * keep their limits. Make-safe intake never passes a limit, so it stays at
+ * PDF_TEXT_MAX_BYTES. */
+export const PDF_TEXT_REQUEST_MAX_BYTES = 20_000_000;
 export const PDF_TEXT_MAX_PAGES = 25;
 export const PDF_TEXT_MAX_CHARS = 40_000;
 
@@ -389,14 +394,29 @@ async function extractPdfTextFromContentStreams(
   }
 }
 
+/** The byte limit one extraction uses: the default, or a raised one capped at
+ * PDF_TEXT_REQUEST_MAX_BYTES. A limit below the default never lowers it. */
+export function pdfTextByteLimit(maxBytes?: number): number {
+  if (typeof maxBytes !== "number" || !Number.isFinite(maxBytes)) {
+    return PDF_TEXT_MAX_BYTES;
+  }
+  return Math.min(
+    Math.max(Math.floor(maxBytes), PDF_TEXT_MAX_BYTES),
+    PDF_TEXT_REQUEST_MAX_BYTES,
+  );
+}
+
 /**
  * Extract a bounded digital text layer from a PDF. PDF.js handles generated
  * builder work orders, including ToUnicode/CID fonts; the original stream reader
  * remains a fallback. Image-only, corrupt and pathological inputs return
- * mode:'none' with a fixed reason for per-source quarantine.
+ * mode:'none' with a fixed reason for per-source quarantine. options.maxBytes
+ * raises the size limit for one named document (see pdfTextByteLimit); pages
+ * and characters keep their limits.
  */
 export async function extractPdfText(
   bytes: Uint8Array,
+  options: { maxBytes?: number } = {},
 ): Promise<PdfTextResult> {
   const empty: PdfTextResult = {
     text: "",
@@ -412,7 +432,7 @@ export async function extractPdfText(
   ) {
     return { ...empty, note: "not_pdf" };
   }
-  if (bytes.byteLength > PDF_TEXT_MAX_BYTES) {
+  if (bytes.byteLength > pdfTextByteLimit(options.maxBytes)) {
     return { ...empty, note: "pdf_too_large" };
   }
 

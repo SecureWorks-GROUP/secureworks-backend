@@ -9,7 +9,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { DueDocument } from "../context-document-text/read.ts";
-import { type ClaimOutcome, type ClaimRequest, DESCRIBED_CODE, type LeasedDocument, LIMITS, previewVision, submitReading, type VisionDeps, type VisionPolicy, type VisionRecord } from "./vision.ts";
+import { type ClaimOutcome, type ClaimRequest, DESCRIBED_CODE, type LeasedDocument, LIMITS, nextDocument, previewVision, submitReading, type VisionDeps, type VisionPolicy, type VisionRecord } from "./vision.ts";
 
 /** The parts of an evidence row the tests read. */
 type Row = {
@@ -98,6 +98,7 @@ function fake(over: {
   lane?: boolean;
   admission?: { open: boolean; code?: string };
   due?: DueDocument[];
+  requested?: DueDocument[];
   files?: Record<string, Uint8Array | "missing" | "error">;
   claim?: (req: ClaimRequest) => ClaimOutcome;
   leased?: LeasedDocument | null;
@@ -120,6 +121,7 @@ function fake(over: {
     policy: () => Promise.resolve(over.policy ?? POLICY),
     admission: () => Promise.resolve(over.admission ?? { open: true }),
     dueDocuments: () => Promise.resolve(over.due ?? []),
+    requestedDocuments: () => Promise.resolve(over.requested ?? []),
     download: (bucket, path) => {
       const got = over.files?.[`${bucket}/${path}`];
       if (got === undefined || got === "missing") {
@@ -491,4 +493,68 @@ Deno.test("written words are still kept as words: the row and the record are unc
   );
   assert(!("described" in row.payload.document));
   assert(!("code" in f.records[0]));
+});
+
+// ── Read requests (20261104130000) ─────────────────────────────────────
+
+Deno.test("a requested scan on no job: next hands it out first; submit saves it on no job, automated, with no re-list", async () => {
+  const scan = doc({
+    source_kind: "email_attachment",
+    source_id: "44444444-4444-4444-8444-444444444444",
+    job_id: null,
+    job_number: null,
+    file_name: "metroll-1056504.jpg",
+    content_type: "image/jpeg",
+    storage_bucket: "context-email-attachments",
+    storage_path: "msg/m/metroll-1056504.jpg",
+    storage_url: null,
+    capture_mode: "backfill",
+  });
+  const f = fake({
+    requested: [scan],
+    due: [doc()],
+    files: { "context-email-attachments/msg/m/metroll-1056504.jpg": jpeg() },
+  });
+  const next = await nextDocument(f.deps);
+  assertEquals(next.outcome, "claimed");
+  if (next.outcome !== "claimed") return;
+  assertEquals(next.document.source_id, scan.source_id);
+  assertEquals(next.document.job_id, null);
+  assertEquals(f.claims.length, 1);
+  assertEquals(f.claims[0].job_id, null);
+
+  const onNoJob = fake({
+    leased: lease({
+      source_kind: "email_attachment",
+      source_id: scan.source_id,
+      job_id: null,
+      file_kind: "pdf",
+      file_name: "metroll-1056504.pdf",
+    }),
+  });
+  const out = await submitReading(onNoJob.deps, {
+    reservation_id: RESV,
+    model: "gpt-6-luna",
+    answer: { kind: "printed_document", text: "PICKUP 1056504", confidence: 0.9, people_visible: false },
+  });
+  assertEquals(out, { outcome: "saved", event_id: "ev-1" });
+  const row = onNoJob.captured[0] as Row;
+  assertEquals("job_id" in row, false);
+  assertEquals("match_method" in row, false);
+  assertEquals(row.provider_message_id, `doctext:no_job:${"b".repeat(64)}`);
+  assertEquals((row.payload as unknown as Record<string, unknown>).automated, true);
+  assertEquals(row.payload.job_id, null);
+  assertEquals(row.metadata, { capture_mode: "backfill", writer: "workflow:context-document-vision", requested_read: true });
+  assertEquals(onNoJob.records.at(-1)?.job_id, null);
+  assertEquals(onNoJob.records.at(-1)?.result, "saved");
+  // A read on no job lists no job for reading.
+  assertEquals(onNoJob.relists, []);
+});
+
+Deno.test("an unreadable requested vision list leaves the ordinary list", async () => {
+  const f = fake({ due: [doc()], files: { [`job-documents/${JOB}/site-photo.jpg`]: jpeg() } });
+  f.deps.requestedDocuments = () => Promise.reject(new Error("missing"));
+  const next = await nextDocument(f.deps);
+  assertEquals(next.outcome, "claimed");
+  assertEquals(f.claims[0].job_id, JOB);
 });

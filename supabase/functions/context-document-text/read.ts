@@ -27,6 +27,20 @@
 // backoff. Idle, with no read and no run row, while the flag
 // context_document_text_v1 or the capture lane is off.
 //
+// Read requests (migration 20261104130000, context_document_text_requests):
+// documents someone named are listed by context_document_text_requested_due
+// and read first in each run.
+//   * An email attachment named by a request whose email is on NO job is read
+//     on no job: its row carries no job, is keyed doctext:no_job:<sha-256>,
+//     and is marked automated so the attribution ladder never places it (the
+//     words of a supplier bill name job numbers and addresses the ladder would
+//     otherwise follow). It wakes no read and lists no job.
+//   * A request may raise one PDF's size limit (up to request_max_pdf_bytes,
+//     20 MB); pages and characters keep their limits. Before a read above the
+//     5 MB default the reader records an attempt (large_read_started), so a
+//     file that stops the worker backs off and ends failed instead of being
+//     taken again every run.
+//
 // Logs and results carry ids, counts and codes only, never words.
 
 export const FLAG = "context_document_text_v1";
@@ -40,7 +54,15 @@ export interface ReaderPolicy {
   key_prefix: string;
   batch_limit: number;
   catchup_priority: number;
+  /** Key segment of a read on no job (20261104130000); "no_job". */
+  no_job_key?: string;
+  /** The most a read request may raise one PDF's size limit to. */
+  request_max_pdf_bytes?: number;
 }
+
+/** The key segment of a read on no job, as the policy names it. The vision
+ * reader keys the same way (its own policy has no such field). */
+export const NO_JOB_KEY = "no_job";
 
 /** Local limits of one invocation (not business thresholds). */
 export const LIMITS = {
@@ -48,16 +70,21 @@ export const LIMITS = {
   runningStaleMs: 10 * 60_000,
   /** Matches the extractor's own cap; checked before extraction too. */
   maxPdfBytes: 5_000_000,
+  /** The most any read request may raise one PDF to (the extractor's own
+   * request cap), whatever the policy says. */
+  requestMaxPdfBytes: 20_000_000,
   previewMax: 100,
   /** How far back the history re-list looks for this reader's rows. */
   relistWindowMs: 24 * 60 * 60_000,
 };
 
-/** One document due a read, as context_document_text_due returns it. */
+/** One document due a read, as context_document_text_due (or
+ * context_document_text_requested_due) returns it. */
 export interface DueDocument {
   source_kind: "job_document" | "email_attachment";
   source_id: string;
-  job_id: string;
+  /** NULL: a requested email attachment read on no job. */
+  job_id: string | null;
   job_number: string | null;
   file_name: string | null;
   doc_type: string | null;
@@ -70,6 +97,8 @@ export interface DueDocument {
   doc_at: string | null;
   capture_mode: "live" | "backfill";
   attempts: number;
+  /** A read request's raised PDF size limit (requested list only). */
+  max_pdf_bytes?: number | null;
 }
 
 /** The extractor's result, as ops-api/makesafe_pdf_text.ts returns it. */
@@ -107,7 +136,7 @@ export type ReadResult =
 export interface ReadRecord {
   source_kind: string;
   source_id: string;
-  job_id: string;
+  job_id: string | null;
   fingerprint: string;
   file_kind: FileKind;
   result: ReadResult;
@@ -130,8 +159,10 @@ export interface ReaderDeps {
   ): Promise<{ id: string; status: string; started_at: string } | null>;
   recordRun(run: Record<string, unknown>): Promise<string>;
   dueDocuments(limit: number): Promise<DueDocument[]>;
+  /** Requested documents due a read (context_document_text_requested_due). */
+  requestedDocuments(limit: number): Promise<DueDocument[]>;
   download(bucket: string, path: string): Promise<Download>;
-  extract(bytes: Uint8Array): Promise<PdfText>;
+  extract(bytes: Uint8Array, opts?: { maxBytes?: number }): Promise<PdfText>;
   capture(row: Record<string, unknown>): Promise<CaptureOutcome>;
   record(rec: ReadRecord): Promise<{ outcome?: string; error?: string }>;
   relistBackfill(
@@ -249,6 +280,32 @@ export function resolveLocation(
   return { ok: false, code: "unsupported_location" };
 }
 
+/**
+ * The PDF size limit one document is read at: the 5 MB default, or a read
+ * request's raised limit, never above the policy's request_max_pdf_bytes nor
+ * the extractor's own request cap.
+ */
+export function pdfByteLimit(doc: DueDocument, policy: ReaderPolicy): number {
+  const asked = doc.max_pdf_bytes;
+  if (
+    typeof asked !== "number" || !Number.isInteger(asked) ||
+    asked <= LIMITS.maxPdfBytes
+  ) return LIMITS.maxPdfBytes;
+  const most = typeof policy.request_max_pdf_bytes === "number" &&
+      Number.isFinite(policy.request_max_pdf_bytes)
+    ? Math.min(policy.request_max_pdf_bytes, LIMITS.requestMaxPdfBytes)
+    : LIMITS.maxPdfBytes;
+  return Math.max(LIMITS.maxPdfBytes, Math.min(asked, most));
+}
+
+/** The job segment of a document's evidence key: its job, or no_job. */
+export function jobKey(
+  doc: Pick<DueDocument, "job_id">,
+  policy: Pick<ReaderPolicy, "no_job_key">,
+): string {
+  return doc.job_id ?? policy.no_job_key ?? NO_JOB_KEY;
+}
+
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
   return Array.from(new Uint8Array(digest))
@@ -351,7 +408,10 @@ export function buildDocumentTextRow(
     truncated: boolean;
     extractor: string | null;
   },
-  policy: Pick<ReaderPolicy, "event_type" | "event_source" | "key_prefix">,
+  policy: Pick<
+    ReaderPolicy,
+    "event_type" | "event_source" | "key_prefix" | "no_job_key"
+  >,
 ): Record<string, unknown> {
   const label = documentLabel(doc.doc_type);
   const pages = read.pageCount;
@@ -367,7 +427,7 @@ export function buildDocumentTextRow(
   const summary =
     `[Document text: ${label}${pagePart}, ${read.text.length} characters${cutPart}.]`;
   const words = `${header}\n\n${read.text}`;
-  return {
+  const row: Record<string, unknown> = {
     event_type: policy.event_type,
     source: policy.event_source,
     entity_type: doc.source_kind,
@@ -375,7 +435,9 @@ export function buildDocumentTextRow(
     job_id: doc.job_id,
     match_method: "direct_job_id",
     event_at: doc.doc_at,
-    provider_message_id: `${policy.key_prefix}${doc.job_id}:${read.sha256}`,
+    provider_message_id: `${policy.key_prefix}${
+      jobKey(doc, policy)
+    }:${read.sha256}`,
     channel: "document",
     direction: "internal",
     thread_key: null,
@@ -406,6 +468,24 @@ export function buildDocumentTextRow(
     },
     metadata: { capture_mode: doc.capture_mode, writer: ACTOR },
   };
+  return doc.job_id === null ? onNoJob(row) : row;
+}
+
+/**
+ * A requested read on no job (20261104130000): the row names no job and no
+ * match method, is marked automated so the attribution ladder never places it
+ * (its words name job numbers and addresses), and is history that wakes no
+ * read. Shared with the vision reader.
+ */
+export function onNoJob(row: Record<string, unknown>): Record<string, unknown> {
+  const { job_id: _job, match_method: _method, ...rest } = row;
+  const payload = (row.payload ?? {}) as Record<string, unknown>;
+  const metadata = (row.metadata ?? {}) as Record<string, unknown>;
+  return {
+    ...rest,
+    payload: { ...payload, job_id: null, automated: true, no_job: true },
+    metadata: { ...metadata, capture_mode: "backfill", requested_read: true },
+  };
 }
 
 function codePart(value: unknown, fallback = "error"): string {
@@ -419,7 +499,7 @@ export interface StepResult {
   code?: string;
   /** Stop the run: the capture lane went off mid-run. */
   stop?: string;
-  savedMode?: "live" | "backfill";
+  savedMode?: "live" | "backfill" | "no_job";
 }
 
 /** One document: locate, download, extract, save, record. */
@@ -477,13 +557,26 @@ export async function processDocument(
     return finish({ result: "error", code }, { outcome: "error", code });
   }
   const sha = await sha256Hex(got.bytes);
-  if (got.bytes.byteLength > LIMITS.maxPdfBytes) {
+  const limit = pdfByteLimit(doc, policy);
+  if (got.bytes.byteLength > limit) {
     return finish({ result: "too_large", code: "pdf_too_large", sha256: sha }, {
       outcome: "too_large",
       code: "pdf_too_large",
     });
   }
-  const pdf = await deps.extract(got.bytes);
+  if (got.bytes.byteLength > LIMITS.maxPdfBytes) {
+    // A read above the default limit may stop the worker. Record the attempt
+    // first: a file that does backs off (15 min, 1 h, 6 h, 24 h) and ends
+    // failed:large_read_started instead of being taken again every run.
+    const started = await deps.record({
+      ...base,
+      result: "error",
+      code: "large_read_started",
+      sha256: sha,
+    });
+    if (started.error) return { outcome: "record_failed", code: started.error };
+  }
+  const pdf = await deps.extract(got.bytes, { maxBytes: limit });
   const text = readableText(pdf);
   if (!text) {
     const why = noTextResult(pdf);
@@ -520,9 +613,10 @@ export async function processDocument(
       code,
     });
   }
+  const savedMode = doc.job_id === null ? "no_job" : doc.capture_mode;
   const step: StepResult = saved.outcome === "duplicate"
-    ? { outcome: "duplicate", savedMode: doc.capture_mode }
-    : { outcome: "saved", savedMode: doc.capture_mode };
+    ? { outcome: "duplicate", savedMode }
+    : { outcome: "saved", savedMode };
   return finish({
     result: "saved",
     sha256: sha,
@@ -540,6 +634,8 @@ export function emptyCounts(): Record<string, number> {
     duplicate: 0,
     live_saved: 0,
     backfill_saved: 0,
+    no_job_saved: 0,
+    requested: 0,
     no_text_layer: 0,
     image: 0,
     not_supported: 0,
@@ -558,7 +654,9 @@ function tally(counts: Record<string, number>, step: StepResult): void {
     case "saved":
     case "duplicate":
       counts[step.outcome]++;
-      if (step.savedMode === "backfill") counts.backfill_saved++;
+      // A read on no job lists no job for reading.
+      if (step.savedMode === "no_job") counts.no_job_saved++;
+      else if (step.savedMode === "backfill") counts.backfill_saved++;
       else counts.live_saved++;
       break;
     case "no_text_layer":
@@ -588,6 +686,33 @@ export type RunResult =
     documents: { source_id: string; outcome: string; code?: string }[];
   };
 
+/**
+ * The documents a run takes: requested ones first (named by someone), then the
+ * ordinary list, together at most the batch. A requested list that cannot be
+ * read (the migration missing) leaves the ordinary list to run on.
+ */
+export async function documentsDue(
+  deps: Pick<ReaderDeps, "dueDocuments" | "requestedDocuments">,
+  limit: number,
+): Promise<
+  { documents: DueDocument[]; requested: number; requestedError?: string }
+> {
+  let requested: DueDocument[] = [];
+  let requestedError: string | undefined;
+  try {
+    requested = (await deps.requestedDocuments(limit)).slice(0, limit);
+  } catch {
+    requestedError = "requested_unreadable";
+  }
+  const rest = limit - requested.length;
+  const ordinary = rest > 0 ? await deps.dueDocuments(rest) : [];
+  return {
+    documents: [...requested, ...ordinary.slice(0, Math.max(rest, 0))],
+    requested: requested.length,
+    ...(requestedError ? { requestedError } : {}),
+  };
+}
+
 /** One run: the documents due now, then the history re-list. */
 export async function runDocumentText(deps: ReaderDeps): Promise<RunResult> {
   if (!(await deps.flagOn())) return { outcome: "idle", reason: "flag_off" };
@@ -613,8 +738,13 @@ export async function runDocumentText(deps: ReaderDeps): Promise<RunResult> {
   let status: "succeeded" | "partial" | "failed" = "succeeded";
   let errorCode: string | null = null;
   try {
-    const due = await deps.dueDocuments(policy.batch_limit);
-    for (const doc of due) {
+    const due = await documentsDue(deps, policy.batch_limit);
+    if (due.requestedError) {
+      status = "partial";
+      errorCode = due.requestedError;
+    }
+    counts.requested = due.requested;
+    for (const doc of due.documents) {
       if (deps.now() - started > LIMITS.timeBudgetMs) {
         status = "partial";
         errorCode = "time_budget";
@@ -706,6 +836,8 @@ export interface PreviewResult {
     source_kind: string;
     source_id: string;
     job_number: string | null;
+    on_no_job: boolean;
+    max_pdf_bytes?: number;
     file_kind: FileKind;
     location: string;
     capture_mode: string;
@@ -718,14 +850,18 @@ export interface PreviewResult {
  * read. No download, no extraction, no write; works with the flag off.
  */
 export async function previewDocumentText(
-  deps: Pick<ReaderDeps, "flagOn" | "laneOn" | "dueDocuments" | "supabaseUrl">,
+  deps: Pick<
+    ReaderDeps,
+    "flagOn" | "laneOn" | "dueDocuments" | "requestedDocuments" | "supabaseUrl"
+  >,
   limit: number,
 ): Promise<PreviewResult> {
-  const [flagOn, laneOn, due] = await Promise.all([
+  const [flagOn, laneOn, listed] = await Promise.all([
     deps.flagOn(),
     deps.laneOn(),
-    deps.dueDocuments(limit),
+    documentsDue(deps, limit),
   ]);
+  const due = listed.documents;
   return {
     outcome: "preview",
     flag_on: flagOn,
@@ -739,6 +875,10 @@ export async function previewDocumentText(
         source_kind: d.source_kind,
         source_id: d.source_id,
         job_number: d.job_number,
+        on_no_job: d.job_id === null,
+        ...(typeof d.max_pdf_bytes === "number"
+          ? { max_pdf_bytes: d.max_pdf_bytes }
+          : {}),
         file_kind: kind,
         location: where === null
           ? "not_read"

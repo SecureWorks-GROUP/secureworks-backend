@@ -380,9 +380,15 @@ BEGIN
   'the ledger''s reserve must stay 100 and 100');
  -- Readers of the policy are untouched; the replaced bodies are this migration's.
  -- (the call cap setting, 20261013100000, changed in two of them only which policy function the
- -- cap reads call: that one name is put back before the comparison)
+ -- cap reads call: that one name is put back before the comparison; and the read requests,
+ -- 20261104130000, replace the vision claim and the vision status bodies so a requested scan can be
+ -- read on no job, and leave this migration's admission and ceiling as they were: its own contract
+ -- proves both, so those two exact bodies are accepted here too)
  PERFORM pg_temp.cb_assert((SELECT jsonb_object_agg(p.oid::regprocedure::text,
-    md5(replace(p.prosrc, 'public.context_cadence_policy_today()', 'public.context_cadence_policy()'))) FROM pg_proc p
+    CASE WHEN (p.oid::regprocedure::text, md5(p.prosrc)) IN (('claim_context_document_vision(jsonb)', '673a48233da0ac9f40d3d8415076b424'),
+       ('context_document_vision_status()', '5dfc83c4eba046329dee9dda60ff5f7e'))
+     THEN pre.untouched ->> p.oid::regprocedure::text
+     ELSE md5(replace(p.prosrc, 'public.context_cadence_policy_today()', 'public.context_cadence_policy()')) END) FROM pg_proc p
    WHERE p.oid::regprocedure::text IN (SELECT jsonb_object_keys(pre.untouched))) = pre.untouched, 'a reader this migration leaves alone moved');
  -- (the saved job story, 20261009100000, adds a story branch to the admission and
  -- leaves every other phase as it was: its own contract proves both, so its body

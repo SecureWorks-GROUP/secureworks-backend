@@ -111,6 +111,16 @@ export function liveDeps(deps: HandlerDeps): VisionDeps {
       if (error) raise("due_documents_unreadable");
       return (data ?? []) as DueDocument[];
     },
+    async requestedDocuments(limit) {
+      // Requested scans (context_document_text_requests, 20261104130000),
+      // on their job or on no job.
+      const { data, error } = await supabase.rpc(
+        "context_document_vision_requested_due",
+        { p_limit: limit },
+      );
+      if (error) raise("requested_unreadable");
+      return (data ?? []) as DueDocument[];
+    },
     async download(bucket, path): Promise<Download> {
       try {
         const { data, error } = await supabase.storage.from(bucket).download(

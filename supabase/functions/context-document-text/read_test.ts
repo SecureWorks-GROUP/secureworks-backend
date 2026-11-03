@@ -6,7 +6,7 @@
 
 // deno-lint-ignore no-import-prefix
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { type CaptureOutcome, type Download, type DueDocument, type PdfText, previewDocumentText, processDocument, type ReaderDeps, type ReaderPolicy, type ReadRecord, sha256Hex } from "./read.ts";
+import { buildDocumentTextRow, type CaptureOutcome, type Download, documentsDue, type DueDocument, type PdfText, pdfByteLimit, previewDocumentText, processDocument, type ReaderDeps, type ReaderPolicy, type ReadRecord, runDocumentText, sha256Hex } from "./read.ts";
 
 const SUPABASE = "https://kevgrhcjxspbxgovpmfl.supabase.co";
 const JOB = "11111111-1111-4111-8111-111111111111";
@@ -62,6 +62,7 @@ const PDF_BYTES = new TextEncoder().encode("%PDF-1.4 fixture bytes");
 interface Calls {
   downloads: string[];
   extracts: number;
+  extractLimits: (number | undefined)[];
   captures: Record<string, unknown>[];
   records: ReadRecord[];
   runs: Record<string, unknown>[];
@@ -70,6 +71,8 @@ interface Calls {
 
 function fakeDeps(opts: {
   due?: DueDocument[];
+  requested?: DueDocument[];
+  requestedThrows?: boolean;
   download?: (bucket: string, path: string) => Download;
   extract?: PdfText;
   capture?: (row: Record<string, unknown>) => CaptureOutcome;
@@ -84,6 +87,7 @@ function fakeDeps(opts: {
   const calls: Calls = {
     downloads: [],
     extracts: 0,
+    extractLimits: [],
     captures: [],
     records: [],
     runs: [],
@@ -111,14 +115,23 @@ function fakeDeps(opts: {
       }
       return Promise.resolve(opts.due ?? [doc()]);
     },
+    requestedDocuments() {
+      if (opts.requestedThrows) {
+        return Promise.reject(
+          Object.assign(new Error("x"), { code: "requested_unreadable" }),
+        );
+      }
+      return Promise.resolve(opts.requested ?? []);
+    },
     download(bucket, path) {
       calls.downloads.push(`${bucket}/${path}`);
       return Promise.resolve(
         opts.download?.(bucket, path) ?? { ok: true, bytes: PDF_BYTES },
       );
     },
-    extract() {
+    extract(_bytes, o) {
       calls.extracts++;
+      calls.extractLimits.push(o?.maxBytes);
       return Promise.resolve(opts.extract ?? textPdf());
     },
     capture(row) {
@@ -270,4 +283,170 @@ Deno.test("preview: lists what a run would take, reads and writes nothing, flag 
     calls.records.length,
     calls.runs.length,
   ], [0, 0, 0, 0, 0]);
+});
+
+// ── Read requests (20261104130000) ─────────────────────────────────────
+
+const REQ_POLICY: ReaderPolicy = {
+  ...POLICY,
+  no_job_key: "no_job",
+  request_max_pdf_bytes: 20_000_000,
+};
+
+/** A requested supplier bill whose email is on no job. */
+function noJobBill(over: Partial<DueDocument> = {}): DueDocument {
+  return doc({
+    source_kind: "email_attachment",
+    source_id: "66666666-6666-4666-8666-666666666666",
+    job_id: null,
+    job_number: null,
+    file_name: "Invoice_10095132.pdf",
+    doc_type: "email_attachment",
+    content_type: "application/pdf",
+    storage_bucket: "context-email-attachments",
+    storage_path: "msg/abc/Invoice_10095132.pdf",
+    storage_url: null,
+    pdf_url: null,
+    capture_mode: "backfill",
+    max_pdf_bytes: null,
+    ...over,
+  });
+}
+
+const BILL_WORDS =
+  "TAX INVOICE 10095132. Deliver to SWF-261562, 12 Example Street. 6 x 2400 mm posts, 12 x rails, 1 x gate kit. Total includes GST. Payment due on the 20th of the month following.";
+
+Deno.test("requested: a bill on no job is saved on no job, keyed no_job, marked automated, and lists no job", async () => {
+  const { deps, calls } = fakeDeps({
+    requested: [noJobBill()],
+    due: [],
+    extract: textPdf(BILL_WORDS, 1),
+  });
+  const run = await runDocumentText({ ...deps, policy: () => Promise.resolve(REQ_POLICY) });
+  if (run.outcome !== "ran") throw new Error(run.outcome);
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts.requested, 1);
+  assertEquals(run.counts.saved, 1);
+  assertEquals(run.counts.no_job_saved, 1);
+  assertEquals(run.counts.backfill_saved, 0);
+  assertEquals(calls.relists.length, 0);
+  assertEquals(calls.downloads, ["context-email-attachments/msg/abc/Invoice_10095132.pdf"]);
+  const row = calls.captures[0];
+  const sha = await sha256Hex(PDF_BYTES);
+  assertEquals("job_id" in row, false);
+  assertEquals("match_method" in row, false);
+  assertEquals(row.provider_message_id, `doctext:no_job:${sha}`);
+  const payload = row.payload as Record<string, unknown>;
+  assertEquals(payload.automated, true);
+  assertEquals(payload.no_job, true);
+  assertEquals(payload.job_id, null);
+  assertEquals(row.metadata, { capture_mode: "backfill", writer: "workflow:context-document-text", requested_read: true });
+  assertEquals(calls.records.length, 1);
+  assertEquals(calls.records[0].job_id, null);
+  assertEquals(calls.records[0].result, "saved");
+  assertEquals(calls.extractLimits, [5_000_000]);
+});
+
+Deno.test("requested: a document on a job keeps exactly its old evidence row", () => {
+  const read = { sha256: "c".repeat(64), text: QUOTE_WORDS, pageCount: 2, truncated: false, extractor: "unpdf@1.6.2" };
+  const row = buildDocumentTextRow(doc(), read, REQ_POLICY);
+  assertEquals(row.job_id, JOB);
+  assertEquals(row.match_method, "direct_job_id");
+  assertEquals(row.provider_message_id, `doctext:${JOB}:${"c".repeat(64)}`);
+  assertEquals(row.metadata, { capture_mode: "live", writer: "workflow:context-document-text" });
+  const payload = row.payload as Record<string, unknown>;
+  assertEquals("automated" in payload, false);
+  assertEquals("no_job" in payload, false);
+  assertEquals(payload.job_id, JOB);
+  // Same row with the old policy shape (no no_job_key): nothing about a job's row depends on it.
+  assertEquals(buildDocumentTextRow(doc(), read, POLICY), row);
+});
+
+Deno.test("requested: requested documents run first and the ordinary list fills the batch", async () => {
+  const asked: number[] = [];
+  const listed = await documentsDue({
+    requestedDocuments: () => Promise.resolve([noJobBill()]),
+    dueDocuments: (n) => {
+      asked.push(n);
+      return Promise.resolve([doc(), doc({ source_id: "77777777-7777-4777-8777-777777777777" })]);
+    },
+  }, 20);
+  assertEquals(listed.requested, 1);
+  assertEquals(listed.documents.map((d) => d.source_id), [
+    "66666666-6666-4666-8666-666666666666",
+    "22222222-2222-4222-8222-222222222222",
+    "77777777-7777-4777-8777-777777777777",
+  ]);
+  assertEquals(asked, [19]);
+  // A full requested list leaves no room: the ordinary list is not asked.
+  const full = await documentsDue({
+    requestedDocuments: () => Promise.resolve([noJobBill(), noJobBill()]),
+    dueDocuments: () => { throw new Error("not asked"); },
+  }, 2);
+  assertEquals(full.documents.length, 2);
+});
+
+Deno.test("requested: an unreadable requested list leaves the ordinary list to run", async () => {
+  const { deps, calls } = fakeDeps({ requestedThrows: true });
+  const run = await runDocumentText(deps);
+  if (run.outcome !== "ran") throw new Error(run.outcome);
+  assertEquals(run.status, "partial");
+  assertEquals(run.error_code, "requested_unreadable");
+  assertEquals(run.counts.saved, 1);
+  assertEquals(calls.captures.length, 1);
+});
+
+Deno.test("requested: a raised limit reads a 5.4 MB PDF after recording the attempt; without it the PDF is too large", async () => {
+  const bytes = new Uint8Array(5_412_737);
+  bytes.set(new TextEncoder().encode("%PDF-1.4"));
+  const sha = await sha256Hex(bytes);
+  const quote = doc({
+    source_kind: "email_attachment",
+    job_id: JOB,
+    content_type: "application/pdf",
+    storage_bucket: "context-email-attachments",
+    storage_path: "msg/q/quote.pdf",
+    storage_url: null,
+    pdf_url: null,
+    capture_mode: "backfill",
+  });
+  // No request: too large, nothing extracted.
+  const plain = fakeDeps({ download: () => ({ ok: true, bytes }) });
+  assertEquals((await processDocument(quote, REQ_POLICY, plain.deps)).outcome, "too_large");
+  assertEquals(plain.calls.extracts, 0);
+  // A request for 20 MB: the attempt is recorded, then the read at 20 MB.
+  const raised = fakeDeps({ download: () => ({ ok: true, bytes }), extract: textPdf(QUOTE_WORDS, 3) });
+  const step = await processDocument({ ...quote, max_pdf_bytes: 20_000_000 }, REQ_POLICY, raised.deps);
+  assertEquals(step.outcome, "saved");
+  assertEquals(raised.calls.records.map((r) => [r.result, r.code ?? null]), [["error", "large_read_started"], ["saved", null]]);
+  assertEquals(raised.calls.records[0].sha256, sha);
+  assertEquals(raised.calls.extractLimits, [20_000_000]);
+  assertEquals(raised.calls.records[1].page_count, 3);
+  // A failed attempt record stops before the read.
+  const blocked = fakeDeps({ download: () => ({ ok: true, bytes }), record: () => ({ error: "document_text_source_not_found" }) });
+  assertEquals((await processDocument({ ...quote, max_pdf_bytes: 20_000_000 }, REQ_POLICY, blocked.deps)).outcome, "record_failed");
+  assertEquals(blocked.calls.extracts, 0);
+});
+
+Deno.test("requested: the size limit never passes the policy or 20 MB, and a PDF under 5 MB records no extra attempt", async () => {
+  assertEquals(pdfByteLimit(doc(), REQ_POLICY), 5_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 4_000_000 }), REQ_POLICY), 5_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), REQ_POLICY), 12_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 90_000_000 }), REQ_POLICY), 20_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), { ...REQ_POLICY, request_max_pdf_bytes: 8_000_000 }), 8_000_000);
+  // An old policy without the field never raises.
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), POLICY), 5_000_000);
+  const small = fakeDeps();
+  await processDocument(doc({ max_pdf_bytes: 20_000_000 }), REQ_POLICY, small.deps);
+  assertEquals(small.calls.records.map((r) => r.result), ["saved"]);
+  assertEquals(small.calls.extractLimits, [20_000_000]);
+});
+
+Deno.test("requested: preview shows requested documents first and marks a read on no job", async () => {
+  const { deps } = fakeDeps({ requested: [noJobBill({ max_pdf_bytes: 20_000_000 })], due: [doc()] });
+  const result = await previewDocumentText(deps, 10);
+  assertEquals(result.due.map((d) => [d.on_no_job, d.max_pdf_bytes ?? null, d.location]), [
+    [true, 20_000_000, "storage:context-email-attachments"],
+    [false, null, "storage:job-documents"],
+  ]);
 });
