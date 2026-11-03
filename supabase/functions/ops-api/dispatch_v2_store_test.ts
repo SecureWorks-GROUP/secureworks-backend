@@ -1845,6 +1845,46 @@ Deno.test("S08 patio: the refill takes the newer revision's engine lines into th
   assertOnlyV2Writes(db);
 });
 
+// ── B3: the fence fill writes each line's sealed source and unit ─────────────
+
+Deno.test("B3 fence fill: each row carries its sealed line and unit; Shaun's email wording is unchanged", async () => {
+  const db = makeDb();
+  const fence = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  fence.scope_json = {
+    ...fenceScope("Stratco"),
+    tool: "fencing",
+    job: { ...fenceScope("Stratco").job, gates: [{ type: "pedestrian", width: 900, height: 1800 }] },
+    lines: [
+      { id: "SL-kit", description: "Panel kit 1800H + 2400H post (2380mm wide)", quantity: 2, unit: "each", category: "panels", supplierName: "Stratco" },
+      { id: "SL-gate", description: "Gate 1: pedestrian gate parts (900mm)", quantity: 1, unit: "each", category: "gates", supplierName: "Stratco" },
+      { id: "SL-gpost", description: "50x50mm SHS gate post, L2400mm ×2 (gate 1)", quantity: 2, unit: "each", category: "gates", supplierName: "Stratco" },
+    ],
+  };
+  const revision = await seal(db, JOB.fence, 5);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals(out.added, 6);
+  const rows = [...db.tables.job_material_lines].sort((a: any, b: any) => a.position - b.position);
+  assertEquals(rows.map((r: any) => [r.description, r.quantity, r.unit, r.source_line_id, r.source_version_id]), [
+    ["1800H standard width panels with 2400H posts", 2, "each", "SL-kit", revision],
+    ["gate posts", 2, "each", "SL-gpost", revision],
+    ["gate stiles pair", 1, "each", "SL-gate#1/4", revision],
+    ["1800mm Colorbond infill sheets", 2, "each", "SL-gate#2/4", revision],
+    ["Lokklatch kit", 1, "each", "SL-gate#3/4", revision],
+    ["long rail", 1, "each", "SL-gate#4/4", revision],
+  ]);
+  // The planted fault: a row with no sealed source is caught.
+  const noSource = (rs: any[]) => rs.filter((r) => !r.source_line_id || !r.unit).map((r) => r.description);
+  assertEquals(noSource(rows), []);
+  assertEquals(noSource(rows.map((r: any, i: number) => (i === 4 ? { ...r, source_line_id: null } : r))), ["Lokklatch kit"]);
+  // The order email reads as Shaun's always has: no unit in a fence line.
+  const made = await makeEmail(db, JOB.fence, SUP.stratco);
+  const body = String(made.email.body_text);
+  assert(body.includes("2 x 1800H standard width panels with 2400H posts"), body);
+  assert(body.includes("1 x Lokklatch kit"), body);
+  assert(!/\beach x\b/.test(body), body);
+  assertOnlyV2Writes(db);
+});
+
 // ── Boxes and the main tick ─────────────────────────────────────────────────
 
 Deno.test("boxes: add flags a supplier with no approved email; an occupied box cannot be removed", async () => {
