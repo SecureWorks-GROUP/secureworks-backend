@@ -36,7 +36,9 @@
 --      re-decision rule (context_redecided_metadata: older than 48 hours is
 --      capture_mode relink). A failure leaves the row empty as before.
 --   3. context_redecide_one and context_redecide_resting: an empty row with
---      no job may be re-decided (outcomes set_aside and named added).
+--      no job may be re-decided (outcomes set_aside and named added), and a
+--      bucket row that stays in the bucket is written when its reason changed
+--      (937 C2 rows were set aside before the reasons existed and carry none).
 --   4. P1b (context_reconsider_eligible, context_reconsider_contact): a new
 --      job, or a job that gets its contact late, also reconsiders the
 --      contact's earlier empty rows (a lead's call before the job), placing
@@ -44,7 +46,7 @@
 -- Every other character of each body is the live body (pg_get_functiondef,
 -- production, 3 Nov 2026). md5(prosrc), old -> new:
 --   public.context_reconsider_eligible(public.business_events,uuid)             375857877700389aa8f6f730095b8800 -> b36321bfcadcb02dc2aef454d12cece7
---   public.context_redecide_one(uuid,text,jsonb)                                3c79bd64e707a5f5a4bd92a5d67a0aca -> 8b96162586764b08d76e419871e17fb9
+--   public.context_redecide_one(uuid,text,jsonb)                                3c79bd64e707a5f5a4bd92a5d67a0aca -> b90e52161037944135f326ecf38c9745
 --   public.context_redecide_resting(text,timestamptz,uuid)                      6dccf6320f1fffa4a4c385e23ba9de88 -> 5c11ac90d98fe62b0749e27c4f427f64
 --   public.context_reconsider_contact(text,timestamptz,text,uuid)               75aea904fb88a526ee6aed68b4d592b9 -> 53f7d9d592e75d0232226fa466f76464
 --   public.resolve_context_attribution(public.business_events,boolean,boolean)  2ccef791fca954bfe1fcbb4e0de5f8a2 -> f9cd8d311bf00a92f7b708ff2d2dc8a7
@@ -66,7 +68,7 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_reconsider_eligible(public.business_events,uuid)',ARRAY['375857877700389aa8f6f730095b8800','b36321bfcadcb02dc2aef454d12cece7'],false),
-  ('public.context_redecide_one(uuid,text,jsonb)',ARRAY['3c79bd64e707a5f5a4bd92a5d67a0aca','8b96162586764b08d76e419871e17fb9'],false),
+  ('public.context_redecide_one(uuid,text,jsonb)',ARRAY['3c79bd64e707a5f5a4bd92a5d67a0aca','b90e52161037944135f326ecf38c9745'],false),
   ('public.context_redecide_resting(text,timestamptz,uuid)',ARRAY['6dccf6320f1fffa4a4c385e23ba9de88','5c11ac90d98fe62b0749e27c4f427f64'],false),
   ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['75aea904fb88a526ee6aed68b4d592b9','53f7d9d592e75d0232226fa466f76464'],false),
   ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['2ccef791fca954bfe1fcbb4e0de5f8a2','f9cd8d311bf00a92f7b708ff2d2dc8a7'],false),
@@ -254,6 +256,10 @@ BEGIN
   -- its twin) or its named rule changed.
   WHEN e.attribution_status='empty' THEN CASE WHEN resolved.attribution_status='admin_bucket' THEN 'set_aside'
    WHEN resolved.attribution_status='empty' AND resolved.metadata->>'placement_rule' IS DISTINCT FROM e.metadata->>'placement_rule' THEN 'named' END
+  -- A bucket row that stays in the bucket is written when its reason changed
+  -- (a row set aside before the reasons existed gets one).
+  WHEN e.attribution_status='admin_bucket' AND resolved.attribution_status='admin_bucket'
+   AND coalesce(resolved.metadata->>'bucket_reason',resolved.metadata->>'reason') IS DISTINCT FROM coalesce(e.metadata->>'bucket_reason',e.metadata->>'reason') THEN 'named'
   WHEN resolved.attribution_status='pending_luna' AND e.attribution_status IS DISTINCT FROM 'unplaced'
    AND NOT (coalesce(e.metadata,'{}'::jsonb) ? 'luna_outcome') THEN 'review'
   WHEN resolved.attribution_status IN ('automated','empty') THEN 'taken_out' END;
@@ -275,7 +281,7 @@ BEGIN
  RETURN v_outcome;
 END $function$;
 COMMENT ON FUNCTION public.context_redecide_one(uuid,text,jsonb) IS
- 'Unplaced stage 1 (20261014170000): re-runs the ladder on one row with no job resting in the bucket or unplaced (reasons thread_bound, invoice_linked, hand_run) and writes only a placement (placed), a review case for a bucket row the model has not answered (review) or a machine or empty row taken out with no job (taken_out), with metadata.placement_redecided; anything else is unchanged (an unplaced row is never sent to the model again). A placement or review case follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). A locked row is busy. Service role only. C2 known contacts (20261104095000): also re-decides an empty row with no job: placed, set_aside (a copy following its twin''s not-about-a-job reason) or named (its named rule changed); otherwise unchanged.';
+ 'Unplaced stage 1 (20261014170000): re-runs the ladder on one row with no job resting in the bucket or unplaced (reasons thread_bound, invoice_linked, hand_run) and writes only a placement (placed), a review case for a bucket row the model has not answered (review) or a machine or empty row taken out with no job (taken_out), with metadata.placement_redecided; anything else is unchanged (an unplaced row is never sent to the model again). A placement or review case follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). A locked row is busy. Service role only. C2 known contacts (20261104095000): also re-decides an empty row with no job: placed, set_aside (a copy following its twin''s not-about-a-job reason) or named (its named rule changed); a bucket row that stays in the bucket is written (named) when its reason changed, so a row set aside before the reasons existed gets one; otherwise unchanged.';
 
 -- 4. public.context_redecide_resting(text,timestamptz,uuid)
 CREATE OR REPLACE FUNCTION public.context_redecide_resting(p_status text DEFAULT 'unplaced'::text, p_before_at timestamp with time zone DEFAULT NULL::timestamp with time zone, p_before_id uuid DEFAULT NULL::uuid)
@@ -1101,7 +1107,7 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_reconsider_eligible(public.business_events,uuid)','b36321bfcadcb02dc2aef454d12cece7'),
-  ('public.context_redecide_one(uuid,text,jsonb)','8b96162586764b08d76e419871e17fb9'),
+  ('public.context_redecide_one(uuid,text,jsonb)','b90e52161037944135f326ecf38c9745'),
   ('public.context_redecide_resting(text,timestamptz,uuid)','5c11ac90d98fe62b0749e27c4f427f64'),
   ('public.context_reconsider_contact(text,timestamptz,text,uuid)','53f7d9d592e75d0232226fa466f76464'),
   ('public.resolve_context_attribution(public.business_events,boolean,boolean)','f9cd8d311bf00a92f7b708ff2d2dc8a7'),

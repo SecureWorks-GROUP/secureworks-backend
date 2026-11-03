@@ -157,6 +157,20 @@ BEGIN
  IF r<>'named' THEN RAISE EXCEPTION 'c2k hand run several: expected named, got %',r; END IF;
  r:=public.context_redecide_one(e.id,'hand_run');
  IF r<>'unchanged' THEN RAISE EXCEPTION 'c2k hand run several twice: expected unchanged, got %',r; END IF;
+ -- A bucket row set aside before the reasons existed gets its reason once.
+ INSERT INTO public.business_events(event_type,source,channel,direction,occurred_at,event_at,contact_id,payload)
+ VALUES('client.sms_in','ghl-webhook-receiver','sms','inbound',at,at,'c2kNoJobsBucket01','{"body":"Do you do fences in Morley?"}') RETURNING * INTO e;
+ IF e.attribution_status<>'admin_bucket' OR e.metadata->>'bucket_reason' IS NULL THEN RAISE EXCEPTION 'c2k bucket fixture: % %',e.attribution_status,e.metadata->>'bucket_reason'; END IF;
+ tw:=e;
+ UPDATE public.business_events SET metadata=metadata-'bucket_reason' WHERE id=e.id;
+ r:=public.context_redecide_one(e.id,'hand_run');
+ IF r<>'named' THEN RAISE EXCEPTION 'c2k bucket reason: expected named, got %',r; END IF;
+ SELECT * INTO e FROM public.business_events WHERE id=e.id;
+ IF e.attribution_status<>'admin_bucket' OR e.job_id IS NOT NULL OR e.metadata->>'bucket_reason' IS DISTINCT FROM tw.metadata->>'bucket_reason' THEN
+  RAISE EXCEPTION 'c2k bucket reason: got % % %',e.attribution_status,e.job_id,e.metadata->>'bucket_reason';
+ END IF;
+ r:=public.context_redecide_one(e.id,'hand_run');
+ IF r<>'unchanged' THEN RAISE EXCEPTION 'c2k bucket reason twice: expected unchanged, got %',r; END IF;
  res:=public.context_redecide_resting('empty',NULL,NULL);
  IF res->>'outcome'<>'done' OR NOT (res ? 'named') OR NOT (res ? 'set_aside') THEN RAISE EXCEPTION 'c2k resting empty: %',res; END IF;
  -- P1b: a lead's call before the job, then the job: the call goes on it.
@@ -179,7 +193,7 @@ DECLARE x record; problems text[]:='{}'; r text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.resolve_context_attribution(public.business_events,boolean,boolean)','f9cd8d311bf00a92f7b708ff2d2dc8a7','L1g plus unplaced stage 1 (20261014170000)%C2 known contacts (20261104095000)%',false),
-  ('public.context_redecide_one(uuid,text,jsonb)','8b96162586764b08d76e419871e17fb9','Unplaced stage 1 (20261014170000)%C2 known contacts (20261104095000)%',true),
+  ('public.context_redecide_one(uuid,text,jsonb)','b90e52161037944135f326ecf38c9745','Unplaced stage 1 (20261014170000)%C2 known contacts (20261104095000)%',true),
   ('public.context_redecide_resting(text,timestamptz,uuid)','5c11ac90d98fe62b0749e27c4f427f64','Unplaced stage 1 (20261014170000)%C2 known contacts (20261104095000)%',true),
   ('public.context_reconsider_eligible(public.business_events,uuid)','b36321bfcadcb02dc2aef454d12cece7','%C2 known contacts (20261104095000)%',false),
   ('public.context_reconsider_contact(text,timestamptz,text,uuid)','53f7d9d592e75d0232226fa466f76464','%C2 known contacts (20261104095000)%',true),
