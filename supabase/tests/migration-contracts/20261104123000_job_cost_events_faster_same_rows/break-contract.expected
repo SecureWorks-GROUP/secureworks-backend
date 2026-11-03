@@ -1,0 +1,1 @@
+the cost view reads the crew list once (no scan of it per bill line)
