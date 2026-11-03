@@ -45,6 +45,18 @@ import { QUOTE_LINE_FLAGS } from "./quote_work_order_lines.ts";
 export const GROUP_WORK_ORDER_AUTO_PATIO_FLAG = "group_work_order_auto_patio_v1";
 export const GROUP_WORK_ORDER_AUTO_FENCE_FLAG = "group_work_order_auto_fence_v1";
 export const PATIO_AUTO_GROUP_MIN_CREW = 2;
+/**
+ * Owner, 3 Nov 2026: "all patio pay needs to go through [group work orders]
+ * from now", one person or many, for patio jobs after Zoo. While this switch
+ * is on a patio job needs 1 crew for its group, and ordinary hours on a patio
+ * job are refused (group_work_order.ts assertPatioPaysThroughGroup).
+ */
+export const PATIO_PAY_GROUP_ONLY_FLAG = "patio_pay_group_only_v1";
+
+async function minCrewFor(client: any, kind: { jobType: string }): Promise<number> {
+  if (kind.jobType === "patio" && await flagOn(client, PATIO_PAY_GROUP_ONLY_FLAG)) return 1;
+  return PATIO_AUTO_GROUP_MIN_CREW;
+}
 export const PATIO_AUTO_GROUP_LIMIT = 50;
 /** Office admins are allocated to jobs to watch them, not to install. */
 const NOT_CREW_ROLES: ReadonlySet<string> = new Set(["admin"]);
@@ -200,10 +212,11 @@ async function openMissingWorkOrders(client: any, kind: AutoGroupKind) {
     const hasWo = new Set((wos || []).map((w: any) => String(w.job_id)));
     const missing = ids.filter((id: string) => !hasWo.has(id));
     const crew = await readCrew(client, missing);
+    const minCrew = await minCrewFor(client, kind);
     for (const job of jobs || []) {
       const id = String(job.id);
       if (hasWo.has(id)) continue;
-      if ((crew.get(id) || []).length < PATIO_AUTO_GROUP_MIN_CREW) continue;
+      if ((crew.get(id) || []).length < minCrew) continue;
       if (results.length >= PATIO_AUTO_GROUP_LIMIT) break;
       const { error: rpcError } = await client.rpc("ensure_job_work_order_draft", {
         p_job_id: id,
@@ -241,6 +254,7 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
     const jobIds = live.map((w: any) => String(w.job_id));
     if (jobIds.length === 0) return { ...empty, switched_on: true };
     const crew = await readCrew(client, jobIds);
+    const minCrew = await minCrewFor(client, kind);
     const { data: groups, error: groupError } = await client.from("group_work_orders").select(
       "id, job_id, work_order_id, status, split_frozen_at",
     ).in("job_id", jobIds);
@@ -257,7 +271,7 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
         if (r) results.push({ ...base, ...r });
         continue;
       }
-      if (people.length < PATIO_AUTO_GROUP_MIN_CREW) continue;
+      if (people.length < minCrew) continue;
       if (kind.refuseLabourOutsidePool && labourOutsidePool(wo.scope_items)) {
         results.push({ ...base, reason: "labour_outside_pool" });
         continue;
