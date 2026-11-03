@@ -162,7 +162,14 @@ BEGIN;
 SELECT pg_temp.tp04_cases();
 ROLLBACK;
 
--- C. Structure.
+-- C. Structure. A registered successor that replaces the two timelines
+-- (C14, 20261103203000) comes off first, inside this transaction.
+BEGIN;
+SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_contact_job_timeline(text,timestamptz,text,text)')),'')
+ ='454ced32a1213e2c28d7d41d37263df5' AS c14_live \gset
+\if :c14_live
+\ir ../../../rollbacks/20261103203000_context_send_party_link_down.sql
+\endif
 DO $$
 DECLARE x record; problems text[]:='{}'; src text; r text;
 BEGIN
@@ -217,3 +224,4 @@ BEGIN
  THEN RAISE EXCEPTION 'tp04: re-apply changed a body, comment or grant'; END IF;
 END $$;
 DROP TABLE tp04_before;
+ROLLBACK;
