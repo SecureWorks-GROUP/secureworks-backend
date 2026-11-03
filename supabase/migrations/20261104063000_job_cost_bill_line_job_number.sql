@@ -30,9 +30,9 @@
 -- Rehearsed 3 Nov 2026 on production in rolled-back transactions (CIO helper, Claude), live data 12:21Z, before
 -- 778,077.27 total job cost (sum of v_job_profit.actual_cost_ex, 2,008 jobs; 19,052.25 of it on the holding job):
 --   Switch off (as created): 778,111.81 (+34.54, one no-job line now on SWF-26058); without the holding job
---   759,025.02 to 763,417.74 (+4,392.72, five supplier lines). 58 installer lines (25,025.59) move to 9 jobs as
---   installer bills waiting for a person; SWF-26177's margin is withheld (355 to 354 margins) until a person or
---   Bookkeeping confirms its 2,724.50.
+--   759,025.02 to 763,417.74 (+4,392.72, five supplier lines on five jobs). 58 installer lines (25,025.59) move to
+--   36 jobs as installer bills waiting for a person (9 of those jobs newly show it); SWF-26177's margin is withheld
+--   (355 to 354 margins) until a person or Bookkeeping confirms its 2,724.50.
 --   Switch on: 803,137.40 (+25,060.13); without the holding job 788,443.33 (+29,418.31); 41 jobs change; margins
 --   355 to 360. SWF-26177 5,723.86 to 8,448.36, the figure its Xero lines give (V8).
 --   Against Bookkeeping's July to October ledger (lines it places on a job that also name one job): supplier lines
