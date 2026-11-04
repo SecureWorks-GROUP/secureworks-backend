@@ -154,3 +154,43 @@ Deno.test('completed Misc quote and legacy Quick Quote keep existing public pric
   assert(legacyFlag.ok)
   assertEquals(legacyFlag.output, legacy.output)
 })
+
+Deno.test('new Misc missing or unproven completion flag cannot derive public zero or partial price', () => {
+  for (const flag of [undefined, null, false, 'true']) {
+    const input = inputs([null])
+    input.job.pricing_json = { ...input.job.pricing_json, tool: 'misc-scoper', pricing_complete: flag }
+    assertEquals(dispatchAdapter(input), {
+      ok: false, reason: 'misc_quote_pricing_incomplete', matched_kind: 'quick_quote',
+    })
+  }
+})
+
+Deno.test('new Misc claimed complete still retains missing or nonfinite sell inputs as incomplete', () => {
+  for (const value of [undefined, null, '', 'unconfirmed', NaN, Infinity]) {
+    for (const field of ['totalExGST', 'gst', 'totalIncGST', 'quantity', 'unit_price', 'total']) {
+      const input = inputs([null])
+      const pricing = input.job.pricing_json!
+      Object.assign(pricing, { tool: 'misc-scoper', pricing_complete: true })
+      if (['quantity', 'unit_price', 'total'].includes(field)) {
+        (pricing.line_items as Array<Record<string, unknown>>)[0][field] = value
+      } else pricing[field] = value
+      assertEquals(dispatchAdapter(input), {
+        ok: false, reason: 'misc_quote_pricing_incomplete', matched_kind: 'quick_quote',
+      })
+    }
+  }
+})
+
+Deno.test('new Misc explicitly known zero sell inputs remain known zero', () => {
+  const input = inputs([0])
+  input.job.pricing_json = {
+    ...input.job.pricing_json, tool: 'misc-scoper', pricing_complete: true,
+    totalExGST: 0, gst: 0, totalIncGST: 0,
+    line_items: [{ description: 'Known zero fixture', quantity: 1, unit_price: 0, total: 0, cost_price: 0 }],
+  }
+  const result = dispatchAdapter(input)
+  assert(result.ok)
+  assertEquals(result.output.pricing_public.totals.total_inc_gst, 0)
+  assertEquals(result.output.pricing_public.line_items[0].unit_sell, 0)
+  assertEquals(result.output.internal_cost.line_costs[0].unit_cost, 0)
+})
