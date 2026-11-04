@@ -1,4 +1,5 @@
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
+import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -4631,6 +4632,8 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     siAt = tok.accessToken
     siTi = tok.tenantId
     const xInv = await xeroGet(`/Invoices/${siId}`, siAt, siTi)
+    const emailStatusRefusal = invoiceEmailStatusRefusal(xInv?.Invoices?.[0])
+    if (emailStatusRefusal) return json(emailStatusRefusal, emailStatusRefusal.status_code)
     const xContact = xInv?.Invoices?.[0]?.Contact
     xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
     for (const cp of (xContact?.ContactPersons || [])) {
@@ -10696,7 +10699,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // Dashboard callers pass only xero_invoice_id; MCP sw_send_invoice_email passes to_email for Outlook+PDF.
         if (!siTo) {
           const { accessToken: sAt, tenantId: sTi } = await getToken(client)
-          await xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST')
+          const emailStatusRefusal = await sendIssuedInvoiceEmail(
+            () => xeroGet(`/Invoices/${siId}`, sAt, sTi),
+            () => xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST'),
+          )
+          if (emailStatusRefusal) return json(emailStatusRefusal, emailStatusRefusal.status_code)
           try {
             await client.from('job_events').insert({
               job_id: directSendInvoice?.job_id || null,
