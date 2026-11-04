@@ -30,7 +30,7 @@ BEGIN
     IF stage->'trigger'->>'submission_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
       AND stage->'trigger'->>'step_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
       sid:=(stage->'trigger'->>'submission_id')::uuid; stepid:=(stage->'trigger'->>'step_id')::uuid;
-      SELECT * INTO submission FROM public.council_submissions WHERE id=sid AND job_id=NEW.job_id AND org_id=target.org_id;
+      SELECT * INTO submission FROM public.council_submissions WHERE id=sid AND job_id=NEW.job_id AND org_id=target.org_id FOR SHARE;
       IF FOUND AND (SELECT count(*) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(submission.steps)='array' THEN submission.steps ELSE '[]'::jsonb END) s WHERE s->>'step_id'=stepid::text)=1
         AND EXISTS(SELECT 1 FROM jsonb_array_elements(submission.steps) s WHERE s->>'step_id'=stepid::text AND s->>'name'=stage->'trigger'->>'step_name' AND s->>'status' IS DISTINCT FROM 'complete') THEN reason:=NULL;
       ELSE reason:='quote_council_step_not_on_job_or_already_complete'; END IF;
@@ -61,7 +61,7 @@ BEGIN
     END IF;
     IF review.trigger_kind='council_step_complete' THEN
       SELECT * INTO council FROM public.quote_invoice_council_bindings WHERE quote_revision_id=NEW.quote_revision_id AND stage_id=NEW.stage_id;
-      SELECT * INTO submission FROM public.council_submissions WHERE id=council.submission_id AND job_id=NEW.job_id;
+      SELECT * INTO submission FROM public.council_submissions WHERE id=council.submission_id AND job_id=NEW.job_id FOR SHARE;
       IF council.state IS DISTINCT FROM 'eligible' OR council.org_id IS DISTINCT FROM NEW.org_id OR council.job_id IS DISTINCT FROM NEW.job_id
         OR review.source->>'submission_id' IS DISTINCT FROM council.submission_id::text OR review.source->>'step_id' IS DISTINCT FROM council.step_id::text
         OR (SELECT count(*) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(submission.steps)='array' THEN submission.steps ELSE '[]'::jsonb END) s WHERE s->>'step_id'=council.step_id::text AND s->>'name'=council.step_name AND s->>'status'='complete' AND s->>'completion_source'='explicit_status_update')<>1 THEN

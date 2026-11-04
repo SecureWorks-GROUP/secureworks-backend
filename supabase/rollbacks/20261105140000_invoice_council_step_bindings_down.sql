@@ -5,6 +5,8 @@ CREATE OR REPLACE FUNCTION public.guard_invoice_milestone_claim() RETURNS trigge
 LANGUAGE plpgsql SET search_path = '' AS $$
 DECLARE binding record; review record; accepted record;
 BEGIN
+  SELECT * INTO review FROM public.invoice_milestone_reviews WHERE id=NEW.review_id;
+  IF (TG_OP='INSERT' OR (TG_OP='UPDATE' AND OLD.state='prepared' AND NEW.state='dispatching')) AND review.trigger_kind IS DISTINCT FROM 'scheduled' THEN RAISE EXCEPTION 'Council draft dispatch held after rollback'; END IF;
   IF TG_OP='INSERT' OR (TG_OP='UPDATE' AND OLD.state='prepared' AND NEW.state='dispatching') THEN
     SELECT d.* INTO accepted FROM public.job_documents d
       JOIN public.quote_revisions q ON q.id=d.quote_revision_id AND q.job_document_id=d.id AND q.job_id=d.job_id

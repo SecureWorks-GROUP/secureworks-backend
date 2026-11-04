@@ -805,3 +805,64 @@ Deno.test("council step choices are staff-only exact-job GET, never inferred or 
   );
   assertEquals(f.writes.length, 0);
 });
+Deno.test("council billing: missing release binding, renamed steps and wrong source ids hold before provider traffic", async () => {
+  const raw: any = pricing();
+  const stage = raw.billing_milestones.milestones[0];
+  stage.trigger = {
+    kind: "council_step_completed",
+    submission_id: id(7),
+    step_id: id(8),
+    step_name: "Fixture council checkpoint",
+  };
+  stage.printed_terms = councilBillingTerms(2, stage.trigger.step_name);
+  raw.payment_schedule.payments[1].printed_terms = stage.printed_terms;
+  const mutations = [
+    (f: any) => f.tables.quote_invoice_council_bindings.length = 0,
+    (f: any) => f.tables.quote_invoice_council_bindings[0].state = "held",
+    (f: any) =>
+      f.tables.council_submissions[0].steps[0].name = "Renamed checkpoint",
+    (f: any) => f.tables.invoice_milestone_reviews[0].source.step_id = id(99),
+    (f: any) =>
+      f.tables.council_submissions[0].steps[0].completion_source =
+        "workflow_jump",
+  ];
+  for (const mutate of mutations) {
+    const f = fixture({ rawPricing: raw });
+    f.tables.council_submissions = [{
+      id: id(7),
+      job_id: JOB,
+      org_id: ORG,
+      steps: [{
+        step_id: id(8),
+        name: stage.trigger.step_name,
+        status: "complete",
+        completion_source: "explicit_status_update",
+      }],
+    }];
+    f.tables.quote_invoice_council_bindings = [{
+      quote_revision_id: REV,
+      stage_id: stage.id,
+      org_id: ORG,
+      job_id: JOB,
+      submission_id: id(7),
+      step_id: id(8),
+      step_name: stage.trigger.step_name,
+      state: "eligible",
+    }];
+    f.tables.invoice_milestone_reviews[0].trigger_kind =
+      "council_step_complete";
+    f.tables.invoice_milestone_reviews[0].source = {
+      submission_id: id(7),
+      step_id: id(8),
+    };
+    mutate(f);
+    await processInstallDrafts(
+      f.client,
+      f.deps,
+      JOB,
+      ORG,
+      "council_step_complete",
+    );
+    assertEquals(f.counts(), { creates: 0, reads: 0, searches: 0 });
+  }
+});
