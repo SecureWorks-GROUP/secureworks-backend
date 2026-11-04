@@ -732,3 +732,29 @@ Deno.test("provider inventory: only explicit complete page metadata passes; shor
     false,
   );
 });
+
+Deno.test("accepted billing: historical accepted document without any claim and pre-send acceptance both stay held", async () => {
+  for (
+    const mutate of [(f: any) =>
+      f.tables.job_documents.push({
+        ...f.tables.job_documents[0],
+        id: id(97),
+        quote_revision_id: id(98),
+        superseded_at: "2026-11-03",
+      }), (f: any) => f.tables.job_documents[0].accepted_at = "2026-11-01"]
+  ) {
+    const f = fixture();
+    mutate(f);
+    const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+    assertEquals(
+      result.drafts[0].reason,
+      "accepted_replacement_requires_review",
+    );
+    assertEquals(f.counts(), { creates: 0, searches: 0, reads: 0 });
+    assert(
+      f.tables.invoice_milestone_reviews[0].hold_reasons.includes(
+        "accepted_replacement_requires_review",
+      ),
+    );
+  }
+});

@@ -47,3 +47,5 @@ The provider gateway uses documented ContactIDs plus Type filtering and page/pag
 Admission holds are appended atomically to the existing held review by a service-only narrow RPC. Codes are previous_revision_invoice_claim_requires_review, existing_invoice_requires_review and invoice_inventory_unavailable. The queue remains context, not a debt. The exact provider/claim outcome remains separately visible.
 
 API basis verified 4 Nov 2026 from [Xero invoices](https://developer.xero.com/documentation/api/accounting/invoices) and [requests and responses](https://developer.xero.com/documentation/api/accounting/requests-and-responses/). No live credentials or provider requests were used to verify the contract.
+
+Historical accepted quote documents also hold unsupported replacements even when no milestone claim exists. An acceptance timestamp earlier than the exact released revision's send time is not adopted as acceptance of that revision. The durable reason is `accepted_replacement_requires_review`. A verified Xero payer must already be pinned at quote release; creating a contact only at acceptance does not silently rebind that frozen payer.

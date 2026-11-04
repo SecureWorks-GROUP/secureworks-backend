@@ -84,6 +84,18 @@ DO $$ BEGIN
   RAISE EXCEPTION 'Replacement revision acquired duplicate economic billing';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE '%earlier accepted revision%' THEN RAISE; END IF; END;
 END $$;
+-- Historical acceptance without a milestone claim is still unsupported replacement authority.
+INSERT INTO public.job_documents(id,job_id,type,sent_at,accepted_at,superseded_at,quote_revision_id)
+VALUES('66000000-0000-4000-8000-000000000030','66000000-0000-4000-8000-000000000001','quote',now(),now(),now(),'66000000-0000-4000-8000-000000000007');
+DO $$ BEGIN
+ BEGIN
+  INSERT INTO public.invoice_milestone_draft_claims(org_id,job_id,quote_revision_id,review_id,stage_id,xero_contact_id,amount_cents,currency,label,printed_terms,due_date,reference,payload_hash,state)
+  SELECT org_id,job_id,accepted_quote_revision_id,id,'historical-check','66000000-0000-4000-8000-000000000002',1,'AUD','Fixture stage','Fixture terms','2026-11-06','WS6-CONTRACT-HISTORY',repeat('e',64),'prepared' FROM public.invoice_milestone_reviews WHERE job_id='66000000-0000-4000-8000-000000000001';
+  RAISE EXCEPTION 'Historical acceptance without a claim admitted billing';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE '%Accepted replacement quote%' THEN RAISE; END IF; END;
+END $$;
+-- Restore this fixture's historical marker for the independent concurrent same-revision scenario.
+UPDATE public.job_documents SET accepted_at=NULL WHERE id='66000000-0000-4000-8000-000000000030';
 -- Restore document context for the independent concurrent same-revision scenario.
 UPDATE public.job_documents SET quote_revision_id='66000000-0000-4000-8000-000000000004' WHERE id='66000000-0000-4000-8000-000000000003';
 COMMIT;

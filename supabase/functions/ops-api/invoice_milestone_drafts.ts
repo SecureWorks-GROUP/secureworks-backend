@@ -191,6 +191,17 @@ export async function reconcileMilestoneDraft(
     });
   }
 }
+function admissionConflict(error: any): string | null {
+  const message = String(error?.message || "");
+  if (message.includes("earlier accepted revision")) {
+    return "previous_revision_invoice_claim_requires_review";
+  }
+  if (
+    message.includes("Accepted replacement quote") ||
+    message.includes("accepted document changed")
+  ) return "accepted_replacement_requires_review";
+  return null;
+}
 async function admissionHold(client: any, review: any, reason: string) {
   const result = await client.rpc("record_invoice_milestone_admission_hold", {
     p_review_id: review.id,
@@ -335,7 +346,7 @@ export async function processInstallDrafts(
     }
     const documents = rows(
       await client.from("job_documents").select(
-        "id,accepted_at,sent_at,superseded_at",
+        "id,quote_revision_id,accepted_at,sent_at,superseded_at",
       ).eq("job_id", jobId).eq("type", "quote"),
       "Accepted payer set",
     ) || [];
@@ -349,6 +360,23 @@ export async function processInstallDrafts(
         state: "held",
         reason: "multiple_accepted_documents_require_review",
       });
+      continue;
+    }
+    if (
+      documents.some((d: any) =>
+        d.accepted_at &&
+        (d.id !== doc.id || d.quote_revision_id !== revision.id)
+      ) ||
+      !(new Date(doc.accepted_at).getTime() >=
+        new Date(revision.sent_at).getTime())
+    ) {
+      outcomes.push(
+        await admissionHold(
+          client,
+          review,
+          "accepted_replacement_requires_review",
+        ),
+      );
       continue;
     }
     const parsed = acceptedInstallMilestone(
@@ -435,12 +463,13 @@ export async function processInstallDrafts(
         ignoreDuplicates: true,
       },
     );
-    if (inserted.error?.message?.includes("earlier accepted revision")) {
+    const insertHold = admissionConflict(inserted.error);
+    if (insertHold) {
       outcomes.push(
         await admissionHold(
           client,
           review,
-          "previous_revision_invoice_claim_requires_review",
+          insertHold,
         ),
       );
       continue;
@@ -473,12 +502,13 @@ export async function processInstallDrafts(
         state: "dispatching",
         hold_reason: "dispatch_outcome_pending",
       }).eq("id", claim.id).eq("state", "prepared").select().maybeSingle();
-    if (acquisition.error?.message?.includes("earlier accepted revision")) {
+    const dispatchHold = admissionConflict(acquisition.error);
+    if (dispatchHold) {
       outcomes.push(
         await admissionHold(
           client,
           review,
-          "previous_revision_invoice_claim_requires_review",
+          dispatchHold,
         ),
       );
       continue;
