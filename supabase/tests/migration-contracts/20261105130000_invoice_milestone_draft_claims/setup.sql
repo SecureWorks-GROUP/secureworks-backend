@@ -9,3 +9,6 @@ CREATE TABLE IF NOT EXISTS public.job_contacts (id uuid PRIMARY KEY DEFAULT gen_
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
 
 ALTER TABLE public.job_documents ADD COLUMN IF NOT EXISTS run_label text;
+
+-- Match the full registered stack: commercial totals are mandatory, even for fixture-only rows.
+ALTER TABLE public.quote_revisions ALTER COLUMN totals_snapshot_json SET NOT NULL;
