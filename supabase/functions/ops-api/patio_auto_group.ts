@@ -57,6 +57,12 @@ async function minCrewFor(client: any, kind: { jobType: string }): Promise<numbe
   if (kind.jobType === "patio" && await flagOn(client, PATIO_PAY_GROUP_ONLY_FLAG)) return 1;
   return PATIO_AUTO_GROUP_MIN_CREW;
 }
+
+/** A patio on the pay-through-group rule gets its group as soon as the work order is priced, before anyone is allocated. Crew are added when they are named. */
+async function minCrewToGroup(client: any, kind: { jobType: string }): Promise<number> {
+  if (kind.jobType === "patio" && await flagOn(client, PATIO_PAY_GROUP_ONLY_FLAG)) return 0;
+  return await minCrewFor(client, kind);
+}
 export const PATIO_AUTO_GROUP_LIMIT = 50;
 /** Office admins are allocated to jobs to watch them, not to install. */
 const NOT_CREW_ROLES: ReadonlySet<string> = new Set(["admin"]);
@@ -254,7 +260,7 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
     const jobIds = live.map((w: any) => String(w.job_id));
     if (jobIds.length === 0) return { ...empty, switched_on: true };
     const crew = await readCrew(client, jobIds);
-    const minCrew = await minCrewFor(client, kind);
+    const minCrew = await minCrewToGroup(client, kind);
     const { data: groups, error: groupError } = await client.from("group_work_orders").select(
       "id, job_id, work_order_id, status, split_frozen_at",
     ).in("job_id", jobIds);
@@ -305,9 +311,13 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
         continue;
       }
       const groupId = String(created.id);
-      const { error: crewError } = await client.from("group_work_order_participants").insert(
-        people.map((userId) => ({ group_id: groupId, user_id: userId })),
-      );
+      let crewError: { message?: string } | null = null;
+      if (people.length) {
+        const added = await client.from("group_work_order_participants").insert(
+          people.map((userId) => ({ group_id: groupId, user_id: userId })),
+        );
+        crewError = added.error;
+      }
       if (crewError) console.error(kind.logTag, "crew not added:", groupId, crewError.message);
       await logEvent(client, jobId, "group_work_order_auto_created", {
         group_id: groupId,
