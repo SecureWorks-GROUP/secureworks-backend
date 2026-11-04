@@ -17,6 +17,7 @@ import {
   daysBetween,
   dayZeroFor,
   type DebtKind,
+  companyTermsFor,
   dueDateFor,
   firstNameOf,
   historyLine,
@@ -53,7 +54,12 @@ import {
   resolvePayer,
   type WsJobContact,
 } from "./debt_ws_payer.ts";
+import {
+  type ReceivableClass,
+  receivableOfEntry,
+} from "./debt_ws_receivables.ts";
 import type {
+  DebtWsCompanyTerms,
   DebtWsSettings,
   DebtWsStore,
   WsJanListRow,
@@ -102,6 +108,18 @@ export interface OverviewRow {
   says_paid_since: string | null;
   cycle_start: string;
   open: boolean;
+  // Receivables (Shaun, 4 Nov 2026; debt_ws_receivables.ts). The money view only: the
+  // chase steps above still run on day and category.
+  /** debt, other, write_off or needs_a_look. */
+  receivable_class: ReceivableClass;
+  /** Company, Final, Deposit, Materials, Progress payment, Planning fee, Extra labour. */
+  type_label: string;
+  /** The date it should be paid by. */
+  pay_by: string | null;
+  /** Days after pay by; 0 when not due yet. */
+  days_overdue: number;
+  /** Company terms in days (company invoices only), else null. */
+  terms_days: number | null;
 }
 
 export interface BookEntry {
@@ -153,6 +171,26 @@ export interface Book {
   contacts: Map<string, WsJobContact[]>;
   janVisitDate: string;
   janRow: WsJanListRow | null;
+  /**
+   * The per-company terms used for the company due dates. status "unavailable" when the
+   * setting could not be read (every company then falls back to the default, 10 days).
+   */
+  terms: DebtWsCompanyTerms & { status: "ok" | "unavailable" };
+}
+
+/** The per-company terms, or the 10-day default for every company when they cannot be read. */
+export async function readCompanyTerms(
+  store: DebtWsStore,
+): Promise<Book["terms"]> {
+  try {
+    return { ...(await store.companyTerms()), status: "ok" };
+  } catch (error) {
+    console.error(
+      "[debt_ws] company terms read failed; every company falls back to 10 days",
+      (error as Error)?.message ?? error,
+    );
+    return { by_company: {}, default_days: 10, status: "unavailable" };
+  }
 }
 
 const uniq = (
@@ -280,13 +318,15 @@ export async function loadBook(
 
   const jobIds = uniq(invoices.map((i) => i.job_id));
   const janVisitDate = nextMonday(today);
-  const [jobRows, historyRows, exits, janRow, contactRows] = await Promise.all([
-    jobIds.length ? store.jobs(jobIds) : Promise.resolve([]),
-    jobIds.length ? store.jobInvoices(jobIds) : Promise.resolve([]),
-    jobIds.length ? store.rectificationExits(jobIds) : Promise.resolve([]),
-    store.janList(janVisitDate),
-    jobIds.length ? store.jobContacts(jobIds) : Promise.resolve([]),
-  ]);
+  const [jobRows, historyRows, exits, janRow, contactRows, terms] = await Promise
+    .all([
+      jobIds.length ? store.jobs(jobIds) : Promise.resolve([]),
+      jobIds.length ? store.jobInvoices(jobIds) : Promise.resolve([]),
+      jobIds.length ? store.rectificationExits(jobIds) : Promise.resolve([]),
+      store.janList(janVisitDate),
+      jobIds.length ? store.jobContacts(jobIds) : Promise.resolve([]),
+      readCompanyTerms(store),
+    ]);
   const contacts = groupBy(contactRows, (c) => String(c.job_id));
   const jobs = new Map(jobRows.map((j) => [String(j.id), j]));
   const history = groupBy(historyRows, (i) => i.job_id);
@@ -340,7 +380,14 @@ export async function loadBook(
     const key = inv.xero_invoice_id;
     const kind = cls.kind;
     const invoiceDate = inv.invoice_date ?? today;
-    const dueDate = dueDateFor(kind, invoiceDate);
+    // The company first: a company invoice is due on that company's own terms.
+    const companyKey = cls.lane === "account"
+      ? companyKeyOf(inv, settings.company_aliases)
+      : null;
+    const termsDays = cls.lane === "account"
+      ? companyTermsFor(companyKey, terms.by_company, terms.default_days)
+      : null;
+    const dueDate = dueDateFor(kind, invoiceDate, termsDays ?? undefined);
     const dayZero = dayZeroFor(
       kind,
       dueDate,
@@ -394,9 +441,6 @@ export async function loadBook(
     const label = cls.lane === "homeowner"
       ? payerLabel(payer, job?.client_name ?? null, cls.letter)
       : { label: payer, neighbourOf: null };
-    const companyKey = cls.lane === "account"
-      ? companyKeyOf(inv, settings.company_aliases)
-      : null;
     const payerContact = resolvePayer(
       inv,
       job,
@@ -404,6 +448,17 @@ export async function loadBook(
       cls.lane,
     );
     const templateReady = !!ladder.step_due && isTextStep(ladder.step_due.step);
+    const money = receivableOfEntry({
+      kind,
+      stage: cls.stage,
+      notChased,
+      jobStatus: job?.status ?? null,
+      dayZero,
+      dueDate,
+      invoiceDate: inv.invoice_date,
+      xeroDue: inv.due_date,
+      today,
+    });
     const row: OverviewRow = {
       share_key: key,
       xero_invoice_id: key,
@@ -450,6 +505,11 @@ export async function loadBook(
       says_paid_since: state?.says_paid_since ?? null,
       cycle_start: dayZero,
       open,
+      receivable_class: money.receivable_class,
+      type_label: money.type_label,
+      pay_by: money.pay_by,
+      days_overdue: money.days_overdue,
+      terms_days: termsDays,
     };
     entries.push({
       inv,
@@ -487,6 +547,7 @@ export async function loadBook(
     contacts,
     janVisitDate,
     janRow,
+    terms,
   };
 }
 
@@ -630,6 +691,10 @@ export interface CompanyView {
   // Additions beyond the spec shape.
   to_email: string | null;
   xero_invoice_ids: string[];
+  /** Days this company has to pay (its own terms, or the default). */
+  terms_days: number;
+  /** True when the days come from the default, not a setting for this company. */
+  terms_default: boolean;
 }
 
 const sumCents = (xs: number[]) =>
@@ -688,6 +753,12 @@ export function companiesOf(
       statement: { week_start: weekStart, status },
       to_email: toEmail,
       xero_invoice_ids: entries.map((e) => e.inv.xero_invoice_id),
+      terms_days: companyTermsFor(
+        companyKey,
+        book.terms.by_company,
+        book.terms.default_days,
+      ),
+      terms_default: !(companyKey in book.terms.by_company),
     });
   }
   return out.sort((a, b) => b.past_due.amount - a.past_due.amount);

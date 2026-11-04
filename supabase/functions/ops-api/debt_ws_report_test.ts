@@ -16,9 +16,11 @@ import {
   runDebtWsAction,
 } from "./debt_ws_actions.ts";
 import {
+  AMBROSE_CONTACT,
   fakeDeps,
   FakeStore,
   IDS,
+  JOBS,
   NOW,
   SERVER,
   SHAUN,
@@ -30,7 +32,8 @@ import {
   type DebtReport,
   debtReportEmail,
   debtReportHtml,
-  REPORT_BUCKETS,
+  overdueSections,
+  termsNote,
 } from "./debt_ws_report.ts";
 
 type Deps = ReturnType<typeof fakeDeps>["deps"];
@@ -63,9 +66,19 @@ async function report(store = new FakeStore(), options = {}) {
   return { body: res.body as any, report: (res.body as any).report as DebtReport, rec, store, deps };
 }
 
-// ── The figures ──
+// ── The figures (Shaun, 4 Nov 2026: Debt and receivables) ──
+//
+// The fixture's eight open invoices, today Thursday 8 Oct 2026:
+//   Debt     INV-2001 Alex final $1,000 (pay by 1 Oct, 7 days overdue)
+//            INV-2006 Robin final $750 (pay by 8 Sep, 30 days overdue: bad debt)
+//            INV-2003 MLB $330 (5 Sep + 10 days = 11 Sep, 27 days overdue: bad debt)
+//            INV-2008 MLB $440 (pay by 15 Oct: not due yet)
+//   Other    INV-2002 Casey materials $2,000 (18 days overdue)
+//            INV-2007 Jamie go-ahead deposit $5,000 (7 days overdue)
+//   Write-off list  INV-2005 Builderwest $561
+//   Needs a look    INV-2004 Pat Nobody $50 (not linked to a job)
 
-Deno.test("report: every open invoice lands in exactly one bucket, and the buckets tie to Xero's open total to the cent", async () => {
+Deno.test("report: every open invoice is in Receivables exactly once, and Receivables ties to our Xero copy to the cent", async () => {
   const { report: r } = await report();
   const open = new FakeStore().invoices.filter((i) =>
     i.status === "AUTHORISED" && Number(i.amount_due) > 0
@@ -75,35 +88,86 @@ Deno.test("report: every open invoice lands in exactly one bucket, and the bucke
   assertEquals(r.tie.ok, true);
   assertEquals(r.tie.sum, xero);
   assertEquals(r.tie.unplaced, []);
-  const rows = r.sections.flatMap((s) => s.rows);
-  assertEquals(rows.length, open.length);
-  assertEquals(new Set(rows.map((x) => x.xero_invoice_id)).size, open.length);
+  assertEquals(r.receivables.count, open.length);
+  assertEquals(r.receivables.amount, 10131);
+  assertEquals(r.receivables.adds_up, true);
+  assertEquals(r.rows.length, open.length);
+  assertEquals(new Set(r.rows.map((x) => x.xero_invoice_id)).size, open.length);
+  // Each invoice sits in exactly one line of "Where the receivables sit".
+  const ids = r.receivables.lines.flatMap((l) => l.invoices.map((i) => i.xero_invoice_id));
+  assertEquals(ids.length, open.length);
+  assertEquals(new Set(ids).size, open.length);
+  const sum = r.receivables.lines.reduce((s, l) => s + cents(l.amount), 0) / 100;
+  assertEquals(sum, r.receivables.amount);
 });
 
-Deno.test("report: the debt categories are the tab's own, with the not-chased contacts left out as the tab's chart does", async () => {
-  const store = new FakeStore();
-  const { report: r } = await report(store);
-  assertEquals(r.buckets.active, { count: 1, amount: 1000 });
-  assertEquals(r.buckets.escalating, { count: 1, amount: 2000 });
-  assertEquals(r.buckets.bad_debt, { count: 2, amount: 1080 }); // MLB day 27, Robin day 30
-  assertEquals(r.debt.count, 4);
-  assertEquals(r.debt.amount, 4080);
-  // Not counted as debt.
-  assertEquals(r.buckets.not_due, { count: 1, amount: 440 });
-  assertEquals(r.buckets.go_ahead, { count: 1, amount: 5000 });
-  assertEquals(r.buckets.needs_a_look, { count: 1, amount: 50 });
-  assertEquals(r.buckets.not_chased, { count: 1, amount: 561 });
-  assert(r.not_chased_names.includes("Builderwest"));
-  // The same book, worked out the tab's way, gives the same category totals.
-  const book = await loadBook(store, { now: NOW });
-  const tab = categoryTotals(book.entries.filter((e) => e.open && !e.notChased));
-  for (const b of REPORT_BUCKETS.filter((x) => x.debt)) {
-    assertEquals(r.buckets[b.key], (tab as any)[b.key], b.key);
-  }
+Deno.test("report: Debt is finals on finished jobs and company invoices; everything else is Other receivables", async () => {
+  const { report: r } = await report();
+  const rv = r.receivables;
+  assertEquals(rv.debt, { count: 4, amount: 2520 });
+  assertEquals(rv.debt_overdue, { count: 3, amount: 2080 });
+  assertEquals(rv.bad_debt, { count: 2, amount: 1080 }); // Robin 30 days, MLB 27 days
+  assertEquals(rv.other, { count: 2, amount: 7000 });
+  assertEquals(rv.other_overdue, { count: 2, amount: 7000 });
+  assertEquals(rv.write_off, { count: 1, amount: 561 });
+  assertEquals(rv.needs_a_look, { count: 1, amount: 50 });
+  assert(r.write_off_names.includes("Builderwest"));
+  const line = (k: string) => rv.lines.find((l) => l.key === k)!;
+  assertEquals(rv.lines.map((l) => l.key), [
+    "debt_not_due",
+    "debt_overdue",
+    "other_not_due",
+    "other_overdue",
+    "write_off",
+    "needs_a_look",
+  ]);
+  assertEquals(line("debt_not_due").invoices.map((i) => i.invoice_number), ["INV-2008"]);
+  assertEquals(
+    line("other_overdue").invoices.map((i) => [i.invoice_number, i.type_label]),
+    [["INV-2002", "Materials"], ["INV-2007", "Go-ahead deposit"]],
+  );
+  assertStringIncludes(line("write_off").sub, "for us to check whether to write off");
+  // The chase is untouched: the tab's own categories still match the tab.
   assertEquals(r.tie.tab_match, true);
 });
 
-Deno.test("report: a SAMPLE- test invoice is listed as ignored and still ties to Xero", async () => {
+Deno.test("report: a final on a job not yet Complete or Invoiced is Needs a look, not debt, and still on the tab", async () => {
+  const store = new FakeStore();
+  // The fence job is still being built (any status before Complete).
+  store.jobRows.find((j) => j.id === JOBS.fence)!.status = "in_progress";
+  const { report: r } = await report(store);
+  const row = r.rows.find((x) => x.invoice_number === "INV-2001")!;
+  assertEquals(row.receivable_class, "needs_a_look");
+  assertStringIncludes(row.next, "not marked Complete or Invoiced");
+  assertEquals(r.receivables.debt, { count: 3, amount: 1520 });
+  assertEquals(r.receivables.needs_a_look, { count: 2, amount: 1050 });
+  assertEquals(r.tie.ok, true);
+});
+
+Deno.test("report: debt by how overdue, split Private and Companies, adds up to Debt", async () => {
+  const { report: r } = await report();
+  const band = (k: string) => r.debt_bands.find((b) => b.key === k)!;
+  assertEquals(r.debt_bands.map((b) => b.key), ["not_due", "d1_7", "d8_20", "d21"]);
+  assertEquals(band("not_due").companies, { count: 1, amount: 440 });
+  assertEquals(band("d1_7").private, { count: 1, amount: 1000 });
+  assertEquals(band("d8_20").total, { count: 0, amount: 0 });
+  assertEquals(band("d21").private, { count: 1, amount: 750 });
+  assertEquals(band("d21").companies, { count: 1, amount: 330 });
+  assertEquals(band("d21").name, "21 days or more (bad debt)");
+  const total = r.debt_bands.reduce((s, b) => s + cents(b.total.amount), 0) / 100;
+  assertEquals(total, r.receivables.debt.amount);
+});
+
+Deno.test("report: coming due in the next 7 days, Debt and Other shown apart", async () => {
+  const { report: r } = await report();
+  assertEquals(r.coming_due.from, "2026-10-08");
+  assertEquals(r.coming_due.to, "2026-10-15");
+  // MLB INV-2008, dated 5 Oct: pay by 15 Oct (company terms, 10 days).
+  assertEquals(r.coming_due.debt, { count: 1, amount: 440 });
+  assertEquals(r.coming_due.other, { count: 0, amount: 0 });
+});
+
+Deno.test("report: a SAMPLE- test invoice is left out of Receivables, named, and Xero still ties", async () => {
   const store = new FakeStore();
   store.invoices.push({
     ...store.invoices[0],
@@ -113,10 +177,82 @@ Deno.test("report: a SAMPLE- test invoice is listed as ignored and still ties to
     amount_due: 352,
     total: 352,
   });
-  const { report: r } = await report(store);
-  assertEquals(r.buckets.excluded, { count: 1, amount: 352 });
-  assertEquals(r.tie.ok, true);
+  const { report: r, body } = await report(store);
+  assertEquals(r.receivables.test.count, 1);
+  assertEquals(r.receivables.test.amount, 352);
+  assertEquals(r.receivables.amount, 10131);
   assertEquals(r.xero_open.amount, 10131 + 352);
+  assertEquals(r.tie.ok, true);
+  assertStringIncludes(body.html, "INV-TEST");
+  assertStringIncludes(body.html, "Left out: 1 test invoice");
+});
+
+Deno.test("report: company terms per company; Ambrose on 14 days moves its pay-by date", async () => {
+  const store = new FakeStore();
+  const base = store.invoices.find((i) => i.xero_invoice_id === IDS.account)!;
+  store.invoices.push({
+    ...base,
+    xero_invoice_id: "10000000-0000-4000-8000-0000000000a1",
+    invoice_number: "INV-4001",
+    contact_name: "Ambrose Construct Group",
+    xero_contact_id: AMBROSE_CONTACT,
+    reference: "AMB-1",
+    amount_due: 1100,
+    total: 1100,
+    invoice_date: "2026-09-28",
+  });
+  const { report: r } = await report(store);
+  const amb = r.rows.find((x) => x.invoice_number === "INV-4001")!;
+  // 28 Sep + 14 days = 12 Oct: not overdue yet (on 10 days it would be 2 days overdue).
+  assertEquals(amb.pay_by, "2026-10-12");
+  assertEquals(amb.days_overdue, 0);
+  assertEquals(amb.receivable_class, "debt");
+  assertEquals(r.terms.companies, [{ name: "Ambrose Construct Group", days: 14 }]);
+  assertStringIncludes(termsNote(r), "Ambrose Construct Group 14 days, every other company 10 days");
+  // Terms that cannot be read put every company on 10 days, and say so.
+  store.termsReadFails = true;
+  const { report: r2 } = await report(store);
+  assertEquals(r2.rows.find((x) => x.invoice_number === "INV-4001")!.pay_by, "2026-10-08");
+  assertEquals(r2.terms.status, "unavailable");
+  assertStringIncludes(termsNote(r2), "could not be read");
+});
+
+Deno.test("report: what happened this week: invoices paid in full and the Debt tab's own activity", async () => {
+  const store = new FakeStore();
+  store.logRows.push({
+    id: "l1",
+    share_key: IDS.final,
+    xero_invoice_ids: [IDS.final],
+    job_id: null,
+    kind: "text_sent",
+    step: "d3",
+    body: "Hi Alex",
+    meta: {},
+    created_by: null,
+    created_by_name: "Shaun",
+    created_at: "2026-10-04T01:00:00Z",
+  }, {
+    id: "l2",
+    share_key: IDS.final,
+    xero_invoice_ids: [IDS.final],
+    job_id: null,
+    kind: "text_sent",
+    step: "d1",
+    body: "Older",
+    meta: {},
+    created_by: null,
+    created_by_name: "Shaun",
+    created_at: "2026-09-20T01:00:00Z",
+  });
+  const { report: r } = await report(store);
+  assertEquals(r.week.from, "2026-10-02");
+  assertEquals(r.week.to, "2026-10-08");
+  assertEquals(r.week.paid_in_full.status, "ok");
+  assertEquals(r.week.paid_in_full.count, 1);
+  assertEquals(r.week.paid_in_full.amount, 900);
+  assertEquals(r.week.activity.status, "ok");
+  // Only the text sent this week counts.
+  assertEquals(r.week.activity.texts_sent, 1);
 });
 
 Deno.test("report: cash at bank per Xero account, grouped, with provisions set aside", async () => {
@@ -145,29 +281,8 @@ Deno.test("report: Xero down for the bank balances still gives the report, sayin
   assertEquals(r.tie.ok, true);
 });
 
-Deno.test("report: money received in the last 7 and 30 days, split fencing and patio, with deposits", async () => {
-  const { report: r } = await report();
-  assertEquals(r.received.status, "ok");
-  assertEquals(r.received.d7.from, "2026-10-02");
-  assertEquals(r.received.d7.amount, 1700);
-  assertEquals(r.received.d7.count, 2);
-  assertEquals(r.received.d7.fencing_patio, 1700);
-  assertEquals(r.received.d7.deposits, 800);
-  assertEquals(r.received.d30.from, "2026-09-09");
-  assertEquals(r.received.d30.amount, 2030);
-  assertEquals(r.received.d30.other, 330);
-});
-
-Deno.test("report: debt expected in the next 7 and 30 days comes from not-due invoices by the tab's due dates", async () => {
-  const { report: r } = await report();
-  // MLB INV-2008, dated 5 Oct: due 15 Oct (company terms, 10 days).
-  assertEquals(r.expected.d7, { count: 1, amount: 440 });
-  assertEquals(r.expected.d30, { count: 1, amount: 440 });
-});
-
-Deno.test("report: companies after aliases, with this week's statement status; top debtors; possible payments", async () => {
-  const store = new FakeStore();
-  const { report: r } = await report(store, {
+Deno.test("report: unmatched bank receipts that match an open invoice are noted", async () => {
+  const { report: r } = await report(new FakeStore(), {
     bank: [{
       bank_transaction_id: "bt1",
       type: "RECEIVE",
@@ -186,76 +301,69 @@ Deno.test("report: companies after aliases, with this week's statement status; t
       line_item_descriptions: [],
     }],
   });
-  const mlb = r.companies.find((c) => c.name === "Major Loss Builders")!;
-  assertEquals(mlb.past, { count: 1, amount: 330, oldest: 27 });
-  assertEquals(mlb.grace.count, 1);
-  assertEquals(mlb.grace.next_due, "2026-10-15");
-  assertEquals(mlb.statement, "ready");
-  const bw = r.companies.find((c) => c.name === "Builderwest Pty Ltd")!;
-  assertEquals(bw.statement, "not_chased");
-  assertEquals(r.top_debtors[0].name, "Casey Example");
-  assertEquals(r.top_debtors.length, 4);
-  assertEquals(r.top_total, 4080);
   assertEquals(r.bank_feed.receipts, { count: 1, amount: 1000 });
   assertEquals(r.bank_feed.transfers, { count: 1, amount: 5000 });
   assertEquals(r.bank_feed.matches.map((m) => m.invoice_number), ["INV-2001"]);
-  assert(r.key_points.some((k) => k.includes("may already be paid")));
 });
 
-Deno.test("report: every invoice row carries the payer, job, type, invoice, date, amount, days, next step and last chase", async () => {
+Deno.test("report: every invoice row carries who, invoice, type, amount, invoiced, pay by, days overdue and the hold", async () => {
   const store = new FakeStore();
-  store.logRows.push({
-    id: "l1",
+  store.stateRows.push({
     share_key: IDS.final,
-    xero_invoice_ids: [IDS.final],
-    job_id: null,
-    kind: "text_sent",
-    step: "d3",
-    body: "Hi Alex",
-    meta: {},
-    created_by: null,
-    created_by_name: "Shaun",
-    created_at: "2026-10-04T01:00:00Z",
+    says_paid_since: "2026-10-06",
+    paused_until: null,
+    agent_reviewed_at: null,
+    note: null,
+    pay_link: null,
+    pay_link_read_at: null,
   });
   const { report: r } = await report(store);
-  const active = r.sections.find((s) => s.key === "active")!;
-  const row = active.rows[0];
-  assertEquals(row.invoice_number, "INV-2001");
+  const row = r.rows.find((x) => x.invoice_number === "INV-2001")!;
   assertEquals(row.payer, "Alex Sample");
   assertEquals(row.job_number, "SWF-90001");
-  assertEquals(row.job_type, "Fencing");
-  assertEquals(row.days, 7);
-  assertEquals(row.chase, "4 Oct 26 Texted (d3)");
-  assertStringIncludes(row.next, "Day 7");
-  // Worst first: the sections run bad debt, escalating, active, then not counted as debt.
-  assertEquals(r.sections.map((s) => s.key), [
-    "bad_debt",
-    "escalating",
-    "active",
-    "not_due",
-    "go_ahead",
-    "needs_a_look",
-    "not_chased",
-  ]);
+  assertEquals(row.receivable_class, "debt");
+  assertEquals(row.type_label, "Final");
+  assertEquals(row.invoice_date, "2026-10-01");
+  assertEquals(row.pay_by, "2026-10-01");
+  assertEquals(row.days_overdue, 7);
+  assertEquals(row.hold, "Says paid");
+  // Most overdue first.
+  const days = r.rows.map((x) => x.days_overdue);
+  assertEquals(days, [...days].sort((a, b) => b - a));
   // The neighbour share on a fence reads "Robin Next (neighbour of Taylor Main)".
-  const robin = r.sections[0].rows.find((x) => x.invoice_number === "INV-2006")!;
+  const robin = r.rows.find((x) => x.invoice_number === "INV-2006")!;
   assertEquals(robin.payer, "Robin Next (neighbour of Taylor Main)");
   assertStringIncludes(robin.next, "Jan's visit list");
+  // The sections of "Every invoice" add up to Receivables.
+  const sections = overdueSections(r);
+  const total = sections.reduce((s, x) => s + cents(x.total), 0) / 100;
+  assertEquals(total, r.receivables.amount);
 });
 
-Deno.test("report: the HTML, the notes and the email carry no long dash and no emoji, and name the tie", async () => {
+Deno.test("report: the HTML, the notes and the email carry no long dash and no emoji, and use the new words", async () => {
   const { body, report: r } = await report();
   assert(!LONG_DASH_OR_EMOJI.test(body.html), "the HTML has a long dash or emoji");
   assert(!LONG_DASH_OR_EMOJI.test(JSON.stringify(r)), "the data has a long dash or emoji");
-  assertStringIncludes(body.html, "Debt position");
+  assertStringIncludes(body.html, "Debt and receivables");
+  assertStringIncludes(body.html, "Where the receivables sit");
+  assertStringIncludes(body.html, "Debt, by how overdue");
+  assertStringIncludes(body.html, "Coming due in the next 7 days");
+  assertStringIncludes(body.html, "What happened this week");
+  assertStringIncludes(body.html, "Every invoice, by how overdue it is");
+  assertStringIncludes(body.html, "Write-off list");
   assertStringIncludes(body.html, "to the cent");
-  assertStringIncludes(body.html, "Not counted as debt");
+  assert(!/\blate\b/i.test(body.html), "the report says late, not overdue");
+  // Dropped sections.
+  assert(!body.html.includes("Debt by job type"));
+  assert(!body.html.includes("Aging"));
   assertEquals(debtReportHtml(r), body.html);
   const email = debtReportEmail(r, { greeting: "Marnin", sentBy: "Shaun" });
-  assertEquals(email.subject, "Debt position: Thursday the 8th of October 2026");
+  assertEquals(email.subject, "Debt and receivables: Thursday the 8th of October 2026");
   assertStringIncludes(email.html, "Hi Marnin,");
   assertStringIncludes(email.html, "attached as a PDF");
   assertStringIncludes(email.html, "suppress-auto-appended-default-signature");
+  assertStringIncludes(email.text, "Receivables (every unpaid invoice): $10,131.00 across 8 invoices.");
+  assertStringIncludes(email.text, "Debt overdue: $2,080.00 across 3 invoices");
   assert(!LONG_DASH_OR_EMOJI.test(email.html + email.text));
 });
 
@@ -282,7 +390,7 @@ Deno.test("report: still reads before the report migration is applied (the repor
   const store = new FakeStore();
   store.reportReadsFail = true;
   const { body, report: r } = await report(store);
-  assertEquals(r.received.status, "unavailable");
+  assertEquals(r.receivables.amount, 10131);
   assertEquals(body.delivery.can_send, false);
   assertEquals(body.last_sent, null);
 });
@@ -293,7 +401,7 @@ Deno.test("report pdf: staff can download it; the bytes come back as base64 with
   const res = await call(deps, "debt_ws_report_pdf", STAFF);
   assertEquals(res.status, 200);
   const b = res.body as any;
-  assertEquals(b.filename, "Debt position 2026-10-08.pdf");
+  assertEquals(b.filename, "Debt and receivables 2026-10-08.pdf");
   assertEquals(b.content_type, "application/pdf");
   assertStringIncludes(atob(b.pdf_base64), "%PDF");
   assertEquals(rec.pdfs, 1);
@@ -339,7 +447,7 @@ Deno.test("send: emails the PDF from admin@ to Marnin, cc Shaun, marked internal
   assertEquals(email.cc, ["shaun@secureworkswa.com.au"]);
   assertEquals(email.internal_report, "debt_report");
   assertEquals(email.attachments?.length, 1);
-  assertEquals(email.attachments![0].name, "Debt position 2026-10-08.pdf");
+  assertEquals(email.attachments![0].name, "Debt and receivables 2026-10-08.pdf");
   assertEquals(email.attachments![0].contentType, "application/pdf");
   assertStringIncludes(atob(email.attachments![0].contentBytes), "%PDF");
   assertStringIncludes(email.htmlBody, "Hi Marnin,");
@@ -352,7 +460,10 @@ Deno.test("send: emails the PDF from admin@ to Marnin, cc Shaun, marked internal
   assert(String(row.html).startsWith("<!doctype html>"));
   assertEquals(row.pdf_base64, email.attachments![0].contentBytes);
   assertEquals(String(row.pdf_sha256).length, 64);
-  assertEquals(row.totals.debt, { count: 4, amount: 4080 });
+  assertEquals(row.totals.version, "debt-report/v2");
+  assertEquals(row.totals.receivables, { count: 8, amount: 10131 });
+  assertEquals(row.totals.debt, { count: 4, amount: 2520 });
+  assertEquals(row.totals.debt_overdue, { count: 3, amount: 2080 });
   // The log line on the workshop log.
   const line = store.logRows.find((l) => l.kind === "email_sent" && l.share_key === "debt-report");
   assert(line, "no log line");
@@ -473,7 +584,7 @@ Deno.test("fresh copy: a stale copy refuses a manual send, draws no PDF, and say
   assertEquals(r2.emails.length, 0);
 });
 
-// ── The Wednesday 12pm auto-send ──
+// ── The Wednesday 2pm auto-send ──
 
 Deno.test("auto: does nothing while report_auto_send is off (the default), or while sending is off", async () => {
   const store = new FakeStore();
@@ -493,7 +604,7 @@ Deno.test("auto: does nothing while report_auto_send is off (the default), or wh
   assertEquals((await call(deps, "debt_ws_report_auto", SHAUN)).status, 403);
 });
 
-Deno.test("auto: when switched on it sends once a week, as the Wednesday 12pm auto-send", async () => {
+Deno.test("auto: when switched on it sends once a week, as the Wednesday 2pm auto-send", async () => {
   const store = new FakeStore();
   store.settingsRow.sending_enabled = true;
   store.reportSettingsRow.auto_send = true;
@@ -501,7 +612,7 @@ Deno.test("auto: when switched on it sends once a week, as the Wednesday 12pm au
   const first = await call(deps, "debt_ws_report_auto", SERVER);
   assertEquals((first.body as any).sent, true);
   assertEquals(rec.emails.length, 1);
-  assertStringIncludes(rec.emails[0].htmlBody, "the Wednesday 12pm auto-send");
+  assertStringIncludes(rec.emails[0].htmlBody, "the Wednesday 2pm auto-send");
   assertEquals(store.reportRows[0].kind, "auto");
   assertEquals(store.reportRows[0].week_start, "2026-10-05");
   const second = await call(deps, "debt_ws_report_auto", SERVER);
@@ -510,30 +621,30 @@ Deno.test("auto: when switched on it sends once a week, as the Wednesday 12pm au
   assertEquals(rec.emails.length, 1);
 });
 
-Deno.test("auto: at Wednesday 12:00 Perth it reads the copy synced at 11:55 and files the week from Monday", async () => {
+Deno.test("auto: at Wednesday 14:00 Perth it reads the copy synced at 13:55 and files the week from Monday", async () => {
   const store = new FakeStore();
   store.settingsRow.sending_enabled = true;
   store.reportSettingsRow.auto_send = true;
-  store.syncedAt = "2026-10-07T03:55:01Z"; // the 11:55 refresh
-  const wednesdayNoon = new Date("2026-10-07T04:00:00Z");
-  store.clock = () => wednesdayNoon;
-  const { deps, rec } = fakeDeps(store, { now: wednesdayNoon });
+  store.syncedAt = "2026-10-07T05:55:01Z"; // the 13:55 refresh
+  const wednesday2pm = new Date("2026-10-07T06:00:00Z");
+  store.clock = () => wednesday2pm;
+  const { deps, rec } = fakeDeps(store, { now: wednesday2pm });
   const res = await call(deps, "debt_ws_report_auto", SERVER);
   assertEquals((res.body as any).sent, true, JSON.stringify(res.body));
   assertEquals(rec.emails.length, 1);
   assertEquals(store.reportRows[0].week_start, "2026-10-05");
-  assertEquals(store.reportRows[0].sent_by_name, "the Wednesday 12pm auto-send");
+  assertEquals(store.reportRows[0].sent_by_name, "the Wednesday 2pm auto-send");
   assertEquals(store.reportRows[0].status, "sent");
 });
 
-Deno.test("auto: a stale copy at 12:00 sends nothing and is recorded as refused, without taking the week", async () => {
+Deno.test("auto: a stale copy at 14:00 sends nothing and is recorded as refused, without taking the week", async () => {
   const store = new FakeStore();
   store.settingsRow.sending_enabled = true;
   store.reportSettingsRow.auto_send = true;
-  store.syncedAt = "2026-10-07T03:19:00Z"; // the 11:55 refresh and the 11:49 sync both missed
-  const wednesdayNoon = new Date("2026-10-07T04:00:00Z");
-  store.clock = () => wednesdayNoon;
-  const { deps, rec } = fakeDeps(store, { now: wednesdayNoon });
+  store.syncedAt = "2026-10-07T05:19:00Z"; // the 13:55 refresh and the 13:49 sync both missed
+  const wednesday2pm = new Date("2026-10-07T06:00:00Z");
+  store.clock = () => wednesday2pm;
+  const { deps, rec } = fakeDeps(store, { now: wednesday2pm });
   const res = await call(deps, "debt_ws_report_auto", SERVER);
   assertEquals(res.status, 409);
   assertEquals((res.body as any).code, "xero_copy_stale");
@@ -543,8 +654,8 @@ Deno.test("auto: a stale copy at 12:00 sends nothing and is recorded as refused,
   assertEquals(store.reportRows[0].kind, "auto");
   assertEquals(store.reportRows[0].status, "refused");
   // The refused row does not hold the week: once the copy is fresh the auto send can go.
-  store.syncedAt = "2026-10-07T04:04:00Z";
-  const later = new Date("2026-10-07T04:10:00Z");
+  store.syncedAt = "2026-10-07T06:04:00Z";
+  const later = new Date("2026-10-07T06:10:00Z");
   store.clock = () => later;
   const { deps: d2, rec: r2 } = fakeDeps(store, { now: later });
   const again = await call(d2, "debt_ws_report_auto", SERVER);
@@ -652,18 +763,20 @@ Deno.test("total owed: not due yet splits by the kind the tab already gives (pro
   assertEquals(t.adds_up, true);
 });
 
-Deno.test("total owed: the debt report shows the same total and lines as the Debt tab", async () => {
+Deno.test("receivables: the debt report shows the same Receivables and lines as the Debt tab", async () => {
   const ov = await overview();
   const { report: r } = await report();
-  assertEquals(r.total_owed.amount, ov.total_owed.amount);
+  assertEquals(r.receivables.amount, ov.receivables.amount);
   assertEquals(
-    r.total_owed.lines.map((l) => [l.key, l.count, l.amount]),
-    ov.total_owed.lines.map((l: any) => [l.key, l.count, l.amount]),
+    r.receivables.lines.map((l) => [l.key, l.count, l.amount]),
+    ov.receivables.lines.map((l: any) => [l.key, l.count, l.amount]),
   );
-  assertEquals(r.total_owed.amount, r.xero_open.amount);
+  assertEquals(r.receivables.amount, r.xero_open.amount);
+  // The older breakdown is still on the overview, with the same total.
+  assertEquals(ov.total_owed.amount, ov.receivables.amount);
   const html = debtReportHtml(r);
-  assertStringIncludes(html, "Total owed to us");
-  assertStringIncludes(html, "Adds up to total owed to us");
+  assertStringIncludes(html, "Receivables");
+  assert(!html.includes("Total owed to us"));
   assert(!LONG_DASH_OR_EMOJI.test(html));
 });
 
@@ -726,12 +839,10 @@ Deno.test("xero check: the report says it under the total, in the notes and in t
   const { report: r } = await report(store);
   assertEquals(r.xero_check?.status, "differs");
   const html = debtReportHtml(r);
-  assertStringIncludes(html, "does not match Xero");
   assertStringIncludes(html, "Does not match Xero: 1 invoice differs (INV-0704)");
-  assert(r.key_points.some((k) => k.includes("INV-0704")));
   assert(r.notes.some((n) => n.startsWith("Check against Xero")));
   const mail = debtReportEmail(r, { greeting: "Marnin", sentBy: "Shaun" });
   assertStringIncludes(mail.text, "Check against Xero: Does not match Xero: 1 invoice differs (INV-0704).");
-  assertStringIncludes(mail.text, "Total owed to us: $10,131.00 across 8 invoices.");
+  assertStringIncludes(mail.text, "Receivables (every unpaid invoice): $10,131.00 across 8 invoices.");
   assert(!LONG_DASH_OR_EMOJI.test(html + mail.text));
 });

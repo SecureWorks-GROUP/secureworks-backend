@@ -57,7 +57,7 @@ async function fixtureReport(store = new FakeStore()): Promise<DebtReport> {
   return (res.body as any).report as DebtReport;
 }
 
-Deno.test("report pdf: the summary, the tie to Xero, the companies, every invoice and the notes are all in it", async () => {
+Deno.test("report pdf: the headline figures, where the receivables sit with the tie, the overdue bands, every invoice and the notes are all in it", async () => {
   const report = await fixtureReport();
   const pdf = await renderDebtReportPdf(report);
   assert(pdf.pageCount >= 2, `pages: ${pdf.pageCount}`);
@@ -66,24 +66,28 @@ Deno.test("report pdf: the summary, the tie to Xero, the companies, every invoic
   for (
     const expected of [
       "SECUREWORKS GROUP",
-      "Debt position",
-      "CASH AT BANK (ALL ACCOUNTS)",
-      "$108,266.51",
-      "Total debt",
-      "$4,080.00",
-      "Adds up to total owed to us",
-      "TOTAL OWED TO US",
+      "Debt and receivables",
+      "RECEIVABLES",
       "$10,131.00",
-      "Operations",
-      "Total received",
-      "Due in the next 7 days",
-      "Major Loss Builders",
-      "Not sent yet this week",
-      "Every open invoice",
+      "DEBT OVERDUE",
+      "$2,080.00",
+      "BAD DEBT (21 DAYS OR MORE)",
+      "$1,080.00",
+      "OTHER RECEIVABLES",
+      "$7,000.00",
+      "CASH AT BANK",
+      "$108,266.51",
+      "WHERE THE RECEIVABLES SIT",
+      "Write-off list",
+      "DEBT, BY HOW OVERDUE",
+      "21 days or more (bad debt)",
+      "COMING DUE IN THE NEXT 7 DAYS",
+      "WHAT HAPPENED THIS WEEK",
+      "Every invoice, by how overdue it is",
+      "Overdue 21 days or more",
       "INV-2001",
       "Alex Sample",
       "Builderwest Pty Ltd",
-      "Key points",
       "Notes",
       `Page 1 of ${pdf.pageCount}`,
     ]

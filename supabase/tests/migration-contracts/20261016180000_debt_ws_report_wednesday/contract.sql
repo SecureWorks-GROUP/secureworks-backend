@@ -21,14 +21,18 @@ BEGIN
   END IF;
 END $$;
 
--- 2. The words follow the new day.
+-- 2. The words follow the new day. 20261105120000_debt_ws_receivables.sql later moves the
+--    time to 2pm (14:00) on the same Wednesday, so either time is accepted here; what must
+--    never come back is the old Monday.
 DO $$
-BEGIN
-  IF col_description('public.debt_ws_settings'::regclass,
+DECLARE
+  v_switch text := col_description('public.debt_ws_settings'::regclass,
        (SELECT attnum FROM pg_attribute WHERE attrelid = 'public.debt_ws_settings'::regclass
-          AND attname = 'report_auto_send')::integer) NOT LIKE '%Wednesday 12:00 Perth%'
-     OR obj_description('public.trigger_debt_ws_report_auto()'::regprocedure, 'pg_proc')
-          NOT LIKE '%Wed 12:00 Perth%' THEN
+          AND attname = 'report_auto_send')::integer);
+  v_trigger text := obj_description('public.trigger_debt_ws_report_auto()'::regprocedure, 'pg_proc');
+BEGIN
+  IF NOT (v_switch LIKE '%Wednesday 12:00 Perth%' OR v_switch LIKE '%Wednesday 2pm (14:00 Perth)%')
+     OR NOT (v_trigger LIKE '%Wed 12:00 Perth%' OR v_trigger LIKE '%Wed 14:00 Perth%') THEN
     RAISE EXCEPTION 'contract: the report comments still name the old day';
   END IF;
 END $$;
