@@ -768,7 +768,7 @@ Deno.test("job status GHL push authenticates and makes HTTP 401 observable witho
       status: "processing",
     });
     assertEquals(result.success, true);
-    assertEquals(result.new_status, "processing");
+    assertEquals("new_status" in result ? result.new_status : undefined, "processing");
     assertEquals(requests.length, 1);
     assertEquals(
       new Headers(requests[0].headers).get("Authorization"),
