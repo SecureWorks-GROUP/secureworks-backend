@@ -12,6 +12,7 @@ import {
   processInstallDrafts,
   reconcileMilestoneDraft,
 } from "./invoice_milestone_drafts.ts";
+import { readJobBookings } from "./job_bookings.ts";
 const ORG = "00000000-0000-0000-0000-000000000001";
 const id = (n: number) =>
   `11000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -436,6 +437,7 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
   const puts: any[] = [];
   let provider: any = null;
   let forbidden = 0;
+  let loseCreateResponse = false;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     if (url.includes("/rest/v1/org_config")) return Response.json([]);
@@ -458,6 +460,12 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
         TotalTax: Math.round(total / 11 * 100) / 100,
         DueDateString: body.Invoices[0].DueDate,
       };
+      if (loseCreateResponse) {
+        throw new DOMException(
+          "Captured response lost after provider acceptance",
+          "TimeoutError",
+        );
+      }
       return Response.json({ Invoices: [provider] });
     }
     if (
@@ -515,6 +523,12 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
         "drafts" in booking.invoice_drafts,
     );
     assertEquals(booking.invoice_drafts.drafts[0]?.state, "draft_confirmed");
+    const listed = await readJobBookings(f.client, JOB);
+    assertEquals(listed.job_id, JOB);
+    assertEquals(listed.bookings.length, 1);
+    assertEquals(listed.bookings[0].id, booking.assignment.id);
+    assertEquals(listed.bookings[0].scheduled_date, "2026-11-09");
+
     assertEquals(puts.length, 1);
     assertEquals(forbidden, 0);
     await runtime.createAssignment(f.client, {
@@ -524,6 +538,51 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
       assignment_type: "install",
     });
     assertEquals(puts.length, 1);
+    assertEquals((await readJobBookings(f.client, JOB)).bookings.length, 2);
+    f = fixture();
+    provider = null;
+    puts.length = 0;
+    loseCreateResponse = true;
+    const lost = await runtime._updateJobStatus(f.client, {
+      job_id: JOB,
+      status: "scheduled",
+      skip_ghl_push: true,
+    });
+    assert(
+      "invoice_drafts" in lost && lost.invoice_drafts &&
+        "drafts" in lost.invoice_drafts,
+    );
+    assertEquals(lost.invoice_drafts.drafts[0].state, "unknown");
+    assertEquals(puts.length, 1);
+    const realNow = Date.now;
+    Date.now = () => realNow() + 7 * 60 * 1000;
+    try {
+      await runtime._updateJobStatus(f.client, {
+        job_id: JOB,
+        status: "scheduled",
+        skip_ghl_push: true,
+      });
+    } finally {
+      Date.now = realNow;
+    }
+    assertEquals(puts.length, 1);
+    loseCreateResponse = false;
+    const recovered = await runtime._invoiceMilestoneDraftsActionForTest(
+      f.client,
+      {
+        job_id: JOB,
+        mode: "reconcile",
+        claim_id: f.tables.invoice_milestone_draft_claims[0].id,
+      },
+      new URLSearchParams(),
+      "POST",
+      "jwt",
+      { role: "admin", orgId: ORG, id: id(70) },
+      false,
+    );
+    assertEquals((await recovered.json()).draft.state, "draft_confirmed");
+    assertEquals(puts.length, 1);
+    assertEquals(forbidden, 0);
   } finally {
     globalThis.fetch = original;
   }
@@ -864,5 +923,32 @@ Deno.test("council billing: missing release binding, renamed steps and wrong sou
       "council_step_complete",
     );
     assertEquals(f.counts(), { creates: 0, reads: 0, searches: 0 });
+  }
+});
+Deno.test("council step names preserve exact quoted text up to 500 characters and refuse all controls", () => {
+  for (
+    const name of [
+      'A "quoted" checkpoint',
+      "L".repeat(500),
+      "L".repeat(501),
+      "Bad\u0001checkpoint",
+      "Bad\ncheckpoint",
+      "Bad\u007fcheckpoint",
+    ]
+  ) {
+    const raw: any = pricing();
+    const stage = raw.billing_milestones.milestones[0];
+    stage.trigger = {
+      kind: "council_step_completed",
+      submission_id: id(7),
+      step_id: id(8),
+      step_name: name,
+    };
+    stage.printed_terms = councilBillingTerms(2, name);
+    raw.payment_schedule.payments[1].printed_terms = stage.printed_terms;
+    assertEquals(
+      acceptedBillingMilestones(raw).ok,
+      name.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(name),
+    );
   }
 });

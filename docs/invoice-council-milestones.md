@@ -8,7 +8,7 @@ The optional frozen trigger is `{kind:'council_step_completed',submission_id,ste
 
 Only an explicit complete call through the real council-status writer follows the durable SQL review into draft preparation. A workflow jump or overall completion label is never authority. The accepted stage, captured source submission/step ids, immutable release binding and current explicit completion must all match. PostgreSQL repeats those checks before prepared-to-dispatching admission. Reset and recompletion retain the first captured review and existing claim; they cannot mint another invoice.
 
-The provider path, exact DRAFT GET/read-back, durable unknown state, staff-only reconciliation and no-create retry policy are inherited unchanged. No customer send or authorise path is added. The staff GET/process/reconcile API from #1329 remains the office recovery door; process now consumes both explicit trigger kinds.
+Exact step names preserve quotation marks up to 500 characters and reject control characters. The provider path, exact DRAFT GET/read-back, durable unknown state, staff-only reconciliation and no-create retry policy are inherited unchanged. No customer send or authorise path is added. The staff GET/process/reconcile API from #1329 remains the office recovery door; process now consumes both explicit trigger kinds.
 
 ## Exact proofs
 
@@ -20,3 +20,5 @@ INVOICE_DRAFT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:56437/postgres I
 Optional connected producer proof: the Scope Engine checker can generate a private temporary raw pricing handoff from the actual engine, quote, seal and save serializer with both triggers. Set `WS6_PRODUCER_PRICING_FILE` to that file for the same typed Deno command. The real explicit council writer and real scheduled-status writer consume those exact bytes and reach two captured Inclusive DRAFT PUTs plus exact GETs, one per distinct stage, with no sends, authorise or contact redirects. The handoff is never committed or printed and is deleted after receipt. The accepted-document, payer and source rows in that test remain stand-ins; SQL independently proves actual release/trigger bindings.
 
 Limits remain: no live provider write or hosted staff trial, no production migration, no named-party invoice automation, and no variation adjustment policy. The council workflow must exist before the accepted quote. The provider HTTP window after admitted dispatch is unchanged from #1329; later supersession leaves a frozen draft for staff reconciliation, never an automatic send. This is a bounded draft-preparation implementation, not full office business acceptance or money approval.
+
+The captured writer proof also creates two actual first-party assignments, lists those same saved ids/dates through readJobBookings, and demonstrates an actual captured provider PUT response timeout: subsequent status calls beyond replay retention perform no second PUT; office reconcile binds the existing draft.

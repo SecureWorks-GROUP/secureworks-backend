@@ -39334,7 +39334,7 @@ async function billingCouncilStepsAction(client:any,params:URLSearchParams,metho
   for(const sub of result.data||[]) {
     if(!CREATE_INVOICE_DRAFT_UUID_RE.test(String(sub.id||''))||!Array.isArray(sub.steps))continue
     for(const step of sub.steps) {
-      if(CREATE_INVOICE_DRAFT_UUID_RE.test(String(step?.step_id||'')) && typeof step.name==='string' && step.name.trim() && step.name.length<=160 && !/[\r\n"]/u.test(step.name) && sub.steps.filter((s:any)=>s?.step_id===step.step_id).length===1 && step.status!=='complete') steps.push({submission_id:sub.id,step_id:step.step_id,step_name:step.name,submission_name:String(sub.template_type||'Council workflow')})
+      if(CREATE_INVOICE_DRAFT_UUID_RE.test(String(step?.step_id||'')) && typeof step.name==='string' && step.name.trim() && step.name.length<=500 && !/[\u0000-\u001f\u007f]/u.test(step.name) && sub.steps.filter((s:any)=>s?.step_id===step.step_id).length===1 && step.status!=='complete') steps.push({submission_id:sub.id,step_id:step.step_id,step_name:step.name,submission_name:String(sub.template_type||'Council workflow')})
     }
   }
   return json({ok:true,job_id:jobId,steps})

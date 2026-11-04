@@ -70,8 +70,8 @@ export function acceptedBillingMilestones(raw: any) {
       UUID.test(String(stage.trigger.submission_id || "")) &&
       UUID.test(String(stage.trigger.step_id || "")) &&
       typeof stage.trigger.step_name === "string" &&
-      stage.trigger.step_name.trim() && stage.trigger.step_name.length <= 160 &&
-      !/[\r\n"]/u.test(stage.trigger.step_name)
+      stage.trigger.step_name.trim() && stage.trigger.step_name.length <= 500 &&
+      !/[\u0000-\u001f\u007f]/u.test(stage.trigger.step_name)
     ) {
       key = `council:${stage.trigger.submission_id}:${stage.trigger.step_id}`;
       terms = councilBillingTerms(stage.due_rule.days, stage.trigger.step_name);
