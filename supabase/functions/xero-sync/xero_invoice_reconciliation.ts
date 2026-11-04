@@ -94,10 +94,19 @@ export const DRAFT_RECONCILE_LIMIT = 5;
 export const MISMATCH_RECONCILE_LIMIT = 5;
 export const MISMATCH_RETRY_MS = 24 * 60 * 60 * 1000;
 const XERO_INVOICE_STATUSES = ["DRAFT", "SUBMITTED", "AUTHORISED", "PAID", "VOIDED", "DELETED"];
-/** PostgREST filter: stored status is missing or differs from raw_json.Status. */
-export const STATUS_MISMATCH_FILTER = XERO_INVOICE_STATUSES
-  .map((st) => `and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`)
-  .join(",");
+/** A customer invoice stored with no Xero record (raw_json null) and not
+ *  voided or deleted. INV-1315 class: the status-mismatch filter needs
+ *  raw_json.Status, so a row that was never read back was never selected,
+ *  and its lines stayed missing. One GET /Invoices/{id} fills them. */
+export const UNREAD_XERO_RECORD_FILTER =
+  "and(raw_json.is.null,or(status.is.null,status.not.in.(VOIDED,DELETED)))";
+/** PostgREST filter: stored status is missing or differs from raw_json.Status,
+ *  or the row was never read back from Xero. */
+export const STATUS_MISMATCH_FILTER = [
+  ...XERO_INVOICE_STATUSES
+    .map((st) => `and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`),
+  UNREAD_XERO_RECORD_FILTER,
+].join(",");
 // sync_invoices runs every 15 minutes. The draft sweep is a quota decision,
 // not a freshness decision: it costs one GET /Invoices/{id} per draft, so it
 // is gated to one pass per 24 hours through the existing sync-state table.
