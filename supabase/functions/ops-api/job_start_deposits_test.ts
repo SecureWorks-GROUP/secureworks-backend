@@ -9,12 +9,14 @@ import {
   JobStartDepositError,
 } from "./job_start_deposits.ts";
 import {
+  _authorizeOpsApiAction,
   prepareClockEventAssignment,
   updateAssignment,
   updateJobPhase,
   updateJobStatus,
   updateMyAssignment,
 } from "./index.ts";
+import { clearDepositFlag } from "./job_deposit_advance.ts";
 
 const owner = {
   id: "owner",
@@ -83,6 +85,8 @@ function fixture(extra: any = {}) {
           return q;
         },
         order: () => q,
+        not: () => q,
+        is: () => q,
         range: (a: number, b: number) => {
           start = a;
           end = b;
@@ -371,6 +375,144 @@ Deno.test("crew can start after both deposits are paid", async () => {
   }, "crew");
   assertEquals(result.assignment.status, "in_progress");
   assertEquals(f.writes[0].table, "job_assignments");
+  assertEquals(f.writes[0].value.status, "in_progress");
+});
+
+Deno.test("stale unpaid mirror blocks crew until the synchronized evidence is paid", async () => {
+  const f = fixture({
+    xero_invoices: [
+      deposit("owner"),
+      deposit("neighbour", {
+        status: "AUTHORISED",
+        synced_at: "2000-01-01T00:00:00Z",
+      }),
+    ],
+  });
+  const start = () =>
+    updateMyAssignment(f.client, {
+      id: "assignment",
+      status: "in_progress",
+    }, "crew");
+  const err = await assertRejects(start, JobStartDepositError);
+  assertEquals(err.status, 409);
+  assertEquals(err.code, "job_deposits_unpaid");
+  assertEquals(f.writes, []);
+  // Stand-in for a completed mirror refresh, not an office bypass or a Xero call.
+  f.tables.xero_invoices[1] = deposit("neighbour");
+  await start();
+  assertEquals(f.writes[0].value.status, "in_progress");
+});
+
+Deno.test("known limitation: stale or undated PAID mirror can permit crew start", async () => {
+  for (const synced_at of ["2000-01-01T00:00:00Z", null]) {
+    const f = fixture({
+      xero_invoices: [
+        deposit("owner", { synced_at }),
+        deposit("neighbour", { synced_at }),
+      ],
+    });
+    await updateMyAssignment(f.client, {
+      id: "assignment",
+      status: "in_progress",
+    }, "crew");
+    assertEquals(f.writes[0].value.status, "in_progress");
+  }
+});
+
+Deno.test("unmatched payer evidence blocks crew and office before any start write", async () => {
+  for (
+    const run of [
+      (c: any) =>
+        updateMyAssignment(c, {
+          id: "assignment",
+          status: "in_progress",
+        }, "crew"),
+      (c: any) =>
+        updateAssignment(c, {
+          id: "assignment",
+          status: "in_progress",
+        }),
+    ]
+  ) {
+    const f = fixture({
+      xero_invoices: [
+        deposit("owner"),
+        deposit("neighbour", { job_contact_id: "unrecognized-party" }),
+      ],
+    });
+    const err = await assertRejects(() => run(f.client), JobStartDepositError);
+    assertEquals(err.code, "job_deposits_unpaid");
+    assertEquals(err.reasons, ["party_without_deposit:B"]);
+    assertEquals(f.writes, []);
+  }
+});
+
+Deno.test("signed-in office authority and caller override fields do not bypass unknown payer roster", async () => {
+  for (const role of ["admin", "owner", "ops_manager"]) {
+    assertEquals(
+      _authorizeOpsApiAction({
+        url: new URL(
+          "https://example.invalid/ops-api?action=update_assignment",
+        ),
+        authMode: "jwt",
+        authUser: { role },
+      }),
+      { ok: true },
+    );
+    const f = fixture({ job_contacts: [neighbour] });
+    const err = await assertRejects(() =>
+      updateAssignment(f.client, {
+        id: "assignment",
+        status: "in_progress",
+        override: true,
+        bypass_deposit_gate: true,
+        deposit_paid: true,
+      }), JobStartDepositError);
+    assertEquals(err.status, 409);
+    assertEquals(err.code, "job_deposits_unreadable");
+    assertEquals(f.writes, []);
+  }
+});
+
+Deno.test("clearing the office deposit flag does not override the start guard", async () => {
+  const f = fixture({
+    xero_invoices: [deposit("owner")],
+    job_deposit_advance_state: [{
+      job_id: "job",
+      flag: "deposit_unpaid",
+      flag_cleared_at: null,
+    }],
+  });
+  const cleared = await clearDepositFlag(
+    {
+      client: f.client,
+      now: () => new Date("2026-11-04T08:00:00Z"),
+      moveJobStatus: () => Promise.reject(new Error("no status move expected")),
+      sendSms: () => Promise.reject(new Error("no send expected")),
+    },
+    { job_id: "job" },
+    "office",
+  );
+  assertEquals(cleared.action, "cleared");
+  const flagWrites = [...f.writes];
+  const err = await assertRejects(() =>
+    updateAssignment(f.client, {
+      id: "assignment",
+      status: "in_progress",
+    }), JobStartDepositError);
+  assertEquals(err.code, "job_deposits_unpaid");
+  assertEquals(f.writes, flagWrites);
+});
+
+Deno.test("known limitation: empty legacy roster uses its one-owner deposit fallback", async () => {
+  const f = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+  });
+  await updateMyAssignment(f.client, {
+    id: "assignment",
+    status: "in_progress",
+  }, "crew");
   assertEquals(f.writes[0].value.status, "in_progress");
 });
 
