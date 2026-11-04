@@ -438,6 +438,16 @@ Deno.test("the sync never places a bill whose supplier document is duplicated (r
   // Its own older facts, outside the window or cap, are swept too: hold first, then the fact goes by its own source.
   const sweep = src.slice(src.indexOf("// 5. This path's own facts outside this run's window or cap"), src.indexOf("// Bill pre-match (JP-06): after the queue upsert"));
   assertEquals(sweep.includes("if (seenNow.has(id) || !OWN_FACT_SOURCES.has(src)) continue"), true);
+  // An agent-placed fact follows the bill's amount and is then left alone:
+  // filtered to agent_prematch and its own job, before the assigned-queue skip.
+  const follow = src.indexOf("if (agentPrematchAmountFollowsBill({");
+  const skipAssigned = src.indexOf("if (existingQueueStatus && existingQueueStatus !== 'open')");
+  assertEquals(follow > 0 && follow < skipAssigned, true);
+  const followBody = src.slice(follow, skipAssigned);
+  assertEquals(followBody.includes(".eq('automation_source', 'agent_prematch')"), true);
+  assertEquals(followBody.includes(".eq('job_id', placedJob)"), true);
+  assertEquals(followBody.includes(".eq('status', 'assigned')"), true);
+  assertEquals(followBody.includes("continue"), true);
   assertEquals(sweep.includes("if (qs && qs !== 'open') continue"), true);
   assertEquals(sweep.indexOf("suggestionReason: 'duplicate_document'") < sweep.indexOf(".from('job_materials_facts').delete()"), true);
   // A removal is counted only when the database confirms it.

@@ -57,6 +57,7 @@ import {
   DEFAULT_MATCH_CONFIG,
   extractJobNumber,
   amountIsKnown,
+  agentPrematchAmountFollowsBill,
   existingFactVerdict,
   HELD_QUEUE_REASONS,
   JOB_NUMBER_RE,
@@ -1889,6 +1890,48 @@ async function ingestMaterialsActuals(
 
       const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
       const installer = isInstallerBill(b.line_items)
+      // Agent-placed whole-bill facts keep their job. Their amount follows the
+      // bill, the same step this path's own facts take on 'keep' (finish line
+      // A2: a fact can sit behind an amended bill). A missing amount is not
+      // written as 0. A person's fact and a split are not touched. The assigned
+      // queue row's amounts follow too; its status and job do not.
+      if (agentPrematchAmountFollowsBill({
+        source: factSourceById.get(bill.xero_invoice_id),
+        amountKnown: amountIsKnown(bill.sub_total),
+        factJobId: factJobById.get(bill.xero_invoice_id),
+      })) {
+        const placedJob = factJobById.get(bill.xero_invoice_id) as string
+        const nowIso = new Date().toISOString()
+        const { error: aErr } = await sb.from('job_materials_facts')
+          .update({
+            amount_ex_gst: bill.sub_total,
+            amount_inc_gst: bill.total ?? null,
+            fact_date: bill.invoice_date,
+            updated_at: nowIso,
+          })
+          .eq('xero_invoice_id', bill.xero_invoice_id)
+          .eq('automation_source', 'agent_prematch')
+          .eq('job_id', placedJob)
+        if (aErr) {
+          console.error(`[materials] agent fact amount refresh failed ${bill.xero_invoice_id}:`, aErr.message)
+        } else {
+          const counts = result as Record<string, unknown>
+          counts.agent_amount_refreshed = Number(counts.agent_amount_refreshed || 0) + 1
+        }
+        if (existingQueueStatus === 'assigned') {
+          const { error: qErr } = await sb.from('materials_reconciliation_queue')
+            .update({
+              sub_total: bill.sub_total,
+              total: bill.total ?? null,
+              invoice_date: bill.invoice_date,
+              updated_at: nowIso,
+            })
+            .eq('xero_invoice_id', bill.xero_invoice_id)
+            .eq('status', 'assigned')
+          if (qErr) console.error(`[materials] agent queue amount refresh failed ${bill.xero_invoice_id}:`, qErr.message)
+        }
+        continue
+      }
       if (existingQueueStatus && existingQueueStatus !== 'open') {
         result.skipped_manual++
         continue

@@ -410,9 +410,22 @@ export function buildQueueRow(
 // This path never MOVES a fact to another job. It keeps its own fact
 // (xero_ref_link or po_deterministic) unless the bill now hard-contradicts it,
 // and then removes it so a person decides. Pre-match and human facts are not
-// this path's to change.
+// this path's to move or remove. The one exception is the amount: an
+// agent-placed whole-bill fact follows the bill's current amount
+// (agentPrematchAmountFollowsBill). Its job stays.
 // ─────────────────────────────────────────────────────────────
 export const OWN_FACT_SOURCES = new Set(["xero_ref_link", "po_deterministic"]);
+
+/** Copy the bill's current amount onto an agent-placed whole-bill fact.
+ *  The job is never moved. A missing amount is not written as zero. A person's
+ *  fact and a split (the source map prefers manual_split) are refused. */
+export function agentPrematchAmountFollowsBill(input: {
+  source: string | null | undefined;
+  amountKnown: boolean;
+  factJobId: string | null | undefined;
+}): boolean {
+  return input.source === "agent_prematch" && input.amountKnown === true && !!input.factJobId;
+}
 
 // Detection grammar, the same as the pre-match (bill_prematch.ts
 // JOB_NUMBER_RE_GLOBAL): hyphen optional, so "SWF26999" in a line is seen as a
