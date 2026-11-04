@@ -307,6 +307,7 @@ import {
   rescheduleJobBookings,
 } from './job_bookings.ts'
 import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
+import { assertJobDepositsBeforeWork, isInstallationAssignment, JobStartDepositError } from './job_start_deposits.ts'
 import {
   deriveFencingStageV1,
   fencingStageTruthFields,
@@ -15314,6 +15315,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               assignment_id,
               tradeUser.id,
               idempotency_key,
+              event,
             )
             if (duplicate) {
               return json({ success: true, assignment, duplicate: true })
@@ -15608,6 +15610,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     if (err instanceof ApiError) {
       return json(err.body || { error: err.message }, err.status)
     }
+    if (err instanceof JobStartDepositError) {
+      return json({ success: false, error: err.message, code: err.code, reasons: err.reasons }, err.status)
+    }
     console.error('[ops-api] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
@@ -15620,6 +15625,7 @@ export async function prepareClockEventAssignment(
   assignmentId: string,
   tradeUserId: string,
   idempotencyKey?: string | null,
+  event?: string,
 ): Promise<{ assignment: any; duplicate: boolean }> {
   const { data: assignment, error: assignmentError } = await client.from('job_assignments')
     .select('*')
@@ -15635,6 +15641,10 @@ export async function prepareClockEventAssignment(
       .eq('detail_json->>idempotency_key', idempotencyKey)
       .limit(1)
     if (existing && existing.length > 0) return { assignment, duplicate: true }
+  }
+
+  if (event && ['clock_on', 'start_travel', 'arrived', 'resume'].includes(event) && isInstallationAssignment(assignment)) {
+    await assertJobDepositsBeforeWork(client, assignment.job_id)
   }
 
   return { assignment, duplicate: false }
@@ -36703,6 +36713,10 @@ export async function updateAssignment(client: any, body: any) {
     if (body[bodyKey] !== undefined) update[dbKey] = body[bodyKey]
   }
 
+  if ((update.status === 'in_progress' || (update.assignment_type !== undefined && oldAssignment?.status === 'in_progress')) && isInstallationAssignment({ ...oldAssignment, ...update })) {
+    await assertJobDepositsBeforeWork(client, oldAssignment?.job_id)
+  }
+
   if (oldAssignment?.job_id) {
     const { data: makesafeDetail, error: makesafeDetailErr } = await client.from('makesafe_job_details')
       .select('cycle_number').eq('job_id', oldAssignment.job_id).maybeSingle()
@@ -37319,7 +37333,7 @@ async function setJobLead(client: any, body: any) {
   }
 }
 
-async function updateJobStatus(client: any, body: any) {
+export async function updateJobStatus(client: any, body: any) {
   const jId = body.jobId || body.job_id
   const status = body.status
   if (!jId || !status) throw new Error('jobId and status required')
@@ -37328,6 +37342,10 @@ async function updateJobStatus(client: any, body: any) {
   // redeploy. Preserve that behaviour here and let database constraints /
   // stage-gate shadow observations catch invalid transitions downstream.
   if (!status || typeof status !== 'string' || status.length > 50) throw new Error('Invalid status')
+
+  // Shared fences must not bypass either party's deposit by a manual move or
+  // the scheduled-day sweep, which also calls this writer.
+  if (status === 'in_progress') await assertJobDepositsBeforeWork(client, jId)
 
   // Capture old status + job data for business_events dual-write
   const { data: jobBefore } = await client.from('jobs')
@@ -55521,7 +55539,7 @@ export const _tradeLogMyJobHoursForTest = tradeLogMyJobHours
 export const _pickHoursAssignmentForTest = pickHoursAssignment
 export const _assertFencingCompletionEvidenceForTest = assertFencingCompletionEvidence
 
-async function updateMyAssignment(client: any, body: any, userId: string) {
+export async function updateMyAssignment(client: any, body: any, userId: string) {
   const id = body.assignmentId || body.id
 
   // ── Acknowledge-only path (no status change) ──
@@ -55554,13 +55572,17 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
   // Verify this assignment belongs to the authenticated user
   const { data: assignment, error: findErr } = await client
     .from('job_assignments')
-    .select('id, job_id, user_id, status, started_at, completed_at, acknowledged_at')
+    .select('id, job_id, user_id, status, started_at, completed_at, acknowledged_at, assignment_type, role, is_ghost')
     .eq('id', id)
     .maybeSingle()
 
   if (findErr) throw findErr
   if (!assignment) throw new Error('Assignment not found')
   if (assignment.user_id !== userId) throw new Error('Not your assignment')
+
+  if (newStatus === 'in_progress' && isInstallationAssignment(assignment)) {
+    await assertJobDepositsBeforeWork(client, assignment.job_id)
+  }
 
   // Record timestamps for time tracking
   const updateFields: any = { status: newStatus }
@@ -55608,7 +55630,7 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
 
 const VALID_PHASES = ['assigned','acknowledged','travelling','arrived','materials_check','working','wrap_up','complete'] as const
 
-async function updateJobPhase(client: any, body: any, userId: string) {
+export async function updateJobPhase(client: any, body: any, userId: string) {
   const assignmentId = body.assignmentId || body.id
   const newPhase = body.phase
   if (!assignmentId || !newPhase) throw new Error('assignmentId and phase required')
@@ -55617,7 +55639,7 @@ async function updateJobPhase(client: any, body: any, userId: string) {
   // Verify ownership
   const { data: asgn, error: findErr } = await client
     .from('job_assignments')
-    .select('id, job_id, user_id, job_phase, status, started_at, completed_at')
+    .select('id, job_id, user_id, job_phase, status, started_at, completed_at, assignment_type, role, is_ghost')
     .eq('id', assignmentId)
     .maybeSingle()
   if (findErr) throw findErr
@@ -55627,6 +55649,10 @@ async function updateJobPhase(client: any, body: any, userId: string) {
   const oldPhase = asgn.job_phase || 'assigned'
   // Skip if already at this phase
   if (oldPhase === newPhase) return { assignment: asgn, changed: false }
+
+  if (['arrived', 'materials_check', 'working'].includes(newPhase) && isInstallationAssignment(asgn)) {
+    await assertJobDepositsBeforeWork(client, asgn.job_id)
+  }
 
   // Build update
   const now = new Date().toISOString()
