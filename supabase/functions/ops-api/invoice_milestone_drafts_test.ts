@@ -479,7 +479,10 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
       status: "scheduled",
       skip_ghl_push: true,
     });
-    assertEquals(a.invoice_drafts?.drafts?.[0]?.state, "draft_confirmed");
+    assert(
+      "invoice_drafts" in a && a.invoice_drafts && "drafts" in a.invoice_drafts,
+    );
+    assertEquals(a.invoice_drafts.drafts[0]?.state, "draft_confirmed");
     assertEquals(puts.length, 1);
     assertEquals(puts[0].Invoices[0].Status, "DRAFT");
     assertEquals(puts[0].Invoices[0].Contact.ContactID, CONTACT);
@@ -501,7 +504,11 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
       scheduled_date: "2026-11-09",
       assignment_type: "install",
     });
-    assertEquals(booking.invoice_drafts?.drafts?.[0]?.state, "draft_confirmed");
+    assert(
+      "invoice_drafts" in booking && booking.invoice_drafts &&
+        "drafts" in booking.invoice_drafts,
+    );
+    assertEquals(booking.invoice_drafts.drafts[0]?.state, "draft_confirmed");
     assertEquals(puts.length, 1);
     assertEquals(forbidden, 0);
     await runtime.createAssignment(f.client, {
