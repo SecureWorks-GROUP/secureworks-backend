@@ -508,6 +508,7 @@ jobs:
             supabase/functions/send-quote/quote_party_view_test.ts \
             supabase/functions/send-quote/ghl_email_note_test.ts \
             supabase/functions/ghl-proxy/hardening_helpers_test.ts \
+            supabase/functions/ghl-proxy/misc_scope_save_test.ts \
             supabase/functions/ghl-proxy/provider_reads_test.ts \
             supabase/functions/ghl-proxy/lead_search_test.ts \
             supabase/functions/ghl-proxy/sms_sender_default_test.ts \
@@ -656,6 +657,11 @@ jobs:
           deno test --allow-read --allow-env \
             supabase/functions/ghl-proxy/sms_capture_test.ts \
             supabase/functions/ghl-proxy/send_sms_response_test.ts
+
+      - name: Test Misc-only scope save against concurrent job edits
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ghl-proxy/misc_scope_save_handler_test.ts
 
       # C7: GHL text reactions are one client.sms_reaction row each (channel
       # status, never read as the customer writing), and the operator's
