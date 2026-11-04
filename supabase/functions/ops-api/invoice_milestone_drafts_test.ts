@@ -735,13 +735,18 @@ Deno.test("provider inventory: only explicit complete page metadata passes; shor
 
 Deno.test("accepted billing: historical accepted document without any claim and pre-send acceptance both stay held", async () => {
   for (
-    const mutate of [(f: any) =>
-      f.tables.job_documents.push({
-        ...f.tables.job_documents[0],
-        id: id(97),
-        quote_revision_id: id(98),
-        superseded_at: "2026-11-03",
-      }), (f: any) => f.tables.job_documents[0].accepted_at = "2026-11-01"]
+    const mutate of [
+      (f: any) =>
+        f.tables.job_documents.push({
+          ...f.tables.job_documents[0],
+          id: id(97),
+          quote_revision_id: id(98),
+          superseded_at: "2026-11-03",
+        }),
+      (f: any) => f.tables.job_documents[0].accepted_at = "2026-11-01",
+      (f: any) => f.tables.job_documents[0].sent_at = "2099-01-01",
+      (f: any) => f.tables.job_documents[0].sent_at = "unreadable",
+    ]
   ) {
     const f = fixture();
     mutate(f);

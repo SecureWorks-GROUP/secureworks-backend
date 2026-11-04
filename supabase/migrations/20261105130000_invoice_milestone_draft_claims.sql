@@ -85,11 +85,11 @@ BEGIN
     SELECT d.* INTO accepted FROM public.job_documents d
       JOIN public.quote_revisions q ON q.id=d.quote_revision_id AND q.job_document_id=d.id AND q.job_id=d.job_id
       WHERE d.job_id=NEW.job_id AND d.quote_revision_id=NEW.quote_revision_id
-        AND d.type='quote' AND d.sent_at IS NOT NULL AND d.accepted_at IS NOT NULL
-        AND d.superseded_at IS NULL AND d.job_contact_id IS NULL AND q.sent_at IS NOT NULL AND d.accepted_at>=q.sent_at
+        AND d.type='quote' AND d.run_label IS NULL AND d.sent_at IS NOT NULL AND d.accepted_at IS NOT NULL
+        AND d.superseded_at IS NULL AND d.job_contact_id IS NULL AND q.sent_at IS NOT NULL AND d.accepted_at>=q.sent_at AND d.accepted_at>=d.sent_at
       FOR SHARE OF d;
     IF NOT FOUND OR (SELECT count(*) FROM public.job_documents d WHERE d.job_id=NEW.job_id
-      AND d.type='quote' AND d.sent_at IS NOT NULL AND d.accepted_at IS NOT NULL AND d.superseded_at IS NULL)<>1 THEN
+      AND d.type='quote' AND d.run_label IS NULL AND d.sent_at IS NOT NULL AND d.accepted_at IS NOT NULL AND d.superseded_at IS NULL)<>1 THEN
       RAISE EXCEPTION 'Invoice milestone accepted document changed before claim admission';
     END IF;
   END IF;
@@ -161,7 +161,7 @@ BEGIN
  SELECT * INTO revision FROM public.quote_revisions WHERE id=NEW.quote_revision_id;
  payment:=revision.pricing_snapshot_json->'raw'->'payment_schedule'->'payments'->0;
  IF binding.state IS DISTINCT FROM 'eligible' OR binding.org_id IS DISTINCT FROM NEW.org_id OR binding.job_id IS DISTINCT FROM NEW.job_id OR binding.xero_contact_id IS DISTINCT FROM NEW.xero_contact_id
-  OR doc.job_id IS DISTINCT FROM NEW.job_id OR doc.quote_revision_id IS DISTINCT FROM NEW.quote_revision_id OR doc.accepted_at IS NULL OR doc.sent_at IS NULL OR doc.superseded_at IS NOT NULL OR doc.job_contact_id IS NOT NULL OR doc.accepted_at<revision.sent_at
+  OR doc.type IS DISTINCT FROM 'quote' OR doc.run_label IS NOT NULL OR doc.job_id IS DISTINCT FROM NEW.job_id OR doc.quote_revision_id IS DISTINCT FROM NEW.quote_revision_id OR doc.accepted_at IS NULL OR doc.sent_at IS NULL OR doc.superseded_at IS NOT NULL OR doc.job_contact_id IS NOT NULL OR doc.accepted_at<revision.sent_at OR doc.accepted_at<doc.sent_at
   OR revision.job_id IS DISTINCT FROM NEW.job_id OR revision.job_document_id IS DISTINCT FROM NEW.accepted_document_id OR revision.sent_at IS NULL
   OR payment->>'id' IS DISTINCT FROM NEW.stage_id OR jsonb_typeof(payment->'amount_inc_gst') IS DISTINCT FROM 'number' THEN
    RAISE EXCEPTION 'Accepted deposit receipt lacks exact released first-stage binding';

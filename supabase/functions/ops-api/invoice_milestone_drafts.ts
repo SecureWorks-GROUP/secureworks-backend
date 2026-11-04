@@ -311,7 +311,7 @@ export async function processInstallDrafts(
     }
     const doc = rows(
       await client.from("job_documents").select(
-        "id,quote_revision_id,job_id,job_contact_id,accepted_at,sent_at,superseded_at",
+        "id,quote_revision_id,job_id,job_contact_id,run_label,accepted_at,sent_at,superseded_at",
       ).eq("id", review.accepted_document_id).eq("job_id", jobId).maybeSingle(),
       "Accepted document",
     );
@@ -331,7 +331,7 @@ export async function processInstallDrafts(
     );
     if (
       !doc?.accepted_at || !doc.sent_at || doc.superseded_at ||
-      doc.job_contact_id ||
+      doc.job_contact_id || doc.run_label != null ||
       doc.quote_revision_id !== review.accepted_quote_revision_id ||
       !revision?.sent_at || revision.job_document_id !== doc.id ||
       binding?.state !== "eligible" ||
@@ -368,7 +368,8 @@ export async function processInstallDrafts(
         (d.id !== doc.id || d.quote_revision_id !== revision.id)
       ) ||
       !(new Date(doc.accepted_at).getTime() >=
-        new Date(revision.sent_at).getTime())
+          new Date(revision.sent_at).getTime() &&
+        new Date(doc.accepted_at).getTime() >= new Date(doc.sent_at).getTime())
     ) {
       outcomes.push(
         await admissionHold(

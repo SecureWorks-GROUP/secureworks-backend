@@ -7,3 +7,5 @@ CREATE TABLE IF NOT EXISTS public.job_contacts (id uuid PRIMARY KEY DEFAULT gen_
 
 -- Supabase-style inherited grants must not defeat the migration's narrow grants.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+
+ALTER TABLE public.job_documents ADD COLUMN IF NOT EXISTS run_label text;
