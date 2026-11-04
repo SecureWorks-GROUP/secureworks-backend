@@ -483,7 +483,8 @@ jobs:
             supabase/functions/ops-api/dispatch_v2_working_days_test.ts \
             supabase/functions/ops-api/dispatch_v2_fence_scope_test.ts \
             supabase/functions/ops-api/dispatch_v2_order_confirmed_test.ts \
-            supabase/functions/ops-api/dispatch_v2_order_documents_test.ts
+            supabase/functions/ops-api/dispatch_v2_order_documents_test.ts \
+            supabase/functions/ops-api/dispatch_v2_order_sheet_pdf_test.ts
 
       # Dispatch v2 slice 8: supplier replies matched to orders, delivery date
       # suggestions (rules, engine on an in-memory store, migration text).

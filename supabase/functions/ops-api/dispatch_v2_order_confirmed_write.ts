@@ -22,7 +22,10 @@
 //     tag, never client-visible, never synced to GHL);
 //   * on Accept and the stage press (not a by-hand date): the supplier's PDFs
 //     from the order's matched replies, saved to the job's documents once
-//     each (dispatch_v2_order_documents.ts, contract section 3e.2).
+//     each (dispatch_v2_order_documents.ts, contract section 3e.2); when
+//     none of those replies carries a PDF, our own one-page Material order
+//     sheet instead, once per order (dispatch_v2_order_sheet_pdf.ts,
+//     contract section 3e.3).
 // Never a job, job status, stage, supplier, Xero, GHL, SMS or email.
 //
 // It never throws and never undoes the press that called it: a failure is
@@ -44,6 +47,7 @@ import {
   type DispatchOrderDocumentsResult,
   saveDispatchSupplierDocuments,
 } from "./dispatch_v2_order_documents.ts";
+import { saveDispatchOrderSheet } from "./dispatch_v2_order_sheet_pdf.ts";
 
 export type DispatchOrderConfirmedTrigger = "accept" | "stage_set" | "date_set";
 
@@ -101,10 +105,12 @@ export type DispatchOrderConfirmedResult = {
   documents: DispatchOrderDocumentsResult | null;
 };
 
-// The order email columns the line needs. order_lines and subject are read
-// for the order sheet (dispatch_v2_order_sheet_pdf.ts) and the documents.
+// The order email columns the line needs.
 export const DISPATCH_CONFIRMED_ORDER_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, status, sent_at, delivery_date, body_text";
+// The same, plus the material lines the order sheet prints.
+const DISPATCH_ORDER_SHEET_SELECT =
+  `${DISPATCH_CONFIRMED_ORDER_SELECT}, order_lines`;
 const ORDER_STATUSES_SENT = ["sent", "send_unknown"];
 const BOX_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, delivery_date, delivery_date_set_at";
@@ -366,15 +372,52 @@ export async function runDispatchV2OrderConfirmed(
   }
   let documents: DispatchOrderDocumentsResult | null = null;
   try {
-    const found = await loadConfirmedOrder(client, input);
-    if (found.order) {
+    const found = await loadConfirmedOrder(
+      client,
+      input,
+      DISPATCH_ORDER_SHEET_SELECT,
+    );
+    const order = found.order;
+    if (order) {
+      const now = deps.now ? deps.now() : new Date().toISOString();
       documents = await saveDispatchSupplierDocuments(client, {
         orgId: input.orgId,
-        order: found.order,
+        order,
         trigger: input.trigger,
         operatorUserId: input.operator.userId,
-        now: deps.now ? deps.now() : new Date().toISOString(),
+        now,
       });
+      // No PDF on any matched reply (and the replies WERE read, so we know
+      // there is none): our own Material order sheet, once per order.
+      if (documents.read === "ok" && documents.found === 0) {
+        const box = await loadBox(client, input.orgId, order);
+        const sheet = await saveDispatchOrderSheet(client, {
+          orgId: input.orgId,
+          order,
+          fulfilment: dispatchOrderFulfilmentOf(order.body_text),
+          branch: dispatchOrderBranchOf(order.body_text),
+          when: dispatchCrewLineWhen({ box, order }),
+          supplierRef: dispatchCrewLineRef(
+            await loadRefs(
+              client,
+              input.orgId,
+              String(order.id),
+              input.acceptedEmailId,
+            ),
+          ),
+          trigger: input.trigger,
+          operatorUserId: input.operator.userId,
+          now,
+        });
+        if (sheet?.saved) {
+          documents.saved.push({
+            job_document_id: sheet.job_document_id,
+            name: sheet.name,
+          });
+        } else if (sheet) {
+          documents.skipped.push({ sha256: sheet.sha256, reason: sheet.reason });
+        }
+      }
     }
   } catch (e) {
     log("documents failed", e);

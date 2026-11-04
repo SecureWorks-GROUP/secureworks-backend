@@ -1255,6 +1255,36 @@ Open points:
 - A PDF someone already uploaded by hand (SWP-261382.pdf on SWP-261382) has
   no hash on file, so it cannot be recognised: the same file can show twice.
 
+### 3e.3 Our own Material order sheet when the supplier sends no PDF
+
+On Accept and on the stage press, when the order's matched replies were read
+and **none** carries a PDF, a one-page "Material order" sheet is made from
+our order email and saved to the job the same way
+(`dispatch_v2_order_sheet_pdf.ts`).
+
+1. **Only when we know there is no PDF.** If the matched replies could not be
+   read, no sheet is made: a failed read is not "no PDF".
+2. **What it says**, and nothing else: MATERIAL ORDER, SecureWorks Group, the
+   supplier, pickup or delivery (`Pickup from Neerabup` when the order body
+   names a branch), the day (`Tue 3 Nov 2026`, `ASAP` or `No date yet`, by
+   the same rule as the crew line), the job number, the supplier's reference
+   when one was found, the day we ordered, and the material lines (the
+   order's saved `order_lines`, else the email body between its opening line
+   and its `Date:` line). No price, client name, phone number, email address
+   or notes. The footer says SecureWorks Group made it from our order email
+   and that the supplier sent no document.
+3. **One page.** A long order shows as many lines as fit, then
+   `and N more lines on the order email`.
+4. **Made the same way as the purchase order PDF** (jsPDF, fixed creation
+   date and file id), so the same order makes the same bytes.
+5. **Once per order.** Saved through the same claim as 3e.2, with `source
+   'order_sheet'` and kind `order_sheet`; a partial unique index
+   (`dispatch_v2_order_documents_one_sheet`) allows one sheet per order, and
+   the writer checks for it before making another. Named `<Supplier>
+   material order`, type `material_order`, crew-visible.
+6. **A supplier PDF that arrives later** is saved by the sweep in 3e.2 as
+   usual. The sheet stays on the job beside it (it is never removed).
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,
