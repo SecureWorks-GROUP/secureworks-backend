@@ -12,6 +12,7 @@ CREATE TABLE public.quote_invoice_billing_bindings (
 );
 ALTER TABLE public.quote_invoice_billing_bindings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.quote_invoice_billing_bindings FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.quote_invoice_billing_bindings FROM service_role;
 GRANT SELECT ON public.quote_invoice_billing_bindings TO service_role;
 
 CREATE FUNCTION public.pin_quote_invoice_billing_payer() RETURNS trigger
@@ -67,6 +68,7 @@ CREATE TABLE public.invoice_milestone_draft_claims (
 );
 ALTER TABLE public.invoice_milestone_draft_claims ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.invoice_milestone_draft_claims FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON public.invoice_milestone_draft_claims FROM service_role;
 GRANT SELECT,INSERT,UPDATE ON public.invoice_milestone_draft_claims TO service_role;
 CREATE FUNCTION public.guard_invoice_milestone_claim() RETURNS trigger
 LANGUAGE plpgsql SET search_path = '' AS $$
@@ -148,6 +150,7 @@ CREATE TABLE public.quote_invoice_deposit_receipts (
 );
 ALTER TABLE public.quote_invoice_deposit_receipts ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.quote_invoice_deposit_receipts FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON public.quote_invoice_deposit_receipts FROM service_role;
 GRANT SELECT,INSERT ON public.quote_invoice_deposit_receipts TO service_role;
 CREATE FUNCTION public.guard_quote_invoice_deposit_receipt() RETURNS trigger
 LANGUAGE plpgsql SET search_path='' AS $$
@@ -158,7 +161,7 @@ BEGIN
  SELECT * INTO revision FROM public.quote_revisions WHERE id=NEW.quote_revision_id;
  payment:=revision.pricing_snapshot_json->'raw'->'payment_schedule'->'payments'->0;
  IF binding.state IS DISTINCT FROM 'eligible' OR binding.org_id IS DISTINCT FROM NEW.org_id OR binding.job_id IS DISTINCT FROM NEW.job_id OR binding.xero_contact_id IS DISTINCT FROM NEW.xero_contact_id
-  OR doc.job_id IS DISTINCT FROM NEW.job_id OR doc.quote_revision_id IS DISTINCT FROM NEW.quote_revision_id OR doc.accepted_at IS NULL OR doc.sent_at IS NULL OR doc.superseded_at IS NOT NULL OR doc.job_contact_id IS NOT NULL
+  OR doc.job_id IS DISTINCT FROM NEW.job_id OR doc.quote_revision_id IS DISTINCT FROM NEW.quote_revision_id OR doc.accepted_at IS NULL OR doc.sent_at IS NULL OR doc.superseded_at IS NOT NULL OR doc.job_contact_id IS NOT NULL OR doc.accepted_at<revision.sent_at
   OR revision.job_id IS DISTINCT FROM NEW.job_id OR revision.job_document_id IS DISTINCT FROM NEW.accepted_document_id OR revision.sent_at IS NULL
   OR payment->>'id' IS DISTINCT FROM NEW.stage_id OR jsonb_typeof(payment->'amount_inc_gst') IS DISTINCT FROM 'number' THEN
    RAISE EXCEPTION 'Accepted deposit receipt lacks exact released first-stage binding';
@@ -168,3 +171,14 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION public.guard_quote_invoice_deposit_receipt() FROM PUBLIC,anon,authenticated;
 CREATE TRIGGER guard_quote_invoice_deposit_receipt BEFORE INSERT ON public.quote_invoice_deposit_receipts FOR EACH ROW EXECUTE FUNCTION public.guard_quote_invoice_deposit_receipt();
+
+CREATE FUNCTION public.reject_invoice_evidence_mutation() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$
+BEGIN RAISE EXCEPTION 'Invoice evidence is immutable and cannot be erased'; END $$;
+REVOKE ALL ON FUNCTION public.reject_invoice_evidence_mutation() FROM PUBLIC,anon,authenticated;
+CREATE TRIGGER immutable_quote_invoice_billing_binding BEFORE UPDATE OR DELETE ON public.quote_invoice_billing_bindings FOR EACH ROW EXECUTE FUNCTION public.reject_invoice_evidence_mutation();
+CREATE TRIGGER immutable_quote_invoice_deposit_receipt BEFORE UPDATE OR DELETE ON public.quote_invoice_deposit_receipts FOR EACH ROW EXECUTE FUNCTION public.reject_invoice_evidence_mutation();
+CREATE TRIGGER preserve_invoice_milestone_claim BEFORE DELETE ON public.invoice_milestone_draft_claims FOR EACH ROW EXECUTE FUNCTION public.reject_invoice_evidence_mutation();
+
+REVOKE ALL ON public.invoice_milestone_reviews FROM service_role;
+GRANT SELECT,INSERT ON public.invoice_milestone_reviews TO service_role;
+CREATE TRIGGER preserve_invoice_milestone_review BEFORE DELETE ON public.invoice_milestone_reviews FOR EACH ROW EXECUTE FUNCTION public.reject_invoice_evidence_mutation();

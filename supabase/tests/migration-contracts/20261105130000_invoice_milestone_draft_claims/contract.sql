@@ -44,12 +44,27 @@ INSERT INTO public.quote_invoice_deposit_receipts(org_id,job_id,quote_revision_i
 VALUES('00000000-0000-0000-0000-000000000001','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000020','66000000-0000-4000-8000-000000000002','deposit',1,'Fixture accepted first payment');
 DO $$ BEGIN
  IF has_table_privilege('authenticated','public.quote_invoice_deposit_receipts','SELECT') OR has_table_privilege('service_role','public.quote_invoice_deposit_receipts','UPDATE') THEN RAISE EXCEPTION 'Deposit receipt is mutable or browser-readable'; END IF;
+ IF has_table_privilege('service_role','public.quote_invoice_deposit_receipts','DELETE') OR has_table_privilege('service_role','public.quote_invoice_billing_bindings','INSERT,UPDATE,DELETE') OR has_table_privilege('service_role','public.invoice_milestone_draft_claims','DELETE') THEN RAISE EXCEPTION 'Inherited ALL grants bypass invoice evidence retention'; END IF;
+ BEGIN UPDATE public.quote_invoice_billing_bindings SET xero_contact_id='66000000-0000-4000-8000-000000000099' WHERE quote_revision_id='66000000-0000-4000-8000-000000000004'; RAISE EXCEPTION 'Payer binding mutated'; EXCEPTION WHEN raise_exception THEN IF SQLERRM='Payer binding mutated' THEN RAISE; END IF; END;
+ BEGIN DELETE FROM public.quote_invoice_deposit_receipts WHERE provider_invoice_id='66000000-0000-4000-8000-000000000020'; RAISE EXCEPTION 'Deposit receipt erased'; EXCEPTION WHEN raise_exception THEN IF SQLERRM='Deposit receipt erased' THEN RAISE; END IF; END;
+ BEGIN DELETE FROM public.invoice_milestone_draft_claims WHERE reference='WS6-CONTRACT-PIN'; RAISE EXCEPTION 'Claim erased for retry'; EXCEPTION WHEN raise_exception THEN IF SQLERRM='Claim erased for retry' THEN RAISE; END IF; END;
+
  BEGIN
  INSERT INTO public.quote_invoice_deposit_receipts(org_id,job_id,quote_revision_id,accepted_document_id,provider_invoice_id,xero_contact_id,stage_id,amount_cents,reference)
  VALUES('00000000-0000-0000-0000-000000000001','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000021','66000000-0000-4000-8000-000000000002','different-stage',1,'Fixture other payment');
  RAISE EXCEPTION 'Non-first-stage receipt admitted';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM='Non-first-stage receipt admitted' THEN RAISE; END IF; END;
 END $$;
+-- Same-document resend cannot borrow an earlier acceptance timestamp for deposit metadata.
+UPDATE public.job_documents SET accepted_at=now()-interval '1 second' WHERE id='66000000-0000-4000-8000-000000000003';
+DO $$ BEGIN
+ BEGIN
+ INSERT INTO public.quote_invoice_deposit_receipts(org_id,job_id,quote_revision_id,accepted_document_id,provider_invoice_id,xero_contact_id,stage_id,amount_cents,reference)
+ VALUES('00000000-0000-0000-0000-000000000001','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000022','66000000-0000-4000-8000-000000000002','deposit',1,'Fixture earlier acceptance');
+ RAISE EXCEPTION 'Receipt borrowed pre-send acceptance';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE '%exact released first-stage binding%' THEN RAISE; END IF; END;
+END $$;
+UPDATE public.job_documents SET accepted_at=now() WHERE id='66000000-0000-4000-8000-000000000003';
 SELECT public.record_invoice_milestone_admission_hold(id,org_id,'existing_invoice_requires_review') FROM public.invoice_milestone_reviews WHERE job_id='66000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.invoice_milestone_reviews WHERE job_id='66000000-0000-4000-8000-000000000001' AND 'existing_invoice_requires_review'=ANY(hold_reasons)) THEN RAISE EXCEPTION 'Admission hold was not durable'; END IF;
