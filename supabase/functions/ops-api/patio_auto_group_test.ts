@@ -141,6 +141,27 @@ Deno.test("crew is live allocations, admins left out", () => {
   assertEquals(crew.get("a"), ["isaac", "nithin"]);
 });
 
+Deno.test("patio pay through the group: one crew, or none yet, still gets the group", async () => {
+  const fake = patioWorld();
+  fake.rows("feature_flags").push({ flag_name: "patio_pay_group_only_v1", enabled: true });
+  fake.rows("jobs").push({
+    id: "solo-none", org_id: "org", job_number: "SOLO-NONE", type: "patio", status: "scheduled", work_order_id: "wo-solo-none",
+  });
+  fake.rows("work_orders").push({
+    id: "wo-solo-none", job_id: "solo-none", kind: "job", status: "approved", agreed_labour_ex: 2160,
+    sealed_content_hash: "h", approved_by: null,
+    jobs: { id: "solo-none", org_id: "org", job_number: "SOLO-NONE", type: "patio", status: "scheduled", work_order_id: "wo-solo-none" },
+  });
+  const out = await autoGroupPatioJobs(fake.client());
+  const by = Object.fromEntries(out.results.map((r) => [r.job_id, r]));
+  assertEquals(by.c.reason, "group_created");
+  assertEquals(by["solo-none"].reason, "group_created");
+  assertEquals(by["solo-none"].added, 0);
+  const shell = fake.rows("group_work_orders").find((g) => g.job_id === "solo-none");
+  assertEquals(shell?.work_order_id, "wo-solo-none");
+  assertEquals(fake.rows("group_work_order_participants").filter((p) => p.group_id === shell?.id).length, 0);
+});
+
 Deno.test("auto group: priced open patio jobs with 2+ crew get a group with the crew on it", async () => {
   const fake = patioWorld();
   const out = await autoGroupPatioJobs(fake.client());
