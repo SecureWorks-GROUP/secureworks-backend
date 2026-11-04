@@ -1538,6 +1538,13 @@ import {
   setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import {
+  type AutoStartDeps,
+  loadJobAutoStartCandidates,
+  readJobAutoStartFlag,
+  recordJobAutoStartRun,
+  runJobAutoStartAction,
+} from './job_auto_start.ts'
 import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
 import {
   type DepositFlagBlock,
@@ -5399,6 +5406,7 @@ export function _authorizeOpsApiAction(input: {
 // action only with its cron caller and a test in service_credential_handler_test.ts.
 export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new Set([
   'job_closeout_sweep', // trigger_job_closeout_sweep (sw_service_key())
+  'job_auto_start_sweep', // trigger_job_auto_start, cron job-auto-start (sw_service_key())
   'auto_issue_job_work_orders', // trigger_job_work_order_auto_issue (sw_service_key())
   'makesafe_email_canary', // trigger_makesafe_reconcile, cron makesafe-canary-d4 (sw_service_key())
   'makesafe_email_reconcile', // trigger_makesafe_reconcile, crons makesafe-reconcile-d1 and -d3 (&mode=D3) (sw_service_key())
@@ -9243,6 +9251,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : { kind: 'none' }
         const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
         return json(closeout.body, closeout.status)
+      }
+      // ── Scheduled -> In Progress on a booked work day, 6am Perth (job_auto_start.ts;
+      // pg_cron job-auto-start). Server key only, POST only.
+      case 'job_auto_start_sweep': {
+        const autoStart = await runJobAutoStartAction(
+          req.method,
+          body || {},
+          authMode === 'api_key' && serverSecretPresented,
+          jobAutoStartDeps(client),
+        )
+        return json(autoStart.body, autoStart.status)
       }
       // ── Deposit advance for fencing and patio (job_deposit_advance.ts;
       // docs/job-deposit-advance-v1.md). Server key only for the two that move or text;
@@ -23803,6 +23822,16 @@ async function updateRepairStage(client: any, body: any) {
   }
 
   const previousStage = insuranceRepairStage(authorityRow)
+  // Optional compare and set (the 6am auto start, job_auto_start.ts): with
+  // expected_stages the move lands only while the card still reads one of them,
+  // so a card moved by hand in the meantime is left alone. Without it the move
+  // is unchanged.
+  const expectedStages = Array.isArray(body?.expected_stages)
+    ? body.expected_stages.filter((s: unknown) => typeof s === 'string' && s.length > 0)
+    : null
+  if (expectedStages && expectedStages.length > 0 && !expectedStages.includes(previousStage)) {
+    return { success: false, job_id: jobId, skipped: 'stage_changed', expected_stages: expectedStages, stage_seen: previousStage }
+  }
   const nextMetadata = { ...(job.metadata || {}), repair_stage: requestedStage }
 
   // jobs.metadata is a single jsonb blob and PostgREST has no partial-object
@@ -23845,6 +23874,7 @@ async function updateRepairStage(client: any, body: any) {
       to_stage: requestedStage,
       changed_at: new Date().toISOString(),
       operator_email: operatorEmail,
+      ...(cleanReviewedString(body?.source) ? { source: cleanReviewedString(body?.source) } : {}),
     },
   }).then(() => {}).catch(() => {})
 
@@ -57497,6 +57527,19 @@ function jobCloseoutDeps(client: any): JobCloseoutDeps {
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
     sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
     laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
+
+/** The 6am auto start (job_auto_start.ts): moves through updateJobStatus and, for a repair,
+ *  updateRepairStage, so a move is the same as a hand move on the Ops Dash. */
+function jobAutoStartDeps(client: any): AutoStartDeps {
+  return {
+    now: () => new Date(),
+    readFlag: () => readJobAutoStartFlag(client),
+    loadCandidates: () => loadJobAutoStartCandidates(client),
+    moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
+    moveRepairStage: (moveBody: Record<string, unknown>) => updateRepairStage(client, moveBody),
+    recordRun: (row: Record<string, unknown>) => recordJobAutoStartRun(client, row),
   }
 }
 

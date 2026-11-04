@@ -169,6 +169,37 @@ Deno.test("a repair stage move persists, keeps the rest of metadata, and is audi
   assertEquals(audit.detail_json.operator_email, "admin@secureworkswa.com.au");
 });
 
+Deno.test("expected_stages makes the move compare and set (the 6am auto start)", async () => {
+  const moved = makeStageClient({
+    jobs: [typedRepairJob({ metadata: { repair_stage: "scheduled" } })],
+  });
+  const ok: any = await _updateRepairStage(moved, {
+    job_id: REPAIR_JOB_ID,
+    stage: "on_site",
+    expected_stages: ["scheduled"],
+    source: "auto_schedule_start",
+  });
+  assertEquals(ok.success, true);
+  assertEquals(moved.tables.jobs[0].metadata.repair_stage, "on_site");
+  const audit = moved.tables.job_events.find((row) =>
+    row.event_type === "repair_stage_changed"
+  );
+  assertEquals(audit?.detail_json.source, "auto_schedule_start");
+
+  const left = makeStageClient({
+    jobs: [typedRepairJob({ metadata: { repair_stage: "on_site" } })],
+  });
+  const skipped: any = await _updateRepairStage(left, {
+    job_id: REPAIR_JOB_ID,
+    stage: "on_site",
+    expected_stages: ["scheduled"],
+  });
+  assertEquals(skipped.success, false);
+  assertEquals(skipped.skipped, "stage_changed");
+  assertEquals(skipped.stage_seen, "on_site");
+  assertEquals(left.tables.job_events.length, 0);
+});
+
 Deno.test("every one of the nine board stages is accepted, and nothing else is", async () => {
   for (const stage of INSURANCE_REPAIR_STAGES) {
     const client = makeStageClient({ jobs: [typedRepairJob()] });

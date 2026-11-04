@@ -465,6 +465,8 @@ job_receipt_catch_up # probe=source-only
 job_deposit_paid # probe=source-only
 job_deposit_catch_up # probe=source-only
 clear_job_deposit_flag # probe=source-only
+# Scheduled -> In Progress on a booked work day, 6am Perth (job_auto_start.ts)
+job_auto_start_sweep # probe=source-only
 
 # Tracking correction GET is refused before any provider reads or writes.
 xero_correct_bill_tracking # probe=bounded-refusal
