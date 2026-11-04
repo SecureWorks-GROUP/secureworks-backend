@@ -3,6 +3,7 @@
 import type { BankTransaction, WsInvoice, WsJob } from "./debt_ws_rules.ts";
 import {
   DEBT_WS_SETTINGS_OFF,
+  type DebtWsCompanyTerms,
   type DebtWsReportSettings,
   type DebtWsSettings,
   type DebtWsStore,
@@ -67,6 +68,8 @@ export const JOBS = {
   newPatio: "20000000-0000-4000-8000-00000000000e",
 };
 export const MLB_CONTACT = "c0000000-0000-4000-8000-0000000000a1";
+/** A second company with its own terms (14 days) and no open invoice in the fixture. */
+export const AMBROSE_CONTACT = "c0000000-0000-4000-8000-0000000000a2";
 
 function inv(over: Partial<WsInvoice>): WsInvoice {
   return {
@@ -339,6 +342,13 @@ export class FakeStore implements DebtWsStore {
   mirrorCheckRows: MirrorCheckRow[] = [];
   /** Set to make the check read fail (its migration not applied yet). */
   mirrorReadFails = false;
+  /** debt_ws_settings company_terms (Ambrose 14 days in the fixture) and the default. */
+  termsRow: DebtWsCompanyTerms = {
+    by_company: { [AMBROSE_CONTACT]: 14 },
+    default_days: 10,
+  };
+  /** Set to make the terms read fail (the receivables migration not applied yet). */
+  termsReadFails = false;
 
   settings() {
     return Promise.resolve({ ...this.settingsRow });
@@ -628,6 +638,37 @@ export class FakeStore implements DebtWsStore {
       latest: newest[0] ?? null,
       latestComplete: newest.find((r) => r.complete) ?? null,
     });
+  }
+  // ── Receivables ──
+  companyTerms() {
+    if (this.termsReadFails) return Promise.reject(new Error("no columns"));
+    return Promise.resolve({
+      by_company: { ...this.termsRow.by_company },
+      default_days: this.termsRow.default_days,
+    });
+  }
+  setCompanyTerms(companyKey: string, days: number | null) {
+    const key = companyKey.trim().toLowerCase();
+    if (days === null) delete this.termsRow.by_company[key];
+    else this.termsRow.by_company[key] = days;
+    return this.companyTerms();
+  }
+  invoicesRaisedBetween(from: string, to: string) {
+    return Promise.resolve(
+      this.invoices.filter((i) =>
+        i.invoice_type === "ACCREC" &&
+        (i.status === "AUTHORISED" || i.status === "PAID") &&
+        !!i.invoice_date && i.invoice_date >= from && i.invoice_date <= to
+      ),
+    );
+  }
+  logsBetween(fromIso: string, toIso: string) {
+    return Promise.resolve(
+      this.logRows.filter((l) =>
+        Date.parse(l.created_at) >= Date.parse(fromIso) &&
+        Date.parse(l.created_at) <= Date.parse(toIso)
+      ).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))),
+    );
   }
   reportSends(limit: number) {
     if (this.reportReadsFail) return Promise.reject(new Error("no table"));
