@@ -35,6 +35,7 @@ import {
   type BankTransaction,
   classifyInvoice,
   clientTextProblem,
+  companyTermsFor,
   DEBT_WS_PLAYBOOK_VERSION,
   DEBT_WS_VERSION,
   firstNameOf,
@@ -100,8 +101,12 @@ import {
   debtReportHtml,
   debtReportTotals,
   perthClock,
+  perthDayStartIso,
   placeOpenInvoices,
+  receivablesFrom,
+  reportWeek,
   totalOwedFrom,
+  writeOffNamesOf,
 } from "./debt_ws_report.ts";
 import {
   xeroCheckUnread,
@@ -842,6 +847,41 @@ function notChasedNamesOf(settings: DebtWsSettings): string[] {
   return settings.not_chased_contacts.filter((x) => !UUID.test(x));
 }
 
+/**
+ * Money in against new invoices for the Monday-to-Sunday week holding today (Shaun, 4 Nov
+ * 2026: one line on the desk). Paid to us: customer payments applied in Xero this week.
+ * New invoices: receivables raised with an invoice date this week (AUTHORISED or PAID), at
+ * their total. Both include GST; test invoices are left out. Null when either cannot be read.
+ */
+async function weekMoney(deps: DebtWsDeps, today: string) {
+  const from = mondayOf(today);
+  const to = addDays(from, 6);
+  const notTest = (ref: unknown) =>
+    !String(ref ?? "").toUpperCase().includes("SAMPLE-");
+  try {
+    const [payments, raised] = await Promise.all([
+      deps.store.paymentsBetween(from, to),
+      deps.store.invoicesRaisedBetween(from, to),
+    ]);
+    const cents = (xs: number[]) =>
+      Math.round(xs.reduce((s, x) => s + Math.round(Number(x || 0) * 100), 0)) / 100;
+    const paidIn = payments.filter((p) => notTest(p.reference));
+    const newInvoices = raised.filter((i) => notTest(i.reference));
+    return {
+      week_start: from,
+      week_end: to,
+      paid_in: { count: paidIn.length, amount: cents(paidIn.map((p) => p.amount)) },
+      invoiced: {
+        count: newInvoices.length,
+        amount: cents(newInvoices.map((i) => Number(i.total || 0))),
+      },
+    };
+  } catch (error) {
+    console.error("[debt_ws] week money unavailable", (error as Error)?.name);
+    return null;
+  }
+}
+
 export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
   const now = deps.now();
   // One read of the open invoices, shared by the book and "Total owed to us", so the
@@ -849,11 +889,13 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
   const openInvoices = await deps.store.openInvoices();
   const book = await loadBook(deps.store, { now, openInvoices });
   const weekStart = mondayOf(book.today);
-  const [statements, paid, xeroCheck] = await Promise.all([
+  const [statements, paid, xeroCheck, week] = await Promise.all([
     deps.store.statementsForWeek(weekStart),
     paidThisWeek(deps.store, book.today),
     xeroCheckFor(deps, now),
+    weekMoney(deps, book.today),
   ]);
+  const placed = placeOpenInvoices(book, openInvoices);
   const open = book.entries.filter((e) => e.open);
   const notDue = open.filter((e) => e.category === null);
   const janItems = janItemsLive(book);
@@ -869,6 +911,10 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
       agent_on: book.settings.agent_enabled,
       viewer_is_owner: isOwner(caller, deps.env, book.settings),
       owner_set: debtWsOwnerIds(deps.env, book.settings).length > 0,
+      // Company terms (days to pay) for companies with no setting of their own, and whether
+      // the setting could be read (when not, every company is on the default).
+      terms_default_days: book.terms.default_days,
+      terms_status: book.terms.status,
     },
     categories: categoryTotals(open),
     rows: sortRows(open.map((e) => e.row)),
@@ -881,14 +927,16 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
     },
     not_chased: notChasedGroups(open),
     needs_a_look: book.needsALook,
-    // Every open invoice, broken down (debt_ws_report.ts totalOwedFrom), and whether our
-    // Xero copy matched Xero at the last hourly check. Display only: nothing here is chased.
-    total_owed: totalOwedFrom(
-      placeOpenInvoices(book, openInvoices),
-      notChasedNamesOf(book.settings),
-    ),
+    // Receivables (Shaun, 4 Nov 2026): every unpaid invoice, split into Debt, Other
+    // receivables, the Write-off list and Needs a look, each with its pay-by date and days
+    // overdue (debt_ws_report.ts receivablesFrom). Display only: nothing here is chased.
+    receivables: receivablesFrom(placed, writeOffNamesOf(book)),
+    // The older breakdown, kept so a screen that has not reloaded still works.
+    total_owed: totalOwedFrom(placed, notChasedNamesOf(book.settings)),
     xero_check: xeroCheck,
     paid_this_week: paid,
+    // Paid to us this week against new invoices raised this week; null when unread.
+    week_money: week,
     jan_list: {
       visit_date: book.janVisitDate,
       status: book.janRow?.status ?? "open",
@@ -3321,15 +3369,17 @@ export async function debtWsAgentSubmit(
 // debt_ws_report_pdf  GET, staff:  the same report as a PDF (Download PDF).
 // debt_ws_report_send POST, owner: emails the PDF to the report recipients (Marnin, cc
 //                                  Shaun), built fresh at the moment of sending.
-// debt_ws_report_auto POST, server key: the Wednesday 12:00 Perth cron. Does nothing
+// debt_ws_report_auto POST, server key: the Wednesday 2pm (14:00) Perth cron. Does nothing
 //                                  unless report_auto_send is on; one auto report per week.
 //
-// Consolidate first (Shaun, 16 Oct 2026: "it goes Wednesday at 12pm after consolidating the
-// debt for that day"). Every report is built fresh from the tab's own book at the moment it
-// is made, with the bank balances read live from Xero. The invoices come from our Xero copy,
+// Consolidate first (Shaun, 16 Oct 2026: "it goes Wednesday ... after consolidating the
+// debt for that day"; moved from 12pm to 2pm on 4 Nov 2026). Every report is built fresh
+// from the tab's own book at the moment it is made, with the bank balances read live from
+// Xero. The invoices come from our Xero copy,
 // which xero-sync brings up to date every 15 minutes, and on a Wednesday the cron
-// debt-ws-report-refresh runs one extra sync at 11:55 Perth so the copy is about five minutes
-// old at 12:00 (20261016180000_debt_ws_report_wednesday.sql). A send, automatic or by hand,
+// debt-ws-report-refresh runs one extra sync at 13:55 Perth so the copy is about five minutes
+// old at 14:00 (20261016180000_debt_ws_report_wednesday.sql, moved to 2pm by
+// 20261105120000_debt_ws_receivables.sql). A send, automatic or by hand,
 // refuses when the copy is older than DEBT_WS_REPORT_MAX_COPY_AGE_MS or its age is unknown,
 // so Marnin never gets a report built on stale debt.
 //
@@ -3349,7 +3399,7 @@ export const DEBT_WS_REPORT_LOG_KEY = "debt-report";
  */
 export const DEBT_WS_REPORT_MAX_COPY_AGE_MS = 20 * 60_000;
 /** Who the automatic report says it came from (the email and the record). */
-export const DEBT_WS_REPORT_AUTO_LABEL = "the Wednesday 12pm auto-send";
+export const DEBT_WS_REPORT_AUTO_LABEL = "the Wednesday 2pm auto-send";
 
 /**
  * Why a report must not be sent on this copy of the debt, or null when the copy is fresh:
@@ -3399,13 +3449,19 @@ async function loadDebtReport(
   const open = await deps.store.openInvoices();
   const book = await loadBook(deps.store, { now, openInvoices: open });
   const today = book.today;
-  const [statements, payments, syncedAt, bank, feed, xeroCheck] = await Promise.all([
-    deps.store.statementsForWeek(mondayOf(today)),
+  const week = reportWeek(today);
+  const [paidInFull, weekLogs, syncedAt, bank, feed, xeroCheck] = await Promise.all([
     // The extras never stop the report: a read that fails shows as "not read".
-    deps.store.paymentsBetween(addDays(today, -29), today).catch((error) => {
-      console.error("[debt_ws_report] payments unavailable", error?.name);
+    deps.store.paidBetween(week.from, week.to).catch((error) => {
+      console.error("[debt_ws_report] paid invoices unavailable", error?.name);
       return null;
     }),
+    deps.store.logsBetween(perthDayStartIso(week.from), now.toISOString()).catch(
+      (error) => {
+        console.error("[debt_ws_report] week log unavailable", error?.name);
+        return null;
+      },
+    ),
     deps.store.lastInvoiceSync().catch(() => null),
     deps.bankSummary().then((accounts) => ({
       accounts,
@@ -3420,28 +3476,14 @@ async function loadDebtReport(
     ),
     xeroCheckFor(deps, now),
   ]);
-  const paidJobIds = [
-    ...new Set(
-      (payments ?? []).map((p) => p.job_id).filter((id): id is string =>
-        !!id && !book.jobs.has(String(id))
-      ),
-    ),
-  ];
-  const paymentJobs = new Map(book.jobs);
-  if (paidJobIds.length) {
-    for (const job of await deps.store.jobs(paidJobIds).catch(() => [])) {
-      paymentJobs.set(String(job.id), job);
-    }
-  }
   const coversAll = !!feed &&
     book.entries.every((e) => bankCovers(feed, bankFromOf(e.inv)));
   return buildDebtReport({
     now,
     book,
     openInvoices: open,
-    statements,
-    payments,
-    paymentJobs,
+    paidInFull,
+    weekLogs,
     bank,
     feed: feed ? { txs: feed.txs, truncated: feed.truncated || !coversAll } : null,
     syncedAt,
@@ -3727,7 +3769,9 @@ async function sendDebtReport(
     {
       body: `Debt report emailed to ${addresses.to.join(", ")}${
         addresses.cc.length ? `, cc ${addresses.cc.join(", ")}` : ""
-      }: debt ${money(report.debt.amount)} across ${report.debt.count} invoice(s)`,
+      }: receivables ${money(report.receivables.amount)}, debt overdue ${
+        money(report.receivables.debt_overdue.amount)
+      } across ${report.receivables.debt_overdue.count} invoice(s)`,
       meta: {
         report_id: claim.id,
         kind,
@@ -3816,7 +3860,7 @@ export async function debtWsReportSend(
 }
 
 /**
- * The Wednesday 12:00 Perth cron. Off unless report_auto_send and sending are both on; once
+ * The Wednesday 14:00 (2pm) Perth cron. Off unless report_auto_send and sending are both on; once
  * a week (the week is Monday to Sunday, Perth, so week_start is still that Monday). Refuses
  * (xero_copy_stale) when our Xero copy is not fresh, like a manual send.
  */
@@ -3844,12 +3888,63 @@ export async function debtWsReportAuto(deps: DebtWsDeps) {
   }
   const sent = await sendDebtReport(
     deps,
-    { user_id: null, label: "Wednesday 12pm auto-send" },
+    { user_id: null, label: "Wednesday 2pm auto-send" },
     "auto",
     addresses,
     weekStart,
   );
   return sent ?? skipped("already_sent");
+}
+
+// ── debt_ws_set_company_terms ──
+//
+// Company terms (Shaun, 4 Nov 2026): how many days each company has to pay, from the
+// invoice date. MLB (all its aliases) 10, Ambrose Construct Group 14, every other company 10.
+// The owner changes them on the Debt tab; they are kept in debt_ws_settings.company_terms
+// by one database call (debt_ws_set_company_terms), keyed by the company's canonical Xero
+// contact id, so an alias contact always lands on its company. days null puts the company
+// back on the default. This moves the company's pay-by date, so its due date, day and
+// category on the tab move with it; nothing else about the chase changes.
+
+const NAME_KEY = /^name:[a-z0-9& ]{1,200}$/;
+
+export async function debtWsSetCompanyTerms(
+  deps: DebtWsDeps,
+  caller: DebtWsCaller,
+  rawBody: unknown,
+) {
+  const body = asBody(rawBody);
+  onlyKeys(body, ["company_key", "days"]);
+  const raw = typeof body.company_key === "string"
+    ? body.company_key.trim().toLowerCase()
+    : "";
+  if (!UUID.test(raw) && !NAME_KEY.test(raw)) {
+    bad("company_key must be the company's key from the Debt tab");
+  }
+  const days = body.days;
+  if (
+    days !== null &&
+    (typeof days !== "number" || !Number.isInteger(days) || days < 0 ||
+      days > 120)
+  ) {
+    bad("days must be a whole number of days from 0 to 120, or null for the default");
+  }
+  const actor = await actorOf(deps, caller);
+  const settings = await deps.store.settings();
+  const key = canonicalCompanyKey(raw, settings.company_aliases);
+  const terms = await deps.store.setCompanyTerms(
+    key,
+    days as number | null,
+    actor.user_id,
+  );
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    company_key: key,
+    terms_days: companyTermsFor(key, terms.by_company, terms.default_days),
+    terms_default: !(key in terms.by_company),
+    default_days: terms.default_days,
+  };
 }
 
 // ── The dispatcher (index.ts wiring) ──
@@ -3879,6 +3974,7 @@ export const DEBT_WS_ACTIONS: Record<
   debt_ws_report_pdf: { method: "GET", who: "staff" },
   debt_ws_report_send: { method: "POST", who: "owner" },
   debt_ws_report_auto: { method: "POST", who: "server" },
+  debt_ws_set_company_terms: { method: "POST", who: "owner" },
 };
 
 export function isDebtWsAction(action: unknown): boolean {
@@ -4004,6 +4100,8 @@ export async function runDebtWsAction(
         return ok(await debtWsReportSend(deps, caller, body));
       case "debt_ws_report_auto":
         return ok(await debtWsReportAuto(deps));
+      case "debt_ws_set_company_terms":
+        return ok(await debtWsSetCompanyTerms(deps, caller, body));
       default:
         return ok(await debtWsAgentSubmit(deps, caller, body));
     }

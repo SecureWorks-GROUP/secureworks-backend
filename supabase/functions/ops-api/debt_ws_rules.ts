@@ -472,11 +472,40 @@ export function isNotChased(
 
 // ── Section 3: due dates, days and categories ──
 
-/** Shaun, 8 Oct: final on the invoice date, progress +7 days, account +10 days. */
-export function dueDateFor(kind: DebtKind, invoiceDate: string): string {
-  return kind === "final"
-    ? invoiceDate
-    : addDays(invoiceDate, kind === "progress" ? 7 : 10);
+/** Company terms when a company has none set (Shaun, 4 Nov 2026: every other company 10 days). */
+export const DEFAULT_COMPANY_TERMS_DAYS = 10;
+
+/**
+ * Shaun, 8 Oct: final on the invoice date, progress +7 days. A company (account) invoice is
+ * due its company's terms after the invoice date (Shaun, 4 Nov 2026: set per company on the
+ * Debt tab, 10 days unless set; MLB 10, Ambrose Construct Group 14).
+ */
+export function dueDateFor(
+  kind: DebtKind,
+  invoiceDate: string,
+  companyTermsDays: number = DEFAULT_COMPANY_TERMS_DAYS,
+): string {
+  if (kind === "final") return invoiceDate;
+  if (kind === "progress") return addDays(invoiceDate, 7);
+  return addDays(invoiceDate, companyTermsDays);
+}
+
+/**
+ * The days a company has to pay, from the per-company terms setting (keyed by the company's
+ * canonical Xero contact id, after aliases). Anything missing or not a sensible whole number
+ * falls back to the default.
+ */
+export function companyTermsFor(
+  companyKey: string | null | undefined,
+  terms: Readonly<Record<string, number>>,
+  defaultDays: number = DEFAULT_COMPANY_TERMS_DAYS,
+): number {
+  const fallback = Number.isInteger(defaultDays) && defaultDays >= 0 && defaultDays <= 120
+    ? defaultDays
+    : DEFAULT_COMPANY_TERMS_DAYS;
+  const key = String(companyKey ?? "").trim().toLowerCase();
+  const days = key ? terms[key] : undefined;
+  return Number.isInteger(days) && days! >= 0 && days! <= 120 ? days! : fallback;
 }
 
 /**

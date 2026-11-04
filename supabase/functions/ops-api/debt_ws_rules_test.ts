@@ -10,8 +10,10 @@ import {
   categoryFor,
   classifyInvoice,
   clientTextProblem,
+  companyTermsFor,
   daysBetween,
   dayZeroFor,
+  DEFAULT_COMPANY_TERMS_DAYS,
   dueDateFor,
   escapeHtml,
   firstNameOf,
@@ -55,6 +57,15 @@ import {
   type WsInvoice,
   type WsJob,
 } from "./debt_ws_rules.ts";
+import {
+  daysOverdue,
+  NOT_COMPLETE_REASON,
+  OVERDUE_BANDS,
+  overdueBand,
+  receivableOfEntry,
+  receivableOfGoAhead,
+  receivableOfUnplaced,
+} from "./debt_ws_receivables.ts";
 
 function inv(over: Partial<WsInvoice> = {}): WsInvoice {
   return {
@@ -537,6 +548,86 @@ Deno.test("due dates: final on the invoice date, progress +7, account +10", () =
   assertEquals(dueDateFor("final", "2026-10-01"), "2026-10-01");
   assertEquals(dueDateFor("progress", "2026-10-01"), "2026-10-08");
   assertEquals(dueDateFor("account", "2026-10-01"), "2026-10-11");
+});
+
+Deno.test("due dates: a company's own terms move only company invoices (Ambrose 14 days)", () => {
+  assertEquals(dueDateFor("account", "2026-10-01", 14), "2026-10-15");
+  assertEquals(dueDateFor("account", "2026-10-01", 0), "2026-10-01");
+  // Terms never touch a private final or a progress payment.
+  assertEquals(dueDateFor("final", "2026-10-01", 14), "2026-10-01");
+  assertEquals(dueDateFor("progress", "2026-10-01", 14), "2026-10-08");
+  assertEquals(DEFAULT_COMPANY_TERMS_DAYS, 10);
+});
+
+Deno.test("company terms: the company's own days, else the default; nonsense falls back to the default", () => {
+  const terms = { "amb": 14, "zero": 0, "bad": 14.5, "big": 121, "neg": -3 } as Record<string, number>;
+  assertEquals(companyTermsFor("amb", terms), 14);
+  assertEquals(companyTermsFor("zero", terms), 0);
+  assertEquals(companyTermsFor("mlb", terms), 10);
+  assertEquals(companyTermsFor("mlb", terms, 12), 12);
+  assertEquals(companyTermsFor(null, terms), 10);
+  for (const k of ["bad", "big", "neg"]) assertEquals(companyTermsFor(k, terms), 10, k);
+});
+
+// ── Receivables (Shaun, 4 Nov 2026): Debt or Other, pay by and days overdue ──
+
+const TODAY = "2026-10-08";
+const entry = (over: Partial<Parameters<typeof receivableOfEntry>[0]> = {}) =>
+  receivableOfEntry({
+    kind: "final",
+    stage: null,
+    notChased: false,
+    jobStatus: "complete",
+    dayZero: "2026-10-01",
+    dueDate: "2026-10-01",
+    invoiceDate: "2026-10-01",
+    xeroDue: "2026-10-15",
+    today: TODAY,
+    ...over,
+  });
+
+Deno.test("receivables: a final on a Complete or Invoiced job is Debt, pay by the invoice date", () => {
+  for (const status of ["complete", "invoiced", "final_payment", "get_review", "paid", "archived", "rectification"]) {
+    const v = entry({ jobStatus: status });
+    assertEquals([v.receivable_class, v.type_label, v.pay_by, v.days_overdue], ["debt", "Final", "2026-10-01", 7], status);
+  }
+  // A rectification exit restarts the clock: pay by day 0.
+  assertEquals(entry({ dayZero: "2026-10-05" }).days_overdue, 3);
+});
+
+Deno.test("receivables: a final on a job not yet Complete is Needs a look, not Debt", () => {
+  for (const status of ["in_progress", "scheduled", "accepted", "", null]) {
+    const v = entry({ jobStatus: status });
+    assertEquals(v.receivable_class, "needs_a_look", String(status));
+    assertEquals(v.look_reason, NOT_COMPLETE_REASON);
+  }
+});
+
+Deno.test("receivables: company invoices are Debt at invoice date plus terms; progress and deposits are Other at Xero's due date", () => {
+  const company = entry({ kind: "account", jobStatus: null, dueDate: "2026-10-15" });
+  assertEquals([company.receivable_class, company.type_label, company.pay_by, company.days_overdue], ["debt", "Company", "2026-10-15", 0]);
+  const materials = entry({ kind: "progress", stage: "materials", xeroDue: "2026-09-27T00:00:00" });
+  assertEquals([materials.receivable_class, materials.type_label, materials.pay_by, materials.days_overdue], ["other", "Materials", "2026-09-27", 11]);
+  assertEquals(entry({ kind: "progress", stage: "planning fee" }).type_label, "Planning fee");
+  assertEquals(entry({ kind: "progress", stage: "progress" }).type_label, "Progress payment");
+  // No Xero due date: the invoice date.
+  assertEquals(entry({ kind: "progress", stage: "deposit", xeroDue: null, invoiceDate: "2026-09-20" }).pay_by, "2026-09-20");
+  const goAhead = receivableOfGoAhead({ stage: "deposit", invoiceDate: "2026-10-01", xeroDue: "2026-10-03", today: TODAY });
+  assertEquals([goAhead.receivable_class, goAhead.type_label, goAhead.pay_by, goAhead.days_overdue], ["other", "Go-ahead deposit", "2026-10-03", 5]);
+});
+
+Deno.test("receivables: a not-chased contact is the Write-off list, whatever its kind", () => {
+  assertEquals(entry({ notChased: true }).receivable_class, "write_off");
+  assertEquals(entry({ kind: "account", notChased: true }).receivable_class, "write_off");
+  const unplaced = receivableOfUnplaced({ cls: "needs_a_look", reason: "not linked to a job", invoiceDate: "2026-10-01", xeroDue: null, today: TODAY });
+  assertEquals([unplaced.receivable_class, unplaced.days_overdue, unplaced.look_reason], ["needs_a_look", 7, "not linked to a job"]);
+});
+
+Deno.test("overdue bands: not due, 1 to 7, 8 to 20, 21 or more (bad debt)", () => {
+  assertEquals([0, 1, 7, 8, 20, 21, 90].map(overdueBand), ["not_due", "d1_7", "d1_7", "d8_20", "d8_20", "d21", "d21"]);
+  assertEquals(OVERDUE_BANDS.map((b) => b.name), ["Not due", "1 to 7 days", "8 to 20 days", "21 days or more (bad debt)"]);
+  assertEquals(daysOverdue("2026-10-09", TODAY), 0);
+  assertEquals(daysOverdue(null, TODAY), 0);
 });
 
 Deno.test("day 0: a final restarts when the job left rectification after the due date", () => {

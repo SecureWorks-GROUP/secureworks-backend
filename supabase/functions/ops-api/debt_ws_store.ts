@@ -6,7 +6,11 @@
 // PostgREST returns errors, it does not throw (AGENTS.md). Every read here checks `error`
 // and throws DebtWsError, so an unread table never reads as "nothing there".
 
-import type { WsInvoice, WsJob } from "./debt_ws_rules.ts";
+import {
+  DEFAULT_COMPANY_TERMS_DAYS,
+  type WsInvoice,
+  type WsJob,
+} from "./debt_ws_rules.ts";
 import type { WsJobContact } from "./debt_ws_payer.ts";
 import type { MirrorCheckRow } from "./debt_ws_xero_check.ts";
 
@@ -260,7 +264,7 @@ export interface DebtWsStore {
   // ── The debt report (20261015170000_debt_ws_report.sql) ──
   // Kept apart from settings() on purpose: the Debt tab itself never reads these columns,
   // so the tab keeps working even before the report migration is applied.
-  /** Who the report goes to, who is copied, and the Wednesday 12pm auto-send switch. */
+  /** Who the report goes to, who is copied, and the Wednesday 2pm auto-send switch. */
   reportSettings(): Promise<DebtWsReportSettings>;
   /** Customer payments applied in Xero between two dates (inclusive), one per payment. */
   paymentsBetween(from: string, to: string): Promise<WsPayment[]>;
@@ -286,6 +290,47 @@ export interface DebtWsStore {
   mirrorChecks(): Promise<
     { latest: MirrorCheckRow | null; latestComplete: MirrorCheckRow | null }
   >;
+
+  // ── Receivables (20261105120000_debt_ws_receivables.sql) ──
+  // Kept apart from settings() like the report settings: if the migration is not applied
+  // yet, the tab still works and every company falls back to 10 days.
+  /** The per-company terms (days to pay), keyed by canonical company key, and the default. */
+  companyTerms(): Promise<DebtWsCompanyTerms>;
+  /**
+   * Sets one company's terms (days, 0 to 120), or clears it back to the default with null,
+   * in one atomic database call (debt_ws_set_company_terms). Returns the terms after.
+   */
+  setCompanyTerms(
+    companyKey: string,
+    days: number | null,
+    userId: string | null,
+  ): Promise<DebtWsCompanyTerms>;
+  /**
+   * Receivables raised with an invoice date between two Perth dates (inclusive): ACCREC,
+   * AUTHORISED or PAID (a draft or a voided invoice was not raised).
+   */
+  invoicesRaisedBetween(from: string, to: string): Promise<WsInvoice[]>;
+  /** Every workshop log line written between two instants (inclusive), oldest first. */
+  logsBetween(fromIso: string, toIso: string): Promise<WsLogRow[]>;
+}
+
+/** debt_ws_settings company_terms and company_terms_default. */
+export interface DebtWsCompanyTerms {
+  /** {canonical company key: days to pay}, lower case keys. */
+  by_company: Record<string, number>;
+  default_days: number;
+}
+
+/** company_terms as {key: whole days 0 to 120}; anything else is dropped. */
+export function companyTermsOf(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+  for (const [key, days] of Object.entries(value)) {
+    const k = key.trim().toLowerCase();
+    const n = typeof days === "number" ? days : Number(days);
+    if (k && Number.isInteger(n) && n >= 0 && n <= 120) out[k] = n;
+  }
+  return out;
 }
 
 /** debt_ws_settings report columns (20261015170000_debt_ws_report.sql). */
@@ -953,6 +998,61 @@ export function createSupabaseDebtWsStore(
       const one = (data: unknown) =>
         Array.isArray(data) && data[0] ? toMirrorCheck(data[0]) : null;
       return { latest: one(latest.data), latestComplete: one(done.data) };
+    },
+
+    // ── Receivables ──
+    async companyTerms() {
+      const { data, error } = await client.from("debt_ws_settings").select(
+        "company_terms, company_terms_default",
+      ).eq("id", 1).maybeSingle();
+      if (error) readFailed("the company terms", error);
+      const d = Number(data?.company_terms_default);
+      return {
+        by_company: companyTermsOf(data?.company_terms),
+        default_days: Number.isInteger(d) && d >= 0 && d <= 120
+          ? d
+          : DEFAULT_COMPANY_TERMS_DAYS,
+      };
+    },
+    async setCompanyTerms(companyKey, days, userId) {
+      const { data, error } = await client.rpc("debt_ws_set_company_terms", {
+        p_company_key: companyKey,
+        p_days: days,
+        p_user_id: userId,
+      });
+      if (error) writeFailed("the company terms", error);
+      const row = Array.isArray(data) ? data[0] : data;
+      const d = Number(row?.company_terms_default);
+      return {
+        by_company: companyTermsOf(row?.company_terms),
+        default_days: Number.isInteger(d) ? d : DEFAULT_COMPANY_TERMS_DAYS,
+      };
+    },
+    async invoicesRaisedBetween(from, to) {
+      const rows = await paged(
+        () =>
+          client.from("xero_invoices").select(INVOICE_SELECT).eq(
+            "org_id",
+            orgId,
+          ).eq("invoice_type", "ACCREC").in("status", ["AUTHORISED", "PAID"])
+            .gte("invoice_date", from).lte("invoice_date", to).order(
+              "xero_invoice_id",
+              { ascending: true },
+            ),
+        "the invoices raised this week",
+      );
+      return rows.map(toInvoice);
+    },
+    logsBetween(fromIso, toIso) {
+      return paged<WsLogRow>(
+        () =>
+          client.from("debt_ws_log").select("*").eq("org_id", orgId).gte(
+            "created_at",
+            fromIso,
+          ).lte("created_at", toIso).order("created_at", { ascending: true })
+            .order("id", { ascending: true }),
+        "the week's workshop log",
+      );
     },
     async reportSends(limit) {
       const { data, error } = await client.from("debt_ws_reports").select(
