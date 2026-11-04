@@ -73,6 +73,10 @@ LANGUAGE plpgsql SET search_path = '' AS $$
 DECLARE binding record; review record; accepted record;
 BEGIN
   IF TG_OP='INSERT' OR (TG_OP='UPDATE' AND OLD.state='prepared' AND NEW.state='dispatching') THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(NEW.org_id::text||':'||NEW.job_id::text,0));
+    IF EXISTS(SELECT 1 FROM public.invoice_milestone_draft_claims c WHERE c.org_id=NEW.org_id AND c.job_id=NEW.job_id AND c.quote_revision_id<>NEW.quote_revision_id) THEN
+      RAISE EXCEPTION 'Invoice claim from an earlier accepted revision requires office review';
+    END IF;
     SELECT d.* INTO accepted FROM public.job_documents d
       JOIN public.quote_revisions q ON q.id=d.quote_revision_id AND q.job_document_id=d.id AND q.job_id=d.job_id
       WHERE d.job_id=NEW.job_id AND d.quote_revision_id=NEW.quote_revision_id
@@ -113,3 +117,51 @@ CREATE TRIGGER guard_invoice_milestone_claim BEFORE INSERT OR UPDATE ON public.i
   FOR EACH ROW EXECUTE FUNCTION public.guard_invoice_milestone_claim();
 COMMENT ON TABLE public.invoice_milestone_draft_claims IS
   'One durable draft-only dispatch claim per exact accepted revision and stage. Unknown outcomes never reset or automatically create again. Staff reconciliation can only bind an existing matching DRAFT.';
+
+-- Admission holds are durable review context, never a payable obligation.
+CREATE FUNCTION public.record_invoice_milestone_admission_hold(p_review_id uuid,p_org_id uuid,p_reason text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+BEGIN
+ IF p_reason NOT IN ('previous_revision_invoice_claim_requires_review','existing_invoice_requires_review','invoice_inventory_unavailable') THEN RAISE EXCEPTION 'Unknown invoice admission hold'; END IF;
+ UPDATE public.invoice_milestone_reviews SET hold_reasons=ARRAY(SELECT DISTINCT unnest(hold_reasons||ARRAY[p_reason])) WHERE id=p_review_id AND org_id=p_org_id;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Invoice admission review missing'; END IF;
+END $$;
+REVOKE ALL ON FUNCTION public.record_invoice_milestone_admission_hold(uuid,uuid,text) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.record_invoice_milestone_admission_hold(uuid,uuid,text) TO service_role;
+
+CREATE TABLE public.quote_invoice_deposit_receipts (
+ org_id uuid NOT NULL,
+ job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE RESTRICT,
+ quote_revision_id uuid NOT NULL REFERENCES public.quote_revisions(id) ON DELETE RESTRICT,
+ accepted_document_id uuid NOT NULL REFERENCES public.job_documents(id) ON DELETE RESTRICT,
+ provider_invoice_id uuid NOT NULL,
+ xero_contact_id uuid NOT NULL,
+ stage_id text NOT NULL,
+ amount_cents bigint NOT NULL CHECK(amount_cents>0 AND amount_cents<9007199254740991),
+ reference text NOT NULL,
+ captured_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(org_id,provider_invoice_id),
+ UNIQUE(org_id,job_id,quote_revision_id,accepted_document_id,stage_id)
+);
+ALTER TABLE public.quote_invoice_deposit_receipts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.quote_invoice_deposit_receipts FROM PUBLIC,anon,authenticated;
+GRANT SELECT,INSERT ON public.quote_invoice_deposit_receipts TO service_role;
+CREATE FUNCTION public.guard_quote_invoice_deposit_receipt() RETURNS trigger
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE binding record; doc record; revision record; payment jsonb;
+BEGIN
+ SELECT * INTO binding FROM public.quote_invoice_billing_bindings WHERE quote_revision_id=NEW.quote_revision_id;
+ SELECT * INTO doc FROM public.job_documents WHERE id=NEW.accepted_document_id;
+ SELECT * INTO revision FROM public.quote_revisions WHERE id=NEW.quote_revision_id;
+ payment:=revision.pricing_snapshot_json->'raw'->'payment_schedule'->'payments'->0;
+ IF binding.state IS DISTINCT FROM 'eligible' OR binding.org_id IS DISTINCT FROM NEW.org_id OR binding.job_id IS DISTINCT FROM NEW.job_id OR binding.xero_contact_id IS DISTINCT FROM NEW.xero_contact_id
+  OR doc.job_id IS DISTINCT FROM NEW.job_id OR doc.quote_revision_id IS DISTINCT FROM NEW.quote_revision_id OR doc.accepted_at IS NULL OR doc.sent_at IS NULL OR doc.superseded_at IS NOT NULL OR doc.job_contact_id IS NOT NULL
+  OR revision.job_id IS DISTINCT FROM NEW.job_id OR revision.job_document_id IS DISTINCT FROM NEW.accepted_document_id OR revision.sent_at IS NULL
+  OR payment->>'id' IS DISTINCT FROM NEW.stage_id OR jsonb_typeof(payment->'amount_inc_gst') IS DISTINCT FROM 'number' THEN
+   RAISE EXCEPTION 'Accepted deposit receipt lacks exact released first-stage binding';
+ END IF;
+ IF (payment->>'amount_inc_gst')::numeric*100 IS DISTINCT FROM NEW.amount_cents::numeric THEN RAISE EXCEPTION 'Accepted deposit receipt amount differs from printed first stage'; END IF;
+ RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION public.guard_quote_invoice_deposit_receipt() FROM PUBLIC,anon,authenticated;
+CREATE TRIGGER guard_quote_invoice_deposit_receipt BEFORE INSERT ON public.quote_invoice_deposit_receipts FOR EACH ROW EXECUTE FUNCTION public.guard_quote_invoice_deposit_receipt();

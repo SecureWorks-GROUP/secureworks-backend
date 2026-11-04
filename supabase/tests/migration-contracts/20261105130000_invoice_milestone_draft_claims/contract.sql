@@ -4,7 +4,7 @@ VALUES('66000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-000000000
 INSERT INTO public.job_documents(id,job_id,type,sent_at,accepted_at)
 VALUES('66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000001','quote',now(),now());
 INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,pricing_snapshot_json)
-VALUES('66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),1,'send-quote/send','{"raw":{"billing_milestones":{"version":1}}}');
+VALUES('66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),1,'send-quote/send','{"raw":{"billing_milestones":{"version":1},"payment_schedule":{"version":1,"payments":[{"id":"deposit","amount_inc_gst":0.01}]}}}');
 UPDATE public.job_documents SET quote_revision_id='66000000-0000-4000-8000-000000000004' WHERE id='66000000-0000-4000-8000-000000000003';
 UPDATE public.jobs SET xero_contact_id='66000000-0000-4000-8000-000000000099',status='scheduled' WHERE id='66000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
@@ -39,6 +39,21 @@ DO $$ BEGIN
   EXCEPTION WHEN raise_exception THEN IF SQLERRM='Provider id replaced' THEN RAISE; END IF; END;
 END $$;
 UPDATE public.invoice_milestone_draft_claims SET state='draft_confirmed' WHERE reference='WS6-CONTRACT-PIN';
+-- Exact acceptance receipt metadata cannot bind a different first payment or overwrite an identity.
+INSERT INTO public.quote_invoice_deposit_receipts(org_id,job_id,quote_revision_id,accepted_document_id,provider_invoice_id,xero_contact_id,stage_id,amount_cents,reference)
+VALUES('00000000-0000-0000-0000-000000000001','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000020','66000000-0000-4000-8000-000000000002','deposit',1,'Fixture accepted first payment');
+DO $$ BEGIN
+ IF has_table_privilege('authenticated','public.quote_invoice_deposit_receipts','SELECT') OR has_table_privilege('service_role','public.quote_invoice_deposit_receipts','UPDATE') THEN RAISE EXCEPTION 'Deposit receipt is mutable or browser-readable'; END IF;
+ BEGIN
+ INSERT INTO public.quote_invoice_deposit_receipts(org_id,job_id,quote_revision_id,accepted_document_id,provider_invoice_id,xero_contact_id,stage_id,amount_cents,reference)
+ VALUES('00000000-0000-0000-0000-000000000001','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000021','66000000-0000-4000-8000-000000000002','different-stage',1,'Fixture other payment');
+ RAISE EXCEPTION 'Non-first-stage receipt admitted';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM='Non-first-stage receipt admitted' THEN RAISE; END IF; END;
+END $$;
+SELECT public.record_invoice_milestone_admission_hold(id,org_id,'existing_invoice_requires_review') FROM public.invoice_milestone_reviews WHERE job_id='66000000-0000-4000-8000-000000000001';
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM public.invoice_milestone_reviews WHERE job_id='66000000-0000-4000-8000-000000000001' AND 'existing_invoice_requires_review'=ANY(hold_reasons)) THEN RAISE EXCEPTION 'Admission hold was not durable'; END IF;
+END $$;
 -- A document superseded after preparation cannot acquire dispatch.
 INSERT INTO public.invoice_milestone_draft_claims(org_id,job_id,quote_revision_id,review_id,stage_id,xero_contact_id,amount_cents,currency,label,printed_terms,due_date,reference,payload_hash,state)
 SELECT org_id,job_id,accepted_quote_revision_id,id,'admission','66000000-0000-4000-8000-000000000002',1,'AUD','Fixture stage','Fixture accepted terms','2026-11-06','WS6-CONTRACT-ADMISSION',repeat('c',64),'prepared'
@@ -58,4 +73,17 @@ VALUES('66000000-0000-4000-8000-000000000006','66000000-0000-4000-8000-000000000
 DO $$ BEGIN
   IF NOT EXISTS(SELECT 1 FROM public.quote_invoice_billing_bindings WHERE quote_revision_id='66000000-0000-4000-8000-000000000006' AND state='held' AND hold_reason='billing_contact_override_requires_review') THEN RAISE EXCEPTION 'Bill-to ambiguity became authority'; END IF;
 END $$;
+UPDATE public.jobs SET pricing_json='{}' WHERE id='66000000-0000-4000-8000-000000000001';
+INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,pricing_snapshot_json)
+VALUES('66000000-0000-4000-8000-000000000007','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),3,'send-quote/send','{"raw":{"billing_milestones":{"version":1}}}');
+UPDATE public.job_documents SET quote_revision_id='66000000-0000-4000-8000-000000000007' WHERE id='66000000-0000-4000-8000-000000000003';
+DO $$ BEGIN
+ BEGIN
+  INSERT INTO public.invoice_milestone_draft_claims(org_id,job_id,quote_revision_id,review_id,stage_id,xero_contact_id,amount_cents,currency,label,printed_terms,due_date,reference,payload_hash,state)
+  SELECT org_id,job_id,'66000000-0000-4000-8000-000000000007',id,'changed-stage-id','66000000-0000-4000-8000-000000000099',1,'AUD','Fixture replacement','Fixture terms','2026-11-06','WS6-CONTRACT-REPLACEMENT',repeat('f',64),'prepared' FROM public.invoice_milestone_reviews WHERE job_id='66000000-0000-4000-8000-000000000001';
+  RAISE EXCEPTION 'Replacement revision acquired duplicate economic billing';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE '%earlier accepted revision%' THEN RAISE; END IF; END;
+END $$;
+-- Restore document context for the independent concurrent same-revision scenario.
+UPDATE public.job_documents SET quote_revision_id='66000000-0000-4000-8000-000000000004' WHERE id='66000000-0000-4000-8000-000000000003';
 COMMIT;
