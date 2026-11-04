@@ -232,6 +232,17 @@ Cancelled, deleted and labour/subcontract POs are never on the Arrival line.
 ## 2. `dispatch_arrival` (new, pure read)
 
 `GET ops-api?action=dispatch_arrival&job_id=<uuid>` (`jobId` also accepted).
+
+Optional `proposed_install_date=YYYY-MM-DD` previews an install against the
+same supplier ready/delivery facts. It must be a real calendar date. The read
+adds `proposed_install_date`, `latest_confirmed_delivery_date` (or null) and
+`schedule_warnings`. Every warning carries its code, message, supplier identity,
+recorded delivery date, confirmation state and date provenance. Codes are
+`supplier_dates_unreadable`, `supplier_dates_missing`, `supplier_date_missing`,
+`supplier_date_unconfirmed` and `supplier_ready_after_install`. A requested date
+never becomes confirmed readiness. Delivered materials and extra orders are
+excluded. Warnings do not block or move a booking, invent fabrication days,
+send anything, or write any data. Omitting the query keeps the existing shape.
 Staff sessions and the privileged ops key only (403
 `operator_access_required` otherwise). Not on the trade, routine or agent-read
 lists. For the job screen's full Arrival line.

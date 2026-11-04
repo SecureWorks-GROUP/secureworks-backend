@@ -7454,6 +7454,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             url.searchParams.get('job_id') || url.searchParams.get('jobId'),
             DEFAULT_ORG_ID,
             _perthTodayYmd(),
+            url.searchParams.get('proposed_install_date'),
           ))
         } catch (e) {
           if (e instanceof DispatchArrivalError) throw new ApiError(e.message, e.status, e.body)

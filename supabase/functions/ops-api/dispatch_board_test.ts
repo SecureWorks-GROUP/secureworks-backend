@@ -922,6 +922,34 @@ Deno.test("dispatch_arrival: one job's install and Arrival line", async () => {
   assertEquals(answer.arrival.orders.length, 1);
   assertEquals(answer.arrival_read, "ok");
   assertEquals(answer.stage.key, "scheduled");
+  assertEquals("schedule_warnings" in answer, false);
+});
+
+Deno.test("dispatch_arrival: proposed install compares recorded supplier date without changing bookings", async () => {
+  const fixture = boardFixture();
+  const before = structuredClone(fixture);
+  const { client } = makeClient(fixture);
+  const answer = await dispatchArrivalRead(client, jobId(3), ORG_ID, TODAY, TODAY);
+  assertEquals(answer.latest_confirmed_delivery_date, addDays(TODAY, 1));
+  assertEquals(answer.schedule_warnings?.map((w) => w.code), ["supplier_ready_after_install"]);
+  assertEquals(answer.install?.day, addDays(TODAY, 2));
+  assertEquals(fixture, before);
+});
+
+Deno.test("dispatch_arrival: invalid proposed date refuses before database reads", async () => {
+  const { client, reads } = makeClient(boardFixture());
+  for (const date of ["2026-02-30", "tomorrow", ""]) {
+    const error = await assertRejects(() => dispatchArrivalRead(client, jobId(3), ORG_ID, TODAY, date), DispatchArrivalError);
+    assertEquals(error.status, 400);
+  }
+  assertEquals(reads, []);
+});
+
+Deno.test("dispatch_arrival: unreadable supplier dates warn rather than claiming readiness", async () => {
+  const { client } = makeClient(boardFixture(), { fail: ["job_material_suppliers"] });
+  const answer = await dispatchArrivalRead(client, jobId(3), ORG_ID, TODAY, TODAY);
+  assertEquals(answer.latest_confirmed_delivery_date, null);
+  assertEquals(answer.schedule_warnings?.map((w) => w.code), ["supplier_dates_unreadable"]);
 });
 
 Deno.test("dispatch_arrival: refuses a bad id, an unknown job and a make-safe", async () => {
