@@ -716,10 +716,12 @@ jobs:
       # Slice EM1: the old monitor-inbox path stays pinned to its own five
       # mailboxes and two groups, and never reads monitored_mailboxes (the new
       # poller's list, behind email_capture_v2). email.md review M14, row E22.
+      # It also never files inline email pictures (attachments_test.ts).
       - name: Test the pinned old mailbox poll
         run: |
           deno test --allow-read \
-            supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
+            supabase/functions/monitor-inbox/legacy_mailboxes_test.ts \
+            supabase/functions/monitor-inbox/attachments_test.ts
 
       # Slice F-ACT: the one actor rule (verified user, else x-sw-actor on a
       # server-key call, else actor_missing; never refused).

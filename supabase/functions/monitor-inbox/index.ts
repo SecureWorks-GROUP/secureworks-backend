@@ -21,6 +21,7 @@ import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { legacyPollPlan } from './legacy_mailboxes.ts'
 import { readerOwnsEvidence, readReaderFlags } from './reader_handover.ts'
 import { findStoredCopy, supabaseCopyLookup } from './self_copy.ts'
+import { storableAttachmentKind } from './attachments.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -358,10 +359,11 @@ async function processMailbox(
         if (attachResp.ok) {
           const attachData = await attachResp.json()
           for (const att of (attachData.value || [])) {
-            if (!att.contentBytes || att.size > 10000000) continue // Skip if no content or >10MB
-            const isPdf = (att.contentType || '').includes('pdf') || (att.name || '').endsWith('.pdf')
-            const isImage = (att.contentType || '').startsWith('image/')
-            if (!isPdf && !isImage) continue // Only store PDFs and images
+            // PDFs and pictures only, up to 10MB, and never an inline picture
+            // from the email body (signature logos): attachments.ts.
+            const kind = storableAttachmentKind(att)
+            if (!kind) continue
+            const isPdf = kind === 'pdf'
 
             const ext = isPdf ? 'pdf' : (att.name || '').split('.').pop() || 'jpg'
             const storagePath = `${DEFAULT_ORG_ID}/${jobId}/supplier/${Date.now()}_${(att.name || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_')}`
