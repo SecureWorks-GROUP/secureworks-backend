@@ -102,6 +102,19 @@ export interface DispatchRepliesSources {
     supplierId: string | null;
     now: string;
   }): Promise<PaymentHoldRead>;
+  /** After Accept: the order is confirmed (contract section 3e), so the
+   * crew pickup line and the supplier's documents go on the job, once per
+   * order (dispatch_v2_order_confirmed_write.ts). Never throws. Optional so
+   * an older stand-in still works; index.ts adds it to the sources it
+   * passes. Left out, Accept answers order_confirmed: null. */
+  orderConfirmed?(input: {
+    orgId: string;
+    jobId: string;
+    supplierId: string | null;
+    orderId: string;
+    emailId: string | null;
+    operator: { userId: string | null; email: string };
+  }): Promise<unknown>;
 }
 
 // The supplier box's delivery_date_source for a date taken from a supplier's

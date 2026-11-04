@@ -24,7 +24,9 @@
 //   * Pressing Save with nothing different writes nothing.
 //
 // What this touches: one job_material_suppliers row (the seven delivery date
-// columns only) and one job_events row (the audit line). Never jobs (no status
+// columns only) and one job_events row (the audit line). A new date on an
+// order already confirmed then runs ctx.onDateChanged (the crew "moved to"
+// line, contract section 3e). Never jobs (no status
 // or stage change), suppliers, purchase_orders, the order emails, the reply
 // tables, Xero, GHL, SMS or any email.
 //
@@ -58,6 +60,18 @@ export type DispatchV2DeliveryDateContext = {
   // Today in Perth (YYYY-MM-DD), for the fresh Arrival line in the answer.
   today: string;
   now?: () => string;
+  // Runs after a date is set or changed (not cleared): when the box's order
+  // was already confirmed and its crew pickup line names a different day, a
+  // new line follows ("Stratco pickup moved to Thu 5 Nov"; contract section
+  // 3e, dispatch_v2_order_confirmed_write.ts). It never writes the first
+  // line. index.ts passes it; left out, the press answers as before. It
+  // never throws and never undoes the date write.
+  onDateChanged?: (input: {
+    jobId: string;
+    supplierId: string | null;
+    boxId: string;
+    operator: { userId: string | null; email: string };
+  }) => Promise<unknown>;
 };
 
 const BOX_SELECT =
@@ -454,12 +468,28 @@ export async function setDispatchV2DeliveryDate(
       via: ctx.via,
     },
   );
+  // A new day on an order already confirmed: the crew's "moved to" line.
+  let crewLine: unknown = undefined;
+  if (want.date !== null && ctx.onDateChanged) {
+    try {
+      crewLine = await ctx.onDateChanged({
+        jobId: String(updated.job_id),
+        supplierId: text(updated.supplier_id),
+        boxId: String(updated.id),
+        operator,
+      });
+    } catch (e) {
+      console.error("[dispatch_v2_delivery_date] crew line failed:", e);
+      crewLine = null;
+    }
+  }
   return {
     success: true,
     ...(logged ? {} : { audit_logged: false }),
     job_status_changed: false,
     box: projectDeliveryDateBox(updated),
     arrival: await freshArrival(client, String(updated.job_id), ctx),
+    ...(crewLine !== undefined ? { order_confirmed: crewLine } : {}),
   };
 }
 

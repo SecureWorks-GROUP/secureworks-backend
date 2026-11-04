@@ -363,6 +363,7 @@ import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 // Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
 import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_write.ts'
+import { runDispatchV2OrderConfirmed, type DispatchOrderConfirmedDeps } from './dispatch_v2_order_confirmed_write.ts'
 import { runDispatchV2PaymentAction } from './dispatch_v2_payment_write.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
@@ -7661,7 +7662,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: repliesActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             store: postgrestRepliesStore(client),
-            sources: postgrestDispatchRepliesSources(client),
+            sources: {
+              ...postgrestDispatchRepliesSources(client),
+              // Accept confirms the order: the crew pickup line and the
+              // supplier's documents (contract section 3e).
+              orderConfirmed: (i) => runDispatchV2OrderConfirmed(client, {
+                orgId: i.orgId,
+                jobId: i.jobId,
+                supplierId: i.supplierId,
+                orderId: i.orderId,
+                trigger: 'accept',
+                operator: i.operator,
+                acceptedEmailId: i.emailId,
+              }, dispatchOrderConfirmedDeps(client)),
+            },
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -7694,6 +7708,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: deliveryDateActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             today: _perthTodayYmd(),
+            // A new day on an order already confirmed: the crew's "moved to"
+            // line (contract section 3e). Never the first line.
+            onDateChanged: (i) => runDispatchV2OrderConfirmed(client, {
+              orgId: DEFAULT_ORG_ID,
+              jobId: i.jobId,
+              supplierId: i.supplierId,
+              trigger: 'date_set',
+              operator: i.operator,
+            }, dispatchOrderConfirmedDeps(client)),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -7727,6 +7750,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: materialStageActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             today: _perthTodayYmd(),
+            // Order confirmed by hand: the crew pickup line and the
+            // supplier's documents (contract section 3e).
+            onOrderConfirmed: (i) => runDispatchV2OrderConfirmed(client, {
+              orgId: DEFAULT_ORG_ID,
+              jobId: i.jobId,
+              supplierId: i.supplierId,
+              trigger: 'stage_set',
+              operator: i.operator,
+            }, dispatchOrderConfirmedDeps(client)),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -46384,6 +46416,28 @@ async function addNote(client: any, body: any, isAdmin = false, access?: TradeJo
     ghl_synced: !!ghl_note_id,
     ghl_note_id,
     ghl_push_error,
+  }
+}
+
+// Dispatch v2 Tweak 1 (contract section 3e): what the order-confirmed writer
+// needs from this file. The crew pickup line is written by addNote itself,
+// with exactly what the Dispatch "Add a note" button sends
+// (modules/ops-dispatch.js): internal only, from_ops (the Office tag), never
+// synced to GHL. So the trade app shows it in the job's notes as an Office
+// note, and it never reaches the client.
+function dispatchOrderConfirmedDeps(client: any): DispatchOrderConfirmedDeps {
+  return {
+    writeNote: async ({ jobId, text, userId }) => {
+      const out = await addNote(client, {
+        job_id: jobId,
+        user_id: userId,
+        text,
+        visibility: 'internal_only',
+        sync_to_ghl: false,
+        from_ops: true,
+      }, true)
+      return { id: out?.note?.id ? String(out.note.id) : null }
+    },
   }
 }
 

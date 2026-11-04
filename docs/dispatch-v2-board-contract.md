@@ -1135,6 +1135,71 @@ A1's terms and A4 to A7 on A2's payment object.
 - Migration contract tests need psql, which is not installed on this PC;
   CI runs them on the PR.
 
+## 3e. Once an order is confirmed (Tweak 1, approved by Shaun 4 Nov 2026)
+
+An order counts as confirmed when a person presses **Accept** on a supplier
+reply's date suggestion (`dispatch_v2_suggestion_accept`), or moves the box's
+material stage to **Order confirmed** by hand
+(`dispatch_v2_set_material_stage`). Both presses then run the same step,
+`runDispatchV2OrderConfirmed` (`dispatch_v2_order_confirmed_write.ts`; rules
+in `dispatch_v2_order_confirmed.ts`). It runs after the press's own write has
+succeeded, never throws, and never undoes the press. Its answer comes back on
+the press as `order_confirmed` (null when the step failed outright).
+
+Nothing here sends anything, moves a job stage or status, or touches
+`suppliers`, Xero or GHL. No backfill: orders confirmed before this ships get
+nothing.
+
+### 3e.1 The crew pickup line
+
+One note in the job's crew thread, written by `add_note` with exactly what
+the Dispatch "Add a note" button sends: `event_type 'note'`,
+`detail_json {text, visibility: 'internal_only', sync_to_ghl: false,
+from_ops: true}`. The trade app shows it in the job's notes with the Office
+tag. It is never client-visible and never synced to GHL.
+
+| Case | Line |
+|------|------|
+| Pickup with a day, a branch on the order and a supplier ref | `Stratco pickup Tue 3 Nov · from Neerabup · ref 123456` |
+| Delivery with a day | `R&R delivery Mon 2 Nov` |
+| ASAP order | `Fencing Warehouse pickup ASAP` |
+| Order asked for a day but none is known | `Metroll delivery no date yet` |
+| Day changed later | `Stratco pickup moved to Thu 5 Nov` |
+
+Rules:
+
+1. **Which order.** Accept: the order Accept was for. Stage press: the box's
+   newest sent order (status `sent`), as the board picks it. No sent order:
+   no line (`reason: no_sent_order`).
+2. **The day.** The box's own date, unless it was set before this order was
+   sent (then it belonged to an earlier order); else the date the order
+   email asked for; else ASAP when its Date line says ASAP; else "no date
+   yet". The same rule as the board's current-order date.
+3. **Pickup or delivery** from the order email's opening line
+   (`dispatchV2FulfilmentOf`).
+4. **"from <branch>"** only when the opening line says "pickup / pick up /
+   collect from <place>" (the order builder's "for pickup from Neerabup:").
+   A long phrase is not a branch and is left off.
+5. **"ref <number>"** only when the reply scan found one: the accepted
+   reply's own references first, then those the matcher saved on the order
+   (`dispatch_v2_supplier_order_refs`), then those on the order's other
+   matched replies. A reply still waiting for a person to confirm the guess
+   does not count.
+6. **Once.** `dispatch_v2_order_crew_lines` remembers every line. Pressing
+   again, or Accept after the stage press, with the same day writes nothing.
+   Two presses at once claim the same `(order_id, seq)`; the second is
+   refused by the unique key, so one note is written.
+7. **A new day later** writes one short "moved to" line. A day landing on an
+   ASAP (or no-date) line writes the full line, so the crew gets the branch
+   and ref with the day. A cleared date writes nothing.
+8. **A date typed by hand** (`dispatch_v2_set_delivery_date`) only follows
+   up an order that already has a line. It never writes the first line: a
+   date typed by hand is not, by itself, the order being confirmed.
+9. **A failed note** gives its claim back, so the next press writes it.
+
+Migration: `20261105120000_dispatch_v2_order_crew_lines.sql` (rollback in
+`supabase/rollbacks/`).
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,

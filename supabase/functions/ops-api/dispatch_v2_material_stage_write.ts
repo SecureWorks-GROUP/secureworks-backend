@@ -23,7 +23,9 @@
 //
 // What this touches: one job_material_suppliers row (the three material stage
 // columns, and payment_reopened_at on a pick of Awaiting payment) and one
-// job_events row (the audit line). Never jobs,
+// job_events row (the audit line). A pick of Order confirmed then runs
+// ctx.onOrderConfirmed (Tweak 1, contract section 3e: the crew pickup line
+// and the supplier's documents on the job). Never jobs,
 // suppliers, purchase_orders, the order emails, the reply tables, Xero, GHL,
 // SMS or any email.
 //
@@ -57,6 +59,18 @@ export type DispatchV2MaterialStageContext = {
   // Today in Perth (YYYY-MM-DD), for the fresh Arrival line in the answer.
   today: string;
   now?: () => string;
+  // Runs once the box is at Order confirmed (contract section 3e): the crew
+  // pickup line and the supplier's documents
+  // (dispatch_v2_order_confirmed_write.ts). index.ts passes it; left out
+  // (as in the older tests), the press answers as it did before. It never
+  // throws and never undoes the stage write; its answer is returned as
+  // order_confirmed.
+  onOrderConfirmed?: (input: {
+    jobId: string;
+    supplierId: string | null;
+    boxId: string;
+    operator: { userId: string | null; email: string };
+  }) => Promise<unknown>;
 };
 
 const BOX_SELECT =
@@ -333,12 +347,29 @@ export async function setDispatchV2MaterialStage(
       eventError,
     );
   }
+  // Order confirmed by hand (Shaun, 4 Nov 2026): the crew pickup line and
+  // the supplier's documents, once per order. Never undoes the stage.
+  let orderConfirmed: unknown = undefined;
+  if (want.stage === "order_confirmed" && ctx.onOrderConfirmed) {
+    try {
+      orderConfirmed = await ctx.onOrderConfirmed({
+        jobId: String(updated.job_id),
+        supplierId: text(updated.supplier_id),
+        boxId: String(updated.id),
+        operator,
+      });
+    } catch (e) {
+      console.error("[dispatch_v2_material_stage] order confirmed failed:", e);
+      orderConfirmed = null;
+    }
+  }
   return {
     success: true,
     ...(eventError ? { audit_logged: false } : {}),
     job_status_changed: false,
     box: projectMaterialStageBox(updated),
     arrival: await freshArrival(client, String(updated.job_id), ctx),
+    ...(orderConfirmed !== undefined ? { order_confirmed: orderConfirmed } : {}),
   };
 }
 

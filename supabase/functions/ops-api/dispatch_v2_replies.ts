@@ -1047,6 +1047,24 @@ export async function acceptSuggestion(
       via: ctx.via,
     },
   );
+  // The order is confirmed (Tweak 1, contract section 3e): the crew pickup
+  // line and the supplier's documents, once per order. Never undoes Accept.
+  let orderConfirmed: unknown = null;
+  if (ctx.sources.orderConfirmed) {
+    try {
+      orderConfirmed = await ctx.sources.orderConfirmed({
+        orgId: ctx.orgId,
+        jobId: s.job_id,
+        supplierId: order.supplier_id,
+        orderId: order.order_id,
+        emailId: s.email_id ?? null,
+        operator,
+      });
+    } catch (e) {
+      console.error("[dispatch_v2_replies] order confirmed failed:", e);
+      orderConfirmed = null;
+    }
+  }
   return {
     ok: true,
     suggestion: projectSuggestion(updated),
@@ -1066,6 +1084,9 @@ export async function acceptSuggestion(
     payment_hold: payment ? payment.hold : null,
     // The accepted box's payment object (dispatch_v2_payment.ts).
     box_payment: payment ? payment.box_payment : null,
+    // The crew pickup line and the documents saved (contract section 3e);
+    // null when not run.
+    order_confirmed: orderConfirmed,
   };
 }
 

@@ -1022,7 +1022,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261104040000", "dispatch_order_bill_more_rules"),
                       # Auto start: the job_auto_start_sweep run ledger and
                       # its 6am Perth cron trigger (job_auto_start.ts).
-                      ("20261105010000", "job_auto_start")]:
+                      ("20261105010000", "job_auto_start"),
+                      # Dispatch v2 Tweak 1: the crew pickup line memory
+                      # (dispatch_v2_order_confirmed_write.ts).
+                      ("20261105120000", "dispatch_v2_order_crew_lines")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
