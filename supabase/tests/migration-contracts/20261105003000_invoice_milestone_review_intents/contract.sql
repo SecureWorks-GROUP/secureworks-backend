@@ -1,4 +1,17 @@
 BEGIN;
+-- Earlier full-stack contracts can leave reviews for unrelated jobs. Their
+-- presence must neither fail this contract nor be modified by its assertions.
+INSERT INTO public.jobs(id, org_id, type, status, job_number) VALUES
+ ('99000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'patio', 'accepted', 'WS6-REVIEW-UNRELATED');
+UPDATE public.jobs SET status='scheduled' WHERE id='99000000-0000-4000-8000-000000000001';
+CREATE TEMP VIEW ws6_invoice_reviews_under_test AS
+ SELECT * FROM public.invoice_milestone_reviews WHERE job_id IN (
+  '11000000-0000-4000-8000-000000000001'::uuid,
+  '11000000-0000-4000-8000-000000000002'::uuid,
+  '11000000-0000-4000-8000-000000000003'::uuid,
+  '11000000-0000-4000-8000-000000000004'::uuid,
+  '11000000-0000-4000-8000-000000000005'::uuid
+ );
 INSERT INTO public.jobs(id, org_id, type, status, job_number) VALUES
   ('11000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'patio', 'accepted', 'WS6-REVIEW-ONE'),
   ('11000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'WS6-REVIEW-TWO'),
@@ -13,7 +26,7 @@ INSERT INTO public.quote_revisions(id, job_id, job_document_id, version, totals_
   ('33000000-0000-4000-8000-000000000002', '11000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001', 2, '{}', 'send-quote/send', '2026-11-02');
 UPDATE public.job_documents SET quote_revision_id = '33000000-0000-4000-8000-000000000001'
   WHERE id IN ('22000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002');
-UPDATE public.jobs SET status = 'scheduled' WHERE id::text LIKE '11000000-%';
+UPDATE public.jobs SET status = 'scheduled' WHERE id IN ('11000000-0000-4000-8000-000000000001','11000000-0000-4000-8000-000000000002','11000000-0000-4000-8000-000000000003');
 DO $$ BEGIN
   IF (SELECT count(*) FROM public.invoice_milestone_reviews WHERE job_id = '11000000-0000-4000-8000-000000000001') <> 2 THEN
     RAISE EXCEPTION 'one scheduled review per accepted document, excluding unaccepted'; END IF;
@@ -38,7 +51,7 @@ INSERT INTO public.council_submissions(id, job_id, steps) VALUES
  ('44000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001', '[{"step_id":"engineering","status":"pending"}]');
 UPDATE public.council_submissions SET current_step_index = 1 WHERE id = '44000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
-  IF (SELECT count(*) FROM public.invoice_milestone_reviews) <> 3 THEN RAISE EXCEPTION 'repeat scheduling or workflow jump duplicated review'; END IF;
+  IF (SELECT count(*) FROM ws6_invoice_reviews_under_test) <> 3 THEN RAISE EXCEPTION 'repeat scheduling or workflow jump duplicated review'; END IF;
 END $$;
 UPDATE public.council_submissions SET steps = '[{"step_id":"engineering","status":"complete"}]'
   WHERE id = '44000000-0000-4000-8000-000000000001';
@@ -49,8 +62,8 @@ UPDATE public.council_submissions SET steps = '[{"step_id":"engineering","status
 UPDATE public.council_submissions SET steps = '[{"step_id":"engineering","status":"complete"}]'
   WHERE id = '44000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
-  IF (SELECT count(*) FROM public.invoice_milestone_reviews) <> 5 THEN RAISE EXCEPTION 'council completion/recompletion must add exactly one review per accepted document'; END IF;
-  IF EXISTS (SELECT FROM public.invoice_milestone_reviews WHERE state <> 'held') THEN RAISE EXCEPTION 'no review may become invoice authority'; END IF;
+  IF (SELECT count(*) FROM ws6_invoice_reviews_under_test) <> 5 THEN RAISE EXCEPTION 'council completion/recompletion must add exactly one review per accepted document'; END IF;
+  IF EXISTS (SELECT FROM ws6_invoice_reviews_under_test WHERE state <> 'held') THEN RAISE EXCEPTION 'no review may become invoice authority'; END IF;
   IF has_table_privilege('anon', 'public.invoice_milestone_reviews', 'SELECT,INSERT,UPDATE,DELETE')
     OR has_table_privilege('authenticated', 'public.invoice_milestone_reviews', 'SELECT,INSERT,UPDATE,DELETE') THEN
     RAISE EXCEPTION 'queue must not expose direct browser access'; END IF;
@@ -85,19 +98,19 @@ END $$;
 -- A workflow jump may mark earlier steps complete but is not a milestone attestation.
 UPDATE public.council_submissions SET steps='[{"step_id":"jumped","status":"complete","completion_source":"workflow_jump"}]', current_step_index=1 WHERE id='44000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
- IF EXISTS (SELECT FROM public.invoice_milestone_reviews WHERE milestone_key='council_step:jumped') THEN RAISE EXCEPTION 'workflow jump fabricated milestone'; END IF;
+ IF EXISTS (SELECT FROM ws6_invoice_reviews_under_test WHERE milestone_key='council_step:jumped') THEN RAISE EXCEPTION 'workflow jump fabricated milestone'; END IF;
 END $$;
 SAVEPOINT explicit_attestation;
 UPDATE public.council_submissions SET steps='[{"step_id":"jumped","status":"complete","completion_source":"explicit_status_update"}]' WHERE id='44000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
- IF (SELECT count(*) FROM public.invoice_milestone_reviews WHERE milestone_key='council_step:jumped') <> 2 THEN RAISE EXCEPTION 'later explicit completion must capture one held review per accepted document'; END IF;
+ IF (SELECT count(*) FROM ws6_invoice_reviews_under_test WHERE milestone_key='council_step:jumped') <> 2 THEN RAISE EXCEPTION 'later explicit completion must capture one held review per accepted document'; END IF;
 END $$;
 ROLLBACK TO SAVEPOINT explicit_attestation;
 -- Malformed or unidentified workflow steps never become named billing evidence.
 UPDATE public.council_submissions SET steps='[1,"x",{},{"status":"complete"}]' WHERE id='44000000-0000-4000-8000-000000000001';
 UPDATE public.council_submissions SET steps='null' WHERE id='44000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
- IF (SELECT count(*) FROM public.invoice_milestone_reviews) <> 6 THEN RAISE EXCEPTION 'malformed council input fabricated review'; END IF;
+ IF (SELECT count(*) FROM ws6_invoice_reviews_under_test) <> 6 THEN RAISE EXCEPTION 'malformed council input fabricated review'; END IF;
 END $$;
 -- Do not acknowledge a source write if its review would be lost.
 ALTER TABLE public.invoice_milestone_reviews ADD CONSTRAINT injected_capture_failure
@@ -124,4 +137,8 @@ DO $$ BEGIN
  IF EXISTS (SELECT FROM public.invoice_milestone_reviews WHERE job_id='11000000-0000-4000-8000-000000000005') THEN RAISE EXCEPTION 'failed capture left partial reviews'; END IF;
 END $$;
 ALTER TABLE public.invoice_milestone_reviews DROP CONSTRAINT injected_capture_failure;
+DO $$ BEGIN
+ IF (SELECT count(*) FROM public.invoice_milestone_reviews WHERE job_id='99000000-0000-4000-8000-000000000001') <> 1 THEN
+  RAISE EXCEPTION 'contract must preserve unrelated review'; END IF;
+END $$;
 ROLLBACK;
