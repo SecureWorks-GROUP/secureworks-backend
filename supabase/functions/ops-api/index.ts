@@ -10761,6 +10761,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { accessToken: asAt, tenantId: asTi } = await getToken(client)
         const asRes = await xeroPost(`/Invoices/${asId}`, asAt, asTi, { Invoices: [{ InvoiceID: asId, Status: 'AUTHORISED' }] }, 'POST')
         const asApproved = asRes?.Invoices?.[0]
+        const asEmailStatusRefusal = invoiceEmailStatusRefusal(asApproved)
+        if (asEmailStatusRefusal) return json(asEmailStatusRefusal, asEmailStatusRefusal.status_code)
         const asInvNumber = asApproved?.InvoiceNumber || ''
         const asTotal = asApproved?.Total || 0
 
@@ -39761,7 +39763,10 @@ async function createInvoice(
   const emailRequested = !sesContext && !internal.captainLock && !!send_email
   let emailStatus: InvoiceEmailStatus = emailRequested ? 'failed' : 'not_requested'
   let emailError: Record<string, unknown> | null = null
-  if (emailRequested && xeroInvId) {
+  const createdEmailRefusal = emailRequested ? invoiceEmailStatusRefusal(xeroInv) : null
+  if (createdEmailRefusal) {
+    emailError = { ...createdEmailRefusal, provider_call_made: false, xero_invoice_id: xeroInvId, invoice_number: invNumber }
+  } else if (emailRequested && xeroInvId) {
     try {
       await xeroPost(`/Invoices/${xeroInvId}/Email`, accessToken, tenantId, {}, 'POST')
       emailStatus = 'accepted'
@@ -40138,11 +40143,20 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
   if (cacheErr) throw new ApiError('update_invoice cache update failed: ' + cacheErr.message, 500)
 
   // Resend email if requested
+  let updateEmailStatus: InvoiceEmailStatus = 'not_requested'
+  let updateEmailRefusal: ReturnType<typeof invoiceEmailStatusRefusal> = null
   if (resend_email) {
-    try {
-      await xeroPost(`/Invoices/${xero_invoice_id}/Email`, accessToken, tenantId, {}, 'POST')
-    } catch (emailErr: any) {
-      console.error('[update_invoice] Failed to resend email:', emailErr.message)
+    updateEmailRefusal = invoiceEmailStatusRefusal(xeroInvoice)
+    if (updateEmailRefusal) {
+      updateEmailStatus = 'failed'
+    } else {
+      try {
+        await xeroPost(`/Invoices/${xero_invoice_id}/Email`, accessToken, tenantId, {}, 'POST')
+        updateEmailStatus = 'accepted'
+      } catch (emailErr: any) {
+        updateEmailStatus = rejectedInvoiceEmailStatus(emailErr)
+        console.error('[update_invoice] Failed to resend email:', emailErr.message)
+      }
     }
   }
 
@@ -40160,7 +40174,8 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
         xero_invoice_id,
         invoice_number: xeroInvoice.InvoiceNumber || invRecord.invoice_number,
         total: xeroInvoice.Total,
-        resent: !!resend_email,
+        resent: invoiceEmailAccepted(updateEmailStatus),
+        email_status: updateEmailStatus,
       },
     })
   }
@@ -40169,6 +40184,9 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
     success: true,
     invoice_number: xeroInvoice.InvoiceNumber || invRecord?.invoice_number,
     total: xeroInvoice.Total,
+    emailed: invoiceEmailAccepted(updateEmailStatus),
+    email_status: updateEmailStatus,
+    ...(updateEmailRefusal ? { warning: updateEmailRefusal.error, email_error: updateEmailRefusal } : {}),
   }
 }
 
