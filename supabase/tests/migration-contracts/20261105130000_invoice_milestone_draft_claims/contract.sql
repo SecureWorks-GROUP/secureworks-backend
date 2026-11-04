@@ -21,6 +21,14 @@ DO $$ BEGIN
     RAISE EXCEPTION 'Commercial payload changed';
   EXCEPTION WHEN raise_exception THEN IF SQLERRM='Commercial payload changed' THEN RAISE; END IF; END;
 END $$;
+UPDATE public.job_documents SET sent_at=now()+interval '1 second' WHERE id='66000000-0000-4000-8000-000000000003';
+DO $$ BEGIN
+ BEGIN
+  UPDATE public.invoice_milestone_draft_claims SET state='dispatching' WHERE reference='WS6-CONTRACT-PIN' AND state='prepared';
+  RAISE EXCEPTION 'Future document send admitted dispatch';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM NOT LIKE '%accepted document changed%' THEN RAISE; END IF; END;
+END $$;
+UPDATE public.job_documents SET sent_at=now() WHERE id='66000000-0000-4000-8000-000000000003';
 UPDATE public.invoice_milestone_draft_claims SET state='dispatching' WHERE reference='WS6-CONTRACT-PIN' AND state='prepared';
 DO $$ BEGIN
   IF (SELECT count(*) FROM public.invoice_milestone_draft_claims WHERE reference='WS6-CONTRACT-PIN' AND state='dispatching')<>1 THEN RAISE EXCEPTION 'First dispatch missing'; END IF;
