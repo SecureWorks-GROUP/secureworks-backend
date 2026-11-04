@@ -1,4 +1,5 @@
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
+import { contactReuseDecision } from '../ghl-proxy/contact_reuse.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -40593,8 +40594,9 @@ async function createGHLContact(client: any, body: any) {
   const name = [firstName, lastName].filter(Boolean).join(' ')
   const headers = { 'Authorization': `Bearer ${GHL_API_TOKEN}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' }
 
-  // Dedup: search by email first, then phone
-  let existingId: string | null = null
+  // Dedup: search by email first, then phone. A phone on a different person is not reused.
+  let existing: Record<string, unknown> | null = null
+  let matchedBy: 'email' | 'phone' | null = null
   if (email) {
     try {
       const dupRes = await fetch(`https://services.leadconnectorhq.com/contacts/search/duplicate`, {
@@ -40603,11 +40605,11 @@ async function createGHLContact(client: any, body: any) {
       })
       if (dupRes.ok) {
         const dupData = await dupRes.json()
-        if (dupData.contact?.id) existingId = dupData.contact.id
+        if (dupData.contact?.id) { existing = dupData.contact; matchedBy = 'email' }
       }
     } catch (e) { /* continue to phone check */ }
   }
-  if (!existingId && phone) {
+  if (!existing && phone) {
     try {
       const dupRes = await fetch(`https://services.leadconnectorhq.com/contacts/search/duplicate`, {
         method: 'POST', headers,
@@ -40615,13 +40617,47 @@ async function createGHLContact(client: any, body: any) {
       })
       if (dupRes.ok) {
         const dupData = await dupRes.json()
-        if (dupData.contact?.id) existingId = dupData.contact.id
+        if (dupData.contact?.id) { existing = dupData.contact; matchedBy = 'phone' }
       }
     } catch (e) { /* continue to create */ }
   }
 
-  let contactId = existingId
-  let contactExisted = !!existingId
+  if (existing && matchedBy) {
+    const decision = contactReuseDecision({
+      matchedBy,
+      wantedFirst: firstName,
+      wantedLast: lastName,
+      wantedEmail: email,
+      existingFirst: typeof existing.firstName === 'string' ? existing.firstName : null,
+      existingLast: typeof existing.lastName === 'string' ? existing.lastName : null,
+      existingName: typeof existing.name === 'string' ? existing.name : null,
+      existingEmail: typeof existing.email === 'string' ? existing.email : null,
+    })
+    if (decision.action === 'choose') {
+      if (job_id) {
+        await client.from('job_events').insert({
+          job_id,
+          event_type: 'contact_choice_required',
+          detail_json: { existing_contact_id: existing.id, message: decision.message },
+        })
+      }
+      return {
+        contact_id: null,
+        name,
+        email: email || '',
+        phone: phone || '',
+        existed: false,
+        linked_job_id: null,
+        contact_choice_required: true,
+        code: 'contact_choice_required',
+        existing_contact_id: existing.id,
+        message: decision.message,
+      }
+    }
+  }
+
+  let contactId = existing ? String(existing.id) : null
+  let contactExisted = !!existing
 
   if (!contactId) {
     // Create new contact
