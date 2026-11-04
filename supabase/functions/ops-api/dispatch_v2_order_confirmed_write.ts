@@ -19,7 +19,10 @@
 //     was written, so it is never written twice);
 //   * the crew thread note itself, through deps.writeNote, which is the same
 //     add_note the Dispatch "Add a note" button uses (internal only, Office
-//     tag, never client-visible, never synced to GHL).
+//     tag, never client-visible, never synced to GHL);
+//   * on Accept and the stage press (not a by-hand date): the supplier's PDFs
+//     from the order's matched replies, saved to the job's documents once
+//     each (dispatch_v2_order_documents.ts, contract section 3e.2).
 // Never a job, job status, stage, supplier, Xero, GHL, SMS or email.
 //
 // It never throws and never undoes the press that called it: a failure is
@@ -37,6 +40,10 @@ import {
   dispatchOrderBranchOf,
   dispatchOrderFulfilmentOf,
 } from "./dispatch_v2_order_confirmed.ts";
+import {
+  type DispatchOrderDocumentsResult,
+  saveDispatchSupplierDocuments,
+} from "./dispatch_v2_order_documents.ts";
 
 export type DispatchOrderConfirmedTrigger = "accept" | "stage_set" | "date_set";
 
@@ -62,6 +69,8 @@ export type DispatchOrderConfirmedDeps = {
     text: string;
     userId: string | null;
   }): Promise<{ id: string | null }>;
+  // The clock (tests pin it); left out, the real time.
+  now?: () => string;
 };
 
 export type DispatchCrewLineResult =
@@ -87,6 +96,9 @@ export type DispatchCrewLineResult =
 
 export type DispatchOrderConfirmedResult = {
   crew_line: DispatchCrewLineResult;
+  // The supplier's documents saved to the job; null when not run (a by-hand
+  // date press) or when there is no sent order.
+  documents: DispatchOrderDocumentsResult | null;
 };
 
 // The order email columns the line needs. order_lines and subject are read
@@ -348,5 +360,24 @@ export async function runDispatchV2OrderConfirmed(
   deps: DispatchOrderConfirmedDeps,
 ): Promise<DispatchOrderConfirmedResult> {
   const crewLine = await writeDispatchCrewLine(client, input, deps);
-  return { crew_line: crewLine };
+  // A by-hand date press only follows up the crew line.
+  if (input.trigger === "date_set") {
+    return { crew_line: crewLine, documents: null };
+  }
+  let documents: DispatchOrderDocumentsResult | null = null;
+  try {
+    const found = await loadConfirmedOrder(client, input);
+    if (found.order) {
+      documents = await saveDispatchSupplierDocuments(client, {
+        orgId: input.orgId,
+        order: found.order,
+        trigger: input.trigger,
+        operatorUserId: input.operator.userId,
+        now: deps.now ? deps.now() : new Date().toISOString(),
+      });
+    }
+  } catch (e) {
+    log("documents failed", e);
+  }
+  return { crew_line: crewLine, documents };
 }

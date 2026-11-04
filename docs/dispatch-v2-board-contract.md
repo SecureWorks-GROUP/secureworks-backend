@@ -1200,6 +1200,61 @@ Rules:
 Migration: `20261105120000_dispatch_v2_order_crew_lines.sql` (rollback in
 `supabase/rollbacks/`).
 
+### 3e.2 The supplier's documents on the job
+
+On Accept and on the stage press (not on a by-hand date press), every PDF
+on the supplier replies **matched** to the order (`state 'matched'`, the
+order named) is saved to the job (`dispatch_v2_order_documents.ts`).
+
+1. **Matched replies only.** A reply waiting for a person to confirm a best
+   guess carries an `order_id` too, but those are often statements, lead
+   emails or another job's invoice, so they never count.
+2. **Where the PDF comes from.** The email capture reader already keeps each
+   email's file attachments (never inline pictures) in the private bucket
+   `context-email-attachments`, one `context_email_attachments` row each with
+   its SHA-256. A file it had already kept from another email is
+   `skipped_duplicate`: the copy is found by its hash. Nothing calls Outlook.
+3. **PDFs only.** A PDF type, or a `.pdf` name with a generic type (Stratco
+   sends `application/octet-stream`). The bytes must start like a PDF and
+   match the SHA-256 the reader recorded, or nothing is saved.
+4. **Once.** `dispatch_v2_order_documents` is unique on `(job_id,
+   content_sha256)`: the same file is saved to a job once, however many
+   replies carry it. A claim is made first and given back on any failure; a
+   claim older than ten minutes (a run that died) may be taken over.
+5. **Named for what it is**, from the file name, then the subject, then the
+   email's first words (the earliest kind word in each wins):
+   `Stratco order confirmation`, `B&D invoice`, `R&R quote`, else
+   `<Supplier> order document`.
+6. **Saved as** `job_documents` type `material_order`, `visible_to_trades
+   true`, `pdf_url` and `storage_url` the public `job-documents` link, at
+   `<job_id>/dispatch-orders/<hash>-<name>.pdf`. The trade app shows that
+   type (it is not in `TRADE_MONEY_DOC_TYPES`, and no name or path says
+   "work order" or "WO", so the priced work order lock does not hide it);
+   the ops dashboard lists it under Material Documents. One
+   `dispatch_v2_order_document_saved` job_events row per document (audit).
+7. **Later invoices.** After each five-minute reply scan
+   (`dispatch_v2_replies_scan`), the sweep opens every order confirmed in
+   the last 45 days (it has a first crew line) with a matched reply changed
+   in the last 7 days, and saves any new PDF. Newest shows on top (the job's
+   documents read newest first). The answer carries `order_documents
+   {orders, saved, failed}`.
+8. **No backfill.** An order confirmed before this ships has no crew line,
+   so it is never swept. SWP-261382's existing documents and its 12 receipt
+   images are left as they are.
+
+Migration: `20261105121000_dispatch_v2_order_documents.sql` (rollback in
+`supabase/rollbacks/`).
+
+Open points:
+
+- The capture bucket is private (email.md M11: "no new public filing"), and
+  opening its files was held for the owner's word. Shaun's Tweak 1 ruling
+  (4 Nov 2026) is read as that word for supplier PDFs on matched replies of
+  confirmed orders only: those are copied to the job's documents, whose
+  bucket is public by link, as every other job document is.
+- A PDF someone already uploaded by hand (SWP-261382.pdf on SWP-261382) has
+  no hash on file, so it cannot be recognised: the same file can show twice.
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,

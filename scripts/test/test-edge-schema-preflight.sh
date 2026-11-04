@@ -1025,7 +1025,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261105010000", "job_auto_start"),
                       # Dispatch v2 Tweak 1: the crew pickup line memory
                       # (dispatch_v2_order_confirmed_write.ts).
-                      ("20261105120000", "dispatch_v2_order_crew_lines")]:
+                      ("20261105120000", "dispatch_v2_order_crew_lines"),
+                      # Dispatch v2 Tweak 1: the supplier documents memory
+                      # (dispatch_v2_order_documents.ts).
+                      ("20261105121000", "dispatch_v2_order_documents")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
