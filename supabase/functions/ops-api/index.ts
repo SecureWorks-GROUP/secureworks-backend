@@ -10463,6 +10463,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (delErr) return json({ error: delErr.message }, 500)
         return json({ success: true })
       }
+      case 'billing_council_steps': return await billingCouncilStepsAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'invoice_milestone_drafts': return await invoiceMilestoneDraftsAction(client, body, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'create_invoice': return json(await createInvoice(client, body))
       // WS6 preparation only: durable held review intents, never provider drafts.
@@ -39319,6 +39320,26 @@ async function invoiceMilestoneReviewsAction(
 }
 export const _invoiceMilestoneReviewsActionForTest = invoiceMilestoneReviewsAction
 
+async function billingCouncilStepsAction(client:any,params:URLSearchParams,method:string,authMode:string,authUser:any,serverSecretPresented:boolean) {
+  if (!((authMode==='api_key' && serverSecretPresented) || (authMode==='jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId===DEFAULT_ORG_ID))) return json({ok:false,code:'operator_access_required'},403)
+  if(method!=='GET') return json({ok:false,code:'method_not_allowed'},405)
+  const jobId=params.get('job_id')
+  if(!CREATE_INVOICE_DRAFT_UUID_RE.test(String(jobId||''))) return json({ok:false,code:'job_id_required'},400)
+  const job=await client.from('jobs').select('id').eq('id',jobId).eq('org_id',DEFAULT_ORG_ID).maybeSingle()
+  if(job.error)return json({ok:false,code:'job_lookup_unavailable'},503)
+  if(!job.data)return json({ok:false,code:'job_not_found'},404)
+  const result=await client.from('council_submissions').select('id,steps,template_type').eq('job_id',jobId).eq('org_id',DEFAULT_ORG_ID)
+  if(result.error)return json({ok:false,code:'council_steps_unavailable'},503)
+  const steps:any[]=[]
+  for(const sub of result.data||[]) {
+    if(!CREATE_INVOICE_DRAFT_UUID_RE.test(String(sub.id||''))||!Array.isArray(sub.steps))continue
+    for(const step of sub.steps) {
+      if(CREATE_INVOICE_DRAFT_UUID_RE.test(String(step?.step_id||'')) && typeof step.name==='string' && step.name.trim() && step.name.length<=160 && !/[\r\n"]/u.test(step.name) && sub.steps.filter((s:any)=>s?.step_id===step.step_id).length===1 && step.status!=='complete') steps.push({submission_id:sub.id,step_id:step.step_id,step_name:step.name,submission_name:String(sub.template_type||'Council workflow')})
+    }
+  }
+  return json({ok:true,job_id:jobId,steps})
+}
+export const _billingCouncilStepsActionForTest=billingCouncilStepsAction
 function milestoneDraftDeps(client: any): DraftDeps {
   return {
     search: async (reference, _contactId) => {
@@ -39344,6 +39365,10 @@ async function followInstallBilling(client: any, jobId: string) {
   try { return await processInstallDrafts(client, milestoneDraftDeps(client), jobId, DEFAULT_ORG_ID) }
   catch { return { ok: false, state: 'held', code: 'invoice_automation_unavailable', source_saved: true, retry_requires_office_review: true } }
 }
+async function followCouncilBilling(client:any,jobId:string) {
+  try {return await processInstallDrafts(client,milestoneDraftDeps(client),jobId,DEFAULT_ORG_ID,'council_step_complete')}
+  catch {return {ok:false,state:'held',code:'invoice_automation_unavailable',source_saved:true,retry_requires_office_review:true}}
+}
 async function invoiceMilestoneDraftsAction(client: any, body: any, params: URLSearchParams, method: string, authMode: string, authUser: any, serverSecretPresented: boolean) {
   if (!((authMode === 'api_key' && serverSecretPresented) || (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId === DEFAULT_ORG_ID))) return json({ ok: false, code: 'operator_access_required' }, 403)
   const jobId = method === 'GET' ? params.get('job_id') : body?.job_id
@@ -39358,7 +39383,7 @@ async function invoiceMilestoneDraftsAction(client: any, body: any, params: URLS
   }
   if (method !== 'POST') return json({ ok: false, code: 'method_not_allowed' }, 405)
   if (Object.keys(body || {}).some(k => !['action','job_id','claim_id','mode'].includes(k)) || !['process','reconcile'].includes(body?.mode)) return json({ ok: false, code: 'invalid_draft_request' }, 400)
-  if (body.mode === 'process') return json(await processInstallDrafts(client, milestoneDraftDeps(client), jobId, DEFAULT_ORG_ID))
+  if (body.mode === 'process') return json(await processInstallDrafts(client, milestoneDraftDeps(client), jobId, DEFAULT_ORG_ID, 'all'))
   if (!CREATE_INVOICE_DRAFT_UUID_RE.test(String(body.claim_id || ''))) return json({ ok: false, code: 'claim_id_required' }, 400)
   const result = await client.from('invoice_milestone_draft_claims').select('*').eq('id', body.claim_id).eq('job_id', jobId).eq('org_id', DEFAULT_ORG_ID).maybeSingle()
   if (result.error) return json({ ok: false, code: 'invoice_claim_unavailable' }, 503)
@@ -62864,7 +62889,8 @@ async function updateCouncilStatus(client: any, body: any) {
     payload: { step_name: steps[idx].name, step_status: status, overall_status: overallStatus },
   })
 
-  return { success: true, overall_status: overallStatus, step: steps[idx] }
+  const invoiceDrafts=status==='complete' ? await followCouncilBilling(client,sub.job_id) : undefined
+  return { success: true, overall_status: overallStatus, step: steps[idx], ...(invoiceDrafts ? {invoice_drafts:invoiceDrafts} : {}) }
 }
 
 export const _updateCouncilStatusForTest = updateCouncilStatus

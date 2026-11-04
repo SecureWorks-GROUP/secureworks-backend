@@ -12,7 +12,13 @@ export const billingTerms = (days: number) =>
     : `Due ${days} calendar ${
       days === 1 ? "day" : "days"
     } after installation is booked.`;
-export function acceptedInstallMilestone(raw: any) {
+export const councilBillingTerms = (days: number, name: string) =>
+  days === 0
+    ? `Due on the day council step "${name}" is completed.`
+    : `Due ${days} calendar ${
+      days === 1 ? "day" : "days"
+    } after council step "${name}" is completed.`;
+export function acceptedBillingMilestones(raw: any) {
   const envelope = raw?.billing_milestones;
   if (!envelope) {
     return { ok: false as const, reason: "machine_billing_terms_missing" };
@@ -25,25 +31,13 @@ export function acceptedInstallMilestone(raw: any) {
   if (
     raw?.pricing_complete !== true || envelope.version !== 1 ||
     envelope.currency !== "AUD" || !Array.isArray(envelope.milestones) ||
-    envelope.milestones.length !== 1 || raw?.payment_schedule?.version !== 1 ||
-    !Array.isArray(payments) || payments.length < 2
-  ) return fail();
-  const stage = envelope.milestones[0];
-  if (
-    !stage || typeof stage.id !== "string" || !stage.id.trim() ||
-    stage.id.length > 100 || stage.trigger?.kind !== "install_scheduled" ||
-    stage.due_rule?.kind !== "days_after_trigger" ||
-    !Number.isInteger(stage.due_rule.days) || stage.due_rule.days < 0 ||
-    stage.due_rule.days > 365 || typeof stage.label !== "string" ||
-    !stage.label.trim() || /deposit/i.test(stage.label) ||
-    stage.printed_terms !== billingTerms(stage.due_rule.days) ||
-    cents(stage.amount_inc_gst) === null
+    envelope.milestones.length < 1 || envelope.milestones.length > 20 ||
+    raw?.payment_schedule?.version !== 1 || !Array.isArray(payments) ||
+    payments.length < 2
   ) return fail();
   const ids = new Set<string>();
   let sum = 0;
-  let selected = -1;
-  for (let i = 0; i < payments.length; i++) {
-    const p = payments[i];
+  for (const p of payments) {
     const amount = cents(p?.amount_inc_gst);
     if (
       typeof p?.id !== "string" || !p.id.trim() || ids.has(p.id) ||
@@ -52,20 +46,58 @@ export function acceptedInstallMilestone(raw: any) {
     ) return fail();
     ids.add(p.id);
     sum += amount;
-    if (p.id === stage.id) {
-      selected = i;
-      if (
-        p.label !== stage.label || p.printed_terms !== stage.printed_terms ||
-        amount !== cents(stage.amount_inc_gst)
-      ) return fail();
-    }
   }
-  if (selected <= 0 || sum !== cents(raw.totalIncGST)) return fail();
-  return {
-    ok: true as const,
-    stage,
-    amountCents: cents(stage.amount_inc_gst)!,
-  };
+  if (sum !== cents(raw.totalIncGST)) return fail();
+  const selected = new Set<string>();
+  const triggers = new Set<string>();
+  for (const stage of envelope.milestones) {
+    if (
+      !stage || typeof stage.id !== "string" || !stage.id.trim() ||
+      stage.id.length > 100 || selected.has(stage.id) ||
+      stage.due_rule?.kind !== "days_after_trigger" ||
+      !Number.isInteger(stage.due_rule.days) || stage.due_rule.days < 0 ||
+      stage.due_rule.days > 365 || typeof stage.label !== "string" ||
+      !stage.label.trim() || /deposit/i.test(stage.label) ||
+      cents(stage.amount_inc_gst) === null
+    ) return fail();
+    let key: string;
+    let terms: string;
+    if (stage.trigger?.kind === "install_scheduled") {
+      key = "install_scheduled";
+      terms = billingTerms(stage.due_rule.days);
+    } else if (
+      stage.trigger?.kind === "council_step_completed" &&
+      UUID.test(String(stage.trigger.submission_id || "")) &&
+      UUID.test(String(stage.trigger.step_id || "")) &&
+      typeof stage.trigger.step_name === "string" &&
+      stage.trigger.step_name.trim() && stage.trigger.step_name.length <= 160 &&
+      !/[\r\n"]/u.test(stage.trigger.step_name)
+    ) {
+      key = `council:${stage.trigger.submission_id}:${stage.trigger.step_id}`;
+      terms = councilBillingTerms(stage.due_rule.days, stage.trigger.step_name);
+    } else return fail();
+    if (triggers.has(key) || stage.printed_terms !== terms) return fail();
+    const index = payments.findIndex((p: any) => p.id === stage.id);
+    const payment = payments[index];
+    if (
+      index <= 0 || payment.label !== stage.label ||
+      payment.printed_terms !== stage.printed_terms ||
+      cents(payment.amount_inc_gst) !== cents(stage.amount_inc_gst)
+    ) return fail();
+    selected.add(stage.id);
+    triggers.add(key);
+  }
+  return { ok: true as const, stages: envelope.milestones };
+}
+export function acceptedInstallMilestone(raw: any) {
+  const parsed = acceptedBillingMilestones(raw);
+  if (!parsed.ok) return parsed;
+  const stage = parsed.stages.find((s: any) =>
+    s.trigger.kind === "install_scheduled"
+  );
+  return stage
+    ? { ok: true as const, stage, amountCents: cents(stage.amount_inc_gst)! }
+    : { ok: false as const, reason: "installation_billing_terms_missing" };
 }
 export interface DraftDeps {
   search(reference: string, contactId: string): Promise<any[]>;
@@ -187,14 +219,16 @@ export async function processInstallDrafts(
   deps: DraftDeps,
   jobId: string,
   orgId: string,
+  triggerKind: "scheduled" | "council_step_complete" | "all" = "scheduled",
 ) {
-  const reviews = rows(
-    await client.from("invoice_milestone_reviews").select("*").eq(
-      "job_id",
-      jobId,
-    ).eq("org_id", orgId).eq("trigger_kind", "scheduled"),
-    "Invoice reviews",
-  ) || [];
+  let reviewQuery = client.from("invoice_milestone_reviews").select("*").eq(
+    "job_id",
+    jobId,
+  ).eq("org_id", orgId);
+  if (triggerKind !== "all") {
+    reviewQuery = reviewQuery.eq("trigger_kind", triggerKind);
+  }
+  const reviews = rows(await reviewQuery, "Invoice reviews") || [];
   const outcomes = [];
   for (const review of reviews) {
     if (
@@ -261,7 +295,7 @@ export async function processInstallDrafts(
       });
       continue;
     }
-    const parsed = acceptedInstallMilestone(
+    const parsed = acceptedBillingMilestones(
       revision.pricing_snapshot_json?.raw,
     );
     if (!parsed.ok) {
@@ -272,7 +306,60 @@ export async function processInstallDrafts(
       });
       continue;
     }
-    const { stage, amountCents } = parsed;
+    const stage = parsed.stages.find((s: any) =>
+      review.trigger_kind === "scheduled"
+        ? s.trigger.kind === "install_scheduled"
+        : s.trigger.kind === "council_step_completed" &&
+          s.trigger.submission_id === review.source?.submission_id &&
+          s.trigger.step_id === review.source?.step_id
+    );
+    if (!stage) {
+      outcomes.push({
+        review_id: review.id,
+        state: "held",
+        reason: "accepted_trigger_binding_missing",
+      });
+      continue;
+    }
+    if (stage.trigger.kind === "council_step_completed") {
+      const council = rows(
+        await client.from("quote_invoice_council_bindings").select("*").eq(
+          "quote_revision_id",
+          revision.id,
+        ).eq("stage_id", stage.id).eq("org_id", orgId).eq("job_id", jobId)
+          .maybeSingle(),
+        "Frozen council step",
+      );
+      const submission = rows(
+        await client.from("council_submissions").select("id,job_id,steps").eq(
+          "id",
+          stage.trigger.submission_id,
+        ).eq("job_id", jobId).maybeSingle(),
+        "Council completion",
+      );
+      const exact = Array.isArray(submission?.steps)
+        ? submission.steps.filter((s: any) =>
+          s.step_id === stage.trigger.step_id
+        )
+        : [];
+      if (
+        council?.state !== "eligible" ||
+        council.submission_id !== stage.trigger.submission_id ||
+        council.step_id !== stage.trigger.step_id ||
+        council.step_name !== stage.trigger.step_name || exact.length !== 1 ||
+        exact[0].name !== stage.trigger.step_name ||
+        exact[0].status !== "complete" ||
+        exact[0].completion_source !== "explicit_status_update"
+      ) {
+        outcomes.push({
+          review_id: review.id,
+          state: "held",
+          reason: "council_completion_or_release_binding_missing",
+        });
+        continue;
+      }
+    }
+    const amountCents = cents(stage.amount_inc_gst)!;
     const event = new Date(review.created_at);
     if (!Number.isFinite(event.getTime())) {
       throw new Error("Billing trigger date invalid");

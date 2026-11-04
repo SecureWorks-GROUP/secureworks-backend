@@ -4,8 +4,10 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  acceptedBillingMilestones,
   acceptedInstallMilestone,
   billingTerms,
+  councilBillingTerms,
   matchesDraft,
   processInstallDrafts,
   reconcileMilestoneDraft,
@@ -53,7 +55,7 @@ function pricing() {
     },
   };
 }
-function fixture(options: any = {}) {
+export function fixture(options: any = {}) {
   const tables: Record<string, any[]> = {
     jobs: [{
       id: JOB,
@@ -83,7 +85,7 @@ function fixture(options: any = {}) {
       job_id: JOB,
       job_document_id: DOC,
       sent_at: "2026-11-02T00:00:00Z",
-      pricing_snapshot_json: { raw: pricing() },
+      pricing_snapshot_json: { raw: options.rawPricing || pricing() },
     }],
     quote_invoice_billing_bindings: [{
       quote_revision_id: REV,
@@ -443,13 +445,17 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
     if (url.endsWith("/Invoices") && init?.method === "PUT") {
       const body = JSON.parse(String(init.body));
       puts.push(body);
+      const total = body.Invoices[0].LineItems.reduce(
+        (sum: number, line: any) => sum + line.UnitAmount * line.Quantity,
+        0,
+      );
       provider = {
         ...body.Invoices[0],
         InvoiceID: INVOICE,
         InvoiceNumber: "INV-FIXTURE",
-        Total: amount,
-        SubTotal: Math.round(amount / 1.1 * 100) / 100,
-        TotalTax: Math.round(amount / 11 * 100) / 100,
+        Total: total,
+        SubTotal: Math.round(total / 1.1 * 100) / 100,
+        TotalTax: Math.round(total / 11 * 100) / 100,
         DueDateString: body.Invoices[0].DueDate,
       };
       return Response.json({ Invoices: [provider] });
@@ -551,4 +557,251 @@ Deno.test("invoice draft office action denies trades, foreign org and body bypas
     false,
   );
   assertEquals(bad.status, 400);
+});
+
+Deno.test("council billing: typed step identity can coexist with installation, duplicate trigger and free text are refused", () => {
+  const raw: any = pricing();
+  const selected = raw.billing_milestones.milestones[0];
+  const trigger = {
+    kind: "council_step_completed",
+    submission_id: id(7),
+    step_id: id(8),
+    step_name: "Fixture council checkpoint",
+  };
+  const stage = {
+    ...structuredClone(selected),
+    id: "council",
+    trigger,
+    printed_terms: councilBillingTerms(2, trigger.step_name),
+  };
+  raw.payment_schedule.payments.push({
+    id: stage.id,
+    label: stage.label,
+    printed_terms: stage.printed_terms,
+    amount_inc_gst: amount,
+  });
+  raw.totalIncGST = amount * 3;
+  raw.billing_milestones.milestones.push(stage);
+  assertEquals(acceptedBillingMilestones(raw).ok, true);
+  for (
+    const patch of [{ step_id: "guessed" }, {
+      step_name: "Different checkpoint",
+    }]
+  ) {
+    const bad = structuredClone(raw);
+    Object.assign(bad.billing_milestones.milestones[1].trigger, patch);
+    assertEquals(acceptedBillingMilestones(bad).ok, false);
+  }
+  const bad = structuredClone(raw);
+  bad.billing_milestones.milestones[1].trigger = structuredClone(
+    selected.trigger,
+  );
+  bad.billing_milestones.milestones[1].printed_terms = selected.printed_terms;
+  bad.payment_schedule.payments[2].printed_terms = selected.printed_terms;
+  assertEquals(acceptedBillingMilestones(bad).ok, false);
+});
+Deno.test("real explicit council completion reaches one draft and ignores workflow jumps, including exact producer raw when supplied", async () => {
+  const file = Deno.env.get("WS6_PRODUCER_PRICING_FILE");
+  let raw: any;
+  if (file) raw = JSON.parse(await Deno.readTextFile(file));
+  else {
+    raw = pricing();
+    const stage = raw.billing_milestones.milestones[0];
+    stage.trigger = {
+      kind: "council_step_completed",
+      submission_id: id(7),
+      step_id: id(8),
+      step_name: "Fixture council checkpoint",
+    };
+    stage.printed_terms = councilBillingTerms(2, stage.trigger.step_name);
+    raw.payment_schedule.payments[1].printed_terms = stage.printed_terms;
+  }
+  const parsed = acceptedBillingMilestones(raw);
+  assert(parsed.ok);
+  const stage = parsed.stages.find((s: any) =>
+    s.trigger.kind === "council_step_completed"
+  );
+  assert(stage);
+  const f = fixture({ rawPricing: raw });
+  const sub = {
+    id: stage.trigger.submission_id,
+    org_id: ORG,
+    job_id: JOB,
+    template_type: "fixture",
+    steps: [{
+      step_id: stage.trigger.step_id,
+      name: stage.trigger.step_name,
+      status: "pending",
+    }],
+    current_step_index: 0,
+  };
+  f.tables.council_submissions = [sub];
+  f.tables.quote_invoice_council_bindings = [{
+    quote_revision_id: REV,
+    stage_id: stage.id,
+    org_id: ORG,
+    job_id: JOB,
+    submission_id: sub.id,
+    step_id: stage.trigger.step_id,
+    step_name: stage.trigger.step_name,
+    state: "eligible",
+  }];
+  f.tables.invoice_milestone_reviews.push({
+    ...f.tables.invoice_milestone_reviews[0],
+    id: id(9),
+    trigger_kind: "council_step_complete",
+    source: { submission_id: sub.id, step_id: stage.trigger.step_id },
+  });
+  const original = globalThis.fetch;
+  const creates: any[] = [];
+  const provider = new Map<string, any>();
+  let forbidden = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("/rest/v1/org_config")) return Response.json([]);
+    if (url.includes("/TrackingCategories")) {
+      return Response.json({ TrackingCategories: [] });
+    }
+    if (url.endsWith("/Invoices") && init?.method === "PUT") {
+      const body = JSON.parse(String(init.body));
+      const inv = body.Invoices[0];
+      const total = inv.LineItems.reduce(
+        (sum: number, line: any) => sum + line.Quantity * line.UnitAmount,
+        0,
+      );
+      const invoice = {
+        ...inv,
+        InvoiceID: id(100 + creates.length),
+        InvoiceNumber: "INV-FIXTURE",
+        Total: total,
+        SubTotal: Math.round(total / 1.1 * 100) / 100,
+        TotalTax: Math.round(total / 11 * 100) / 100,
+        DueDateString: inv.DueDate,
+      };
+      creates.push(body);
+      provider.set(invoice.InvoiceID, invoice);
+      return Response.json({ Invoices: [invoice] });
+    }
+    const match = url.match(/\/Invoices\/([0-9a-f-]+)$/);
+    if (match && (!init?.method || init.method === "GET")) {
+      return Response.json({
+        Invoices: provider.has(match[1]) ? [provider.get(match[1])] : [],
+      });
+    }
+    if (url.includes("/Invoices?")) {
+      const query = new URL(url).searchParams.get("where") || "";
+      return Response.json({
+        Invoices: [...provider.values()].filter((i) =>
+          query === `Reference=="${i.Reference}"`
+        ),
+      });
+    }
+    if (
+      url.includes("/Email") || url.includes("/Contacts") ||
+      (url.includes("/Invoices") && init?.method === "POST")
+    ) {
+      forbidden++;
+      throw new Error("Forbidden provider transport");
+    }
+    if (url.startsWith("https://fixture.supabase.test/functions/")) {
+      return Response.json({ success: true });
+    }
+    throw new Error("Unexpected fixture transport");
+  };
+  try {
+    const choices = await runtime._billingCouncilStepsActionForTest(
+      f.client,
+      new URLSearchParams({ job_id: JOB }),
+      "GET",
+      "jwt",
+      { role: "admin", orgId: ORG },
+      false,
+    );
+    const choiceBody = await choices.json();
+    assertEquals(choiceBody.steps[0].step_id, stage.trigger.step_id);
+    // Fake source row mirrors the actual SQL trigger; PostgreSQL contract proves the capture and binding separately.
+    sub.steps[0] = {
+      ...sub.steps[0],
+      status: "complete",
+      completion_source: "workflow_jump",
+    } as any;
+    await processInstallDrafts(
+      f.client,
+      runtime._milestoneDraftDepsForTest(f.client),
+      JOB,
+      ORG,
+      "council_step_complete",
+    );
+    assertEquals(creates.length, 0);
+    const completed: any = await runtime._updateCouncilStatusForTest(f.client, {
+      submission_id: sub.id,
+      step_id: stage.trigger.step_id,
+      status: "complete",
+    });
+    assertEquals(
+      completed.invoice_drafts?.drafts?.[0]?.state,
+      "draft_confirmed",
+    );
+    assertEquals(creates.length, 1);
+    await runtime._updateCouncilStatusForTest(f.client, {
+      submission_id: sub.id,
+      step_id: stage.trigger.step_id,
+      status: "complete",
+    });
+    assertEquals(creates.length, 1);
+    if (
+      file &&
+      parsed.stages.some((s: any) => s.trigger.kind === "install_scheduled")
+    ) {
+      await runtime._updateJobStatus(f.client, {
+        job_id: JOB,
+        status: "scheduled",
+        skip_ghl_push: true,
+      });
+      assertEquals(creates.length, 2);
+    }
+    assertEquals(forbidden, 0);
+    assert(
+      [...provider.values()].every((i) =>
+        i.Status === "DRAFT" && i.LineAmountTypes === "Inclusive" &&
+        i.Contact.ContactID === CONTACT
+      ),
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+Deno.test("council step choices are staff-only exact-job GET, never inferred or written", async () => {
+  const f = fixture();
+  const params = new URLSearchParams({ job_id: JOB });
+  for (
+    const auth of [{ role: "trade", orgId: ORG }, {
+      role: "admin",
+      orgId: id(90),
+    }]
+  ) {
+    assertEquals(
+      (await runtime._billingCouncilStepsActionForTest(
+        f.client,
+        params,
+        "GET",
+        "jwt",
+        auth,
+        false,
+      )).status,
+      403,
+    );
+  }
+  assertEquals(
+    (await runtime._billingCouncilStepsActionForTest(
+      f.client,
+      params,
+      "POST",
+      "jwt",
+      { role: "admin", orgId: ORG },
+      false,
+    )).status,
+    405,
+  );
+  assertEquals(f.writes.length, 0);
 });
