@@ -126,7 +126,7 @@ import {
   resolveSendInvoiceDelivery,
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
-import { ghlEmailNoteRequest } from './ghl_email_note.ts'
+import { ghlEmailNoteRequest, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -212,6 +212,48 @@ function logEmailToGHL(contactId: string | null | undefined, subject: string, re
     headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
     body: JSON.stringify(request),
   }).then(() => {}, () => {})
+}
+
+// A sent quote: a note that names the quote and the revision, and a move to the
+// trade's Quote Sent stage. Same gate as the other ghl-proxy calls (no API key,
+// nothing is posted). A failure here does not unsend the email.
+async function recordQuoteSentOnGhl(o: {
+  contactId: string | null | undefined
+  opportunityId: string | null | undefined
+  jobId: string | null | undefined
+  jobType: string | null | undefined
+  quoteNumber: string | null | undefined
+  revisionLabel: string | null | undefined
+}): Promise<void> {
+  if (!SW_API_KEY) return
+  const plan = quoteSentGhl(o)
+  const headers = { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY }
+  if (plan.note) {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=add_note`, {
+        method: 'POST', headers, body: JSON.stringify(plan.note),
+      })
+      if (!res.ok) console.log('[send-quote] quote sent note was not written', res.status)
+    } catch (e) {
+      console.log('[send-quote] quote sent note failed', (e as Error).message)
+    }
+  }
+  if (plan.stage) {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          opportunityId: plan.stage.opportunityId,
+          stageId: plan.stage.stageId,
+          ...(o.jobType ? { jobType: o.jobType } : {}),
+        }),
+      })
+      if (!res.ok) console.log('[send-quote] quote sent stage was not moved', res.status)
+    } catch (e) {
+      console.log('[send-quote] quote sent stage failed', (e as Error).message)
+    }
+  }
 }
 
 // ── Base64 helper for large binary files (chunked to avoid stack overflow) ──
@@ -814,7 +856,7 @@ serve(async (req: Request) => {
       // staging time for the manifest snapshot.
       const { data: doc, error: docErr } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, pricing_json, org_id), job_contacts(client_name, client_email)')
+        .select('*, jobs(client_name, site_suburb, site_address, type, job_number, ghl_contact_id, ghl_opportunity_id, pricing_json, org_id), job_contacts(client_name, client_email)')
         .eq('id', document_id)
         .single()
 
@@ -1249,9 +1291,19 @@ serve(async (req: Request) => {
           await linkQuoteDocumentToRevision(sb, { document_id: doc.id, revision_id: releasedRevisionId }, { handler: 'send-quote/send', job_id: doc.job_id })
         }
 
-        // B1: log the email on the GHL contact once the send is recorded, naming the job, so ghl-proxy records
-        // the GHL update on the job (job_events ghl_note_added) after the send it belongs to.
-        logEmailToGHL(doc.jobs?.ghl_contact_id, emailSubject, client_email, doc.job_id)
+        // B1: after the send is recorded, tell GHL the quote number and revision and move to Quote Sent.
+        // ghl-proxy writes job_events ghl_note_added when the note names the job. No key: nothing is posted.
+        await recordQuoteSentOnGhl({
+          contactId: doc.jobs?.ghl_contact_id,
+          opportunityId: doc.jobs?.ghl_opportunity_id,
+          jobId: doc.job_id,
+          jobType: doc.jobs?.type,
+          quoteNumber: doc.quote_number,
+          revisionLabel: revisionLabelFromSealed(
+            sealedSource.kind === 'sealed' ? sealedSource.scope_json : null,
+            sealedSource.kind === 'sealed' ? sealedSource.pricing_json : doc.jobs?.pricing_json,
+          ),
+        })
 
         // Canonical release events — only when this UPDATE actually flipped the row.
         // Awaited via safeBusinessEventInsert so transient Supabase failures are logged as
