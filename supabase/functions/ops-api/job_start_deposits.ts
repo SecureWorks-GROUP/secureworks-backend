@@ -7,6 +7,7 @@ import {
   liveDepositInvoices,
 } from "../_shared/job_deposit_paid.ts";
 import { isInsuranceRepairFamily } from "./insurance_repairs_board.ts";
+import { payingParties } from "../_shared/job_paid_closeout.ts";
 
 export class JobStartDepositError extends Error {
   readonly status = 409;
@@ -82,6 +83,16 @@ export async function assertJobDepositsBeforeWork(client: any, jobId: string) {
         jobId,
       ),
     ]);
+    // A partial shared-boundary roster must not turn its lone neighbour into
+    // the owner through the legacy invoice matching fallback. An explicitly
+    // removed/zero-share owner is different: that decision remains recorded.
+    const primaryRows = parties.filter((party: any) =>
+      party.is_primary === true
+    );
+    if (
+      primaryRows.length > 1 ||
+      (primaryRows.length === 0 && payingParties(parties).length > 0)
+    ) throw new Error("payer roster incomplete");
     // The older advance evaluator treats a missing amount as zero. At the work
     // start boundary an unread amount is unknown, even if the status says PAID.
     if (

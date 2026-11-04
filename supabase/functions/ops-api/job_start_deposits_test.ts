@@ -192,6 +192,43 @@ Deno.test("no invoice is not paid; a null neighbour share still requires its dep
   }
 });
 
+Deno.test("a missing or ambiguous primary party cannot make a lone neighbour the owner", async () => {
+  for (
+    const parties of [[neighbour], [
+      owner,
+      { ...owner, id: "other-owner" },
+      neighbour,
+    ]]
+  ) {
+    const f = fixture({ job_contacts: parties });
+    const error = await assertRejects(
+      () => assertJobDepositsBeforeWork(f.client, "job"),
+      JobStartDepositError,
+    );
+    assertEquals(error.code, "job_deposits_unreadable");
+    assertEquals(f.writes, []);
+  }
+});
+
+Deno.test("an explicit nonpaying owner does not require an invented deposit", async () => {
+  for (
+    const changes of [{ share_percentage: 0 }, { removed_at: "2026-11-01" }]
+  ) {
+    const f = fixture({
+      job_contacts: [{ ...owner, ...changes }, neighbour],
+      xero_invoices: [deposit("neighbour")],
+    });
+    await assertJobDepositsBeforeWork(f.client, "job");
+  }
+});
+
+Deno.test("known paid negative due retains the canonical overpayment rule", async () => {
+  const f = fixture({
+    xero_invoices: [deposit("owner"), deposit("neighbour", { amount_due: -1 })],
+  });
+  await assertJobDepositsBeforeWork(f.client, "job");
+});
+
 Deno.test("non-deposit job types keep their start path without reading invoices", async () => {
   for (const type of ["makesafe", "insurance", "decking"]) {
     const f = fixture({ jobs: [{ id: "job", type }] });
