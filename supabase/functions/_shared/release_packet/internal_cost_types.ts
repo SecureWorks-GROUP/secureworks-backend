@@ -21,8 +21,9 @@ export type InternalLineCost = {
   // Same line_id as PricingLineItem.line_id in the client-facing manifest.
   // Joins the two snapshots without storing the description twice.
   line_id: string
-  unit_cost: number
-  line_cost_total_ex: number
+  // Unknown is null. A known zero remains 0.
+  unit_cost: number | null
+  line_cost_total_ex: number | null
   // Hard-blocker (validator enforces): non-empty for every category=material
   // line. Captured in client-facing pricing_public for material lines too,
   // but persisted here for internal supplier-management traceability.
@@ -30,8 +31,9 @@ export type InternalLineCost = {
 }
 
 export type InternalCostEstimates = {
-  material_total: number
-  labour_total: number
+  // A total derived from incomplete line costs stays unknown.
+  material_total: number | null
+  labour_total: number | null
   subcontract_commission_total: number
 }
 
