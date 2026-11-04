@@ -203,7 +203,7 @@ Deno.test("council completion: failed capture is reported before success or even
   assertEquals(reads, ["council_submissions", "council_submissions"]);
 });
 
-Deno.test("council workflow jump: completion is tagged as positioning and failed write is reported", async () => {
+Deno.test("council workflow jump: preserves real completion, tags positioning only and reports failed write", async () => {
   const writes: any[] = [];
   const reads: string[] = [];
   const db = {
@@ -227,6 +227,12 @@ Deno.test("council workflow jump: completion is tagged as positioning and failed
               steps: [{
                 step_id: "engineering",
                 name: "Engineering",
+                status: "complete",
+                completion_source: "explicit_status_update",
+                completed_at: "2026-11-01T00:00:00.000Z",
+              }, {
+                step_id: "certification",
+                name: "Certification",
                 status: "pending",
               }, { step_id: "approval", name: "Approval", status: "pending" }],
             },
@@ -247,10 +253,13 @@ Deno.test("council workflow jump: completion is tagged as positioning and failed
   };
   await assertRejects(
     () =>
-      jumpCouncil(db, { submission_id: "submission", target_step_index: 1 }),
+      jumpCouncil(db, { submission_id: "submission", target_step_index: 2 }),
     Error,
     "council jump write failed",
   );
-  assertEquals(writes[0].steps[0].completion_source, "workflow_jump");
+  assertEquals(writes[0].steps[0].completion_source, "explicit_status_update");
+  assertEquals(writes[0].steps[0].completed_at, "2026-11-01T00:00:00.000Z");
+  assertEquals(writes[0].steps[1].status, "complete");
+  assertEquals(writes[0].steps[1].completion_source, "workflow_jump");
   assertEquals(reads, ["council_submissions", "council_submissions"]);
 });
