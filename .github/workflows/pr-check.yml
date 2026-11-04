@@ -299,6 +299,7 @@ jobs:
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/job_bookings_test.ts \
+            supabase/functions/ops-api/job_start_deposits_test.ts \
             supabase/functions/ops-api/ghost_observer_auto_mirror_test.ts
 
       # JP-24 slice 1: a sent quote records which frozen scope revision it was
