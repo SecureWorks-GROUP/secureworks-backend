@@ -24,6 +24,7 @@ import { decideReportingStaffAuth, reportingApiCallerSeesStaffDetail } from './r
 import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { jobProfitabilityAction, type JobProfitabilityDetail } from './job_profitability.ts'
+import { loadTeamActivity, teamActivityResponse } from './team_activity.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -266,27 +267,11 @@ serve(async (req: Request) => {
         return json(await salesLeadsAction(sb, url.searchParams))
       case 'team_activity': {
         const since = url.searchParams.get('since') || new Date(Date.now() - 24 * 3600000).toISOString()
-        const { data: events } = await sb.from('job_events')
-          .select('id, job_id, event_type, detail_json, created_at, users:user_id(name)')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .gte('created_at', since)
-          .order('created_at', { ascending: false })
-          .limit(50)
-        const jobIds = [...new Set((events || []).map((e: any) => e.job_id).filter(Boolean))]
-        let jobNames: Record<string, string> = {}
-        if (jobIds.length > 0) {
-          const { data: jobs } = await sb.from('jobs').select('id, client_name, job_number').in('id', jobIds.slice(0, 100))
-          for (const j of (jobs || [])) jobNames[j.id] = `${j.job_number} (${j.client_name})`
-        }
-        return json({
-          events: (events || []).map((e: any) => ({
-            type: e.event_type, job: jobNames[e.job_id] || e.job_id,
-            who: e.users?.name || 'System', when: e.created_at,
-            detail: typeof e.detail_json === 'string' ? e.detail_json.slice(0, 200) : JSON.stringify(e.detail_json || {}).slice(0, 200),
-          })),
-          total: (events || []).length,
-          period: `Since ${since}`,
-        })
+        // job_events has no org column. Scope through the job
+        // (jobs!inner / jobs.org_id), and surface a read error.
+        const activity = await loadTeamActivity(sb, since, DEFAULT_ORG_ID)
+        const response = teamActivityResponse(activity)
+        return json(response.body, response.status)
       }
       case 'sales_alerts':
         return json(await salesAlertsAction(sb, url.searchParams))
