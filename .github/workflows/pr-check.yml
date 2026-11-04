@@ -478,6 +478,7 @@ jobs:
             supabase/functions/ops-api/dispatch_install_write_test.ts \
             supabase/functions/ops-api/dispatch_offline_dry_run_test.ts \
             supabase/functions/ops-api/dispatch_board_test.ts \
+            supabase/functions/ops-api/dispatch_schedule_warnings_test.ts \
             supabase/functions/ops-api/dispatch_v2_material_stage_test.ts \
             supabase/functions/ops-api/dispatch_v2_payment_test.ts \
             supabase/functions/ops-api/dispatch_v2_working_days_test.ts \

@@ -33,6 +33,7 @@
 //   ordered yet, Schedule Install).
 
 import { STATUS_LABELS } from "../_shared/stage-gate/job-state-machine.ts";
+import { dispatchScheduleWarnings } from "./dispatch_schedule_warnings.ts";
 import { insuranceRepairStage } from "./insurance_repairs_board.ts";
 import { dispatchWorkType } from "./dispatch_job_list.ts";
 import {
@@ -1857,6 +1858,7 @@ export async function dispatchArrivalRead(
   jobIdParam: string | null,
   orgId: string,
   today: string,
+  proposedInstallDate: string | null = null,
 ) {
   const jobId = String(jobIdParam ?? "").trim();
   if (!jobId) {
@@ -1865,6 +1867,13 @@ export async function dispatchArrivalRead(
   if (!UUID_RE.test(jobId)) {
     throw new DispatchArrivalError(
       "job_id must be a job id",
+      400,
+      "invalid_request",
+    );
+  }
+  if (proposedInstallDate !== null && !isDispatchDeliveryDate(proposedInstallDate)) {
+    throw new DispatchArrivalError(
+      "proposed_install_date must be a real date YYYY-MM-DD",
       400,
       "invalid_request",
     );
@@ -1992,5 +2001,8 @@ export async function dispatchArrivalRead(
     payment_hold: dispatchPaymentHold(arrival),
     // What the job is waiting on us for (null when it is not on the board).
     waiting: stage ? dispatchBoardWaiting(stage, arrival) : null,
+    ...(proposedInstallDate !== null
+      ? dispatchScheduleWarnings(proposedInstallDate, arrival, arrivalOk)
+      : {}),
   };
 }
