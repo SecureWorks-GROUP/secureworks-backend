@@ -141,6 +141,7 @@ export function makeBody(overrides: Record<string, any> = {}): any {
 export function happyFixture() {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: {
       ContactID: "xero-contact-1",
       EmailAddress: "client@example.com",

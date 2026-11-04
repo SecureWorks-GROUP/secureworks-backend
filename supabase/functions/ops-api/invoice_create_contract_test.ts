@@ -18,6 +18,7 @@ Deno.env.set("SUPABASE_URL", "https://fixture.supabase.test");
 Deno.env.set("XERO_CLIENT_ID", "fixture-client-id");
 const {
   _createInvoiceForTest: createInvoice,
+  _updateInvoiceForTest: updateInvoice,
   _createInvoiceDraftActionForTest: createInvoiceDraftAction,
   _createInvoiceDraftHttpStatusForTest: createInvoiceDraftHttpStatus,
   _createMakesafeDraftInvoiceForTest: createMakesafeDraftInvoice,
@@ -36,7 +37,7 @@ const JOB_ID = "10000000-0000-4000-8000-000000000001";
 const CONTACT_ID = "20000000-0000-4000-8000-000000000002";
 const JOB_CONTACT_ID = "30000000-0000-4000-8000-000000000003";
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
-function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJobId?: string } = {}) {
+function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJobId?: string; invoice?: Record<string, unknown> } = {}) {
   const events: any[] = [];
   const updates: { table: string; value: any }[] = [];
   const upserts: { table: string; value: any }[] = [];
@@ -61,6 +62,8 @@ function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJ
       const single = () =>
         table === "jobs"
           ? ((filters.id && filters.id !== job.id) || (filters.org_id && filters.org_id !== job.org_id) ? null : { ...job, ...updated })
+          : table === "xero_invoices" && options.invoice
+          ? options.invoice
           : table === "xero_tokens"
           ? {
             access_token: "fixture-token",
@@ -188,6 +191,14 @@ function providerFixture(
     }
     if (url.includes("/TrackingCategories")) {
       return Promise.resolve(Response.json({ TrackingCategories: [] }));
+    }
+    if (/\/Invoices\/[^/]+$/.test(url) && init?.method === "POST") {
+      const body = JSON.parse(String(init.body));
+      return Promise.resolve(Response.json({ Invoices: [{
+        ...body.Invoices[0],
+        Status: "AUTHORISED",
+        ...(typeof invoiceOverride === "function" ? invoiceOverride(body.Invoices[0]) : invoiceOverride),
+      }] }));
     }
     if (url.endsWith("/Invoices") && init?.method === "PUT") {
       const body = JSON.parse(String(init.body));
@@ -526,6 +537,7 @@ for (const email of ["accepted", "failed", "unknown", "partial"] as const) {
     try {
       const result = await createInvoice(client, {
         ...invoiceBody(),
+        xero_status: "AUTHORISED",
         send_email: true,
       });
       assertEquals(result.success, true);
@@ -584,6 +596,7 @@ for (const refusal of ["blocked", "guard_unavailable"] as const) {
     try {
       const result: any = await createInvoice(client, {
         ...invoiceBody(),
+        xero_status: "AUTHORISED",
         send_email: true,
       });
       assertEquals(result.success, true);
@@ -771,3 +784,36 @@ Deno.test("job status GHL push authenticates and makes HTTP 401 observable witho
     console.log = originalLog;
   }
 });
+
+for (const status of ["DRAFT", "SUBMITTED", undefined]) {
+  Deno.test(`invoice create never emails provider ${String(status)}`, async () => {
+    const provider = providerFixture("accepted", { Status: status });
+    try {
+      const result = await createInvoice(fixtureClient().client, {
+        ...invoiceBody(), xero_status: "AUTHORISED", send_email: true,
+      });
+      assertEquals(result.success, true);
+      assertEquals(result.emailed, false);
+      assertEquals(result.email_status, "failed");
+      assertEquals(provider.emailCalls(), 0);
+      assertEquals(provider.creates.length, 1);
+    } finally { provider.restore(); }
+  });
+}
+
+for (const status of ["DRAFT", undefined, "AUTHORISED"]) {
+  Deno.test(`invoice edit resend honours provider ${String(status)}`, async () => {
+    const provider = providerFixture("accepted", { Status: status });
+    const { client, events } = fixtureClient({ invoice: { job_id: JOB_ID, invoice_type: "ACCREC" } });
+    try {
+      const result = await updateInvoice(client, {
+        xero_invoice_id: "40000000-0000-4000-8000-000000000004",
+        line_items: invoiceBody().line_items, resend_email: true,
+      }, client);
+      assertEquals(result.success, true);
+      assertEquals(result.emailed, status === "AUTHORISED");
+      assertEquals(provider.emailCalls(), status === "AUTHORISED" ? 1 : 0);
+      assertEquals(events.find(row => row.event_type === "invoice_updated").detail_json.resent, status === "AUTHORISED");
+    } finally { provider.restore(); }
+  });
+}

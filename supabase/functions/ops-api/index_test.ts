@@ -218,6 +218,7 @@ Deno.test("T6: Xero contact empty + jobs.client_email null → 400 recipient_unv
   // Modify fixtures: Xero contact has no email, job has no client_email
   const xeroNoEmail = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-1", EmailAddress: "", ContactPersons: [] },
   }
   const seed = {
@@ -247,6 +248,7 @@ Deno.test("T6: Xero contact empty + jobs.client_email null → 400 recipient_unv
 Deno.test("T7: unlinked ACCREC invoice + caller job_id → invoice_link_required", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-999",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-9", EmailAddress: "client@example.com", ContactPersons: [] },
   }
   // Crucially, xero_invoices.job_id = null (unlinked)
@@ -304,6 +306,7 @@ Deno.test("T7: unlinked ACCREC invoice + caller job_id → invoice_link_required
 Deno.test("T8: drift case (Xero=A, jobs.client_email=B, to=B) → contact_job_recipient_mismatch", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-1", EmailAddress: "bilal@xero.test", ContactPersons: [] },
   }
   const seed = {
@@ -350,6 +353,7 @@ Deno.test("T9: To with mixed case + whitespace matches lowercased allowlist", as
 Deno.test("T10: CC string 'a@x,b@x' both in allowlist → 200, normalized CC sent to Outlook", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: {
       ContactID: "xero-contact-1",
       EmailAddress: "client@example.com",
@@ -392,6 +396,7 @@ Deno.test("T10: CC string 'a@x,b@x' both in allowlist → 200, normalized CC sen
 Deno.test("T11: CC array ['a@x','b@x'] both in allowlist → 200, joined CC sent", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: {
       ContactID: "xero-contact-1",
       EmailAddress: "client@example.com",
@@ -432,6 +437,7 @@ Deno.test("T11: CC array ['a@x','b@x'] both in allowlist → 200, joined CC sent
 Deno.test("T12: CC array with comma-injected entry ['a@x,b@x'] → split, both verified", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: {
       ContactID: "xero-contact-1",
       EmailAddress: "client@example.com",
@@ -514,6 +520,7 @@ Deno.test("T13: linked invoice + matching body.job_id → audit job_id = xero_in
 Deno.test("T14: Xero contact has no email but jobs.client_email matches → 200 (legacy)", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-1", EmailAddress: "", ContactPersons: [] },  // genuinely empty
   }
   const seed = {
@@ -543,6 +550,7 @@ Deno.test("T14b: malformed Xero contact email does not fall back to jobs.client_
   const fix = happyFixture()
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-1", EmailAddress: "not-an-email", ContactPersons: [] },
   }
   const { client } = makeStubClient(fix.seed)
@@ -564,6 +572,7 @@ Deno.test("T14c: non-string Xero contact email does not fall back to jobs.client
   const fix = happyFixture()
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-1", EmailAddress: {}, ContactPersons: [] },
   }
   const { client } = makeStubClient(fix.seed)
@@ -585,6 +594,7 @@ Deno.test("T14d: delimiter-only Xero contact email does not fall back to jobs.cl
   const fix = happyFixture()
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: { ContactID: "xero-contact-1", EmailAddress: ",", ContactPersons: [] },
   }
   const { client } = makeStubClient(fix.seed)
@@ -609,6 +619,7 @@ Deno.test("T14d: delimiter-only Xero contact email does not fall back to jobs.cl
 Deno.test("T15: ContactPersons email authorizes send", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-123",
+    Status: "AUTHORISED",
     Contact: {
       ContactID: "xero-contact-1",
       EmailAddress: "primary@example.com",
