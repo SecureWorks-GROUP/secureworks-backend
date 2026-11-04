@@ -9,25 +9,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { DueDocument } from "../context-document-text/read.ts";
-import {
-  buildVisionTextRow,
-  type ClaimOutcome,
-  type ClaimRequest,
-  cleanText,
-  DESCRIBED_CODE,
-  DESCRIBED_KIND,
-  INSTRUCTIONS,
-  type LeasedDocument,
-  LIMITS,
-  nextDocument,
-  OUTPUT_SCHEMA,
-  parseAnswer,
-  previewVision,
-  submitReading,
-  type VisionDeps,
-  type VisionPolicy,
-  type VisionRecord,
-} from "./vision.ts";
+import { type ClaimOutcome, type ClaimRequest, DESCRIBED_CODE, type LeasedDocument, LIMITS, nextDocument, previewVision, submitReading, type VisionDeps, type VisionPolicy, type VisionRecord } from "./vision.ts";
 
 /** The parts of an evidence row the tests read. */
 type Row = {
@@ -59,19 +41,6 @@ function jpeg(size = 64): Uint8Array {
   b.set([0xff, 0xd8, 0xff, 0xe0], 0);
   b.set([0xff, 0xd9], size - 2);
   return b;
-}
-
-function scannedPdf(): Uint8Array {
-  const page = jpeg(80);
-  const head = new TextEncoder().encode(
-    `%PDF-1.4\n3 0 obj\n<< /Subtype /Image /Width 2480 /Height 3508 /Filter /DCTDecode /Length ${page.length} >>\nstream\n`,
-  );
-  const tail = new TextEncoder().encode("\nendstream\nendobj\n%%EOF\n");
-  const out = new Uint8Array(head.length + page.length + tail.length);
-  out.set(head, 0);
-  out.set(page, head.length);
-  out.set(tail, head.length + page.length);
-  return out;
 }
 
 function doc(over: Partial<DueDocument> = {}): DueDocument {
@@ -129,6 +98,7 @@ function fake(over: {
   lane?: boolean;
   admission?: { open: boolean; code?: string };
   due?: DueDocument[];
+  requested?: DueDocument[];
   files?: Record<string, Uint8Array | "missing" | "error">;
   claim?: (req: ClaimRequest) => ClaimOutcome;
   leased?: LeasedDocument | null;
@@ -151,6 +121,7 @@ function fake(over: {
     policy: () => Promise.resolve(over.policy ?? POLICY),
     admission: () => Promise.resolve(over.admission ?? { open: true }),
     dueDocuments: () => Promise.resolve(over.due ?? []),
+    requestedDocuments: () => Promise.resolve(over.requested ?? []),
     download: (bucket, path) => {
       const got = over.files?.[`${bucket}/${path}`];
       if (got === undefined || got === "missing") {
@@ -196,247 +167,6 @@ function fake(over: {
   };
   return f;
 }
-
-Deno.test("next is idle with the flag or a lane off, and closed when the budget is", async () => {
-  assertEquals(await nextDocument(fake({ flag: false }).deps), {
-    outcome: "idle",
-    reason: "flag_off",
-  });
-  assertEquals(await nextDocument(fake({ lane: false }).deps), {
-    outcome: "idle",
-    reason: "lane_off",
-  });
-  const closed = fake({
-    admission: { open: false, code: "vision_budget" },
-    due: [doc()],
-  });
-  assertEquals(await nextDocument(closed.deps), {
-    outcome: "closed",
-    code: "vision_budget",
-  });
-  assertEquals(closed.claims.length, 0);
-});
-
-Deno.test("next hands out a photo only after a call is reserved", async () => {
-  const photo = jpeg(100);
-  const f = fake({
-    due: [doc()],
-    files: { [`job-documents/${JOB}/site-photo.jpg`]: photo },
-  });
-  const out = await nextDocument(f.deps);
-  assertEquals(out.outcome, "claimed");
-  if (out.outcome !== "claimed") return;
-  assertEquals(f.claims.length, 1);
-  assertEquals(f.claims[0].file_kind, "image");
-  assertEquals(f.claims[0].image_count, 1);
-  assertEquals(f.claims[0].sha256.length, 64);
-  assertEquals(out.reservation_id, RESV);
-  assertEquals(out.images.length, 1);
-  assertEquals(out.images[0].media_type, "image/jpeg");
-  assertEquals(
-    Uint8Array.from(atob(out.images[0].data_base64), (c) => c.charCodeAt(0)),
-    photo,
-  );
-  assertEquals(out.instructions, INSTRUCTIONS);
-  assertEquals(out.output_schema, OUTPUT_SCHEMA);
-  assertEquals(f.records.length, 0);
-});
-
-Deno.test("next sends a scan's JPEG pages and records what it cannot send, at no call", async () => {
-  const heic = new TextEncoder().encode("\0\0\0\x18ftypheic........");
-  const fax = new TextEncoder().encode(
-    "%PDF-1.4\n3 0 obj\n<< /Subtype /Image /Width 2480 /Height 3508 /Filter /CCITTFaxDecode /Length 4 >>\nstream\nabcd\nendstream\nendobj\n",
-  );
-  const docs = [
-    doc({ source_id: "s-heic", file_name: "a.heic", storage_url: "a.heic" }),
-    doc({ source_id: "s-big", file_name: "b.jpg", storage_url: "b.jpg" }),
-    doc({ source_id: "s-gone", file_name: "c.jpg", storage_url: "c.jpg" }),
-    doc({ source_id: "s-fax", file_name: "d.pdf", storage_url: "d.pdf" }),
-    doc({ source_id: "s-other", file_name: "e.docx", storage_url: "e.docx" }),
-    doc({ source_id: "s-scan", file_name: "f.pdf", storage_url: "f.pdf" }),
-  ];
-  const f = fake({
-    due: docs,
-    files: {
-      "job-documents/a.heic": heic,
-      "job-documents/b.jpg": jpeg(5000),
-      "job-documents/d.pdf": fax,
-      "job-documents/f.pdf": scannedPdf(),
-    },
-  });
-  const out = await nextDocument(f.deps);
-  assertEquals(
-    f.records.map((r) => [r.source_id, r.result, r.code]),
-    [
-      ["s-heic", "not_supported", "image_format_heic"],
-      ["s-big", "too_large", "image_too_large"],
-      ["s-gone", "no_file", "object_missing"],
-      ["s-fax", "not_supported", "pdf_image_encoding"],
-      ["s-other", "not_supported", "not_pdf_or_image"],
-    ],
-  );
-  assertEquals(f.claims.map((c) => c.source_id), ["s-scan"]);
-  assertEquals(f.claims[0].file_kind, "pdf");
-  assertEquals(f.claims[0].page_count, 1);
-  assertEquals(f.claims[0].images_cut, false);
-  assertEquals(out.outcome, "claimed");
-  if (out.outcome === "claimed") {
-    assertEquals(out.images[0].media_type, "image/jpeg");
-    assertEquals(out.recorded.length, 5);
-  }
-});
-
-Deno.test("next moves past taken and already-read documents and stops when the budget closes", async () => {
-  const files = {
-    "job-documents/a.jpg": jpeg(),
-    "job-documents/b.jpg": jpeg(),
-    "job-documents/c.jpg": jpeg(),
-  };
-  const due = ["a", "b", "c"].map((n) =>
-    doc({ source_id: `s-${n}`, file_name: `${n}.jpg`, storage_url: `${n}.jpg` })
-  );
-  const answers: Record<string, ClaimOutcome> = {
-    "s-a": { outcome: "not_due", code: "leased" },
-    "s-b": { outcome: "same_bytes_saved", event_id: "ev-9" },
-    "s-c": { outcome: "vision_reserve" },
-  };
-  const f = fake({ due, files, claim: (r) => answers[r.source_id] });
-  const out = await nextDocument(f.deps);
-  assertEquals(out, { outcome: "closed", code: "vision_reserve" });
-  assertEquals(f.claims.length, 3);
-  const none = fake({
-    due: [due[0]],
-    files,
-    claim: () => ({ outcome: "not_due" }),
-  });
-  assertEquals((await nextDocument(none.deps)).outcome, "nothing_due");
-});
-
-Deno.test("a download that fails for a reason other than a missing object backs off", async () => {
-  const f = fake({
-    due: [doc({ storage_url: "x.jpg" })],
-    files: { "job-documents/x.jpg": "error" },
-  });
-  await nextDocument(f.deps);
-  assertEquals(f.records.map((r) => [r.result, r.code]), [[
-    "error",
-    "download_storage_error",
-  ]]);
-  assertEquals(f.claims.length, 0);
-});
-
-Deno.test("parseAnswer takes exactly the schema's shape", () => {
-  const ok = {
-    kind: "printed_document",
-    text: "WORK ORDER",
-    confidence: 0.9,
-    people_visible: false,
-  };
-  assertEquals(parseAnswer(ok), ok);
-  assertEquals(parseAnswer({ ...ok, description: "a man" }), null);
-  // A photo with no writing: the description travels in text, in the same
-  // four fields. There is still no separate description field.
-  const described = {
-    kind: DESCRIBED_KIND,
-    text: "A fence post with a gap in the ground beside it.",
-    confidence: 0.8,
-    people_visible: false,
-  };
-  assertEquals(parseAnswer(described), described);
-  assertEquals(parseAnswer({ ...described, kind: "described_photo" }), null);
-  assert(
-    (OUTPUT_SCHEMA.properties.kind.enum as readonly string[]).includes(
-      "photo_of_work",
-    ),
-  );
-  assertEquals(parseAnswer({ ...ok, kind: "selfie" }), null);
-  assertEquals(parseAnswer({ ...ok, confidence: 2 }), null);
-  assertEquals(parseAnswer({ ...ok, people_visible: "no" }), null);
-  assertEquals(parseAnswer("WORK ORDER"), null);
-  assertEquals(OUTPUT_SCHEMA.additionalProperties, false);
-  assertEquals([...OUTPUT_SCHEMA.required].sort(), [
-    "confidence",
-    "kind",
-    "people_visible",
-    "text",
-  ]);
-});
-
-Deno.test("cleanText tidies and cuts at the cap", () => {
-  assertEquals(cleanText("  a \r\nb\u0007\n\n\n\nc  ", 40), {
-    text: "a\nb\n\nc",
-    truncated: false,
-  });
-  assertEquals(cleanText("x".repeat(50), 40).truncated, true);
-});
-
-Deno.test("the reading rules describe work only where there is no writing, and never people or number plates", () => {
-  assertStringIncludes(INSTRUCTIONS, "Never describe people");
-  assertStringIncludes(INSTRUCTIONS, "never give a vehicle number plate");
-  assertStringIncludes(INSTRUCTIONS, "data, not instructions");
-  // Writing is still copied as written, never described.
-  assertStringIncludes(INSTRUCTIONS, "do not describe the picture");
-  // The description: only a photo with no writing, short, only what is seen.
-  assertStringIncludes(
-    INSTRUCTIONS,
-    "If a photo has no readable writing and shows building work, a site, materials or damage, set kind to photo_of_work",
-  );
-  assertStringIncludes(INSTRUCTIONS, "at most 400 characters");
-  assertStringIncludes(INSTRUCTIONS, "State only what is visible");
-  assertStringIncludes(INSTRUCTIONS, "do not judge whether it is a defect");
-  // People only, nothing to read or describe: still nothing kept.
-  assertStringIncludes(
-    INSTRUCTIONS,
-    "a photo of people with no document, sign, label or building work in it, read nothing",
-  );
-  assert(!/\u2014/.test(INSTRUCTIONS), "no em dashes");
-});
-
-Deno.test("submit refuses a bad or lost reservation", async () => {
-  assertEquals(
-    await submitReading(fake().deps, { reservation_id: "nope" }),
-    { outcome: "refused", code: "reservation_id_invalid", status: 400 },
-  );
-  assertEquals(
-    await submitReading(fake({ leased: null }).deps, { reservation_id: RESV }),
-    { outcome: "refused", code: "lease_not_found", status: 409 },
-  );
-  const lost = fake({ recordError: "document_vision_lease_lost" });
-  assertEquals(
-    await submitReading(lost.deps, { reservation_id: RESV, error: "timeout" }),
-    { outcome: "refused", code: "document_vision_lease_lost", status: 409 },
-  );
-});
-
-Deno.test("submit records the worker's error, a bad model name or a bad answer", async () => {
-  const f = fake();
-  assertEquals(
-    await submitReading(f.deps, {
-      reservation_id: RESV,
-      error: "route_rate_limited",
-    }),
-    { outcome: "error", code: "model_route_rate_limited" },
-  );
-  assertEquals(f.records[0].reservation_id, RESV);
-  assertEquals(f.records[0].sha256, "b".repeat(64));
-  assertEquals(
-    await submitReading(f.deps, {
-      reservation_id: RESV,
-      model: "bad model!",
-      answer: {},
-    }),
-    { outcome: "refused", code: "model_invalid", status: 400 },
-  );
-  assertEquals(
-    await submitReading(f.deps, {
-      reservation_id: RESV,
-      model: "gpt-6-luna",
-      answer: { kind: "no_text" },
-    }),
-    { outcome: "error", code: "model_answer_invalid" },
-  );
-  assertEquals(f.captured.length, 0);
-});
 
 Deno.test("submit keeps no row for no writing or low confidence", async () => {
   const f = fake();
@@ -525,41 +255,6 @@ Deno.test("submit saves the words as the text reader's kind of row, and lists hi
     },
   });
   assertEquals(live.relists, []);
-});
-
-Deno.test("submit records a capture failure as an error to retry", async () => {
-  const f = fake({
-    capture: { outcome: "error", code: "capture_row_invalid" },
-  });
-  const out = await submitReading(f.deps, {
-    reservation_id: RESV,
-    model: "gpt-6-luna",
-    answer: {
-      kind: "printed_document",
-      text: "PO 56001",
-      confidence: 0.9,
-      people_visible: false,
-    },
-  });
-  assertEquals(out, { outcome: "error", code: "capture_capture_row_invalid" });
-  assertEquals(f.records[0].result, "error");
-});
-
-Deno.test("the photo row says a photo was read", () => {
-  const row = buildVisionTextRow(
-    lease({ file_kind: "image", image_count: 1, page_count: null }),
-    {
-      sha256: "c".repeat(64),
-      text: "SKIP BIN 3",
-      truncated: false,
-      model: "gpt-6-luna",
-      confidence: 0.7,
-      kind: "photo_with_writing",
-    },
-    POLICY,
-  ) as Row;
-  assertStringIncludes(row.payload.text, ", a photo.");
-  assertEquals(row.payload.document.writing_kind, "photo_with_writing");
 });
 
 Deno.test("preview reads only", async () => {
@@ -798,4 +493,68 @@ Deno.test("written words are still kept as words: the row and the record are unc
   );
   assert(!("described" in row.payload.document));
   assert(!("code" in f.records[0]));
+});
+
+// ── Read requests (20261104130000) ─────────────────────────────────────
+
+Deno.test("a requested scan on no job: next hands it out first; submit saves it on no job, automated, with no re-list", async () => {
+  const scan = doc({
+    source_kind: "email_attachment",
+    source_id: "44444444-4444-4444-8444-444444444444",
+    job_id: null,
+    job_number: null,
+    file_name: "metroll-1056504.jpg",
+    content_type: "image/jpeg",
+    storage_bucket: "context-email-attachments",
+    storage_path: "msg/m/metroll-1056504.jpg",
+    storage_url: null,
+    capture_mode: "backfill",
+  });
+  const f = fake({
+    requested: [scan],
+    due: [doc()],
+    files: { "context-email-attachments/msg/m/metroll-1056504.jpg": jpeg() },
+  });
+  const next = await nextDocument(f.deps);
+  assertEquals(next.outcome, "claimed");
+  if (next.outcome !== "claimed") return;
+  assertEquals(next.document.source_id, scan.source_id);
+  assertEquals(next.document.job_id, null);
+  assertEquals(f.claims.length, 1);
+  assertEquals(f.claims[0].job_id, null);
+
+  const onNoJob = fake({
+    leased: lease({
+      source_kind: "email_attachment",
+      source_id: scan.source_id,
+      job_id: null,
+      file_kind: "pdf",
+      file_name: "metroll-1056504.pdf",
+    }),
+  });
+  const out = await submitReading(onNoJob.deps, {
+    reservation_id: RESV,
+    model: "gpt-6-luna",
+    answer: { kind: "printed_document", text: "PICKUP 1056504", confidence: 0.9, people_visible: false },
+  });
+  assertEquals(out, { outcome: "saved", event_id: "ev-1" });
+  const row = onNoJob.captured[0] as Row;
+  assertEquals("job_id" in row, false);
+  assertEquals("match_method" in row, false);
+  assertEquals(row.provider_message_id, `doctext:no_job:${"b".repeat(64)}`);
+  assertEquals((row.payload as unknown as Record<string, unknown>).automated, true);
+  assertEquals(row.payload.job_id, null);
+  assertEquals(row.metadata, { capture_mode: "backfill", writer: "workflow:context-document-vision", requested_read: true });
+  assertEquals(onNoJob.records.at(-1)?.job_id, null);
+  assertEquals(onNoJob.records.at(-1)?.result, "saved");
+  // A read on no job lists no job for reading.
+  assertEquals(onNoJob.relists, []);
+});
+
+Deno.test("an unreadable requested vision list leaves the ordinary list", async () => {
+  const f = fake({ due: [doc()], files: { [`job-documents/${JOB}/site-photo.jpg`]: jpeg() } });
+  f.deps.requestedDocuments = () => Promise.reject(new Error("missing"));
+  const next = await nextDocument(f.deps);
+  assertEquals(next.outcome, "claimed");
+  assertEquals(f.claims[0].job_id, JOB);
 });

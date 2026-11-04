@@ -193,7 +193,7 @@ if [[ "$action" == "job_profit_list" ]]; then
 fi
 
 case "$action" in
-  trade_calendar | my_jobs | my_work_orders | my_job_work_order | report_work_order_variation | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
+  trade_calendar | my_jobs | my_work_orders | my_job_work_order | report_work_order_variation | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done | request_work_order)
     printf '%s\n' '{"error":"Login required"}'
     ;;
   # Stands in for the ops-api front door (_authorizeOpsApiAction): no debt_ws_

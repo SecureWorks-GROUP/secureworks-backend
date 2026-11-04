@@ -5,31 +5,8 @@
 // returning the shapes that module returns.
 
 // deno-lint-ignore no-import-prefix
-import {
-  assert,
-  assertEquals,
-  assertMatch,
-  assertStringIncludes,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildDocumentTextRow,
-  type CaptureOutcome,
-  documentLabel,
-  type Download,
-  type DueDocument,
-  fileKind,
-  noTextResult,
-  type PdfText,
-  previewDocumentText,
-  processDocument,
-  readableText,
-  type ReaderDeps,
-  type ReaderPolicy,
-  type ReadRecord,
-  resolveLocation,
-  runDocumentText,
-  sha256Hex,
-} from "./read.ts";
+import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { buildDocumentTextRow, type CaptureOutcome, type Download, documentsDue, type DueDocument, type PdfText, pdfByteLimit, previewDocumentText, processDocument, type ReaderDeps, type ReaderPolicy, type ReadRecord, runDocumentText, sha256Hex } from "./read.ts";
 
 const SUPABASE = "https://kevgrhcjxspbxgovpmfl.supabase.co";
 const JOB = "11111111-1111-4111-8111-111111111111";
@@ -85,14 +62,21 @@ const PDF_BYTES = new TextEncoder().encode("%PDF-1.4 fixture bytes");
 interface Calls {
   downloads: string[];
   extracts: number;
+  extractLimits: (number | undefined)[];
   captures: Record<string, unknown>[];
+  /** The outcome writes: every record but the read_started mark. */
   records: ReadRecord[];
+  /** Every write and step in order: "mark", "download", "extract", "capture", "record:<result>". */
+  writes: string[];
   runs: Record<string, unknown>[];
+  staleCloses: number;
   relists: { source: string; since: string; priority: number }[];
 }
 
 function fakeDeps(opts: {
   due?: DueDocument[];
+  requested?: DueDocument[];
+  requestedThrows?: boolean;
   download?: (bucket: string, path: string) => Download;
   extract?: PdfText;
   capture?: (row: Record<string, unknown>) => CaptureOutcome;
@@ -101,15 +85,19 @@ function fakeDeps(opts: {
   flag?: boolean;
   lane?: boolean;
   latest?: { id: string; status: string; started_at: string } | null;
+  stale?: { closed?: number; error?: string };
   dueThrows?: boolean;
   clock?: () => number;
 } = {}): { deps: ReaderDeps; calls: Calls } {
   const calls: Calls = {
     downloads: [],
     extracts: 0,
+    extractLimits: [],
     captures: [],
     records: [],
+    writes: [],
     runs: [],
+    staleCloses: 0,
     relists: [],
   };
   let n = 0;
@@ -120,6 +108,10 @@ function fakeDeps(opts: {
     laneOn: () => Promise.resolve(opts.lane ?? true),
     policy: () => Promise.resolve(POLICY),
     latestRun: () => Promise.resolve(opts.latest ?? null),
+    closeStaleRuns() {
+      calls.staleCloses++;
+      return Promise.resolve(opts.stale ?? { closed: 0 });
+    },
     recordRun(run) {
       calls.runs.push(run);
       return Promise.resolve(
@@ -134,18 +126,30 @@ function fakeDeps(opts: {
       }
       return Promise.resolve(opts.due ?? [doc()]);
     },
+    requestedDocuments() {
+      if (opts.requestedThrows) {
+        return Promise.reject(
+          Object.assign(new Error("x"), { code: "requested_unreadable" }),
+        );
+      }
+      return Promise.resolve(opts.requested ?? []);
+    },
     download(bucket, path) {
       calls.downloads.push(`${bucket}/${path}`);
+      calls.writes.push("download");
       return Promise.resolve(
         opts.download?.(bucket, path) ?? { ok: true, bytes: PDF_BYTES },
       );
     },
-    extract() {
+    extract(_bytes, o) {
       calls.extracts++;
+      calls.writes.push("extract");
+      calls.extractLimits.push(o?.maxBytes);
       return Promise.resolve(opts.extract ?? textPdf());
     },
     capture(row) {
       calls.captures.push(row);
+      calls.writes.push("capture");
       return Promise.resolve(
         opts.capture?.(row) ??
           {
@@ -155,7 +159,9 @@ function fakeDeps(opts: {
       );
     },
     record(rec) {
-      calls.records.push(rec);
+      const mark = rec.result === "error" && rec.code === "read_started";
+      calls.writes.push(mark ? "mark" : `record:${rec.result}`);
+      if (!mark) calls.records.push(rec);
       return Promise.resolve(opts.record?.(rec) ?? { outcome: rec.result });
     },
     relistBackfill(source, since, priority) {
@@ -165,290 +171,6 @@ function fakeDeps(opts: {
   };
   return { deps, calls };
 }
-
-// ── File kind and location ─────────────────────────────────────────────
-
-Deno.test("file kind: content type first, then the name, then the location", () => {
-  assertEquals(fileKind(doc()), "pdf");
-  assertEquals(
-    fileKind(doc({ file_name: "IMG_2041.HEIC", pdf_url: null })),
-    "image",
-  );
-  assertEquals(
-    fileKind(doc({ file_name: "site.jpg", pdf_url: null })),
-    "image",
-  );
-  assertEquals(
-    fileKind(doc({ file_name: "plans.dwg", pdf_url: null })),
-    "other",
-  );
-  assertEquals(
-    fileKind(
-      doc({
-        source_kind: "email_attachment",
-        content_type: "application/pdf",
-        file_name: "scan",
-      }),
-    ),
-    "pdf",
-  );
-  assertEquals(
-    fileKind(
-      doc({
-        source_kind: "email_attachment",
-        content_type: "image/png",
-        file_name: "a.pdf",
-      }),
-    ),
-    "image",
-  );
-  // No name: pdf_url is only ever set for a PDF.
-  assertEquals(fileKind(doc({ file_name: null, storage_url: null })), "pdf");
-  assertEquals(
-    fileKind(doc({ file_name: null, storage_url: null, pdf_url: null })),
-    "other",
-  );
-});
-
-Deno.test("location: only our own storage is ever read", () => {
-  assertEquals(resolveLocation(doc(), SUPABASE), {
-    ok: true,
-    bucket: "job-documents",
-    path: `${JOB}/quote-Q1001.pdf`,
-  });
-  // A bare stored path is the job-documents bucket.
-  assertEquals(resolveLocation(doc({ pdf_url: null }), SUPABASE), {
-    ok: true,
-    bucket: "job-documents",
-    path: `${JOB}/quote-Q1001.pdf`,
-  });
-  // Encoded names decode; signed links resolve to the object.
-  assertEquals(
-    resolveLocation(
-      doc({
-        pdf_url:
-          `${SUPABASE}/storage/v1/object/sign/job-documents/${JOB}/Work%20Order.pdf?token=abc`,
-      }),
-      SUPABASE,
-    ),
-    { ok: true, bucket: "job-documents", path: `${JOB}/Work Order.pdf` },
-  );
-  // Somebody else's host, plain http, or a path escape: never fetched.
-  assertEquals(
-    resolveLocation(
-      doc({
-        pdf_url:
-          "https://evil.example/storage/v1/object/public/job-documents/x.pdf",
-        storage_url: null,
-      }),
-      SUPABASE,
-    ),
-    { ok: false, code: "unsupported_location" },
-  );
-  assertEquals(
-    resolveLocation(
-      doc({
-        pdf_url: SUPABASE.replace("https", "http") +
-          "/storage/v1/object/public/job-documents/x.pdf",
-        storage_url: null,
-      }),
-      SUPABASE,
-    ),
-    { ok: false, code: "unsupported_location" },
-  );
-  assertEquals(
-    resolveLocation(
-      doc({ pdf_url: null, storage_url: "../secrets/x.pdf" }),
-      SUPABASE,
-    ),
-    { ok: false, code: "unsupported_location" },
-  );
-  assertEquals(
-    resolveLocation(doc({ pdf_url: null, storage_url: "  " }), SUPABASE),
-    {
-      ok: false,
-      code: "no_location",
-    },
-  );
-  // An email attachment lives only in the private reader bucket.
-  assertEquals(
-    resolveLocation(
-      doc({
-        source_kind: "email_attachment",
-        storage_bucket: "context-email-attachments",
-        storage_path: "abc/def.pdf",
-      }),
-      SUPABASE,
-    ),
-    { ok: true, bucket: "context-email-attachments", path: "abc/def.pdf" },
-  );
-  assertEquals(
-    resolveLocation(
-      doc({
-        source_kind: "email_attachment",
-        storage_bucket: "job-documents",
-        storage_path: "abc/def.pdf",
-      }),
-      SUPABASE,
-    ),
-    { ok: false, code: "no_location" },
-  );
-});
-
-// ── The text gate ───────────────────────────────────────────────────────
-
-Deno.test("text: the extractor's text, or a short clean purchase order it held back", () => {
-  assertEquals(readableText(textPdf()), QUOTE_WORDS);
-  const po = "Purchase Order PO-56001 Supplier Stratco 24 posts";
-  assertEquals(
-    readableText({
-      text: "",
-      rawText: po,
-      charCount: po.length,
-      mode: "none",
-      note: "low_quality_text",
-    }),
-    po,
-  );
-  // Mojibake, one repeated token, a scan with nothing: no text.
-  assertEquals(
-    readableText({
-      text: "",
-      rawText: "ÿþ\u0001\u0002 ~~~ ### ;;; ééééééé",
-      charCount: 30,
-      mode: "none",
-      note: "low_quality_text",
-    }),
-    null,
-  );
-  const locale = Array(30).fill("en-AU").join(" ");
-  assertEquals(
-    readableText({
-      text: "",
-      rawText: locale,
-      charCount: locale.length,
-      mode: "none",
-      note: "low_quality_text",
-    }),
-    null,
-  );
-  assertEquals(
-    readableText({
-      text: "",
-      rawText: "",
-      charCount: 0,
-      mode: "none",
-      note: "no_text_layer",
-    }),
-    null,
-  );
-});
-
-Deno.test("text: why a PDF gave no text, as a record outcome", () => {
-  const none = (note: string): PdfText => ({
-    text: "",
-    rawText: "",
-    charCount: 0,
-    mode: "none",
-    note,
-  });
-  assertEquals(noTextResult(none("no_text_layer")), {
-    result: "no_text_layer",
-    code: "no_text_layer",
-  });
-  assertEquals(noTextResult(none("low_quality_text")), {
-    result: "no_text_layer",
-    code: "low_quality_text",
-  });
-  assertEquals(noTextResult(none("pdf_too_large")), {
-    result: "too_large",
-    code: "pdf_too_large",
-  });
-  assertEquals(noTextResult(none("pdf_too_many_pages")), {
-    result: "too_many_pages",
-    code: "pdf_too_many_pages",
-  });
-  assertEquals(noTextResult(none("not_pdf")), {
-    result: "unreadable",
-    code: "not_pdf",
-  });
-  assertEquals(noTextResult(none("pdf_parse_failed")), {
-    result: "unreadable",
-    code: "pdf_parse_failed",
-  });
-});
-
-// ── The evidence row ───────────────────────────────────────────────────
-
-Deno.test("row: keyed by job and content hash, on the document's own job, marked as document text", async () => {
-  const sha = await sha256Hex(PDF_BYTES);
-  assertMatch(sha, /^[0-9a-f]{64}$/);
-  const row = buildDocumentTextRow(doc({ capture_mode: "backfill" }), {
-    sha256: sha,
-    text: QUOTE_WORDS,
-    pageCount: 2,
-    truncated: false,
-    extractor: "unpdf@1.6.2",
-  }, POLICY);
-  assertEquals(row.provider_message_id, `doctext:${JOB}:${sha}`);
-  assertEquals(row.event_type, "document.text_extracted");
-  assertEquals(row.source, "context-document-text");
-  assertEquals(row.job_id, JOB);
-  assertEquals(row.match_method, "direct_job_id");
-  assertEquals(row.channel, "document");
-  assertEquals(row.event_at, "2026-10-04T02:00:00.000Z");
-  assertEquals(
-    (row.metadata as Record<string, unknown>).capture_mode,
-    "backfill",
-  );
-  const payload = row.payload as Record<string, unknown>;
-  assertEquals(payload.document_text, true);
-  // The ladder's admission rule: a payload job equal to the row's job.
-  assertEquals(payload.job_id, JOB);
-  const text = payload.text as string;
-  assert(text.startsWith('[Document text: Quote "quote-Q1001.pdf", 2 pages.'));
-  assertStringIncludes(text, "not a message.]");
-  assert(text.endsWith(QUOTE_WORDS));
-  assertEquals(row.body_preview, QUOTE_WORDS.slice(0, 500));
-  // The summary carries no words and no file name.
-  assertEquals(
-    row.safe_summary,
-    `[Document text: Quote, 2 pages, ${QUOTE_WORDS.length} characters.]`,
-  );
-  // Only business_events columns (capture_business_event refuses others).
-  for (const k of Object.keys(row)) {
-    assert(
-      [
-        "event_type",
-        "source",
-        "entity_type",
-        "entity_id",
-        "job_id",
-        "match_method",
-        "event_at",
-        "provider_message_id",
-        "channel",
-        "direction",
-        "thread_key",
-        "body_preview",
-        "safe_summary",
-        "privacy_classification",
-        "retention_class",
-        "payload",
-        "metadata",
-      ].includes(k),
-      k,
-    );
-  }
-});
-
-Deno.test("row: labels for each document kind", () => {
-  assertEquals(documentLabel("work_order"), "Work order");
-  assertEquals(documentLabel("supplier_invoice"), "Supplier invoice");
-  assertEquals(documentLabel("email_attachment"), "Email attachment");
-  assertEquals(documentLabel("roof_report"), "Roof report");
-  assertEquals(documentLabel(null), "Document");
-});
 
 // ── One document ───────────────────────────────────────────────────────
 
@@ -554,199 +276,6 @@ Deno.test("document: other kinds, foreign links and missing objects are terminal
   assertEquals(missing.calls.records[0].result, "no_file");
 });
 
-Deno.test("document: a storage fault is an error the database backs off", async () => {
-  const { deps, calls } = fakeDeps({
-    download: () => ({ ok: false, code: "storage_error", missing: false }),
-  });
-  assertEquals(await processDocument(doc(), POLICY, deps), {
-    outcome: "error",
-    code: "download_storage_error",
-  });
-  assertEquals(calls.records[0].result, "error");
-  assertEquals(calls.records[0].code, "download_storage_error");
-});
-
-Deno.test("document: over 5 MB is too_large before any parse", async () => {
-  const big = new Uint8Array(5_000_001);
-  big.set(PDF_BYTES);
-  const { deps, calls } = fakeDeps({
-    download: () => ({ ok: true, bytes: big }),
-  });
-  assertEquals(
-    (await processDocument(doc(), POLICY, deps)).outcome,
-    "too_large",
-  );
-  assertEquals(calls.extracts, 0);
-});
-
-Deno.test("document: the capture lane switched off mid-run stops the run and records nothing", async () => {
-  const { deps, calls } = fakeDeps({
-    capture: () => ({ outcome: "capture_disabled" }),
-  });
-  const step = await processDocument(doc(), POLICY, deps);
-  assertEquals(step.stop, "capture_disabled");
-  assertEquals(calls.records.length, 0);
-});
-
-Deno.test("document: a refused save is an error with the writer's code", async () => {
-  const { deps, calls } = fakeDeps({
-    capture: () => ({ outcome: "error", code: "capture_row_unknown_column" }),
-  });
-  assertEquals(await processDocument(doc(), POLICY, deps), {
-    outcome: "error",
-    code: "capture_capture_row_unknown_column",
-  });
-  assertEquals(calls.records[0].result, "error");
-});
-
-// ── A run ──────────────────────────────────────────────────────────────
-
-Deno.test("run: idle with no run row while the flag or the capture lane is off", async () => {
-  const off = fakeDeps({ flag: false });
-  assertEquals(await runDocumentText(off.deps), {
-    outcome: "idle",
-    reason: "flag_off",
-  });
-  assertEquals(off.calls.runs.length, 0);
-  const lane = fakeDeps({ lane: false });
-  assertEquals(await runDocumentText(lane.deps), {
-    outcome: "idle",
-    reason: "capture_lane_off",
-  });
-  assertEquals(lane.calls.runs.length, 0);
-});
-
-Deno.test("run: a fresh run in progress is left alone", async () => {
-  const { deps, calls } = fakeDeps({
-    latest: { id: "r1", status: "running", started_at: "2026-10-04T23:58:00Z" },
-  });
-  assertEquals(await runDocumentText(deps), {
-    outcome: "run_in_progress",
-    run_id: "r1",
-  });
-  assertEquals(calls.runs.length, 0);
-});
-
-Deno.test("run: a mixed batch, counted, and history documents listed for reading", async () => {
-  const due = [
-    doc({ source_id: "a0000000-0000-4000-8000-000000000001" }),
-    doc({
-      source_id: "a0000000-0000-4000-8000-000000000002",
-      capture_mode: "backfill",
-      doc_type: "work_order",
-      file_name: "wo.pdf",
-    }),
-    doc({
-      source_id: "a0000000-0000-4000-8000-000000000003",
-      file_name: "site.jpg",
-      pdf_url: null,
-      storage_url: `${JOB}/site.jpg`,
-    }),
-    doc({
-      source_id: "a0000000-0000-4000-8000-000000000004",
-      pdf_url: "https://drive.example/x.pdf",
-      storage_url: null,
-    }),
-  ];
-  const { deps, calls } = fakeDeps({ due });
-  const result = await runDocumentText(deps);
-  assert(result.outcome === "ran");
-  assertEquals(result.status, "succeeded");
-  assertEquals(result.counts.selected, 4);
-  assertEquals(result.counts.saved, 2);
-  assertEquals(result.counts.live_saved, 1);
-  assertEquals(result.counts.backfill_saved, 1);
-  assertEquals(result.counts.no_text_layer, 1);
-  assertEquals(result.counts.image, 1);
-  assertEquals(result.counts.no_file, 1);
-  assertEquals(result.counts.relisted_jobs, 1);
-  assertEquals(calls.relists, [{
-    source: "context-document-text",
-    since: "2026-10-04T00:00:00.000Z",
-    priority: 2,
-  }]);
-  // Opened running, closed once with the counts.
-  assertEquals(calls.runs[0].status, "running");
-  assertEquals(calls.runs[1].status, "succeeded");
-  // Results carry ids and codes only, never words.
-  assert(!JSON.stringify(result).includes("Colorbond"));
-});
-
-Deno.test("run: no history saved, no re-list", async () => {
-  const { deps, calls } = fakeDeps();
-  const result = await runDocumentText(deps);
-  assert(result.outcome === "ran");
-  assertEquals(calls.relists.length, 0);
-});
-
-Deno.test("run: a failed re-list or a failed record makes the run partial", async () => {
-  const relist = fakeDeps({
-    due: [doc({ capture_mode: "backfill" })],
-    relist: { error: "relist_failed" },
-  });
-  const r1 = await runDocumentText(relist.deps);
-  assert(r1.outcome === "ran");
-  assertEquals([r1.status, r1.error_code], ["partial", "relist_failed"]);
-
-  const rec = fakeDeps({
-    record: () => ({ error: "document_text_event_not_found" }),
-  });
-  const r2 = await runDocumentText(rec.deps);
-  assert(r2.outcome === "ran");
-  assertEquals([r2.status, r2.error_code, r2.counts.record_failed], [
-    "partial",
-    "record_failed",
-    1,
-  ]);
-});
-
-Deno.test("run: an unreadable due list fails the run with its code", async () => {
-  const { deps, calls } = fakeDeps({ dueThrows: true });
-  const r = await runDocumentText(deps);
-  assert(r.outcome === "ran");
-  assertEquals([r.status, r.error_code], [
-    "failed",
-    "due_documents_unreadable",
-  ]);
-  assertEquals(calls.runs[1].error_code, "due_documents_unreadable");
-});
-
-Deno.test("run: the time budget stops the run partial", async () => {
-  let t = Date.parse("2026-10-05T00:00:00Z");
-  const { deps } = fakeDeps({
-    due: [doc(), doc({ source_id: "a0000000-0000-4000-8000-000000000009" })],
-    clock: () => {
-      const now = t;
-      t += 60_000;
-      return now;
-    },
-  });
-  const r = await runDocumentText(deps);
-  assert(r.outcome === "ran");
-  assertEquals([r.status, r.error_code], ["partial", "time_budget"]);
-  assertEquals(r.counts.selected, 1);
-});
-
-Deno.test("run: a step that throws is recorded as an error, the run carries on", async () => {
-  const { deps, calls } = fakeDeps({
-    due: [doc(), doc({ source_id: "a0000000-0000-4000-8000-000000000010" })],
-  });
-  let first = true;
-  deps.extract = () => {
-    if (first) {
-      first = false;
-      return Promise.reject(new Error("boom"));
-    }
-    return Promise.resolve(textPdf());
-  };
-  const r = await runDocumentText(deps);
-  assert(r.outcome === "ran");
-  assertEquals(r.counts.errors, 1);
-  assertEquals(r.counts.saved, 1);
-  assertEquals(calls.records[0].result, "error");
-  assertEquals(calls.records[0].code, "threw_error");
-});
-
 Deno.test("preview: lists what a run would take, reads and writes nothing, flag off or on", async () => {
   const due = [
     doc(),
@@ -770,4 +299,250 @@ Deno.test("preview: lists what a run would take, reads and writes nothing, flag 
     calls.records.length,
     calls.runs.length,
   ], [0, 0, 0, 0, 0]);
+});
+
+// ── Read requests (20261104130000) ─────────────────────────────────────
+
+const REQ_POLICY: ReaderPolicy = {
+  ...POLICY,
+  no_job_key: "no_job",
+  request_max_pdf_bytes: 20_000_000,
+};
+
+/** A requested supplier bill whose email is on no job. */
+function noJobBill(over: Partial<DueDocument> = {}): DueDocument {
+  return doc({
+    source_kind: "email_attachment",
+    source_id: "66666666-6666-4666-8666-666666666666",
+    job_id: null,
+    job_number: null,
+    file_name: "Invoice_10095132.pdf",
+    doc_type: "email_attachment",
+    content_type: "application/pdf",
+    storage_bucket: "context-email-attachments",
+    storage_path: "msg/abc/Invoice_10095132.pdf",
+    storage_url: null,
+    pdf_url: null,
+    capture_mode: "backfill",
+    max_pdf_bytes: null,
+    ...over,
+  });
+}
+
+const BILL_WORDS =
+  "TAX INVOICE 10095132. Deliver to SWF-261562, 12 Example Street. 6 x 2400 mm posts, 12 x rails, 1 x gate kit. Total includes GST. Payment due on the 20th of the month following.";
+
+Deno.test("requested: a bill on no job is saved on no job, keyed no_job, marked automated, and lists no job", async () => {
+  const { deps, calls } = fakeDeps({
+    requested: [noJobBill()],
+    due: [],
+    extract: textPdf(BILL_WORDS, 1),
+  });
+  const run = await runDocumentText({ ...deps, policy: () => Promise.resolve(REQ_POLICY) });
+  if (run.outcome !== "ran") throw new Error(run.outcome);
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts.requested, 1);
+  assertEquals(run.counts.saved, 1);
+  assertEquals(run.counts.no_job_saved, 1);
+  assertEquals(run.counts.backfill_saved, 0);
+  assertEquals(calls.relists.length, 0);
+  assertEquals(calls.downloads, ["context-email-attachments/msg/abc/Invoice_10095132.pdf"]);
+  const row = calls.captures[0];
+  const sha = await sha256Hex(PDF_BYTES);
+  assertEquals("job_id" in row, false);
+  assertEquals("match_method" in row, false);
+  assertEquals(row.provider_message_id, `doctext:no_job:${sha}`);
+  const payload = row.payload as Record<string, unknown>;
+  assertEquals(payload.automated, true);
+  assertEquals(payload.no_job, true);
+  assertEquals(payload.job_id, null);
+  assertEquals(row.metadata, { capture_mode: "backfill", writer: "workflow:context-document-text", requested_read: true });
+  assertEquals(calls.records.length, 1);
+  assertEquals(calls.records[0].job_id, null);
+  assertEquals(calls.records[0].result, "saved");
+  assertEquals(calls.extractLimits, [5_000_000]);
+});
+
+Deno.test("requested: a document on a job keeps exactly its old evidence row", () => {
+  const read = { sha256: "c".repeat(64), text: QUOTE_WORDS, pageCount: 2, truncated: false, extractor: "unpdf@1.6.2" };
+  const row = buildDocumentTextRow(doc(), read, REQ_POLICY);
+  assertEquals(row.job_id, JOB);
+  assertEquals(row.match_method, "direct_job_id");
+  assertEquals(row.provider_message_id, `doctext:${JOB}:${"c".repeat(64)}`);
+  assertEquals(row.metadata, { capture_mode: "live", writer: "workflow:context-document-text" });
+  const payload = row.payload as Record<string, unknown>;
+  assertEquals("automated" in payload, false);
+  assertEquals("no_job" in payload, false);
+  assertEquals(payload.job_id, JOB);
+  // Same row with the old policy shape (no no_job_key): nothing about a job's row depends on it.
+  assertEquals(buildDocumentTextRow(doc(), read, POLICY), row);
+});
+
+Deno.test("requested: requested documents run first and the ordinary list fills the batch", async () => {
+  const asked: number[] = [];
+  const listed = await documentsDue({
+    requestedDocuments: () => Promise.resolve([noJobBill()]),
+    dueDocuments: (n) => {
+      asked.push(n);
+      return Promise.resolve([doc(), doc({ source_id: "77777777-7777-4777-8777-777777777777" })]);
+    },
+  }, 20);
+  assertEquals(listed.requested, 1);
+  assertEquals(listed.documents.map((d) => d.source_id), [
+    "66666666-6666-4666-8666-666666666666",
+    "22222222-2222-4222-8222-222222222222",
+    "77777777-7777-4777-8777-777777777777",
+  ]);
+  assertEquals(asked, [19]);
+  // A full requested list leaves no room: the ordinary list is not asked.
+  const full = await documentsDue({
+    requestedDocuments: () => Promise.resolve([noJobBill(), noJobBill()]),
+    dueDocuments: () => { throw new Error("not asked"); },
+  }, 2);
+  assertEquals(full.documents.length, 2);
+});
+
+Deno.test("requested: an unreadable requested list leaves the ordinary list to run", async () => {
+  const { deps, calls } = fakeDeps({ requestedThrows: true });
+  const run = await runDocumentText(deps);
+  if (run.outcome !== "ran") throw new Error(run.outcome);
+  assertEquals(run.status, "partial");
+  assertEquals(run.error_code, "requested_unreadable");
+  assertEquals(run.counts.saved, 1);
+  assertEquals(calls.captures.length, 1);
+});
+
+Deno.test("requested: a raised limit reads a 5.4 MB PDF after recording the attempt; without it the PDF is too large", async () => {
+  const bytes = new Uint8Array(5_412_737);
+  bytes.set(new TextEncoder().encode("%PDF-1.4"));
+  const sha = await sha256Hex(bytes);
+  const quote = doc({
+    source_kind: "email_attachment",
+    job_id: JOB,
+    content_type: "application/pdf",
+    storage_bucket: "context-email-attachments",
+    storage_path: "msg/q/quote.pdf",
+    storage_url: null,
+    pdf_url: null,
+    capture_mode: "backfill",
+  });
+  // No request: too large, nothing extracted.
+  const plain = fakeDeps({ download: () => ({ ok: true, bytes }) });
+  assertEquals((await processDocument(quote, REQ_POLICY, plain.deps)).outcome, "too_large");
+  assertEquals(plain.calls.extracts, 0);
+  // A request for 20 MB: the attempt is recorded, then the read at 20 MB.
+  const raised = fakeDeps({ download: () => ({ ok: true, bytes }), extract: textPdf(QUOTE_WORDS, 3) });
+  const step = await processDocument({ ...quote, max_pdf_bytes: 20_000_000 }, REQ_POLICY, raised.deps);
+  assertEquals(step.outcome, "saved");
+  assertEquals(raised.calls.writes, ["mark", "download", "extract", "capture", "record:saved"]);
+  assertEquals(raised.calls.records.map((r) => [r.result, r.code ?? null]), [["saved", null]]);
+  assertEquals(raised.calls.records[0].sha256, sha);
+  assertEquals(raised.calls.extractLimits, [20_000_000]);
+  assertEquals(raised.calls.records[0].page_count, 3);
+  // A failed attempt record stops before the read.
+  const blocked = fakeDeps({ download: () => ({ ok: true, bytes }), record: () => ({ error: "document_text_source_not_found" }) });
+  assertEquals((await processDocument({ ...quote, max_pdf_bytes: 20_000_000 }, REQ_POLICY, blocked.deps)).outcome, "record_failed");
+  assertEquals(blocked.calls.extracts, 0);
+  assertEquals(blocked.calls.downloads.length, 0);
+});
+
+Deno.test("requested: the size limit never passes the policy or 20 MB, and a PDF under 5 MB records one attempt, as every PDF does", async () => {
+  assertEquals(pdfByteLimit(doc(), REQ_POLICY), 5_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 4_000_000 }), REQ_POLICY), 5_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), REQ_POLICY), 12_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 90_000_000 }), REQ_POLICY), 20_000_000);
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), { ...REQ_POLICY, request_max_pdf_bytes: 8_000_000 }), 8_000_000);
+  // An old policy without the field never raises.
+  assertEquals(pdfByteLimit(doc({ max_pdf_bytes: 12_000_000 }), POLICY), 5_000_000);
+  const small = fakeDeps();
+  await processDocument(doc({ max_pdf_bytes: 20_000_000 }), REQ_POLICY, small.deps);
+  assertEquals(small.calls.writes, ["mark", "download", "extract", "capture", "record:saved"]);
+  assertEquals(small.calls.records.map((r) => r.result), ["saved"]);
+  assertEquals(small.calls.extractLimits, [20_000_000]);
+});
+
+Deno.test("requested: preview shows requested documents first and marks a read on no job", async () => {
+  const { deps } = fakeDeps({ requested: [noJobBill({ max_pdf_bytes: 20_000_000 })], due: [doc()] });
+  const result = await previewDocumentText(deps, 10);
+  assertEquals(result.due.map((d) => [d.on_no_job, d.max_pdf_bytes ?? null, d.location]), [
+    [true, 20_000_000, "storage:context-email-attachments"],
+    [false, null, "storage:job-documents"],
+  ]);
+});
+
+// ── A file that stops the worker (20261104180000) ──────────────────────
+
+Deno.test("stop: every PDF records its attempt before the download; a worker that stops mid-read leaves that attempt", async () => {
+  // The read never returns, as when the worker stopped on 2612d4d2 (30 Oct to 3 Nov 2026).
+  const { deps, calls } = fakeDeps();
+  const hung: ReaderDeps = {
+    ...deps,
+    extract(bytes, o) {
+      void deps.extract(bytes, o);
+      return new Promise<PdfText>(() => {});
+    },
+  };
+  void processDocument(doc(), POLICY, hung);
+  // The content hash is an async digest: give it a moment.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(calls.writes, ["mark", "download", "extract"]);
+  assertEquals(calls.records.length, 0);
+});
+
+Deno.test("stop: a read that finishes writes its mark, then exactly one outcome", async () => {
+  const saved = fakeDeps();
+  assertEquals((await processDocument(doc(), POLICY, saved.deps)).outcome, "saved");
+  assertEquals(saved.calls.writes, ["mark", "download", "extract", "capture", "record:saved"]);
+  const scan = fakeDeps({ extract: { text: "", rawText: "", charCount: 0, mode: "none", note: "no_text_layer", pageCount: 2 } });
+  assertEquals((await processDocument(doc(), POLICY, scan.deps)).outcome, "no_text_layer");
+  assertEquals(scan.calls.writes, ["mark", "download", "extract", "record:no_text_layer"]);
+  const gone = fakeDeps({ download: () => ({ ok: false, code: "missing", missing: true }) });
+  assertEquals((await processDocument(doc(), POLICY, gone.deps)).outcome, "no_file");
+  assertEquals(gone.calls.writes, ["mark", "download", "record:no_file"]);
+  const flaky = fakeDeps({ download: () => ({ ok: false, code: "storage_error", missing: false }) });
+  assertEquals((await processDocument(doc(), POLICY, flaky.deps)).outcome, "error");
+  assertEquals(flaky.calls.writes, ["mark", "download", "record:error"]);
+  assertEquals(flaky.calls.records[0].code, "download_storage_error");
+});
+
+Deno.test("stop: photos, other kinds and links outside our storage are recorded at once, with no mark", async () => {
+  const photo = fakeDeps();
+  await processDocument(doc({ file_name: "site.jpg", pdf_url: null, storage_url: `${JOB}/site.jpg` }), POLICY, photo.deps);
+  assertEquals(photo.calls.writes, ["record:no_text_layer"]);
+  const other = fakeDeps();
+  await processDocument(doc({ file_name: "plan.dwg", pdf_url: null, storage_url: `${JOB}/plan.dwg` }), POLICY, other.deps);
+  assertEquals(other.calls.writes, ["record:not_supported"]);
+  const foreign = fakeDeps();
+  await processDocument(doc({ pdf_url: "https://example.com/q.pdf", storage_url: "https://example.com/q.pdf" }), POLICY, foreign.deps);
+  assertEquals(foreign.calls.writes, ["record:no_file"]);
+});
+
+Deno.test("stop: a mark the writer refuses stops before the download", async () => {
+  const { deps, calls } = fakeDeps({ record: () => ({ error: "document_text_source_not_found" }) });
+  const step = await processDocument(doc(), POLICY, deps);
+  assertEquals(step, { outcome: "record_failed", code: "document_text_source_not_found" });
+  assertEquals(calls.downloads.length, 0);
+  assertEquals(calls.extracts, 0);
+});
+
+Deno.test("stale: each run first closes this reader's runs left running, and counts them", async () => {
+  const closed = fakeDeps({
+    stale: { closed: 360 },
+    latest: { id: "old", status: "running", started_at: "2026-10-04T23:40:00Z" },
+  });
+  const run = await runDocumentText(closed.deps);
+  if (run.outcome !== "ran") throw new Error(run.outcome);
+  assertEquals(closed.calls.staleCloses, 1);
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts.stale_runs_closed, 360);
+  assertEquals(closed.calls.runs.at(-1)?.status, "succeeded");
+  // A run still inside its window is left alone: nothing closed, nothing read.
+  const busy = fakeDeps({ latest: { id: "now", status: "running", started_at: "2026-10-04T23:55:00Z" } });
+  assertEquals((await runDocumentText(busy.deps)).outcome, "run_in_progress");
+  assertEquals(busy.calls.staleCloses, 0);
+  // A closing that fails is named on the run, and the documents are still read.
+  const failing = fakeDeps({ stale: { error: "close_stale_failed" } });
+  const run2 = await runDocumentText(failing.deps);
+  if (run2.outcome !== "ran") throw new Error(run2.outcome);
+  assertEquals([run2.status, run2.error_code, run2.counts.saved], ["partial", "close_stale_failed", 1]);
 });

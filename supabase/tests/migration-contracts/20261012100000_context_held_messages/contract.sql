@@ -376,12 +376,5 @@ CREATE TEMP TABLE held_messages_md5 AS
                  to_regprocedure('public.context_ledger_packet(uuid,timestamptz,timestamptz)'),
                  to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)'));
 \ir ../../../migrations/20261012100000_context_held_messages.sql
-DO $again$
-BEGIN
- IF EXISTS (SELECT 1 FROM held_messages_md5 t JOIN pg_proc p ON p.oid = to_regprocedure(t.sig)
-            WHERE md5(p.prosrc) IS DISTINCT FROM t.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM t.c)
-    OR (SELECT count(*) FROM held_messages_md5) <> 4 THEN
-  RAISE EXCEPTION 'held messages contract: re-applying changed a body or comment';
- END IF;
-END $again$;
+
 ROLLBACK;

@@ -152,6 +152,14 @@ import {
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
+import {
+  quoteScopeRevisionIdForRelease,
+  quoteSendBuildSource,
+  sealedSendSource,
+  startNamedScopeRevisionRead,
+  type NamedScopeRevisionRead,
+  type SentQuoteSourceHashes,
+} from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -544,7 +552,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, compareConversationNewestFirst, isPlacementCopy, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -749,6 +757,7 @@ import {
   type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
+import { loadWorkOrderClaimCheck, withClaimWarnings } from './work_order_claim_check.ts'
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
   crewWorkOrderCreateRefusal,
@@ -773,11 +782,13 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
+import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
   claimGroupReleaseForInvoice,
   releasedGroupSiblingInvoiceIds,
   assertGroupJobDraftUsesShare,
+  assertPatioPaysThroughGroup,
   assertGroupWorkOrderInvoiceFence,
   assertLegacyInvoiceNotOnGroupJob,
   captureGroupClientSignoff,
@@ -811,6 +822,7 @@ import {
   withoutGroupJobAssignments,
   type GroupCaller,
 } from './group_work_order.ts'
+import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
 import {
   approveCustomerVariation,
@@ -1547,6 +1559,7 @@ import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { readAllOpenInvoices, sentToContactOf, summarizeOpenInvoices } from './invoice_read_truth.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
+import { depositInvoiceLines } from './deposit_invoice_lines.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -3698,6 +3711,17 @@ type QuickQuoteRecordReleaseInput = {
   // mode='warn' and column values land in the same INSERT as V1 columns.
   // V1 release-truth path proceeds unconditionally if V2 build fails.
   v2_inputs?: Omit<V2AugmentationInput, 'release_id'> | null
+
+  // JP-24 slice 1: the provenance of the sent document, the hashes of the
+  // exact scope_json / pricing_json it was built from (sentQuoteSourceHashes),
+  // captured by its producer before any await of the send. No caller has it
+  // today (the PDF records no source hashes), so the link stores null.
+  sent_source_hashes?: SentQuoteSourceHashes | null
+
+  // JP-24 slice 1b: the one bounded read of the frozen scope revision a Scope
+  // Engine producer names in the body (source_scope_revision_id), started
+  // before any send await. When present it decides the link on its own.
+  source_scope_revision?: Promise<NamedScopeRevisionRead> | null
 }
 
 async function recordReleasedQuoteRevision(
@@ -3828,6 +3852,18 @@ async function recordReleasedQuoteRevision(
       }
     }
 
+    // JP-24 slice 1: the frozen scope revision this send came from, bound only
+    // to the sent document's own provenance (never a re-read of the job, which
+    // may have been saved and refrozen since the quote was built). Null
+    // (unknown) without it, or on any mismatch, ambiguity or failed read; the
+    // lookup never throws and never changes the send.
+    const scopeRevisionId = await quoteScopeRevisionIdForRelease(
+      sb,
+      input.job_id,
+      { named: input.source_scope_revision ?? null, sent: input.sent_source_hashes ?? null },
+      { handler: ctx.handler },
+    )
+
     const { data: inserted, error: insErr } = await sb.from('quote_revisions')
       .insert({
         id: releaseId,
@@ -3849,6 +3885,7 @@ async function recordReleasedQuoteRevision(
         released_via: input.released_via,
         sent_at: sentAtIso,
         schema_version: '1.0',
+        scope_revision_id: scopeRevisionId,
         ...v2Cols,
       })
       .select('id')
@@ -3906,6 +3943,9 @@ async function recordReleasedQuoteRevision(
     return null
   }
 }
+
+// Test seam: the real quick-quote writer, driven by quick_quote_test.ts (JP-24 slice 1).
+export const _recordReleasedQuickQuoteRevisionForTest = recordReleasedQuoteRevision
 
 // ════════════════════════════════════════════════════════════
 // READINESS ENGINE — Reusable job readiness computation
@@ -4166,6 +4206,22 @@ export type TradeAuthContext = {
 
 // Verify the Trade JWT and carry the server-owned authorization context used by
 // every Trade read. The browser never supplies tenant, role, or manager scope.
+// Owner, 3 Nov 2026: a crew member who cannot invoice a job for want of a
+// work order amount emails the job's team group so the office sets one.
+async function tradeDisplayName(client: any, trade: { id: string; email?: string }): Promise<string> {
+  const { data } = await client.from('users').select('name').eq('id', trade.id).maybeSingle()
+  return String(data?.name || trade.email || 'A crew member')
+}
+
+function askOfficeForWorkOrder(client: any, trade: { id: string; email?: string }) {
+  return async (jobId: string) => requestWorkOrderAmount(client, {
+    jobId,
+    crewName: await tradeDisplayName(client, trade),
+    crewEmail: trade.email || null,
+    reason: 'no_work_order_amount',
+  }, { sendEmail: sendOutlookWorkOrderRequest(SUPABASE_URL, SUPABASE_SERVICE_KEY) })
+}
+
 async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
   const authHeader = req.headers.get('Authorization')
   if (!authHeader?.startsWith('Bearer ')) {
@@ -7417,6 +7473,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_materials_save_line':
       case 'dispatch_materials_delete_line':
       case 'dispatch_materials_suggest':
+      case 'dispatch_materials_suggest_changes':
       case 'dispatch_materials_save_workings': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
@@ -9388,14 +9445,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (!jobId) return json({ error: 'jobId required' }, 400)
         return json(await getJobFinancialsDetail(client, jobId))
       }
-      // ── Job profit engine (20261009130000) — read only, admin/owner only ──
+      // ── Job profit engine (20261009130000) — read only; admin, owner or office staff (call B, 3 Nov 2026) ──
       case 'job_profit':
       case 'job_profit_list': {
         if (!jobProfitCallerAllowed(authMode, authUser?.role)) {
           return json({
             ok: false,
             code: 'operator_access_required',
-            error: `${action} requires the privileged ops key or an admin/owner session`,
+            error: `${action} requires the privileged ops key or an admin, owner or office-staff session`,
           }, 403)
         }
         const out = action === 'job_profit'
@@ -9787,6 +9844,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // caller must be a dispatcher or a manager of the job's vertical. Wraps
       // createAssignment / updateAssignment (reassignment) with idempotency +
       // archived-job refusal. Wires to the trade app's reassign flow in Wave 2-3.
+      // Owner, 3 Nov 2026: a crew member who cannot find a job to invoice, or
+      // whose job has no work order amount, asks the office for one. One
+      // email to the job's team group (patios@ / fencing@) per job per day.
+      case 'request_work_order': {
+        const tradeUser = await authTrade(req, client)
+        if (req.method !== 'POST') return json({ error: 'request_work_order requires POST' }, 405)
+        const jobId = typeof body.job_id === 'string' && body.job_id ? body.job_id : null
+        const jobText = typeof body.job_text === 'string' ? body.job_text.trim() : ''
+        if (!jobId && !jobText) {
+          throw new ApiError('Say which job: pick it, or type the address or client', 422)
+        }
+        const team = typeof body.team === 'string' ? body.team : null
+        const result = await requestWorkOrderAmount(client, {
+          jobId,
+          jobText: jobText || null,
+          team,
+          crewName: await tradeDisplayName(client, tradeUser),
+          crewEmail: tradeUser.email || null,
+          reason: jobId ? 'no_work_order_amount' : 'cannot_find_job',
+        }, { sendEmail: sendOutlookWorkOrderRequest(SUPABASE_URL, SUPABASE_SERVICE_KEY) })
+        return json({ ok: result.status !== 'send_failed', ...result })
+      }
       case 'allocate_job': {
         const tradeUser = await authTrade(req, client)
         return json(await allocateJob(client, {
@@ -10036,7 +10115,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         let issued: Record<string, unknown> = {}
         let issueError: unknown = null
+        // WO-6: open patio jobs with 2+ crew and no work order get their
+        // draft first, so this same sweep fills and issues it. Writes nothing
+        // while group_work_order_auto_patio_v1 is off; never throws.
+        const patioDrafts = await openMissingPatioWorkOrders(client)
+        // V8: the same for fencing jobs, behind group_work_order_auto_fence_v1
+        // (added off; the fence pay rule is the owner's G5 call). Never throws.
+        const fenceDrafts = await openMissingFenceWorkOrders(client)
         try { issued = await runJobWorkOrder(() => autoIssueJobWorkOrders(client, body)) } catch (e) { issueError = e }
+        // WO-6: then a group on every open patio job with a priced work order
+        // and 2+ crew. Same flag; never throws.
+        const patioGroups = await autoGroupPatioJobs(client)
+        // V8: fencing groups, same fence flag; never throws.
+        const fenceGroups = await autoGroupFenceJobs(client)
         // Ready full-super groups go to Xero as drafts with no office click
         // (owner, 30 Oct 2026). A failure here never stops the work order sweep.
         const groupReleases: unknown[] = []
@@ -10049,7 +10140,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           groupReleases.push({ error: 'group release sweep failed' })
         }
         if (issueError) throw issueError
-        return json({ ...issued, group_releases: groupReleases })
+        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups, fence_drafts: fenceDrafts, fence_groups: fenceGroups })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any
@@ -10847,6 +10938,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           review_state: reviewStateFromOfficeStatus(line.office_review_status),
         }))
 
+        // V16: office-only warning on a line claiming "Work order $X" when the
+        // job's live labour differs from the largest claim or 2+ leads claimed.
+        // Never blocks; a failed read is said on the claim line, never clean.
+        if (_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          const claimRead = await loadWorkOrderClaimCheck(client, tilJobId)
+          return json({
+            lines: withClaimWarnings(enrichedLines, claimRead),
+            work_order_claim_check: claimRead.check,
+            work_order_claim_check_error: claimRead.error,
+          })
+        }
         return json({ lines: enrichedLines })
       }
 
@@ -13043,6 +13145,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...plainExtras,
               ...(weeklyInvoice?.lines || []),
             ]).catch((error) => groupWorkOrderApiError(error))
+            await assertPatioPaysThroughGroup(client, [
+              ...plainLabour,
+              ...plainExtras,
+              ...(weeklyInvoice?.lines || []),
+            ], null, askOfficeForWorkOrder(client, tradeUser)).catch((error) => groupWorkOrderApiError(error))
             const shareSources = [
               ...labourLines.filter((line: any) => draftShareShaped(line)),
               ...extras.filter((extra: any) => draftShareShaped(extra)),
@@ -14120,6 +14227,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ...extraLineItems,
               ],
             }).catch((error) => groupWorkOrderApiError(error))
+            // Owner, 3 Nov 2026: patio pay goes through the group work order.
+            await assertPatioPaysThroughGroup(client, [
+              ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+              ...extraLineItems,
+            ], null, askOfficeForWorkOrder(client, tradeUser)).catch((error) => groupWorkOrderApiError(error))
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
@@ -19581,7 +19693,7 @@ async function getJobConversation(client: any, body: any) {
   try {
     const { rows: bev, error: bevErr, decisionsError } = await readBusinessEventsBySourceTime(client, {
       jobId,
-      select: TIMELINE_MESSAGE_COLUMNS,
+      select: `${TIMELINE_MESSAGE_COLUMNS}, copy_of:metadata->>placement_copy_of`,
       limit,
       since: sinceFilter,
       until,
@@ -19590,7 +19702,9 @@ async function getJobConversation(client: any, body: any) {
     })
     if (decisionsError) personDecisionsReadFailed = decisionsError
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
-    for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
+    // C2 known contacts (20261104095000): our own tool's copy of a text sits on
+    // its twin's job and is shown once, as the twin.
+    for (const r of bev) if (!isPlacementCopy(r)) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
   }
@@ -39266,7 +39380,10 @@ async function createInvoice(
 ) {
   const { job_id, jobId, contact_name, contactName, xero_contact_id, job_contact_id,
           line_items, lineItems, due_date, dueDate, reference,
-          xero_status, send_email } = body
+          xero_status, send_email, line_amount_types } = body
+  // Lines are ex GST (Xero adds 10%) unless the caller sends them inc GST: the deposit invoice does, so its total is
+  // the deposit to the cent (deposit_invoice_lines.ts, B2).
+  const lineAmountTypes: 'Inclusive' | 'Exclusive' = line_amount_types === 'Inclusive' ? 'Inclusive' : 'Exclusive'
   const sesContext = internal.ses
 
   const items = line_items || lineItems
@@ -39546,7 +39663,7 @@ async function createInvoice(
       Contact: resolvedContactId
         ? { ContactID: resolvedContactId }
         : { Name: contact },
-      LineAmountTypes: 'Exclusive',
+      LineAmountTypes: lineAmountTypes,
       LineItems: xeroLineItems,
       Reference: ref,
       DueDate: xeroDueDate,
@@ -39656,8 +39773,9 @@ async function createInvoice(
 
   // Immediately record in xero_invoices so future queries see it
   // (don't wait for xero-sync which runs every 2 hours)
-  const invTotal = xeroInv?.Total ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0) * 1.1
-  const invSubTotal = xeroInv?.SubTotal ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0)
+  const lineSum = items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0)
+  const invTotal = xeroInv?.Total ?? (lineAmountTypes === 'Inclusive' ? lineSum : lineSum * 1.1)
+  const invSubTotal = xeroInv?.SubTotal ?? (lineAmountTypes === 'Inclusive' ? Math.round((lineSum - lineSum / 11) * 100) / 100 : lineSum)
   if (xeroInvId) {
     // Loop 1B-a-apply: stamp the eleven traceability columns added by
     // migration 20260506101511_loop_1b_a_traceability. Eight columns come
@@ -40743,6 +40861,9 @@ async function createMiscJob(client: any, body: any) {
 // ── Send Quick Quote Email to Client ──
 async function sendQuickQuoteEmail(client: any, body: any) {
   const { job_id, pdf_url } = body
+  // JP-24 slice 1b: read the producer-named frozen revision now, before any
+  // send await, with its frozen pricing (D1 fix F1). Judged before the email.
+  const sourceScopeRevisionRead = startNamedScopeRevisionRead(client, body?.source_scope_revision_id, { withFrozenBlobs: true })
   if (!job_id) throw new Error('job_id required')
 
   const { data: job, error: jobErr } = await client.from('jobs')
@@ -40760,7 +40881,14 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
   if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
 
-  const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
+  // D1 fix F1: a send naming sealed revision A quotes A's frozen price and
+  // records A's pricing on the release, never the live job's. An unprovable
+  // named revision refuses here, before the email.
+  const sealedSource = sealedSendSource(await sourceScopeRevisionRead, job_id)
+  if (sealedSource.kind === 'refused') throw new Error(sealedSource.body.error)
+  const sealedPricingJson = sealedSource.kind === 'sealed' ? sealedSource.pricing_json : null
+  const builtPricing = quoteSendBuildSource(sealedSource, job).pricing_json as any
+  const pricing = typeof builtPricing === 'string' ? JSON.parse(builtPricing || '{}') : (builtPricing || {})
 
   // ── Server-side pricing gate (mirrors send-quote quotePricingGateError) ──
   // Refuse to send a quote the scoping tool flagged as failing validation, or one
@@ -40881,6 +41009,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       client_name: string | null
       pricing_json: Record<string, unknown> | null
     }
+    if (sealedPricingJson) fresh.pricing_json = sealedPricingJson
     const freshPricing = (fresh.pricing_json ?? {}) as Record<string, unknown>
     const freshTotalIncGSTRaw = freshPricing.totalIncGST ?? freshPricing.total ?? freshPricing.grandTotal
     const totalIncGSTNum = typeof freshTotalIncGSTRaw === 'number' && Number.isFinite(freshTotalIncGSTRaw)
@@ -40980,6 +41109,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
       released_via: 'ops-api/send_quick_quote_email',
       org_id: DEFAULT_ORG_ID,
       v2_inputs: v2InputsQq,
+      source_scope_revision: sourceScopeRevisionRead,
     }, { handler: 'ops-api/send_quick_quote_email', job_id })
 
     // N2 — see send-quote handlers. Structured body_preview so the extractor
@@ -41402,28 +41532,16 @@ async function createDepositInvoice(client: any, body: any) {
   refParts.push(`DEP${depositPercent}`)
   const reference = refParts.join('-')
 
-  // Deposit is inc GST — Xero adds GST, so we need ex GST amount
-  const depositExGst = Math.round((depositAmountIncGst / 1.1) * 100) / 100
-
-  const lineItems: any[] = [{
-    description,
-    quantity: 1,
-    unit_price: depositExGst,
-    account_code: accountCodeForJob(job.type),
-  }]
-
-  // Extra line items (council fees, etc.) — each has amount_inc_gst
+  // The deposit and any extras go inc GST (deposit_invoice_lines.ts), so Xero's total is the deposit to the cent
+  // (B2): an ex-GST line, round(inc / 1.1), with GST added on top missed about 1 in 11 inc-GST amounts by a cent.
   const extras = body.extra_line_items || []
-  for (const extra of extras) {
-    if (extra.amount_inc_gst > 0 && extra.description) {
-      lineItems.push({
-        description: extra.description,
-        quantity: 1,
-        unit_price: Math.round((extra.amount_inc_gst / 1.1) * 100) / 100,
-        account_code: accountCodeForJob(job.type),
-      })
-    }
-  }
+  const depositLines = depositInvoiceLines({
+    depositIncGst: depositAmountIncGst,
+    description,
+    accountCode: accountCodeForJob(job.type),
+    extras,
+  })
+  const lineItems: any[] = depositLines.line_items
 
   // Create Xero invoice as a draft by default so Shaun can review before sending.
   const invoiceResult = await createInvoice(client, {
@@ -41431,6 +41549,7 @@ async function createDepositInvoice(client: any, body: any) {
     xero_contact_id: invoiceContactId,
     contact_name: invoiceContactName,
     line_items: lineItems,
+    line_amount_types: depositLines.line_amount_types,
     reference,
     xero_status: body.xero_status || 'DRAFT',
     send_email: body.send_email !== false, // default: send
@@ -56437,7 +56556,10 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 }
 
 // ── my_trade_invoices: invoice history for a trade ──
-const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note'
+// xero_bill_total / xero_adjustments_ex / xero_adjustment_lines: what Xero pays
+// and the office's changes to the bill in Xero (Group WO V10, migration
+// 20261103140000; apply it before deploying this).
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines'
 
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
@@ -56556,7 +56678,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
     .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 

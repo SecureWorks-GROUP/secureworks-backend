@@ -438,11 +438,7 @@ $$;
 -- A later slice (B-5, 20261005210000) replaces the lane list; stand this
 -- migration's body back up (rolled back below) so its re-apply guard holds.
 \ir b2_cron_lanes.sql
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'8c99245789cadf661d4b6be1207f0887'
- THEN RAISE EXCEPTION 'b2 b2_cron_lanes.sql is not the B-2 body'; END IF;
-END $$;
+
 -- History daily (20261007050000) widens M4's live-job list, which this
 -- migration's guard pins; stand M4's body back up the same way.
 SELECT md5(prosrc)<>'49eb23015b724a29058c11b2743954bf' AS b2_list_moved

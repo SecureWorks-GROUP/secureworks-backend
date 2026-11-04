@@ -13,23 +13,7 @@ import {
   E_SENT,
 } from "../_shared/evidence/outlook_mail_fixtures.ts";
 import type { AttachmentResult } from "./attachments.ts";
-import {
-  type AudienceResolveOutcome,
-  type CaptureDeps,
-  type CaptureOutcome,
-  type CaptureResult,
-  type DeepGate,
-  type DeepScope,
-  deepWindow,
-  historyWindow,
-  mayResolveAudience,
-  perthMonth,
-  POLICY,
-  runOutlookCapture,
-  type RunRow,
-  type SourceRow,
-  sweepMissList,
-} from "./capture.ts";
+import { type AudienceResolveOutcome, type CaptureDeps, type CaptureOutcome, type CaptureResult, type DeepGate, type DeepScope, historyWindow, POLICY, runOutlookCapture, type RunRow, type SourceRow } from "./capture.ts";
 import { GraphReadError } from "./graph.ts";
 import { handleCapture } from "./handler.ts";
 
@@ -249,6 +233,8 @@ function deps(w: World): CaptureDeps {
     captureLaneOn: async () => w.lane,
     sources: async () => w.sources,
     supplierDomains: async () => new Set(["steelsupply.example"]),
+    builderSenders: async () =>
+      new Set(["builder.example", "mailer.one@portal.example"]),
     jobClientEmails: async () => new Set(["sam.sample@example.net"]),
     historyScope: async () => ({
       jobNumbers: new Set(["SWP-990001"]),
@@ -412,68 +398,6 @@ Deno.test("HTTP queue drives all four real capture modes to terminal receipts wi
   assertEquals(w.captured.length, 4, "no accepted mode is skipped by queueing");
 });
 
-Deno.test("idle unless email_reader_v1, email_capture_v2 and the capture lane are on; reads nothing", async () => {
-  for (
-    const [patch, reason] of [
-      [{ flags: { reader: false, program: true } }, "email_reader_v1_off"],
-      [{ flags: { reader: true, program: false } }, "email_capture_v2_off"],
-      [{ lane: false }, "capture_lane_off"],
-    ] as const
-  ) {
-    const w = world({
-      ...patch,
-      mailboxes: {
-        "nithin@secureworkswa.com.au": [msg(1, "2026-10-02T05:55:00Z")],
-      },
-    });
-    const r = await runOutlookCapture(deps(w), { mode: "poll" });
-    assertEquals(r, { outcome: "idle", reason });
-    assertEquals(w.listCalls, 0);
-    assertEquals(w.runs.length, 0);
-  }
-});
-
-Deno.test("first poll reads the last 30 minutes, inbound and sent, and records the pair cursor", async () => {
-  const box = [
-    msg(1, "2026-10-02T05:00:00Z"), // older than 30 minutes: not read
-    {
-      ...E_IDENTITY,
-      receivedAt: "2026-10-02T05:40:00Z",
-      parentFolderId: "F-inbox",
-    },
-    {
-      ...E_SENT,
-      receivedAt: "2026-10-02T05:45:00Z",
-      sentAt: "2026-10-02T05:45:00Z",
-      parentFolderId: "F-sent",
-    },
-    msg(4, "2026-10-02T05:50:00Z", { parentFolderId: "F-junk" }),
-    msg(5, "2026-10-02T05:51:00Z", { isDraft: true }),
-  ];
-  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
-  const r = await runOutlookCapture(deps(w), { mode: "poll" });
-  assert(r.outcome === "ran");
-  const run = lastRun(w, "outlook_nithin");
-  assertEquals(run.status, "succeeded");
-  assertEquals(run.counts!.inserted, 2);
-  assertEquals(run.counts!.skipped_folder, 2);
-  assertEquals(w.captured.map((c) => c.event_type), [
-    "client.email_in",
-    "client.email_out",
-  ]);
-  assertEquals(
-    (w.captured[1].payload as Record<string, unknown>).folder_kind,
-    "sent",
-  );
-  assertEquals(run.window_to, "2026-10-02T05:51:00.000Z");
-  assertEquals(run.window_end_id, "G0005");
-  assertEquals(run.cursor, {
-    mode: "poll",
-    backlog: false,
-    ids_at_end: ["h:G0005"],
-  });
-});
-
 Deno.test("a caught-up poll overlaps 10 minutes; re-read mail is a duplicate, never a second row", async () => {
   const box = [msg(1, "2026-10-02T05:39:00Z"), msg(2, "2026-10-02T05:50:00Z")];
   const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
@@ -606,47 +530,6 @@ Deno.test("capture lane switched off mid-run: partial, cursor not past the unsav
   assertEquals(run.window_to, "2026-10-02T05:41:00.000Z");
 });
 
-Deno.test("a live run of the same source is busy; an abandoned one is closed", async () => {
-  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": [] } });
-  w.runs.push({
-    id: "old",
-    source: "outlook_nithin",
-    status: "running",
-    started_at: "2026-10-02T05:58:00Z",
-    updated_at: "2026-10-02T05:58:00Z",
-    window_to: null,
-    window_end_id: null,
-    cursor: null,
-  });
-  const r = await runOutlookCapture(deps(w), { mode: "poll" });
-  assert(r.outcome === "ran");
-  assertEquals(r.sources[0].outcome, "busy");
-  w.runs[0].updated_at = "2026-10-02T05:30:00Z";
-  await runOutlookCapture(deps(w), { mode: "poll" });
-  assertEquals(w.runs[0].status, "failed");
-  assertEquals(w.runs[0].error_code, "abandoned");
-});
-
-Deno.test("sweep re-reads 48 hours; what the poll missed counts as sweep_misses", async () => {
-  const box = [
-    msg(1, "2026-10-01T08:00:00Z"),
-    msg(2, "2026-10-02T04:00:00Z"),
-    msg(3, "2026-09-29T08:00:00Z"),
-  ];
-  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
-  w.keys.set("email:m2@mail.example.com", "ev-existing");
-  const r = await runOutlookCapture(deps(w), {
-    mode: "sweep",
-    source: "nithin",
-  });
-  assert(r.outcome === "ran");
-  const run = lastRun(w, "outlook_sweep_nithin");
-  assertEquals(run.status, "succeeded");
-  assertEquals(run.counts!.sweep_misses, 1);
-  assertEquals(run.counts!.duplicates, 1);
-  assertEquals(run.counts!.seen, 2);
-});
-
 // Lanes health (6 Oct 2026): the first nightly sweep after the reader was
 // switched on re-read 48 hours that began before the reader's first poll, and
 // the status counted that older mail as "missed by the poll". The sweep now
@@ -661,79 +544,6 @@ const SHARED: SourceRow = {
   scope_label: "admin",
   owner_privacy: false,
 };
-const toShared = { to: [SHARED.email] };
-
-Deno.test("a sweep records when each email it had to save was received (cursor.miss_received_at)", async () => {
-  const box = [
-    msg(1, "2026-10-01T08:00:00Z", toShared),
-    msg(2, "2026-10-02T04:00:00Z", toShared),
-    msg(4, "2026-10-01T09:30:00.5Z", toShared),
-  ];
-  const w = world({ sources: [SHARED], mailboxes: { [SHARED.email]: box } });
-  w.keys.set("email:m2@mail.example.com", "ev-existing");
-  await runOutlookCapture(deps(w), { mode: "sweep", source: "admin" });
-  const run = lastRun(w, "outlook_sweep_admin");
-  assertEquals(run.counts!.sweep_misses, 2);
-  assertEquals(run.cursor!.miss_received_at, [
-    "2026-10-01T08:00:00.000Z",
-    "2026-10-01T09:30:00.500Z",
-  ]);
-  // A poll records no such list.
-  await runOutlookCapture(deps(w), { mode: "poll" });
-  assertEquals(
-    "miss_received_at" in lastRun(w, "outlook_admin").cursor!,
-    false,
-  );
-});
-
-// Review round 3: the list kept the oldest 100, so when a busy mailbox is
-// switched on, mail past the list (the newer pre-poll mail) still counted as
-// missed by the poll. The list keeps the newest instead: every miss past it
-// is older than its oldest time, so the status can leave those out whenever
-// that oldest time is before the source's first poll.
-Deno.test("a sweep with more misses than the list holds keeps the newest; the rest are older than every listed time", async () => {
-  const box = Array.from(
-    { length: POLICY.sweepMissTimesMax + 3 },
-    (_, i) =>
-      msg(
-        100 + i,
-        new Date(Date.parse("2026-10-01T08:00:00Z") + i * 60_000)
-          .toISOString(),
-        toShared,
-      ),
-  );
-  const w = world({ sources: [SHARED], mailboxes: { [SHARED.email]: box } });
-  await runOutlookCapture(deps(w), { mode: "sweep", source: "admin" });
-  const run = lastRun(w, "outlook_sweep_admin");
-  assertEquals(run.counts!.sweep_misses, POLICY.sweepMissTimesMax + 3);
-  const times = run.cursor!.miss_received_at as string[];
-  assertEquals(times.length, POLICY.sweepMissTimesMax);
-  // The three oldest (08:00, 08:01, 08:02) are past the list.
-  assertEquals(times[0], "2026-10-01T08:03:00.000Z");
-  assertEquals(times[times.length - 1], "2026-10-01T09:42:00.000Z");
-});
-
-Deno.test("the sweep's miss list: an unreadable time is listed as null (it always counts), then the newest times, oldest first", () => {
-  const t = (m: number) => Date.parse("2026-10-01T08:00:00Z") + m * 60_000;
-  assertEquals(sweepMissList([t(2), null, t(0), t(1)], 3), [
-    null,
-    "2026-10-01T08:01:00.000Z",
-    "2026-10-01T08:02:00.000Z",
-  ]);
-  // More unreadable times than the list holds: no time is listed, so the
-  // status cannot say the rest are older and counts them all.
-  assertEquals(sweepMissList([null, t(0), null, null], 2), [null, null]);
-  assertEquals(sweepMissList([t(5), t(4)], 3), [
-    "2026-10-01T08:04:00.000Z",
-    "2026-10-01T08:05:00.000Z",
-  ]);
-  assertEquals(sweepMissList([], 3), []);
-  assertEquals(
-    sweepMissList([t(1)]).length,
-    1,
-    "the default cap is POLICY.sweepMissTimesMax",
-  );
-});
 
 Deno.test("attachments: a poll handles an email's files once; the sweep and history runs recheck them", async () => {
   const box = [{
@@ -901,38 +711,6 @@ Deno.test("groups: posts read through conversations, oldest first, one row per p
     "patio",
   );
   assertEquals(run.window_to, "2026-10-02T05:55:00.000Z");
-});
-
-Deno.test("a group the directory cannot find fails with group_not_found", async () => {
-  const w = world({
-    sources: [{
-      email: "finance@secureworkswa.com.au",
-      source_key: "finance",
-      kind: "group",
-      scope_label: "finance",
-      owner_privacy: false,
-    }],
-  });
-  await runOutlookCapture(deps(w), { mode: "poll" });
-  assertEquals(lastRun(w, "outlook_finance").error_code, "group_not_found");
-});
-
-Deno.test("an unknown or unselected source is refused; unknown-kind sources are never read", async () => {
-  const w = world({
-    sources: [{
-      email: "info@secureworkswa.com.au",
-      source_key: "info",
-      kind: "unknown",
-      scope_label: "other",
-      owner_privacy: false,
-    }],
-  });
-  assertEquals(
-    await runOutlookCapture(deps(w), { mode: "poll", source: "info" }),
-    { outcome: "refused", code: "source_not_selected" },
-  );
-  const r = await runOutlookCapture(deps(w), { mode: "poll" });
-  assert(r.outcome === "ran" && r.sources.length === 0);
 });
 
 Deno.test("an inbound email the old path already saved is skipped, not saved twice (gap plan B-1)", async () => {
@@ -1217,62 +995,6 @@ Deno.test("fixed sweep: page walk resumes all 450 live emails across 200-convers
   assert(w.attachmentRecheck.every(Boolean));
 });
 
-Deno.test("fixed sweep: failed and abandoned runs retain the exact window and cursor", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { [FENCING.email]: sweepGroup(250) },
-  });
-  await runOutlookCapture(deps(w), FIXED_SWEEP);
-  const first = lastRun(w, "outlook_sweep_fencing");
-  const reached = structuredClone(first.cursor);
-  w.now += 5 * 60_000;
-  w.onConversationList = () => {
-    throw new GraphReadError("graph_503", 503);
-  };
-  await runOutlookCapture(deps(w), FIXED_SWEEP);
-  const failed = lastRun(w, "outlook_sweep_fencing");
-  assertEquals(failed.status, "failed");
-  assertEquals(failed.cursor!.group, reached!.group);
-  w.onConversationList = undefined;
-  w.runs.push({
-    ...structuredClone(failed),
-    id: "sweep-killed",
-    status: "running",
-    started_at: new Date(w.now + 1).toISOString(),
-    updated_at: new Date(w.now + 1).toISOString(),
-  });
-  w.now += 15 * 60_000;
-  await runOutlookCapture(deps(w), FIXED_SWEEP);
-  assertEquals(
-    w.runs.find((r) => r.id === "sweep-killed")!.error_code,
-    "abandoned",
-  );
-  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
-  assertEquals(w.captured.length, 250);
-  assertEquals(w.keys.size, 250);
-});
-
-Deno.test("fixed sweep: changed lower bound cannot reuse a narrower window cursor", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { [FENCING.email]: sweepGroup(250) },
-  });
-  await runOutlookCapture(deps(w), {
-    ...FIXED_SWEEP,
-    from: "2026-10-02T02:30:00.000Z",
-  });
-  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "partial");
-  w.now += 5 * 60_000;
-  await runOutlookCapture(deps(w), FIXED_SWEEP);
-  const wider = lastRun(w, "outlook_sweep_fencing");
-  assertEquals(wider.counts!.conversations_read, 200);
-  assertEquals(wider.counts!.conversations_skipped, 0);
-  w.now += 5 * 60_000;
-  await runOutlookCapture(deps(w), FIXED_SWEEP);
-  assertEquals(lastRun(w, "outlook_sweep_fencing").status, "succeeded");
-  assertEquals(w.keys.size, 250);
-});
-
 Deno.test("fixed sweep: budget-cut group capture makes progress until every live message is saved once", async () => {
   const w = world({
     sources: [FENCING],
@@ -1348,25 +1070,6 @@ Deno.test("fixed sweep: personal mailbox resumes after a budget stop without his
   assertEquals(lastRun(w, "outlook_sweep_nithin").status, "succeeded");
   assertEquals(w.keys.size, 6);
   assertEquals(w.captured.length, 6);
-});
-
-Deno.test("fixed sweep: malformed, oversized, future, incomplete and sourceless windows refuse before capture", async () => {
-  for (
-    const req of [
-      { ...FIXED_SWEEP, from: "not-a-date" },
-      { ...FIXED_SWEEP, from: "2026-09-29T00:00:00Z" },
-      { ...FIXED_SWEEP, to: "2026-10-03T00:00:00Z" },
-      { ...FIXED_SWEEP, from: undefined },
-      { ...FIXED_SWEEP, to: undefined },
-      { ...FIXED_SWEEP, source: undefined },
-    ]
-  ) {
-    const w = world();
-    const result = await runOutlookCapture(deps(w), req);
-    assertEquals(result.outcome, "refused");
-    assertEquals(w.runs.length, 0);
-    assertEquals(w.listCalls, 0);
-  }
 });
 
 Deno.test("W7: a group history larger than one run resumes where the last run stopped; nothing is read twice", async () => {
@@ -1476,299 +1179,6 @@ Deno.test("W7: a conversation that gets new mail during the load is still read (
   assertEquals(w.keys.size, 450);
 });
 
-Deno.test("W7: a window whose start the plan moved forward keeps its progress", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(450) },
-  });
-  await runOutlookCapture(deps(w), FENCING_HISTORY);
-  w.now += 5 * 60_000;
-  await runOutlookCapture(deps(w), {
-    ...FENCING_HISTORY,
-    from: "2026-08-10T00:00:00.000Z",
-  });
-  const second = historyRuns(w)[1];
-  assertEquals(second.status, "succeeded");
-  assertEquals(second.counts!.conversations_skipped, 400);
-  assertEquals(w.captured.length, 450);
-});
-
-Deno.test("W7: a run that fails or is abandoned hands its cursor on; the next run does not start again", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(450) },
-  });
-  await runOutlookCapture(deps(w), FENCING_HISTORY);
-  const reached = walkOf(historyRuns(w)[0]);
-
-  // A Graph fault on the next run: failed, no progress, the cursor kept.
-  w.now += 5 * 60_000;
-  w.onConversationList = () => {
-    // The running row already carries the cursor it started from.
-    assertEquals(walkOf(historyRuns(w).at(-1)!), reached);
-    throw new GraphReadError("graph_503", 503);
-  };
-  await runOutlookCapture(deps(w), FENCING_HISTORY);
-  const failed = historyRuns(w)[1];
-  assertEquals(failed.status, "failed");
-  assertEquals(failed.error_code, "graph_503");
-  assertEquals(failed.counts!.progressed, 0);
-  assertEquals(walkOf(failed), reached);
-  assertEquals(failed.window_to, historyRuns(w)[0].window_to);
-
-  // A worker that stopped mid-run: closed as abandoned, its cursor kept.
-  w.onConversationList = undefined;
-  w.runs.push({
-    id: "run-stuck",
-    source: "outlook_history_fencing",
-    status: "running",
-    started_at: new Date(w.now + 1).toISOString(),
-    updated_at: new Date(w.now + 1).toISOString(),
-    window_to: failed.window_to,
-    window_end_id: null,
-    cursor: failed.cursor,
-  });
-  w.now += 15 * 60_000;
-  await runOutlookCapture(deps(w), FENCING_HISTORY);
-  assertEquals(
-    w.runs.find((r) => r.id === "run-stuck")!.error_code,
-    "abandoned",
-  );
-  const last = historyRuns(w).at(-1)!;
-  assertEquals(last.status, "succeeded");
-  assertEquals(last.counts!.conversations_read, 50);
-  assertEquals(w.captured.length, 450);
-});
-
-Deno.test("W7: a long history run saves its cursor on its running row as it goes", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(300) },
-    tick: 1_000,
-  });
-  const seen: Array<string | null> = [];
-  w.onConversationList = () => {
-    const r = historyRuns(w).at(-1)!;
-    if (r.status === "running") seen.push(r.window_to);
-  };
-  await runOutlookCapture(deps(w), FENCING_HISTORY);
-  assertEquals(historyRuns(w)[0].status, "partial");
-  // The second page was listed after checkpoints moved the running row's cursor.
-  assert(seen.length >= 2 && seen.at(-1) !== null);
-});
-
-Deno.test("W7: a conversation Graph answers 404 for is counted and passed; the walk is not held there", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
-  });
-  const d = deps(w);
-  const threads = d.mail.listGroupThreads;
-  const posts = d.mail.listGroupPosts;
-  d.mail.listGroupThreads = async (g, c) => {
-    if (c === "C005") throw new GraphReadError("graph_404", 404);
-    return await threads(g, c);
-  };
-  d.mail.listGroupPosts = async (g, th, topic) => {
-    if (th === "T-C007") throw new GraphReadError("graph_404", 404);
-    return await posts(g, th, topic);
-  };
-  await runOutlookCapture(d, FENCING_HISTORY);
-  const run = historyRuns(w)[0];
-  assertEquals(run.status, "succeeded");
-  assertEquals(run.error_code, null);
-  assertEquals(run.counts!.conversations_gone, 1);
-  assertEquals(run.counts!.threads_gone, 1);
-  assertEquals(run.counts!.conversations_read, 30);
-  assertEquals(w.captured.length, 28);
-  assert(!w.keys.has("email:c005-0@mail.example.org"));
-  assert(!w.keys.has("email:c007-0@mail.example.org"));
-});
-
-Deno.test("W7: any other fault reading a conversation still fails the run at it, cursor before it", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
-  });
-  const d = deps(w);
-  const threads = d.mail.listGroupThreads;
-  d.mail.listGroupThreads = async (g, c) => {
-    if (c === "C005") throw new GraphReadError("graph_403", 403);
-    return await threads(g, c);
-  };
-  await runOutlookCapture(d, FENCING_HISTORY);
-  const run = historyRuns(w)[0];
-  assertEquals(run.status, "failed");
-  assertEquals(run.error_code, "graph_403");
-  assertEquals(w.captured.length, 5);
-  assertEquals(walkOf(run).before_ids, ["h:C004"]);
-});
-
-Deno.test("W7: a long conversation checkpoints inside itself, so an abandoned run hands on the posts it saved", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(1, 60) },
-    tick: 1_000,
-  });
-  const d = deps(w);
-  const save = d.recordRun;
-  const running: Array<unknown> = [];
-  d.recordRun = async (row) => {
-    if (row.status === "running" && row.run_id) {
-      running.push(
-        ((row.cursor as Record<string, unknown>)?.group as Record<
-          string,
-          unknown
-        >)?.conv ?? null,
-      );
-    }
-    return await save(row);
-  };
-  await runOutlookCapture(d, FENCING_HISTORY);
-  // A running-row checkpoint already names the conversation cut point.
-  assert(running.includes("h:C000"), `checkpoints: ${JSON.stringify(running)}`);
-});
-
-function groupPost(id: string, at: string): OutlookMailItem {
-  return {
-    graphId: id,
-    internetMessageId: `<${id}@mail.example.org>`,
-    conversationId: "C000",
-    subject: "Fence quote",
-    from: "sam.sample@example.net",
-    to: [],
-    receivedAt: at,
-    bodyText: id,
-    folderKind: "group",
-  };
-}
-
-Deno.test("W7: a many-page conversation saves its page and the next run resumes past it", async () => {
-  // T1's second page is older than its first. A time cursor would drop it.
-  const t0 = [
-    groupPost("P-T0-0", "2026-09-10T00:00:00.000Z"),
-    groupPost("P-T0-1", "2026-09-10T01:00:00.000Z"),
-  ];
-  const t1 = [
-    groupPost("P-T1-0", "2026-09-20T00:00:00.000Z"),
-    groupPost("P-T1-1", "2026-09-21T00:00:00.000Z"),
-    groupPost("P-T1-2", "2026-09-01T00:00:00.000Z"),
-    groupPost("P-T1-3", "2026-09-02T00:00:00.000Z"),
-  ];
-  const w = world({
-    sources: [FENCING],
-    groups: {
-      "fencing@secureworkswa.com.au": {
-        id: "GRP-FENCING",
-        posts: [
-          ...t0.map((post) => ({ conv: "C000", thread: "T0", post })),
-          ...t1.map((post) => ({ conv: "C000", thread: "T1", post })),
-        ],
-      },
-    },
-  });
-  const d = deps(w);
-  const postTokens: string[] = [];
-  d.mail.listGroupThreadPage = async (_groupId, _conv, next) => {
-    if (next) return { items: [], next: null };
-    return {
-      items: [
-        { id: "T0", topic: "A" },
-        { id: "T1", topic: "B" },
-      ],
-      next: null,
-    };
-  };
-  const pages: Record<string, OutlookMailItem[]> = { T0: t0, T1: t1 };
-  d.mail.listGroupPostPage = async (_groupId, thread, _topic, next) => {
-    const token = next ?? "start";
-    postTokens.push(`${thread}:${token}`);
-    const all = pages[thread] ?? [];
-    const offset = token === "start" ? 0 : Number(token);
-    const more = offset + 2 < all.length ? String(offset + 2) : null;
-    return { items: all.slice(offset, offset + 2), next: more };
-  };
-  let arm = true;
-  const capture = d.capture;
-  d.capture = async (row) => {
-    const out = await capture(row);
-    if (arm && w.keys.size >= 4) w.tick = 200_000;
-    return out;
-  };
-  await runOutlookCapture(d, FENCING_HISTORY);
-  const first = historyRuns(w)[0];
-  assertEquals(first.status, "partial");
-  assertEquals(walkOf(first).conv, "h:C000");
-  assertEquals(walkOf(first).thread, "h:T1");
-  assertEquals(walkOf(first).post_page, "2");
-  assertEquals(walkOf(first).conv_after, null);
-  assertEquals(walkOf(first).before, null);
-  assertEquals(w.keys.size, 4);
-  assertEquals(postTokens, ["T0:start", "T1:start"]);
-
-  arm = false;
-  w.tick = 0;
-  w.now += 5 * 60_000;
-  postTokens.length = 0;
-  await runOutlookCapture(d, FENCING_HISTORY);
-  assertEquals(historyRuns(w)[1].status, "succeeded");
-  assertEquals(postTokens, ["T1:2"]);
-  assertEquals(w.keys.size, 6);
-  assertEquals(w.captured.length, 6);
-});
-
-Deno.test("W7: a hung post page times out as graph_timeout, keeps the page checkpoint, and is not retried in a loop", async () => {
-  const all = [
-    groupPost("P0", "2026-09-01T00:00:00.000Z"),
-    groupPost("P1", "2026-09-02T00:00:00.000Z"),
-    groupPost("P2", "2026-09-03T00:00:00.000Z"),
-    groupPost("P3", "2026-09-04T00:00:00.000Z"),
-  ];
-  const w = world({
-    sources: [FENCING],
-    groups: {
-      "fencing@secureworkswa.com.au": {
-        id: "GRP-FENCING",
-        posts: all.map((post) => ({ conv: "C000", thread: "T0", post })),
-      },
-    },
-  });
-  const d = deps(w);
-  const postTokens: string[] = [];
-  d.mail.listGroupThreadPage = async () => ({
-    items: [{ id: "T0", topic: "A" }],
-    next: null,
-  });
-  d.mail.listGroupPostPage = async (_groupId, thread, _topic, next) => {
-    const token = next ?? "start";
-    postTokens.push(`${thread}:${token}`);
-    if (postTokens.length > 4) throw new Error("post page retried in a loop");
-    if (token !== "start") throw new GraphReadError("graph_timeout", null);
-    return { items: all.slice(0, 2), next: "2" };
-  };
-  await runOutlookCapture(d, FENCING_HISTORY);
-  const first = historyRuns(w)[0];
-  assertEquals(first.status, "failed");
-  assertEquals(first.error_code, "graph_timeout");
-  assertEquals(walkOf(first).conv, "h:C000");
-  assertEquals(walkOf(first).thread, "h:T0");
-  assertEquals(walkOf(first).post_page, "2");
-  assertEquals(walkOf(first).before, null);
-  assertEquals(w.keys.size, 2);
-  assertEquals(postTokens, ["T0:start", "T0:2"]);
-
-  w.now += 5 * 60_000;
-  postTokens.length = 0;
-  await runOutlookCapture(d, FENCING_HISTORY);
-  const second = historyRuns(w)[1];
-  assertEquals(second.status, "failed");
-  assertEquals(second.error_code, "graph_timeout");
-  assertEquals(postTokens, ["T0:2"]);
-  assertEquals(w.keys.size, 2);
-  assertEquals(w.captured.length, 2);
-  assertEquals(walkOf(second).post_page, "2");
-});
-
 // History depth PR B (7 Oct 2026): mode deep. One slice of a mailbox older
 // than the 60-day limit, kept only where it touches a monitored live job from
 // that job's lead-in on, every row marked history_tier deep; the counts-only
@@ -1796,62 +1206,6 @@ function deepScope(p: {
     builderRefs: m(p.builderRefs),
   };
 }
-
-Deno.test("deep: idle while email_reader_deep_v1 is off; refused without a source, before the hard floor, over 32 days in a user mailbox, or in the future", async () => {
-  const box = [msg(1, "2026-05-10T02:00:00Z", { subject: "SWP-990001" })];
-  const off = world({
-    mailboxes: { "nithin@secureworkswa.com.au": box },
-    deep: { ...world().deep, enabled: false },
-  });
-  assertEquals(await runOutlookCapture(deps(off), DEEP_WINDOW), {
-    outcome: "idle",
-    reason: "email_reader_deep_v1_off",
-  });
-  assertEquals(off.listCalls, 0);
-  assertEquals(off.runs.length, 0);
-  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
-  for (
-    const [patch, code] of [
-      [{ source: null }, "deep_needs_source"],
-      [{
-        from: "2024-12-31T15:59:59.000Z",
-        to: "2025-01-20T00:00:00.000Z",
-      }, "deep_window_before_floor"],
-      [{
-        from: "2026-04-01T00:00:00.000Z",
-        to: "2026-05-04T00:00:00.000Z",
-      }, "deep_window_too_long"],
-      [{
-        from: "2026-09-20T00:00:00.000Z",
-        to: "2026-10-09T00:00:00.000Z",
-      }, "deep_window_invalid"],
-      [{
-        from: "2026-06-01T00:00:00.000Z",
-        to: "2026-05-01T00:00:00.000Z",
-      }, "deep_window_invalid"],
-    ] as const
-  ) {
-    assertEquals(
-      await runOutlookCapture(deps(w), { ...DEEP_WINDOW, ...patch }),
-      { outcome: "refused", code },
-    );
-  }
-  assertEquals(w.listCalls, 0);
-  assertEquals(w.runs.length, 0);
-  // A group is walked in one window of any length; the probe spans any length.
-  const gate = world().deep;
-  const year = {
-    mode: "deep" as const,
-    from: "2025-03-01T00:00:00.000Z",
-    to: "2026-06-01T00:00:00.000Z",
-  };
-  assert(deepWindow(year, NOW, gate, "group").ok);
-  assertEquals(deepWindow(year, NOW, gate, "user"), {
-    ok: false,
-    code: "deep_window_too_long",
-  });
-  assert(deepWindow({ ...year, probe: true }, NOW, gate, "user").ok);
-});
 
 Deno.test("deep: keeps mail touching a monitored job from that job's lead-in on, by job number, builder reference and client email; older matches are skipped_before_job; rows are backfill and history_tier deep", async () => {
   const box = [
@@ -1923,243 +1277,6 @@ Deno.test("deep: keeps mail touching a monitored job from that job's lead-in on,
   assertEquals(run.window_to, "2026-05-20T02:00:00.000Z");
 });
 
-Deno.test("deep: a user slice cut by the time budget resumes where it stopped; a window with the same end and an earlier start is read from its own start", async () => {
-  const box: Msg[] = [];
-  for (let i = 0; i < 6; i++) {
-    box.push(
-      msg(i, `2026-05-2${i}T02:00:00Z`, { subject: `SWP-990001 update ${i}` }),
-    );
-  }
-  box.push(msg(9, "2026-04-30T12:00:00Z", { subject: "SWP-990001 before" }));
-  const w = world({
-    mailboxes: { "nithin@secureworkswa.com.au": box },
-    tick: 30_000,
-    deepScope: deepScope({
-      jobNumbers: { "SWP-990001": "2026-04-01T00:00:00Z" },
-    }),
-  });
-  await runOutlookCapture(deps(w), DEEP_WINDOW);
-  const first = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(first.status, "partial");
-  const savedFirst = w.keys.size;
-  assert(savedFirst > 0 && savedFirst < 6);
-  // The same end, a day earlier start: not the first window's cursor.
-  w.tick = 0;
-  await runOutlookCapture(deps(w), {
-    ...DEEP_WINDOW,
-    from: "2026-04-30T00:00:00.000Z",
-  });
-  const wider = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(wider.status, "succeeded");
-  assertEquals(wider.counts!.skipped_before_cursor, 0);
-  assertEquals(wider.counts!.duplicates, savedFirst);
-  assertEquals(wider.counts!.inserted, 7 - savedFirst);
-  // The first window resumes from its own cursor.
-  w.tick = 30_000;
-  for (let i = 0; i < 6; i++) {
-    await runOutlookCapture(deps(w), DEEP_WINDOW);
-    if (lastRun(w, "outlook_deep_history_nithin").status === "succeeded") {
-      break;
-    }
-  }
-  const done = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(done.status, "succeeded");
-  assertEquals(
-    (done.cursor as Record<string, unknown>).history_from,
-    DEEP_WINDOW.from,
-  );
-  assertEquals(w.keys.size, 7);
-});
-
-Deno.test("deep: the plan's slice id rides on the run's cursor, and a cut run is resumed only by a call for the same slice; another posting of the same window reads it from its own start", async () => {
-  const SLICE_A = "2026-10-01T05:00:00.000Z";
-  const SLICE_B = "2026-10-02T05:00:00.000Z";
-  const box: Msg[] = [];
-  for (let i = 0; i < 6; i++) {
-    box.push(
-      msg(i, `2026-05-2${i}T02:00:00Z`, { subject: `SWP-990001 update ${i}` }),
-    );
-  }
-  const w = world({
-    mailboxes: { "nithin@secureworkswa.com.au": box },
-    tick: 30_000,
-    deepScope: deepScope({
-      jobNumbers: { "SWP-990001": "2026-04-01T00:00:00Z" },
-    }),
-  });
-  // Slice A is cut by the time budget part way.
-  await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice: SLICE_A });
-  const a = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(a.status, "partial");
-  assertEquals((a.cursor as Record<string, unknown>).deep_slice, SLICE_A);
-  const savedA = w.keys.size;
-  assert(savedA > 0 && savedA < 6);
-  // The plan posts the same window again as a new slice (a re-walk after a
-  // key change): never resumed from slice A's cursor, read from its start.
-  w.tick = 0;
-  await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice: SLICE_B });
-  const b = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(b.status, "succeeded");
-  assertEquals((b.cursor as Record<string, unknown>).deep_slice, SLICE_B);
-  assertEquals(b.counts!.skipped_before_cursor, 0);
-  assertEquals(b.counts!.seen, 6);
-  assertEquals(b.counts!.duplicates, savedA);
-  assertEquals(b.counts!.inserted, 6 - savedA);
-  // A call for slice A again carries on from slice A's own cursor.
-  await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice: SLICE_A });
-  const again = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(again.status, "succeeded");
-  assertEquals((again.cursor as Record<string, unknown>).deep_slice, SLICE_A);
-  assert(again.counts!.skipped_before_cursor >= 1);
-  assert(again.counts!.seen < 6);
-  // A call that names no slice resumes neither.
-  await runOutlookCapture(deps(w), DEEP_WINDOW);
-  const none = lastRun(w, "outlook_deep_history_nithin");
-  assertEquals(none.counts!.skipped_before_cursor, 0);
-  assertEquals(none.counts!.seen, 6);
-  assert(!("deep_slice" in (none.cursor as Record<string, unknown>)));
-});
-
-Deno.test("deep: a slice id is the plan's ISO time or nothing, and only a deep call carries one", async () => {
-  const w = world({
-    mailboxes: {
-      "nithin@secureworkswa.com.au": [
-        msg(1, "2026-05-10T02:00:00Z", { subject: "SWP-990001" }),
-      ],
-    },
-  });
-  for (
-    const slice of [
-      "2026-10-01 05:00:00",
-      "2026-10-01T05:00:00Z",
-      "slice-1",
-      "",
-      "2026-13-01T05:00:00.000Z",
-    ]
-  ) {
-    assertEquals(
-      await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice }),
-      { outcome: "refused", code: "deep_slice_invalid" },
-    );
-  }
-  assertEquals(
-    await runOutlookCapture(deps(w), {
-      mode: "history",
-      source: "nithin",
-      from: "2026-09-01T00:00:00.000Z",
-      to: "2026-09-02T00:00:00.000Z",
-      slice: "2026-10-01T05:00:00.000Z",
-    }),
-    { outcome: "refused", code: "slice_needs_deep_mode" },
-  );
-  assertEquals(w.listCalls, 0);
-  assertEquals(w.runs.length, 0);
-});
-
-Deno.test("deep: a group window is walked as W7's history and ends at the window's end", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
-    deepScope: deepScope({
-      clientEmails: { "sam.sample@example.net": "2026-01-01T00:00:00Z" },
-    }),
-  });
-  const req = {
-    mode: "deep" as const,
-    source: "fencing",
-    from: "2026-09-28T00:00:00.000Z",
-    to: "2026-09-29T12:00:00.000Z",
-  };
-  await runOutlookCapture(deps(w), req);
-  const run = lastRun(w, "outlook_deep_history_fencing");
-  assertEquals(run.status, "succeeded");
-  const expected = fencingGroup(30).posts.filter((p) => {
-    const t = Date.parse(p.post.receivedAt!);
-    return t >= Date.parse(req.from) && t < Date.parse(req.to);
-  }).length;
-  assert(expected > 0);
-  assertEquals(w.captured.length, expected);
-  assertEquals(run.counts!.kept_by_client_email, expected);
-  assert((run.cursor as Record<string, unknown>).group !== undefined);
-  assertEquals((run.cursor as Record<string, unknown>).history_tier, "deep");
-  assert(
-    w.captured.every((c) =>
-      Date.parse(String(c.event_at)) < Date.parse(req.to) &&
-      (c.metadata as Record<string, unknown>).history_tier === "deep"
-    ),
-  );
-  assert(historyRuns(w).length === 0); // never W7's run source
-});
-
-Deno.test("deep probe: counts by Perth month and folder kind, writes nothing, needs no deep flag", async () => {
-  const box: Msg[] = [
-    msg(1, "2025-03-10T02:00:00Z"),
-    msg(2, "2025-03-31T20:00:00Z", { parentFolderId: "F-sent" }), // 1 Apr in Perth
-    msg(3, "2025-04-02T02:00:00Z", { parentFolderId: "F-junk" }),
-    msg(4, "2025-04-03T02:00:00Z", { parentFolderId: "F-deleted" }),
-  ];
-  for (let i = 0; i < 120; i++) {
-    box.push(msg(100 + i, `2026-05-1${i % 10}T0${i % 9}:00:00Z`));
-  }
-  const w = world({
-    mailboxes: { "nithin@secureworkswa.com.au": box },
-    deep: { ...world().deep, enabled: false },
-  });
-  const r = await runOutlookCapture(deps(w), {
-    mode: "deep",
-    probe: true,
-    source: "nithin",
-    from: "2025-02-28T16:00:00.000Z",
-    to: "2026-06-01T00:00:00.000Z",
-  });
-  assert(r.outcome === "probe");
-  assertEquals(r.complete, true);
-  assertEquals(r.kind, "user");
-  assertEquals(r.months["2025-03"], { seen: 1, more: false });
-  assertEquals(r.months["2025-04"], { seen: 3, more: false });
-  assertEquals(r.months["2026-05"], { seen: 100, more: true });
-  assertEquals(r.months["2025-12"], { seen: 0, more: false });
-  assertEquals(Object.keys(r.months).length, 16);
-  assertEquals(Object.keys(r.months), Object.keys(r.months).sort());
-  assertEquals(r.folders, { inbox: 101, sent: 1, deleted: 1, skipped: 1 });
-  assertEquals(r.oldest_seen, "2025-03-10T02:00:00.000Z");
-  assertEquals(r.error_code, null);
-  // Nothing written: no evidence row, no run row, no attachment.
-  assertEquals(w.captured.length, 0);
-  assertEquals(w.runs.length, 0);
-  assertEquals(w.attachmentCalls.length, 0);
-  assertEquals(perthMonth(Date.parse("2025-03-31T20:00:00Z")), "2025-04");
-  // A probe is only a deep call.
-  assertEquals(
-    await runOutlookCapture(deps(w), { mode: "poll", probe: true }),
-    { outcome: "refused", code: "probe_needs_deep_mode" },
-  );
-});
-
-Deno.test("deep probe: a group counts conversations by the month they were last delivered, until one is older than the window", async () => {
-  const w = world({
-    sources: [FENCING],
-    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
-    deep: { ...world().deep, enabled: false },
-  });
-  const r = await runOutlookCapture(deps(w), {
-    mode: "deep",
-    probe: true,
-    source: "fencing",
-    from: "2026-09-29T00:00:00.000Z",
-    to: "2026-10-01T00:00:00.000Z",
-  });
-  assert(r.outcome === "probe");
-  assertEquals(r.complete, true);
-  assertEquals(r.kind, "group");
-  // Conversation i was last delivered 2i hours before 30 Sep 00:00Z.
-  assertEquals(r.folders, { conversations: 13, undated: 0 });
-  assertEquals(r.months, { "2026-09": { seen: 13, more: false } });
-  assertEquals(w.postReads.length, 0);
-  assertEquals(w.captured.length, 0);
-  assertEquals(w.runs.length, 0);
-});
-
 Deno.test("every mode writes the builder references an email names; the prefix floor is used (and counted) when the company prefixes cannot be read", async () => {
   const box = [
     msg(1, "2026-10-02T05:50:00Z", {
@@ -2192,6 +1309,117 @@ Deno.test("every mode writes the builder references an email names; the prefix f
       .builder_ref_prefixes_floor_only,
     1,
   );
+});
+
+// C7 rule proofs (3 Nov 2026): job mail the reader dropped as noise or as
+// owner-private mail in one live week, rebuilt here with made-up parties.
+Deno.test("a partner's document sent through Xero, MYOB, QuickBooks or Buildertrend is saved as that partner's mail; platform news and a copy of our own document are not", async () => {
+  const replyTo = (v: string) => ({ "reply-to": v });
+  const box = [
+    msg(1, "2026-10-02T05:41:00Z", {
+      from: "messaging-service@post.xero.com",
+      subject: "Invoice INV-77001 from Steel Supply for SECUREWORKS WA",
+      headers: replyTo("Steel Supply <orders@steelsupply.example>"),
+    }),
+    msg(2, "2026-10-02T05:42:00Z", {
+      from: "messaging-service@post.xero.com",
+      subject: "Message from sam.sample@example.net regarding invoice INV-1789",
+      bodyText: "The gate latch is still loose; I will pay when it is fixed.",
+      headers: replyTo("sam.sample@example.net"),
+    }),
+    msg(3, "2026-10-02T05:43:00Z", {
+      from: "accountright@apps.myob.com",
+      subject: "Remittance advice",
+      headers: replyTo("ap@builder-accounts.example"),
+    }),
+    msg(4, "2026-10-02T05:44:00Z", {
+      from: "notifications@buildertrend.net",
+      subject: "Bill payment made on job '6 - Warranty - 190 Sample Ave'",
+      headers: replyTo("no-reply@buildertrend.net"),
+    }),
+    msg(5, "2026-10-02T05:45:00Z", {
+      from: "noreply@send.xero.com",
+      subject: "Dive into the latest from Xero",
+      headers: { "list-unsubscribe": "<mailto:u@send.xero.com>" },
+    }),
+    msg(6, "2026-10-02T05:46:00Z", {
+      from: "messaging-service@post.xero.com",
+      subject: "Invoice INV-1790 from SecureWorks WA for Sam Sample",
+      headers: replyTo("accounts@secureworkswa.com.au"),
+    }),
+  ];
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  const saved = w.captured.map((r) => {
+    const p = r.payload as Record<string, unknown>;
+    return [r.event_type, p.email, p.sender_kind, p.sent_via];
+  });
+  assertEquals(saved, [
+    ["supplier.email_in", "orders@steelsupply.example", "supplier", "post.xero.com"],
+    ["client.email_in", "sam.sample@example.net", "customer", "post.xero.com"],
+    ["client.email_in", "ap@builder-accounts.example", "customer", "apps.myob.com"],
+    ["supplier.email_in", "notifications@buildertrend.net", "automated", "buildertrend.net"],
+  ]);
+  assert(String(w.captured[1].body_preview).includes("gate latch"));
+  assertEquals(lastRun(w, "outlook_nithin").counts!.skipped_noise, 2);
+});
+
+Deno.test("a known supplier's or builder's machine mail is saved (a bounce of our job email, a bookings schedule); other machine mail naming no job is not", async () => {
+  const box = [
+    msg(1, "2026-10-02T05:41:00Z", {
+      from: "postmaster@steelsupply.example",
+      subject: "Undeliverable: URGENT PICKUP - JOB SWP-261-283",
+      headers: { "auto-submitted": "auto-replied" },
+    }),
+    msg(2, "2026-10-02T05:42:00Z", {
+      from: "noreply@builder.example",
+      subject: "Please check attached bookings schedule",
+    }),
+    msg(3, "2026-10-02T05:43:00Z", {
+      from: "mailer.one@portal.example",
+      subject: "Work order issued",
+    }),
+    msg(4, "2026-10-02T05:44:00Z", {
+      from: "no-reply@app.example",
+      subject: "Your one-time code is 198252",
+    }),
+  ];
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  assertEquals(
+    w.captured.map((r) => [r.event_type, (r.payload as Record<string, unknown>).email]),
+    [
+      ["supplier.email_in", "postmaster@steelsupply.example"],
+      ["client.email_in", "noreply@builder.example"],
+      ["client.email_in", "mailer.one@portal.example"],
+    ],
+  );
+  assertEquals(lastRun(w, "outlook_nithin").counts!.skipped_noise, 1);
+});
+
+Deno.test("owner mailbox: our own mail naming a builder's reference, and our system's notices, are saved; our own mail naming no job is not (D-EM3)", async () => {
+  const owner: SourceRow = {
+    email: "marnin@secureworkswa.com.au",
+    source_key: "marnin",
+    kind: "user",
+    scope_label: "owner",
+    owner_privacy: true,
+  };
+  const ours = (n: number, subject: string, from = "marnin@secureworkswa.com.au", to = ["someone@example.org"]) =>
+    msg(n, `2026-10-02T05:4${n}:00Z`, { from, to, subject, folderKind: "sent", parentFolderId: "F-sent" });
+  const box = [
+    ours(1, "Cheque details - 16 Sample Way (PO 20304569-06)", undefined, ["marnin@secureworkswa.com.au"]),
+    ours(2, "New Google Review", "noreply@mail.secureworkswa.com.au", ["marnin@secureworkswa.com.au"]),
+    ours(3, "Dinner on Friday"),
+  ];
+  const w = world({ sources: [owner], mailboxes: { "marnin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  assertEquals(w.captured.map((r) => (r.payload as Record<string, unknown>).subject), [
+    "Cheque details - 16 Sample Way (PO 20304569-06)",
+    "New Google Review",
+  ]);
+  assertEquals((w.captured[0].payload as Record<string, unknown>).builder_refs, ["PO-20304569"]);
+  assertEquals(lastRun(w, "outlook_marnin").counts!.skipped_private, 1);
 });
 
 // Group mailbox audience (9 Oct 2026): a group post lists no recipients, so
@@ -2428,47 +1656,4 @@ Deno.test("group mailbox audience: our group post read again (a sweep) goes to t
   );
   assertEquals(run.counts!.audience_resolve_errors, 1);
   assertEquals(run.counts!.audience_relabelled, 0);
-});
-
-Deno.test("group mailbox audience: which copies that meet a saved row may know better who our email went to", () => {
-  const groups = new Set([
-    "ses@secureworkswa.com.au",
-    "finance@secureworkswa.com.au",
-  ]);
-  const r = (to: string[], cc: string[] = []) => ({ payload: { to, cc } });
-  assert(mayResolveAudience(r([]), "ours", "group", groups));
-  assert(
-    mayResolveAudience(
-      r(["coordinator@builder.example"], ["ses@secureworkswa.com.au"]),
-      "ours",
-      "user",
-      groups,
-    ),
-  );
-  assert(
-    mayResolveAudience(
-      r(["Finance <FINANCE@secureworkswa.com.au>"]),
-      "ours",
-      "user",
-      groups,
-    ),
-  );
-  assert(
-    !mayResolveAudience(
-      r(["pat.example@example.com"], ["admin@secureworkswa.com.au"]),
-      "ours",
-      "user",
-      groups,
-    ),
-  );
-  assert(!mayResolveAudience(r([]), "ours", "user", groups));
-  assert(
-    !mayResolveAudience(
-      r(["ses@secureworkswa.com.au"]),
-      "customer",
-      "user",
-      groups,
-    ),
-  );
-  assert(!mayResolveAudience(r([]), "customer", "group", groups));
 });

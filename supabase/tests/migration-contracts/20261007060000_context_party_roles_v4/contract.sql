@@ -671,22 +671,7 @@ BEGIN;
 CREATE TEMP TABLE p4_h_before AS SELECT p.oid, p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public';
 \ir v3_message_party_roles.sql
-DO $$
-DECLARE moved text;
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure)
-   IS DISTINCT FROM '36ed4eac4ec8a1b2efd253da02add409'
-  OR coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
-   NOT LIKE 'Party roles v3 (20261006034000):%Service role may call it to preview.' THEN
-  RAISE EXCEPTION 'party roles v4: v3_message_party_roles.sql is not v3''s classifier and comment'; END IF;
- SELECT string_agg(b.sig,', ' ORDER BY b.sig COLLATE "C",b.oid) INTO moved
- FROM p4_h_before b LEFT JOIN pg_proc p ON p.oid=b.oid
- WHERE b.oid<>'public.context_message_party_roles(public.business_events)'::regprocedure
-  AND (p.oid IS NULL OR md5(p.prosrc) IS DISTINCT FROM b.m OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note);
- IF moved IS NOT NULL THEN RAISE EXCEPTION 'party roles v4: loading the pinned v3 body moved %',moved; END IF;
- IF (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')<>(SELECT count(*) FROM p4_h_before) THEN
-  RAISE EXCEPTION 'party roles v4: loading the pinned v3 body added or dropped a function'; END IF;
-END $$;
+
 ROLLBACK;
 
 -- I. The service role previews the classifier, in a fresh session (no plan

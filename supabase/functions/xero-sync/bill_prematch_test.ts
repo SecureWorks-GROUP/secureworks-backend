@@ -438,9 +438,46 @@ Deno.test("the sync never places a bill whose supplier document is duplicated (r
   // Its own older facts, outside the window or cap, are swept too: hold first, then the fact goes by its own source.
   const sweep = src.slice(src.indexOf("// 5. This path's own facts outside this run's window or cap"), src.indexOf("// Bill pre-match (JP-06): after the queue upsert"));
   assertEquals(sweep.includes("if (seenNow.has(id) || !OWN_FACT_SOURCES.has(src)) continue"), true);
+  // An agent-placed fact follows the bill's amount and is then left alone:
+  // filtered to agent_prematch and its own job, before the assigned-queue skip.
+  const follow = src.indexOf("if (agentPrematchAmountFollowsBill({");
+  const skipAssigned = src.indexOf("if (existingQueueStatus && existingQueueStatus !== 'open')");
+  assertEquals(follow > 0 && follow < skipAssigned, true);
+  const followBody = src.slice(follow, skipAssigned);
+  assertEquals(followBody.includes(".eq('automation_source', 'agent_prematch')"), true);
+  assertEquals(followBody.includes(".eq('job_id', placedJob)"), true);
+  assertEquals(followBody.includes(".eq('status', 'assigned')"), true);
+  assertEquals(followBody.includes("continue"), true);
   assertEquals(sweep.includes("if (qs && qs !== 'open') continue"), true);
   assertEquals(sweep.indexOf("suggestionReason: 'duplicate_document'") < sweep.indexOf(".from('job_materials_facts').delete()"), true);
   // A removal is counted only when the database confirms it.
   assertEquals(sweep.includes("if (dErr || !Array.isArray(gone)) {"), true);
   assertEquals(sweep.indexOf("if (gone.length === 0) continue") < sweep.indexOf("counts.duplicate_facts_held ="), true);
+});
+
+Deno.test("a new bill is proposed on the next run even when the open list is longer than one run's share", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue
+    .filter((q) => q.id === "q-open-noref" || q.id === "q-open-refnojob")
+    .map((q) => ({ ...q, xero_contact_id: "c-fwwa" }));
+  seed.jobs = [{ id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [];
+  const line = (text: string) => [{ Description: text, AccountCode: "305", LineAmount: 400 }];
+  seed.xero_invoices = [
+    { xero_invoice_id: "xinv-001", invoice_number: "12345678", status: "AUTHORISED", reference: null, line_items: line("Job SWF-25010 posts"), job_id: null },
+    { xero_invoice_id: "xinv-003", invoice_number: "BD-7777", status: "AUTHORISED", reference: null, line_items: line("Job SWF-25010 rails"), job_id: null },
+  ];
+  seed.context_email_attachments = [];
+  // The older bill already has a proposal from an earlier run; the newer one has none.
+  seed.materials_bill_proposals = [{ id: "p-old", xero_invoice_id: "xinv-001", outcome: "queued_for_review", outcome_reason: null, input_hash: "an older decision", auto_assigned_at: null }];
+  const { client, store } = makeFakeClient(seed);
+
+  const out = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:00:00.000Z", maxRows: 1, turn: 0 });
+  assertEquals([out.rows_decided, out.rows_waiting_turn], [1, 1]);
+  assertEquals(store.materials_bill_proposals.filter((p) => p.outcome !== "superseded").map((p) => p.xero_invoice_id).sort(), ["xinv-001", "xinv-003"]);
+  assertEquals(store.materials_bill_proposals.find((p) => p.id === "p-old")!.outcome, "queued_for_review");
+
+  // The next run's turn reaches the older bill.
+  await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:15:00.000Z", maxRows: 1, turn: 1 });
+  assertEquals(store.materials_bill_proposals.find((p) => p.id === "p-old")!.outcome, "superseded");
 });

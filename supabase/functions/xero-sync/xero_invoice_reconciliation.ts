@@ -80,13 +80,33 @@ export const DRAFT_RECONCILE_LIMIT = 5;
 // Rows whose stored status disagrees with their own stored Xero record (CFO-14,
 // 19 Oct 2026: 97 customer invoices, e.g. 6 open invoices stored as DELETED by
 // an old error branch). They are never stale in the open or draft sense, so
-// they never healed. A few are re-read once a day under the draft gate.
-export const MISMATCH_RECONCILE_LIMIT = 10;
+// they never healed. A few are re-read every run; each row at most once a day.
+//
+// Until 3 Nov 2026 they rode the daily draft gate, last in the batch. 20 were
+// re-read on 27 and 28 Oct; from 29 Oct every run was stopped for CPU time
+// before this step, and the first full run (3 Nov 07:19Z) marked the day swept
+// without reaching them, so 42 sat unread (INV-1075, SW1346: the old hourly
+// re-read set PAID on 27 Aug without the record, which still lists no credit
+// note). A row healed by its re-read leaves the selection, so the cost is one
+// Xero call per row, not per run. Five a run keeps a run with a full page of
+// open receivables near Xero's 60 calls a minute (a 429 holds every Xero call
+// through the shared cooldown); the 42 heal in about nine runs.
+export const MISMATCH_RECONCILE_LIMIT = 5;
+export const MISMATCH_RETRY_MS = 24 * 60 * 60 * 1000;
 const XERO_INVOICE_STATUSES = ["DRAFT", "SUBMITTED", "AUTHORISED", "PAID", "VOIDED", "DELETED"];
-/** PostgREST filter: stored status is missing or differs from raw_json.Status. */
-export const STATUS_MISMATCH_FILTER = XERO_INVOICE_STATUSES
-  .map((st) => `and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`)
-  .join(",");
+/** A customer invoice stored with no Xero record (raw_json null) and not
+ *  voided or deleted. INV-1315 class: the status-mismatch filter needs
+ *  raw_json.Status, so a row that was never read back was never selected,
+ *  and its lines stayed missing. One GET /Invoices/{id} fills them. */
+export const UNREAD_XERO_RECORD_FILTER =
+  "and(raw_json.is.null,or(status.is.null,status.not.in.(VOIDED,DELETED)))";
+/** PostgREST filter: stored status is missing or differs from raw_json.Status,
+ *  or the row was never read back from Xero. */
+export const STATUS_MISMATCH_FILTER = [
+  ...XERO_INVOICE_STATUSES
+    .map((st) => `and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`),
+  UNREAD_XERO_RECORD_FILTER,
+].join(",");
 // sync_invoices runs every 15 minutes. The draft sweep is a quota decision,
 // not a freshness decision: it costs one GET /Invoices/{id} per draft, so it
 // is gated to one pass per 24 hours through the existing sync-state table.
@@ -199,21 +219,26 @@ export async function listStaleXeroInvoices(
     }
     draftRows = drafts.data;
   }
-  let mismatchRows: Array<{ xero_invoice_id: string }> = [];
-  if (gate.due) {
-    const mismatched = await client.from("xero_invoices")
-      .select("xero_invoice_id")
-      .eq("org_id", orgId).eq("invoice_type", "ACCREC")
-      .or(STATUS_MISMATCH_FILTER)
-      .order("reconcile_attempted_at", { ascending: true, nullsFirst: true })
-      .limit(MISMATCH_RECONCILE_LIMIT);
-    if (invalid(mismatched.data, mismatched.error)) {
-      throw new Error(
-        "Invoice reconciliation is incomplete: status mismatch selection failed",
-      );
-    }
-    mismatchRows = mismatched.data;
+  // Not under the daily gate: a row attempted in the last day (healed rows
+  // leave the selection; a failing one stays) waits, so a row Xero cannot
+  // answer costs one call a day. Never-attempted rows sort first.
+  const mismatched = await client.from("xero_invoices")
+    .select("xero_invoice_id,reconcile_attempted_at")
+    .eq("org_id", orgId).eq("invoice_type", "ACCREC")
+    .or(STATUS_MISMATCH_FILTER)
+    .order("reconcile_attempted_at", { ascending: true, nullsFirst: true })
+    .limit(MISMATCH_RECONCILE_LIMIT);
+  if (invalid(mismatched.data, mismatched.error)) {
+    throw new Error(
+      "Invoice reconciliation is incomplete: status mismatch selection failed",
+    );
   }
+  const retryBefore = now.getTime() - MISMATCH_RETRY_MS;
+  const mismatchRows: Array<{ xero_invoice_id: string }> = mismatched.data
+    .filter((row: { reconcile_attempted_at?: string | null }) => {
+      const at = Date.parse(String(row.reconcile_attempted_at ?? ""));
+      return !Number.isFinite(at) || at < retryBefore;
+    });
   const seen = new Set<string>();
   const merged: Array<{ xero_invoice_id: string }> = [];
   const take = (rows: Array<{ xero_invoice_id: string }>, cap: number) => {
@@ -266,7 +291,7 @@ export function isolatedReconcileFailure(error: unknown): boolean {
 
 // Failed lookups leave balances and synced_at untouched. Only the attempt
 // stamp moves, so a permanently broken row stops heading the next sweep.
-async function recordReconcileFailure(
+export async function recordReconcileFailure(
   // deno-lint-ignore no-explicit-any
   client: any,
   orgId: string,

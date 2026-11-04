@@ -11,6 +11,9 @@
 --      holding job, a public-key row, a crew-marked row and a non-invoice row
 --      are never touched; xero_invoices is never written; a second run writes
 --      nothing. Bad plans and the attribution lane off refuse.
+--   3a. An empty plan (xero-sync's own_job mode, finish line B3, 3 Nov 2026)
+--      places only rows whose invoice has a job: nothing by reference, nothing
+--      queued, the holding job's row and the unlinked invoices' rows untouched.
 --   4. The touched jobs go on the catch-up list; a holding job never does.
 --   5. Every dry run works inside a READ ONLY transaction.
 --   6. The undo puts every row back exactly and removes the backfill's rows.
@@ -148,6 +151,35 @@ BEGIN
   RAISE EXCEPTION 'xero_evidence_contract: a second backfill would write again';
  END IF;
 END $$;
+
+-- 3a. An empty plan: a payment recorded before its invoice was linked follows the
+--     link, and nothing else moves (xero-sync runs this whatever the flag says).
+SAVEPOINT own_job;
+DO $$
+DECLARE res jsonb;
+BEGIN
+ res:=public.context_xero_evidence_place('{}'::jsonb,false);
+ IF (res->'written'->>'queued_with_candidates')::integer<>0 OR (res->'written'->>'skipped_busy')::integer<>0
+  OR (res->'written'->>'changed_meanwhile')::integer<>0 THEN
+  RAISE EXCEPTION 'xero_evidence_contract: an empty plan wrote %',res->'written';
+ END IF;
+ IF (SELECT count(*) FROM public.business_events b
+     WHERE b.id IN ('c5e40000-0000-4000-8000-0000000000e9','c5e40000-0000-4000-8000-000000000e10','c5e40000-0000-4000-8000-000000000e12')
+      AND b.job_id='c5e40000-0000-4000-8000-0000000000a1' AND b.match_method='direct_job_id'
+      AND b.metadata->>'placement_rule'='xero_invoice_job')<>3 THEN
+  RAISE EXCEPTION 'xero_evidence_contract: an empty plan did not put the rows whose invoice has a job on that job';
+ END IF;
+ IF EXISTS(SELECT 1 FROM public.business_events b JOIN c5e_before s ON s.id=b.id
+   WHERE b.id IN ('c5e40000-0000-4000-8000-0000000000e6','c5e40000-0000-4000-8000-0000000000e7','c5e40000-0000-4000-8000-0000000000e8')
+    AND to_jsonb(b)<>s.r) THEN
+  RAISE EXCEPTION 'xero_evidence_contract: an empty plan touched an unlinked invoice''s row or the holding job''s row';
+ END IF;
+ IF EXISTS(SELECT 1 FROM public.business_events b
+   WHERE b.metadata->>'placement_rule'='xero_reference_unique' OR coalesce(b.metadata,'{}'::jsonb) ? 'xero_review') THEN
+  RAISE EXCEPTION 'xero_evidence_contract: an empty plan matched by reference or queued a row';
+ END IF;
+END $$;
+ROLLBACK TO SAVEPOINT own_job;
 
 -- 3. Placement.
 DO $$

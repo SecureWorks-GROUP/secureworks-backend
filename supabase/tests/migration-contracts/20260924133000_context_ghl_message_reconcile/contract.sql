@@ -251,11 +251,17 @@ SELECT md5(prosrc)<>'ecdec7c3bc7f09cb3ea23d35ac096cd2' AS c1d_lanes_moved
 FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure \gset
 \if :c1d_lanes_moved
 -- Restore the later capture classification before historical rollback proof.
+-- C1 capture lanes (20261103230000) replace both capture bodies after CTX-T5: they come off first.
+\ir ../20261030192929_context_capture_excludes_evaluation/roll_back_successors.sql
 \ir ../../../rollbacks/20261030192929_context_capture_excludes_evaluation_down.sql
 -- Restore the superseded health preimage inside this rollback-only proof.
 \ir ../20261030144532_context_email_sweep_continuation/pre-sweep-health.sql
 \ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
 \endif
+-- B4 rules (e) and (f) (20261104233000) replace that view again: they come off before (c) and (d).
+\ir ../20261104233000_dispatch_order_bill_saved_numbers/roll_back_if_live.sql
+-- B4 rules (c) and (d) (20261104040000) read the email reader's attachments: they come off first.
+\ir ../20261104040000_dispatch_order_bill_more_rules/roll_back_if_live.sql
 \ir ../../../rollbacks/20261002150000_context_email_reader_down.sql
 \ir ../../../rollbacks/20260924210000_context_ghl_retry_status_down.sql
 -- Likewise T2 (20261002100000) adds its own job to the lane list C1d pins.

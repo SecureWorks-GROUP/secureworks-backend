@@ -17,6 +17,7 @@ import {
   autoIssueJobWorkOrders,
   backfillJobWorkOrders,
   createJobWorkOrder,
+  jobWorkOrderFilledFrom,
   readJobWorkOrder,
   tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
@@ -33,6 +34,8 @@ const REV_NEWER = "55555555-5555-4555-8555-555555555552";
 type Tables = Record<string, any[]>;
 
 function get(row: any, path: string) {
+  // PostgREST JSON text path (detail_json->>work_order_id) reads as a dot path.
+  if (path.includes("->>")) path = path.replace(/->>/g, ".");
   return path.split(".").reduce(
     (v, k) => (v == null ? v : (Array.isArray(v) ? v[0] : v)[k]),
     row,
@@ -46,8 +49,10 @@ class Query {
   private mode: "one" | "maybe" | null = null;
   private lim: number | null = null;
   private sorts: Array<{ col: string; ascending: boolean }> = [];
+  private exactCount = false;
   constructor(private db: FakeDb, private table: string) {}
-  select(_cols?: string) {
+  select(_cols?: string, opts?: { count?: string }) {
+    if (opts?.count === "exact") this.exactCount = true;
     return this;
   }
   insert(payload: any) {
@@ -153,6 +158,7 @@ class Query {
         ? { data: rows[0], error: null }
         : { data: null, error: { message: "not one" } };
     }
+    if (this.exactCount) return { data: rows, count: rows.length, error: null };
     return { data: rows, error: null };
   }
 }
@@ -339,8 +345,20 @@ Deno.test("an untouched draft is filled from the accepted quote on the staff rea
   ], [2, "hrs", 2, 80, 160, false, true]);
   assert(roots.flags.includes("outside_quote_labour"));
   assert(wo.scope_items.every((i: any) => i.source === "quote"));
+  // The revision the lines came from is stored on the row (R7), and the
+  // read says where it came from.
+  assertEquals(wo.quote_filled_scope_revision_id, REV_ACCEPTED);
+  assertEquals(r.filled_from, {
+    scope_revision_id: REV_ACCEPTED,
+    source: "work_order",
+    unreadable: false,
+  });
   // Stored, so the next read is a plain read.
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
+  assertEquals(
+    db.tables.work_orders[0].quote_filled_scope_revision_id,
+    REV_ACCEPTED,
+  );
   const again: any = await readJobWorkOrder(db, {
     jobId: JOB,
     fillFromQuote: true,
@@ -492,6 +510,24 @@ Deno.test("no accepted revision: the draft is not filled, from a later revision 
     assertEquals(db.tables.work_orders[0].agreed_labour_ex, null, label);
     assertEquals(db.writes(), [], label);
   }
+});
+
+Deno.test("a missing named accepted revision does not fill from another quote frozen before acceptance", async () => {
+  const db = baseDb();
+  db.tables.jobs[0].accepted_at = "2026-10-11T00:00:00Z";
+  // The quote was rendered from A, then B froze before the acceptance arrived.
+  // A remains the explicit accepted identity, but its read now returns no row.
+  db.tables.scope_revisions = [laterRevision()];
+  const preview = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals([preview.quote.source, preview.quote.scope_revision_id, preview.quote.flags], [
+    null, null, ["no_accepted_quote"],
+  ]);
+  assertEquals(preview.result.lines, []);
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.reason, "no_accepted_quote");
+  assertEquals(db.tables.work_orders[0].scope_items, []);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
+  assertEquals(db.writes(), []);
 });
 
 Deno.test("an unreadable accepted revision is never replaced by another one", async () => {
@@ -1464,4 +1500,252 @@ Deno.test("auto issue: a job moved past quoted with a frozen tool quote goes to 
       );
     }
   }
+});
+
+Deno.test("filled_from: a draft filled before the column existed reads its revision from the fill event", async () => {
+  const db = baseDb();
+  db.tables.work_orders[0].quote_filled_at = "2026-10-15T00:00:00Z";
+  db.tables.work_orders[0].hand_edited_at = "2026-10-15T01:00:00Z";
+  db.tables.job_events.push(
+    {
+      job_id: JOB,
+      event_type: "job_work_order_draft_filled_from_quote",
+      created_at: "2026-10-15T00:00:00Z",
+      detail_json: { work_order_id: DRAFT, scope_revision_id: REV_ACCEPTED },
+    },
+    {
+      job_id: JOB,
+      event_type: "job_work_order_draft_filled_from_quote",
+      created_at: "2026-10-16T00:00:00Z",
+      detail_json: {
+        work_order_id: "00000000-0000-4000-8000-0000000000ff",
+        scope_revision_id: "00000000-0000-4000-8000-0000000000fe",
+      },
+    },
+  );
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.filled_from, {
+    scope_revision_id: REV_ACCEPTED,
+    source: "fill_event",
+    unreadable: false,
+  });
+});
+
+Deno.test("filled_from: a stamped fill whose event was never written is unknown, not not filled", async () => {
+  const db = baseDb();
+  db.tables.work_orders[0].quote_filled_at = "2026-10-15T00:00:00Z";
+  db.tables.work_orders[0].hand_edited_at = "2026-10-15T01:00:00Z";
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.filled_from, {
+    scope_revision_id: null,
+    source: null,
+    unreadable: true,
+  });
+});
+
+Deno.test("filled_from: an unread fill event is unknown, never not filled", () => {
+  assertEquals(
+    jobWorkOrderFilledFrom({ id: DRAFT, quote_filled_scope_revision_id: null }, null),
+    { scope_revision_id: null, source: null, unreadable: true },
+  );
+  assertEquals(
+    jobWorkOrderFilledFrom({ id: DRAFT, quote_filled_scope_revision_id: null }, []),
+    { scope_revision_id: null, source: null, unreadable: false },
+  );
+  // The column wins over any event.
+  assertEquals(
+    jobWorkOrderFilledFrom(
+      { id: DRAFT, quote_filled_scope_revision_id: REV_ACCEPTED },
+      null,
+    ).source,
+    "work_order",
+  );
+});
+
+Deno.test("a cleared draft refilled after a newer revision is recorded names the newer revision (PR 1100 F1)", async () => {
+  const db = baseDb();
+  await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(
+    db.tables.work_orders[0].quote_filled_scope_revision_id,
+    REV_ACCEPTED,
+  );
+  // Staff clear the lines and the agreed labour; the job's accepted revision
+  // is then recorded as a newer one.
+  Object.assign(db.tables.work_orders[0], {
+    scope_items: [],
+    agreed_labour_ex: null,
+  });
+  db.tables.scope_revisions.push(laterRevision());
+  db.tables.jobs[0].expected_costs = { scope_revision_id: REV_NEWER };
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
+  assertEquals(r.quote_fill.filled, true);
+  assertEquals(r.quote_fill.scope_revision_id, REV_NEWER);
+  assertEquals(r.work_order.quote_filled_scope_revision_id, REV_NEWER);
+  assertEquals(r.filled_from.source, "work_order");
+});
+
+// ── D1 fix F3: a failed accepted-revision read at acceptance ──
+//
+// The quote was sent naming A and the customer accepted A. The scoper had
+// refrozen B (unsent) before the acceptance, so B is the newest revision frozen
+// at or before accepted_at. The expected-cost freeze at acceptance could not
+// prove the source (a read failed), so jobs.expected_costs stayed null. Before
+// the fix the work order then filled from B: B's lines and B's labour figure
+// went to the crew. Rule: Unknown never picks a different revision.
+const DOC_A = "66666666-6666-4666-8666-666666666661";
+function sentAAcceptedAfterRefreezeToB(db: FakeDb) {
+  db.tables.jobs[0].expected_costs = null;
+  db.tables.jobs[0].accepted_at = ACCEPTED_AT;
+  db.tables.scope_revisions[0].status = "superseded";
+  db.tables.scope_revisions.push({
+    ...laterRevision(),
+    frozen_at: "2026-10-08T00:00:00Z", // before the acceptance (9 Oct)
+  });
+  db.tables.job_documents = [{ id: DOC_A, job_id: JOB, type: "quote", accepted_at: ACCEPTED_AT }];
+  db.tables.run_acceptances = [];
+  db.tables.job_variations = [];
+  db.tables.quote_revisions = [{
+    job_id: JOB, job_document_id: DOC_A, scope_revision_id: REV_ACCEPTED, sent_at: "2026-10-06T00:00:00Z",
+  }];
+  return db;
+}
+
+Deno.test("D1-F3a a failed accepted-revision read: the work order is not filled from the newer revision B; it says Unknown and why", async () => {
+  const db = sentAAcceptedAfterRefreezeToB(baseDb());
+  db.failOn.add("select:job_documents");
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.quote.source, null);
+  assertEquals(p.quote.scope_revision_id, null, "no revision is picked");
+  assert(p.quote.flags.includes("accepted_quote_unproven:acceptance_chain_unreadable"), p.quote.flags.join(","));
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.reason, outcome.unproven_reason], [false, "no_accepted_quote", "acceptance_chain_unreadable"]);
+  const wo = db.tables.work_orders[0];
+  assertEquals([wo.scope_items, wo.agreed_labour_ex], [[], null], "the draft stays untouched: no B lines, no B labour");
+});
+
+Deno.test("D1-F3b once the read works, the chain's named revision A fills, never the newer B", async () => {
+  const db = sentAAcceptedAfterRefreezeToB(baseDb());
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals([outcome.filled, outcome.scope_revision_id], [true, REV_ACCEPTED]);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED, "A's labour figure, not B's 175");
+});
+
+// Scope B4 (owner, 3 Nov 2026): the patio crew work order is the accepted
+// labour, trades x days x day rate. An older patio quote (SWP-261640 shape:
+// no labour row, labourCostEstimate 0) kept it only in the sealed scope.
+function olderPatioQuoteDb() {
+  const db = baseDb();
+  db.tables.jobs[0].type = "patio";
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    line_items: [{ category: "steel", description: "Posts 90x90x2", quantity: 4, cost_price: 582.2, total_cost: 582.2 }],
+    labourCostEstimate: 0,
+  });
+  db.tables.scope_revisions[0].scope_canonical_text = JSON.stringify({
+    pricing: { labour: { days: "1.5", sell: "2640", trades: "2", dayRate: "360" } },
+  });
+  return db;
+}
+
+Deno.test("older patio quote: the work order takes trades x days x day rate from the sealed scope and waits for Shaun", async () => {
+  const db = olderPatioQuoteDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assertEquals(r.issued, false, "never issued automatically");
+  assertEquals(calls, []);
+  assertEquals(wo.status, "draft");
+  assertEquals(wo.agreed_labour_ex, 1080);
+  assertEquals(wo.quote_filled_at, undefined, "not stamped as the quote's own");
+  const line = wo.scope_items.find((i: any) => i.line_key === "labour:scope");
+  assertEquals(
+    [line.description, line.total, line.counted, line.needs_review],
+    ["Labour: 2 trades x 1.5 days at $360/day", 1080, true, true],
+  );
+  assert(line.flags.includes("labour_from_scope_config"));
+});
+
+Deno.test("a patio quote with its own labour row ignores the scope figure", async () => {
+  const db = olderPatioQuoteDb();
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    line_items: [{ category: "labour", unit: "hrs", quantity: 24, cost_price: 45, description: "Labour: 2 trades x 1.5 days" }],
+    labourCostEstimate: 1080,
+  });
+  db.tables.scope_revisions[0].scope_canonical_text = JSON.stringify({
+    pricing: { labour: { days: "9", trades: "9", dayRate: "999" } },
+  });
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.filled, true);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 1080);
+  assert(wo.quote_filled_at, "the quote's own labour is stamped as before");
+  assert(!wo.scope_items.some((i: any) => i.line_key === "labour:scope"));
+});
+
+// Scope B4: the new patio tool (patio-scoper) seals no pricing line items. Its
+// labour is the sealed scope's labour lines (draft.pricing.labourLines: people
+// x days x day rate, or one figure for the line), and their sum is the quote's
+// labourCostEstimate (SWP-26248 Rev 10 shape, made-up figures). Without them
+// the fill found no line, wrote nothing and the crew work order never filled.
+function patioToolQuoteDb() {
+  const db = baseDb();
+  db.tables.jobs[0].type = "patio";
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    tool: "patio-scoper",
+    labourCostEstimate: 2680,
+    internal: { labour: 2680, materials: 5000 },
+  });
+  db.tables.scope_revisions[0].scope_canonical_text = JSON.stringify({
+    tool: "patio-scoper",
+    lines: [{ id: "post-1", description: "Post 90x90", quantity: 4, unit: "each" }],
+    draft: {
+      pricing: {
+        labour: 2680,
+        labourLines: [
+          { id: "crew", work: "Build the patio: footings, posts, frame, roof, gutter and flashings", people: 2, days: 3, dayRate: 380, amount: null },
+          { id: "x1", work: "Remove the old pergola", people: null, days: null, dayRate: null, amount: 400 },
+        ],
+      },
+    },
+  });
+  return db;
+}
+
+Deno.test("new patio tool: the work order fills with the sealed labour lines, the quote's labour is agreed, and it goes to the trades", async () => {
+  const db = patioToolQuoteDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals([r.reason, r.issued], ["issued", true]);
+  assertEquals(calls.length, 1);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 2680, "the quote's labourCostEstimate");
+  assert(wo.quote_filled_at, "stamped as the quote's own");
+  assert(wo.quote_filled_scope_revision_id, "names the sealed revision");
+  const labour = wo.scope_items.filter((i: any) => i.line_key.startsWith("labour:tool:"));
+  assertEquals(
+    labour.map((l: any) => [l.description, l.qty, l.unit, l.total, l.counted, l.needs_review]),
+    [
+      ["Labour: Build the patio: footings, posts, frame, roof, gutter and flashings", 6, "trade days", 2280, true, false],
+      ["Labour: Remove the old pergola", null, null, 400, true, false],
+    ],
+  );
+  for (const l of labour) assert(!/\$|\d+\/day/.test(l.description), `no rate in the words: ${l.description}`);
+  assert(!wo.scope_items.some((i: any) => i.line_key === "labour:scope"));
+});
+
+Deno.test("new patio tool: lines that do not make the quote's labour are kept, flagged, and the agreed labour stays the quote's", async () => {
+  const db = patioToolQuoteDb();
+  const pricing = JSON.parse(db.tables.scope_revisions[0].pricing_canonical_text);
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({ ...pricing, labourCostEstimate: 3000 });
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.filled, true);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.agreed_labour_ex, 3000);
+  const labour = wo.scope_items.filter((i: any) => i.line_key.startsWith("labour:tool:"));
+  assertEquals(labour.length, 2);
+  assert(labour.every((l: any) => !l.counted && l.needs_review && l.flags.includes("labour_differs_from_quote")));
 });

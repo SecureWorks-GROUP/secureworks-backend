@@ -14,6 +14,8 @@ import {
   looksLikeText,
   PDF_TEXT_MAX_BYTES,
   PDF_TEXT_MIN_CHARS,
+  PDF_TEXT_REQUEST_MAX_BYTES,
+  pdfTextByteLimit,
 } from "./makesafe_pdf_text.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -53,7 +55,7 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-function validTextPdf(lines: string[]): Uint8Array {
+function validTextPdf(lines: string[], padBytes = 0): Uint8Array {
   const escaped = lines.map((line) =>
     line.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
   );
@@ -67,6 +69,13 @@ function validTextPdf(lines: string[]): Uint8Array {
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${enc(content).length} >>\nstream\n${content}\nendstream`,
   ];
+  // An unreferenced stream of spaces makes a large file that is still a
+  // valid PDF (a quote whose size is its photos, not its words).
+  if (padBytes > 0) {
+    objects.push(
+      `<< /Length ${padBytes} >>\nstream\n${" ".repeat(padBytes)}\nendstream`,
+    );
+  }
   let pdf = "%PDF-1.4\n";
   const offsets = [0];
   for (let index = 0; index < objects.length; index++) {
@@ -231,4 +240,66 @@ Deno.test("uncompressed (no /Filter) content stream is still read", async () => 
   const r = await extractPdfText(pdf);
   assertEquals(r.mode, "text");
   assert(r.text.includes("MLB-25795"));
+});
+
+Deno.test("a raised size limit reads a PDF over 5 MB, never past 20 MB; the default stays 5 MB", async () => {
+  assertEquals(pdfTextByteLimit(), PDF_TEXT_MAX_BYTES);
+  assertEquals(pdfTextByteLimit(1_000), PDF_TEXT_MAX_BYTES);
+  assertEquals(pdfTextByteLimit(Number.NaN), PDF_TEXT_MAX_BYTES);
+  assertEquals(pdfTextByteLimit(12_345_678), 12_345_678);
+  assertEquals(pdfTextByteLimit(99_000_000), PDF_TEXT_REQUEST_MAX_BYTES);
+
+  const lines = [
+    "Quote Q-261180 for a patio, three areas: 6.0 m by 4.2 m, 3.5 m by 3.0 m and 2.4 m by 2.4 m",
+    "Insulated roof panels, steel posts and beams, gutters and downpipes, council plans included",
+    "Price includes GST. Deposit of 30 per cent on acceptance, balance on completion of the work",
+  ];
+  // About the size of SWP-261180's 5,412,737-byte quote.
+  const big = validTextPdf(lines, 5_412_000);
+  assert(big.length > PDF_TEXT_MAX_BYTES && big.length < 5_500_000);
+  const refused = await extractPdfText(big);
+  assertEquals(refused.mode, "none");
+  assertEquals(refused.note, "pdf_too_large");
+  const read = await extractPdfText(big, { maxBytes: 20_000_000 });
+  assertEquals(read.mode, "text");
+  assertEquals(read.pageCount, 1);
+  assert(read.text.includes("6.0 m by 4.2 m"));
+  // Pages and characters keep their limits: only the bytes moved.
+  assert(read.text.length <= 40_000);
+
+  const huge = new Uint8Array(PDF_TEXT_REQUEST_MAX_BYTES + 1);
+  huge.set(enc("%PDF-"));
+  const capped = await extractPdfText(huge, { maxBytes: 50_000_000 });
+  assertEquals(capped.note, "pdf_too_large");
+});
+
+Deno.test("a corrupt Flate stream in a PDF pdf.js cannot open returns pdf_parse_failed and leaves no stray rejection", async () => {
+  // The shape that stopped the document text reader from 30 Oct 2026: no xref (pdf.js indexes
+  // every object, then gives up), so the stream fallback inflates a stream that is not valid
+  // deflate. The write and close of that DecompressionStream reject too; before the fix those
+  // rejections were unhandled and Deno stopped the worker just after this call returned.
+  const junk = new Uint8Array(64).map((_, i) => (i * 37 + 11) & 0xff);
+  junk[0] = 0x78; // a zlib header, then bytes that are not deflate
+  junk[1] = 0x9c;
+  const pdf = concat(
+    enc(`%PDF-1.4\n1 0 obj\n<< /Length ${junk.length} /Filter /FlateDecode >>\nstream\n`),
+    junk,
+    enc("\nendstream\nendobj\n"),
+  );
+  let stray: unknown = null;
+  const onRejection = (e: PromiseRejectionEvent) => {
+    stray = e.reason;
+    e.preventDefault();
+  };
+  globalThis.addEventListener("unhandledrejection", onRejection);
+  try {
+    const r = await extractPdfText(pdf);
+    assertEquals(r.mode, "none");
+    assertEquals(r.note, "pdf_parse_failed");
+    // Let any rejected stream promise surface before judging.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } finally {
+    globalThis.removeEventListener("unhandledrejection", onRejection);
+  }
+  assertEquals(stray, null);
 });

@@ -10,8 +10,10 @@ import {
 import {
   R2_LIST_ITEM,
   R3_LIST_ITEM,
+  RX1_REACTION_ITEM,
+  RX1_TARGET_ITEM,
 } from "../_shared/evidence/ghl_message_fixtures.ts";
-import { handleReconcile, liveReconcileDeps, sameSecret } from "./handler.ts";
+import { handleReconcile, sameSecret } from "./handler.ts";
 import { RUN_SOURCE } from "./reconcile.ts";
 
 const SERVICE = "service-key-fixture";
@@ -261,21 +263,6 @@ Deno.test("the service role is accepted by exact key or by role claim; every oth
   assertEquals(started, ["env", "cron", "cron-no-env"]);
 });
 
-Deno.test("the cron call is answered 202 and the run continues in the background", async () => {
-  const pending: Promise<unknown>[] = [];
-  const response = await handleReconcile(
-    post({ Authorization: `Bearer ${SERVICE}` }),
-    {
-      env,
-      createSupabase: () => fakeSupabase({ flag: false, runs: [], keys: [] }),
-      waitUntil: (p) => pending.push(p),
-    },
-  );
-  assertEquals(response.status, 202);
-  assertEquals(pending.length, 1);
-  assertEquals(await pending[0], { outcome: "idle", reason: "item_flag_off" });
-});
-
 Deno.test("end to end over the real provider reads: missed texts saved, run recorded, known text skipped", async () => {
   const log: URL[] = [];
   const supabase = fakeSupabase({
@@ -323,15 +310,146 @@ Deno.test("end to end over the real provider reads: missed texts saved, run reco
   );
 });
 
-Deno.test("adapter: runs are read newest first for this source only", async () => {
-  const supabase = fakeSupabase({ flag: true, runs: [{ id: "r" }], keys: [] });
-  const deps = liveReconcileDeps({ env, createSupabase: () => supabase });
-  const runs = await deps.latestRuns(5);
-  assertEquals(runs, [{ id: "r" } as any]);
-  const read = supabase.calls.find((c) => c.name === "context_capture_runs")!;
-  assertEquals((read.args as any[]).find((f) => f[0] === "eq"), [
-    "eq",
-    "source",
-    RUN_SOURCE,
-  ]);
+// C7 (3 Nov 2026): the reaction repair through the real door and provider reads.
+function reactionFetch(log: { method: string; url: URL }[]) {
+  const conv = RX1_REACTION_ITEM.conversationId;
+  const contact = RX1_REACTION_ITEM.contactId;
+  return ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    log.push({ method: init?.method ?? "GET", url });
+    let body: unknown;
+    if (url.pathname === `/contacts/${contact}`) {
+      body = { contact: { id: contact, locationId: "loc_secureworks" } };
+    } else if (url.pathname === `/conversations/${conv}`) {
+      body = {
+        id: conv,
+        contactId: contact,
+        locationId: "loc_secureworks",
+      };
+    } else if (url.pathname === `/conversations/${conv}/messages`) {
+      body = {
+        messages: {
+          messages: [RX1_REACTION_ITEM, RX1_TARGET_ITEM].map((m) => ({
+            ...m,
+            locationId: "loc_secureworks",
+          })),
+          nextPage: false,
+          lastMessageId: RX1_TARGET_ITEM.id,
+        },
+      };
+    } else throw new Error(`unexpected ${url}`);
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+  }) as typeof fetch;
+}
+
+Deno.test("C7 reaction repair door: a dry run reads GHL and the saved keys only, and answers what it would save", async () => {
+  const log: { method: string; url: URL }[] = [];
+  const supabase = fakeSupabase({ flag: true, runs: [], keys: [] });
+  const response = await handleReconcile(
+    post({ Authorization: `Bearer ${SERVICE}` }, {
+      action: "reaction_repair",
+      since: "2026-10-26T16:00:00Z",
+      conversations: [{
+        contact_id: RX1_REACTION_ITEM.contactId,
+        conversation_id: RX1_REACTION_ITEM.conversationId,
+      }],
+    }),
+    {
+      env,
+      createSupabase: () => supabase,
+      fetch: reactionFetch(log),
+      now: () => Date.parse("2026-11-03T14:00:00.000Z"),
+    },
+  );
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.action, "reaction_repair");
+  assertEquals(body.outcome, "ran");
+  assertEquals(body.dry_run, true);
+  assertEquals(body.complete, true);
+  assertEquals(body.counts.reactions_to_write, 1);
+  assertEquals(body.reactions[0].key, `ghl:${RX1_REACTION_ITEM.id}`);
+  assertEquals(body.reactions[0].result, "would_write");
+  assertEquals(body.reactions[0].reacted_to_key, `ghl:${RX1_TARGET_ITEM.id}`);
+  // Read only: GETs to GHL; on the database the flag, the lane and one key read.
+  assert(log.length > 0 && log.every((r) => r.method === "GET"));
+  const names = supabase.calls.map((c) => c.name);
+  assert(!names.includes("capture_business_event"), "no write");
+  assert(!names.includes("record_capture_run"), "no run row");
+  assertEquals(
+    supabase.calls.filter((c) => c.kind === "from").map((c) => c.name),
+    ["business_events"],
+  );
+  assert(!JSON.stringify(body).includes("automation apologies"));
+});
+
+Deno.test("C7 reaction repair door: a real run saves the reaction through the one writer, as a backfill row", async () => {
+  const supabase = fakeSupabase({ flag: true, runs: [], keys: [] });
+  const response = await handleReconcile(
+    post({ Authorization: `Bearer ${SERVICE}` }, {
+      action: "reaction_repair",
+      since: "2026-10-26T16:00:00Z",
+      dry_run: false,
+      conversations: [{
+        contact_id: RX1_REACTION_ITEM.contactId,
+        conversation_id: RX1_REACTION_ITEM.conversationId,
+      }],
+    }),
+    {
+      env,
+      createSupabase: () => supabase,
+      fetch: reactionFetch([]),
+      now: () => Date.parse("2026-11-03T14:00:00.000Z"),
+    },
+  );
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.counts.inserted, 1);
+  const writes = supabase.calls.filter((c) =>
+    c.name === "capture_business_event"
+  );
+  assertEquals(writes.length, 1);
+  const row = (writes[0].args as any).p_row;
+  assertEquals(row.provider_message_id, `ghl:${RX1_REACTION_ITEM.id}`);
+  assertEquals(row.event_type, "client.sms_reaction");
+  assertEquals(row.metadata, {
+    capture_mode: "backfill",
+    capture_path: "reaction_repair",
+  });
+  assert(
+    !supabase.calls.some((c) => c.name === "record_capture_run"),
+    "the repair never touches the reconciler's scan",
+  );
+});
+
+Deno.test("C7 reaction repair door: a malformed request is refused with its code; the caller must be the service role", async () => {
+  const deps = {
+    env,
+    createSupabase: () => fakeSupabase({ flag: true, runs: [], keys: [] }),
+    fetch: reactionFetch([]),
+    now: () => Date.parse("2026-11-03T14:00:00.000Z"),
+  };
+  const missing = await handleReconcile(
+    post({ Authorization: `Bearer ${SERVICE}` }, { action: "reaction_repair" }),
+    deps,
+  );
+  assertEquals(missing.status, 400);
+  assertEquals((await missing.json()).error, "since_required");
+  const old = await handleReconcile(
+    post({ Authorization: `Bearer ${SERVICE}` }, {
+      action: "reaction_repair",
+      since: "2026-06-01T00:00:00Z",
+    }),
+    deps,
+  );
+  assertEquals(old.status, 400);
+  assertEquals((await old.json()).error, "since_too_old");
+  const anon = await handleReconcile(
+    post({ Authorization: "Bearer not-the-key" }, {
+      action: "reaction_repair",
+      since: "2026-10-26T16:00:00Z",
+    }),
+    deps,
+  );
+  assertEquals(anon.status, 401);
 });

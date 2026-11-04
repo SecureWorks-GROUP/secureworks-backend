@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -148,4 +149,70 @@ Deno.test("scope supplier: the fence tool's typed names find Shaun's approved or
   assertEquals(match(""), null);
   // An alias only counts when its approved email is there.
   assertEquals(dispatchV2MatchScopeSupplier("RNR", ["Lysaght"]), null);
+});
+
+// ── B3: each fence fill line names the sealed line it came from ─────────────
+// A fence one-tool revision saves its sealed lines (scope_json.lines, scope-engine-v2 #732) beside its job. The fill
+// keeps Shaun's lines and wording, and writes on each the sealed line's id and unit. A gate split into parts: the
+// posts come from the gate's own post line; the other parts from the gate's kit line, each "<id>#k/n" (the index
+// job_material_lines_source_line_once allows one row per id and revision).
+function sealedFence(lines: Record<string, unknown>[]) {
+  return {
+    ...scope({
+      supplier: "R&R",
+      runs: [{ name: "Rear", panels: Array(9).fill(0).map(() => panel()) }],
+      gates: [{ type: "pedestrian", width: 900, height: 1800 }],
+    }),
+    tool: "fencing",
+    lines,
+  };
+}
+const SEALED = [
+  { id: "SL-kit", description: "Panel kit 1800H + 2400H post (2380mm wide)", quantity: 9, unit: "each", category: "panels", supplierName: "R&R Fencing" },
+  { id: "SL-conc", description: "Concrete 20kg bag (Kwikset)", quantity: 25, unit: "each", category: "materials", supplierName: "R&R Fencing" },
+  { id: "SL-gate", description: "Gate 1: pedestrian gate parts (900mm)", quantity: 1, unit: "each", category: "gates", supplierName: "R&R Fencing" },
+  { id: "SL-gpost", description: "50x50mm SHS gate post, L2400mm ×2 (gate 1)", quantity: 2, unit: "each", category: "gates", supplierName: "R&R Fencing" },
+  { id: "SL-rem", description: "Remove asbestos fence (licenced)", quantity: 9, unit: "m", category: "removal", supplier: "office" },
+];
+// Every line a fill made from sealed lines must name one, with a unit.
+const unnamed = (lines: any[]) => lines.filter((l) => !l.scope_line_id || !l.unit);
+
+Deno.test("B3 fence fill: each line names the sealed line it came from, with its unit; Shaun's lines unchanged", () => {
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(SEALED))!;
+  assertEquals(fill.lines.map((l: any) => [l.quantity, l.description, l.scope_line_id, l.unit]), [
+    [9, "1800H standard width panels with 2400H posts", "SL-kit", "each"],
+    [2, "gate posts", "SL-gpost", "each"],
+    [1, "gate stiles pair", "SL-gate#1/4", "each"],
+    [2, "1800mm Colorbond infill sheets", "SL-gate#2/4", "each"],
+    [1, "Lokklatch kit", "SL-gate#3/4", "each"],
+    [1, "long rail", "SL-gate#4/4", "each"],
+  ]);
+  assertEquals(unnamed(fill.lines), []);
+  assertEquals(fill.notes, []);
+  // The planted fault: a part with no sealed line is caught.
+  const planted = fill.lines.map((l: any, i: number) => (i === 3 ? { ...l, scope_line_id: null } : l));
+  assertEquals(unnamed(planted).map((l: any) => l.description), ["1800mm Colorbond infill sheets"]);
+});
+
+Deno.test("B3 fence fill: a gate with no post line of its own splits its kit line into 5 parts", () => {
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(SEALED.filter((l) => l.id !== "SL-gpost")))!;
+  assertEquals(fill.lines.slice(1).map((l: any) => l.scope_line_id), ["SL-gate#1/5", "SL-gate#2/5", "SL-gate#3/5", "SL-gate#4/5", "SL-gate#5/5"]);
+});
+
+Deno.test("B3 fence fill: a sealed line with no unit takes the unit Shaun's table implies, and says which", () => {
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(SEALED.map(({ unit: _u, ...l }) => l)))!;
+  assertEquals(fill.lines.map((l: any) => l.unit), ["each", "each", "pair", "each", "kit", "each"]);
+  assertEquals(fill.notes, [
+    "The sealed lines carry no unit, so these take the unit Shaun's order table implies: 1800H standard width panels with 2400H posts (each), gate posts (each), gate stiles pair (pair), 1800mm Colorbond infill sheets (each), Lokklatch kit (kit), long rail (each).",
+  ]);
+});
+
+Deno.test("B3 fence fill: a fill line with no sealed line to name keeps a null id and says so; a scope with no sealed lines is unchanged", () => {
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(SEALED.filter((l) => l.category !== "gates")))!;
+  assertEquals(fill.lines.map((l: any) => l.scope_line_id), ["SL-kit", null, null, null, null, null]);
+  assertEquals(fill.notes, [
+    "5 lines name no sealed line of the scope: gate posts, gate stiles pair, 1800mm Colorbond infill sheets, Lokklatch kit, long rail.",
+  ]);
+  const old = dispatchV2FenceLinesFromScope(scope({ runs: [{ panels: [panel()] }] }))!;
+  assertEquals(old.lines.map((l: any) => [l.scope_line_id ?? null, l.unit]), [[null, null]]);
 });

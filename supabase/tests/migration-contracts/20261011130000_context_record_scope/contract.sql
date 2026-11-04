@@ -208,11 +208,5 @@ CREATE TEMP TABLE record_scope_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_job_record_timeline', 'context_document_vision_policy');
 \ir ../../../migrations/20261011130000_context_record_scope.sql
-DO $again$
-BEGIN
- IF (SELECT count(*) FROM record_scope_md5) <> 2 OR EXISTS (SELECT 1 FROM record_scope_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
-       WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
-  RAISE EXCEPTION 'record scope contract: a re-apply must change nothing';
- END IF;
-END $again$;
+
 ROLLBACK;

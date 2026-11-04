@@ -21,6 +21,12 @@
 //      written. The read path (v_job_expected_cost_facts) reports suppressed.
 //      No fabricated baseline. This is the NULL-PRICING RULE.
 //
+// D1 / JP-24 candidate: send-quote acceptance now resolves a declared release
+// binding by row identity before the legacy time resolver. A missing, partial,
+// conflicting or corrupt declared chain suppresses the snapshot. Existing
+// unbound quotes keep CP1's old path; a non-null existing baseline is never
+// overwritten. This candidate does not authorize held rollout or a backfill.
+//
 // This helper is a SEPARATE accept-time path from freezeScope() in
 // ../scope_freeze/scope_freeze.ts. It must NOT change freezeScope's null
 // rejection (scope_freeze.ts `job_missing_pricing`) — it does not route through
@@ -37,6 +43,7 @@
 // the real service-role client when wired through send-quote / ops-api.
 
 import { jsonHash } from '../release_packet/canonicalize.ts'
+import { readAcceptedQuoteCostSource } from './accepted_quote_cost_source.ts'
 
 // ── The canonical cost keys ──────────────────────────────────────────────────
 // Verified identical across live jobs.pricing_json and frozen
@@ -86,6 +93,9 @@ export type ExpectedCostsSnapshot = {
 
 export type FreezeExpectedCostsInput = {
   job_id: string
+  // send-quote's actual acceptance only. A declared release-to-scope binding
+  // takes precedence over time selection; other legacy callers stay unchanged.
+  quote_acceptance?: boolean
   // Overridable clock for tests + so callers can pin frozen_at to the exact
   // accept moment. Defaults to now().
   now_iso?: string
@@ -114,7 +124,9 @@ export type FreezeExpectedCostsResult =
         | 'no_cost_lanes' // a pricing object exists but carries no cost lanes
         | 'zero_filled_pricing' // lanes present but all 0 — fabricated placeholder, not a baseline
         | 'frozen_hash_mismatch_no_live' // frozen row failed verification, no live fallback
+        | 'accepted_quote_source_unproven'
       existing_confidence?: ExpectedCostConfidence
+      source_reason?: string
     }
   | { ok: false; error: { code: 'job_not_found' | 'db_error'; message?: string } }
 
@@ -225,6 +237,31 @@ async function fetchFrozenRevisionAsOfAcceptance(
   }
 }
 
+// A released quote may name a now-superseded A while the draft is already B.
+// Identity, job, frozen lifecycle, acceptance time and BOTH canonical payloads
+// are checked. No newest-by-time or price match can replace the declared A.
+async function fetchNamedAcceptedRevision(
+  client: any,
+  job_id: string,
+  revision_id: string,
+  accepted_at: string,
+): Promise<{ ok: true; row: FrozenRevisionRow | null } | { ok: false; error: { code: 'db_error'; message: string } }> {
+  try {
+    const { data, error } = await client.from('scope_revisions')
+      .select('id, pricing_canonical_text, pricing_hash, scope_canonical_text, scope_hash, frozen_at')
+      .eq('job_id', job_id).eq('id', revision_id)
+      .in('status', ['frozen', 'superseded']).lte('frozen_at', accepted_at).maybeSingle()
+    if (error) return { ok: false, error: { code: 'db_error', message: String(error?.message ?? error) } }
+    if (!data) return { ok: true, row: null }
+    let scope: unknown
+    try { scope = JSON.parse(data.scope_canonical_text) } catch { return { ok: true, row: null } }
+    if (!isPlainObject(scope) || await jsonHash(scope) !== data.scope_hash) return { ok: true, row: null }
+    return { ok: true, row: data }
+  } catch (e) {
+    return { ok: false, error: { code: 'db_error', message: String((e as Error)?.message ?? e) } }
+  }
+}
+
 // ── freezeExpectedCostsOnAcceptance ──────────────────────────────────────────
 // Idempotent, write-once. Call at every acceptance transition (status ->
 // 'accepted'). Safe to call more than once and from more than one site: an
@@ -253,10 +290,21 @@ export async function freezeExpectedCostsOnAcceptance(
     }
   }
 
-  // Resolve the SOURCE per the CP1 order: frozen revision AS OF ACCEPTANCE first
-  // (hash-verified), else live pricing_json, else suppress.
-  const frozenRes = await fetchFrozenRevisionAsOfAcceptance(client, input.job_id, job.accepted_at)
+  // Prefer explicit accepted identity when declared. With no declared binding,
+  // retain CP1's prior time resolver and fallback; it is not acceptance proof.
+  const source = input.quote_acceptance
+    ? await readAcceptedQuoteCostSource(client, input.job_id)
+    : { kind: 'legacy' as const }
+  const unproven = (source_reason: string): FreezeExpectedCostsResult => ({
+    ok: true, snapshot: false, reason: 'accepted_quote_source_unproven', source_reason,
+  })
+  if (source.kind === 'unknown') return unproven(source.reason)
+  if (source.kind === 'bound' && !job.accepted_at) return unproven('job_acceptance_not_true')
+  const frozenRes = source.kind === 'bound'
+    ? await fetchNamedAcceptedRevision(client, input.job_id, source.revision_id, job.accepted_at!)
+    : await fetchFrozenRevisionAsOfAcceptance(client, input.job_id, job.accepted_at)
   if (!frozenRes.ok) return { ok: false, error: frozenRes.error }
+  if (source.kind === 'bound' && !frozenRes.row) return unproven('accepted_revision_unavailable')
 
   let confidence: ExpectedCostConfidence | null = null
   let sourcePricing: Record<string, unknown> | null = null
@@ -292,6 +340,10 @@ export async function freezeExpectedCostsOnAcceptance(
       frozenHashMismatch = true
     }
   }
+
+  // An explicit accepted revision cannot silently become another source on
+  // corruption. This does not alter CP1's existing legacy fallback behavior.
+  if (source.kind === 'bound' && confidence === null) return unproven('accepted_revision_hash_mismatch')
 
   if (confidence === null) {
     const live = coercePricing(job.pricing_json)

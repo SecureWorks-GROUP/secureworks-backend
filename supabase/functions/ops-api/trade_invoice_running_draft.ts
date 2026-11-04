@@ -629,6 +629,116 @@ function dismissedFrom(
   return prior?.dismissed_source_keys || [];
 }
 
+const EDIT_FIELDS = [
+  "description",
+  "hours",
+  "rate",
+  "work_date",
+  "start_time",
+  "finish_time",
+  "break_minutes",
+  "included",
+  "job_number",
+  "client_name",
+] as const;
+
+// Delete or edit lines already on a draft. A `lines` entry is still an add
+// unless it says remove or update. Adds go through mergeApproved, which does
+// not put a dismissed key back and does not replace a line already there.
+export function applyOwnerCommand(state: {
+  cards?: Array<Record<string, unknown>>;
+  dismissed?: string[];
+  remove?: unknown[];
+  edits?: Array<Record<string, unknown>>;
+  lines?: Array<Record<string, unknown>>;
+}): {
+  cards: Array<Record<string, unknown>>;
+  dismissed: string[];
+  adds: Array<Record<string, unknown>>;
+  removed: string[];
+  edited: string[];
+  missing: string[];
+  locked: boolean;
+} {
+  let cards = JSON.parse(JSON.stringify(state.cards || [])) as Array<
+    Record<string, unknown>
+  >;
+  const dismissed = new Set(
+    (state.dismissed || []).filter(Boolean).map(String),
+  );
+  const removed: string[] = [];
+  const edited: string[] = [];
+  const missing: string[] = [];
+  const adds: Array<Record<string, unknown>> = [];
+
+  const drop = (ref: unknown) => {
+    const key = typeof ref === "string"
+      ? ref
+      : sourceKey(ref as Record<string, unknown>);
+    if (!key) {
+      missing.push("");
+      return;
+    }
+    const before = cards.length;
+    cards = cards.filter((card) => sourceKey(card) !== key);
+    if (cards.length === before) missing.push(key);
+    else removed.push(key);
+    dismissed.add(key);
+  };
+
+  const change = (edit: Record<string, unknown>) => {
+    const key = sourceKey(edit);
+    if (!key) {
+      missing.push("");
+      return;
+    }
+    const card = cards.find((item) => sourceKey(item) === key);
+    if (!card) {
+      missing.push(key);
+      return;
+    }
+    for (const field of EDIT_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(edit, field)) {
+        card[field] = edit[field];
+      }
+    }
+    if (
+      !Object.prototype.hasOwnProperty.call(edit, "rate") &&
+      Object.prototype.hasOwnProperty.call(edit, "amount")
+    ) {
+      card.rate = edit.amount;
+    }
+    card.owner_edited = true;
+    card.source_key = key;
+    edited.push(key);
+  };
+
+  for (const ref of state.remove || []) drop(ref);
+  for (const edit of state.edits || []) change(edit);
+  for (const line of state.lines || []) {
+    if (!line || typeof line !== "object") continue;
+    if (line.remove === true) {
+      drop(line);
+      continue;
+    }
+    if (line.update === true) {
+      change(line);
+      continue;
+    }
+    adds.push(JSON.parse(JSON.stringify(line)));
+  }
+
+  return {
+    cards,
+    dismissed: [...dismissed],
+    adds,
+    removed,
+    edited,
+    missing,
+    locked: removed.length > 0 || edited.length > 0,
+  };
+}
+
 export async function getRunningInvoiceDraft(
   client: any,
   userId: string,
@@ -742,19 +852,48 @@ export async function saveRunningInvoiceDraft(
     : (prior?.draft_builder && typeof prior.draft_builder === "object"
       ? prior.draft_builder
       : {});
+  const priorBuilder = prior?.draft_builder &&
+      typeof prior.draft_builder === "object"
+    ? prior.draft_builder as Record<string, any>
+    : {};
+  const priorLocked = priorBuilder.manualLock === true;
   const [suggested, claimed] = await Promise.all([
     loadSuggested(client, user, weekStart, weekEnd),
     loadClaimed(client, user.id),
   ]);
-  const agentLines = mode === "agent" && Array.isArray(body?.lines)
-    ? body.lines
-    : [];
-  const merged = mergeApproved({
-    cards: Array.isArray(incoming.jobCards) ? incoming.jobCards : [],
-    dismissed: dismissedFrom(body, incoming, prior),
-    claimed,
-    suggested: suggested.concat(agentLines),
+  let baseCards = Array.isArray(incoming.jobCards) ? incoming.jobCards : [];
+  let dismissed = dismissedFrom(body, incoming, prior);
+  // Once the owner has edited, an automatic rebuild keeps the saved lines.
+  // It does not put a removed line back or replace an edit.
+  if (mode === "auto" && priorLocked && body?.resync !== true) {
+    if (Array.isArray(priorBuilder.jobCards)) baseCards = priorBuilder.jobCards;
+    const savedDismissed = Array.isArray(priorBuilder.dismissedKeys)
+      ? priorBuilder.dismissedKeys.map(String)
+      : (prior?.dismissed_source_keys || []);
+    dismissed = [...new Set(
+      [...savedDismissed, ...dismissed].filter(Boolean).map(String),
+    )];
+  }
+  const command = applyOwnerCommand({
+    cards: baseCards,
+    dismissed,
+    remove: mode === "auto" || !Array.isArray(body?.remove) ? [] : body.remove,
+    edits: mode === "auto" || !Array.isArray(body?.edits) ? [] : body.edits,
+    lines: mode === "agent" && Array.isArray(body?.lines) ? body.lines : [],
   });
+  if (
+    body?.resync === true && body?.restore_removed === true && mode !== "auto"
+  ) {
+    command.dismissed = [];
+  }
+  const merged = mergeApproved({
+    cards: command.cards,
+    dismissed: command.dismissed,
+    claimed,
+    suggested: suggested.concat(command.adds),
+  });
+  const locked = !!(incoming.manualLock || command.locked || priorLocked ||
+    body?.manual_lock === true);
   const gstOn = body?.gst_on != null ? !!body.gst_on : !!incoming.gst_on;
   const notes = body?.notes != null ? body.notes : (incoming.notes || "");
   const builder = {
@@ -768,6 +907,7 @@ export async function saveRunningInvoiceDraft(
       ? incoming.invLumpLines
       : [],
     dismissedKeys: merged.dismissed,
+    ...(locked ? { manualLock: true } : {}),
     notes,
     gst_on: gstOn,
     weekStart,
@@ -809,6 +949,9 @@ export async function saveRunningInvoiceDraft(
     submitted: false,
     draft_builder: builder,
     added: merged.added,
+    removed: command.removed,
+    edited: command.edited,
+    missing: command.missing,
     pay_rules: "unchanged_until_submit",
   };
 }

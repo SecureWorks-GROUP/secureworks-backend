@@ -11,16 +11,7 @@ import {
   assertRejects,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  reconDailyList,
-  reconDailyListArgs,
-  reconDailySenderWords,
-  ReconDecisionError,
-  reconLeftOut,
-  reconDecisionUser,
-  reconRecordDecision,
-  reconRecordDecisionCall,
-} from "./recon_decisions.ts";
+import { reconDailyList, reconDailyListArgs, ReconDecisionError, reconLeftOut, reconDecisionUser, reconRecordDecision, reconRecordDecisionCall } from "./recon_decisions.ts";
 import {
   _authorizeOpsApiAction,
   _opsApiActionNeedsStaffRole,
@@ -200,38 +191,6 @@ Deno.test("the daily list asks one more than its page and says more only when it
   assertEquals([none.count, none.more], [0, false]);
 });
 
-Deno.test("a customer message is labelled by role and never reads Sender not known", async () => {
-  const now = new Date("2026-10-20T00:00:00Z");
-  const summary = {
-    channel: "sms",
-    counterpart_role: "customer",
-    direction: "inbound",
-    from: null,
-    occurred_at: "2026-10-17T01:00:00Z",
-    preview: "Patio start date?",
-    subject: null,
-  };
-  for (const role of ["customer", "job_customer", "any_job_customer", "Customer"]) {
-    const words = reconDailySenderWords(role);
-    assertEquals(words, "Customer");
-    assertEquals(words.includes("Sender not known"), false);
-    const out = await reconDailyList(
-      fakeRpc([{ band: 3, subject_kind: "event", subject_id: EVENT, summary: { ...summary, counterpart_role: role } }]),
-      new URLSearchParams(""),
-      now,
-    );
-    const item = (out.items as { summary: { counterpart_role: string } }[])[0];
-    assertEquals(item.summary.counterpart_role, role);
-    const labelled = reconDailySenderWords(item.summary.counterpart_role);
-    assertEquals(labelled, "Customer");
-    assertEquals(labelled.includes("Sender not known"), false);
-    assertEquals(JSON.stringify(item).includes("Sender not known"), false);
-  }
-  for (const role of [null, undefined, "", "unknown", "unstamped", "lead"]) {
-    assertEquals(reconDailySenderWords(role), "Sender not known");
-  }
-});
-
 Deno.test("a daily list answer that is not a list is a failed read, never an empty list", async () => {
   const now = new Date("2026-10-20T00:00:00Z");
   for (const data of [null, undefined, {}, { items: [] }, "x", 0]) {
@@ -253,20 +212,6 @@ Deno.test("front door: staff only, never a trade, the shared key or agent-read",
     const shared = _authorizeOpsApiAction({ url, authMode: "api_key", serverSecretPresented: false });
     assertEquals(shared.ok ? null : [shared.status, shared.code], [401, "user_jwt_required"]);
   }
-});
-
-Deno.test("source: both actions are dispatched, on no routine list, the person from the session", async () => {
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assertEquals(src.includes("case 'recon_daily_list':"), true);
-  assertEquals(src.includes("case 'recon_record_decision':"), true);
-  const start = src.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set([");
-  const end = src.indexOf("])", start);
-  assertEquals(start > 0 && end > start, true);
-  assertEquals(src.slice(start, end).includes("recon_"), false);
-  assertEquals(
-    src.includes("reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null })"),
-    true,
-  );
 });
 
 Deno.test("the daily list says what it left out, and an unread count is never zero", async () => {

@@ -13,13 +13,31 @@
 //     uniqueBody; a group post is cut at its first quoted-history marker).
 //     Cut at 20,000 characters, flagged.
 //   * who sent it is decided here, deterministically, with no model call:
-//     ours, supplier (domain on suppliers), council (gov.au), automated
-//     (no-reply, platform, auto-submitted, list mail) or customer. Automated
-//     mail is not written unless it names exactly one of our references;
-//     platform mail (Xero, MYOB, ...) is never written.
+//     ours, supplier (domain on suppliers or Dispatch's approved supplier
+//     order addresses), council (gov.au), customer (a builder's sender, or
+//     anyone else), automated (no-reply, platform, auto-submitted, list mail).
+//     Automated mail is not written unless it names exactly one of our
+//     references; platform mail (Xero, MYOB, ...) is never written, except a
+//     platform's document address sending one organisation's own document
+//     (PLATFORM_DOCUMENT_SENDERS: an invoice, quote, credit note, receipt,
+//     remittance, or a customer's message about our invoice). That is the
+//     organisation's mail: its Reply-To names it (payload.email, its sender
+//     kind decides supplier or customer), payload.sent_via names the platform,
+//     and with no Reply-To (a group post) it is saved as automated supplier
+//     mail. A copy of our own document (Reply-To ours) stays platform mail.
+//     (C7 rule proofs, 3 Nov 2026: 29 such emails in one week were dropped.)
+//   * a lead source's notice of a new customer lead allocated to us
+//     (LEAD_NOTICE_SENDERS: a Stratco lead allocation from Stratco's national
+//     no-reply address) is a lead, not noise: saved as client.email_in from a
+//     customer, with payload.lead_source and payload.lead_ref (the source's
+//     own lead number), on no job unless the ladder finds one it names. Other
+//     mail from that address stays noise. (C7 rule proofs, 3 Nov 2026: 7 in
+//     one week were dropped.)
 //   * owner mailboxes (owner_privacy): our own human-sent mail is captured
-//     only when it names one of our references or goes to a job's client
-//     email (D-EM3). Tool-marked mail is always captured.
+//     only when it names one of our references or a builder's reference, or
+//     goes to a job's client email (D-EM3). Tool-marked mail and our own
+//     system's machine-sent notices (a no-reply address of ours) are always
+//     captured.
 //   * payload.email is the counterpart (inbound sender, outbound first outside
 //     recipient), the key the placement ladder matches against a job.
 //   * who our own email went to (group mailbox audience, 9 Oct 2026): its own
@@ -123,6 +141,8 @@ export interface OutlookCaptureContext {
   jobClientEmails?: ReadonlySet<string>;
   /** The make-safe reference prefixes (floor plus company prefixes); when given, payload.builder_refs is written. */
   builderRefPrefixes?: readonly string[];
+  /** Builder senders (makesafe_companies.sender_patterns): whole addresses or domains, lower case. */
+  builderSenders?: ReadonlySet<string>;
   /** "deep" on a row of the deep history load (metadata.history_tier). */
   historyTier?: "deep";
 }
@@ -166,7 +186,65 @@ const NO_REPLY_LOCAL =
   /^(no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|notifications?|notify|mailer[-_.]?daemon|postmaster|bounces?|alerts?|newsletter|news|marketing|info[-_.]?noreply)([-_.+].*)?$/;
 /** Our reference grammar: job numbers (SWP-, SWF-, SWD-, SWR-, SWMS-, legacy SW1234), INV-, PO-. */
 const OUR_REF = /^(SW[A-Z]{0,3}-?\d{3,}|INV-\d{3,}|PO-?\d{4,})$/;
+/**
+ * A platform's address that sends one organisation's own document on its
+ * behalf, never the platform's own news: Xero (invoices, quotes, credit
+ * notes, receipts, remittances, statements, a customer's message about an
+ * invoice), MYOB AccountRight and QuickBooks (invoices, remittances),
+ * Buildertrend (a builder's bills, payments and orders).
+ */
+export const PLATFORM_DOCUMENT_SENDERS: ReadonlySet<string> = new Set([
+  "messaging-service@post.xero.com",
+  "accountright@apps.myob.com",
+  "quickbooks@notification.intuit.com",
+  "notifications@buildertrend.net",
+]);
 const TO_TAG = /^(patios|fencing)\+([a-z0-9-]{3,40})@secureworkswa\.com\.au$/;
+
+/** One lead source's allocation notice: its sender address, what marks the notice, where its lead number is. */
+export interface LeadNoticeRule {
+  /** payload.lead_source. */
+  source: string;
+  /** The subject or the words say it is a lead allocated to us. */
+  notice: RegExp;
+  /** The source's own lead number (first group). */
+  ref: RegExp;
+}
+
+/**
+ * Lead sources that tell us of a new customer lead by machine-sent mail,
+ * keyed by their exact sender address. Stratco (national) allocates leads to
+ * its installers from no-reply@stratco.com.au: "Stratco lead allocation -
+ * 234402", "<name> you have been allocated a Stratco lead. The lead reference
+ * number is 234402." (55 such notices reached admin@ from August to 3 Nov
+ * 2026, every one with that subject.) Stratco WA, the supplier, mails from
+ * stratcowa.com.au and is on the supplier list.
+ */
+export const LEAD_NOTICE_SENDERS: ReadonlyMap<string, LeadNoticeRule> = new Map(
+  [[
+    "no-reply@stratco.com.au",
+    {
+      source: "stratco",
+      notice: /\bstratco lead allocation\b|\ballocated a stratco lead\b/i,
+      ref:
+        /\b(?:stratco lead allocation\s*[-:#]\s*|lead reference number is\s*#?\s*)(\d{4,10})\b/i,
+    },
+  ]],
+);
+
+/** A lead source's allocation notice: its source and lead number (null when not named); null when not a notice. */
+export function leadNotice(
+  from: string | null,
+  subject: string,
+  words: string,
+): { source: string; ref: string | null } | null {
+  const a = emailAddress(from);
+  const rule = a ? LEAD_NOTICE_SENDERS.get(a) : undefined;
+  if (!rule) return null;
+  const text = `${subject}\n${words}`;
+  if (!rule.notice.test(text)) return null;
+  return { source: rule.source, ref: rule.ref.exec(text)?.[1] ?? null };
+}
 
 /** Lower-case bare address of "Name <a@b>" or "a@b"; null when not an address. */
 export function emailAddress(raw: string | null | undefined): string | null {
@@ -207,6 +285,19 @@ function isSupplierDomain(
   return false;
 }
 
+/** A builder's sender: its whole address, or an address at its domain. */
+function isBuilderSender(
+  address: string,
+  builders: ReadonlySet<string> | undefined,
+): boolean {
+  if (!builders || builders.size === 0) return false;
+  return builders.has(address) || isSupplierDomain(domainOf(address), builders);
+}
+
+function isNoReplyLocal(address: string): boolean {
+  return NO_REPLY_LOCAL.test(address.slice(0, address.indexOf("@")));
+}
+
 function headerValue(
   headers: Record<string, string> | null | undefined,
   name: string,
@@ -243,6 +334,7 @@ export function senderKind(
   from: string | null,
   headers: Record<string, string> | null | undefined,
   supplierDomains?: ReadonlySet<string>,
+  builderSenders?: ReadonlySet<string>,
 ): SenderKind {
   const a = emailAddress(from);
   if (!a) return "automated";
@@ -250,8 +342,9 @@ export function senderKind(
   if (OUR_DOMAIN.test(domain)) return "ours";
   if (/(^|\.)gov\.au$/.test(domain)) return "council";
   if (isSupplierDomain(domain, supplierDomains)) return "supplier";
+  if (isBuilderSender(a, builderSenders)) return "customer";
   if (PLATFORM_DOMAIN.test(domain)) return "automated";
-  if (NO_REPLY_LOCAL.test(a.slice(0, a.indexOf("@")))) return "automated";
+  if (isNoReplyLocal(a)) return "automated";
   if (headerSaysAutomated(headers)) return "automated";
   return "customer";
 }
@@ -259,6 +352,30 @@ export function senderKind(
 function isPlatform(from: string | null): boolean {
   const a = emailAddress(from);
   return !!a && PLATFORM_DOMAIN.test(domainOf(a));
+}
+
+/**
+ * A platform document (PLATFORM_DOCUMENT_SENDERS): the platform, and the
+ * organisation it was sent for, read from Reply-To (its first address that is
+ * neither a platform's nor a no-reply one; null when there is none, as on a
+ * group post). Null when the sender is not a document address, or when a
+ * Reply-To is ours (a copy of our own document).
+ */
+export function platformDocument(
+  from: string | null,
+  headers: Record<string, string> | null | undefined,
+): { platform: string; party: string | null } | null {
+  const a = emailAddress(from);
+  if (!a || !PLATFORM_DOCUMENT_SENDERS.has(a)) return null;
+  const replyTo = (headerValue(headers, "reply-to") ?? "").split(/[,;]/)
+    .map((x) => emailAddress(x)).filter((x): x is string => !!x);
+  if (replyTo.some((r) => isOurAddress(r))) return null;
+  const party =
+    replyTo.find((r) =>
+      !PLATFORM_DOMAIN.test(domainOf(r)) && !isNoReplyLocal(r) &&
+      !PLATFORM_DOCUMENT_SENDERS.has(r)
+    ) ?? null;
+  return { platform: domainOf(a), party };
 }
 
 /** Our reference tokens a text names (job numbers, INV-, PO-), distinct. */
@@ -446,7 +563,12 @@ export function buildOutlookMailRow(
     ? [...new Set([...to, ...cc, mailbox])]
     : [...new Set([...to, ...cc])];
   const external = recipients.filter((a) => !isOurAddress(a));
-  const kind = senderKind(from, item.headers, ctx.supplierDomains);
+  let kind = senderKind(
+    from,
+    item.headers,
+    ctx.supplierDomains,
+    ctx.builderSenders,
+  );
 
   const subject = clip(tidyText(String(item.subject ?? "")), SUBJECT_MAX_CHARS);
   let words = String(item.bodyText ?? "");
@@ -483,6 +605,8 @@ export function buildOutlookMailRow(
   let direction: "inbound" | "outbound" | "internal";
   let counterpart: string | null;
   let audienceBasis: AudienceBasis | null = null;
+  let sentVia: string | null = null;
+  let lead: { source: string; ref: string | null } | null = null;
   if (kind === "ours") {
     // Who our email went to. Its own outside recipient decides; recorded
     // recipients that are all ours make it internal. A group post carries no
@@ -509,17 +633,44 @@ export function buildOutlookMailRow(
       audienceBasis = party ? "group_thread" : "unknown";
     }
     const marked = toolMarked(item.headers);
-    if (source.ownerPrivacy && !marked && source.kind === "user") {
+    // Human-sent only: a notice our own system sends from a no-reply address
+    // of ours is not a person's own mail.
+    if (
+      source.ownerPrivacy && !marked && source.kind === "user" &&
+      !isNoReplyLocal(from)
+    ) {
       const toClient = !!ctx.jobClientEmails &&
         external.some((a) => ctx.jobClientEmails!.has(a));
-      if (refs.length === 0 && !toClient) {
+      if (refs.length === 0 && builderRefs.length === 0 && !toClient) {
         return { kind: "skip", reason: "skipped_private", senderKind: kind };
       }
     }
   } else {
     direction = "inbound";
     counterpart = from;
-    if (kind === "automated") {
+    const document = platformDocument(from, item.headers);
+    lead = leadNotice(from, subject, words);
+    if (lead) {
+      // A new customer lead from its lead source: the customer's mail, placed
+      // like any other by what it names.
+      kind = "customer";
+      eventType = "client.email_in";
+    } else if (document) {
+      // One organisation's own document, sent through its platform.
+      sentVia = document.platform;
+      counterpart = document.party ?? from;
+      kind = document.party
+        ? senderKind(
+          document.party,
+          null,
+          ctx.supplierDomains,
+          ctx.builderSenders,
+        )
+        : "automated";
+      eventType = kind === "automated" || kind === "supplier"
+        ? "supplier.email_in"
+        : "client.email_in";
+    } else if (kind === "automated") {
       if (isPlatform(from) || refs.length !== 1) {
         return { kind: "skip", reason: "skipped_noise", senderKind: kind };
       }
@@ -582,6 +733,11 @@ export function buildOutlookMailRow(
       forwarded.length > BODY_MAX_CHARS;
   }
   if (tag) payload.to_tag = tag;
+  if (sentVia) payload.sent_via = sentVia;
+  if (lead) {
+    payload.lead_source = lead.source;
+    if (lead.ref) payload.lead_ref = lead.ref;
+  }
   if (builderRefs.length) payload.builder_refs = builderRefs;
   if (audienceBasis) payload.audience_basis = audienceBasis;
   const metadata: Record<string, unknown> = keyFromInternet

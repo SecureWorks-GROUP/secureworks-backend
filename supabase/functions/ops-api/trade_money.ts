@@ -29,6 +29,11 @@ export interface TradeMoneyRow {
   // The recurring deduction this invoice carries (for example Ute hire), taken
   // off trade_payable already. Absent on an invoice that carries none.
   recurring_deduction?: { label: string; amount: number }
+  // Group WO V10: the changes the office made to the bill in Xero, named, once
+  // xero-sync has read it, and the bill's total in Xero. `payable` is already
+  // after them. Absent while the bill is not read (unknown).
+  xero_adjustments?: { total: number; lines: { description: string; amount: number; account_code: string | null; kind: string }[] }
+  xero_pays?: number
   total_inc: number | null
   figures_ok: boolean
   figures_note: string | null
@@ -121,9 +126,13 @@ export function tradeMoneyRow(presented: any): TradeMoneyRow {
   const amountPaid = num(presented?.amount_paid) || 0
   const figuresOk = !figuresError && tradePayable !== null
   // Cash due to the trade: the persisted split's trade_payable when it exists,
-  // else the legacy header total. Weekly work-order invoices carry to_be_paid_ex.
+  // after the office's changes in Xero once the bill is read (V10), else the
+  // legacy header total. Weekly work-order invoices carry to_be_paid_ex.
   const legacyPayable = num(presented?.to_be_paid) ?? num(presented?.to_be_paid_ex) ?? totalInc ?? 0
-  const payable = r2(tradePayable !== null ? tradePayable : legacyPayable)
+  const xeroAdjustments = figuresOk && presented?.xero_adjustments && num(presented?.payable_after_xero) !== null
+    ? presented.xero_adjustments
+    : null
+  const payable = r2(tradePayable !== null ? (xeroAdjustments ? num(presented.payable_after_xero)! : tradePayable) : legacyPayable)
   const counts = !RELEASED.has(status) && !(bill && VOID_BILL.has(bill))
   const paid = status === 'paid' || bill === 'PAID'
   const outstanding = counts ? r2(Math.max(0, payable - amountPaid)) : 0
@@ -151,6 +160,20 @@ export function tradeMoneyRow(presented: any): TradeMoneyRow {
           label: String(presented.recurring_deduction.label || ''),
           amount: num(presented.recurring_deduction.amount) ?? 0,
         },
+      }
+      : {}),
+    ...(xeroAdjustments
+      ? {
+        xero_adjustments: {
+          total: num(xeroAdjustments.total) ?? 0,
+          lines: (Array.isArray(xeroAdjustments.lines) ? xeroAdjustments.lines : []).map((line: any) => ({
+            description: String(line?.description || ''),
+            amount: num(line?.amount) ?? 0,
+            account_code: line?.account_code ? String(line.account_code) : null,
+            kind: String(line?.kind || 'office_line'),
+          })),
+        },
+        ...(num(presented?.xero_pays) !== null ? { xero_pays: num(presented.xero_pays)! } : {}),
       }
       : {}),
     total_inc: totalInc,

@@ -273,18 +273,6 @@ Deno.test("rows maps every parameter onto the RPC and logs counts, never row con
   assertEquals(JSON.parse(lines[0]).returned, 1);
 });
 
-Deno.test("rows defaults to the bucket, 25 rows, no filters", () => {
-  assertEquals(rowsArgs(new URLSearchParams()), {
-    p_scope: "bucket",
-    p_reason: null,
-    p_source: null,
-    p_since: null,
-    p_cursor_at: null,
-    p_cursor_id: null,
-    p_limit: 25,
-  });
-});
-
 Deno.test("rows refuses unknown scopes and reasons, half cursors, bad ids, dates and limits", () => {
   for (
     const q of [

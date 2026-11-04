@@ -22,6 +22,7 @@ import {
   buildQueueRow,
   dateWithinWindow,
   DEFAULT_MATCH_CONFIG,
+  agentPrematchAmountFollowsBill,
   amountIsKnown,
   existingFactVerdict,
   HELD_QUEUE_REASONS,
@@ -489,6 +490,16 @@ Deno.test("existing fact: pre-match and human facts are never this path's to cha
   for (const source of ["agent_prematch", "manual_queue"]) {
     assertEquals(existingFactVerdict({ source, factJobId: "A", factJobBlocked: true, refTokens: T("X", "Y"), lineTokens: T(), jobFromRefId: null }), "not_ours");
   }
+});
+Deno.test("agent fact amount follows the bill; the job is not this path's to move", () => {
+  assertEquals(agentPrematchAmountFollowsBill({ source: "agent_prematch", amountKnown: true, factJobId: "A" }), true);
+  assertEquals(agentPrematchAmountFollowsBill({ source: "agent_prematch", amountKnown: false, factJobId: "A" }), false);
+  assertEquals(agentPrematchAmountFollowsBill({ source: "agent_prematch", amountKnown: true, factJobId: null }), false);
+  assertEquals(agentPrematchAmountFollowsBill({ source: "manual_queue", amountKnown: true, factJobId: "A" }), false);
+  assertEquals(agentPrematchAmountFollowsBill({ source: "manual_split", amountKnown: true, factJobId: "A" }), false);
+  assertEquals(agentPrematchAmountFollowsBill({ source: "xero_ref_link", amountKnown: true, factJobId: "A" }), false);
+  // Placement stays not_ours even when the amount may follow.
+  assertEquals(existingFactVerdict({ source: "agent_prematch", factJobId: "A", factJobBlocked: false, refTokens: T(), lineTokens: T(), jobFromRefId: null, amountKnown: true }), "not_ours");
 });
 Deno.test("new placement: only one consistent job number, and never the PO fallback once a job is named", () => {
   assertEquals(newPlacementAllowed({ refTokens: T("SWF-26535"), lineTokens: T("SWF-26999"), jobFromRefId: "A" }), { reference: false, poFallback: false });

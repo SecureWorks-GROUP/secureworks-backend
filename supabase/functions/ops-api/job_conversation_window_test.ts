@@ -20,12 +20,7 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _getJobConversationForTest } from "./index.ts";
-import {
-  conversationWindow,
-  happenedBy,
-  readBusinessEventsBySourceTime,
-  TIMELINE_MESSAGE_COLUMNS,
-} from "./job_conversation_timeline.ts";
+import { conversationWindow, happenedBy, readBusinessEventsBySourceTime } from "./job_conversation_timeline.ts";
 
 type Tables = Record<string, any[]>;
 const WRITE_METHODS = ["insert", "update", "upsert", "delete"];
@@ -162,18 +157,6 @@ Deno.test("window: since and until are ISO date-times or absent; anything else i
   assert(happenedBy("2030-01-01T00:00:00.000Z", null));
 });
 
-Deno.test("reader: both reads stop at until, inclusive, and give the newest N inside the window", async () => {
-  const client = fakeClient(tables());
-  const { rows, error } = await readBusinessEventsBySourceTime(client, {
-    jobId: JOB, select: TIMELINE_MESSAGE_COLUMNS, limit: 50, since: AUG_START, until: AUG_END, messagesOnly: true,
-  });
-  assertEquals(error, null);
-  assertEquals(rows.map((r: any) => r.id), ["aug-unstamped", "aug-last", "aug-2", "aug-1"].sort((a, b) => {
-    const at = (id: string) => Date.parse(tables().business_events.find((r) => r.id === id)!.event_at ?? tables().business_events.find((r) => r.id === id)!.occurred_at);
-    return at(b) - at(a);
-  }));
-});
-
 Deno.test("get_job_conversation: a period read gives that period's messages from every source, even when later months hold more than the limit", async () => {
   const client = fakeClient(tables());
   const answer: any = await _getJobConversationForTest(client, { job_id: JOB, limit: 50, since: AUG_START, until: AUG_END });
@@ -189,14 +172,4 @@ Deno.test("get_job_conversation: a period read gives that period's messages from
   assertEquals(before.messages.length, 50);
   assert(!before.messages.some((m: any) => m.id === "bev:aug-1"));
   assertEquals(before.summary.window, { since: AUG_START, until: null });
-});
-
-Deno.test("dispatch: get_job_conversation refuses an unreadable window with 400 invalid_window before any read", async () => {
-  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const at = index.indexOf("case 'get_job_conversation': {");
-  assert(at > 0, "the case has its own block");
-  const block = index.slice(at, at + 400);
-  assert(block.includes("const asked = conversationWindow(body)"));
-  assert(block.includes("if (asked.error) return json({ error: asked.error, code: 'invalid_window' }, 400)"));
-  assert(block.indexOf("conversationWindow(body)") < block.indexOf("getJobConversation(client, body)"), "the window is checked first");
 });

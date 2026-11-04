@@ -101,13 +101,12 @@ BEGIN
  PERFORM set_config('session_replication_role','replica',true);
  UPDATE public.business_events SET job_id=other_job WHERE id=ev;
  PERFORM set_config('session_replication_role','origin',true);
- BEGIN
-  PERFORM public.context_ledger_rebuild_packet(run_id,token);
-  RAISE EXCEPTION 'moved source accepted';
- EXCEPTION WHEN raise_exception THEN
-  IF SQLERRM NOT LIKE 'context_rebuild_prior_source_unresolved:%' THEN RAISE; END IF;
- END;
- PERFORM pg_temp.rb_assert(NOT EXISTS(SELECT 1 FROM public.context_ledger_items WHERE generation_id=new_gen),'partial seed survived invalid source');
+ -- Since 20261104034000 a fresh seed leaves the moved notes out and names them (checks.rebuild_seed.left_out),
+ -- never copying them as certain; the person's correction is still carried.
+ packet := public.context_ledger_rebuild_packet(run_id,token);
+ PERFORM pg_temp.rb_assert(NOT EXISTS(SELECT 1 FROM public.context_ledger_items WHERE generation_id=new_gen AND NOT person_locked),'moved source copied into a fresh seed');
+ PERFORM pg_temp.rb_assert(jsonb_array_length(packet->'open_items')=1 AND packet->'open_items'->0->>'item_key'='request:person','person correction lost or moved notes carried');
+ PERFORM pg_temp.rb_assert((SELECT jsonb_array_length(checks#>'{rebuild_seed,left_out}') FROM public.context_ledger_generations WHERE id=new_gen)=3,'moved notes not named');
  PERFORM pg_temp.rb_assert(NOT has_function_privilege('anon','public.context_ledger_rebuild_packet(uuid,uuid)','EXECUTE')
   AND NOT has_function_privilege('authenticated','public.context_ledger_rebuild_packet(uuid,uuid)','EXECUTE'),'public access widened');
 END $$;

@@ -7,12 +7,31 @@
 // money figure here: every number on the response comes from v_job_profit,
 // v_job_cost_events or v_job_revenue_events, so Jarvis, the ops API and the
 // finance tab cannot disagree. view=rollup sums those same v_job_profit rows
-// in job_profit_rollup.ts. Read only. Field contract for the dashboard:
+// in job_profit_rollup.ts. The one exception is `patio_expected`
+// (job_profit_patio_expected.ts): the patio scoper's own expected figures for
+// its frozen revision, set beside the engine's actuals and never fed back
+// into them. Read only. Field contract for the dashboard:
 // docs/job-profit-read-contract.md (JOB_PROFIT_LABELS carries the same
 // meanings on every response). The admin/owner gate lives at the
 // dispatch in index.ts (privileged ops key or an admin/owner session).
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
+import { readJobProfitOrderSources } from "./job_profit_order_sources.ts";
+import { readJobDispatchOrders } from "./job_dispatch_orders.ts";
+import {
+  type FrozenAcceptance,
+  INSTALLER_RULE_PROBE,
+  lastSaveHashes,
+  NO_REVISION_BINDING,
+  PATIO_EXPECTED_SCOPE_PROJECTION,
+  PATIO_FROZEN_REVISION_COLUMNS,
+  PATIO_LAST_SAVE_HASH_COLUMNS,
+  patioExpectedVersusActual,
+} from "./job_profit_patio_expected.ts";
+import {
+  JOB_ACCEPTANCE_NOT_TRUE,
+  readRevisionAcceptance,
+} from "./job_profit_revision_binding.ts";
 
 export const JOB_PROFIT_LABELS = {
   profit:
@@ -20,7 +39,9 @@ export const JOB_PROFIT_LABELS = {
   quoted_ex:
     "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent. Never the live price. quoted_source names the quote it came from.",
   expected_cost_ex:
-    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. Null when no cost was fixed at a quote, including a quote sent with no cost figures. Never a live pricing estimate.",
+    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision, sent_quote_revision or frozen_scope_revision (the sealed patio scope revision the customer's invoices are on). Null when no cost was fixed at a quote or sealed scope, including a quote sent with no cost figures, a sealed patio scope the customer's invoices are not on, or one that states no labour while labour is on the job; then expected_cost_missing names the document that would fix it. Never a live pricing estimate.",
+  expected_cost_missing:
+    "Only when expected_cost_ex is null: the document that would fix this job's expected cost and who holds it, as {code, document, holder}. A builder's works order, a make-safe invoice or the job's own bills set what we are paid or what we spent, never the expected cost, so builder jobs name the costing document they lack.",
   actual_cost_ex:
     "Actual cost from the job's own lines only: trade charges, supplier bills and materials facts linked to the job (cost_basis is always line_level; line_level_cost_ex is the same figure). Never a Xero Project total.",
   xero_project_expenses_ex:
@@ -43,22 +64,27 @@ export const JOB_PROFIT_LABELS = {
     "Invoice emailed, no bill matched to this order: the supplier emailed an invoice for the order, and no bill is linked to the order yet. The bill may already be on the job without a link to the order, so check before chasing it. Money owed or paid, never nothing owed. invoice_emailed_ex is the amount of the priced ones; it is in neither committed_open_ex nor actual cost.",
   rollup_expected_vs_actual:
     "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines) and whose expected cost names every lane (no expected_cost_lane_missing). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
+  dispatch_orders:
+    "Dispatch orders on the job (each supplier order email sent from Dispatch, and each purchase order that is not a draft or cancelled) with the supplier bills linked to each by rule, never by a person: the bill is from the order's supplier and carries a supplier ref saved for that order, our job number, our PO number (on the bill or the supplier's PDF of it), or the job's site address on the bill or that PDF when it matches one order of that supplier; never the same amount alone. rule says which matched and matched_in where (bill or supplier_pdf). ordered, billed and not_billed are counts of orders. A linked bill's amount is the bill's own, ex GST; cost_on_this_job says whether Job Profit counts that bill on this job. A link never places a bill or changes any total. unclear_bills name this order and another, so neither is linked. status unknown: the orders or links could not be read; never read that as not billed.",
   holding_jobs:
     "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;
 
 /**
- * Deliberately strict, like the other money surfaces: a server key (the
- * service key or the agent server key, both auth mode api_key) or an
- * admin/owner session. ops_manager, trades and the routine are refused.
+ * A server key (the service key or the agent server key, both auth mode
+ * api_key), or an admin, owner or office-staff (ops_manager) session. Marnin,
+ * 3 Nov 2026 (call B): "yes office staff can see job profit in ops dash or
+ * thorugh agents asking". Trades, crew, estimators, the routine and the agent
+ * read key are refused.
  */
+export const JOB_PROFIT_SESSION_ROLES: readonly string[] = ["admin", "owner", "ops_manager"];
 export function jobProfitCallerAllowed(
   authMode: string,
   role: string | null | undefined,
 ): boolean {
   if (authMode === "api_key") return true;
   const r = String(role || "").toLowerCase();
-  return authMode === "jwt" && (r === "admin" || r === "owner");
+  return authMode === "jwt" && JOB_PROFIT_SESSION_ROLES.includes(r);
 }
 
 export type JobProfitResult = { status: number; body: Record<string, unknown> };
@@ -102,11 +128,125 @@ export type TimelineEntry = {
   confidence: string | null;
   description: string | null;
   hours: number | null;
+  // A trade charge only, when its crew invoice was read (tradeChargeDates).
+  submitted_on?: string | null;
+  work_date?: string | null;
+  line_date?: string | null;
 };
+
+/**
+ * When a trade charged (finish line A5, owner ask 1, 3 Nov 2026). The cost
+ * view dates a crew invoice line by its line_date or else the pay week's
+ * start, which is not when the trade charged. These come from the crew
+ * invoice itself: submitted_on is the Perth day the trade submitted it
+ * (trade_invoices.submitted_at), work_date the day worked from the line's
+ * time entry, line_date the line's own day (a work order's completed or
+ * scheduled day, or the day typed). Dates only: no figure, lane or cost event
+ * date changes.
+ */
+export type TradeChargeDates = {
+  submitted_at: string | null;
+  submitted_on: string | null;
+  work_date: string | null;
+  line_date: string | null;
+};
+export type TradeChargeDatesRead = {
+  status: "ok" | "unknown" | "none";
+  reason?: string;
+  byLine: Map<string, TradeChargeDates>;
+};
+
+const TRADE_LINE_DATE_COLUMNS =
+  "id, work_date, line_date, trade_invoices(submitted_at)";
+const TRADE_LINE_DATE_CHUNK = 150;
+const PERTH_OFFSET_MS = 8 * 60 * 60 * 1000; // Perth keeps UTC+8 all year
+
+/** The Perth calendar day of a timestamp, or null. */
+export function perthDayOfTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  if (DATE_RE.test(value)) return value;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms)
+    ? new Date(ms + PERTH_OFFSET_MS).toISOString().slice(0, 10)
+    : null;
+}
+
+/**
+ * Reads the submitted day, work date and line date of every trade line among
+ * the job's cost events, by line id. A failed read is "unknown" and leaves
+ * every date out, so a date is never invented.
+ */
+export async function readTradeChargeDates(
+  client: any,
+  costEvents: any[],
+): Promise<TradeChargeDatesRead> {
+  const ids = [
+    ...new Set(
+      costEvents.filter((e) => e?.source === "trade_line" && e.source_id)
+        .map((e) => String(e.source_id)),
+    ),
+  ].filter((id) => UUID_RE.test(id));
+  const byLine = new Map<string, TradeChargeDates>();
+  if (!ids.length) return { status: "none", byLine };
+  for (let i = 0; i < ids.length; i += TRADE_LINE_DATE_CHUNK) {
+    const chunk = ids.slice(i, i + TRADE_LINE_DATE_CHUNK);
+    const { data, error } = await client.from("trade_invoice_lines")
+      .select(TRADE_LINE_DATE_COLUMNS).in("id", chunk);
+    if (error) {
+      return {
+        status: "unknown",
+        reason: `crew invoice dates read failed: ${error.message}`,
+        byLine: new Map(),
+      };
+    }
+    for (const r of data || []) {
+      const inv = Array.isArray(r.trade_invoices)
+        ? r.trade_invoices[0]
+        : r.trade_invoices;
+      const submittedAt = inv?.submitted_at ?? null;
+      byLine.set(String(r.id), {
+        submitted_at: submittedAt,
+        submitted_on: perthDayOfTimestamp(submittedAt),
+        work_date: r.work_date ?? null,
+        line_date: r.line_date ?? null,
+      });
+    }
+  }
+  return { status: "ok", byLine };
+}
+
+/** A trade line's dates onto its cost event; any other event is unchanged. */
+export function withTradeChargeDates(
+  costEvents: any[],
+  dates: TradeChargeDatesRead,
+): any[] {
+  return costEvents.map((e) => {
+    if (e?.source !== "trade_line") return e;
+    const d = dates.byLine.get(String(e.source_id));
+    return d ? { ...e, ...d } : e;
+  });
+}
+
+/** Charge order: submitted day, then the day worked (or the line's day); unknown last. */
+function chargeOrderKey(e: any): string {
+  return `${e.submitted_on ?? "9999-12-31"}|${
+    e.work_date ?? e.line_date ?? "9999-12-31"
+  }`;
+}
+
+function chargeWhen(e: any): Omit<TradeChargeDates, "submitted_at"> {
+  return {
+    submitted_on: e.submitted_on ?? null,
+    work_date: e.work_date ?? null,
+    line_date: e.line_date ?? null,
+  };
+}
 
 const COST_KIND: Record<string, TimelineEntry["kind"]> = {
   trade_line: "trade_charge",
   trade_employer_super: "employer_super",
+  // The company super a crew bill raised straight in Xero states (20261104071000).
+  bill_employer_super: "employer_super",
   supplier_bill: "supplier_bill",
   materials_fact: "materials_fact",
   po_committed: "purchase_order",
@@ -141,8 +281,12 @@ export function buildJobProfitTimeline(
 ): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const e of costEvents) {
+    // A trade charge is dated by the day it was submitted, once its crew
+    // invoice is read; until then by its cost event date, as before.
+    const dated = e.source === "trade_line" && "submitted_on" in e;
     out.push({
-      date: e.event_date ?? null,
+      date: (dated ? e.submitted_on ?? e.event_date : e.event_date) ?? null,
+      ...(dated ? chargeWhen(e) : {}),
       kind: costEventKind(e.source),
       lane: e.lane ?? null,
       party: e.party ?? null,
@@ -382,7 +526,7 @@ export async function jobProfitAction(
   }
   const summary = rows[0];
 
-  const [costs, revenue] = await Promise.all([
+  const [costs, revenue, patioScope, patioFrozen] = await Promise.all([
     client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq(
       "job_id",
       summary.job_id,
@@ -391,6 +535,17 @@ export async function jobProfitAction(
       "job_id",
       summary.job_id,
     ).order("invoice_date", { ascending: true }).limit(2000),
+    // Projected paths only: scope_json can be megabytes of media.
+    client.from("jobs").select(PATIO_EXPECTED_SCOPE_PROJECTION).eq(
+      "id",
+      summary.job_id,
+    ).limit(1),
+    // The job's frozen patio revision (earlier ones are superseded).
+    client.from("scope_revisions").select(PATIO_FROZEN_REVISION_COLUMNS).eq(
+      "job_id",
+      summary.job_id,
+    ).eq("status", "frozen").eq("tool_kind", "patio")
+      .order("revision_number", { ascending: false }).limit(1),
   ]);
   if (costs.error) {
     return {
@@ -407,7 +562,8 @@ export async function jobProfitAction(
     };
   }
 
-  const costEvents = costs.data || [];
+  const chargeDates = await readTradeChargeDates(client, costs.data || []);
+  const costEvents = withTradeChargeDates(costs.data || [], chargeDates);
   const revenueEvents = revenue.data || [];
   const trades = new Map<
     string,
@@ -418,8 +574,12 @@ export async function jobProfitAction(
       lines: number;
       first: string | null;
       last: string | null;
+      first_charge?: Omit<TradeChargeDates, "submitted_at">;
+      last_charge?: Omit<TradeChargeDates, "submitted_at">;
     }
   >();
+  const firstLine = new Map<string, any>();
+  const lastLine = new Map<string, any>();
   for (const e of costEvents) {
     if (e.source !== "trade_line" || !e.is_actual) continue;
     const key = e.party_id ? `id:${e.party_id}` : `line:${e.source_id}`;
@@ -434,6 +594,7 @@ export async function jobProfitAction(
       };
     t.amount_ex = round2(t.amount_ex + (num(e.amount_ex) ?? 0));
     t.lines += 1;
+    // first and last stay the cost event dates (unchanged for every reader).
     if (e.event_date && (!t.first || e.event_date < t.first)) {
       t.first = e.event_date;
     }
@@ -441,6 +602,22 @@ export async function jobProfitAction(
       t.last = e.event_date;
     }
     trades.set(key, t);
+    const f = firstLine.get(key);
+    if (!f || chargeOrderKey(e) < chargeOrderKey(f)) firstLine.set(key, e);
+    const l = lastLine.get(key);
+    if (!l || chargeOrderKey(e) > chargeOrderKey(l)) lastLine.set(key, e);
+  }
+  // first_charge and last_charge: when the trade charged, each from one line
+  // (the earliest and latest by submitted day, then day worked). Only when
+  // every line's crew invoice was read, so a date is never guessed.
+  if (chargeDates.status === "ok") {
+    for (const [key, t] of trades) {
+      const f = firstLine.get(key), l = lastLine.get(key);
+      if (f && "submitted_on" in f && l && "submitted_on" in l) {
+        t.first_charge = chargeWhen(f);
+        t.last_charge = chargeWhen(l);
+      }
+    }
   }
 
   return {
@@ -448,12 +625,132 @@ export async function jobProfitAction(
     body: {
       job: summary,
       trades: [...trades.values()].sort((a, b) => b.amount_ex - a.amount_ex),
+      trade_charge_dates: chargeDates.status === "unknown"
+        ? { status: "unknown", reason: chargeDates.reason }
+        : { status: chargeDates.status },
       cost_events: costEvents,
+      material_order_sources: await readJobProfitOrderSources(client, summary.job_id, costEvents),
+      dispatch_orders: await readJobDispatchOrders(client, summary.job_id, costEvents),
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
+      line_evidence: await readJobLineEvidence(client, summary.job_id),
       labels: JOB_PROFIT_LABELS,
+      ...(await patioExpectedPart(client, patioScope, patioFrozen, summary)),
     },
   };
+}
+
+// Present only for a patio scoper 2.0 job, or when its scope could not be
+// read; every other job's response is unchanged.
+async function patioExpectedPart(
+  client: any,
+  current: { data: any[] | null; error: { message: string } | null },
+  frozen: { data: any[] | null; error: { message: string } | null },
+  summary: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const failed = current.error
+    ? `job scope read failed: ${current.error.message}`
+    : frozen.error
+    ? `frozen scope read failed: ${frozen.error.message}`
+    : null;
+  if (failed) {
+    return { patio_expected: { status: "unreadable", error: failed } };
+  }
+  const cur = current.data?.[0] ?? null;
+  const frz = frozen.data?.[0] ?? null;
+  // Only a patio job with a frozen row needs the whole last save, to compare
+  // it with the frozen row by hash. A failed read leaves freshness unchecked
+  // (flagged), never assumed.
+  let hashes = null;
+  if (frz && (cur?.ptool === "patio-scoper" || frz.tool_kind === "patio")) {
+    const full = await client.from("jobs").select(PATIO_LAST_SAVE_HASH_COLUMNS)
+      .eq("id", summary.job_id).limit(1);
+    if (!full.error) hashes = await lastSaveHashes(full.data?.[0] ?? null);
+  }
+  // JP-12: only an engine that has the installer rule can say an installer
+  // bill was confirmed. Asked for a patio job only; an error is not known.
+  let installerCheck: boolean | null = null;
+  if (frz || cur?.ptool === "patio-scoper") {
+    const probe = await client.rpc(INSTALLER_RULE_PROBE, { p_line_items: [] });
+    installerCheck = !probe.error && probe.data === false ? true : null;
+  }
+  // A freeze is not an acceptance: only recorded acceptance on the job lets
+  // the frozen revision be compared with actuals. Found evidence counts even
+  // if the other read failed; a failed read with none found is not known.
+  let acceptance: FrozenAcceptance | null = null;
+  if (frz) {
+    const [docs, runs] = await Promise.all([
+      client.from("job_documents").select("id").eq("job_id", summary.job_id)
+        .eq("type", "quote").not("accepted_at", "is", null).limit(1),
+      client.from("run_acceptances").select("id").eq("job_id", summary.job_id)
+        .eq("status", "accepted").limit(1),
+    ]);
+    acceptance = !docs.error && (docs.data?.length ?? 0) > 0
+      ? { accepted: true, source: "job_documents.accepted_at" }
+      : !runs.error && (runs.data?.length ?? 0) > 0
+      ? { accepted: true, source: "run_acceptances" }
+      : docs.error || runs.error
+      ? { accepted: null, source: null }
+      : { accepted: false, source: null };
+  }
+  // Whether that acceptance is this frozen revision's: read from the chain
+  // accepted document -> released quote_revisions row -> scope_revision_id
+  // (JP-23 slice 2). It can only narrow job acceptance. Until the send link
+  // (slice 1) exists every job reads not known, and nothing is compared.
+  const revisionAcceptance = !frz
+    ? NO_REVISION_BINDING
+    : acceptance?.accepted === true
+    ? await readRevisionAcceptance(
+      client,
+      String(summary.job_id),
+      typeof frz.id === "string" ? frz.id : null,
+    )
+    : JOB_ACCEPTANCE_NOT_TRUE;
+  const result = patioExpectedVersusActual(
+    cur,
+    frz,
+    summary,
+    hashes,
+    installerCheck,
+    acceptance,
+    revisionAcceptance,
+  );
+  return result ? { patio_expected: result } : {};
+}
+
+/**
+ * R57 (2 Nov 2026): every item in the job's figure with Bookkeeping's line
+ * evidence, and the job's status (verified only when every item is evidenced;
+ * otherwise provisional with why_not_verified). Read on its own so a failed
+ * read never hides the figures; a failure reads "unknown", never "verified".
+ */
+export async function readJobLineEvidence(
+  client: any,
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  if (typeof client?.rpc !== "function") {
+    return { status: "unknown", reason: "line evidence is not readable here" };
+  }
+  try {
+    const { data, error } = await client.rpc("job_profit_line_evidence", {
+      p_job_id: jobId,
+    });
+    if (error) {
+      return {
+        status: "unknown",
+        reason: `line evidence read failed: ${error.message}`,
+      };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return { status: "unknown", reason: "line evidence read returned nothing" };
+    }
+    return data as Record<string, unknown>;
+  } catch (e) {
+    return {
+      status: "unknown",
+      reason: `line evidence read failed: ${(e as Error).message}`,
+    };
+  }
 }
 
 /** ops-api `job_profit_list`: the engine's rows, filtered. */

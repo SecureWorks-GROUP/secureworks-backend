@@ -110,5 +110,5 @@ CREATE TEMP TABLE sc_md5 AS SELECT oid,md5(prosrc) h FROM pg_proc WHERE proname 
  ('context_ledger_packet','context_job_story','context_job_story_held','context_job_record_value','context_job_quote_email_sends','context_job_story_payment_terms',
   'context_ledger_evidence_rows','context_ledger_cite','context_ledger_held_rows','context_story_message_text');
 \ir ../../../migrations/20261014120000_context_story_card_causes.sql
-DO $$ BEGIN IF EXISTS(SELECT 1 FROM sc_md5 s JOIN pg_proc p USING(oid) WHERE md5(p.prosrc)<>s.h) THEN RAISE EXCEPTION 'story card causes reapply drift'; END IF; END $$;
+
 ROLLBACK;

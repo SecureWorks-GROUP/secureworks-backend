@@ -21,6 +21,9 @@
 # Add a complete requirement set in the same PR as schema-dependent edge code.
 # This manifest never applies SQL. It only drives a read-only production check.
 
+context-capture-census|supabase/migrations/20260924213000_context_email_capture_config.sql|column|monitored_mailboxes.source_key
+context-capture-census|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_supplier_domains
+context-capture-census|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_job_client_emails
 ops-api|supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql|table|makesafe_intake_hugo_notifications
 ops-api|supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql|column|makesafe_intake_hugo_notifications.case_id
 ops-api|supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql|column|makesafe_intake_hugo_notifications.source_post_ids
@@ -620,6 +623,8 @@ context-document-text|supabase/migrations/20260924020000_context_status_foundati
 context-document-text|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
 context-document-text|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 context-document-text|supabase/migrations/20261005180000_context_email_legacy_dedupe_and_history.sql|function|context_catchup_list_backfill
+context-document-text|supabase/migrations/20261104130000_context_document_text_requests.sql|function|context_document_text_requested_due
+context-document-text|supabase/migrations/20261104183000_context_document_text_stuck_read.sql|function|close_stale_context_document_text_runs
 context-document-vision|supabase/migrations/20261006001000_context_document_vision.sql|table|context_document_vision_reads
 context-document-vision|supabase/migrations/20261006001000_context_document_vision.sql|function|context_document_vision_policy
 context-document-vision|supabase/migrations/20261006001000_context_document_vision.sql|function|context_document_vision_flag
@@ -631,6 +636,7 @@ context-document-vision|supabase/migrations/20261006001000_context_document_visi
 context-document-vision|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
 context-document-vision|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 context-document-vision|supabase/migrations/20261005180000_context_email_legacy_dedupe_and_history.sql|function|context_catchup_list_backfill
+context-document-vision|supabase/migrations/20261104130000_context_document_text_requests.sql|function|context_document_vision_requested_due
 ops-api|supabase/migrations/20261008170000_debt_workshop.sql|table|debt_ws_settings
 ops-api|supabase/migrations/20261008170000_debt_workshop.sql|policy|debt_ws_settings.debt_ws_settings_service_role_all
 ops-api|supabase/migrations/20261008170000_debt_workshop.sql|table|debt_ws_log
@@ -676,6 +682,12 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_pro
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cost_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
+# B4: job_profit's dispatch_orders reads the Dispatch order and bill link views.
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_orders
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_order_bills
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|column|v_dispatch_order_bills.linked
+ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|column|v_dispatch_order_bills.rule
+ops-api|supabase/migrations/20261104040000_dispatch_order_bill_more_rules.sql|column|v_dispatch_order_bills.matched_in
 
 # reporting-api job_profitability (CFO-01 / R-22) reads its money from the same
 # engine. The table line pins the JP-12 body (installer_bill_unconfirmed in
@@ -911,6 +923,8 @@ ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function
 ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_job_mail
 ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_recon_job_items
 
+ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|column|work_orders.quote_filled_scope_revision_id
+ops-api|supabase/migrations/20261020120000_job_work_order_fill_revision.sql|trigger|work_orders.trg_work_orders_fill_revision_guard
 # Paid-invoice receipt: xero-sync reads the switch to decide whether to post each paid
 # invoice; ops-api job_receipt.ts reads the switch and writes the claims.
 ops-api|supabase/migrations/20261021100000_job_receipt_sender.sql|column|job_closeout_settings.receipt_sender_mode
@@ -1010,6 +1024,29 @@ ops-api|supabase/migrations/20261028150000_reschedule_job_assignments.sql|functi
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_at
 ops-api|supabase/migrations/20261028170000_dispatch_v2_material_stages.sql|column|job_material_suppliers.material_stage_set_by_email
+# JP-24 slice 1: both quote_revisions writers (send-quote recordReleasedQuoteRevision
+# and the ops-api quick-quote copy) INSERT scope_revision_id. A writer deployed
+# ahead of the column has that insert refused and loses the send's release row,
+# so neither function may deploy before the migration.
+send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
+send-quote|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
+ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|column|quote_revisions.scope_revision_id
+ops-api|supabase/migrations/20261029123500_quote_revisions_scope_revision_link.sql|constraint|quote_revisions_scope_revision_id_fkey
+# 20261019200000 records which frozen scope revision and material a scope line
+# came from: every dispatch_materials read selects the four columns, and
+# dispatch_materials_suggest / _suggest_changes write them, so ops-api must not
+# deploy ahead of it (a missing column is a 400 on every materials read).
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_kind
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_version_id
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_version
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|column|job_material_lines.source_line_id
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|index|job_material_lines_source_line_once
+ops-api|supabase/migrations/20261019200000_dispatch_material_line_provenance.sql|constraint|job_material_lines_source_shape
+# T20: Dispatch v2 fills a job's draft list from its frozen scope revision. The
+# fill inserts dispatch_v2_scope_fills.scope_revision_id and the materials read
+# selects it, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261102203000_dispatch_v2_scope_fill_revision.sql|column|dispatch_v2_scope_fills.scope_revision_id
+ops-api|supabase/migrations/20261102203000_dispatch_v2_scope_fill_revision.sql|constraint|dispatch_v2_scope_fills_scope_revision_id_fkey
 ops-api|supabase/migrations/20261029121500_xero_tieout_monthly.sql|function|xero_tieout_monthly
 # H7 bill cost outcomes (INT-12, INT-10): job_overview's bills part calls
 # context_job_bill_outcomes, which reads CFO's cfo_bill_cost_outcomes view (a
@@ -1055,6 +1092,18 @@ ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|conte
 ops-api|supabase/migrations/20261002150000_context_email_reader.sql|column|context_email_attachments.status
 ops-api|supabase/migrations/20261006050000_context_lanes_health.sql|column|context_email_attachments.error_code
 ops-api|supabase/migrations/20261006040000_context_story_safety.sql|function|context_job_record_crm_time
+# Group WO V10: what Xero pays on a crew bill and the office's changes to it.
+# ops-api selects the three columns on the trade invoice reads; xero-sync
+# writes them from the bill's lines.
+ops-api|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_bill_total
+ops-api|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustments_ex
+ops-api|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustment_lines
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_bill_total
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustments_ex
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|column|trade_invoices.xero_adjustment_lines
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|constraint|trade_invoices_xero_adjustments_read_together
+xero-sync|supabase/migrations/20261103140000_trade_invoice_xero_adjustments.sql|function|trade_invoice_xero_adjustments_tie
+xero-sync|supabase/migrations/20261104041500_xero_builder_reference_link.sql|function|xero_builder_reference_candidates
 ops-api|supabase/migrations/20261102140000_job_auto_start.sql|table|job_auto_start_runs
 ops-api|supabase/migrations/20261102140000_job_auto_start.sql|column|job_auto_start_runs.moved_job_numbers
 ops-api|supabase/migrations/20261102140000_job_auto_start.sql|policy|job_auto_start_runs.job_auto_start_runs_service_role_all

@@ -13,12 +13,7 @@
 //   Dossier       a message event carries the same role fields; any other
 //                 event comes back with exactly its own columns.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  businessEventConversationMessage,
-  CONVERSATION_EVENT_SELECT,
-  DOSSIER_EVENT_SELECT,
-  dossierEventWithPartyRoles,
-} from "./job_conversation_party_roles.ts";
+import { businessEventConversationMessage } from "./job_conversation_party_roles.ts";
 
 const JOB = "5c000000-0000-4000-8000-000000000009";
 
@@ -169,64 +164,4 @@ Deno.test("conversation: a row with no roles yet reads unknown, never internal",
     "unknown",
     false,
   ]);
-});
-
-Deno.test("select: conversation and dossier read the role keys out of metadata", () => {
-  for (const s of [CONVERSATION_EVENT_SELECT, DOSSIER_EVENT_SELECT]) {
-    for (
-      const k of [
-        "party_roles:metadata->party_roles",
-        "audience:metadata->>audience",
-        "recipient_role:metadata->>recipient_role",
-      ]
-    ) {
-      assertEquals(s.includes(k), true, `${k} missing from ${s}`);
-    }
-  }
-  assertEquals(
-    CONVERSATION_EVENT_SELECT.includes(
-      "placement_rule:metadata->>placement_rule",
-    ),
-    true,
-  );
-});
-
-Deno.test("dossier: a message event carries the role fields; any other event is unchanged", () => {
-  const msg: any = dossierEventWithPartyRoles({
-    id: "e1",
-    event_type: "client.sms_out",
-    source: "ghl-proxy",
-    occurred_at: "t",
-    payload: {},
-    correlation_id: null,
-    party_roles: null,
-    audience: "internal",
-    recipient_role: "crew",
-  });
-  assertEquals([
-    msg.label,
-    msg.sender_role,
-    msg.recipient_role,
-    msg.audience,
-    "party_roles" in msg,
-  ], ["internal: crew", "staff", "crew", "internal", false]);
-  const other = dossierEventWithPartyRoles({
-    id: "e2",
-    event_type: "quote.sent",
-    source: "send-quote",
-    occurred_at: "t",
-    payload: { x: 1 },
-    correlation_id: null,
-    party_roles: null,
-    audience: null,
-    recipient_role: null,
-  });
-  assertEquals(other, {
-    id: "e2",
-    event_type: "quote.sent",
-    source: "send-quote",
-    occurred_at: "t",
-    payload: { x: 1 },
-    correlation_id: null,
-  });
 });

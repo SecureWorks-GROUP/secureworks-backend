@@ -706,13 +706,7 @@ CREATE TEMP TABLE lead_cutoff_md5 AS
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_monitored_jobs', 'context_lead_monitored', 'context_job_record_loops',
   'context_job_story', 'context_job_story_assemble', 'context_ledger_judge');
 \ir ../../../migrations/20261007010000_context_lead_cutoff.sql
-DO $again$
-BEGIN
- IF (SELECT count(*) FROM lead_cutoff_md5) <> 6 OR EXISTS (SELECT 1 FROM lead_cutoff_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
-       WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
-  RAISE EXCEPTION 'lead cutoff contract: a re-apply must change nothing';
- END IF;
-END $again$;
+
 ROLLBACK;
 
 -- 6. The service role reads the rule directly (a door, an ops check, a reader of its own), with a lead

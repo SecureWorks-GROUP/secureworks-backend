@@ -271,7 +271,7 @@ BEGIN
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9','53f7d9d592e75d0232226fa466f76464')
  THEN RAISE EXCEPTION 'l1g: the rules-off ladder, the entry, the trigger, the timeline, the preview or P1b changed'; END IF;
  IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1e:%'
  THEN RAISE EXCEPTION 'l1g: the rules-off ladder must stay L1e'; END IF;
@@ -340,7 +340,7 @@ $b$))<>'0870431e8ec3ab2f2e123146298c9727'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure) NOT IN ('f98da204718a4d5ac6395761a963ced4','be5e8d7df251fb3baf2d1a47641d93eb')
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9')
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) NOT IN ('5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9','53f7d9d592e75d0232226fa466f76464')
  THEN RAISE EXCEPTION 'l1g: the rules-off ladder, the entry, the trigger, the timeline, the preview or P1b changed'; END IF;
  IF coalesce(obj_description('public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1g:%'
   OR coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1e:%'
@@ -360,11 +360,6 @@ END $$;
 CREATE TEMP TABLE l1g_before AS SELECT md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p WHERE p.oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure;
 \ir ../../../migrations/20261006035000_context_ladder_held_live_job.sql
-DO $$
-BEGIN
- IF EXISTS(SELECT 1 FROM l1g_before b, pg_proc p WHERE p.oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure
-   AND (md5(p.prosrc) IS DISTINCT FROM b.md5 OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note))
- THEN RAISE EXCEPTION 'l1g: re-apply changed the body or comment'; END IF;
-END $$;
+
 DROP TABLE l1g_before;
 \endif

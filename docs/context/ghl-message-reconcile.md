@@ -126,3 +126,64 @@ deleted.
   service key and `{"wait": true}` returns the run summary.
 - Status and alarms: `ghl_capture` block of `context_pipeline_status()`
   ([pipeline-status.md](pipeline-status.md)).
+
+## Text reactions (C7, 3 Nov 2026)
+
+A text reaction is the mark a phone puts on a text that already exists (an
+iPhone tapback such as `Liked “<our text>”`, an Android emoji reaction). GHL
+keeps it as its own item: type 45, `TYPE_SMS_REACTION` in the conversation
+list (`messageType` empty from a single-message read). It carries the
+contact, conversation, direction, our number and GHL's own time, but not the
+id of the text it reacts to, only a copy of its words. Until this change the
+row builder skipped it (`unsupported_type`), so the C7 census counted 13 of
+1,126 texts as not captured (27 Oct to 3 Nov).
+
+- Every door (this reconciler, the receiver's doorbell read, the history load)
+  now saves it through `_shared/evidence/ghl_message.ts` as one row: key
+  `ghl:<GHL message id>`, event type `client.sms_reaction`, channel `status`,
+  the contact and conversation of the item. `payload.body` keeps the
+  provider's words; `body_preview` is the short account (`[Reaction 👍 (Liked)
+  on our text ghl:<id>: “…”]`); `payload.reaction` holds the mark, the quoted
+  words and, when the caller holds the conversation page, the one earlier text
+  whose words equal the quote (`reacted_to_key`, match `quoted_text`; else
+  `several`, `not_found`, `no_quote` or `not_in_hand`, never guessed).
+- Channel `status`, never `sms`: every reader that takes an inbound text as the
+  customer writing keys on channel `sms` (or `client.reply` /
+  `client.sms_in`): the notes reader's `context_ledger_message_kind`, the
+  card's messages and open items (`context_job_record_messages`,
+  `context_job_record_loops`) and the lead monitor. So a reaction never opens,
+  reopens or closes a notes item, never makes a job due a read and never makes
+  a reply owed. It is on its job's record and nothing more: a weak
+  acknowledgement at most.
+- Placement: the ladder places it like any worded row of its contact, so by
+  the same rules as the text it reacts to, whose words it quotes. A
+  read-only preview of the 13 on 3 Nov (exact builder rows, backfill mode):
+  10 land on the job of the text they react to, 3 on no job, as their texts.
+  Not built: a ladder step that follows `reacted_to_key` when a contact rule
+  would disagree (none of the 13 needed it); a placement slice would add it.
+
+### Reaction repair (one operator pass)
+
+Reactions skipped before this change are saved by the reconciler's
+`reaction_repair` action, through the same builder and writer:
+
+```
+POST /functions/v1/ghl-message-reconcile   (service key)
+{"action": "reaction_repair",
+ "since": "2026-07-01T00:00:00Z",          # at most 140 days back
+ "conversations": [{"contact_id": "…", "conversation_id": "…"}],  # optional, up to 50
+ "next": "<cursor from the previous answer>",                     # optional, sweep only
+ "dry_run": false}                                                # omit for a dry run
+```
+
+- Dry run (the default): GHL GETs and one `business_events` key read per
+  conversation; no row, no run row, no writer call. It answers each reaction
+  as `would_write` or `exists`.
+- Real run: saves only missing reactions (any other missing item is left to
+  the reconciler and the history load), `capture_mode: backfill`,
+  `metadata.capture_path: reaction_repair` (find or undo them by that key).
+- Without `conversations` it sweeps every conversation whose last message is
+  at or after `since`, newest first, for at most 100 seconds per call; repeat
+  with the answer's `next` until `complete` is true. Always foreground.
+- Answers ids, times, codes and counts only. It never touches the
+  reconciler's run rows or scan.

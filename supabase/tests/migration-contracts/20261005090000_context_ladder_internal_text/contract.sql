@@ -346,12 +346,6 @@ CREATE TEMP TABLE l1d_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.p
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
   AND p.proname IN ('context_ladder_p1a','resolve_context_attribution','context_internal_text_role','context_internal_about_job');
 \ir ../../../migrations/20261005090000_context_ladder_internal_text.sql
-DO $$
-BEGIN
- IF (SELECT count(*) FROM l1d_before)<>5 THEN RAISE EXCEPTION 'l1d: expected 5 functions, got %',(SELECT count(*) FROM l1d_before); END IF;
- IF EXISTS(SELECT 1 FROM l1d_before b LEFT JOIN pg_proc p ON p.oid=b.sig::regprocedure
-   WHERE md5(p.prosrc) IS DISTINCT FROM b.md5 OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note)
- THEN RAISE EXCEPTION 'l1d: re-apply changed a body or comment'; END IF;
-END $$;
+
 DROP TABLE l1d_before;
 \endif

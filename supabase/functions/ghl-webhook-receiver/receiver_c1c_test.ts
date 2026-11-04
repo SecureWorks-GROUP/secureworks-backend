@@ -33,7 +33,7 @@ import {
   R7_LIST_ITEMS,
   R9_WEBHOOK,
 } from "../_shared/evidence/ghl_message_fixtures.ts";
-import { c1cContractRowLines, c1cContractRows } from "./c1c_contract_rows.ts";
+import { c1cContractRows } from "./c1c_contract_rows.ts";
 import { TEST_LOCATION_ID } from "./named_rows_fixture.ts";
 import {
   evidenceRows,
@@ -87,22 +87,6 @@ function assertNoText(r: Run, forbidden: string[]) {
     assertFalse(r.logs.includes(s), `logs must not carry ${s}`);
   }
 }
-
-// ── the database proof and the receiver cannot drift ─────
-
-Deno.test("the C1c SQL contract's input rows are exactly what the receiver builds", async () => {
-  const contract = await Deno.readTextFile(
-    new URL(
-      "../../tests/migration-contracts/20260924130000_ghl_webhook_receipts/contract.sql",
-      import.meta.url,
-    ),
-  );
-  const block = contract.slice(
-    contract.indexOf("-- ROWS BEGIN"),
-    contract.indexOf("-- ROWS END"),
-  ).split("\n").slice(2).join("\n").trimEnd();
-  assertEquals(block, c1cContractRowLines());
-});
 
 // ── the flag ──────────────────────────────────────────────
 

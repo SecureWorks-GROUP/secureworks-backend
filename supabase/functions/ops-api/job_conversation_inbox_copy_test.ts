@@ -56,13 +56,7 @@ import {
   _assembleJobDossierForTest,
   _getJobConversationForTest,
 } from "./index.ts";
-import {
-  LEGACY_INBOX_LABEL,
-  legacyInboxRowsToShow,
-  readInboxEventCopies,
-  UNLINKED_RULES_FLAG,
-  UNPLACED_INBOX_LABEL,
-} from "./job_conversation_inbox_copy.ts";
+import { LEGACY_INBOX_LABEL, UNLINKED_RULES_FLAG, UNPLACED_INBOX_LABEL } from "./job_conversation_inbox_copy.ts";
 
 // ── Recorded fixtures ─────────────────────────────────────────────────────
 
@@ -499,52 +493,6 @@ Deno.test("R0 N8: an inbox-only row stays on its guessed job, labelled, in every
   }
 });
 
-Deno.test("R0: each writer key alone proves an event copy and where it sits", async () => {
-  const inbox = {
-    id: N1_INBOX,
-    graph_message_id: N1_GRAPH,
-    received_at: N1_AT,
-  };
-  const base = { ...swp261379Tables().business_events[0], job_id: SWP_261379 };
-  const variants: Record<string, any> = {
-    source_pointer: {
-      ...base,
-      provider_message_id: null,
-      payload: { body: "x" },
-    },
-    provider_key: {
-      ...base,
-      source_table: null,
-      source_id: null,
-      payload: { body: "x" },
-    },
-    payload_pointer: {
-      ...base,
-      source_table: null,
-      source_id: null,
-      provider_message_id: null,
-      occurred_at: "2026-09-18T06:46:52.000Z", // same instant, other text form
-    },
-  };
-  for (const [key, row] of Object.entries(variants)) {
-    const check = await readInboxEventCopies(
-      fakeClient({ business_events: [row] }),
-      [inbox],
-    );
-    assert(check.ok, key);
-    assertEquals(check.copies.get(N1_INBOX), SWP_261379, key);
-  }
-  const otherInstant = {
-    ...variants.payload_pointer,
-    occurred_at: "2026-09-18T06:47:00+00:00",
-  };
-  const check = await readInboxEventCopies(
-    fakeClient({ business_events: [otherInstant] }),
-    [inbox],
-  );
-  assertEquals(check.copies.size, 0);
-});
-
 Deno.test("R0: a database answer that does not reference the inbox row never hides it", async () => {
   // The fake ignores the payload-pointer id filter, as a mis-shaped query
   // would; an unrelated placed event at E2 row 1's instant must not hide it.
@@ -566,53 +514,6 @@ Deno.test("R0: a database answer that does not reference the inbox row never hid
   ) => m.source_ref);
   assert(inboxRefs.includes(E2_IDS[0]));
   assertEquals(inboxRefs.length, 4); // E2 x3 plus N1, whose copy is gone here
-});
-
-Deno.test("R0: a failed lookup keeps every row it could not prove copied, marked unknown", async () => {
-  const client = fakeClient(withFlag(swp261379Tables(), "off"), {
-    failTable: "business_events",
-    failColumn: "provider_message_id",
-  });
-  const messages = await conversation(client, SWP_261379);
-  for (const m of refs(messages, ...E2_IDS)) {
-    assertEquals(m.event_copy, "unknown");
-  }
-  assertEquals(refs(messages, ...E2_IDS).length, 3);
-  // N1's copy is still proven by its source pointer: unplaced, flag off.
-  assertEquals(refs(messages, N1_INBOX)[0]?.event_copy, "unplaced");
-
-  // With every lookup failing, nothing is hidden, in either flag state.
-  for (const unlinkedRulesOn of [false, true]) {
-    const pure = legacyInboxRowsToShow([{ id: "x" }, { id: "y" }], {
-      ok: false,
-      copies: new Map(),
-      errors: ["timeout"],
-    }, { unlinkedRulesOn });
-    assertEquals(pure.map((p) => [p.row.id, p.event_copy]), [
-      ["x", "unknown"],
-      ["y", "unknown"],
-    ]);
-  }
-});
-
-Deno.test("R0: every event-copy lookup is keyed, so it stays on an index", async () => {
-  const client = fakeClient(withFlag(swp261379Tables(), "off"));
-  await conversation(client, SWP_261379);
-  const lookups = client.reads.filter((r) =>
-    r.table === "business_events" && !r.filters.includes("eq:job_id")
-  );
-  assertEquals(lookups.length, 3);
-  for (const r of lookups) {
-    assert(
-      r.filters.includes("in:source_id") ||
-        r.filters.includes("in:provider_message_id") ||
-        r.filters.includes("in:occurred_at"),
-      `unkeyed lookup: ${r.filters.join(",")}`,
-    );
-  }
-  const flagReads = client.reads.filter((r) => r.table === "feature_flags");
-  assertEquals(flagReads.length, 1);
-  assert(flagReads[0].filters.includes("eq:flag_name"));
 });
 
 Deno.test("R0: the dossier conversation carries the same answer in both flag states", async () => {

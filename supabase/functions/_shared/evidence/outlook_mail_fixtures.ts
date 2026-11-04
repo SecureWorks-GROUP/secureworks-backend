@@ -108,7 +108,7 @@ export const E_SUPPLIER: OutlookMailItem = {
   folderKind: "inbox",
 };
 
-/** A platform notification: never written. */
+/** A supplier's receipt sent through Xero with no Reply-To: saved as automated supplier mail (payload.sent_via post.xero.com). */
 export const E_XERO: OutlookMailItem = {
   graphId: "AAMkAGEm2XeroImmutable05=",
   internetMessageId: "<em2-xero-0005@post.xero.com>",

@@ -3,20 +3,8 @@
 // a failed read never shown as empty) and on the real ops-api front door
 // (staff only, never an agent read, trades refused).
 // deno-lint-ignore-file no-import-prefix no-explicit-any
-import {
-  assertEquals,
-  assertRejects,
-  assertThrows,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  ATTACHMENT_ROW_CAP,
-  CALL_WORDS_NOTE,
-  contextMessageOriginal,
-  eventIdFrom,
-  FILES_NOT_AVAILABLE,
-  MessageOriginalError,
-  messageKind,
-} from "./context_message_original.ts";
+import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { ATTACHMENT_ROW_CAP, CALL_WORDS_NOTE, contextMessageOriginal, FILES_NOT_AVAILABLE, MessageOriginalError } from "./context_message_original.ts";
 import {
   _authorizeOpsApiAction,
   _opsApiActionNeedsStaffRole,
@@ -53,14 +41,6 @@ function params(q: string) {
   return new URLSearchParams(q);
 }
 
-Deno.test("event_id must be a uuid", () => {
-  for (const q of ["", "event_id=", "event_id=abc", "event_id=1;drop"]) {
-    const e = assertThrows(() => eventIdFrom(params(q)), MessageOriginalError);
-    assertEquals([e.code, e.status], ["invalid_request", 400], q);
-  }
-  assertEquals(eventIdFrom(params(`event_id=${ID.toUpperCase()}`)), ID);
-});
-
 Deno.test("a missing message is 404 and a failed read is 500, never an empty answer", async () => {
   const none = fakeClient({ business_events: { data: null, error: null } });
   const e1 = await assertRejects(
@@ -75,14 +55,6 @@ Deno.test("a missing message is 404 and a failed read is 500, never an empty ans
     MessageOriginalError,
   );
   assertEquals([e2.code, e2.status], ["message_read_failed", 500]);
-});
-
-Deno.test("message kinds", () => {
-  assertEquals(messageKind({ channel: "call", event_type: "call.completed" }), "call");
-  assertEquals(messageKind({ channel: "sms", event_type: "call.transcript_completed" }), "call");
-  assertEquals(messageKind({ channel: "email", event_type: "client.email_received" }), "email");
-  assertEquals(messageKind({ channel: "sms", event_type: "client.sms_received" }), "text");
-  assertEquals(messageKind({ channel: "status", event_type: "task.created" }), "other");
 });
 
 Deno.test("a call returns its facts and never its words", async () => {

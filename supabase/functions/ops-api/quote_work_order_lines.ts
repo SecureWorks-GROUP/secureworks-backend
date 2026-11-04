@@ -124,6 +124,9 @@ export const QUOTE_LINE_FLAGS = {
   outsideQuoteLabour: "outside_quote_labour",
   labourSplitUnverified: "labour_split_unverified",
   labourUnverified: "labour_unverified",
+  /** Older patio quote: no labour row or figure in its pricing, so the
+   *  labour is the sealed scope's own trades x days x day rate. */
+  labourFromScopeConfig: "labour_from_scope_config",
 } as const;
 
 export const QUOTE_RESULT_FLAGS = {
@@ -532,6 +535,71 @@ function extraLines(items: Record<string, any>[]): QuoteWorkOrderLine[] {
 
 // ── The builder ─────────────────────────────────────────────────────────────
 
+/** The new patio tool's (patio-scoper) sealed labour lines, from the scope's
+ *  draft.pricing.labourLines: one work order line each. A line's labour is
+ *  people x days x day rate when all three are entered, else its one figure
+ *  (amount), the tool's own rule (patio/scoper/src/money.ts labourLineCost).
+ *  Their sum is the quote's labourCostEstimate; the tool seals no pricing line
+ *  items. The words are staff's own, never a rate or amount: people x days ride
+ *  as qty in "trade days". */
+export function patioToolLabourLines(labourLines: unknown): QuoteWorkOrderLine[] {
+  if (!Array.isArray(labourLines)) return [];
+  const out: QuoteWorkOrderLine[] = [];
+  labourLines.forEach((raw, i) => {
+    const l = asObject(raw);
+    const people = positive(l.people);
+    const days = positive(l.days);
+    const dayRate = positive(l.dayRate ?? l.day_rate);
+    const byRate = people !== null && days !== null && dayRate !== null;
+    const total = byRate ? round2(people * days * dayRate) : positive(l.amount);
+    const work = text(l.work);
+    if (total === null && !work) return;
+    out.push({
+      line_key: `labour:tool:${i}`,
+      source: "quote",
+      basis: "quote_labour_line",
+      description: work ? `Labour: ${work}` : "Labour",
+      qty: byRate ? round2(people * days) : null,
+      unit: byRate ? "trade days" : null,
+      hours: null,
+      rate: byRate ? dayRate : null,
+      rate_unit: byRate ? "day" : null,
+      total,
+      counted: false,
+      flags: [],
+      needs_review: false,
+    });
+  });
+  return out;
+}
+
+/** One labour line from a patio scope's {trades, days, dayRate}; null unless
+ *  all three are positive numbers. It always asks the approver to look. */
+export function patioScopeLabourLine(
+  scopeLabour: unknown,
+): QuoteWorkOrderLine | null {
+  const l = asObject(scopeLabour);
+  const trades = positive(l.trades);
+  const days = positive(l.days);
+  const dayRate = positive(l.dayRate ?? l.day_rate);
+  if (trades === null || days === null || dayRate === null) return null;
+  return {
+    line_key: "labour:scope",
+    source: "quote",
+    basis: "quote_labour_line",
+    description: `Labour: ${trades} trades x ${days} days at $${dayRate}/day`,
+    qty: round2(trades * days),
+    unit: "trade days",
+    hours: null,
+    rate: dayRate,
+    rate_unit: "day",
+    total: round2(trades * days * dayRate),
+    counted: true,
+    flags: [QUOTE_LINE_FLAGS.labourFromScopeConfig],
+    needs_review: true,
+  };
+}
+
 export function buildQuoteWorkOrderLines(input: {
   jobType: unknown;
   pricing: unknown;
@@ -540,13 +608,19 @@ export function buildQuoteWorkOrderLines(input: {
    *  change time is unknown): lines priced from them cannot reproduce the
    *  quote. */
   ratesChangedSinceQuote?: readonly string[];
+  /** The sealed revision's own patio labour (scope pricing.labour). Used
+   *  only when the quote's pricing has no labour row and no labour figure. */
+  scopeLabour?: unknown;
+  /** The new patio tool's sealed labour lines (scope draft.pricing.labourLines).
+   *  Used when the quote's pricing has no labour row. */
+  toolLabourLines?: unknown;
 }): QuoteWorkOrderLines {
   const jobType = jobTypeOf(input.jobType);
   const pricing = asObject(input.pricing);
   const items = lineItems(pricing);
   const changed = new Set(input.ratesChangedSinceQuote ?? []);
   const flags: string[] = [];
-  const quoteLabour = positive(pricing.labourCostEstimate) ??
+  let quoteLabour = positive(pricing.labourCostEstimate) ??
     positive(asObject(pricing.internal).labour);
 
   // The base lines are the ones the quote's labour figure is built from:
@@ -573,6 +647,28 @@ export function buildQuoteWorkOrderLines(input: {
       ),
     );
     base = extras.filter((l) => labourRowKeys.has(l.line_key));
+    // The new patio tool seals its labour as lines in the scope, with no
+    // pricing line items; together they make the quote's labour figure.
+    const fromTool = base.length === 0
+      ? patioToolLabourLines(input.toolLabourLines)
+      : [];
+    if (fromTool.length > 0) {
+      extras.push(...fromTool);
+      base = fromTool;
+      if (quoteLabour === null && fromTool.every((l) => l.total !== null)) {
+        quoteLabour = round2(fromTool.reduce((s, l) => s + (l.total ?? 0), 0));
+      }
+    }
+    // Owner, 3 Nov 2026: the patio crew work order is the accepted labour,
+    // trades x days x day rate. Older patio quotes kept it only in the scope.
+    const fromScope = base.length === 0 && quoteLabour === null
+      ? patioScopeLabourLine(input.scopeLabour)
+      : null;
+    if (fromScope) {
+      extras.push(fromScope);
+      base = [fromScope];
+      quoteLabour = fromScope.total;
+    }
   }
   const extraLabour = extras.filter((l) =>
     l.basis === "quote_labour_line" && !base.includes(l)

@@ -936,6 +936,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Paid close-out review switch: the per-job
                       # review_opt_out columns (job_closeout.ts).
                       ("20261020093000", "job_review_opt_out"),
+                      # S6 (R7): the scope revision a job work order was
+                      # filled from (job_work_orders.ts).
+                      ("20261020120000", "job_work_order_fill_revision"),
                       # The invoice mirror check: debt_ws_overview and the debt
                       # report read the newest xero_mirror_checks row.
                       ("20261020150000", "xero_mirror_checks"),
@@ -968,6 +971,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch v2: the supplier box's material stage
                       # (dispatch_v2_material_stage_write.ts).
                       ("20261028170000", "dispatch_v2_material_stages"),
+                      # T20: the scope fill records the sealed scope revision
+                      # it read (dispatch_v2_store.ts).
+                      ("20261102203000", "dispatch_v2_scope_fill_revision"),
                       # Dispatch v2 payment step: on account or pay first
                       # (dispatch_v2_payment.ts).
                       ("20261029120000", "dispatch_v2_on_account_suppliers"),
@@ -991,6 +997,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Whole-job move / stretch: reschedule_job_bookings calls
                       # reschedule_job_assignments_v1 (job_bookings.ts).
                       ("20261028150000", "reschedule_job_assignments"),
+                      # JP-24 slice 1: the quick-quote quote_revisions writer
+                      # inserts scope_revision_id (quote_scope_revision_link.ts).
+                      ("20261029123500", "quote_revisions_scope_revision_link"),
+                      ("20261019200000", "dispatch_material_line_provenance"),
                       # TP-01 Xero tie-out: xero_tieout calls
                       # xero_tieout_monthly (xero_tieout.ts).
                       ("20261029121500", "xero_tieout_monthly"),
@@ -1001,6 +1011,15 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261002150000", "context_email_reader"),
                       ("20261006050000", "context_lanes_health"),
                       ("20261006040000", "context_story_safety"),
+                      # Group WO V10: what Xero pays on a crew bill and the
+                      # office's changes, on the trade invoice reads.
+                      ("20261103140000", "trade_invoice_xero_adjustments"),
+                      # B4: job_profit's dispatch_orders reads the Dispatch
+                      # order and bill link views (job_dispatch_orders.ts).
+                      ("20261104010000", "dispatch_order_bill_links"),
+                      # B4 rules (c) and (d): the matched_po_number,
+                      # matched_site_address and matched_in columns.
+                      ("20261104040000", "dispatch_order_bill_more_rules"),
                       # Auto start: the job_auto_start_sweep run ledger and
                       # its 6am Perth cron trigger (job_auto_start.ts).
                       ("20261102140000", "job_auto_start")]:

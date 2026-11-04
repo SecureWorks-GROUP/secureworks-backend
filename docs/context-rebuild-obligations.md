@@ -135,9 +135,9 @@ for that fresh read. A reviewable dry run must be enclosed in BEGIN/ROLLBACK;
 only an explicitly authorized operation may COMMIT. No real job or lease tokens
 are embedded in the repository. There is no production execution receipt yet.
 
-Local proof: `psql -X -v ON_ERROR_STOP=1 -f
-supabase/tests/context-recovery/recovery.sql` against the existing disposable
-migration-stack database.13synthetic scenarios/37assertions use the actual
+Local proof (removed on 3 Nov 2026 under the two-edit rule; it is in git history):
+`psql -X -v ON_ERROR_STOP=1 -f supabase/tests/context-recovery/recovery.sql`
+against the existing disposable migration-stack database.13synthetic scenarios/37assertions use the actual
 preparation, normal writer, guarded finish, current-generation read and rollback.
 They include a new customer reply closing only its own confirmation, later staff
 and financial changes, invalid source, exact-key recovery and retained provenance.

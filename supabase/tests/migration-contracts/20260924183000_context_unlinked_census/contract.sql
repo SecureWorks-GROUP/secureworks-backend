@@ -1,7 +1,6 @@
 -- B0 contract. Proves, against real PostgreSQL:
---   1. the SQL key helpers give exactly the fixture table the TypeScript twin
---      runs (job_refs_contract_rows_test.ts proves the block below IS
---      _shared/job_refs_fixtures.ts);
+--   1. the SQL key helpers give exactly the fixture table copied from
+--      _shared/job_refs_fixtures.ts (nothing checks that the copy still matches);
 --   2. every B0 function is service_role only;
 --   3. the census classifies the named rows (adminbucket.md B0 row: N1, N5,
 --      N6, N8 as a custody multi_ref candidate, N10; plus N2, N3, N4, N7, N9,

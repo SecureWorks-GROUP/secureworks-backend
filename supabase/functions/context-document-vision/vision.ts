@@ -22,6 +22,12 @@
 //      confidence. A document from the last 48 hours wakes a read like any new
 //      evidence; an older one lists its job through the one history re-list.
 //
+// Read requests (migration 20261104130000): documents someone named are handed
+// out first, by context_document_vision_requested_due. A requested email
+// attachment whose email is on no job is read on no job, as the text reader
+// reads it: its row carries no job, is keyed doctext:no_job:<sha-256>, is
+// marked automated so the attribution ladder never places it, and lists no job.
+//
 // A photo with no writing (owner's decision D6, 12 Oct 2026): when the model
 // answers kind photo_of_work, its text is a short factual description of the
 // work shown, and it is kept as the same kind of evidence row, headed as a
@@ -39,6 +45,9 @@ import {
   type DueDocument,
   type FileKind,
   fileKind,
+  jobKey,
+  NO_JOB_KEY,
+  onNoJob,
   resolveLocation,
   sha256Hex,
 } from "../context-document-text/read.ts";
@@ -106,7 +115,7 @@ export type VisionResult =
 export interface VisionRecord {
   source_kind: string;
   source_id: string;
-  job_id: string;
+  job_id: string | null;
   fingerprint: string;
   file_kind: FileKind;
   result: VisionResult;
@@ -126,7 +135,7 @@ export interface VisionRecord {
 export interface ClaimRequest {
   source_kind: string;
   source_id: string;
-  job_id: string;
+  job_id: string | null;
   fingerprint: string;
   file_kind: FileKind;
   sha256: string;
@@ -149,7 +158,8 @@ export type ClaimOutcome =
 export interface LeasedDocument {
   source_kind: "job_document" | "email_attachment";
   source_id: string;
-  job_id: string;
+  /** NULL: a requested attachment read on no job. */
+  job_id: string | null;
   fingerprint: string;
   file_kind: FileKind;
   sha256: string;
@@ -173,6 +183,8 @@ export interface VisionDeps {
   /** Is a vision call admissible today (budget, reserve)? Read only. */
   admission(): Promise<{ open: boolean; code?: string }>;
   dueDocuments(limit: number): Promise<DueDocument[]>;
+  /** Requested documents due a vision read (context_document_vision_requested_due). */
+  requestedDocuments(limit: number): Promise<DueDocument[]>;
   download(bucket: string, path: string): Promise<Download>;
   /** Page count of a PDF, or null when it cannot be read. */
   pageCount(bytes: Uint8Array): Promise<number | null>;
@@ -331,7 +343,7 @@ export function buildVisionTextRow(
   const summary = described
     ? `[Photo description: ${label}, ${what}, ${read.text.length} characters, described by a vision model.]`
     : `[Document text: ${label}, ${what}, ${read.text.length} characters, read by a vision model.]`;
-  return {
+  const row: Record<string, unknown> = {
     event_type: policy.event_type,
     source: policy.event_source,
     entity_type: doc.source_kind,
@@ -339,7 +351,9 @@ export function buildVisionTextRow(
     job_id: doc.job_id,
     match_method: "direct_job_id",
     event_at: doc.doc_at,
-    provider_message_id: `${policy.key_prefix}${doc.job_id}:${read.sha256}`,
+    provider_message_id: `${policy.key_prefix}${
+      jobKey(doc, { no_job_key: NO_JOB_KEY })
+    }:${read.sha256}`,
     channel: "document",
     direction: "internal",
     thread_key: null,
@@ -377,6 +391,7 @@ export function buildVisionTextRow(
     },
     metadata: { capture_mode: doc.capture_mode, writer: ACTOR },
   };
+  return doc.job_id === null ? onNoJob(row) : row;
 }
 
 /** What a document came to before any model call. */
@@ -496,7 +511,7 @@ export type NextResult =
     document: {
       source_kind: string;
       source_id: string;
-      job_id: string;
+      job_id: string | null;
       file_kind: FileKind;
       page_count: number | null;
       image_count: number;
@@ -506,6 +521,27 @@ export type NextResult =
     output_schema: typeof OUTPUT_SCHEMA;
     recorded: { source_id: string; outcome: string; code?: string }[];
   };
+
+/**
+ * The documents a "next" call looks at: requested ones first, then the
+ * ordinary list, together at most the batch. A requested list that cannot be
+ * read (the migration missing) leaves the ordinary list.
+ */
+export async function visionDue(
+  deps: Pick<VisionDeps, "dueDocuments" | "requestedDocuments">,
+  limit: number,
+): Promise<DueDocument[]> {
+  let requested: DueDocument[] = [];
+  try {
+    requested = (await deps.requestedDocuments(limit)).slice(0, limit);
+  } catch {
+    requested = [];
+  }
+  const rest = limit - requested.length;
+  return rest > 0
+    ? [...requested, ...(await deps.dueDocuments(rest)).slice(0, rest)]
+    : requested;
+}
 
 /**
  * The next document to read: everything up to the model call. Documents that
@@ -520,7 +556,7 @@ export async function nextDocument(deps: VisionDeps): Promise<NextResult> {
   const policy = await deps.policy();
   const started = deps.now();
   const recorded: { source_id: string; outcome: string; code?: string }[] = [];
-  const due = await deps.dueDocuments(policy.batch_limit);
+  const due = await visionDue(deps, policy.batch_limit);
   for (const doc of due) {
     if (deps.now() - started > LIMITS.timeBudgetMs) break;
     const base = {
@@ -731,7 +767,7 @@ export async function submitReading(
   });
   if (
     done.outcome !== "refused" && saved.outcome === "inserted" &&
-    lease.capture_mode === "backfill"
+    lease.capture_mode === "backfill" && lease.job_id !== null
   ) {
     // History wakes no read on its own: list its job through the one
     // history re-list (B-1). A failed re-list is reported, never undone.
@@ -755,6 +791,7 @@ export interface PreviewResult {
     source_kind: string;
     source_id: string;
     job_number: string | null;
+    on_no_job: boolean;
     file_kind: FileKind;
     location: string;
     capture_mode: string;
@@ -766,7 +803,12 @@ export interface PreviewResult {
 export async function previewVision(
   deps: Pick<
     VisionDeps,
-    "flagOn" | "laneOn" | "admission" | "dueDocuments" | "supabaseUrl"
+    | "flagOn"
+    | "laneOn"
+    | "admission"
+    | "dueDocuments"
+    | "requestedDocuments"
+    | "supabaseUrl"
   >,
   limit: number,
 ): Promise<PreviewResult> {
@@ -774,7 +816,7 @@ export async function previewVision(
     deps.flagOn(),
     deps.laneOn(),
     deps.admission(),
-    deps.dueDocuments(limit),
+    visionDue(deps, limit),
   ]);
   return {
     outcome: "preview",
@@ -787,6 +829,7 @@ export async function previewVision(
         source_kind: d.source_kind,
         source_id: d.source_id,
         job_number: d.job_number,
+        on_no_job: d.job_id === null,
         file_kind: fileKind(d),
         location: where.ok ? `storage:${where.bucket}` : where.code,
         capture_mode: d.capture_mode,

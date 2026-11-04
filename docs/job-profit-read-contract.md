@@ -27,7 +27,7 @@ carry no money.
 
 | Action | Returns |
 |---|---|
-| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `cost_events`, `revenue_events`, `timeline`, `labels` |
+| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `trade_charge_dates` (below), `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `labels` |
 | `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
 
@@ -38,6 +38,23 @@ answers an empty `jobs` with `has_more` false, never an error. Totals come from
 
 The `type` filter matches `work_type`, not `jobs.type`: a job whose family is
 repair is listed as `repair` whatever its type. `work_subtype` is the family.
+
+## When each trade charged
+
+A crew invoice line's `event_date` in `v_job_cost_events` is its `line_date`
+or else the pay week's start, so it is not when the trade charged. `job_profit`
+reads each trade line's crew invoice (`trade_invoice_lines` by line id, with
+`trade_invoices.submitted_at`) and adds, on that line's `cost_events` row and
+its `timeline` entry: `submitted_on` (the Perth day the trade submitted it),
+`work_date` (the day worked, from the line's time entry) and `line_date` (the
+line's own day: a work order's completed or scheduled day, or the day typed).
+Each `trades` row gains `first_charge` and `last_charge`, each taken from one
+line: the earliest and latest by submitted day, then day worked (or line day).
+A trade charge's `timeline` date is its submitted day; a line never submitted
+keeps its cost event date. `trades.first` and `trades.last` stay the cost event
+dates. `trade_charge_dates.status` is `ok`, `none` (no trade line) or
+`unknown` with a `reason`: then no date is added and none is guessed. No
+figure, lane or cost event date changes.
 Legacy jobs have no row.
 
 ## Job fields
@@ -180,6 +197,56 @@ A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
 parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
 figure; `holding_jobs` reports it on its own so the parked cost stays visible.
 
+## Dispatch orders and their bills (B4)
+
+`job_profit` answers `dispatch_orders`: the job's Dispatch orders and the supplier bills linked to each, read
+from `v_dispatch_orders` and `v_dispatch_order_bills` (migration `20261104010000`, service role only; code
+`job_dispatch_orders.ts`; rules (c) and (d) from migration `20261104040000`, (e) and (f) from `20261104233000`). An order is a Dispatch v2
+supplier order email that went out (`sent` or `send_unknown`) or a purchase order that is not a draft or
+cancelled.
+
+A supplier bill (Xero ACCPAY, AUTHORISED or PAID) links to an order by the owner's rule of 3 Nov 2026, by
+itself, never by a person: the bill's supplier is the order's supplier (the supplier record's Xero contact, or
+the names agree once company words are dropped: "Metroll" and "Metroll Perth"), and the bill's number,
+reference or line text carries `supplier_ref` (a supplier order, quote or invoice number saved for that order
+from its replies) or `job_number` (our job number, as `SWP-261309`, `SWP261309` or `SWP 261309`), and, decided
+3 Nov 2026 09:44Z, `po_number` (our PO number as words, `PO-298035` or `PO 298035`, or run together,
+`PO298035`, `PO#298035`, never the digits alone; on the bill or on the supplier's PDF of it) or `site_address`
+(the job's site address in the bill's own number, reference or lines, decided 10:26Z, or on the supplier's PDF,
+keyed by the context placer's `context_address_key`, when it matches exactly one order of that supplier). The
+supplier's PDF of a bill is a PDF that came in by email from that supplier (never one we sent; the sender's address
+carries the supplier's name), whose file name and text both carry the bill's number and whose text names the bill's
+supplier. Its text is what the document text reader or, for a scan, the vision reader already extracted; a scan
+neither could read has no text and its bill waits. The same supplier and the same
+amount alone never link. Purchase orders have no saved refs and Dispatch v2 emails have no order number, so
+`supplier_ref` applies only to v2 orders and `po_number` only to purchase orders. A bill links to one order:
+one that names two orders links neither and is listed under that order's `unclear_bills` with a reason
+(`several_order_numbers`, `other_order_ref`, `job_disagrees`, `several_jobs_named`, `several_orders_on_job`);
+an order's own number (saved ref or PO number) picks its order when nothing else on the bill points at another
+job.
+
+Two more, from migration `20261104233000` (3 Nov 2026), for bills that carry nothing of ours but that our own records
+tie to the order: `bill_number` (purchase orders only: the bill's own number written on the purchase order's
+reference or notes, where the office records the supplier's quote or invoice number, as `R&R INV-86846` or
+`Lysaght quote KEW/231967 received`; read as written on the bill, its letters, then 5 or more digits, then at most
+one letter, so `INV-86846` never matches `INV-86846a`; a number of digits alone needs 6 or more and is never read
+inside an amount; it picks its order like a saved ref) and `job_number` found in `pdf_email` (Dispatch v2 orders
+only: our job number in the subject and body of the emails that carry the supplier's PDF of the bill, the supplier's
+own email from the domain the order went to, or ours, such as a forward to finance@ asking to pay it, never a
+customer's; those words must name exactly one job number; the PDF's own text is not needed, so a scan no reader can
+read still links; it places like a job number on the bill).
+
+| Field | Meaning |
+|---|---|
+| `status`, `reason` | `ok`, or `unknown` with a reason when the orders or links cannot be read. Unknown is never "not billed": `ordered`, `billed` and `not_billed` are then null |
+| `ordered`, `billed`, `not_billed` | Counts of orders; billed = at least one bill linked |
+| `orders[]` | `order_kind` (`dispatch_v2_email` or `purchase_order`), `order_id`, `supplier`, `order_label` (the email subject or PO number), `order_status`, `ordered_at`, `state` (`billed` or `not_billed`), `bills[]`, `unclear_bills[]` |
+| `bills[]` | `invoice_number`, `supplier`, `bill_date`, `bill_status`, `bill_sub_total_ex` (the bill's own amount, ex GST), `rule` (every rule that matched, joined by `+`, in the order `supplier_ref`, `job_number`, `po_number`, `site_address`, `bill_number`), `matched_ref`, `matched_job_number`, `matched_po_number`, `matched_site_address` (the address key), `matched_in` (where it was found, joined by `+` in this order: `bill`, `supplier_pdf`, `pdf_email`, `order`), `cost_on_this_job` (Job Profit counts the bill on this job) |
+
+No price goes on an order and a link moves nothing: it places no bill, writes no row, and changes no figure
+in `job`, `cost_events`, `ordered_not_billed_count` or any rollup. `ordered_not_billed_count` still counts
+purchase orders only.
+
 ## Where a bill's cost counts (H7)
 
 `cfo_bill_cost_outcomes` (`20261029170000`, contract
@@ -256,6 +323,24 @@ obligations are shown separately. No new cost formula is calculated by the
 API or screen. Missing super records do not establish zero or cost-close.
 The source producer and its feature activation remain owned by Group WO;
 this consumer compatibility change does not activate that feature.
+
+A crew bill raised straight in Xero (no crew-app record) can state the company super on its super line
+("Company contribution $50.40"). Since 20261104071000 each placed line of that bill carries its share of
+it (line amount x contribution / the bill's other lines), source `bill_employer_super`, on the line's job
+and lane, unpaid, behind the same `job_cost_employer_super_v1` switch. `job_profit.timeline` labels it
+`employer_super`. The super line itself, the worker's share withheld from pay and paid to the fund, is
+never a cost on any bill. Crew-app mirror bills stay out, so a crew invoice's super is only ever its own.
+
+## Split lines and supplier credits (A6, 3 Nov 2026)
+
+- A Xero line Bookkeeping's ledger splits across jobs is one `cost_events` row per part (20261104070000):
+  source `supplier_bill`, `source_id` `<bill>:<line>:part<k>`, match `bookkeeping_evidence`, at the part's
+  amount. Parts are used only while complete and adding up to the Xero line as we hold it, and only where
+  the ledger's line evidence is (no office whole-bill job). An AI whole-bill fact stands aside whenever the
+  ledger places any line or part of that bill on another job; a person's split still outranks the ledger.
+- A supplier credit is taken at the credit note's own ex-GST rate (its sub total over its total), the bill's
+  rate only when our copy does not hold the note (20261104072000). One bill's credit rows are rounded as a
+  running total, so they add up to the credit's own cents.
 
 ### Context money-book completeness (TP-13 / TP-17 composition, 31 Oct 2026)
 

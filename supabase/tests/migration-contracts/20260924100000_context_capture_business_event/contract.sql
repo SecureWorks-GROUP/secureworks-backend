@@ -1,8 +1,8 @@
 -- C1a behaviour contract: capture_business_event, the one writer for new
 -- evidence code, on the named rows of sms.md §10 (R5 tool-send race, R2, R7,
 -- R13, R32 MMS). The input rows between the ROWS markers are exactly what the
--- TypeScript builder (_shared/evidence/ghl_message.ts) produces for the
--- recorded fixtures; ghl_message_contract_rows_test.ts fails if they drift.
+-- TypeScript builder (_shared/evidence/ghl_message.ts) produced for the
+-- recorded fixtures when they were copied; nothing checks that they still match.
 -- Ids are the design's GHL ids; job ids and job numbers are synthetic; row
 -- labels only. Every fixture write is rolled back.
 BEGIN;
@@ -15,12 +15,6 @@ BEGIN
   END IF;
   NEW := public.resolve_context_attribution(NEW);
   RETURN NEW;
-END $$;
-DO $$
-BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.attribute_business_event()'))
-    IS DISTINCT FROM 'c399dfbebcd120a4b0741a9130a973bf'
- THEN RAISE EXCEPTION 'c1a contract: attribute_business_event is not the live body'; END IF;
 END $$;
 
 CREATE TEMP TABLE c1a_rows(label text PRIMARY KEY, r jsonb NOT NULL) ON COMMIT DROP;

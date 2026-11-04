@@ -223,6 +223,20 @@ pair on `trade_invoice_lines` (id, line type, description, the two review
 fields) and does not put prices on that list. A failed line read leaves
 the detail up and sets `trade_invoice_lines_error`.
 
+For a staff caller only, `list_trade_invoice_lines` also carries the V16
+work-order claim check (`work_order_claim_check.ts`). A line whose
+description starts "Work order $X" (the lead's fixed-price claim) gets
+`work_order_claim_warning`: words when the job's live labour differs from
+the largest claim on the job, or two or more people claimed a work order;
+otherwise null. Every other line gets null. Live means the invoice is not
+`ops-reject` and not `draft`; labour is `v_trade_charge_resolved.cost_lane =
+'labour'` on `resolved_job_id`, at `line_total_ex` as Job Profit counts it.
+The response adds `work_order_claim_check` (labour, largest claim, claimant
+count and names, difference) and `work_order_claim_check_error`. A failed
+read keeps the list and says on each claim line that the check could not be
+read; a labour line with no amount makes labour unknown, never 0. It is a
+warning only: it never blocks a review and never changes or recomputes pay.
+
 ## Backfill
 
 `scripts/backfill-job-work-orders-active.ts`. Dry-run by default. It is not

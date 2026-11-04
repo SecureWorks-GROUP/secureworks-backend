@@ -481,6 +481,72 @@ export type PresentedTradeInvoiceRecurringDeduction = {
   payable_before_deduction: number;
 };
 
+// One change the office made to the crew bill in Xero after our push, named
+// (Group WO field-ready check V10). xero-sync reads it from the bill
+// (xero-sync/trade_bill_status.ts) into trade_invoices.xero_adjustment_lines.
+export type TradeInvoiceXeroAdjustmentLine = {
+  description: string;
+  amount: number;
+  account_code: string | null;
+  // office_line: a line the office added; unexplained: the rest of a
+  // difference no line names.
+  kind: "office_line" | "unexplained";
+};
+
+// Added to a presented invoice only once xero-sync has read its bill. Absent
+// means not read yet (unknown); a read bill with no changes has an empty list
+// and a total of 0.
+export type PresentedTradeInvoiceXeroAdjustments = {
+  xero_adjustments: { total: number; lines: TradeInvoiceXeroAdjustmentLine[] };
+  // trade_payable with the office's changes in Xero: what this invoice pays
+  // the trade. The app shows it as the pay figure.
+  payable_after_xero: number;
+  // The bill's total in Xero. Absent on a voided or deleted bill. It differs
+  // from payable_after_xero only when Xero's tax differs from the invoice's
+  // (four GST bills of 30 Aug to 14 Sep were entered without GST).
+  xero_pays?: number;
+};
+
+const VOID_XERO_BILL_STATUSES = new Set(["VOIDED", "DELETED"]);
+
+function presentedMoney(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? round2(n) : null;
+}
+
+/**
+ * The office's changes to the crew bill in Xero, as xero-sync recorded them,
+ * for an invoice whose trade_payable is known. {} when the bill has not been
+ * read yet, so the invoice reads exactly as it did before.
+ */
+export function presentTradeInvoiceXeroAdjustments(
+  invoice: Record<string, unknown>,
+  tradePayable: number | null,
+): Partial<PresentedTradeInvoiceXeroAdjustments> {
+  const total = presentedMoney(invoice.xero_adjustments_ex);
+  if (total === null || tradePayable === null) return {};
+  const lines = (Array.isArray(invoice.xero_adjustment_lines)
+    ? invoice.xero_adjustment_lines
+    : [])
+    .filter((line: unknown) => line && typeof line === "object")
+    .map((line: any): TradeInvoiceXeroAdjustmentLine => ({
+      description: String(line.description ?? "").replace(/\s+/g, " ").trim(),
+      amount: presentedMoney(line.amount) ?? 0,
+      account_code: line.account_code ? String(line.account_code) : null,
+      kind: line.kind === "unexplained" ? "unexplained" : "office_line",
+    }));
+  const billTotal = presentedMoney(invoice.xero_bill_total);
+  const billStatus = String(invoice.xero_bill_status ?? "").toUpperCase();
+  return {
+    xero_adjustments: { total, lines },
+    payable_after_xero: round2(tradePayable + total),
+    ...(billTotal !== null && !VOID_XERO_BILL_STATUSES.has(billStatus)
+      ? { xero_pays: billTotal }
+      : {}),
+  };
+}
+
 export function presentTradeInvoiceMoney<
   T extends Record<string, unknown>,
 >(
@@ -488,7 +554,8 @@ export function presentTradeInvoiceMoney<
 ):
   & T
   & { trade_payable: number | null }
-  & Partial<PresentedTradeInvoiceRecurringDeduction> {
+  & Partial<PresentedTradeInvoiceRecurringDeduction>
+  & Partial<PresentedTradeInvoiceXeroAdjustments> {
   const hasPersistedSplit = PERSISTED_SPLIT_FIELDS.some((field) =>
     invoice[field] !== null && invoice[field] !== undefined
   );
@@ -497,14 +564,16 @@ export function presentTradeInvoiceMoney<
   }
 
   const money = validatePersistedTradeInvoiceMoney(invoice);
+  const xero = presentTradeInvoiceXeroAdjustments(invoice, money.trade_payable);
   if (!money.recurring_deduction) {
-    return { ...invoice, trade_payable: money.trade_payable };
+    return { ...invoice, trade_payable: money.trade_payable, ...xero };
   }
   return {
     ...invoice,
     trade_payable: money.trade_payable,
     recurring_deduction: money.recurring_deduction,
     payable_before_deduction: tradeInvoicePayableBeforeDeduction(money),
+    ...xero,
   };
 }
 

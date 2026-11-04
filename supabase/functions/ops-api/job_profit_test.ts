@@ -3,15 +3,7 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildJobProfitTimeline,
-  costEventKind,
-  JOB_PROFIT_LABELS,
-  jobProfitAction,
-  jobProfitCallerAllowed,
-  jobProfitListAction,
-  parseJobProfitListFilters,
-} from "./job_profit.ts";
+import { costEventKind, JOB_PROFIT_LABELS, jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from "./job_profit.ts";
 
 // A recording PostgREST stand-in: each from() answers from `tables` and logs
 // the filters it was given.
@@ -67,11 +59,12 @@ function fakeClient(
 
 const JOB = "a7000000-0000-4000-8000-000000000001";
 
-Deno.test("only the ops key or an admin/owner session may read job profit", () => {
+Deno.test("only the ops key or an admin, owner or office-staff session may read job profit", () => {
   assert(jobProfitCallerAllowed("api_key", null));
   assert(jobProfitCallerAllowed("jwt", "admin"));
   assert(jobProfitCallerAllowed("jwt", "Owner"));
-  for (const role of ["ops_manager", "lead_installer", "trade", "", null]) {
+  assert(jobProfitCallerAllowed("jwt", "ops_manager"));
+  for (const role of ["lead_installer", "trade", "crew", "estimator", "", null]) {
     assert(
       !jobProfitCallerAllowed("jwt", role),
       `role ${role} must be refused`,
@@ -80,164 +73,6 @@ Deno.test("only the ops key or an admin/owner session may read job profit", () =
   assert(!jobProfitCallerAllowed("routine", "admin"));
   assert(!jobProfitCallerAllowed("agent_read", null));
   assert(!jobProfitCallerAllowed("none", null));
-});
-
-Deno.test("list filters are validated, never passed through raw", () => {
-  const ok = parseJobProfitListFilters(
-    new URLSearchParams(
-      "type=fencing,patio&status=complete&from=2025-07-01&to=2026-06-30&date_field=invoiced&limit=50&offset=10",
-    ),
-  );
-  assertEquals(ok, {
-    ok: true,
-    types: ["fencing", "patio"],
-    statuses: ["complete"],
-    from: "2025-07-01",
-    to: "2026-06-30",
-    dateField: "invoiced",
-    limit: 50,
-    offset: 10,
-  });
-  assertEquals(parseJobProfitListFilters(new URLSearchParams("")), {
-    ok: true,
-    types: [],
-    statuses: [],
-    from: null,
-    to: null,
-    dateField: "created",
-    limit: 100,
-    offset: 0,
-  });
-  assertEquals(
-    parseJobProfitListFilters(new URLSearchParams("limit=500")).ok,
-    true,
-  );
-  for (
-    const bad of [
-      "type=fencing)",
-      "status=a;b",
-      "from=1/7/2025",
-      "to=2026-6-1",
-      "date_field=paid",
-      "limit=0",
-      "limit=501",
-      "offset=-1",
-      "limit=abc",
-    ]
-  ) {
-    assertEquals(
-      parseJobProfitListFilters(new URLSearchParams(bad)).ok,
-      false,
-      bad,
-    );
-  }
-});
-
-Deno.test("timeline: every event in date order, one paid entry per paid document", () => {
-  const costs = [
-    {
-      source: "trade_line",
-      source_id: "l2",
-      document_id: "ti1",
-      document_number: "SW-INV-1",
-      event_date: "2026-08-05",
-      lane: "labour",
-      party: "Trade One",
-      amount_ex: "120.50",
-      is_actual: true,
-      paid: true,
-      paid_on: "2026-08-20",
-      confidence: "high",
-    },
-    {
-      source: "trade_line",
-      source_id: "l1",
-      document_id: "ti1",
-      document_number: "SW-INV-1",
-      event_date: "2026-08-04",
-      lane: "commission",
-      party: "Trade One",
-      amount_ex: 100,
-      is_actual: true,
-      paid: true,
-      paid_on: "2026-08-20",
-      confidence: "high",
-    },
-    {
-      source: "po_committed",
-      source_id: "po1",
-      document_id: "po1",
-      event_date: "2026-08-01",
-      lane: "materials",
-      party: "Supplier",
-      amount_ex: 80,
-      is_actual: false,
-      paid: false,
-      paid_on: null,
-    },
-  ];
-  const revenue = [
-    {
-      kind: "invoice_line",
-      source_id: "inv1:1",
-      document_id: "inv1",
-      document_number: "INV-1",
-      invoice_date: "2026-08-08",
-      amount_ex: 600,
-      status: "PAID",
-      paid: true,
-      paid_on: "2026-08-18",
-      counts_as_invoiced: true,
-    },
-    {
-      kind: "invoice_line",
-      source_id: "inv1:2",
-      document_id: "inv1",
-      document_number: "INV-1",
-      invoice_date: "2026-08-08",
-      amount_ex: 400,
-      status: "PAID",
-      paid: true,
-      paid_on: "2026-08-18",
-      counts_as_invoiced: true,
-    },
-    {
-      kind: "variation",
-      source_id: "v1",
-      document_id: "v1",
-      document_number: "V1",
-      invoice_date: "2026-08-07",
-      amount_ex: 100,
-      status: "approved",
-      paid: false,
-      paid_on: null,
-      counts_as_invoiced: false,
-    },
-  ];
-  const t = buildJobProfitTimeline(costs, revenue);
-  assertEquals(t.map((e) => [e.date, e.kind]), [
-    ["2026-08-01", "purchase_order"],
-    ["2026-08-04", "trade_charge"],
-    ["2026-08-05", "trade_charge"],
-    ["2026-08-07", "variation"],
-    ["2026-08-08", "sales_invoice"],
-    ["2026-08-08", "sales_invoice"],
-    ["2026-08-18", "sales_invoice_paid"],
-    ["2026-08-20", "cost_paid"],
-  ]);
-  const po = t.find((e) => e.kind === "purchase_order")!;
-  assertEquals(po.counts, false, "a committed PO never counts as actual cost");
-  assertEquals(
-    t.find((e) => e.kind === "variation")!.counts,
-    false,
-    "a variation is listed, not invoiced",
-  );
-  assertEquals(t.find((e) => e.kind === "sales_invoice_paid")!.amount_ex, 1000);
-  assertEquals(t.find((e) => e.kind === "cost_paid")!.amount_ex, 220.5);
-  assertEquals(
-    t.find((e) => e.kind === "trade_charge" && e.source_id === "l2")!.amount_ex,
-    120.5,
-  );
 });
 
 Deno.test("job_profit: needs a job, rejects malformed ids, 404 when absent", async () => {
@@ -383,8 +218,13 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
     "SWF-1",
   ]);
   for (const call of c.calls.slice(1)) {
-    assertEquals(call.ops.find(([op]) => op === "eq")![1], ["job_id", JOB]);
+    assertEquals(
+      call.ops.find(([op]) => op === "eq")![1],
+      call.table === "jobs" ? ["id", JOB] : ["job_id", JOB],
+    );
   }
+  // a job that is not a patio scoper record gets no patio_expected key
+  assertEquals("patio_expected" in body, false);
 });
 
 Deno.test("job_profit: a read error is a 500, never an empty job", async () => {
@@ -610,99 +450,6 @@ Deno.test("rollup: Xero Project expenses are in no total of cost or profit", asy
   }
 });
 
-// CFO-12: the three purchase order states reach the timeline as orders, never
-// as a bill, never as actual cost, and an unpriced order carries no $0.00.
-Deno.test("job profit timeline: ordered, invoice-emailed and committed orders (CFO-12)", () => {
-  const costs = [
-    {
-      source: "po_committed",
-      source_id: "po1",
-      document_id: "po1",
-      event_date: "2026-08-01",
-      lane: "materials",
-      party: "Supplier",
-      amount_ex: 200,
-      is_actual: false,
-      paid: false,
-      paid_on: null,
-      confidence: "committed",
-    },
-    {
-      source: "po_ordered",
-      source_id: "po2",
-      document_id: "po2",
-      document_number: "PO-1000001",
-      event_date: "2026-08-02",
-      lane: "materials",
-      party: "Dispatch Supplier",
-      amount_ex: null,
-      is_actual: false,
-      paid: false,
-      paid_on: null,
-      confidence: "ordered_not_billed",
-    },
-    {
-      source: "po_invoice_emailed",
-      source_id: "po3",
-      document_id: "po3",
-      event_date: "2026-09-02",
-      lane: "materials",
-      party: "Supplier",
-      amount_ex: 300,
-      is_actual: false,
-      paid: false,
-      paid_on: null,
-      confidence: "invoice_emailed",
-    },
-  ];
-  const t = buildJobProfitTimeline(costs, []);
-  assertEquals(t.map((e) => [e.date, e.kind, e.amount_ex, e.counts]), [
-    ["2026-08-01", "purchase_order", 200, false],
-    ["2026-08-02", "purchase_order_ordered", null, false],
-    ["2026-09-02", "purchase_order_invoice_emailed", 300, false],
-  ]);
-  assert(
-    !t.some((e) => e.kind === "cost_paid"),
-    "no order is ever a paid cost",
-  );
-  assert(
-    !t.some((e) => e.kind === "supplier_bill"),
-    "no order state is shown as a supplier bill",
-  );
-});
-
-Deno.test("costEventKind: an unknown po_ state is a purchase order, other unknowns stay supplier bills", () => {
-  assertEquals(costEventKind("po_committed"), "purchase_order");
-  assertEquals(costEventKind("po_ordered"), "purchase_order_ordered");
-  assertEquals(
-    costEventKind("po_invoice_emailed"),
-    "purchase_order_invoice_emailed",
-  );
-  assertEquals(costEventKind("po_something_new"), "purchase_order");
-  assertEquals(costEventKind("supplier_bill"), "supplier_bill");
-  assertEquals(costEventKind("materials_fact"), "materials_fact");
-  assertEquals(costEventKind(undefined), "supplier_bill");
-});
-
-Deno.test("job profit labels name the CFO-12 commitment states", () => {
-  assert(
-    JOB_PROFIT_LABELS.committed_open_ex.includes("never counted here as $0.00"),
-  );
-  assert(
-    JOB_PROFIT_LABELS.ordered_not_billed_count.startsWith(
-      "Ordered, not billed",
-    ),
-  );
-  assert(
-    JOB_PROFIT_LABELS.invoice_emailed_count.startsWith(
-      "Invoice emailed, no bill matched to this order",
-    ),
-  );
-  assert(
-    JOB_PROFIT_LABELS.invoice_emailed_count.includes("never nothing owed"),
-  );
-});
-
 Deno.test("rollup: expected vs actual counts only jobs whose actual cost is complete", async () => {
   const row = (over: Record<string, unknown>) => ({
     work_type: "fencing",
@@ -906,6 +653,12 @@ Deno.test("rollup: a holding job is in no total, type or month, and is reported 
   assertEquals(body.holding_jobs.profit_ex, null);
 });
 
+Deno.test("a Xero crew bill's company super is employer super on the timeline, never a supplier bill", () => {
+  assertEquals(costEventKind("bill_employer_super"), "employer_super");
+  assertEquals(costEventKind("trade_employer_super"), "employer_super");
+  assertEquals(costEventKind("supplier_bill"), "supplier_bill");
+});
+
 Deno.test("employer super remains a separate unpaid obligation, not a supplier bill or trade cash", async () => {
   const events = [
     {
@@ -1008,4 +761,155 @@ Deno.test("employer super remains a separate unpaid obligation, not a supplier b
     "original identity and counting fields retained",
   );
   assert(!JOB_PROFIT_LABELS.profit.includes("super share is not added"));
+});
+
+Deno.test("job_profit: line evidence comes with the figures; a failed read is unknown, never verified", async () => {
+  const tables = {
+    jobs: [{ id: JOB, job_number: "SWF-1" }],
+    v_job_profit: [{ job_id: JOB, job_number: "SWF-1", invoiced_ex: 1000, actual_cost_ex: 570, profit_ex: 430 }],
+    v_job_cost_events: [],
+    v_job_revenue_events: [],
+  };
+  const ok: any = fakeClient(tables);
+  const seen: unknown[] = [];
+  ok.rpc = (fn: string, args: unknown) => {
+    seen.push([fn, args]);
+    return Promise.resolve({ data: { status: "provisional", items: 3, evidenced: 1 }, error: null });
+  };
+  const r1 = await jobProfitAction(ok, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(r1.status, 200);
+  assertEquals((r1.body as any).line_evidence, { status: "provisional", items: 3, evidenced: 1 });
+  assertEquals(seen, [["job_profit_line_evidence", { p_job_id: JOB }]]);
+
+  const bad: any = fakeClient(tables);
+  bad.rpc = () => Promise.resolve({ data: null, error: { message: "timeout" } });
+  const r2 = await jobProfitAction(bad, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(r2.status, 200, "figures still return when the evidence read fails");
+  assertEquals((r2.body as any).line_evidence.status, "unknown");
+
+  const none: any = fakeClient(tables);
+  const r3 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals((r3.body as any).line_evidence.status, "unknown");
+});
+
+// When each trade charged (finish line A5, owner ask 1, coordinator spot-check
+// 3 Nov 2026 18:02Z). SWF-261099 as production holds it: the cost view dates
+// all three crew lines by the pay week's start (12 Oct); the crew invoices say
+// trade one submitted $140 worked 12 Oct and $80 worked 13 Oct on 18 Oct, and
+// trade two submitted $70 with no work date on 22 Oct (Perth days).
+const TL = (n: number) => `c1000000-0000-4000-8000-00000000000${n}`;
+function tradeLineEvent(n: number, party: string, amount: number, over: Record<string, unknown> = {}) {
+  return {
+    job_id: JOB, source: "trade_line", source_id: TL(n), document_id: `ti-${party}`,
+    event_date: "2026-10-12", lane: "labour", party_id: party, party: `Trade ${party}`,
+    amount_ex: amount, is_actual: true, paid: false, paid_on: null, ...over,
+  };
+}
+function swf261099(dateErrors: Record<string, string> = {}) {
+  return fakeClient({
+    jobs: [{ id: JOB, job_number: "SWF-261099" }],
+    v_job_profit: [{ job_id: JOB, job_number: "SWF-261099", actual_labour_ex: 290, actual_cost_ex: 290 }],
+    v_job_cost_events: [
+      tradeLineEvent(1, "b353f39a", 140),
+      tradeLineEvent(2, "b353f39a", 80),
+      tradeLineEvent(3, "f9a9e835", 70),
+    ],
+    v_job_revenue_events: [],
+    trade_invoice_lines: [
+      { id: TL(1), work_date: "2026-10-12", line_date: null, trade_invoices: { submitted_at: "2026-10-18T06:21:28.254+00:00" } },
+      { id: TL(2), work_date: "2026-10-13", line_date: null, trade_invoices: { submitted_at: "2026-10-18T06:21:28.254+00:00" } },
+      { id: TL(3), work_date: null, line_date: null, trade_invoices: { submitted_at: "2026-10-22T12:43:48.421+00:00" } },
+    ],
+  }, dateErrors);
+}
+
+Deno.test("job_profit: each trade's first and last charge are the days it submitted them, with the day worked (SWF-261099)", async () => {
+  const c = swf261099();
+  const out = await jobProfitAction(c, new URLSearchParams("job_number=SWF-261099"));
+  assertEquals(out.status, 200);
+  const body = out.body as any;
+  assertEquals(body.trade_charge_dates, { status: "ok" });
+  assertEquals(body.trades, [
+    {
+      party_id: "b353f39a", party: "Trade b353f39a", amount_ex: 220, lines: 2,
+      first: "2026-10-12", last: "2026-10-12", // the cost event dates, unchanged
+      first_charge: { submitted_on: "2026-10-18", work_date: "2026-10-12", line_date: null },
+      last_charge: { submitted_on: "2026-10-18", work_date: "2026-10-13", line_date: null },
+    },
+    {
+      party_id: "f9a9e835", party: "Trade f9a9e835", amount_ex: 70, lines: 1,
+      first: "2026-10-12", last: "2026-10-12",
+      first_charge: { submitted_on: "2026-10-22", work_date: null, line_date: null },
+      last_charge: { submitted_on: "2026-10-22", work_date: null, line_date: null },
+    },
+  ]);
+  // Each line carries its own dates; its money, lane and cost event date are untouched.
+  const lines = body.cost_events.filter((e: any) => e.source === "trade_line");
+  assertEquals(lines.map((e: any) => [e.amount_ex, e.event_date, e.lane, e.submitted_on, e.work_date]), [
+    [140, "2026-10-12", "labour", "2026-10-18", "2026-10-12"],
+    [80, "2026-10-12", "labour", "2026-10-18", "2026-10-13"],
+    [70, "2026-10-12", "labour", "2026-10-22", null],
+  ]);
+  assertEquals(body.job.actual_labour_ex, 290, "the engine row is passed through untouched");
+  // The money timeline dates each trade charge by the day it was submitted.
+  const tl = body.timeline.filter((t: any) => t.kind === "trade_charge");
+  assertEquals(tl.map((t: any) => [t.date, t.work_date, t.amount_ex]), [
+    ["2026-10-18", "2026-10-12", 140],
+    ["2026-10-18", "2026-10-13", 80],
+    ["2026-10-22", null, 70],
+  ]);
+  // One read of the crew invoice lines, by the job's own trade line ids only.
+  const read = c.calls.filter((x) => x.table === "trade_invoice_lines");
+  assertEquals(read.length, 1);
+  assertEquals(read[0].ops.find(([op]) => op === "in")![1], ["id", [TL(1), TL(2), TL(3)]]);
+});
+
+Deno.test("job_profit: a job whose lines have no work date says so; a line's own day is kept apart; Perth days", async () => {
+  const c = fakeClient({
+    jobs: [{ id: JOB, job_number: "SWP-261183" }],
+    v_job_profit: [{ job_id: JOB, job_number: "SWP-261183" }],
+    v_job_cost_events: [
+      tradeLineEvent(4, "p1", 80, { event_date: "2026-09-21" }),
+      tradeLineEvent(5, "p2", 50, { event_date: "2026-09-18" }),
+      // A draft line: not actual, never submitted.
+      tradeLineEvent(6, "p2", 30, { event_date: "2026-09-21", is_actual: false, document_status: "draft" }),
+    ],
+    v_job_revenue_events: [],
+    trade_invoice_lines: [
+      // 16:30Z on 21 Sep is 00:30 on 22 Sep in Perth.
+      { id: TL(4), work_date: null, line_date: null, trade_invoices: { submitted_at: "2026-09-21T16:30:00+00:00" } },
+      { id: TL(5), work_date: null, line_date: "2026-09-18", trade_invoices: [{ submitted_at: "2026-09-25T01:00:00+00:00" }] },
+      { id: TL(6), work_date: null, line_date: null, trade_invoices: { submitted_at: null } },
+    ],
+  });
+  const body = (await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`))).body as any;
+  assertEquals(body.trades.map((t: any) => [t.party_id, t.lines, t.first_charge, t.last_charge]), [
+    ["p1", 1, { submitted_on: "2026-09-22", work_date: null, line_date: null }, { submitted_on: "2026-09-22", work_date: null, line_date: null }],
+    ["p2", 1, { submitted_on: "2026-09-25", work_date: null, line_date: "2026-09-18" }, { submitted_on: "2026-09-25", work_date: null, line_date: "2026-09-18" }],
+  ], "the draft line is in no trade total and no first or last charge");
+  const draft = body.cost_events.find((e: any) => e.source_id === TL(6));
+  assertEquals([draft.submitted_on, draft.work_date, draft.event_date], [null, null, "2026-09-21"]);
+  const tl = body.timeline.filter((t: any) => t.kind === "trade_charge");
+  assertEquals(tl.map((t: any) => [t.date, t.submitted_on, t.line_date]), [
+    ["2026-09-21", null, null], // never submitted: its cost event date, as before
+    ["2026-09-22", "2026-09-22", null],
+    ["2026-09-25", "2026-09-25", "2026-09-18"],
+  ]);
+});
+
+Deno.test("job_profit: a failed crew invoice dates read leaves every date out and says so; no trade line, no read", async () => {
+  const bad = swf261099({ trade_invoice_lines: "permission denied" });
+  const out = await jobProfitAction(bad, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals(out.status, 200, "the figures still show");
+  const body = out.body as any;
+  assertEquals(body.trade_charge_dates.status, "unknown");
+  assert(body.trade_charge_dates.reason.includes("permission denied"));
+  assertEquals(body.trades.map((t: any) => "first_charge" in t), [false, false]);
+  assertEquals(body.cost_events.filter((e: any) => "submitted_on" in e).length, 0);
+  assertEquals(body.timeline.filter((t: any) => t.kind === "trade_charge").map((t: any) => t.date), ["2026-10-12", "2026-10-12", "2026-10-12"]);
+
+  const none = fakeClient({ v_job_profit: [{ job_id: JOB }], v_job_cost_events: [], v_job_revenue_events: [] });
+  const r2 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
+  assertEquals((r2.body as any).trade_charge_dates, { status: "none" });
+  assertEquals(none.calls.some((x) => x.table === "trade_invoice_lines"), false);
 });

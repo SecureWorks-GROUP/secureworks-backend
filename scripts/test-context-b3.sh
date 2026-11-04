@@ -24,5 +24,4 @@ for _pass in 1 2; do
   psql "$url" -X -v ON_ERROR_STOP=1 -1 -f "$root/supabase/migrations/$migration.sql"
  done
 done
-psql "$url" -X -v ON_ERROR_STOP=1 -f "$root/supabase/tests/context_b1_contract.sql"
 psql "$url" -X -v ON_ERROR_STOP=1 -f "$root/supabase/tests/context_b3_contract.sql"

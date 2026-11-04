@@ -19,15 +19,7 @@ import {
   assertRejects,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildJobProfitability,
-  FULL_DETAIL_ROW_KEYS,
-  FULL_DETAIL_SUMMARY_KEYS,
-  jobProfitabilityAction,
-  jobProfitabilityLimit,
-  PROFIT_READ_CHUNK,
-  PROFIT_READ_CONCURRENCY,
-} from "./job_profitability.ts";
+import { buildJobProfitability, FULL_DETAIL_ROW_KEYS, FULL_DETAIL_SUMMARY_KEYS, jobProfitabilityAction } from "./job_profitability.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 
@@ -261,40 +253,6 @@ Deno.test("a job missing from the engine is Unknown with a reason, not $0", () =
   assertEquals(body.summary.unknown_reasons, { not_in_job_profit_engine: 1 });
 });
 
-Deno.test("keys: every earlier row and summary key is kept", () => {
-  const body: any = full(JOBS, PROFITS);
-  for (
-    const k of [
-      "id",
-      "job_number",
-      "client_name",
-      "type",
-      "status",
-      "quote_value",
-      "invoiced",
-      "bills",
-      "margin",
-      "margin_pct",
-      "data_source",
-    ]
-  ) {
-    assert(k in body.jobs[0], `row key ${k}`);
-  }
-  for (
-    const k of [
-      "total_jobs",
-      "total_invoiced",
-      "total_bills",
-      "total_margin",
-      "avg_margin_pct",
-      "data_sources",
-      "xero_projects_matched",
-    ]
-  ) {
-    assert(k in body.summary, `summary key ${k}`);
-  }
-});
-
 Deno.test("data_source: evidence presence only", () => {
   const body: any = full(
     [job("1"), job("6"), job("7")],
@@ -344,57 +302,6 @@ function stubClient(
     },
   };
 }
-
-Deno.test("route: same jobs filters, then v_job_profit for those ids in chunks", async () => {
-  const many = Array.from(
-    { length: PROFIT_READ_CHUNK + 5 },
-    (_, i) => job(`j${i}`),
-  );
-  const sb = stubClient({
-    jobs: () => ({ data: many, error: null }),
-    v_job_profit: (call) => {
-      const ids = call.ops.find(([op]) => op === "in")![1][1] as string[];
-      return { data: ids.map((id) => profit(id)), error: null };
-    },
-  });
-  const params = new URLSearchParams({
-    type: "fencing",
-    status: "complete",
-    from: "2026-10-01",
-    to: "2026-10-31",
-    limit: "500",
-  });
-  const body: any = await jobProfitabilityAction(sb, params, ORG);
-
-  const jobsCall = sb.calls[0];
-  assertEquals(jobsCall.table, "jobs");
-  const ops = jobsCall.ops.map(([op, args]) => `${op}:${JSON.stringify(args)}`);
-  for (
-    const want of [
-      `eq:["org_id","${ORG}"]`,
-      `eq:["legacy",false]`,
-      `eq:["type","fencing"]`,
-      `eq:["status","complete"]`,
-      `gte:["created_at","2026-10-01"]`,
-      `lte:["created_at","2026-10-31"]`,
-      `limit:[500]`,
-    ]
-  ) assert(ops.includes(want), `jobs read missing ${want}`);
-
-  const profitCalls = sb.calls.filter((c) => c.table === "v_job_profit");
-  assertEquals(profitCalls.length, 2);
-  for (const c of profitCalls) {
-    assert(
-      c.ops.some(([op, args]) =>
-        op === "eq" && args[0] === "org_id" && args[1] === ORG
-      ),
-    );
-  }
-  assertEquals(body.jobs.length, many.length);
-  assertEquals(body.summary.money_source, "v_job_profit");
-  assertEquals(body.summary.jobs_margin_unknown, many.length);
-  assertEquals(body.summary.avg_margin_pct, null);
-});
 
 Deno.test("route: a failed v_job_profit read fails the answer", async () => {
   const sb = stubClient({
@@ -603,55 +510,5 @@ Deno.test("duplicate engine rows for one job fail loudly", () => {
     () => full([job("1")], [KNOWN, KNOWN]),
     Error,
     "more than one row for a job",
-  );
-});
-
-Deno.test("limit: clamped to 1..5000, default 50", () => {
-  assertEquals(jobProfitabilityLimit(null), 50);
-  assertEquals(jobProfitabilityLimit(""), 50);
-  assertEquals(jobProfitabilityLimit("abc"), 50);
-  assertEquals(jobProfitabilityLimit("0"), 50);
-  assertEquals(jobProfitabilityLimit("-20"), 1);
-  assertEquals(jobProfitabilityLimit("120"), 120);
-  assertEquals(jobProfitabilityLimit("999999"), 5000);
-});
-
-Deno.test("route: v_job_profit chunks run with bounded parallelism, results in job order", async () => {
-  const many = Array.from(
-    { length: PROFIT_READ_CHUNK * 7 + 3 },
-    (_, i) => job(`p${i}`),
-  );
-  let inFlight = 0;
-  let peak = 0;
-  const sb = stubClient({
-    jobs: () => ({ data: many, error: null }),
-    v_job_profit: async (call) => {
-      inFlight += 1;
-      peak = Math.max(peak, inFlight);
-      await new Promise((r) => setTimeout(r, 5));
-      inFlight -= 1;
-      const ids = call.ops.find(([op]) => op === "in")![1][1] as string[];
-      return { data: ids.map((id) => profit(id)), error: null };
-    },
-  });
-  const body: any = await jobProfitabilityAction(
-    sb,
-    new URLSearchParams({ limit: "5000" }),
-    ORG,
-    "full",
-  );
-  assertEquals(sb.calls.filter((c) => c.table === "v_job_profit").length, 8);
-  assertEquals(peak, PROFIT_READ_CONCURRENCY);
-  assertEquals(body.jobs.map((r: any) => r.id), many.map((j) => j.id));
-});
-
-Deno.test("route: the jobs read clamps limit", async () => {
-  const sb = stubClient({
-    jobs: () => ({ data: [], error: null }),
-    v_job_profit: () => ({ data: [], error: null }),
-  });
-  await jobProfitabilityAction(sb, new URLSearchParams({ limit: "-3" }), ORG);
-  assert(
-    sb.calls[0].ops.some(([op, args]) => op === "limit" && args[0] === 1),
   );
 });

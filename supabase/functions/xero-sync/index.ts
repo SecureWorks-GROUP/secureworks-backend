@@ -29,7 +29,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
-import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
+import { catchUpTradeBillStatusFromMirror, shouldBackfillTradeBillPdf, tradeBillAdjustmentsPatch, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
 import { isTradeInvoiceRecurringDeductionXeroLine, isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
@@ -38,13 +38,15 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
+import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
-import { readAll, runBillPrematch } from './bill_prematch_run.ts'
+import { PREMATCH_ROWS_PER_RUN, readAll, runBillPrematch } from './bill_prematch_run.ts'
 import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
+import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenceCandidates } from './builder_reference_match.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
@@ -55,6 +57,7 @@ import {
   DEFAULT_MATCH_CONFIG,
   extractJobNumber,
   amountIsKnown,
+  agentPrematchAmountFollowsBill,
   existingFactVerdict,
   HELD_QUEUE_REASONS,
   JOB_NUMBER_RE,
@@ -267,10 +270,35 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await syncSupplierCreditNotes(sb as any, DEFAULT_ORG_ID, tenantId,
           (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers)))
       }
+      case 'sync_customer_allocations': {
+        // Reads Xero only: re-reads into our copy each sales invoice whose credit note,
+        // overpayment or prepayment allocations our copy lacks. Also runs hourly inside
+        // sync_invoices; this skips the hourly gate.
+        const { accessToken, tenantId } = await getToken(sb)
+        const result = await syncCustomerAllocations(sb, DEFAULT_ORG_ID, tenantId,
+          (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers),
+          (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId, {}),
+          undefined, depositStampHook(sb), true)
+        await sb.from('webhook_log').insert({
+          org_id: DEFAULT_ORG_ID, source: 'xero', event_type: 'sync_customer_allocations',
+          payload: result, status: 'processed',
+        })
+        return json(result)
+      }
       case 'sync_bank_transactions':
         return json(await syncBankTransactions(sb))
+      case 'ingest_materials_recent':
+        // Scheduled every 15 minutes (xero-materials-ingest): the bills of the last 90 days, the
+        // window every new bill falls in. The pre-match runs on its own schedule.
+        return json(await ingestMaterialsActuals(sb, { windowDays: MATERIALS_RECENT_WINDOW_DAYS, prematch: false }))
+      case 'ingest_materials_all':
+        // Scheduled once a day (xero-materials-ingest-all): every bill, as the owner asked on 28 Oct.
+        return json(await ingestMaterialsActuals(sb, { windowDays: MATERIALS_WINDOW_DAYS, prematch: false }))
+      case 'bill_prematch':
+        // Scheduled every 15 minutes (xero-bill-prematch), a share of the open bills each run.
+        return json(await scheduledBillPrematch(sb))
       case 'ingest_materials': {
-        // Standalone materials-actuals ingest (also runs inside sync_invoices).
+        // Manual materials-actuals ingest with its pre-match (the schedules above split the two).
         const windowDays = parseInt(url.searchParams.get('window_days') || String(MATERIALS_WINDOW_DAYS), 10)
         const limitParam = url.searchParams.get('limit')
         const limit = limitParam ? parseInt(limitParam, 10) : null
@@ -278,7 +306,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, check_invoice_mirror' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, ingest_materials_recent, ingest_materials_all, bill_prematch, check_invoice_mirror, sync_customer_allocations' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {
@@ -700,6 +728,19 @@ async function logJobPaymentReceived(sb: any, jobId: string, inv: any) {
   console.log(`[xero-sync] Job ${jobId} fully paid — payment event logged`)
 }
 
+// The deposit stamp for an invoice re-read by id: one that moves from AUTHORISED to
+// PAID is exactly the deposit the incremental list's If-Modified-Since window can
+// pass over. Counts go to the run summary when one is given.
+function depositStampHook(sb: any, counts?: { stamps: number; contradictions: number }) {
+  return async (_invoiceId: string, payload: any) => {
+    const verified = payload?.Invoices?.[0] ?? null
+    if (!verified || !depositStampRelevant(verified)) return
+    const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
+    if (counts && stamped?.action === 'stamped') counts.stamps++
+    else if (counts && stamped?.action === 'contradiction_logged') counts.contradictions++
+  }
+}
+
 async function syncInvoices(sb: any) {
   closeoutMoveSwitch = null
   receiptSwitch = null
@@ -1065,10 +1106,19 @@ async function syncInvoices(sb: any) {
           if (inv.Type === 'ACCPAY') {
             try {
               const { data: tradeInv } = await sb.from('trade_invoices')
-                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)')
+                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, users:user_id(name)')
                 .eq('xero_bill_id', inv.InvoiceID)
                 .maybeSingle()
               if (tradeInv) {
+                // V10: what Xero pays and every change the office made to the
+                // bill in Xero (trade_bill_status.ts). Its own write, so a
+                // refused reading never holds back the paid status below.
+                const adjustments = tradeBillAdjustmentsPatch(inv, tradeInv)
+                if (adjustments) {
+                  const { error: adjustErr } = await sb.from('trade_invoices').update(adjustments).eq('id', tradeInv.id)
+                  if (adjustErr) console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' Xero changes write failed:', adjustErr.message)
+                  else console.log('[xero-sync] Trade invoice ' + tradeInv.id + ' Xero pays ' + adjustments.xero_bill_total + ', changes ' + adjustments.xero_adjustments_ex)
+                }
                 const patch = tradeBillStatusPatch(inv, tradeInv)
                 if (patch) {
                   const { error: patchErr } = await sb.from('trade_invoices').update(patch).eq('id', tradeInv.id)
@@ -1130,6 +1180,9 @@ async function syncInvoices(sb: any) {
 
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
+  // Crew bills paid in Xero that the incremental window passed over.
+  let tradeBillCatchUp: unknown = null
+  try { tradeBillCatchUp = await catchUpTradeBillStatusFromMirror(sb) } catch (e) { console.log('[xero-sync] trade bill catch-up failed:', (e as Error).message) }
 
   // ── Customer contacts created without a postal address: heal a few per run ──
   const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
@@ -1137,7 +1190,10 @@ async function syncInvoices(sb: any) {
   // ── Match unlinked invoices after sync ──
   const matchResult = await matchUnlinkedInvoices(sb)
 
-  // ── Invoice evidence onto its job (B-4): off until context_xero_evidence_place_v1 ──
+  // ── Invoice evidence onto its job (B-4) ──
+  // Rows about an invoice that now has a job go to that job in this pass, so a payment
+  // recorded before its invoice was linked follows the link above (B3). The reference
+  // matcher's plan and review queue stay off until context_xero_evidence_place_v1.
   // Moves only evidence rows; never links an invoice. A failure never breaks the sync.
   let invoiceEvidence: unknown
   try {
@@ -1147,8 +1203,12 @@ async function syncInvoices(sb: any) {
     console.error('[xero-sync] Invoice evidence placement error:', (e as Error).message)
   }
 
-  // ── Materials-actuals ingestion (U3) — land supplier bills on jobs or queue ──
-  const materialsResult = await ingestMaterialsActuals(sb)
+  // ── Materials-actuals ingestion (U3) and the bill pre-match run on their own schedules ──
+  // (3 Nov 2026, migration 20261103170000: xero-materials-ingest, xero-bill-prematch and
+  // xero-materials-ingest-all). Inside this run, with every bill read (#1184), they used up the
+  // run's CPU time from 29 Oct: each run was stopped there, so the bank feed copy, the stale
+  // invoice re-check and settlement capture below never ran and no proposal was written after 31 Oct.
+  const materialsResult = { ran: false, reason: 'own_schedule' }
 
   // ── Bank-transactions sync (M9 data substrate) — early-enabled so real
   //    bank-feed SPEND lines accumulate for M9 receipt-pairing tolerances.
@@ -1174,6 +1234,7 @@ async function syncInvoices(sb: any) {
   let reconciled = 0
   let reconciliationError: Record<string, unknown> | null = null
   let reconciliationSummary: Record<string, unknown> | null = null
+  const stampCounts = { stamps: 0, contradictions: 0 }
   try {
     // A token failure here is a run-wide fact and still stops reconciliation.
     const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
@@ -1182,15 +1243,7 @@ async function syncInvoices(sb: any) {
       DEFAULT_ORG_ID,
       (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at2, tid2, {}),
       undefined,
-      // An invoice that reconciles from AUTHORISED to PAID is exactly the
-      // deposit the incremental loop's If-Modified-Since window can pass over.
-      async (_invoiceId: string, payload: any) => {
-        const verified = payload?.Invoices?.[0] ?? null
-        if (!verified || !depositStampRelevant(verified)) return
-        const stamped = await applyDepositStamp(sb, DEFAULT_ORG_ID, verified)
-        if (stamped?.action === 'stamped') depositStamps++
-        else if (stamped?.action === 'contradiction_logged') depositStampContradictions++
-      },
+      depositStampHook(sb, stampCounts),
     )
     reconciled = summary.reconciled
     reconciliationSummary = { ...summary }
@@ -1200,6 +1253,24 @@ async function syncInvoices(sb: any) {
     reconciliationError = { error: e.message }
     console.error('[xero-sync] Reconciliation error:', (e as Error).message)
   }
+
+  // ── Customer allocations (A4 V27): at most once an hour, re-read each sales invoice
+  //    whose credit note, overpayment or prepayment allocations in Xero our copy lacks
+  //    (customer_allocations.ts). Reads Xero only; a failure never breaks the sync.
+  let customerAllocations: unknown
+  try {
+    const { accessToken: at3, tenantId: tid3 } = await getToken(sb)
+    customerAllocations = await syncCustomerAllocations(sb, DEFAULT_ORG_ID, tid3,
+      (path, params, headers) => xeroGet(path, at3, tid3, params, headers),
+      (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at3, tid3, {}),
+      undefined, depositStampHook(sb, stampCounts))
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    customerAllocations = { ran: false, reason: 'error', error: e.message }
+    console.error('[xero-sync] Customer allocation check failed:', e.message)
+  }
+  depositStamps += stampCounts.stamps
+  depositStampContradictions += stampCounts.contradictions
 
   // Independent payment/batch modification cursor. This capture never calls a
   // provider write or changes invoice amounts, attribution, debt or job state.
@@ -1239,11 +1310,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
@@ -1280,6 +1351,8 @@ async function invoiceMirrorCheck(sb: any, force: boolean) {
 // in Xero (job_id is null) and attempts to auto-link them to jobs.
 //
 // Strategy 1: Reference field contains a job number (SWP-25029, etc.)
+// Strategy 1b: No job number, but the builder's claim and PO name one job of the
+//              invoice's trade (builder_reference_match.ts); several → flag
 // Strategy 2: Contact name matches a single job's client_name exactly
 // Strategy 3: Multiple client_name matches → flag for manual review
 // ════════════════════════════════════════════════════════════
@@ -1293,8 +1366,9 @@ export async function matchUnlinkedInvoices(client: any) {
     // Invoices with no job_id, newest first, customer invoices ahead of the
     // 1,600-odd unlinked supplier bills. With no order the old 100-row cap was
     // filled by years-old bills and this week's invoices never reached here.
+    // Customer invoices also bring their date and lines for the builder reference rule.
     const unlinkedQuery = (type: string, cap: number) => client.from('xero_invoices')
-      .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token')
+      .select(`id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token${type === 'ACCREC' ? ', invoice_date, line_items' : ''}`)
       .is('job_id', null)
       .eq('invoice_type', type)
       .not('status', 'in', '("VOIDED","DELETED")')
@@ -1311,6 +1385,12 @@ export async function matchUnlinkedInvoices(client: any) {
     })
 
     if (unlinked.length === 0) return { matched: 0, flagged: 0 }
+
+    // One candidate read for every customer invoice in this pass. A failed read
+    // links nothing by the builder rule; every other strategy runs as before.
+    const builderRef = await loadBuilderReferenceCandidates(client, unlinkedSales || [])
+    if (!builderRef.ready) console.error('[xero-sync] builder reference candidates unavailable:', builderRef.error)
+    const builderRefResult = { ready: builderRef.ready, linked: 0, flagged: 0, error: builderRef.error ?? null }
 
     for (const inv of unlinked) {
       const ref = inv.reference || ''
@@ -1368,6 +1448,89 @@ export async function matchUnlinkedInvoices(client: any) {
           }
 
           matched++
+          continue
+        }
+      }
+
+      // Strategy 1b: the builder's claim and PO (finish line B3). A customer invoice
+      // with no job number, dated from 1 Jul 2026, links only to the one job left
+      // after the trade and status checks. Otherwise its candidates go to a person
+      // and the contact-name match is skipped: the builder's own reference already
+      // says which jobs it can be. No builder reference or no candidate: as before.
+      if (builderRef.ready && inv.invoice_type === 'ACCREC') {
+        const decision = decideBuilderReference(inv, builderRef.rows)
+        if (decision.outcome === 'link') {
+          const refusal = await sealedSesXeroLinkRefusal(
+            client,
+            inv,
+            decision.job_id,
+            'xero-sync/unlinked builder reference match',
+          )
+          if (refusal) {
+            refusals.push(refusal)
+            continue
+          }
+
+          const { data: linked, error: linkErr } = await client.from('xero_invoices')
+            .update({ job_id: decision.job_id, updated_at: new Date().toISOString() })
+            .eq('id', inv.id)
+            .is('job_id', null)
+            .select('id')
+          if (linkErr) {
+            console.error(`[xero-sync] builder reference link failed for invoice ${inv.invoice_number}:`, linkErr.message)
+            continue
+          }
+          if (!linked || linked.length === 0) continue
+
+          if (await automationLaneEnabled(client, 'capture')) {
+            await insertCapturedEvidence(client, {
+              event_type: 'invoice.auto_linked',
+              source: 'xero-sync',
+              entity_type: 'invoice',
+              entity_id: inv.xero_invoice_id,
+              job_id: decision.job_id,
+              match_method: 'direct_reference',
+              event_at: new Date().toISOString(),
+              channel: 'system', direction: 'system',
+              payload: {
+                invoice_number: inv.invoice_number,
+                job_number: decision.job_number,
+                method: 'builder_reference',
+                rule: decision.evidence.rule,
+                evidence: decision.evidence,
+              },
+            }).then(() => undefined, () => undefined)
+          }
+
+          // The invoice is placed: an item an earlier pass raised for a person to place it is
+          // closed, so the Today list does not ask for a link that is already made.
+          await client.from('ai_annotations')
+            .update({
+              status: 'resolved',
+              resolved_at: new Date().toISOString(),
+              resolved_by: 'auto',
+              resolution: { value: 'auto_linked', text: `Linked to ${decision.job_number} by the builder reference rule`, job_id: decision.job_id },
+            })
+            .eq('source_ref', `sync:unlinked:${inv.xero_invoice_id}`)
+            .eq('status', 'active')
+            .then(() => undefined, () => undefined)
+
+          matched++
+          builderRefResult.linked++
+          continue
+        }
+
+        if (decision.outcome === 'person') {
+          // One item per invoice, ever: once a person has resolved or dismissed it,
+          // the 15-minute sync does not raise it again.
+          const annotation = builderReferenceAnnotation(inv, decision, DEFAULT_ORG_ID)
+          const { data: existingAnn } = await client.from('ai_annotations')
+            .select('id').eq('source_ref', annotation.source_ref).limit(1)
+          if (!existingAnn || existingAnn.length === 0) {
+            await client.from('ai_annotations').insert(annotation).then(() => undefined, () => undefined)
+          }
+          flagged++
+          builderRefResult.flagged++
           continue
         }
       }
@@ -1476,8 +1639,8 @@ export async function matchUnlinkedInvoices(client: any) {
       // These could be direct Xero invoices not related to SW jobs
     }
 
-    console.log(`[xero-sync] Invoice matching: ${matched} auto-linked, ${flagged} flagged for review, ${refusals.length} sealed SES links refused`)
-    return { matched, flagged, refused: refusals.length, refusals }
+    console.log(`[xero-sync] Invoice matching: ${matched} auto-linked (${builderRefResult.linked} by builder reference), ${flagged} flagged for review, ${refusals.length} sealed SES links refused`)
+    return { matched, flagged, refused: refusals.length, refusals, builder_reference: builderRefResult }
   } catch (e: any) {
     console.error('[xero-sync] Invoice matching degraded:', (e as Error).message)
     return {
@@ -1511,10 +1674,12 @@ export async function matchUnlinkedInvoices(client: any) {
 // bill reader places the older bills too; 720 bills older than 90 days had
 // never reached a fact or Bills to place). Ten years is "all of them".
 const MATERIALS_WINDOW_DAYS = 3650
+// The scheduled 15-minute ingest reads the last 90 days; the daily run reads every bill.
+const MATERIALS_RECENT_WINDOW_DAYS = 90
 
 async function ingestMaterialsActuals(
   sb: any,
-  opts: { windowDays?: number; limit?: number | null; capped?: boolean; config?: MatchConfig } = {},
+  opts: { windowDays?: number; limit?: number | null; capped?: boolean; config?: MatchConfig; prematch?: boolean } = {},
 ) {
   const windowDays = opts.windowDays ?? MATERIALS_WINDOW_DAYS
   // No cap by default: every bill in the window is read each run. A manual
@@ -1725,6 +1890,48 @@ async function ingestMaterialsActuals(
 
       const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
       const installer = isInstallerBill(b.line_items)
+      // Agent-placed whole-bill facts keep their job. Their amount follows the
+      // bill, the same step this path's own facts take on 'keep' (finish line
+      // A2: a fact can sit behind an amended bill). A missing amount is not
+      // written as 0. A person's fact and a split are not touched. The assigned
+      // queue row's amounts follow too; its status and job do not.
+      if (agentPrematchAmountFollowsBill({
+        source: factSourceById.get(bill.xero_invoice_id),
+        amountKnown: amountIsKnown(bill.sub_total),
+        factJobId: factJobById.get(bill.xero_invoice_id),
+      })) {
+        const placedJob = factJobById.get(bill.xero_invoice_id) as string
+        const nowIso = new Date().toISOString()
+        const { error: aErr } = await sb.from('job_materials_facts')
+          .update({
+            amount_ex_gst: bill.sub_total,
+            amount_inc_gst: bill.total ?? null,
+            fact_date: bill.invoice_date,
+            updated_at: nowIso,
+          })
+          .eq('xero_invoice_id', bill.xero_invoice_id)
+          .eq('automation_source', 'agent_prematch')
+          .eq('job_id', placedJob)
+        if (aErr) {
+          console.error(`[materials] agent fact amount refresh failed ${bill.xero_invoice_id}:`, aErr.message)
+        } else {
+          const counts = result as Record<string, unknown>
+          counts.agent_amount_refreshed = Number(counts.agent_amount_refreshed || 0) + 1
+        }
+        if (existingQueueStatus === 'assigned') {
+          const { error: qErr } = await sb.from('materials_reconciliation_queue')
+            .update({
+              sub_total: bill.sub_total,
+              total: bill.total ?? null,
+              invoice_date: bill.invoice_date,
+              updated_at: nowIso,
+            })
+            .eq('xero_invoice_id', bill.xero_invoice_id)
+            .eq('status', 'assigned')
+          if (qErr) console.error(`[materials] agent queue amount refresh failed ${bill.xero_invoice_id}:`, qErr.message)
+        }
+        continue
+      }
       if (existingQueueStatus && existingQueueStatus !== 'open') {
         result.skipped_manual++
         continue
@@ -1998,6 +2205,8 @@ async function ingestMaterialsActuals(
       // starts the organisation-wide pre-match and its placements.
       prematch = opts.capped
         ? { ran: false, reason: 'capped_manual_run' }
+        : opts.prematch === false
+        ? { ran: false, reason: 'own_schedule' }
         : await runBillPrematch(sb, { orgId: DEFAULT_ORG_ID })
     } catch (e: any) {
       if (e instanceof XeroCooldownError) throw e
@@ -2021,6 +2230,33 @@ async function ingestMaterialsActuals(
     console.error('[materials] ingest failed:', (e as Error).message)
     return { success: false, error: (e as Error).message, ...result }
   }
+}
+
+
+// The scheduled bill pre-match (JP-06) on its own: a share of the open bills each run, new bills
+// first, the turn moving every 15 minutes. Logged like the ingest so a stopped run shows.
+async function scheduledBillPrematch(sb: any) {
+  let prematch: unknown
+  try {
+    prematch = await runBillPrematch(sb, {
+      orgId: DEFAULT_ORG_ID,
+      maxRows: PREMATCH_ROWS_PER_RUN,
+      turn: Math.floor(Date.now() / 900_000),
+    })
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    prematch = { ran: false, reason: 'error', error: (e as Error).message }
+    console.error('[materials] bill pre-match failed:', (e as Error).message)
+  }
+  await sb.from('webhook_log').insert({
+    org_id: DEFAULT_ORG_ID,
+    source: 'xero',
+    event_type: 'bill_prematch',
+    payload: { prematch },
+    status: 'processed',
+  }).then(() => undefined, () => undefined)
+  console.log(`[materials] bill pre-match: ${JSON.stringify(prematch)}`)
+  return { success: true, prematch }
 }
 
 

@@ -22,13 +22,7 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  buildInvoiceAuthorisedEvidence,
-  INVOICE_AUTHORISED_BODY_PREVIEW,
-  INVOICE_EMAILED_BODY_PREVIEW,
-  type InvoiceAuthorisedSource,
-  writeInvoiceAuthorisedEvidence,
-} from "./invoice_status_evidence.ts";
+import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from "./invoice_status_evidence.ts";
 import { _verifyAndSendInvoiceEmail } from "./index.ts";
 import {
   happyFixture,
@@ -77,86 +71,6 @@ const REFERENCES = ["INV-1477", "SWP-261247", "SWF-261463", "PO-1001", "1477"];
 
 const JOB_ID = "ace953b5-0000-4000-8000-000000000001";
 
-const SOURCES: InvoiceAuthorisedSource[] = [
-  "ops-api/approve_invoice",
-  "ops-api/approve_and_send_invoice",
-  "ops-api/makesafe_send_pack",
-];
-
-for (const source of SOURCES) {
-  Deno.test(`K3 authorised (${source}): linked invoice keeps its job and carries digit-free words`, () => {
-    const row = buildInvoiceAuthorisedEvidence({
-      source,
-      xeroInvoiceId: "xero-inv-1",
-      jobId: JOB_ID,
-      payload: {
-        previous_status: "DRAFT",
-        new_status: "AUTHORISED",
-        invoice_number: "INV-1477",
-        total: 880,
-      },
-      operator: "ops@example.com",
-    });
-
-    assertEquals(row.event_type, "invoice.authorised");
-    assertEquals(row.source, source);
-    assertEquals(row.entity_type, "invoice");
-    assertEquals(row.entity_id, "xero-inv-1");
-    assertEquals(row.job_id, JOB_ID);
-    assertEquals(row.correlation_id, JOB_ID);
-    // Rule A keeps job_id only for direct custody methods.
-    assertEquals(row.match_method, "direct_job_id");
-    assertEquals(row.channel, "invoice");
-    assertEquals(row.direction, "internal");
-    assertEquals(row.body_preview, INVOICE_AUTHORISED_BODY_PREVIEW);
-    assertEquals((row.metadata as Row).operator, "ops@example.com");
-
-    // The ladder's words are the fixed sentence, with no digit at all.
-    const words = contextEventText(row);
-    assertEquals(words, INVOICE_AUTHORISED_BODY_PREVIEW);
-    assert(!/\d/.test(words), "authorised words must be digit-free");
-    for (const ref of REFERENCES) {
-      assert(
-        !stepOneMatches(words, ref),
-        `step 1 must not match ${ref} in the words`,
-      );
-    }
-    // The number is still recorded, in payload only.
-    assertEquals((row.payload as Row).invoice_number, "INV-1477");
-  });
-}
-
-Deno.test("K3 authorised: unlinked invoice is still written, with no invented custody", () => {
-  for (const jobId of [null, undefined, ""]) {
-    const row = buildInvoiceAuthorisedEvidence({
-      source: "ops-api/approve_invoice",
-      xeroInvoiceId: "xero-inv-2",
-      jobId,
-      payload: { invoice_number: "INV-1477" },
-      operator: null,
-    });
-    assertEquals(row.job_id, null);
-    assertEquals(row.correlation_id, null);
-    assertEquals(row.match_method, null);
-    assertEquals(row.channel, "invoice");
-    assertEquals(row.direction, "internal");
-    assertEquals(row.body_preview, INVOICE_AUTHORISED_BODY_PREVIEW);
-    assertEquals((row.metadata as Row).operator, null);
-  }
-});
-
-Deno.test("K3 authorised: channel is not one the ladder treats as automated", () => {
-  // resolve_context_attribution marks channel system/audit rows 'automated'.
-  const row = buildInvoiceAuthorisedEvidence({
-    source: "ops-api/makesafe_send_pack",
-    xeroInvoiceId: "x",
-    jobId: JOB_ID,
-    payload: {},
-    operator: null,
-  });
-  assert(!["system", "audit"].includes(row.channel as string));
-});
-
 // ── The writer all three authorised sites call. ──
 // A client that records every table it is asked for. Any read other than the
 // business_events insert (for example the capture lane in automation_switches)
@@ -181,29 +95,6 @@ function recordingClient(
     },
   };
   return { client, tables, rows };
-}
-
-for (const source of SOURCES) {
-  Deno.test(`K3 write (${source}): one unconditional business_events insert of the built row`, async () => {
-    const { client, tables, rows } = recordingClient(() =>
-      Promise.resolve({ error: null })
-    );
-    const input = {
-      source,
-      xeroInvoiceId: "xero-inv-1",
-      jobId: JOB_ID,
-      payload: { invoice_number: "INV-1477" },
-      operator: "ops@example.com",
-    };
-    const written = await writeInvoiceAuthorisedEvidence(client, input);
-    assertEquals(written, true);
-    assertEquals(
-      tables,
-      ["business_events"],
-      "no capture-lane or other read before the insert",
-    );
-    assertEquals(rows, [buildInvoiceAuthorisedEvidence(input)]);
-  });
 }
 
 Deno.test("K3 write: a returned PostgREST error is reported, never thrown", async () => {

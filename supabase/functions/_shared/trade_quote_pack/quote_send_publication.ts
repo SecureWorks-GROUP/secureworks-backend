@@ -52,7 +52,7 @@ export const QUOTE_SEND_CLAIM_TTL_MS = 15 * 60 * 1000
 
 export type QuoteSendPublicationClient = {
   from: (table: string) => any
-  rpc?: (fn: string) => Promise<{ data: unknown; error: { message?: string } | null }>
+  rpc?: (fn: string) => PromiseLike<{ data: unknown; error: { message?: string } | null }>
 }
 
 export type QuoteSendDocumentClaim = {

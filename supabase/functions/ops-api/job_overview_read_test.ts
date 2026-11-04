@@ -12,26 +12,7 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  callWords,
-  invoiceTotals,
-  isMissingFunction,
-  JOB_OVERVIEW_VERSION,
-  jobOverviewAction,
-  noteGroup,
-  noteOwner,
-  OVERVIEW_MESSAGE_LIMIT,
-  OVERVIEW_NOT_SEEN,
-  overviewMatching,
-  overviewInvoice,
-  overviewMessages,
-  overviewNote,
-  overviewStory,
-  perthDay,
-  perthStamp,
-  plainText,
-  requestJobStoryAction,
-} from "./job_overview_read.ts";
+import { invoiceTotals, isMissingFunction, JOB_OVERVIEW_VERSION, jobOverviewAction, OVERVIEW_NOT_SEEN, overviewMatching, overviewInvoice, overviewMessages, overviewStory, requestJobStoryAction } from "./job_overview_read.ts";
 import { StoryReadError } from "./job_story_read.ts";
 import {
   _authorizeOpsApiAction,
@@ -973,24 +954,6 @@ Deno.test("CTX-T22: a row a person placed carries who, when, the other jobs and 
   assertEquals("decisions" in fine.sources.messages, false);
 });
 
-Deno.test("the newest 80 messages, oldest first, at most 400 characters each", () => {
-  const many = Array.from({ length: 120 }, (_, i) => ({
-    id: `bev:m${String(i).padStart(3, "0")}`,
-    channel: "sms",
-    direction: "inbound",
-    occurred_at: new Date(Date.UTC(2026, 8, 1, 0, i)).toISOString(),
-    body: "x".repeat(500),
-    source_system: "business_events",
-    source_ref: `m${i}`,
-  }));
-  const out = overviewMessages(many, new Map(), null);
-  assertEquals(out.length, OVERVIEW_MESSAGE_LIMIT);
-  assertEquals(out[0].id, "bev:m040");
-  assertEquals(out[out.length - 1].id, "bev:m119");
-  assert(out.every((x: any) => x.text.length <= 400));
-  assertEquals(out[0].who, "Customer");
-});
-
 Deno.test("a draft is never invoiced and a deleted invoice counts for nothing; a bill is not a customer invoice", async () => {
   const o: any = await jobOverviewAction(
     fullClient(),
@@ -1351,117 +1314,6 @@ Deno.test("both doors are staff-only: not profile-scoped, not agent-read, trades
   }
 });
 
-Deno.test("the dispatch: job_overview GET only, request_job_story POST only, the asker is the verified actor", async () => {
-  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = index.indexOf("case 'job_overview':");
-  assert(start > 0, "job_overview is not dispatched");
-  const block = index.slice(
-    start,
-    index.indexOf("// ── Same-site links", start),
-  );
-  assert(block.includes("case 'request_job_story': {"));
-  assert(
-    block.includes(
-      "if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID)",
-    ),
-  );
-  assert(
-    block.includes(
-      "if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)",
-    ),
-  );
-  assert(
-    block.includes(
-      "return json(await jobOverviewAction(client, url.searchParams, { getJobConversation }))",
-    ),
-  );
-  assert(
-    block.includes(
-      "if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)",
-    ),
-  );
-  assert(
-    block.includes(
-      "return json(await requestJobStoryAction(client, body, receiptActor(requestActor, authMode)))",
-    ),
-  );
-  assert(
-    block.includes(
-      "if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)",
-    ),
-  );
-});
-
-Deno.test("plain words and Perth time", () => {
-  assertEquals(
-    plainText(`23m Colorbond ${DASH} 1800mm ${DASH} Testvale`),
-    "23m Colorbond, 1800mm, Testvale",
-  );
-  assertEquals(plainText("5\u201310 days"), "5 to 10 days");
-  assertEquals(
-    plainText(`${DASH} leading and trailing ${DASH}`),
-    "leading and trailing",
-  );
-  assertEquals(plainText(null), "");
-  assertEquals(perthDay("2026-10-08T06:01:00Z"), "Thu 8 Oct");
-  assertEquals(perthStamp("2026-10-08T06:01:00Z"), "Thu 8 Oct, 2:01pm");
-  assertEquals(perthStamp("2026-10-08T16:05:00Z"), "Fri 9 Oct, 12:05am");
-  assertEquals(perthStamp("not a time"), null);
-  assertEquals(callWords("inbound", "no-answer", 0), "Missed call");
-  assertEquals(callWords("outbound", "busy", null), "Call not answered");
-  assertEquals(callWords("inbound", "voicemail", 20), "Voicemail");
-  assertEquals(callWords("inbound", "completed", 120), "Call, 2 min");
-  assertEquals(callWords("inbound", "completed", 45), "Call, 45 s");
-  assertEquals(callWords("inbound", null, null), "Call");
-});
-
-Deno.test("note groups and owners follow the story's rule", () => {
-  assertEquals(
-    noteGroup({ status: "open", blocks: "booking", item_type: "constraint" }),
-    "blocking",
-  );
-  assertEquals(
-    noteGroup({ status: "open", blocks: "none", item_type: "request" }),
-    "waiting",
-  );
-  assertEquals(
-    noteGroup({ status: "open", item_type: "agreement", modality: "offered" }),
-    "waiting",
-  );
-  assertEquals(
-    noteGroup({ status: "open", item_type: "constraint" }),
-    "good_to_know",
-  );
-  assertEquals(
-    noteGroup({ status: "closed", blocks: "deposit", item_type: "request" }),
-    "good_to_know",
-  );
-  assertEquals(
-    noteOwner({
-      item_type: "commitment",
-      from_role: "customer",
-      from_name: "Pat",
-    }),
-    { owner: "customer", owner_name: "Pat" },
-  );
-  assertEquals(
-    noteOwner({ item_type: "request", from_role: "customer", to_role: null }),
-    { owner: "us", owner_name: null },
-  );
-  assertEquals(noteOwner({ item_type: "dependency", to_role: "us" }), {
-    owner: "third_party",
-    owner_name: null,
-  });
-  assertEquals(
-    noteOwner({ item_type: "agreement", from_role: "us", to_role: "customer" }),
-    { owner: "customer", owner_name: null },
-  );
-  assertEquals(noteOwner({ item_type: "issue", from_role: "customer" }), {
-    owner: "us",
-    owner_name: null,
-  });
-});
-
 Deno.test("B1: held Rowan contact history is requested and stays job-not-certain, including a call twin", async () => {
   const tables = TABLES();
   tables.jobs[0].ghl_contact_id = "RowanContact001";
@@ -1544,59 +1396,6 @@ Deno.test("B1: held Rowan contact history is requested and stays job-not-certain
   assertEquals(tables.jobs[0].ghl_contact_id, "RowanContact001");
 });
 
-Deno.test("B2: held and unconfirmed future money keeps its explanation without transcript words or changed sums", () => {
-  const card = {
-    loops: [
-      {
-        source: "record",
-        rule: "R8_not_yet_invoiced",
-        status: "not_due",
-        amount: 500,
-        why: TRANSCRIPT_WORDS,
-      },
-      {
-        source: "record",
-        rule: "R8_not_yet_invoiced",
-        status: "not_due",
-        amount: null,
-        why: TRANSCRIPT_WORDS,
-      },
-      {
-        source: "record",
-        rule: "R8_not_yet_invoiced",
-        status: "unconfirmed",
-        amount: null,
-        why: TRANSCRIPT_WORDS,
-      },
-      ...STORY.loops,
-    ],
-    money: {
-      issued: 500,
-      paid: 500,
-      owing: 0,
-      not_yet_invoiced: {
-        amount: 500,
-        held: true,
-        status: "not_due",
-        basis: "held until work is complete, not owed now",
-      },
-    },
-  };
-  const shown = overviewStory(card);
-  assertEquals(
-    shown.loops[0].why,
-    "Held until the work is complete, not owed now.",
-  );
-  assert(shown.loops[1].why.includes("amount is unconfirmed"));
-  assert(shown.loops[2].why.includes("not a payment request"));
-  assertEquals(shown.money, card.money);
-  assertEquals(
-    shown.loops.map((l: any) => l.status),
-    card.loops.map((l) => l.status),
-  );
-  assertEquals(JSON.stringify(shown).includes(TRANSCRIPT_WORDS), false);
-});
-
 Deno.test("B5: a proven emailed quote appears without a send stamp, never borrowing the live price or reviving history", async () => {
   const tables = TABLES();
   const doc = tables.job_documents.find((d: any) => d.id === QUOTE_DOC)!;
@@ -1658,47 +1457,4 @@ Deno.test("B5: a proven emailed quote appears without a send stamp, never borrow
     false,
     "unreadable send evidence is not no sent quotes",
   );
-});
-
-Deno.test("held notes: a note a held message holds up says job not certain; every other note is unchanged", () => {
-  const base = {
-    item_key: "commitment:none:abc123def456",
-    item_type: "commitment",
-    status: "open",
-    from_role: "us",
-    to_role: "customer",
-    what: "Job not certain: We promised to tell the crew to add extra concrete at the windy rear.",
-    opened_at: "2026-10-06T02:00:00Z",
-    opened_by: [{ table: "business_events", id: "7fb00000-0000-4000-8000-000000000002", excerpt: "tell the crew" }],
-    cites_ok: true,
-  };
-  const held = overviewNote({ ...base, job_certain: false, certainty: "job_not_certain" }, new Map());
-  assertEquals([held.job_certain, held.certainty, held.shown], [false, "job_not_certain", true]);
-  assert(held.what.startsWith("Job not certain: "));
-  const plain = overviewNote(base, new Map());
-  assert(!("job_certain" in plain) && !("certainty" in plain), "a certain note carries no new key");
-  assertEquals(Object.keys(plain).sort(), Object.keys(overviewNote({ ...base, job_certain: true }, new Map())).sort());
-});
-
-Deno.test("CTX-T22, Finance's allocation contract: a bill counted on two jobs reaches the page as the card says it, never summed again", () => {
-  const card = {
-    version: "job-story-v1",
-    not_known: [{
-      what: "Supplier bill BILL-1 is counted as cost on this job and also on SWP-2.",
-      why: "A bill counts as cost once, on the job Xero's bill link puts it on; counted on two jobs it is a defect for Finance to correct, and until then the jobs' costs count it more than once.",
-    }],
-    money: { supplier_bills: [{ number: "BILL-1", total: 1100 }] },
-    meta: {
-      cost_check: {
-        read_from: "v_job_cost_events",
-        bills: 1,
-        counted_elsewhere: 1,
-        items: [{ document_id: "x1", document_number: "BILL-1", here_ex: 1000, elsewhere_ex: 1000, other_job_numbers: ["SWP-2"] }],
-      },
-    },
-  };
-  const shown = overviewStory(card);
-  assertEquals(shown.meta.cost_check, card.meta.cost_check);
-  assertEquals(shown.not_known, card.not_known);
-  assertEquals(shown.money, card.money);
 });

@@ -12,8 +12,8 @@ BEGIN
  IF coalesce(obj_description('public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1g plus unplaced stage 1%'
  THEN RAISE EXCEPTION 's1: the rules ladder is not marked as stage 1''s'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)
-  NOT IN ('58fcf93d4c82604822d4ca4b70cc4680','2ccef791fca954bfe1fcbb4e0de5f8a2')
- THEN RAISE EXCEPTION 's1: the rules ladder is neither stage 1''s nor TP-04''s'; END IF;
+  NOT IN ('58fcf93d4c82604822d4ca4b70cc4680','2ccef791fca954bfe1fcbb4e0de5f8a2','f9cd8d311bf00a92f7b708ff2d2dc8a7')
+ THEN RAISE EXCEPTION 's1: the rules ladder is neither stage 1''s, TP-04''s nor C2 known contacts'''; END IF;
  -- The rules-off ladder and the entry are untouched.
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'32365101d23dde1695707a0bddff640b'
