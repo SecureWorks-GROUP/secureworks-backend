@@ -10,6 +10,7 @@ import {
   MISMATCH_RECONCILE_LIMIT,
   MISMATCH_RETRY_MS,
   STATUS_MISMATCH_FILTER,
+  UNREAD_XERO_RECORD_FILTER,
   OPEN_RECONCILE_LIMIT,
   reconcileStaleXeroInvoices,
   reconcileXeroInvoice,
@@ -799,6 +800,13 @@ Deno.test("rows whose status disagrees with their own Xero record are re-read ev
   for (const st of ["DRAFT", "SUBMITTED", "AUTHORISED", "PAID", "VOIDED", "DELETED"]) {
     assertEquals(STATUS_MISMATCH_FILTER.includes(`and(raw_json->>Status.eq.${st},or(status.is.null,status.neq.${st}))`), true);
   }
+  // A row stored with no Xero record (INV-1315) is in the same selection.
+  // Voided or deleted rows with no record stay out.
+  assertEquals(STATUS_MISMATCH_FILTER.endsWith("," + UNREAD_XERO_RECORD_FILTER), true);
+  assertEquals(
+    UNREAD_XERO_RECORD_FILTER,
+    "and(raw_json.is.null,or(status.is.null,status.not.in.(VOIDED,DELETED)))",
+  );
   // A row attempted inside the last day waits (a failing row costs one call a
   // day); never attempted, older than a day or an unreadable stamp is taken.
   const at = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
