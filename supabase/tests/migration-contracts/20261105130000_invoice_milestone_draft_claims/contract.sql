@@ -3,8 +3,8 @@ INSERT INTO public.jobs(id,org_id,type,status,job_number,xero_contact_id,pricing
 VALUES('66000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-000000000001','patio','accepted','WS6-BILL-PIN','66000000-0000-4000-8000-000000000002','{}');
 INSERT INTO public.job_documents(id,job_id,type,sent_at,accepted_at)
 VALUES('66000000-0000-4000-8000-000000000003','66000000-0000-4000-8000-000000000001','quote',now(),now());
-INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,pricing_snapshot_json)
-VALUES('66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),1,'send-quote/send','{"raw":{"billing_milestones":{"version":1},"payment_schedule":{"version":1,"payments":[{"id":"deposit","amount_inc_gst":0.01}]}}}');
+INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,totals_snapshot_json,pricing_snapshot_json)
+VALUES('66000000-0000-4000-8000-000000000004','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),1,'send-quote/send','{}','{"raw":{"billing_milestones":{"version":1},"payment_schedule":{"version":1,"payments":[{"id":"deposit","amount_inc_gst":0.01}]}}}');
 UPDATE public.job_documents SET quote_revision_id='66000000-0000-4000-8000-000000000004' WHERE id='66000000-0000-4000-8000-000000000003';
 UPDATE public.jobs SET xero_contact_id='66000000-0000-4000-8000-000000000099',status='scheduled' WHERE id='66000000-0000-4000-8000-000000000001';
 DO $$ BEGIN
@@ -91,14 +91,14 @@ END $$;
 UPDATE public.job_documents SET superseded_at=NULL WHERE id='66000000-0000-4000-8000-000000000003';
 -- A second opt-in with mutable redirect cannot gain an eligible binding.
 UPDATE public.jobs SET pricing_json='{"billing_contact":{"name":"Fixture alternate payer"}}' WHERE id='66000000-0000-4000-8000-000000000001';
-INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,pricing_snapshot_json)
-VALUES('66000000-0000-4000-8000-000000000006','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),2,'send-quote/send','{"raw":{"billing_milestones":{"version":1}}}');
+INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,totals_snapshot_json,pricing_snapshot_json)
+VALUES('66000000-0000-4000-8000-000000000006','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),2,'send-quote/send','{}','{"raw":{"billing_milestones":{"version":1}}}');
 DO $$ BEGIN
   IF NOT EXISTS(SELECT 1 FROM public.quote_invoice_billing_bindings WHERE quote_revision_id='66000000-0000-4000-8000-000000000006' AND state='held' AND hold_reason='billing_contact_override_requires_review') THEN RAISE EXCEPTION 'Bill-to ambiguity became authority'; END IF;
 END $$;
 UPDATE public.jobs SET pricing_json='{}' WHERE id='66000000-0000-4000-8000-000000000001';
-INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,pricing_snapshot_json)
-VALUES('66000000-0000-4000-8000-000000000007','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),3,'send-quote/send','{"raw":{"billing_milestones":{"version":1}}}');
+INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,totals_snapshot_json,pricing_snapshot_json)
+VALUES('66000000-0000-4000-8000-000000000007','66000000-0000-4000-8000-000000000001','66000000-0000-4000-8000-000000000003',now(),3,'send-quote/send','{}','{"raw":{"billing_milestones":{"version":1}}}');
 UPDATE public.job_documents SET quote_revision_id='66000000-0000-4000-8000-000000000007' WHERE id='66000000-0000-4000-8000-000000000003';
 DO $$ BEGIN
  BEGIN
