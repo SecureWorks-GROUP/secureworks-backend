@@ -1,3 +1,4 @@
+import { readInvoiceMilestoneReviews } from './invoice_milestone_reviews.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
@@ -10457,6 +10458,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true })
       }
       case 'create_invoice': return json(await createInvoice(client, body))
+      // WS6 preparation only: durable held review intents, never provider drafts.
+      // Default front door remains staff/server-only; trades are not admitted.
+      case 'invoice_milestone_reviews':
+        return await invoiceMilestoneReviewsAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'create_invoice_draft': {
         const result = await createInvoiceDraftAction(
           client,
@@ -39270,6 +39275,26 @@ async function assertCreateInvoiceDraftTenantBindings(
   }
   return null
 }
+
+async function invoiceMilestoneReviewsAction(
+  client: any,
+  params: URLSearchParams,
+  method: string,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'role' | 'orgId'> | null | undefined,
+  serverSecretPresented: boolean,
+): Promise<Response> {
+  if (!((authMode === 'api_key' && serverSecretPresented) ||
+        (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId === DEFAULT_ORG_ID))) {
+    return json({ ok: false, code: 'operator_access_required' }, 403)
+  }
+  if (method !== 'GET') return json({ ok: false, code: 'method_not_allowed' }, 405)
+  const jobId = String(params.get('job_id') || '').trim()
+  if (!CREATE_INVOICE_DRAFT_UUID_RE.test(jobId)) return json({ ok: false, code: 'job_id_invalid' }, 400)
+  const result = await readInvoiceMilestoneReviews(client, jobId, DEFAULT_ORG_ID)
+  return json(result, result.ok ? 200 : result.status_code)
+}
+export const _invoiceMilestoneReviewsActionForTest = invoiceMilestoneReviewsAction
 
 async function createInvoiceDraftAction(
   client: any,
