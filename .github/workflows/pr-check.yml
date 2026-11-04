@@ -197,6 +197,11 @@ jobs:
         run: |
           bash scripts/test/test-smoke-ops-api-action-surface.sh
 
+      - name: Test contact-linked customer scope jobs (read only)
+        run: |
+          deno test supabase/functions/ghl-proxy/customer_scope_jobs_test.ts
+          deno test --no-check --allow-env --allow-read --allow-net=127.0.0.1 supabase/functions/ghl-proxy/customer_scope_jobs_handler_test.ts
+
       - name: Test bundled ops-api deploy metadata
         run: |
           bash scripts/test/test-stamp-ops-api-build-metadata.sh

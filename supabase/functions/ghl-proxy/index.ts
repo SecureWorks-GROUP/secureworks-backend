@@ -1,5 +1,6 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 import { opportunityFieldInputs, readOpportunityFieldDefs } from './opportunity_custom_fields.ts'
+import { readCustomerScopeJobs, customerJobsStore, CustomerScopeJobsError } from './customer_scope_jobs.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
@@ -2044,6 +2045,20 @@ serve(async (req: Request) => {
         return json({ job: { ...job, current_scope_hash, current_scope_updated_at: job.updated_at || null } })
       }
       return json({ job: null })
+    }
+
+    // Read-only SE-59 customer grouping. Contact identity is resolved from a
+    // verified anchor job, never supplied by the browser or matched by name.
+    if (action === 'customer_scope_jobs') {
+      if (req.method !== 'GET') return json({ error: 'GET required', code: 'method_not_allowed' }, 405)
+      try {
+        return json(await readCustomerScopeJobs({ jobId: url.searchParams.get('jobId') ?? '', mode: credential.mode,
+          orgId: authProfile?.org_id ?? null, role: authProfile?.role ?? null,
+        }, customerJobsStore(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY))))
+      } catch (error) {
+        if (error instanceof CustomerScopeJobsError) return json({ error: error.message, code: error.code }, error.status)
+        return json({ error: 'The customer jobs could not be read.', code: 'customer_jobs_unreadable' }, 503)
+      }
     }
 
     // ── Search Supabase jobs across multiple fields ──
