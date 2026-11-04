@@ -243,6 +243,34 @@ async function admissionHold(client: any, review: any, reason: string) {
   if (result.error) throw new Error("Invoice admission hold could not persist");
   return { review_id: review.id, state: "held", reason };
 }
+/** A bounded exact-count read never treats a truncated evidence set as complete. */
+async function siblingInvoiceEvidence(client: any, expected: any) {
+  const evidence: Record<string, any[]> = {};
+  for (
+    const table of [
+      "invoice_milestone_draft_claims",
+      "quote_invoice_deposit_receipts",
+    ]
+  ) {
+    const result = await client.from(table).select("*", { count: "exact" }).eq(
+      "org_id",
+      expected.org_id,
+    ).eq("xero_contact_id", expected.xero_contact_id).neq(
+      "job_id",
+      expected.job_id,
+    )
+      .limit(100);
+    const data = rows(result, "Other job invoice evidence");
+    if (
+      !Array.isArray(data) || !Number.isInteger(result.count) ||
+      result.count < 0 || result.count >= 100 || result.count !== data.length
+    ) {
+      throw new Error("Other job invoice evidence incomplete");
+    }
+    evidence[table] = data;
+  }
+  return evidence;
+}
 async function invoiceInventorySafe(
   client: any,
   deps: DraftDeps,
@@ -276,6 +304,7 @@ async function invoiceInventorySafe(
       ...inventory.map((i: any) => String(i.InvoiceID || "")),
       ...mirrors.map((i: any) => String(i.xero_invoice_id || "")),
     ]);
+    let siblings: Record<string, any[]> | undefined;
     for (const invoiceId of ids) {
       if (!UUID.test(invoiceId)) {
         throw new Error("Provider inventory identity missing");
@@ -306,6 +335,45 @@ async function invoiceInventorySafe(
         invoice.CurrencyCode === "AUD" &&
         cents(invoice.Total) === receipt.amount_cents &&
         invoice.Reference === receipt.reference &&
+        ["AUTHORISED", "PAID"].includes(invoice.Status)
+      ) continue;
+      // Only immutable evidence from a different job can explain a repeat
+      // customer's invoice. Current-job history keeps the existing review gates.
+      siblings ||= await siblingInvoiceEvidence(client, expected);
+      const sibling = (r: any) =>
+        r.org_id === expected.org_id &&
+        r.xero_contact_id === expected.xero_contact_id &&
+        UUID.test(String(r.job_id || "")) && r.job_id !== expected.job_id &&
+        UUID.test(String(r.quote_revision_id || "")) &&
+        r.provider_invoice_id === invoiceId;
+      const siblingClaims = siblings.invoice_milestone_draft_claims.filter(
+        sibling,
+      );
+      const siblingReceipts = siblings.quote_invoice_deposit_receipts.filter(
+        sibling,
+      );
+      if (
+        siblingClaims.length + siblingReceipts.length !== 1 ||
+        siblings.invoice_milestone_draft_claims.some((c: any) =>
+          c.state !== "draft_confirmed" &&
+          (c.provider_invoice_id === invoiceId ||
+            c.reference === invoice.Reference)
+        )
+      ) return "existing_invoice_requires_review";
+      const siblingClaim = siblingClaims[0];
+      if (
+        siblingClaim?.state === "draft_confirmed" &&
+        matchesDraft({ ...invoice, Status: "DRAFT" }, siblingClaim) &&
+        ["DRAFT", "AUTHORISED", "PAID"].includes(invoice.Status)
+      ) continue;
+      const siblingReceipt = siblingReceipts[0];
+      if (
+        siblingReceipt &&
+        UUID.test(String(siblingReceipt.accepted_document_id || "")) &&
+        invoice.Contact?.ContactID === siblingReceipt.xero_contact_id &&
+        invoice.CurrencyCode === "AUD" &&
+        cents(invoice.Total) === siblingReceipt.amount_cents &&
+        invoice.Reference === siblingReceipt.reference &&
         ["AUTHORISED", "PAID"].includes(invoice.Status)
       ) continue;
       return "existing_invoice_requires_review";

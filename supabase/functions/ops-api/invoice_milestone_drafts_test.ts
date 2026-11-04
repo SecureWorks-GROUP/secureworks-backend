@@ -135,7 +135,10 @@ export function fixture(options: any = {}) {
         payload: any = null,
         upsertOptions: any = {},
         done = false,
-        result: any;
+        result: any,
+        exactCount = false,
+        siblingQuery = false,
+        rowLimit: number | undefined;
       const predicates: Array<(r: any) => boolean> = [];
       const run = () => {
         if (done) return result;
@@ -144,7 +147,8 @@ export function fixture(options: any = {}) {
         let found = data.filter((r) => predicates.every((p) => p(r)));
         if (
           (options.failTable === table && mode !== "read") ||
-          (options.failReadTable === table && mode === "read")
+          (options.failReadTable === table && mode === "read") ||
+          (options.failReadSiblingTable === table && siblingQuery)
         ) {
           return result = {
             data: null,
@@ -182,15 +186,28 @@ export function fixture(options: any = {}) {
           }
           writes.push({ table, mode, payload });
         }
-        return result = { data: structuredClone(found), error: null };
+        const count = options.evidenceCountTable === table
+          ? options.evidenceCount
+          : found.length;
+        return result = {
+          data: structuredClone(
+            rowLimit === undefined ? found : found.slice(0, rowLimit),
+          ),
+          error: null,
+          ...(exactCount ? { count } : {}),
+        };
       };
       const q: any = {
-        select: () => q,
+        select: (_columns: any, selectOptions: any = {}) => {
+          exactCount = selectOptions.count === "exact";
+          return q;
+        },
         eq: (k: string, v: any) => {
           predicates.push((r) => r[k] === v);
           return q;
         },
         neq: (k: string, v: any) => {
+          siblingQuery ||= k === "job_id";
           predicates.push((r) => r[k] !== v);
           return q;
         },
@@ -202,7 +219,10 @@ export function fixture(options: any = {}) {
         in: () => q,
         or: () => q,
         order: () => q,
-        limit: () => q,
+        limit: (n: number) => {
+          rowLimit = n;
+          return q;
+        },
         range: () => q,
         update: (v: any) => {
           mode = "update";
@@ -1170,5 +1190,147 @@ Deno.test("accepted billing: historical accepted document without any claim and 
         "accepted_replacement_requires_review",
       ),
     );
+  }
+});
+
+// A confirmed first job for the same pinned payer must not stop the next job.
+function addSiblingInvoices(f: ReturnType<typeof fixture>) {
+  const receipt = {
+    org_id: ORG,
+    job_id: id(81),
+    quote_revision_id: id(82),
+    accepted_document_id: id(83),
+    provider_invoice_id: id(84),
+    xero_contact_id: CONTACT,
+    stage_id: "deposit",
+    amount_cents: Math.round(amount * 100),
+    reference: "Fixture sibling first payment",
+  };
+  const claim = {
+    org_id: ORG,
+    job_id: id(81),
+    quote_revision_id: id(82),
+    provider_invoice_id: id(85),
+    xero_contact_id: CONTACT,
+    state: "draft_confirmed",
+    reference: "Fixture sibling later payment",
+    amount_cents: Math.round(amount * 100),
+    label: "Sibling installation",
+    due_date: "2026-11-06",
+  };
+  f.tables.quote_invoice_deposit_receipts = [receipt];
+  f.tables.invoice_milestone_draft_claims.push(claim);
+  const deposit = {
+    ...f.invoice({
+      ...receipt,
+      label: "First payment",
+      due_date: claim.due_date,
+    }),
+    InvoiceID: receipt.provider_invoice_id,
+    Status: "AUTHORISED",
+  };
+  const later = { ...f.invoice(claim), InvoiceID: claim.provider_invoice_id };
+  f.provider.push(deposit, later);
+  return { receipt, claim, deposit, later };
+}
+Deno.test("repeat customer: exact other-job first payment and confirmed milestone allow one new draft, never another PUT on repeat", async () => {
+  for (const status of ["DRAFT", "AUTHORISED", "PAID"]) {
+    const f = fixture(), sibling = addSiblingInvoices(f);
+    sibling.later.Status = status;
+    const before = structuredClone(sibling);
+    const first = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+    assertEquals(first.drafts[0].state, "draft_confirmed");
+    assertEquals(f.counts().creates, 1);
+    assertEquals(f.provider[2].Status, "DRAFT");
+    assertEquals(f.provider[2].Contact.ContactID, CONTACT);
+    assertEquals(f.provider[2].Total, amount);
+    assertEquals(await processInstallDrafts(f.client, f.deps, JOB, ORG), first);
+    assertEquals(f.counts().creates, 1);
+    assertEquals(sibling, before);
+  }
+});
+Deno.test("repeat customer: uncertain, foreign, current-job and changed provider invoices remain held without create", async () => {
+  const cases: Array<
+    (
+      f: ReturnType<typeof fixture>,
+      s: ReturnType<typeof addSiblingInvoices>,
+    ) => void
+  > = [
+    (_f, s) => s.claim.state = "unknown",
+    (_f, s) => s.claim.state = "dispatching",
+    (_f, s) => s.claim.state = "prepared",
+    (_f, s) => s.claim.org_id = id(90),
+    (_f, s) => s.receipt.org_id = id(90),
+    (_f, s) => s.claim.xero_contact_id = id(90),
+    (_f, s) => s.receipt.xero_contact_id = id(90),
+    (_f, s) => s.receipt.job_id = JOB,
+    (_f, s) => s.claim.job_id = JOB,
+    (_f, s) => s.receipt.accepted_document_id = "unreadable",
+    (_f, s) => s.claim.quote_revision_id = "unreadable",
+    (_f, s) => s.deposit.Reference = "Manual deposit",
+    (_f, s) => s.deposit.Total += amount,
+    (_f, s) => s.deposit.Status = "DRAFT",
+    (_f, s) => s.deposit.CurrencyCode = "NZD",
+    (_f, s) => s.later.Contact.ContactID = id(90),
+    (_f, s) => s.later.DueDateString = "2026-11-07",
+    (_f, s) => s.later.LineItems[0].Description = "Changed work",
+    (_f, s) => s.later.LineItems[0].Quantity = 2,
+    (_f, s) => s.later.Total += amount,
+    (_f, s) => s.later.Status = "SUBMITTED",
+    (f, s) =>
+      f.tables.invoice_milestone_draft_claims.push({
+        ...s.claim,
+        reference: "Ambiguous",
+        state: "unknown",
+      }),
+    (f, s) =>
+      f.tables.invoice_milestone_draft_claims.push({
+        ...s.claim,
+        provider_invoice_id: null,
+        state: "unknown",
+      }),
+    (f, s) =>
+      f.tables.quote_invoice_deposit_receipts.push({
+        ...s.receipt,
+        provider_invoice_id: s.claim.provider_invoice_id,
+      }),
+  ];
+  for (const mutate of cases) {
+    const f = fixture(), sibling = addSiblingInvoices(f);
+    mutate(f, sibling);
+    const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+    assertEquals(result.drafts[0].state, "held");
+    assert(
+      [
+        "existing_invoice_requires_review",
+        "previous_revision_invoice_claim_requires_review",
+      ].includes(result.drafts[0].reason),
+    );
+    assertEquals(f.counts().creates, 0);
+    assertEquals(f.counts().searches, 0);
+  }
+});
+Deno.test("repeat customer: unreadable or incomplete sibling evidence never permits a new draft", async () => {
+  for (
+    const table of [
+      "invoice_milestone_draft_claims",
+      "quote_invoice_deposit_receipts",
+    ]
+  ) {
+    for (
+      const options of [
+        { failReadSiblingTable: table },
+        ...[undefined, 0, 2, 100].map((count) => ({
+          evidenceCountTable: table,
+          evidenceCount: count,
+        })),
+      ]
+    ) {
+      const f = fixture(options);
+      addSiblingInvoices(f);
+      const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+      assertEquals(result.drafts[0].reason, "invoice_inventory_unavailable");
+      assertEquals(f.counts().creates, 0);
+    }
   }
 });
