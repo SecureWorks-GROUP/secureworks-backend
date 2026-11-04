@@ -1,5 +1,6 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 import { opportunityFieldInputs, readOpportunityFieldDefs } from './opportunity_custom_fields.ts'
+import { contactReuseDecision } from './contact_reuse.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
@@ -2373,7 +2374,26 @@ serve(async (req: Request) => {
                 }))
               } catch (error) {
                 const duplicateId = ((error as Error)?.message || '').match(/"contactId"\s*:\s*"([^"]+)"/)?.[1]
-                if (duplicateId) return contactShape(await ghl(`/contacts/${encodeURIComponent(duplicateId)}`))
+                if (duplicateId) {
+                  const existing = contactShape(await ghl(`/contacts/${encodeURIComponent(duplicateId)}`))
+                  const decision = contactReuseDecision({
+                    matchedBy: 'phone',
+                    wantedFirst: candidate.firstName,
+                    wantedLast: candidate.lastName,
+                    wantedEmail: candidate.email,
+                    existingFirst: existing.firstName,
+                    existingLast: existing.lastName,
+                    existingEmail: existing.email,
+                  })
+                  if (decision.action === 'choose') {
+                    throw new FenceMintError(409, 'contact_choice_required', decision.message, {
+                      existingContactId: existing.id,
+                      existingName: decision.existingName,
+                      existingEmail: decision.existingEmail,
+                    })
+                  }
+                  return existing
+                }
                 throw error
               }
             },
@@ -2655,6 +2675,8 @@ serve(async (req: Request) => {
 
       let contactId: string | null = null
       let contactExisted = false
+      let matchedContact: Record<string, unknown> | null = null
+      let matchedBy: 'email' | 'phone' | null = null
 
       // Dedup by email
       if (email) {
@@ -2668,9 +2690,9 @@ serve(async (req: Request) => {
           })
           // v2 search returns { contact: {...} } if found
           if (searchRes.contact && searchRes.contact.id) {
-            contactId = searchRes.contact.id
-            contactExisted = true
-            console.log('[ghl-proxy] Dedup: found existing contact by email:', contactId)
+            matchedContact = searchRes.contact
+            matchedBy = 'email'
+            console.log('[ghl-proxy] Dedup: found existing contact by email:', searchRes.contact.id)
           }
         } catch (e) {
           console.log('[ghl-proxy] Email dedup search failed, trying phone:', e)
@@ -2678,7 +2700,7 @@ serve(async (req: Request) => {
       }
 
       // Dedup by phone if email didn't match
-      if (!contactId && normalizedPhone) {
+      if (!matchedContact && normalizedPhone) {
         try {
           const searchRes = await ghl(`/contacts/search/duplicate`, {
             method: 'POST',
@@ -2688,13 +2710,39 @@ serve(async (req: Request) => {
             }),
           })
           if (searchRes.contact && searchRes.contact.id) {
-            contactId = searchRes.contact.id
-            contactExisted = true
-            console.log('[ghl-proxy] Dedup: found existing contact by phone:', contactId)
+            matchedContact = searchRes.contact
+            matchedBy = 'phone'
+            console.log('[ghl-proxy] Dedup: found existing contact by phone:', searchRes.contact.id)
           }
         } catch (e) {
           console.log('[ghl-proxy] Phone dedup search failed:', e)
         }
+      }
+
+      if (matchedContact && matchedBy) {
+        const decision = contactReuseDecision({
+          matchedBy,
+          wantedFirst: resolvedFirst,
+          wantedLast: resolvedLast,
+          wantedEmail: email,
+          existingFirst: typeof matchedContact.firstName === 'string' ? matchedContact.firstName : null,
+          existingLast: typeof matchedContact.lastName === 'string' ? matchedContact.lastName : null,
+          existingName: typeof matchedContact.name === 'string' ? matchedContact.name : null,
+          existingEmail: typeof matchedContact.email === 'string' ? matchedContact.email : null,
+        })
+        if (decision.action === 'choose') {
+          return json({
+            contactId: null,
+            opportunityId: null,
+            contactExisted: false,
+            contactChoiceRequired: true,
+            code: 'contact_choice_required',
+            existingContactId: matchedContact.id,
+            error: decision.message,
+          }, 409)
+        }
+        contactId = String(matchedContact.id)
+        contactExisted = true
       }
 
       // Create contact if no match found
@@ -2722,6 +2770,32 @@ serve(async (req: Request) => {
           // GHL returns the existing contactId in duplicate errors — use it instead of failing
           const dupMatch = errMsg.match(/"contactId"\s*:\s*"([^"]+)"/)
           if (dupMatch && dupMatch[1]) {
+            let recovered: Record<string, unknown> = { id: dupMatch[1] }
+            try {
+              const full = await ghl(`/contacts/${encodeURIComponent(dupMatch[1])}`)
+              recovered = (full.contact || full) as Record<string, unknown>
+            } catch { /* the id alone cannot show a different person */ }
+            const decision = contactReuseDecision({
+              matchedBy: 'phone',
+              wantedFirst: resolvedFirst,
+              wantedLast: resolvedLast,
+              wantedEmail: email,
+              existingFirst: typeof recovered.firstName === 'string' ? recovered.firstName : null,
+              existingLast: typeof recovered.lastName === 'string' ? recovered.lastName : null,
+              existingName: typeof recovered.name === 'string' ? recovered.name : null,
+              existingEmail: typeof recovered.email === 'string' ? recovered.email : null,
+            })
+            if (decision.action === 'choose') {
+              return json({
+                contactId: null,
+                opportunityId: null,
+                contactExisted: false,
+                contactChoiceRequired: true,
+                code: 'contact_choice_required',
+                existingContactId: dupMatch[1],
+                error: decision.message,
+              }, 409)
+            }
             contactId = dupMatch[1]
             contactExisted = true
             console.log('[ghl-proxy] Recovered existing contact from duplicate error:', contactId)
