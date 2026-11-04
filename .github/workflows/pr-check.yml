@@ -198,7 +198,9 @@ jobs:
           bash scripts/test/test-smoke-ops-api-action-surface.sh
 
       - name: Test idempotent Misc walk-up draft creation
-        run: deno test supabase/functions/ghl-proxy/misc_job_create_test.ts
+        run: |
+          deno test supabase/functions/ghl-proxy/misc_job_create_test.ts
+          deno test --no-check --allow-env --allow-read --allow-net=127.0.0.1 supabase/functions/ghl-proxy/misc_job_create_handler_test.ts
 
       - name: Test bundled ops-api deploy metadata
         run: |
