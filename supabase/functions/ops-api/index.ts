@@ -1,3 +1,4 @@
+import { processInstallDrafts, reconcileMilestoneDraft, type DraftDeps } from './invoice_milestone_drafts.ts'
 import { readInvoiceMilestoneReviews } from './invoice_milestone_reviews.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
@@ -10462,6 +10463,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (delErr) return json({ error: delErr.message }, 500)
         return json({ success: true })
       }
+      case 'invoice_milestone_drafts': return await invoiceMilestoneDraftsAction(client, body, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'create_invoice': return json(await createInvoice(client, body))
       // WS6 preparation only: durable held review intents, never provider drafts.
       // Default front door remains staff/server-only; trades are not admitted.
@@ -36371,7 +36373,7 @@ export async function allocateJob(client: any, args: {
         preferredAssignmentId: String(dup[0].id),
       })
     }
-    return { ok: true, mode: 'idempotent', deduped: true, assignment: dup[0] }
+    return { ok: true, mode: 'idempotent', deduped: true, assignment: dup[0], invoice_drafts: await followInstallBilling(client, jobId) }
   }
 
   // M3b U2c: overwrite any body-supplied value with the SERVER-derived actor
@@ -36501,7 +36503,7 @@ export async function createAssignment(client: any, body: any) {
         canonicalCreated: false,
         preferredAssignmentId: String(exactDuplicate.id),
       })
-      return { assignment: exactDuplicate, deduped: true }
+      return { assignment: exactDuplicate, deduped: true, invoice_drafts: await followInstallBilling(client, jId) }
     }
   }
 
@@ -36692,7 +36694,8 @@ export async function createAssignment(client: any, body: any) {
     }
   } catch (e) { console.log('[ops-api] ghost observer auto-mirror (create) failed:', e) }
 
-  return { assignment: data }
+  const invoiceDrafts = await followInstallBilling(client, jId)
+  return { assignment: data, invoice_drafts: invoiceDrafts }
 }
 
 export async function updateAssignment(client: any, body: any) {
@@ -36923,7 +36926,8 @@ export async function updateAssignment(client: any, body: any) {
     } catch (e) { console.log('[ops-api] ghost observer auto-mirror (update) failed:', e) }
   }
 
-  return { assignment: data, all_complete: allComplete, suggest_status: suggestStatus, job_id: data?.job_id }
+  const invoiceDrafts = data?.job_id ? await followInstallBilling(client, data.job_id) : undefined
+  return { assignment: data, all_complete: allComplete, suggest_status: suggestStatus, job_id: data?.job_id, ...(invoiceDrafts ? { invoice_drafts: invoiceDrafts } : {}) }
 }
 
 // What reschedule_job_bookings borrows from the assignment writers above, so
@@ -37724,7 +37728,8 @@ async function updateJobStatus(client: any, body: any) {
     })()
   }
 
-  return { success: true, job_id: jId, new_status: status, job_number: data?.job_number || jobBefore?.job_number }
+  const invoiceDrafts = status === 'scheduled' ? await followInstallBilling(client, jId) : undefined
+  return { success: true, job_id: jId, new_status: status, job_number: data?.job_number || jobBefore?.job_number, ...(invoiceDrafts ? { invoice_drafts: invoiceDrafts } : {}) }
 }
 // Test-only export alias (mirrors the `_`-prefixed convention in this file).
 export const _updateJobStatus = updateJobStatus
@@ -39106,6 +39111,8 @@ interface CreateInvoiceInternalOptions {
   preserveJobLifecycle?: boolean
   /** Trusted wrapper only: do not mirror a requested status as provider fact. */
   requireProviderDraftConfirmation?: boolean
+  /** Trusted accepted milestone only; never accepted from an action body. */
+  milestone?: { claimId: string; orgId: string; contactId: string; quoteRevisionId: string; terms: string; dueDate: string }
 }
 
 const CREATE_INVOICE_DRAFT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -39312,6 +39319,57 @@ async function invoiceMilestoneReviewsAction(
 }
 export const _invoiceMilestoneReviewsActionForTest = invoiceMilestoneReviewsAction
 
+function milestoneDraftDeps(client: any): DraftDeps {
+  return {
+    search: async (reference, _contactId) => {
+      const { accessToken, tenantId } = await getToken(client)
+      const result = await xeroGet('/Invoices', accessToken, tenantId, { where: `Reference=="${reference}"`, page: '1', pageSize: '100' })
+      if (!Array.isArray(result?.Invoices) || result.Invoices.length >= 100) throw new Error('Provider search incomplete')
+      return result.Invoices
+    },
+    read: async (id) => {
+      if (!CREATE_INVOICE_DRAFT_UUID_RE.test(id)) throw new Error('Invalid provider invoice identity')
+      const { accessToken, tenantId } = await getToken(client)
+      const result = await xeroGet(`/Invoices/${id}`, accessToken, tenantId)
+      if (!Array.isArray(result?.Invoices) || result.Invoices.length !== 1 || result.Invoices[0]?.InvoiceID !== id) throw new Error('Provider identity read unavailable')
+      return result.Invoices[0]
+    },
+    create: (payload, claim) => createInvoice(client, payload, {
+      preserveJobLifecycle: true, requireProviderDraftConfirmation: true,
+      milestone: { claimId: claim.id, orgId: claim.org_id, contactId: claim.xero_contact_id, quoteRevisionId: claim.quote_revision_id, terms: claim.printed_terms, dueDate: claim.due_date },
+    }),
+  }
+}
+async function followInstallBilling(client: any, jobId: string) {
+  try { return await processInstallDrafts(client, milestoneDraftDeps(client), jobId, DEFAULT_ORG_ID) }
+  catch { return { ok: false, state: 'held', code: 'invoice_automation_unavailable', source_saved: true, retry_requires_office_review: true } }
+}
+async function invoiceMilestoneDraftsAction(client: any, body: any, params: URLSearchParams, method: string, authMode: string, authUser: any, serverSecretPresented: boolean) {
+  if (!((authMode === 'api_key' && serverSecretPresented) || (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId === DEFAULT_ORG_ID))) return json({ ok: false, code: 'operator_access_required' }, 403)
+  const jobId = method === 'GET' ? params.get('job_id') : body?.job_id
+  if (!CREATE_INVOICE_DRAFT_UUID_RE.test(String(jobId || ''))) return json({ ok: false, code: 'job_id_required' }, 400)
+  const job = await client.from('jobs').select('id').eq('id', jobId).eq('org_id', DEFAULT_ORG_ID).maybeSingle()
+  if (job.error) return json({ ok: false, code: 'job_lookup_unavailable' }, 503)
+  if (!job.data) return json({ ok: false, code: 'job_not_found' }, 404)
+  if (method === 'GET') {
+    const result = await client.from('invoice_milestone_draft_claims').select('*').eq('job_id', jobId).eq('org_id', DEFAULT_ORG_ID).order('created_at', { ascending: false })
+    if (result.error) return json({ ok: false, code: 'invoice_claims_unavailable' }, 503)
+    return json({ ok: true, job_id: jobId, drafts: result.data || [], automatic_send: false, send_requires_staff: true })
+  }
+  if (method !== 'POST') return json({ ok: false, code: 'method_not_allowed' }, 405)
+  if (Object.keys(body || {}).some(k => !['action','job_id','claim_id','mode'].includes(k)) || !['process','reconcile'].includes(body?.mode)) return json({ ok: false, code: 'invalid_draft_request' }, 400)
+  if (body.mode === 'process') return json(await processInstallDrafts(client, milestoneDraftDeps(client), jobId, DEFAULT_ORG_ID))
+  if (!CREATE_INVOICE_DRAFT_UUID_RE.test(String(body.claim_id || ''))) return json({ ok: false, code: 'claim_id_required' }, 400)
+  const result = await client.from('invoice_milestone_draft_claims').select('*').eq('id', body.claim_id).eq('job_id', jobId).eq('org_id', DEFAULT_ORG_ID).maybeSingle()
+  if (result.error) return json({ ok: false, code: 'invoice_claim_unavailable' }, 503)
+  if (!result.data) return json({ ok: false, code: 'claim_not_found' }, 404)
+  const audit = await client.from('invoice_milestone_draft_claims').update({ last_reconciled_by: authMode === 'jwt' ? String(authUser.id || authUser.role) : 'privileged_server', last_reconciled_at: new Date().toISOString() }).eq('id', result.data.id).eq('org_id', DEFAULT_ORG_ID)
+  if (audit.error) return json({ ok: false, code: 'reconciliation_audit_unavailable' }, 503)
+  return json({ ok: true, draft: await reconcileMilestoneDraft(client, milestoneDraftDeps(client), result.data), automatic_send: false })
+}
+export const _invoiceMilestoneDraftsActionForTest = invoiceMilestoneDraftsAction
+export const _milestoneDraftDepsForTest = milestoneDraftDeps
+
 async function createInvoiceDraftAction(
   client: any,
   body: any,
@@ -39427,6 +39485,7 @@ async function createInvoice(
   // the deposit to the cent (deposit_invoice_lines.ts, B2).
   const lineAmountTypes: 'Inclusive' | 'Exclusive' = line_amount_types === 'Inclusive' ? 'Inclusive' : 'Exclusive'
   const sesContext = internal.ses
+  if (internal.milestone && (xero_contact_id !== internal.milestone.contactId || lineAmountTypes !== 'Inclusive' || send_email !== false || xero_status !== 'DRAFT')) throw new Error('Trusted milestone request changed its frozen draft contract')
 
   const items = line_items || lineItems
   if (!items || items.length === 0) throw new Error('line_items required')
@@ -39538,7 +39597,7 @@ async function createInvoice(
   // share (no party named, or the primary party) goes to that contact instead of
   // the client's Xero contact. Never on SES work, never on a neighbour's invoice,
   // and the client's own xero_contact_id is not overwritten with it.
-  const billingContact = sesContext ? null : await loadClientBillingContact(client, job_id || jobId, job_contact_id)
+  const billingContact = (sesContext || internal.milestone) ? null : await loadClientBillingContact(client, job_id || jobId, job_contact_id)
   if (billingContact) contact = billingContact.xeroName
 
   // Resolve Xero contact — find or create if no xero_contact_id provided
@@ -39688,14 +39747,14 @@ async function createInvoice(
   }))
 
   // Use requested status — DRAFT (for bookkeeper review) or AUTHORISED (approve & send)
-  const invoiceStatus = (sesContext || internal.captainLock) ? 'DRAFT' : (xero_status || 'DRAFT')
+  const invoiceStatus = (sesContext || internal.captainLock || internal.milestone) ? 'DRAFT' : (xero_status || 'DRAFT')
 
   // Loop 1B-a-apply: Terms text comes from the preflight context (which
   // already resolved override > jobs.payment_terms > pricing_json.payment_terms
   // > division-default). DueDate prefers preflight context too so the body
   // override flows through one resolution path.
-  const xeroTermsText = traceCtx?.payment_terms_text || ''
-  const xeroDueDate = traceCtx?.due_date
+  const xeroTermsText = internal.milestone?.terms || traceCtx?.payment_terms_text || ''
+  const xeroDueDate = internal.milestone?.dueDate || traceCtx?.due_date
     || due_date || dueDate
     || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
 
@@ -39706,6 +39765,7 @@ async function createInvoice(
         ? { ContactID: resolvedContactId }
         : { Name: contact },
       LineAmountTypes: lineAmountTypes,
+      ...(internal.milestone ? { CurrencyCode: 'AUD' } : {}),
       LineItems: xeroLineItems,
       Reference: ref,
       DueDate: xeroDueDate,
@@ -39719,7 +39779,7 @@ async function createInvoice(
   // Only trusted internal options may override it; no request-body key is read.
   // Xero retains idempotency results for six minutes, not indefinitely.
   const jIdForKey = job_id || jobId || 'nojob'
-  const invIdempotencyKey = sesContext
+  const invIdempotencyKey = internal.milestone ? `billing-milestone-${internal.milestone.claimId}` : sesContext
     ? `ses-invoice-create-${sesContext.obligationRevisionId}`
     : (internal.makesafeIdempotencyKey || await genericInvoiceIdempotencyKey({
       orgId: DEFAULT_ORG_ID,
@@ -39734,6 +39794,10 @@ async function createInvoice(
   const result = await xeroPost('/Invoices', accessToken, tenantId, invoice, 'PUT', invIdempotencyKey)
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
+  if (internal.milestone && xeroInvId) {
+    const checkpoint = await client.from('invoice_milestone_draft_claims').update({ provider_invoice_id: xeroInvId, updated_at: new Date().toISOString() }).eq('id', internal.milestone.claimId).eq('org_id', internal.milestone.orgId).eq('state', 'dispatching').select('id').single()
+    if (checkpoint.error || !checkpoint.data) throw new Error('Milestone provider outcome is not checkpointed; never create again')
+  }
   const invNumber = xeroInv?.InvoiceNumber
   const providerInvoiceStatus = xeroInv?.Status == null ? null : String(xeroInv.Status)
   const providerInvoiceType = xeroInv?.Type == null ? null : String(xeroInv.Type)
@@ -39793,7 +39857,7 @@ async function createInvoice(
 
   // Email acceptance is separate from successful invoice creation. A timeout or
   // incomplete response leaves the delivery outcome unknown; never retry here.
-  const emailRequested = !sesContext && !internal.captainLock && !!send_email
+  const emailRequested = !sesContext && !internal.captainLock && !internal.milestone && !!send_email
   let emailStatus: InvoiceEmailStatus = emailRequested ? 'failed' : 'not_requested'
   let emailError: Record<string, unknown> | null = null
   const createdEmailRefusal = emailRequested ? invoiceEmailStatusRefusal(xeroInv) : null
@@ -39856,7 +39920,7 @@ async function createInvoice(
       account_code:               traceCtx?.account_code || null,
       tracking_option:            traceCtx?.tracking_option || null,
       xero_project_manual_status: traceCtx?.xero_project_manual_status || 'needs_manual_fill',
-      quote_revision_id:          traceCtx?.quote_revision_id || null,
+      quote_revision_id:          internal.milestone?.quoteRevisionId || traceCtx?.quote_revision_id || null,
       scope_revision_id:          traceCtx?.scope_revision_id || null,
       job_contact_id:             job_contact_id || null,
       reference_suffix:           referenceSuffix,
@@ -39871,6 +39935,7 @@ async function createInvoice(
       )
       if (mirrorError) throw new Error(mirrorError.message)
     } catch (upsertErr: any) {
+      if (internal.milestone) throw new Error('Milestone provider draft is checkpointed but local mirror failed; reconcile without create')
       if (sesContext) {
         throw new Error(
           `Xero accepted the SES draft and its invoice id was checkpointed, but the local mirror write failed (${upsertErr.message}). Reconcile by the SES external token / checkpointed Xero id; do not mint again.`,

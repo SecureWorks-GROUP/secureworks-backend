@@ -61,7 +61,9 @@ for (const role of ["admin", "owner", "ops_manager"]) {
     assertEquals(response.status, 200);
     const body = await response.json();
     assertEquals(body.reviews[0].state, "held");
-    assertEquals(body.automatic_xero_drafts, false);
+    assertEquals(body.automatic_xero_drafts_defined_here, false);
+    assertEquals(body.reviews_only, true);
+    assertEquals(body.provider_outcomes_action, "invoice_milestone_drafts");
     assertEquals(body.preparation_only, true);
     assertEquals(body.send_requires_staff, true);
     assertEquals(db.reads.map((r) => r.filters), [{ id: JOB, org_id: ORG }, {

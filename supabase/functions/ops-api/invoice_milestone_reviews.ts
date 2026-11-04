@@ -21,7 +21,9 @@ export async function readInvoiceMilestoneReviews(
     job_id: jobId,
     reviews: data ?? [],
     preparation_only: true,
-    automatic_xero_drafts: false,
+    reviews_only: true,
+    automatic_xero_drafts_defined_here: false,
+    provider_outcomes_action: "invoice_milestone_drafts",
     send_requires_staff: true,
   };
 }
