@@ -5,8 +5,8 @@ INSERT INTO public.job_documents(id,job_id,type,sent_at,accepted_at)
 VALUES('77000000-0000-4000-8000-000000000003','77000000-0000-4000-8000-000000000001','quote',now(),now());
 INSERT INTO public.council_submissions(id,org_id,job_id,steps)
 VALUES('77000000-0000-4000-8000-000000000005','00000000-0000-0000-0000-000000000001','77000000-0000-4000-8000-000000000001','[{"step_id":"77000000-0000-4000-8000-000000000006","name":"Fixture council checkpoint","status":"pending"}]');
-INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,pricing_snapshot_json)
-VALUES('77000000-0000-4000-8000-000000000004','77000000-0000-4000-8000-000000000001','77000000-0000-4000-8000-000000000003',now(),1,'send-quote/send','{"raw":{"billing_milestones":{"version":1,"milestones":[{"id":"council","trigger":{"kind":"council_step_completed","submission_id":"77000000-0000-4000-8000-000000000005","step_id":"77000000-0000-4000-8000-000000000006","step_name":"Fixture council checkpoint"}}]}}}');
+INSERT INTO public.quote_revisions(id,job_id,job_document_id,sent_at,version,released_via,totals_snapshot_json,pricing_snapshot_json)
+VALUES('77000000-0000-4000-8000-000000000004','77000000-0000-4000-8000-000000000001','77000000-0000-4000-8000-000000000003',now(),1,'send-quote/send','{}','{"raw":{"billing_milestones":{"version":1,"milestones":[{"id":"council","trigger":{"kind":"council_step_completed","submission_id":"77000000-0000-4000-8000-000000000005","step_id":"77000000-0000-4000-8000-000000000006","step_name":"Fixture council checkpoint"}}]}}}');
 UPDATE public.job_documents SET quote_revision_id='77000000-0000-4000-8000-000000000004' WHERE id='77000000-0000-4000-8000-000000000003';
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.quote_invoice_council_bindings WHERE quote_revision_id='77000000-0000-4000-8000-000000000004' AND state='eligible' AND step_id='77000000-0000-4000-8000-000000000006') THEN RAISE EXCEPTION 'Exact prequote council step not pinned'; END IF;
