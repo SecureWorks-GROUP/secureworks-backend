@@ -3,7 +3,10 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _invoiceMilestoneReviewsActionForTest as action } from "./index.ts";
+import {
+  _invoiceMilestoneReviewsActionForTest as action,
+  _updateCouncilStatusForTest as updateCouncil,
+} from "./index.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const JOB = "11000000-0000-4000-8000-000000000001";
@@ -143,4 +146,58 @@ Deno.test("invoice review read: unreadable review store never becomes empty succ
     Error,
     "could not be read",
   );
+});
+
+Deno.test("council completion: failed capture is reported before success or event logging", async () => {
+  const writes: any[] = [];
+  const reads: string[] = [];
+  const db = {
+    from(table: string) {
+      reads.push(table);
+      if (table !== "council_submissions") {
+        throw new Error("must not read/log after failed completion");
+      }
+      let updating = false;
+      const query: any = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        single() {
+          return Promise.resolve({
+            data: {
+              id: "submission",
+              job_id: JOB,
+              steps: [{ step_id: "engineering", status: "pending" }],
+            },
+          });
+        },
+        update(payload: unknown) {
+          updating = true;
+          writes.push(payload);
+          return query;
+        },
+        then(resolve: any) {
+          return Promise.resolve({
+            error: updating ? new Error("review queue insert failed") : null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  };
+  await assertRejects(
+    () =>
+      updateCouncil(db, {
+        submission_id: "submission",
+        step_id: "engineering",
+        status: "complete",
+      }),
+    Error,
+    "review queue insert failed",
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(reads, ["council_submissions", "council_submissions"]);
 });

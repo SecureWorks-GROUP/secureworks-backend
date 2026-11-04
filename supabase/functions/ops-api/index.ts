@@ -62744,12 +62744,15 @@ async function updateCouncilStatus(client: any, body: any) {
   // Find the first non-complete step as current
   const newCurrentIdx = steps.findIndex((s: any) => s.status !== 'complete')
 
-  await client.from('council_submissions').update({
+  const { error: councilUpdateError } = await client.from('council_submissions').update({
     steps,
     current_step_index: newCurrentIdx >= 0 ? newCurrentIdx : steps.length - 1,
     overall_status: overallStatus,
     updated_at: new Date().toISOString(),
   }).eq('id', submission_id)
+  // The milestone review is captured in this write's transaction. Never
+  // report completion when PostgreSQL rolled it back (including capture errors).
+  if (councilUpdateError) throw councilUpdateError
 
   const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
 
@@ -62763,6 +62766,8 @@ async function updateCouncilStatus(client: any, body: any) {
 
   return { success: true, overall_status: overallStatus, step: steps[idx] }
 }
+
+export const _updateCouncilStatusForTest = updateCouncilStatus
 
 async function sendCouncilEmail(client: any, body: any) {
   const { submission_id, step_index, to_email, cc, subject, body_html, body_text, attachments } = body
