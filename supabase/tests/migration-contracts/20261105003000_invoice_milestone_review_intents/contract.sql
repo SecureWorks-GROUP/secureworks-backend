@@ -82,6 +82,17 @@ DO $$ BEGIN
  IF (SELECT status FROM public.jobs WHERE id='11000000-0000-4000-8000-000000000004') <> 'accepted' THEN
   RAISE EXCEPTION 'capture must not move lifecycle'; END IF;
 END $$;
+-- A workflow jump may mark earlier steps complete but is not a milestone attestation.
+UPDATE public.council_submissions SET steps='[{"step_id":"jumped","status":"complete","completion_source":"workflow_jump"}]', current_step_index=1 WHERE id='44000000-0000-4000-8000-000000000001';
+DO $$ BEGIN
+ IF EXISTS (SELECT FROM public.invoice_milestone_reviews WHERE milestone_key='council_step:jumped') THEN RAISE EXCEPTION 'workflow jump fabricated milestone'; END IF;
+END $$;
+SAVEPOINT explicit_attestation;
+UPDATE public.council_submissions SET steps='[{"step_id":"jumped","status":"complete","completion_source":"explicit_status_update"}]' WHERE id='44000000-0000-4000-8000-000000000001';
+DO $$ BEGIN
+ IF (SELECT count(*) FROM public.invoice_milestone_reviews WHERE milestone_key='council_step:jumped') <> 2 THEN RAISE EXCEPTION 'later explicit completion must capture one held review per accepted document'; END IF;
+END $$;
+ROLLBACK TO SAVEPOINT explicit_attestation;
 -- Malformed or unidentified workflow steps never become named billing evidence.
 UPDATE public.council_submissions SET steps='[1,"x",{},{"status":"complete"}]' WHERE id='44000000-0000-4000-8000-000000000001';
 UPDATE public.council_submissions SET steps='null' WHERE id='44000000-0000-4000-8000-000000000001';

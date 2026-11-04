@@ -8,7 +8,7 @@ The database captures the existing writers, in the same transaction:
 
 - A job's status changes into `scheduled`.
 - The first-party calendar or assignment writer records a live `scheduled` or `confirmed` install booking with a date. Ghost/observer rows, delivery/visit/meeting rows and cancelled rows do not count. The calendar can leave the job's lifecycle at `processing`; the assignment trigger covers that path.
-- A council submission's named `step_id` changes to `complete`. Changing only the workflow cursor or overall status is not completion evidence. Unnamed or malformed steps provide no named milestone evidence.
+- A council submission's named `step_id` changes to `complete`. Changing only the workflow cursor or overall status is not completion evidence. The workflow-jump writer tags positioning-only completions as `workflow_jump`; these are excluded even though the workflow marks those earlier steps complete. Unnamed or malformed steps provide no named milestone evidence.
 
 There is one review per job, accepted document and milestone key. All crew bookings and lifecycle scheduling share `scheduled`. Repeated saves, rescheduling, council reset/recompletion and simultaneous crew bookings reuse the existing review. With no current accepted sent quote document, one unbound review records that missing input. An unbound review and a later document-bound review are **review context, never separate payable obligations**.
 

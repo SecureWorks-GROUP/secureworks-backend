@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _invoiceMilestoneReviewsActionForTest as action,
+  _jumpCouncilStepForTest as jumpCouncil,
   _updateCouncilStatusForTest as updateCouncil,
 } from "./index.ts";
 
@@ -199,5 +200,57 @@ Deno.test("council completion: failed capture is reported before success or even
     "review queue insert failed",
   );
   assertEquals(writes.length, 1);
+  assertEquals(reads, ["council_submissions", "council_submissions"]);
+});
+
+Deno.test("council workflow jump: completion is tagged as positioning and failed write is reported", async () => {
+  const writes: any[] = [];
+  const reads: string[] = [];
+  const db = {
+    from(table: string) {
+      reads.push(table);
+      if (table !== "council_submissions") {
+        throw new Error("must not log after failed jump");
+      }
+      const query: any = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        single() {
+          return Promise.resolve({
+            data: {
+              id: "submission",
+              job_id: JOB,
+              steps: [{
+                step_id: "engineering",
+                name: "Engineering",
+                status: "pending",
+              }, { step_id: "approval", name: "Approval", status: "pending" }],
+            },
+          });
+        },
+        update(payload: unknown) {
+          writes.push(payload);
+          return query;
+        },
+        then(resolve: any) {
+          return Promise.resolve({
+            error: new Error("council jump write failed"),
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  };
+  await assertRejects(
+    () =>
+      jumpCouncil(db, { submission_id: "submission", target_step_index: 1 }),
+    Error,
+    "council jump write failed",
+  );
+  assertEquals(writes[0].steps[0].completion_source, "workflow_jump");
   assertEquals(reads, ["council_submissions", "council_submissions"]);
 });

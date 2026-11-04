@@ -93,12 +93,13 @@ BEGIN
   LOOP
     -- A named, completed step is evidence for review, never billing approval.
     -- A workflow jump that only changes current_step_index has no effect.
-    IF step->>'status' = 'complete' AND nullif(btrim(step->>'step_id'), '') IS NOT NULL
+    IF step->>'status' = 'complete' AND step->>'completion_source' IS DISTINCT FROM 'workflow_jump' AND nullif(btrim(step->>'step_id'), '') IS NOT NULL
       AND NOT EXISTS (
         SELECT 1 FROM jsonb_array_elements(
           CASE WHEN jsonb_typeof(OLD.steps) = 'array' THEN OLD.steps ELSE '[]'::jsonb END
         ) old_step
         WHERE old_step->>'step_id' = step->>'step_id' AND old_step->>'status' = 'complete'
+          AND old_step->>'completion_source' IS DISTINCT FROM 'workflow_jump'
       ) THEN
       key := 'council_step:' || (step->>'step_id');
       PERFORM public.enqueue_invoice_milestone_review(NEW.job_id, 'council_step_complete', key,

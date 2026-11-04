@@ -20934,6 +20934,8 @@ async function jumpCouncilStep(client: any, body: any) {
       steps[i].completed_at = null
     } else {
       steps[i].status = 'complete'
+      // Workflow positioning is not evidence that an accepted billing milestone happened.
+      steps[i].completion_source = 'workflow_jump'
       if (!steps[i].completed_at) steps[i].completed_at = now
       if (!steps[i].started_at) steps[i].started_at = now
     }
@@ -20953,12 +20955,13 @@ async function jumpCouncilStep(client: any, body: any) {
 
   const overallStatus = target === 0 && steps.length > 1 ? 'in_progress' : steps.every((s: any) => s.status === 'complete') ? 'complete' : 'in_progress'
 
-  await client.from('council_submissions').update({
+  const { error: councilJumpError } = await client.from('council_submissions').update({
     steps,
     current_step_index: target,
     overall_status: overallStatus,
     updated_at: now,
   }).eq('id', submission_id)
+  if (councilJumpError) throw councilJumpError
 
   const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
 
@@ -20972,6 +20975,8 @@ async function jumpCouncilStep(client: any, body: any) {
 
   return { success: true, overall_status: overallStatus, current_step_index: target, steps }
 }
+
+export const _jumpCouncilStepForTest = jumpCouncilStep
 
 // ── Geocoding helper (Nominatim, free, no API key) ──
 async function geocodeAddress(address: string, suburb?: string): Promise<{ lat: number, lng: number } | null> {
@@ -62733,7 +62738,10 @@ async function updateCouncilStatus(client: any, body: any) {
   if (notes) steps[idx].notes = notes
   if (documents_received) steps[idx].documents_received = [...(steps[idx].documents_received || []), ...documents_received]
   if (status === 'in_progress' && !steps[idx].started_at) steps[idx].started_at = new Date().toISOString()
-  if (status === 'complete') steps[idx].completed_at = new Date().toISOString()
+  if (status === 'complete') {
+    steps[idx].completed_at = new Date().toISOString()
+    steps[idx].completion_source = 'explicit_status_update'
+  }
 
   // Calculate overall status and advance current step
   const allComplete = steps.every((s: any) => s.status === 'complete')
