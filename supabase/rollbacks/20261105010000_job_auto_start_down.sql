@@ -1,4 +1,4 @@
--- Rollback of 20261102140000_job_auto_start.sql: unschedules the cron and drops its
+-- Rollback of 20261105010000_job_auto_start.sql: unschedules the cron and drops its
 -- caller. The flag row and the run log are kept (the runs are the only record of what
 -- moved); turn the flag off instead of deleting it.
 DO $cron$

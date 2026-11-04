@@ -14,7 +14,7 @@
 -- (update_job_status with compare and set on 'scheduled'; a repair's board stage through
 -- update_repair_stage with compare and set on 'scheduled'), so it records a
 -- status_changed (or repair_stage_changed) job event with source auto_schedule_start.
--- Rollback: supabase/rollbacks/20261102140000_job_auto_start_down.sql.
+-- Rollback: supabase/rollbacks/20261105010000_job_auto_start_down.sql.
 
 -- ── 1. The switch ────────────────────────────────────────────────────────────
 -- DO NOTHING so a re-apply never flips an operator's setting back.
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS job_auto_start_runs_run_on_idx
   ON public.job_auto_start_runs (run_on DESC, ran_at DESC);
 
 COMMENT ON TABLE public.job_auto_start_runs IS
-  'The 6am auto start (20261102140000): one row per live run of ops-api job_auto_start_sweep. run_on is the Perth day; outcome ok | partial (a move failed) | failed (candidates unreadable); moved_job_numbers lists the jobs moved to In Progress; detail.not_moved lists every other candidate and why (booked_earlier_only, starts_later, not_booked_today, no_work_booking, skipped, status_changed, ...). Written only by ops-api job_auto_start.ts.';
+  'The 6am auto start (20261105010000): one row per live run of ops-api job_auto_start_sweep. run_on is the Perth day; outcome ok | partial (a move failed) | failed (candidates unreadable); moved_job_numbers lists the jobs moved to In Progress; detail.not_moved lists every other candidate and why (booked_earlier_only, starts_later, not_booked_today, no_work_booking, skipped, status_changed, ...). Written only by ops-api job_auto_start.ts.';
 
 ALTER TABLE public.job_auto_start_runs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.job_auto_start_runs FROM PUBLIC, anon, authenticated;

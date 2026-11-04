@@ -29,7 +29,7 @@
 //     jobs.status. They are skipped (make_safe_board).
 //   - Forward only: nothing is ever moved back.
 //
-// Switch: feature_flags.job_auto_start_v1 (seeded ON by 20261102140000). Missing or
+// Switch: feature_flags.job_auto_start_v1 (seeded ON by 20261105010000). Missing or
 // unreadable is off. Each live run writes one job_auto_start_runs row: the Perth day,
 // how many moved and their job numbers, and what was skipped and why.
 
