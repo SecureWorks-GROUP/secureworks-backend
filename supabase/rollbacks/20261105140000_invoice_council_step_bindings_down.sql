@@ -8,11 +8,18 @@ BEGIN
   SELECT * INTO review FROM public.invoice_milestone_reviews WHERE id=NEW.review_id;
   IF (TG_OP='INSERT' OR (TG_OP='UPDATE' AND OLD.state='prepared' AND NEW.state='dispatching')) AND review.trigger_kind IS DISTINCT FROM 'scheduled' THEN RAISE EXCEPTION 'Council draft dispatch held after rollback'; END IF;
   IF TG_OP='INSERT' OR (TG_OP='UPDATE' AND OLD.state='prepared' AND NEW.state='dispatching') THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(NEW.org_id::text||':'||NEW.job_id::text,0));
+    IF EXISTS(SELECT 1 FROM public.invoice_milestone_draft_claims c WHERE c.org_id=NEW.org_id AND c.job_id=NEW.job_id AND c.quote_revision_id<>NEW.quote_revision_id) THEN
+      RAISE EXCEPTION 'Invoice claim from an earlier accepted revision requires office review';
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.job_documents d WHERE d.job_id=NEW.job_id AND d.type='quote' AND d.accepted_at IS NOT NULL AND (d.id IS DISTINCT FROM (SELECT accepted_document_id FROM public.invoice_milestone_reviews WHERE id=NEW.review_id) OR d.quote_revision_id IS DISTINCT FROM NEW.quote_revision_id)) THEN
+      RAISE EXCEPTION 'Accepted replacement quote requires office review';
+    END IF;
     SELECT d.* INTO accepted FROM public.job_documents d
       JOIN public.quote_revisions q ON q.id=d.quote_revision_id AND q.job_document_id=d.id AND q.job_id=d.job_id
       WHERE d.job_id=NEW.job_id AND d.quote_revision_id=NEW.quote_revision_id
         AND d.type='quote' AND d.sent_at IS NOT NULL AND d.accepted_at IS NOT NULL
-        AND d.superseded_at IS NULL AND d.job_contact_id IS NULL AND q.sent_at IS NOT NULL
+        AND d.superseded_at IS NULL AND d.job_contact_id IS NULL AND q.sent_at IS NOT NULL AND d.accepted_at>=q.sent_at
       FOR SHARE OF d;
     IF NOT FOUND OR (SELECT count(*) FROM public.job_documents d WHERE d.job_id=NEW.job_id
       AND d.type='quote' AND d.sent_at IS NOT NULL AND d.accepted_at IS NOT NULL AND d.superseded_at IS NULL)<>1 THEN

@@ -11,6 +11,9 @@ UPDATE public.job_documents SET quote_revision_id='77000000-0000-4000-8000-00000
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.quote_invoice_council_bindings WHERE quote_revision_id='77000000-0000-4000-8000-000000000004' AND state='eligible' AND step_id='77000000-0000-4000-8000-000000000006') THEN RAISE EXCEPTION 'Exact prequote council step not pinned'; END IF;
  IF has_table_privilege('authenticated','public.quote_invoice_council_bindings','SELECT') OR has_table_privilege('service_role','public.quote_invoice_council_bindings','UPDATE') THEN RAISE EXCEPTION 'Pinned council identity can be changed or read by browser'; END IF;
+ IF has_table_privilege('service_role','public.quote_invoice_council_bindings','INSERT,DELETE') THEN RAISE EXCEPTION 'Inherited grant permits council binding erase or insert'; END IF;
+ BEGIN UPDATE public.quote_invoice_council_bindings SET step_name='Changed' WHERE quote_revision_id='77000000-0000-4000-8000-000000000004'; RAISE EXCEPTION 'Council binding changed'; EXCEPTION WHEN raise_exception THEN IF SQLERRM='Council binding changed' THEN RAISE; END IF; END;
+
 END $$;
 UPDATE public.council_submissions SET steps='[{"step_id":"77000000-0000-4000-8000-000000000006","name":"Fixture council checkpoint","status":"complete","completion_source":"workflow_jump"}]' WHERE id='77000000-0000-4000-8000-000000000005';
 DO $$ BEGIN

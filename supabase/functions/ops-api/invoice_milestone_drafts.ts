@@ -99,8 +99,17 @@ export function acceptedInstallMilestone(raw: any) {
     ? { ok: true as const, stage, amountCents: cents(stage.amount_inc_gst)! }
     : { ok: false as const, reason: "installation_billing_terms_missing" };
 }
+/** Accounting API pagination metadata is authoritative; a short page alone is not completeness. */
+export function completeInvoicePage(result: any): boolean {
+  const p = result?.pagination;
+  const count = result?.Invoices?.length;
+  return Array.isArray(result?.Invoices) && count < 100 && p?.page === 1 &&
+    p.pageSize === 100 && Number.isInteger(p.pageCount) && p.pageCount >= 0 &&
+    p.pageCount <= 1 && p.itemCount === count;
+}
 export interface DraftDeps {
   search(reference: string, contactId: string): Promise<any[]>;
+  inventory(contactId: string): Promise<any[]>;
   read(invoiceId: string): Promise<any>;
   create(payload: any, claim: any): Promise<any>;
 }
@@ -214,6 +223,98 @@ export async function reconcileMilestoneDraft(
     });
   }
 }
+function admissionConflict(error: any): string | null {
+  const message = String(error?.message || "");
+  if (message.includes("earlier accepted revision")) {
+    return "previous_revision_invoice_claim_requires_review";
+  }
+  if (
+    message.includes("Accepted replacement quote") ||
+    message.includes("accepted document changed")
+  ) return "accepted_replacement_requires_review";
+  return null;
+}
+async function admissionHold(client: any, review: any, reason: string) {
+  const result = await client.rpc("record_invoice_milestone_admission_hold", {
+    p_review_id: review.id,
+    p_org_id: review.org_id,
+    p_reason: reason,
+  });
+  if (result.error) throw new Error("Invoice admission hold could not persist");
+  return { review_id: review.id, state: "held", reason };
+}
+async function invoiceInventorySafe(
+  client: any,
+  deps: DraftDeps,
+  review: any,
+  expected: any,
+  claims: any[],
+) {
+  try {
+    const mirrors = rows(
+      await client.from("xero_invoices").select("xero_invoice_id").eq(
+        "org_id",
+        expected.org_id,
+      ).eq("job_id", expected.job_id).eq("invoice_type", "ACCREC"),
+      "Invoice mirror inventory",
+    ) || [];
+    const receipts = rows(
+      await client.from("quote_invoice_deposit_receipts").select("*").eq(
+        "org_id",
+        expected.org_id,
+      ).eq("job_id", expected.job_id).eq(
+        "quote_revision_id",
+        expected.quote_revision_id,
+      ),
+      "Accepted deposit receipts",
+    ) || [];
+    const inventory = await deps.inventory(expected.xero_contact_id);
+    if (!Array.isArray(inventory) || inventory.length >= 100) {
+      throw new Error("Provider inventory incomplete");
+    }
+    const ids = new Set<string>([
+      ...inventory.map((i: any) => String(i.InvoiceID || "")),
+      ...mirrors.map((i: any) => String(i.xero_invoice_id || "")),
+    ]);
+    for (const invoiceId of ids) {
+      if (!UUID.test(invoiceId)) {
+        throw new Error("Provider inventory identity missing");
+      }
+      const invoice = await deps.read(invoiceId);
+      if (invoice?.InvoiceID !== invoiceId || invoice.Type !== "ACCREC") {
+        throw new Error("Provider inventory mismatch");
+      }
+      if (["VOIDED", "DELETED"].includes(invoice.Status)) continue;
+      const known = claims.find((c: any) =>
+        c.provider_invoice_id === invoiceId &&
+        c.quote_revision_id === expected.quote_revision_id
+      );
+      const compared = known || expected;
+      if (
+        (known || invoice.Reference === expected.reference) &&
+        matchesDraft({ ...invoice, Status: "DRAFT" }, compared) &&
+        ["DRAFT", "AUTHORISED", "PAID"].includes(invoice.Status)
+      ) continue;
+      const receipt = receipts.find((r: any) =>
+        r.provider_invoice_id === invoiceId
+      );
+      if (
+        receipt &&
+        receipt.accepted_document_id === review.accepted_document_id &&
+        receipt.xero_contact_id === expected.xero_contact_id &&
+        invoice.Contact?.ContactID === receipt.xero_contact_id &&
+        invoice.CurrencyCode === "AUD" &&
+        cents(invoice.Total) === receipt.amount_cents &&
+        invoice.Reference === receipt.reference &&
+        ["AUTHORISED", "PAID"].includes(invoice.Status)
+      ) continue;
+      return "existing_invoice_requires_review";
+    }
+    return null;
+  } catch {
+    return "invoice_inventory_unavailable";
+  }
+}
 export async function processInstallDrafts(
   client: any,
   deps: DraftDeps,
@@ -279,7 +380,7 @@ export async function processInstallDrafts(
     }
     const documents = rows(
       await client.from("job_documents").select(
-        "id,accepted_at,sent_at,superseded_at",
+        "id,quote_revision_id,accepted_at,sent_at,superseded_at",
       ).eq("job_id", jobId).eq("type", "quote"),
       "Accepted payer set",
     ) || [];
@@ -293,6 +394,23 @@ export async function processInstallDrafts(
         state: "held",
         reason: "multiple_accepted_documents_require_review",
       });
+      continue;
+    }
+    if (
+      documents.some((d: any) =>
+        d.accepted_at &&
+        (d.id !== doc.id || d.quote_revision_id !== revision.id)
+      ) ||
+      !(new Date(doc.accepted_at).getTime() >=
+        new Date(revision.sent_at).getTime())
+    ) {
+      outcomes.push(
+        await admissionHold(
+          client,
+          review,
+          "accepted_replacement_requires_review",
+        ),
+      );
       continue;
     }
     const parsed = acceptedBillingMilestones(
@@ -382,11 +500,43 @@ export async function processInstallDrafts(
       due_date: due.toISOString().slice(0, 10),
       currency: "AUD",
     };
+    const jobClaims = rows(
+      await client.from("invoice_milestone_draft_claims").select("*").eq(
+        "org_id",
+        orgId,
+      ).eq("job_id", jobId),
+      "Prior invoice claims",
+    ) || [];
+    if (jobClaims.some((c: any) => c.quote_revision_id !== revision.id)) {
+      outcomes.push(
+        await admissionHold(
+          client,
+          review,
+          "previous_revision_invoice_claim_requires_review",
+        ),
+      );
+      continue;
+    }
     const hash = await digest(payload);
     const reference = `SW-BILL-${
       (await digest({ orgId, jobId, revision: revision.id, stage: stage.id }))
         .slice(0, 40)
     }`;
+    const sameClaim = jobClaims.find((c: any) =>
+      c.quote_revision_id === revision.id && c.stage_id === stage.id
+    );
+    if (sameClaim && sameClaim.state !== "prepared") {
+      outcomes.push(sameClaim);
+      continue;
+    }
+    const inventoryHold = await invoiceInventorySafe(client, deps, review, {
+      ...payload,
+      reference,
+    }, jobClaims);
+    if (inventoryHold) {
+      outcomes.push(await admissionHold(client, review, inventoryHold));
+      continue;
+    }
     const inserted = await client.from("invoice_milestone_draft_claims").upsert(
       {
         ...payload,
@@ -400,6 +550,17 @@ export async function processInstallDrafts(
         ignoreDuplicates: true,
       },
     );
+    const insertHold = admissionConflict(inserted.error);
+    if (insertHold) {
+      outcomes.push(
+        await admissionHold(
+          client,
+          review,
+          insertHold,
+        ),
+      );
+      continue;
+    }
     rows(inserted, "Invoice claim");
     let claim = rows(
       await client.from("invoice_milestone_draft_claims").select("*").eq(
@@ -423,13 +584,23 @@ export async function processInstallDrafts(
       outcomes.push(claim);
       continue;
     }
-    const acquired = rows(
-      await client.from("invoice_milestone_draft_claims").update({
+    const acquisition = await client.from("invoice_milestone_draft_claims")
+      .update({
         state: "dispatching",
         hold_reason: "dispatch_outcome_pending",
-      }).eq("id", claim.id).eq("state", "prepared").select().maybeSingle(),
-      "Invoice dispatch claim",
-    );
+      }).eq("id", claim.id).eq("state", "prepared").select().maybeSingle();
+    const dispatchHold = admissionConflict(acquisition.error);
+    if (dispatchHold) {
+      outcomes.push(
+        await admissionHold(
+          client,
+          review,
+          dispatchHold,
+        ),
+      );
+      continue;
+    }
+    const acquired = rows(acquisition, "Invoice dispatch claim");
     if (!acquired) {
       outcomes.push({ id: claim.id, state: "dispatching" });
       continue;

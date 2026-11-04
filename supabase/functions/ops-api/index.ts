@@ -1,4 +1,4 @@
-import { processInstallDrafts, reconcileMilestoneDraft, type DraftDeps } from './invoice_milestone_drafts.ts'
+import { processInstallDrafts, reconcileMilestoneDraft, completeInvoicePage, type DraftDeps } from './invoice_milestone_drafts.ts'
 import { readInvoiceMilestoneReviews } from './invoice_milestone_reviews.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
@@ -39342,10 +39342,17 @@ async function billingCouncilStepsAction(client:any,params:URLSearchParams,metho
 export const _billingCouncilStepsActionForTest=billingCouncilStepsAction
 function milestoneDraftDeps(client: any): DraftDeps {
   return {
+    inventory: async (contactId) => {
+      if(!CREATE_INVOICE_DRAFT_UUID_RE.test(contactId))throw new Error('Invalid inventory payer')
+      const {accessToken,tenantId}=await getToken(client)
+      const result=await xeroGet('/Invoices',accessToken,tenantId,{ContactIDs:contactId,where:`Type=="ACCREC"`,page:'1',pageSize:'100'})
+      if(!completeInvoicePage(result))throw new Error('Provider invoice inventory incomplete')
+      return result.Invoices
+    },
     search: async (reference, _contactId) => {
       const { accessToken, tenantId } = await getToken(client)
       const result = await xeroGet('/Invoices', accessToken, tenantId, { where: `Reference=="${reference}"`, page: '1', pageSize: '100' })
-      if (!Array.isArray(result?.Invoices) || result.Invoices.length >= 100) throw new Error('Provider search incomplete')
+      if (!completeInvoicePage(result)) throw new Error('Provider search incomplete')
       return result.Invoices
     },
     read: async (id) => {

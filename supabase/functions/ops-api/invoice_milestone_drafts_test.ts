@@ -7,6 +7,7 @@ import {
   acceptedBillingMilestones,
   acceptedInstallMilestone,
   billingTerms,
+  completeInvoicePage,
   councilBillingTerms,
   matchesDraft,
   processInstallDrafts,
@@ -117,6 +118,18 @@ export function fixture(options: any = {}) {
   const writes: any[] = [];
   let serial = 20;
   const client = {
+    rpc: async (_name: string, args: any) => {
+      const review = tables.invoice_milestone_reviews.find((r) =>
+        r.id === args.p_review_id && r.org_id === args.p_org_id
+      );
+      if (review) {
+        review.hold_reasons = [
+          ...new Set([...(review.hold_reasons || []), args.p_reason]),
+        ];
+        return { data: null, error: null };
+      }
+      return { data: null, error: { message: "Missing review" } };
+    },
     from(table: string) {
       let mode = "read",
         payload: any = null,
@@ -129,7 +142,10 @@ export function fixture(options: any = {}) {
         done = true;
         const data = tables[table] ||= [];
         let found = data.filter((r) => predicates.every((p) => p(r)));
-        if (options.failTable === table && mode !== "read") {
+        if (
+          (options.failTable === table && mode !== "read") ||
+          (options.failReadTable === table && mode === "read")
+        ) {
           return result = {
             data: null,
             error: { message: "fixture persistence failure" },
@@ -235,16 +251,20 @@ export function fixture(options: any = {}) {
     DueDateString: claim.due_date,
   });
   const deps = {
-    search: async () => {
-      searches++;
-      if (options.searchFails) throw new Error("unreadable provider");
+    inventory: async () => {
+      if (options.inventoryFails) throw new Error("inventory unavailable");
       return structuredClone(provider);
     },
-    read: async () => {
+    search: async (reference: string) => {
+      searches++;
+      if (options.searchFails) throw new Error("unreadable provider");
+      return structuredClone(provider.filter((i) => i.Reference === reference));
+    },
+    read: async (invoiceId: string) => {
       reads++;
       if (options.readFails) throw new Error("read unavailable");
       return {
-        ...structuredClone(provider[0]),
+        ...structuredClone(provider.find((i) => i.InvoiceID === invoiceId)),
         ...(options.readOverride || {}),
       };
     },
@@ -473,7 +493,15 @@ Deno.test("real scheduled status writer reaches one Xero DRAFT PUT; no sends, au
       (!init?.method || init.method === "GET")
     ) return Response.json({ Invoices: [provider] });
     if (url.includes("/Invoices?")) {
-      return Response.json({ Invoices: provider ? [provider] : [] });
+      return Response.json({
+        Invoices: provider ? [provider] : [],
+        pagination: {
+          page: 1,
+          pageSize: 100,
+          pageCount: provider ? 1 : 0,
+          itemCount: provider ? 1 : 0,
+        },
+      });
     }
     if (
       url.includes("/Email") || url.includes("/Contacts") ||
@@ -749,10 +777,19 @@ Deno.test("real explicit council completion reaches one draft and ignores workfl
     }
     if (url.includes("/Invoices?")) {
       const query = new URL(url).searchParams.get("where") || "";
-      return Response.json({
-        Invoices: [...provider.values()].filter((i) =>
+      const list = new URL(url).searchParams.has("ContactIDs")
+        ? [...provider.values()]
+        : [...provider.values()].filter((i) =>
           query === `Reference=="${i.Reference}"`
-        ),
+        );
+      return Response.json({
+        Invoices: list,
+        pagination: {
+          page: 1,
+          pageSize: 100,
+          pageCount: list.length ? 1 : 0,
+          itemCount: list.length,
+        },
       });
     }
     if (
@@ -949,6 +986,184 @@ Deno.test("council step names preserve exact quoted text up to 500 characters an
     assertEquals(
       acceptedBillingMilestones(raw).ok,
       name.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(name),
+    );
+  }
+});
+
+Deno.test("accepted billing: any earlier-revision claim holds before provider lookups and persists the review reason", async () => {
+  const f = fixture();
+  f.tables.invoice_milestone_draft_claims.push({
+    id: id(90),
+    org_id: ORG,
+    job_id: JOB,
+    quote_revision_id: id(91),
+    stage_id: "different-stage-id",
+    state: "unknown",
+  });
+  const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+  assertEquals(
+    result.drafts[0].reason,
+    "previous_revision_invoice_claim_requires_review",
+  );
+  assertEquals(f.counts(), { creates: 0, searches: 0, reads: 0 });
+  assert(
+    f.tables.invoice_milestone_reviews[0].hold_reasons.includes(
+      "previous_revision_invoice_claim_requires_review",
+    ),
+  );
+});
+Deno.test("accepted billing: live legacy invoice with an empty or stale mirror holds without matching by amount or DEP text", async () => {
+  for (const mirrored of [false, true]) {
+    const f = fixture();
+    const legacy = f.invoice({
+      reference: "Fixture legacy balance",
+      label: "Legacy work",
+      due_date: "2026-11-06",
+    });
+    legacy.InvoiceID = id(92);
+    legacy.Status = "AUTHORISED";
+    f.provider.push(legacy);
+    if (mirrored) {
+      f.tables.xero_invoices.push({
+        org_id: ORG,
+        job_id: JOB,
+        invoice_type: "ACCREC",
+        xero_invoice_id: legacy.InvoiceID,
+        status: "VOIDED",
+        synced_at: "2000-01-01",
+      });
+    }
+    const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+    assertEquals(result.drafts[0].reason, "existing_invoice_requires_review");
+    assertEquals(f.counts().creates, 0);
+    assertEquals(f.counts().searches, 0);
+    assert(
+      f.tables.invoice_milestone_reviews[0].hold_reasons.includes(
+        "existing_invoice_requires_review",
+      ),
+    );
+  }
+});
+Deno.test("accepted billing: unreadable mirror or live inventory and full page cap hold durably before create", async () => {
+  for (
+    const options of [{ failReadTable: "xero_invoices" }, {
+      inventoryFails: true,
+    }, { cap: true }]
+  ) {
+    const f = fixture(options);
+    if (options.cap) {
+      for (let n = 0; n < 100; n++) {
+        f.provider.push({ InvoiceID: id(200 + n) });
+      }
+    }
+    const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+    assertEquals(result.drafts[0].reason, "invoice_inventory_unavailable");
+    assertEquals(f.counts().creates, 0);
+    assertEquals(f.counts().searches, 0);
+    assert(
+      f.tables.invoice_milestone_reviews[0].hold_reasons.includes(
+        "invoice_inventory_unavailable",
+      ),
+    );
+  }
+});
+Deno.test("accepted billing: only an exact accepted first-stage receipt permits the existing deposit alongside a later draft", async () => {
+  const f = fixture();
+  const deposit = f.invoice({
+    reference: "Fixture accepted first payment",
+    label: "First payment",
+    due_date: "2026-11-06",
+  });
+  deposit.InvoiceID = id(93);
+  deposit.Status = "AUTHORISED";
+  f.provider.push(deposit);
+  f.tables.quote_invoice_deposit_receipts = [{
+    org_id: ORG,
+    job_id: JOB,
+    quote_revision_id: REV,
+    accepted_document_id: DOC,
+    provider_invoice_id: deposit.InvoiceID,
+    xero_contact_id: CONTACT,
+    stage_id: "deposit",
+    amount_cents: Math.round(amount * 100),
+    reference: deposit.Reference,
+  }];
+  const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+  assertEquals(result.drafts[0].state, "draft_confirmed");
+  assertEquals(f.counts().creates, 1);
+  const bad = fixture();
+  bad.provider.push(deposit);
+  bad.tables.quote_invoice_deposit_receipts = [{
+    ...f.tables.quote_invoice_deposit_receipts[0],
+    accepted_document_id: id(95),
+  }];
+  assertEquals(
+    (await processInstallDrafts(bad.client, bad.deps, JOB, ORG)).drafts[0]
+      .reason,
+    "existing_invoice_requires_review",
+  );
+  assertEquals(bad.counts().creates, 0);
+});
+
+Deno.test("provider inventory: only explicit complete page metadata passes; short partial or missing pages hold", () => {
+  const one = { InvoiceID: INVOICE };
+  assert(
+    completeInvoicePage({
+      Invoices: [],
+      pagination: { page: 1, pageSize: 100, pageCount: 0, itemCount: 0 },
+    }),
+  );
+  assert(
+    completeInvoicePage({
+      Invoices: [one],
+      pagination: { page: 1, pageSize: 100, pageCount: 1, itemCount: 1 },
+    }),
+  );
+  for (
+    const p of [
+      undefined,
+      { page: 1, pageSize: 100, pageCount: 2, itemCount: 1 },
+      { page: 2, pageSize: 100, pageCount: 2, itemCount: 1 },
+      { page: 1, pageSize: 10, pageCount: 1, itemCount: 1 },
+      { page: 1, pageSize: 100, pageCount: 1, itemCount: 2 },
+    ]
+  ) {
+    assertEquals(
+      completeInvoicePage({ Invoices: [one], pagination: p }),
+      false,
+    );
+  }
+  assertEquals(
+    completeInvoicePage({
+      Invoices: Array(100).fill(one),
+      pagination: { page: 1, pageSize: 100, pageCount: 1, itemCount: 100 },
+    }),
+    false,
+  );
+});
+
+Deno.test("accepted billing: historical accepted document without any claim and pre-send acceptance both stay held", async () => {
+  for (
+    const mutate of [(f: any) =>
+      f.tables.job_documents.push({
+        ...f.tables.job_documents[0],
+        id: id(97),
+        quote_revision_id: id(98),
+        superseded_at: "2026-11-03",
+      }), (f: any) => f.tables.job_documents[0].accepted_at = "2026-11-01"]
+  ) {
+    const f = fixture();
+    mutate(f);
+    const result = await processInstallDrafts(f.client, f.deps, JOB, ORG);
+    assertEquals(
+      result.drafts[0].reason,
+      "accepted_replacement_requires_review",
+    );
+    assertEquals(f.counts(), { creates: 0, searches: 0, reads: 0 });
+    assert(
+      f.tables.invoice_milestone_reviews[0].hold_reasons.includes(
+        "accepted_replacement_requires_review",
+      ),
     );
   }
 });
