@@ -1,3 +1,4 @@
+import { prepareAcceptanceDepositDispatch, captureAcceptanceDepositReceipt } from './acceptance_deposit_receipt.ts'
 import { processInstallDrafts, reconcileMilestoneDraft, completeInvoicePage, type DraftDeps } from './invoice_milestone_drafts.ts'
 import { readInvoiceMilestoneReviews } from './invoice_milestone_reviews.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
@@ -41540,7 +41541,7 @@ function buildScopeSummaryLine(job: any): string {
 // callers — do not change); sendAcceptanceInvoice defaults it to AUTHORISED.
 // Returns xero_status (the status Xero actually assigned) so callers can gate
 // client-facing payment links. See "Acceptance Deposit Invoice Invariant" in AGENTS.md.
-async function createDepositInvoice(client: any, body: any) {
+async function createDepositInvoice(client: any, body: any, acceptanceReceipt?: { orgId: string; documentId: string }) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
@@ -41673,6 +41674,17 @@ async function createDepositInvoice(client: any, body: any) {
   })
   const lineItems: any[] = depositLines.line_items
 
+  // Metadata only. The context is supplied privately by sendAcceptanceInvoice,
+  // never read from an action body. A failed read leaves the receipt unbound;
+  // existing invoice calculation, PUT, status and send behavior stay unchanged.
+  const receiptPlan = acceptanceReceipt ? await prepareAcceptanceDepositDispatch(client, {
+    orgId: acceptanceReceipt.orgId, jobId: jId, documentId: acceptanceReceipt.documentId,
+    partyId: job_contact_id, runLabel, reference,
+  }, async (exactReference) => {
+    const { accessToken, tenantId } = await getToken(client)
+    return await xeroGet('/Invoices', accessToken, tenantId, { where: `Reference=="${exactReference}"`, page: '1', pageSize: '100' })
+  }) : null
+
   // Create Xero invoice as a draft by default so Shaun can review before sending.
   const invoiceResult = await createInvoice(client, {
     job_id: jId,
@@ -41686,6 +41698,17 @@ async function createDepositInvoice(client: any, body: any) {
     job_contact_id: job_contact_id,
     run_label: runLabel,
   })
+
+  const depositReceipt = receiptPlan?.state === 'prepared'
+    ? await captureAcceptanceDepositReceipt(client, {
+      orgId: acceptanceReceipt!.orgId, jobId: jId, documentId: acceptanceReceipt!.documentId,
+      partyId: job_contact_id, runLabel, creationResult: { ...invoiceResult, job_id: jId }, dispatchToken: receiptPlan.token,
+    }, { readInvoice: async (id) => {
+      const { accessToken, tenantId } = await getToken(client)
+      const result = await xeroGet(`/Invoices/${id}`, accessToken, tenantId)
+      if (!Array.isArray(result?.Invoices) || result.Invoices.length !== 1) throw new Error('Exact deposit read unavailable')
+      return result.Invoices[0]
+    } }) : receiptPlan
 
   // Total invoice amount = deposit + extras
   const extrasTotal = extras.reduce((s: number, e: any) => s + (e.amount_inc_gst || 0), 0)
@@ -41751,6 +41774,7 @@ async function createDepositInvoice(client: any, body: any) {
     description,
     // Surface the Xero status so acceptance callers can gate the Pay Now email.
     xero_status: invoiceResult.status,
+    ...(acceptanceReceipt ? { deposit_receipt: depositReceipt } : {}),
   }
 }
 
@@ -57427,7 +57451,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     job_contact_id: body.job_contact_id || null,
     run_label: body.run_label || null,
     xero_status: body.xero_status || 'AUTHORISED',
-  })
+  }, acceptedJobDocumentId && !body.job_contact_id && !body.run_label ? { orgId: DEFAULT_ORG_ID, documentId: acceptedJobDocumentId } : undefined)
 
   // Get Xero online invoice URL for payment
   let paymentUrl = ''
@@ -57632,8 +57656,11 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     payment_url: paymentUrl,
     sms_sent: false,
     branded_email_sent: brandedEmailSent,
+    ...(invoiceResult.deposit_receipt ? { deposit_receipt: invoiceResult.deposit_receipt } : {}),
   }
 }
+
+export const _sendAcceptanceInvoiceForTest = sendAcceptanceInvoice
 
 // ── send_review_request: a person asks for the review text on one job ──
 // The text, the recipients (every paying owner), the 90-day look-back and the per-job
