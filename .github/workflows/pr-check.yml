@@ -316,6 +316,8 @@ jobs:
         run: |
           deno test --allow-env --allow-read \
             supabase/functions/_shared/scope_freeze/quote_scope_revision_link_test.ts
+          deno test \
+            supabase/functions/_shared/release_packet/adapters/quick_quote_cost_truth_test.ts
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/send-quote/index_test.ts \
             supabase/functions/ops-api/quick_quote_test.ts

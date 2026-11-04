@@ -53,6 +53,13 @@ export function dispatchAdapter(
     inputs.job.type,
     typeof pricingSource === 'string' ? pricingSource : undefined,
   )
+  // The new quote-only scoper retains missing sell values as null while a
+  // draft is being saved. Do not shape those missing inputs into zero or a
+  // partial public quote. Legacy Quick Quote payloads keep their contract.
+  if (kind === 'quick_quote' && pricingJson.tool === 'misc-scoper' &&
+      pricingJson.pricing_complete === false) {
+    return { ok: false, reason: 'misc_quote_pricing_incomplete', matched_kind: kind }
+  }
   if (!kind) {
     return {
       ok: false,
