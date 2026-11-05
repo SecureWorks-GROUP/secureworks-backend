@@ -1208,7 +1208,7 @@ Rules:
    date typed by hand is not, by itself, the order being confirmed.
 9. **A failed note** gives its claim back, so the next press writes it.
 
-Migration: `20261105120000_dispatch_v2_order_crew_lines.sql` (rollback in
+Migration: `20261105160000_dispatch_v2_order_crew_lines.sql` (rollback in
 `supabase/rollbacks/`).
 
 ### 3e.2 The supplier's documents on the job
@@ -1253,7 +1253,7 @@ order named) is saved to the job (`dispatch_v2_order_documents.ts`).
    so it is never swept. SWP-261382's existing documents and its 12 receipt
    images are left as they are.
 
-Migration: `20261105121000_dispatch_v2_order_documents.sql` (rollback in
+Migration: `20261105161000_dispatch_v2_order_documents.sql` (rollback in
 `supabase/rollbacks/`).
 
 Open points:

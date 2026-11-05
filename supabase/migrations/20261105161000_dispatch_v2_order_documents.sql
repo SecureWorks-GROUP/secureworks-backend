@@ -28,7 +28,7 @@
 -- No job, job status, supplier (suppliers is never written), Xero, GHL, send
 -- or existing row is touched by this migration. No backfill.
 --
--- Rollback: supabase/rollbacks/20261105121000_dispatch_v2_order_documents_down.sql.
+-- Rollback: supabase/rollbacks/20261105161000_dispatch_v2_order_documents_down.sql.
 
 CREATE TABLE IF NOT EXISTS public.dispatch_v2_order_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

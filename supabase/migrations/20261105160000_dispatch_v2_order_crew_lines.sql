@@ -25,7 +25,7 @@
 -- or existing row is touched by this migration. No backfill: orders confirmed
 -- before it get no line.
 --
--- Rollback: supabase/rollbacks/20261105120000_dispatch_v2_order_crew_lines_down.sql.
+-- Rollback: supabase/rollbacks/20261105160000_dispatch_v2_order_crew_lines_down.sql.
 
 CREATE TABLE IF NOT EXISTS public.dispatch_v2_order_crew_lines (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
