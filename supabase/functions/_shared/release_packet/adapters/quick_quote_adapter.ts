@@ -25,7 +25,6 @@ import {
   asNumberOrNull,
   asObject,
   asString,
-  deriveLineId,
 } from './_extract.ts'
 
 export const buildQuickQuoteScopeBlock: BuildScopeBlock = (inputs: AdapterInputs): AdapterOutput => {
@@ -97,27 +96,26 @@ export const buildQuickQuoteScopeBlock: BuildScopeBlock = (inputs: AdapterInputs
   // supplier_name for material lines unless overridden.
   const lineCosts = lineItems.map((li, idx) => {
     const raw = asObject(rawLines[idx])
-    const unitCost = asNumber(raw.cost_price, 0)
+    const unitCost = asNumberOrNull(raw.cost_price)
     return {
       line_id: li.line_id,
       unit_cost: unitCost,
-      line_cost_total_ex: Math.round(unitCost * li.qty * 100) / 100,
+      line_cost_total_ex: unitCost === null ? null : Math.round(unitCost * li.qty * 100) / 100,
       supplier_name: null,
     }
   })
 
-  const materialTotal = asNumber(
-    pricing.materialCostEstimate,
-    lineCosts
-      .filter((_, i) => lineItems[i].category === 'material')
-      .reduce((a, x) => a + x.line_cost_total_ex, 0),
-  )
-  const labourTotal = asNumber(
-    pricing.labourCostEstimate,
-    lineCosts
-      .filter((_, i) => lineItems[i].category === 'labour')
-      .reduce((a, x) => a + x.line_cost_total_ex, 0),
-  )
+  const categoryCost = (category: LineCategory): number | null => {
+    const costs = lineCosts.filter((_, i) => lineItems[i].category === category)
+    let total = 0
+    for (const line of costs) {
+      if (line.line_cost_total_ex === null) return null
+      total += line.line_cost_total_ex
+    }
+    return total
+  }
+  const materialTotal = asNumberOrNull(pricing.materialCostEstimate) ?? categoryCost('material')
+  const labourTotal = asNumberOrNull(pricing.labourCostEstimate) ?? categoryCost('labour')
   const commissionTotal = asNumber(pricing.commissionCostEstimate, 0)
   const marginPct = asNumber(pricing.margin_pct, 0)
 

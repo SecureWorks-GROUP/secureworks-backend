@@ -16,6 +16,7 @@ import type {
 import { buildPatioScopeBlock, _patioPresenceReport } from './patio_adapter.ts'
 import { buildFenceScopeBlock, _fencePresenceReport } from './fence_adapter.ts'
 import { buildQuickQuoteScopeBlock, _quickQuotePresenceReport } from './quick_quote_adapter.ts'
+import { asArray, asNumberOrNull, asObject } from './_extract.ts'
 
 export const defaultAdapterRegistry: AdapterRegistry = {
   patio: buildPatioScopeBlock,
@@ -53,6 +54,21 @@ export function dispatchAdapter(
     inputs.job.type,
     typeof pricingSource === 'string' ? pricingSource : undefined,
   )
+  // The new quote-only scoper retains missing sell values as null while a
+  // draft is being saved. Do not shape those missing inputs into zero or a
+  // partial public quote. Legacy Quick Quote payloads keep their contract.
+  if (kind === 'quick_quote' && pricingJson.tool === 'misc-scoper') {
+    const lines = asArray(pricingJson.line_items)
+    const knownTotals = ['totalExGST', 'gst', 'totalIncGST'].every((key) =>
+      asNumberOrNull(pricingJson[key]) !== null)
+    const knownLines = lines.length > 0 && lines.every((raw) => {
+      const line = asObject(raw)
+      return ['quantity', 'unit_price', 'total'].every((key) => asNumberOrNull(line[key]) !== null)
+    })
+    if (pricingJson.pricing_complete !== true || !knownTotals || !knownLines) {
+      return { ok: false, reason: 'misc_quote_pricing_incomplete', matched_kind: kind }
+    }
+  }
   if (!kind) {
     return {
       ok: false,
