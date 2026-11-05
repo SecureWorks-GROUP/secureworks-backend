@@ -17,13 +17,23 @@ but runs per invoice, not at close: [job-receipt-v1.md](job-receipt-v1.md).
 
 ## What "paid" means
 
-All three, in `evaluateJobPaid`:
+In `evaluateJobPaid`:
 
 1. Every linked sales invoice that is not voided or deleted is PAID, and none is
    a DRAFT.
-2. Every paying party has a paid final invoice. Paying parties are
-   `job_contacts` rows not removed (`removed_at` null and `status` not
-   `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
+2. Every paying party has a paid final invoice, except when the money paid
+   covers a whole-job quote value (captain, 5 Nov 2026): then the money paid
+   against the whole job decides and no party is checked, so a shared fence
+   where the owner paid the 50% deposit and the neighbour the 50% balance,
+   neither invoice tagged to a party (SWF-261370), is paid, and a 50/50 split
+   a cent out never leaves a card stuck. A whole-job value is the job-level
+   whole-quote total, or a quote document with no run label; a run document's
+   value is one party's share and keeps rule 2. A quote the money does not
+   cover, no sent quote or no recorded quote value also keeps rule 2: a
+   deposit-only job is `not_paid`, never paid less than quoted. The pre-check
+   before the quote read applies rule 1 only, so the quote is read. Paying
+   parties are `job_contacts` rows not removed (`removed_at` null and `status`
+   not `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
    not an explicit 0 (a null share counts: the party writer stores null when no
    portions were sent); a job with none has one payer, its client. A final
    needs positive evidence, the Debt tab's rule (`invoiceKindOf` in
@@ -43,14 +53,16 @@ All three, in `evaluateJobPaid`:
    No sent quote (`no_sent_quote`) or no recorded quote value
    (`quote_value_not_recorded`): rules 1 and 2 decide. A quote or variations
    read failure (`quote_unreadable`, `variations_unreadable`,
-   `quote_read_threw`) decides nothing.
+   `quote_read_threw`) decides nothing past rule 1, rule 2 included.
 
-Outcomes: `paid`; `paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
+Outcomes: `paid` (rule 1 holds and the money covers a whole-job quote value,
+or rules 1, 2 and, where there is a quote value, 3 hold);
+`paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
 stays where it is and `job_closeout_state.paid_less_than_quoted` is set, for the
-Ops card to show); `not_paid`; `undecided` (1 and 2 hold but the quote could not
-be read: in that run nothing moves, is texted, archived or recorded, the move
-and the sender answer `facts_unreadable`, the backlog list excludes it as
-`quote_unreadable`, and the next run asks again).
+Ops card to show); `not_paid`; `undecided` (1 holds but the quote could not be
+read, whatever the parties: in that run nothing moves, is texted, archived or
+recorded, the move and the sender answer `facts_unreadable`, the backlog list
+excludes it as `quote_unreadable`, and the next run asks again).
 
 Holds (never moved, texted or archived): status `rectification`, or
 `jobs.is_callback`.

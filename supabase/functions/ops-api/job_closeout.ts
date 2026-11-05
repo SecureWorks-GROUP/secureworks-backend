@@ -275,7 +275,8 @@ export function reviewRequestMessage(
 
 /**
  * The sent quote (job_quote_values through readJobQuotes: the whole-job total when the
- * quote is split by party, else the accepted or newest current document's value) plus
+ * quote is split by party, else the accepted or newest current document's value, which is
+ * one party's run share when the document has a run label) plus
  * agreed variations (customer accepted or invoiced; one approved internally but never
  * accepted is not owed), inc GST. Pure.
  */
@@ -286,13 +287,16 @@ export function quoteForCloseout(
     | null,
 ): CloseoutQuote {
   let quoteTotal: number | null = null;
+  let wholeJob = false;
   let reason: string | null = null;
   if (!quotes) reason = "quote_unreadable";
   else if (quotes.status === "none_recorded") reason = "no_sent_quote";
   else if (quotes.whole_quote_total) {
     quoteTotal = quotes.whole_quote_total.value_inc_gst;
+    wholeJob = true;
   } else if (quotes.headline?.value_inc_gst != null) {
     quoteTotal = quotes.headline.value_inc_gst;
+    wholeJob = quotes.headline.run_label == null;
   } else reason = "quote_value_not_recorded";
   let variationsInc: number | null = null;
   if (variations) {
@@ -309,6 +313,7 @@ export function quoteForCloseout(
     quote_total_inc: quoteTotal,
     variations_inc: variationsInc,
     unknown_reason: reason,
+    whole_job: wholeJob,
   };
 }
 
@@ -423,13 +428,16 @@ async function loadQuote(
       quote_total_inc: null,
       variations_inc: null,
       unknown_reason: "quote_read_threw",
+      whole_job: false,
     };
   }
 }
 
 /**
- * The strict check for one job. The quote (several reads) is read only when rules 1 and 2
- * already hold, since it can only turn "paid" into "paid less than quoted".
+ * The strict check for one job. The quote (several reads) is read only when the pre-check
+ * (rule 1) already holds: money that covers a whole-job quote value decides paid with no
+ * per-party check; otherwise rule 2 (a paid final per party) applies too
+ * (job_paid_closeout.ts).
  */
 export async function evaluateFacts(
   deps: Pick<JobCloseoutDeps, "client" | "now">,

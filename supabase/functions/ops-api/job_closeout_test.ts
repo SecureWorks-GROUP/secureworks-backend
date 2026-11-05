@@ -433,15 +433,39 @@ Deno.test("quote side: whole-job total wins, then the headline; only agreed vari
       whole_quote_total: { value_inc_gst: 8000, source: "x" },
       headline: { value_inc_gst: 4000 } as any,
     }, variations),
-    { quote_total_inc: 8000, variations_inc: 330, unknown_reason: null },
+    {
+      quote_total_inc: 8000,
+      variations_inc: 330,
+      unknown_reason: null,
+      whole_job: true,
+    },
   );
   assertEquals(
     quoteForCloseout({
       status: "accepted",
       whole_quote_total: null,
-      headline: { value_inc_gst: 4000 } as any,
-    }, []).quote_total_inc,
-    4000,
+      headline: { value_inc_gst: 4000, run_label: null } as any,
+    }, []),
+    {
+      quote_total_inc: 4000,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: true,
+    },
+  );
+  // A run document's value is one party's share, not the whole job.
+  assertEquals(
+    quoteForCloseout({
+      status: "accepted",
+      whole_quote_total: null,
+      headline: { value_inc_gst: 1955.25, run_label: "RHS" } as any,
+    }, []),
+    {
+      quote_total_inc: 1955.25,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: false,
+    },
   );
   assertEquals(quoteForCloseout(null, []).unknown_reason, "quote_unreadable");
   assertEquals(
@@ -554,10 +578,101 @@ Deno.test("SWF-261335 shape: unbilled neighbour -> not paid, the card stays", as
       removed_at: null,
     },
   );
+  addQuote(db, job.id, 6667);
   const out = await closeoutOnPaid(deps, { job_id: job.id });
   assertEquals(out.action, "not_paid");
   assertEquals(moves.length, 0);
-  assertEquals(db.rows("job_closeout_state")[0].outcome, "not_paid");
+  const state = db.rows("job_closeout_state")[0];
+  assertEquals([state.outcome, state.paid_less_than_quoted], [
+    "not_paid",
+    false,
+  ]);
+  assertEquals(
+    db.rows("job_events").some((e) =>
+      e.event_type === "closeout_paid_less_than_quoted"
+    ),
+    false,
+  );
+});
+
+Deno.test("a shared fence whose quote value is the owner's run share: owner paid, neighbour not invoiced -> not paid", async () => {
+  const { db, deps, moves } = setup();
+  const job = addJob(db, { job_number: "SWF-261372" });
+  db.rows("job_contacts").push(
+    {
+      id: "pa",
+      job_id: job.id,
+      contact_label: "A",
+      is_primary: true,
+      share_percentage: 50,
+      removed_at: null,
+    },
+    {
+      id: "pb",
+      job_id: job.id,
+      contact_label: "B",
+      is_primary: false,
+      share_percentage: 50,
+      removed_at: null,
+    },
+  );
+  addInvoice(db, job.id, "SWF-261372-DEP50", "PAID", 1000);
+  addInvoice(db, job.id, "SWF-261372-FINBAL", "PAID", 1000);
+  addQuote(db, job.id, 2000);
+  db.rows("__quote_values")[0].run_label = "RHS";
+  db.rows("__quote_values")[0].value_source = "run_snapshot_share";
+  db.rows("job_documents")[0].run_label = "RHS";
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: job.id })).action,
+    "not_paid",
+  );
+  assertEquals(moves.length, 0);
+});
+
+Deno.test("SWF-261370 shape: owner's deposit plus neighbour's balance, neither tagged to a party, covering the quote moves to get_review", async () => {
+  const { db, deps, moves } = setup();
+  const job = addJob(db, { job_number: "SWF-261370" });
+  db.rows("job_contacts").push(
+    {
+      id: "pa",
+      job_id: job.id,
+      contact_label: "A",
+      is_primary: true,
+      share_percentage: 50,
+      removed_at: null,
+    },
+    {
+      id: "pb",
+      job_id: job.id,
+      contact_label: "B",
+      is_primary: false,
+      share_percentage: 50,
+      removed_at: null,
+    },
+  );
+  addInvoice(db, job.id, "SWF-261370-DEP50", "PAID", 1955.25, {
+    xero_contact_id: "xc-a",
+  });
+  addInvoice(db, job.id, "SWF-261370-FINBAL50", "PAID", 1955.25, {
+    xero_contact_id: "xc-b",
+  });
+  addQuote(db, job.id, 3910.5);
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: job.id })).action,
+    "moved",
+  );
+  assertEquals(moves.length, 1);
+});
+
+Deno.test("a deposit-only job with no sent quote stays where it is", async () => {
+  const { db, deps, moves } = setup();
+  const job = addJob(db, { job_number: "SWF-261371" });
+  addInvoice(db, job.id, "SWF-261371-DEP50", "PAID", 1955.25);
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: job.id })).action,
+    "not_paid",
+  );
+  assertEquals(moves.length, 0);
 });
 
 Deno.test("paid less than quoted: the card stays and carries the marker, logged once", async () => {
