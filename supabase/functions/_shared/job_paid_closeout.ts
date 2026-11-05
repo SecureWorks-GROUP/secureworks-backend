@@ -6,20 +6,18 @@
 // in ops-api/job_closeout.ts, which every step (the Xero sync move, the catch-up, the
 // review sender, the archive sweep and the backlog list) goes through.
 //
-// "Paid" is the captain's strict check, all three must hold:
+// "Paid" is the captain's strict check:
 //   1. Every linked sales invoice that is not voided or deleted is PAID, and none is a
 //      DRAFT (a draft is money we still mean to bill).
-//   2. Every paying party is paid. A paying party is a job_contacts
+//   2. Every paying party has a paid final invoice, checked only when there is no
+//      readable sent quote value (captain, 5 Nov 2026). When rule 3 is decided against a
+//      readable quote value, the money paid against the quote decides and no party is
+//      checked: a shared fence where the owner paid the 50% deposit and the neighbour the
+//      50% balance, neither invoice tagged to a party (SWF-261370), is paid, and a 50/50
+//      split a cent out never leaves a card stuck. A paying party is a job_contacts
 //      row not removed (removed_at null and status not 'removed') whose share_percentage
 //      is not an explicit 0 (a null share counts; the owner and each neighbour on a
-//      shared fence); a job with no such row has one payer, its client. A party is paid
-//      when it has a paid final invoice, or (captain, 5 Nov 2026) when it has at least
-//      one paid invoice of any kind (a deposit included) and rule 3 is decided against a
-//      readable sent quote value and the money paid covers it. No per-party share is
-//      worked out: a 50/50 split a cent out must never leave a card stuck (SWF-261370:
-//      the owner paid the 50% deposit, the neighbour the 50% balance). With no sent quote
-//      or no recorded quote value, or a quote that could not be read or is not covered,
-//      each party still needs a paid final. A final needs
+//      shared fence); a job with no such row has one payer, its client. A final needs
 //      positive evidence: the Debt tab's rule (debt_ws_rules.ts invoiceKindOf), a final
 //      reference ending (FIN, FINBAL or BAL with up to three digits, FINAL, PRIVATE)
 //      whose first line starts "balance", "remaining" or "remainder"; an unlabelled
@@ -30,12 +28,14 @@
 //   3. The money paid covers the sent quote plus agreed variations (customer accepted
 //      or invoiced), short by no more than PAID_QUOTE_ROUNDING_INC (GST rounding). When the
 //      job has no sent quote or no recorded quote value, rules 1 and 2 decide; when the
-//      quote or variations could not be read, nothing is decided (QUOTE_READ_FAILURES).
+//      quote or variations could not be read, nothing is decided (QUOTE_READ_FAILURES),
+//      and rule 2 still applies.
 //
-// Outcomes: "paid" (all three), "paid_less_than_quoted" (1 and 2 hold, 3 fails: the
-// card stays where it is and carries a marker), "not_paid" (1 or 2 fails), "undecided"
-// (1 and 2 hold but the quote could not be read: nothing moves, texts, archives or is
-// recorded, and the next run asks again).
+// Outcomes: "paid" (rule 1 and rule 3 hold, or rules 1 and 2 with no quote value),
+// "paid_less_than_quoted" (1 holds, 3 fails: the card stays where it is and carries a
+// marker), "not_paid" (1 fails, or 2 fails where it applies), "undecided" (1 and 2 hold
+// but the quote could not be read: nothing moves, texts, archives or is recorded, and the
+// next run asks again).
 
 import { invoiceKindOf, parseReference } from "../ops-api/debt_ws_rules.ts";
 
@@ -121,10 +121,6 @@ export interface PartyPaidView {
   label: string | null;
   is_owner: boolean;
   has_paid_final: boolean;
-  /** Any paid invoice (a deposit included) belongs to this party. */
-  has_paid_invoice: boolean;
-  /** Rule 2 holds for this party: a paid final, or a paid invoice with the quote covered. */
-  paid: boolean;
 }
 
 export interface PaidVerdict {
@@ -132,6 +128,8 @@ export interface PaidVerdict {
   /** Every rule that failed, as codes ("draft_invoice", "party_without_paid_final:B"). */
   reasons: string[];
   parties: PartyPaidView[];
+  /** Rule 2 was applied: false when a readable quote value decides, or in the pre-check. */
+  party_check_applied: boolean;
   paid_total_inc: number;
   /** Quote plus agreed variations, inc GST; null when unknown. */
   expected_inc: number | null;
@@ -264,9 +262,9 @@ function newestDate(values: (string | null)[]): string | null {
 }
 
 /**
- * The strict paid check. Pure. A null quote is a pre-check (not read yet): rules 1 and 2
- * decide, and a party with any paid invoice passes rule 2 there, since only the quote can
- * say whether a party's deposit is enough. Never act on a pre-check verdict of paid.
+ * The strict paid check. Pure. A null quote is a pre-check (not read yet): rule 1 decides
+ * and rule 2 is not applied, since a readable quote value would take its place. Never act
+ * on a pre-check verdict of paid.
  */
 export function evaluateJobPaid(input: {
   job: CloseoutJob;
@@ -291,8 +289,7 @@ export function evaluateJobPaid(input: {
     reasons.push("unpaid_invoice");
   }
 
-  // Rule 3 is worked out first: whether the paid money covers a readable sent quote
-  // decides how much rule 2 asks of each party.
+  // Rule 3 is worked out first: a readable quote value takes the place of rule 2.
   const paidTotal = round2(
     live.reduce((sum, inv) => sum + money(inv.amount_paid), 0),
   );
@@ -308,13 +305,11 @@ export function evaluateJobPaid(input: {
     shortfall = round2(Math.max(0, expected - paidTotal));
     quoteShort = shortfall > PAID_QUOTE_ROUNDING_INC;
   }
-  const quoteCovered = quoteKnown && !quoteShort;
-  // A null quote is the pre-check: the quote is not read yet, so a party with a paid
-  // invoice passes here and the real verdict, read with the quote, decides.
-  const preCheck = input.quote === null;
+  // A null quote is the pre-check: the quote is not read yet and may take rule 2's place,
+  // so rule 2 waits for the real verdict.
+  const partyCheckApplied = !quoteKnown && input.quote !== null;
 
-  // Rule 2: every paying party has a paid final, or a paid invoice of any kind when
-  // the paid money covers the quote (rule 3 decided, not short).
+  // Rule 2 (no readable quote value only): every paying party has a paid final.
   const paying = payingParties(input.parties);
   const owner = ownerParty(paying);
   const partyKeys = paying.length
@@ -324,30 +319,24 @@ export function evaluateJobPaid(input: {
       is_owner: owner?.id === p.id,
     }))
     : [{ key: OWNER_KEY, label: null, is_owner: true }];
-  const paidLive = live.filter((inv) => upper(inv.status) === "PAID");
   const paidFinalKeys = new Set(
-    paidLive.filter((inv) => isFinalInvoice(inv, depositId)).map((inv) =>
-      invoicePartyKey(inv, paying)
-    ),
+    live.filter((inv) =>
+      upper(inv.status) === "PAID" && isFinalInvoice(inv, depositId)
+    ).map((inv) => invoicePartyKey(inv, paying)),
   );
-  const paidAnyKeys = new Set(
-    paidLive.map((inv) => invoicePartyKey(inv, paying)),
-  );
-  const parties: PartyPaidView[] = partyKeys.map((p) => {
-    const hasPaidFinal = paidFinalKeys.has(p.key);
-    const hasPaidInvoice = paidAnyKeys.has(p.key);
-    return {
-      ...p,
-      has_paid_final: hasPaidFinal,
-      has_paid_invoice: hasPaidInvoice,
-      paid: hasPaidFinal || ((quoteCovered || preCheck) && hasPaidInvoice),
-    };
-  });
-  for (const p of parties) {
-    if (!p.paid) {
-      reasons.push(
-        `party_without_paid_final:${p.label ?? (p.is_owner ? "owner" : p.key)}`,
-      );
+  const parties: PartyPaidView[] = partyKeys.map((p) => ({
+    ...p,
+    has_paid_final: paidFinalKeys.has(p.key),
+  }));
+  if (partyCheckApplied) {
+    for (const p of parties) {
+      if (!p.has_paid_final) {
+        reasons.push(
+          `party_without_paid_final:${
+            p.label ?? (p.is_owner ? "owner" : p.key)
+          }`,
+        );
+      }
     }
   }
 
@@ -372,6 +361,7 @@ export function evaluateJobPaid(input: {
     outcome,
     reasons,
     parties,
+    party_check_applied: partyCheckApplied,
     paid_total_inc: paidTotal,
     expected_inc: expected,
     shortfall_inc: shortfall,

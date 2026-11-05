@@ -217,39 +217,57 @@ Deno.test("a single-payer job with a paid deposit and paid final is paid", () =>
   assertEquals(v.last_paid_on, "2026-10-01");
 });
 
-Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invoiced -> not paid", () => {
+Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invoiced -> paid less than quoted, the card stays", () => {
   const v = evaluateJobPaid({
     job: job({ job_number: "SWF-261335" }),
     invoices: [inv("DEP50", "PAID", 1018)],
     parties: [party("pa", "A", 100), party("pb", "B", 50)],
     quote: { quote_total_inc: 6667, variations_inc: 0, unknown_reason: null },
   });
-  assertEquals(v.outcome, "not_paid");
-  assertEquals(v.reasons, [
+  // A readable quote decides: no party is checked, and the money is short.
+  assertEquals(v.outcome, "paid_less_than_quoted");
+  assertEquals(v.reasons, ["paid_less_than_quoted"]);
+  // Without a quote value each party needs a paid final.
+  const noValue = evaluateJobPaid({
+    job: job({ job_number: "SWF-261335" }),
+    invoices: [inv("DEP50", "PAID", 1018)],
+    parties: [party("pa", "A", 100), party("pb", "B", 50)],
+    quote: noQuote,
+  });
+  assertEquals(noValue.outcome, "not_paid");
+  assertEquals(noValue.reasons, [
     "party_without_paid_final:A",
     "party_without_paid_final:B",
-    "paid_less_than_quoted",
   ]);
 });
 
-Deno.test("SWF-261227 shape: neighbour B paid deposit and final, owner A billed nothing live -> not paid", () => {
+Deno.test("SWF-261227 shape: neighbour B paid deposit and final, owner A billed nothing live -> short of the quote", () => {
+  const invoices = [
+    inv("SWF-261227-A-DEP50", "VOIDED", 840.13),
+    inv("SWF-261227-B-FINBAL", "PAID", 840.13),
+    inv("SWF-261227-B-DEP50", "DELETED", 840.13),
+    inv("SWF-261227-B-DEP50", "PAID", 840.13, { job_contact_id: "pb" }),
+  ];
+  const parties = [party("pa", "A", 50), party("pb", "B", 50)];
   const v = evaluateJobPaid({
     job: job({ job_number: "SWF-261227" }),
-    invoices: [
-      inv("SWF-261227-A-DEP50", "VOIDED", 840.13),
-      inv("SWF-261227-B-FINBAL", "PAID", 840.13),
-      inv("SWF-261227-B-DEP50", "DELETED", 840.13),
-      inv("SWF-261227-B-DEP50", "PAID", 840.13, { job_contact_id: "pb" }),
-    ],
-    parties: [party("pa", "A", 50), party("pb", "B", 50)],
+    invoices,
+    parties,
     quote: { quote_total_inc: 4340, variations_inc: 0, unknown_reason: null },
   });
-  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.outcome, "paid_less_than_quoted");
   assertEquals(v.parties.map((p) => [p.label, p.has_paid_final]), [
     ["A", false],
     ["B", true],
   ]);
-  assertEquals(v.reasons.includes("party_without_paid_final:A"), true);
+  const noValue = evaluateJobPaid({
+    job: job({ job_number: "SWF-261227" }),
+    invoices,
+    parties,
+    quote: noQuote,
+  });
+  assertEquals(noValue.outcome, "not_paid");
+  assertEquals(noValue.reasons, ["party_without_paid_final:A"]);
 });
 
 Deno.test("SWF-26767 shape: final voided, only deposits paid -> not paid", () => {
@@ -520,120 +538,118 @@ Deno.test("a quote or variations read failure decides nothing", () => {
   assertEquals(unpaid.outcome, "not_paid");
 });
 
-// Captain, 5 Nov 2026: a party with any paid invoice is paid once the money paid covers
-// the sent quote; no per-party share is worked out.
-const swf261370Parties = [
-  party("roger", "A", 50, { xero_contact_id: "xc-roger" }),
-  party("susan", "B", 50, { xero_contact_id: "xc-susan" }),
-];
-const swf261370Quote = {
+// Captain, 5 Nov 2026: when a readable quote value decides rule 3, the money paid against
+// it decides and no party is checked; without one, each party still needs a paid final.
+const sharedFence = [party("roger", "A", 50), party("susan", "B", 50)];
+const quote3910 = {
   quote_total_inc: 3910.5,
   variations_inc: 0,
   unknown_reason: null,
 };
 
-Deno.test("SWF-261370 shape: owner's 50% deposit paid, neighbour's 50% FINBAL paid, together the quote -> paid", () => {
-  const invoices = [
+/** The live SWF-261370 invoices: neither tagged to a party, no share letter, and no Xero
+ *  contact on either party row, so both attribute to the owner. */
+function swf261370Invoices(balance = 1955.25): CloseoutInvoice[] {
+  return [
     inv("SWF-261370-DEP50", "PAID", 1955.25, {
       xero_invoice_id: "x-inv-1689",
       xero_contact_id: "xc-roger",
     }),
-    inv("SWF-261370-FINBAL50", "PAID", 1955.25, {
+    inv("SWF-261370-FINBAL50", "PAID", balance, {
       xero_contact_id: "xc-susan",
     }),
   ];
+}
+
+Deno.test("SWF-261370 shape: owner's 50% deposit plus neighbour's 50% balance, neither tagged to a party, covering the quote -> paid", () => {
   const v = evaluateJobPaid({
-    job: job({
-      job_number: "SWF-261370",
-      deposit_invoice_id: "x-inv-1689",
-    }),
-    invoices,
-    parties: swf261370Parties,
-    quote: swf261370Quote,
+    job: job({ job_number: "SWF-261370", deposit_invoice_id: "x-inv-1689" }),
+    invoices: swf261370Invoices(),
+    parties: sharedFence,
+    quote: quote3910,
   });
   assertEquals(v.outcome, "paid");
   assertEquals(v.reasons, []);
+  assertEquals(v.party_check_applied, false);
   assertEquals(v.paid_total_inc, 3910.5);
   assertEquals(v.shortfall_inc, 0);
-  assertEquals(
-    v.parties.map((
-      p,
-    ) => [p.label, p.has_paid_final, p.has_paid_invoice, p.paid]),
-    [["A", false, true, true], ["B", true, true, true]],
-  );
+  // The parties are still reported: the neighbour carries no attributed final.
+  assertEquals(v.parties.map((p) => [p.label, p.has_paid_final]), [
+    ["A", true],
+    ["B", false],
+  ]);
   // The pre-check (quote not read yet) lets it through to the quote read.
-  assertEquals(
-    evaluateJobPaid({
-      job: job({ deposit_invoice_id: "x-inv-1689" }),
-      invoices,
-      parties: swf261370Parties,
-      quote: null,
-    }).outcome,
-    "paid",
-  );
+  const pre = evaluateJobPaid({
+    job: job({ deposit_invoice_id: "x-inv-1689" }),
+    invoices: swf261370Invoices(),
+    parties: sharedFence,
+    quote: null,
+  });
+  assertEquals([pre.outcome, pre.party_check_applied], ["paid", false]);
 });
 
 Deno.test("a 50/50 split one cent short of the quote is paid", () => {
   const v = evaluateJobPaid({
-    job: job(),
-    invoices: [
-      inv("SWF-7-DEP50", "PAID", 1955.25, { xero_contact_id: "xc-roger" }),
-      inv("SWF-7-FINBAL50", "PAID", 1955.24, { xero_contact_id: "xc-susan" }),
-    ],
-    parties: swf261370Parties,
-    quote: swf261370Quote,
+    job: job({ deposit_invoice_id: "x-inv-1689" }),
+    invoices: swf261370Invoices(1955.24),
+    parties: sharedFence,
+    quote: quote3910,
   });
   assertEquals(v.outcome, "paid");
   assertEquals(v.shortfall_inc, 0.01);
 });
 
-Deno.test("a neighbour with no paid invoice is not paid, even when the owner paid the whole quote", () => {
+Deno.test("paid more than a dollar under the quote is paid less than quoted, whoever paid", () => {
+  const v = evaluateJobPaid({
+    job: job({ deposit_invoice_id: "x-inv-1689" }),
+    invoices: swf261370Invoices(1900),
+    parties: sharedFence,
+    quote: quote3910,
+  });
+  assertEquals(v.outcome, "paid_less_than_quoted");
+  assertEquals(v.reasons, ["paid_less_than_quoted"]);
+  assertEquals(v.shortfall_inc, 55.25);
+});
+
+Deno.test("a readable quote still needs rule 1: an unpaid or draft invoice is not paid", () => {
   const v = evaluateJobPaid({
     job: job(),
     invoices: [
-      inv("SWF-8-FINAL", "PAID", 3910.5, { xero_contact_id: "xc-roger" }),
+      inv("SWF-11-DEP50", "PAID", 1955.25),
+      inv("SWF-11-FINBAL50", "AUTHORISED", 1955.25),
     ],
-    parties: swf261370Parties,
-    quote: swf261370Quote,
+    parties: sharedFence,
+    quote: quote3910,
   });
   assertEquals(v.outcome, "not_paid");
-  assertEquals(v.reasons, ["party_without_paid_final:B"]);
+  assertEquals(v.reasons, ["unpaid_invoice", "paid_less_than_quoted"]);
 });
 
-Deno.test("a deposit-only party still needs a paid final when the quote is short, unknown or unreadable", () => {
-  const invoices = [
-    inv("SWF-9-DEP50", "PAID", 1955.25, { xero_contact_id: "xc-roger" }),
-    inv("SWF-9-FINBAL50", "PAID", 1955.25, { xero_contact_id: "xc-susan" }),
-  ];
-  const base = { job: job(), invoices, parties: swf261370Parties };
-  // No sent quote, or no recorded value: rules 1 and 2 decide, so the deposit is not enough.
+Deno.test("no quote value: a deposit-only job is not paid, each party still needs a paid final", () => {
   for (const reason of ["no_sent_quote", "quote_value_not_recorded"]) {
     const v = evaluateJobPaid({
-      ...base,
+      job: job({ deposit_invoice_id: "x-dep" }),
+      invoices: [
+        inv("SWF-10-DEP50", "PAID", 2000, { xero_invoice_id: "x-dep" }),
+      ],
+      parties: [],
       quote: {
         quote_total_inc: null,
         variations_inc: 0,
         unknown_reason: reason,
       },
     });
-    assertEquals([v.outcome, v.reasons], [
-      "not_paid",
-      ["party_without_paid_final:A"],
-    ], reason);
+    assertEquals(
+      [v.outcome, v.reasons, v.party_check_applied],
+      ["not_paid", ["party_without_paid_final:owner"], true],
+      reason,
+    );
   }
-  // Paid does not cover the quote: the deposit is not enough either.
-  const short = evaluateJobPaid({
-    ...base,
-    quote: { quote_total_inc: 4000, variations_inc: 0, unknown_reason: null },
-  });
-  assertEquals(short.reasons, [
-    "party_without_paid_final:A",
-    "paid_less_than_quoted",
-  ]);
-  assertEquals(short.outcome, "not_paid");
-  // A quote that could not be read decides nothing in the party's favour.
+  // An unreadable quote is no quote value either: rule 2 still applies.
   const unread = evaluateJobPaid({
-    ...base,
+    job: job({ deposit_invoice_id: "x-inv-1689" }),
+    invoices: swf261370Invoices(),
+    parties: sharedFence,
     quote: {
       quote_total_inc: null,
       variations_inc: null,
@@ -641,21 +657,5 @@ Deno.test("a deposit-only party still needs a paid final when the quote is short
     },
   });
   assertEquals(unread.outcome, "not_paid");
-});
-
-Deno.test("a deposit-only job with no quote value is not paid", () => {
-  const v = evaluateJobPaid({
-    job: job({ deposit_invoice_id: "x-dep" }),
-    invoices: [
-      inv("SWF-10-DEP50", "PAID", 2000, { xero_invoice_id: "x-dep" }),
-    ],
-    parties: [],
-    quote: {
-      quote_total_inc: null,
-      variations_inc: 0,
-      unknown_reason: "quote_value_not_recorded",
-    },
-  });
-  assertEquals(v.outcome, "not_paid");
-  assertEquals(v.reasons, ["party_without_paid_final:owner"]);
+  assertEquals(unread.reasons, ["party_without_paid_final:B"]);
 });

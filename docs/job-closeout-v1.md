@@ -17,25 +17,25 @@ but runs per invoice, not at close: [job-receipt-v1.md](job-receipt-v1.md).
 
 ## What "paid" means
 
-All three, in `evaluateJobPaid`:
+In `evaluateJobPaid`:
 
 1. Every linked sales invoice that is not voided or deleted is PAID, and none is
    a DRAFT.
-2. Every paying party is paid. Paying parties are
+2. Every paying party has a paid final invoice, checked only when there is no
+   readable sent quote value (captain, 5 Nov 2026). When rule 3 is decided
+   against a readable quote value, the money paid against it decides and no
+   party is checked: a shared fence where the owner paid the 50% deposit and
+   the neighbour the 50% balance, neither invoice tagged to a party
+   (SWF-261370), is paid, and a 50/50 split a cent out never leaves a card
+   stuck. With no sent quote, no recorded quote value, or a quote that could
+   not be read, each party still needs a paid final. The pre-check before the
+   quote read applies rule 1 only, so the quote is read. Paying parties are
    `job_contacts` rows not removed (`removed_at` null and `status` not
    `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
    not an explicit 0 (a null share counts: the party writer stores null when no
-   portions were sent); a job with none has one payer, its client. A party is
-   paid when it has a paid final invoice, or (captain, 5 Nov 2026) when it has
-   at least one paid invoice of any kind, a deposit included, and rule 3 is
-   decided against a readable sent quote that the money paid covers. No
-   per-party share is worked out, so a 50/50 split a cent out never leaves a
-   card stuck (SWF-261370: the owner paid the 50% deposit, the neighbour the
-   50% balance). With no sent quote, no recorded quote value, a quote that
-   could not be read, or money short of the quote, each party still needs a
-   paid final. The pre-check before the quote read lets a party with any paid
-   invoice through, so the quote is read. A final needs positive evidence,
-   the Debt tab's rule (`invoiceKindOf` in `debt_ws_rules.ts`): a reference ending `FIN`, `FINBAL` or `BAL` (up to
+   portions were sent); a job with none has one payer, its client. A final
+   needs positive evidence, the Debt tab's rule (`invoiceKindOf` in
+   `debt_ws_rules.ts`): a reference ending `FIN`, `FINBAL` or `BAL` (up to
    three digits), `FINAL` or `PRIVATE`, and a first line item starting
    "balance", "remaining" or "remainder" (read as
    `line_items->0->>Description`), and never `jobs.deposit_invoice_id`. An
@@ -51,9 +51,10 @@ All three, in `evaluateJobPaid`:
    No sent quote (`no_sent_quote`) or no recorded quote value
    (`quote_value_not_recorded`): rules 1 and 2 decide. A quote or variations
    read failure (`quote_unreadable`, `variations_unreadable`,
-   `quote_read_threw`) decides nothing.
+   `quote_read_threw`) decides nothing, and rule 2 still applies.
 
-Outcomes: `paid`; `paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
+Outcomes: `paid` (rules 1 and 3 hold, or rules 1 and 2 with no quote value);
+`paid_less_than_quoted` (rule 1 holds, 3 fails: the card
 stays where it is and `job_closeout_state.paid_less_than_quoted` is set, for the
 Ops card to show); `not_paid`; `undecided` (1 and 2 hold but the quote could not
 be read: in that run nothing moves, is texted, archived or recorded, the move
