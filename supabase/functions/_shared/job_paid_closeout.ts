@@ -14,8 +14,8 @@
 //      job decides and no party is checked, so a shared fence where the owner paid the 50%
 //      deposit and the neighbour the 50% balance, neither invoice tagged to a party
 //      (SWF-261370), is paid, and a 50/50 split a cent out never leaves a card stuck. A
-//      quote value that is one party's run share, a quote the money does not cover, an
-//      unreadable quote and no quote all keep rule 2. A paying party is a job_contacts
+//      quote value that is one party's run share, a quote the money does not cover and
+//      no quote all keep rule 2. A paying party is a job_contacts
 //      row not removed (removed_at null and status not 'removed') whose share_percentage
 //      is not an explicit 0 (a null share counts; the owner and each neighbour on a
 //      shared fence); a job with no such row has one payer, its client. A final needs
@@ -29,13 +29,14 @@
 //   3. The money paid covers the sent quote plus agreed variations (customer accepted
 //      or invoiced), short by no more than PAID_QUOTE_ROUNDING_INC (GST rounding). When the
 //      job has no sent quote or no recorded quote value, rules 1 and 2 decide; when the
-//      quote or variations could not be read, nothing is decided (QUOTE_READ_FAILURES).
+//      quote or variations could not be read, nothing past rule 1 is decided, rule 2
+//      included (QUOTE_READ_FAILURES).
 //
 // Outcomes: "paid" (1 holds and the money covers a whole-job quote value, or 1, 2 and,
 // where there is a quote value, 3 hold), "paid_less_than_quoted" (1 and 2 hold, 3 fails:
-// the card stays where it is and carries a marker), "not_paid" (1 or 2 fails, where 2
-// applies), "undecided" (1 and 2 hold but the quote could not be read: nothing moves,
-// texts, archives or is recorded, and the next run asks again).
+// the card stays where it is and carries a marker), "not_paid" (1 fails, or 2 fails
+// where it applies), "undecided" (1 holds but the quote could not be read, whatever the
+// parties: nothing moves, texts, archives or is recorded, and the next run asks again).
 
 import { invoiceKindOf, parseReference } from "../ops-api/debt_ws_rules.ts";
 
@@ -130,8 +131,6 @@ export interface PaidVerdict {
   /** Every rule that failed, as codes ("draft_invoice", "party_without_paid_final:B"). */
   reasons: string[];
   parties: PartyPaidView[];
-  /** Rule 2 was applied: false when the money covers a whole-job quote value, or in the pre-check. */
-  party_check_applied: boolean;
   paid_total_inc: number;
   /** Quote plus agreed variations, inc GST; null when unknown. */
   expected_inc: number | null;
@@ -307,10 +306,18 @@ export function evaluateJobPaid(input: {
     shortfall = round2(Math.max(0, expected - paidTotal));
     quoteShort = shortfall > PAID_QUOTE_ROUNDING_INC;
   }
+  const quoteUnknownReason = quoteKnown ? null : (input.quote?.unknown_reason ??
+    (variations === null && quoteTotal !== null
+      ? "variations_unreadable"
+      : "quote_unknown"));
+  const quoteUnread = input.quote !== null && quoteUnknownReason !== null &&
+    (QUOTE_READ_FAILURES as readonly string[]).includes(quoteUnknownReason);
   // A null quote is the pre-check: the quote is not read yet and may take rule 2's place,
-  // so rule 2 waits for the real verdict.
+  // so rule 2 waits for the real verdict. An unread quote decides nothing, rule 2 included.
   const quoteDecides = quoteKnown && input.quote!.whole_job && !quoteShort;
-  const partyCheckApplied = input.quote !== null && !quoteDecides;
+  const partyCheckApplied = input.quote !== null && !quoteDecides &&
+    !quoteUnread;
+  const rule1 = reasons.length === 0;
 
   // Rule 2 (unless a covered whole-job quote value decides): every paying party has a
   // paid final.
@@ -344,20 +351,15 @@ export function evaluateJobPaid(input: {
     }
   }
 
-  const quoteUnknownReason = quoteKnown ? null : (input.quote?.unknown_reason ??
-    (variations === null && quoteTotal !== null
-      ? "variations_unreadable"
-      : "quote_unknown"));
-  const quoteUnread = input.quote !== null && quoteUnknownReason !== null &&
-    (QUOTE_READ_FAILURES as readonly string[]).includes(quoteUnknownReason);
-
   const rules12 = reasons.length === 0;
   if (quoteShort) reasons.push("paid_less_than_quoted");
-  if (rules12 && quoteUnread) reasons.push(quoteUnknownReason!);
-  const outcome: PaidOutcome = !rules12
+  if (rule1 && quoteUnread) reasons.push(quoteUnknownReason!);
+  const outcome: PaidOutcome = !rule1
     ? "not_paid"
     : quoteUnread
     ? "undecided"
+    : !rules12
+    ? "not_paid"
     : quoteShort
     ? "paid_less_than_quoted"
     : "paid";
@@ -365,7 +367,6 @@ export function evaluateJobPaid(input: {
     outcome,
     reasons,
     parties,
-    party_check_applied: partyCheckApplied,
     paid_total_inc: paidTotal,
     expected_inc: expected,
     shortfall_inc: shortfall,

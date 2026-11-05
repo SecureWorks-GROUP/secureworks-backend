@@ -237,7 +237,6 @@ Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invo
   });
   // The money is short of the quote, so each party still needs a paid final.
   assertEquals(v.outcome, "not_paid");
-  assertEquals(v.party_check_applied, true);
   assertEquals(v.reasons, [
     "party_without_paid_final:A",
     "party_without_paid_final:B",
@@ -613,7 +612,6 @@ Deno.test("SWF-261370 shape: owner's 50% deposit plus neighbour's 50% balance, n
   });
   assertEquals(v.outcome, "paid");
   assertEquals(v.reasons, []);
-  assertEquals(v.party_check_applied, false);
   assertEquals(v.paid_total_inc, 3910.5);
   assertEquals(v.shortfall_inc, 0);
   // The parties are still reported: the neighbour carries no attributed final.
@@ -628,7 +626,7 @@ Deno.test("SWF-261370 shape: owner's 50% deposit plus neighbour's 50% balance, n
     parties: sharedFence,
     quote: null,
   });
-  assertEquals([pre.outcome, pre.party_check_applied], ["paid", false]);
+  assertEquals(pre.outcome, "paid");
 });
 
 Deno.test("a 50/50 split one cent short of the quote is paid", () => {
@@ -673,7 +671,6 @@ Deno.test("a quote value that is one party's run share keeps rule 2: an uninvoic
     },
   });
   assertEquals(v.outcome, "not_paid");
-  assertEquals(v.party_check_applied, true);
   assertEquals(v.reasons, ["party_without_paid_final:B"]);
   assertEquals(v.shortfall_inc, 0);
 });
@@ -713,13 +710,15 @@ Deno.test("no quote value: a deposit-only job is not paid, each party still need
       },
     });
     assertEquals(
-      [v.outcome, v.reasons, v.party_check_applied],
-      ["not_paid", ["party_without_paid_final:owner"], true],
+      [v.outcome, v.reasons],
+      ["not_paid", ["party_without_paid_final:owner"]],
       reason,
     );
   }
-  // An unreadable quote is no quote value either: rule 2 still applies.
-  const unread = evaluateJobPaid({
+});
+
+Deno.test("SWF-261370 shape with an unreadable quote is undecided, whatever the parties", () => {
+  const v = evaluateJobPaid({
     job: job({ deposit_invoice_id: "x-inv-1689" }),
     invoices: swf261370Invoices(),
     parties: sharedFence,
@@ -730,6 +729,5 @@ Deno.test("no quote value: a deposit-only job is not paid, each party still need
       whole_job: false,
     },
   });
-  assertEquals(unread.outcome, "not_paid");
-  assertEquals(unread.reasons, ["party_without_paid_final:B"]);
+  assertEquals([v.outcome, v.reasons], ["undecided", ["quote_unreadable"]]);
 });

@@ -29,9 +29,8 @@ In `evaluateJobPaid`:
    a cent out never leaves a card stuck. A whole-job value is the job-level
    whole-quote total, or a quote document with no run label; a run document's
    value is one party's share and keeps rule 2. A quote the money does not
-   cover, no sent quote, no recorded quote value, or a quote that could not be
-   read also keeps rule 2: a deposit-only job is `not_paid`, never paid less
-   than quoted. The pre-check before the quote read applies rule 1 only, so
+   cover, no sent quote or no recorded quote value also keeps rule 2: a
+   deposit-only job is `not_paid`, never paid less than quoted. The pre-check before the quote read applies rule 1 only, so
    the quote is read. Paying parties are
    `job_contacts` rows not removed (`removed_at` null and `status` not
    `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
@@ -54,14 +53,14 @@ In `evaluateJobPaid`:
    No sent quote (`no_sent_quote`) or no recorded quote value
    (`quote_value_not_recorded`): rules 1 and 2 decide. A quote or variations
    read failure (`quote_unreadable`, `variations_unreadable`,
-   `quote_read_threw`) decides nothing.
+   `quote_read_threw`) decides nothing past rule 1, rule 2 included.
 
 Outcomes: `paid` (rule 1 holds and the money covers a whole-job quote value,
 or rules 1, 2 and, where there is a quote value, 3 hold);
 `paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
 stays where it is and `job_closeout_state.paid_less_than_quoted` is set, for the
-Ops card to show); `not_paid`; `undecided` (1 and 2 hold but the quote could not
-be read: in that run nothing moves, is texted, archived or recorded, the move
+Ops card to show); `not_paid`; `undecided` (1 holds but the quote could not be
+read, whatever the parties: in that run nothing moves, is texted, archived or recorded, the move
 and the sender answer `facts_unreadable`, the backlog list excludes it as
 `quote_unreadable`, and the next run asks again).
 

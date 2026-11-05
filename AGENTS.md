@@ -4816,8 +4816,8 @@ Debt tab's `invoiceKindOf` (an unlabelled invoice never is), except when the
 money covers a whole-job quote value (the whole-quote total or a quote with no
 run label, never one party's run share), when no party is checked; paid covers the
 `job_quote_values` quote plus customer-accepted or invoiced variations; one
-approved internally but never accepted is not owed). A quote or variations READ
-failure is `undecided`: nothing moves, texts, archives or is recorded that run;
+approved internally but never accepted is not owed). With rule 1 holding, a quote or
+variations READ failure is `undecided` whatever the parties: nothing moves, texts, archives or is recorded that run;
 only no sent quote or no recorded value lets rules 1 and 2 decide alone. A live
 sweep that cannot read the switches archives nothing. Every read, move, text and
 sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
