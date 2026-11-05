@@ -329,17 +329,25 @@ function nameSealedLines(
 // The short forms the scopes carry, to the approved email's name. The Scope
 // Engine's catalogue ids (a sealed patio line's supplierId) mostly match a name
 // as they are ("stratco", "metroll", "lysaght"); bd-metals and cmi do not.
-const SCOPE_SUPPLIER_ALIASES: Record<string, string> = {
-  bdmetals: "B&D Metals Group",
-  cmi: "CMI (Combined Metal Industries)",
-  rnr: "R&R Fencing",
-  randr: "R&R Fencing",
-  strato: "Stratco WA",
-  fss: "Fencing Supply Centre",
-  fencesupplycentre: "Fencing Supply Centre",
-  bnd: "B&D Metals Group",
-  bandd: "B&D Metals Group",
-  bandmetals: "B&D Metals Group",
+// Tweak 4 (5 Nov 2026) renamed "B&D Metals Group" to "BD Metals" and "R&R
+// Fencing" to "RnR Fencing": each alias names every name the entry has had,
+// so a scope still finds its supplier before and after the rename lands.
+const SCOPE_SUPPLIER_ALIASES: Record<string, string[]> = {
+  bdmetals: ["BD Metals", "B&D Metals Group"],
+  cmi: ["CMI (Combined Metal Industries)"],
+  rnr: ["RnR Fencing", "R&R Fencing"],
+  randr: ["RnR Fencing", "R&R Fencing"],
+  strato: ["Stratco WA"],
+  fss: ["Fencing Supply Centre"],
+  fencesupplycentre: ["Fencing Supply Centre"],
+  bnd: ["BD Metals", "B&D Metals Group"],
+  bandd: ["BD Metals", "B&D Metals Group"],
+  bd: ["BD Metals", "B&D Metals Group"],
+  bandmetals: ["BD Metals", "B&D Metals Group"],
+  rnrfencing: ["RnR Fencing", "R&R Fencing"],
+  randrfencing: ["RnR Fencing", "R&R Fencing"],
+  bandmetalsgroup: ["BD Metals", "B&D Metals Group"],
+  banddmetalsgroup: ["BD Metals", "B&D Metals Group"],
 };
 
 // "R&R Fencing" -> "randrfencing": case, spaces and punctuation never matter.
@@ -362,9 +370,10 @@ export function dispatchV2MatchScopeSupplier(
   const key = supplierKey(scopeName);
   if (!key) return null;
   const alias = SCOPE_SUPPLIER_ALIASES[key];
+  const aliasKeys = alias ? alias.map(supplierKey) : null;
   for (const name of approvedNames) {
     const k = supplierKey(name);
-    if (alias ? k === supplierKey(alias) : k === key || k.replace(/(wa|perth)$/, "") === key) {
+    if (aliasKeys ? aliasKeys.includes(k) : k === key || k.replace(/(wa|perth)$/, "") === key) {
       return name;
     }
   }

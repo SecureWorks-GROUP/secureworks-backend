@@ -551,7 +551,8 @@ Nothing merges to main until Shaun says "merge to main".
 ### 3c.1 The rules in business words
 
 1. **On account or pay first.** Five suppliers are on account: Bunnings,
-   Fence Makers, Fencing Warehouse WA, R&R Fencing and Stratco WA. Every
+   Fence Makers, Fencing Warehouse WA, RnR Fencing (R&R Fencing until
+   Tweak 4) and Stratco WA. Every
    other supplier pays first, including a box whose supplier is not linked to
    the approved supplier list at all, so nothing slips past payment. The list
    is kept in one place (`dispatch_approved_supplier_emails.on_account`);
@@ -1467,6 +1468,24 @@ against a job alone).
    number never ties a Xero bill. A number now kept on two orders on two
    jobs makes a bill quoting it `several_order_numbers` (left for a person),
    never a guess.
+
+## Tweak 4: the approved supplier names on the board (5 Nov 2026)
+
+Full rules: docs/dispatch-v2-emails-contract.md, section "Tweak 4".
+
+1. **The name a box shows.** A supplier box whose Xero contact is linked to
+   an active approved supplier shows the approved name ("BD Metals", not
+   "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty") on the Arrival
+   line (`supplier_name` in `arrival.orders`), so in the Needs you now tags
+   and to do text too. The name comes from the approved list the board
+   already reads for the payment terms (`DISPATCH_ACCOUNT_ENTRY_SELECT`,
+   `dispatchV2ApprovedNameFor`). Any other box, or when the approved list
+   could not be read, shows the name copied from Xero, as before.
+2. **The crew pickup line and the order paperwork** (section 3e) name the
+   approved supplier the same way: "RnR Fencing delivery Mon 2 Nov".
+3. **Renames.** "R&R Fencing" is now "RnR Fencing" and "B&D Metals Group"
+   is now "BD Metals" (section 3c.1's on-account list is the same five
+   suppliers).
 
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 

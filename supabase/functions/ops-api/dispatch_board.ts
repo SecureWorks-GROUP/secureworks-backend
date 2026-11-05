@@ -73,6 +73,7 @@ import {
 import {
   type DispatchV2Accounts,
   dispatchV2AccountsOf,
+  dispatchV2ApprovedNameFor,
   dispatchV2TermsFor,
 } from "./dispatch_v2_payment.ts";
 
@@ -1009,7 +1010,11 @@ export function dispatchArrival(
       key: `box:${supplierId}`,
       source: "supplier_box",
       supplier_id: supplierId,
-      supplier_name: text(box.supplier_name),
+      // Tweak 4: the approved name ("BD Metals") when the box's Xero contact
+      // is linked to an approved supplier, else the name copied from Xero.
+      // The Needs you now tags and the Arrival line read this name.
+      supplier_name: dispatchV2ApprovedNameFor(input.accounts, supplierId) ??
+        text(box.supplier_name),
       order_sent: !!sent || sentByOrder,
       sent_at: sent?.sent_at ?? null,
       delivery_date: deliveryDate,

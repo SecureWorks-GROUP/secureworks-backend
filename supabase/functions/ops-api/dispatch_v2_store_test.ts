@@ -225,6 +225,16 @@ const SCHEMA: Record<string, string[]> = {
     "created_at",
     "created_by_email",
   ],
+  // 20261105184500_dispatch_v2_supplier_picker.sql: the bill count view the
+  // Add supplier search reads (one row per linked Xero contact).
+  dispatch_approved_supplier_contact_bills: [
+    "org_id",
+    "approved_id",
+    "supplier_id",
+    "bills_12m",
+    "last_bill_date",
+    "is_pinned",
+  ],
   // The install, for skips_ready (dispatch_board.ts loadDispatchInstall).
   job_assignments: [
     "id",
@@ -421,6 +431,7 @@ function seed(): Record<string, Row[]> {
       { supplier_id: SUP.metroll, approved_id: APPROVED.metroll, org_id: ORG },
       { supplier_id: SUP.oldlink, approved_id: APPROVED.retired, org_id: ORG },
     ],
+    dispatch_approved_supplier_contact_bills: [],
     job_material_suppliers: [],
     job_material_lines: [],
     dispatch_material_photos: [],
@@ -1269,6 +1280,200 @@ Deno.test("search: approved list first, then every other active supplier, each f
   const q = await get(db, "dispatch_v2_supplier_search", { q: "strat" });
   assertEquals(q.approved.map((a: any) => a.supplier_id), [SUP.stratco]);
   assertEquals(q.others, []);
+});
+
+// Tweak 4 (5 Nov 2026): one row per approved supplier, under its approved
+// name, on its main Xero contact; the other contacts go under Show more.
+const BD = {
+  approved: uuid("c7", 1),
+  rrApproved: uuid("c7", 2),
+  main: uuid("c8", 1),
+  second: uuid("c8", 2),
+  third: uuid("c8", 3),
+  rr: uuid("c8", 4),
+};
+
+function bdSeed(): Record<string, Row[]> {
+  const init = seed();
+  const contact = (id: string, name: string, xero: string | null) => ({
+    id,
+    org_id: ORG,
+    name,
+    email: "xero-sync-owns-this@example.test",
+    is_active: true,
+    xero_contact_id: xero,
+  });
+  init.suppliers.push(
+    contact(BD.main, "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty", "xc-bd-1"),
+    contact(BD.second, "B & D Metals", "xc-bd-2"),
+    contact(BD.third, "B&D Metals Group", "xc-bd-3"),
+    contact(BD.rr, "R&R FENCING", "xc-rr"),
+  );
+  const entry = (id: string, name: string, to: string) => ({
+    id,
+    org_id: ORG,
+    name,
+    used_for: "fencing",
+    to_emails: [to],
+    cc_emails: [],
+    active: true,
+    on_account: false,
+    approved_by: "Shaun",
+    approved_on: "2026-10-23",
+  });
+  init.dispatch_approved_supplier_emails.push(
+    entry(BD.approved, "BD Metals", "orders@bd.test"),
+    entry(BD.rrApproved, "RnR Fencing", "orders@rr.test"),
+  );
+  for (const id of [BD.main, BD.second, BD.third]) {
+    init.dispatch_approved_supplier_email_links.push({
+      supplier_id: id,
+      approved_id: BD.approved,
+      org_id: ORG,
+    });
+  }
+  init.dispatch_approved_supplier_email_links.push({
+    supplier_id: BD.rr,
+    approved_id: BD.rrApproved,
+    org_id: ORG,
+  });
+  const bills = (
+    supplierId: string,
+    approvedId: string,
+    n: number,
+    last: string | null,
+  ) => ({
+    org_id: ORG,
+    approved_id: approvedId,
+    supplier_id: supplierId,
+    bills_12m: n,
+    last_bill_date: last,
+    is_pinned: false,
+  });
+  init.dispatch_approved_supplier_contact_bills.push(
+    bills(BD.main, BD.approved, 36, "2026-10-30"),
+    bills(BD.second, BD.approved, 2, "2026-11-01"),
+    bills(BD.third, BD.approved, 0, null),
+    bills(BD.rr, BD.rrApproved, 217, "2026-11-04"),
+  );
+  return init;
+}
+
+Deno.test("search (Tweak 4): b&d, bd and b and d all give one BD Metals row on its busiest Xero contact", async () => {
+  const db = makeDb(bdSeed());
+  for (const q of ["b&d", "bd", "b and d", "BD Metals", "jaiama"]) {
+    const out = await get(db, "dispatch_v2_supplier_search", { q });
+    assertEquals(out.ranking, "bills", q);
+    assertEquals(
+      out.approved.map((a: any) => [a.name, a.supplier_id, a.main_reason, a.other_contacts, a.can_add]),
+      [["BD Metals", BD.main, "most_bills", 2, true]],
+      q,
+    );
+    assertEquals(out.approved[0].xero_name, "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty");
+    assertEquals(out.approved[0].bills_12m, 36);
+    assertEquals(out.approved[0].to, ["orders@bd.test"]);
+    // Show more: the other two contacts, busiest first, each on the same
+    // approved email.
+    assertEquals(
+      out.more_approved.map((m: any) => [m.name, m.supplier_id, m.approved_name, m.can_add]),
+      [
+        ["B & D Metals", BD.second, "BD Metals", true],
+        ["B&D Metals Group", BD.third, "BD Metals", true],
+      ],
+      q,
+    );
+    assertEquals(out.others, [], q);
+  }
+});
+
+Deno.test("search (Tweak 4): rnr, r&r and r and r all find RnR Fencing", async () => {
+  const db = makeDb(bdSeed());
+  for (const q of ["rnr", "r&r", "r and r", "RnR", "R & R fencing"]) {
+    const out = await get(db, "dispatch_v2_supplier_search", { q });
+    assertEquals(
+      out.approved.map((a: any) => [a.name, a.supplier_id, a.xero_name, a.main_reason]),
+      [["RnR Fencing", BD.rr, "R&R FENCING", "only_contact"]],
+      q,
+    );
+    assertEquals(out.more_approved, [], q);
+  }
+});
+
+Deno.test("search (Tweak 4): a pin wins over the bill count; a tie goes to the newest bill", async () => {
+  const init = bdSeed();
+  init.dispatch_approved_supplier_contact_bills.find((r) => r.supplier_id === BD.third)!.is_pinned = true;
+  let out = await get(makeDb(init), "dispatch_v2_supplier_search", { q: "bd" });
+  assertEquals(out.approved[0].supplier_id, BD.third);
+  assertEquals(out.approved[0].main_reason, "pinned");
+  assertEquals(out.more_approved.map((m: any) => m.supplier_id), [BD.main, BD.second]);
+
+  const tie = bdSeed();
+  tie.dispatch_approved_supplier_contact_bills.find((r) => r.supplier_id === BD.second)!.bills_12m = 36;
+  out = await get(makeDb(tie), "dispatch_v2_supplier_search", { q: "bd" });
+  // Both have 36 bills; the second contact's newest bill (1 Nov) is newer.
+  assertEquals(out.approved[0].supplier_id, BD.second);
+});
+
+Deno.test("search (Tweak 4): an approved supplier with no Xero contact shows greyed with Add to Xero first", async () => {
+  const db = makeDb(bdSeed());
+  const out = await get(db, "dispatch_v2_supplier_search", { q: "unique" });
+  assertEquals(out.approved.length, 1);
+  const row = out.approved[0];
+  assertEquals([row.name, row.supplier_id, row.can_add], ["Unique Laser", null, false]);
+  assertEquals(row.note, "Add to Xero first: this supplier has no Xero contact yet");
+});
+
+Deno.test("search (Tweak 4): the bill counts failing to read never stops the search", async () => {
+  const db = makeDb(bdSeed());
+  const saved = SCHEMA.dispatch_approved_supplier_contact_bills;
+  delete SCHEMA.dispatch_approved_supplier_contact_bills;
+  try {
+    const out = await get(db, "dispatch_v2_supplier_search", { q: "b&d" });
+    assertEquals(out.ranking, "unavailable");
+    assertEquals(out.approved.map((a: any) => a.name), ["BD Metals"]);
+    assert(out.approved[0].supplier_id);
+    assertEquals(out.approved[0].bills_12m, null);
+    assertEquals(out.more_approved.length, 2);
+  } finally {
+    SCHEMA.dispatch_approved_supplier_contact_bills = saved;
+  }
+});
+
+Deno.test("boxes (Tweak 4): a box on a linked contact shows the approved name, with the Xero name beside it", async () => {
+  const db = makeDb(bdSeed());
+  const added = await addBox(db, JOB.fence, BD.main);
+  assertEquals(added.supplier.name, "BD Metals");
+  assertEquals(added.supplier.xero_name, "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty");
+  await addBox(db, JOB.fence, SUP.plain);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const byId = new Map(read.suppliers.map((s: any) => [s.supplier_id, s]));
+  assertEquals((byId.get(BD.main) as any).name, "BD Metals");
+  assertEquals((byId.get(BD.main) as any).xero_name, "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty");
+  // Not on the approved list: the Xero name, as before.
+  assertEquals((byId.get(SUP.plain) as any).name, "Plain Hardware");
+  // The box row itself still keeps the Xero contact's name.
+  const box = db.tables.job_material_suppliers.find((b: any) => b.supplier_id === BD.main);
+  assertEquals(box!.supplier_name, "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty");
+});
+
+Deno.test("auto fill (Tweak 4): a scope naming B&D fills a box on BD Metals' main Xero contact", async () => {
+  const db = makeDb(bdSeed());
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("B&D");
+  await seal(db, JOB.fence);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out.supplier.supplier_id, BD.main);
+  // With the bill counts unreadable, the name order picks as before.
+  const db2 = makeDb(bdSeed());
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("B&D");
+  await seal(db2, JOB.fence);
+  const saved = SCHEMA.dispatch_approved_supplier_contact_bills;
+  delete SCHEMA.dispatch_approved_supplier_contact_bills;
+  try {
+    const fallback = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+    assertEquals(fallback.supplier.supplier_id, BD.second);
+  } finally {
+    SCHEMA.dispatch_approved_supplier_contact_bills = saved;
+  }
 });
 
 // ── Lines ───────────────────────────────────────────────────────────────────

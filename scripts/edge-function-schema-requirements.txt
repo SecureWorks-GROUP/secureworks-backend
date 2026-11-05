@@ -1135,3 +1135,12 @@ ops-api|supabase/migrations/20261105171000_dispatch_v2_reply_pdf_rung.sql|constr
 # Dispatch v2 Tweak 2 piece 3: the supplier's own number kept against a job with
 # no order (dispatch_v2_replies_store.ts writes ON CONFLICT job_id,order_id,ref).
 ops-api|supabase/migrations/20261105172000_dispatch_v2_job_supplier_refs.sql|constraint|dispatch_v2_supplier_order_refs_job_order_ref_key
+#
+# Dispatch v2 Tweak 4: the simpler supplier picker. dispatch_v2_supplier_search
+# (dispatch_v2_store.ts) reads the bill count view to pick each approved
+# supplier's main Xero contact (dispatch_v2_supplier_picker.ts).
+ops-api|supabase/migrations/20261105184500_dispatch_v2_supplier_picker.sql|table|dispatch_approved_supplier_contact_bills
+ops-api|supabase/migrations/20261105184500_dispatch_v2_supplier_picker.sql|column|dispatch_approved_supplier_contact_bills.bills_12m
+ops-api|supabase/migrations/20261105184500_dispatch_v2_supplier_picker.sql|column|dispatch_approved_supplier_contact_bills.last_bill_date
+ops-api|supabase/migrations/20261105184500_dispatch_v2_supplier_picker.sql|column|dispatch_approved_supplier_contact_bills.is_pinned
+ops-api|supabase/migrations/20261105184500_dispatch_v2_supplier_picker.sql|column|dispatch_approved_supplier_emails.pinned_supplier_id

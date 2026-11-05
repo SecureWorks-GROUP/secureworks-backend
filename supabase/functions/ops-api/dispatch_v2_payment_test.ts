@@ -15,6 +15,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   dispatchV2AccountsOf,
+  dispatchV2ApprovedNameFor,
   dispatchV2PaymentOf,
   dispatchV2PaymentTerms,
   dispatchV2ReplyStage,
@@ -469,6 +470,20 @@ Deno.test("terms: the account list maps each linked supplier; a retired entry is
     "unknown",
   );
   assertEquals(dispatchV2TermsFor(null, SUP.stratco), "unknown");
+});
+
+Deno.test("approved name (Tweak 4): the active approved entry's name for a linked supplier, else null", () => {
+  const t = accountTables();
+  const accounts = dispatchV2AccountsOf(
+    t.dispatch_approved_supplier_email_links,
+    t.dispatch_approved_supplier_emails.filter((e) => e.org_id === ORG),
+  );
+  assertEquals(dispatchV2ApprovedNameFor(accounts, SUP.stratco), "Stratco WA");
+  assertEquals(dispatchV2ApprovedNameFor(accounts, SUP.lysaght), "Lysaght");
+  assertEquals(dispatchV2ApprovedNameFor(accounts, SUP.retired), null);
+  assertEquals(dispatchV2ApprovedNameFor(accounts, SUP.unlisted), null);
+  assertEquals(dispatchV2ApprovedNameFor(dispatchV2AccountsOf(null, []), SUP.stratco), null);
+  assertEquals(dispatchV2ApprovedNameFor(null, SUP.stratco), null);
 });
 
 Deno.test("terms: the box helper carries the terms and leaves the stage as before", () => {

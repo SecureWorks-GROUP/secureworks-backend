@@ -86,6 +86,13 @@ import {
   scopeEngineSealedLines,
 } from "./scope_engine_materials.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
+// Tweak 4: the supplier picker rules and the name a box shows.
+import {
+  dispatchV2BuildSupplierPicker,
+  dispatchV2MainReason,
+  dispatchV2RankLinkedContacts,
+  dispatchV2SupplierDisplayName,
+} from "./dispatch_v2_supplier_picker.ts";
 import {
   dispatchV2BoxDateMode,
   dispatchV2BoxStage,
@@ -744,7 +751,14 @@ export async function readDispatchV2Materials(
       });
       return {
         supplier_id: id,
-        name: contact?.is_active && contact?.name ? contact.name : box.supplier_name,
+        // Tweak 4: the approved name when the box's Xero contact is linked
+        // to an approved supplier ("BD Metals"), else the Xero name.
+        name: dispatchV2SupplierDisplayName(
+          entry,
+          contact?.is_active && contact?.name ? contact.name : box.supplier_name,
+        ),
+        // The Xero contact the box is on, as Xero names it.
+        xero_name: contact?.name ?? box.supplier_name ?? null,
         active: contact?.is_active === true,
         position: box.position,
         is_main: id === mainId,
@@ -828,10 +842,18 @@ function boxMaterialStage(
 
 // ── Supplier search for Add supplier ────────────────────────────────────────
 
-// The approved list first (each approved supplier with its Xero contacts),
-// then every other active Xero supplier contact. Each row says whether it has
-// an approved order email. `q` filters by name; no q lists everything
-// approved and the first `limit` others.
+// Tweak 4 (contract section "Tweak 4", rules in dispatch_v2_supplier_picker.ts):
+// one row per approved supplier under its approved name, with its main Xero
+// contact behind it; the other Xero contacts of the approved suppliers and
+// every other active Xero supplier come back as well, for Show more. `q`
+// filters by name, ignoring case, spaces, punctuation, "&" and "and". No q
+// lists everything approved and the first `limit` others.
+//
+// The bill counts come from the dispatch_approved_supplier_contact_bills view
+// (migration 20261105184500), worked out by Postgres on every read, so the
+// main contact is always as fresh as the 06:55 Xero sync. If that read
+// fails, the search still answers (ranking "unavailable") and each main
+// contact falls back to the name order.
 export async function searchDispatchV2Suppliers(
   client: any,
   params: { get(name: string): string | null },
@@ -862,80 +884,65 @@ export async function searchDispatchV2Suppliers(
   const activeLinks = (links || []).filter((l: any) =>
     activeIds.has(String(l.approved_id))
   );
-  const linkedIds = activeLinks.map((l: any) => String(l.supplier_id));
-  const contacts = await readContacts(client, linkedIds, ctx);
+  const linked = new Set(activeLinks.map((l: any) => String(l.supplier_id)));
 
-  const needle = q.toLowerCase();
-  const approved: any[] = [];
-  for (const entry of entries || []) {
-    const entryContacts = activeLinks
-      .filter((l: any) => String(l.approved_id) === String(entry.id))
-      .map((l: any) => contacts.get(String(l.supplier_id)))
-      .filter((c: any) => c && c.is_active === true);
-    const nameHit = !needle || String(entry.name).toLowerCase().includes(needle);
-    const shown = nameHit
-      ? entryContacts
-      : entryContacts.filter((c: any) =>
-        String(c.name).toLowerCase().includes(needle)
-      );
-    if (!nameHit && shown.length === 0) continue;
-    const base = {
-      approved_id: entry.id,
-      approved_name: entry.name,
-      used_for: entry.used_for,
-      to: entry.to_emails || [],
-      cc: entry.cc_emails || [],
-      has_approved_email: true,
-    };
-    if (shown.length === 0) {
-      // Approved, but no Xero supplier contact is linked to it yet: it cannot
-      // become a supplier box until one is.
-      approved.push({
-        ...base,
-        supplier_id: null,
-        name: entry.name,
-        can_add: false,
-        note: "No Xero supplier contact is linked to this approved supplier yet",
-      });
-      continue;
-    }
-    for (const contact of shown) {
-      approved.push({
-        ...base,
-        supplier_id: contact.id,
-        name: contact.name,
-        can_add: true,
-        note: null,
-      });
-    }
+  // Every supplier contact of the organisation, in one paged read (about 300
+  // today): the linked ones for the approved rows, the rest for Show more.
+  // Matching is done here, not with ilike, so "b&d" finds "B & D".
+  let all: any[];
+  try {
+    all = await fetchAllRows<any>(
+      () =>
+        client.from("suppliers")
+          .select("id, name, is_active, xero_contact_id")
+          .eq("org_id", ctx.orgId),
+      "supplier contacts search",
+      "id",
+    );
+  } catch (error) {
+    readFailed("supplier contacts search", error);
+  }
+  const contacts = new Map<string, any>(all!.map((r: any) => [String(r.id), r]));
+
+  // The bill counts and pins: a failed read is "unavailable", never a refusal.
+  let bills: Map<string, any> | null = null;
+  const billRead = await client
+    .from("dispatch_approved_supplier_contact_bills")
+    .select("supplier_id, approved_id, bills_12m, last_bill_date, is_pinned")
+    .eq("org_id", ctx.orgId);
+  if (billRead.error) {
+    console.error(
+      "[dispatch_v2] supplier bill counts read failed:",
+      billRead.error?.message ?? billRead.error,
+    );
+  } else {
+    bills = new Map(
+      (billRead.data || []).map((
+        r: any,
+      ) => [String(r.supplier_id), {
+        bills_12m: Number(r.bills_12m) || 0,
+        last_bill_date: r.last_bill_date ?? null,
+        is_pinned: r.is_pinned === true,
+      }]),
+    );
   }
 
-  let others = client.from("suppliers")
-    .select("id, name")
-    .eq("org_id", ctx.orgId)
-    .eq("is_active", true)
-    .order("name", { ascending: true })
-    .limit(limit + linkedIds.length);
-  if (q) others = others.ilike("name", `%${q}%`);
-  const { data: rest, error: restError } = await others;
-  if (restError) readFailed("supplier contacts search", restError);
-  const linked = new Set(linkedIds);
-  const otherRows = (rest || [])
-    .filter((row: any) => !linked.has(String(row.id)))
-    .slice(0, limit)
-    .map((row: any) => ({
-      supplier_id: row.id,
-      name: row.name,
-      approved_id: null,
-      approved_name: null,
-      used_for: null,
-      to: [],
-      cc: [],
-      has_approved_email: false,
-      can_add: true,
-      note: "No approved order email: Dispatch will not send to this supplier",
-    }));
-  return { q, approved, others: otherRows };
+  const others = all!
+    .filter((row: any) => row.is_active === true && !linked.has(String(row.id)))
+    .sort((a: any, b: any) =>
+      String(a.name ?? "").localeCompare(String(b.name ?? "")) ||
+      String(a.id).localeCompare(String(b.id))
+    );
+  const picker = dispatchV2BuildSupplierPicker({
+    entries: entries || [],
+    links: activeLinks,
+    contacts,
+    bills,
+    others,
+    q,
+    limit,
+  });
+  return { q, ranking: bills ? "bills" : "unavailable", ...picker };
 }
 
 // ── Lines ───────────────────────────────────────────────────────────────────
@@ -1367,7 +1374,52 @@ async function resolveScopeSupplier(
         `The scope names ${shown} as the supplier, but no supplier contact is linked to its approved order email. ${onList}`,
     };
   }
-  return { contact: contacts[0], note: null };
+  // Tweak 4: the scope's lines go in a box on the same main contact the Add
+  // supplier search uses (a pin, else the most Xero bills in the last 12
+  // months). With no pin and no bills, the name order above stands.
+  const main = await scopeMainContact(client, entry.id, contacts, ctx);
+  return { contact: main ?? contacts[0], note: null };
+}
+
+// The main Xero contact of one approved supplier, by its pin or its bill
+// count (dispatch_approved_supplier_contact_bills), or null when neither
+// decides it or the counts cannot be read (never a refusal).
+async function scopeMainContact(
+  client: any,
+  approvedId: string,
+  contacts: any[],
+  ctx: DispatchV2Context,
+): Promise<any | null> {
+  const { data, error } = await client
+    .from("dispatch_approved_supplier_contact_bills")
+    .select("supplier_id, bills_12m, last_bill_date, is_pinned")
+    .eq("org_id", ctx.orgId)
+    .eq("approved_id", approvedId);
+  if (error) {
+    console.error(
+      "[dispatch_v2] scope supplier bill counts read failed:",
+      error?.message ?? error,
+    );
+    return null;
+  }
+  const bills = new Map<string, any>(
+    (data || []).map((r: any) => [String(r.supplier_id), r]),
+  );
+  const ranked = dispatchV2RankLinkedContacts(contacts.map((c) => {
+    const b = bills.get(String(c.id));
+    return {
+      supplier_id: String(c.id),
+      name: String(c.name ?? ""),
+      is_active: c.is_active === true,
+      has_xero_contact: true,
+      bills_12m: Number(b?.bills_12m) || 0,
+      last_bill_date: b?.last_bill_date ?? null,
+      is_pinned: b?.is_pinned === true,
+    };
+  }));
+  const reason = dispatchV2MainReason(ranked);
+  if (reason !== "pinned" && reason !== "most_bills") return null;
+  return contacts.find((c) => String(c.id) === ranked[0].supplier_id) ?? null;
 }
 
 function linesWord(n: number): string {
@@ -1816,7 +1868,9 @@ export async function addDispatchV2Supplier(
     ...(unchanged ? { unchanged: true } : {}),
     supplier: {
       supplier_id: supplierId,
-      name: contact.name,
+      // Tweak 4: the approved name when linked, else the Xero name.
+      name: dispatchV2SupplierDisplayName(approved, contact.name),
+      xero_name: contact.name,
       position: box.position,
       approved_email: projectApproved(approved),
       send_blocked: approved ? null : {
@@ -2180,7 +2234,13 @@ async function boxContext(
     box,
     lines,
     approved,
-    supplierName: contact?.name || box.supplier_name,
+    // Tweak 4: the approved name when linked ("BD Metals"), so the order row,
+    // the crew pickup line and the reply cards name the supplier the way
+    // Shaun does. The order email body never names the supplier.
+    supplierName: dispatchV2SupplierDisplayName(
+      approved,
+      contact?.name || box.supplier_name,
+    ),
     isMain,
     orderable: dispatchV2OrderableLines(lines, supplierId),
   };
