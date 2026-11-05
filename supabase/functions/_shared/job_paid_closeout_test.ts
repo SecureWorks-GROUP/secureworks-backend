@@ -85,6 +85,7 @@ const noQuote = {
   quote_total_inc: null,
   variations_inc: 0,
   unknown_reason: "quote_unknown",
+  whole_job: false,
 };
 
 Deno.test("only fencing and patio are close-out jobs, from complete, final payment or invoiced", () => {
@@ -208,7 +209,12 @@ Deno.test("a single-payer job with a paid deposit and paid final is paid", () =>
       inv("SWF-1-FINBAL", "PAID", 2000),
     ],
     parties: [],
-    quote: { quote_total_inc: 4000, variations_inc: 0, unknown_reason: null },
+    quote: {
+      quote_total_inc: 4000,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: true,
+    },
   });
   assertEquals(v.outcome, "paid");
   assertEquals(v.reasons, []);
@@ -217,16 +223,26 @@ Deno.test("a single-payer job with a paid deposit and paid final is paid", () =>
   assertEquals(v.last_paid_on, "2026-10-01");
 });
 
-Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invoiced -> paid less than quoted, the card stays", () => {
+Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invoiced -> not paid, no marker", () => {
   const v = evaluateJobPaid({
     job: job({ job_number: "SWF-261335" }),
     invoices: [inv("DEP50", "PAID", 1018)],
     parties: [party("pa", "A", 100), party("pb", "B", 50)],
-    quote: { quote_total_inc: 6667, variations_inc: 0, unknown_reason: null },
+    quote: {
+      quote_total_inc: 6667,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: true,
+    },
   });
-  // A readable quote decides: no party is checked, and the money is short.
-  assertEquals(v.outcome, "paid_less_than_quoted");
-  assertEquals(v.reasons, ["paid_less_than_quoted"]);
+  // The money is short of the quote, so each party still needs a paid final.
+  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.party_check_applied, true);
+  assertEquals(v.reasons, [
+    "party_without_paid_final:A",
+    "party_without_paid_final:B",
+    "paid_less_than_quoted",
+  ]);
   // Without a quote value each party needs a paid final.
   const noValue = evaluateJobPaid({
     job: job({ job_number: "SWF-261335" }),
@@ -241,7 +257,7 @@ Deno.test("SWF-261335 shape: only the owner's deposit paid, neighbour never invo
   ]);
 });
 
-Deno.test("SWF-261227 shape: neighbour B paid deposit and final, owner A billed nothing live -> short of the quote", () => {
+Deno.test("SWF-261227 shape: neighbour B paid deposit and final, owner A billed nothing live -> not paid", () => {
   const invoices = [
     inv("SWF-261227-A-DEP50", "VOIDED", 840.13),
     inv("SWF-261227-B-FINBAL", "PAID", 840.13),
@@ -253,9 +269,18 @@ Deno.test("SWF-261227 shape: neighbour B paid deposit and final, owner A billed 
     job: job({ job_number: "SWF-261227" }),
     invoices,
     parties,
-    quote: { quote_total_inc: 4340, variations_inc: 0, unknown_reason: null },
+    quote: {
+      quote_total_inc: 4340,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: true,
+    },
   });
-  assertEquals(v.outcome, "paid_less_than_quoted");
+  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.reasons, [
+    "party_without_paid_final:A",
+    "paid_less_than_quoted",
+  ]);
   assertEquals(v.parties.map((p) => [p.label, p.has_paid_final]), [
     ["A", false],
     ["B", true],
@@ -340,7 +365,12 @@ Deno.test("SWF-26818 shape: every final paid but well under the quote -> paid le
       inv("SWF-26818-FIN25", "PAID", 1267.87),
     ],
     parties: [],
-    quote: { quote_total_inc: 10414, variations_inc: 0, unknown_reason: null },
+    quote: {
+      quote_total_inc: 10414,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: true,
+    },
   });
   assertEquals(v.outcome, "paid_less_than_quoted");
   assertEquals(v.reasons, ["paid_less_than_quoted"]);
@@ -358,7 +388,12 @@ Deno.test("shared fence: both owners paid their finals and the quote is covered 
       inv("SWF-2-B-FINBAL", "PAID", 1000),
     ],
     parties: [party("pa", "A", 50), party("pb", "B", 50)],
-    quote: { quote_total_inc: 4000, variations_inc: 0, unknown_reason: null },
+    quote: {
+      quote_total_inc: 4000,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: true,
+    },
   });
   assertEquals(v.outcome, "paid");
 });
@@ -424,6 +459,7 @@ Deno.test("rounding: a dollar short and agreed variations both count", () => {
         quote_total_inc: 4000,
         variations_inc: 330,
         unknown_reason: null,
+        whole_job: true,
       },
     }).outcome,
     "paid",
@@ -436,6 +472,7 @@ Deno.test("rounding: a dollar short and agreed variations both count", () => {
         quote_total_inc: 4000,
         variations_inc: 990,
         unknown_reason: null,
+        whole_job: true,
       },
     }).outcome,
     "paid_less_than_quoted",
@@ -447,6 +484,7 @@ Deno.test("only a dollar of rounding is allowed: a few dollars or a percent shor
     quote_total_inc: total,
     variations_inc: 0,
     unknown_reason: null,
+    whole_job: true,
   });
   const fewDollars = evaluateJobPaid({
     job: job(),
@@ -492,6 +530,7 @@ Deno.test("no sent quote or no recorded quote value: rules 1 and 2 decide alone"
         quote_total_inc: null,
         variations_inc: 0,
         unknown_reason: reason,
+        whole_job: false,
       },
     });
     assertEquals([v.outcome, v.quote_unknown_reason], ["paid", reason]);
@@ -511,6 +550,7 @@ Deno.test("a quote or variations read failure decides nothing", () => {
         quote_total_inc: null,
         variations_inc: null,
         unknown_reason: reason,
+        whole_job: false,
       },
     });
     assertEquals([v.outcome, v.reasons], ["undecided", [reason]]);
@@ -521,6 +561,7 @@ Deno.test("a quote or variations read failure decides nothing", () => {
       quote_total_inc: 9999,
       variations_inc: null,
       unknown_reason: null,
+      whole_job: true,
     },
   });
   assertEquals(noVariations.outcome, "undecided");
@@ -533,18 +574,20 @@ Deno.test("a quote or variations read failure decides nothing", () => {
       quote_total_inc: null,
       variations_inc: null,
       unknown_reason: "quote_unreadable",
+      whole_job: false,
     },
   });
   assertEquals(unpaid.outcome, "not_paid");
 });
 
-// Captain, 5 Nov 2026: when a readable quote value decides rule 3, the money paid against
-// it decides and no party is checked; without one, each party still needs a paid final.
+// Captain, 5 Nov 2026: when the money paid covers a whole-job quote value, it decides and no
+// party is checked; otherwise each party still needs a paid final.
 const sharedFence = [party("roger", "A", 50), party("susan", "B", 50)];
 const quote3910 = {
   quote_total_inc: 3910.5,
   variations_inc: 0,
   unknown_reason: null,
+  whole_job: true,
 };
 
 /** The live SWF-261370 invoices: neither tagged to a party, no share letter, and no Xero
@@ -599,16 +642,40 @@ Deno.test("a 50/50 split one cent short of the quote is paid", () => {
   assertEquals(v.shortfall_inc, 0.01);
 });
 
-Deno.test("paid more than a dollar under the quote is paid less than quoted, whoever paid", () => {
+Deno.test("paid more than a dollar under a whole-job quote: each party still needs a paid final", () => {
   const v = evaluateJobPaid({
     job: job({ deposit_invoice_id: "x-inv-1689" }),
     invoices: swf261370Invoices(1900),
     parties: sharedFence,
     quote: quote3910,
   });
-  assertEquals(v.outcome, "paid_less_than_quoted");
-  assertEquals(v.reasons, ["paid_less_than_quoted"]);
+  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.reasons, [
+    "party_without_paid_final:B",
+    "paid_less_than_quoted",
+  ]);
   assertEquals(v.shortfall_inc, 55.25);
+});
+
+Deno.test("a quote value that is one party's run share keeps rule 2: an uninvoiced neighbour is not paid", () => {
+  const v = evaluateJobPaid({
+    job: job({ deposit_invoice_id: "x-a-dep" }),
+    invoices: [
+      inv("SWF-12-DEP50", "PAID", 1000, { xero_invoice_id: "x-a-dep" }),
+      inv("SWF-12-FINBAL", "PAID", 1000),
+    ],
+    parties: sharedFence,
+    quote: {
+      quote_total_inc: 2000,
+      variations_inc: 0,
+      unknown_reason: null,
+      whole_job: false,
+    },
+  });
+  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.party_check_applied, true);
+  assertEquals(v.reasons, ["party_without_paid_final:B"]);
+  assertEquals(v.shortfall_inc, 0);
 });
 
 Deno.test("a readable quote still needs rule 1: an unpaid or draft invoice is not paid", () => {
@@ -622,7 +689,12 @@ Deno.test("a readable quote still needs rule 1: an unpaid or draft invoice is no
     quote: quote3910,
   });
   assertEquals(v.outcome, "not_paid");
-  assertEquals(v.reasons, ["unpaid_invoice", "paid_less_than_quoted"]);
+  assertEquals(v.reasons, [
+    "unpaid_invoice",
+    "party_without_paid_final:A",
+    "party_without_paid_final:B",
+    "paid_less_than_quoted",
+  ]);
 });
 
 Deno.test("no quote value: a deposit-only job is not paid, each party still needs a paid final", () => {
@@ -637,6 +709,7 @@ Deno.test("no quote value: a deposit-only job is not paid, each party still need
         quote_total_inc: null,
         variations_inc: 0,
         unknown_reason: reason,
+        whole_job: false,
       },
     });
     assertEquals(
@@ -654,6 +727,7 @@ Deno.test("no quote value: a deposit-only job is not paid, each party still need
       quote_total_inc: null,
       variations_inc: null,
       unknown_reason: "quote_unreadable",
+      whole_job: false,
     },
   });
   assertEquals(unread.outcome, "not_paid");

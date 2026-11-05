@@ -9,12 +9,13 @@
 // "Paid" is the captain's strict check:
 //   1. Every linked sales invoice that is not voided or deleted is PAID, and none is a
 //      DRAFT (a draft is money we still mean to bill).
-//   2. Every paying party has a paid final invoice, checked only when there is no
-//      readable sent quote value (captain, 5 Nov 2026). When rule 3 is decided against a
-//      readable quote value, the money paid against the quote decides and no party is
-//      checked: a shared fence where the owner paid the 50% deposit and the neighbour the
-//      50% balance, neither invoice tagged to a party (SWF-261370), is paid, and a 50/50
-//      split a cent out never leaves a card stuck. A paying party is a job_contacts
+//   2. Every paying party has a paid final invoice, except when the money paid covers a
+//      whole-job quote value (captain, 5 Nov 2026): then the money paid against the whole
+//      job decides and no party is checked, so a shared fence where the owner paid the 50%
+//      deposit and the neighbour the 50% balance, neither invoice tagged to a party
+//      (SWF-261370), is paid, and a 50/50 split a cent out never leaves a card stuck. A
+//      quote value that is one party's run share, a quote the money does not cover, an
+//      unreadable quote and no quote all keep rule 2. A paying party is a job_contacts
 //      row not removed (removed_at null and status not 'removed') whose share_percentage
 //      is not an explicit 0 (a null share counts; the owner and each neighbour on a
 //      shared fence); a job with no such row has one payer, its client. A final needs
@@ -28,14 +29,13 @@
 //   3. The money paid covers the sent quote plus agreed variations (customer accepted
 //      or invoiced), short by no more than PAID_QUOTE_ROUNDING_INC (GST rounding). When the
 //      job has no sent quote or no recorded quote value, rules 1 and 2 decide; when the
-//      quote or variations could not be read, nothing is decided (QUOTE_READ_FAILURES),
-//      and rule 2 still applies.
+//      quote or variations could not be read, nothing is decided (QUOTE_READ_FAILURES).
 //
-// Outcomes: "paid" (rule 1 and rule 3 hold, or rules 1 and 2 with no quote value),
-// "paid_less_than_quoted" (1 holds, 3 fails: the card stays where it is and carries a
-// marker), "not_paid" (1 fails, or 2 fails where it applies), "undecided" (1 and 2 hold
-// but the quote could not be read: nothing moves, texts, archives or is recorded, and the
-// next run asks again).
+// Outcomes: "paid" (1 holds and the money covers a whole-job quote value, or 1, 2 and,
+// where there is a quote value, 3 hold), "paid_less_than_quoted" (1 and 2 hold, 3 fails:
+// the card stays where it is and carries a marker), "not_paid" (1 or 2 fails, where 2
+// applies), "undecided" (1 and 2 hold but the quote could not be read: nothing moves,
+// texts, archives or is recorded, and the next run asks again).
 
 import { invoiceKindOf, parseReference } from "../ops-api/debt_ws_rules.ts";
 
@@ -108,6 +108,8 @@ export interface CloseoutQuote {
   variations_inc: number | null;
   /** Why the quote is unknown, when it is. */
   unknown_reason: string | null;
+  /** The value is the whole job's, not one party's run share. */
+  whole_job: boolean;
 }
 
 export type PaidOutcome =
@@ -128,7 +130,7 @@ export interface PaidVerdict {
   /** Every rule that failed, as codes ("draft_invoice", "party_without_paid_final:B"). */
   reasons: string[];
   parties: PartyPaidView[];
-  /** Rule 2 was applied: false when a readable quote value decides, or in the pre-check. */
+  /** Rule 2 was applied: false when the money covers a whole-job quote value, or in the pre-check. */
   party_check_applied: boolean;
   paid_total_inc: number;
   /** Quote plus agreed variations, inc GST; null when unknown. */
@@ -263,8 +265,8 @@ function newestDate(values: (string | null)[]): string | null {
 
 /**
  * The strict paid check. Pure. A null quote is a pre-check (not read yet): rule 1 decides
- * and rule 2 is not applied, since a readable quote value would take its place. Never act
- * on a pre-check verdict of paid.
+ * and rule 2 is not applied, since a covered whole-job quote value would take its place.
+ * Never act on a pre-check verdict of paid.
  */
 export function evaluateJobPaid(input: {
   job: CloseoutJob;
@@ -289,7 +291,7 @@ export function evaluateJobPaid(input: {
     reasons.push("unpaid_invoice");
   }
 
-  // Rule 3 is worked out first: a readable quote value takes the place of rule 2.
+  // Rule 3 is worked out first: a covered whole-job quote value takes the place of rule 2.
   const paidTotal = round2(
     live.reduce((sum, inv) => sum + money(inv.amount_paid), 0),
   );
@@ -307,9 +309,11 @@ export function evaluateJobPaid(input: {
   }
   // A null quote is the pre-check: the quote is not read yet and may take rule 2's place,
   // so rule 2 waits for the real verdict.
-  const partyCheckApplied = !quoteKnown && input.quote !== null;
+  const quoteDecides = quoteKnown && input.quote!.whole_job && !quoteShort;
+  const partyCheckApplied = input.quote !== null && !quoteDecides;
 
-  // Rule 2 (no readable quote value only): every paying party has a paid final.
+  // Rule 2 (unless a covered whole-job quote value decides): every paying party has a
+  // paid final.
   const paying = payingParties(input.parties);
   const owner = ownerParty(paying);
   const partyKeys = paying.length

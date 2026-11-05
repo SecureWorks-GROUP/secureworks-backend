@@ -4809,11 +4809,12 @@ Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
 `complete`), gets one review text (none when staff switched it off for the job,
 `jobs.review_opt_out`), and is archived 24 hours later. "Paid" is
 the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
-invoice PAID and none DRAFT; only when there is no readable quote value, every
-paying party, `job_contacts` with `removed_at` null, `status` not `removed`, and
-a share that is not an explicit 0 (null counts), has a paid final, a final
-needing positive evidence by the Debt tab's `invoiceKindOf` (an unlabelled
-invoice never is); with a readable quote no party is checked; paid covers the
+invoice PAID and none DRAFT; every paying party, `job_contacts` with
+`removed_at` null, `status` not `removed`, and a share that is not an explicit
+0 (null counts), has a paid final, a final needing positive evidence by the
+Debt tab's `invoiceKindOf` (an unlabelled invoice never is), except when the
+money covers a whole-job quote value (the whole-quote total or a quote with no
+run label, never one party's run share), when no party is checked; paid covers the
 `job_quote_values` quote plus customer-accepted or invoiced variations; one
 approved internally but never accepted is not owed). A quote or variations READ
 failure is `undecided`: nothing moves, texts, archives or is recorded that run;
