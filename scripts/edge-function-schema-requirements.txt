@@ -1121,3 +1121,17 @@ ops-api|supabase/migrations/20261105161000_dispatch_v2_order_documents.sql|colum
 ops-api|supabase/migrations/20261105161000_dispatch_v2_order_documents.sql|column|dispatch_v2_order_documents.job_document_id
 ops-api|supabase/migrations/20261105161000_dispatch_v2_order_documents.sql|constraint|dispatch_v2_order_documents_job_file_unique
 ops-api|supabase/migrations/20261105161000_dispatch_v2_order_documents.sql|index|dispatch_v2_order_documents_one_sheet
+# Dispatch v2 Tweak 2 piece 1: an order Shaun sent from Outlook recorded as a
+# sent order (dispatch_v2_outlook_order.ts; dispatch_v2_store.ts selects origin).
+ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|column|dispatch_supplier_order_emails.origin
+ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|column|dispatch_supplier_order_emails.source_business_event_id
+ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|index|dispatch_supplier_order_emails_source_event_idx
+ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|function|dispatch_v2_record_outlook_order
+#
+# Dispatch v2 Tweak 2 piece 2: the job number in a supplier's stored PDF, saved
+# with the rung pdf_job_number (dispatch_v2_replies.ts, dispatch_v2_reply_pdf.ts).
+ops-api|supabase/migrations/20261105171000_dispatch_v2_reply_pdf_rung.sql|constraint|dispatch_v2_supplier_emails_rung_valid
+#
+# Dispatch v2 Tweak 2 piece 3: the supplier's own number kept against a job with
+# no order (dispatch_v2_replies_store.ts writes ON CONFLICT job_id,order_id,ref).
+ops-api|supabase/migrations/20261105172000_dispatch_v2_job_supplier_refs.sql|constraint|dispatch_v2_supplier_order_refs_job_order_ref_key

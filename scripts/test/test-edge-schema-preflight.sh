@@ -1028,7 +1028,16 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261105160000", "dispatch_v2_order_crew_lines"),
                       # Dispatch v2 Tweak 1: the supplier documents memory
                       # (dispatch_v2_order_documents.ts).
-                      ("20261105161000", "dispatch_v2_order_documents")]:
+                      ("20261105161000", "dispatch_v2_order_documents"),
+                      # Dispatch v2 Tweak 2: an order sent from Outlook becomes
+                      # a Dispatch order (dispatch_v2_outlook_order.ts).
+                      ("20261105170000", "dispatch_v2_outlook_orders"),
+                      # Dispatch v2 Tweak 2: the job number in a supplier's
+                      # PDF (dispatch_v2_reply_pdf.ts).
+                      ("20261105171000", "dispatch_v2_reply_pdf_rung"),
+                      # Dispatch v2 Tweak 2: the supplier's own number kept
+                      # against a job (dispatch_v2_replies_store.ts).
+                      ("20261105172000", "dispatch_v2_job_supplier_refs")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

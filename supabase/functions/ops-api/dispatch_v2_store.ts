@@ -183,7 +183,9 @@ const BOX_SELECT =
 const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
-  "id, org_id, job_id, supplier_id, supplier_name, approved_email_id, work_type, is_main_supplier, standing_lines_included, status, team_cc_email, to_emails, cc_emails, subject, body_text, built_body_text, delivery_date, order_lines, photo_ids, test_sent_at, test_sent_to, test_sent_by_email, send_claimed_at, sent_at, sent_by_email, sent_from_mailbox, sent_to_emails, sent_cc_emails, sent_internet_message_id, sent_conversation_id, sent_graph_message_id, last_error, created_at, created_by_email, updated_at, updated_by_email";
+  "id, org_id, job_id, supplier_id, supplier_name, approved_email_id, work_type, is_main_supplier, standing_lines_included, status, team_cc_email, to_emails, cc_emails, subject, body_text, built_body_text, delivery_date, order_lines, photo_ids, test_sent_at, test_sent_to, test_sent_by_email, send_claimed_at, sent_at, sent_by_email, sent_from_mailbox, sent_to_emails, sent_cc_emails, sent_internet_message_id, sent_conversation_id, sent_graph_message_id, last_error, created_at, created_by_email, updated_at, updated_by_email, origin";
+// origin: migration 20261105170000_dispatch_v2_outlook_orders.sql ('outlook'
+// = recorded from an order Shaun sent from Outlook, contract section 3f.1).
 // on_account: migration 20261029120000_dispatch_v2_on_account_suppliers.sql
 // (the payment step, dispatch_v2_payment.ts).
 const APPROVED_SELECT =
@@ -404,6 +406,17 @@ async function readPhotos(client: any, jobId: string): Promise<any[]> {
   return data || [];
 }
 
+/** True when an order Shaun sent from Outlook was recorded on the job. */
+async function hasOutlookOrder(client: any, jobId: string): Promise<boolean> {
+  const { data, error } = await client.from("dispatch_supplier_order_emails")
+    .select("id")
+    .eq("job_id", jobId)
+    .eq("origin", "outlook")
+    .limit(1);
+  if (error) readFailed("outlook order read", error);
+  return Array.isArray(data) && data.length > 0;
+}
+
 async function readJobEmails(client: any, jobId: string): Promise<any[]> {
   const { data, error } = await client.from("dispatch_supplier_order_emails")
     .select(EMAIL_SELECT)
@@ -575,6 +588,9 @@ export function projectDispatchV2Email(row: any, nowMs = Date.now()) {
     supplier_id: row?.supplier_id,
     supplier_name: row?.supplier_name,
     status,
+    // Tweak 2: true for an order Shaun sent from Outlook that the reply scan
+    // recorded. Always sent: never edited, sent again or discarded here.
+    from_outlook: row?.origin === "outlook",
     from: DISPATCH_V2_FROM_MAILBOX,
     to: row?.to_emails || [],
     cc: row?.cc_emails || [],
@@ -679,8 +695,10 @@ export async function readDispatchV2Materials(
     // The screen fills a fencing job from the scope on its own when it opens
     // and this is true: no lines, never filled before, and the job has a
     // frozen scope revision (T20).
+    // Tweak 2 (contract section 3f.1): never once Shaun's own Outlook order
+    // was recorded on the job; he ordered without the list.
     auto_fill: job.work_type === "fencing" && lines.length === 0 && !scopeFill &&
-      seal?.state === "frozen",
+      seal?.state === "frozen" && !emails.some((e) => e?.origin === "outlook"),
     // The job's latest frozen scope revision, or why there is none (null when
     // the list already has lines). The fill uses the accepted revision when
     // the job has one.
@@ -1393,6 +1411,15 @@ export async function suggestDispatchV2Draft(
   }
   if (auto && await readScopeFill(client, job.id)) {
     refuse(409, "already_filled", "This job was filled from the scope before");
+  }
+  // Tweak 2 (contract section 3f.1): the screen's own fill never runs on a
+  // job whose order Shaun sent from Outlook. The Fill press still works.
+  if (auto && await hasOutlookOrder(client, job.id)) {
+    refuse(
+      409,
+      "ordered_from_outlook",
+      "This job was ordered from Outlook, so it is not filled on its own",
+    );
   }
   if (job.work_type !== "fencing" && job.work_type !== "patio") {
     refuse(

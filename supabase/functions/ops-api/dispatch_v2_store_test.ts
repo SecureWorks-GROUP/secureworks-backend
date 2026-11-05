@@ -318,6 +318,9 @@ const SCHEMA: Record<string, string[]> = {
     "created_by_email",
     "updated_at",
     "updated_by_email",
+    // Tweak 2: migration 20261105170000_dispatch_v2_outlook_orders.sql.
+    "origin",
+    "source_business_event_id",
   ],
 };
 
@@ -1497,6 +1500,58 @@ Deno.test("auto fill: fencing only, never over lines, and a box already there is
   await seal(db2, JOB.fence);
   const empty = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
   assertEquals([empty.added, db2.tables.dispatch_v2_scope_fills.length, db2.tables.job_material_suppliers.length], [0, 0, 0]);
+});
+
+// Tweak 2 (contract section 3f.1): an order Shaun sent from Outlook.
+const OUTLOOK_BODY = [
+  "Hi Team, could we please order the following for delivery:",
+  "",
+  "Materials Needed:",
+  "1. 14 x panels",
+].join("\n");
+Deno.test("outlook order: shown as from Outlook; the screen's own fill never runs, the Fill press still does", async () => {
+  const db = makeDb();
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = fenceScope("Stratco");
+  await seal(db, JOB.fence);
+  // Before: an empty fencing list with a frozen scope fills on its own.
+  assertEquals((await get(db, "dispatch_v2_materials", { job_id: JOB.fence })).auto_fill, true);
+  const sentAt = "2026-11-03T09:05:03.000Z";
+  const columns = SCHEMA.dispatch_supplier_order_emails;
+  const email: Row = Object.fromEntries(columns.map((c) => [c, null]));
+  Object.assign(email, {
+    id: "00000000-0000-0000-0000-0000000c0001",
+    org_id: ORG,
+    job_id: JOB.fence,
+    supplier_id: SUP.stratco,
+    supplier_name: "Stratco",
+    status: "sent",
+    origin: "outlook",
+    source_business_event_id: "00000000-0000-0000-0000-0000000c0002",
+    subject: "Material Order Ref SWF-261586",
+    body_text: OUTLOOK_BODY,
+    built_body_text: OUTLOOK_BODY,
+    sent_at: sentAt,
+    created_at: sentAt,
+    updated_at: sentAt,
+    to_emails: ["tradewa@stratcowa.com.au"],
+    cc_emails: [],
+    order_lines: [{ line_id: null, updated_at: null, text: "14 x panels", standing: false }],
+    photo_ids: [],
+    sent_to_emails: ["tradewa@stratcowa.com.au"],
+    sent_cc_emails: [],
+  });
+  // The box the recording made (dispatch_v2_record_outlook_order).
+  await addBox(db, JOB.fence, SUP.stratco);
+  db.tables.dispatch_supplier_order_emails.push(email);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.auto_fill, false);
+  const shown = JSON.stringify(read);
+  assertEquals(shown.includes('"from_outlook":true'), true);
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true }), 409, "ordered_from_outlook");
+  assertEquals(db.tables.job_material_lines.length, 0);
+  // Shaun's own Fill press is his choice and still works.
+  const pressed = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence });
+  assertEquals(pressed.added > 0, true);
 });
 
 // ── T20: the fill reads the job's frozen scope revision ─────────────────────

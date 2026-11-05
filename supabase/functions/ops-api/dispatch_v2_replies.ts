@@ -34,7 +34,10 @@ import {
   isAutoReply,
   type JobHint,
   jobNumbersIn,
+  learnableSupplierRefs,
   matchEmail,
+  type MatchResult,
+  type RefLinkHint,
   normaliseJobNumber,
   perthDay,
   readDeliveryDate,
@@ -57,6 +60,17 @@ import {
   SourceReadError,
 } from "./dispatch_v2_replies_sources.ts";
 import { dispatchV2MentionsPickup } from "./dispatch_v2_emails.ts";
+import {
+  type OutlookOrderStore,
+  outlookTieReason,
+  recordOutlookOrderForReply,
+} from "./dispatch_v2_outlook_order.ts";
+import {
+  PDF_EMAILS_PER_RUN,
+  pdfMatch,
+  pickPdfJob,
+  type ReplyPdfReader,
+} from "./dispatch_v2_reply_pdf.ts";
 import { emailProviderKey } from "../_shared/evidence/outlook_mail.ts";
 
 export const DISPATCH_V2_REPLIES_READ_ACTIONS = [
@@ -82,6 +96,14 @@ export type DispatchV2RepliesContext = {
   via: "screen" | "terminal";
   store: RepliesStore;
   sources: DispatchRepliesSources;
+  // Tweak 2 piece 1 (contract section 3f.1): orders Shaun sent from Outlook.
+  // The scan only; without it a reply matched by job number alone stays as
+  // it is.
+  outlook?: OutlookOrderStore;
+  // Tweak 2 piece 2 (contract section 3f.2): the job number in a supplier's
+  // stored PDF. The scan only; without it an email the words cannot place
+  // stays as it is.
+  pdfs?: ReplyPdfReader;
   now?: () => string;
 };
 
@@ -258,38 +280,50 @@ async function projectOne(ctx: DispatchV2RepliesContext, row: EmailRow) {
 
 // ── Shared steps ──────────────────────────────────────────────────────────
 
-/** Link the email's supplier numbers to an order, skipping any number that
- * is already linked to a different order (one number, one order). */
+/** Remember the email's supplier numbers against the job and order it was
+ * tied to (Tweak 2 piece 3, contract section 3f.3). `target.order_id` null:
+ * the job had no order for it, so the number is kept against the job alone.
+ *
+ * Only numbers worth learning (learnableSupplierRefs: no short numbers,
+ * never our own job number). A number already seen on this job (on any of
+ * its orders, or on the job alone) is left as it is. A number seen on a
+ * different job is linked here too, so the matching knows it is on two jobs
+ * and stops using it. */
 async function linkRefs(
   ctx: DispatchV2RepliesContext,
   email: EmailRow,
-  order: { order_id: string; job_id: string; supplier_name: string | null },
+  target: {
+    order_id: string | null;
+    job_id: string;
+    supplier_name: string | null;
+    job_number?: string | null;
+  },
   via: RefLinkRow["linked_via"],
   operator: Operator | null,
-  known?: Map<string, { order_id: string; supplier_key: string | null }[]>,
+  known?: Map<string, RefLinkHint[]>,
 ): Promise<string[]> {
-  // The table keeps 3 to 24 characters, upper case, no spaces.
-  const refs = (email.supplier_refs ?? []).filter((r) =>
-    /^[A-Z0-9/-]{3,24}$/.test(r)
-  );
+  const refs = learnableSupplierRefs(email.supplier_refs ?? [], [
+    ...(email.job_numbers ?? []),
+    target.job_number,
+  ]);
   if (refs.length === 0) return [];
-  const existing = known ??
-    new Map<string, { order_id: string; supplier_key: string | null }[]>();
+  const existing = known ?? new Map<string, RefLinkHint[]>();
   if (!known) {
     for (const l of await ctx.store.refLinks(ctx.orgId, refs)) {
       existing.set(l.ref, [...(existing.get(l.ref) ?? []), l]);
     }
   }
-  // A number already linked (to this order or another) is left as it is.
-  const fresh = refs.filter((ref) => (existing.get(ref) ?? []).length === 0);
+  const fresh = refs.filter((ref) =>
+    !(existing.get(ref) ?? []).some((l) => l.job_id === target.job_id)
+  );
   if (fresh.length === 0) return [];
   await ctx.store.insertRefLinks(
     ctx.orgId,
     fresh.map((ref) => ({
-      order_id: order.order_id,
-      job_id: order.job_id,
+      order_id: target.order_id,
+      job_id: target.job_id,
       supplier_key: email.supplier_key,
-      supplier_name: order.supplier_name ?? email.supplier_name,
+      supplier_name: target.supplier_name ?? email.supplier_name,
       ref,
       source_email_id: email.id,
       linked_via: via,
@@ -300,7 +334,11 @@ async function linkRefs(
   for (const ref of fresh) {
     existing.set(ref, [
       ...(existing.get(ref) ?? []),
-      { order_id: order.order_id, supplier_key: email.supplier_key },
+      {
+        order_id: target.order_id,
+        job_id: target.job_id,
+        supplier_key: email.supplier_key,
+      },
     ]);
   }
   return fresh;
@@ -441,6 +479,13 @@ type ScanCounts = {
   already_stored: number;
   suggestions: number;
   refs_linked: number;
+  // Tweak 2: orders recorded from Outlook, and replies tied to one.
+  outlook_orders: number;
+  outlook_tied: number;
+  // Tweak 2 piece 2: emails whose stored PDFs were read, and those the job
+  // number in a PDF matched.
+  pdf_read: number;
+  pdf_matched: number;
 };
 
 function zeroCounts(): ScanCounts {
@@ -456,6 +501,10 @@ function zeroCounts(): ScanCounts {
     already_stored: 0,
     suggestions: 0,
     refs_linked: 0,
+    outlook_orders: 0,
+    outlook_tied: 0,
+    pdf_read: 0,
+    pdf_matched: 0,
   };
 }
 
@@ -580,21 +629,24 @@ export async function scanDispatchV2Replies(
         work.flatMap((w) => supplierRefsIn(w.row.subject, w.row.body)),
       ),
     ];
-    const refLinks = new Map<
-      string,
-      { order_id: string; supplier_key: string | null }[]
-    >();
+    const refLinks = new Map<string, RefLinkHint[]>();
     for (const l of await store.refLinks(orgId, refs)) {
       refLinks.set(l.ref, [...(refLinks.get(l.ref) ?? []), l]);
     }
+    // The jobs of the orders, and of numbers seen on a job alone (piece 3).
+    const linkJobIds = [...refLinks.values()].flat().map((l) => l.job_id)
+      .filter((id): id is string => !!id);
     const jobsById = new Map(
-      (await store.jobsByIds(orgId, orders.map((o) => o.job_id)))
-        .map((j) => [j.job_id, j]),
+      (await store.jobsByIds(orgId, [
+        ...orders.map((o) => o.job_id),
+        ...linkJobIds,
+      ])).map((j) => [j.job_id, j]),
     );
     for (const j of numberedJobs) jobsById.set(j.job_id, j);
 
+    let pdfBudget = PDF_EMAILS_PER_RUN;
     for (const { row, sender } of work) {
-      const result = matchEmail(
+      let result: MatchResult = matchEmail(
         {
           email: row,
           sender,
@@ -608,6 +660,62 @@ export async function scanDispatchV2Replies(
         approved,
         now,
       );
+
+      // Tweak 2 piece 2 (contract section 3f.2): not matched by its words,
+      // and its words name none of our jobs. Read the PDFs the capture kept
+      // for it: exactly one of our jobs there matches it to that job (a job
+      // number beats a best guess). None, several, or a file that cannot be
+      // read: it keeps what its words gave it.
+      if (
+        result.state !== "matched" && ctx.pdfs && row.has_attachments &&
+        row.provider_message_id && pdfBudget > 0 &&
+        !jobNumbersIn(row.subject, row.body).some((n) => jobsByNumber.has(n))
+      ) {
+        pdfBudget--;
+        counts.pdf_read++;
+        try {
+          const pdf = await ctx.pdfs.jobNumbersInPdfs(row.provider_message_id);
+          const unknown = pdf.job_numbers.filter((n) => !jobsByNumber.has(n));
+          if (unknown.length > 0) {
+            for (const j of await store.jobsByNumbers(orgId, unknown)) {
+              jobsByNumber.set(normaliseJobNumber(j.job_number), j);
+              jobsById.set(j.job_id, j);
+            }
+          }
+          const pick = pickPdfJob(pdf.job_numbers, jobsByNumber);
+          if (pick.kind === "one") {
+            // The job's orders, when the run's list does not hold them (a
+            // job no email in this run named, its order sent long ago).
+            if (!orders.some((o) => o.job_id === pick.job.job_id)) {
+              const more = await sources.listOrders(orgId, {
+                sentSince: now,
+                jobIds: [pick.job.job_id],
+              });
+              for (const o of more.rows) {
+                if (orderById.has(o.order_id)) continue;
+                orders.push(o);
+                orderById.set(o.order_id, o);
+                orderConversationIds.set(
+                  o.order_id,
+                  o.sent_conversation_id ? [o.sent_conversation_id] : [],
+                );
+              }
+            }
+            result = pdfMatch(
+              pick.job,
+              pick.job_number,
+              orders,
+              sender,
+              approved,
+              pdf.files.length === 1 ? pdf.files[0] : null,
+            );
+            counts.pdf_matched++;
+          }
+        } catch (e) {
+          console.error("[dispatch_v2_replies] pdf job number read failed:", e);
+        }
+      }
+
       const delivery = readDeliveryDate(row.body, row.received_at);
       const placed = result.state !== "unmatched";
       const inserted = await store.insertEmail({
@@ -631,8 +739,8 @@ export async function scanDispatchV2Replies(
         state: result.state,
         rung: result.rung,
         match_reason: result.reason,
-        job_id: placed ? result.job_id : null,
-        order_id: placed ? result.order_id : null,
+        job_id: result.state !== "unmatched" ? result.job_id : null,
+        order_id: result.state !== "unmatched" ? result.order_id : null,
         candidates: result.state === "matched" ? [] : result.candidates,
         rejected_order_ids: [],
         decision: null,
@@ -648,20 +756,84 @@ export async function scanDispatchV2Replies(
       counts.stored++;
       counts[result.state]++;
       if (result.state !== "matched") continue;
-      const order = result.order_id
+      let email = inserted;
+      let order = result.order_id
         ? orderById.get(result.order_id) ?? null
         : null;
-      if (order) {
+
+      // Tweak 2 piece 1 (contract section 3f.1): matched by the job number
+      // only (in its words, or in its PDF: piece 2), with no Dispatch order
+      // for this supplier on the job. If Shaun
+      // sent the order from Outlook, record it as a sent order and tie the
+      // reply to it. Nothing is sent; when the sent email cannot be found or
+      // read, the reply stays matched to the job only.
+      if (
+        !order &&
+        (result.rung === "job_number" || result.rung === "pdf_job_number") &&
+        ctx.outlook &&
+        sender.supplier_key
+      ) {
+        const job = jobsById.get(result.job_id);
+        const supplier = approved.find((a) =>
+          a.supplier_key === sender.supplier_key
+        ) ?? null;
+        const outcome = job
+          ? await recordOutlookOrderForReply(ctx.outlook, {
+            orgId,
+            reply: {
+              id: inserted.id,
+              conversation_id: inserted.conversation_id,
+              received_at: inserted.received_at,
+            },
+            job,
+            supplier,
+          })
+          : null;
+        if (outcome?.order) {
+          const tied = await store.updateEmail(orgId, inserted.id, "matched", {
+            order_id: outcome.order.order_id,
+            match_reason: `${inserted.match_reason ?? "Job number"}. ${
+              outlookTieReason(outcome.order)
+            }`,
+            updated_at: now,
+          });
+          if (outcome.recorded) counts.outlook_orders++;
+          if (tied) {
+            email = tied;
+            order = outcome.order;
+            counts.outlook_tied++;
+            // Later emails in this run match it by thread.
+            if (!orderById.has(order.order_id)) {
+              orders.push(order);
+              orderById.set(order.order_id, order);
+              orderConversationIds.set(
+                order.order_id,
+                order.sent_conversation_id ? [order.sent_conversation_id] : [],
+              );
+            }
+          }
+        }
+      }
+
+      // Tweak 2 piece 3 (contract section 3f.3): the supplier's own numbers
+      // in it are remembered against its order, or against the job alone
+      // when it has no order, so a later email quoting them matches.
+      if (email.job_id) {
         counts.refs_linked += (await linkRefs(
           ctx,
-          inserted,
-          order,
+          email,
+          {
+            order_id: order?.order_id ?? null,
+            job_id: email.job_id,
+            supplier_name: order?.supplier_name ?? null,
+            job_number: jobsById.get(email.job_id)?.job_number ?? null,
+          },
           "certain_match",
           null,
           refLinks,
         )).length;
       }
-      if (await suggestFor(ctx, inserted, order, now)) counts.suggestions++;
+      if (await suggestFor(ctx, email, order, now)) counts.suggestions++;
     }
   }
 
@@ -781,9 +953,14 @@ export async function assignReply(body: any, ctx: DispatchV2RepliesContext) {
   if (!updated) {
     refuse(409, "email_changed", "Someone else changed this email first");
   }
-  const linked = order
-    ? await linkRefs(ctx, updated, order, "assigned", operator)
-    : [];
+  // Tweak 2 piece 3: with no order picked, the numbers are remembered
+  // against the job alone.
+  const linked = await linkRefs(ctx, updated, {
+    order_id: order?.order_id ?? null,
+    job_id: jobId,
+    supplier_name: order?.supplier_name ?? null,
+    job_number: job.job_number,
+  }, "assigned", operator);
   const suggestion = await suggestFor(ctx, updated, order, now);
   await ctx.store.logJobEvent(
     jobId,

@@ -1296,6 +1296,178 @@ our order email and saved to the job the same way
 6. **A supplier PDF that arrives later** is saved by the sweep in 3e.2 as
    usual. The sheet stays on the job beside it (it is never removed).
 
+## 3f. Supplier emails Dispatch did not send (Tweak 2, approved by Shaun 5 Nov 2026)
+
+Shaun often orders straight from Outlook (admin@secureworkswa.com.au), and
+suppliers write about orders in ways the reply scan's rungs (thread, job
+number, supplier number, best guess) did not tie to an order. The example: the
+order for SWF-261586 (Vesna Tapajner) went from Outlook to R&R Fencing on
+3 Nov 2026; R&R's reply on 4 Nov was matched to the job by its number only,
+with no order to tie it to, so the box never moved.
+
+All three pieces run inside the reply scan (`dispatch_v2_replies_scan`, every
+five minutes, only while `dispatch_v2_replies_v1` is on). None of them sends
+anything, moves a job stage or status, writes `suppliers`, Xero or GHL, or
+calls Outlook. No backfill: replies stored before this ships stay as they are.
+
+### 3f.1 An order Shaun sent from Outlook becomes a Dispatch order
+
+Automatic, no tap (Shaun's ruling, 5 Nov 2026). Rules in
+`dispatch_v2_outlook_order.ts`; the one write is the database function
+`dispatch_v2_record_outlook_order` (migration
+`20261105170000_dispatch_v2_outlook_orders.sql`).
+
+1. **When.** A supplier reply is matched by a job number rung with no order
+   (`state 'matched'`, `rung 'job_number'` or `'pdf_job_number'` (3f.2),
+   `order_id` null), the sender is on
+   the approved order email list, and the job has no order row for that
+   supplier (any of the supplier's linked Xero contacts, any status but
+   `discarded`: a draft, a Dispatch send or an earlier Outlook order all
+   leave the job alone).
+2. **Our sent email.** From the capture (`business_events`,
+   `outlook-mail-capture`, outbound, `folder_kind 'sent'`, mailbox admin@):
+   subject `Material Order Ref <job number>` (never `RE:` or `FW:`; words
+   after a dash allowed), a To address that is the supplier's approved order
+   address or shares its company domain (never a shared mail domain such as
+   gmail.com), sent before the reply, body not cut off by the reader, and not
+   the message id of a Dispatch send. The one in the reply's own Outlook
+   conversation wins, else the newest.
+3. **What is read from it.** The opening line says delivery or pickup (and
+   `pickup from <branch>`); the `Date:` line gives the day (`12 November
+   2026`, `Thu 12 Nov`, `12/11/2026`, `12/11`; with no year, the send's year,
+   or the next one when the day would be more than 60 days before the send)
+   or ASAP; the `Address:` line; and the numbered lines under `Materials
+   Needed:`, a line that does not start a number joining the line above it
+   (`Profile: Ridgeside` under the panels). `4 x bags of quickset` and
+   `Fixings, Post Caps and Screws as necessary` are marked standing lines.
+   The body kept is the opening line to `Please confirm when you can, thank
+   you.` (or to the sign-off), without the subject line or the signature.
+   **Not readable** (no `Materials Needed:` heading, no numbered line, or
+   words before the first numbered line): nothing is recorded.
+4. **Which Xero contact.** One supplier can be several Xero contacts (R&R
+   Fencing is three). The one already boxed on the job; else the only one;
+   else the one Dispatch last sent an order to; else the one last boxed on
+   any job. Two boxed on the job, or no way to tell: nothing is recorded.
+5. **What is written, in one transaction.** The supplier box if the job has
+   none for that contact (last in the job's order, never ticked as main);
+   one `dispatch_supplier_order_emails` row with `status 'sent'`, `origin
+   'outlook'`, the real sent time, mailbox, internet message id, conversation
+   id, subject, body (also as `built_body_text`), To and CC, the delivery
+   date, the order lines (`line_id` null: they were never the job's list
+   lines) and `source_business_event_id` (the captured sent email); and one
+   `job_events` row `dispatch_v2_outlook_order_recorded`. No material lines
+   are added to the job's list.
+6. **Once per sent email.** `source_business_event_id` is unique; the
+   function takes a per-job lock and returns the existing order for the same
+   sent email (`already_recorded`), so two replies or two scans never make
+   two orders.
+7. **Never a draft.** A check keeps an Outlook row `sent` with its sent time
+   and source: it can never be edited, sent again or discarded as a draft.
+   The materials panel shows it with `from_outlook: true`.
+8. **The reply is tied to it.** The reply's `order_id` is set and its match
+   reason gains `Tied to the order sent from Outlook on Tue 3 Nov`. From
+   there the normal steps run: the box moves by the payment rules (3c: a
+   reply to the newest sent order moves a Sent box to Awaiting payment or
+   Quote received), a date in the reply becomes a suggestion that waits for
+   Shaun's Accept, and Accept runs Tweak 1 (3e). Later replies in the same
+   thread match the order by thread, in the same run and after.
+9. **No fencing fill.** The screen's own fill from the scope (`auto_fill`)
+   is false on a job with an Outlook order, and `dispatch_v2_suggest_draft`
+   with `auto: true` refuses `409 ordered_from_outlook`. Shaun's Fill press
+   still works.
+10. **Anything else does nothing.** No sent email found, not readable, no
+    approved entry, a failed read or write: the reply stays matched to the
+    job only, exactly as before, and the scan carries on. The scan's answer
+    counts `outlook_orders` (recorded) and `outlook_tied` (replies tied).
+
+### 3f.2 The job number inside the supplier's PDF
+
+Suppliers often put our job number only on the PDF they attach (an order
+confirmation, a quote, an invoice), not in the email words. Rules in
+`dispatch_v2_reply_pdf.ts`, called from the scan; the rung is allowed by
+migration `20261105171000_dispatch_v2_reply_pdf_rung.sql`.
+
+1. **When.** A supplier email the text rungs did not match (`unmatched`, or a
+   `best_guess` waiting for a person), whose words name none of our existing
+   jobs (an email whose words name two of our jobs stays in the tray as
+   before), and that the capture reader marked as having attachments.
+2. **Which files.** Only the copies the capture reader already stored:
+   `context_email_attachments` rows for the email's provider message id with
+   status `stored`, or `skipped_duplicate` with the stored copy found by its
+   SHA-256 (the same files Tweak 1 saves to the job). A PDF by type, or a
+   `.pdf` name with a generic type, and the bytes must start like a PDF.
+   Outlook is never called.
+3. **What is read.** The PDF's text (the shared reader: 5 MB, 25 pages,
+   40,000 characters), and in it our job numbers as a PDF prints them:
+   `SWF`, `SWP` or `SWR`, an optional hyphen or space, 4 to 7 digits, upper
+   case (`SWF-261586`, `SWF261586`, `YourRefSWF-261586`). Never `SWMS`, other
+   prefixes, or a number that is part of a longer code.
+4. **Exactly one job.** The numbers found across the email's PDFs are looked
+   up as existing jobs (numbers that are not our jobs are ignored). Exactly
+   one job: the email is matched to it, `rung 'pdf_job_number'`, reason `Job
+   number SWF-261586 in the attached PDF (CO11041784.pdf)`, shown as `Job
+   number in the PDF`. The order is the sender's latest sent order on that
+   job (the job number rung's choice); with none, 3f.1 looks for the order
+   Shaun sent from Outlook. A job number in the PDF beats a best guess.
+5. **None, or more than one** (a statement listing several jobs), a file that
+   cannot be read, a failed read: the email keeps what its words gave it
+   (tray or best guess) and the scan carries on. Nothing is retried.
+6. **Bounded.** At most 3 PDFs an email and 10 emails a scan run; an email
+   past the run's 10 keeps what its words gave it. The scan's answer counts
+   `pdf_read` and `pdf_matched`.
+7. **Known gap.** A file the reader had already kept from another email is
+   recorded for this one up to about six minutes after capture. If that row
+   is not there yet when the scan reads the email (two minutes after
+   capture), that file is not read for it.
+
+### 3f.3 Learning the supplier's own order number
+
+Suppliers quote their own numbers: Fencing Warehouse `Customer Order
+11041784`, CMI `Sales Order 240272`, Metroll `SO#1056395`, Oxworks `W2SO
+92250`, a supplier's Xero `INV-91320`. Rules in `dispatch_v2_replies_rules.ts`
+(`supplierRefsIn`, `learnableSupplierRefs`, rung 3 of `matchEmail`) and
+`linkRefs` in `dispatch_v2_replies.ts`; the table is
+`dispatch_v2_supplier_order_refs` (migration
+`20261105172000_dispatch_v2_job_supplier_refs.sql` lets a number be kept
+against a job alone).
+
+1. **What is read.** The labelled numbers the reply scan already read
+   (`Sales Order`, `Order`, `SO`, `Invoice`, `INV`, `Quote`, `Docket` ...),
+   plus `Customer Order <number>` (Fencing Warehouse's order number; `Customer
+   No` and `Your ref` are still never read) and `W2SO <number>` (kept as
+   `W2SO92250`).
+2. **When it is learned.** Whenever an email is tied to one of our jobs: the
+   scan's matches (thread, job number, PDF job number, supplier number), a
+   confirmed best guess, and a hand pick. Against the order when the email
+   has one; against the job alone (`order_id` null) when it has none (for
+   example a reply matched by the job number with no order for that
+   supplier, or picked by hand without an order).
+3. **Never learned.** A number with fewer than 5 digits (`7781`, `CSH003`: too
+   likely an account code), one of our own job numbers written without its
+   letters (`261586` on SWF-261586, or any job number the email names), and
+   anything the table cannot hold (3 to 24 characters, upper case, no
+   spaces).
+4. **Once per job.** A number already kept on that job (on any of its orders
+   or on the job alone) is left as it is. A number seen on a different job is
+   kept there too, so the matching can see it is on two jobs.
+5. **Matching by it (rung 3).** A later email from the same supplier quoting
+   a learned number, with no thread or job number match first: all its
+   numbers' links on one job only, and one live order among them: that order
+   (as before). Kept on the job alone: matched to the job, and to the
+   sender's latest order on it now when there is one; reason `Supplier's own
+   number already seen on this job`. Two orders on the one job: the tray with
+   both (as before).
+6. **A number seen on two jobs is not used**, and a short number already in
+   the table (from before this change) is not used either: the email goes on
+   to the best guess, or the tray.
+7. **Not moved later.** A number kept against a job alone stays so when an
+   order is made later; rung 3 then picks the sender's order on that job.
+8. **Who else reads the table.** The bill links (`dispatch_order_bill_links`
+   rules) and Tweak 1 read only links with an order id, so a job-alone
+   number never ties a Xero bill. A number now kept on two orders on two
+   jobs makes a bill quoting it `several_order_numbers` (left for a person),
+   never a guess.
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,

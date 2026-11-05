@@ -77,7 +77,9 @@ export type EmailRow = {
 };
 
 export type RefLinkRow = {
-  order_id: string;
+  // Null: the number was seen on the job when it had no order for that
+  // supplier (Tweak 2 piece 3, migration 20261105172000).
+  order_id: string | null;
   job_id: string;
   supplier_key: string | null;
   supplier_name: string | null;
@@ -395,7 +397,9 @@ export function postgrestRepliesStore(client: any): RepliesStore {
       if (rows.length === 0) return;
       const { error } = await client.from("dispatch_v2_supplier_order_refs")
         .upsert(rows.map((r) => ({ ...r, org_id: orgId })), {
-          onConflict: "order_id,ref",
+          // One link per job, order (or none) and number: the
+          // NULLS NOT DISTINCT key from 20261105172000.
+          onConflict: "job_id,order_id,ref",
           ignoreDuplicates: true,
         });
       if (error) failed("supplier number write", error);
