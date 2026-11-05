@@ -4,6 +4,8 @@
 -- the function writes that the stand-ins lack (production types: 20261023214200 for the order email columns,
 -- suppliers.is_active from the Xero sync).
 ALTER TABLE public.suppliers ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true;
+-- job_material_suppliers.is_main_supplier: 20261023214200 line 179 adds it in production; the box stand-in lacks it.
+ALTER TABLE public.job_material_suppliers ADD COLUMN IF NOT EXISTS is_main_supplier boolean NOT NULL DEFAULT false;
 ALTER TABLE public.dispatch_supplier_order_emails
   ADD COLUMN IF NOT EXISTS approved_email_id uuid,
   ADD COLUMN IF NOT EXISTS work_type text,
