@@ -13,7 +13,7 @@ BEGIN
   END IF;
   BEGIN
     INSERT INTO public.dispatch_v2_supplier_order_refs (org_id, order_id, job_id, ref, linked_via)
-    VALUES (org, NULL, 'f4000000-0000-4000-8000-000000000001', '11041784', 'certain_match');
+    VALUES (org, NULL, 'd1720000-0000-4000-8000-000000000001', '11041784', 'certain_match');
     RAISE EXCEPTION 'rollback left order_id optional';
   EXCEPTION WHEN not_null_violation THEN NULL;
   END;

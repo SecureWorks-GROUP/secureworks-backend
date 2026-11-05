@@ -5,15 +5,15 @@ BEGIN;
 DO $$
 DECLARE
   org uuid := '00000000-0000-0000-0000-000000000001';
-  j_vesna uuid := 'f2000000-0000-4000-8000-000000000001';
-  j_drafted uuid := 'f2000000-0000-4000-8000-000000000002';
-  j_boxed uuid := 'f2000000-0000-4000-8000-000000000003';
-  s_rr uuid := 'f2000000-0000-4000-8000-000000000011';
-  s_rr2 uuid := 'f2000000-0000-4000-8000-000000000012';
-  s_old uuid := 'f2000000-0000-4000-8000-000000000013';
-  ev1 uuid := 'f2000000-0000-4000-8000-000000000021';
-  ev2 uuid := 'f2000000-0000-4000-8000-000000000022';
-  ev3 uuid := 'f2000000-0000-4000-8000-000000000023';
+  j_vesna uuid := 'd1700000-0000-4000-8000-000000000001';
+  j_drafted uuid := 'd1700000-0000-4000-8000-000000000002';
+  j_boxed uuid := 'd1700000-0000-4000-8000-000000000003';
+  s_rr uuid := 'd1700000-0000-4000-8000-000000000011';
+  s_rr2 uuid := 'd1700000-0000-4000-8000-000000000012';
+  s_old uuid := 'd1700000-0000-4000-8000-000000000013';
+  ev1 uuid := 'd1700000-0000-4000-8000-000000000021';
+  ev2 uuid := 'd1700000-0000-4000-8000-000000000022';
+  ev3 uuid := 'd1700000-0000-4000-8000-000000000023';
   p jsonb;
   r jsonb;
   r2 jsonb;
@@ -107,11 +107,11 @@ BEGIN
   -- 6. An inactive supplier or an unknown job records nothing.
   r2 := public.dispatch_v2_record_outlook_order(
     p || jsonb_build_object('job_id', j_boxed, 'supplier_id', s_old, 'related_supplier_ids', jsonb_build_array(s_old),
-                            'source_business_event_id', 'f2000000-0000-4000-8000-000000000024'));
+                            'source_business_event_id', 'd1700000-0000-4000-8000-000000000024'));
   IF r2->>'reason' <> 'supplier_inactive' THEN RAISE EXCEPTION 'contract 6: %', r2; END IF;
   r2 := public.dispatch_v2_record_outlook_order(
-    p || jsonb_build_object('job_id', 'f2000000-0000-4000-8000-000000000099',
-                            'source_business_event_id', 'f2000000-0000-4000-8000-000000000025'));
+    p || jsonb_build_object('job_id', 'd1700000-0000-4000-8000-000000000099',
+                            'source_business_event_id', 'd1700000-0000-4000-8000-000000000025'));
   IF r2->>'reason' <> 'job_not_found' THEN RAISE EXCEPTION 'contract 6b: %', r2; END IF;
   SELECT count(*) INTO n FROM public.dispatch_supplier_order_emails WHERE job_id = j_boxed;
   IF n <> 1 THEN RAISE EXCEPTION 'contract 6: % order rows on the boxed job', n; END IF;
