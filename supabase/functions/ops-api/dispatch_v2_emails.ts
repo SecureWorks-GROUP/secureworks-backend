@@ -35,6 +35,24 @@
 // following for pickup:" and has no Address line. There is no column for it:
 // the email's own opening line is the record (dispatchV2FulfilmentOf), so an
 // email edited by hand to say pickup counts as a pickup too.
+//
+// Pickup has no Contact line either (Tweak 6, Shaun 5 Nov 2026): the client's
+// phone is for a driver on site, and nobody delivers a pickup. So a pickup
+// never needs the client's name or phone, and a missing one never stops it.
+// A delivery keeps its Contact line, and an empty one still stops the send.
+//
+// An order that is just a photo (Tweak 5, Shaun 5 Nov 2026): a box with a
+// photo and no material line can make its email. Under "Materials Needed:"
+// it says one sentence instead of numbered lines:
+//
+//   Materials Needed:
+//
+//   Please see attached for materials needed.
+//
+// The heading stays, because Tweak 2 reads it on orders sent from Outlook.
+// The fencing standing lines are NOT added to a photo-only order. With
+// photos AND real lines, the numbered lines come as usual, then
+// "Please also see attached." under them.
 
 // Every supplier order email goes out from this mailbox, through Outlook.
 export const DISPATCH_V2_FROM_MAILBOX = "admin@secureworkswa.com.au";
@@ -91,6 +109,13 @@ export function dispatchV2StandingLinesApply(
 ): boolean {
   return workType === "fencing" && isMainSupplier === true;
 }
+
+// The photo sentences (Tweak 5). Exact wording approved by Shaun, 5 Nov 2026.
+// A photo-only order says the first one instead of numbered lines; an order
+// with lines and photos says the second one under its numbered lines.
+export const DISPATCH_V2_PHOTO_ONLY_TEXT =
+  "Please see attached for materials needed.";
+export const DISPATCH_V2_ALSO_ATTACHED_TEXT = "Please also see attached.";
 
 // ── The main supplier ───────────────────────────────────────────────────────
 
@@ -307,8 +332,12 @@ export type DispatchV2Built = {
   body_text: string;
   lines: DispatchV2BuiltLine[];
   standing_lines_included: boolean;
+  // True when the order is just photos: no material line, at least one
+  // photo, and "Please see attached for materials needed." in the body.
+  photo_only: boolean;
   // Which of Date / Address / Contact came out empty. A send is refused while
-  // any is still empty in the body.
+  // any is still empty in the body. A pickup has neither an Address nor a
+  // Contact line, so neither can be missing on a pickup.
   missing: ("date" | "address" | "contact")[];
 };
 
@@ -318,24 +347,34 @@ export function dispatchV2BuildEmail(input: {
   isMainSupplier: boolean;
   lines: any[];
   deliveryDate: string | null;
-  // Default delivery. A pickup has no Address line.
+  // Default delivery. A pickup has no Address line and no Contact line.
   fulfilment?: DispatchV2Fulfilment | null;
   // Default "date". ASAP writes "Date: ASAP" and ignores deliveryDate.
   dateMode?: DispatchV2DateMode | null;
+  // How many photos go with the email (default none). With photos and no
+  // line, the order is photo-only; with both, the lines say
+  // "Please also see attached." under them.
+  photoCount?: number | null;
 }): DispatchV2Built {
   const pickup = input.fulfilment === "pickup";
   const dateText = input.dateMode === "asap"
     ? DISPATCH_V2_ASAP_DATE_TEXT
     : dispatchV2DeliveryDateText(input.deliveryDate) ?? "";
   const address = pickup ? "" : dispatchV2AddressText(input.job);
-  const contact = dispatchV2ContactText(input.job);
+  // Tweak 6: a pickup leaves the client's phone and name out altogether.
+  const contact = pickup ? "" : dispatchV2ContactText(input.job);
+  const photos = Math.max(0, Math.floor(Number(input.photoCount) || 0));
+  // A line with no words on it (an empty row) is not a line.
   const built: DispatchV2BuiltLine[] = (input.lines || []).map((line) => ({
     line_id: line?.id ? String(line.id) : null,
     updated_at: line?.updated_at ? String(line.updated_at) : null,
     text: dispatchV2LineText(line),
     standing: false,
   })).filter((line) => line.text);
-  const standing = dispatchV2StandingLinesApply(
+  const photoOnly = built.length === 0 && photos > 0;
+  // The standing lines go only on an order that has real lines: a
+  // photo-only order says only the photo sentence (Shaun, 5 Nov 2026).
+  const standing = !photoOnly && dispatchV2StandingLinesApply(
     input.workType,
     input.isMainSupplier,
   );
@@ -345,6 +384,12 @@ export function dispatchV2BuildEmail(input: {
     }
   }
   const numbered = built.map((line, index) => `${index + 1}. ${line.text}`);
+  // What goes under "Materials Needed:".
+  const materials = photoOnly
+    ? [DISPATCH_V2_PHOTO_ONLY_TEXT]
+    : photos > 0
+    ? [numbered.join("\n\n"), "", DISPATCH_V2_ALSO_ATTACHED_TEXT]
+    : [numbered.join("\n\n")];
   const body = [
     `Hi Team, could we please order the following for ${
       pickup ? "pickup" : "delivery"
@@ -352,11 +397,11 @@ export function dispatchV2BuildEmail(input: {
     "",
     `Date: ${dateText}`.trimEnd(),
     ...(pickup ? [] : [`Address: ${address}`.trimEnd()]),
-    `Contact: ${contact}`.trimEnd(),
+    ...(pickup ? [] : [`Contact: ${contact}`.trimEnd()]),
     "",
     "Materials Needed:",
     "",
-    numbered.join("\n\n"),
+    ...materials,
     "",
     "",
     "Please confirm when you can, thank you.",
@@ -364,14 +409,25 @@ export function dispatchV2BuildEmail(input: {
   const missing: DispatchV2Built["missing"] = [];
   if (!dateText) missing.push("date");
   if (!pickup && !address) missing.push("address");
-  if (!contact) missing.push("contact");
+  if (!pickup && !contact) missing.push("contact");
   return {
     subject: dispatchV2Subject(input.job?.job_number),
     body_text: body,
     lines: built,
     standing_lines_included: standing,
+    photo_only: photoOnly,
     missing,
   };
+}
+
+// Can a held email be sent as far as its contents go? It needs at least one
+// material line or one photo. A photo-only email whose photos were all taken
+// off says "see attached" with nothing attached, so it is refused
+// (nothing_to_order) until a photo is put back or the email is made again.
+export function dispatchV2EmailHasSomethingToOrder(email: any): boolean {
+  const lines = Array.isArray(email?.order_lines) ? email.order_lines : [];
+  const photos = Array.isArray(email?.photo_ids) ? email.photo_ids : [];
+  return lines.length > 0 || photos.length > 0;
 }
 
 // Which of the Date / Address / Contact lines are still empty in a body as
@@ -625,7 +681,9 @@ export async function dispatchV2Sha256Hex(bytes: Uint8Array): Promise<string> {
 // ── Lines on an email ───────────────────────────────────────────────────────
 
 // The lines that go on a supplier box's email: under that supplier, not In
-// stock, not already sent on an email, and not on a v1 purchase order.
+// stock, not already sent on an email, and not on a v1 purchase order. A
+// line with no description (an empty row) is not a line and is left out
+// (Tweak 5), so it can never turn into an empty numbered line on an order.
 export function dispatchV2OrderableLines(
   lines: any[],
   supplierId: string,
@@ -635,9 +693,40 @@ export function dispatchV2OrderableLines(
       String(line?.supplier_id ?? "") === supplierId &&
       line?.status !== "in_stock" &&
       !line?.dispatch_order_email_id &&
-      !line?.purchase_order_id
+      !line?.purchase_order_id &&
+      cleanLine(line?.description) !== ""
     )
     .sort((a, b) => (Number(a?.position) || 0) - (Number(b?.position) || 0));
+}
+
+// The order email statuses that mean an email went, or may have gone. A
+// photo named on one of these has been sent to the supplier.
+const DISPATCH_V2_GONE_STATUSES = ["sent", "sending", "send_unknown"];
+
+// The photos a new email for one box takes (Tweak 5): the box's photos,
+// oldest first, leaving out any photo that already went on a sent email (as
+// lines already sent are left out), at most three. photos: the box's
+// dispatch_material_photos rows (id, created_at). emails: the box's order
+// emails (status, photo_ids).
+export function dispatchV2UnsentPhotoIds(
+  photos: any[],
+  emails: any[],
+): string[] {
+  const gone = new Set<string>();
+  for (const email of Array.isArray(emails) ? emails : []) {
+    if (!DISPATCH_V2_GONE_STATUSES.includes(String(email?.status ?? ""))) {
+      continue;
+    }
+    for (const id of Array.isArray(email?.photo_ids) ? email.photo_ids : []) {
+      gone.add(String(id));
+    }
+  }
+  const at = (photo: any) => String(photo?.created_at ?? "");
+  return [...(Array.isArray(photos) ? photos : [])]
+    .filter((photo) => photo?.id && !gone.has(String(photo.id)))
+    .sort((a, b) => at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)
+    .slice(0, DISPATCH_V2_PHOTOS_PER_EMAIL_MAX)
+    .map((photo) => String(photo.id));
 }
 
 // Do the box's lines still match the lines a held email was built from? Same

@@ -9,6 +9,8 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   cleanDispatchV2EmailList,
+  DISPATCH_V2_ALSO_ATTACHED_TEXT,
+  DISPATCH_V2_PHOTO_ONLY_TEXT,
   DISPATCH_V2_STANDING_LINES,
   dispatchV2AddressText,
   dispatchV2BodyHtml,
@@ -18,6 +20,7 @@ import {
   dispatchV2ContactText,
   dispatchV2DefaultCc,
   dispatchV2DeliveryDateText,
+  dispatchV2EmailHasSomethingToOrder,
   dispatchV2EmptyDetailLines,
   dispatchV2FulfilmentOf,
   dispatchV2FulfilmentParam,
@@ -30,6 +33,7 @@ import {
   dispatchV2SuggestionAllowed,
   dispatchV2TeamCc,
   dispatchV2TestEmail,
+  dispatchV2UnsentPhotoIds,
 } from "./dispatch_v2_emails.ts";
 import {
   outlookDispatchV2Sender,
@@ -170,9 +174,14 @@ Deno.test("pickup: the opening line says pickup and there is no Address line", (
     "Hi Team, could we please order the following for pickup:",
   );
   assert(!built.body_text.includes("Address:"));
+  // Tweak 6: no Contact line on a pickup either.
+  assert(!built.body_text.includes("Contact:"));
+  assert(!built.body_text.includes("0400 000 000"));
+  assert(!built.body_text.includes("Jeremy"));
   assert(built.body_text.includes("Date: 2 November 2026"));
   assertEquals(dispatchV2FulfilmentOf(built.body_text), "pickup");
-  // A pickup with no site address is not missing anything.
+  // A pickup with no site address and no client phone or name is not
+  // missing anything but its date.
   const bare = dispatchV2BuildEmail({
     job: { job_number: "SWF-1" },
     workType: "patio",
@@ -181,7 +190,7 @@ Deno.test("pickup: the opening line says pickup and there is no Address line", (
     deliveryDate: null,
     fulfilment: "pickup",
   });
-  assertEquals(bare.missing, ["date", "contact"]);
+  assertEquals(bare.missing, ["date"]);
   // Delivery (and no choice at all) keeps the Address line.
   for (const fulfilment of ["delivery", null, undefined] as const) {
     const d = dispatchV2BuildEmail({
@@ -333,13 +342,17 @@ Deno.test("main supplier: the tick wins, else the box with the panels, else the 
 });
 
 Deno.test("lines: the email takes the box's lines that are not In stock, not sent and not on a PO, in order", () => {
+  const d = "Posts";
   const lines = [
-    { id: "3", supplier_id: "a", position: 3, status: "to_order" },
-    { id: "1", supplier_id: "a", position: 1, status: "not_reviewed" },
-    { id: "2", supplier_id: "a", position: 2, status: "in_stock" },
-    { id: "4", supplier_id: "a", position: 4, dispatch_order_email_id: "e" },
-    { id: "5", supplier_id: "b", position: 5 },
-    { id: "6", supplier_id: null, position: 6 },
+    { id: "3", supplier_id: "a", position: 3, status: "to_order", description: d },
+    { id: "1", supplier_id: "a", position: 1, status: "not_reviewed", description: d },
+    { id: "2", supplier_id: "a", position: 2, status: "in_stock", description: d },
+    { id: "4", supplier_id: "a", position: 4, dispatch_order_email_id: "e", description: d },
+    { id: "5", supplier_id: "b", position: 5, description: d },
+    { id: "6", supplier_id: null, position: 6, description: d },
+    // An empty row (no words) is not a line (Tweak 5).
+    { id: "7", supplier_id: "a", position: 7, status: "to_order", description: "   " },
+    { id: "8", supplier_id: "a", position: 8, status: "to_order" },
   ];
   assertEquals(dispatchV2OrderableLines(lines, "a").map((l) => l.id), ["1", "3"]);
   const snapshot = [
@@ -510,4 +523,209 @@ Deno.test("sender: posts to send-outlook-email with the key, no job_id; no answe
   assertEquals(lost.kind, "unknown");
   const unset = outlookDispatchV2Sender({ supabaseUrl: "", apiKey: "" });
   assertEquals((await unset({} as any)).kind, "refused");
+});
+
+// ── Tweak 5: an order that is just a photo ──────────────────────────────────
+
+Deno.test("photo only: no line and a photo says Please see attached, keeps the heading and the date format", () => {
+  const built = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "patio",
+    isMainSupplier: true,
+    lines: [],
+    deliveryDate: "2026-11-10",
+    fulfilment: "pickup",
+    photoCount: 2,
+  });
+  assertEquals(built.photo_only, true);
+  assertEquals(built.lines, []);
+  assertEquals(
+    built.body_text,
+    [
+      "Hi Team, could we please order the following for pickup:",
+      "",
+      "Date: 10 November 2026",
+      "",
+      "Materials Needed:",
+      "",
+      "Please see attached for materials needed.",
+      "",
+      "",
+      "Please confirm when you can, thank you.",
+    ].join("\n"),
+  );
+  assertEquals(built.missing, []);
+  assertEquals(DISPATCH_V2_PHOTO_ONLY_TEXT, "Please see attached for materials needed.");
+  // No numbered line, and no long dash.
+  assert(!/^\d+\. /m.test(built.body_text));
+  assert(!/[\u2014\u2013]/.test(built.body_text));
+});
+
+Deno.test("photo only: a delivery keeps its Address and Contact lines", () => {
+  const built = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "patio",
+    isMainSupplier: false,
+    lines: [],
+    deliveryDate: "2026-11-10",
+    fulfilment: "delivery",
+    photoCount: 1,
+  });
+  assertEquals(
+    built.body_text,
+    [
+      "Hi Team, could we please order the following for delivery:",
+      "",
+      "Date: 10 November 2026",
+      "Address: 12 Example Street, Clarkson",
+      "Contact: 0400 000 000 (Jeremy)",
+      "",
+      "Materials Needed:",
+      "",
+      "Please see attached for materials needed.",
+      "",
+      "",
+      "Please confirm when you can, thank you.",
+    ].join("\n"),
+  );
+  assertEquals(built.photo_only, true);
+});
+
+Deno.test("photo only: the fencing standing lines are not added for the main supplier", () => {
+  const built = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "fencing",
+    isMainSupplier: true,
+    lines: [],
+    deliveryDate: "2026-11-10",
+    photoCount: 1,
+  });
+  assertEquals(built.photo_only, true);
+  assertEquals(built.standing_lines_included, false);
+  assertEquals(built.lines, []);
+  for (const line of DISPATCH_V2_STANDING_LINES) {
+    assert(!built.body_text.includes(line), line);
+  }
+  assert(built.body_text.includes(DISPATCH_V2_PHOTO_ONLY_TEXT));
+});
+
+Deno.test("photo only: an empty line row is ignored, so it is still photo only (never '1. ')", () => {
+  const built = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "patio",
+    isMainSupplier: false,
+    lines: [{ id: "x", description: "  ", quantity: null }],
+    deliveryDate: "2026-11-10",
+    photoCount: 1,
+  });
+  assertEquals(built.photo_only, true);
+  assertEquals(built.lines, []);
+  assert(!/^1\. /m.test(built.body_text));
+});
+
+Deno.test("photos and lines: numbered lines as before, then Please also see attached under them", () => {
+  const built = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "fencing",
+    isMainSupplier: true,
+    lines: [PLINTHS],
+    deliveryDate: "2026-11-04",
+    photoCount: 1,
+  });
+  assertEquals(built.photo_only, false);
+  // The standing lines still go on when there are real lines.
+  assertEquals(built.standing_lines_included, true);
+  assert(built.body_text.endsWith(
+    [
+      "Materials Needed:",
+      "",
+      "1. 14 x 150mm standard width plinths",
+      "Colour: Monument",
+      "",
+      "2. 4 x bags of quickset",
+      "",
+      "3. Fixings, Post Caps and Screws as necessary",
+      "",
+      "Please also see attached.",
+      "",
+      "",
+      "Please confirm when you can, thank you.",
+    ].join("\n"),
+  ));
+  assertEquals(DISPATCH_V2_ALSO_ATTACHED_TEXT, "Please also see attached.");
+  // With no photo the email is exactly as before.
+  const plain = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "fencing",
+    isMainSupplier: true,
+    lines: [PLINTHS],
+    deliveryDate: "2026-11-04",
+  });
+  assert(!plain.body_text.includes("attached"));
+  assertEquals(plain.photo_only, false);
+});
+
+Deno.test("Tweak 6: a pickup has no Contact line; a delivery keeps it and still needs it", () => {
+  const noPhone = { ...JOB, client_phone: null, client_name: null };
+  const pickup = dispatchV2BuildEmail({
+    job: noPhone,
+    workType: "fencing",
+    isMainSupplier: false,
+    lines: [PLINTHS],
+    deliveryDate: "2026-11-04",
+    fulfilment: "pickup",
+  });
+  assert(!pickup.body_text.includes("Contact:"));
+  assertEquals(pickup.missing, []);
+  assertEquals(dispatchV2EmptyDetailLines(pickup.body_text), []);
+  const delivery = dispatchV2BuildEmail({
+    job: JOB,
+    workType: "fencing",
+    isMainSupplier: false,
+    lines: [PLINTHS],
+    deliveryDate: "2026-11-04",
+    fulfilment: "delivery",
+  });
+  assert(delivery.body_text.includes("\nContact: 0400 000 000 (Jeremy)\n"));
+  const deliveryNoPhone = dispatchV2BuildEmail({
+    job: noPhone,
+    workType: "fencing",
+    isMainSupplier: false,
+    lines: [PLINTHS],
+    deliveryDate: "2026-11-04",
+    fulfilment: "delivery",
+  });
+  assertEquals(deliveryNoPhone.missing, ["contact"]);
+  assertEquals(dispatchV2EmptyDetailLines(deliveryNoPhone.body_text), ["contact"]);
+});
+
+Deno.test("send check: an email needs a line or a photo", () => {
+  assert(dispatchV2EmailHasSomethingToOrder({ order_lines: [{ line_id: "1" }], photo_ids: [] }));
+  assert(dispatchV2EmailHasSomethingToOrder({ order_lines: [], photo_ids: ["p"] }));
+  assert(!dispatchV2EmailHasSomethingToOrder({ order_lines: [], photo_ids: [] }));
+  assert(!dispatchV2EmailHasSomethingToOrder({}));
+});
+
+Deno.test("photos for a new email: oldest first, at most three, leaving out photos already sent", () => {
+  const photo = (id: string, at: string) => ({ id, created_at: at });
+  const photos = [
+    photo("p3", "2026-11-05T03:00:00Z"),
+    photo("p1", "2026-11-05T01:00:00Z"),
+    photo("p2", "2026-11-05T02:00:00Z"),
+    photo("p4", "2026-11-05T04:00:00Z"),
+    photo("p5", "2026-11-05T05:00:00Z"),
+  ];
+  assertEquals(dispatchV2UnsentPhotoIds(photos, []), ["p1", "p2", "p3"]);
+  const emails = [
+    { status: "sent", photo_ids: ["p1"] },
+    { status: "send_unknown", photo_ids: ["p2"] },
+    // A held or thrown-away email has not sent its photos.
+    { status: "draft", photo_ids: ["p3"] },
+    { status: "discarded", photo_ids: ["p4"] },
+  ];
+  assertEquals(dispatchV2UnsentPhotoIds(photos, emails), ["p3", "p4", "p5"]);
+  assertEquals(
+    dispatchV2UnsentPhotoIds(photos, [{ status: "sent", photo_ids: ["p1", "p2", "p3", "p4", "p5"] }]),
+    [],
+  );
 });

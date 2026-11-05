@@ -1295,6 +1295,50 @@ our order email and saved to the job the same way
    material order`, type `material_order`, crew-visible.
 6. **A supplier PDF that arrives later** is saved by the sweep in 3e.2 as
    usual. The sheet stays on the job beside it (it is never removed).
+7. **Not for a photo-only order** (Tweak 5). An order with no material line
+   and at least one photo gets no sheet: a sheet with no lines says nothing.
+   Its photos are saved instead (3e.4). An order with lines and photos gets
+   the sheet and its photos.
+
+### 3e.4 The order's own photos when the supplier sends no PDF (Tweak 5, Shaun 5 Nov 2026)
+
+An order email can be just a photo (a drawing, a handwritten list), or lines
+with photos (emails contract, "An order that is just a photo"). When the
+order is confirmed and the supplier sent no PDF, the crew needs to see what
+was ordered, so the photos that went on our order email are saved to the job
+(`saveDispatchOrderPhotos` in `dispatch_v2_order_documents.ts`, called from
+`dispatch_v2_order_confirmed_write.ts`).
+
+1. **Same moment as the sheet.** On Accept and on the stage press, only when
+   the matched replies were read and none carries a PDF (3e.3 rule 1). A
+   supplier PDF means no sheet and no photos.
+2. **Which photos.** The order email's `photo_ids`, in the order they were
+   attached, read from `dispatch_material_photos`. The bytes are copied from
+   the private `dispatch-material-photos` bucket and must match the SHA-256
+   recorded at upload. A photo removed since the send, or with no hash on
+   file, is skipped (`photo_not_found`); changed bytes are skipped
+   (`hash_mismatch`). Nothing is half saved: the claim is given back.
+3. **Named** `<Supplier> order photo 1`, `<Supplier> order photo 2`, and so
+   on (`Stratco order photo 1.jpg`), saved as `job_documents` type
+   `material_order`, `visible_to_trades true`, at
+   `<job_id>/dispatch-orders/<hash>-<name>.<jpg|png|webp>` in the public
+   `job-documents` bucket, with the photo's own content type. The ops
+   dashboard lists it under Material Documents (its View link opens the
+   picture) and the trade app shows it, as for 3e.2.
+4. **Once per photo.** Through the same claim as 3e.2 (unique on `job_id,
+   content_sha256`), with `source 'order_photo'` and kind `order_photo`.
+   Pressing again saves nothing twice. One
+   `dispatch_v2_order_document_saved` job_events row per photo (audit).
+5. **The crew pickup line** (3e.1) is written for a photo-only order exactly
+   as for any order.
+6. **Photo-only order:** photos, no sheet. **Lines and photos:** the sheet
+   (3e.3) and the photos. **No photo:** the sheet only, as before.
+
+Migration: `20261105190000_dispatch_v2_order_photo_documents.sql` adds
+`order_photo` to the `source` and `kind` checks of
+`dispatch_v2_order_documents` (same constraint names; rollback in
+`supabase/rollbacks/`). Until it runs, a photo's claim is refused by the old
+check: logged, nothing saved, the order and crew line unaffected.
 
 ## 3f. Supplier emails Dispatch did not send (Tweak 2, approved by Shaun 5 Nov 2026)
 

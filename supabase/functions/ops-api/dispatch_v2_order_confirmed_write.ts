@@ -25,7 +25,9 @@
 //     each (dispatch_v2_order_documents.ts, contract section 3e.2); when
 //     none of those replies carries a PDF, our own one-page Material order
 //     sheet instead, once per order (dispatch_v2_order_sheet_pdf.ts,
-//     contract section 3e.3).
+//     contract section 3e.3), and the photos that went on our order email,
+//     once each (Tweak 5, contract section 3e.4). A photo-only order gets
+//     its photos and no sheet: a sheet with no lines says nothing.
 // Never a job, job status, stage, supplier, Xero, GHL, SMS or email.
 //
 // It never throws and never undoes the press that called it: a failure is
@@ -44,7 +46,9 @@ import {
   dispatchOrderFulfilmentOf,
 } from "./dispatch_v2_order_confirmed.ts";
 import {
+  dispatchOrderIsPhotoOnly,
   type DispatchOrderDocumentsResult,
+  saveDispatchOrderPhotos,
   saveDispatchSupplierDocuments,
 } from "./dispatch_v2_order_documents.ts";
 import { saveDispatchOrderSheet } from "./dispatch_v2_order_sheet_pdf.ts";
@@ -108,9 +112,10 @@ export type DispatchOrderConfirmedResult = {
 // The order email columns the line needs.
 export const DISPATCH_CONFIRMED_ORDER_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, status, sent_at, delivery_date, body_text";
-// The same, plus the material lines the order sheet prints.
+// The same, plus the material lines the order sheet prints and the photos
+// that went on the email (Tweak 5).
 const DISPATCH_ORDER_SHEET_SELECT =
-  `${DISPATCH_CONFIRMED_ORDER_SELECT}, order_lines`;
+  `${DISPATCH_CONFIRMED_ORDER_SELECT}, order_lines, photo_ids`;
 const ORDER_STATUSES_SENT = ["sent", "send_unknown"];
 const BOX_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, delivery_date, delivery_date_set_at";
@@ -388,35 +393,49 @@ export async function runDispatchV2OrderConfirmed(
         now,
       });
       // No PDF on any matched reply (and the replies WERE read, so we know
-      // there is none): our own Material order sheet, once per order.
+      // there is none): our own Material order sheet, once per order, and
+      // the photos that went on our order email, once each. A photo-only
+      // order gets only its photos (Tweak 5): a sheet with no lines is
+      // useless to the crew.
       if (documents.read === "ok" && documents.found === 0) {
-        const box = await loadBox(client, input.orgId, order);
-        const sheet = await saveDispatchOrderSheet(client, {
+        if (!dispatchOrderIsPhotoOnly(order)) {
+          const box = await loadBox(client, input.orgId, order);
+          const sheet = await saveDispatchOrderSheet(client, {
+            orgId: input.orgId,
+            order,
+            fulfilment: dispatchOrderFulfilmentOf(order.body_text),
+            branch: dispatchOrderBranchOf(order.body_text),
+            when: dispatchCrewLineWhen({ box, order }),
+            supplierRef: dispatchCrewLineRef(
+              await loadRefs(
+                client,
+                input.orgId,
+                String(order.id),
+                input.acceptedEmailId,
+              ),
+            ),
+            trigger: input.trigger,
+            operatorUserId: input.operator.userId,
+            now,
+          });
+          if (sheet?.saved) {
+            documents.saved.push({
+              job_document_id: sheet.job_document_id,
+              name: sheet.name,
+            });
+          } else if (sheet) {
+            documents.skipped.push({ sha256: sheet.sha256, reason: sheet.reason });
+          }
+        }
+        const photos = await saveDispatchOrderPhotos(client, {
           orgId: input.orgId,
           order,
-          fulfilment: dispatchOrderFulfilmentOf(order.body_text),
-          branch: dispatchOrderBranchOf(order.body_text),
-          when: dispatchCrewLineWhen({ box, order }),
-          supplierRef: dispatchCrewLineRef(
-            await loadRefs(
-              client,
-              input.orgId,
-              String(order.id),
-              input.acceptedEmailId,
-            ),
-          ),
           trigger: input.trigger,
           operatorUserId: input.operator.userId,
           now,
         });
-        if (sheet?.saved) {
-          documents.saved.push({
-            job_document_id: sheet.job_document_id,
-            name: sheet.name,
-          });
-        } else if (sheet) {
-          documents.skipped.push({ sha256: sheet.sha256, reason: sheet.reason });
-        }
+        documents.saved.push(...photos.saved);
+        documents.skipped.push(...photos.skipped);
       }
     }
   } catch (e) {

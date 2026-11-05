@@ -132,7 +132,7 @@ Fields that need explaining:
 
 - `test` and `sent` are null until they happen. A test send never fills `sent`.
 - `edited` is true once the body differs from what the template built.
-- `empty_detail_lines` lists the Date, Address and Contact lines left blank. While any is blank, the send is refused.
+- `empty_detail_lines` lists the Date, Address and Contact lines left blank. While any is blank, the send is refused. A pickup has neither an Address nor a Contact line (Tweak 6), so only its Date can be blank.
 - `line_count` counts the standing lines too.
 - `fulfilment` is `pickup` when the body's first non-empty line mentions pickup, pick up, pick-up, collect or collection, else `delivery`. It is read from the body every time, so a hand edit to the opening line counts (see "Delivery or pickup" below).
 - If a send was claimed more than 2 minutes ago with no answer, the email reads as `send_unknown`.
@@ -384,11 +384,13 @@ Makes the held email for one box:
 
 | Part | What goes in |
 |---|---|
-| Lines | The box's lines, except In stock lines, lines already sent, and lines on a v1 purchase order. |
+| Lines | The box's lines, except In stock lines, lines already sent, lines on a v1 purchase order, and empty rows (a line with no words is not a line). |
 | Body | The wiki template, below. |
 | To | The approved entry's To. |
 | CC | The approved entry's CC plus the team mailbox, without repeats. |
-| Photos | The box's photos, three at most. |
+| Photos | The box's photos that have not already gone out, oldest first, three at most (`dispatchV2UnsentPhotoIds`). A photo named on a sent, sending or send_unknown email is left off, so a new email never re-sends a photo the supplier already has. The photos can still be changed on the held email. |
+
+A box needs a line or a photo to make an email (Tweak 5, Shaun 5 Nov 2026). A box with photos and no line makes a **photo-only** email: see "An order that is just a photo" below.
 
 The team mailbox depends on the job type:
 
@@ -405,11 +407,13 @@ The team mailbox depends on the job type:
   "success": true,
   "email": Email,
   "missing": ["date"],
+  "photo_only": false,
   "team_cc_open_question": null
 }
 ```
 
 - `missing` lists the Date, Address and Contact lines that came out blank.
+- `photo_only` is true when the email has no material line and at least one photo (on a new email and on a rebuild).
 - `team_cc_open_question` is set for decking and other job types.
 - If the box already has an open email, it comes back unchanged: `{ "success": true, "unchanged": true, "email": Email }`.
 - `rebuild: true` on a held email rebuilds it from the lines and loses any edits. The answer then carries `rebuilt: true`.
@@ -421,6 +425,8 @@ Refusals:
 |---|---|
 | 409 | `no_approved_email`, `no_lines_to_order`, `supplier_not_on_job`, `email_changed` (on a rebuild) |
 | 400 | `invalid_request` (a bad date, or a `fulfilment` other than `delivery` or `pickup`) |
+
+`no_lines_to_order` now means the box has neither a line to order nor a photo that has not gone out. Its message: "This supplier box has nothing to order. Add a line or a photo (In stock lines, and lines and photos already sent, are left out)".
 
 **The body** follows `secureworks-wiki` `harness/ops/agents/soybean-legacy-import/client-message-templates.md`, material order email, exactly:
 
@@ -455,7 +461,40 @@ Rules for the body:
 - Long dashes become commas.
 - A line reads `<qty>[ <unit>] x <description>`, then its detail lines, `Profile:` and `Colour:`.
 - A blank Date, Address or Contact line stays as `Date:` so it is easy to see.
-- For a pickup the opening line reads `for pickup:` and there is no Address line at all, so the address is never `missing` (the Date line is then the pickup date).
+- For a pickup the opening line reads `for pickup:` and there is no Address line and no Contact line at all, so neither is ever `missing` (the Date line is then the pickup date). A pickup with no client phone or name can be made and sent. See "No client phone number on a pickup" below.
+- With photos as well as lines, the numbered lines are followed by a blank line and `Please also see attached.`
+- With photos and no line, the numbered lines are replaced by `Please see attached for materials needed.` (see below).
+
+#### An order that is just a photo (Tweak 5, Shaun 5 Nov 2026)
+
+Sometimes the order is a photo: a drawing, a handwritten list, a picture of the part. A box with at least one photo (not yet sent) and no line can make and send its email. It uses the same template. The `Materials Needed:` heading is kept (Tweak 2's Outlook reader looks for it) and the date format is unchanged:
+
+```
+Hi Team, could we please order the following for pickup:
+
+Date: 10 November 2026
+
+Materials Needed:
+
+Please see attached for materials needed.
+
+
+Please confirm when you can, thank you.
+```
+
+A photo-only delivery keeps its Address and Contact lines, like any delivery.
+
+- The fencing standing lines (`4 x bags of quickset`, `Fixings, Post Caps and Screws as necessary`) are **not** added to a photo-only email, even for the main supplier: `standing_lines_included` is false and `line_count` is 0.
+- An empty, untyped line row is ignored, so it never turns a photo-only email into a `1. ` with nothing after it.
+- With lines and photos, the email is the usual numbered lines (standing lines included where they apply), then `Please also see attached.`
+- A photo-only email whose photos are all taken off in the editor cannot be sent (send check 5, `nothing_to_order`). Put a photo back on it, or discard it.
+- Once the photo-only email is sent, its photos count as sent, so the box has nothing left to order until a line or a new photo is added. A new photo makes a new order with only the new photo on it.
+- When the supplier confirms it and sends no PDF, the photos are saved to the job for the crew, in place of our order sheet (board contract section 3e.4).
+- Tweak 2's Outlook reader is unchanged: an order typed by hand in Outlook still needs numbered lines to be read.
+
+#### No client phone number on a pickup (Tweak 6, Shaun 5 Nov 2026)
+
+On a pickup the client is not there to take a delivery, so their phone number is no use to the supplier, and a missing number used to stop the send. Every pickup email now has no `Contact:` line, and a missing client phone or name never blocks a pickup. Delivery emails are unchanged: the Contact line stays, and a blank one still stops the send.
 
 #### Delivery or pickup (Shaun, 29 Oct 2026)
 
@@ -472,7 +511,7 @@ Where it shows:
 
 ### dispatch_v2_save_email (POST)
 
-Body: `{ "email_id", "expected_updated_at", "to"?, "cc"?, "subject"?, "body_text"?, "photo_ids"? }`. Saves edits to a held email.
+Body: `{ "email_id", "expected_updated_at", "to"?, "cc"?, "subject"?, "body_text"?, "photo_ids"? }`. Saves edits to a held email. `photo_ids` may be emptied on a photo-only email; the send then refuses it (`nothing_to_order`).
 
 | Field | Limit |
 |---|---|
@@ -512,9 +551,10 @@ Checks, in order. Each refusal happens before anything is sent:
 2. The email is held. An unknown send needs `confirm_resend: true` (409 `send_unknown`). Anything else gives 409 `email_not_sendable`.
 3. The supplier still has an active approved entry (409 `no_approved_email`).
 4. The box's orderable lines are exactly the ones the email was made from (409 `order_lines_changed`: make the email again).
-5. The Date, Address and Contact lines are filled in (409 `email_details_missing`, with `missing`).
-6. The photos are on file and unchanged (409 `photo_not_found` or `photo_changed`).
-7. There is an operator email (400 `operator_email_required`).
+5. The email has a line or a photo (409 `nothing_to_order`: "This email has no lines and no photo. Put a photo back on it, or discard it."). Tweak 5.
+6. The Date, Address and Contact lines are filled in (409 `email_details_missing`, with `missing`). A pickup has no Address or Contact line, so only its Date is checked (Tweak 6).
+7. The photos are on file and unchanged (409 `photo_not_found` or `photo_changed`).
+8. There is an operator email (400 `operator_email_required`).
 
 **Test mode (`test: true`).** It sends the same email to `admin@secureworkswa.com.au` only, with no CC:
 
