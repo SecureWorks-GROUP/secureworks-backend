@@ -183,6 +183,43 @@ async function loadBox(client: any, orgId: string, order: any) {
   return data ?? null;
 }
 
+// Tweak 4: the approved name of the order's supplier ("RnR Fencing") when its
+// Xero contact is linked to an active approved supplier, so an order made
+// before the rename still gets the name Shaun uses. Null when it is not
+// linked, or when a read fails (the line then uses the name on the order).
+async function loadApprovedName(
+  client: any,
+  orgId: string,
+  supplierId: unknown,
+): Promise<string | null> {
+  if (typeof supplierId !== "string" || !supplierId) return null;
+  try {
+    const link = await client.from("dispatch_approved_supplier_email_links")
+      .select("approved_id")
+      .eq("supplier_id", supplierId)
+      .eq("org_id", orgId)
+      .maybeSingle();
+    if (link.error) {
+      log("approved link read failed", link.error);
+      return null;
+    }
+    if (!link.data?.approved_id) return null;
+    const entry = await client.from("dispatch_approved_supplier_emails")
+      .select("name, active")
+      .eq("id", link.data.approved_id)
+      .eq("org_id", orgId)
+      .maybeSingle();
+    if (entry.error) {
+      log("approved name read failed", entry.error);
+      return null;
+    }
+    return entry.data?.active === true ? text(entry.data.name) : null;
+  } catch (error) {
+    log("approved name read failed", error);
+    return null;
+  }
+}
+
 // The supplier references, in the order the line prefers them: the accepted
 // reply's own, then those saved on the order by the reply matcher, then
 // those on the order's other matched replies (oldest first). A failed read
@@ -271,8 +308,9 @@ export async function writeDispatchCrewLine(
       };
     }
 
-    const supplier = text(order.supplier_name) || text(box?.supplier_name) ||
-      "Supplier";
+    const supplier =
+      (await loadApprovedName(client, input.orgId, order.supplier_id)) ||
+      text(order.supplier_name) || text(box?.supplier_name) || "Supplier";
     const fulfilment = dispatchOrderFulfilmentOf(order.body_text);
     const branch = kind === "confirmed"
       ? dispatchOrderBranchOf(order.body_text)
@@ -377,8 +415,16 @@ export async function runDispatchV2OrderConfirmed(
       input,
       DISPATCH_ORDER_SHEET_SELECT,
     );
-    const order = found.order;
-    if (order) {
+    const read = found.order;
+    if (read) {
+      // Tweak 4: the documents are named with the approved name too
+      // ("RnR Fencing invoice"), when the supplier is linked.
+      const approvedName = await loadApprovedName(
+        client,
+        input.orgId,
+        read.supplier_id,
+      );
+      const order = approvedName ? { ...read, supplier_name: approvedName } : read;
       const now = deps.now ? deps.now() : new Date().toISOString();
       documents = await saveDispatchSupplierDocuments(client, {
         orgId: input.orgId,

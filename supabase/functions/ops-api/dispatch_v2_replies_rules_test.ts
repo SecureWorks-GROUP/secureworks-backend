@@ -157,6 +157,17 @@ Deno.test("sender: a shared mail domain never names a supplier by domain", () =>
   );
 });
 
+Deno.test("supplier key (Tweak 4): the renamed approved entries keep their stored keys", () => {
+  // Stored reply rows carry "rrfencing" and "bdmetals"; the 5 Nov 2026 renames
+  // must not orphan them.
+  assertEquals(supplierKeyOf("RnR Fencing"), supplierKeyOf("R&R Fencing"));
+  assertEquals(supplierKeyOf("RnR Fencing"), "rrfencing");
+  assertEquals(supplierKeyOf("BD Metals"), supplierKeyOf("B&D Metals Group"));
+  // Ordinary words with an n are untouched.
+  assertEquals(supplierKeyOf("Bondor"), "bondor");
+  assertEquals(supplierKeyOf("Fence Makers"), supplierKeyOf("Fence Makers"));
+});
+
 Deno.test("sender: a Xero contact on the approved list takes that supplier's key", () => {
   const s = identifySender("accounts@fencingwarehousewa.au", [], CONTACTS);
   assertEquals(s.supplier_key, supplierKeyOf("Fencing Warehouse"));

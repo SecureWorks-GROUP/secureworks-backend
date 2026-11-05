@@ -472,6 +472,7 @@ jobs:
             supabase/functions/ops-api/dispatch_orders_store_test.ts \
             supabase/functions/ops-api/dispatch_v2_emails_test.ts \
             supabase/functions/ops-api/dispatch_v2_store_test.ts \
+            supabase/functions/ops-api/dispatch_v2_supplier_picker_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
             supabase/functions/receive-po-email/po_email_tag_test.ts \
             supabase/functions/ops-api/dispatch_deliveries_test.ts \

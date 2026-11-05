@@ -188,20 +188,34 @@ Params:
 
 | Param | Meaning |
 |---|---|
-| `q` | Optional name filter. |
+| `q` | Optional name filter. Matching ignores case, spaces, punctuation, "&" and "and" (see "Tweak 4" below). |
 | `limit` | Optional, 1 to 100. Default 25. Applies to `others` only. |
 
-The approved list comes first, then every other active Xero supplier contact.
+Since Tweak 4 (5 Nov 2026) the answer has three lists: `approved` (one row per approved supplier, under its approved name, on its main Xero contact), then, for Show more, `more_approved` (the other Xero contacts of those suppliers) and `others` (every other active Xero supplier contact). `ranking` says whether the bill counts were read (`bills`) or not (`unavailable`: the main contact then falls back to the name order, and the search still answers).
 
 ```json
 {
-  "q": "strat",
+  "q": "b&d",
+  "ranking": "bills",
   "approved": [
     {
-      "approved_id": "uuid", "approved_name": "Stratco", "used_for": "fencing+patio",
-      "to": ["tradewa@stratcowa.com.au"], "cc": ["tony.bacich@stratcowa.com.au"],
+      "approved_id": "uuid", "approved_name": "BD Metals", "used_for": "fencing",
+      "to": ["orders@example"], "cc": [], "on_account": false,
       "has_approved_email": true,
-      "supplier_id": "uuid", "name": "Stratco (WA) Pty Ltd", "can_add": true, "note": null
+      "name": "BD Metals",
+      "supplier_id": "uuid", "xero_name": "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty",
+      "main_reason": "most_bills", "bills_12m": 36, "last_bill_date": "2026-10-30",
+      "other_contacts": 2, "can_add": true, "note": null
+    }
+  ],
+  "more_approved": [
+    {
+      "approved_id": "uuid", "approved_name": "BD Metals", "used_for": "fencing",
+      "to": ["orders@example"], "cc": [], "on_account": false,
+      "has_approved_email": true,
+      "name": "Jaiama Investments T/a B&D Metals", "supplier_id": "uuid",
+      "xero_name": "Jaiama Investments T/a B&D Metals",
+      "bills_12m": 0, "last_bill_date": null, "can_add": true, "note": null
     }
   ],
   "others": [
@@ -215,9 +229,10 @@ The approved list comes first, then every other active Xero supplier contact.
 }
 ```
 
-- An approved entry that has more than one Xero contact appears once per contact.
-- An approved entry with no linked Xero contact appears with `supplier_id: null` and `can_add: false`. Seven entries are like this until Shaun names a contact: Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication and Unique Laser.
+- `main_reason` is `pinned`, `most_bills`, `only_contact` or `no_bills` (null when there is no contact).
+- An approved entry with no linked Xero contact appears once with `supplier_id: null`, `can_add: false` and the note "Add to Xero first: this supplier has no Xero contact yet". Seven entries are like this (5 Nov 2026): AB Steel Fabrication, Fielders, Maxicoat, Metric Fencing, QSM Fabrication, Solarspan and Unique Laser.
 - A supplier linked only to a retired (inactive) entry appears in `others`.
+- `approved` and `others` keep their old shapes, so a screen from before Tweak 4 still works (it shows the approved row and the others, and never the other contacts).
 
 ### dispatch_v2_photo_url (GET)
 
@@ -684,10 +699,42 @@ Two v1 interactions to know about:
 - v1's `dispatch_materials` read lists v2 draft-list lines, with a null `supplier_id`.
 - v1's pipeline `dispatch=1` counts draft-list lines among a job's materials lines.
 
+## Tweak 4: a simpler supplier picker (Shaun said Go on 5 Nov 2026)
+
+Shaun: "when I search B&D Metals I see 3 of them. Show me the one we use most, and put the other ones under Show more."
+
+### Tweak 4.1 The rules in business words
+
+1. **One row per approved supplier.** The Add supplier search shows each of the 26 approved suppliers once, under its approved name.
+2. **The main Xero contact.** Behind each row sits the linked Xero contact with the most Xero bills (not deleted, not voided) dated in the last 12 months (Perth date). A tie goes to the contact with the newest bill. Picking the row makes the box on that contact.
+3. **A pin.** A person can pin a contact instead (`pinned_supplier_id`, with `pinned_by` and `pinned_at`). A pin wins while the contact is still linked and active; if the contact is deleted the pin clears. The migration pins CMI to "CMI (Combined Metal Industries / CMI WA)": CMI moved Xero contact in October, so its newest bills land there, though the Trustee contact has more over the year. There is no screen to set a pin yet: it is set in the database.
+4. **Show more.** The other Xero contacts of the 26, then every other Xero supplier. A one-off supplier is still found by typing its name.
+5. **Search words.** Case, spaces, punctuation, "&" and "and" do not matter, and "RnR" / "R n R" read as "R and R". So "bd", "b&d" and "b and d" all find BD Metals; "rnr", "r&r" and "r and r" all find RnR Fencing. A word with a vowel either side of the n ("and", "one") is left alone.
+6. **No Xero contact yet.** An approved supplier with no linked Xero contact still shows, greyed, with "Add to Xero first". It cannot become a box until Xero has it. On 5 Nov 2026: AB Steel Fabrication, Fielders, Maxicoat (powder coating), Metric Fencing, QSM Fabrication, Solarspan, Unique Laser.
+7. **Renames.** "B&D Metals Group" is now "BD Metals" and "R&R Fencing" is now "RnR Fencing". The order email body never names the supplier, so suppliers see no change.
+8. **Ampelite.** CC warwick@ampelite.com.au is removed. To stays waorders@ampelite.com.au. Ampelite stays pay first.
+9. **The name a box shows.** A box whose Xero contact is linked to an active approved supplier shows the approved name ("BD Metals") on the Materials panel, the board's Arrival line and Needs you now tags, the crew pickup line, the supplier documents and our own Material order sheet. The box row itself still stores the Xero contact's name (`job_material_suppliers.supplier_name`); the screen gets the Xero name as `xero_name`.
+10. **The scope fill.** A fence scope naming an approved supplier fills a box on the same main contact (a pin, else the most bills). With no pin and no bills, the old name order stands.
+
+### Tweak 4.2 Read at the time, not kept in a table
+
+The bill counts are a view, `dispatch_approved_supplier_contact_bills`, worked out by Postgres on every search: one row per linked Xero contact with `bills_12m`, `last_bill_date` (any age) and `is_pinned`. Chosen over a table refreshed each day because it is always as fresh as the 06:55 Xero sync, needs no cron and nothing can go stale, and it reads in about 5 ms today (44 links, one indexed look-up each). It reads with the caller's rights (`security_invoker`), and only `service_role` may read it. A failed read never stops the search: `ranking` says `unavailable`.
+
+### Tweak 4.3 Kept the same on purpose
+
+- **Stored reply keys.** `supplierKeyOf` (dispatch_v2_replies_rules.ts) reads "RnR" as "R and R", so "RnR Fencing" keeps the stored key `rrfencing` and "BD Metals" keeps `bdmetals`. Stored reply rows and delivery suggestions are not orphaned.
+- **The fence tool's typed names.** The scope matcher knows both the new and the old names, so a scope typed "R&R", "RNR", "B&D", "BND" or "BD" still finds the approved entry, before or after the migration.
+- **Outlook order matching** goes by the approved entry's addresses, not its name, so the renames do not touch it. Which contact an Outlook order lands on is unchanged (the one boxed on the job, else the only one, else the last used).
+- **On account.** The five on-account suppliers are the same five; R&R Fencing is now named RnR Fencing.
+
+### Tweak 4.4 Migration
+
+`supabase/migrations/20261105184500_dispatch_v2_supplier_picker.sql`: the three pin columns, the view, its grants, the two renames (skipped if the new name is taken), the Ampelite CC removal and the CMI pin (only when that contact is really linked). Every data change matches org `00000000-0000-0000-0000-000000000001` and the names as stored. Nothing touches `suppliers` (the 06:55 Xero sync owns it). Rollback: `supabase/rollbacks/20261105184500_dispatch_v2_supplier_picker_down.sql`. Contract: `supabase/tests/migration-contracts/20261105184500_dispatch_v2_supplier_picker/`. The deploy gate names the view and its columns. The ops-api change reads the view, so the migration must be applied before the ops-api deploy (the merge to main does both, migration first).
+
 ## Not done or not decided
 
 - **Decking team CC.** Decking copies patios@ for now, and every decking email says it is open. Other job types (miscellaneous, insurance that is not a repair) get no team CC and say so. Shaun to rule.
-- **Seven approved suppliers have no Xero contact linked** (Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication, Unique Laser), so they show `can_add: false` until Shaun names the right contact. Mackson and Palram were ruled and are linked in the seed.
+- **Seven approved suppliers have no Xero contact linked** (Metric Fencing, Solarspan, Maxicoat, AB Steel Fabrication, Fielders, QSM Fabrication, Unique Laser), so they show greyed with "Add to Xero first" (`can_add: false`) until the contact is made in Xero and linked. Mackson and Palram were ruled and are linked in the seed.
 - **Signature (decided, changed 29 Oct 2026).** Order emails carry Shaun's signature (`signature: shaun`). Shaun, 29 Oct 2026, after the first real sends went out bare: "Emails have no signature!! Always use my sign". This replaces the 23 Oct ruling of no signature.
 - **One open email per box.** A second order to the same supplier on the same job waits until the first is sent or discarded.
 - **Ids not checked against live Outlook.** That the draft gives `internetMessageId` and `conversationId` before sending is from Graph's documentation; it has not been tried against live Outlook (no sends from this build). The first send will show it. `graph_message_id` may change in Sent Items: match on the conversation id or the Message-ID.

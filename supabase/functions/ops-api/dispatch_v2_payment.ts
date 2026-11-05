@@ -8,7 +8,8 @@
 //
 // The rules, in business words:
 //   * On account or pay first. Five suppliers are on account (Bunnings, Fence
-//     Makers, Fencing Warehouse WA, R&R Fencing, Stratco WA). Every other
+//     Makers, Fencing Warehouse WA, RnR Fencing, Stratco WA; RnR Fencing was
+//     named R&R Fencing until Tweak 4). Every other
 //     supplier pays first, including a box whose supplier is not linked to the
 //     approved supplier list at all, so nothing slips past payment. The list
 //     is kept in one place (dispatch_approved_supplier_emails.on_account).
@@ -34,9 +35,13 @@ export function dispatchV2PaymentTerms(input: {
 
 // The account list as read: supplier id -> its linked approved entry (active
 // or not). `readOk` false = the read failed, every box is "unknown".
+// `name` is the entry's approved name (Tweak 4: the name a box shows).
 export type DispatchV2Accounts = {
   readOk: boolean;
-  bySupplier: Map<string, { active: boolean; on_account: boolean }>;
+  bySupplier: Map<
+    string,
+    { active: boolean; on_account: boolean; name?: string | null }
+  >;
 };
 
 /** The account list from its two reads: the links (supplier_id ->
@@ -46,7 +51,10 @@ export function dispatchV2AccountsOf(
   links: any[] | null | undefined,
   entries: any[] | null | undefined,
 ): DispatchV2Accounts {
-  const bySupplier = new Map<string, { active: boolean; on_account: boolean }>();
+  const bySupplier = new Map<
+    string,
+    { active: boolean; on_account: boolean; name?: string | null }
+  >();
   if (!Array.isArray(links) || !Array.isArray(entries)) {
     return { readOk: false, bySupplier };
   }
@@ -61,6 +69,9 @@ export function dispatchV2AccountsOf(
     bySupplier.set(supplierId, {
       active: entry.active === true,
       on_account: entry.on_account === true,
+      name: typeof entry.name === "string" && entry.name.trim()
+        ? entry.name.trim()
+        : null,
     });
   }
   return { readOk: true, bySupplier };
@@ -80,6 +91,18 @@ export function dispatchV2TermsFor(
     linked: !!entry && entry.active,
     onAccount: entry ? entry.on_account : null,
   });
+}
+
+/** Tweak 4: the approved name a box shows ("BD Metals") when its supplier is
+ * linked to an active approved entry; null otherwise (the box keeps the name
+ * copied from Xero), and null when the account list was not read. */
+export function dispatchV2ApprovedNameFor(
+  accounts: DispatchV2Accounts | null | undefined,
+  supplierId: unknown,
+): string | null {
+  if (!accounts || !accounts.readOk) return null;
+  const entry = accounts.bySupplier.get(String(supplierId ?? ""));
+  return entry && entry.active && entry.name ? entry.name : null;
 }
 
 // ── Paid for the current order ──────────────────────────────────────────────

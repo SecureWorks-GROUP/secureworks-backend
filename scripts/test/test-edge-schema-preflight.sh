@@ -1037,7 +1037,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261105171000", "dispatch_v2_reply_pdf_rung"),
                       # Dispatch v2 Tweak 2: the supplier's own number kept
                       # against a job (dispatch_v2_replies_store.ts).
-                      ("20261105172000", "dispatch_v2_job_supplier_refs")]:
+                      ("20261105172000", "dispatch_v2_job_supplier_refs"),
+                      # Dispatch v2 Tweak 4: the bill count view behind the
+                      # simpler supplier picker (dispatch_v2_supplier_picker.ts).
+                      ("20261105184500", "dispatch_v2_supplier_picker")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

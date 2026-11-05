@@ -33,6 +33,7 @@ import {
   dispatchBoardStageSince,
   perthDayOf,
 } from "./dispatch_board.ts";
+import { dispatchV2AccountsOf } from "./dispatch_v2_payment.ts";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
 const ROW_CEILING = 1000;
@@ -637,6 +638,47 @@ Deno.test("arrival: a box says pickup when its newest sent email opened for pick
       ["po:po2", null],
     ],
   );
+});
+
+Deno.test("arrival (Tweak 4): a box linked to an approved supplier shows the approved name", () => {
+  const accounts = dispatchV2AccountsOf(
+    [
+      { supplier_id: "s1", approved_id: "e1" },
+      { supplier_id: "s2", approved_id: "e2" },
+    ],
+    [
+      { id: "e1", name: "BD Metals", active: true, on_account: false },
+      { id: "e2", name: "Retired Co", active: false, on_account: false },
+    ],
+  );
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: null,
+    orders: [],
+    accounts,
+    boxes: [
+      { supplier_id: "s1", supplier_name: "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty" },
+      { supplier_id: "s2", supplier_name: "Retired Co Pty Ltd" },
+      { supplier_id: "s3", supplier_name: "Plain Hardware" },
+    ],
+  });
+  assertEquals(
+    arrival.orders.map((o) => [o.key, o.supplier_name]),
+    [
+      ["box:s1", "BD Metals"],
+      ["box:s2", "Retired Co Pty Ltd"],
+      ["box:s3", "Plain Hardware"],
+    ],
+  );
+  // The approved list could not be read: the Xero name, as before.
+  const unread = dispatchArrival({
+    today: TODAY,
+    installDay: null,
+    orders: [],
+    accounts: dispatchV2AccountsOf(null, null),
+    boxes: [{ supplier_id: "s1", supplier_name: "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty" }],
+  });
+  assertEquals(unread.orders[0].supplier_name, "Jaiama Investments Pty Ltd T/A B&D Metals Group Pty");
 });
 
 Deno.test("arrival: a box falls back to its v1 Dispatch order, other material orders are listed, cancelled and labour orders are not", () => {

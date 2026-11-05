@@ -151,6 +151,18 @@ Deno.test("scope supplier: the fence tool's typed names find Shaun's approved or
   assertEquals(dispatchV2MatchScopeSupplier("RNR", ["Lysaght"]), null);
 });
 
+Deno.test("scope supplier (Tweak 4): the renamed BD Metals and RnR Fencing are still found by every typed form", () => {
+  // Shaun renamed two approved entries on 5 Nov 2026.
+  const approved = ["RnR Fencing", "Fencing Warehouse WA", "BD Metals", "Metroll Perth"];
+  const match = (name: string) => dispatchV2MatchScopeSupplier(name, approved);
+  for (const typed of ["RNR", "R&R", "R and R", "RnR Fencing", "R&R Fencing"]) {
+    assertEquals(match(typed), "RnR Fencing", typed);
+  }
+  for (const typed of ["BND", "B&D", "BD", "B and D", "BD Metals", "B&D Metals Group"]) {
+    assertEquals(match(typed), "BD Metals", typed);
+  }
+});
+
 // ── B3: each fence fill line names the sealed line it came from ─────────────
 // A fence one-tool revision saves its sealed lines (scope_json.lines, scope-engine-v2 #732) beside its job. The fill
 // keeps Shaun's lines and wording, and writes on each the sealed line's id and unit. A gate split into parts: the

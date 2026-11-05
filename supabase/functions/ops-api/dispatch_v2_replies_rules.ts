@@ -209,12 +209,33 @@ const OUR_DOMAIN =
   /(^|\.)(secureworkswa\.com\.au|secureworksgroup\.com\.au|secureworksgroup\.app)$/;
 
 /** A stable key for a supplier name: lower case letters and digits only,
- * with company words dropped ("R & R Fencing Pty Ltd" -> "rrfencing"). */
+ * with company words dropped ("R & R Fencing Pty Ltd" -> "rrfencing").
+ * Tweak 4 (5 Nov 2026): "RnR", "R n R" and "R and R" key as "R & R" does, so
+ * renaming the approved entry "R&R Fencing" to "RnR Fencing" keeps the key
+ * "rrfencing" that replies and supplier numbers were saved under. ("B&D
+ * Metals Group" and "BD Metals" both key as "bdmetals" already.) */
 export function supplierKeyOf(name: unknown): string {
-  return text(name).toLowerCase()
+  const words = text(name).toLowerCase()
     .replace(/&/g, " ")
     .replace(/\b(pty|ltd|limited|proprietary|the|co|company|group)\b/g, " ")
-    .replace(/[^a-z0-9]+/g, "");
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (
+      w.length === 1 && i + 2 < words.length &&
+      (words[i + 1] === "and" || words[i + 1] === "n") &&
+      words[i + 2].length === 1
+    ) {
+      out.push(w + words[i + 2]);
+      i += 2;
+      continue;
+    }
+    const joined = /^([b-df-hj-np-tv-z])n([b-df-hj-np-tv-z])$/.exec(w);
+    out.push(joined ? joined[1] + joined[2] : w);
+  }
+  return out.join("");
 }
 
 // ── Who sent it ───────────────────────────────────────────────────────────

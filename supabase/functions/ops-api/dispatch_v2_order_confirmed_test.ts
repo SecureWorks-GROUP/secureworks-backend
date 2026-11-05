@@ -430,6 +430,28 @@ Deno.test("writer: the reference comes from the accepted reply first, then the o
   assertEquals((r3.crew_line as any).text, "Stratco pickup Tue 3 Nov · from Neerabup");
 });
 
+Deno.test("writer (Tweak 4): the crew line names the approved supplier (RnR Fencing), not the Xero contact", async () => {
+  const t = setup();
+  t.tables.dispatch_approved_supplier_emails = [
+    { id: "e-rr", org_id: ORG, name: "RnR Fencing", active: true },
+  ];
+  t.tables.dispatch_approved_supplier_email_links = [
+    { supplier_id: SUP.rr, approved_id: "e-rr", org_id: ORG },
+  ];
+  const rr = await t.confirm({ supplierId: SUP.rr });
+  assertEquals((rr.crew_line as any).text, "RnR Fencing delivery Mon 2 Nov");
+  // A retired approved entry: the order's own name, as before.
+  const t2 = setup();
+  t2.tables.dispatch_approved_supplier_emails = [
+    { id: "e-rr", org_id: ORG, name: "RnR Fencing", active: false },
+  ];
+  t2.tables.dispatch_approved_supplier_email_links = [
+    { supplier_id: SUP.rr, approved_id: "e-rr", org_id: ORG },
+  ];
+  const old = await t2.confirm({ supplierId: SUP.rr });
+  assertEquals((old.crew_line as any).text, "R&R delivery Mon 2 Nov");
+});
+
 Deno.test("writer: a delivery, and an ASAP order that later gets a date", async () => {
   const t = setup();
   const rr = await t.confirm({ supplierId: SUP.rr });
