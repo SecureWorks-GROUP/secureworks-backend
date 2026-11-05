@@ -1,5 +1,6 @@
 // JWT flag: --no-verify-jwt (scoping tools call with x-api-key auth, not Supabase JWT)
 import { opportunityFieldInputs, readOpportunityFieldDefs } from './opportunity_custom_fields.ts'
+import { isMiscScopeSave, miscScopeSaveRefusal } from './misc_scope_save.ts'
 import { createMiscDraft, miscJobStore, MiscJobCreateError } from './misc_job_create.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
@@ -2820,7 +2821,7 @@ serve(async (req: Request) => {
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
       const { data: targetJob, error: targetError } = await sb.from('jobs')
-        .select('id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, scope_json, updated_at')
+        .select('id, org_id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, scope_json, pricing_json, updated_at')
         .eq('id', jobId)
         .single()
 
@@ -2834,6 +2835,9 @@ serve(async (req: Request) => {
       ) {
         return json({ error: 'Job belongs to a different organisation', code: 'org_mismatch' }, 403)
       }
+
+      const miscRefusal = await miscScopeSaveRefusal(targetJob, scopeJson, meta || {})
+      if (miscRefusal) return json({ error: miscRefusal.error, code: miscRefusal.code }, miscRefusal.status)
 
       const incomingIdentity = extractScopeIdentity(scopeJson || {}, meta || {})
       const targetJobNumber = cleanIdentity(targetJob.job_number)
@@ -3000,6 +3004,14 @@ serve(async (req: Request) => {
         return json({ error: error.message }, 500)
       }
       if (!data) {
+        // A same-scope-hash winner could still have different pricing or an
+        // accepted job status. Misc never reports that CAS loss as success.
+        if (isMiscScopeSave(scopeJson)) {
+          return json({
+            error: 'The job changed while this save was in flight. Reload before saving; the custom draft was not saved.',
+            code: 'misc_scope_save_conflict',
+          }, 409)
+        }
         const { data: current, error: currentError } = await sb.from('jobs')
           .select('scope_json, updated_at')
           .eq('id', jobId)

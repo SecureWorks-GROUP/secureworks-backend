@@ -25,6 +25,15 @@ import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as l
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { jobProfitabilityAction, type JobProfitabilityDetail } from './job_profitability.ts'
 import { loadTeamActivity, teamActivityResponse } from './team_activity.ts'
+import {
+  buildCeoTargets,
+  CEO_TARGET_CONFIG_KEYS,
+  grossMarginBenchmarksFromConfig,
+  GROSS_MARGIN_CONFIG_KEYS,
+  MARGIN_GOAL_DEFAULT,
+  MONTHLY_REVENUE_DEFAULT,
+  type OrgConfigReader,
+} from './ceo_targets.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -785,26 +794,26 @@ async function dashboardSummary(sb: any) {
   }
 }
 
-// Fetch all CEO targets from org_config
-async function getTargets(sb: any) {
-  const keys = [
-    'monthly_revenue_target', 'margin_target_pct', 'monthly_jobs_target',
-    'monthly_marketing_budget', 'pipeline_coverage_target',
-    'dso_target', 'cycle_time_target', 'cost_to_revenue_target',
-    'concentration_risk_threshold', 'win_rate_target',
-  ]
+// Fetch CEO targets from org_config. revenue stays the monthly company
+// figure. Division keys add an annual target and a monthly run-rate.
+// A division with no revenue split is NOT OBSERVED, never 0.
+async function getTargets(sb: OrgConfigReader) {
   const { data } = await sb
     .from('org_config')
     .select('config_key, config_value')
     .eq('org_id', DEFAULT_ORG_ID)
-    .in('config_key', keys)
+    .in('config_key', CEO_TARGET_CONFIG_KEYS)
 
-  const targets: Record<string, number> = {}
-  for (const row of (data || [])) {
-    const key = row.config_key.replace('monthly_', '').replace('_target', '').replace('_pct', '').replace('_threshold', '')
-    targets[key] = row.config_value?.amount || 0
-  }
-  return targets
+  return buildCeoTargets(data || [])
+}
+
+async function loadGrossMarginBenchmarks(sb: OrgConfigReader) {
+  const { data } = await sb
+    .from('org_config')
+    .select('config_key, config_value')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .in('config_key', GROSS_MARGIN_CONFIG_KEYS)
+  return grossMarginBenchmarksFromConfig(data || [])
 }
 
 
@@ -1813,11 +1822,14 @@ async function salesBreakdown(sb: any) {
 // INSIGHTS ENGINE — Actionable recommendations & benchmarks
 // ════════════════════════════════════════════════════════════
 
-// Industry benchmarks for trades/construction in Perth
-const BENCHMARKS = {
-  gross_margin_target: 30,       // 30%+ is healthy for patio/fencing
-  gross_margin_warning: 20,      // Below 20% is concerning
-  gross_margin_critical: 15,     // Below 15% is unsustainable
+// Industry benchmarks for trades/construction in Perth.
+// Gross margin is overlaid from org_config in generateInsights.
+// Goal 50 (margin_target_pct), floor 40 (margin_floor_pct), critical 30
+// (margin_critical_pct). A missing row keeps these defaults.
+const INDUSTRY_BENCHMARKS = {
+  gross_margin_target: 50,
+  gross_margin_warning: 40,
+  gross_margin_critical: 30,
   cpl_target: 80,               // $80 or less is good for home services
   cpl_warning: 120,             // Above $120 needs attention
   cpa_target: 250,              // $250 or less for a won job
@@ -1846,6 +1858,10 @@ interface Insight {
 }
 
 async function generateInsights(sb: any) {
+  const benchmarks = {
+    ...INDUSTRY_BENCHMARKS,
+    ...await loadGrossMarginBenchmarks(sb),
+  }
   const now = new Date()
   const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0]
   const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().split('T')[0]
@@ -1911,24 +1927,24 @@ async function generateInsights(sb: any) {
   // Gross margin
   if (rev > 0) {
     const marginRounded = Math.round(margin)
-    if (margin >= BENCHMARKS.gross_margin_target) {
+    if (margin >= benchmarks.gross_margin_target) {
       insights.push({
         category: 'Financial', title: 'Margins are healthy',
-        message: `Gross margin at ${marginRounded}%, above the ${BENCHMARKS.gross_margin_target}% target.`,
-        severity: 'success', metric: 'Gross Margin', value: `${marginRounded}%`, benchmark: `${BENCHMARKS.gross_margin_target}%`,
+        message: `Gross margin at ${marginRounded}%, above the ${benchmarks.gross_margin_target}% target.`,
+        severity: 'success', metric: 'Gross Margin', value: `${marginRounded}%`, benchmark: `${benchmarks.gross_margin_target}%`,
       })
-    } else if (margin >= BENCHMARKS.gross_margin_warning) {
+    } else if (margin >= benchmarks.gross_margin_warning) {
       insights.push({
         category: 'Financial', title: 'Margins tightening',
-        message: `Gross margin at ${marginRounded}% — below the ${BENCHMARKS.gross_margin_target}% target. Review material costs and pricing.`,
-        severity: 'warning', metric: 'Gross Margin', value: `${marginRounded}%`, benchmark: `${BENCHMARKS.gross_margin_target}%`,
+        message: `Gross margin at ${marginRounded}% — below the ${benchmarks.gross_margin_target}% target. Review material costs and pricing.`,
+        severity: 'warning', metric: 'Gross Margin', value: `${marginRounded}%`, benchmark: `${benchmarks.gross_margin_target}%`,
         action: 'Review supplier pricing and consider quoting higher on next jobs. Check if any jobs have cost overruns.',
       })
     } else {
       insights.push({
         category: 'Financial', title: 'Margins critically low',
         message: `Gross margin at ${marginRounded}% — well below sustainable levels. Immediate action needed.`,
-        severity: 'critical', metric: 'Gross Margin', value: `${marginRounded}%`, benchmark: `${BENCHMARKS.gross_margin_target}%`,
+        severity: 'critical', metric: 'Gross Margin', value: `${marginRounded}%`, benchmark: `${benchmarks.gross_margin_target}%`,
         action: 'Audit current job costs. Identify which jobs are dragging margins down. Increase quotes by 10-15% or renegotiate supplier rates.',
       })
     }
@@ -1966,10 +1982,10 @@ async function generateInsights(sb: any) {
     })
   }
 
-  if (rev > 0 && totalReceivables > rev * (BENCHMARKS.receivables_warning_pct / 100)) {
+  if (rev > 0 && totalReceivables > rev * (benchmarks.receivables_warning_pct / 100)) {
     insights.push({
       category: 'Financial', title: 'High receivables ratio',
-      message: `Outstanding receivables ($${Math.round(totalReceivables).toLocaleString()}) are ${Math.round((totalReceivables / rev) * 100)}% of monthly revenue. Target is under ${BENCHMARKS.receivables_warning_pct}%.`,
+      message: `Outstanding receivables ($${Math.round(totalReceivables).toLocaleString()}) are ${Math.round((totalReceivables / rev) * 100)}% of monthly revenue. Target is under ${benchmarks.receivables_warning_pct}%.`,
       severity: 'warning', action: 'Tighten payment terms. Consider requiring deposits upfront. Chase outstanding invoices.',
     })
   }
@@ -1988,24 +2004,24 @@ async function generateInsights(sb: any) {
   const winRate = quotedJobs.length > 0 ? (wonJobs.length / quotedJobs.length) * 100 : 0
 
   if (quotedJobs.length >= 5) {
-    if (winRate >= BENCHMARKS.win_rate_target) {
+    if (winRate >= benchmarks.win_rate_target) {
       insights.push({
         category: 'Sales', title: 'Strong win rate',
-        message: `Converting ${Math.round(winRate)}% of quotes to jobs (${wonJobs.length}/${quotedJobs.length}). Above the ${BENCHMARKS.win_rate_target}% target.`,
-        severity: 'success', metric: 'Win Rate', value: `${Math.round(winRate)}%`, benchmark: `${BENCHMARKS.win_rate_target}%`,
+        message: `Converting ${Math.round(winRate)}% of quotes to jobs (${wonJobs.length}/${quotedJobs.length}). Above the ${benchmarks.win_rate_target}% target.`,
+        severity: 'success', metric: 'Win Rate', value: `${Math.round(winRate)}%`, benchmark: `${benchmarks.win_rate_target}%`,
       })
-    } else if (winRate < BENCHMARKS.win_rate_warning) {
+    } else if (winRate < benchmarks.win_rate_warning) {
       insights.push({
         category: 'Sales', title: 'Low win rate — review quoting',
-        message: `Only converting ${Math.round(winRate)}% of quotes. Industry target is ${BENCHMARKS.win_rate_target}%+.`,
-        severity: 'critical', metric: 'Win Rate', value: `${Math.round(winRate)}%`, benchmark: `${BENCHMARKS.win_rate_target}%`,
+        message: `Only converting ${Math.round(winRate)}% of quotes. Industry target is ${benchmarks.win_rate_target}%+.`,
+        severity: 'critical', metric: 'Win Rate', value: `${Math.round(winRate)}%`, benchmark: `${benchmarks.win_rate_target}%`,
         action: 'Review recent lost quotes. Are you pricing too high? Is follow-up happening within 24 hours? Consider adding a \"why did we lose\" field.',
       })
     } else {
       insights.push({
         category: 'Sales', title: 'Win rate needs improvement',
-        message: `Win rate at ${Math.round(winRate)}%. Target is ${BENCHMARKS.win_rate_target}%+.`,
-        severity: 'warning', metric: 'Win Rate', value: `${Math.round(winRate)}%`, benchmark: `${BENCHMARKS.win_rate_target}%`,
+        message: `Win rate at ${Math.round(winRate)}%. Target is ${benchmarks.win_rate_target}%+.`,
+        severity: 'warning', metric: 'Win Rate', value: `${Math.round(winRate)}%`, benchmark: `${benchmarks.win_rate_target}%`,
         action: 'Speed up quote follow-up. Call within 24h of sending. Ask for feedback on lost quotes.',
       })
     }
@@ -2018,11 +2034,11 @@ async function generateInsights(sb: any) {
       return s + (new Date(j.accepted_at).getTime() - new Date(j.quoted_at).getTime()) / 86400000
     }, 0) / velocityJobs.length
 
-    if (avgQuoteToAccept > BENCHMARKS.quote_to_accept_days * 2) {
+    if (avgQuoteToAccept > benchmarks.quote_to_accept_days * 2) {
       insights.push({
         category: 'Sales', title: 'Slow quote acceptance',
-        message: `Average ${Math.round(avgQuoteToAccept)} days from quote to acceptance. Benchmark is ${BENCHMARKS.quote_to_accept_days} days.`,
-        severity: 'warning', metric: 'Quote → Accept', value: `${Math.round(avgQuoteToAccept)} days`, benchmark: `${BENCHMARKS.quote_to_accept_days} days`,
+        message: `Average ${Math.round(avgQuoteToAccept)} days from quote to acceptance. Benchmark is ${benchmarks.quote_to_accept_days} days.`,
+        severity: 'warning', metric: 'Quote → Accept', value: `${Math.round(avgQuoteToAccept)} days`, benchmark: `${benchmarks.quote_to_accept_days} days`,
         action: 'Follow up on quotes within 48 hours. Add urgency with limited-time pricing. Make it easy to accept (digital signatures).',
       })
     }
@@ -2054,25 +2070,25 @@ async function generateInsights(sb: any) {
 
   if (currentSpend > 0) {
     // CPL analysis
-    if (currentCPL > 0 && currentCPL <= BENCHMARKS.cpl_target) {
+    if (currentCPL > 0 && currentCPL <= benchmarks.cpl_target) {
       insights.push({
         category: 'Marketing', title: 'CPL is efficient',
-        message: `Cost per lead at $${Math.round(currentCPL)} — below the $${BENCHMARKS.cpl_target} target. Consider scaling spend.`,
-        severity: 'success', metric: 'CPL', value: `$${Math.round(currentCPL)}`, benchmark: `$${BENCHMARKS.cpl_target}`,
+        message: `Cost per lead at $${Math.round(currentCPL)} — below the $${benchmarks.cpl_target} target. Consider scaling spend.`,
+        severity: 'success', metric: 'CPL', value: `$${Math.round(currentCPL)}`, benchmark: `$${benchmarks.cpl_target}`,
         action: 'Increase daily budget by 20% and monitor for 2 weeks. Your ads are efficient — capture more market share.',
       })
-    } else if (currentCPL > BENCHMARKS.cpl_warning) {
+    } else if (currentCPL > benchmarks.cpl_warning) {
       insights.push({
         category: 'Marketing', title: 'CPL too high — optimise ads',
-        message: `Cost per lead at $${Math.round(currentCPL)}, well above the $${BENCHMARKS.cpl_target} target.`,
-        severity: 'critical', metric: 'CPL', value: `$${Math.round(currentCPL)}`, benchmark: `$${BENCHMARKS.cpl_target}`,
+        message: `Cost per lead at $${Math.round(currentCPL)}, well above the $${benchmarks.cpl_target} target.`,
+        severity: 'critical', metric: 'CPL', value: `$${Math.round(currentCPL)}`, benchmark: `$${benchmarks.cpl_target}`,
         action: 'Review search terms report for wasted spend. Tighten negative keywords. Test new ad copy. Consider pausing worst-performing campaigns.',
       })
-    } else if (currentCPL > BENCHMARKS.cpl_target) {
+    } else if (currentCPL > benchmarks.cpl_target) {
       insights.push({
         category: 'Marketing', title: 'CPL above target',
-        message: `Cost per lead at $${Math.round(currentCPL)} vs $${BENCHMARKS.cpl_target} target.`,
-        severity: 'warning', metric: 'CPL', value: `$${Math.round(currentCPL)}`, benchmark: `$${BENCHMARKS.cpl_target}`,
+        message: `Cost per lead at $${Math.round(currentCPL)} vs $${benchmarks.cpl_target} target.`,
+        severity: 'warning', metric: 'CPL', value: `$${Math.round(currentCPL)}`, benchmark: `$${benchmarks.cpl_target}`,
         action: 'Check search terms for irrelevant clicks. Review ad copy and landing page conversion rate.',
       })
     }
@@ -2119,18 +2135,18 @@ async function generateInsights(sb: any) {
   const scorecard = [
     {
       name: 'Gross Margin', value: rev > 0 ? Math.round(margin) : null, unit: '%',
-      target: BENCHMARKS.gross_margin_target, warning: BENCHMARKS.gross_margin_warning,
-      status: rev === 0 ? 'no-data' : margin >= BENCHMARKS.gross_margin_target ? 'green' : margin >= BENCHMARKS.gross_margin_warning ? 'amber' : 'red',
+      target: benchmarks.gross_margin_target, warning: benchmarks.gross_margin_warning,
+      status: rev === 0 ? 'no-data' : margin >= benchmarks.gross_margin_target ? 'green' : margin >= benchmarks.gross_margin_warning ? 'amber' : 'red',
     },
     {
       name: 'Win Rate', value: quotedJobs.length >= 3 ? Math.round(winRate) : null, unit: '%',
-      target: BENCHMARKS.win_rate_target, warning: BENCHMARKS.win_rate_warning,
-      status: quotedJobs.length < 3 ? 'no-data' : winRate >= BENCHMARKS.win_rate_target ? 'green' : winRate >= BENCHMARKS.win_rate_warning ? 'amber' : 'red',
+      target: benchmarks.win_rate_target, warning: benchmarks.win_rate_warning,
+      status: quotedJobs.length < 3 ? 'no-data' : winRate >= benchmarks.win_rate_target ? 'green' : winRate >= benchmarks.win_rate_warning ? 'amber' : 'red',
     },
     {
       name: 'Cost Per Lead', value: currentCPL > 0 ? Math.round(currentCPL) : null, unit: '$', inverted: true,
-      target: BENCHMARKS.cpl_target, warning: BENCHMARKS.cpl_warning,
-      status: currentCPL === 0 ? 'no-data' : currentCPL <= BENCHMARKS.cpl_target ? 'green' : currentCPL <= BENCHMARKS.cpl_warning ? 'amber' : 'red',
+      target: benchmarks.cpl_target, warning: benchmarks.cpl_warning,
+      status: currentCPL === 0 ? 'no-data' : currentCPL <= benchmarks.cpl_target ? 'green' : currentCPL <= benchmarks.cpl_warning ? 'amber' : 'red',
     },
     {
       name: 'Pipeline Cover', value: rev > 0 ? parseFloat((pipelineValue / rev).toFixed(1)) : null, unit: 'x',
@@ -2145,8 +2161,8 @@ async function generateInsights(sb: any) {
     {
       name: 'Receivables Health',
       value: rev > 0 ? Math.round((totalReceivables / rev) * 100) : null, unit: '% of rev',
-      target: BENCHMARKS.receivables_warning_pct, warning: BENCHMARKS.receivables_warning_pct, inverted: true,
-      status: rev === 0 ? 'no-data' : totalReceivables <= rev * 0.1 ? 'green' : totalReceivables <= rev * (BENCHMARKS.receivables_warning_pct / 100) ? 'amber' : 'red',
+      target: benchmarks.receivables_warning_pct, warning: benchmarks.receivables_warning_pct, inverted: true,
+      status: rev === 0 ? 'no-data' : totalReceivables <= rev * 0.1 ? 'green' : totalReceivables <= rev * (benchmarks.receivables_warning_pct / 100) ? 'amber' : 'red',
     },
   ]
 
@@ -2157,7 +2173,7 @@ async function generateInsights(sb: any) {
   return {
     insights,
     scorecard,
-    benchmarks: BENCHMARKS,
+    benchmarks,
     data_quality: {
       has_xero_data: rev > 0,
       has_ads_data: currentSpend > 0,
@@ -4426,8 +4442,8 @@ async function performanceBenchmarks(sb: any) {
   for (const r of (configRows || [])) {
     targets[r.config_key] = r.config_value?.amount || 0
   }
-  const revenueTarget = targets.monthly_revenue_target || 180000
-  const marginTarget = targets.margin_target_pct || 30
+  const revenueTarget = targets.monthly_revenue_target || MONTHLY_REVENUE_DEFAULT
+  const marginTarget = targets.margin_target_pct || MARGIN_GOAL_DEFAULT
   const jobsTarget = targets.monthly_jobs_target || 15
 
   // Get P&L data from xero_reports for current, last, and YoY months
