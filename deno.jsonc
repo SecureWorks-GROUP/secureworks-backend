@@ -1,4 +1,7 @@
 {
+  "imports": {
+    "https://esm.sh/tslib@2.8.1/denonext/tslib.mjs": "npm:tslib@2.8.1/tslib.es6.mjs"
+  },
   "tasks": {
     "test:ops-api": "deno test --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/",
     "test:approve-and-send": "deno test --no-check --allow-env --allow-net=127.0.0.1 supabase/functions/ops-api/approve_and_send_test.ts"

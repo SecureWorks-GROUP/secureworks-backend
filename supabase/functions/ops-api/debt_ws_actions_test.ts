@@ -14,6 +14,7 @@ import {
   runDebtWsAction,
 } from "./debt_ws_actions.ts";
 import {
+  AMBROSE_CONTACT,
   fakeDeps,
   FakeStore,
   IDS,
@@ -184,6 +185,8 @@ Deno.test("overview: categories, rows, companies, not due, not chased, needs a l
     agent_on: false,
     viewer_is_owner: true,
     owner_set: true,
+    terms_default_days: 10,
+    terms_status: "ok",
   });
   assertEquals(b.categories.active, { count: 1, amount: 1000 });
   assertEquals(b.categories.escalating, { count: 1, amount: 2000 });
@@ -220,6 +223,12 @@ Deno.test("overview: categories, rows, companies, not due, not chased, needs a l
   assertEquals(final.ghl_linked, true);
   assertEquals(final.payer_label, "Alex Sample");
   assertEquals(final.flag_count, 0);
+  // The money view (Shaun, 4 Nov 2026): Debt, invoiced, pay by and days overdue.
+  assertEquals(final.receivable_class, "debt");
+  assertEquals(final.type_label, "Final");
+  assertEquals(final.pay_by, "2026-10-01");
+  assertEquals(final.days_overdue, 7);
+  assertEquals(final.terms_days, null);
   for (
     const key of [
       "share_key",
@@ -255,6 +264,9 @@ Deno.test("overview: categories, rows, companies, not due, not chased, needs a l
   assertEquals(progress.day, 11);
   assertEquals(progress.category, "escalating");
   assertEquals(progress.stage, "materials");
+  // A materials invoice is Other receivables, not debt; still chased as before.
+  assertEquals(progress.receivable_class, "other");
+  assertEquals(progress.type_label, "Materials");
 
   const jan = b.rows.find((r: any) => r.xero_invoice_id === IDS.janFinal);
   assertEquals(jan.on_jan_list, true);
@@ -271,6 +283,9 @@ Deno.test("overview: categories, rows, companies, not due, not chased, needs a l
     oldest_days: 27,
   });
   assertEquals(b.companies[0].in_grace, { count: 1, amount: 440 });
+  // MLB has no terms of its own in the fixture, so it is on the default 10 days.
+  assertEquals(b.companies[0].terms_days, 10);
+  assertEquals(b.companies[0].terms_default, true);
   assertEquals(b.companies[0].category, "bad_debt");
   assertEquals(b.companies[0].statement, {
     week_start: "2026-10-05",
@@ -284,6 +299,123 @@ Deno.test("overview: categories, rows, companies, not due, not chased, needs a l
     status: "open",
     count: 1,
   });
+
+  // Receivables: every unpaid invoice, Debt and Other apart.
+  assertEquals(b.receivables.count, 8);
+  assertEquals(b.receivables.amount, 10131);
+  assertEquals(b.receivables.debt, { count: 4, amount: 2520 });
+  assertEquals(b.receivables.debt_overdue, { count: 3, amount: 2080 });
+  assertEquals(b.receivables.other, { count: 2, amount: 7000 });
+  assertEquals(b.receivables.write_off, { count: 1, amount: 561 });
+  // This week (Monday 5 to Sunday 11 Oct): paid to us against new invoices raised.
+  assertEquals(b.week_money, {
+    week_start: "2026-10-05",
+    week_end: "2026-10-11",
+    paid_in: { count: 2, amount: 1700 },
+    invoiced: { count: 1, amount: 440 },
+  });
+});
+
+Deno.test("overview: a payments read that fails leaves week_money null and the tab still loads", async () => {
+  const store = new FakeStore();
+  store.paymentsBetween = () => Promise.reject(new Error("down"));
+  const { deps } = fakeDeps(store);
+  const b = (await call(deps, "debt_ws_overview", SHAUN)).body as any;
+  assertEquals(b.week_money, null);
+  assertEquals(b.receivables.amount, 10131);
+});
+
+// ── Company terms (Shaun, 4 Nov 2026) ──
+
+// A second Xero contact for MLB ("ML Builders"), folded onto MLB by company_aliases.
+const OTHER_MLB_ALIAS = "c0000000-0000-4000-8000-0000000000a9";
+
+Deno.test("company terms: Ambrose on 14 days moves its due date; MLB and every other company stay on 10", async () => {
+  const store = new FakeStore();
+  const base = store.invoices.find((i) => i.xero_invoice_id === IDS.account)!;
+  store.invoices.push({
+    ...base,
+    xero_invoice_id: "10000000-0000-4000-8000-0000000000a1",
+    invoice_number: "INV-4001",
+    contact_name: "Ambrose Construct Group",
+    xero_contact_id: AMBROSE_CONTACT,
+    reference: "AMB-1",
+    amount_due: 1100,
+    total: 1100,
+    invoice_date: "2026-09-28",
+  });
+  const { deps } = fakeDeps(store);
+  const b = (await call(deps, "debt_ws_overview", SHAUN)).body as any;
+  const amb = b.rows.find((r: any) => r.invoice_number === "INV-4001");
+  const company = b.companies.find((c: any) => c.company_key === AMBROSE_CONTACT);
+  assertEquals(company.terms_days, 14);
+  assertEquals(company.terms_default, false);
+  // 28 Sep + 14 days = 12 Oct: not due yet (on 10 days it would be 2 days overdue).
+  assertEquals(amb.due_date, "2026-10-12");
+  assertEquals(amb.pay_by, "2026-10-12");
+  assertEquals(amb.terms_days, 14);
+  assertEquals(amb.days_overdue, 0);
+  assertEquals(amb.category, null); // not due yet: in no debt category
+  assertEquals(company.in_grace, { count: 1, amount: 1100 });
+  const mlb = b.companies.find((c: any) => c.company_key === MLB_CONTACT);
+  assertEquals(mlb.terms_days, 10);
+});
+
+Deno.test("company terms: only the owner can change them; an alias lands on its company; null goes back to the default", async () => {
+  const store = new FakeStore();
+  store.settingsRow.company_aliases = { [OTHER_MLB_ALIAS]: MLB_CONTACT };
+  const { deps } = fakeDeps(store);
+  // Staff who are not the owner are refused, and nothing changes.
+  const staff = await call(deps, "debt_ws_set_company_terms", STAFF, {
+    company_key: MLB_CONTACT,
+    days: 21,
+  });
+  assertEquals(staff.status, 403);
+  assertEquals(store.termsRow.by_company[MLB_CONTACT], undefined);
+  // The owner sets MLB through an alias contact: it is kept on MLB's canonical key.
+  const set = await call(deps, "debt_ws_set_company_terms", SHAUN, {
+    company_key: OTHER_MLB_ALIAS.toUpperCase(),
+    days: 21,
+  });
+  assertEquals(set.status, 200, JSON.stringify(set.body));
+  assertEquals((set.body as any).company_key, MLB_CONTACT);
+  assertEquals((set.body as any).terms_days, 21);
+  assertEquals((set.body as any).terms_default, false);
+  assertEquals(store.termsRow.by_company[MLB_CONTACT], 21);
+  // MLB's INV-2008 (5 Oct) is now due 26 Oct.
+  const b = (await call(deps, "debt_ws_overview", SHAUN)).body as any;
+  assertEquals(b.companies.find((c: any) => c.company_key === MLB_CONTACT).terms_days, 21);
+  // Back to the default.
+  const clear = await call(deps, "debt_ws_set_company_terms", SHAUN, {
+    company_key: MLB_CONTACT,
+    days: null,
+  });
+  assertEquals(clear.status, 200);
+  assertEquals((clear.body as any).terms_default, true);
+  assertEquals((clear.body as any).terms_days, 10);
+  assert(!(MLB_CONTACT in store.termsRow.by_company));
+  // The other company's terms are untouched.
+  assertEquals(store.termsRow.by_company[AMBROSE_CONTACT], 14);
+});
+
+Deno.test("company terms: bad input is refused before anything is written", async () => {
+  const store = new FakeStore();
+  const { deps } = fakeDeps(store);
+  for (
+    const body of [
+      { company_key: MLB_CONTACT, days: 121 },
+      { company_key: MLB_CONTACT, days: -1 },
+      { company_key: MLB_CONTACT, days: 14.5 },
+      { company_key: MLB_CONTACT, days: "14" },
+      { company_key: MLB_CONTACT },
+      { company_key: "not a key", days: 14 },
+      { company_key: MLB_CONTACT, days: 14, extra: true },
+    ]
+  ) {
+    const res = await call(deps, "debt_ws_set_company_terms", SHAUN, body);
+    assertEquals(res.status, 400, JSON.stringify(body));
+  }
+  assertEquals(store.termsRow.by_company, { [AMBROSE_CONTACT]: 14 });
 });
 
 Deno.test("overview: a viewer who is not the owner sees viewer_is_owner false", async () => {

@@ -261,3 +261,52 @@ Deno.test("store: the invoice sync time is the sync cursor (a complete run), els
   );
   assertEquals(error.code, "debt_ws_read_failed");
 });
+
+Deno.test("store: company terms read from the settings row; bad values fall back; a missing column throws", async () => {
+  const { client, log } = fakeClient(() => ({
+    data: {
+      company_terms: { "EB7BC4E3-D7C1-41A6-99E1-723452C6E497": 14, mlb: 10, odd: 14.5, big: 500 },
+      company_terms_default: 10,
+    },
+    error: null,
+  }));
+  const terms = await createSupabaseDebtWsStore(client).companyTerms();
+  assertEquals(terms, {
+    by_company: { "eb7bc4e3-d7c1-41a6-99e1-723452c6e497": 14, mlb: 10 },
+    default_days: 10,
+  });
+  assertEquals(log[0].table, "debt_ws_settings");
+  assert(log[0].calls[0].includes("company_terms, company_terms_default"));
+  // Before the migration the columns are missing: the read throws, and loadBook falls back.
+  const { client: before } = fakeClient(() => ({
+    data: null,
+    error: { code: "42703", message: "column does not exist" },
+  }));
+  await assertRejects(() => createSupabaseDebtWsStore(before).companyTerms(), DebtWsError);
+});
+
+Deno.test("store: setting company terms is one call to debt_ws_set_company_terms", async () => {
+  const rpcs: Array<{ fn: string; args: unknown }> = [];
+  const client = {
+    rpc(fn: string, args: unknown) {
+      rpcs.push({ fn, args });
+      return Promise.resolve({
+        data: [{ company_terms: { amb: 21 }, company_terms_default: 10 }],
+        error: null,
+      });
+    },
+  };
+  const out = await createSupabaseDebtWsStore(client as any).setCompanyTerms("amb", 21, "user-1");
+  assertEquals(rpcs, [{
+    fn: "debt_ws_set_company_terms",
+    args: { p_company_key: "amb", p_days: 21, p_user_id: "user-1" },
+  }]);
+  assertEquals(out, { by_company: { amb: 21 }, default_days: 10 });
+  const failing = {
+    rpc: () => Promise.resolve({ data: null, error: { code: "42883", message: "no function" } }),
+  };
+  await assertRejects(
+    () => createSupabaseDebtWsStore(failing as any).setCompanyTerms("amb", 21, "user-1"),
+    DebtWsError,
+  );
+});
