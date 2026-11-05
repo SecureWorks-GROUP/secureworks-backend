@@ -391,6 +391,8 @@ class FakeSources implements DispatchRepliesSources {
     suppliers: [],
     box_payment: null,
   };
+  // The order-confirmed step (Tweak 1): left out unless a test sets it.
+  orderConfirmed?: DispatchRepliesSources["orderConfirmed"];
   paymentHold?: DispatchRepliesSources["paymentHold"] = (input) => {
     this.holdReads.push({ jobId: input.jobId, supplierId: input.supplierId });
     return Promise.resolve(this.hold);
@@ -1177,4 +1179,42 @@ Deno.test("accept: no offer to hold on a repair job; an older stand-in answers a
   const r2 = await old.run("dispatch_v2_suggestion_accept", { suggestion_id: s2.id });
   assertEquals(r2.stage_move_offer.label, "Move to Order Confirmed?");
   assertEquals([r2.stage_move_held, r2.payment_hold, r2.box_payment], [null, null, null]);
+});
+
+// Tweak 1 (contract section 3e): Accept confirms the order, so the crew
+// pickup line and the supplier's documents follow, once, after the date is
+// saved. The step itself is tested in dispatch_v2_order_confirmed_test.ts.
+Deno.test("accept: runs the order-confirmed step once, after the date; a failure never undoes Accept", async () => {
+  const t = await scanned();
+  const calls: any[] = [];
+  t.sources.orderConfirmed = (input) => {
+    calls.push({ ...input, dateSaved: t.sources.writes.length === 1 });
+    return Promise.resolve({ crew_line: { written: true } });
+  };
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals(calls, [{
+    orgId: ORG,
+    jobId: J1,
+    supplierId: S_STRATCO,
+    orderId: O1,
+    emailId: s.email_id,
+    operator: { userId: SHAUN.id, email: SHAUN.email },
+    dateSaved: true,
+  }]);
+  assertEquals(r.order_confirmed, { crew_line: { written: true } });
+  assertEquals(r.job_status_changed, false);
+
+  const broken = await scanned();
+  broken.sources.orderConfirmed = () => Promise.reject(new Error("boom"));
+  const s2 = broken.store.suggestions.find((x) => x.order_id === O1)!;
+  const r2 = await broken.run("dispatch_v2_suggestion_accept", { suggestion_id: s2.id });
+  assertEquals(r2.suggestion.state, "accepted");
+  assertEquals(r2.order_confirmed, null);
+
+  // An older stand-in with no step: Accept answers order_confirmed null.
+  const old = await scanned();
+  const s3 = old.store.suggestions.find((x) => x.order_id === O1)!;
+  const r3 = await old.run("dispatch_v2_suggestion_accept", { suggestion_id: s3.id });
+  assertEquals(r3.order_confirmed, null);
 });

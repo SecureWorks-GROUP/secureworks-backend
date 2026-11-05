@@ -1146,6 +1146,156 @@ A1's terms and A4 to A7 on A2's payment object.
 - Migration contract tests need psql, which is not installed on this PC;
   CI runs them on the PR.
 
+## 3e. Once an order is confirmed (Tweak 1, approved by Shaun 4 Nov 2026)
+
+An order counts as confirmed when a person presses **Accept** on a supplier
+reply's date suggestion (`dispatch_v2_suggestion_accept`), or moves the box's
+material stage to **Order confirmed** by hand
+(`dispatch_v2_set_material_stage`). Both presses then run the same step,
+`runDispatchV2OrderConfirmed` (`dispatch_v2_order_confirmed_write.ts`; rules
+in `dispatch_v2_order_confirmed.ts`). It runs after the press's own write has
+succeeded, never throws, and never undoes the press. Its answer comes back on
+the press as `order_confirmed` (null when the step failed outright).
+
+Nothing here sends anything, moves a job stage or status, or touches
+`suppliers`, Xero or GHL. No backfill: orders confirmed before this ships get
+nothing.
+
+### 3e.1 The crew pickup line
+
+One note in the job's crew thread, written by `add_note` with exactly what
+the Dispatch "Add a note" button sends: `event_type 'note'`,
+`detail_json {text, visibility: 'internal_only', sync_to_ghl: false,
+from_ops: true}`. The trade app shows it in the job's notes with the Office
+tag. It is never client-visible and never synced to GHL.
+
+| Case | Line |
+|------|------|
+| Pickup with a day, a branch on the order and a supplier ref | `Stratco pickup Tue 3 Nov · from Neerabup · ref 123456` |
+| Delivery with a day | `R&R delivery Mon 2 Nov` |
+| ASAP order | `Fencing Warehouse pickup ASAP` |
+| Order asked for a day but none is known | `Metroll delivery no date yet` |
+| Day changed later | `Stratco pickup moved to Thu 5 Nov` |
+
+Rules:
+
+1. **Which order.** Accept: the order Accept was for. Stage press: the box's
+   newest sent order (status `sent`), as the board picks it. No sent order:
+   no line (`reason: no_sent_order`).
+2. **The day.** The box's own date, unless it was set before this order was
+   sent (then it belonged to an earlier order); else the date the order
+   email asked for; else ASAP when its Date line says ASAP; else "no date
+   yet". The same rule as the board's current-order date.
+3. **Pickup or delivery** from the order email's opening line
+   (`dispatchV2FulfilmentOf`).
+4. **"from <branch>"** only when the opening line says "pickup / pick up /
+   collect from <place>" (the order builder's "for pickup from Neerabup:").
+   A long phrase is not a branch and is left off.
+5. **"ref <number>"** only when the reply scan found one: the accepted
+   reply's own references first, then those the matcher saved on the order
+   (`dispatch_v2_supplier_order_refs`), then those on the order's other
+   matched replies. A reply still waiting for a person to confirm the guess
+   does not count.
+6. **Once.** `dispatch_v2_order_crew_lines` remembers every line. Pressing
+   again, or Accept after the stage press, with the same day writes nothing.
+   Two presses at once claim the same `(order_id, seq)`; the second is
+   refused by the unique key, so one note is written.
+7. **A new day later** writes one short "moved to" line. A day landing on an
+   ASAP (or no-date) line writes the full line, so the crew gets the branch
+   and ref with the day. A cleared date writes nothing.
+8. **A date typed by hand** (`dispatch_v2_set_delivery_date`) only follows
+   up an order that already has a line. It never writes the first line: a
+   date typed by hand is not, by itself, the order being confirmed.
+9. **A failed note** gives its claim back, so the next press writes it.
+
+Migration: `20261105120000_dispatch_v2_order_crew_lines.sql` (rollback in
+`supabase/rollbacks/`).
+
+### 3e.2 The supplier's documents on the job
+
+On Accept and on the stage press (not on a by-hand date press), every PDF
+on the supplier replies **matched** to the order (`state 'matched'`, the
+order named) is saved to the job (`dispatch_v2_order_documents.ts`).
+
+1. **Matched replies only.** A reply waiting for a person to confirm a best
+   guess carries an `order_id` too, but those are often statements, lead
+   emails or another job's invoice, so they never count.
+2. **Where the PDF comes from.** The email capture reader already keeps each
+   email's file attachments (never inline pictures) in the private bucket
+   `context-email-attachments`, one `context_email_attachments` row each with
+   its SHA-256. A file it had already kept from another email is
+   `skipped_duplicate`: the copy is found by its hash. Nothing calls Outlook.
+3. **PDFs only.** A PDF type, or a `.pdf` name with a generic type (Stratco
+   sends `application/octet-stream`). The bytes must start like a PDF and
+   match the SHA-256 the reader recorded, or nothing is saved.
+4. **Once.** `dispatch_v2_order_documents` is unique on `(job_id,
+   content_sha256)`: the same file is saved to a job once, however many
+   replies carry it. A claim is made first and given back on any failure; a
+   claim older than ten minutes (a run that died) may be taken over.
+5. **Named for what it is**, from the file name, then the subject, then the
+   email's first words (the earliest kind word in each wins):
+   `Stratco order confirmation`, `B&D invoice`, `R&R quote`, else
+   `<Supplier> order document`.
+6. **Saved as** `job_documents` type `material_order`, `visible_to_trades
+   true`, `pdf_url` and `storage_url` the public `job-documents` link, at
+   `<job_id>/dispatch-orders/<hash>-<name>.pdf`. The trade app shows that
+   type (it is not in `TRADE_MONEY_DOC_TYPES`, and no name or path says
+   "work order" or "WO", so the priced work order lock does not hide it);
+   the ops dashboard lists it under Material Documents. One
+   `dispatch_v2_order_document_saved` job_events row per document (audit).
+7. **Later invoices.** After each five-minute reply scan
+   (`dispatch_v2_replies_scan`), the sweep opens every order confirmed in
+   the last 45 days (it has a first crew line) with a matched reply changed
+   in the last 7 days, and saves any new PDF. Newest shows on top (the job's
+   documents read newest first). The answer carries `order_documents
+   {orders, saved, failed}`.
+8. **No backfill.** An order confirmed before this ships has no crew line,
+   so it is never swept. SWP-261382's existing documents and its 12 receipt
+   images are left as they are.
+
+Migration: `20261105121000_dispatch_v2_order_documents.sql` (rollback in
+`supabase/rollbacks/`).
+
+Open points:
+
+- The capture bucket is private (email.md M11: "no new public filing"), and
+  opening its files was held for the owner's word. Shaun's Tweak 1 ruling
+  (4 Nov 2026) is read as that word for supplier PDFs on matched replies of
+  confirmed orders only: those are copied to the job's documents, whose
+  bucket is public by link, as every other job document is.
+- A PDF someone already uploaded by hand (SWP-261382.pdf on SWP-261382) has
+  no hash on file, so it cannot be recognised: the same file can show twice.
+
+### 3e.3 Our own Material order sheet when the supplier sends no PDF
+
+On Accept and on the stage press, when the order's matched replies were read
+and **none** carries a PDF, a one-page "Material order" sheet is made from
+our order email and saved to the job the same way
+(`dispatch_v2_order_sheet_pdf.ts`).
+
+1. **Only when we know there is no PDF.** If the matched replies could not be
+   read, no sheet is made: a failed read is not "no PDF".
+2. **What it says**, and nothing else: MATERIAL ORDER, SecureWorks Group, the
+   supplier, pickup or delivery (`Pickup from Neerabup` when the order body
+   names a branch), the day (`Tue 3 Nov 2026`, `ASAP` or `No date yet`, by
+   the same rule as the crew line), the job number, the supplier's reference
+   when one was found, the day we ordered, and the material lines (the
+   order's saved `order_lines`, else the email body between its opening line
+   and its `Date:` line). No price, client name, phone number, email address
+   or notes. The footer says SecureWorks Group made it from our order email
+   and that the supplier sent no document.
+3. **One page.** A long order shows as many lines as fit, then
+   `and N more lines on the order email`.
+4. **Made the same way as the purchase order PDF** (jsPDF, fixed creation
+   date and file id), so the same order makes the same bytes.
+5. **Once per order.** Saved through the same claim as 3e.2, with `source
+   'order_sheet'` and kind `order_sheet`; a partial unique index
+   (`dispatch_v2_order_documents_one_sheet`) allows one sheet per order, and
+   the writer checks for it before making another. Named `<Supplier>
+   material order`, type `material_order`, crew-visible.
+6. **A supplier PDF that arrives later** is saved by the sweep in 3e.2 as
+   usual. The sheet stays on the job beside it (it is never removed).
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,

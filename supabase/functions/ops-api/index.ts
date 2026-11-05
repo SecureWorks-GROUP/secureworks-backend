@@ -364,6 +364,8 @@ import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 // Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
 import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_write.ts'
+import { runDispatchV2OrderConfirmed, type DispatchOrderConfirmedDeps } from './dispatch_v2_order_confirmed_write.ts'
+import { sweepDispatchV2OrderDocuments } from './dispatch_v2_order_documents.ts'
 import { runDispatchV2PaymentAction } from './dispatch_v2_payment_write.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
@@ -7665,7 +7667,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: repliesActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             store: postgrestRepliesStore(client),
-            sources: postgrestDispatchRepliesSources(client),
+            sources: {
+              ...postgrestDispatchRepliesSources(client),
+              // Accept confirms the order: the crew pickup line and the
+              // supplier's documents (contract section 3e).
+              orderConfirmed: (i) => runDispatchV2OrderConfirmed(client, {
+                orgId: i.orgId,
+                jobId: i.jobId,
+                supplierId: i.supplierId,
+                orderId: i.orderId,
+                trigger: 'accept',
+                operator: i.operator,
+                acceptedEmailId: i.emailId,
+              }, dispatchOrderConfirmedDeps(client)),
+            },
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -7698,6 +7713,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: deliveryDateActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             today: _perthTodayYmd(),
+            // A new day on an order already confirmed: the crew's "moved to"
+            // line (contract section 3e). Never the first line.
+            onDateChanged: (i) => runDispatchV2OrderConfirmed(client, {
+              orgId: DEFAULT_ORG_ID,
+              jobId: i.jobId,
+              supplierId: i.supplierId,
+              trigger: 'date_set',
+              operator: i.operator,
+            }, dispatchOrderConfirmedDeps(client)),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -7731,6 +7755,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: materialStageActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             today: _perthTodayYmd(),
+            // Order confirmed by hand: the crew pickup line and the
+            // supplier's documents (contract section 3e).
+            onOrderConfirmed: (i) => runDispatchV2OrderConfirmed(client, {
+              orgId: DEFAULT_ORG_ID,
+              jobId: i.jobId,
+              supplierId: i.supplierId,
+              trigger: 'stage_set',
+              operator: i.operator,
+            }, dispatchOrderConfirmedDeps(client)),
           }))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
@@ -7777,6 +7810,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // minutes, migration 20261023230100). Server key only. Does nothing while
       // feature flag dispatch_v2_replies_v1 is off. Reads captured mail and
       // writes only the dispatch_v2_* reply tables: no send, no job write.
+      // Then (Tweak 1, contract section 3e.2) it sweeps the orders already
+      // confirmed for new supplier PDFs, such as a later invoice, and saves
+      // them to the job's documents (crew-visible, once each).
       case 'dispatch_v2_replies_scan': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
           return json({ error: 'forbidden: dispatch_v2_replies_scan requires the ops server key', code: 'server_key_required' }, 403)
@@ -7785,13 +7821,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'dispatch_v2_replies_scan is POST only', code: 'method_not_allowed' }, 405)
         }
         try {
-          return json(await runDispatchV2RepliesAction(action, url.searchParams, body, {
+          const scanned: any = await runDispatchV2RepliesAction(action, url.searchParams, body, {
             orgId: DEFAULT_ORG_ID,
             actor: { userId: null, email: null, orgId: null },
             via: 'terminal',
             store: postgrestRepliesStore(client),
             sources: postgrestDispatchRepliesSources(client),
-          }))
+          })
+          if (scanned?.skipped === 'flag_off') return json(scanned)
+          // Never throws; a failed sweep only means no new documents this run.
+          const orderDocuments = await sweepDispatchV2OrderDocuments(client, {
+            orgId: DEFAULT_ORG_ID,
+            now: new Date().toISOString(),
+          })
+          return json({ ...scanned, order_documents: orderDocuments })
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
           throw e
@@ -46412,6 +46455,28 @@ async function addNote(client: any, body: any, isAdmin = false, access?: TradeJo
     ghl_synced: !!ghl_note_id,
     ghl_note_id,
     ghl_push_error,
+  }
+}
+
+// Dispatch v2 Tweak 1 (contract section 3e): what the order-confirmed writer
+// needs from this file. The crew pickup line is written by addNote itself,
+// with exactly what the Dispatch "Add a note" button sends
+// (modules/ops-dispatch.js): internal only, from_ops (the Office tag), never
+// synced to GHL. So the trade app shows it in the job's notes as an Office
+// note, and it never reaches the client.
+function dispatchOrderConfirmedDeps(client: any): DispatchOrderConfirmedDeps {
+  return {
+    writeNote: async ({ jobId, text, userId }) => {
+      const out = await addNote(client, {
+        job_id: jobId,
+        user_id: userId,
+        text,
+        visibility: 'internal_only',
+        sync_to_ghl: false,
+        from_ops: true,
+      }, true)
+      return { id: out?.note?.id ? String(out.note.id) : null }
+    },
   }
 }
 
