@@ -108,7 +108,15 @@ export type SenderIdentity = {
   order_desk: boolean;
 };
 
-export type MatchRung = "thread" | "job_number" | "supplier_ref" | "best_guess";
+// pdf_job_number: Tweak 2 piece 2 (contract section 3f.2), the job number on
+// the supplier's stored PDF. Set by the scan (dispatch_v2_reply_pdf.ts), never
+// by matchEmail, which reads only the email's own words.
+export type MatchRung =
+  | "thread"
+  | "job_number"
+  | "pdf_job_number"
+  | "supplier_ref"
+  | "best_guess";
 
 export type MatchCandidate = {
   order_id: string | null;
@@ -775,6 +783,27 @@ function latestSent(orders: V2Order[]): V2Order {
   )[0];
 }
 
+/** The order on a job that an email from this sender belongs to: the
+ * sender's most recently sent order there, or, when the sender's supplier is
+ * not known, the job's only order. Null when there is none. Used by the
+ * job number rung and by the PDF job number rung (Tweak 2 piece 2). */
+export function senderOrderOnJob(
+  jobId: string,
+  orders: V2Order[],
+  sender: SenderIdentity,
+  approved: ApprovedSupplierSender[],
+): V2Order | null {
+  const jobOrders = orders.filter((o) =>
+    o.job_id === jobId && !GONE_ORDER_STATUSES.has(String(o.status).toLowerCase())
+  );
+  const fromSender = jobOrders.filter((o) =>
+    orderIsFromSender(o, sender, approved)
+  );
+  if (fromSender.length > 0) return latestSent(fromSender);
+  if (!sender.supplier_key && jobOrders.length === 1) return jobOrders[0];
+  return null;
+}
+
 function isSent(order: V2Order): boolean {
   return !!order.sent_at || order.status === "sent";
 }
@@ -898,15 +927,7 @@ export function matchEmail(
         ),
       };
     }
-    const jobOrders = live.filter((o) => o.job_id === job!.job_id);
-    const fromSender = jobOrders.filter((o) =>
-      orderIsFromSender(o, sender, approved)
-    );
-    let order: V2Order | null = null;
-    if (fromSender.length > 0) order = latestSent(fromSender);
-    else if (!sender.supplier_key && jobOrders.length === 1) {
-      order = jobOrders[0];
-    }
+    const order = senderOrderOnJob(job.job_id, inputs.orders, sender, approved);
     return {
       state: "matched",
       rung: "job_number",
@@ -1024,6 +1045,8 @@ export function rungLabel(rung: string | null): string | null {
       return "Same thread";
     case "job_number":
       return "Job number in email";
+    case "pdf_job_number":
+      return "Job number in the PDF";
     case "supplier_ref":
       return "Supplier's own number";
     case "best_guess":

@@ -18,6 +18,7 @@ import type {
   OutlookOrderStore,
   RecordOutlookOrderInput,
 } from "./dispatch_v2_outlook_order.ts";
+import type { ReplyPdfRead } from "./dispatch_v2_reply_pdf.ts";
 import {
   capturedEmailOf,
   type EmailRow,
@@ -146,6 +147,8 @@ type Captured = {
   history_tier?: string;
   sender_kind?: string;
   provider?: string;
+  // The capture reader kept attachments for it (Tweak 2 piece 2).
+  attachments?: boolean;
 };
 
 function eventRow(c: Captured) {
@@ -164,7 +167,7 @@ function eventRow(c: Captured) {
       body: `Subject: ${c.subject}\n\n${c.body}`,
       conversation_id: c.conv ?? null,
       sender_kind: c.sender_kind ?? "supplier",
-      has_attachments: false,
+      has_attachments: c.attachments ?? false,
       attachments: [],
     },
     metadata: {
@@ -1383,4 +1386,204 @@ Deno.test("outlook order: without the Outlook step, or with nothing found, the r
   assertEquals([row.state, row.rung, row.order_id], ["matched", "job_number", null]);
   assertEquals([result.outlook_orders, result.outlook_tied], [0, 0]);
   assertEquals(outlook.calls.length, 0);
+});
+
+// ── Tweak 2 piece 2: the job number inside the supplier's PDF ────────────
+// (dispatch_v2_reply_pdf.ts, contract section 3f.2)
+
+/** What each email's stored PDFs say, by provider message id, and every
+ * email the scan asked about. */
+function pdfReader(byMessage: Record<string, ReplyPdfRead>) {
+  const asked: string[] = [];
+  return {
+    asked,
+    jobNumbersInPdfs(id: string) {
+      asked.push(id);
+      return Promise.resolve(
+        byMessage[id] ?? { read: "none", job_numbers: [], files: [] },
+      );
+    },
+  };
+}
+
+function pdfOk(job_numbers: string[], files = ["SO-240272.pdf"]): ReplyPdfRead {
+  return { read: "ok", job_numbers, files };
+}
+
+function withPdf(seq: number): Captured {
+  return { ...MAIL.find((m) => m.seq === seq)!, attachments: true };
+}
+
+Deno.test("pdf job number: an email its words cannot place is matched by the one job in its PDF", async () => {
+  const t = setup();
+  // Stratco, two open orders, words name no job: the PDF says SWP-26701.
+  t.ctx.pdfs = pdfReader({
+    "email:m105@supplier.example": pdfOk(["SWP-26701"], [
+      "Stratco-Order-46102.pdf",
+    ]),
+  });
+  t.store.events = [withPdf(105)].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const result = await t.run("dispatch_v2_replies_scan");
+  const e = t.store.emails[0];
+  assertEquals([e.state, e.rung, e.job_id, e.order_id], [
+    "matched",
+    "pdf_job_number",
+    J2,
+    O2, // Stratco's order on that job, not CMI's
+  ]);
+  assertEquals(
+    e.match_reason,
+    "Job number SWP-26701 in the attached PDF (Stratco-Order-46102.pdf)",
+  );
+  assertEquals(e.candidates, []);
+  assertEquals([result.pdf_read, result.pdf_matched, result.matched], [
+    1,
+    1,
+    1,
+  ]);
+  // Shown in plain words.
+  const shown = await t.run("dispatch_v2_replies", {}, { job_id: J2 });
+  const row = shown.emails.find((x: any) => x.id === e.id);
+  assertEquals(row.rung_label, "Job number in the PDF");
+});
+
+Deno.test("pdf job number: a job number in the PDF beats a best guess", async () => {
+  const t = setup();
+  // CMI's email is a best guess at its one open order (J2); its PDF names J1,
+  // where CMI has no order: matched to that job alone.
+  t.ctx.pdfs = pdfReader({
+    "email:m104@supplier.example": pdfOk(["SWF-261387"]),
+  });
+  t.store.events = [withPdf(104)].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  await t.run("dispatch_v2_replies_scan");
+  const e = t.store.emails[0];
+  assertEquals([e.state, e.rung, e.job_id, e.order_id], [
+    "matched",
+    "pdf_job_number",
+    J1,
+    null,
+  ]);
+});
+
+Deno.test("pdf job number: none, several, not ours or unreadable: left as it was", async () => {
+  const cases: [string, ReplyPdfRead][] = [
+    ["no job number", pdfOk([])],
+    ["two of our jobs (a statement)", pdfOk(["SWF-261387", "SWP-26701"])],
+    ["not one of our jobs", pdfOk(["SWF-999999"])],
+    ["could not be read", { read: "failed", job_numbers: [], files: [] }],
+  ];
+  for (const [label, read] of cases) {
+    const t = setup();
+    t.ctx.pdfs = pdfReader({ "email:m105@supplier.example": read });
+    t.store.events = [withPdf(105)].map(eventRow);
+    t.store.scan.cursor_sequence = 100;
+    const result = await t.run("dispatch_v2_replies_scan");
+    const e = t.store.emails[0];
+    assertEquals([e.state, e.rung, e.job_id], ["unmatched", null, null], label);
+    assertEquals(result.pdf_matched, 0, label);
+  }
+  // A best guess stays a best guess when its PDF names two jobs.
+  const g = setup();
+  g.ctx.pdfs = pdfReader({
+    "email:m104@supplier.example": pdfOk(["SWF-261387", "SWR-261499"]),
+  });
+  g.store.events = [withPdf(104)].map(eventRow);
+  g.store.scan.cursor_sequence = 100;
+  await g.run("dispatch_v2_replies_scan");
+  assertEquals([g.store.emails[0].state, g.store.emails[0].rung], [
+    "needs_confirmation",
+    "best_guess",
+  ]);
+});
+
+Deno.test("pdf job number: not read with no attachment, when the words matched, or when the words name jobs", async () => {
+  const t = setup();
+  const pdfs = pdfReader({});
+  t.ctx.pdfs = pdfs;
+  t.store.events = [
+    MAIL.find((m) => m.seq === 105)!, // no attachment
+    withPdf(101), // same thread
+    withPdf(103), // job number in the words
+    {
+      // Its words name two of our jobs: unmatched, and the PDF is not read.
+      seq: 111,
+      from: "tradewa@stratcowa.com.au",
+      subject: "Orders SWF-261387 and SWP-26701",
+      body: "See attached.",
+      attachments: true,
+    },
+  ].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const r = await t.run("dispatch_v2_replies_scan");
+  assertEquals(pdfs.asked, []);
+  assertEquals(r.pdf_read, 0);
+});
+
+Deno.test("pdf job number: at most ten emails' PDFs a run", async () => {
+  const t = setup();
+  const byMessage: Record<string, ReplyPdfRead> = {};
+  const events: Captured[] = [];
+  for (let i = 0; i < 12; i++) {
+    const seq = 200 + i;
+    byMessage[`email:m${seq}@supplier.example`] = pdfOk(["SWP-26701"]);
+    events.push({
+      seq,
+      from: "tradewa@stratcowa.com.au",
+      subject: `Order update ${i}`,
+      body: "Your order is in production.",
+      attachments: true,
+    });
+  }
+  const pdfs = pdfReader(byMessage);
+  t.ctx.pdfs = pdfs;
+  t.store.events = events.map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const r = await t.run("dispatch_v2_replies_scan");
+  assertEquals([pdfs.asked.length, r.pdf_read, r.pdf_matched], [10, 10, 10]);
+  assertEquals(
+    t.store.emails.filter((e) => e.rung === "pdf_job_number").length,
+    10,
+  );
+});
+
+Deno.test("pdf job number: a reader that throws never stops the scan", async () => {
+  const t = setup();
+  t.ctx.pdfs = {
+    jobNumbersInPdfs: () => Promise.reject(new Error("storage down")),
+  };
+  t.store.events = [withPdf(105)].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const r = await t.run("dispatch_v2_replies_scan");
+  assertEquals(r.ok, true);
+  assertEquals(t.store.emails[0].state, "unmatched");
+});
+
+Deno.test("pdf job number: with no Dispatch order there, the order Shaun sent from Outlook is found", async () => {
+  const t = setup();
+  t.ctx.outlook = outlookStore(t.sources);
+  // Fencing Warehouse's confirmation: no job number in the words, only on
+  // its PDF ("Customer Order 11041784", "Your Ref SWF-261387").
+  t.ctx.pdfs = pdfReader({
+    "email:m120@supplier.example": pdfOk(["SWF-261387"], ["CO11041784.pdf"]),
+  });
+  t.store.events = [{
+    seq: 120,
+    from: "sales@fencingwarehousewa.au",
+    subject: "Fencing Warehouse WA - Customer Order 11041784",
+    body: "Please find your order confirmation attached.",
+    attachments: true,
+  }].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const r = await t.run("dispatch_v2_replies_scan");
+  const e = t.store.emails[0];
+  assertEquals([e.state, e.rung, e.job_id], ["matched", "pdf_job_number", J1]);
+  assertEquals(e.order_id, "aaaaaaa9-0000-4000-8000-000000000009");
+  assertEquals([r.pdf_matched, r.outlook_orders, r.outlook_tied], [1, 1, 1]);
+  assert(
+    String(e.match_reason).startsWith(
+      "Job number SWF-261387 in the attached PDF (CO11041784.pdf). Tied to the order sent from Outlook",
+    ),
+  );
 });

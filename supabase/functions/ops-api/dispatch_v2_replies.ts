@@ -35,6 +35,7 @@ import {
   type JobHint,
   jobNumbersIn,
   matchEmail,
+  type MatchResult,
   normaliseJobNumber,
   perthDay,
   readDeliveryDate,
@@ -62,6 +63,12 @@ import {
   outlookTieReason,
   recordOutlookOrderForReply,
 } from "./dispatch_v2_outlook_order.ts";
+import {
+  PDF_EMAILS_PER_RUN,
+  pdfMatch,
+  pickPdfJob,
+  type ReplyPdfReader,
+} from "./dispatch_v2_reply_pdf.ts";
 import { emailProviderKey } from "../_shared/evidence/outlook_mail.ts";
 
 export const DISPATCH_V2_REPLIES_READ_ACTIONS = [
@@ -91,6 +98,10 @@ export type DispatchV2RepliesContext = {
   // The scan only; without it a reply matched by job number alone stays as
   // it is.
   outlook?: OutlookOrderStore;
+  // Tweak 2 piece 2 (contract section 3f.2): the job number in a supplier's
+  // stored PDF. The scan only; without it an email the words cannot place
+  // stays as it is.
+  pdfs?: ReplyPdfReader;
   now?: () => string;
 };
 
@@ -453,6 +464,10 @@ type ScanCounts = {
   // Tweak 2: orders recorded from Outlook, and replies tied to one.
   outlook_orders: number;
   outlook_tied: number;
+  // Tweak 2 piece 2: emails whose stored PDFs were read, and those the job
+  // number in a PDF matched.
+  pdf_read: number;
+  pdf_matched: number;
 };
 
 function zeroCounts(): ScanCounts {
@@ -470,6 +485,8 @@ function zeroCounts(): ScanCounts {
     refs_linked: 0,
     outlook_orders: 0,
     outlook_tied: 0,
+    pdf_read: 0,
+    pdf_matched: 0,
   };
 }
 
@@ -607,8 +624,9 @@ export async function scanDispatchV2Replies(
     );
     for (const j of numberedJobs) jobsById.set(j.job_id, j);
 
+    let pdfBudget = PDF_EMAILS_PER_RUN;
     for (const { row, sender } of work) {
-      const result = matchEmail(
+      let result: MatchResult = matchEmail(
         {
           email: row,
           sender,
@@ -622,6 +640,62 @@ export async function scanDispatchV2Replies(
         approved,
         now,
       );
+
+      // Tweak 2 piece 2 (contract section 3f.2): not matched by its words,
+      // and its words name none of our jobs. Read the PDFs the capture kept
+      // for it: exactly one of our jobs there matches it to that job (a job
+      // number beats a best guess). None, several, or a file that cannot be
+      // read: it keeps what its words gave it.
+      if (
+        result.state !== "matched" && ctx.pdfs && row.has_attachments &&
+        row.provider_message_id && pdfBudget > 0 &&
+        !jobNumbersIn(row.subject, row.body).some((n) => jobsByNumber.has(n))
+      ) {
+        pdfBudget--;
+        counts.pdf_read++;
+        try {
+          const pdf = await ctx.pdfs.jobNumbersInPdfs(row.provider_message_id);
+          const unknown = pdf.job_numbers.filter((n) => !jobsByNumber.has(n));
+          if (unknown.length > 0) {
+            for (const j of await store.jobsByNumbers(orgId, unknown)) {
+              jobsByNumber.set(normaliseJobNumber(j.job_number), j);
+              jobsById.set(j.job_id, j);
+            }
+          }
+          const pick = pickPdfJob(pdf.job_numbers, jobsByNumber);
+          if (pick.kind === "one") {
+            // The job's orders, when the run's list does not hold them (a
+            // job no email in this run named, its order sent long ago).
+            if (!orders.some((o) => o.job_id === pick.job.job_id)) {
+              const more = await sources.listOrders(orgId, {
+                sentSince: now,
+                jobIds: [pick.job.job_id],
+              });
+              for (const o of more.rows) {
+                if (orderById.has(o.order_id)) continue;
+                orders.push(o);
+                orderById.set(o.order_id, o);
+                orderConversationIds.set(
+                  o.order_id,
+                  o.sent_conversation_id ? [o.sent_conversation_id] : [],
+                );
+              }
+            }
+            result = pdfMatch(
+              pick.job,
+              pick.job_number,
+              orders,
+              sender,
+              approved,
+              pdf.files.length === 1 ? pdf.files[0] : null,
+            );
+            counts.pdf_matched++;
+          }
+        } catch (e) {
+          console.error("[dispatch_v2_replies] pdf job number read failed:", e);
+        }
+      }
+
       const delivery = readDeliveryDate(row.body, row.received_at);
       const placed = result.state !== "unmatched";
       const inserted = await store.insertEmail({
@@ -645,8 +719,8 @@ export async function scanDispatchV2Replies(
         state: result.state,
         rung: result.rung,
         match_reason: result.reason,
-        job_id: placed ? result.job_id : null,
-        order_id: placed ? result.order_id : null,
+        job_id: result.state !== "unmatched" ? result.job_id : null,
+        order_id: result.state !== "unmatched" ? result.order_id : null,
         candidates: result.state === "matched" ? [] : result.candidates,
         rejected_order_ids: [],
         decision: null,
@@ -668,12 +742,15 @@ export async function scanDispatchV2Replies(
         : null;
 
       // Tweak 2 piece 1 (contract section 3f.1): matched by the job number
-      // only, with no Dispatch order for this supplier on the job. If Shaun
+      // only (in its words, or in its PDF: piece 2), with no Dispatch order
+      // for this supplier on the job. If Shaun
       // sent the order from Outlook, record it as a sent order and tie the
       // reply to it. Nothing is sent; when the sent email cannot be found or
       // read, the reply stays matched to the job only.
       if (
-        !order && result.rung === "job_number" && ctx.outlook &&
+        !order &&
+        (result.rung === "job_number" || result.rung === "pdf_job_number") &&
+        ctx.outlook &&
         sender.supplier_key
       ) {
         const job = jobsById.get(result.job_id);

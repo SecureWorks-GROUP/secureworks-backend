@@ -353,6 +353,7 @@ import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
 import { runDispatchV2RepliesAction } from './dispatch_v2_replies.ts'
 import { postgrestOutlookOrderStore } from './dispatch_v2_outlook_order.ts'
+import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
 // Dispatch v2 slices 5 and 6: draft list, supplier boxes and supplier order
@@ -7832,6 +7833,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // alone to a job with no Dispatch order for that supplier records
             // the order Shaun sent from Outlook (never sends anything).
             outlook: postgrestOutlookOrderStore(client),
+            // Tweak 2 (contract section 3f.2): an email its words cannot place
+            // is matched by the one job number in its stored PDFs (read only).
+            pdfs: postgrestReplyPdfReader(client),
           })
           if (scanned?.skipped === 'flag_off') return json(scanned)
           // Never throws; a failed sweep only means no new documents this run.

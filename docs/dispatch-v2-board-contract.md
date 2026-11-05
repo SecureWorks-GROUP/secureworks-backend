@@ -1317,8 +1317,9 @@ Automatic, no tap (Shaun's ruling, 5 Nov 2026). Rules in
 `dispatch_v2_record_outlook_order` (migration
 `20261105170000_dispatch_v2_outlook_orders.sql`).
 
-1. **When.** A supplier reply is matched by the job number rung with no order
-   (`state 'matched'`, `rung 'job_number'`, `order_id` null), the sender is on
+1. **When.** A supplier reply is matched by a job number rung with no order
+   (`state 'matched'`, `rung 'job_number'` or `'pdf_job_number'` (3f.2),
+   `order_id` null), the sender is on
    the approved order email list, and the job has no order row for that
    supplier (any of the supplier's linked Xero contacts, any status but
    `discarded`: a draft, a Dispatch send or an earlier Outlook order all
@@ -1378,6 +1379,46 @@ Automatic, no tap (Shaun's ruling, 5 Nov 2026). Rules in
     approved entry, a failed read or write: the reply stays matched to the
     job only, exactly as before, and the scan carries on. The scan's answer
     counts `outlook_orders` (recorded) and `outlook_tied` (replies tied).
+
+### 3f.2 The job number inside the supplier's PDF
+
+Suppliers often put our job number only on the PDF they attach (an order
+confirmation, a quote, an invoice), not in the email words. Rules in
+`dispatch_v2_reply_pdf.ts`, called from the scan; the rung is allowed by
+migration `20261105171000_dispatch_v2_reply_pdf_rung.sql`.
+
+1. **When.** A supplier email the text rungs did not match (`unmatched`, or a
+   `best_guess` waiting for a person), whose words name none of our existing
+   jobs (an email whose words name two of our jobs stays in the tray as
+   before), and that the capture reader marked as having attachments.
+2. **Which files.** Only the copies the capture reader already stored:
+   `context_email_attachments` rows for the email's provider message id with
+   status `stored`, or `skipped_duplicate` with the stored copy found by its
+   SHA-256 (the same files Tweak 1 saves to the job). A PDF by type, or a
+   `.pdf` name with a generic type, and the bytes must start like a PDF.
+   Outlook is never called.
+3. **What is read.** The PDF's text (the shared reader: 5 MB, 25 pages,
+   40,000 characters), and in it our job numbers as a PDF prints them:
+   `SWF`, `SWP` or `SWR`, an optional hyphen or space, 4 to 7 digits, upper
+   case (`SWF-261586`, `SWF261586`, `YourRefSWF-261586`). Never `SWMS`, other
+   prefixes, or a number that is part of a longer code.
+4. **Exactly one job.** The numbers found across the email's PDFs are looked
+   up as existing jobs (numbers that are not our jobs are ignored). Exactly
+   one job: the email is matched to it, `rung 'pdf_job_number'`, reason `Job
+   number SWF-261586 in the attached PDF (CO11041784.pdf)`, shown as `Job
+   number in the PDF`. The order is the sender's latest sent order on that
+   job (the job number rung's choice); with none, 3f.1 looks for the order
+   Shaun sent from Outlook. A job number in the PDF beats a best guess.
+5. **None, or more than one** (a statement listing several jobs), a file that
+   cannot be read, a failed read: the email keeps what its words gave it
+   (tray or best guess) and the scan carries on. Nothing is retried.
+6. **Bounded.** At most 3 PDFs an email and 10 emails a scan run; an email
+   past the run's 10 keeps what its words gave it. The scan's answer counts
+   `pdf_read` and `pdf_matched`.
+7. **Known gap.** A file the reader had already kept from another email is
+   recorded for this one up to about six minutes after capture. If that row
+   is not there yet when the scan reads the email (two minutes after
+   capture), that file is not read for it.
 
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
