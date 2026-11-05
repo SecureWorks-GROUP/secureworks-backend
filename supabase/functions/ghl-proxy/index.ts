@@ -2,6 +2,7 @@
 import { opportunityFieldInputs, readOpportunityFieldDefs } from './opportunity_custom_fields.ts'
 import { isMiscScopeSave, miscScopeSaveRefusal } from './misc_scope_save.ts'
 import { readCustomerScopeJobs, customerJobsStore, CustomerScopeJobsError } from './customer_scope_jobs.ts'
+import { createMiscDraft, miscJobStore, MiscJobCreateError } from './misc_job_create.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Proxy Edge Function
@@ -2535,6 +2536,22 @@ serve(async (req: Request) => {
           communication_sent: false,
         }))
         return json({ error: typed.message, code: typed.code, details: typed.details || null }, typed.status)
+      }
+    }
+
+    // Misc walk-up creation is a local jobs-row write only. Its permanent
+    // request UUID is also the row id, so retries cannot insert a second job.
+    if (action === 'create_misc_draft') {
+      if (req.method !== 'POST') return json({ error: 'POST required', code: 'method_not_allowed' }, 405)
+      let body: unknown
+      try { body = await req.json() } catch { return json({ error: 'Request JSON required', code: 'invalid_misc_create' }, 400) }
+      try {
+        return json(await createMiscDraft(body, {
+          mode: credential.mode, userId: authUserId, orgId: authProfile?.org_id ?? null, role: authProfile?.role ?? null,
+        }, miscJobStore(createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY))))
+      } catch (error) {
+        if (error instanceof MiscJobCreateError) return json({ error: error.message, code: error.code }, error.status)
+        return json({ error: 'The create outcome is unknown. Retry the same request.', code: 'misc_create_unconfirmed' }, 503)
       }
     }
 
