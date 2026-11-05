@@ -57,6 +57,11 @@ import {
   SourceReadError,
 } from "./dispatch_v2_replies_sources.ts";
 import { dispatchV2MentionsPickup } from "./dispatch_v2_emails.ts";
+import {
+  type OutlookOrderStore,
+  outlookTieReason,
+  recordOutlookOrderForReply,
+} from "./dispatch_v2_outlook_order.ts";
 import { emailProviderKey } from "../_shared/evidence/outlook_mail.ts";
 
 export const DISPATCH_V2_REPLIES_READ_ACTIONS = [
@@ -82,6 +87,10 @@ export type DispatchV2RepliesContext = {
   via: "screen" | "terminal";
   store: RepliesStore;
   sources: DispatchRepliesSources;
+  // Tweak 2 piece 1 (contract section 3f.1): orders Shaun sent from Outlook.
+  // The scan only; without it a reply matched by job number alone stays as
+  // it is.
+  outlook?: OutlookOrderStore;
   now?: () => string;
 };
 
@@ -441,6 +450,9 @@ type ScanCounts = {
   already_stored: number;
   suggestions: number;
   refs_linked: number;
+  // Tweak 2: orders recorded from Outlook, and replies tied to one.
+  outlook_orders: number;
+  outlook_tied: number;
 };
 
 function zeroCounts(): ScanCounts {
@@ -456,6 +468,8 @@ function zeroCounts(): ScanCounts {
     already_stored: 0,
     suggestions: 0,
     refs_linked: 0,
+    outlook_orders: 0,
+    outlook_tied: 0,
   };
 }
 
@@ -648,20 +662,73 @@ export async function scanDispatchV2Replies(
       counts.stored++;
       counts[result.state]++;
       if (result.state !== "matched") continue;
-      const order = result.order_id
+      let email = inserted;
+      let order = result.order_id
         ? orderById.get(result.order_id) ?? null
         : null;
+
+      // Tweak 2 piece 1 (contract section 3f.1): matched by the job number
+      // only, with no Dispatch order for this supplier on the job. If Shaun
+      // sent the order from Outlook, record it as a sent order and tie the
+      // reply to it. Nothing is sent; when the sent email cannot be found or
+      // read, the reply stays matched to the job only.
+      if (
+        !order && result.rung === "job_number" && ctx.outlook &&
+        sender.supplier_key
+      ) {
+        const job = jobsById.get(result.job_id);
+        const supplier = approved.find((a) =>
+          a.supplier_key === sender.supplier_key
+        ) ?? null;
+        const outcome = job
+          ? await recordOutlookOrderForReply(ctx.outlook, {
+            orgId,
+            reply: {
+              id: inserted.id,
+              conversation_id: inserted.conversation_id,
+              received_at: inserted.received_at,
+            },
+            job,
+            supplier,
+          })
+          : null;
+        if (outcome?.order) {
+          const tied = await store.updateEmail(orgId, inserted.id, "matched", {
+            order_id: outcome.order.order_id,
+            match_reason: `${inserted.match_reason ?? "Job number"}. ${
+              outlookTieReason(outcome.order)
+            }`,
+            updated_at: now,
+          });
+          if (outcome.recorded) counts.outlook_orders++;
+          if (tied) {
+            email = tied;
+            order = outcome.order;
+            counts.outlook_tied++;
+            // Later emails in this run match it by thread.
+            if (!orderById.has(order.order_id)) {
+              orders.push(order);
+              orderById.set(order.order_id, order);
+              orderConversationIds.set(
+                order.order_id,
+                order.sent_conversation_id ? [order.sent_conversation_id] : [],
+              );
+            }
+          }
+        }
+      }
+
       if (order) {
         counts.refs_linked += (await linkRefs(
           ctx,
-          inserted,
+          email,
           order,
           "certain_match",
           null,
           refLinks,
         )).length;
       }
-      if (await suggestFor(ctx, inserted, order, now)) counts.suggestions++;
+      if (await suggestFor(ctx, email, order, now)) counts.suggestions++;
     }
   }
 

@@ -173,7 +173,7 @@ export function domainOf(address: string): string {
 
 // Shared mail services: a domain here never identifies a supplier by itself,
 // only the exact address does.
-const SHARED_MAIL_DOMAINS = new Set([
+export const SHARED_MAIL_DOMAINS = new Set([
   "gmail.com",
   "googlemail.com",
   "outlook.com",
