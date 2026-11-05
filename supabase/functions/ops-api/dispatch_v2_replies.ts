@@ -34,8 +34,10 @@ import {
   isAutoReply,
   type JobHint,
   jobNumbersIn,
+  learnableSupplierRefs,
   matchEmail,
   type MatchResult,
+  type RefLinkHint,
   normaliseJobNumber,
   perthDay,
   readDeliveryDate,
@@ -278,38 +280,50 @@ async function projectOne(ctx: DispatchV2RepliesContext, row: EmailRow) {
 
 // ── Shared steps ──────────────────────────────────────────────────────────
 
-/** Link the email's supplier numbers to an order, skipping any number that
- * is already linked to a different order (one number, one order). */
+/** Remember the email's supplier numbers against the job and order it was
+ * tied to (Tweak 2 piece 3, contract section 3f.3). `target.order_id` null:
+ * the job had no order for it, so the number is kept against the job alone.
+ *
+ * Only numbers worth learning (learnableSupplierRefs: no short numbers,
+ * never our own job number). A number already seen on this job (on any of
+ * its orders, or on the job alone) is left as it is. A number seen on a
+ * different job is linked here too, so the matching knows it is on two jobs
+ * and stops using it. */
 async function linkRefs(
   ctx: DispatchV2RepliesContext,
   email: EmailRow,
-  order: { order_id: string; job_id: string; supplier_name: string | null },
+  target: {
+    order_id: string | null;
+    job_id: string;
+    supplier_name: string | null;
+    job_number?: string | null;
+  },
   via: RefLinkRow["linked_via"],
   operator: Operator | null,
-  known?: Map<string, { order_id: string; supplier_key: string | null }[]>,
+  known?: Map<string, RefLinkHint[]>,
 ): Promise<string[]> {
-  // The table keeps 3 to 24 characters, upper case, no spaces.
-  const refs = (email.supplier_refs ?? []).filter((r) =>
-    /^[A-Z0-9/-]{3,24}$/.test(r)
-  );
+  const refs = learnableSupplierRefs(email.supplier_refs ?? [], [
+    ...(email.job_numbers ?? []),
+    target.job_number,
+  ]);
   if (refs.length === 0) return [];
-  const existing = known ??
-    new Map<string, { order_id: string; supplier_key: string | null }[]>();
+  const existing = known ?? new Map<string, RefLinkHint[]>();
   if (!known) {
     for (const l of await ctx.store.refLinks(ctx.orgId, refs)) {
       existing.set(l.ref, [...(existing.get(l.ref) ?? []), l]);
     }
   }
-  // A number already linked (to this order or another) is left as it is.
-  const fresh = refs.filter((ref) => (existing.get(ref) ?? []).length === 0);
+  const fresh = refs.filter((ref) =>
+    !(existing.get(ref) ?? []).some((l) => l.job_id === target.job_id)
+  );
   if (fresh.length === 0) return [];
   await ctx.store.insertRefLinks(
     ctx.orgId,
     fresh.map((ref) => ({
-      order_id: order.order_id,
-      job_id: order.job_id,
+      order_id: target.order_id,
+      job_id: target.job_id,
       supplier_key: email.supplier_key,
-      supplier_name: order.supplier_name ?? email.supplier_name,
+      supplier_name: target.supplier_name ?? email.supplier_name,
       ref,
       source_email_id: email.id,
       linked_via: via,
@@ -320,7 +334,11 @@ async function linkRefs(
   for (const ref of fresh) {
     existing.set(ref, [
       ...(existing.get(ref) ?? []),
-      { order_id: order.order_id, supplier_key: email.supplier_key },
+      {
+        order_id: target.order_id,
+        job_id: target.job_id,
+        supplier_key: email.supplier_key,
+      },
     ]);
   }
   return fresh;
@@ -611,16 +629,18 @@ export async function scanDispatchV2Replies(
         work.flatMap((w) => supplierRefsIn(w.row.subject, w.row.body)),
       ),
     ];
-    const refLinks = new Map<
-      string,
-      { order_id: string; supplier_key: string | null }[]
-    >();
+    const refLinks = new Map<string, RefLinkHint[]>();
     for (const l of await store.refLinks(orgId, refs)) {
       refLinks.set(l.ref, [...(refLinks.get(l.ref) ?? []), l]);
     }
+    // The jobs of the orders, and of numbers seen on a job alone (piece 3).
+    const linkJobIds = [...refLinks.values()].flat().map((l) => l.job_id)
+      .filter((id): id is string => !!id);
     const jobsById = new Map(
-      (await store.jobsByIds(orgId, orders.map((o) => o.job_id)))
-        .map((j) => [j.job_id, j]),
+      (await store.jobsByIds(orgId, [
+        ...orders.map((o) => o.job_id),
+        ...linkJobIds,
+      ])).map((j) => [j.job_id, j]),
     );
     for (const j of numberedJobs) jobsById.set(j.job_id, j);
 
@@ -795,11 +815,19 @@ export async function scanDispatchV2Replies(
         }
       }
 
-      if (order) {
+      // Tweak 2 piece 3 (contract section 3f.3): the supplier's own numbers
+      // in it are remembered against its order, or against the job alone
+      // when it has no order, so a later email quoting them matches.
+      if (email.job_id) {
         counts.refs_linked += (await linkRefs(
           ctx,
           email,
-          order,
+          {
+            order_id: order?.order_id ?? null,
+            job_id: email.job_id,
+            supplier_name: order?.supplier_name ?? null,
+            job_number: jobsById.get(email.job_id)?.job_number ?? null,
+          },
           "certain_match",
           null,
           refLinks,
@@ -925,9 +953,14 @@ export async function assignReply(body: any, ctx: DispatchV2RepliesContext) {
   if (!updated) {
     refuse(409, "email_changed", "Someone else changed this email first");
   }
-  const linked = order
-    ? await linkRefs(ctx, updated, order, "assigned", operator)
-    : [];
+  // Tweak 2 piece 3: with no order picked, the numbers are remembered
+  // against the job alone.
+  const linked = await linkRefs(ctx, updated, {
+    order_id: order?.order_id ?? null,
+    job_id: jobId,
+    supplier_name: order?.supplier_name ?? null,
+    job_number: job.job_number,
+  }, "assigned", operator);
   const suggestion = await suggestFor(ctx, updated, order, now);
   await ctx.store.logJobEvent(
     jobId,

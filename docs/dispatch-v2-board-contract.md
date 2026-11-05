@@ -1420,6 +1420,54 @@ migration `20261105171000_dispatch_v2_reply_pdf_rung.sql`.
    is not there yet when the scan reads the email (two minutes after
    capture), that file is not read for it.
 
+### 3f.3 Learning the supplier's own order number
+
+Suppliers quote their own numbers: Fencing Warehouse `Customer Order
+11041784`, CMI `Sales Order 240272`, Metroll `SO#1056395`, Oxworks `W2SO
+92250`, a supplier's Xero `INV-91320`. Rules in `dispatch_v2_replies_rules.ts`
+(`supplierRefsIn`, `learnableSupplierRefs`, rung 3 of `matchEmail`) and
+`linkRefs` in `dispatch_v2_replies.ts`; the table is
+`dispatch_v2_supplier_order_refs` (migration
+`20261105172000_dispatch_v2_job_supplier_refs.sql` lets a number be kept
+against a job alone).
+
+1. **What is read.** The labelled numbers the reply scan already read
+   (`Sales Order`, `Order`, `SO`, `Invoice`, `INV`, `Quote`, `Docket` ...),
+   plus `Customer Order <number>` (Fencing Warehouse's order number; `Customer
+   No` and `Your ref` are still never read) and `W2SO <number>` (kept as
+   `W2SO92250`).
+2. **When it is learned.** Whenever an email is tied to one of our jobs: the
+   scan's matches (thread, job number, PDF job number, supplier number), a
+   confirmed best guess, and a hand pick. Against the order when the email
+   has one; against the job alone (`order_id` null) when it has none (for
+   example a reply matched by the job number with no order for that
+   supplier, or picked by hand without an order).
+3. **Never learned.** A number with fewer than 5 digits (`7781`, `CSH003`: too
+   likely an account code), one of our own job numbers written without its
+   letters (`261586` on SWF-261586, or any job number the email names), and
+   anything the table cannot hold (3 to 24 characters, upper case, no
+   spaces).
+4. **Once per job.** A number already kept on that job (on any of its orders
+   or on the job alone) is left as it is. A number seen on a different job is
+   kept there too, so the matching can see it is on two jobs.
+5. **Matching by it (rung 3).** A later email from the same supplier quoting
+   a learned number, with no thread or job number match first: all its
+   numbers' links on one job only, and one live order among them: that order
+   (as before). Kept on the job alone: matched to the job, and to the
+   sender's latest order on it now when there is one; reason `Supplier's own
+   number already seen on this job`. Two orders on the one job: the tray with
+   both (as before).
+6. **A number seen on two jobs is not used**, and a short number already in
+   the table (from before this change) is not used either: the email goes on
+   to the best guess, or the tray.
+7. **Not moved later.** A number kept against a job alone stays so when an
+   order is made later; rung 3 then picks the sender's order on that job.
+8. **Who else reads the table.** The bill links (`dispatch_order_bill_links`
+   rules) and Tweak 1 read only links with an order id, so a job-alone
+   number never ties a Xero bill. A number now kept on two orders on two
+   jobs makes a bill quoting it `several_order_numbers` (left for a person),
+   never a guess.
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,

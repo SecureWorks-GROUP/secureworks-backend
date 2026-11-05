@@ -272,7 +272,10 @@ class MemoryStore implements RepliesStore {
   insertRefLinks(org: string, rows: RefLinkRow[]) {
     for (const r of rows) {
       if (
-        !this.refs.some((x) => x.order_id === r.order_id && x.ref === r.ref)
+        // The key from 20261105172000: job, order (or none) and number.
+        !this.refs.some((x) =>
+          x.job_id === r.job_id && x.order_id === r.order_id && x.ref === r.ref
+        )
       ) {
         this.refs.push({ ...r, org_id: org });
       }
@@ -1585,5 +1588,127 @@ Deno.test("pdf job number: with no Dispatch order there, the order Shaun sent fr
     String(e.match_reason).startsWith(
       "Job number SWF-261387 in the attached PDF (CO11041784.pdf). Tied to the order sent from Outlook",
     ),
+  );
+});
+
+// ── Tweak 2 piece 3: the supplier's own order number, learned ─────────────
+// (contract section 3f.3)
+
+/** A Fencing Warehouse email (FW has no Dispatch order in the fixtures). */
+function fwMail(seq: number, subject: string, body = ""): Captured {
+  return { seq, from: "sales@fencingwarehousewa.au", subject, body };
+}
+
+async function scan(t: ReturnType<typeof setup>, events: Captured[]) {
+  t.store.events.push(...events.map(eventRow));
+  return await t.run("dispatch_v2_replies_scan");
+}
+
+Deno.test("supplier number: learned on a job with no order, then a later email quoting it matches that job", async () => {
+  const t = setup();
+  t.store.scan.cursor_sequence = 100;
+  // Matched by the job number alone (FW has no order on SWF-261387).
+  const first = await scan(t, [
+    fwMail(
+      150,
+      "RE: Material Order Ref SWF-261387",
+      "Thanks, entered as Customer Order 11041784.",
+    ),
+  ]);
+  assertEquals(first.refs_linked, 1);
+  assertEquals(
+    t.store.refs.map((r) => [r.ref, r.job_id, r.order_id, r.linked_via]),
+    [["11041784", J1, null, "certain_match"]],
+  );
+  // Days later, only their own number: matched to the job.
+  await scan(t, [fwMail(151, "Fencing Warehouse WA - Customer Order 11041784")]);
+  const later = t.store.emails.find((e) => e.sequence_number === 151)!;
+  assertEquals([later.state, later.rung, later.job_id, later.order_id], [
+    "matched",
+    "supplier_ref",
+    J1,
+    null,
+  ]);
+  assertEquals(later.match_reason, "Supplier's own number already seen on this job");
+  // Nothing new to learn from it.
+  assertEquals(t.store.refs.length, 1);
+});
+
+Deno.test("supplier number: CMI's sales order learned on its order matches the next email by itself", async () => {
+  const t = setup();
+  t.store.scan.cursor_sequence = 100;
+  // CMI's reply in the thread of its order on SWP-26701.
+  await scan(t, [{
+    seq: 160,
+    from: "kris.idnay@cmiwa.com.au",
+    subject: "RE: Material Order Ref SWP-26701 - Sales Order 240272",
+    body: "Booked in.",
+    conv: "CONV-O3",
+  }]);
+  assertEquals(t.store.refs.map((r) => [r.ref, r.order_id]), [["240272", O3]]);
+  // CMI now has a second open order (on SWF-261387): only the number can tell.
+  t.sources.orders.push({
+    ...t.sources.orders[2],
+    order_id: "aaaaaaa4-0000-4000-8000-000000000004",
+    job_id: J1,
+    job_number: "SWF-261387",
+  });
+  await scan(t, [{
+    seq: 161,
+    from: "kris.idnay@cmiwa.com.au",
+    subject: "Combined Metal Industries - Sales Order 240272",
+    body: "Your order has been dispatched.",
+  }]);
+  const e = t.store.emails.find((x) => x.sequence_number === 161)!;
+  assertEquals([e.rung, e.order_id], ["supplier_ref", O3]);
+});
+
+Deno.test("supplier number: never a short number or our own job number", async () => {
+  const t = setup();
+  t.store.scan.cursor_sequence = 100;
+  const r = await scan(t, [
+    fwMail(
+      170,
+      "RE: Material Order Ref SWF-261387",
+      "Order No: 7781. Account CSH003. Our ref: 261387.",
+    ),
+  ]);
+  assertEquals(t.store.emails[0].state, "matched");
+  assertEquals(r.refs_linked, 0);
+  assertEquals(t.store.refs.length, 0);
+});
+
+Deno.test("supplier number: a number seen on two jobs is not used", async () => {
+  const t = setup();
+  t.store.scan.cursor_sequence = 100;
+  await scan(t, [
+    fwMail(180, "RE: Material Order Ref SWF-261387", "Customer Order 11041784."),
+    // The same number on another job: kept there too.
+    fwMail(181, "RE: Material Order Ref SWP-26701", "Customer Order 11041784."),
+  ]);
+  assertEquals(
+    t.store.refs.map((r) => r.job_id).sort(),
+    [J1, J2].sort(),
+  );
+  await scan(t, [fwMail(182, "Customer Order 11041784 dispatched")]);
+  const e = t.store.emails.find((x) => x.sequence_number === 182)!;
+  // Not placed by the number: FW has no order, so it goes to the tray.
+  assertEquals([e.state, e.rung, e.job_id], ["unmatched", null, null]);
+});
+
+Deno.test("supplier number: picked by hand with no order, the number is kept against the job", async () => {
+  const t = setup();
+  t.store.scan.cursor_sequence = 100;
+  await scan(t, [fwMail(190, "Customer Order 11041784", "Ready for pickup.")]);
+  const tray = t.store.emails[0];
+  assertEquals(tray.state, "unmatched");
+  const r = await t.run("dispatch_v2_replies_assign", {
+    email_id: tray.id,
+    job_id: J1,
+  });
+  assertEquals(r.supplier_refs_linked, ["11041784"]);
+  assertEquals(
+    t.store.refs.map((x) => [x.ref, x.job_id, x.order_id, x.linked_via]),
+    [["11041784", J1, null, "assigned"]],
   );
 });

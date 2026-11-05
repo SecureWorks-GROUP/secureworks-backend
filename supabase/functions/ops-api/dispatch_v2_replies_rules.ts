@@ -381,14 +381,26 @@ export function normaliseJobNumber(value: unknown): string {
 
 // A supplier's own number comes after a label that says what it is. "Your
 // ref" is OUR reference written back to us, and an account or customer number
-// is the same on every order, so neither is read.
+// is the same on every order, so neither is read. "Customer Order" is the
+// exception: it is Fencing Warehouse's own order number ("Customer Order
+// 11041784"), one per order (Tweak 2 piece 3).
 const SUPPLIER_REF_RE =
-  /(?<!your\s{1,3})(?<!customer\s{1,3})\b(sales\s+order|order\s+confirmation|purchase\s+order|order|s\/o|so|tax\s+invoice|sales\s+invoice|invoice|inv|quotation|quote|delivery\s+docket|docket|consignment|con\s*note|booking|our\s+ref(?:erence)?|ref(?:erence)?)\b\.?\s*(?:no\.?|number|num|#)?\s*[:#.\- ]\s*([A-Z]{0,4}[-/]?\d[A-Z0-9/-]{2,19})/gi;
+  /(?<!your\s{1,3})(?<!customer\s{1,3})\b(customer\s+order|sales\s+order|order\s+confirmation|purchase\s+order|order|s\/o|so|tax\s+invoice|sales\s+invoice|invoice|inv|quotation|quote|delivery\s+docket|docket|consignment|con\s*note|booking|our\s+ref(?:erence)?|ref(?:erence)?)\b\.?\s*(?:no\.?|number|num|#)?\s*[:#.\- ]\s*([A-Z]{0,4}[-/]?\d[A-Z0-9/-]{2,19})/gi;
+
+// Oxworks writes its sales order as one code and a number: "W2SO 92250",
+// kept as W2SO92250 (Tweak 2 piece 3).
+const OXWORKS_SO_RE = /\bW2SO\s*[-#:]?\s*(\d{4,10})\b/gi;
 
 /** The supplier's own order, invoice or quote numbers an email quotes,
  * upper case, distinct. Our job numbers and our v1 PO numbers are left out. */
 export function supplierRefsIn(subject: string, body: string): string[] {
   const out: string[] = [];
+  for (const source of [subject, body]) {
+    for (const m of source.matchAll(OXWORKS_SO_RE)) {
+      const ref = `W2SO${m[1]}`;
+      if (!out.includes(ref)) out.push(ref);
+    }
+  }
   for (const source of [subject, body]) {
     for (const m of source.matchAll(SUPPLIER_REF_RE)) {
       let ref = m[2].toUpperCase().replace(/[-/.]+$/, "");
@@ -403,6 +415,33 @@ export function supplierRefsIn(subject: string, body: string): string[] {
     }
   }
   return out;
+}
+
+// A supplier number is learned, and matched by, only with at least this many
+// digits: a short one ("7781", "CSH003") is too likely to be an account code
+// or to turn up on another order (Tweak 2 piece 3).
+export const LEARNABLE_REF_MIN_DIGITS = 5;
+
+/** The supplier numbers worth remembering against a job or order (Tweak 2
+ * piece 3, contract section 3f.3): the shape the table keeps (3 to 24
+ * characters, upper case, no spaces), at least LEARNABLE_REF_MIN_DIGITS
+ * digits, and never one of our own job numbers written without its letters
+ * ("Order 261586" on SWF-261586). `ourJobNumbers`: the job numbers the email
+ * names and the job it is tied to. */
+export function learnableSupplierRefs(
+  refs: string[],
+  ourJobNumbers: (string | null | undefined)[],
+): string[] {
+  const ours = new Set(
+    ourJobNumbers.map((n) => text(n).replace(/\D+/g, "")).filter((d) =>
+      d.length > 0
+    ),
+  );
+  return refs.filter((r) =>
+    /^[A-Z0-9/-]{3,24}$/.test(r) &&
+    (r.match(/\d/g) ?? []).length >= LEARNABLE_REF_MIN_DIGITS &&
+    !ours.has(r.replace(/\D+/g, ""))
+  );
 }
 
 // ── Delivery dates ────────────────────────────────────────────────────────
@@ -731,6 +770,15 @@ export function suggestionLabel(
 
 // ── Which order: the four rungs ───────────────────────────────────────────
 
+/** One link of a supplier's own number: to an order, or (Tweak 2 piece 3,
+ * order_id null) to a job that had no order when the number was seen.
+ * job_id may be left out when the link names an order. */
+export type RefLinkHint = {
+  order_id: string | null;
+  job_id?: string | null;
+  supplier_key: string | null;
+};
+
 export type MatchInputs = {
   email: CapturedEmail;
   sender: SenderIdentity;
@@ -743,7 +791,8 @@ export type MatchInputs = {
   // Jobs found by the job numbers the email quotes (job number -> job).
   jobsByNumber: Map<string, JobHint>;
   // Supplier refs already linked to orders: ref -> links.
-  refLinks: Map<string, { order_id: string; supplier_key: string | null }[]>;
+  // (order_id null: a job with no order then, Tweak 2 piece 3.)
+  refLinks: Map<string, RefLinkHint[]>;
   // The job details of every order's job (for the best guess).
   jobsById: Map<string, JobHint>;
   // Orders a person already said this email is NOT for.
@@ -938,19 +987,47 @@ export function matchEmail(
     };
   }
 
-  // 3. The supplier's own number, already linked to an order.
-  const refs = supplierRefsIn(email.subject, email.body);
-  const linkedOrderIds = new Set<string>();
+  // 3. The supplier's own number, already seen on one of our jobs (on an
+  // order, or on the job alone: Tweak 2 piece 3, contract section 3f.3).
+  // Only numbers worth learning count (never a short one), and a number seen
+  // on two jobs is not used at all: the email goes on to the best guess.
+  const refs = learnableSupplierRefs(
+    supplierRefsIn(email.subject, email.body),
+    [],
+  );
+  // job id -> the order ids linked on it (null: linked to the job alone).
+  const linkedByJob = new Map<string, Set<string | null>>();
   for (const ref of refs) {
     for (const link of inputs.refLinks.get(ref) ?? []) {
       if (
         sender.supplier_key && link.supplier_key &&
         link.supplier_key !== sender.supplier_key
       ) continue;
-      linkedOrderIds.add(link.order_id);
+      const jobId = link.job_id ??
+        inputs.orders.find((o) => o.order_id === link.order_id)?.job_id;
+      if (!jobId) continue;
+      const onJob = linkedByJob.get(jobId) ?? new Set<string | null>();
+      onJob.add(link.order_id);
+      linkedByJob.set(jobId, onJob);
     }
   }
-  const linked = live.filter((o) => linkedOrderIds.has(o.order_id));
+  const refJob = linkedByJob.size === 1 ? [...linkedByJob.keys()][0] : null;
+  const refOrderIds = refJob ? linkedByJob.get(refJob)! : new Set();
+  const linked = live.filter((o) => refOrderIds.has(o.order_id));
+  if (refJob && linked.length === 0 && refOrderIds.has(null)) {
+    // Seen before on this job when it had no order: the job, and the
+    // sender's order on it now when there is one.
+    const order = senderOrderOnJob(refJob, inputs.orders, sender, approved);
+    return {
+      state: "matched",
+      rung: "supplier_ref",
+      job_id: refJob,
+      job_number: inputs.jobsById.get(refJob)?.job_number ??
+        order?.job_number ?? null,
+      order_id: order?.order_id ?? null,
+      reason: "Supplier's own number already seen on this job",
+    };
+  }
   if (linked.length === 1) {
     const o = linked[0];
     return {

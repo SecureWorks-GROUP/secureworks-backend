@@ -14,6 +14,8 @@ import {
   isAutoReply,
   type JobHint,
   jobNumbersIn,
+  LEARNABLE_REF_MIN_DIGITS,
+  learnableSupplierRefs,
   matchEmail,
   type MatchInputs,
   perthDay,
@@ -413,7 +415,7 @@ Deno.test("rung 3: the supplier's own number already linked", () => {
     inputs({
       email: email({
         from_email: "sales@fencingwarehousewa.au",
-        subject: "Order 7781 update",
+        subject: "Order 77810 update",
         body: "Delivery Tue 4 Nov",
       }),
       orders: [
@@ -429,7 +431,7 @@ Deno.test("rung 3: the supplier's own number already linked", () => {
           supplier_name: "Fencing Warehouse WA",
         }),
       ],
-      refLinks: new Map([["7781", [{
+      refLinks: new Map([["77810", [{
         order_id: "ord-fw",
         supplier_key: "fencingwarehousewa",
       }]]]),
@@ -445,7 +447,7 @@ Deno.test("rung 3: the supplier's own number already linked", () => {
 Deno.test("rung 3: another supplier's link with the same number is ignored", () => {
   const r = matchEmail(
     inputs({
-      email: email({ subject: "Order 7781 update", body: "" }),
+      email: email({ subject: "Order 77810 update", body: "" }),
       orders: [
         order({
           order_id: "ord-fw",
@@ -453,7 +455,7 @@ Deno.test("rung 3: another supplier's link with the same number is ignored", () 
           supplier_name: "Fencing Warehouse WA",
         }),
       ],
-      refLinks: new Map([["7781", [{
+      refLinks: new Map([["77810", [{
         order_id: "ord-fw",
         supplier_key: "fencingwarehousewa",
       }]]]),
@@ -567,4 +569,145 @@ Deno.test("stage move is only ever offered, from the two waiting stages, never f
   );
   assertEquals(stageMoveOffer(job({ status: "scheduled" })), null);
   assertEquals(stageMoveOffer(job({ type: "repair" })), null);
+});
+
+// ── Tweak 2 piece 3: the supplier's own order number, learned ─────────────
+// (contract section 3f.3)
+
+Deno.test("supplier numbers: the forms Fencing Warehouse, CMI, Metroll, Oxworks and Xero use", () => {
+  const cases: [string, string[]][] = [
+    ["Fencing Warehouse WA - Customer Order 11041784", ["11041784"]],
+    ["Combined Metal Industries - Sales Order 240272", ["240272"]],
+    ["Metroll Perth SO#1056395 Order Acknowledgement", ["1056395"]],
+    ["Oxworks W2SO 92250 confirmation", ["W2SO92250"]],
+    ["Invoice INV-91320 from R&R Fencing", ["INV-91320"]],
+    // An account or customer number is never a supplier's order number.
+    ["Customer No 001185", []],
+  ];
+  for (const [subject, refs] of cases) {
+    assertEquals(supplierRefsIn(subject, ""), refs, subject);
+  }
+});
+
+Deno.test("supplier numbers worth learning: no short numbers, never our own job number", () => {
+  assertEquals(
+    learnableSupplierRefs(
+      ["11041784", "W2SO92250", "INV-91320", "7781", "CSH003", "261586", "26158"],
+      ["SWF-261586"],
+    ),
+    ["11041784", "W2SO92250", "INV-91320", "26158"],
+  );
+  assertEquals(LEARNABLE_REF_MIN_DIGITS, 5);
+});
+
+Deno.test("rung 3: a number seen on a job with no order then matches that job, and the sender's order there now", () => {
+  const fw = {
+    from_email: "sales@fencingwarehousewa.au",
+    subject: "Customer Order 11041784 - dispatched",
+    body: "",
+  };
+  // Seen on job-1 when it had no order; it still has none from FW.
+  const alone = matchEmail(
+    inputs({
+      email: email(fw),
+      refLinks: new Map([["11041784", [{
+        order_id: null,
+        job_id: "job-1",
+        supplier_key: "fencingwarehousewa",
+      }]]]),
+    }),
+    APPROVED,
+    NOW,
+  );
+  assertEquals(alone.state, "matched");
+  if (alone.state === "matched") {
+    assertEquals(
+      [alone.rung, alone.job_id, alone.job_number, alone.order_id],
+      ["supplier_ref", "job-1", "SWF-261600", null],
+    );
+    assertEquals(alone.reason, "Supplier's own number already seen on this job");
+  }
+  // Since then FW has an order on that job: the email goes to it.
+  const withOrder = matchEmail(
+    inputs({
+      email: email(fw),
+      orders: [
+        order(),
+        order({
+          order_id: "ord-fw",
+          supplier_id: "sup-fw-1",
+          supplier_name: "Fencing Warehouse WA",
+        }),
+      ],
+      refLinks: new Map([["11041784", [{
+        order_id: null,
+        job_id: "job-1",
+        supplier_key: "fencingwarehousewa",
+      }]]]),
+    }),
+    APPROVED,
+    NOW,
+  );
+  if (withOrder.state === "matched") assertEquals(withOrder.order_id, "ord-fw");
+  assertEquals(withOrder.state, "matched");
+});
+
+Deno.test("rung 3: a number seen on two jobs is not used", () => {
+  const r = matchEmail(
+    inputs({
+      email: email({
+        from_email: "sales@fencingwarehousewa.au",
+        subject: "Customer Order 11041784",
+        body: "",
+      }),
+      orders: [
+        order({
+          order_id: "ord-fw",
+          supplier_id: "sup-fw-1",
+          supplier_name: "Fencing Warehouse WA",
+        }),
+      ],
+      refLinks: new Map([["11041784", [
+        { order_id: "ord-fw", supplier_key: "fencingwarehousewa" },
+        { order_id: null, job_id: "job-2", supplier_key: "fencingwarehousewa" },
+      ]]]),
+    }),
+    APPROVED,
+    NOW,
+  );
+  // Not matched by the number: it goes on to the best guess (FW's one open
+  // order), for a person to confirm.
+  assertEquals(r.rung, "best_guess");
+});
+
+Deno.test("rung 3: a short number already in the table is not used", () => {
+  const r = matchEmail(
+    inputs({
+      email: email({
+        from_email: "sales@fencingwarehousewa.au",
+        subject: "Order 7781 update",
+        body: "",
+      }),
+      orders: [
+        order({
+          order_id: "ord-fw",
+          supplier_id: "sup-fw-1",
+          supplier_name: "Fencing Warehouse WA",
+        }),
+        order({
+          order_id: "ord-fw-b",
+          job_id: "job-2",
+          supplier_id: "sup-fw-1",
+          supplier_name: "Fencing Warehouse WA",
+        }),
+      ],
+      refLinks: new Map([["7781", [{
+        order_id: "ord-fw",
+        supplier_key: "fencingwarehousewa",
+      }]]]),
+    }),
+    APPROVED,
+    NOW,
+  );
+  assert(r.rung !== "supplier_ref");
 });
