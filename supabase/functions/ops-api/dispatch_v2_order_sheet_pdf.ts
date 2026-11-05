@@ -15,6 +15,11 @@
 //
 // One page only: a long order shows as many lines as fit, then says how many
 // more are on the order email.
+//
+// A photo-only order (Tweak 5) never gets a sheet: with no lines it would say
+// nothing, so the order's photos are saved to the job instead
+// (saveDispatchOrderPhotos in dispatch_v2_order_documents.ts). The caller,
+// dispatch_v2_order_confirmed_write.ts, makes that choice.
 
 import { dispatchPdfText } from "./dispatch_order_pdf.ts";
 import { perthDate, sha256Hex } from "./dispatch_orders.ts";

@@ -38,8 +38,18 @@
 // object in job-documents, one job_documents row and one job_events audit
 // row per document. Never a job, job status, stage, supplier, Xero, GHL,
 // SMS or email. It never throws.
+//
+// The order's own photos (Tweak 5, Shaun 5 Nov 2026): when the supplier
+// sends no PDF, the photos that went on our order email are saved to the job
+// too, so the crew sees what was ordered: "<Supplier> order photo 1", "... 2"
+// and so on, once per photo (by its SHA-256, the same claim as a PDF). A
+// photo-only order gets its photos INSTEAD of our one-page order sheet (a
+// sheet with no lines says nothing); an order with lines and photos gets the
+// sheet AND the photos. See saveDispatchOrderPhotos below and contract
+// section 3e.4.
 
 import { dispatchPdfText } from "./dispatch_order_pdf.ts";
+import { DISPATCH_V2_PHOTO_BUCKET } from "./dispatch_v2_emails.ts";
 
 export const DISPATCH_DOCS_BUCKET = "job-documents";
 export const DISPATCH_DOC_TYPE = "material_order";
@@ -53,7 +63,9 @@ export type DispatchSupplierDocKind =
   | "quote"
   | "order_document";
 
-export type DispatchDocSource = "supplier_reply" | "order_sheet";
+// supplier_reply: a PDF from a matched reply. order_sheet: our one-page
+// Material order sheet. order_photo: a photo that went on our order email.
+export type DispatchDocSource = "supplier_reply" | "order_sheet" | "order_photo";
 
 // ── Rules (pure) ────────────────────────────────────────────────────────────
 
@@ -138,6 +150,60 @@ export function hasPdfMagic(bytes: Uint8Array): boolean {
   return false;
 }
 
+/** The name the crew sees for the order's own photos (Tweak 5):
+ * "Stratco order photo 1", "Stratco order photo 2". */
+export function dispatchOrderPhotoName(supplier: unknown, number: number): string {
+  const name = typeof supplier === "string" && supplier.trim()
+    ? supplier.trim()
+    : "Supplier";
+  return `${name} order photo ${number}`;
+}
+
+/** Is this order just photos (Tweak 5)? No material line on the order and at
+ * least one photo. Such an order gets its photos on the job instead of our
+ * order sheet. order: a dispatch_supplier_order_emails row (order_lines,
+ * photo_ids). */
+export function dispatchOrderIsPhotoOnly(order: {
+  order_lines?: unknown;
+  photo_ids?: unknown;
+}): boolean {
+  const lines = Array.isArray(order?.order_lines) ? order.order_lines : [];
+  const photos = Array.isArray(order?.photo_ids) ? order.photo_ids : [];
+  return lines.length === 0 && photos.length > 0;
+}
+
+// The file kinds a saved document may be. A PDF is the default; the order's
+// photos are JPEG, PNG or WebP (the only kinds Dispatch takes).
+const FILE_KINDS: Record<string, { extension: string }> = {
+  "application/pdf": { extension: "pdf" },
+  "image/jpeg": { extension: "jpg" },
+  "image/png": { extension: "png" },
+  "image/webp": { extension: "webp" },
+};
+
+/** Do the bytes really hold the kind of file we are about to save? A PDF
+ * starts with "%PDF-"; a JPEG, PNG or WebP has its own first bytes. */
+export function dispatchDocBytesAre(
+  bytes: Uint8Array,
+  contentType: string,
+): boolean {
+  if (contentType === "application/pdf") return hasPdfMagic(bytes);
+  if (contentType === "image/jpeg") {
+    return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (contentType === "image/png") {
+    return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e &&
+      bytes[3] === 0x47;
+  }
+  if (contentType === "image/webp") {
+    const ascii = (from: number, to: number) =>
+      String.fromCharCode(...bytes.subarray(from, to));
+    return bytes.length >= 12 && ascii(0, 4) === "RIFF" &&
+      ascii(8, 12) === "WEBP";
+  }
+  return false;
+}
+
 /** A storage-safe file name: letters, digits, dot, dash, underscore. */
 export function dispatchDocSafeName(name: string): string {
   const s = name.replace(/&/g, "and").replace(/[^A-Za-z0-9._-]+/g, "-")
@@ -151,10 +217,11 @@ export function dispatchDocStoragePath(
   jobId: string,
   sha256: string,
   displayName: string,
+  extension = "pdf",
 ): string {
   return `${jobId}/dispatch-orders/${sha256.slice(0, 16)}-${
     dispatchDocSafeName(displayName)
-  }.pdf`;
+  }.${extension}`;
 }
 
 export async function sha256HexOf(bytes: Uint8Array): Promise<string> {
@@ -287,7 +354,7 @@ export type DispatchSaveDocInput = {
   orderId: string;
   supplierId: string | null;
   source: DispatchDocSource;
-  kind: DispatchSupplierDocKind | "order_sheet";
+  kind: DispatchSupplierDocKind | "order_sheet" | "order_photo";
   displayName: string;
   sha256: string;
   replyEmailId?: string | null;
@@ -295,6 +362,9 @@ export type DispatchSaveDocInput = {
   sourceFileName?: string | null;
   // The bytes, or how to fetch them (from the private capture bucket).
   bytes: () => Promise<Uint8Array | null>;
+  // The file's type: left out, a PDF. The order's photos pass image/jpeg,
+  // image/png or image/webp.
+  contentType?: string;
   trigger: string;
   operatorUserId?: string | null;
   now: string;
@@ -309,6 +379,7 @@ export type DispatchSaveDocResult =
       | "in_progress"
       | "claim_failed"
       | "not_a_pdf"
+      | "not_an_image"
       | "hash_mismatch"
       | "download_failed"
       | "upload_failed"
@@ -381,9 +452,10 @@ async function releaseClaim(client: any, claimId: string) {
   if (error) log("document claim release failed", error);
 }
 
-/** Save one PDF to the job once: claim, fetch and check the bytes, upload to
- * job-documents, add the job_documents row (material_order, crew-visible),
- * then mark the claim saved. A failure gives the claim back. Never throws. */
+/** Save one file (a PDF, or one of the order's photos) to the job once:
+ * claim, fetch and check the bytes, upload to job-documents, add the
+ * job_documents row (material_order, crew-visible), then mark the claim
+ * saved. A failure gives the claim back. Never throws. */
 export async function saveDispatchOrderDocument(
   client: any,
   input: DispatchSaveDocInput,
@@ -393,6 +465,10 @@ export async function saveDispatchOrderDocument(
     reason,
     sha256: input.sha256,
   });
+  const contentType = input.contentType ?? "application/pdf";
+  const fileKind = FILE_KINDS[contentType];
+  // A type we do not save is refused before anything is claimed.
+  if (!fileKind) return fail("not_an_image");
   let claimId: string | null = null;
   try {
     const claim = await claimDoc(client, input);
@@ -409,9 +485,9 @@ export async function saveDispatchOrderDocument(
       await releaseClaim(client, claimId);
       return fail("download_failed");
     }
-    if (!hasPdfMagic(bytes)) {
+    if (!dispatchDocBytesAre(bytes, contentType)) {
       await releaseClaim(client, claimId);
-      return fail("not_a_pdf");
+      return fail(contentType === "application/pdf" ? "not_a_pdf" : "not_an_image");
     }
     if ((await sha256HexOf(bytes)) !== input.sha256) {
       await releaseClaim(client, claimId);
@@ -422,10 +498,11 @@ export async function saveDispatchOrderDocument(
       input.jobId,
       input.sha256,
       input.displayName,
+      fileKind.extension,
     );
     const bucket = client.storage.from(DISPATCH_DOCS_BUCKET);
     const up = await bucket.upload(path, bytes, {
-      contentType: "application/pdf",
+      contentType,
       upsert: true,
     });
     if (up?.error) {
@@ -438,7 +515,7 @@ export async function saveDispatchOrderDocument(
       await releaseClaim(client, claimId);
       return fail("upload_failed");
     }
-    const fileName = `${dispatchPdfText(input.displayName)}.pdf`;
+    const fileName = `${dispatchPdfText(input.displayName)}.${fileKind.extension}`;
     const doc = await client.from("job_documents").insert({
       job_id: input.jobId,
       type: DISPATCH_DOC_TYPE,
@@ -593,6 +670,104 @@ export async function saveDispatchSupplierDocuments(
     return result;
   } catch (e) {
     log("supplier documents failed", e);
+    return { ...result, read: "failed" };
+  }
+}
+
+// ── The order's own photos (Tweak 5) ────────────────────────────────────────
+
+const PHOTO_SELECT = "id, job_id, file_name, content_type, sha256, storage_path";
+
+/** Save the photos that went on our order email to the job, once each,
+ * named "<Supplier> order photo 1", "2", ... in the order they were attached.
+ * The caller decides WHEN: only after the matched replies were read and none
+ * carries a PDF (dispatch_v2_order_confirmed_write.ts). order: a
+ * dispatch_supplier_order_emails row with id, job_id, supplier_id,
+ * supplier_name and photo_ids. The photos are copied from the private
+ * dispatch-material-photos bucket; a photo whose bytes no longer match the
+ * SHA-256 recorded at upload is not saved. Never throws. */
+export async function saveDispatchOrderPhotos(
+  client: any,
+  input: {
+    orgId: string;
+    order: any;
+    trigger: string;
+    operatorUserId?: string | null;
+    now: string;
+  },
+): Promise<DispatchOrderDocumentsResult> {
+  const result: DispatchOrderDocumentsResult = {
+    read: "ok",
+    found: 0,
+    saved: [],
+    skipped: [],
+  };
+  try {
+    const ids: string[] = (Array.isArray(input.order?.photo_ids)
+      ? input.order.photo_ids
+      : []).map(String);
+    if (ids.length === 0) return result;
+    const jobId = String(input.order.job_id);
+    const read = await client.from("dispatch_material_photos")
+      .select(PHOTO_SELECT)
+      .eq("job_id", jobId)
+      .in("id", ids);
+    if (read.error) {
+      log("order photos read failed", read.error);
+      return { ...result, read: "failed" };
+    }
+    const rows = read.data || [];
+    const supplier = String(input.order.supplier_name ?? "").trim() ||
+      "Supplier";
+    for (let i = 0; i < ids.length; i++) {
+      const photo = rows.find((r: any) => String(r.id) === ids[i]);
+      const sha = String(photo?.sha256 ?? "").toLowerCase();
+      // A photo removed since the send, or one with no hash on file, cannot
+      // be checked, so it is not saved.
+      if (!photo || !/^[0-9a-f]{64}$/.test(sha) || !photo.storage_path) {
+        result.skipped.push({ sha256: sha, reason: "photo_not_found" });
+        continue;
+      }
+      result.found++;
+      const saved = await saveDispatchOrderDocument(client, {
+        orgId: input.orgId,
+        jobId,
+        orderId: String(input.order.id),
+        supplierId: input.order.supplier_id ?? null,
+        source: "order_photo",
+        kind: "order_photo",
+        displayName: dispatchOrderPhotoName(supplier, i + 1),
+        sha256: sha,
+        sourceFileName: typeof photo.file_name === "string"
+          ? photo.file_name
+          : null,
+        contentType: String(photo.content_type ?? ""),
+        bytes: async () => {
+          const { data, error } = await client.storage.from(
+            DISPATCH_V2_PHOTO_BUCKET,
+          ).download(photo.storage_path);
+          if (error || !data) {
+            log("order photo download failed", error);
+            return null;
+          }
+          return new Uint8Array(await data.arrayBuffer());
+        },
+        trigger: input.trigger,
+        operatorUserId: input.operatorUserId ?? null,
+        now: input.now,
+      });
+      if (saved.saved) {
+        result.saved.push({
+          job_document_id: saved.job_document_id,
+          name: saved.name,
+        });
+      } else {
+        result.skipped.push({ sha256: sha, reason: saved.reason });
+      }
+    }
+    return result;
+  } catch (e) {
+    log("order photos failed", e);
     return { ...result, read: "failed" };
   }
 }

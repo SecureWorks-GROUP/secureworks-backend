@@ -59,6 +59,7 @@ import {
   dispatchV2CanSuggest,
   dispatchV2CheckPhoto,
   dispatchV2DefaultCc,
+  dispatchV2EmailHasSomethingToOrder,
   dispatchV2EmptyDetailLines,
   dispatchV2MainSupplierId,
   dispatchV2OrderableLines,
@@ -68,6 +69,7 @@ import {
   dispatchV2SuggestionAllowed,
   dispatchV2TeamCc,
   dispatchV2TestEmail,
+  dispatchV2UnsentPhotoIds,
   isDispatchV2Date,
 } from "./dispatch_v2_emails.ts";
 import {
@@ -2257,6 +2259,9 @@ function noApprovedEmail(): never {
 // Make the held email for one supplier box, in the template, with To and CC
 // from the approved list plus the team mailbox. An open email for the box is
 // returned as it is (rebuild: true rebuilds it from the lines, losing edits).
+// The box needs a line to order or a photo not sent yet (Tweak 5): a box with
+// only photos makes a photo-only email ("Please see attached for materials
+// needed."), and photos already sent on an earlier order are left off.
 // fulfilment: "delivery" (the default) or "pickup" (no Address line). A
 // rebuild without one keeps the open email's, read from its opening line.
 // date_mode (piece C):
@@ -2295,11 +2300,13 @@ export async function makeDispatchV2Email(
   const rebuild = body?.rebuild === true;
   const info = await boxContext(client, job, supplierId, ctx);
   if (!info.approved) noApprovedEmail();
-  if (info.orderable.length === 0) {
+  // The box's photos not sent yet (Tweak 5): oldest first, at most three.
+  const photoIds = await unsentBoxPhotoIds(client, job.id, supplierId);
+  if (info.orderable.length === 0 && photoIds.length === 0) {
     refuse(
       409,
       "no_lines_to_order",
-      "This supplier box has no lines to order (In stock and sent lines are left out)",
+      "This supplier box has nothing to order. Add a line or a photo (In stock lines, and lines and photos already sent, are left out)",
     );
   }
 
@@ -2342,21 +2349,13 @@ export async function makeDispatchV2Email(
     deliveryDate,
     fulfilment: asked ?? (open ? dispatchV2FulfilmentOf(open.body_text) : null),
     dateMode,
+    photoCount: photoIds.length,
   });
   const to = (info.approved.to_emails || []).map((e: string) =>
     String(e).toLowerCase()
   );
   const team = dispatchV2TeamCc(job.work_type);
   const cc = dispatchV2DefaultCc(info.approved.cc_emails || [], team.email, to);
-  // The box's photos go on by default (at most three).
-  const { data: boxPhotos, error: photoError } = await client
-    .from("dispatch_material_photos")
-    .select("id")
-    .eq("job_id", job.id)
-    .eq("supplier_id", supplierId)
-    .order("created_at", { ascending: true })
-    .limit(DISPATCH_V2_PHOTOS_PER_EMAIL_MAX);
-  if (photoError) readFailed("box photos read", photoError);
   const now = nowIso(ctx);
   const values = {
     supplier_name: info.supplierName,
@@ -2372,7 +2371,7 @@ export async function makeDispatchV2Email(
     built_body_text: built.body_text,
     delivery_date: deliveryDate,
     order_lines: built.lines,
-    photo_ids: (boxPhotos || []).map((p: any) => p.id),
+    photo_ids: photoIds,
     last_error: null,
     updated_at: now,
     updated_by_email: ctx.actor.email,
@@ -2394,6 +2393,7 @@ export async function makeDispatchV2Email(
       rebuilt: true,
       email: projectDispatchV2Email(row, nowMs),
       missing: built.missing,
+      photo_only: built.photo_only,
       date_mode: dateMode,
       date_mode_saved: await saveBoxDateMode(client, job.id, info.box, askedMode, ctx),
       team_cc_open_question: team.open_question,
@@ -2435,10 +2435,35 @@ export async function makeDispatchV2Email(
     success: true,
     email: projectDispatchV2Email(inserted, nowMs),
     missing: built.missing,
+    photo_only: built.photo_only,
     date_mode: dateMode,
     date_mode_saved: await saveBoxDateMode(client, job.id, info.box, askedMode, ctx),
     team_cc_open_question: team.open_question,
   };
+}
+
+// The box's photos a new email takes (Tweak 5): oldest first, at most three,
+// leaving out any photo already named on an email that went (or may have
+// gone). The box's held email is not "gone", so a rebuild keeps its photos.
+async function unsentBoxPhotoIds(
+  client: any,
+  jobId: string,
+  supplierId: string,
+): Promise<string[]> {
+  const [photoRes, emailRes] = await Promise.all([
+    client.from("dispatch_material_photos")
+      .select("id, created_at")
+      .eq("job_id", jobId)
+      .eq("supplier_id", supplierId)
+      .order("created_at", { ascending: true }),
+    client.from("dispatch_supplier_order_emails")
+      .select("id, status, photo_ids")
+      .eq("job_id", jobId)
+      .eq("supplier_id", supplierId),
+  ]);
+  if (photoRes.error) readFailed("box photos read", photoRes.error);
+  if (emailRes.error) readFailed("box emails read", emailRes.error);
+  return dispatchV2UnsentPhotoIds(photoRes.data || [], emailRes.data || []);
 }
 
 // Save the date choice a Make email was asked for on its box (piece C), so
@@ -2655,8 +2680,9 @@ async function emailAttachments(client: any, email: any) {
 // admin@ only and records it in the test_* columns: the email stays held and
 // nothing is stamped. A test copy is optional (Shaun, 26 Oct). A real send
 // needs an approved order email for the supplier, the Date,
-// Address and Contact lines filled in, and the box's lines unchanged since the
-// email was made.
+// Address and Contact lines filled in (a pickup has no Address or Contact
+// line), the box's lines unchanged since the email was made, and at least
+// one line or one photo on the email (Tweak 5).
 export async function sendDispatchV2Email(
   client: any,
   body: any,
@@ -2693,6 +2719,15 @@ export async function sendDispatchV2Email(
       409,
       "order_lines_changed",
       "The lines in this supplier box changed after the email was made. Make the email again.",
+    );
+  }
+  // A photo-only email with every photo taken off would say "see attached"
+  // with nothing attached.
+  if (!dispatchV2EmailHasSomethingToOrder(email)) {
+    refuse(
+      409,
+      "nothing_to_order",
+      "This email has no lines and no photo. Put a photo back on it, or discard it.",
     );
   }
   const empty = dispatchV2EmptyDetailLines(email.body_text);

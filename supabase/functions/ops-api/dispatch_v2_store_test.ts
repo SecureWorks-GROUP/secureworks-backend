@@ -2354,6 +2354,150 @@ Deno.test("make email: no approved email, no lines and a bad date are refused", 
   assertEquals(db.tables.dispatch_supplier_order_emails.length, 0);
 });
 
+// ── Tweak 5: an order that is just a photo; Tweak 6: no Contact on pickup ──
+
+async function uploadPhoto(
+  db: ReturnType<typeof makeDb>,
+  jobId: string,
+  supplierId: string | null,
+  name = "drawing.jpg",
+) {
+  return (await call(db, "dispatch_v2_upload_photo", {
+    job_id: jobId,
+    supplier_id: supplierId,
+    file_name: name,
+    data_base64: jpegBase64(),
+  })).photo;
+}
+
+Deno.test("make email: a box with only a photo makes a photo-only email and sends it; the photo is not sent twice", async () => {
+  const db = makeDb();
+  await addBox(db, JOB.patio, SUP.metroll);
+  // Nothing at all in the box: still refused, as before.
+  await refused(makeEmail(db, JOB.patio, SUP.metroll), 409, "no_lines_to_order");
+  const photo = await uploadPhoto(db, JOB.patio, SUP.metroll);
+  const made = await makeEmail(db, JOB.patio, SUP.metroll, {
+    delivery_date: "2026-11-10",
+    fulfilment: "pickup",
+  });
+  assertEquals(made.photo_only, true);
+  assertEquals(made.missing, []);
+  const email = made.email;
+  assertEquals(email.photo_ids, [photo.id]);
+  assertEquals(email.line_count, 0);
+  assertEquals(
+    email.body_text,
+    [
+      "Hi Team, could we please order the following for pickup:",
+      "",
+      "Date: 10 November 2026",
+      "",
+      "Materials Needed:",
+      "",
+      "Please see attached for materials needed.",
+      "",
+      "",
+      "Please confirm when you can, thank you.",
+    ].join("\n"),
+  );
+  const { sent, sender } = fakeSender();
+  const real = await call(db, "dispatch_v2_send_email", {
+    email_id: email.id,
+    expected_updated_at: email.updated_at,
+  }, ctx(sender));
+  assertEquals([real.success, real.recorded, real.email.status], [true, true, "sent"]);
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].attachments.length, 1);
+  assert(sent[0].htmlBody.includes("Please see attached for materials needed."));
+  // The photo went: the box has nothing left to order.
+  await refused(makeEmail(db, JOB.patio, SUP.metroll), 409, "no_lines_to_order");
+  // A new photo is a new order, and the photo already sent is left off it.
+  const second = await uploadPhoto(db, JOB.patio, SUP.metroll, "more.jpg");
+  const next = await makeEmail(db, JOB.patio, SUP.metroll);
+  assertEquals(next.email.photo_ids, [second.id]);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: a fencing main supplier with only a photo gets no standing lines", async () => {
+  const db = makeDb();
+  await addBox(db, JOB.fence, SUP.stratco);
+  await uploadPhoto(db, JOB.fence, SUP.stratco);
+  const made = await makeEmail(db, JOB.fence, SUP.stratco);
+  assertEquals(made.photo_only, true);
+  assertEquals(made.email.is_main_supplier, true);
+  assertEquals(made.email.standing_lines_included, false);
+  assert(!made.email.body_text.includes("quickset"));
+  assert(!made.email.body_text.includes("Fixings"));
+});
+
+Deno.test("make email: photos and lines number the lines, then say Please also see attached", async () => {
+  const db = await fencingJob();
+  await uploadPhoto(db, JOB.fence, SUP.stratco);
+  const made = await makeEmail(db, JOB.fence, SUP.stratco);
+  assertEquals(made.photo_only, false);
+  assertEquals(made.email.photo_ids.length, 1);
+  assert(made.email.body_text.endsWith(
+    "4. Fixings, Post Caps and Screws as necessary\n\nPlease also see attached.\n\n\nPlease confirm when you can, thank you.",
+  ));
+  // Metroll's box has a line and no photo: exactly as before.
+  const metroll = await makeEmail(db, JOB.fence, SUP.metroll);
+  assert(!metroll.email.body_text.includes("attached"));
+});
+
+Deno.test("send: a photo-only email with its photo taken off is refused before anything goes", async () => {
+  const db = makeDb();
+  await addBox(db, JOB.patio, SUP.metroll);
+  await uploadPhoto(db, JOB.patio, SUP.metroll);
+  const email = (await makeEmail(db, JOB.patio, SUP.metroll)).email;
+  const emptied = (await call(db, "dispatch_v2_save_email", {
+    email_id: email.id,
+    expected_updated_at: email.updated_at,
+    photo_ids: [],
+  })).email;
+  const { sent, sender } = fakeSender();
+  await refused(
+    call(db, "dispatch_v2_send_email", {
+      email_id: email.id,
+      expected_updated_at: emptied.updated_at,
+    }, ctx(sender)),
+    409,
+    "nothing_to_order",
+  );
+  assertEquals(sent.length, 0);
+});
+
+Deno.test("Tweak 6: a pickup with no client phone is made and sent with no Contact line; a delivery still needs it", async () => {
+  const db = await fencingJob();
+  const row = db.tables.jobs.find((j: any) => j.id === JOB.fence)!;
+  row.client_phone = null;
+  row.client_name = null;
+  const { sent, sender } = fakeSender();
+  const pickup = await makeEmail(db, JOB.fence, SUP.stratco, { fulfilment: "pickup" });
+  assertEquals(pickup.missing, []);
+  assert(!pickup.email.body_text.includes("Contact:"));
+  assertEquals(pickup.email.empty_detail_lines, []);
+  const went = await call(db, "dispatch_v2_send_email", {
+    email_id: pickup.email.id,
+    expected_updated_at: pickup.email.updated_at,
+  }, ctx(sender));
+  assertEquals(went.email.status, "sent");
+  assert(!sent[0].htmlBody.includes("Contact:"));
+  // Delivery: the Contact line stays, and an empty one stops the send.
+  const delivery = await makeEmail(db, JOB.fence, SUP.metroll, { fulfilment: "delivery" });
+  assertEquals(delivery.missing, ["contact"]);
+  assert(delivery.email.body_text.includes("\nContact:\n"));
+  const missing = await refused(
+    call(db, "dispatch_v2_send_email", {
+      email_id: delivery.email.id,
+      expected_updated_at: delivery.email.updated_at,
+    }, ctx(sender)),
+    409,
+    "email_details_missing",
+  );
+  assertEquals(missing.body.missing, ["contact"]);
+  assertEquals(sent.length, 1);
+});
+
 Deno.test("make email: pickup says so, has no Address line and a rebuild keeps it", async () => {
   const db = await fencingJob();
   await refused(
