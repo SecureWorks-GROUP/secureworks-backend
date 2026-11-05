@@ -197,6 +197,11 @@ jobs:
         run: |
           bash scripts/test/test-smoke-ops-api-action-surface.sh
 
+      - name: Test exact acceptance deposit receipts (metadata only)
+        run: |
+          deno test --frozen supabase/functions/ops-api/acceptance_deposit_receipt_test.ts
+          deno test --frozen --no-check --allow-env --allow-read supabase/functions/ops-api/acceptance_deposit_receipt_handler_test.ts
+
       - name: Test bundled ops-api deploy metadata
         run: |
           bash scripts/test/test-stamp-ops-api-build-metadata.sh
@@ -481,6 +486,8 @@ jobs:
             supabase/functions/ops-api/dispatch_offline_dry_run_test.ts \
             supabase/functions/ops-api/dispatch_board_test.ts \
             supabase/functions/ops-api/dispatch_schedule_warnings_test.ts \
+            supabase/functions/ops-api/invoice_milestone_drafts_test.ts \
+            supabase/functions/ops-api/invoice_milestone_reviews_test.ts \
             supabase/functions/ops-api/dispatch_v2_material_stage_test.ts \
             supabase/functions/ops-api/dispatch_v2_payment_test.ts \
             supabase/functions/ops-api/dispatch_v2_working_days_test.ts \
