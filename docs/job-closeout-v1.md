@@ -21,13 +21,21 @@ All three, in `evaluateJobPaid`:
 
 1. Every linked sales invoice that is not voided or deleted is PAID, and none is
    a DRAFT.
-2. Every paying party has a paid final invoice. Paying parties are
+2. Every paying party is paid. Paying parties are
    `job_contacts` rows not removed (`removed_at` null and `status` not
    `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
    not an explicit 0 (a null share counts: the party writer stores null when no
-   portions were sent); a job with none has one payer, its client. A final
-   needs positive evidence, the Debt tab's rule (`invoiceKindOf` in
-   `debt_ws_rules.ts`): a reference ending `FIN`, `FINBAL` or `BAL` (up to
+   portions were sent); a job with none has one payer, its client. A party is
+   paid when it has a paid final invoice, or (captain, 5 Nov 2026) when it has
+   at least one paid invoice of any kind, a deposit included, and rule 3 is
+   decided against a readable sent quote that the money paid covers. No
+   per-party share is worked out, so a 50/50 split a cent out never leaves a
+   card stuck (SWF-261370: the owner paid the 50% deposit, the neighbour the
+   50% balance). With no sent quote, no recorded quote value, a quote that
+   could not be read, or money short of the quote, each party still needs a
+   paid final. The pre-check before the quote read lets a party with any paid
+   invoice through, so the quote is read. A final needs positive evidence,
+   the Debt tab's rule (`invoiceKindOf` in `debt_ws_rules.ts`): a reference ending `FIN`, `FINBAL` or `BAL` (up to
    three digits), `FINAL` or `PRIVATE`, and a first line item starting
    "balance", "remaining" or "remainder" (read as
    `line_items->0->>Description`), and never `jobs.deposit_invoice_id`. An

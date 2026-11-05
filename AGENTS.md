@@ -4812,7 +4812,9 @@ the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
 invoice PAID and none DRAFT; every paying party, `job_contacts` with
 `removed_at` null, `status` not `removed`, and a share that is not an explicit
 0 (null counts), has a paid final, a final needing positive evidence by the
-Debt tab's `invoiceKindOf` (an unlabelled invoice never is); paid covers the
+Debt tab's `invoiceKindOf` (an unlabelled invoice never is), or, when the money
+paid covers a readable sent quote, any paid invoice (a deposit included, no
+per-party share); paid covers the
 `job_quote_values` quote plus customer-accepted or invoiced variations; one
 approved internally but never accepted is not owed). A quote or variations READ
 failure is `undecided`: nothing moves, texts, archives or is recorded that run;

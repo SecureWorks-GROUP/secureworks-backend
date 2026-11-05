@@ -560,6 +560,54 @@ Deno.test("SWF-261335 shape: unbilled neighbour -> not paid, the card stays", as
   assertEquals(db.rows("job_closeout_state")[0].outcome, "not_paid");
 });
 
+Deno.test("SWF-261370 shape: owner's deposit plus neighbour's balance covering the quote moves to get_review", async () => {
+  const { db, deps, moves } = setup();
+  const job = addJob(db, { job_number: "SWF-261370" });
+  db.rows("job_contacts").push(
+    {
+      id: "pa",
+      job_id: job.id,
+      contact_label: "A",
+      is_primary: true,
+      share_percentage: 50,
+      removed_at: null,
+      xero_contact_id: "xc-a",
+    },
+    {
+      id: "pb",
+      job_id: job.id,
+      contact_label: "B",
+      is_primary: false,
+      share_percentage: 50,
+      removed_at: null,
+      xero_contact_id: "xc-b",
+    },
+  );
+  addInvoice(db, job.id, "SWF-261370-DEP50", "PAID", 1955.25, {
+    xero_contact_id: "xc-a",
+  });
+  addInvoice(db, job.id, "SWF-261370-FINBAL50", "PAID", 1955.25, {
+    xero_contact_id: "xc-b",
+  });
+  addQuote(db, job.id, 3910.5);
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: job.id })).action,
+    "moved",
+  );
+  assertEquals(moves.length, 1);
+});
+
+Deno.test("a deposit-only shared fence with no sent quote stays where it is", async () => {
+  const { db, deps, moves } = setup();
+  const job = addJob(db, { job_number: "SWF-261371" });
+  addInvoice(db, job.id, "SWF-261371-DEP50", "PAID", 1955.25);
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: job.id })).action,
+    "not_paid",
+  );
+  assertEquals(moves.length, 0);
+});
+
 Deno.test("paid less than quoted: the card stays and carries the marker, logged once", async () => {
   const { db, deps, moves } = setup();
   const job = paidJob(db);

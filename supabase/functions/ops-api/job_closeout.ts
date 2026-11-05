@@ -428,8 +428,10 @@ async function loadQuote(
 }
 
 /**
- * The strict check for one job. The quote (several reads) is read only when rules 1 and 2
- * already hold, since it can only turn "paid" into "paid less than quoted".
+ * The strict check for one job. The quote (several reads) is read only when the pre-check
+ * (rule 1, and rule 2 with any paid invoice per party) already holds: the quote turns
+ * "paid" into "paid less than quoted", and decides whether a party paid only by a deposit
+ * is paid (rule 2 in job_paid_closeout.ts).
  */
 export async function evaluateFacts(
   deps: Pick<JobCloseoutDeps, "client" | "now">,
@@ -667,7 +669,8 @@ export async function closeoutCatchUp(
   const results: SettleResult[] = [];
   for (const job of jobs) {
     const f = facts.get(job.id)!;
-    // Cheap pre-check: only a job whose invoices are all paid can pass.
+    // Cheap pre-check: only a job whose invoices are all paid, with a paid invoice for
+    // every paying party, can pass.
     const pre = evaluateJobPaid({
       job,
       invoices: f.invoices,
