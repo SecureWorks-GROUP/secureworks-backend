@@ -1,5 +1,8 @@
 // Which email attachments the old monitor-inbox path files onto a job.
 //
+// Deploy note: the Dispatch Tweak 1 change here went live with the 5 Nov
+// redeploy PR (the #1319 deploy run stopped on a migration clash, #1334).
+//
 // It files PDFs (as job documents) and pictures (as job_media 'receipt'
 // photos), up to 10 MB, and nothing else. It never files an INLINE
 // attachment: those are the pictures inside the email's body, mostly

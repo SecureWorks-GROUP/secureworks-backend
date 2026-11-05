@@ -2,6 +2,8 @@
 // Dispatch v2 Tweak 1, part 2 (Shaun, 4 Nov 2026): once a supplier order is
 // confirmed, the supplier's own PDFs go on the job, where the crew sees them.
 // Contract: docs/dispatch-v2-board-contract.md, section 3e.2.
+// Deploy note: first shipped live by the 5 Nov redeploy PR, because the
+// #1319 deploy run stopped on a migration version clash (fixed in #1334).
 //
 // The rules, in business words:
 //   * Every real PDF on a supplier reply MATCHED to the order (state
