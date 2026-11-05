@@ -1,3 +1,4 @@
+import { readInvoiceMilestoneReviews } from './invoice_milestone_reviews.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
@@ -10462,6 +10463,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json({ success: true })
       }
       case 'create_invoice': return json(await createInvoice(client, body))
+      // WS6 preparation only: durable held review intents, never provider drafts.
+      // Default front door remains staff/server-only; trades are not admitted.
+      case 'invoice_milestone_reviews':
+        return await invoiceMilestoneReviewsAction(client, url.searchParams, req.method, authMode, authUser, serverSecretPresented)
       case 'create_invoice_draft': {
         const result = await createInvoiceDraftAction(
           client,
@@ -20940,6 +20945,8 @@ async function jumpCouncilStep(client: any, body: any) {
       steps[i].completed_at = null
     } else {
       steps[i].status = 'complete'
+      // Workflow positioning is not evidence that an accepted billing milestone happened.
+      steps[i].completion_source = 'workflow_jump'
       if (!steps[i].completed_at) steps[i].completed_at = now
       if (!steps[i].started_at) steps[i].started_at = now
     }
@@ -20959,12 +20966,13 @@ async function jumpCouncilStep(client: any, body: any) {
 
   const overallStatus = target === 0 && steps.length > 1 ? 'in_progress' : steps.every((s: any) => s.status === 'complete') ? 'complete' : 'in_progress'
 
-  await client.from('council_submissions').update({
+  const { error: councilJumpError } = await client.from('council_submissions').update({
     steps,
     current_step_index: target,
     overall_status: overallStatus,
     updated_at: now,
   }).eq('id', submission_id)
+  if (councilJumpError) throw councilJumpError
 
   const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
 
@@ -20978,6 +20986,8 @@ async function jumpCouncilStep(client: any, body: any) {
 
   return { success: true, overall_status: overallStatus, current_step_index: target, steps }
 }
+
+export const _jumpCouncilStepForTest = jumpCouncilStep
 
 // ── Geocoding helper (Nominatim, free, no API key) ──
 async function geocodeAddress(address: string, suburb?: string): Promise<{ lat: number, lng: number } | null> {
@@ -39281,6 +39291,26 @@ async function assertCreateInvoiceDraftTenantBindings(
   }
   return null
 }
+
+async function invoiceMilestoneReviewsAction(
+  client: any,
+  params: URLSearchParams,
+  method: string,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: Pick<TradeAuthContext, 'role' | 'orgId'> | null | undefined,
+  serverSecretPresented: boolean,
+): Promise<Response> {
+  if (!((authMode === 'api_key' && serverSecretPresented) ||
+        (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId === DEFAULT_ORG_ID))) {
+    return json({ ok: false, code: 'operator_access_required' }, 403)
+  }
+  if (method !== 'GET') return json({ ok: false, code: 'method_not_allowed' }, 405)
+  const jobId = String(params.get('job_id') || '').trim()
+  if (!CREATE_INVOICE_DRAFT_UUID_RE.test(jobId)) return json({ ok: false, code: 'job_id_invalid' }, 400)
+  const result = await readInvoiceMilestoneReviews(client, jobId, DEFAULT_ORG_ID)
+  return json(result, result.ok ? 200 : result.status_code)
+}
+export const _invoiceMilestoneReviewsActionForTest = invoiceMilestoneReviewsAction
 
 async function createInvoiceDraftAction(
   client: any,
@@ -62735,7 +62765,10 @@ async function updateCouncilStatus(client: any, body: any) {
   if (notes) steps[idx].notes = notes
   if (documents_received) steps[idx].documents_received = [...(steps[idx].documents_received || []), ...documents_received]
   if (status === 'in_progress' && !steps[idx].started_at) steps[idx].started_at = new Date().toISOString()
-  if (status === 'complete') steps[idx].completed_at = new Date().toISOString()
+  if (status === 'complete') {
+    steps[idx].completed_at = new Date().toISOString()
+    steps[idx].completion_source = 'explicit_status_update'
+  }
 
   // Calculate overall status and advance current step
   const allComplete = steps.every((s: any) => s.status === 'complete')
@@ -62746,12 +62779,15 @@ async function updateCouncilStatus(client: any, body: any) {
   // Find the first non-complete step as current
   const newCurrentIdx = steps.findIndex((s: any) => s.status !== 'complete')
 
-  await client.from('council_submissions').update({
+  const { error: councilUpdateError } = await client.from('council_submissions').update({
     steps,
     current_step_index: newCurrentIdx >= 0 ? newCurrentIdx : steps.length - 1,
     overall_status: overallStatus,
     updated_at: new Date().toISOString(),
   }).eq('id', submission_id)
+  // The milestone review is captured in this write's transaction. Never
+  // report completion when PostgreSQL rolled it back (including capture errors).
+  if (councilUpdateError) throw councilUpdateError
 
   const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
 
@@ -62765,6 +62801,8 @@ async function updateCouncilStatus(client: any, body: any) {
 
   return { success: true, overall_status: overallStatus, step: steps[idx] }
 }
+
+export const _updateCouncilStatusForTest = updateCouncilStatus
 
 async function sendCouncilEmail(client: any, body: any) {
   const { submission_id, step_index, to_email, cc, subject, body_html, body_text, attachments } = body
