@@ -1315,7 +1315,7 @@ calls Outlook. No backfill: replies stored before this ships stay as they are.
 Automatic, no tap (Shaun's ruling, 5 Nov 2026). Rules in
 `dispatch_v2_outlook_order.ts`; the one write is the database function
 `dispatch_v2_record_outlook_order` (migration
-`20261105130000_dispatch_v2_outlook_orders.sql`).
+`20261105170000_dispatch_v2_outlook_orders.sql`).
 
 1. **When.** A supplier reply is matched by the job number rung with no order
    (`state 'matched'`, `rung 'job_number'`, `order_id` null), the sender is on

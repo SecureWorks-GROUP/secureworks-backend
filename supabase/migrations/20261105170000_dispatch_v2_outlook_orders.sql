@@ -34,7 +34,7 @@
 --
 -- No existing row changes (every row reads origin 'dispatch'). No backfill.
 --
--- Rollback: supabase/rollbacks/20261105130000_dispatch_v2_outlook_orders_down.sql.
+-- Rollback: supabase/rollbacks/20261105170000_dispatch_v2_outlook_orders_down.sql.
 
 ALTER TABLE public.dispatch_supplier_order_emails
   ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'dispatch',

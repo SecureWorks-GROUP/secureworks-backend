@@ -1,4 +1,4 @@
--- Down for 20261105130000_dispatch_v2_outlook_orders. Roll back ops-api first
+-- Down for 20261105170000_dispatch_v2_outlook_orders. Roll back ops-api first
 -- (dispatch_v2_outlook_order.ts calls the function and the Dispatch reads
 -- select the origin column).
 --

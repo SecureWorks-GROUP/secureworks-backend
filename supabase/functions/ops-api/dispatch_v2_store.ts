@@ -184,7 +184,7 @@ const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
   "id, org_id, job_id, supplier_id, supplier_name, approved_email_id, work_type, is_main_supplier, standing_lines_included, status, team_cc_email, to_emails, cc_emails, subject, body_text, built_body_text, delivery_date, order_lines, photo_ids, test_sent_at, test_sent_to, test_sent_by_email, send_claimed_at, sent_at, sent_by_email, sent_from_mailbox, sent_to_emails, sent_cc_emails, sent_internet_message_id, sent_conversation_id, sent_graph_message_id, last_error, created_at, created_by_email, updated_at, updated_by_email, origin";
-// origin: migration 20261105130000_dispatch_v2_outlook_orders.sql ('outlook'
+// origin: migration 20261105170000_dispatch_v2_outlook_orders.sql ('outlook'
 // = recorded from an order Shaun sent from Outlook, contract section 3f.1).
 // on_account: migration 20261029120000_dispatch_v2_on_account_suppliers.sql
 // (the payment step, dispatch_v2_payment.ts).

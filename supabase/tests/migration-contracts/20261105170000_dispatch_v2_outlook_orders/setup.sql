@@ -1,4 +1,4 @@
--- Prerequisites for 20261105130000_dispatch_v2_outlook_orders: the registered stack supplies jobs, suppliers and
+-- Prerequisites for 20261105170000_dispatch_v2_outlook_orders: the registered stack supplies jobs, suppliers and
 -- job_events (stand-ins), job_material_suppliers (20261014130000) and a narrow dispatch_supplier_order_emails
 -- stand-in (20261104010000). Added here, without changing anything an earlier registered case created: the columns
 -- the function writes that the stand-ins lack (production types: 20261023214200 for the order email columns,

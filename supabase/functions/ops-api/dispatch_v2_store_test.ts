@@ -318,7 +318,7 @@ const SCHEMA: Record<string, string[]> = {
     "created_by_email",
     "updated_at",
     "updated_by_email",
-    // Tweak 2: migration 20261105130000_dispatch_v2_outlook_orders.sql.
+    // Tweak 2: migration 20261105170000_dispatch_v2_outlook_orders.sql.
     "origin",
     "source_business_event_id",
   ],
