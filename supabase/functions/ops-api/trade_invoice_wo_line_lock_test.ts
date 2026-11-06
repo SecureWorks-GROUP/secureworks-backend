@@ -321,7 +321,7 @@ Deno.test("index.ts reads WO job cards for the submitting trade only, before per
   assertStringIncludes(block, ".gte('scheduled_date', week_start).lte('scheduled_date', weekEnd)");
   assertStringIncludes(block, "selectWorkOrderLineAssignmentIds({");
   const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
-  const persistAt = INDEX.indexOf("? await _persistWeeklyTradeInvoice(", includedAt);
+  const persistAt = INDEX.indexOf("? _persistWeeklyTradeInvoice(", includedAt);
   assert(includedAt > readAt, "included ids must be built after the WO card read");
   assert(persistAt > includedAt, "the stamp set must exist before the invoice is persisted");
 });

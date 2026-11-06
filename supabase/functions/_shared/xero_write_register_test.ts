@@ -62,7 +62,8 @@ Deno.test("every Xero write site in supabase/functions is on the register, and e
     "The register names a site the sources no longer have. Remove or rename it.",
   );
   // Today's count, so a scan that silently finds nothing cannot pass.
-  assert(sites.length >= 40, `only ${sites.length} sites found`);
+  // 38 since the four trade bill creates share createTradeXeroBillOnce (6 Nov 2026).
+  assert(sites.length >= 38, `only ${sites.length} sites found`);
 });
 
 Deno.test("the register's rows are X1 to X15, each with an owner and a gate, each key on one row", () => {
