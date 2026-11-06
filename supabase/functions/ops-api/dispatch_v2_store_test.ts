@@ -259,6 +259,17 @@ const SCHEMA: Record<string, string[]> = {
     "received_at",
     "matched_at",
     "rung",
+    "snippet",
+    "delivery_date",
+    "provider_message_id",
+  ],
+  // Which replies carry a PDF (dispatch_board.ts markDispatchV2ReplyPdfs).
+  context_email_attachments: [
+    "id",
+    "provider_message_id",
+    "file_name",
+    "content_type",
+    "status",
   ],
   dispatch_v2_scope_fills: [
     "job_id",
@@ -444,6 +455,7 @@ function seed(): Record<string, Row[]> {
     quote_revisions: [],
     feature_flags: [],
     dispatch_v2_supplier_emails: [],
+    context_email_attachments: [],
     job_assignments: [],
     job_events: [],
   };
@@ -1183,6 +1195,64 @@ Deno.test("read: a matched supplier reply moves the box on, as on the board", as
   assertEquals(metroll.material_stage.key, "awaiting_payment");
   assertEquals(metroll.material_stage.source, "reply");
   assertEquals(metroll.material_stage.reply.email_id, "00000000-0000-0000-0000-0000000b0001");
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("read: a plain reply with no PDF, date or price leaves the box at Sent, with a note", async () => {
+  // Shaun 6 Nov 2026: CMI's "All good Shaun" is not a quote.
+  const db = await fencingJob();
+  const sentAt = "2026-10-28T01:00:00.000Z";
+  const emailId = "00000000-0000-0000-0000-0000000e0002";
+  const columns = SCHEMA.dispatch_supplier_order_emails;
+  const email: Row = Object.fromEntries(columns.map((c) => [c, null]));
+  Object.assign(email, {
+    id: emailId,
+    org_id: ORG,
+    job_id: JOB.fence,
+    supplier_id: SUP.metroll,
+    status: "sent",
+    body_text: "Hi, please deliver the following.",
+    sent_at: sentAt,
+    created_at: sentAt,
+    updated_at: sentAt,
+    to_emails: [],
+    cc_emails: [],
+    order_lines: [],
+    photo_ids: [],
+    sent_to_emails: [],
+    sent_cc_emails: [],
+  });
+  db.tables.dispatch_supplier_order_emails.push(email);
+  db.tables.dispatch_v2_supplier_emails.push({
+    id: "00000000-0000-0000-0000-0000000b0002",
+    org_id: ORG,
+    job_id: JOB.fence,
+    state: "matched",
+    order_id: emailId,
+    received_at: "2026-10-28T04:00:00.000Z",
+    matched_at: "2026-10-28T04:01:00.000Z",
+    rung: "thread",
+    snippet: "All good Shaun. Seems like you're getting busier.",
+    delivery_date: null,
+    provider_message_id: "msg-chat",
+  });
+  // The email's only file is a logo, not a PDF.
+  db.tables.context_email_attachments.push({
+    id: "att-logo",
+    provider_message_id: "msg-chat",
+    file_name: "image001.png",
+    content_type: "image/png",
+    status: "stored",
+  });
+  db.tables.feature_flags.push({ flag_name: "dispatch_v2_replies_v1", enabled: true });
+  const on = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  const stage = on.suppliers[0].material_stage;
+  assertEquals([stage.key, stage.source, stage.reply], ["sent", "worked_out", null]);
+  assertEquals(stage.reply_note, {
+    email_id: "00000000-0000-0000-0000-0000000b0002",
+    received_at: "2026-10-28T04:00:00.000Z",
+    snippet: "All good Shaun. Seems like you're getting busier.",
+  });
   assertOnlyV2Writes(db);
 });
 

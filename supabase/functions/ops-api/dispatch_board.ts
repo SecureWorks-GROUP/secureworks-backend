@@ -47,6 +47,7 @@ import {
   isDispatchDeliveryDate,
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows, fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
+import { isDispatchPdfCandidate } from "./dispatch_v2_order_documents.ts";
 import {
   type DispatchV2DateMode,
   type DispatchV2Fulfilment,
@@ -57,6 +58,7 @@ import {
   type DispatchMaterialStageKey,
   dispatchMaterialStageLabel,
   type DispatchMaterialStageReply,
+  type DispatchMaterialStageReplyNote,
   type DispatchMaterialStageShown,
   dispatchMaterialTodo,
   type DispatchMaterialWaitingOn,
@@ -639,9 +641,11 @@ export const DISPATCH_ACCOUNT_ENTRY_SELECT = "id, name, active, on_account";
 
 // Matched supplier replies (dispatch_v2_supplier_emails, migration
 // 20261023230000_dispatch_v2_replies_tables.sql): the reply step of the
-// material stage (contract section 3c).
+// material stage (contract section 3c). snippet, delivery_date and
+// provider_message_id say whether the reply has a PDF, a date or a price
+// (dispatchV2ReplyHasSubstance); only such a reply moves a box.
 export const DISPATCH_BOARD_REPLY_SELECT =
-  "id, job_id, state, order_id, received_at, matched_at, rung";
+  "id, job_id, state, order_id, received_at, matched_at, rung, snippet, delivery_date, provider_message_id";
 const DISPATCH_V2_REPLIES_SWITCH = "dispatch_v2_replies_v1";
 
 export type DispatchBoardSentEmail = {
@@ -778,6 +782,9 @@ export type DispatchArrivalOrder = {
   // The matched supplier reply that moved the box (source "reply"); null
   // otherwise, and for a purchase order.
   material_stage_reply: DispatchMaterialStageReply | null;
+  // A reply that came in but said too little to move a box at Sent to
+  // supplier (no PDF, date or price): shown as a note.
+  material_stage_reply_note: DispatchMaterialStageReplyNote | null;
   // A pickup on the install's first day: the screen leaves Materials ready
   // out of the box's strip and picker. Always false for a purchase order.
   skips_ready: boolean;
@@ -1040,6 +1047,7 @@ export function dispatchArrival(
       payment: view.payment,
       held_by_payment: view.held_by_payment,
       material_stage_reply: view.reply,
+      material_stage_reply_note: view.reply_note,
       skips_ready: view.skips_ready,
       // What the supplier was asked (the newest sent order's Date line);
       // the box's next-email mode while nothing was sent.
@@ -1077,6 +1085,7 @@ export function dispatchArrival(
       payment: null,
       held_by_payment: false,
       material_stage_reply: null,
+      material_stage_reply_note: null,
       skips_ready: false,
       date_mode: null,
     }, installDay));
@@ -1659,6 +1668,59 @@ export async function loadDispatchInstall(
   return dispatchBoardInstall(bookings.data, today);
 }
 
+/** Sets has_pdf on each reply: true when the reader kept a PDF from that
+ * email (context_email_attachments, by provider_message_id), false when it
+ * kept none. A failed attachments read leaves has_pdf null on every reply,
+ * which dispatchV2ReplyHasSubstance counts as enough to move the box, as
+ * before: a failed read never hides a real quote. Never throws. */
+export async function markDispatchV2ReplyPdfs(
+  client: any,
+  replies: any[],
+  label: string,
+): Promise<any[]> {
+  const rows = replies || [];
+  const messages = [
+    ...new Set(
+      rows.map((r) => r?.provider_message_id).filter((m) =>
+        typeof m === "string" && m.trim()
+      ).map(String),
+    ),
+  ];
+  // A reply with no message id cannot be looked up: unknown (null), which
+  // moves the box as before.
+  const known = (r: any) =>
+    typeof r?.provider_message_id === "string" && r.provider_message_id.trim();
+  if (!messages.length) {
+    return rows.map((r) => ({ ...r, has_pdf: null }));
+  }
+  try {
+    const atts = await fetchAllRowsInChunks<any>(
+      messages,
+      (chunk) =>
+        client.from("context_email_attachments")
+          .select("id, provider_message_id, file_name, content_type, status")
+          .in("provider_message_id", chunk)
+          .in("status", ["stored", "skipped_duplicate"]),
+      `${label}_reply_attachments`,
+      "id",
+    );
+    const withPdf = new Set(
+      atts.filter((a) => isDispatchPdfCandidate(a))
+        .map((a) => String(a.provider_message_id)),
+    );
+    return rows.map((r) => ({
+      ...r,
+      has_pdf: known(r) ? withPdf.has(String(r.provider_message_id)) : null,
+    }));
+  } catch (e) {
+    console.error(
+      `[dispatch] ${label} reply attachments read failed:`,
+      (e as Error)?.message ?? e,
+    );
+    return rows.map((r) => ({ ...r, has_pdf: null }));
+  }
+}
+
 /** The matched supplier replies on these jobs, for the reply step. Read only
  * while the replies switch (feature_flags dispatch_v2_replies_v1) is on: off
  * means no reply is read and nothing moves by itself (an empty answer, not a
@@ -1677,7 +1739,7 @@ export async function loadDispatchV2MatchedReplies(
       .maybeSingle();
     if (error) throw error;
     if (flag?.enabled !== true) return [];
-    return await fetchAllRowsInChunks<any>(
+    const replies = await fetchAllRowsInChunks<any>(
       ids,
       (chunk) =>
         client.from("dispatch_v2_supplier_emails")
@@ -1687,6 +1749,7 @@ export async function loadDispatchV2MatchedReplies(
       `${label}_replies`,
       "id",
     );
+    return await markDispatchV2ReplyPdfs(client, replies, label);
   });
   if (result.error) {
     console.error(
