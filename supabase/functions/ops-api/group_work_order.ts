@@ -2474,7 +2474,12 @@ export async function assertGroupClientConfirmationBeforeCompletion(
   const group = await loadGroupByJob(client, jobId);
   if (!group || group.status === "void") return { grouped: false, capture: null };
   let capture: unknown = null;
-  if (!(await countingSignoff(client, jobId, group)) && recordOnSite) capture = await recordOnSite();
+  // A newly offered on-site signature is newer evidence, including rejection.
+  // Do not hide it behind an earlier office/client approval.
+  if (recordOnSite) {
+    const attempt = await recordOnSite();
+    if (attempt && (attempt as {recorded?:boolean}).recorded === true) capture = attempt;
+  }
   if (!(await countingSignoff(client, jobId, group))) {
     throw new GroupWorkOrderError("group_client_signoff_required", "The client must sign off the current work before it can be ended. The office can record the client's signed copy or written confirmation on their behalf.", 409);
   }

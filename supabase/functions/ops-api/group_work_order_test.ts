@@ -2660,3 +2660,13 @@ Deno.test("office cannot present an older client confirmation as fresh after reo
  m.rows("job_client_signoffs").push({id:"old-confirmation",job_id:JOB,org_id:ORG,method:"office_on_behalf",signed_name:"Invented Client",happy:true,client_confirmed_on:"2026-11-05",work_done:"Agreed work",captured_by:USER_A,captured_by_actor:"user:"+USER_A,capture_auth_source:"jwt",confirmation_kind:"written_confirmation",confirmation_reference:"An earlier client email",created_at:"2026-11-06T06:00:00Z"});
  assertEquals((await readGroupWorkOrderOffice(m.client(),trade(USER_A,true),{group_id:GROUP})).client_signed,false);
 });
+
+Deno.test("a new on-site client rejection takes precedence over an earlier counting sign-off",async()=>{
+ const m=new Memory();seedSplit(m,"open");
+ m.rows("job_client_signoffs").push({id:"earlier-acceptance",job_id:JOB,method:"on_site",happy:true,signature_media_id:"old-signature",created_at:"2026-11-06T05:00:00Z"});
+ let recorded=0;
+ await assertRejects(()=>assertGroupClientConfirmationBeforeCompletion(m.client(),JOB,async()=>{
+  recorded++;m.rows("job_client_signoffs").push({id:"new-rejection",job_id:JOB,method:"on_site",happy:false,signature_media_id:"new-signature",created_at:"2026-11-06T06:00:00Z"});return {recorded:true,counts:false};
+ }),GroupWorkOrderError,"client must sign off the current work");
+ assertEquals(recorded,1);assertEquals(m.rows("jobs")[0].status,"scheduled");
+});
