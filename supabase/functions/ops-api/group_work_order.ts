@@ -2449,7 +2449,7 @@ function happyFlag(value: unknown): boolean | null {
 async function countingSignoff(
   client: any,
   jobId: string,
-  group?: Record<string, unknown>,
+  group?: Record<string, unknown> | null,
 ): Promise<boolean> {
   const [rows, minimum, latestHoursAt] = await Promise.all([
     rowsOf(
@@ -2462,17 +2462,30 @@ async function countingSignoff(
     latestHoursOnJob(client, jobId),
   ]);
   const latest = newestSignoff(rows);
-  const currentGroup = group || await loadGroupByJob(client, jobId);
+  const currentGroup = group === undefined ? await loadGroupByJob(client, jobId) : group;
   const legacy = await legacyFrozenWaiverCounts(client, currentGroup, latest);
   return signoffCounts(latest, minimum, latestHoursAt, legacy, currentGroup?.signoff_required_after);
 }
 
-/** The same current sign-off required by freeze also guards ending group work. */
+/** Current client confirmation guards active groups and patio work on the group route, including missing setup. */
 export async function assertGroupClientConfirmationBeforeCompletion(
   client: any, jobId: string, recordOnSite?: () => Promise<unknown>,
-): Promise<{ grouped: boolean; capture: unknown }> {
-  const group = await loadGroupByJob(client, jobId);
-  if (!group || group.status === "void") return { grouped: false, capture: null };
+): Promise<{ grouped: boolean; requiresConfirmation: boolean; capture: unknown }> {
+  const found = await loadGroupByJob(client, jobId);
+  const group = found && found.status !== "void" ? found : null;
+  let requiresConfirmation = Boolean(group);
+  if (!group) {
+    const job = await loadJob(client, jobId);
+    if (job?.type === "patio") {
+      // Reuse the canonical price-free route, including its flag, genuine
+      // pre-group work exception and existing-pay checks. Missing setup must
+      // not let a group-required job bypass client confirmation.
+      const routes = await readInvoicePayableRoutes(client, [jobId], [], String(job.org_id));
+      if (!routes[0]) throw new GroupWorkOrderError("group_work_order_unreadable", "Could not check how this job is paid. Refresh before ending the work.", 503);
+      requiresConfirmation = routes[0].route === "group_setup_required";
+    }
+  }
+  if (!requiresConfirmation) return { grouped: false, requiresConfirmation: false, capture: null };
   let capture: unknown = null;
   // A newly offered on-site signature is newer evidence, including rejection.
   // Do not hide it behind an earlier office/client approval.
@@ -2483,7 +2496,7 @@ export async function assertGroupClientConfirmationBeforeCompletion(
   if (!(await countingSignoff(client, jobId, group))) {
     throw new GroupWorkOrderError("group_client_signoff_required", "The client must sign off the current work before it can be ended. The office can record the client's signed copy or written confirmation on their behalf.", 409);
   }
-  return { grouped: true, capture };
+  return { grouped: Boolean(group), requiresConfirmation: true, capture };
 }
 
 async function storeClientSignature(

@@ -37,6 +37,10 @@ complete office entry on the client's behalf. New hours, changed hours,
 participant removal and reopening invalidate an earlier confirmation.
 Reopening always requires a new confirmation, even when hours did not change.
 The installer completion handler checks this before changing the job status.
+It also checks patio jobs whose canonical payable route requires group setup,
+even before their group exists. It reuses that route’s existing flag,
+pre-group scheduling and prior-pay rules. Genuine ordinary pre-group work
+keeps its existing completion policy.
 Daily attendance and saving actual hours keep their existing behaviour.
 
 The SQL freeze/release path and application reads use the same newest-row,

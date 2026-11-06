@@ -55236,7 +55236,7 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
   }
   // End-work and freeze use the same current client-confirmation boundary.
   // A signature uploaded by this wizard may satisfy it before job completion.
-  let groupConfirmation: {grouped:boolean;capture:unknown}
+  let groupConfirmation: {grouped:boolean;requiresConfirmation:boolean;capture:unknown}
   try {
     groupConfirmation = await assertGroupClientConfirmationBeforeCompletion(client, job.id,
       () => recordOnSiteClientSignoff(client, body, tradeUser, job))
@@ -55255,9 +55255,9 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     console.warn('[ops-api] complete_my_job invoice queue failed (non-blocking):', e instanceof Error ? e.message : e)
     invoiceQueue = { lane: null, work_orders: [], error: e instanceof Error ? e.message : String(e) }
   }
-  // Non-group completion keeps its existing non-blocking capture behaviour.
-  let clientSignoff: any = groupConfirmation.capture || (groupConfirmation.grouped ? {recorded:false,reason:'already_on_file',counts:true} : null)
-  if (!groupConfirmation.grouped) try {
+  // Jobs on the ordinary hours route keep their existing non-blocking capture behaviour.
+  let clientSignoff: any = groupConfirmation.capture || (groupConfirmation.requiresConfirmation ? {recorded:false,reason:'already_on_file',counts:true} : null)
+  if (!groupConfirmation.requiresConfirmation) try {
     clientSignoff = await recordOnSiteClientSignoff(client, body, tradeUser, job)
   } catch (e) {
     console.error('[ops-api] complete_my_job client sign-off record failed (non-blocking):', e instanceof Error ? e.message : e)

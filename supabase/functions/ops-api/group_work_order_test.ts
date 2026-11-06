@@ -55,6 +55,7 @@ import {
   readMyGroupWorkOrders,
   readInvoicePayableRoutes,
   readPatioLegacyHoursJobIds,
+  PATIO_PAY_GROUP_ONLY_FLAG,
   assertPatioPaysThroughGroup,
   assertAllInGroupInvoiceStandalone,
   assertGroupClientConfirmationBeforeCompletion,
@@ -2669,4 +2670,31 @@ Deno.test("a new on-site client rejection takes precedence over an earlier count
   recorded++;m.rows("job_client_signoffs").push({id:"new-rejection",job_id:JOB,method:"on_site",happy:false,signature_media_id:"new-signature",created_at:"2026-11-06T06:00:00Z"});return {recorded:true,counts:false};
  }),GroupWorkOrderError,"client must sign off the current work");
  assertEquals(recorded,1);assertEquals(m.rows("jobs")[0].status,"scheduled");
+});
+
+Deno.test("group-required patio completion cannot escape client confirmation while group setup is missing",async()=>{
+ const db=new Memory();seedSplit(db,"open");
+ db.rows("jobs")[0].type="patio";
+ db.rows("feature_flags").push({flag_name:PATIO_PAY_GROUP_ONLY_FLAG,enabled:true});
+ db.rows("group_work_orders")[0].job_id=OTHER_JOB;
+ db.rows("jobs").push({id:OTHER_JOB,org_id:ORG,type:"patio",status:"scheduled"});
+ db.rows("job_assignments").push({id:"anchor-allocation",job_id:OTHER_JOB,user_id:USER_A,scheduled_date:"2026-10-19",status:"scheduled",is_ghost:false});
+ const refusal=await assertRejects(()=>assertGroupClientConfirmationBeforeCompletion(db.client(),JOB),GroupWorkOrderError);
+ assertEquals(refusal.code,"group_client_signoff_required");
+ assertEquals(db.rows("jobs")[0].status,"scheduled");
+ db.rows("job_client_signoffs").push({id:"client-confirmation",job_id:JOB,method:"on_site",happy:true,signature_media_id:"signature",created_at:"2026-10-26T00:00:00Z"});
+ const result=await assertGroupClientConfirmationBeforeCompletion(db.client(),JOB);
+ assertEquals(result.grouped,false);assertEquals(result.requiresConfirmation,true);
+ assertEquals(db.rows("group_work_orders").some(g=>g.job_id===JOB),false,"the guard must not create a group");
+});
+Deno.test("ordinary patio work with genuine pre-group pay and scheduling keeps its existing completion policy",async()=>{
+ const db=new Memory();seedSplit(db,"open");db.rows("jobs")[0].type="patio";
+ db.rows("feature_flags").push({flag_name:PATIO_PAY_GROUP_ONLY_FLAG,enabled:true});
+ db.rows("group_work_orders")[0].job_id=OTHER_JOB;db.rows("jobs").push({id:OTHER_JOB,org_id:ORG,type:"patio",status:"scheduled"});
+ for(const a of db.rows("job_assignments"))if(a.job_id===JOB)a.scheduled_date="2026-10-18";
+ db.rows("job_assignments").push({id:"anchor-allocation",job_id:OTHER_JOB,user_id:USER_A,scheduled_date:"2026-10-19",status:"scheduled",is_ghost:false});
+ db.rows("trade_invoices").push({id:"legacy-invoice",status:"paid"});
+ db.rows("trade_invoice_lines").push({job_id:JOB,trade_invoice_id:"legacy-invoice",line_type:"labour",source_work_order_id:WO,trade_invoices:{status:"paid"}});
+ const result=await assertGroupClientConfirmationBeforeCompletion(db.client(),JOB);
+ assertEquals(result.requiresConfirmation,false);assertEquals(result.grouped,false);
 });

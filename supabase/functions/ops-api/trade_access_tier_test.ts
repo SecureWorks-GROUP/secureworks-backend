@@ -2966,3 +2966,12 @@ Deno.test("group end-work: missing or stale client confirmation leaves the job o
  await assertRejects(()=>_tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,access),Error,"client must sign off the current work");
  assertEquals(job.status,"processing");
 });
+
+Deno.test("group-required patio without setup: installer completion refuses before changing the job",async()=>{
+ const t=woodvaleSeed();const lead=viewer(LEAD,"lead_installer");
+ const job=t.jobs.find((j:any)=>j.id===JOB_FENCE);job.type="patio";
+ t.group_work_orders=[];t.feature_flags=(t.feature_flags||[]).filter((f:any)=>f.flag_name!=="patio_pay_group_only_v1");
+ t.feature_flags.push({flag_name:"patio_pay_group_only_v1",enabled:true});
+ await assertRejects(()=>_tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,{orgId:ORG_A,managedVerticals:[]}),Error,"client must sign off the current work");
+ assertEquals(job.status,"processing");
+});
