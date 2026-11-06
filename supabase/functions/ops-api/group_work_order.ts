@@ -30,6 +30,7 @@
 //
 // Nothing here sends a text, an email or a review request.
 
+import { clientSignoffForm, hasOfficeClientConfirmation, validSignoffDay, SIGNED_CLIENT_COPY_COLUMNS } from "./client_signoff_form_data.ts";
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
 import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
@@ -758,7 +759,7 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
 }
 
 const GROUP_COLUMNS =
-  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by";
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by, signoff_required_after";
 
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(
@@ -1307,17 +1308,27 @@ function signoffCounts(
   row: Record<string, unknown> | null,
   minimum: number,
   latestHoursAt: string | null,
+  allowLegacyWaiver = false,
+  reopenedAt?: unknown,
 ): boolean {
   if (!row) return false;
   const method = String(row.method || "");
   if (method === "revoked") return false;
   if (method === "office_waiver") {
-    return String(row.waiver_reason || "").trim().length >= 3 &&
+    return allowLegacyWaiver && String(row.waiver_reason || "").trim().length >= 3 &&
       Boolean(String(row.captured_by_actor || "").trim()) &&
       signedAfterHours(row.created_at, latestHoursAt);
   }
-  if (method !== "on_site" && method !== "share_link") return false;
-  if (!row.signature_media_id) return false;
+  if (method === "office_on_behalf") {
+    if (!hasOfficeClientConfirmation(row) || row.happy !== true) return false;
+    if (reopenedAt) {
+      const reopened = Date.parse(String(reopenedAt));
+      if (!Number.isFinite(reopened) || String(row.client_confirmed_on) < new Date(reopened + 8 * 3600_000).toISOString().slice(0,10)) return false;
+    }
+  } else {
+    if (method !== "on_site" && method !== "share_link") return false;
+    if (!row.signature_media_id) return false;
+  }
   if (row.happy === false) return false;
   if (
     row.satisfaction_rating != null &&
@@ -1342,6 +1353,22 @@ function newestSignoff(
   return sorted[0] || null;
 }
 
+
+// Only the pre-existing frozen cohort keeps the old office-waiver authority.
+// The policy instant is immutable and is set by the migration's first apply.
+async function legacyFrozenWaiverCounts(client: any, group: Record<string, unknown> | null, row: Record<string, unknown> | null): Promise<boolean> {
+  if (row?.method !== "office_waiver" || !group?.split_frozen_at) return false;
+  const { data, error } = await client.from("group_client_signoff_policy")
+    .select("client_confirmation_since").eq("id", 1).maybeSingle();
+  throwQuery(error, "check the historical sign-off policy");
+  const since = Date.parse(String(data?.client_confirmation_since || ""));
+  const frozen = Date.parse(String(group.split_frozen_at));
+  if (!Number.isFinite(since) || !Number.isFinite(frozen)) {
+    throw new GroupWorkOrderError("group_work_order_unreadable", "The historical sign-off policy could not be checked.", 503);
+  }
+  return frozen < since;
+}
+
 async function happyMinimum(client: any): Promise<number> {
   const { data, error } = await client.from("client_signoff_settings").select(
     "min_happy_rating",
@@ -1353,7 +1380,7 @@ async function happyMinimum(client: any): Promise<number> {
 
 async function latestHoursOnJob(client: any, jobId: string): Promise<string | null> {
   const groups = await rowsOf(
-    client.from("group_work_orders").select("id, status, hours_changed_at").eq(
+    client.from("group_work_orders").select("id, status, hours_changed_at, signoff_required_after").eq(
       "job_id",
       jobId,
     ),
@@ -1372,7 +1399,7 @@ async function latestHoursOnJob(client: any, jobId: string): Promise<string | nu
   // max() over both, not a later-of that treats a missing side as unknown.
   // Deleting the last hour row leaves hours_changed_at.
   const changed = latestStamp(
-    live.map((row) => ({ created_at: row.hours_changed_at })),
+    live.flatMap((row) => [{ created_at: row.hours_changed_at }, { created_at: row.signoff_required_after }]),
   );
   return laterInstant(latestStamp(stamps), changed);
 }
@@ -1773,7 +1800,7 @@ async function loadShareView(
       ),
       rowsOf(
         client.from("job_client_signoffs").select(
-          "id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, captured_by_actor, signed_name",
+          "id, job_id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, signed_name," + SIGNED_CLIENT_COPY_COLUMNS,
         ).eq("job_id", group.job_id),
         "load the client sign-off",
       ),
@@ -1827,6 +1854,8 @@ async function loadShareView(
     newestSignoff(signoffs),
     minimum,
     latestHoursAt,
+    await legacyFrozenWaiverCounts(client, group, newestSignoff(signoffs)),
+    group.signoff_required_after,
   );
   // An approval counts only when it is newer than every hours change. The
   // office can approve for the whole crew (owner, 30 Oct 2026), on the same terms.
@@ -2357,6 +2386,9 @@ export async function readGroupWorkOrderPublic(client: any, token: string) {
   await assertGroupEnabled(client);
   const group = await requireTokenGroup(client, token);
   const job = await loadJob(client, String(group.job_id));
+  if (!job || String(job.org_id) !== String(group.org_id)) {
+    throw new GroupWorkOrderError("group_share_token_invalid", "This sign-off link is not valid.", 404);
+  }
   const feedback = await rowsOf(
     client.from("group_work_order_feedback").select("id").eq(
       "group_id",
@@ -2369,7 +2401,8 @@ export async function readGroupWorkOrderPublic(client: any, token: string) {
     job_number: job?.job_number || null,
     site_suburb: job?.site_suburb || null,
     job_type: job?.type || null,
-    client_signed: groupIsSigned(group),
+    client_signed: await countingSignoff(client, String(group.job_id), group),
+    form: clientSignoffForm(job || {}),
     feedback_submitted: feedback.length > 0,
     office_only_notice: OFFICE_FEEDBACK_NOTICE,
   };
@@ -2416,18 +2449,54 @@ function happyFlag(value: unknown): boolean | null {
 async function countingSignoff(
   client: any,
   jobId: string,
+  group?: Record<string, unknown> | null,
 ): Promise<boolean> {
   const [rows, minimum, latestHoursAt] = await Promise.all([
     rowsOf(
       client.from("job_client_signoffs").select(
-        "id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, captured_by_actor",
+        "id, job_id, method, happy, satisfaction_rating, created_at, signature_media_id, waiver_reason, signed_name," + SIGNED_CLIENT_COPY_COLUMNS,
       ).eq("job_id", jobId),
       "load the client sign-off",
     ),
     happyMinimum(client),
     latestHoursOnJob(client, jobId),
   ]);
-  return signoffCounts(newestSignoff(rows), minimum, latestHoursAt);
+  const latest = newestSignoff(rows);
+  const currentGroup = group === undefined ? await loadGroupByJob(client, jobId) : group;
+  const legacy = await legacyFrozenWaiverCounts(client, currentGroup, latest);
+  return signoffCounts(latest, minimum, latestHoursAt, legacy, currentGroup?.signoff_required_after);
+}
+
+/** Current client confirmation guards active groups and patio work on the group route, including missing setup. */
+export async function assertGroupClientConfirmationBeforeCompletion(
+  client: any, jobId: string, recordOnSite?: () => Promise<unknown>,
+): Promise<{ grouped: boolean; requiresConfirmation: boolean; capture: unknown }> {
+  const found = await loadGroupByJob(client, jobId);
+  const group = found && found.status !== "void" ? found : null;
+  let requiresConfirmation = Boolean(group);
+  if (!group) {
+    const job = await loadJob(client, jobId);
+    if (job?.type === "patio") {
+      // Reuse the canonical price-free route, including its flag, genuine
+      // pre-group work exception and existing-pay checks. Missing setup must
+      // not let a group-required job bypass client confirmation.
+      const routes = await readInvoicePayableRoutes(client, [jobId], [], String(job.org_id));
+      if (!routes[0]) throw new GroupWorkOrderError("group_work_order_unreadable", "Could not check how this job is paid. Refresh before ending the work.", 503);
+      requiresConfirmation = routes[0].route === "group_setup_required";
+    }
+  }
+  if (!requiresConfirmation) return { grouped: false, requiresConfirmation: false, capture: null };
+  let capture: unknown = null;
+  // A newly offered on-site signature is newer evidence, including rejection.
+  // Do not hide it behind an earlier office/client approval.
+  if (recordOnSite) {
+    const attempt = await recordOnSite();
+    if (attempt && (attempt as {recorded?:boolean}).recorded === true) capture = attempt;
+  }
+  if (!(await countingSignoff(client, jobId, group))) {
+    throw new GroupWorkOrderError("group_client_signoff_required", "The client must sign off the current work before it can be ended. The office can record the client's signed copy or written confirmation on their behalf.", 409);
+  }
+  return { grouped: Boolean(group), requiresConfirmation: true, capture };
 }
 
 async function storeClientSignature(
@@ -2442,9 +2511,10 @@ async function storeClientSignature(
     device: string | null;
     happy: boolean | null;
     rating: number | null;
+    confirmation?: { client_confirmed_on: string; work_done: string; outstanding_items: string | null };
   },
 ) {
-  if (await countingSignoff(client, String(group.job_id))) {
+  if (await countingSignoff(client, String(group.job_id), group)) {
     return { ok: true, client_signed: true, already_signed: true };
   }
   const { data: media, error: mediaError } = await client.from("job_media")
@@ -2476,9 +2546,10 @@ async function storeClientSignature(
     captured_by: input.capturedBy,
     captured_by_actor: input.actor,
     captured_device: input.device,
+    ...(input.confirmation || {}),
   });
   throwQuery(error, "record the client's signature");
-  const counts = await countingSignoff(client, String(group.job_id));
+  const counts = await countingSignoff(client, String(group.job_id), group);
   if (counts && group.status === "open") {
     const signedAt = new Date().toISOString();
     const { error: stampError } = await client.from("group_work_orders")
@@ -2501,12 +2572,24 @@ export async function clientSignGroupWorkOrder(
     client,
     String(body.share_token || ""),
   );
+  let confirmation: {client_confirmed_on:string;work_done:string;outstanding_items:string|null} | undefined;
+  if (body.form_version === "client-confirmation-v1") {
+    const day = String(body.client_confirmed_on || "").trim();
+    const work = String(body.work_done || "").trim();
+    const notes = String(body.outstanding_items || "").trim();
+    const today = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0,10);
+    if (!validSignoffDay(day) || day > today || !work || work.length > 10000 || notes.length > 10000 || typeof body.happy !== "boolean") {
+      throw new GroupWorkOrderError("group_client_form_incomplete", "Enter the work completed, confirmation date and whether you accept the work.", 400);
+    }
+    confirmation = {client_confirmed_on:day,work_done:work,outstanding_items:notes || null};
+  }
   // The public link cannot choose the on-site method. That capture is the
   // participant's signed-in phone.
   return await storeClientSignature(client, group, {
     name: signerName(body.signer_name || body.signature_name),
     png: parseSignature(body.signature_png, true) || "",
     method: "share_link",
+    confirmation,
     capturedBy: null,
     actor: "client link",
     device: deviceLabel(body.device || body.captured_device),
@@ -2552,7 +2635,7 @@ export async function submitGroupWorkOrderFeedback(
 ) {
   await assertGroupEnabled(client);
   const group = await requireTokenGroup(client, String(body.share_token || ""));
-  if (!(await countingSignoff(client, String(group.job_id)))) {
+  if (!(await countingSignoff(client, String(group.job_id), group))) {
     throw new GroupWorkOrderError(
       "group_client_signoff_required",
       "The client signs the job before leaving feedback.",
