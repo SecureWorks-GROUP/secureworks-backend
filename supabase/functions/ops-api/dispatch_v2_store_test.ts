@@ -259,6 +259,17 @@ const SCHEMA: Record<string, string[]> = {
     "received_at",
     "matched_at",
     "rung",
+    "snippet",
+    "delivery_date",
+    "provider_message_id",
+  ],
+  // Which replies carry a PDF (dispatch_board.ts markDispatchV2ReplyPdfs).
+  context_email_attachments: [
+    "id",
+    "provider_message_id",
+    "file_name",
+    "content_type",
+    "status",
   ],
   dispatch_v2_scope_fills: [
     "job_id",
@@ -444,6 +455,7 @@ function seed(): Record<string, Row[]> {
     quote_revisions: [],
     feature_flags: [],
     dispatch_v2_supplier_emails: [],
+    context_email_attachments: [],
     job_assignments: [],
     job_events: [],
   };

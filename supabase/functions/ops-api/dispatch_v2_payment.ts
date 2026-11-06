@@ -259,6 +259,34 @@ export function dispatchV2ReplyAt(reply: {
   return stampText(reply?.received_at) ?? stampText(reply?.matched_at);
 }
 
+// A dollar amount: "$1,234.50", "$ 980", or "1,234.50 inc GST".
+const DISPATCH_V2_REPLY_MONEY = [
+  /\$\s?\d/,
+  /\b\d{1,3}(?:,\d{3})*\.\d{2}\s*(?:inc|incl|ex|excl|\+)\.?\s*gst\b/i,
+];
+
+/** Whether a supplier reply says enough to move a box on by itself (Shaun,
+ * 6 Nov 2026, "go"): a PDF attached (a quote, invoice or confirmation), a
+ * delivery date the reader found in it, or a dollar amount near its top (the
+ * snippet: the reply's own words, before the quoted thread). A plain "All
+ * good Shaun" does not: the box stays at Sent to supplier and the screen
+ * shows the reply as a note (reply_note). has_pdf left out or null (the
+ * attachments were not read) counts as enough, as before this rule, so a
+ * failed read never hides a real quote. */
+export function dispatchV2ReplyHasSubstance(reply: {
+  has_pdf?: boolean | null;
+  delivery_date?: unknown;
+  snippet?: unknown;
+}): boolean {
+  if (!reply) return false;
+  if (reply.has_pdf !== false) return true;
+  if (typeof reply.delivery_date === "string" && reply.delivery_date.trim()) {
+    return true;
+  }
+  const words = typeof reply.snippet === "string" ? reply.snippet : "";
+  return DISPATCH_V2_REPLY_MONEY.some((re) => re.test(words));
+}
+
 /** Whether one reply is tied to the box's newest order: matched, naming
  * that order email, and arrived after it was sent. */
 export function dispatchV2ReplyTiedToOrder(
