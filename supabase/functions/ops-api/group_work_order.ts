@@ -615,6 +615,12 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    needle: "group_hours_not_member",
+    code: "group_hours_not_member",
+    message: "Join the group before logging hours on it.",
+    status: 409,
+  },
+  {
     needle: "group_hours_not_assigned",
     code: "group_hours_not_assigned",
     message: "Those hours are on a day you are not allocated to this job.",
@@ -696,16 +702,6 @@ export function liveAssignment(row: Record<string, unknown>): boolean {
   if (row.is_ghost === true) return false;
   if (String(row.role || "").toLowerCase() === "observer") return false;
   return String(row.status || "").toLowerCase() !== "cancelled";
-}
-
-function assignmentCoversDay(
-  row: Record<string, unknown>,
-  userId: string,
-  workDate: string,
-): boolean {
-  return String(row.user_id) === userId &&
-    String(row.scheduled_date || "") === workDate &&
-    liveAssignment(row);
 }
 
 async function callerAssigned(
@@ -1245,7 +1241,6 @@ type ShareView = {
   hoursOfficeApproved: boolean;
 };
 
-const CREW_APPROVAL_MESSAGE = "Every crew member has to approve the hours before the shares are finalised.";
 
 function signedAfterHours(signedAt: unknown, latestHoursAt: string | null): boolean {
   if (!latestHoursAt) return true;
@@ -1855,19 +1850,13 @@ async function loadShareView(
   group: Record<string, unknown>,
   participants: readonly Record<string, unknown>[],
 ): Promise<ShareView> {
-  const [entries, assignments, signoffs, minimum, latestHoursAt, crewByJob] = await Promise
+  const [entries, signoffs, minimum, latestHoursAt, crewByJob] = await Promise
     .all([
       rowsOf(
         client.from("group_work_order_time_entries").select(
           "user_id, work_date, hours, created_at",
         ).eq("group_id", group.id),
         "load hours",
-      ),
-      rowsOf(
-        client.from("job_assignments").select(
-          "user_id, scheduled_date, status, role, is_ghost",
-        ).eq("job_id", group.job_id),
-        "load allocations",
       ),
       rowsOf(
         client.from("job_client_signoffs").select(
@@ -1879,6 +1868,9 @@ async function loadShareView(
       latestHoursOnJob(client, String(group.job_id)),
       readGroupWorkOrderCrew(client, [String(group.job_id)]),
     ]);
+  // Owner, 6 Nov 2026: a crew member logs their own hours for any day on the
+  // job, and logging them is their own confirmation. A member's hours count,
+  // booked day or not; the twin of group_work_order_write_split (20261106140000).
   const requiredCrew = new Set(crewByJob.get(String(group.job_id)) || []);
   const memberIds = new Set(participants.map((row) => String(row.user_id)));
   const hoursByUser = new Map<string, number>();
@@ -1888,12 +1880,7 @@ async function loadShareView(
     if (!(hours > 0)) continue;
     const userId = String(entry.user_id);
     const workDate = String(entry.work_date || "");
-    if (
-      !requiredCrew.has(userId) || !memberIds.has(userId) ||
-      !assignments.some((row) => assignmentCoversDay(row, userId, workDate))
-    ) {
-      continue;
-    }
+    if (!requiredCrew.has(userId) || !memberIds.has(userId)) continue;
     hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
     counting.push({ userId, workDate });
   }
@@ -1932,12 +1919,9 @@ async function loadShareView(
   // office can approve for the whole crew (owner, 30 Oct 2026), on the same terms.
   const hoursOfficeApproved = Boolean(group.hours_office_approved_at) &&
     signedAfterHours(group.hours_office_approved_at, latestHoursAt);
-  const needsApproval = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !hoursOfficeApproved
-    ? participants.filter((row) =>
-      (hoursByUser.get(String(row.user_id)) || 0) > 0 &&
-      !(row.crew_signed_at && signedAfterHours(row.crew_signed_at, latestHoursAt))
-    ).map((row) => String(row.user_id)).sort()
-    : [];
+  // Nobody approves anyone else's hours (owner, 6 Nov 2026). Kept empty so
+  // older screens that still read it never wait on it.
+  const needsApproval: string[] = [];
   let awaiting: GroupAwaiting = "ready";
   if (!signed) awaiting = "awaiting_signoff";
   else if (group.split_frozen_at) awaiting = "frozen";
@@ -2186,7 +2170,11 @@ async function readGroupCrewStatus(client: any, caller: GroupCaller, groupId: st
   };
 }
 
-/** Every crew member's hours and approval, and the sign-off. Hours only, never rates or pay. */
+/**
+ * Every crew member's hours and the sign-off. Hours only, never rates or pay.
+ * Logging your own hours is your confirmation (owner, 6 Nov 2026): nobody
+ * approves anyone else's, so crew_approval_required is always false.
+ */
 async function readGroupCrewHours(client: any, caller: GroupCaller, group: Record<string, unknown>) {
   const participants = await loadParticipants(client, String(group.id));
   const view = await loadShareView(client, group, participants);
@@ -2201,13 +2189,14 @@ async function readGroupCrewHours(client: any, caller: GroupCaller, group: Recor
       name: full ? full.split(/\s+/)[0] : "A crew member",
       me: id === caller.userId,
       hours,
-      approved: required ? hours > 0 && !view.needsApproval.includes(id) : Boolean(row.crew_signed_at),
+      // Confirmed by the person who logged them.
+      approved: hours > 0,
       approved_by_office: required && view.hoursOfficeApproved && hours > 0,
     };
   });
   const signoff = view.signed && view.signoff ? view.signoff : null;
   return {
-    crew_approval_required: required,
+    crew_approval_required: false,
     hours_office_approved: required && view.hoursOfficeApproved,
     crew_hours: crewHours,
     my_hours_approved: crewHours.some((row) => row.me && row.approved),
@@ -2924,10 +2913,8 @@ export async function freezeGroupWorkOrder(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   if (!caller.isStaff) requireParticipant(participants, caller.userId);
-  if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !group.split_frozen_at &&
-    (await loadShareView(client, group, participants)).needsApproval.length > 0) {
-    throw new GroupWorkOrderError("group_crew_approval_required", CREW_APPROVAL_MESSAGE, 409);
-  }
+  // The freeze waits for hours, rates and the client sign-off, never for one
+  // crew member approving another's hours (owner, 6 Nov 2026).
   const { error } = await client.rpc("freeze_group_work_order_split", {
     p_group_id: group.id,
   });
@@ -3078,37 +3065,13 @@ export async function resolveGroupShareInvoiceExtra(
     ).eq("group_id", group.id).eq("user_id", input.userId),
     "load hours",
   );
-  const assignments = await rowsOf(
-    client.from("job_assignments").select(
-      "user_id, scheduled_date, status, role, is_ghost",
-    ).eq("job_id", group.job_id).eq("user_id", input.userId),
-    "load allocations",
-  );
-  const ownHours = entries.filter((row) =>
-    assignmentCoversDay(row, input.userId, String(row.work_date || "")) ||
-    assignments.some((assignment) =>
-      assignmentCoversDay(
-        assignment,
-        input.userId,
-        String(row.work_date || ""),
-      )
-    )
-  ).reduce((sum, row) => {
-    const covered = assignments.some((assignment) =>
-      assignmentCoversDay(assignment, input.userId, String(row.work_date || ""))
-    );
-    return covered ? sum + Number(row.hours || 0) : sum;
-  }, 0);
+  // Every hour a crew member logged counts, booked day or not (6 Nov 2026).
+  const ownHours = entries.reduce((sum, row) => sum + Math.max(0, Number(row.hours || 0)), 0);
   if (ownHours <= 0) {
     throw new GroupWorkOrderError(
       "group_share_hours_missing",
       "Submit your hours on this group before invoicing your share.",
     );
-  }
-  // The first share invoice freezes the split, so it waits for the crew too.
-  if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !group.split_frozen_at &&
-    (await loadShareView(client, group, await loadParticipants(client, String(group.id)))).needsApproval.length > 0) {
-    throw new GroupWorkOrderError("group_crew_approval_required", CREW_APPROVAL_MESSAGE, 409);
   }
   // Quote only. The line trigger freezes in the same statement as the insert.
   const shares = await readSplit(client, String(group.id), false);

@@ -8,6 +8,7 @@ import {
   labourOutsidePool,
   openMissingFenceWorkOrders,
   openMissingPatioWorkOrders,
+  removedUserIds,
 } from "./patio_auto_group.ts";
 
 type Row = Record<string, any>;
@@ -204,6 +205,24 @@ Deno.test("auto group: priced open patio jobs with 2+ crew get a group with the 
   fake.rows("users").push({ id: "late", role: "crew" });
   fake.rows("job_assignments").push({ job_id: "a", user_id: "late", status: "scheduled" });
   assertEquals((await autoGroupPatioJobs(fake.client())).crew_added, 0);
+});
+
+Deno.test("auto group: someone who left or was removed is never added back by the sweep", async () => {
+  assertEquals([...removedUserIds([{ detail: { user_id: "u-1" } }, { detail: null }, {}])], ["u-1"]);
+  const fake = patioWorld();
+  await autoGroupPatioJobs(fake.client());
+  const group = fake.rows("group_work_orders")[0];
+  const people = fake.rows("group_work_order_participants");
+  // The crew member leaves (or the office removes them): the row goes and an event stays.
+  people.splice(people.findIndex((p) => p.user_id === "ryan"), 1);
+  fake.rows("group_work_order_events").push({ group_id: group.id, action: "remove_participant", detail: { user_id: "ryan" } });
+  const swept = await autoGroupPatioJobs(fake.client());
+  assertEquals(swept.crew_added, 0);
+  assertEquals(people.some((p) => p.user_id === "ryan"), false);
+  // Someone newly allocated still joins.
+  fake.rows("users").push({ id: "new-crew", role: "crew" });
+  fake.rows("job_assignments").push({ job_id: "a", user_id: "new-crew", status: "scheduled" });
+  assertEquals((await autoGroupPatioJobs(fake.client())).crew_added, 1);
 });
 
 Deno.test("auto group: off switch, and the database fence wins", async () => {
