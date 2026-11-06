@@ -437,7 +437,7 @@ Deno.test("list_supplier_bills accepts an exactly full page", async () => {
   assertEquals(listed.next_page, 4);
 });
 
-Deno.test("list_supplier_bills caches a whole page in one upsert, not one per bill", async () => {
+Deno.test("list_supplier_bills returns a full page without writing the local mirror", async () => {
   const upserts: any[] = [];
   const client = {
     from() {
@@ -466,12 +466,10 @@ Deno.test("list_supplier_bills caches a whole page in one upsert, not one per bi
     },
   );
   assertEquals(listed.count, 40);
-  assertEquals(upserts.length, 1);
-  assertEquals(Array.isArray(upserts[0]), true);
-  assertEquals(upserts[0].length, 40);
+  assertEquals(upserts.length, 0);
 });
 
-Deno.test("cache batch dedupes by InvoiceID so one duplicate cannot fail the page", async () => {
+Deno.test("list_supplier_bills preserves provider rows without deduping or caching a read", async () => {
   const upserts: any[] = [];
   const client = {
     from() {
@@ -490,25 +488,48 @@ Deno.test("cache batch dedupes by InvoiceID so one duplicate cannot fail the pag
       getToken: async () => ({ accessToken: "t", tenantId: "n" }),
       xeroGet: (async () => ({
         Invoices: [
-          { InvoiceID: "dup", Type: "ACCPAY", Status: "DRAFT", Contact: { Name: "A" }, LineItems: [] },
-          { InvoiceID: "dup", Type: "ACCPAY", Status: "AUTHORISED", Contact: { Name: "A" }, LineItems: [] },
-          { InvoiceID: "other", Type: "ACCPAY", Status: "DRAFT", Contact: { Name: "B" }, LineItems: [] },
-          { Type: "ACCPAY", Status: "DRAFT", Contact: { Name: "No ID" }, LineItems: [] },
+          {
+            InvoiceID: "dup",
+            Type: "ACCPAY",
+            Status: "DRAFT",
+            Contact: { Name: "A" },
+            LineItems: [],
+          },
+          {
+            InvoiceID: "dup",
+            Type: "ACCPAY",
+            Status: "AUTHORISED",
+            Contact: { Name: "A" },
+            LineItems: [],
+          },
+          {
+            InvoiceID: "other",
+            Type: "ACCPAY",
+            Status: "DRAFT",
+            Contact: { Name: "B" },
+            LineItems: [],
+          },
+          {
+            Type: "ACCPAY",
+            Status: "DRAFT",
+            Contact: { Name: "No ID" },
+            LineItems: [],
+          },
         ],
       })) as any,
     },
   );
-  // The caller still sees every row Xero returned; only the cache is deduped.
   assertEquals(listed.count, 4);
-  assertEquals(upserts.length, 1);
-  const rows = upserts[0];
-  assertEquals(rows.length, 2);
-  assertEquals(rows.map((r: any) => r.xero_invoice_id).sort(), ["dup", "other"]);
-  // Last write for a duplicated id wins.
-  assertEquals(rows.find((r: any) => r.xero_invoice_id === "dup").status, "AUTHORISED");
+  assertEquals(listed.bills.map((bill: any) => bill.xero_invoice_id), [
+    "dup",
+    "dup",
+    "other",
+    null,
+  ]);
+  assertEquals(upserts.length, 0);
 });
 
-Deno.test("cached bill rows carry Xero fields only, never job or SES columns", async () => {
+Deno.test("a draft bill write caches Xero fields only, never job or SES columns", async () => {
   const upserts: any[] = [];
   const client = {
     from() {
@@ -520,12 +541,16 @@ Deno.test("cached bill rows carry Xero fields only, never job or SES columns", a
       };
     },
   };
-  await listSupplierBills(
+  await createSupplierBill(
     client,
-    {},
+    {
+      xero_contact_id: "fixture-contact",
+      line_items: [{ description: "Fixture work", unit_amount: 1 }],
+    },
     {
       getToken: async () => ({ accessToken: "t", tenantId: "n" }),
-      xeroGet: (async () => ({
+      xeroGet: () => Promise.resolve({}),
+      xeroPost: (async () => ({
         Invoices: [{
           InvoiceID: "bill-1",
           Type: "ACCPAY",
@@ -539,7 +564,8 @@ Deno.test("cached bill rows carry Xero fields only, never job or SES columns", a
       })) as any,
     },
   );
-  const row = upserts[0][0];
+  assertEquals(upserts.length, 1);
+  const row = upserts[0];
   for (
     const forbidden of [
       "job_id",
@@ -831,4 +857,76 @@ Deno.test("create_supplier_credit_note mints a DRAFT ACCPAYCREDIT only", async (
   );
   assertEquals(created.status, "DRAFT");
   assertEquals(created.credit_note.xero_credit_note_id, "cn-1");
+});
+
+Deno.test("supplier bill detail is read-only even when a mirror writer is available", async () => {
+  let mirrorWrites = 0;
+  const client = {
+    from() {
+      return {
+        upsert: () => {
+          mirrorWrites++;
+          return Promise.resolve({ error: null });
+        },
+      };
+    },
+  };
+  const got = await getSupplierBill(client, { xero_bill_id: "fixture-bill" }, {
+    getToken: () => Promise.resolve({ accessToken: "fixture", tenantId: "fixture" }),
+    xeroGet: () => Promise.resolve({ Invoices: [{ InvoiceID: "fixture-bill", Type: "ACCPAY", Status: "PAID" }] }),
+  });
+  assertEquals(got.bill.status, "PAID");
+  assertEquals(mirrorWrites, 0);
+});
+
+Deno.test("supplier bill list applies exact contact and returns every applied filter", async () => {
+  const contactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  for (const input of [
+    { xero_contact_id: ` ${contactId.toUpperCase()} `, contact_name: "Fixture", status: "paid", reference: "fixture-ref", page: "2", page_size: "5" },
+    new URLSearchParams({ xero_contact_id: contactId, contact_name: "Fixture", status: "paid", reference: "fixture-ref", page: "2", page_size: "5" }),
+  ]) {
+    let providerParams: Record<string, string> = {};
+    let writes = 0;
+    const listed = await listSupplierBills({
+      from: () => ({ upsert: () => { writes++; return Promise.resolve({ error: null }); } }),
+    }, input, {
+      getToken: () => Promise.resolve({ accessToken: "fixture", tenantId: "fixture" }),
+      xeroGet: (_path, _token, _tenant, params) => {
+        providerParams = params || {};
+        return Promise.resolve({ Invoices: [{ InvoiceID: "fixture-bill", Type: "ACCPAY", Contact: { ContactID: contactId.toUpperCase(), Name: "Fixture" } }] });
+      },
+    });
+    assertEquals(providerParams.ContactIDs, contactId);
+    assertEquals(providerParams.page, "2");
+    assertEquals(providerParams.pageSize, "5");
+    assertEquals(providerParams.where.includes('Status=="PAID"'), true);
+    assertEquals(providerParams.where.includes('Contact.Name.Contains("Fixture")'), true);
+    assertEquals(providerParams.where.includes("fixture-ref"), true);
+    assertEquals(listed.filters, { xero_contact_id: contactId, contact_name: "Fixture", invoice_ref: "fixture-ref", status: "PAID" });
+    assertEquals(listed.count, 1);
+    assertEquals(listed.has_more, false);
+    assertEquals(writes, 0);
+  }
+});
+
+Deno.test("supplier bill list refuses an invalid exact contact before provider or token reads", async () => {
+  const calls: string[] = [];
+  const err = await assertRejects(() => listSupplierBills({}, { xero_contact_id: "invalid-contact" }, {
+    getToken: () => { calls.push("token"); return Promise.resolve({ accessToken: "fixture", tenantId: "fixture" }); },
+    xeroGet: () => { calls.push("provider"); return Promise.resolve({ Invoices: [] }); },
+  }), SupplierBillError);
+  assertEquals(err.status, 400);
+  assertEquals(err.code, "CONTACT_ID_INVALID");
+  assertEquals(calls, []);
+});
+
+Deno.test("supplier bill list refuses a provider that ignores the exact contact filter", async () => {
+  for (const contact of [{ ContactID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }, {}]) {
+    const err = await assertRejects(() => listSupplierBills({}, { xero_contact_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, {
+      getToken: () => Promise.resolve({ accessToken: "fixture", tenantId: "fixture" }),
+      xeroGet: () => Promise.resolve({ Invoices: [{ InvoiceID: "fixture-bill", Type: "ACCPAY", Contact: contact }] }),
+    }), SupplierBillError);
+    assertEquals(err.status, 502);
+    assertEquals(err.code, "XERO_RESPONSE_INVALID");
+  }
 });

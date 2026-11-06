@@ -270,32 +270,6 @@ export function clampBillPageSize(raw: unknown): number {
   return Math.min(SUPPLIER_BILL_MAX_PAGE_SIZE, Math.floor(parsed));
 }
 
-/**
- * Cache a whole provider page in one upsert.
- * The old per-invoice awaited loop cost one Postgres round trip per bill, so a
- * full page of 100 ACCPAY rows (each carrying raw_json) routinely outran the
- * MCP per-attempt abort budget before any rows reached the caller.
- */
-async function cacheAccpayBatch(client: any, invoices: any[]): Promise<void> {
-  // Dedupe by InvoiceID first. An ON CONFLICT batch that touches the same key
-  // twice is rejected whole, so one duplicate row from the provider would drop
-  // the entire page's cache instead of just its own.
-  const byId = new Map<string, Record<string, unknown>>();
-  for (const inv of invoices || []) {
-    if (!inv?.InvoiceID) continue;
-    byId.set(String(inv.InvoiceID), accpayCacheRow(inv));
-  }
-  const rows = [...byId.values()];
-  if (rows.length === 0) return;
-  try {
-    await client.from("xero_invoices").upsert(rows, {
-      onConflict: "org_id,xero_invoice_id",
-    });
-  } catch {
-    /* local cache is best-effort */
-  }
-}
-
 async function loadAccpayFromXero(
   xeroGet: XeroGetFn,
   accessToken: string,
@@ -377,7 +351,8 @@ export async function getSupplierBill(
     tenantId,
     xeroInvoiceId,
   );
-  await cacheAccpay(client, inv);
+  // A read must not refresh the local mirror. Cache refresh belongs to the
+  // explicit Xero sync action; the draft write doors cache their own writes.
   return { ok: true, bill: presentBill(inv) };
 }
 
@@ -446,6 +421,19 @@ export async function listSupplierBills(
   const status = mapSupplierBillStatusFilter(read("status"));
   const contactName = String(read("contact") || read("contact_name") || "")
     .trim();
+  const contactId = String(read("xero_contact_id") || "").trim().toLowerCase();
+  if (
+    contactId &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      contactId,
+    )
+  ) {
+    throw new SupplierBillError(
+      "xero_contact_id must be a UUID",
+      400,
+      "CONTACT_ID_INVALID",
+    );
+  }
   const invoiceRef = String(
     read("invoice_ref") || read("invoice_number") || read("reference") ||
       read("ref") || "",
@@ -465,6 +453,7 @@ export async function listSupplierBills(
     page: String(page),
     pageSize: String(pageSize),
     order: "Date DESC",
+    ...(contactId ? { ContactIDs: contactId } : {}),
   });
   // One bounded provider page only. This door never traverses Xero pages: the
   // caller pages explicitly, so a full ACCPAY ledger cannot blow the MCP
@@ -480,7 +469,20 @@ export async function listSupplierBills(
       "XERO_RESPONSE_INVALID",
     );
   }
-  await cacheAccpayBatch(client, invoices);
+  // Do not silently trim an unfiltered provider page: that would conceal a
+  // scope failure and invalidate its pagination, including an empty result.
+  if (
+    contactId &&
+    invoices.some((invoice: { Contact?: { ContactID?: unknown } }) =>
+      String(invoice.Contact?.ContactID || "").toLowerCase() !== contactId
+    )
+  ) {
+    throw new SupplierBillError(
+      "Xero returned a bill outside the requested contact",
+      502,
+      "XERO_RESPONSE_INVALID",
+    );
+  }
   return {
     ok: true,
     bills: invoices.map(presentBill),
@@ -489,6 +491,12 @@ export async function listSupplierBills(
     count: invoices.length,
     has_more: invoices.length >= pageSize,
     next_page: invoices.length >= pageSize ? page + 1 : null,
+    filters: {
+      xero_contact_id: contactId || null,
+      contact_name: contactName || null,
+      invoice_ref: invoiceRef || null,
+      status,
+    },
   };
 }
 
