@@ -1,0 +1,1 @@
+-- The earlier registered work-order and scope-draft cases provide the schema.
