@@ -14,3 +14,9 @@ CREATE TABLE IF NOT EXISTS storage.buckets(
  id text PRIMARY KEY,name text NOT NULL,public boolean DEFAULT false,
  file_size_limit bigint,allowed_mime_types text[]
 );
+-- Older storage rollback guards resolve storage.objects whenever buckets
+-- exists. Model the companion catalog too, as Supabase always supplies both.
+CREATE TABLE IF NOT EXISTS storage.objects(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),bucket_id text,name text
+);
+ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
