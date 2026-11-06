@@ -1653,6 +1653,14 @@ For the orders sent from Outlook before the rule was switched on. Rules in
    Emails to sort once. The dry run after a real run shows the orders as
    already recorded.
 
+### 3g.3 Westline Fencing on the approved order list
+
+Migration `20261106120100_dispatch_v2_westline_supplier.sql` adds Westline
+Fencing (`info@westlinefencing.com.au`, pay first, fencing, approved by Shaun
+6 Nov 2026). On 6 Nov there is no Westline contact in Xero (no `suppliers`
+row), so it is not linked: its orders wait under Emails to sort until a
+Westline supplier contact exists in Xero and is linked to the entry.
+
 ## Tweak 4: the approved supplier names on the board (5 Nov 2026)
 
 Full rules: docs/dispatch-v2-emails-contract.md, section "Tweak 4".
