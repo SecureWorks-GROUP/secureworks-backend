@@ -9,6 +9,9 @@ The population contains distinct genuine allocations in the job's
 organisation, excluding cancelled rows, observers, ghosts and office admin
 watching allocations. A null legacy allocation status still counts. An
 office manager who is genuinely allocated remains eligible to install.
+Since `20261106160000`, anyone already paid by the hour on the job is not
+crew either (see "Crew already paid by the hour" in
+`group-work-orders-v1.md`).
 
 Explicit members of an active group remain required after a role or
 allocation changes. Membership is a retained obligation; silently dropping

@@ -333,3 +333,9 @@ BEGIN
     EXECUTE replace(body, before_text, after_text);
   END IF;
 END $$;
+-- The lock fires only on the columns it names, so it must name the new one.
+DROP TRIGGER IF EXISTS group_work_order_budget_lock ON public.group_work_orders;
+CREATE TRIGGER group_work_order_budget_lock
+  BEFORE UPDATE OF pay_basis, approved_budget_ex, budget_approved_by, budget_approved_at, budget_approval_reason, hours_paid_ex
+  ON public.group_work_orders
+  FOR EACH ROW EXECUTE FUNCTION public.group_work_order_budget_lock();
