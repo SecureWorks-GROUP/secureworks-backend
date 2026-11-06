@@ -1,10 +1,14 @@
--- Put back the old fence: any ordinary pay on the job refuses a group. The
--- contract must catch that the rest of the crew are stuck again.
-DO $$
-DECLARE body text;
-BEGIN
-  body := pg_get_functiondef('public.group_work_orders_refuse_existing_pay()'::regprocedure);
-  body := replace(body, $o$      AND NOT public.group_work_order_line_is_paid_hours(l.line_type, l.source_work_order_id, l.description)
-$o$, '');
-  EXECUTE body;
-END $$;
+-- Put back the reading the second review caught: every invoice that is not
+-- ops-reject counts as paid, drafts included. The contract must catch that
+-- an unbilled draft is taken off the pot and its owner left out of the crew.
+CREATE OR REPLACE FUNCTION public.group_work_order_invoice_billed(
+  p_status text,
+  p_xero_bill_id text,
+  p_xero_bill_status text
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+  SELECT p_status IS DISTINCT FROM 'ops-reject';
+$$;

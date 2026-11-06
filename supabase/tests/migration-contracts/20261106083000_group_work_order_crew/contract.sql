@@ -19,7 +19,10 @@ BEGIN
     AND NOT public.group_work_order_paid_by_hours(v_job, e.user_id)
     AND e.hours > 0$later$, $was$  WHERE e.group_id = p_group_id
     AND e.hours > 0$was$);
- body := replace(body, $later$  SELECT g.pay_basis INTO v_basis FROM public.group_work_orders g WHERE g.id = p_group_id;
+ body := replace(body, $later$  IF p_freeze AND EXISTS (SELECT 1 FROM public.group_work_order_hours_unresolved(v_job)) THEN
+    RAISE EXCEPTION 'group_hours_claim_unresolved' USING ERRCODE = '23514';
+  END IF;
+  SELECT g.pay_basis INTO v_basis FROM public.group_work_orders g WHERE g.id = p_group_id;
   v_hours_paid := public.group_work_order_hours_paid_total(v_job, v_basis);
   v_pot := v_pot - v_hours_paid;
   IF v_pot <= 0 THEN

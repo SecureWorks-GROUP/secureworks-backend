@@ -954,8 +954,9 @@ BEGIN
     END IF;
   END;
 
-  -- 'Other' is hourly pay. Since 20261106160000 it no longer blocks a group:
-  -- the paid member stays out of the crew and their pay comes off the pot.
+  -- 'Other' is hourly pay. Since 20261106160000, once billed in Xero it no
+  -- longer blocks a group: the paid member stays out of the crew and their
+  -- pay comes off the pot.
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
   VALUES (v_other_job, v_org, 'fencing', 'quoted', 'GWO-OTHER');
   INSERT INTO public.work_orders (
@@ -967,9 +968,9 @@ BEGIN
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
-    gst_on, super_rate, super_amount, gross_earned, net_pay
+    gst_on, super_rate, super_amount, gross_earned, net_pay, xero_bill_id, xero_bill_status
   ) VALUES (
-    v_other_invoice, v_org, v_a, 'draft', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
+    v_other_invoice, v_org, v_a, 'paid', 10, 0, 10, false, 0.12, 1.20, 10, 9.40, 'GWO-OTHER-BILL', 'PAID'
   );
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex

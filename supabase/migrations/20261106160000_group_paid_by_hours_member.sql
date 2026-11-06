@@ -21,10 +21,17 @@
 -- 5. Nobody can be paid twice: the paid member's own group share line is
 --    refused, and new ordinary hours on a grouped job stay refused.
 --
--- "Paid" counts every invoice that is not ops-reject, drafts included, the
--- same reading as the double-pay fence. No row is written by this file, no
--- invoice or Xero bill is touched, nothing sends. The runner supplies the
--- transaction. TypeScript twin: isPaidHoursLine and loadShareView in
+-- "Paid" means the hours reached Xero as a live bill: the invoice is not
+-- ops-reject, carries a Xero bill id, and our copy of that bill reads
+-- AUTHORISED (awaiting payment) or PAID. A draft, a pending or queried
+-- invoice, a bill Xero has not confirmed yet, and a voided or deleted bill
+-- are not paid: they are unresolved claims. An unresolved claim is never
+-- taken off the pot, and it refuses the group opening or freezing, naming
+-- whose claim it is, until it is withdrawn (ops-reject) or billed. That
+-- keeps the double-pay fence: nobody holds a live hours claim and a share.
+-- No row is written by this file, no invoice or Xero bill is touched,
+-- nothing sends. The runner supplies the transaction. TypeScript twin:
+-- isPaidHoursLine, isBilledHoursInvoice and readHoursPayOnJob in
 -- group_work_order.ts. Change both together.
 
 CREATE OR REPLACE FUNCTION public.group_work_order_line_is_paid_hours(
@@ -45,6 +52,24 @@ $$;
 COMMENT ON FUNCTION public.group_work_order_line_is_paid_hours(text, uuid, text) IS
   '20261106160000: ordinary hours pay on a job (normal pay that is not an office fee and not a work-order claim). It no longer blocks a group; its payee is left out of the split and the pot is reduced by it.';
 
+-- The invoice reached Xero as a live bill (20261106160000).
+CREATE OR REPLACE FUNCTION public.group_work_order_invoice_billed(
+  p_status text,
+  p_xero_bill_id text,
+  p_xero_bill_status text
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+  SELECT p_status IS DISTINCT FROM 'ops-reject'
+    AND NULLIF(btrim(COALESCE(p_xero_bill_id, '')), '') IS NOT NULL
+    AND upper(btrim(COALESCE(p_xero_bill_status, ''))) IN ('AUTHORISED', 'PAID');
+$$;
+
+COMMENT ON FUNCTION public.group_work_order_invoice_billed(text, text, text) IS
+  '20261106160000: a trade invoice whose Xero bill is live (AUTHORISED or PAID in our copy). Only hours on such an invoice count as already paid.';
+
 -- What each payee was paid by the hour on a job, gross ex GST.
 CREATE OR REPLACE FUNCTION public.group_work_order_hours_paid(p_job uuid)
 RETURNS TABLE(user_id uuid, gross_ex numeric)
@@ -58,9 +83,27 @@ AS $$
   JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
   WHERE l.job_id = p_job
     AND i.user_id IS NOT NULL
-    AND i.status IS DISTINCT FROM 'ops-reject'
+    AND public.group_work_order_invoice_billed(i.status, i.xero_bill_id, i.xero_bill_status)
     AND public.group_work_order_line_is_paid_hours(l.line_type, l.source_work_order_id, l.description)
   GROUP BY i.user_id;
+$$;
+
+-- Who holds an hours claim on a job that is not ops-reject and not billed
+-- yet (a draft, pending, queried, not yet confirmed or voided bill).
+CREATE OR REPLACE FUNCTION public.group_work_order_hours_unresolved(p_job uuid)
+RETURNS TABLE(user_id uuid)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT DISTINCT i.user_id
+  FROM public.trade_invoice_lines l
+  JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
+  WHERE l.job_id = p_job
+    AND i.status IS DISTINCT FROM 'ops-reject'
+    AND NOT public.group_work_order_invoice_billed(i.status, i.xero_bill_id, i.xero_bill_status)
+    AND public.group_work_order_line_is_paid_hours(l.line_type, l.source_work_order_id, l.description);
 $$;
 
 CREATE OR REPLACE FUNCTION public.group_work_order_paid_by_hours(p_job uuid, p_user uuid)
@@ -76,7 +119,7 @@ AS $$
     JOIN public.trade_invoices i ON i.id = l.trade_invoice_id
     WHERE l.job_id = p_job
       AND i.user_id = p_user
-      AND i.status IS DISTINCT FROM 'ops-reject'
+      AND public.group_work_order_invoice_billed(i.status, i.xero_bill_id, i.xero_bill_status)
       AND public.group_work_order_line_is_paid_hours(l.line_type, l.source_work_order_id, l.description)
   );
 $$;
@@ -115,12 +158,16 @@ AS $$
 $$;
 
 REVOKE ALL ON FUNCTION public.group_work_order_line_is_paid_hours(text, uuid, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_work_order_invoice_billed(text, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_work_order_hours_paid(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.group_work_order_hours_unresolved(uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_work_order_paid_by_hours(uuid, uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_work_order_hours_paid_budget(text, numeric) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.group_work_order_hours_paid_total(uuid, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.group_work_order_line_is_paid_hours(text, uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_invoice_billed(text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_hours_paid(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.group_work_order_hours_unresolved(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_paid_by_hours(uuid, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_hours_paid_budget(text, numeric) TO service_role;
 GRANT EXECUTE ON FUNCTION public.group_work_order_hours_paid_total(uuid, text) TO service_role;
@@ -138,7 +185,8 @@ END $$;
 COMMENT ON COLUMN public.group_work_orders.hours_paid_ex IS
   '20261106160000: at the freeze, the pot used by crew already paid by the hour on this job (left out of the split). Null before the freeze.';
 
--- 1. Ordinary hours no longer refuse a group; a work-order claim still does.
+-- 1. Billed ordinary hours no longer refuse a group; a work-order claim still
+--    does, and so does an hours claim not billed yet.
 CREATE OR REPLACE FUNCTION public.group_work_orders_refuse_existing_pay()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -158,6 +206,10 @@ BEGIN
       AND NOT public.group_work_order_line_is_paid_hours(l.line_type, l.source_work_order_id, l.description)
   ) THEN
     RAISE EXCEPTION 'group_open_blocked_by_work_order_claim' USING ERRCODE = '23514';
+  END IF;
+  -- An hours claim not billed yet must be withdrawn or billed first.
+  IF EXISTS (SELECT 1 FROM public.group_work_order_hours_unresolved(NEW.job_id)) THEN
+    RAISE EXCEPTION 'group_open_blocked_by_hours_claim' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
@@ -180,9 +232,10 @@ DECLARE
         AND i.status IS DISTINCT FROM 'ops-reject'
         AND public.group_work_order_line_is_normal_pay(l.line_type, l.source_work_order_id)
         AND NOT public.group_work_order_line_is_office_fee(l.line_type, l.description)
-        -- Someone else's paid hours were taken off the pot (20261106160000).
+        -- Someone else's billed hours were taken off the pot (20261106160000).
         AND (
           NOT public.group_work_order_line_is_paid_hours(l.line_type, l.source_work_order_id, l.description)
+          OR NOT public.group_work_order_invoice_billed(i.status, i.xero_bill_id, i.xero_bill_status)
           OR i.user_id IS NOT DISTINCT FROM (
             SELECT i2.user_id FROM public.trade_invoices i2 WHERE i2.id = NEW.trade_invoice_id
           )
@@ -253,7 +306,10 @@ BEGIN$o$, $n$  v_needs_rate text;
   v_basis text;
   v_hours_paid numeric := 0; -- pot used by crew paid by the hour (20261106160000)
 BEGIN$n$],
-    ARRAY[$o$  v_pot_cents := round(v_pot * 100)::bigint;$o$, $n$  SELECT g.pay_basis INTO v_basis FROM public.group_work_orders g WHERE g.id = p_group_id;
+    ARRAY[$o$  v_pot_cents := round(v_pot * 100)::bigint;$o$, $n$  IF p_freeze AND EXISTS (SELECT 1 FROM public.group_work_order_hours_unresolved(v_job)) THEN
+    RAISE EXCEPTION 'group_hours_claim_unresolved' USING ERRCODE = '23514';
+  END IF;
+  SELECT g.pay_basis INTO v_basis FROM public.group_work_orders g WHERE g.id = p_group_id;
   v_hours_paid := public.group_work_order_hours_paid_total(v_job, v_basis);
   v_pot := v_pot - v_hours_paid;
   IF v_pot <= 0 THEN

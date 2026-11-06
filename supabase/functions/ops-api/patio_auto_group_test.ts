@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert";
-import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine, isPaidHoursLine } from "./group_work_order.ts";
+import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine, isBilledHoursInvoice, isPaidHoursLine } from "./group_work_order.ts";
 import {
   autoGroupFenceJobs,
   autoGroupPatioJobs,
@@ -35,7 +35,7 @@ class Fake {
           const paid = (jobId: string, userId: string) => fake.rows("trade_invoice_lines").some((line) => {
             const invoice = fake.rows("trade_invoices").find((i) => i.id === line.trade_invoice_id);
             return line.job_id === jobId && isPaidHoursLine(line) && invoice?.user_id === userId &&
-              invoice.status !== "ops-reject";
+              isBilledHoursInvoice(invoice);
           });
           for (const row of fake.rows("job_assignments")) {
             const user = fake.rows("users").find((u) => u.id === row.user_id);
@@ -132,7 +132,7 @@ function patioWorld() {
   allocate("b", "isaac"); allocate("b", "ryan"); allocate("b", "kai");
   allocate("c", "isaac"); allocate("c", "ryan", { status: "cancelled" }); allocate("c", "ryan", { is_ghost: true, status: "scheduled" });
   for (const j of ["d", "e"]) { allocate(j, "isaac"); allocate(j, "ryan"); }
-  fake.rows("trade_invoices").push({ id: "inv-n", status: "paid", user_id: "nithin" }, { id: "inv-r", status: "approved", user_id: "ryan" });
+  fake.rows("trade_invoices").push({ id: "inv-n", status: "paid", user_id: "nithin" }, { id: "inv-r", status: "paid", user_id: "ryan", xero_bill_id: "BILL-R", xero_bill_status: "PAID" });
   // Nithin's council fee on a is not crew pay; Ryan's hours on b keep him out
   // of b's group (the rest of b's crew still get one).
   fake.rows("trade_invoice_lines").push(

@@ -231,13 +231,13 @@ Trade JWT, while the switch is on. The caller is the signed-in user.
 
 | Action | Result |
 | --- | --- |
-| `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. Refused when the job already has a work-order claim (`group_open_blocked_by_work_order_claim`), or when the caller was paid by the hour on it (`group_member_paid_by_hours`). No dollars. The public token is not on this card. |
+| `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. Refused when the job already has a work-order claim (`group_open_blocked_by_work_order_claim`), when someone's hours claim on it is not billed in Xero yet (`group_open_blocked_by_hours_claim`, naming them), or when the caller was paid by the hour on it (`group_member_paid_by_hours`). No dollars. The public token is not on this card. |
 | `join_group_work_order` | The caller must be allocated, unless they are staff. After freeze, `group_split_frozen`. |
 | `sign_group_work_order` | Crew signature. PNG or JPEG data URL whose decoded bytes are between 3 and 150000 and match that format, or omitted. SVG is refused. Not the invoice gate. |
 | `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, any day on the job (6 November 2026; a booked day is also still accepted). Saving the same day with the same times, break and hours does not move the row's `updated_at` or the group's `hours_changed_at`. |
 | `group_work_order_my_share` | The closed object above. |
 | `capture_group_client_signoff` | On-site client drawing. Records the trade user id. |
-| `freeze_group_work_order` | Explicit freeze after everyone in the one crew population (`group_work_order_crew`) has counting hours, with no crew approval of anyone's hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. |
+| `freeze_group_work_order` | Explicit freeze after everyone in the one crew population (`group_work_order_crew`) has counting hours, with no crew approval of anyone's hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. Refused while any hours claim on the job is not billed in Xero (`group_hours_claim_unresolved`, naming whose). |
 | `group_work_order_preview_client_link` | Draft only. `send: true` is 409. |
 
 Public, no account, while the switch is on. The token is only for the
@@ -325,7 +325,7 @@ All-in shares submit one at a time as their own office-held invoice using the in
 
 The `group_work_order_my_share` Trade door now calls `readTradeGroupWorkOrder`. It checks the caller's organisation and genuine allocation, then returns the same price-free `discovery` decision carried by `my_group_work_orders.payable_routes`: Create, Join, member or a specific setup blocker. Fencing and patio use the same decision. A missing group is a successful discovery read, not a participant-price error. Existing groups only expose their pool or own share through the unchanged participant-only reader.
 
-Create needs an approved sealed job work order with a positive allowance and no existing work-order claim, including a draft claim. A crew member already paid by the hour on the job gets the reason `paid_by_hours` and no Create or Join; the rest of the crew still can. A frozen group must be reopened before another worker can join. Ghost and observer assignments confer no authority. The existing create/join commands recheck their guards on the person's press. Discovery creates no records, changes no switch and never converts an existing ordinary pay claim to a group.
+Create needs an approved sealed job work order with a positive allowance and no existing work-order claim, including a draft claim. A crew member already paid by the hour on the job gets the reason `paid_by_hours` and no Create or Join; the rest of the crew still can. An hours claim on the job not billed in Xero yet gives everyone the reason `hours_claim_unresolved` until it is withdrawn or billed. A frozen group must be reopened before another worker can join. Ghost and observer assignments confer no authority. The existing create/join commands recheck their guards on the person's press. Discovery creates no records, changes no switch and never converts an existing ordinary pay claim to a group.
 
 Work/Scope and the normal invoice card use that decision for their existing inline controls. A setup blocker is visible without a Create/Join button. Eligible ordinary-hours cards offer Create without changing their pay route until the group actually exists. New fencing groups from Scope Engine acceptance remain separate work; the fencing auto-group switch is unchanged.
 
@@ -335,13 +335,24 @@ Owner, 6 Nov 2026: when one crew member was already paid ordinary hours on a
 job, the work order is reduced by that pay and the rest of the crew split
 what is left. This is the general rule, not a one-job exception. Migration
 `20261106160000_group_paid_by_hours_member.sql`; TypeScript twin
-`isPaidHoursLine` and `readHoursPaidOnJob` in `group_work_order.ts` (change
-both together).
+`isPaidHoursLine`, `isBilledHoursInvoice` and `readHoursPayOnJob` in
+`group_work_order.ts` (change both together).
 
 - Paid by the hour means a normal pay line on the job that is not an office
   fee, not a crew work order line and not a `work order` claim, on an
-  invoice that is not `ops-reject`. A draft counts, the same reading as the
-  double-pay fence.
+  invoice that reached Xero as a live bill: not `ops-reject`, a Xero bill id,
+  and our copy of the bill reads `AUTHORISED` or `PAID`
+  (`group_work_order_invoice_billed`).
+- Any other hours claim on the job that is not `ops-reject` (a draft, a
+  pending or queried invoice, a bill Xero has not confirmed yet, a voided or
+  deleted bill) is unresolved, not paid. Nothing comes off the pot for it and
+  its owner stays crew. It refuses the group opening
+  (`group_open_blocked_by_hours_claim`, discovery reason
+  `hours_claim_unresolved`) and the freeze (`group_hours_claim_unresolved`),
+  naming whose claim it is, until it is withdrawn (ops-reject) or billed.
+  While no group exists its owner can still submit it as ordinary hours, so
+  no pay is lost, and nobody holds a live hours claim and a share at once.
+  The office read lists these as `hours_claims_unresolved`.
 - That person is not group crew (`group_work_order_crew` leaves them out),
   owes no hours and takes no share, even if they joined before they were
   paid. Their paid days stay paid. They cannot open or join the group, and
@@ -356,6 +367,8 @@ both together).
   that amount and stops with `hours_paid_changed` if the paid hours move
   after the freeze (reopen and freeze again).
 - A `work order` claim on the job still refuses a group, as before.
+- A share line is refused while anyone else's hours on the job are
+  unresolved, as well as for the share owner's own hours.
 
 Nothing is paid twice, no invoice or Xero bill is changed, and nothing
 sends. Proof: `group_work_order_test.ts` (paid by the hour cases) and the

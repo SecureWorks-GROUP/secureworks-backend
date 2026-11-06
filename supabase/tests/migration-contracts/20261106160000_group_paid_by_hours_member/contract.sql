@@ -1,9 +1,12 @@
 -- One crew member already paid by the hour on a job: the rest of the crew
 -- still get a group, the paid member is out of the crew and the split, the
 -- pot is the work order less what they were paid (on the group's pay basis),
--- the freeze records that amount and the release stops if it moves. A
--- work-order claim still refuses a group. Synthetic records only; rolled back.
--- The first check is the break target.
+-- the freeze records that amount and the release stops if it moves. Only
+-- hours billed in Xero (AUTHORISED or PAID) count as paid: a draft or a
+-- voided bill is an unresolved claim that refuses the group opening and the
+-- freeze until it is withdrawn or billed. A work-order claim still refuses a
+-- group. Synthetic records only; rolled back.
+-- The first check (step 0) is the break target.
 BEGIN;
 
 -- Fixture-only: the client sign-off is not what this proves. Restored by the
@@ -57,13 +60,43 @@ BEGIN
     (gen_random_uuid(),org,crew_a,50,'2026-01-01'),(gen_random_uuid(),org,crew_b,50,'2026-01-01'),
     (gen_random_uuid(),org,paid_c,50,'2026-01-01');
 
-  -- Crew C was already paid ordinary hours on the job (a draft counts).
+  -- Crew C has ordinary hours on the job, still a draft: not paid yet.
   INSERT INTO public.trade_invoices(id,org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,invoice_number)
     VALUES(inv_c,org,paid_c,'draft',100,100,0,100,false,0.12,12,94,'SYN-PAID-HOURS-INV-1');
   INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,description,line_total_ex)
     VALUES(inv_c,job,'labour','Synthetic hours',100);
 
-  -- 1. The group opens over someone else's ordinary hours.
+  -- 0. A claim not billed in Xero is not paid: nothing comes off the pot,
+  --    C stays crew, and the group cannot open until it is withdrawn or billed.
+  IF public.group_work_order_paid_by_hours(job, paid_c)
+     OR public.group_work_order_hours_paid_total(job, 'all_in_12_v2') <> 0
+     OR (SELECT array_agg(h.user_id) FROM public.group_work_order_hours_unresolved(job) h) IS DISTINCT FROM ARRAY[paid_c] THEN
+    RAISE EXCEPTION 'paid-by-hours: an unbilled draft was read as paid';
+  END IF;
+  refused := NULL;
+  BEGIN
+    INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis)
+      VALUES(grp,org,job,wo,'synthetic-paid-hours-token-1','all_in_12_v2');
+  EXCEPTION WHEN check_violation THEN refused := SQLERRM; END;
+  IF refused IS DISTINCT FROM 'group_open_blocked_by_hours_claim' THEN
+    RAISE EXCEPTION 'paid-by-hours: an unbilled hours claim did not hold the group: %', refused;
+  END IF;
+  IF NOT public.group_work_order_invoice_billed('paid', 'SYN-BILL', 'PAID')
+     OR NOT public.group_work_order_invoice_billed('pushed_to_xero', 'SYN-BILL', 'authorised')
+     OR public.group_work_order_invoice_billed('draft', NULL, NULL)
+     OR public.group_work_order_invoice_billed('pushed_to_xero', 'SYN-BILL', NULL)
+     OR public.group_work_order_invoice_billed('pushed_to_xero', 'SYN-BILL', 'DRAFT')
+     OR public.group_work_order_invoice_billed('pushed_to_xero', 'SYN-BILL', 'VOIDED')
+     OR public.group_work_order_invoice_billed('approved', 'SYN-BILL', 'DELETED')
+     OR public.group_work_order_invoice_billed('paid', ' ', 'PAID')
+     OR public.group_work_order_invoice_billed('ops-reject', 'SYN-BILL', 'PAID') THEN
+    RAISE EXCEPTION 'paid-by-hours: billed reading is wrong';
+  END IF;
+
+  -- C's hours are billed and paid in Xero.
+  UPDATE public.trade_invoices SET status='paid', xero_bill_id='SYN-BILL-1', xero_bill_status='PAID' WHERE id = inv_c;
+
+  -- 1. The group opens over someone else's paid ordinary hours.
   BEGIN
     INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis)
       VALUES(grp,org,job,wo,'synthetic-paid-hours-token-1','all_in_12_v2');
@@ -118,6 +151,19 @@ BEGIN
     RAISE EXCEPTION 'paid-by-hours: projected split is wrong: %', split;
   END IF;
 
+  -- A bill voided before the freeze is an unresolved claim again: the
+  -- projection still prices, but the freeze waits and writes no share.
+  UPDATE public.trade_invoices SET xero_bill_status='VOIDED' WHERE id = inv_c;
+  refused := NULL;
+  BEGIN PERFORM public.group_work_order_write_split(grp, true);
+  EXCEPTION WHEN check_violation THEN refused := SQLERRM; END;
+  IF refused IS DISTINCT FROM 'group_hours_claim_unresolved'
+     OR (SELECT split_frozen_at FROM public.group_work_orders WHERE id = grp) IS NOT NULL
+     OR EXISTS (SELECT 1 FROM public.group_work_order_shares WHERE group_id = grp) THEN
+    RAISE EXCEPTION 'paid-by-hours: freeze went past an unbilled hours claim: %', refused;
+  END IF;
+  UPDATE public.trade_invoices SET xero_bill_status='PAID' WHERE id = inv_c;
+
   -- 4. The freeze records what came off the pot, and locks it.
   PERFORM public.group_work_order_write_split(grp, true);
   IF (SELECT hours_paid_ex FROM public.group_work_orders WHERE id = grp) IS DISTINCT FROM 112.00
@@ -141,13 +187,13 @@ BEGIN
     RAISE EXCEPTION 'paid-by-hours: release blocked on the paid member: %', st->'reasons';
   END IF;
 
-  -- If the paid pay moves after the freeze, the release stops.
-  UPDATE public.trade_invoices SET status = 'ops-reject' WHERE id = inv_c;
+  -- If the paid pay moves after the freeze (the bill is voided), the release stops.
+  UPDATE public.trade_invoices SET xero_bill_status = 'VOIDED' WHERE id = inv_c;
   st := public.group_work_order_release_state(grp);
   IF NOT (st->'reasons' ? 'hours_paid_changed') THEN
     RAISE EXCEPTION 'paid-by-hours: release missed a change in paid pay: %', st->'reasons';
   END IF;
-  UPDATE public.trade_invoices SET status = 'draft' WHERE id = inv_c;
+  UPDATE public.trade_invoices SET xero_bill_status = 'PAID' WHERE id = inv_c;
 
   -- 5. A work-order claim still refuses a group.
   INSERT INTO public.trade_invoices(id,org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,invoice_number)
@@ -164,8 +210,8 @@ BEGIN
   END IF;
 
   -- Paid pay that uses the whole pot leaves nothing to split.
-  INSERT INTO public.trade_invoices(id,org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,invoice_number)
-    VALUES(inv_small,org,paid_c,'draft',100,100,0,100,false,0.12,12,94,'SYN-PAID-HOURS-INV-3');
+  INSERT INTO public.trade_invoices(id,org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,invoice_number,xero_bill_id,xero_bill_status)
+    VALUES(inv_small,org,paid_c,'pushed_to_xero',100,100,0,100,false,0.12,12,94,'SYN-PAID-HOURS-INV-3','SYN-BILL-3','AUTHORISED');
   INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,description,line_total_ex)
     VALUES(inv_small,small_job,'labour','Synthetic hours',100);
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis)
@@ -179,6 +225,9 @@ BEGIN
 
   IF has_function_privilege('anon','public.group_work_order_hours_paid_total(uuid,text)','execute')
      OR has_function_privilege('authenticated','public.group_work_order_paid_by_hours(uuid,uuid)','execute')
+     OR has_function_privilege('authenticated','public.group_work_order_hours_unresolved(uuid)','execute')
+     OR has_function_privilege('anon','public.group_work_order_invoice_billed(text,text,text)','execute')
+     OR NOT has_function_privilege('service_role','public.group_work_order_hours_unresolved(uuid)','execute')
      OR NOT has_function_privilege('service_role','public.group_work_order_hours_paid_total(uuid,text)','execute') THEN
     RAISE EXCEPTION 'paid-by-hours: function access changed';
   END IF;

@@ -1,7 +1,7 @@
 -- WO-6. Nithin's flat office fees (Council Approval, Materials Ordered) never
 -- block a group and a group never blocks them; install hours on a grouped
--- job are refused (since 20261106160000 earlier install hours no longer stop
--- a group opening). The weekly coverage view names each patio job's gap. Synthetic
+-- job are refused (since 20261106160000 earlier install hours billed in Xero
+-- no longer stop a group opening; hours not billed yet still do). The weekly coverage view names each patio job's gap. Synthetic
 -- records only; every fixture write is rolled back.
 BEGIN;
 DO $$
@@ -58,10 +58,20 @@ BEGIN
     RAISE EXCEPTION 'office fee blocked a group: %', SQLERRM;
   END;
 
-  -- 2. Since 20261106160000 install hours no longer block one: Ryan, paid by
-  -- the hour, is left out of the crew. The group is undone so the coverage
-  -- read below sees j2 as before.
+  -- 2. Since 20261106160000 install hours not billed yet hold a group; once
+  -- billed in Xero they no longer block one: Ryan, paid by the hour, is left
+  -- out of the crew. The bill and group are undone so the coverage read below
+  -- sees j2 as before.
+  refused := NULL;
   BEGIN
+    INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,pay_basis)
+      VALUES(org,j2,w2,'synthetic-wo6-token-2','all_in_12_v2');
+  EXCEPTION WHEN check_violation THEN refused := SQLERRM; END;
+  IF refused IS DISTINCT FROM 'group_open_blocked_by_hours_claim' THEN
+    RAISE EXCEPTION 'unbilled hours did not hold a group on j2: %', refused;
+  END IF;
+  BEGIN
+    UPDATE public.trade_invoices SET status='paid', xero_bill_id='SYN-WO6-BILL-R1', xero_bill_status='PAID' WHERE id = inv_r;
     INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,pay_basis)
       VALUES(org,j2,w2,'synthetic-wo6-token-2','all_in_12_v2');
     IF NOT public.group_work_order_paid_by_hours(j2, ryan)
