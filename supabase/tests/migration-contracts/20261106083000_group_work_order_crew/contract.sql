@@ -6,6 +6,13 @@ DECLARE body text := pg_get_functiondef('public.group_work_order_write_split(uui
 previous text;
 BEGIN
  SELECT b.body INTO previous FROM public.migration_contract_group_crew_before b;
+ -- Later amendments to this writer are undone first, newest first, so this
+ -- check still pins only this migration's own change.
+ -- 20261106140000: every crew hour counts, booked day or not.
+ body := replace(body, $later$  WHERE e.group_id = p_group_id
+    AND e.hours > 0; -- every crew hour counts, booked day or not (20261106140000)$later$, $was$  WHERE e.group_id = p_group_id
+    AND e.hours > 0
+    AND public.group_work_order_assignment_covers(v_job, e.user_id, e.work_date);$was$);
  IF replace(body, $new$
   -- One population for automatic membership, readiness and both split modes.
   -- Explicit members remain obligations; a watching allocation adds nobody.
