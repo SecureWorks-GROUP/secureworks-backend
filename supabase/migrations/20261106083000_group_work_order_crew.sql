@@ -70,7 +70,13 @@ $prior$;
   );
 $replacement$;
 BEGIN
-  IF strpos(body, replacement) > 0 THEN RETURN; END IF;
+  IF strpos(body, replacement) > 0 THEN
+    IF strpos(body, prior) > 0 OR
+       length(body) - length(replace(body, replacement, '')) <> length(replacement) THEN
+      RAISE EXCEPTION 'group_split_crew_preimage_changed';
+    END IF;
+    RETURN;
+  END IF;
   IF strpos(body, prior) = 0 OR
      length(body) - length(replace(body, prior, '')) <> length(prior) THEN
     RAISE EXCEPTION 'group_split_crew_preimage_changed';
