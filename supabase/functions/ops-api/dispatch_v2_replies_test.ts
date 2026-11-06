@@ -14,10 +14,11 @@ import {
   runDispatchV2RepliesAction,
 } from "./dispatch_v2_replies.ts";
 import { DispatchMaterialsError } from "./dispatch_materials_store.ts";
-import type {
-  OutlookOrderStore,
-  RecordOutlookOrderInput,
-} from "./dispatch_v2_outlook_order.ts";
+import { OUR_SENT_ORDER_VIA } from "./dispatch_v2_outlook_on_send.ts";
+import {
+  MemoryOnSendStore,
+  sentEmail,
+} from "./dispatch_v2_outlook_on_send_test_fakes.ts";
 import type { ReplyPdfRead } from "./dispatch_v2_reply_pdf.ts";
 import {
   capturedEmailOf,
@@ -1229,104 +1230,79 @@ Deno.test("accept: runs the order-confirmed step once, after the date; a failure
   assertEquals(r3.order_confirmed, null);
 });
 
-// ── Tweak 2 piece 1: an order Shaun sent from Outlook ─────────────────────
-// (dispatch_v2_outlook_order.ts, contract section 3f.1)
+// ── Section 3g: an order sent from Outlook is a Dispatch order when sent ──
+// (dispatch_v2_outlook_on_send.ts; replaces the 5 Nov reply trigger, 3f.1)
 
-/** The order Shaun sent Fencing Warehouse from Outlook for SWF-261387, and
- * the database function that records it, in memory. A recorded order is
+const FW_RECORDED_AT = "2026-10-22T02:00:00Z";
+
+/** The send rule's database in memory, holding the order sent to Fencing
+ * Warehouse from Outlook for SWF-261387 on Thu 22 Oct. A recorded order is
  * also added to the fake orders, as the database would hold it. */
-function outlookStore(sources: FakeSources): OutlookOrderStore & {
-  calls: RecordOutlookOrderInput[];
-} {
-  const sent = {
-    business_event_id: uuid(900),
-    provider_message_id: "email:fw-order@outlook.com",
+function onSendStore(sources: FakeSources): MemoryOnSendStore {
+  const s = new MemoryOnSendStore();
+  s.since = "2026-10-21T00:00:00Z";
+  s.entries = [{
+    approved_id: "f0000000-0000-4000-8000-000000000001",
+    supplier_key: "fencingwarehousewa",
+    supplier_name: "Fencing Warehouse WA",
+    supplier_ids: [S_FW],
+    emails: ["sales@fencingwarehousewa.au"],
+    on_account: true,
+  }];
+  s.jobs = JOBS.map((j) => ({
+    job_id: j.job_id,
+    job_number: j.job_number,
+    client_name: j.client_name,
+    status: j.status,
+    type: j.type,
+    legacy: false,
+    ses_family: null,
+    makesafe_family: null,
+    repair_stage: null,
+  }));
+  s.sent = [sentEmail(1, {
     internet_message_id: "fw-order@outlook.com",
+    provider_message_id: "email:fw-order@outlook.com",
     conversation_id: "CONV-FW",
-    sent_at: "2026-10-22T02:00:00Z",
-    mailbox: "admin@secureworkswa.com.au",
-    from_email: "admin@secureworkswa.com.au",
-    sent_by_email: "admin@secureworkswa.com.au",
-    folder_kind: "sent",
+    sent_at: FW_RECORDED_AT,
     to: ["sales@fencingwarehousewa.au"],
-    cc: ["fencing@secureworkswa.com.au"],
     subject: "Material Order Ref SWF-261387",
     body: [
       "Hi Team, could we please order the following for delivery:",
       "",
       "Date: 29 October 2026",
       "Address: 12 Example St, Carlisle WA 6101",
-      "Contact: <PHONE> (Jo)",
       "",
       "Materials Needed:",
       "1. 10 x 1800H panels",
       "",
       "Please confirm when you can, thank you.",
     ].join("\n"),
-    body_truncated: false,
+  })];
+  s.onRecord = (row, input) => {
+    sources.orders.push({
+      order_id: row.order_id,
+      job_id: row.job_id,
+      job_number: "SWF-261387",
+      supplier_id: row.supplier_id,
+      supplier_name: "Fencing Warehouse WA",
+      status: "sent",
+      sent_at: input.sent_at,
+      sent_internet_message_id: input.sent_internet_message_id,
+      sent_conversation_id: input.sent_conversation_id,
+      confirmed_delivery_date: null,
+    });
   };
-  const recorded = new Map<string, string>();
-  const calls: RecordOutlookOrderInput[] = [];
-  return {
-    calls,
-    sentOrderEmails: () => Promise.resolve([sent]),
-    jobOrders: (_org, jobId) =>
-      Promise.resolve(
-        sources.orders.filter((o) => o.job_id === jobId).map((o) => ({
-          id: o.order_id,
-          supplier_id: o.supplier_id,
-          status: o.status,
-          origin: recorded.has(o.order_id) ? "outlook" : "dispatch",
-          source_business_event_id: recorded.get(o.order_id) ?? null,
-          sent_internet_message_id: o.sent_internet_message_id,
-        })),
-      ),
-    jobBoxSupplierIds: () => Promise.resolve([]),
-    supplierUsage: () => Promise.resolve([]),
-    recordOutlookOrder(input) {
-      calls.push(input);
-      for (const [id, event] of recorded) {
-        if (event === input.source_business_event_id) {
-          return Promise.resolve({
-            recorded: false,
-            order_id: id,
-            box_created: false,
-            reason: "already_recorded",
-          });
-        }
-      }
-      const id = "aaaaaaa9-0000-4000-8000-000000000009";
-      recorded.set(id, input.source_business_event_id);
-      sources.orders.push({
-        order_id: id,
-        job_id: input.job_id,
-        job_number: "SWF-261387",
-        supplier_id: input.supplier_id,
-        supplier_name: "Fencing Warehouse WA",
-        status: "sent",
-        sent_at: input.sent_at,
-        sent_internet_message_id: input.sent_internet_message_id,
-        sent_conversation_id: input.sent_conversation_id,
-        confirmed_delivery_date: null,
-        fulfilment: "delivery",
-      });
-      return Promise.resolve({
-        recorded: true,
-        order_id: id,
-        box_created: true,
-        reason: null,
-      });
-    },
-  };
+  return s;
 }
 
-Deno.test("outlook order: a reply matched by job number only is tied to the order Shaun sent from Outlook", async () => {
+Deno.test("outlook order (3g): recorded when sent, before the reply is read; the reply then ties to it the normal way", async () => {
   const t = setup();
-  const outlook = outlookStore(t.sources);
-  t.ctx.outlook = outlook;
+  const onSend = onSendStore(t.sources);
+  t.ctx.onSend = onSend;
   t.store.events = [
     eventRow(MAIL.find((m) => m.seq === 103)!),
-    // A second reply in the same thread, later in the same run.
+    // A second reply in the same thread.
     eventRow({
       seq: 104,
       from: "sales@fencingwarehousewa.au",
@@ -1337,58 +1313,117 @@ Deno.test("outlook order: a reply matched by job number only is tied to the orde
   ];
   t.store.scan.cursor_sequence = 100;
   const result = await t.run("dispatch_v2_replies_scan");
-  assertEquals([result.outlook_orders, result.outlook_tied], [1, 1]);
-  const first = t.store.emails.find((e) => e.sequence_number === 103)!;
-  assertEquals(first.state, "matched");
-  assertEquals(first.rung, "job_number");
-  assertEquals(first.order_id, "aaaaaaa9-0000-4000-8000-000000000009");
-  assert(
-    String(first.match_reason).includes(
-      "Tied to the order sent from Outlook on Thu 22 Oct",
-    ),
+  assertEquals([result.sent.sent_orders, result.sent.sent_replies_tied], [1, 0]);
+  const order = onSend.orders[0];
+  assertEquals(
+    [order.origin, order.supplier_id, order.sent_at],
+    ["outlook", S_FW, FW_RECORDED_AT],
   );
-  // The later reply finds the recorded order by its thread.
-  const second = t.store.emails.find((e) => e.sequence_number === 104)!;
-  assertEquals([second.rung, second.order_id], [
-    "thread",
-    "aaaaaaa9-0000-4000-8000-000000000009",
-  ]);
-  // One order, recorded once.
-  assertEquals(outlook.calls.length, 1);
-  assertEquals(outlook.calls[0].supplier_id, S_FW);
-  assertEquals(outlook.calls[0].order_lines.map((l) => l.text), [
+  assertEquals(onSend.calls[0].trigger, "send");
+  assertEquals(onSend.calls[0].order_lines.map((l) => l.text), [
     "10 x 1800H panels",
   ]);
+  // The reply finds the order by the job number and the sender, as any
+  // Dispatch order; the later one by its thread.
+  const first = t.store.emails.find((e) => e.sequence_number === 103)!;
+  assertEquals([first.state, first.rung, first.order_id], [
+    "matched",
+    "job_number",
+    order.order_id,
+  ]);
+  const second = t.store.emails.find((e) => e.sequence_number === 104)!;
+  assertEquals([second.rung, second.order_id], ["thread", order.order_id]);
   // The reply's date waits for Shaun's Accept, on that order.
   const s = t.store.suggestions.find((x) => x.email_id === first.id)!;
-  assertEquals(s.order_id, "aaaaaaa9-0000-4000-8000-000000000009");
-  assertEquals(s.state, "open");
+  assertEquals([s.order_id, s.state], [order.order_id, "open"]);
   assertEquals(t.sources.writes.length, 0);
-  const accepted = await t.run("dispatch_v2_suggestion_accept", {
-    suggestion_id: s.id,
-  });
-  assertEquals(accepted.ok ?? true, true);
-  assertEquals(t.sources.writes[0].order.order_id, s.order_id);
+  // The next run records nothing new.
+  const again = await t.run("dispatch_v2_replies_scan");
+  assertEquals([again.sent.sent_orders, again.sent.sent_already], [0, 1]);
+  assertEquals(onSend.orders.length, 1);
 });
 
-Deno.test("outlook order: without the Outlook step, or with nothing found, the reply stays matched to the job only", async () => {
-  // As before Tweak 2: no Outlook store.
+Deno.test("outlook order (3g): a reply no longer records an order; without the send rule it stays matched to the job only", async () => {
   const plain = await scanned();
   const e = plain.bySeq(103)!;
   assertEquals([e.state, e.rung, e.order_id], ["matched", "job_number", null]);
-  assertEquals([plain.result.outlook_orders, plain.result.outlook_tied], [0, 0]);
+  assertEquals(plain.result.sent, null);
 
-  // An Outlook store that finds no sent email.
+  // The send rule on, but the order was sent before it was switched on:
+  // the reply stays as it is (the catch-up is for those).
   const t = setup();
-  const outlook = outlookStore(t.sources);
-  t.ctx.outlook = { ...outlook, sentOrderEmails: () => Promise.resolve([]) };
+  const onSend = onSendStore(t.sources);
+  onSend.since = "2026-10-23T00:00:00Z";
+  t.ctx.onSend = onSend;
   t.store.events = [eventRow(MAIL.find((m) => m.seq === 103)!)];
   t.store.scan.cursor_sequence = 100;
   const result = await t.run("dispatch_v2_replies_scan");
   const row = t.store.emails[0];
   assertEquals([row.state, row.rung, row.order_id], ["matched", "job_number", null]);
-  assertEquals([result.outlook_orders, result.outlook_tied], [0, 0]);
-  assertEquals(outlook.calls.length, 0);
+  assertEquals([result.sent.sent_read, onSend.calls.length], [0, 0]);
+});
+
+Deno.test("outlook order (3g): a failing send rule never stops the reply scan", async () => {
+  const t = setup();
+  const onSend = onSendStore(t.sources);
+  onSend.failing.add("sentOrderEmails");
+  t.ctx.onSend = onSend;
+  t.store.events = [eventRow(MAIL.find((m) => m.seq === 103)!)];
+  t.store.scan.cursor_sequence = 100;
+  const result = await t.run("dispatch_v2_replies_scan");
+  assertEquals(result.ok, true);
+  assertEquals(result.sent.sent_failed, 1);
+  assertEquals(t.store.emails[0].state, "matched");
+});
+
+Deno.test("outlook order (3g): our own sent email placed by hand goes on the job only, never on an order", async () => {
+  const t = setup();
+  t.store.emails.push({
+    id: "dddddddd-0000-4000-8000-000000000777",
+    org_id: ORG,
+    business_event_id: uuid(777),
+    sequence_number: 777,
+    provider_message_id: "email:sent777@outlook.com",
+    conversation_id: null,
+    received_at: RECEIVED,
+    from_email: "admin@secureworkswa.com.au",
+    subject: "Material Order Ref SWF-261387",
+    snippet: "Hi Team, could we please order the following for delivery: Date: 29 October 2026",
+    supplier_key: null,
+    supplier_name: null,
+    sender_via: OUR_SENT_ORDER_VIA,
+    order_desk: true,
+    job_numbers: ["SWF-261387"],
+    supplier_refs: [],
+    delivery_date: "2026-10-29",
+    delivery_read: null,
+    state: "unmatched",
+    rung: null,
+    match_reason: "Order sent from Outlook ...",
+    job_id: null,
+    order_id: null,
+    candidates: [],
+    rejected_order_ids: [],
+    decision: null,
+    decided_at: null,
+    decided_by: null,
+    decided_by_email: null,
+    matched_at: null,
+    created_at: NOW,
+    updated_at: NOW,
+  });
+  const r = await t.run("dispatch_v2_replies_assign", {
+    email_id: "dddddddd-0000-4000-8000-000000000777",
+    job_id: J1,
+    order_id: O1,
+  });
+  assertEquals([r.email.state, r.email.job_id, r.email.order_id], [
+    "matched",
+    J1,
+    null,
+  ]);
+  assertEquals(r.suggestion, null);
+  assertEquals(t.store.suggestions.length, 0);
 });
 
 // ── Tweak 2 piece 2: the job number inside the supplier's PDF ────────────
@@ -1563,9 +1598,10 @@ Deno.test("pdf job number: a reader that throws never stops the scan", async () 
   assertEquals(t.store.emails[0].state, "unmatched");
 });
 
-Deno.test("pdf job number: with no Dispatch order there, the order Shaun sent from Outlook is found", async () => {
+Deno.test("pdf job number: with no Dispatch order there, the order sent from Outlook (3g) is found", async () => {
   const t = setup();
-  t.ctx.outlook = outlookStore(t.sources);
+  const onSend = onSendStore(t.sources);
+  t.ctx.onSend = onSend;
   // Fencing Warehouse's confirmation: no job number in the words, only on
   // its PDF ("Customer Order 11041784", "Your Ref SWF-261387").
   t.ctx.pdfs = pdfReader({
@@ -1582,12 +1618,11 @@ Deno.test("pdf job number: with no Dispatch order there, the order Shaun sent fr
   const r = await t.run("dispatch_v2_replies_scan");
   const e = t.store.emails[0];
   assertEquals([e.state, e.rung, e.job_id], ["matched", "pdf_job_number", J1]);
-  assertEquals(e.order_id, "aaaaaaa9-0000-4000-8000-000000000009");
-  assertEquals([r.pdf_matched, r.outlook_orders, r.outlook_tied], [1, 1, 1]);
-  assert(
-    String(e.match_reason).startsWith(
-      "Job number SWF-261387 in the attached PDF (CO11041784.pdf). Tied to the order sent from Outlook",
-    ),
+  assertEquals(e.order_id, onSend.orders[0].order_id);
+  assertEquals([r.pdf_matched, r.sent.sent_orders], [1, 1]);
+  assertEquals(
+    e.match_reason,
+    "Job number SWF-261387 in the attached PDF (CO11041784.pdf)",
   );
 });
 

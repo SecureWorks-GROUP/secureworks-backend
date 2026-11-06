@@ -61,10 +61,11 @@ import {
 } from "./dispatch_v2_replies_sources.ts";
 import { dispatchV2MentionsPickup } from "./dispatch_v2_emails.ts";
 import {
-  type OutlookOrderStore,
-  outlookTieReason,
-  recordOutlookOrderForReply,
-} from "./dispatch_v2_outlook_order.ts";
+  type OnSendStore,
+  OUR_SENT_ORDER_VIA,
+  scanSentOrderEmails,
+  type SentPassCounts,
+} from "./dispatch_v2_outlook_on_send.ts";
 import {
   PDF_EMAILS_PER_RUN,
   pdfMatch,
@@ -96,10 +97,11 @@ export type DispatchV2RepliesContext = {
   via: "screen" | "terminal";
   store: RepliesStore;
   sources: DispatchRepliesSources;
-  // Tweak 2 piece 1 (contract section 3f.1): orders Shaun sent from Outlook.
-  // The scan only; without it a reply matched by job number alone stays as
-  // it is.
-  outlook?: OutlookOrderStore;
+  // Contract section 3g (6 Nov): orders sent from Outlook become Dispatch
+  // orders when they are sent. The scan only; without it the scan reads
+  // supplier replies and nothing else. (This replaces the 5 Nov rule, which
+  // recorded an Outlook order only once the supplier replied.)
+  onSend?: OnSendStore;
   // Tweak 2 piece 2 (contract section 3f.2): the job number in a supplier's
   // stored PDF. The scan only; without it an email the words cannot place
   // stays as it is.
@@ -479,9 +481,9 @@ type ScanCounts = {
   already_stored: number;
   suggestions: number;
   refs_linked: number;
-  // Tweak 2: orders recorded from Outlook, and replies tied to one.
-  outlook_orders: number;
-  outlook_tied: number;
+  // Section 3g: our sent emails read, orders recorded from Outlook,
+  // emails put under Emails to sort, and stored replies tied to an order.
+  sent: SentPassCounts | null;
   // Tweak 2 piece 2: emails whose stored PDFs were read, and those the job
   // number in a PDF matched.
   pdf_read: number;
@@ -501,8 +503,7 @@ function zeroCounts(): ScanCounts {
     already_stored: 0,
     suggestions: 0,
     refs_linked: 0,
-    outlook_orders: 0,
-    outlook_tied: 0,
+    sent: null,
     pdf_read: 0,
     pdf_matched: 0,
   };
@@ -526,6 +527,17 @@ export async function scanDispatchV2Replies(
     : null;
   const cursor = from ?? state.cursor_sequence;
   const counts = zeroCounts();
+
+  // Section 3g: first record the orders sent from Outlook, so a supplier's
+  // reply read below finds its order the normal way. Never throws.
+  if (ctx.onSend) {
+    counts.sent = await scanSentOrderEmails({
+      orgId,
+      store: ctx.onSend,
+      replies: store,
+      now,
+    });
+  }
 
   if (cursor == null) {
     // First run: start from now. Older mail is read only when asked
@@ -756,64 +768,13 @@ export async function scanDispatchV2Replies(
       counts.stored++;
       counts[result.state]++;
       if (result.state !== "matched") continue;
-      let email = inserted;
-      let order = result.order_id
+      const email = inserted;
+      const order = result.order_id
         ? orderById.get(result.order_id) ?? null
         : null;
 
-      // Tweak 2 piece 1 (contract section 3f.1): matched by the job number
-      // only (in its words, or in its PDF: piece 2), with no Dispatch order
-      // for this supplier on the job. If Shaun
-      // sent the order from Outlook, record it as a sent order and tie the
-      // reply to it. Nothing is sent; when the sent email cannot be found or
-      // read, the reply stays matched to the job only.
-      if (
-        !order &&
-        (result.rung === "job_number" || result.rung === "pdf_job_number") &&
-        ctx.outlook &&
-        sender.supplier_key
-      ) {
-        const job = jobsById.get(result.job_id);
-        const supplier = approved.find((a) =>
-          a.supplier_key === sender.supplier_key
-        ) ?? null;
-        const outcome = job
-          ? await recordOutlookOrderForReply(ctx.outlook, {
-            orgId,
-            reply: {
-              id: inserted.id,
-              conversation_id: inserted.conversation_id,
-              received_at: inserted.received_at,
-            },
-            job,
-            supplier,
-          })
-          : null;
-        if (outcome?.order) {
-          const tied = await store.updateEmail(orgId, inserted.id, "matched", {
-            order_id: outcome.order.order_id,
-            match_reason: `${inserted.match_reason ?? "Job number"}. ${
-              outlookTieReason(outcome.order)
-            }`,
-            updated_at: now,
-          });
-          if (outcome.recorded) counts.outlook_orders++;
-          if (tied) {
-            email = tied;
-            order = outcome.order;
-            counts.outlook_tied++;
-            // Later emails in this run match it by thread.
-            if (!orderById.has(order.order_id)) {
-              orders.push(order);
-              orderById.set(order.order_id, order);
-              orderConversationIds.set(
-                order.order_id,
-                order.sent_conversation_id ? [order.sent_conversation_id] : [],
-              );
-            }
-          }
-        }
-      }
+      // (The 5 Nov step that recorded an Outlook order here, once the
+      // supplier replied, is gone: section 3g records it when it is sent.)
 
       // Tweak 2 piece 3 (contract section 3f.3): the supplier's own numbers
       // in it are remembered against its order, or against the job alone
@@ -933,7 +894,13 @@ export async function assignReply(body: any, ctx: DispatchV2RepliesContext) {
   const jobId = uuidParam(body?.job_id, "job_id")!;
   const orderId = uuidParam(body?.order_id, "order_id", false);
   const job = await loadJob(ctx, jobId);
-  const order = orderId ? await orderOnJob(ctx, orderId, jobId) : null;
+  // Section 3g: one of our own sent order emails (one Dispatch could not
+  // place) is put on the job only, never on an order. Tied to an order it
+  // would read as the supplier's reply and move the box.
+  const ourOwn = email.sender_via === OUR_SENT_ORDER_VIA;
+  const order = orderId && !ourOwn
+    ? await orderOnJob(ctx, orderId, jobId)
+    : null;
   const now = nowIso(ctx);
   const updated = await ctx.store.updateEmail(
     ctx.orgId,
@@ -961,7 +928,7 @@ export async function assignReply(body: any, ctx: DispatchV2RepliesContext) {
     supplier_name: order?.supplier_name ?? null,
     job_number: job.job_number,
   }, "assigned", operator);
-  const suggestion = await suggestFor(ctx, updated, order, now);
+  const suggestion = ourOwn ? null : await suggestFor(ctx, updated, order, now);
   await ctx.store.logJobEvent(
     jobId,
     operator.userId,

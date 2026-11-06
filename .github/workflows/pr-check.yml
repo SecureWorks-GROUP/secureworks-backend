@@ -494,7 +494,7 @@ jobs:
       # suggestions (rules, engine on an in-memory store, migration text).
       - name: Test the Dispatch v2 supplier replies
         run: |
-          deno test --no-check --allow-env --allow-read             supabase/functions/ops-api/dispatch_v2_replies_rules_test.ts             supabase/functions/ops-api/dispatch_v2_replies_test.ts             supabase/functions/ops-api/dispatch_v2_replies_store_test.ts             supabase/functions/ops-api/dispatch_v2_outlook_order_test.ts             supabase/functions/ops-api/dispatch_v2_reply_pdf_test.ts
+          deno test --no-check --allow-env --allow-read             supabase/functions/ops-api/dispatch_v2_replies_rules_test.ts             supabase/functions/ops-api/dispatch_v2_replies_test.ts             supabase/functions/ops-api/dispatch_v2_replies_store_test.ts             supabase/functions/ops-api/dispatch_v2_outlook_order_test.ts             supabase/functions/ops-api/dispatch_v2_outlook_on_send_test.ts             supabase/functions/ops-api/dispatch_v2_reply_pdf_test.ts
 
       - name: Test edge deploy workflow classification
         run: |

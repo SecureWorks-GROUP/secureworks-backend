@@ -353,7 +353,7 @@ import {
 import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
 import { runDispatchV2RepliesAction } from './dispatch_v2_replies.ts'
-import { postgrestOutlookOrderStore } from './dispatch_v2_outlook_order.ts'
+import { postgrestOnSendStore } from './dispatch_v2_outlook_on_send.ts'
 import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
@@ -7766,10 +7766,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             via: 'terminal',
             store: postgrestRepliesStore(client),
             sources: postgrestDispatchRepliesSources(client),
-            // Tweak 2 (contract section 3f.1): a reply matched by job number
-            // alone to a job with no Dispatch order for that supplier records
-            // the order Shaun sent from Outlook (never sends anything).
-            outlook: postgrestOutlookOrderStore(client),
+            // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
+            // becomes that supplier's Dispatch order when it is sent (never
+            // sends anything, never moves a job's status).
+            onSend: postgrestOnSendStore(client),
             // Tweak 2 (contract section 3f.2): an email its words cannot place
             // is matched by the one job number in its stored PDFs (read only).
             pdfs: postgrestReplyPdfReader(client),
