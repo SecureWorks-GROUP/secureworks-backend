@@ -22,6 +22,11 @@
 --     genuinely concurrent mints still make exactly one job.
 --   * holder for another trade, contact or job: a real conflict, as before.
 --
+-- Fix, in reserve: a start that failed or was abandoned before binding
+-- anything no longer holds the customer: a new start supersedes it and uses
+-- its own details (a takeover used the old start's site). Starts that bound a
+-- contact or opportunity are still taken over, as GHL may hold their work.
+--
 -- Fix, in reserve: a request refused with nothing bound (no opportunity, no
 -- job) may be judged again when the same request id is retried. A refusal is
 -- a reading of the evidence at that moment, so a fix or a data repair must not
@@ -187,9 +192,22 @@ BEGIN
         WHERE org_id = v_existing.org_id AND type = v_existing.type AND identity_key = v_existing.identity_key
         FOR UPDATE;
       IF v_lock.owner_request_id IS NOT NULL AND v_lock.owner_request_id <> p_request_id THEN
-        SELECT request_id, state, lease_expires_at INTO v_owner
+        SELECT request_id, state, contact_id, opportunity_id, job_id, lease_expires_at INTO v_owner
           FROM public.fence_job_mint_requests WHERE request_id = v_lock.owner_request_id FOR UPDATE;
-        v_has_owner := FOUND AND v_owner.state IN ('reserved', 'contact_resolved', 'opportunity_created');
+        IF FOUND THEN
+          v_has_owner := v_owner.state IN ('reserved', 'contact_resolved', 'opportunity_created');
+          -- The same release as a new start: a failed owner that bound nothing is superseded.
+          IF v_owner.state = 'reserved' AND v_owner.contact_id IS NULL
+            AND v_owner.opportunity_id IS NULL AND v_owner.job_id IS NULL
+            AND v_owner.lease_expires_at IS NOT NULL AND v_owner.lease_expires_at <= now() THEN
+            UPDATE public.fence_job_mint_requests
+              SET state = 'conflict', last_error_code = 'superseded_by_new_start',
+                  last_error_message = 'A newer start for this customer replaced this one before it bound anything',
+                  updated_at = now()
+              WHERE request_id = v_owner.request_id;
+            v_has_owner := false;
+          END IF;
+        END IF;
       END IF;
       IF v_has_owner THEN
         IF v_owner.lease_expires_at IS NULL OR v_owner.lease_expires_at <= now() THEN
@@ -237,6 +255,28 @@ BEGIN
       expected_existing_job_ids, repeat_reason, mapping_outcome, lease_expires_at, created_at, updated_at
     INTO v_owner FROM public.fence_job_mint_requests WHERE request_id = v_lock.owner_request_id;
     v_has_owner := FOUND;
+  END IF;
+
+  -- A start that failed or was abandoned before it bound anything (still
+  -- 'reserved', lease lapsed, no contact, opportunity or job) releases the
+  -- customer: it is marked superseded and this request starts afresh with its
+  -- own details. Taking it over would make the job from the old start's
+  -- typed site and name. Nothing outside the ledger was made by it: GHL's
+  -- opportunity is only created after bind. A retry of the superseded request
+  -- is judged again like any refusal with nothing bound.
+  -- Nested, not one AND: PL/pgSQL does not short-circuit, and v_owner is
+  -- unassigned when the lock has no owner.
+  IF v_has_owner THEN
+    IF v_owner.state = 'reserved' AND v_owner.contact_id IS NULL
+      AND v_owner.opportunity_id IS NULL AND v_owner.job_id IS NULL
+      AND v_owner.lease_expires_at IS NOT NULL AND v_owner.lease_expires_at <= now() THEN
+      UPDATE public.fence_job_mint_requests
+        SET state = 'conflict', last_error_code = 'superseded_by_new_start',
+            last_error_message = 'A newer start for this customer replaced this one before it bound anything',
+            updated_at = now()
+        WHERE request_id = v_owner.request_id;
+      v_has_owner := false;
+    END IF;
   END IF;
 
   IF v_has_owner THEN

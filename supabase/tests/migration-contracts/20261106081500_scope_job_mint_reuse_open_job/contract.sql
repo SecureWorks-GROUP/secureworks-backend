@@ -171,6 +171,51 @@ BEGIN
   END IF;
 END $$;
 
+-- 6b. A start that failed before binding anything (still reserved, lease
+-- lapsed) is superseded by a new start, which makes the job with its own
+-- site. The superseded request, retried, reaches that job.
+DO $$
+DECLARE v jsonb; j record;
+BEGIN
+  v := public.reserve_fence_job_mint('00000000-0000-4000-8000-000000000451', '00000000-0000-4000-8000-0000000000c1',
+    '00000000-0000-4000-8000-0000000000d1', 'email:failed@example.com', 'fp-451', 'RESOLVED_NO_JOB', NULL, NULL, '{}', NULL,
+    'Test', 'Customer', 'failed@example.com', '', 'Old Site', 'Testville', 'patio');
+  PERFORM public.record_fence_job_mint_failure('00000000-0000-4000-8000-000000000451', 'ghl_request_failed', 'GHL timeout',
+    '00000000-0000-4000-8000-0000000000c1', '00000000-0000-4000-8000-0000000000d1', NULL);
+  IF (SELECT state FROM public.fence_job_mint_requests WHERE request_id = '00000000-0000-4000-8000-000000000451') IS DISTINCT FROM 'reserved' THEN
+    RAISE EXCEPTION 'failed start should stay reserved with its lease lapsed';
+  END IF;
+
+  v := public.reserve_fence_job_mint('00000000-0000-4000-8000-000000000452', '00000000-0000-4000-8000-0000000000c1',
+    '00000000-0000-4000-8000-0000000000d1', 'email:failed@example.com', 'fp-452', 'RESOLVED_NO_JOB', NULL, NULL, '{}', NULL,
+    'Test', 'Customer', 'failed@example.com', '', 'New Site', 'Testville', 'patio');
+  IF v->>'ownerRequestId' IS DISTINCT FROM '00000000-0000-4000-8000-000000000452' OR (v->>'executor')::boolean IS NOT TRUE
+    OR (v->>'joined')::boolean IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'failed start still held the customer: %', v;
+  END IF;
+  IF (SELECT last_error_code FROM public.fence_job_mint_requests WHERE request_id = '00000000-0000-4000-8000-000000000451')
+    IS DISTINCT FROM 'superseded_by_new_start' THEN
+    RAISE EXCEPTION 'failed start not marked superseded';
+  END IF;
+  PERFORM public.bind_fence_job_mint_identity('00000000-0000-4000-8000-000000000452', 'contactF', NULL);
+  PERFORM public.record_fence_job_mint_opportunity('00000000-0000-4000-8000-000000000452', 'oppF', 'contactF');
+  v := public.complete_fence_job_mint('00000000-0000-4000-8000-000000000452');
+  SELECT * INTO j FROM public.jobs WHERE id = (v->'canonical'->>'jobId')::uuid;
+  IF j.site_address IS DISTINCT FROM 'New Site' THEN RAISE EXCEPTION 'job made from the old start: %', j.site_address; END IF;
+
+  v := public.reserve_fence_job_mint('00000000-0000-4000-8000-000000000451', '00000000-0000-4000-8000-0000000000c1',
+    '00000000-0000-4000-8000-0000000000d1', 'email:failed@example.com', 'fp-451', 'RESOLVED_NO_JOB', NULL, NULL, '{}', NULL,
+    'Test', 'Customer', 'failed@example.com', '', 'Old Site', 'Testville', 'patio');
+  IF v->>'decision' IS DISTINCT FROM 'continue' OR (v->>'executor')::boolean IS NOT TRUE THEN
+    RAISE EXCEPTION 'superseded start not judged again: %', v;
+  END IF;
+  v := public.bind_fence_job_mint_identity('00000000-0000-4000-8000-000000000451', 'contactF', NULL);
+  IF (v->'canonical'->>'jobId')::uuid IS DISTINCT FROM j.id THEN RAISE EXCEPTION 'superseded start retry: %', v; END IF;
+  IF (SELECT count(*) FROM public.jobs WHERE ghl_contact_id = 'contactF') IS DISTINCT FROM 1::bigint THEN
+    RAISE EXCEPTION 'failed then new start made two jobs';
+  END IF;
+END $$;
+
 -- 7. An in-flight holder of the open job's opportunity is joined, not refused:
 -- the new start waits on it and then replays its job.
 DO $$
