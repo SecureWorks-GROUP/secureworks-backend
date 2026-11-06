@@ -1423,6 +1423,110 @@ export async function assertGroupJobDraftUsesShare(
  */
 export const PATIO_PAY_GROUP_ONLY_FLAG = "patio_pay_group_only_v1";
 
+export type InvoicePayableRoute = {
+  job_id: string;
+  route: "hours" | "group" | "group_setup_required";
+  group_id: string | null;
+  setup_reason?:
+    | "group_missing"
+    | "work_order_missing"
+    | "work_order_not_approved"
+    | "allowance_missing";
+};
+
+function groupSetupReason(
+  workOrder: Record<string, unknown> | null | undefined,
+): InvoicePayableRoute["setup_reason"] {
+  return !workOrder
+    ? "work_order_missing"
+    : workOrder.kind !== "job" || workOrder.status !== "approved" ||
+        !workOrder.sealed_content_hash
+    ? "work_order_not_approved"
+    : !(Number(workOrder.agreed_labour_ex) > 0)
+    ? "allowance_missing"
+    : "group_missing";
+}
+
+/** Price-free routing for jobs the caller has already been authorised to read. */
+export async function readInvoicePayableRoutes(
+  client: any,
+  jobIds: readonly string[],
+  groups: readonly Record<string, unknown>[],
+  orgId: string,
+): Promise<InvoicePayableRoute[]> {
+  const ids = [...new Set(jobIds.filter(Boolean))];
+  if (!ids.length) return [];
+  const { data: flag, error } = await client.from("feature_flags")
+    .select("enabled").eq("flag_name", PATIO_PAY_GROUP_ONLY_FLAG).maybeSingle();
+  throwQuery(error, "check how these jobs are paid");
+  const result: InvoicePayableRoute[] = [];
+  for (let offset = 0; offset < ids.length; offset += 25) {
+    const jobs = await rowsOf(
+      client.from("jobs").select("id, type, work_order_id").eq("org_id", orgId)
+        .in("id", ids.slice(offset, offset + 25)),
+      "check the invoice job routes",
+    );
+    const patioIds = flag?.enabled === true
+      ? jobs.filter((job) => job.type === "patio").map((job) => String(job.id))
+      : [];
+    const prior = patioIds.length
+      ? await rowsOf(
+        client.from("trade_invoice_lines")
+          .select(
+            "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status)",
+          )
+          .in("job_id", patioIds),
+        "check earlier pay on these jobs",
+      )
+      : [];
+    const workOrderIds = jobs.filter((job) => patioIds.includes(String(job.id)))
+      .map((job) => String(job.work_order_id || "")).filter(Boolean);
+    const workOrders = workOrderIds.length
+      ? await rowsOf(
+        client.from("work_orders")
+          .select("id, kind, status, sealed_content_hash, agreed_labour_ex")
+          .in("id", workOrderIds),
+        "check the group work order setup",
+      )
+      : [];
+    for (const job of jobs) {
+      const jobId = String(job.id);
+      const group = groups.find((row) =>
+        String(row.job_id) === jobId && row.status !== "void"
+      );
+      if (group) {
+        result.push({
+          job_id: jobId,
+          route: "group",
+          group_id: String(group.id),
+        });
+        continue;
+      }
+      const legacy = prior.some((row: any) =>
+        String(row.job_id) === jobId &&
+        !["draft", "ops-reject"].includes(
+          String(row.trade_invoices?.status || ""),
+        ) &&
+        isNormalWorkOrderPayLine(row)
+      );
+      if (!patioIds.includes(jobId) || legacy) {
+        result.push({ job_id: jobId, route: "hours", group_id: null });
+        continue;
+      }
+      const workOrder = workOrders.find((row) =>
+        String(row.id) === String(job.work_order_id)
+      );
+      result.push({
+        job_id: jobId,
+        route: "group_setup_required",
+        group_id: null,
+        setup_reason: groupSetupReason(workOrder),
+      });
+    }
+  }
+  return result;
+}
+
 export async function assertPatioPaysThroughGroup(
   client: any,
   lines: readonly FenceLine[],
@@ -1442,7 +1546,7 @@ export async function assertPatioPaysThroughGroup(
     .select("enabled").eq("flag_name", PATIO_PAY_GROUP_ONLY_FLAG).maybeSingle();
   if (flagError || flag?.enabled !== true) return;
   const jobs = await rowsOf(
-    client.from("jobs").select("id, type").in("id", jobIds),
+    client.from("jobs").select("id, type, work_order_id").in("id", jobIds),
     "check the job type",
   );
   const patio = jobs.filter((j) => String(j.type || "") === "patio")
@@ -1469,7 +1573,10 @@ export async function assertPatioPaysThroughGroup(
     const grouped = groups.some((g) =>
       String(g.job_id) === jobId && String(g.status || "") !== "void"
     );
-    if (!grouped && onNoWorkOrderAmount) {
+    const job = jobs.find((row) => String(row.id) === jobId);
+    const setup = grouped ? null : groupSetupReason(job?.work_order_id
+      ? await loadWorkOrder(client, String(job.work_order_id)) : null);
+    if (!grouped && setup !== "group_missing" && onNoWorkOrderAmount) {
       await onNoWorkOrderAmount(jobId).catch((e) =>
         console.error("[patio-pay] work order request failed:", (e as Error)?.message)
       );
@@ -1478,7 +1585,11 @@ export async function assertPatioPaysThroughGroup(
       "patio_pay_group_only",
       grouped
         ? "Patio jobs are paid through the group work order. Log your hours on the group and invoice your share."
-        : "Patio jobs are paid through a group work order. This job has no work order amount yet, so the office has to set it first.",
+        : setup === "group_missing"
+        ? "Group work order needs setting up. The approved work-order amount is ready; the office needs to set up the crew group before you invoice your share."
+        : setup === "work_order_not_approved"
+        ? "Group work order needs setting up. The office needs to approve the job work order first."
+        : "Group work order needs setting up. The office needs to set the job work-order amount first.",
       409,
     );
   }
@@ -1908,7 +2019,8 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     }
   }
   const groups=[...byId.values()];
-  if (!groups.length) return { enabled: true, groups: [] };
+  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId);
+  if (!groups.length) return { enabled: true, groups: [], payable_routes: payableRoutes };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
   const jobs: Record<string,unknown>[] = [], claims: Record<string,unknown>[] = [];
   for(let offset=0;offset<jobIds.length;offset+=100) {
@@ -1955,7 +2067,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
       ...(pay ? {projected_my_budget: projectedBudget, projected_cash_pay: pay.cash_pay, projected_super: pay.super_amount, budget_remainder: pay.budget_remainder} : {}), job_id: group.job_id, job_number: job.job_number,
       client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
   }
-  return { enabled: true, group_job_ids: jobIds, groups: result };
+  return { enabled: true, group_job_ids: jobIds, groups: result, payable_routes: payableRoutes };
 }
 
 async function readSplit(

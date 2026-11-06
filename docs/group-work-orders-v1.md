@@ -291,6 +291,12 @@ response sets `prompt_google_review: true` and includes
 
 Trade > Pay > Weekly Invoice renders these claims inline. Finalise uses the existing guarded freeze; only a current frozen share can be selected. Selected shares join the normal invoice total and generate_trade_invoice extra_items, alongside ordinary work orders and extras. Existing server pricing, signature freshness, duplicate guards and mandatory office review remain authoritative. Save stores selected group identities in the existing draft builder; reloading validates them against fresh own group state before inclusion. No new migration, permission role, rate or pay formula.
 
+### Missing group setup on the weekly invoice
+
+`my_group_work_orders.payable_routes` adds a price-free route for the caller's genuine allocated jobs in their organisation. An existing group uses its share. A patio covered by `patio_pay_group_only_v1` without earlier ordinary pay needs group setup; prior commission is not ordinary pay. Other jobs retain their ordinary hours route.
+
+The setup reason distinguishes an approved allowance with no group from a missing work order, an unapproved work order or a missing allowance. Weekly Invoice shows this before Submit and excludes the setup job from ordinary labour totals and payloads, retaining the saved card and unrelated work. A submit refused for a missing group no longer claims that an approved allowance is missing or requests that amount again. This read creates no group and changes no pay rule or switch.
+
 ## Owner-confirmed all-inclusive budgets,29 October2026
 
 New groups explicitly use immutable pay_basis all_in_12_6_v1. Rate×hours apportions the total budget, includingcashpayandallsuper, rather than guaranteeing hourlypay. SQL group_work_order_share_pay is the trusted maximum-cents conversion to invoicegross under the unchanged12%total/6%workerwithhold policy. The invoice trigger validates its output. Existing groups retain gross_v1 until explicitly amended; a frozen budget/basis cannot change.
