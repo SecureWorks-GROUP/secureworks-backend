@@ -1044,7 +1044,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Local scope drafts are migration-first in ops-api.
                       ("20261106040518", "scope_job_drafts"),
                       ("20261106044806", "scope_local_payment_stages"),
-                      ("20261106062000", "scope_work_order_saved_handoff")]:
+                      ("20261106062000", "scope_work_order_saved_handoff"),
+                      # Dispatch v2 section 3g: an order sent from Outlook is
+                      # recorded when it is sent (dispatch_v2_outlook_on_send.ts).
+                      ("20261106120000", "dispatch_v2_outlook_order_on_send")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
