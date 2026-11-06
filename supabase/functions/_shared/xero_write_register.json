@@ -176,10 +176,8 @@
       "gate_today": "Inside X6, X8 and X9",
       "cfo_confirmed": true,
       "call_sites": [
-        "ops-api/index.ts :: resolveTradeXeroSupplierContact :: POST /Contacts",
-        "ops-api/index.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts",
-        "ops-api/index.ts :: pickContactId :: POST /Contacts",
-        "ops-api/index.ts :: case submit_work_order_invoice :: PUT /Contacts",
+        "ops-api/trade_xero_contact.ts :: activateArchivedTradeContact :: POST /Contacts",
+        "ops-api/trade_xero_contact.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts",
         "ops-api/index.ts :: pushPOToXero :: PUT /Contacts",
         "ops-api/xero_accpay_books.ts :: resolveSupplierContactId :: PUT /Contacts"
       ],

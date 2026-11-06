@@ -110,10 +110,9 @@ X15 now has separate read-only preview and privileged apply tools. Apply require
 
 ### X13 · Find or create a trade's or supplier's Xero contact
 
-- `ops-api/index.ts :: resolveTradeXeroSupplierContact :: POST /Contacts`
-- `ops-api/index.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts`
-- `ops-api/index.ts :: pickContactId :: POST /Contacts`
-- `ops-api/index.ts :: case submit_work_order_invoice :: PUT /Contacts`
+- `ops-api/trade_xero_contact.ts :: activateArchivedTradeContact :: POST /Contacts`
+- `ops-api/trade_xero_contact.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts`
+- Work-order invoices resolve the supplier through `resolveTradeXeroSupplierContact` and no longer write `/Contacts` on their own. Unarchive and create stay these two writes.
 - `ops-api/index.ts :: pushPOToXero :: PUT /Contacts`
 - `ops-api/xero_accpay_books.ts :: resolveSupplierContactId :: PUT /Contacts`
 
