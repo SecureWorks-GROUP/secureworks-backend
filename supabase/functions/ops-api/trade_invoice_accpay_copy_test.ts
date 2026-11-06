@@ -47,11 +47,14 @@ Deno.test("new trade ACCPAY bills never stamp POSSIBLE DUPLICATE or machine net-
 
 Deno.test("trade PDF attach is not swallowed and retry attaches onto existing xero_bill_id", () => {
   assertEquals(INDEX.includes("PDF attach failed (non-blocking)"), false);
-  const pushStart = INDEX.lastIndexOf("case 'push_trade_invoice_to_xero':");
+  // The push body lives in pushTradeInvoiceToXeroAction; the dispatch case
+  // only calls it.
+  const pushStart = INDEX.indexOf("async function pushTradeInvoiceToXeroAction");
   const push = INDEX.slice(
     pushStart,
-    INDEX.indexOf("case 'list_trade_invoice_lines':", pushStart),
+    INDEX.indexOf("\nfunction json(", pushStart),
   );
+  assert(pushStart >= 0 && push.length > 0, "push action body found");
   assert(
     push.includes("if (inv.xero_bill_id)"),
     "retry still reconcilies an existing Xero bill",
@@ -64,9 +67,12 @@ Deno.test("trade PDF attach is not swallowed and retry attaches onto existing xe
     push.includes("canEnterPushTradeInvoiceToXero"),
     "push must accept pushed_to_xero when xero_bill_id is already set",
   );
-  const createPost = push.indexOf("xeroPost('/Invoices'");
+  // Every trade bill create looks in Xero for this invoice's bill first
+  // (createTradeXeroBillOnce, trade_invoice_xero_existing_bill.ts).
+  const createPost = push.indexOf("createTradeXeroBillOnce(");
   const reuseLock = push.indexOf("mustReuseExistingXeroBillForPdfRetry");
   assert(reuseLock >= 0 && createPost > reuseLock, "pushed_to_xero retry must not mint a second ACCPAY");
+  assertEquals(push.includes("xeroPost('/Invoices'"), false, "the push creates through the existing-bill check only");
 });
 
 Deno.test("PDF attach happens before pushed_to_xero so a failed attach is retryable onto the same bill", () => {
