@@ -108,7 +108,7 @@ REVOKE ALL ON FUNCTION public.office_client_confirmation_group_guard() FROM PUBL
 CREATE OR REPLACE FUNCTION public.group_client_signoff_counts(p_job uuid)
 RETURNS boolean LANGUAGE plpgsql STABLE SET search_path=public,pg_temp AS $$
 DECLARE s public.job_client_signoffs%ROWTYPE; v_min smallint; v_latest timestamptz;
-  v_frozen timestamptz; v_since timestamptz;
+  v_frozen timestamptz; v_since timestamptz; v_reopened timestamptz;
 BEGIN
   SELECT * INTO s FROM public.job_client_signoffs WHERE job_id=p_job
     ORDER BY created_at DESC,id::text COLLATE "C" DESC LIMIT 1;
@@ -122,6 +122,8 @@ BEGIN
     IF s.method='office_on_behalf' THEN
       -- The table check binds the evidence, job and identified office actor.
       IF s.happy IS DISTINCT FROM true OR s.capture_request_id IS NULL THEN RETURN false; END IF;
+      SELECT max(g.signoff_required_after) INTO v_reopened FROM public.group_work_orders g WHERE g.job_id=p_job AND g.status<>'void';
+      IF v_reopened IS NOT NULL AND s.client_confirmed_on < (v_reopened AT TIME ZONE 'Australia/Perth')::date THEN RETURN false; END IF;
     ELSIF s.method NOT IN ('on_site','share_link') OR s.signature_media_id IS NULL THEN RETURN false;
     END IF;
     SELECT min_happy_rating INTO v_min FROM public.client_signoff_settings WHERE id=1;

@@ -2650,3 +2650,13 @@ Deno.test("public client form keeps the work, date and outstanding items and doe
  assertEquals(m.rows("jobs")[0].status,"scheduled");
  await assertRejects(()=>clientSignGroupWorkOrder(m.client(),{...body,work_done:""}),GroupWorkOrderError,"Enter the work completed");
 });
+
+Deno.test("office cannot present an older client confirmation as fresh after reopening",async()=>{
+ const m=new Memory();seedSplit(m,"open");
+ m.rows("group_work_orders")[0].signoff_required_after="2026-11-06T05:00:00Z";
+ const body={...confirmationBody(),client_confirmed_on:"2026-11-05"};
+ await assertRejects(()=>recordOfficeClientConfirmation(m.client(),{isStaff:true,userId:USER_A,orgId:ORG},body),ClientSignoffFormError,"client must confirm again");
+ assertEquals(m.rows("job_client_signoffs").length,0);
+ m.rows("job_client_signoffs").push({id:"old-confirmation",job_id:JOB,org_id:ORG,method:"office_on_behalf",signed_name:"Invented Client",happy:true,client_confirmed_on:"2026-11-05",work_done:"Agreed work",captured_by:USER_A,captured_by_actor:"user:"+USER_A,capture_auth_source:"jwt",confirmation_kind:"written_confirmation",confirmation_reference:"An earlier client email",created_at:"2026-11-06T06:00:00Z"});
+ assertEquals((await readGroupWorkOrderOffice(m.client(),trade(USER_A,true),{group_id:GROUP})).client_signed,false);
+});

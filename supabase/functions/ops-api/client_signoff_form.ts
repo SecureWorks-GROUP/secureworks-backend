@@ -121,8 +121,14 @@ export async function recordOfficeClientConfirmation(client: any, caller: Office
   const payloadHash = await digest(new TextEncoder().encode(JSON.stringify(payload)));
   const previous = await requestRecord(client, requestId);
   if (previous) return replay(previous, payloadHash, job.id, caller);
-  const group: any = checked(await client.from("group_work_orders").select("id,split_frozen_at").eq("job_id", job.id).neq("status", "void").maybeSingle(), "check the group");
+  const group: any = checked(await client.from("group_work_orders").select("id,split_frozen_at,signoff_required_after").eq("job_id", job.id).neq("status", "void").maybeSingle(), "check the group");
   if (group?.split_frozen_at) fail("client_signoff_split_frozen", "The group shares are frozen. The office must review and reopen them before recording a new sign-off.", 409);
+  if (group?.signoff_required_after) {
+    const reopened = Date.parse(String(group.signoff_required_after));
+    if (!Number.isFinite(reopened) || day < new Date(reopened + 8 * 3600_000).toISOString().slice(0,10)) {
+      fail("client_signoff_confirmation_stale", "The client must confirm again after the group was reopened. An earlier signed copy or written confirmation cannot unlock the new work.", 409);
+    }
+  }
   const path = copy ? caller.orgId + "/" + job.id + "/" + requestId + "." + copy.extension : null;
   if (copy && path) {
     const storage = client.storage.from(CLIENT_SIGNOFF_COPY_BUCKET);

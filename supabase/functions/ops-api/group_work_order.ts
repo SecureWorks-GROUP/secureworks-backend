@@ -1309,6 +1309,7 @@ function signoffCounts(
   minimum: number,
   latestHoursAt: string | null,
   allowLegacyWaiver = false,
+  reopenedAt?: unknown,
 ): boolean {
   if (!row) return false;
   const method = String(row.method || "");
@@ -1320,6 +1321,10 @@ function signoffCounts(
   }
   if (method === "office_on_behalf") {
     if (!hasOfficeClientConfirmation(row) || row.happy !== true) return false;
+    if (reopenedAt) {
+      const reopened = Date.parse(String(reopenedAt));
+      if (!Number.isFinite(reopened) || String(row.client_confirmed_on) < new Date(reopened + 8 * 3600_000).toISOString().slice(0,10)) return false;
+    }
   } else {
     if (method !== "on_site" && method !== "share_link") return false;
     if (!row.signature_media_id) return false;
@@ -1850,6 +1855,7 @@ async function loadShareView(
     minimum,
     latestHoursAt,
     await legacyFrozenWaiverCounts(client, group, newestSignoff(signoffs)),
+    group.signoff_required_after,
   );
   // An approval counts only when it is newer than every hours change. The
   // office can approve for the whole crew (owner, 30 Oct 2026), on the same terms.
@@ -2456,8 +2462,9 @@ async function countingSignoff(
     latestHoursOnJob(client, jobId),
   ]);
   const latest = newestSignoff(rows);
-  const legacy = await legacyFrozenWaiverCounts(client, group || await loadGroupByJob(client, jobId), latest);
-  return signoffCounts(latest, minimum, latestHoursAt, legacy);
+  const currentGroup = group || await loadGroupByJob(client, jobId);
+  const legacy = await legacyFrozenWaiverCounts(client, currentGroup, latest);
+  return signoffCounts(latest, minimum, latestHoursAt, legacy, currentGroup?.signoff_required_after);
 }
 
 /** The same current sign-off required by freeze also guards ending group work. */

@@ -21,7 +21,7 @@ BEGIN
  capture_auth_source,capture_request_id,capture_payload_hash,confirmation_kind,confirmation_reference,client_confirmed_on,work_done)
  VALUES('00000000-0000-0000-0000-000000000001',j,'office_on_behalf','Invented Client',accepts,
  '00000000-0000-4000-8000-000000000003','user:00000000-0000-4000-8000-000000000003',
- 'jwt',gen_random_uuid(),'sha256:'||repeat('a',64),'written_confirmation','Client email: invented message reference','2026-11-06','Installed the agreed patio') RETURNING id INTO k;
+ 'jwt',gen_random_uuid(),'sha256:'||repeat('a',64),'written_confirmation','Client email: invented message reference',(clock_timestamp() AT TIME ZONE 'Australia/Perth')::date,'Installed the agreed patio') RETURNING id INTO k;
  RETURN k;
 END $$;
 DO $$
@@ -46,6 +46,12 @@ BEGIN
  SELECT signoff_required_after INTO marker FROM public.group_work_orders WHERE job_id=old_j;
  IF marker IS NULL THEN RAISE EXCEPTION 'client-confirmation: reopen did not request fresh confirmation'; END IF;
  PERFORM pg_temp.signoff_expect(false,old_j,'reopened group kept historical approval');
+ INSERT INTO public.job_client_signoffs(org_id,job_id,method,signed_name,happy,captured_by,captured_by_actor,
+ capture_auth_source,capture_request_id,capture_payload_hash,confirmation_kind,confirmation_reference,client_confirmed_on,work_done)
+ VALUES('00000000-0000-0000-0000-000000000001',old_j,'office_on_behalf','Invented Client',true,
+ '00000000-0000-4000-8000-000000000003','user:00000000-0000-4000-8000-000000000003','jwt',gen_random_uuid(),
+ 'sha256:'||repeat('a',64),'written_confirmation','An older client email',(clock_timestamp() AT TIME ZONE 'Australia/Perth')::date-1,'Agreed work');
+ PERFORM pg_temp.signoff_expect(false,old_j,'older client confirmation was re-recorded as fresh after reopening');
  k:=pg_temp.signoff_office(old_j);
  PERFORM pg_temp.signoff_expect(true,old_j,'attributed client written confirmation refused');
  k:=pg_temp.signoff_office(old_j,false);
