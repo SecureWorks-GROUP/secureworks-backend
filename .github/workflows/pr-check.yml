@@ -383,6 +383,13 @@ jobs:
             --filter "builder's order value" \
             supabase/functions/ops-api/trade_app_visibility_rules_test.ts
 
+      - name: Test invoice-only job selection permissions
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "invoice picker" \
+            supabase/functions/ops-api/trade_invoice_job_picker_test.ts \
+            supabase/functions/ops-api/trade_app_visibility_rules_test.ts
+
       # The one staff text for a new job (docs/repair-intake-auto-v1.md,
       # "Messages"): a repair job is told to the repair recipient in repair
       # words, on the approval path and the scan path, and the make-safe text
