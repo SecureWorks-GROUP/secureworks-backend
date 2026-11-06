@@ -50,17 +50,26 @@ money is null and `amounts_confirmed` is false. Known totals and each payer's
 figures must reconcile in integer cents, including each tax subtotal. Negative
 and sub-cent figures are refused. Unknown never becomes zero.
 
-`labourCostEstimate` and `internal.labour_lines` bind the work order. The same
+`labourCostEstimate` and `internal.labour_lines` bind the work order.
+When the frozen pricing has a labour total and no itemised labour, preparation creates one group labour allowance line for that exact total.
+Priced labour lines must add to the frozen total in cents.
+The same
 `work_orders.kind = job` row is retained, linked by `jobs.work_order_id` and
 `work_orders.scope_revision_id` and the existing
 `quote_filled_scope_revision_id` consumed by work-order readers. There is no second crew work order or group
-split. Existing office content is preserved by refusing to overwrite it. A new
-frozen revision may refill this producer's unaccepted draft with the same id.
+split. Saving the frozen source replaces earlier lines on an editable draft, including manual placeholders, with the saved revision's labour.
+An approved work order, a set approval timestamp or a content seal refuses every refill.
+A new frozen revision may refill the unaccepted draft with the same id.
 Payer ids retain their invoice ids. A removed payer's old row remains stored
 under its old revision and is omitted from the current response. Once partial
 acceptance starts, a prepared revision cannot be replaced.
 
 Read returns persisted identities and totals, never a fresh calculation.
+For fencing and patio, `freeze_scope` also prepares these drafts after freezing and returns `job_drafts: {status, data}` beside the saved revision.
+This runs on repeated freezes too, so a retained frozen revision can repair a missed handoff.
+The freeze requires staff access and the job's server-owned organisation before it writes.
+A failed handoff leaves the frozen revision saved and returns its distinct hold or unavailable code inside `job_drafts`; clients must show that result rather than claim the work order was saved.
+The explicit preparation action remains available with the same body and response for retry and readback.
 Absent drafts return 404. A different or stale revision returns 409. After
 release the accepted revision remains readable even if later superseded.
 Preparation while the released source remains current returns the retained
@@ -99,3 +108,7 @@ Local checks cover stored drafts, cent reconciliation, repeated calls, source
 changes, unknowns, partial/full acceptance and existing work-order guards.
 Full live Scope Engine, Dispatch and Job Profit proof belongs to the shared
 whole-job test round after the build PRs land.
+
+The saved handoff follow-up changes only the preparation function and the fencing/patio freeze action.
+It makes no automatic backfill.
+Undo its function code first, then apply `supabase/rollbacks/20261106062000_scope_work_order_saved_handoff_down.sql` to restore the earlier draft-content policy while keeping all stored lines, invoice drafts and revision links.

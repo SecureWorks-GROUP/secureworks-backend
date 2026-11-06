@@ -1,5 +1,8 @@
 import { deepStrictEqual as assertEquals } from "node:assert/strict";
-import { scopeJobDraftsAction } from "./scope_job_drafts.ts";
+import {
+  prepareScopeDraftsAfterFreeze,
+  scopeJobDraftsAction,
+} from "./scope_job_drafts.ts";
 import { releaseScopeJobDraftsOnAcceptance } from "../_shared/scope_freeze/release_scope_job_drafts.ts";
 
 // Generated identifiers and synthetic money only, no operational records.
@@ -8,6 +11,48 @@ const revision = crypto.randomUUID();
 const org = crypto.randomUUID();
 const body = { job_id: job, scope_revision_id: revision };
 const actor = { staff: true, orgId: org };
+
+Deno.test("scope freeze handoff: persisted draft or explicit hold accompanies the saved revision", async () => {
+  const stored = {
+    work_order: { id: crypto.randomUUID(), labour_total_ex_gst: 27.41 },
+  };
+  const result = await prepareScopeDraftsAfterFreeze(
+    {
+      rpc: (name: string, args: unknown) => {
+        assertEquals(name, "prepare_scope_job_drafts");
+        assertEquals(args, {
+          p_job_id: job,
+          p_scope_revision_id: revision,
+          p_org_id: org,
+        });
+        return { data: stored, error: null };
+      },
+    },
+    body,
+    actor,
+  );
+  assertEquals(result, { status: 200, data: stored });
+  assertEquals(
+    await prepareScopeDraftsAfterFreeze(
+      { rpc: () => ({ error: { message: "scope_drafts_work_order_sealed" } }) },
+      body,
+      actor,
+    ),
+    { status: 409, data: { code: "scope_drafts_work_order_sealed" } },
+  );
+  assertEquals(
+    await prepareScopeDraftsAfterFreeze(
+      {
+        rpc: () => {
+          throw new Error("private provider detail");
+        },
+      },
+      body,
+      actor,
+    ),
+    { status: 503, data: { code: "scope_drafts_unavailable" } },
+  );
+});
 
 Deno.test("scope drafts: staff/org/method and input checks write nothing", async () => {
   const client = {

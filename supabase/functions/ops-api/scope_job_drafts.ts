@@ -2,6 +2,28 @@
 // boundary never accepts money, an organisation, or an acceptance claim.
 export type ScopeDraftActor = { staff: boolean; orgId: string | null };
 
+// A freeze is durable before this handoff runs. Return a distinct outcome so
+// clients retain the saved revision while showing any unsaved work-order hold.
+export async function prepareScopeDraftsAfterFreeze(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  input: { job_id: string; scope_revision_id: string },
+  actor: ScopeDraftActor,
+): Promise<{ status: number; data: unknown }> {
+  try {
+    const response = await scopeJobDraftsAction(
+      client,
+      "prepare_scope_job_drafts",
+      "POST",
+      input,
+      actor,
+    );
+    return { status: response.status, data: await response.json() };
+  } catch {
+    return { status: 503, data: { code: "scope_drafts_unavailable" } };
+  }
+}
+
 export async function scopeJobDraftsAction(
   // deno-lint-ignore no-explicit-any
   client: any,
