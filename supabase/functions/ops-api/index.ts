@@ -1,4 +1,5 @@
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
+import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
@@ -42942,11 +42943,17 @@ export async function searchAllJobs(
   isDispatcher = false,
 ) {
   const q = (params.get('q') || '').toLowerCase().trim()
-  const { lens, canSeeCompany } = _resolveTradeJobFeedLens({
-    isDispatcher,
-    managedVerticals: viewer.managedVerticals,
-    q,
-  })
+  // Explicit invoice-only picker; never turn this into seeEverything or a
+  // manager scope. The ordinary All/search and per-job doors stay unchanged.
+  const invoicePicker = params.get('invoice_picker') === '1' &&
+    await readInvoiceAnyJobPermission(client, viewer)
+  const { lens, canSeeCompany } = invoicePicker
+    ? { lens: q ? 'search' : 'company', canSeeCompany: false }
+    : _resolveTradeJobFeedLens({
+      isDispatcher,
+      managedVerticals: viewer.managedVerticals,
+      q,
+    })
   // Company-lens viewers still SELECT the quote columns — in-vertical
   // manager cards need them — then each row is projected by that job's
   // access tier. A fencing manager must not inherit quote on patio rows.
@@ -42955,7 +42962,9 @@ export async function searchAllJobs(
     managedVerticals: viewer.managedVerticals,
   }
   const jobQuoteVisible = (job: any) => tradeViewerQuoteVisibleForJob(job, feedQuoteCtx)
-  const jobFeedSelect = tradeJobFeedSelect(canSeeCompany)
+  const jobFeedSelect = invoicePicker
+    ? 'id, org_id, job_number, client_name, site_suburb, type, status, created_at, updated_at'
+    : tradeJobFeedSelect(canSeeCompany)
 
   const requestedPageSize = Number(params.get('page_size') || TRADE_JOB_FEED_PAGE_DEFAULT)
   const requestedOffset = Number(params.get('offset') || 0)
@@ -42968,8 +42977,8 @@ export async function searchAllJobs(
   const pageSize = Math.min(requestedPageSize, TRADE_JOB_FEED_PAGE_MAX)
   const offset = requestedOffset
 
-  const seeEverything = isDispatcher === true
-  const managedVerticals = _normalizeManagedVerticals(viewer.managedVerticals)
+  const seeEverything = isDispatcher === true || invoicePicker
+  const managedVerticals = invoicePicker ? [] : _normalizeManagedVerticals(viewer.managedVerticals)
   const isCategoryManager = !seeEverything && managedVerticals.length > 0
   const isAllocatedOnly = !seeEverything && managedVerticals.length === 0
 
@@ -43128,8 +43137,10 @@ export async function searchAllJobs(
     const capped = ranked.length > TRADE_JOB_SEARCH_RESULT_CAP || (baseRows || []).length > TRADE_JOB_SEARCH_RESULT_CAP
     const materialized = ranked.slice(0, TRADE_JOB_SEARCH_RESULT_CAP)
     const pageJobs = materialized.slice(offset, offset + pageSize)
-    const jobs = await enrichTradeMakesafeJobs(client, pageJobs, jobQuoteVisible)
-    for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
+    const jobs = invoicePicker
+      ? pageJobs.map(presentInvoiceJobPickerRow)
+      : await enrichTradeMakesafeJobs(client, pageJobs, jobQuoteVisible)
+    if (!invoicePicker) for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
     const canFetchMore = offset + jobs.length < materialized.length
     return {
       jobs,
@@ -43183,9 +43194,11 @@ export async function searchAllJobs(
 
   // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
   // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
-  const jobs = await enrichTradeMakesafeJobs(client, merged, jobQuoteVisible)
+  const jobs = invoicePicker
+    ? merged.map(presentInvoiceJobPickerRow)
+    : await enrichTradeMakesafeJobs(client, merged, jobQuoteVisible)
   // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
-  for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
+  if (!invoicePicker) for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
 
   // `total` counts the paged job query only; the seed and external-ref merges
   // can push a page past it, so never report fewer rows than were sent.

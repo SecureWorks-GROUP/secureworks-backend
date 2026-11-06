@@ -43,7 +43,7 @@
 //     category manager may open/allocate an unassigned make-safe job.
 
 import "./trade_app_visibility_rules_test_env.ts";
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { deepStrictEqual as assertEquals } from "node:assert/strict";
 import {
   _opsApiRequestHandlerForTest,
   _resolveManagerVisibility,
@@ -470,7 +470,7 @@ type QueryLog = {
   inVals: unknown[] | null;
 }[];
 
-function surfaceClient(log: QueryLog): any {
+function surfaceClient(log: QueryLog, invoiceDetails?: unknown): any {
   function builder(table: string) {
     const st = {
       select: "",
@@ -508,7 +508,13 @@ function surfaceClient(log: QueryLog): any {
       order: () => b,
       range: () => b,
       limit: () => b,
-      maybeSingle: () => Promise.resolve({ data: null, error: null }),
+      maybeSingle: () =>
+        Promise.resolve({
+          data: table === "users"
+            ? { invoice_any_job: (invoiceDetails as any)?.invoiceAnyJob }
+            : null,
+          error: null,
+        }),
       then: (resolve: any) => {
         log.push({ table, eq: { ...st.eq }, inVals: st.inVals });
         if (table === "job_assignments") {
@@ -619,6 +625,92 @@ function tradeAuth(overrides: Partial<TradeAuthContext>): TradeAuthContext {
     ...overrides,
   };
 }
+
+Deno.test("invoice picker: three explicit exceptions get minimal company job choices, never another tenant or general job access", async () => {
+  for (const id of ["exception-a", "exception-b", "exception-c"]) {
+    const viewer = tradeAuth({ id });
+    const result = await searchAllJobs(
+      surfaceClient([], { invoiceAnyJob: true }),
+      new URLSearchParams("invoice_picker=1"),
+      viewer,
+      false,
+    );
+    assertEquals(
+      result.jobs.map((j: any) => j.id).sort(),
+      [JOB_FENCING, JOB_PATIO, JOB_DECKING, JOB_MAKESAFE].sort(),
+    );
+    for (const job of result.jobs) {
+      assertEquals(
+        Object.keys(job).sort(),
+        [
+          "id",
+          "job_number",
+          "client_name",
+          "site_suburb",
+          "type",
+          "status",
+          "external_ref",
+        ].sort(),
+      );
+    }
+    const ordinary = await searchAllJobs(
+      surfaceClient([], { invoiceAnyJob: true }),
+      new URLSearchParams(),
+      viewer,
+      false,
+    );
+    assertEquals(ordinary.jobs, [], "grant never widens ordinary job search");
+    const access = await resolveTradeJobAccessTier(
+      accessClient(),
+      JOB_PATIO,
+      id,
+      { isOffice: false, access: ACCESS_NONE },
+    );
+    assertEquals(
+      access.tier,
+      "none",
+      "picker selection grants no job-detail or quote tier",
+    );
+  }
+});
+
+Deno.test("invoice picker: an ordinary account remains allocated-only, including truthy forged permission values", async () => {
+  for (
+    const details of [undefined, {}, { invoiceAnyJob: false }, {
+      invoiceAnyJob: "true",
+    }, { invoiceAnyJob: 1 }]
+  ) {
+    const result = await searchAllJobs(
+      surfaceClient([], details),
+      new URLSearchParams("invoice_picker=1"),
+      tradeAuth({}),
+      false,
+    );
+    assertEquals(
+      result.jobs.map((j: any) => j.id).sort(),
+      [JOB_FENCING, JOB_PATIO].sort(),
+    );
+  }
+});
+
+Deno.test("invoice picker: typed search uses the same minimal company scope", async () => {
+  const result = await searchAllJobs(
+    surfaceClient([], { invoiceAnyJob: true }),
+    new URLSearchParams("invoice_picker=1&q=sw"),
+    tradeAuth({ id: "exception-a" }),
+    false,
+  );
+  assertEquals(
+    result.jobs.map((j: any) => j.id).sort(),
+    [JOB_FENCING, JOB_PATIO, JOB_DECKING, JOB_MAKESAFE].sort(),
+  );
+  assertEquals(
+    result.jobs.some((j: any) =>
+      "metadata" in j || "notes" in j || "client_email" in j
+    ),
+    false,
+  );
+});
 
 Deno.test("rule table (end-to-end): ordinary crew's search_all_jobs is restricted server-side to their own assignments, never a company browse", async () => {
   const log: QueryLog = [];

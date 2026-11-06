@@ -454,3 +454,42 @@ before the matching `ops-api` through the standard lane
 change nobody's visibility. The Phase 2 data change above is a separate,
 explicitly approved step.
 
+## Invoice-only job selection, 6 November 2026
+
+An owner-authorised named exception may select company jobs for their own
+trade invoice without gaining general job access. The protected profile key
+is `users.trade_details.invoiceAnyJob`, enabled only by JSON boolean `true`;
+absent, false and truthy strings/numbers are off. Profile self-update guards
+and `update_trade_profile`'s field allowlist prevent a trade granting it.
+Granting this capability is a separate approved live-data operation after
+the backend and invoice picker are released. No personal identifiers live
+in source, and ordinary users retain their existing allocation scope.
+
+The invoice screen calls `search_all_jobs` with `invoice_picker=1`. The
+server reads only that capability from the caller's tenant-bound profile;
+an unreadable permission refuses. With the capability on, the search uses
+the existing tenant, status, query, paging and external-reference rules but
+returns only `id`, `job_number`, `client_name`, `site_suburb`, `type`,
+`status` and `external_ref`. It skips general-job enrichment and allowlists
+the final reply independently. Prices, quotes, financial history, notes,
+phone/email, manager rights and other people's pay are absent. A picker
+result grants no job-detail access. Without the capability, this parameter
+falls back to the caller's existing search scope. Calls without the
+parameter are unchanged even for a granted profile.
+
+This is a selection exception, not a new invoice engine. The existing
+`generate_trade_invoice` searched-in `extra_items` lane already supports
+the authenticated caller's own invoice on an unassigned job. Its existing
+limitation remains: the writer itself does not enforce allocated-only job
+membership. This change neither adds nor closes that pre-existing write
+boundary; it must not be described as a complete write-authorisation fix.
+Work-order, group-share, money and invoice ownership guards stay in place.
+
+Frontend integration belongs to `secureworks-ux`: add `invoice_picker: 1`
+only to invoice-context `search_all_jobs` calls, including
+`_jcRunJobSearch`. Ordinary Jobs/All search must omit it. Existing selected
+cards use `assignment_id: null` and reach `generate_trade_invoice` as
+searched-in labour extra items. Release plus a capability grant still
+requires an affected-user read/selection proof; database readback and
+source checks alone do not prove that screen journey.
+
