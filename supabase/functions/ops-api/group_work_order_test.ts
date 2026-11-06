@@ -54,6 +54,7 @@ import {
   readTradeGroupWorkOrder,
   readMyGroupWorkOrders,
   readInvoicePayableRoutes,
+  readPatioLegacyHoursJobIds,
   assertPatioPaysThroughGroup,
   assertAllInGroupInvoiceStandalone,
   readGroupWorkOrderOffice,
@@ -553,6 +554,7 @@ class Query {
   private payload: unknown = null;
   private one: "none" | "maybe" | "single" = "none";
   private bounds: [number,number] | null = null;
+  private sorts: {col:string;ascending:boolean}[] = [];
 
   constructor(private memory: Memory, private table: string) {}
 
@@ -568,7 +570,7 @@ class Query {
     return this;
   }
   neq(col: string,value:unknown): this { this.filters.push({op:"neq",col,value}); return this; }
-  order(): this { return this; }
+  order(col:string, options:{ascending?:boolean}={}): this { this.sorts.push({col,ascending:options.ascending!==false});return this; }
   range(start:number,end:number): this { this.bounds=[start,end]; return this; }
   insert(row: unknown): this {
     this.op = "insert";
@@ -608,7 +610,10 @@ class Query {
 
   private matches(row: Row): boolean {
     return this.filters.every((filter) => {
-      if (filter.op === "eq") return row[filter.col] === filter.value;
+      if (filter.op === "eq") {
+        if (filter.col === "jobs.type") return this.memory.rows("jobs").find((job) => job.id === row.job_id)?.type === filter.value;
+        return row[filter.col] === filter.value;
+      }
       if (filter.op === "neq") return row[filter.col] !== filter.value;
       return (filter.value as unknown[]).includes(row[filter.col]);
     });
@@ -695,6 +700,10 @@ class Query {
       return { data: null, error: null };
     }
     let found = rows.filter((row) => this.matches(row));
+    if(this.sorts.length) found=found.toSorted((a,b)=>{
+      for(const {col,ascending} of this.sorts){const left=String(a[col]??""),right=String(b[col]??"");if(left!==right)return (left<right?-1:1)*(ascending?1:-1);}
+      return 0;
+    });
     if(this.bounds) found=found.slice(this.bounds[0],this.bounds[1]+1);
     if (this.one === "maybe") return { data: found[0] || null, error: null };
     if (this.one === "single") {
@@ -2261,7 +2270,7 @@ Deno.test("allocated workers discover an unjoined group without reading its mone
  assertEquals((await readMyGroupWorkOrders(db.client(),trade(USER_C))).groups,[]);
 });
 
-Deno.test("invoice routing distinguishes missing groups from missing allowances and keeps earlier hourly pay", async () => {
+Deno.test("invoice routing distinguishes missing groups and refuses a later job despite earlier hourly claims", async () => {
   const db = new Memory();
   seedSplit(db);
   db.rows("jobs")[0].type = "patio";
@@ -2280,7 +2289,7 @@ Deno.test("invoice routing distinguishes missing groups from missing allowances 
   db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "commission", trade_invoices: { status: "paid" } });
   assertEquals((await read())[0].route, "group_setup_required");
   db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "labour", trade_invoices: { status: "paid" } });
-  assertEquals((await read())[0].route, "hours");
+  assertEquals((await read())[0].route, "group_setup_required");
   assertEquals(await readInvoicePayableRoutes(db.client(), [JOB], [], "another-org"), []);
   assertEquals(await readInvoicePayableRoutes(db.client(), [JOB], existingGroups, ORG),
     [{ job_id: JOB, route: "group", group_id: GROUP, discovery: { state: "join" } }]);
@@ -2418,4 +2427,142 @@ Deno.test("a Grok Bot sets up a group for named allocated crew on an office pers
   assertEquals(again.created, false);
   assertEquals(db.rows("group_work_orders").length, 1);
   assertEquals(db.rows("group_work_order_participants").length, 2);
+});
+
+Deno.test("patio hourly exception belongs only to work started before the first group job", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("jobs")[0].type = "patio";
+  db.rows("jobs").push({
+    id: OTHER_JOB,
+    org_id: ORG,
+    type: "patio",
+    work_order_id: WO,
+  });
+  db.rows("feature_flags").push({
+    flag_name: "patio_pay_group_only_v1",
+    enabled: true,
+  });
+  db.rows("job_assignments").push(
+    {
+      id: "anchor",
+      job_id: JOB,
+      scheduled_date: "2026-01-10",
+      status: null,
+      is_ghost: false,
+    },
+    {
+      id: "old",
+      job_id: OTHER_JOB,
+      scheduled_date: "2026-01-09",
+      status: null,
+      is_ghost: false,
+    },
+    { id: "watch", job_id: JOB, scheduled_date: "2026-01-01", is_ghost: true },
+    {
+      id: "observer",
+      job_id: JOB,
+      scheduled_date: "2026-01-01",
+      role: "observer",
+    },
+    {
+      id: "cancelled",
+      job_id: JOB,
+      scheduled_date: "2026-01-01",
+      status: "cancelled",
+    },
+  );
+  db.rows("trade_invoice_lines").push({
+    job_id: OTHER_JOB,
+    line_type: "labour",
+    trade_invoice_id: "prior",
+    trade_invoices: { status: "paid" },
+  });
+  const jobs = db.rows("jobs");
+  assertEquals([...await readPatioLegacyHoursJobIds(db.client(), jobs)], [
+    OTHER_JOB,
+  ]);
+  const read = () =>
+    readInvoicePayableRoutes(db.client(), [OTHER_JOB], [], ORG);
+  assertEquals((await read())[0].route, "hours");
+  await assertPatioPaysThroughGroup(db.client(), [{
+    job_id: OTHER_JOB,
+    line_type: "labour",
+  }]);
+  db.rows("job_assignments").find((r) => r.id === "old")!.scheduled_date =
+    "2026-01-11";
+  assertEquals((await read())[0].route, "group_setup_required");
+  await assertRejects(
+    () =>
+      assertPatioPaysThroughGroup(db.client(), [{
+        job_id: OTHER_JOB,
+        line_type: "labour",
+      }]),
+    GroupWorkOrderError,
+  );
+  // A historical rejected claim grants nothing, even for an older job.
+  db.rows("job_assignments").find((r) => r.id === "old")!.scheduled_date =
+    "2026-01-09";
+  db.rows("trade_invoice_lines")[0].trade_invoices = { status: "ops-reject" };
+  assertEquals((await read())[0].route, "group_setup_required");
+});
+
+Deno.test("an existing group cannot be bypassed by a legacy ordinary claim", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("jobs")[0].type = "patio";
+  db.rows("feature_flags").push({
+    flag_name: "patio_pay_group_only_v1",
+    enabled: true,
+  });
+  db.rows("trade_invoice_lines").push({
+    job_id: JOB,
+    line_type: "labour",
+    trade_invoice_id: "prior",
+    trade_invoices: { status: "paid" },
+  });
+  await assertRejects(
+    () =>
+      assertPatioPaysThroughGroup(db.client(), [{
+        job_id: JOB,
+        line_type: "labour",
+      }]),
+    GroupWorkOrderError,
+  );
+});
+
+Deno.test("patio cohort scans all allocation pages and keeps a voided anchor as history", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("jobs")[0].type = "patio";
+  db.rows("group_work_orders")[0].status = "void";
+  db.rows("jobs").push({ id: OTHER_JOB, org_id: ORG, type: "patio" });
+  for (let n = 0; n < 501; n++) {
+    db.rows("job_assignments").push({
+      id: `a-${n}`,
+      job_id: JOB,
+      is_ghost: true,
+      scheduled_date: "2025-01-01",
+    });
+  }
+  db.rows("job_assignments").push({
+    id: "z-anchor",
+    job_id: JOB,
+    status: null,
+    scheduled_date: "2026-01-10",
+  }, {
+    id: "z-old",
+    job_id: OTHER_JOB,
+    status: null,
+    scheduled_date: "2026-01-09",
+  });
+  assertEquals([
+    ...await readPatioLegacyHoursJobIds(db.client(), db.rows("jobs")),
+  ], [OTHER_JOB]);
+  for (const row of db.rows("job_assignments")) {
+    if (row.job_id === JOB) row.scheduled_date = null;
+  }
+  assertEquals([
+    ...await readPatioLegacyHoursJobIds(db.client(), db.rows("jobs")),
+  ], []);
 });
