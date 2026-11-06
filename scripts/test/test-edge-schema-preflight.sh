@@ -1050,7 +1050,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261106160000", "group_paid_by_hours_member"),
                       # Trade invoice money controls: events, extras limits, number index.
                       ("20261106163712", "trade_invoice_money_controls"),
-                      ("20261106170000", "group_office_removal_wins")]:
+                      ("20261106170000", "group_office_removal_wins"),
+                      # On-site client sign-off saved once per capture.
+                      ("20261106193000", "group_on_site_signoff_claim")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
