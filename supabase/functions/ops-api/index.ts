@@ -10267,6 +10267,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       //   Requires { scope_revision_id } in the POST body.
       // Responses are intentionally small (ids + status + hashes + structured
       // error codes) so callers can render minimal UI without parsing prose.
+      case 'prepare_scope_job_drafts':
+      case 'read_scope_job_drafts': {
+        const { scopeJobDraftsAction } = await import('./scope_job_drafts.ts')
+        const response = await scopeJobDraftsAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        })
+        return json(await response.json(), response.status)
+      }
       case 'freeze_scope': {
         if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
         const job_id = body.job_id || body.jobId
@@ -37507,6 +37516,11 @@ async function updateJobStatus(client: any, body: any) {
 
     if (error) throw error
     data = written
+  }
+
+  if (status === 'accepted') {
+    const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+    await releaseScopeJobDraftsOnAcceptance(client, jId)
   }
 
   // ── M3d U2b: a transition INTO a terminal jobs.status closes the job's still-

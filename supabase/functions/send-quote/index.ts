@@ -2072,6 +2072,12 @@ serve(async (req: Request) => {
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          try {
+            const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+            await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
+          } catch {
+            console.error('[send-quote] scope work-order release held for retry (run flow, non-blocking); customer acceptance retained')
+          }
         }
 
         if (allAccepted) {
@@ -2221,6 +2227,12 @@ serve(async (req: Request) => {
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
+          }
+          try {
+            const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+            await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
+          } catch {
+            console.error('[send-quote] scope work-order release held for retry (non-blocking); customer acceptance retained')
           }
         }
 
