@@ -438,7 +438,7 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   const noWo = await refused(world(true), hours("p-new"));
   assertEquals(noWo?.code, "patio_pay_group_only");
   assertEquals(noWo?.status, 409);
-  assert(String(noWo?.message).includes("office has to set it first"));
+  assert(String(noWo?.message).includes("office needs to set the job work-order amount first"));
   const grouped = await refused(world(true), hours("p-grouped"));
   assert(String(grouped?.message).includes("Log your hours on the group"));
   assertEquals(await refused(world(true), hours("p-legacy")), null);
