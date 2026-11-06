@@ -3,12 +3,12 @@ import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine } from "./g
 import {
   autoGroupFenceJobs,
   autoGroupPatioJobs,
-  crewByJob,
   GROUP_WORK_ORDER_AUTO_FENCE_FLAG,
   GROUP_WORK_ORDER_AUTO_PATIO_FLAG,
   labourOutsidePool,
   openMissingFenceWorkOrders,
   openMissingPatioWorkOrders,
+  removedUserIds,
 } from "./patio_auto_group.ts";
 
 type Row = Record<string, any>;
@@ -28,6 +28,29 @@ class Fake {
       from: (t: string) => new FakeQuery(fake, t),
       rpc: (fn: string, args: Row) => {
         fake.rpcs.push({ fn, args });
+        if (fn === "group_work_order_crew") {
+          // Fixture stand-in for SQL; the PostgreSQL contract owns qualification.
+          const out = new Map<string, Row>();
+          for (const row of fake.rows("job_assignments")) {
+            const user = fake.rows("users").find((u) => u.id === row.user_id);
+            if (!(args.p_job_ids as string[]).includes(row.job_id) || row.is_ghost === true ||
+              row.status === "cancelled" || row.role === "observer" || user?.role === "admin") continue;
+            out.set(`${row.job_id}:${row.user_id}`,{job_id:row.job_id,user_id:row.user_id});
+          }
+          for (const member of fake.rows("group_work_order_participants")) {
+            const group = fake.rows("group_work_orders").find((g) => g.id === member.group_id);
+            if (group && group.status !== "void" && (args.p_job_ids as string[]).includes(group.job_id)) {
+              out.set(`${group.job_id}:${member.user_id}`,{job_id:group.job_id,user_id:member.user_id});
+            }
+          }
+          let bounds: [number, number] | null = null;
+          const q: any = {order: () => q, range: (a:number,b:number) => {bounds=[a,b];return q;},
+            then: (resolve:any) => {
+              const rows=[...out.values()];
+              return Promise.resolve({data:bounds?rows.slice(bounds[0],bounds[1]+1):rows,error:null}).then(resolve);
+            }};
+          return q;
+        }
         if (fn === "ensure_job_work_order_draft") {
           const id = `wo-${args.p_job_id}`;
           fake.rows("work_orders").push({ id, job_id: args.p_job_id, kind: "job", status: "draft" });
@@ -128,19 +151,6 @@ Deno.test("office milestone fees are not crew pay; install hours still are", () 
   assertEquals(findFenceProblem("ryan", [{ job_id: "j", line_type: "labour", description: "Framing" }], prior)?.code, "work_order_claim_blocked_by_group_share");
 });
 
-Deno.test("crew is live allocations, admins left out", () => {
-  const crew = crewByJob([
-    { job_id: "a", user_id: "isaac", status: "scheduled" },
-    { job_id: "a", user_id: "isaac", status: "complete" },
-    { job_id: "a", user_id: "ryan", status: "cancelled" },
-    { job_id: "a", user_id: "obs", status: "scheduled", role: "observer" },
-    { job_id: "a", user_id: "ghost", status: "scheduled", is_ghost: true },
-    { job_id: "a", user_id: "jan", status: "scheduled" },
-    { job_id: "a", user_id: "nithin", status: "scheduled" },
-  ], new Map([["jan", "admin"], ["nithin", "ops_manager"]]));
-  assertEquals(crew.get("a"), ["isaac", "nithin"]);
-});
-
 Deno.test("patio pay through the group: one crew, or none yet, still gets the group", async () => {
   const fake = patioWorld();
   fake.rows("feature_flags").push({ flag_name: "patio_pay_group_only_v1", enabled: true });
@@ -197,6 +207,24 @@ Deno.test("auto group: priced open patio jobs with 2+ crew get a group with the 
   assertEquals((await autoGroupPatioJobs(fake.client())).crew_added, 0);
 });
 
+Deno.test("auto group: someone who left or was removed is never added back by the sweep", async () => {
+  assertEquals([...removedUserIds([{ detail: { user_id: "u-1" } }, { detail: null }, {}])], ["u-1"]);
+  const fake = patioWorld();
+  await autoGroupPatioJobs(fake.client());
+  const group = fake.rows("group_work_orders")[0];
+  const people = fake.rows("group_work_order_participants");
+  // The crew member leaves (or the office removes them): the row goes and an event stays.
+  people.splice(people.findIndex((p) => p.user_id === "ryan"), 1);
+  fake.rows("group_work_order_events").push({ group_id: group.id, action: "remove_participant", detail: { user_id: "ryan" } });
+  const swept = await autoGroupPatioJobs(fake.client());
+  assertEquals(swept.crew_added, 0);
+  assertEquals(people.some((p) => p.user_id === "ryan"), false);
+  // Someone newly allocated still joins.
+  fake.rows("users").push({ id: "new-crew", role: "crew" });
+  fake.rows("job_assignments").push({ job_id: "a", user_id: "new-crew", status: "scheduled" });
+  assertEquals((await autoGroupPatioJobs(fake.client())).crew_added, 1);
+});
+
 Deno.test("auto group: off switch, and the database fence wins", async () => {
   const off = patioWorld();
   off.rows("feature_flags")[1].enabled = false;
@@ -229,7 +257,7 @@ Deno.test("missing work orders: open patio jobs with 2+ crew get a draft", async
   fake.rows("job_assignments").push({ job_id: "g", user_id: "isaac", status: "scheduled" }, { job_id: "g", user_id: "jan", status: "scheduled" });
   const out = await openMissingPatioWorkOrders(fake.client());
   assertEquals(out.results.map((r: any) => r.job_id), ["f"]);
-  assertEquals(fake.rpcs, [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "f", p_origin: "backfill" } }]);
+  assertEquals(fake.rpcs.filter((call) => call.fn !== "group_work_order_crew"), [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "f", p_origin: "backfill" } }]);
 });
 
 // ── V8 fence groups (job-profit INBOX 3 Nov 2026), switched off ─────────────
@@ -403,7 +431,7 @@ Deno.test("fence missing work orders: open fence jobs with 2+ crew get a draft; 
   fake.rows("job_assignments").push({ job_id: "swf-one", user_id: "alyx", status: "scheduled" }, { job_id: "swf-one", user_id: "jan", status: "scheduled" });
   const out = await openMissingFenceWorkOrders(fake.client());
   assertEquals(out.results.map((r: any) => r.job_id), ["swf-26091"]);
-  assertEquals(fake.rpcs, [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "swf-26091", p_origin: "backfill" } }]);
+  assertEquals(fake.rpcs.filter((call) => call.fn !== "group_work_order_crew"), [{ fn: "ensure_job_work_order_draft", args: { p_job_id: (out.results as Array<{job_id:string}>)[0].job_id, p_origin: "backfill" } }]);
 
   // Off, the same world opens nothing.
   const off = fenceWorld(false);
@@ -427,7 +455,7 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
       { id: "p-legacy", type: "patio" }, { id: "fence", type: "fencing" },
     );
     fake.rows("group_work_orders").push({ job_id: "p-grouped", status: "open" });
-    // SWP-261283 shape: Henry's hours were billed and approved before the switch.
+    // A previous ordinary claim alone does not prove earlier scheduling.
     fake.rows("trade_invoice_lines").push({ job_id: "p-legacy", line_type: "labour", description: "Patio install", trade_invoice_id: "old", trade_invoices: { status: "approved" } });
     return fake.client();
   };
@@ -441,7 +469,7 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   assert(String(noWo?.message).includes("office needs to set the job work-order amount first"));
   const grouped = await refused(world(true), hours("p-grouped"));
   assert(String(grouped?.message).includes("Log your hours on the group"));
-  assertEquals(await refused(world(true), hours("p-legacy")), null);
+  assertEquals((await refused(world(true), hours("p-legacy")))?.code, "patio_pay_group_only");
   assertEquals(await refused(world(true), hours("fence")), null);
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "commission", description: "Commission" }]), null);
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "labour", description: "Council Approval" }]), null);

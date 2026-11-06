@@ -5,6 +5,8 @@
 set -euo pipefail
 
 BEFORE_SHA="${BEFORE_SHA:-}"
+DEPLOY_BASE_SHA="${DEPLOY_BASE_SHA:-}"
+REQUIRE_DEPLOY_BASELINE="${REQUIRE_DEPLOY_BASELINE:-false}"
 HEAD_SHA="${HEAD_SHA:-HEAD}"
 EVENT_NAME="${EVENT_NAME:-unknown}"
 
@@ -57,7 +59,15 @@ DIFF_MODE=
 DIFF_BASE=
 FULL_TREE=false
 
-if [[ "$EVENT_NAME" == "push" && "$BEFORE_SHA" =~ ^0+$ ]]; then
+if [[ -n "$DEPLOY_BASE_SHA" ]]; then
+  DIFF_BASE="$(resolve_commit "$DEPLOY_BASE_SHA")" ||
+    fail "deploy baseline is not a valid commit: $DEPLOY_BASE_SHA"
+  git merge-base --is-ancestor "$DIFF_BASE" "$HEAD_COMMIT" ||
+    fail "deploy baseline is not an ancestor of head: $DIFF_BASE"
+  DIFF_MODE=last-successful-deploy
+elif [[ "$REQUIRE_DEPLOY_BASELINE" == "true" ]]; then
+  fail "successful function deploy baseline is required"
+elif [[ "$EVENT_NAME" == "push" && "$BEFORE_SHA" =~ ^0+$ ]]; then
   DIFF_MODE=initial-full-tree
   FULL_TREE=true
 elif DIFF_BASE="$(resolve_commit "$BEFORE_SHA")"; then
@@ -153,6 +163,7 @@ emit_output migrations_changed "$MIGRATIONS_CHANGED"
 emit_output verification_only "$VERIFICATION_ONLY"
 emit_output verify_ops_api "$VERIFY_OPS_API"
 emit_output diff_mode "$DIFF_MODE"
+emit_output diff_base "$DIFF_BASE"
 
 echo "Diff mode: $DIFF_MODE"
 echo "Changed functions: ${CHANGED_FUNCTIONS:-<none>}"

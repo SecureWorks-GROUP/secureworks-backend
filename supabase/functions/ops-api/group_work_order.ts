@@ -615,6 +615,12 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    needle: "group_hours_not_member",
+    code: "group_hours_not_member",
+    message: "Join the group before logging hours on it.",
+    status: 409,
+  },
+  {
     needle: "group_hours_not_assigned",
     code: "group_hours_not_assigned",
     message: "Those hours are on a day you are not allocated to this job.",
@@ -696,16 +702,6 @@ export function liveAssignment(row: Record<string, unknown>): boolean {
   if (row.is_ghost === true) return false;
   if (String(row.role || "").toLowerCase() === "observer") return false;
   return String(row.status || "").toLowerCase() !== "cancelled";
-}
-
-function assignmentCoversDay(
-  row: Record<string, unknown>,
-  userId: string,
-  workDate: string,
-): boolean {
-  return String(row.user_id) === userId &&
-    String(row.scheduled_date || "") === workDate &&
-    liveAssignment(row);
 }
 
 async function callerAssigned(
@@ -1245,7 +1241,6 @@ type ShareView = {
   hoursOfficeApproved: boolean;
 };
 
-const CREW_APPROVAL_MESSAGE = "Every crew member has to approve the hours before the shares are finalised.";
 
 function signedAfterHours(signedAt: unknown, latestHoursAt: string | null): boolean {
   if (!latestHoursAt) return true;
@@ -1512,6 +1507,18 @@ export async function readPatioLegacyHoursJobIds(
   return legacy;
 }
 
+/**
+ * Whether an earlier ordinary pay claim on a patio job counts as the job being
+ * paid by hours. A draft, a rejected claim and a failed one never do. The
+ * route read (what the app offers) and the submit guard (what the server
+ * accepts) both use this, so the app never offers an hours card the submit
+ * then refuses.
+ */
+export function priorPayClaimHoldsHoursRoute(status: unknown): boolean {
+  const value = String(status || "");
+  return Boolean(value) && !["draft", "ops-reject", "failed"].includes(value);
+}
+
 export type GroupDiscovery = {
   state: "create" | "join" | "member" | "setup_required";
   reason?: string;
@@ -1673,7 +1680,7 @@ export async function readInvoicePayableRoutes(
         const invoice = Array.isArray(row.trade_invoices)
           ? row.trade_invoices[0]
           : row.trade_invoices;
-        return invoice.status !== "draft";
+        return priorPayClaimHoldsHoursRoute(invoice?.status);
       });
       if (!patioIds.includes(jobId) || (legacy && legacyJobs.has(jobId))) {
         result.push({
@@ -1736,10 +1743,9 @@ export async function assertPatioPaysThroughGroup(
   for (const jobId of patio) {
     const legacy = prior.some((row: any) => {
       const invoice = Array.isArray(row.trade_invoices) ? row.trade_invoices[0] : row.trade_invoices;
-      const status = String(invoice?.status || "");
       return String(row.job_id) === jobId &&
         String(row.trade_invoice_id || "") !== String(excludeInvoiceId || "") &&
-        Boolean(status) && !["draft", "ops-reject", "failed"].includes(status) &&
+        priorPayClaimHoldsHoursRoute(invoice?.status) &&
         isNormalWorkOrderPayLine(row);
     });
     const grouped = groups.some((g) =>
@@ -1768,6 +1774,29 @@ export async function assertPatioPaysThroughGroup(
   }
 }
 
+/** The one plain next step for a job paid through a group work order. */
+export function groupRouteNextStep(route: InvoicePayableRoute | null | undefined): string {
+  if (!route) {
+    return "We could not check how this job is paid. Reload to try again.";
+  }
+  const discovery = route.discovery;
+  if (discovery?.state === "create") {
+    return "This job is paid through a group work order. Create the crew group, then add your hours there.";
+  }
+  if (discovery?.state === "join") {
+    return "This job is paid through a group work order. Join the crew group, then add your hours there.";
+  }
+  if (discovery?.state === "member") {
+    return "This job is paid through your crew group. Add your hours there.";
+  }
+  if (discovery?.message) return discovery.message;
+  return route.setup_reason === "work_order_not_approved"
+    ? "This job is paid through a group work order. The office needs to approve the job work order first."
+    : route.setup_reason === "work_order_missing" || route.setup_reason === "allowance_missing"
+    ? "This job is paid through a group work order. The office needs to set the job work-order amount first."
+    : "This job is paid through a group work order. Add your hours on the crew group.";
+}
+
 /** Drop assignments whose job has a non-void group. A row with no job stays. */
 export function withoutGroupJobAssignments<
   T extends { jobs?: { id?: unknown } | null },
@@ -1779,24 +1808,55 @@ export function withoutGroupJobAssignments<
   });
 }
 
+/** Read the database's one crew population. Missing/malformed RPC results
+ * refuse rather than quietly granting readiness or opening an empty group.
+ */
+export async function readGroupWorkOrderCrew(
+  client: any,
+  jobIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const ids = [...new Set(jobIds.filter(Boolean))];
+  const crew = new Map<string, Set<string>>(
+    ids.map((id) => [id, new Set<string>()]),
+  );
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const batch = ids.slice(offset, offset + 100);
+    for (let page = 0;; page++) {
+      const { data, error } = await client.rpc("group_work_order_crew", {
+        p_job_ids: batch,
+      })
+        .order("job_id").order("user_id").range(page * 500, page * 500 + 499);
+      if (
+        error || !Array.isArray(data) || data.some((row: any) =>
+          !batch.includes(String(row?.job_id || "")) ||
+          typeof row?.user_id !== "string" || !row.user_id
+        )
+      ) {
+        throw new GroupWorkOrderError(
+          "group_crew_unreadable",
+          "The group crew could not be checked. Try again before continuing.",
+          503,
+        );
+      }
+      for (const row of data) crew.get(String(row.job_id))!.add(row.user_id);
+      if (data.length < 500) break;
+    }
+  }
+  return new Map([...crew].map(([job, people]) => [job, [...people].sort()]));
+}
+
 async function loadShareView(
   client: any,
   group: Record<string, unknown>,
   participants: readonly Record<string, unknown>[],
 ): Promise<ShareView> {
-  const [entries, assignments, signoffs, minimum, latestHoursAt] = await Promise
+  const [entries, signoffs, minimum, latestHoursAt, crewByJob] = await Promise
     .all([
       rowsOf(
         client.from("group_work_order_time_entries").select(
           "user_id, work_date, hours, created_at",
         ).eq("group_id", group.id),
         "load hours",
-      ),
-      rowsOf(
-        client.from("job_assignments").select(
-          "user_id, scheduled_date, status, role, is_ghost",
-        ).eq("job_id", group.job_id),
-        "load allocations",
       ),
       rowsOf(
         client.from("job_client_signoffs").select(
@@ -1806,7 +1866,13 @@ async function loadShareView(
       ),
       happyMinimum(client),
       latestHoursOnJob(client, String(group.job_id)),
+      readGroupWorkOrderCrew(client, [String(group.job_id)]),
     ]);
+  // Owner, 6 Nov 2026: a crew member logs their own hours for any day on the
+  // job, and logging them is their own confirmation. A member's hours count,
+  // booked day or not; the twin of group_work_order_write_split (20261106140000).
+  const requiredCrew = new Set(crewByJob.get(String(group.job_id)) || []);
+  const memberIds = new Set(participants.map((row) => String(row.user_id)));
   const hoursByUser = new Map<string, number>();
   const counting: { userId: string; workDate: string }[] = [];
   for (const entry of entries) {
@@ -1814,20 +1880,12 @@ async function loadShareView(
     if (!(hours > 0)) continue;
     const userId = String(entry.user_id);
     const workDate = String(entry.work_date || "");
-    if (
-      !assignments.some((row) => assignmentCoversDay(row, userId, workDate))
-    ) {
-      continue;
-    }
+    if (!requiredCrew.has(userId) || !memberIds.has(userId)) continue;
     hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
     counting.push({ userId, workDate });
   }
-  const needsHours = [
-    ...new Set([
-      ...participants.map((row) => String(row.user_id)),
-      ...assignments.filter(liveAssignment).map((row) => String(row.user_id)),
-    ]),
-  ].filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
+  const needsHours = [...requiredCrew]
+    .filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
   const rateUsers = [...new Set(counting.map((row) => row.userId))];
   const rates = rateUsers.length === 0 ? [] : await rowsOf(
     client.from("trade_rates").select(
@@ -1861,12 +1919,9 @@ async function loadShareView(
   // office can approve for the whole crew (owner, 30 Oct 2026), on the same terms.
   const hoursOfficeApproved = Boolean(group.hours_office_approved_at) &&
     signedAfterHours(group.hours_office_approved_at, latestHoursAt);
-  const needsApproval = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !hoursOfficeApproved
-    ? participants.filter((row) =>
-      (hoursByUser.get(String(row.user_id)) || 0) > 0 &&
-      !(row.crew_signed_at && signedAfterHours(row.crew_signed_at, latestHoursAt))
-    ).map((row) => String(row.user_id)).sort()
-    : [];
+  // Nobody approves anyone else's hours (owner, 6 Nov 2026). Kept empty so
+  // older screens that still read it never wait on it.
+  const needsApproval: string[] = [];
   let awaiting: GroupAwaiting = "ready";
   if (!signed) awaiting = "awaiting_signoff";
   else if (group.split_frozen_at) awaiting = "frozen";
@@ -2115,7 +2170,11 @@ async function readGroupCrewStatus(client: any, caller: GroupCaller, groupId: st
   };
 }
 
-/** Every crew member's hours and approval, and the sign-off. Hours only, never rates or pay. */
+/**
+ * Every crew member's hours and the sign-off. Hours only, never rates or pay.
+ * Logging your own hours is your confirmation (owner, 6 Nov 2026): nobody
+ * approves anyone else's, so crew_approval_required is always false.
+ */
 async function readGroupCrewHours(client: any, caller: GroupCaller, group: Record<string, unknown>) {
   const participants = await loadParticipants(client, String(group.id));
   const view = await loadShareView(client, group, participants);
@@ -2130,13 +2189,14 @@ async function readGroupCrewHours(client: any, caller: GroupCaller, group: Recor
       name: full ? full.split(/\s+/)[0] : "A crew member",
       me: id === caller.userId,
       hours,
-      approved: required ? hours > 0 && !view.needsApproval.includes(id) : Boolean(row.crew_signed_at),
+      // Confirmed by the person who logged them.
+      approved: hours > 0,
       approved_by_office: required && view.hoursOfficeApproved && hours > 0,
     };
   });
   const signoff = view.signed && view.signoff ? view.signoff : null;
   return {
-    crew_approval_required: required,
+    crew_approval_required: false,
     hours_office_approved: required && view.hoursOfficeApproved,
     crew_hours: crewHours,
     my_hours_approved: crewHours.some((row) => row.me && row.approved),
@@ -2853,10 +2913,8 @@ export async function freezeGroupWorkOrder(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   if (!caller.isStaff) requireParticipant(participants, caller.userId);
-  if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !group.split_frozen_at &&
-    (await loadShareView(client, group, participants)).needsApproval.length > 0) {
-    throw new GroupWorkOrderError("group_crew_approval_required", CREW_APPROVAL_MESSAGE, 409);
-  }
+  // The freeze waits for hours, rates and the client sign-off, never for one
+  // crew member approving another's hours (owner, 6 Nov 2026).
   const { error } = await client.rpc("freeze_group_work_order_split", {
     p_group_id: group.id,
   });
@@ -3007,37 +3065,13 @@ export async function resolveGroupShareInvoiceExtra(
     ).eq("group_id", group.id).eq("user_id", input.userId),
     "load hours",
   );
-  const assignments = await rowsOf(
-    client.from("job_assignments").select(
-      "user_id, scheduled_date, status, role, is_ghost",
-    ).eq("job_id", group.job_id).eq("user_id", input.userId),
-    "load allocations",
-  );
-  const ownHours = entries.filter((row) =>
-    assignmentCoversDay(row, input.userId, String(row.work_date || "")) ||
-    assignments.some((assignment) =>
-      assignmentCoversDay(
-        assignment,
-        input.userId,
-        String(row.work_date || ""),
-      )
-    )
-  ).reduce((sum, row) => {
-    const covered = assignments.some((assignment) =>
-      assignmentCoversDay(assignment, input.userId, String(row.work_date || ""))
-    );
-    return covered ? sum + Number(row.hours || 0) : sum;
-  }, 0);
+  // Every hour a crew member logged counts, booked day or not (6 Nov 2026).
+  const ownHours = entries.reduce((sum, row) => sum + Math.max(0, Number(row.hours || 0)), 0);
   if (ownHours <= 0) {
     throw new GroupWorkOrderError(
       "group_share_hours_missing",
       "Submit your hours on this group before invoicing your share.",
     );
-  }
-  // The first share invoice freezes the split, so it waits for the crew too.
-  if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER && !group.split_frozen_at &&
-    (await loadShareView(client, group, await loadParticipants(client, String(group.id)))).needsApproval.length > 0) {
-    throw new GroupWorkOrderError("group_crew_approval_required", CREW_APPROVAL_MESSAGE, 409);
   }
   // Quote only. The line trigger freezes in the same statement as the insert.
   const shares = await readSplit(client, String(group.id), false);

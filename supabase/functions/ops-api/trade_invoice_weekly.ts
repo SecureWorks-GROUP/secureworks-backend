@@ -216,6 +216,72 @@ export function workOrderIsInvoiceReady(
   );
 }
 
+export type WorkOrderDirectInvoiceBlock = {
+  code: "work_order_not_complete" | "work_order_no_finish_date";
+  message: string;
+};
+
+/**
+ * The Work Order Invoice door saves through persist_trade_work_order_invoice_v1,
+ * which accepts only a work order marked complete that has a business date
+ * (its Perth completion day, else its scheduled day). The wider
+ * workOrderIsInvoiceReady rule (sent or accepted on a finished job) is right
+ * for weekly job blocks, whose database function does not re-check status,
+ * but the direct door must not offer what its database always refuses. Null
+ * means the door may offer it; otherwise the plain reason and the two ways on.
+ */
+export function workOrderDirectInvoiceBlock(
+  workOrder: Record<string, unknown> | null | undefined,
+): WorkOrderDirectInvoiceBlock | null {
+  const status = String(workOrder?.status || "").trim().toLowerCase();
+  if (status !== "complete") {
+    return {
+      code: "work_order_not_complete",
+      message:
+        "This work order is not marked complete yet, so it cannot be invoiced on its own. Ask the office to mark it complete with the day it was finished, or bill your hours for this job on your Weekly Invoice for the week you worked it.",
+    };
+  }
+  if (!weeklyWorkOrderBusinessDate(workOrder || {})) {
+    return {
+      code: "work_order_no_finish_date",
+      message:
+        "This work order has no finish date, so it cannot be invoiced on its own. Ask the office to add the day it was finished, or bill your hours for this job on your Weekly Invoice for the week you worked it.",
+    };
+  }
+  return null;
+}
+
+/** The Sunday that ends the invoice week a YYYY-MM-DD day falls in. */
+export function invoiceWeekEndingOf(day: unknown): string | null {
+  const text = String(day || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const date = new Date(`${text}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== text) return null;
+  date.setUTCDate(date.getUTCDate() + ((7 - date.getUTCDay()) % 7));
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Where a trade can bill real work when the work order itself cannot be
+ * invoiced: the week of their latest booking on the job that is live and not
+ * yet on an invoice. Null when every booking is billed or cancelled, so the
+ * card never points at a week with nothing left to bill.
+ */
+export function unbilledBookingWeekEnding(
+  bookings: ReadonlyArray<Record<string, unknown>>,
+): string | null {
+  let latest: string | null = null;
+  for (const booking of bookings || []) {
+    const status = String(booking?.status || "").toLowerCase();
+    if (status === "cancelled" || booking?.is_ghost === true) continue;
+    if (booking?.invoiced_in) continue;
+    const day = String(booking?.scheduled_date || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+    if (!latest || day > latest) latest = day;
+  }
+  return latest ? invoiceWeekEndingOf(latest) : null;
+}
+
 export function weeklyWorkOrderBusinessDate(
   workOrder: Record<string, unknown>,
 ): string | null {

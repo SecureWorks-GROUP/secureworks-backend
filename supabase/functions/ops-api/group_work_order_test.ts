@@ -55,6 +55,7 @@ import {
   readMyGroupWorkOrders,
   readInvoicePayableRoutes,
   readPatioLegacyHoursJobIds,
+  readGroupWorkOrderCrew,
   PATIO_PAY_GROUP_ONLY_FLAG,
   assertPatioPaysThroughGroup,
   assertAllInGroupInvoiceStandalone,
@@ -120,6 +121,15 @@ class Memory {
       },
       rpc(fn: string, args: Record<string, unknown> = {}) {
         memory.calls.push({ table: fn, op: "rpc" });
+        if (fn === "group_work_order_crew") {
+          let bounds: [number, number] | null = null;
+          const q: any = {order: () => q, range: (a: number, b: number) => {bounds=[a,b];return q;},
+            then: (resolve: any) => {
+              const rows = (memory.runRpc(fn,args) as Row[]).toSorted((a,b) => String(a.user_id).localeCompare(String(b.user_id)));
+              return Promise.resolve({data:bounds?rows.slice(bounds[0],bounds[1]+1):rows,error:null}).then(resolve);
+            }};
+          return q;
+        }
         try {
           return Promise.resolve({
             data: memory.runRpc(fn, args || {}),
@@ -134,6 +144,24 @@ class Memory {
   }
 
   runRpc(fn: string, args: Record<string, unknown>) {
+    if (fn === "group_work_order_crew") {
+      const jobs = args.p_job_ids as string[];
+      const out = new Map<string, Row>();
+      for (const row of this.rows("job_assignments")) {
+        const user = this.rows("users").find((u) => u.id === row.user_id);
+        if (!jobs.includes(String(row.job_id)) || row.is_ghost === true ||
+          String(row.status || "").toLowerCase() === "cancelled" ||
+          String(row.role || "").toLowerCase() === "observer" || user?.role === "admin") continue;
+        out.set(`${row.job_id}:${row.user_id}`, {job_id:row.job_id,user_id:row.user_id});
+      }
+      for (const member of this.rows("group_work_order_participants")) {
+        const group = this.rows("group_work_orders").find((g) => g.id === member.group_id);
+        if (group && group.status !== "void" && jobs.includes(String(group.job_id))) {
+          out.set(`${group.job_id}:${member.user_id}`,{job_id:group.job_id,user_id:member.user_id});
+        }
+      }
+      return [...out.values()];
+    }
     const groupId = String(args.p_group_id || "");
     const group = this.rows("group_work_orders").find((row) =>
       row.id === groupId
@@ -424,12 +452,11 @@ class Memory {
       const userId = String(entry.user_id);
       const worked = Number(entry.hours || 0);
       const workDate = String(entry.work_date);
-      if (
-        worked <= 0 ||
-        !this.assignmentCovers(userId, String(group.job_id), workDate)
-      ) {
-        continue;
-      }
+      // A member's logged hours count, booked day or not (6 Nov 2026).
+      if (worked <= 0) continue;
+      if (!this.rows("group_work_order_participants").some((row) =>
+        row.group_id === group.id && String(row.user_id) === userId
+      )) continue;
       hours.set(userId, (hours.get(userId) || 0) + worked);
       const raw = this.rows("trade_rates").filter((row) => {
         if (row.user_id !== userId || row.org_id !== group.org_id) return false;
@@ -464,16 +491,8 @@ class Memory {
         (points.get(userId) || 0n) + entryPointsMicro(rate, worked),
       );
     }
-    const participantIds = this.rows("group_work_order_participants").filter((
-      row,
-    ) => row.group_id === group.id).map((row) => String(row.user_id));
-    const assigneeIds = this.rows("job_assignments").filter((row) =>
-      String(row.job_id) === String(group.job_id) &&
-      row.is_ghost !== true &&
-      String(row.role || "").toLowerCase() !== "observer" &&
-      String(row.status || "").toLowerCase() !== "cancelled"
-    ).map((row) => String(row.user_id));
-    const needsHours = [...new Set([...participantIds, ...assigneeIds])]
+    const required = this.runRpc("group_work_order_crew", {p_job_ids:[String(group.job_id)]}) as Row[];
+    const needsHours = required.map((row) => String(row.user_id))
       .filter((userId) => (hours.get(userId) || 0) <= 0).sort();
     if (needsHours.length > 0) {
       throw new Error(`group_split_needs_hours: ${needsHours.join(",")}`);
@@ -968,7 +987,7 @@ Deno.test("non-participant cannot read the sealed price, and a participant sees 
     waiting.calls.some((call) => call.table === "work_orders"),
     false,
   );
-  assertEquals(waiting.calls.some((call) => call.op === "rpc"), false);
+  assertEquals(waiting.calls.some((call) => call.op === "rpc" && call.table !== "group_work_order_crew"), false);
 
   const shown = new Memory();
   seedSplit(shown);
@@ -2337,7 +2356,7 @@ Deno.test("allocated fencing and patio crew get the same price-free Create or Jo
   }
 });
 
-Deno.test("the office approves a full-super crew's hours for them; someone on the crew cannot; later hours undo it", async () => {
+Deno.test("the office can still mark a full-super crew's hours approved; nobody waits for it", async () => {
   const db = new Memory();
   seedSplit(db, "open");
   db.rows("group_work_orders")[0].pay_basis = "all_in_12_v2";
@@ -2346,7 +2365,8 @@ Deno.test("the office approves a full-super crew's hours for them; someone on th
     { id: "t-b", group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 8, created_at: "2026-10-20T08:00:00Z", updated_at: "2026-10-20T08:00:00Z" },
   );
   const before = await readGroupWorkOrderOffice(db.client(), trade("office-1", true), { group_id: GROUP });
-  assertEquals(before.needs_approval, [USER_A, USER_B].sort());
+  // Nobody approves anyone else's hours (6 Nov 2026), so nobody is listed.
+  assertEquals(before.needs_approval, []);
   assertEquals(before.hours_office_approved, false);
 
   // A plain trade cannot, and someone on the crew cannot even with an office role.
@@ -2367,10 +2387,10 @@ Deno.test("the office approves a full-super crew's hours for them; someone on th
   // Crew signatures are untouched: the office approval is not a crew signature.
   assert(db.rows("group_work_order_participants").every((row) => !row.crew_signed_at));
 
-  // Any later hours change needs approving again.
+  // A later hours change takes the office mark off; still nobody is waited on.
   db.rows("group_work_orders")[0].hours_changed_at = "2099-01-02T00:00:00Z";
   const changed = await readGroupWorkOrderOffice(db.client(), trade("office-1", true), { group_id: GROUP });
-  assertEquals(changed.needs_approval, [USER_A, USER_B].sort());
+  assertEquals(changed.needs_approval, []);
   assertEquals(changed.hours_office_approved, false);
 });
 
@@ -2697,4 +2717,142 @@ Deno.test("ordinary patio work with genuine pre-group pay and scheduling keeps i
  db.rows("trade_invoice_lines").push({job_id:JOB,trade_invoice_id:"legacy-invoice",line_type:"labour",source_work_order_id:WO,trade_invoices:{status:"paid"}});
  const result=await assertGroupClientConfirmationBeforeCompletion(db.client(),JOB);
  assertEquals(result.requiresConfirmation,false);assertEquals(result.grouped,false);
+});
+
+// ---- Own hours, any day, no crew approval (owner, 6 Nov 2026) ----
+
+Deno.test("a full-super crew freezes with no crew approval, and logged hours read as confirmed", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  assert(db.rows("group_work_order_participants").every((row) => !row.crew_signed_at));
+  const read: any = (await readMyGroupWorkOrders(db.client(), trade(USER_A))).groups[0];
+  assertEquals(read.crew_approval_required, false);
+  assertEquals(read.my_hours_approved, true);
+  assert((read.crew_hours as any[]).every((row) => row.approved === true));
+
+  // Full super used to wait for every crew member to approve. It no longer does.
+  db.rows("group_work_orders")[0].pay_basis = "all_in_12_v2";
+  const share = await readGroupWorkOrderMyShare(db.client(), trade(USER_A), { group_id: GROUP });
+  assertEquals(share.awaiting, "ready");
+  await freezeGroupWorkOrder(db.client(), trade(USER_A), { group_id: GROUP }).catch((err) => {
+    // Only the pay read after the freeze is outside this fake; the freeze itself ran.
+    if (!(err instanceof GroupWorkOrderError) || err.code === "group_crew_approval_required") throw err;
+  });
+  assert(db.rows("group_work_orders")[0].split_frozen_at, "the split froze without any crew approval");
+});
+
+Deno.test("hours on a day nobody was booked count, for the share and the freeze", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  // Both booked for 20 October only; the work ran on to the 21st and 22nd.
+  db.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-21", hours: 6 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-22", hours: 3 },
+  );
+  const share = await readGroupWorkOrderMyShare(db.client(), trade(USER_B), { group_id: GROUP });
+  assertEquals(share.awaiting, "ready");
+  const line = await resolveGroupShareInvoiceExtra(db.client(), { userId: USER_B, item: { type: "group share", group_id: GROUP } });
+  assert(Number(line?.unit_rate) > 0);
+  await freezeGroupWorkOrder(db.client(), trade(USER_A), { group_id: GROUP });
+  const hours = new Map(db.rows("group_work_order_shares").map((row) => [String(row.user_id), Number(row.hours)]));
+  assertEquals(hours.get(USER_A), 6);
+  assertEquals(hours.get(USER_B), 3);
+});
+
+Deno.test("an admin watching allocation cannot block share readiness; an office installer still can", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("users").push({ id: USER_C, role: "admin" });
+  db.rows("job_assignments").push({
+    id: "watch",
+    job_id: JOB,
+    user_id: USER_C,
+    scheduled_date: "2026-10-20",
+    status: "scheduled",
+    is_ghost: false,
+  });
+  const read = () =>
+    readGroupWorkOrderOffice(db.client(), trade(USER_A, true), {
+      group_id: GROUP,
+    });
+  assertEquals((await read()).needs_hours, [USER_A, USER_B]);
+  db.rows("users")[0].role = "ops_manager";
+  assertEquals((await read()).needs_hours, [USER_A, USER_B, USER_C]);
+  db.rows("users")[0].role = "admin";
+  db.rows("job_assignments").at(-1)!.status = "cancelled";
+  db.rows("group_work_order_participants").push({
+    group_id: GROUP,
+    user_id: USER_C,
+  });
+  assertEquals(
+    (await read()).needs_hours,
+    [USER_A, USER_B, USER_C],
+    "explicit membership is retained for office reconciliation",
+  );
+  assertEquals(db.rows("group_work_order_shares"), []);
+  assertEquals(db.rows("group_work_orders")[0].split_frozen_at ?? null, null);
+});
+
+Deno.test("canonical crew RPC pages every person and refuses incomplete or foreign replies", async () => {
+  const people = Array.from(
+    { length: 501 },
+    (_, n) => ({
+      job_id: JOB,
+      user_id: `fixture-${String(n).padStart(4, "0")}`,
+    }),
+  );
+  const pages: number[] = [];
+  const client = {
+    rpc: () => {
+      let start = 0, end = 0;
+      const q: any = {
+        order: () => q,
+        range: (a: number, b: number) => {
+          start = a;
+          end = b;
+          return q;
+        },
+        then: (resolve: any) => {
+          pages.push(start);
+          return Promise.resolve({
+            data: people.slice(start, end + 1),
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return q;
+    },
+  };
+  assertEquals(
+    (await readGroupWorkOrderCrew(client, [JOB])).get(JOB)?.length,
+    501,
+  );
+  assertEquals(pages, [0, 500]);
+  for (
+    const reply of [{ data: null, error: null }, {
+      data: [],
+      error: { message: "missing function" },
+    }, { data: [{ job_id: OTHER_JOB, user_id: USER_A }], error: null }]
+  ) {
+    const bad = {
+      rpc: () => {
+        const q: any = {
+          order: () => q,
+          range: () => q,
+          then: (resolve: any) => Promise.resolve(reply).then(resolve),
+        };
+        return q;
+      },
+    };
+    const error = await assertRejects(
+      () => readGroupWorkOrderCrew(bad, [JOB]),
+      GroupWorkOrderError,
+    );
+    assertEquals(error.code, "group_crew_unreadable");
+    assertEquals(error.status, 503);
+  }
 });
