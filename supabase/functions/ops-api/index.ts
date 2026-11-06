@@ -41239,6 +41239,20 @@ function trackingCategoryForJob(jobNumber: string, jobType?: string | null): str
   if (prefix === 'SWF') return 'SW - FENCING'
   if (prefix === 'SWD') return 'SW - DECKING'
   if (prefix === 'SWI') return 'SW - INSURANCE WORK'
+  // Finish line A3 item 8 (3 Nov 2026): SWB- is builds work (SWB-26073's bills are tracked SW - BUILDS in Xero).
+  // SWG- (general), SWM- (miscellaneous) and old SW1xxx numbers name no division, so only the job's type can:
+  // a bare number still gets none. Same rule as the SQL job_profit_job_division (20261104235000) and the A3 check.
+  if (upper.startsWith('SWB-')) return 'SW - BUILDS'
+  if (/^(SWG-|SWM-|SW[0-9])/.test(upper)) {
+    const byType: Record<string, string> = {
+      patio: 'SW - PATIOS',
+      fencing: 'SW - FENCING',
+      decking: 'SW - DECKING',
+      insurance: 'SW - INSURANCE WORK',
+      makesafe: 'SW - MAKESAFE',
+    }
+    return byType[type] || ''
+  }
   // 'SWR' deliberately falls through to '': renovation | roofing | repair.
   return ''
 }

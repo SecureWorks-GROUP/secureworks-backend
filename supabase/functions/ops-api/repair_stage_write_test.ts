@@ -528,6 +528,18 @@ Deno.test("a SWR- repair job books to make-safe tracking, never private roofing"
   assertEquals(_trackingCategoryForJob("SWI-26100"), "SW - INSURANCE WORK");
   assertEquals(_trackingCategoryForJob(""), "");
   assertEquals(_trackingCategoryForJob("", "patio"), "");
+  // A3 item 8 (3 Nov 2026): SWB- is builds work; SWG-, SWM- and old SW1xxx numbers name no division, so only the
+  // job's type can, and a bare number still gets none. SWMS- is never read as SWM-.
+  assertEquals(_trackingCategoryForJob("SWB-26073"), "SW - BUILDS");
+  assertEquals(_trackingCategoryForJob("SWB-26073", "patio"), "SW - BUILDS");
+  assertEquals(_trackingCategoryForJob("SWG-20260713-BE", "fencing"), "SW - FENCING");
+  assertEquals(_trackingCategoryForJob("SWG-20260713-BE"), "");
+  assertEquals(_trackingCategoryForJob("SWM-261607", "miscellaneous"), "");
+  assertEquals(_trackingCategoryForJob("SWM-261607", "patio"), "SW - PATIOS");
+  assertEquals(_trackingCategoryForJob("SW1346", "patio"), "SW - PATIOS");
+  assertEquals(_trackingCategoryForJob("SW1797", "fencing"), "SW - FENCING");
+  assertEquals(_trackingCategoryForJob("SW1797"), "");
+  assertEquals(_trackingCategoryForJob("SWMS-261233", "miscellaneous"), "SW - MAKESAFE");
   assertEquals(_accountCodeForJob("makesafe"), "210");
   assertEquals(_accountCodeForJob("patio"), "208");
   assertEquals(_accountCodeForJob("fencing"), "207");

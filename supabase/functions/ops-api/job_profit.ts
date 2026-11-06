@@ -7,7 +7,9 @@
 // money figure here: every number on the response comes from v_job_profit,
 // v_job_cost_events or v_job_revenue_events, so Jarvis, the ops API and the
 // finance tab cannot disagree. view=rollup sums those same v_job_profit rows
-// in job_profit_rollup.ts. The one exception is `patio_expected`
+// in job_profit_rollup.ts. view=division_months reads the division x month
+// figure on Xero's accounting basis (v_job_profit_division_months, finish line
+// A3) in job_profit_division_months.ts. The one exception is `patio_expected`
 // (job_profit_patio_expected.ts): the patio scoper's own expected figures for
 // its frozen revision, set beside the engine's actuals and never fed back
 // into them. Read only. Field contract for the dashboard:
@@ -16,6 +18,7 @@
 // dispatch in index.ts (privileged ops key or an admin/owner session).
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
+import { jobProfitDivisionMonthsAction } from "./job_profit_division_months.ts";
 import { readJobProfitOrderSources } from "./job_profit_order_sources.ts";
 import { readJobDispatchOrders } from "./job_dispatch_orders.ts";
 import {
@@ -68,6 +71,8 @@ export const JOB_PROFIT_LABELS = {
     "Dispatch orders on the job (each supplier order email sent from Dispatch, and each purchase order that is not a draft or cancelled) with the supplier bills linked to each by rule, never by a person: the bill is from the order's supplier and carries a supplier ref saved for that order, our job number, our PO number (on the bill or the supplier's PDF of it), or the job's site address on the bill or that PDF when it matches one order of that supplier; never the same amount alone. rule says which matched and matched_in where (bill or supplier_pdf). ordered, billed and not_billed are counts of orders. A linked bill's amount is the bill's own, ex GST; cost_on_this_job says whether Job Profit counts that bill on this job. A link never places a bill or changes any total. unclear_bills name this order and another, so neither is linked. status unknown: the orders or links could not be read; never read that as not billed.",
   holding_jobs:
     "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
+  division_months:
+    "Company view, view=division_months: each division's monthly revenue and cost on Xero's accounting basis, ex GST, so it can be checked against Xero to the cent. Every row Job Profit counts, dated and divided as Xero books it: a line by its own Xero tracking (Business Unit), a crew line on its posted Xero bill's date and that bill line's tracking, a placement on its bill, a credit on its credit note's date and tracking; employer super is left out (Xero books it under Superannuation, not Cost of Sales); Bookkeeping's overhead and not-a-job-cost lines in Cost of Sales are included as rows with no job (overhead_cost_ex). Where a row holds no Xero tracking, the job's division decides (cost_lines_division_from_job counts those). A division of null is (no division). Not in it: bank lines (our Xero copy holds none), installer bills waiting for a person. Per-job figures are unchanged: this is a different dating and division of the same rows, not a job cost.",
 } as const;
 
 /**
@@ -764,8 +769,14 @@ export async function jobProfitListAction(
   if (view === "rollup") {
     return await jobProfitRollupAction(client, f, JOB_PROFIT_LABELS);
   }
+  if (view === "division_months") {
+    return await jobProfitDivisionMonthsAction(client, params, JOB_PROFIT_LABELS);
+  }
   if (view !== null) {
-    return { status: 400, body: { error: "view must be rollup or omitted" } };
+    return {
+      status: 400,
+      body: { error: "view must be rollup, division_months or omitted" },
+    };
   }
   // No row count: a planned count makes PostgREST refuse (416) any offset at
   // or above the planner's estimate, and work_type is computed, so that
