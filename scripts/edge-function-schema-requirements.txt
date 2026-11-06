@@ -1152,3 +1152,9 @@ ops-api|supabase/migrations/20261106040518_scope_job_drafts.sql|function|read_sc
 ops-api|supabase/migrations/20261106040518_scope_job_drafts.sql|function|release_scope_job_drafts
 send-quote|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_sets
 send-quote|supabase/migrations/20261106040518_scope_job_drafts.sql|function|release_scope_job_drafts
+# Local payment-stage children and exact event consumers.
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|table|scope_payment_plans
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|table|scope_payment_stage_drafts
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|read_scope_payment_stages
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|confirm_scope_payment_stage
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|consume_scope_council_payment_event
