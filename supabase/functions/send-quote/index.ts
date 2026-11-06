@@ -2072,6 +2072,8 @@ serve(async (req: Request) => {
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+          await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
         }
 
         if (allAccepted) {
@@ -2222,6 +2224,8 @@ serve(async (req: Request) => {
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+          await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
         }
 
         // Log rich event for Ops Dashboard attention panel
