@@ -69,10 +69,7 @@ X15 now has separate read-only preview and privileged apply tools. Apply require
 
 ### X6 · Push a crew bill (trade invoice), and attach its PDF
 
-- `ops-api/index.ts :: pushTradeInvoiceToXeroAction :: PUT /Invoices`
-- `ops-api/index.ts :: case submit_work_order_invoice :: PUT /Invoices`
-- `ops-api/index.ts :: case generate_trade_invoice :: PUT /Invoices`
-- `ops-api/index.ts :: submitTradeInvoice :: PUT /Invoices`
+- `ops-api/index.ts :: createTradeXeroBillOnce.putBill :: PUT /Invoices` (every trade bill create: the push, the work-order submit, the weekly generate and the old submit; it looks in Xero for an existing bill first)
 - `ops-api/index.ts :: case attach_invoice_pdf :: PUT /Invoices/{id}/Attachments/{id}`
 
 ### X7 · Push an expense bill

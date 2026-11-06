@@ -71,7 +71,7 @@ CREATE TRIGGER trg_trade_invoice_events_append_only
   FOR EACH ROW EXECUTE FUNCTION public.trade_invoice_events_append_only();
 
 ALTER TABLE public.trade_invoice_events ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.trade_invoice_events FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.trade_invoice_events FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT, INSERT ON public.trade_invoice_events TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.trade_invoice_extra_rate_rules (
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS public.trade_invoice_extra_rate_rules (
 );
 
 ALTER TABLE public.trade_invoice_extra_rate_rules ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.trade_invoice_extra_rate_rules FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.trade_invoice_extra_rate_rules FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.trade_invoice_extra_rate_rules TO service_role;
 
 -- The claim a no-week line makes: its work order and its kind.
