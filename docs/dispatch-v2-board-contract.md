@@ -1574,7 +1574,11 @@ function `dispatch_v2_record_outlook_order_on_send` (migration
 6. **What the box shows.** Stage Sent to supplier, worked out on read from the
    real sent time (3b). The lines read from `Materials Needed:`, delivery or
    pickup, the date or ASAP and the address, all read exactly as 3f.1 rule 3
-   reads them. **With no readable list** (no heading, no numbered line) the
+   reads them; under the heading a quantity line (`1 x 2400H SHS posts`) or
+   a bullet starts a line too, not only a numbered one (Shaun's own emails
+   often mix them; on 6 Nov this read 5 more of the 41 caught-up orders).
+   **With no readable list** (no heading, or words such as `60mm Cutback`
+   under a picture before the first line) the
    email's own words are kept as the order (opening line to `Please confirm`
    or the sign-off) and the lines are left empty; the date, address and
    delivery or pickup are still read from those words. An email with no words

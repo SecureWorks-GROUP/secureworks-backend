@@ -288,6 +288,34 @@ const SIGN_OFF_RE =
 const MATERIALS_RE = /^\s*materials\s+needed\s*:?\s*$/i;
 const ITEM_RE = /^\s*(\d{1,2})[.)]\s+(\S.*)$/;
 const MAX_LINES = 60;
+// The send rule (3g) also reads a list written as quantities ("1 x 2400H SHS
+// posts") or as bullets, not only numbered lines: Shaun's own order emails
+// often mix them. A quantity line is kept whole; a bullet loses its mark.
+const QTY_ITEM_RE = /^\s*\d+(?:\.\d+)?\s*[x×]\s+\S/i;
+const BULLET_ITEM_RE = /^\s*[-*•]\s+(\S.*)$/;
+
+/** The items under "Materials Needed:" read the send rule's way: a numbered,
+ * quantity or bullet line starts an item, any other line belongs to the item
+ * above it. Null when words come before the first item, or there is none. */
+function looseItemsOf(
+  lines: string[],
+  heading: number,
+  confirmAt: number,
+): string[][] | null {
+  const end = confirmAt >= 0 ? confirmAt : lines.length;
+  const items: string[][] = [];
+  for (const raw of lines.slice(heading + 1, end)) {
+    if (raw.trim() === "" || /^\s*\[cid:[^\]]*\]\s*$/i.test(raw)) continue;
+    const numbered = ITEM_RE.exec(raw);
+    const bullet = BULLET_ITEM_RE.exec(raw);
+    if (numbered) items.push([numbered[2].trim()]);
+    else if (QTY_ITEM_RE.test(raw)) items.push([raw.trim()]);
+    else if (bullet) items.push([bullet[1].trim()]);
+    else if (items.length > 0) items[items.length - 1].push(raw.trim());
+    else return null;
+  }
+  return items.length > 0 && items.length <= MAX_LINES ? items : null;
+}
 
 function standingText(text: string): string {
   return text.trim().replace(/\s+/g, " ").toLowerCase();
@@ -395,7 +423,8 @@ export const OUTLOOK_ORDER_BODY_MAX = 20000;
 
 /** Read an order email for the send rule (contract section 3g, Shaun 6 Nov
  * 2026). When the list can be read, the same answer as parseOutlookOrderBody
- * with `list_read` true. When it cannot, the email's own words are kept as
+ * with `list_read` true; a list of quantity or bullet lines ("1 x 2400H SHS
+ * posts") is read too. When it cannot, the email's own words are kept as
  * the order with no lines (`list_read` false); the Date, Address and
  * delivery or pickup are still read from them. Null only when the email has
  * no words at all. */
@@ -407,7 +436,26 @@ export function readOutlookOrderBody(
   if (strict && strict.body_text.length <= OUTLOOK_ORDER_BODY_MAX) {
     return { ...strict, list_read: true };
   }
-  const { lines } = orderTextOf(body);
+  const { lines, confirmAt } = orderTextOf(body);
+  const heading = lines.findIndex((l) => MATERIALS_RE.test(l));
+  const loose = heading < 0 ? null : looseItemsOf(lines, heading, confirmAt);
+  const looseText = lines.join("\n").trim();
+  if (loose && looseText && looseText.length <= OUTLOOK_ORDER_BODY_MAX) {
+    return {
+      ...orderHeadOf(lines.slice(0, heading), looseText, sentAt),
+      lines: loose.map((parts) => {
+        const text = parts.join("\n");
+        return {
+          line_id: null,
+          updated_at: null,
+          text,
+          standing: STANDING.has(standingText(text)),
+        };
+      }),
+      body_text: looseText,
+      list_read: true,
+    };
+  }
   let bodyText = lines.join("\n").trim();
   if (!bodyText) {
     // Nothing above the sign-off: keep the whole email rather than nothing.
@@ -416,7 +464,6 @@ export function readOutlookOrderBody(
   }
   if (!bodyText) return null;
   bodyText = bodyText.slice(0, OUTLOOK_ORDER_BODY_MAX);
-  const heading = lines.findIndex((l) => MATERIALS_RE.test(l));
   return {
     ...orderHeadOf(
       heading < 0 ? lines : lines.slice(0, heading),

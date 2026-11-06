@@ -311,6 +311,45 @@ Deno.test("plan: no readable list keeps the email's words as the order, lines em
   assertEquals(readOutlookOrderBody("   ", null), null);
 });
 
+Deno.test("plan: a list of quantity lines (Fiona's Stratco pickup, 7 Oct) is read as the lines", () => {
+  const body = [
+    "Hi Team, could we please order the following for Pickup from Neerabup:",
+    "",
+    "Date: 20 October 2026",
+    "Address: 34 Warrener Gardens, Gwelup WA 6018",
+    "",
+    "Materials Needed:",
+    "",
+    "1 x 1800H standard width panel with 2400H posts",
+    "Profile: Superdek",
+    "",
+    "1 x 2400H SHS posts",
+    "- 2 x 1800mm Colorbond infill sheets",
+    "",
+    "3. 4 x bags of quickset",
+    "",
+    "Please confirm when you can, thank you.",
+    "",
+    "Kind regards,",
+    "Shaun Lee",
+  ].join("\n");
+  const o = readOutlookOrderBody(body, "2026-10-07T02:00:00Z")!;
+  assertEquals(o.list_read, true);
+  assertEquals(o.lines.map((l) => l.text), [
+    "1 x 1800H standard width panel with 2400H posts\nProfile: Superdek",
+    "1 x 2400H SHS posts",
+    "2 x 1800mm Colorbond infill sheets",
+    "4 x bags of quickset",
+  ]);
+  assertEquals([o.fulfilment, o.pickup_branch, o.delivery_date], ["pickup", "Neerabup", "2026-10-20"]);
+  // Words before the first item: no readable list, the email's words kept.
+  const picture = readOutlookOrderBody(
+    body.replace("Materials Needed:\n\n", "Materials Needed:\n\n60mm Cutback, LH-RH\n"),
+    null,
+  )!;
+  assertEquals([picture.list_read, picture.lines.length], [false, 0]);
+});
+
 Deno.test("plan: refused or ignored, each for its reason", () => {
   const plan = (over: any) =>
     planSentOrderEmail(
