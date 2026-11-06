@@ -8,6 +8,29 @@ BEGIN
  SELECT b.body INTO previous FROM public.migration_contract_group_crew_before b;
  -- Later amendments to this writer are undone first, newest first, so this
  -- check still pins only this migration's own change.
+ -- 20261106160000: crew paid by the hour are out of the split and their pay
+ -- comes off the pot (its six parts, last first).
+ body := replace(body, $later$    RETURN jsonb_build_object('frozen', false, 'shares', v_shares, 'hours_paid_ex', round(v_hours_paid, 2));$later$, $was$    RETURN jsonb_build_object('frozen', false, 'shares', v_shares);$was$);
+ body := replace(body, $later$    jsonb_build_object('pot_ex', round(v_pot, 2), 'hours_paid_ex', round(v_hours_paid, 2))$later$, $was$    jsonb_build_object('pot_ex', round(v_pot, 2))$was$);
+ body := replace(body, $later$  SET split_frozen_at = now(), updated_at = now(), hours_paid_ex = round(v_hours_paid, 2)
+  WHERE id = p_group_id;$later$, $was$  SET split_frozen_at = now(), updated_at = now()
+  WHERE id = p_group_id;$was$);
+ body := replace(body, $later$  WHERE e.group_id = p_group_id
+    AND NOT public.group_work_order_paid_by_hours(v_job, e.user_id)
+    AND e.hours > 0$later$, $was$  WHERE e.group_id = p_group_id
+    AND e.hours > 0$was$);
+ body := replace(body, $later$  SELECT g.pay_basis INTO v_basis FROM public.group_work_orders g WHERE g.id = p_group_id;
+  v_hours_paid := public.group_work_order_hours_paid_total(v_job, v_basis);
+  v_pot := v_pot - v_hours_paid;
+  IF v_pot <= 0 THEN
+    RAISE EXCEPTION 'group_pot_used_by_hours_pay' USING ERRCODE = '23514';
+  END IF;
+  v_pot_cents := round(v_pot * 100)::bigint;$later$, $was$  v_pot_cents := round(v_pot * 100)::bigint;$was$);
+ body := replace(body, $later$  v_needs_rate text;
+  v_basis text;
+  v_hours_paid numeric := 0; -- pot used by crew paid by the hour (20261106160000)
+BEGIN$later$, $was$  v_needs_rate text;
+BEGIN$was$);
  -- 20261106140000: every crew hour counts, booked day or not.
  body := replace(body, $later$  WHERE e.group_id = p_group_id
     AND e.hours > 0; -- every crew hour counts, booked day or not (20261106140000)$later$, $was$  WHERE e.group_id = p_group_id
