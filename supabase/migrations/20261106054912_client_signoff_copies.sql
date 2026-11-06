@@ -2,7 +2,6 @@
 -- Existing frozen groups keep their historical authority. Reopening requires
 -- a fresh client confirmation. No existing job, group, sign-off or money row
 -- is rewritten, and nothing sends.
-BEGIN;
 CREATE TABLE IF NOT EXISTS public.group_client_signoff_policy (
   id smallint PRIMARY KEY CHECK (id = 1),
   client_confirmation_since timestamptz NOT NULL DEFAULT '2026-11-06T05:55:58Z'
@@ -149,4 +148,3 @@ BEGIN
     EXECUTE replace(body,before_text,after_text);
   END IF;
 END $$;
-COMMIT;
