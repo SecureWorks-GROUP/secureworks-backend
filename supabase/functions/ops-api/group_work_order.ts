@@ -1813,12 +1813,49 @@ export function withoutGroupJobAssignments<
   });
 }
 
+/** Read the database's one crew population. Missing/malformed RPC results
+ * refuse rather than quietly granting readiness or opening an empty group.
+ */
+export async function readGroupWorkOrderCrew(
+  client: any,
+  jobIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const ids = [...new Set(jobIds.filter(Boolean))];
+  const crew = new Map<string, Set<string>>(
+    ids.map((id) => [id, new Set<string>()]),
+  );
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const batch = ids.slice(offset, offset + 100);
+    for (let page = 0;; page++) {
+      const { data, error } = await client.rpc("group_work_order_crew", {
+        p_job_ids: batch,
+      })
+        .order("job_id").order("user_id").range(page * 500, page * 500 + 499);
+      if (
+        error || !Array.isArray(data) || data.some((row: any) =>
+          !batch.includes(String(row?.job_id || "")) ||
+          typeof row?.user_id !== "string" || !row.user_id
+        )
+      ) {
+        throw new GroupWorkOrderError(
+          "group_crew_unreadable",
+          "The group crew could not be checked. Try again before continuing.",
+          503,
+        );
+      }
+      for (const row of data) crew.get(String(row.job_id))!.add(row.user_id);
+      if (data.length < 500) break;
+    }
+  }
+  return new Map([...crew].map(([job, people]) => [job, [...people].sort()]));
+}
+
 async function loadShareView(
   client: any,
   group: Record<string, unknown>,
   participants: readonly Record<string, unknown>[],
 ): Promise<ShareView> {
-  const [entries, assignments, signoffs, minimum, latestHoursAt] = await Promise
+  const [entries, assignments, signoffs, minimum, latestHoursAt, crewByJob] = await Promise
     .all([
       rowsOf(
         client.from("group_work_order_time_entries").select(
@@ -1840,7 +1877,10 @@ async function loadShareView(
       ),
       happyMinimum(client),
       latestHoursOnJob(client, String(group.job_id)),
+      readGroupWorkOrderCrew(client, [String(group.job_id)]),
     ]);
+  const requiredCrew = new Set(crewByJob.get(String(group.job_id)) || []);
+  const memberIds = new Set(participants.map((row) => String(row.user_id)));
   const hoursByUser = new Map<string, number>();
   const counting: { userId: string; workDate: string }[] = [];
   for (const entry of entries) {
@@ -1849,6 +1889,7 @@ async function loadShareView(
     const userId = String(entry.user_id);
     const workDate = String(entry.work_date || "");
     if (
+      !requiredCrew.has(userId) || !memberIds.has(userId) ||
       !assignments.some((row) => assignmentCoversDay(row, userId, workDate))
     ) {
       continue;
@@ -1856,12 +1897,8 @@ async function loadShareView(
     hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
     counting.push({ userId, workDate });
   }
-  const needsHours = [
-    ...new Set([
-      ...participants.map((row) => String(row.user_id)),
-      ...assignments.filter(liveAssignment).map((row) => String(row.user_id)),
-    ]),
-  ].filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
+  const needsHours = [...requiredCrew]
+    .filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
   const rateUsers = [...new Set(counting.map((row) => row.userId))];
   const rates = rateUsers.length === 0 ? [] : await rowsOf(
     client.from("trade_rates").select(
