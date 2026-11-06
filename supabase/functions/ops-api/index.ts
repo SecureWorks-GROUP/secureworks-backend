@@ -796,6 +796,14 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
+import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
+import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
+import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, NO_WEEK_CLAIM_REFUSAL } from './trade_invoice_no_week_claim.ts'
+import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
+import { recordTradeInvoiceEvent } from './trade_invoice_events.ts'
+import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_invoice_line_ack.ts'
+import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
+import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
 import { TRADE_INVOICE_ROUTE_ACTIONS, TradeInvoiceStoreError, tradeInvoiceRefusal } from './trade_invoice_refusal.ts'
 import { officeSentBackNote, tradeInvoiceOfficeNote } from './trade_invoice_office_note.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
@@ -2319,8 +2327,10 @@ async function noteTradeRecurringDeductionNotTaken(
 }
 
 function presentTradeInvoice<T extends Record<string, unknown>>(
-  invoice: T,
+  rawInvoice: T,
 ): T & { trade_payable: number | null } & Record<string, unknown> {
+  // A bill voided or deleted in Xero says so on every read.
+  const invoice = { ...rawInvoice, ...presentTradeInvoiceBillOutcome(rawInvoice) } as T
   try {
     const presented = presentTradeInvoiceMoney(withTradeRecurringDeductionOfficeNote(invoice))
     if (String(invoice.invoice_source || '') !== 'weekly_work_order') {
@@ -2472,6 +2482,25 @@ async function releaseGroupCrewBills(client: any, invoiceId: string, actor: stri
   // Once released, every crew bill goes, whatever happened to this one.
   const crew = await pushReleasedGroupSiblings(client, invoiceId, actor).catch(() => null)
   return { released: true, xero_push: own, ...(crew || {}) }
+}
+
+// B13: every trade bill create goes through here. It looks in Xero for a live
+// bill with the same number first, so a retry never makes a second bill.
+function createTradeXeroBillOnce(
+  client: any,
+  args: { accessToken: string; tenantId: string; tradeInvoiceId: string; payload: any; idempotencyKey: string; actor: string },
+) {
+  return createOrReuseTradeXeroBill(client, {
+    xeroGet,
+    putBill: (payload, key) => xeroPost('/Invoices', args.accessToken, args.tenantId, payload, 'PUT', key),
+  }, args)
+}
+
+function tradeXeroBillSearchApiError(error: unknown): never {
+  if (error instanceof TradeXeroBillSearchError) {
+    throw new ApiError(error.message, error.status, { ok: false, code: error.code, error: error.message })
+  }
+  throw error
 }
 
 async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops-api:push_trade_invoice_to_xero') {
@@ -2689,7 +2718,10 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
   }
 
   const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
-  const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
+  // B13: a retry after a lost reply reuses the bill Xero already holds.
+  const { result: xeroResult } = await createTradeXeroBillOnce(client, {
+    accessToken, tenantId, tradeInvoiceId: invoice_id, payload: xeroPayload, idempotencyKey, actor,
+  }).catch((error) => tradeXeroBillSearchApiError(error))
   const bill = xeroResult?.Invoices?.[0]
   const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
     bill,
@@ -11027,21 +11059,71 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
 
       case 'acknowledge_invoice_line': {
-        const { line_id: ackLineId, acknowledged: ackApproved, query_note: ackQueryNote } = body
-        if (!ackLineId) throw new ApiError('line_id required', 400)
-
-        const ackUpdateData: Record<string, any> = {
-          acknowledged_at: new Date().toISOString(),
-          acknowledgment_status: ackApproved !== false ? 'acknowledged' : 'queried',
+        // B12: a trade acknowledges only their own line, on an invoice still
+        // waiting for acknowledgement; staff get the state checks.
+        if (req.method !== 'POST') return json({ error: 'acknowledge_invoice_line is POST only', code: 'method_not_allowed' }, 405)
+        try {
+          return json(await acknowledgeTradeInvoiceLine(client, body, {
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            userId: authMode === 'jwt' ? (authUser?.id || null) : null,
+          }))
+        } catch (error) {
+          if (error instanceof TradeInvoiceLineAckError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
         }
-        if (ackQueryNote) ackUpdateData.query_note = ackQueryNote
+      }
 
-        const { error: ackErr } = await client.from('trade_invoice_lines')
-          .update(ackUpdateData)
-          .eq('id', ackLineId)
+      case 'resolve_stuck_trade_invoice': {
+        // B5: the office's way out of pending acknowledgment, with a reason.
+        if (req.method !== 'POST') return json({ error: 'resolve_stuck_trade_invoice is POST only', code: 'method_not_allowed' }, 405)
+        let resolved: Record<string, any>
+        try {
+          resolved = await resolveStuckTradeInvoice(client, body, {
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            userId: authMode === 'jwt' ? (authUser?.id || null) : null,
+            label: reviewActorLabel(authUser),
+          }, {
+            // A release reads Xero first: a lost create reply leaves a bill there.
+            findLiveBills: async (invoiceNumber: string) => {
+              const auth = await getToken(client)
+              return await findLiveTradeBillsByNumber(xeroGet, auth, invoiceNumber)
+            },
+          })
+        } catch (error) {
+          if (error instanceof StuckTradeInvoiceError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
+        }
+        if (resolved.status !== 'approved') return json(resolved)
+        try {
+          const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: resolved.invoice_id }, reviewActorLabel(authUser))
+          return json({ ...resolved, xero_push: pushed })
+        } catch (pushErr) {
+          // The invoice stays approved: push_trade_invoice_to_xero retries it,
+          // and the retry looks for an existing bill first.
+          return json({ ...resolved, xero_push: 'unconfirmed', xero_push_error: (pushErr as Error)?.message || 'Xero push failed' })
+        }
+      }
 
-        if (ackErr) throw new Error(ackErr.message)
-        return json({ success: true })
+      // B14: the office's rate limits for trade-typed extras lines. Staff only.
+      case 'list_trade_invoice_extra_rate_rules':
+      case 'set_trade_invoice_extra_rate_rule': {
+        const isSet = action === 'set_trade_invoice_extra_rate_rule'
+        if (isSet && req.method !== 'POST') return json({ error: `${action} is POST only`, code: 'method_not_allowed' }, 405)
+        const staff = _opsApiCallerIsStaffOperator(authMode, authUser)
+        try {
+          return json(isSet
+            ? await setExtraRateRule(client, body, { staff, userId: authMode === 'jwt' ? (authUser?.id || null) : null })
+            : await listExtraRateRules(client, { staff }))
+        } catch (error) {
+          if (error instanceof ExtraRateRuleError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
+        }
       }
 
       // ── Job Completion Package ──
@@ -13078,7 +13160,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let createdXeroBillId = ''
             let woPdfAttached = false
             try {
-              const xeroResult = await xeroPost('/Invoices', woAt, woTi, xeroPayload, 'PUT', woIdempotencyKey)
+              const { result: xeroResult } = await createTradeXeroBillOnce(client, {
+                accessToken: woAt, tenantId: woTi, tradeInvoiceId: tradeInv.id, payload: xeroPayload,
+                idempotencyKey: woIdempotencyKey, actor: 'submit_work_order_invoice',
+              })
               const xeroInv = xeroResult?.Invoices?.[0]
               createdXeroBillId = String(xeroInv?.InvoiceID || '')
               const identity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
@@ -14164,6 +14249,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
 
+              // B14: the office's rate limits for trade-typed extras.
+              const extraRateRules = await loadExtraRateRules(client)
               for (const rawItem of invoiceExtraItems) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
@@ -14207,9 +14294,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
                 const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
                 if (week_start && !resolvedJob && item.type !== 'final_payout_deduction') throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
-                const rateSource = serverResolvedWeeklyLine
-                  ? 'server_resolved'
-                  : item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
+                // Only a line the server priced itself is server_resolved. The
+                // client's own rate_source is never trusted (B14).
+                const rateSource = serverResolvedWeeklyLine ? 'server_resolved' : 'client_entered'
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 if (serverResolvedWeeklyLine && Math.abs(amt - Number(item.line_total_ex)) > 0.01) {
@@ -14217,11 +14304,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
                 extraSubtotal += amt
                 const extraHours = serverResolvedWeeklyLine ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
-                const extraRateNote = rateSource === 'client_entered'
-                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                  : serverResolvedWeeklyLine
-                  ? 'Server-resolved from work order, acknowledged crew line, or dated trade rate.'
-                  : 'Server-resolved rate from trade_rates.'
+                // B14: a typed rate above the office limit holds the line for
+                // office review, which holds the whole invoice out of Xero.
+                const extraRateHold: ExtraRateHold | null = item.type === 'final_payout_deduction'
+                  ? null
+                  : extraLineRateHold({
+                    lineType: item.type,
+                    rate,
+                    serverResolved: Boolean(serverResolvedWeeklyLine),
+                    rules: extraRateRules,
+                    tradeHourlyRate: resolvedRate > 0 ? resolvedRate : null,
+                  })
+                const extraRateNote = [
+                  rateSource === 'client_entered'
+                    ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                    : serverResolvedWeeklyLine
+                    ? 'Server-resolved from work order, acknowledged crew line, or dated trade rate.'
+                    : 'Server-resolved rate from trade_rates.',
+                  extraRateHold?.note,
+                ].filter(Boolean).join(' | ')
 
                 // ── M4 U1: make-safe hours flag (searched-in extras path) ────
                 // Structured activation via job type / division / line_type —
@@ -14312,6 +14413,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   _hoursFlag: extraHoursFlag,
                   _woProblems: woProblems,
                   _weeklyServerResolved: serverResolvedWeeklyLine,
+                  _rateHold: extraRateHold,
                 })
               }
             }
@@ -14443,14 +14545,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const duplicateExtraInvoiceRefs = [...new Set(duplicateExtraMatches.map((m: any) => m.invoice?.invoice_number || m.trade_invoice_id).filter(Boolean))]
 
             // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq} (global sequence, never reused)
-            const initials = (userProfile?.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
-            const today = new Date().toISOString().slice(2, 10).replace(/-/g, '')
-            // Global count of ALL invoices by this user (never decreases even if deleted)
-            const { count: totalCount } = await client.from('trade_invoices')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', tradeUser.id)
-            const seq = String((totalCount || 0) + 1).padStart(3, '0')
-            const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
+            // The database refuses a repeat (trade_invoices_invoice_number_key),
+            // so this picks the first free number and a collision at insert
+            // picks the next one (trade_invoice_number.ts).
+            const initials = tradeInvoiceInitials(userProfile?.name)
+            const today = tradeInvoiceDay()
+            let invoiceNumberSkip = 0
+            let invoiceNumber = await nextTradeInvoiceNumber(client, { userId: tradeUser.id, initials, day: today })
+              .catch((error) => { throw new ApiError(error instanceof Error ? error.message : String(error), 503) })
 
             let priorDraftId: string | null = null
             if (weeklyInvoice && week_start) {
@@ -14526,7 +14628,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // memory-only metadata (_hoursFlag unpacks into the flag columns below;
               // _woProblems feeds the unresolved-line audit event). Never send
               // memory-only fields to PostgREST.
-              const { _hoursFlag: _hf, _woProblems: _wp, _weeklyServerResolved: _wsr, ...dbLine } = { ...defaults, ...line }
+              const { _hoursFlag: _hf, _woProblems: _wp, _weeklyServerResolved: _wsr, _rateHold: _rh, ...dbLine } = { ...defaults, ...line }
               // M4 U1: land the flag-fact fields (U4 contract) from the resolver
               // outcome. baseline_hours/baseline_source are recorded for EVERY
               // make-safe line; flag_type/hours_justification/flagged_at only when
@@ -14559,7 +14661,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 group_share_id: dbLine.group_share_id || null,
                 // Only the server-priced group lane adds this hold. Ordinary
                 // invoices retain the existing flag-controlled review policy.
-                office_review_status: isGroupShareInvoiceItem(dbLine) ? 'awaiting' : null,
+                // A held typed rate (B14) starts awaiting office review.
+                office_review_status: isGroupShareInvoiceItem(dbLine) || (line?._rateHold as ExtraRateHold | null)?.held ? 'awaiting' : null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,
@@ -14674,14 +14777,65 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 },
               )
             }
-            const invoiceId = weeklyInvoice
-              ? await _persistWeeklyTradeInvoice(
+            // B16: one live no-week invoice per person per claim. The database
+            // trigger is the guard; this read answers first, in plain words.
+            if (!week_start) {
+              const noWeekClaim = await findNoWeekClaimConflict(client, tradeUser.id, [
+                ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+                ...extraLineItems,
+              ])
+              if (!noWeekClaim.ok) {
+                throw new ApiError('Your open invoices could not be checked, so nothing was sent. Try again shortly.', 503, {
+                  error: 'Your open invoices could not be checked, so nothing was sent. Try again shortly.',
+                  code: 'no_week_claim_unreadable',
+                })
+              }
+              if (noWeekClaim.conflict) {
+                const message = noWeekClaim.conflict.invoice_number
+                  ? `${NO_WEEK_CLAIM_MESSAGE} It is on ${noWeekClaim.conflict.invoice_number}.`
+                  : NO_WEEK_CLAIM_MESSAGE
+                throw new ApiError(message, 409, {
+                  error: message,
+                  code: NO_WEEK_CLAIM_REFUSAL,
+                  existing_invoice_id: noWeekClaim.conflict.invoice_id,
+                  existing_invoice_number: noWeekClaim.conflict.invoice_number,
+                })
+              }
+            }
+            // A repeat invoice number is refused by the database. Pick the next
+            // free number and try again, at most three times in all.
+            const persistWithFreeNumber = async (persist: () => Promise<string>): Promise<string> => {
+              for (let attempt = 0; ; attempt++) {
+                try {
+                  return await persist()
+                } catch (error) {
+                  if (isNoWeekClaimRefusal(error)) {
+                    throw new ApiError(NO_WEEK_CLAIM_MESSAGE, 409, { error: NO_WEEK_CLAIM_MESSAGE, code: NO_WEEK_CLAIM_REFUSAL })
+                  }
+                  if (!isTradeInvoiceNumberCollision(error)) throw error
+                  if (attempt >= 2) {
+                    const message = 'Another invoice took the same number at the same moment. Nothing was saved. Please submit again.'
+                    throw new ApiError(message, 409, { error: message, code: 'invoice_number_taken' })
+                  }
+                  invoiceNumberSkip++
+                  invoiceNumber = await nextTradeInvoiceNumber(client, {
+                    userId: tradeUser.id,
+                    initials,
+                    day: today,
+                    skip: invoiceNumberSkip,
+                  }).catch((e) => { throw new ApiError(e instanceof Error ? e.message : String(e), 503) })
+                  invoicePayload.invoice_number = invoiceNumber
+                }
+              }
+            }
+            const invoiceId = await persistWithFreeNumber(() => weeklyInvoice
+              ? _persistWeeklyTradeInvoice(
                 client,
                 invoicePayload,
                 weeklyInvoice,
                 priorDraftId,
               )
-              : await replaceTradeInvoiceDraftKeepingPrior({
+              : replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
                   .insert(invoicePayload)
@@ -14718,8 +14872,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeUser.id,
                   includedAssignmentIds,
                 ),
-              }, priorDraftId)
+              }, priorDraftId))
             const invoice = { id: invoiceId }
+
+            // B14: one audit event per held typed rate. No amounts in the
+            // reason; the line itself carries them.
+            for (const held of extraLineItems.filter((line: any) => line?._rateHold?.held)) {
+              await recordTradeInvoiceEvent(client, {
+                trade_invoice_id: String(invoiceId),
+                event_type: 'extra_rate_held',
+                actor: `user:${tradeUser.id}`,
+                reason: held._rateHold.note,
+                detail: {
+                  line_type: held.line_type || null,
+                  job_id: held.job_id || null,
+                  cap_source: held._rateHold.source,
+                },
+              })
+            }
 
             // ── Layer B: stamp invoiced_in on every included assignment ──────
             // Marks each manual/clocked assignment as belonging to this invoice so
@@ -15004,6 +15174,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (noteErr) console.error('[ops-api] office review hold note update failed:', noteErr.message)
             }
 
+            // B5: nothing holds it, so it leaves pending acknowledgment before
+            // the push. A push that never runs or fails leaves it approved,
+            // which push_trade_invoice_to_xero can always finish.
+            if (!officeReviewHold && !officeReviewUnreadable) {
+              await markTradeInvoiceReadyForXero(client, invoice.id)
+            }
+
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
             // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
@@ -15148,14 +15325,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     LineItems: allLines,
                   }],
                 }
-                const xeroResult = await xeroPost(
-                  '/Invoices',
+                const { result: xeroResult } = await createTradeXeroBillOnce(client, {
                   accessToken,
                   tenantId,
-                  xeroPayload,
-                  'PUT',
-                  tradeInvoiceXeroIdempotencyKey(invoice.id),
-                )
+                  tradeInvoiceId: invoice.id,
+                  payload: xeroPayload,
+                  idempotencyKey: tradeInvoiceXeroIdempotencyKey(invoice.id),
+                  actor: 'generate_trade_invoice',
+                })
                 const bill = xeroResult?.Invoices?.[0]
                 createdXeroBillId = String(bill?.InvoiceID || '')
                 if (createdXeroBillId) {
@@ -15373,44 +15550,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
 
           case 'acknowledge_invoice_line': {
-            const { line_id, acknowledged, query_note: ackNote } = body
-            if (!line_id) throw new ApiError('line_id required', 400)
-
-            const updateData: Record<string, any> = {
-              acknowledged_by: tradeUser.id,
-              acknowledged_at: new Date().toISOString(),
-              acknowledgment_status: acknowledged !== false ? 'acknowledged' : 'queried',
-            }
-            if (ackNote) updateData.query_note = ackNote
-
-            const { error } = await client.from('trade_invoice_lines')
-              .update(updateData)
-              .eq('id', line_id)
-
-            if (error) throw new Error(error.message)
-
-            // Check if all lines on this invoice are acknowledged
-            const { data: line } = await client.from('trade_invoice_lines')
-              .select('trade_invoice_id')
-              .eq('id', line_id)
-              .maybeSingle()
-
-            if (line) {
-              const { data: allLines } = await client.from('trade_invoice_lines')
-                .select('acknowledgment_status')
-                .eq('trade_invoice_id', line.trade_invoice_id)
-
-              const allAcked = allLines?.every((l: any) => l.acknowledgment_status === 'acknowledged')
-              if (allAcked) {
-                await client.from('trade_invoices')
-                  .update({ status: 'acknowledged', acknowledged_at: new Date().toISOString() })
-                  .eq('id', line.trade_invoice_id)
-
+            // Unreachable today (the main switch answers first); kept on the
+            // same checked path so it can never reopen another trade's line.
+            try {
+              return json(await acknowledgeTradeInvoiceLine(client, body, { staff: false, userId: tradeUser.id }))
+            } catch (error) {
+              if (error instanceof TradeInvoiceLineAckError) {
+                return json({ ok: false, code: error.code, error: error.message }, error.status)
               }
-
+              throw error
             }
-
-            return json({ success: true })
           }
 
           case 'clock_event': {
@@ -56848,7 +56997,10 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 
   // Push to Xero (reuse token from contact resolution above)
   const idempotencyKey = tradeInvoiceXeroIdempotencyKey(insertedInvoice.id)
-  const result = await xeroPost('/Invoices', stAt, stTi, xeroPayload, 'PUT', idempotencyKey)
+  const { result } = await createTradeXeroBillOnce(client, {
+    accessToken: stAt, tenantId: stTi, tradeInvoiceId: insertedInvoice.id, payload: xeroPayload,
+    idempotencyKey, actor: 'submit_trade_invoice',
+  }).catch((error) => tradeXeroBillSearchApiError(error))
 
   const xeroInv = result?.Invoices?.[0]
   const xeroIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({

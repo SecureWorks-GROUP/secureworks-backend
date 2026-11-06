@@ -29,6 +29,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
+import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
 import { catchUpTradeBillStatusFromMirror, shouldBackfillTradeBillPdf, tradeBillAdjustmentsPatch, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
@@ -1183,6 +1184,16 @@ async function syncInvoices(sb: any) {
   // Crew bills paid in Xero that the incremental window passed over.
   let tradeBillCatchUp: unknown = null
   try { tradeBillCatchUp = await catchUpTradeBillStatusFromMirror(sb) } catch (e) { console.log('[xero-sync] trade bill catch-up failed:', (e as Error).message) }
+  // Standing policy (owner, 6 Nov 2026): a trade bill voided or deleted in Xero
+  // with nothing paid frees its week. Each bill is re-read from Xero first; one
+  // with any payment or credit, or a group share, is left for the office.
+  let tradeBillVoidRelease: unknown = null
+  try {
+    tradeBillVoidRelease = await autoReleaseVoidedTradeInvoices(sb, { getToken, xeroGet })
+  } catch (e) {
+    if (e instanceof XeroCooldownError) throw e
+    console.log('[xero-sync] voided trade bill release failed:', (e as Error).message)
+  }
 
   // ── Customer contacts created without a postal address: heal a few per run ──
   const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
@@ -1310,11 +1321,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 

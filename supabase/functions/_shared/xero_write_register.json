@@ -80,10 +80,7 @@
       "gate_today": "With the office-review switches off, a crew submit goes straight to a Xero DRAFT bill and the bookkeeper's approval in Xero is the check. With crew_invoice_line_office_review_v1 on, the invoice is held out of Xero",
       "cfo_confirmed": true,
       "call_sites": [
-        "ops-api/index.ts :: pushTradeInvoiceToXeroAction :: PUT /Invoices",
-        "ops-api/index.ts :: case submit_work_order_invoice :: PUT /Invoices",
-        "ops-api/index.ts :: case generate_trade_invoice :: PUT /Invoices",
-        "ops-api/index.ts :: submitTradeInvoice :: PUT /Invoices",
+        "ops-api/index.ts :: createTradeXeroBillOnce.putBill :: PUT /Invoices",
         "ops-api/index.ts :: case attach_invoice_pdf :: PUT /Invoices/{id}/Attachments/{id}"
       ],
       "changes_books": "draft_only",
