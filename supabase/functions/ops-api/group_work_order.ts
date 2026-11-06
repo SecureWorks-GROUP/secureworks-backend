@@ -1412,16 +1412,78 @@ export async function assertGroupJobDraftUsesShare(
   }
 }
 
-/**
- * Owner, 3 Nov 2026: "all patio pay needs to go through [group work orders]
- * from now", for patio jobs after Zoo. While patio_pay_group_only_v1 is on,
- * ordinary pay (hours, a typed work order) on a patio job is refused; the
- * crew log hours on the job's group and invoice their share. A patio job
- * already paid by ordinary pay before (a live, non-draft invoice) finishes
- * that way: it cannot switch half way. Commission, office fees, travel and
- * materials are not pay here (isNormalWorkOrderPayLine). Off: no change.
+/** Patio pay uses the group route after the first patio group's scheduled
+ * start. A prior ordinary claim alone must not exempt a later job. Only a
+ * genuinely allocated job that started before that boundary may finish by
+ * hours. Existing money remains evidence, never permission for a new claim.
  */
 export const PATIO_PAY_GROUP_ONLY_FLAG = "patio_pay_group_only_v1";
+
+/** Read the first patio group's job, including a voided historical group so
+ * voiding it cannot move the transition. Unknown dates grant no exemption.
+ * Every assignment page is read; nullable legacy statuses remain included.
+ */
+export async function readPatioLegacyHoursJobIds(
+  client: any,
+  jobs: readonly Record<string, unknown>[],
+): Promise<Set<string>> {
+  const legacy = new Set<string>();
+  const orgIds = [
+    ...new Set(jobs.map((job) => String(job.org_id || "")).filter(Boolean)),
+  ];
+  for (const orgId of orgIds) {
+    const anchors = await rowsOf(
+      client.from("group_work_orders")
+        .select("job_id, jobs!inner(type)").eq("org_id", orgId)
+        .eq("jobs.type", "patio").order("created_at", { ascending: true })
+        .order("id", { ascending: true }).range(0, 0),
+      "read the patio group transition",
+    );
+    const anchorId = String(anchors[0]?.job_id || "");
+    if (!anchorId) continue;
+    const ids = [
+      ...new Set([
+        anchorId,
+        ...jobs.filter((job) => job.org_id === orgId)
+          .map((job) => String(job.id)),
+      ]),
+    ];
+    const first = new Map<string, string>();
+    for (let offset = 0; offset < ids.length; offset += 25) {
+      for (let page = 0;; page++) {
+        const rows = await rowsOf(
+          client.from("job_assignments")
+            .select("id, job_id, scheduled_date, status, role, is_ghost")
+            .in("job_id", ids.slice(offset, offset + 25)).order("id", {
+              ascending: true,
+            })
+            .range(page * 500, page * 500 + 499),
+          "read the patio scheduling boundary",
+        );
+        for (const row of rows) {
+          const day = String(row.scheduled_date || "");
+          if (
+            !liveAssignment(row) || !/^\d{4}-\d{2}-\d{2}$/.test(day) ||
+            !Number.isFinite(Date.parse(day)) ||
+            new Date(day).toISOString().slice(0, 10) !== day
+          ) continue;
+          const id = String(row.job_id);
+          if (!first.has(id) || day < first.get(id)!) first.set(id, day);
+        }
+        if (rows.length < 500) break;
+      }
+    }
+    const cutover = first.get(anchorId);
+    if (!cutover) continue;
+    for (const job of jobs) {
+      const id = String(job.id);
+      if (job.org_id === orgId && first.has(id) && first.get(id)! < cutover) {
+        legacy.add(id);
+      }
+    }
+  }
+  return legacy;
+}
 
 export type GroupDiscovery = {
   state: "create" | "join" | "member" | "setup_required";
@@ -1512,7 +1574,7 @@ export async function readInvoicePayableRoutes(
   const result: InvoicePayableRoute[] = [];
   for (let offset = 0; offset < ids.length; offset += 25) {
     const jobs = await rowsOf(
-      client.from("jobs").select("id, type, work_order_id").eq("org_id", orgId)
+      client.from("jobs").select("id, type, work_order_id, org_id").eq("org_id", orgId)
         .in("id", ids.slice(offset, offset + 25)),
       "check the invoice job routes",
     );
@@ -1547,6 +1609,9 @@ export async function readInvoicePayableRoutes(
         )
         : [],
     ]);
+    const legacyJobs = patioIds.length
+      ? await readPatioLegacyHoursJobIds(client, jobs.filter((job) => patioIds.includes(String(job.id))))
+      : new Set<string>();
     for (const job of jobs) {
       const jobId = String(job.id);
       const group = groups.find((row) => String(row.job_id) === jobId);
@@ -1583,7 +1648,7 @@ export async function readInvoicePayableRoutes(
           : row.trade_invoices;
         return invoice.status !== "draft";
       });
-      if (!patioIds.includes(jobId) || legacy) {
+      if (!patioIds.includes(jobId) || (legacy && legacyJobs.has(jobId))) {
         result.push({
           job_id: jobId,
           route: "hours",
@@ -1621,9 +1686,10 @@ export async function assertPatioPaysThroughGroup(
   if (jobIds.length === 0) return;
   const { data: flag, error: flagError } = await client.from("feature_flags")
     .select("enabled").eq("flag_name", PATIO_PAY_GROUP_ONLY_FLAG).maybeSingle();
-  if (flagError || flag?.enabled !== true) return;
+  throwQuery(flagError, "check the patio pay rule");
+  if (flag?.enabled !== true) return;
   const jobs = await rowsOf(
-    client.from("jobs").select("id, type, work_order_id").in("id", jobIds),
+    client.from("jobs").select("id, type, work_order_id, org_id").in("id", jobIds),
     "check the job type",
   );
   const patio = jobs.filter((j) => String(j.type || "") === "patio")
@@ -1639,17 +1705,20 @@ export async function assertPatioPaysThroughGroup(
     client.from("group_work_orders").select("job_id, status").in("job_id", patio),
     "check group work orders",
   );
+  const legacyJobs = await readPatioLegacyHoursJobIds(client, jobs.filter((job) => patio.includes(String(job.id))));
   for (const jobId of patio) {
-    const legacy = prior.some((row: any) =>
-      String(row.job_id) === jobId &&
-      String(row.trade_invoice_id || "") !== String(excludeInvoiceId || "") &&
-      !["draft", "ops-reject"].includes(String(row.trade_invoices?.status || "")) &&
-      isNormalWorkOrderPayLine(row)
-    );
-    if (legacy) continue;
+    const legacy = prior.some((row: any) => {
+      const invoice = Array.isArray(row.trade_invoices) ? row.trade_invoices[0] : row.trade_invoices;
+      const status = String(invoice?.status || "");
+      return String(row.job_id) === jobId &&
+        String(row.trade_invoice_id || "") !== String(excludeInvoiceId || "") &&
+        Boolean(status) && !["draft", "ops-reject", "failed"].includes(status) &&
+        isNormalWorkOrderPayLine(row);
+    });
     const grouped = groups.some((g) =>
       String(g.job_id) === jobId && String(g.status || "") !== "void"
     );
+    if (!grouped && legacy && legacyJobs.has(jobId)) continue;
     const job = jobs.find((row) => String(row.id) === jobId);
     const setup = grouped ? null : groupSetupReason(job?.work_order_id
       ? await loadWorkOrder(client, String(job.work_order_id)) : null);

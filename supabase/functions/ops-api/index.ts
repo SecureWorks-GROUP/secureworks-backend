@@ -792,6 +792,7 @@ import {
   reviewCrewInvoiceLine,
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
+import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
@@ -10905,6 +10906,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           .eq('id', aprInvId)
         if (aprErr) throw new Error('Failed to approve: ' + aprErr.message)
         return json({ success: true, invoice_id: aprInvId, status: 'approved' })
+      }
+      case 'release_voided_trade_invoice': {
+        if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+        try {
+          return json(await releaseVoidedTradeInvoice(client, body, {
+            allowed: (authMode === 'api_key' && serverSecretPresented) ||
+              (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) && authUser?.orgId === DEFAULT_ORG_ID),
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            actor: reviewActorLabel(authUser),
+          }, { getToken, xeroGet }))
+        } catch (error) {
+          if (error instanceof VoidedTradeInvoiceReleaseError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
+        }
       }
       case 'reject_trade_invoice': {
         // Ops rejects a pending_ops_review invoice. Sets terminal 'ops-reject' so
