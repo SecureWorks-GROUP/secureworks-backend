@@ -205,6 +205,7 @@ import {
   signoffRowCounts,
   type ClientSignoff,
 } from './trade_client_signoff.ts'
+import { ClientSignoffFormError, readOfficeClientSignoff, recordOfficeClientConfirmation, readOfficeClientSignedCopy, printableClientSignoff } from './client_signoff_form.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
@@ -797,6 +798,7 @@ import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quo
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
+  assertGroupClientConfirmationBeforeCompletion,
   claimGroupReleaseForInvoice,
   releasedGroupSiblingInvoiceIds,
   assertGroupJobDraftUsesShare,
@@ -12072,7 +12074,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await groupWorkOrderJson(readGroupWorkOrderPublic(
           client,
           String(url.searchParams.get('token') || url.searchParams.get('share_token') || body.share_token || ''),
-        ))
+        ).then(async read => url.searchParams.get('format') === 'pdf' ? await printableClientSignoff(read.form) : read))
       case 'group_work_order_client_sign':
         return await groupWorkOrderJson(clientSignGroupWorkOrder(client, groupBody({
           ...body,
@@ -12083,6 +12085,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ...body,
           share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
         })))
+      // The office files the client's actual confirmation; these routes send nothing.
+      // Recording requires its own identified staff JWT, not an agent or shared key.
+      case 'client_signoff_office':
+      case 'client_signoff_form_pdf':
+      case 'client_signoff_copy':
+      case 'record_client_signoff': {
+        const writing = action === 'record_client_signoff'
+        if (req.method !== (writing ? 'POST' : 'GET')) return json({error: 'Method not allowed', code:'method_not_allowed'}, 405)
+        const caller = {userId: authMode === 'jwt' ? authUser?.id || '' : '', orgId: authUser?.orgId || null, isStaff: _opsApiCallerIsStaffOperator(authMode, authUser)}
+        const jobId = String(body.job_id || url.searchParams.get('job_id') || '')
+        try {
+          if (writing) return json(await recordOfficeClientConfirmation(client, caller, body))
+          if (action === 'client_signoff_copy') return json(await readOfficeClientSignedCopy(client, caller, jobId, String(url.searchParams.get('signoff_id') || '')))
+          const read = await readOfficeClientSignoff(client, caller, jobId)
+          return json(action === 'client_signoff_form_pdf' ? await printableClientSignoff(read.form) : read)
+        } catch (error) {
+          if (error instanceof ClientSignoffFormError) return json({error:error.message,code:error.code}, error.status)
+          throw error
+        }
+      }
+
       // Office only. Not on the trade profile-scoped list, so a trade JWT is 403.
       case 'group_work_order_feedback':
       case 'group_work_order_office':
@@ -55193,6 +55216,13 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
   if (ev && ev.applies && !ev.satisfied) {
     throw new ApiError(completionEvidenceMessage(ev, null, 'marked complete'), 422)
   }
+  // End-work and freeze use the same current client-confirmation boundary.
+  // A signature uploaded by this wizard may satisfy it before job completion.
+  let groupConfirmation: {grouped:boolean;capture:unknown}
+  try {
+    groupConfirmation = await assertGroupClientConfirmationBeforeCompletion(client, job.id,
+      () => recordOnSiteClientSignoff(client, body, tradeUser, job))
+  } catch (error) { groupWorkOrderApiError(error) }
   const result = await completeJob(client, {
     job_id: job.id,
     user_id: tradeUser.id,
@@ -55207,9 +55237,9 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     console.warn('[ops-api] complete_my_job invoice queue failed (non-blocking):', e instanceof Error ? e.message : e)
     invoiceQueue = { lane: null, work_orders: [], error: e instanceof Error ? e.message : String(e) }
   }
-  // DSP-11: record the client's on-site sign-off. Never blocks completion.
-  let clientSignoff: any = null
-  try {
+  // Non-group completion keeps its existing non-blocking capture behaviour.
+  let clientSignoff: any = groupConfirmation.capture || (groupConfirmation.grouped ? {recorded:false,reason:'already_on_file',counts:true} : null)
+  if (!groupConfirmation.grouped) try {
     clientSignoff = await recordOnSiteClientSignoff(client, body, tradeUser, job)
   } catch (e) {
     console.error('[ops-api] complete_my_job client sign-off record failed (non-blocking):', e instanceof Error ? e.message : e)

@@ -2712,6 +2712,7 @@ Deno.test("trade_job_detail: fencing job carries completion_evidence; complete_m
   const t = woodvaleSeed();
   const lead = viewer(LEAD, "lead_installer");
   const before = await detail(t, lead);
+  assert(before.completion_evidence);
   assertEquals(before.completion_evidence.applies, true);
   assertEquals(before.completion_evidence.satisfied, false);
   assertEquals(before.completion_evidence.photos_required, 3);
@@ -2728,8 +2729,10 @@ Deno.test("trade_job_detail: fencing job carries completion_evidence; complete_m
   for (let i = 0; i < 3; i++) t.job_media.push({ id: `c${i}`, job_id: JOB_FENCE, phase: "completion", type: "photo", storage_url: "https://x/c.jpg" });
   t.job_media.push({ id: "ns1", job_id: JOB_FENCE, phase: "neighbour_signoff", type: "photo", storage_url: "https://x/ns.png", label: "Neighbour sign-off" });
   const after = await detail(t, lead);
+  assert(after.completion_evidence);
   assertEquals(after.completion_evidence.satisfied, true);
   const done = await _tradeCompleteMyJobForTest(makeClient(t), { jobId: JOB_FENCE }, lead as any, access);
+  assert(done.completion_evidence);
   assertEquals(done.completion_evidence.satisfied, true);
   assertEquals(t.jobs.find((j: any) => j.id === JOB_FENCE).status, "complete");
 });
@@ -2745,6 +2748,7 @@ Deno.test("waive_neighbour_signoff: a reason is logged on the job and replaces t
   );
   const res = await _tradeWaiveNeighbourSignoffForTest(makeClient(t), { jobId: JOB_FENCE, reason: "Front boundary fence, no neighbour" }, lead as any, access);
   assertEquals(res.ok, true);
+  assert(res.completion_evidence);
   assertEquals(res.completion_evidence.waived, true);
   assertEquals(res.completion_evidence.signoffs_required, 0);
   const ev = t.job_events.find((e: any) => e.event_type === "neighbour_signoff_waived");
@@ -2760,6 +2764,7 @@ Deno.test("waive_neighbour_signoff: a reason is logged on the job and replaces t
 Deno.test("patio job: completion_evidence does not apply", async () => {
   const t = seed();
   const p = await _tradeJobDetailForTest(makeClient(t), new URLSearchParams({ jobId: JOB_PATIO }), viewer(CREW, "crew") as any, false);
+  assert(p.completion_evidence);
   assertEquals(p.completion_evidence.applies, false);
   assertEquals(p.completion_evidence.satisfied, true);
 });
@@ -2867,6 +2872,7 @@ Deno.test("my_money: totals by month and FY, paid state from Xero, one bad split
   assertEquals(res.fy_label, "FY 2026/27");
   assertEquals(res.invoices.length, 3, "only my invoices");
   const bad = res.invoices.find((r: any) => r.id === "ti-bad");
+  assert(bad);
   assertEquals(bad.figures_ok, false);
   assertEquals(bad.payable, 500, "cash figure still counts");
   assertEquals(res.month.invoices, 2);
@@ -2877,6 +2883,7 @@ Deno.test("my_money: totals by month and FY, paid state from Xero, one bad split
   assertEquals(res.fytd.figures_incomplete, 1);
   assertEquals(res.months.map((m: any) => m.month), ["2026-09", "2026-08"]);
   const paid = res.invoices.find((r: any) => r.id === "ti-paid");
+  assert(paid);
   assertEquals(paid.paid, true);
   assertEquals(paid.paid_at, "2026-08-10");
 });
@@ -2943,4 +2950,19 @@ Deno.test("complete_my_job: the trade's own work order goes complete and the res
   assertEquals(res2.lane, "weekly_work_order");
   assertEquals(res2.work_orders[0].already_complete, true);
   assertEquals(t.job_events.filter((e: any) => e.event_type === "work_order_completed_by_trade").length, 1, "no second event on a repeat");
+});
+
+Deno.test("group end-work: missing or stale client confirmation leaves the job open before any completion write",async()=>{
+ const t=woodvaleSeed();const lead=viewer(LEAD,"lead_installer");
+ const job=t.jobs.find((j:any)=>j.id===JOB_FENCE);job.type="patio";
+ t.group_work_orders=[{id:"group-confirmation",org_id:ORG_A,job_id:JOB_FENCE,status:"open",split_frozen_at:null,hours_changed_at:"2026-11-06T05:00:00Z"}];
+ const access={orgId:ORG_A,managedVerticals:[] as string[]};
+ await assertRejects(()=>_tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,access),Error,"client must sign off the current work");
+ assertEquals(job.status,"processing");
+ t.job_client_signoffs=[{id:"confirmation",org_id:ORG_A,job_id:JOB_FENCE,method:"office_on_behalf",happy:true,signed_name:"Invented Client",created_at:"2026-11-06T06:00:00Z",client_confirmed_on:"2026-11-06",work_done:"Installed agreed patio",captured_by:LEAD,captured_by_actor:"user:"+LEAD,capture_auth_source:"jwt",confirmation_kind:"written_confirmation",confirmation_reference:"Client email: invented reference"}];
+ const done=await _tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,access);
+ assertEquals(job.status,"complete");assertEquals(done.client_signoff.counts,true);
+ job.status="processing";t.group_work_orders[0].signoff_required_after="2026-11-06T06:01:00Z";
+ await assertRejects(()=>_tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,access),Error,"client must sign off the current work");
+ assertEquals(job.status,"processing");
 });

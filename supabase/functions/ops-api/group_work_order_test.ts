@@ -57,6 +57,7 @@ import {
   readPatioLegacyHoursJobIds,
   assertPatioPaysThroughGroup,
   assertAllInGroupInvoiceStandalone,
+  assertGroupClientConfirmationBeforeCompletion,
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
   removeGroupWorkOrderParticipant,
@@ -68,6 +69,10 @@ import {
   withoutGroupJobAssignments,
 } from "./group_work_order.ts";
 import { TRADE_INVOICE_TIME_LINE_TYPES } from "./trade_invoice_time_entry.ts";
+
+import { recordOfficeClientConfirmation, readOfficeClientSignedCopy, ClientSignoffFormError, decodeClientSignedCopy } from "./client_signoff_form.ts";
+import { hasOfficeClientConfirmation } from "./client_signoff_form_data.ts";
+import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 
 const ORG = "00000000-0000-4000-8000-000000000001";
 const JOB = "10000000-0000-4000-8000-000000000001";
@@ -2231,19 +2236,22 @@ Deno.test("ops-api wires the share, the fence, and the trade and public doors", 
   assertEquals(pack.includes("job_service_reports"), false);
 });
 
-Deno.test("office approval with reason and actor clears sign-off; later hours invalidate it", async () => {
-  const memory = new Memory();
-  seedSplit(memory, "open");
-  memory.rows("job_client_signoffs").push({ id: "office-approved", job_id: JOB,
-    method: "office_waiver", waiver_reason: "Owner confirmed client approval",
-    captured_by_actor: "user:office", created_at: "2099-01-01T00:00:00Z" });
-  const before = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {group_id: GROUP});
-  assertEquals(before.client_signed, true);
-  assertEquals(before.client_signoff_method, "office_waiver");
-  assertEquals(before.split_frozen, false);
-  memory.rows("group_work_orders")[0].hours_changed_at = "2099-01-02T00:00:00Z";
-  const after = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), {group_id: GROUP});
-  assertEquals(after.client_signed, false);
+Deno.test("only historical frozen groups keep office waivers; reopening needs a fresh client sign-off", async () => {
+  const memory = new Memory(); seedSplit(memory, "open");
+  const group = memory.rows("group_work_orders")[0];
+  memory.rows("group_client_signoff_policy").push({id:1,client_confirmation_since:"2026-10-24T00:00:00Z"});
+  memory.rows("job_client_signoffs").push({id:"historical-office",job_id:JOB,method:"office_waiver",
+    waiver_reason:"Fixture approval",captured_by_actor:"user:office",created_at:"2026-10-21T00:00:00Z"});
+  const read = () => readGroupWorkOrderOffice(memory.client(),trade(USER_A,true),{group_id:GROUP});
+  assertEquals((await read()).client_signed,false,"an office waiver cannot unlock a new freeze");
+  group.split_frozen_at="2026-10-22T00:00:00Z";
+  assertEquals((await read()).client_signed,true,"the existing frozen authority is preserved");
+  group.split_frozen_at=null; group.signoff_required_after="2026-10-25T00:00:00Z";
+  assertEquals((await read()).client_signed,false);
+  memory.rows("job_client_signoffs").push({id:"fresh-client",job_id:JOB,method:"on_site",signature_media_id:"fixture-signature",happy:true,created_at:"2026-10-26T00:00:00Z"});
+  assertEquals((await read()).client_signed,true);
+  group.hours_changed_at="2026-10-27T00:00:00Z";
+  assertEquals((await read()).client_signed,false);
 });
 
 Deno.test("all-in group accepts one isolated share and refuses mixed weekly claims", async () => {
@@ -2565,4 +2573,80 @@ Deno.test("patio cohort scans all allocation pages and keeps a voided anchor as 
   assertEquals([
     ...await readPatioLegacyHoursJobIds(db.client(), db.rows("jobs")),
   ], []);
+
+});
+
+function confirmationBody(kind = "written_confirmation"): Record<string, unknown> {
+  return {job_id:JOB,request_id:crypto.randomUUID(),signed_name:"Fixture Client",
+    client_confirmed_on:new Date(Date.now()+8*3600000).toISOString().slice(0,10),work_done:"Fixture installation",
+    outstanding_items:"A recorded fixture note",client_accepts:true,current_client_confirmation:true,
+    confirmation_kind:kind,confirmation_reference:kind==="written_confirmation"?"Email fixture, recorded client message ABC":""};
+}
+function copyStorage(client: any) {
+  const objects = new Map<string, Uint8Array>(); let writes=0;
+  client.storage={from:()=>({
+    upload:(path:string,bytes:Uint8Array)=>{writes++;if(objects.has(path))return {error:{message:"exists"}};objects.set(path,bytes.slice());return {data:{path},error:null};},
+    download:(path:string)=>objects.has(path)?{data:new Blob([new Uint8Array(objects.get(path)!).buffer]),error:null}:{data:null,error:{message:"missing"}},
+  })};
+  return {objects,writes:()=>writes};
+}
+Deno.test("office confirmation records the actual written reference once and cannot impersonate the operator", async () => {
+  const db=new Memory();seedSplit(db,"open");const client=db.client();const body=confirmationBody();
+  const result=await recordOfficeClientConfirmation(client,trade(USER_A,true),{...body,captured_by:USER_B,captured_by_actor:"forged"});
+  const rows=db.rows("job_client_signoffs");assertEquals(rows.length,1);assertEquals(rows[0].captured_by,USER_A);
+  assertEquals(rows[0].captured_by_actor,"user:"+USER_A);assertEquals(rows[0].confirmation_reference,body.confirmation_reference);
+  assertEquals(hasOfficeClientConfirmation(rows[0]),true);assertEquals(rows[0].signed_copy_path,null);
+  const replay=await recordOfficeClientConfirmation(client,trade(USER_A,true),body);
+  assertEquals(replay.signoff_id,result.signoff_id);assertEquals(replay.already_recorded,true);assertEquals(rows.length,1);
+  const changed=await assertRejects(()=>recordOfficeClientConfirmation(client,trade(USER_A,true),{...body,work_done:"Different work"}),ClientSignoffFormError);
+  assertEquals(changed.code,"client_signoff_request_changed");assertEquals(rows.length,1);
+  const other=await assertRejects(()=>recordOfficeClientConfirmation(client,trade(USER_B,true),body),ClientSignoffFormError);
+  assertEquals(other.code,"client_signoff_request_changed");assertEquals(rows.length,1);
+});
+Deno.test("a signed copy stays private, is reconciled by exact bytes, and is verified again on read", async () => {
+  const db=new Memory();seedSplit(db,"open");const client=db.client();const storage=copyStorage(client);
+  const bytes=new TextEncoder().encode("%PDF-1.7\nfixture signed copy");
+  const body={...confirmationBody("signed_copy"),file_base64:encodeBase64(bytes),file_name:"signed-form.pdf"};
+  const record=await recordOfficeClientConfirmation(client,trade(USER_A,true),body);
+  assertEquals(storage.writes(),1);assertEquals(db.rows("job_client_signoffs").length,1);
+  await recordOfficeClientConfirmation(client,trade(USER_A,true),body);assertEquals(storage.writes(),1);
+  const file=await readOfficeClientSignedCopy(client,trade(USER_A,true),JOB,String(record.signoff_id));
+  assertEquals(file.file_base64,body.file_base64);assertEquals(file.content_type,"application/pdf");
+  const row=db.rows("job_client_signoffs")[0];storage.objects.set(String(row.signed_copy_path),new Uint8Array([1,2,3]));
+  const drift=await assertRejects(()=>readOfficeClientSignedCopy(client,trade(USER_A,true),JOB,String(record.signoff_id)),ClientSignoffFormError);
+  assertEquals(drift.code,"client_signoff_copy_changed");
+});
+Deno.test("office confirmation refuses missing evidence, anonymous operators, other organisations and frozen groups", async () => {
+  const db=new Memory();seedSplit(db,"open");const body=confirmationBody();
+  await assertRejects(()=>recordOfficeClientConfirmation(db.client(),{userId:"",orgId:ORG,isStaff:true},body),ClientSignoffFormError);
+  await assertRejects(()=>recordOfficeClientConfirmation(db.client(),trade(USER_A),body),ClientSignoffFormError);
+  await assertRejects(()=>recordOfficeClientConfirmation(db.client(),{...trade(USER_A,true),orgId:OTHER_JOB},body),ClientSignoffFormError);
+  await assertRejects(()=>recordOfficeClientConfirmation(db.client(),trade(USER_A,true),{...body,current_client_confirmation:false}),ClientSignoffFormError);
+  await assertRejects(()=>recordOfficeClientConfirmation(db.client(),trade(USER_A,true),{...body,confirmation_reference:""}),ClientSignoffFormError);
+  assertThrows(()=>decodeClientSignedCopy(encodeBase64(new TextEncoder().encode("<svg>not a signed image</svg>"))),ClientSignoffFormError);
+  db.rows("group_work_orders")[0].split_frozen_at="2026-10-22T00:00:00Z";
+  const frozen=await assertRejects(()=>recordOfficeClientConfirmation(db.client(),trade(USER_A,true),body),ClientSignoffFormError);
+  assertEquals(frozen.code,"client_signoff_split_frozen");assertEquals(db.rows("job_client_signoffs").length,0);
+});
+Deno.test("a group cannot end before current client confirmation, and a real on-site capture is considered before completion", async () => {
+  const db=new Memory();seedSplit(db,"open");
+  const refusal=await assertRejects(()=>assertGroupClientConfirmationBeforeCompletion(db.client(),JOB),GroupWorkOrderError);
+  assertEquals(refusal.code,"group_client_signoff_required");
+  let captured=0;
+  const result=await assertGroupClientConfirmationBeforeCompletion(db.client(),JOB,async()=>{
+    captured++;db.rows("job_client_signoffs").push({id:"client",job_id:JOB,method:"on_site",signature_media_id:"signature",happy:true,created_at:"2026-10-26T00:00:00Z"});return {recorded:true};
+  });
+  assertEquals(captured,1);assertEquals(result.grouped,true);
+  assertEquals(db.calls.some(c=>c.table==="jobs"&&c.op==="update"),false);
+  db.rows("group_work_orders")[0].signoff_required_after="2026-10-27T00:00:00Z";
+  await assertRejects(()=>assertGroupClientConfirmationBeforeCompletion(db.client(),JOB),GroupWorkOrderError);
+});
+
+Deno.test("public client form keeps the work, date and outstanding items and does not turn rejection into acceptance",async()=>{
+ const m=new Memory();seedSplit(m,"open");
+ const body={share_token:"tok-secret",signer_name:"Invented Client",signature_png:"data:image/png;base64,iVBORw0KGgo=",form_version:"client-confirmation-v1",client_confirmed_on:"2026-11-06",work_done:"Installed agreed work",outstanding_items:"Finish still needs attention",happy:false};
+ const result=await clientSignGroupWorkOrder(m.client(),body);assertEquals(result.client_signed,false);
+ const row=m.rows("job_client_signoffs")[0];assertEquals([row.work_done,row.client_confirmed_on,row.outstanding_items,row.happy],[body.work_done,body.client_confirmed_on,body.outstanding_items,false]);
+ assertEquals(m.rows("jobs")[0].status,"scheduled");
+ await assertRejects(()=>clientSignGroupWorkOrder(m.client(),{...body,work_done:""}),GroupWorkOrderError,"Enter the work completed");
 });

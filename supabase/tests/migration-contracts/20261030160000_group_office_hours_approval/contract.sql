@@ -70,8 +70,10 @@ BEGIN
   IF n <> 0 THEN RAISE EXCEPTION 'office approval wrote % crew signatures', n; END IF;
 
   -- Once the split is final the approval cannot be given or moved.
-  INSERT INTO public.job_client_signoffs(job_id,method,waiver_reason,captured_by_actor,created_at)
-    VALUES(job,'office_waiver','Synthetic office sign-off','user:'||office,clock_timestamp() + interval '1 second');
+  INSERT INTO public.job_media(id,job_id,phase,type,storage_url)
+    VALUES('f0310000-0000-4000-8000-000000000599',job,'signature','photo','data:image/png;base64,iVBORw0KGgo=');
+  INSERT INTO public.job_client_signoffs(job_id,method,signed_name,happy,signature_media_id,captured_by_actor,created_at)
+    VALUES(job,'share_link','Synthetic Client',true,'f0310000-0000-4000-8000-000000000599','client link',clock_timestamp() + interval '1 second');
   PERFORM public.freeze_group_work_order_split(grp);
   refused := NULL;
   BEGIN PERFORM public.office_approve_group_hours(grp, office, 'Again after freeze');
