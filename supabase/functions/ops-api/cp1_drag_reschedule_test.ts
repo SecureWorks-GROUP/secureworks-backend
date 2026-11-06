@@ -440,10 +440,10 @@ Deno.test("real-crew: createAssignment rounds before the positive check — 0.4 
 });
 
 // ── install_rescheduled trigger ────────────────────────────────────────────
-const EXPECTED_SMS = "Hi Jane,\n" +
-  "Hope you're well! Just letting you know we've got your fence install rescheduled for Thursday the 2nd of July at Example St. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\n" +
-  "Let us know if you have any questions.\n" +
-  "Cheers, Shaun";
+const EXPECTED_SMS = "Hi Jane,\n\n" +
+  "Hope you're well! Just letting you know we've got your fence install rescheduled for Thursday the 2nd of July at Example St. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\n\n" +
+  "Let us know if you have any questions.\n\n" +
+  "Cheers,\nShaun";
 
 Deno.test("install_rescheduled: renders Shaun's wording verbatim — day-the-date-of-month, street only, no footer", async () => {
   const { calls, restore } = stubFetch();
