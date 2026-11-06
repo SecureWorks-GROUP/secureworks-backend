@@ -714,6 +714,7 @@ import {
 } from './trade_invoice_persistence.ts'
 import {
   resolveTradeXeroSupplierContact as resolveTradeXeroSupplierContactWithXero,
+  TradeXeroSupplierContactError,
   type TradeXeroSupplierContactArgs,
 } from './trade_xero_contact.ts'
 import {
@@ -2655,6 +2656,8 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     name: tradeName,
     email: tradeEmail,
     cachedContactId,
+    source: 'push_trade_invoice_to_xero',
+    actor,
     accessToken,
     tenantId,
   })
@@ -4441,15 +4444,26 @@ export const _xeroPostForTest = (
   method = 'POST', idempotencyKey?: string, requestFetch: typeof fetch = fetch,
 ) => xeroPost(path, accessToken, tenantId, body, method, idempotencyKey, requestFetch)
 
-// Trade supplier contacts live in trade_xero_contact.ts. This wrapper only
-// binds the live Xero transports. Work-order invoices use it too: an inline
-// email-then-create there minted a second contact whenever the login email
-// differed from the supplier's.
-function resolveTradeXeroSupplierContact(
+// Trade supplier contacts live in trade_xero_contact.ts. This wrapper binds
+// the live Xero transports and turns an identity refusal into a 409 the
+// caller can show. A wrong cached link is not resolved again here.
+async function resolveTradeXeroSupplierContact(
   client: any,
   args: TradeXeroSupplierContactArgs,
 ): Promise<string | null> {
-  return resolveTradeXeroSupplierContactWithXero(client, args, { xeroGet, xeroPost })
+  try {
+    return await resolveTradeXeroSupplierContactWithXero(client, args, { xeroGet, xeroPost })
+  } catch (error) {
+    if (error instanceof TradeXeroSupplierContactError) {
+      throw new ApiError(error.message, 409, {
+        ok: false,
+        code: error.code,
+        error: error.message,
+        userMessage: error.message,
+      })
+    }
+    throw error
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -12922,9 +12936,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const { accessToken: woAt, tenantId: woTi } = workOrderBoundary
             const woXeroContactId = await resolveTradeXeroSupplierContact(client, {
               userId: tradeUser.id,
-              name: tradeXeroUser?.name || 'Trade',
+              name: tradeXeroUser?.name || '',
               email: tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || '',
               cachedContactId: tradeXeroUser?.xero_contact_id || null,
+              source: 'submit_work_order_invoice',
+              actor: tradeUser.id,
               accessToken: woAt,
               tenantId: woTi,
             })
@@ -14906,9 +14922,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // the auto-push silently fails forever.
               xeroContactId = await resolveTradeXeroSupplierContact(client, {
                 userId: tradeUser.id,
-                name: userProfile?.name || 'Trade',
+                name: userProfile?.name || '',
                 email: tradeEmail,
                 cachedContactId: userProfile?.xero_contact_id || null,
+                source: 'generate_trade_invoice',
+                actor: tradeUser.id,
                 accessToken,
                 tenantId,
               })
@@ -15088,6 +15106,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 tradeInvoiceMoneyApiError(e)
               }
               if (createdXeroBillId) throw e
+              // A wrong or conflicting supplier link is not a transient Xero
+              // miss. Keep the saved invoice retryable and show the reason.
+              if (e instanceof ApiError) {
+                const contactRefusal = e.body && typeof e.body === 'object'
+                  ? String((e.body as { code?: string }).code || '')
+                  : ''
+                if (
+                  contactRefusal === 'stale_xero_contact' ||
+                  contactRefusal === 'xero_contact_ambiguous' ||
+                  contactRefusal === 'xero_contact_email_conflict'
+                ) {
+                  await markTradeInvoiceRetryable(client, invoice.id, e.message)
+                  throw e
+                }
+              }
               const errMsg = (e as Error).message
               console.log('[ops-api] Xero auto-push failed (non-blocking):', errMsg)
               // Change 6 (Q18): a Xero failure must NOT be swallowed as success and the
@@ -56506,9 +56539,11 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   const { accessToken: stAt, tenantId: stTi } = await getToken(client)
   const stXeroContactId = await resolveTradeXeroSupplierContact(client, {
     userId,
-    name: tradeName,
+    name: tradeUser?.name || '',
     email: tradeUser?.email || '',
     cachedContactId: tradeUser?.xero_contact_id || null,
+    source: 'submit_trade_invoice',
+    actor: userId,
     accessToken: stAt,
     tenantId: stTi,
   })

@@ -110,9 +110,9 @@ X15 now has separate read-only preview and privileged apply tools. Apply require
 
 ### X13 · Find or create a trade's or supplier's Xero contact
 
-- `ops-api/trade_xero_contact.ts :: activateArchivedTradeContact :: POST /Contacts`
+- `ops-api/trade_xero_contact.ts :: activateArchivedTradeContact :: POST /Contacts` restores ACTIVE only after the contact's name or email matches this user. A cached contact that does not match is not unarchived.
 - `ops-api/trade_xero_contact.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts`
-- Work-order invoices resolve the supplier through `resolveTradeXeroSupplierContact` and no longer write `/Contacts` on their own. Unarchive and create stay these two writes.
+- Work-order invoices resolve the supplier through `resolveTradeXeroSupplierContact` and no longer write `/Contacts` on their own.
 - `ops-api/index.ts :: pushPOToXero :: PUT /Contacts`
 - `ops-api/xero_accpay_books.ts :: resolveSupplierContactId :: PUT /Contacts`
 

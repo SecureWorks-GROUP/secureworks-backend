@@ -1,15 +1,16 @@
 // One resolver for the Xero supplier contact on a trade invoice.
 //
-// Every trade ACCPAY push uses this, including a work-order invoice. The
-// work-order path used to look the contact up by email and then create,
-// so a trade whose login email differs from the existing supplier contact
-// (Jean Crous) hit Xero's unique-name check and the bill stayed local.
+// A cached users.xero_contact_id is used only when that Xero contact still
+// identifies this user: its normalised name matches the user's name, or its
+// email matches the user's email. Anything else is a stale or wrong link.
+// The push is refused. The cache is not overwritten and the contact is not
+// unarchived or replaced.
 //
-// Order: cached users.xero_contact_id (re-read, and restored if archived),
-// exact email, exact name, then create. An email hit that is only a
-// customer, or several email hits that do not name this trade, is not a
-// guess. A create Xero refuses because the name already exists is looked
-// up again instead of failing the invoice.
+// An email hit whose name is not this trade is not chosen and not cached.
+// The name lookup still runs. If that finds nothing, the push is refused
+// rather than creating a second contact: the email already belongs to
+// someone else. Several name matches, with none standing out, are refused
+// the same way. Unarchive runs only after that identity check has passed.
 
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 
@@ -27,6 +28,24 @@ export type TradeXeroPost = (
   method?: string,
 ) => Promise<unknown>;
 
+export type TradeXeroContactEvidence = "email" | "name" | "created";
+
+type CacheAuditRow = {
+  event_type: "trade.xero_contact_linked";
+  source: string;
+  entity_type: "user";
+  entity_id: string;
+  payload: {
+    user_id: string;
+    actor: string | null;
+    old_xero_contact_id: string | null;
+    new_xero_contact_id: string;
+    evidence: TradeXeroContactEvidence;
+    contact_name: string | null;
+  };
+  schema_version: "1.0";
+};
+
 type TradeContactCacheClient = {
   from: (table: string) => {
     update: (values: { xero_contact_id: string }) => {
@@ -35,6 +54,9 @@ type TradeContactCacheClient = {
         value: string,
       ) => Promise<{ error: { message?: string } | null }>;
     };
+    insert: (
+      row: CacheAuditRow,
+    ) => Promise<{ error: { message?: string } | null }>;
   };
 };
 
@@ -43,6 +65,10 @@ export type TradeXeroSupplierContactArgs = {
   name?: string | null;
   email?: string | null;
   cachedContactId?: string | null;
+  /** Which push asked. Recorded on the cache-change audit row. */
+  source?: string | null;
+  /** Who asked. Defaults to the user whose cache is written. */
+  actor?: string | null;
   accessToken: string;
   tenantId: string;
 };
@@ -52,13 +78,35 @@ export type TradeXeroSupplierDeps = {
   xeroPost: TradeXeroPost;
 };
 
+export type TradeXeroSupplierContactCode =
+  | "stale_xero_contact"
+  | "xero_contact_ambiguous"
+  | "xero_contact_email_conflict";
+
+export class TradeXeroSupplierContactError extends Error {
+  readonly code: TradeXeroSupplierContactCode;
+
+  constructor(code: TradeXeroSupplierContactCode, message: string) {
+    super(message);
+    this.name = "TradeXeroSupplierContactError";
+    this.code = code;
+  }
+}
+
 type XeroContact = {
   ContactID?: string;
   Name?: string;
+  EmailAddress?: string;
   ContactStatus?: string;
   IsSupplier?: boolean;
   IsCustomer?: boolean;
 };
+
+export type TradeContactPick =
+  | { status: "chosen"; contact: XeroContact }
+  | { status: "none" }
+  | { status: "conflict"; contacts: XeroContact[] }
+  | { status: "ambiguous" };
 
 export function xeroContactWherePath(field: string, value: string): string {
   const escaped = escapeXeroLiteral(value);
@@ -83,6 +131,10 @@ export function normaliseTradeContactName(
   return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+function normaliseEmail(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
 function contactStatus(contact: XeroContact): string {
   return String(contact.ContactStatus || "").toUpperCase();
 }
@@ -94,6 +146,9 @@ function asContact(row: unknown): XeroContact | null {
   return {
     ContactID: record.ContactID,
     Name: typeof record.Name === "string" ? record.Name : undefined,
+    EmailAddress: typeof record.EmailAddress === "string"
+      ? record.EmailAddress
+      : undefined,
     ContactStatus: typeof record.ContactStatus === "string"
       ? record.ContactStatus
       : undefined,
@@ -120,50 +175,97 @@ function createdContactId(payload: unknown): string | null {
   return contactList(payload)[0]?.ContactID ?? null;
 }
 
-function isCustomerOnly(contact: XeroContact): boolean {
-  return contact.IsCustomer === true && contact.IsSupplier !== true;
+/** Name match wins. Email match is the other way a cached contact is still this user. */
+export function tradeContactIdentity(
+  contact: XeroContact,
+  tradeName: string,
+  tradeEmail: string,
+): "name" | "email" | null {
+  const wantedName = normaliseTradeContactName(tradeName);
+  if (wantedName && normaliseTradeContactName(contact.Name) === wantedName) {
+    return "name";
+  }
+  const wantedEmail = normaliseEmail(tradeEmail);
+  if (wantedEmail && normaliseEmail(contact.EmailAddress) === wantedEmail) {
+    return "email";
+  }
+  return null;
+}
+
+function standout(contacts: readonly XeroContact[]): XeroContact | null {
+  const active = contacts.filter((contact) =>
+    contactStatus(contact) === "ACTIVE"
+  );
+  const ranked = active.length > 0 ? active : contacts;
+  if (ranked.length === 1) return ranked[0];
+  const suppliers = ranked.filter((contact) => contact.IsSupplier === true);
+  if (suppliers.length === 1) return suppliers[0];
+  return null;
 }
 
 /**
- * Pick the supplier contact out of one Xero lookup page.
- * A single usable contact is that contact. Several contacts are used only
- * when one of them is this trade's name, or exactly one is a supplier.
- * A customer who is not a supplier is never chosen on the email alone.
+ * Email: only a contact whose name is this trade. A hit under another name
+ * is a conflict, not a choice. Name: the query is already by name. Several
+ * hits with none standing out (one active, or one supplier) are ambiguous.
  */
-export function chooseTradeSupplierContact(
+export function pickTradeSupplierContact(
   contacts: readonly XeroContact[] | null | undefined,
   tradeName: string,
-): XeroContact | null {
+  via: "email" | "name",
+): TradeContactPick {
   const list = (contacts || []).filter((contact) => contact?.ContactID);
-  if (list.length === 0) return null;
+  if (list.length === 0) return { status: "none" };
 
   const wanted = normaliseTradeContactName(tradeName);
-  const nameMatches = wanted
+  const named = wanted
     ? list.filter((contact) =>
       normaliseTradeContactName(contact.Name) === wanted
     )
     : [];
-  let pool = nameMatches.length > 0 ? nameMatches : list;
-  if (nameMatches.length === 0) {
-    const notCustomers = pool.filter((contact) => !isCustomerOnly(contact));
-    if (notCustomers.length === 0) return null;
-    pool = notCustomers;
+  if (named.length === 0) {
+    return via === "email"
+      ? { status: "conflict", contacts: list }
+      : { status: "none" };
   }
-
-  const active = pool.filter((contact) => contactStatus(contact) === "ACTIVE");
-  const ranked = active.length > 0 ? active : pool;
-  if (ranked.length === 1) return ranked[0];
-
-  const suppliers = ranked.filter((contact) => contact.IsSupplier === true);
-  if (suppliers.length === 1) return suppliers[0];
-  if (nameMatches.length > 0) return ranked[0];
-  return null;
+  const pool = named;
+  if (pool.length === 0) return { status: "none" };
+  const chosen = standout(pool);
+  if (!chosen) return { status: "ambiguous" };
+  return { status: "chosen", contact: chosen };
 }
 
 function contactNameAlreadyExists(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error || "");
   return /contact name/i.test(message) &&
     /(unique|already exists)/i.test(message);
+}
+
+function staleLinkMessage(
+  userId: string | null | undefined,
+  contactId: string,
+  contactName: string | null | undefined,
+): string {
+  const who = String(userId || "").trim() || "unknown";
+  return `stale or wrong Xero link for user ${who}: cached contact ${contactId} '${
+    contactName ?? ""
+  }'`;
+}
+
+function ambiguousMessage(tradeName: string): string {
+  const who = tradeName || "this trade";
+  return `Several Xero contacts are named '${who}' and none stands out. Not choosing one.`;
+}
+
+function emailConflictMessage(
+  email: string,
+  tradeName: string,
+  contacts: readonly XeroContact[],
+): string {
+  const names = [
+    ...new Set(contacts.map((contact) => contact.Name || "unnamed")),
+  ].join(", ");
+  const who = tradeName || "this trade";
+  return `Xero email ${email} belongs to '${names}', not ${who}. Not creating another contact.`;
 }
 
 async function activateArchivedTradeContact(
@@ -179,28 +281,13 @@ async function activateArchivedTradeContact(
   return String(contact.ContactID);
 }
 
-async function lookupTradeSupplierContact(
+async function lookupContacts(
   path: string,
-  tradeName: string,
   args: TradeXeroSupplierContactArgs,
   deps: TradeXeroSupplierDeps,
-): Promise<string | null> {
+): Promise<XeroContact[]> {
   const found = await deps.xeroGet(path, args.accessToken, args.tenantId);
-  const chosen = chooseTradeSupplierContact(contactList(found), tradeName);
-  if (!chosen) return null;
-  return await activateArchivedTradeContact(chosen, args, deps);
-}
-
-async function lookupTradeSupplierByName(
-  tradeName: string,
-  args: TradeXeroSupplierContactArgs,
-  deps: TradeXeroSupplierDeps,
-  folded: boolean,
-): Promise<string | null> {
-  const path = folded
-    ? xeroContactNameFoldedWhere(tradeName)
-    : xeroContactWherePath("Name", tradeName);
-  return await lookupTradeSupplierContact(path, tradeName, args, deps);
+  return contactList(found);
 }
 
 export async function resolveTradeXeroSupplierContact(
@@ -209,113 +296,191 @@ export async function resolveTradeXeroSupplierContact(
   deps: TradeXeroSupplierDeps,
 ): Promise<string | null> {
   const cachedContactId = (args.cachedContactId || "").trim();
-  // A cached id goes stale when the supplier is archived. Returning it
-  // blind makes the bill fail with "contact has been archived".
+  const tradeName = (args.name || "").trim();
+  const tradeEmail = (args.email || "").trim();
+  const createName = tradeName || "Trade";
+
+  const remember = async (
+    contactId: string,
+    evidence: TradeXeroContactEvidence,
+    contactName: string | null,
+  ): Promise<string> => {
+    if (!args.userId || contactId === cachedContactId) return contactId;
+    const row: CacheAuditRow = {
+      event_type: "trade.xero_contact_linked",
+      source: String(args.source || "").trim() ||
+        "ops-api/resolveTradeXeroSupplierContact",
+      entity_type: "user",
+      entity_id: args.userId,
+      payload: {
+        user_id: args.userId,
+        actor: String(args.actor || "").trim() || args.userId,
+        old_xero_contact_id: cachedContactId || null,
+        new_xero_contact_id: contactId,
+        evidence,
+        contact_name: contactName,
+      },
+      schema_version: "1.0",
+    };
+    // business_events is the operational event row this push already uses
+    // (trade.xero_push_failed). capture_business_event is the evidence
+    // writer and is keyed on a provider message, so it is the wrong store.
+    const { error: auditError } = await client.from("business_events").insert(
+      row,
+    );
+    if (auditError) {
+      throw new Error(
+        `Could not record the Xero contact link for user ${args.userId}: ${
+          auditError.message || auditError
+        }`,
+      );
+    }
+    const { error } = await client.from("users").update({
+      xero_contact_id: contactId,
+    }).eq("id", args.userId);
+    if (error) {
+      throw new Error(
+        `Could not store the Xero contact link for user ${args.userId}: ${
+          error.message || error
+        }`,
+      );
+    }
+    return contactId;
+  };
+
+  const useChosen = async (
+    contact: XeroContact,
+    evidence: TradeXeroContactEvidence,
+  ): Promise<string> => {
+    const contactId = await activateArchivedTradeContact(contact, args, deps);
+    return await remember(contactId, evidence, contact.Name || null);
+  };
+
   if (cachedContactId) {
+    let contact: XeroContact | undefined;
     try {
       const cached = await deps.xeroGet(
         `/Contacts/${encodeURIComponent(cachedContactId)}`,
         args.accessToken,
         args.tenantId,
       );
-      const contact = contactList(cached)[0];
-      if (contact?.ContactID) {
-        return await activateArchivedTradeContact(contact, args, deps);
-      }
+      contact = contactList(cached)[0];
     } catch (error) {
       if (error instanceof XeroCooldownError) throw error;
+      throw error;
     }
+    if (!contact?.ContactID) {
+      throw new TradeXeroSupplierContactError(
+        "stale_xero_contact",
+        staleLinkMessage(args.userId, cachedContactId, ""),
+      );
+    }
+    if (!tradeContactIdentity(contact, tradeName, tradeEmail)) {
+      throw new TradeXeroSupplierContactError(
+        "stale_xero_contact",
+        staleLinkMessage(args.userId, contact.ContactID, contact.Name),
+      );
+    }
+    // Same id, already cached. Do not write users again. Unarchive only
+    // because the name or email still identifies this user.
+    return await activateArchivedTradeContact(contact, args, deps);
   }
 
-  const tradeName = (args.name || "Trade").trim() || "Trade";
-  const tradeEmail = (args.email || "").trim();
-  let xeroContactId: string | null = null;
-
+  let emailConflict: XeroContact[] = [];
   if (tradeEmail) {
+    let contacts: XeroContact[];
     try {
-      xeroContactId = await lookupTradeSupplierContact(
+      contacts = await lookupContacts(
         xeroContactWherePath("EmailAddress", tradeEmail),
-        tradeName,
         args,
         deps,
       );
     } catch (error) {
       if (error instanceof XeroCooldownError) throw error;
+      throw error;
     }
+    const pick = pickTradeSupplierContact(contacts, tradeName, "email");
+    if (pick.status === "ambiguous") {
+      throw new TradeXeroSupplierContactError(
+        "xero_contact_ambiguous",
+        ambiguousMessage(tradeName),
+      );
+    }
+    if (pick.status === "chosen") return await useChosen(pick.contact, "name");
+    if (pick.status === "conflict") emailConflict = pick.contacts;
   }
 
-  if (!xeroContactId && tradeName) {
-    try {
-      xeroContactId = await lookupTradeSupplierByName(
-        tradeName,
-        args,
-        deps,
-        false,
-      );
-    } catch (error) {
-      if (error instanceof XeroCooldownError) throw error;
-    }
+  const byName = async (folded: boolean): Promise<TradeContactPick> => {
+    const contacts = await lookupContacts(
+      folded
+        ? xeroContactNameFoldedWhere(createName)
+        : xeroContactWherePath("Name", createName),
+      args,
+      deps,
+    );
+    return pickTradeSupplierContact(contacts, createName, "name");
+  };
+
+  let named: TradeContactPick;
+  try {
+    named = await byName(false);
+  } catch (error) {
+    if (error instanceof XeroCooldownError) throw error;
+    throw error;
+  }
+  if (named.status === "ambiguous") {
+    throw new TradeXeroSupplierContactError(
+      "xero_contact_ambiguous",
+      ambiguousMessage(createName),
+    );
+  }
+  if (named.status === "chosen") return await useChosen(named.contact, "name");
+
+  if (emailConflict.length > 0) {
+    throw new TradeXeroSupplierContactError(
+      "xero_contact_email_conflict",
+      emailConflictMessage(tradeEmail, tradeName, emailConflict),
+    );
   }
 
-  if (!xeroContactId) {
-    try {
-      const createRes = await deps.xeroPost(
-        "/Contacts",
-        args.accessToken,
-        args.tenantId,
-        {
-          Contacts: [{
-            Name: tradeName,
-            EmailAddress: tradeEmail || undefined,
-            IsSupplier: true,
-          }],
-        },
-        "PUT",
-      );
-      xeroContactId = createdContactId(createRes);
-    } catch (error) {
-      if (error instanceof XeroCooldownError) throw error;
-      if (!contactNameAlreadyExists(error)) throw error;
-      // The name is already a contact the exact query missed (a race, or
-      // a case difference). Read it again. A second create would only
-      // repeat the refusal and leave the invoice local.
-      try {
-        xeroContactId = await lookupTradeSupplierByName(
-          tradeName,
-          args,
-          deps,
-          false,
+  let xeroContactId: string | null = null;
+  try {
+    const createRes = await deps.xeroPost(
+      "/Contacts",
+      args.accessToken,
+      args.tenantId,
+      {
+        Contacts: [{
+          Name: createName,
+          EmailAddress: tradeEmail || undefined,
+          IsSupplier: true,
+        }],
+      },
+      "PUT",
+    );
+    xeroContactId = createdContactId(createRes);
+  } catch (error) {
+    if (error instanceof XeroCooldownError) throw error;
+    if (!contactNameAlreadyExists(error)) throw error;
+    const recover = async (folded: boolean): Promise<string | null> => {
+      const pick = await byName(folded);
+      if (pick.status === "ambiguous") {
+        throw new TradeXeroSupplierContactError(
+          "xero_contact_ambiguous",
+          ambiguousMessage(createName),
         );
-      } catch (lookupError) {
-        if (lookupError instanceof XeroCooldownError) throw lookupError;
       }
-      if (!xeroContactId) {
-        try {
-          xeroContactId = await lookupTradeSupplierByName(
-            tradeName,
-            args,
-            deps,
-            true,
-          );
-        } catch (lookupError) {
-          if (lookupError instanceof XeroCooldownError) throw lookupError;
-        }
+      if (pick.status === "chosen") {
+        return await useChosen(pick.contact, "name");
       }
-      if (!xeroContactId) throw error;
-    }
+      return null;
+    };
+    xeroContactId = await recover(false);
+    if (!xeroContactId) xeroContactId = await recover(true);
+    if (!xeroContactId) throw error;
+    return xeroContactId;
   }
 
-  if (xeroContactId && args.userId) {
-    const { error } = await client.from("users").update({
-      xero_contact_id: xeroContactId,
-    }).eq("id", args.userId);
-    if (error) {
-      console.error(
-        "[ops-api] trade Xero contact cache write failed:",
-        error.message || error,
-      );
-    }
-  }
-
-  return xeroContactId;
+  if (!xeroContactId) return null;
+  return await remember(xeroContactId, "created", createName);
 }
