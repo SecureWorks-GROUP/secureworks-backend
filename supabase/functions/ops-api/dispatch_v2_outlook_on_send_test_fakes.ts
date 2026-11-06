@@ -24,6 +24,12 @@ import type { SupplierUsage } from "./dispatch_v2_outlook_order.ts";
 
 export const ADMIN = "admin@secureworkswa.com.au";
 
+/** When the capture stored the email: its own recorded_at in a test that
+ * sets one, else the moment it was sent. */
+function storedAt(e: CapturedSentEmail): string {
+  return String((e as { recorded_at?: string }).recorded_at ?? e.sent_at);
+}
+
 /** A sent email as the capture keeps it. */
 export function sentEmail(
   n: number,
@@ -80,7 +86,9 @@ export class MemoryOnSendStore implements CatchUpStore {
     return Promise.resolve(
       this.sent
         .filter((e) =>
-          String(e.sent_at) >= opts.since && String(e.sent_at) < opts.before &&
+          // Read by the stored time, as the capture is (a re-run of the
+          // capture stores an old email with a new stored time).
+          storedAt(e) >= opts.since && storedAt(e) < opts.before &&
           /material order/i.test(e.subject)
         )
         .sort((a, b) => a.sequence_number - b.sequence_number)

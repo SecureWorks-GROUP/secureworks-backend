@@ -35,6 +35,7 @@ import {
   type PlannedOrder,
   planEmails,
   recordInputFor,
+  sentAtOrAfter,
   type SentEmailPlan,
   type StoredReply,
   storedRepliesToTie,
@@ -235,13 +236,20 @@ export async function planCatchUp(
   orgId: string,
   window: { since: string; before: string },
 ): Promise<CatchUpPlan> {
-  const emails = await store.sentOrderEmails({
+  const read = await store.sentOrderEmails({
     since: window.since,
     before: window.before,
     limit: CATCH_UP_LIMIT,
   });
+  // The capture is read by when it stored each email. Mail sent before
+  // `since` that a re-run of the capture stored again later is outside the
+  // catch-up: it is counted, never recorded.
+  const emails = read.filter((e) => sentAtOrAfter(e, window.since));
   const { plans } = await planEmails(store, orgId, emails);
   const ignored: Record<string, number> = {};
+  if (read.length > emails.length) {
+    ignored.sent_before_since = read.length - emails.length;
+  }
   const refused: CatchUpRefusal[] = [];
   for (const p of plans) {
     if (p.verdict === "ignored") {
@@ -292,7 +300,7 @@ export async function planCatchUp(
   return {
     since: window.since,
     before: window.before,
-    read: emails.length,
+    read: read.length,
     orders,
     refused,
     ignored,

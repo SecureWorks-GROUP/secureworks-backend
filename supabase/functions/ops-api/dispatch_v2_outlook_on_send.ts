@@ -1118,6 +1118,14 @@ export function zeroSentCounts(): SentPassCounts {
  * read. Never throws: a failed read or write is counted and the reply scan
  * carries on; the next run tries again (the window is seven days and every
  * write is once per email). */
+/** The capture is read by when it stored an email, which can be long after
+ * the email was sent: a re-run of the capture stores old mail again with a
+ * new stored time. Only an email sent at or after `since` counts. */
+export function sentAtOrAfter(email: CapturedSentEmail, since: string): boolean {
+  const at = Date.parse(String(email.sent_at ?? ""));
+  return Number.isFinite(at) && at >= Date.parse(since);
+}
+
 export async function scanSentOrderEmails(ctx: {
   orgId: string;
   store: OnSendStore;
@@ -1140,12 +1148,16 @@ export async function scanSentOrderEmails(ctx: {
     ).toISOString();
     const before = new Date(nowAt - SENT_LAG_MS).toISOString();
     if (from >= before) return counts;
-    const emails = await store.sentOrderEmails({
+    const read = await store.sentOrderEmails({
       since: from,
       before,
       limit: SENT_LIMIT,
     });
-    counts.sent_read = emails.length;
+    counts.sent_read = read.length;
+    // An old email stored again (sent before the rule started) is never an
+    // order here: older orders are the catch-up's.
+    const emails = read.filter((e) => sentAtOrAfter(e, since));
+    counts.sent_ignored += read.length - emails.length;
     if (emails.length === 0) return counts;
 
     // Already handled: a row under Emails to sort, or an order recorded for

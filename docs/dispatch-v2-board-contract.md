@@ -1595,7 +1595,10 @@ function `dispatch_v2_record_outlook_order_on_send` (migration
    emails at least two minutes old and at most seven days old. **The first
    run records nothing**: it only notes the time
    (`dispatch_v2_reply_scan_state.sent_orders_since`), so switching it on never
-   back-records older orders by itself (that is the catch-up, 3g.2). A failed
+   back-records older orders by itself (that is the catch-up, 3g.2). Only an
+   email sent after that time counts: the capture is read by when it stored
+   an email, and a re-run of the capture stores old mail again, so an old
+   email stored again is counted as ignored, never made an order. A failed
    read or write is counted and the reply scan carries on; the next run tries
    again.
 10. **Once only.** One order per sent email and supplier (a unique key on the
@@ -1621,6 +1624,10 @@ For the orders sent from Outlook before the rule was switched on. Rules in
 1. **Scope.** Every captured order email sent from admin@ since 5 Oct 2026
    (midnight Perth; `since` may name another time), by the rule in 3g.1, on
    jobs still on the Dispatch board. Finished jobs are skipped and listed.
+   The day it was sent decides, not the day the capture stored it: mail sent
+   before 5 Oct that the capture stored again later is counted as
+   `sent_before_since`, never recorded (on 6 Nov 2026, 219 of the 447
+   order-subject emails stored since 5 Oct were sent before it, back to May).
 2. **A dry run by default** (`dry_run` anything but `false`): it changes
    nothing and answers with every order it would make: job and client, the
    job's stage, the supplier, the day sent, the lines read or no list, the

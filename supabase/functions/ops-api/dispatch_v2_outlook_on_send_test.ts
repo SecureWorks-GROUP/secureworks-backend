@@ -462,6 +462,20 @@ Deno.test("scan: the first run only starts the clock; nothing older is recorded"
   assertEquals(t.store.calls.length, 0);
 });
 
+Deno.test("scan: an old email stored again by the capture is never an order", async () => {
+  const t = scanSetup();
+  t.store.since = "2026-11-03T00:00:00Z";
+  t.store.sent = [sentEmail(1, {
+    to: ["sales@randrfencing.com.au"],
+    body: VESNA_BODY,
+    sent_at: "2026-09-20T02:00:00Z",
+    recorded_at: "2026-11-05T00:00:00Z",
+  } as any)];
+  const r = await t.run();
+  assertEquals([r.sent_read, r.sent_ignored, r.sent_orders, r.sent_to_sort], [1, 1, 0, 0]);
+  assertEquals([t.store.calls.length, t.tray.rows.length], [0, 0]);
+});
+
 Deno.test("scan: an order sent after the start is recorded at once, with its box, as Sent", async () => {
   const t = scanSetup();
   t.store.since = "2026-11-03T00:00:00Z";
@@ -586,8 +600,14 @@ function catchUpSetup() {
     sentEmail(5, { to: ["info@westlinefencing.com.au"], body: VESNA_BODY }),
     // A quote request.
     sentEmail(6, { subject: "Material Order Quote Ref SWP-261283", to: ["perth@metroll.com.au"], body: VESNA_BODY }),
-    // Before 5 Oct: outside the catch-up.
-    sentEmail(7, { to: ["sales@randrfencing.com.au"], body: VESNA_BODY, sent_at: "2026-09-20T02:00:00Z" }),
+    // Sent before 5 Oct but stored again by a re-run of the capture on
+    // 20 Oct: read, never recorded.
+    sentEmail(7, {
+      to: ["sales@randrfencing.com.au"],
+      body: VESNA_BODY,
+      sent_at: "2026-09-20T02:00:00Z",
+      recorded_at: "2026-10-20T00:00:00Z",
+    } as any),
   ];
   t.store.replies = [reply(1)];
   // Louise's Metroll box was set to Sent by hand before both orders.
@@ -619,7 +639,7 @@ Deno.test("catch-up: the dry run lists every order and changes nothing", async (
   const t = catchUpSetup();
   const r: any = await t.run({});
   assertEquals([r.dry_run, r.since], [true, CATCH_UP_SINCE_DEFAULT]);
-  assertEquals(r.read, 6);
+  assertEquals(r.read, 7);
   assertEquals(
     r.orders.map((o: any) => [o.job_number, o.supplier, o.list_read, o.box_stage]),
     [
@@ -638,7 +658,7 @@ Deno.test("catch-up: the dry run lists every order and changes nothing", async (
     r.refused.map((x: any) => [x.reason, x.to_sort]),
     [["job_not_on_board", false], ["supplier_not_in_xero", true]],
   );
-  assertEquals(r.counts.ignored, { quote_request: 1 });
+  assertEquals(r.counts.ignored, { sent_before_since: 1, quote_request: 1 });
   // Nothing written.
   assertEquals([t.store.calls.length, t.tray.rows.length, t.store.delivered.length], [0, 0, 0]);
   assertEquals(t.store.replies[0].order_id, null);
