@@ -1170,3 +1170,6 @@ ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|constraint|
 ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|trigger|group_work_orders.trg_group_reopen_client_confirmation
 
 ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|function|prepare_scope_job_drafts
+
+# Shared installer population must exist before the matching edge reads.
+ops-api|supabase/migrations/20261106083000_group_work_order_crew.sql|function|group_work_order_crew
