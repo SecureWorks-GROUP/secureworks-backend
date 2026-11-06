@@ -1,5 +1,3 @@
-BEGIN;
-
 -- Explicit group membership remains an obligation even after a role/allocation
 -- changes. Only genuine non-admin allocations add people automatically.
 CREATE OR REPLACE FUNCTION public.group_work_order_crew(p_job_ids uuid[])
@@ -83,5 +81,3 @@ BEGIN
   END IF;
   EXECUTE replace(body, prior, replacement);
 END $patch$;
-
-COMMIT;
