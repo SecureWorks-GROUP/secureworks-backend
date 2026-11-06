@@ -93,7 +93,7 @@ export type PatioAutoGroupReason =
   | "crew_added"
   | "already_grouped"
   | "too_few_crew"
-  | "crew_paid_by_hours_already"
+  | "work_order_claimed_already"
   | "labour_outside_pool"
   | "group_frozen"
   | "group_void"
@@ -251,7 +251,7 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
       } catch (e) {
         results.push({
           ...base,
-          reason: "crew_paid_by_hours_already",
+          reason: "work_order_claimed_already",
           code: e instanceof GroupWorkOrderError ? e.code : "pay_unreadable",
         });
         continue;
@@ -269,7 +269,7 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
         const blocked = String(insertError.message || "").includes("group_open_blocked_by_work_order_claim");
         results.push({
           ...base,
-          reason: blocked ? "crew_paid_by_hours_already" : String(insertError.code) === "23505" ? "already_grouped" : "group_failed",
+          reason: blocked ? "work_order_claimed_already" : String(insertError.code) === "23505" ? "already_grouped" : "group_failed",
           code: String(insertError.code || ""),
         });
         continue;

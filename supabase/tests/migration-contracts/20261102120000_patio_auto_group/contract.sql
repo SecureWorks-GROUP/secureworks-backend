@@ -1,6 +1,7 @@
 -- WO-6. Nithin's flat office fees (Council Approval, Materials Ordered) never
--- block a group and a group never blocks them; install hours still do, both
--- ways. The weekly coverage view names each patio job's gap. Synthetic
+-- block a group and a group never blocks them; install hours on a grouped
+-- job are refused (since 20261106160000 earlier install hours no longer stop
+-- a group opening). The weekly coverage view names each patio job's gap. Synthetic
 -- records only; every fixture write is rolled back.
 BEGIN;
 DO $$
@@ -57,15 +58,20 @@ BEGIN
     RAISE EXCEPTION 'office fee blocked a group: %', SQLERRM;
   END;
 
-  -- 2. Install hours still block one.
-  refused := NULL;
+  -- 2. Since 20261106160000 install hours no longer block one: Ryan, paid by
+  -- the hour, is left out of the crew. The group is undone so the coverage
+  -- read below sees j2 as before.
   BEGIN
     INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,pay_basis)
       VALUES(org,j2,w2,'synthetic-wo6-token-2','all_in_12_v2');
-  EXCEPTION WHEN check_violation THEN refused := SQLERRM; END;
-  IF refused IS DISTINCT FROM 'group_open_blocked_by_work_order_claim' THEN
-    RAISE EXCEPTION 'install hours did not block a group: %', refused;
-  END IF;
+    IF NOT public.group_work_order_paid_by_hours(j2, ryan)
+       OR EXISTS (SELECT 1 FROM public.group_work_order_crew(ARRAY[j2]) c WHERE c.user_id = ryan) THEN
+      RAISE EXCEPTION 'paid-by-hours crew member was not left out on j2';
+    END IF;
+    RAISE EXCEPTION 'wo6_undo_j2';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'wo6_undo_j2' THEN RAISE; END IF;
+  END;
 
   -- 3. On the grouped job, Nithin's next fee goes through; hours do not.
   INSERT INTO public.trade_invoices(org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,invoice_number)

@@ -1173,3 +1173,8 @@ ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|fu
 
 # Shared installer population must exist before the matching edge reads.
 ops-api|supabase/migrations/20261106083000_group_work_order_crew.sql|function|group_work_order_crew
+
+# Crew already paid by the hour: the group opens, they are left out of the
+# split and the pot is reduced by their pay (read before the matching edge).
+ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|column|group_work_orders.hours_paid_ex
+ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|function|group_work_order_hours_paid

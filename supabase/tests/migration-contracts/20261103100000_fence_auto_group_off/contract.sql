@@ -95,8 +95,8 @@ BEGIN
   INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,description,total_hours,hourly_rate,line_total_ex)
     VALUES(inv,f4,'labour','Fence install',7.5,40,300);
 
-  -- 1. A fence lead's work-order claim blocks a group in the database, as
-  --    hours do; a fence job with no pay takes one.
+  -- 1. A fence lead's work-order claim blocks a group in the database (since
+  --    20261106160000 hours no longer do); a fence job with no pay takes one.
   refused := NULL;
   BEGIN
     INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,pay_basis)

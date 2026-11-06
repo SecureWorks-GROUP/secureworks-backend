@@ -940,9 +940,10 @@ BEGIN
   ) VALUES (
     v_open_invoice, v_org, v_a, 'draft', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
   );
+  -- A work-order claim blocks a group; hourly pay no longer does (20261106160000).
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex
-  ) VALUES (v_open_invoice, v_open_job, 'decking', 10);
+  ) VALUES (v_open_invoice, v_open_job, 'work order', 10);
   BEGIN
     INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
     VALUES (v_org, v_open_job, v_wo, 'token-open-blocked');
@@ -953,7 +954,8 @@ BEGIN
     END IF;
   END;
 
-  -- 'Other' is pay on a group job. Pending Marnin.
+  -- 'Other' is hourly pay. Since 20261106160000 it no longer blocks a group:
+  -- the paid member stays out of the crew and their pay comes off the pot.
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
   VALUES (v_other_job, v_org, 'fencing', 'quoted', 'GWO-OTHER');
   INSERT INTO public.work_orders (
@@ -972,15 +974,11 @@ BEGIN
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex
   ) VALUES (v_other_invoice, v_other_job, 'Other', 10);
-  BEGIN
-    INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
-    VALUES (v_org, v_other_job, v_wo, 'token-other-blocked');
-    RAISE EXCEPTION 'group-wo: a group opened over an Other line';
-  EXCEPTION WHEN check_violation THEN
-    IF SQLERRM IS DISTINCT FROM 'group_open_blocked_by_work_order_claim' THEN
-      RAISE EXCEPTION 'group-wo: open over Other said %', SQLERRM;
-    END IF;
-  END;
+  INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
+  VALUES (v_org, v_other_job, v_wo, 'token-other-opens');
+  IF NOT public.group_work_order_paid_by_hours(v_other_job, v_a) THEN
+    RAISE EXCEPTION 'group-wo: an Other line did not read as hourly pay';
+  END IF;
 
   -- Freeze names an installer who is assigned and has not joined.
   INSERT INTO public.jobs (id, org_id, type, status, job_number)

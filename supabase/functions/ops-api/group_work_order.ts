@@ -345,6 +345,49 @@ export function isNormalWorkOrderPayLine(line: FenceLine): boolean {
   return !NOT_PAY_KEYS.has(key);
 }
 
+/**
+ * Ordinary hours pay: normal pay that is not a work-order claim. Owner, 6 Nov
+ * 2026: it no longer blocks a group; its payee is left out of the split and
+ * the pot is reduced by what they were paid. Mirror of
+ * public.group_work_order_line_is_paid_hours (20261106160000).
+ */
+export function isPaidHoursLine(line: FenceLine): boolean {
+  if (!isNormalWorkOrderPayLine(line)) return false;
+  if (line.source_work_order_id) return false;
+  return fenceLineType(line).replace(/ /g, "") !== "workorder";
+}
+
+/** Who was paid by the hour on a job, and how much gross (any invoice that
+ * is not ops-reject, drafts included, as the double-pay fence reads it). */
+export async function readHoursPaidOnJob(client: any, jobId: string): Promise<Map<string, number>> {
+  const lines = (await rowsOf(
+    client.from("trade_invoice_lines").select(
+      "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoice_id, line_total_ex",
+    ).eq("job_id", jobId),
+    "load hours already paid on the job",
+  )).filter((line) => isPaidHoursLine(line));
+  const invoiceIds = [...new Set(lines.map((line) => String(line.trade_invoice_id || "")).filter(Boolean))];
+  const invoices = invoiceIds.length === 0 ? [] : await rowsOf(
+    client.from("trade_invoices").select("id, status, user_id").in("id", invoiceIds),
+    "load the invoices paid on the job",
+  );
+  const out = new Map<string, number>();
+  for (const line of lines) {
+    const invoice = invoices.find((row) => String(row.id) === String(line.trade_invoice_id));
+    if (!invoice?.user_id || String(invoice.status || "") === "ops-reject") continue;
+    const userId = String(invoice.user_id);
+    out.set(userId, (out.get(userId) || 0) + Number(line.line_total_ex || 0));
+  }
+  return out;
+}
+
+export async function readHoursPaidUserIds(client: any, jobId: string): Promise<Set<string>> {
+  return new Set((await readHoursPaidOnJob(client, jobId)).keys());
+}
+
+const PAID_BY_HOURS_MESSAGE =
+  "You were paid by the hour on this job, so its group pay is for the rest of the crew. Your paid days stay paid.";
+
 export function findFenceProblem(
   submittingUserId: string,
   submitting: readonly FenceLine[],
@@ -500,6 +543,13 @@ const QUERY_FAULTS: {
   status: number;
   keepDetail?: boolean;
 }[] = [
+  {
+    needle: "group_pot_used_by_hours_pay",
+    code: "group_pot_used_by_hours_pay",
+    message:
+      "The hours already paid on this job use up the whole work-order amount, so there is nothing left to split. The office needs to check the work order.",
+    status: 409,
+  },
   {
     needle: "group_split_frozen",
     code: "group_split_frozen",
@@ -755,7 +805,7 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
 }
 
 const GROUP_COLUMNS =
-  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by, signoff_required_after";
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by, signoff_required_after, hours_paid_ex";
 
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(
@@ -919,10 +969,11 @@ export async function assertNoNormalPayOnJob(client: any, jobId: string): Promis
     const invoiceId = String(line.trade_invoice_id || "");
     if (!statusById.has(invoiceId)) continue;
     if (String(statusById.get(invoiceId) || "") === "ops-reject") continue;
-    if (isNormalWorkOrderPayLine(line)) {
+    // Ordinary hours are taken off the pot instead (20261106160000).
+    if (isNormalWorkOrderPayLine(line) && !isPaidHoursLine(line)) {
       throw new GroupWorkOrderError(
         "group_open_blocked_by_work_order_claim",
-        "This job already has normal pay.",
+        "This job already has a work-order claim. The office needs to check it before a group can be created.",
         409,
       );
     }
@@ -995,6 +1046,9 @@ export async function createGroupWorkOrder(
   // The amount is not returned.
   potFromWorkOrder(await loadWorkOrder(client, workOrderId));
   await assertNoNormalPayOnJob(client, jobId);
+  if ((await readHoursPaidUserIds(client, jobId)).has(caller.userId)) {
+    throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_MESSAGE, 409);
+  }
   const token = newShareToken();
   const { data, error } = await client.from("group_work_orders").insert({
     org_id: job.org_id || caller.orgId,
@@ -1071,8 +1125,10 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
     created = true;
   }
   const on = await loadParticipants(client, String(group!.id));
+  const paid = await readHoursPaidUserIds(client, jobId);
   const added: string[] = [];
   for (const id of crewIds) {
+    if (paid.has(id)) continue;
     if (on.some((row) => String(row.user_id) === id)) continue;
     await insertParticipant(client, String(group!.id), id);
     added.push(id);
@@ -1082,13 +1138,16 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
     ...publicGroupCard(group!),
     created,
     job_number: job.job_number ?? null,
-    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id) })),
+    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id), paid_by_hours: paid.has(id) })),
     note: "Group set up. Each crew member logs hours, approves the crew's hours and invoices their share in the trade app; the client signs on the phone or the office signs off.",
   };
 }
 
 async function insertParticipant(client: any, groupId: string, userId: string) {
   const group = await loadGroupById(client, groupId);
+  if (group && (await readHoursPaidUserIds(client, String(group.job_id))).has(userId)) {
+    throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_MESSAGE, 409);
+  }
   if (group?.split_frozen_at) {
     throw new GroupWorkOrderError(
       "group_split_frozen",
@@ -1517,7 +1576,8 @@ function groupDiscovery(
   group: Record<string, unknown> | undefined,
   member: boolean,
   workOrder: Record<string, unknown> | undefined,
-  hasNormalPay: boolean,
+  hasWorkOrderClaim: boolean,
+  callerPaidByHours = false,
 ): GroupDiscovery {
   if (group) {
     if (group.status === "void") {
@@ -1528,6 +1588,11 @@ function groupDiscovery(
       };
     }
     if (member) return { state: "member" };
+    // Paid by the hour on this job: the group is the rest of the crew's
+    // (20261106160000), so never offer a join that would be refused.
+    if (callerPaidByHours) {
+      return { state: "setup_required", reason: "paid_by_hours", message: PAID_BY_HOURS_MESSAGE };
+    }
     return group.split_frozen_at
       ? {
         state: "setup_required",
@@ -1536,13 +1601,16 @@ function groupDiscovery(
       }
       : { state: "join" };
   }
-  if (hasNormalPay) {
+  if (hasWorkOrderClaim) {
     return {
       state: "setup_required",
       reason: "normal_pay_exists",
       message:
-        "This job already has an ordinary pay claim. The office needs to check it before a group can be created.",
+        "This job already has a work-order claim. The office needs to check it before a group can be created.",
     };
+  }
+  if (callerPaidByHours) {
+    return { state: "setup_required", reason: "paid_by_hours", message: PAID_BY_HOURS_MESSAGE };
   }
   const reason = groupSetupReason(workOrder);
   if (reason === "group_missing") return { state: "create" };
@@ -1587,6 +1655,7 @@ export async function readInvoicePayableRoutes(
   groups: readonly Record<string, unknown>[],
   orgId: string,
   memberGroupIds: readonly string[] = [],
+  callerUserId: string | null = null,
 ): Promise<InvoicePayableRoute[]> {
   const ids = [...new Set(jobIds.filter(Boolean))];
   if (!ids.length) return [];
@@ -1607,18 +1676,22 @@ export async function readInvoicePayableRoutes(
       ["fencing", "patio"].includes(String(job.type)) &&
       !groups.some((group) => String(group.job_id) === String(job.id))
     ).map((job) => String(job.id));
+    // Pay is read on grouped jobs too, so a crew member already paid by the
+    // hour is told so rather than offered a join (20261106160000).
+    const payReadIds = jobs.filter((job) => ["fencing", "patio"].includes(String(job.type)))
+      .map((job) => String(job.id));
     const workOrderIds = jobs.filter((job) =>
       supportedIds.includes(String(job.id))
     )
       .map((job) => String(job.work_order_id || "")).filter(Boolean);
     const [prior, workOrders] = await Promise.all([
-      supportedIds.length
+      payReadIds.length
         ? rowsOf(
           client.from("trade_invoice_lines")
             .select(
-              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status)",
+              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status, user_id)",
             )
-            .in("job_id", supportedIds),
+            .in("job_id", payReadIds),
           "check earlier pay on these jobs",
         )
         : [],
@@ -1647,12 +1720,17 @@ export async function readInvoicePayableRoutes(
         return String(row.job_id) === jobId && invoice &&
           invoice.status !== "ops-reject" && isNormalWorkOrderPayLine(row);
       });
+      const invoiceOf = (row: any) =>
+        Array.isArray(row.trade_invoices) ? row.trade_invoices[0] : row.trade_invoices;
       const discovery = supportedIds.includes(jobId) || group
         ? groupDiscovery(
           group,
           memberGroupIds.includes(String(group?.id)),
           workOrder,
-          normalPay.length > 0,
+          normalPay.some((row: any) => !isPaidHoursLine(row)),
+          Boolean(callerUserId) && normalPay.some((row: any) =>
+            isPaidHoursLine(row) && String(invoiceOf(row)?.user_id || "") === callerUserId
+          ),
         )
         : undefined;
       if (group && group.status !== "void") {
@@ -1955,6 +2033,7 @@ export async function readTradeGroupWorkOrder(
     existing ? [existing] : [],
     caller.orgId,
     memberIds,
+    caller.userId,
   );
   const discovery = route?.discovery ||
     {
@@ -2303,7 +2382,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     }
   }
   const groups=[...byId.values()];
-  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId, memberIds);
+  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId, memberIds, caller.userId);
   if (!groups.length) return { enabled: true, groups: [], payable_routes: payableRoutes };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
   const jobs: Record<string,unknown>[] = [], claims: Record<string,unknown>[] = [];
@@ -2777,9 +2856,10 @@ export async function readGroupWorkOrderOffice(
       "load feedback",
     ),
   ]);
-  const [workOrder, view] = await Promise.all([
+  const [workOrder, view, hoursPaid] = await Promise.all([
     loadWorkOrder(client, String(group.work_order_id)),
     loadShareView(client, group, participants),
+    readHoursPaidOnJob(client, String(group.job_id)),
   ]);
   const people = participants.length ? await rowsOf(
     client.from("users").select("id, name").in("id", participants.map((p) => p.user_id)),
@@ -2803,6 +2883,11 @@ export async function readGroupWorkOrderOffice(
         ? null
         : centsToMoney(moneyToCents(workOrder.agreed_labour_ex) || 0)
       : null,
+    // Crew paid by the hour on this job: left out of the split, and the pot
+    // is reduced by what they were paid (20261106160000).
+    paid_by_hours: [...hoursPaid].sort(([a], [b]) => a.localeCompare(b))
+      .map(([userId, gross]) => ({ user_id: userId, gross_ex: Math.round(gross * 100) / 100 })),
+    hours_paid_ex: group.hours_paid_ex == null ? null : Number(group.hours_paid_ex),
     needs_hours: view.needsHours,
     needs_rate: view.needsRate,
     needs_approval: view.needsApproval,

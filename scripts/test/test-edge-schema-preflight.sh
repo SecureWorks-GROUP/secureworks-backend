@@ -1046,7 +1046,8 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261106044806", "scope_local_payment_stages"),
                       ("20261106054912", "client_signoff_copies"),
                       ("20261106062000", "scope_work_order_saved_handoff"),
-                      ("20261106083000", "group_work_order_crew")]:
+                      ("20261106083000", "group_work_order_crew"),
+                      ("20261106160000", "group_paid_by_hours_member")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
