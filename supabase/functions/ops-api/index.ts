@@ -803,7 +803,7 @@ import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay,
 import { recordTradeInvoiceEvent } from './trade_invoice_events.ts'
 import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_invoice_line_ack.ts'
 import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
-import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
+import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, STUCK_TRADE_INVOICE_STATUS, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
 import { TRADE_INVOICE_ROUTE_ACTIONS, TradeInvoiceStoreError, tradeInvoiceRefusal } from './trade_invoice_refusal.ts'
 import { officeSentBackNote, tradeInvoiceOfficeNote } from './trade_invoice_office_note.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
@@ -57223,9 +57223,26 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     if (status) query = query.eq('status', status)
     return query
   }
-  const [weekly, noWeek] = await Promise.all([build(false), build(true)])
+  // A stuck invoice (saved, no Xero bill, never pushed) can be any age, so the
+  // newest-by-week read above misses old ones and the office never sees the
+  // button that clears them. Read them on their own, whatever their week, and
+  // merge: mergeTradeBillRows drops any already listed. Skipped when the list
+  // is filtered to another status. Bounded: one row over the cap says it hit.
+  const stuckRead = !status || status === STUCK_TRADE_INVOICE_STATUS
+    ? client
+      .from('trade_invoices')
+      .select(TRADE_BILLS_COLUMNS)
+      .eq('status', STUCK_TRADE_INVOICE_STATUS)
+      .is('xero_bill_id', null)
+      .order('created_at', { ascending: false })
+      .limit(STUCK_TRADE_BILLS_CAP + 1)
+    : Promise.resolve({ data: [], error: null })
+  const [weekly, noWeek, stuck] = await Promise.all([build(false), build(true), stuckRead])
   if (weekly.error) throw weekly.error
   if (noWeek.error) throw noWeek.error
+  if (stuck.error) throw stuck.error
+  const stuckRows = stuck.data || []
+  const stuckCapHit = stuckRows.length > STUCK_TRADE_BILLS_CAP
 
   // Also get trade rates for display
   const { data: rates } = await client
@@ -57235,19 +57252,26 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     .order('effective_from', { ascending: false })
 
   return {
-    invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [])
+    invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
       .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
     rates: rates || [],
+    ...(stuckCapHit
+      ? { stuck_note: `More than ${STUCK_TRADE_BILLS_CAP} invoices are stuck with no Xero bill; only the newest ${STUCK_TRADE_BILLS_CAP} are listed.` }
+      : {}),
   }
 }
+export const _listTradeInvoicesForTest = listTradeInvoices
+
+/** Most stuck invoices (no Xero bill) one Trade Bills read adds. */
+export const STUCK_TRADE_BILLS_CAP = 200
 
 const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
 
 /** Weekly and no-week invoices in one list, newest first by week, else by day made. */
-export function mergeTradeBillRows(weekly: any[], noWeek: any[]): any[] {
+export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = []): any[] {
   const key = (row: any) => String(row?.week_start || String(row?.created_at || '').slice(0, 10) || '')
   const seen = new Set<string>()
-  return [...weekly, ...noWeek]
+  return [...weekly, ...noWeek, ...stuck]
     .filter((row: any) => {
       const id = String(row?.id || '')
       if (!id || seen.has(id)) return false
