@@ -817,7 +817,7 @@ import {
   joinGroupWorkOrder,
   previewGroupClientLink,
   readGroupWorkOrderFeedback,
-  readGroupWorkOrderMyShare,
+  readTradeGroupWorkOrder,
   readMyGroupWorkOrders,
   readGroupWorkOrderOffice,
   readGroupWorkOrderPublic,
@@ -12465,7 +12465,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               return await groupWorkOrderJson(readMyGroupWorkOrders(client, groupCaller))
             }
             if (action === 'group_work_order_my_share') {
-              return await groupWorkOrderJson(readGroupWorkOrderMyShare(client, groupCaller, groupPayload))
+              return await groupWorkOrderJson(readTradeGroupWorkOrder(client, groupCaller, groupPayload))
             }
             if (action === 'capture_group_client_signoff') {
               return await groupWorkOrderJson(captureGroupClientSignoff(client, groupCaller, groupPayload))

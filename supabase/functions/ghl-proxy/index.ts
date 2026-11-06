@@ -110,6 +110,7 @@ import {
   stampedFenceOpportunityName,
   validateFenceMintInput,
 } from './fence_mint.ts'
+import { lookupScopeMintDuplicates } from './scope_mint_contacts.ts'
 import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
 import {
   assertGhlProviderReadCaller,
@@ -233,7 +234,7 @@ function json(data: unknown, status = 200, extraHeaders: Record<string, string> 
 
 async function ghl(path: string, init: RequestInit = {}) {
   const url = `${GHL_BASE}${path}`
-  console.log(`[ghl-proxy] Calling: ${init.method || 'GET'} ${url}`)
+  console.log(`[ghl-proxy] Calling: ${init.method || 'GET'} ${url.split('?')[0]}`)
   const res = await fetch(url, {
     ...init,
     headers: {
@@ -2354,23 +2355,10 @@ serve(async (req: Request) => {
             },
             getContact: async (contactId) => contactShape(await ghl(`/contacts/${encodeURIComponent(contactId)}`)),
             findContacts: async (candidate) => {
-              const lookups: Promise<any>[] = []
-              if (candidate.email) {
-                lookups.push(ghl('/contacts/search/duplicate', {
-                  method: 'POST',
-                  body: JSON.stringify({ locationId: GHL_LOCATION_ID, email: candidate.email }),
-                  signal: AbortSignal.timeout(8000),
-                }))
-              }
-              if (candidate.phone) {
-                lookups.push(ghl('/contacts/search/duplicate', {
-                  method: 'POST',
-                  body: JSON.stringify({ locationId: GHL_LOCATION_ID, phone: normalizeAUPhone(candidate.phone) }),
-                  signal: AbortSignal.timeout(8000),
-                }))
-              }
-              // At most two independent identity reads, in one bounded batch.
-              const matches = await Promise.all(lookups)
+              const matches = await lookupScopeMintDuplicates(ghl, GHL_LOCATION_ID, {
+                email: candidate.email,
+                phone: candidate.phone ? normalizeAUPhone(candidate.phone) : null,
+              })
               return matches.map(contactShape).filter((contact) => contact.id)
             },
             createContact: async (candidate) => {
