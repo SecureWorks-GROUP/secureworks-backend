@@ -24,9 +24,11 @@
 //   * Pressing Save with nothing different writes nothing.
 //
 // What this touches: one job_material_suppliers row (the seven delivery date
-// columns only) and one job_events row (the audit line). A new date on an
-// order already confirmed then runs ctx.onDateChanged (the crew "moved to"
-// line, contract section 3e). Never jobs (no status
+// columns only) and one job_events row (the audit line). Then
+// ctx.onDateChanged runs (contract section 3e): a date ticked Confirmed is
+// the order being confirmed (crew line and documents, as the stage press); a
+// date not ticked only follows up an order already confirmed (the crew
+// "moved to" line). Never jobs (no status
 // or stage change), suppliers, purchase_orders, the order emails, the reply
 // tables, Xero, GHL, SMS or any email.
 //
@@ -60,16 +62,19 @@ export type DispatchV2DeliveryDateContext = {
   // Today in Perth (YYYY-MM-DD), for the fresh Arrival line in the answer.
   today: string;
   now?: () => string;
-  // Runs after a date is set or changed (not cleared): when the box's order
-  // was already confirmed and its crew pickup line names a different day, a
-  // new line follows ("Stratco pickup moved to Thu 5 Nov"; contract section
-  // 3e, dispatch_v2_order_confirmed_write.ts). It never writes the first
-  // line. index.ts passes it; left out, the press answers as before. It
-  // never throws and never undoes the date write.
+  // Runs after a date is set or changed (not cleared), with `confirmed` =
+  // whether the box's date is now ticked Confirmed. Ticked: the order is
+  // confirmed (index.ts runs the Tweak 1 step with trigger 'date_confirmed':
+  // the crew line and documents). Not ticked: only a follow-up of an order
+  // already confirmed ("Stratco pickup moved to Thu 5 Nov"; trigger
+  // 'date_set'). Contract section 3e, dispatch_v2_order_confirmed_write.ts.
+  // index.ts passes it; left out, the press answers as before. It never
+  // throws and never undoes the date write.
   onDateChanged?: (input: {
     jobId: string;
     supplierId: string | null;
     boxId: string;
+    confirmed: boolean;
     operator: { userId: string | null; email: string };
   }) => Promise<unknown>;
 };
@@ -468,7 +473,8 @@ export async function setDispatchV2DeliveryDate(
       via: ctx.via,
     },
   );
-  // A new day on an order already confirmed: the crew's "moved to" line.
+  // Ticked Confirmed: the order-confirmed step. Not ticked: only the crew's
+  // "moved to" line on an order already confirmed.
   let crewLine: unknown = undefined;
   if (want.date !== null && ctx.onDateChanged) {
     try {
@@ -476,6 +482,7 @@ export async function setDispatchV2DeliveryDate(
         jobId: String(updated.job_id),
         supplierId: text(updated.supplier_id),
         boxId: String(updated.id),
+        confirmed: !!updated.delivery_date_confirmed_at,
         operator,
       });
     } catch (e) {

@@ -8,11 +8,18 @@
 //     through DispatchRepliesSources.orderConfirmed): trigger 'accept'.
 //   * A person moving a box's material stage to Order confirmed
 //     (dispatch_v2_material_stage_write.ts): trigger 'stage_set'.
-//   * A person changing a box's delivery date by hand
-//     (dispatch_v2_delivery_date.ts): trigger 'date_set'. This one only ever
-//     FOLLOWS UP an order that already has a line ("moved to ..."); it never
-//     writes the first line, because a date typed by hand is not, by itself,
-//     the order being confirmed.
+//   * A person saving a box's delivery date by hand
+//     (dispatch_v2_delivery_date.ts):
+//       - with Confirmed ticked: trigger 'date_confirmed'. The supplier
+//         confirmed by phone or email and the person says so, which is the
+//         order being confirmed (Shaun, 6 Nov 2026: "set the box to Order
+//         confirmed by hand" is how he confirms CMI). It does everything the
+//         stage press does: the first line, or a "moved to" line, and the
+//         documents.
+//       - with Confirmed NOT ticked: trigger 'date_set'. A date that is only
+//         pencilled in is not the order being confirmed, so this one only
+//         FOLLOWS UP an order that already has a line ("moved to ..."); it
+//         never writes the first line and saves no documents.
 //
 // What it writes, and nothing else:
 //   * one dispatch_v2_order_crew_lines row per line (the memory that the line
@@ -20,7 +27,8 @@
 //   * the crew thread note itself, through deps.writeNote, which is the same
 //     add_note the Dispatch "Add a note" button uses (internal only, Office
 //     tag, never client-visible, never synced to GHL);
-//   * on Accept and the stage press (not a by-hand date): the supplier's PDFs
+//   * on Accept, the stage press and a by-hand date ticked Confirmed (not an
+//     unconfirmed by-hand date): the supplier's PDFs
 //     from the order's matched replies, saved to the job's documents once
 //     each (dispatch_v2_order_documents.ts, contract section 3e.2); when
 //     none of those replies carries a PDF, our own one-page Material order
@@ -53,7 +61,20 @@ import {
 } from "./dispatch_v2_order_documents.ts";
 import { saveDispatchOrderSheet } from "./dispatch_v2_order_sheet_pdf.ts";
 
-export type DispatchOrderConfirmedTrigger = "accept" | "stage_set" | "date_set";
+export type DispatchOrderConfirmedTrigger =
+  | "accept"
+  | "stage_set"
+  | "date_confirmed"
+  | "date_set";
+
+/** The trigger for a by-hand date save: ticked Confirmed is the order being
+ * confirmed ('date_confirmed'); a date not ticked only follows up
+ * ('date_set'). */
+export function dispatchDateTrigger(
+  confirmed: boolean,
+): DispatchOrderConfirmedTrigger {
+  return confirmed ? "date_confirmed" : "date_set";
+}
 
 export type DispatchOrderConfirmedInput = {
   orgId: string;
@@ -409,7 +430,7 @@ export async function runDispatchV2OrderConfirmed(
   deps: DispatchOrderConfirmedDeps,
 ): Promise<DispatchOrderConfirmedResult> {
   const crewLine = await writeDispatchCrewLine(client, input, deps);
-  // A by-hand date press only follows up the crew line.
+  // A by-hand date NOT ticked Confirmed only follows up the crew line.
   if (input.trigger === "date_set") {
     return { crew_line: crewLine, documents: null };
   }

@@ -367,7 +367,7 @@ import { outlookDispatchV2Sender } from './dispatch_v2_send.ts'
 // Dispatch v2: a supplier order's delivery date set, changed or cleared by hand.
 import { runDispatchV2DeliveryDateAction } from './dispatch_v2_delivery_date.ts'
 import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_write.ts'
-import { runDispatchV2OrderConfirmed, type DispatchOrderConfirmedDeps } from './dispatch_v2_order_confirmed_write.ts'
+import { dispatchDateTrigger, runDispatchV2OrderConfirmed, type DispatchOrderConfirmedDeps } from './dispatch_v2_order_confirmed_write.ts'
 import { sweepDispatchV2OrderDocuments } from './dispatch_v2_order_documents.ts'
 import { runDispatchV2PaymentAction } from './dispatch_v2_payment_write.ts'
 import {
@@ -7649,13 +7649,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: deliveryDateActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
             today: _perthTodayYmd(),
-            // A new day on an order already confirmed: the crew's "moved to"
-            // line (contract section 3e). Never the first line.
+            // Contract section 3e. A date ticked Confirmed is the order being
+            // confirmed: crew line and documents, as the stage press. A date
+            // not ticked only follows up an order already confirmed (the
+            // crew's "moved to" line), never the first line.
             onDateChanged: (i) => runDispatchV2OrderConfirmed(client, {
               orgId: DEFAULT_ORG_ID,
               jobId: i.jobId,
               supplierId: i.supplierId,
-              trigger: 'date_set',
+              trigger: dispatchDateTrigger(i.confirmed),
               operator: i.operator,
             }, dispatchOrderConfirmedDeps(client)),
           }))

@@ -21,6 +21,7 @@ import {
   dispatchOrderBranchOf,
 } from "./dispatch_v2_order_confirmed.ts";
 import {
+  dispatchDateTrigger,
   type DispatchOrderConfirmedDeps,
   type DispatchOrderConfirmedInput,
   runDispatchV2OrderConfirmed,
@@ -508,6 +509,33 @@ Deno.test("writer: a by-hand date on an order never confirmed writes nothing", a
   assertEquals(t.tables.dispatch_v2_order_crew_lines.length, 0);
 });
 
+Deno.test("trigger (Tweak 7 Part A): a by-hand date ticked Confirmed is the order confirmed", () => {
+  assertEquals(dispatchDateTrigger(true), "date_confirmed");
+  assertEquals(dispatchDateTrigger(false), "date_set");
+});
+
+Deno.test("writer (Tweak 7 Part A): a by-hand date ticked Confirmed writes the first line", async () => {
+  // Shaun 6 Nov 2026: CMI confirms by phone or Pro Forma, he types the day
+  // and ticks Confirmed. That is the order being confirmed.
+  const t = setup();
+  const box = t.tables.job_material_suppliers.find((b) => b.id === BOX.stratco)!;
+  Object.assign(box, {
+    delivery_date: "2026-11-05",
+    delivery_date_source: "by_hand",
+    delivery_date_set_at: "2026-11-02T01:00:00Z",
+    delivery_date_confirmed_at: "2026-11-02T01:00:00Z",
+  });
+  const r = await t.confirm({ trigger: "date_confirmed" });
+  assertEquals((r.crew_line as any).kind, "confirmed");
+  assertEquals((r.crew_line as any).text, "Stratco pickup Thu 5 Nov · from Neerabup");
+  const [line] = t.tables.dispatch_v2_order_crew_lines;
+  assertEquals([line.seq, line.trigger], [1, "date_confirmed"]);
+  // Ticked again on the same day, or the stage moved after: nothing new.
+  const again = await t.confirm({ trigger: "stage_set" });
+  assertEquals((again.crew_line as any).reason, "no_change");
+  assertEquals(t.notes.length, 1);
+});
+
 Deno.test("writer: two presses at once write one note", async () => {
   const t = setup({
     // Someone else claims line 1 between this press's read and its claim.
@@ -655,7 +683,7 @@ Deno.test("hook: a new date by hand follows up a confirmed order; a cleared date
         orgId: ORG,
         jobId: i.jobId,
         supplierId: i.supplierId,
-        trigger: "date_set",
+        trigger: dispatchDateTrigger(i.confirmed),
         operator: i.operator,
       }, t.deps);
     },
@@ -676,4 +704,50 @@ Deno.test("hook: a new date by hand follows up a confirmed order; a cleared date
   assertEquals(calls.length, 1);
   assertEquals("order_confirmed" in cleared, false);
   assert(t.notes.length === 2);
+});
+
+Deno.test("hook (Tweak 7 Part A): a date ticked Confirmed confirms the order; a date not ticked does not", async () => {
+  const calls: any[] = [];
+  const hookCtx = (t: ReturnType<typeof setup>) => ({
+    orgId: ORG,
+    actor: { ...SHAUN, orgId: ORG },
+    via: "screen" as const,
+    today: "2026-11-02",
+    now: () => "2026-11-02T03:00:00.000Z",
+    // As index.ts wires it.
+    onDateChanged: (i: any) => {
+      calls.push(i);
+      return runDispatchV2OrderConfirmed(t.client, {
+        orgId: ORG,
+        jobId: i.jobId,
+        supplierId: i.supplierId,
+        trigger: dispatchDateTrigger(i.confirmed),
+        operator: i.operator,
+      }, t.deps);
+    },
+  });
+  // Not ticked, on an order never confirmed: a pencilled-in day, no line.
+  const t1 = setup();
+  const pencilled = await runDispatchV2DeliveryDateAction(
+    t1.client,
+    DISPATCH_V2_SET_DELIVERY_DATE_ACTION,
+    { box_id: BOX.stratco, delivery_date: "2026-11-05", confirmed: false },
+    hookCtx(t1),
+  ) as any;
+  assertEquals(calls[0].confirmed, false);
+  assertEquals(pencilled.order_confirmed.crew_line.reason, "not_confirmed_yet");
+  assertEquals(t1.notes.length, 0);
+  // Ticked Confirmed, on an order never confirmed: the full first line.
+  const t2 = setup();
+  const ticked = await runDispatchV2DeliveryDateAction(
+    t2.client,
+    DISPATCH_V2_SET_DELIVERY_DATE_ACTION,
+    { box_id: BOX.stratco, delivery_date: "2026-11-05", confirmed: true },
+    hookCtx(t2),
+  ) as any;
+  assertEquals(calls[1].confirmed, true);
+  assertEquals(ticked.order_confirmed.crew_line.kind, "confirmed");
+  assertEquals(t2.notes.map((n) => n.text), ["Stratco pickup Thu 5 Nov · from Neerabup"]);
+  // The job's stage and status are never touched by the date press.
+  assertEquals(ticked.job_status_changed, false);
 });
