@@ -10276,6 +10276,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(await response.json(), response.status)
       }
+      case 'read_scope_payment_stages':
+      case 'confirm_scope_payment_stage': {
+        const { scopePaymentStagesAction } = await import('./scope_payment_stages.ts')
+        const response = await scopePaymentStagesAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+        })
+        return json(await response.json(), response.status)
+      }
       case 'freeze_scope': {
         if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
         const job_id = body.job_id || body.jobId
@@ -62813,12 +62823,23 @@ async function updateCouncilStatus(client: any, body: any) {
   // Find the first non-complete step as current
   const newCurrentIdx = steps.findIndex((s: any) => s.status !== 'complete')
 
-  await client.from('council_submissions').update({
+  const { error: councilWriteError } = await client.from('council_submissions').update({
     steps,
     current_step_index: newCurrentIdx >= 0 ? newCurrentIdx : steps.length - 1,
     overall_status: overallStatus,
     updated_at: new Date().toISOString(),
   }).eq('id', submission_id)
+  if (councilWriteError) throw councilWriteError
+  if (status === 'complete') {
+    try {
+      const { error: stageError } = await client.rpc('consume_scope_council_payment_event', {
+        p_submission: submission_id, p_step: steps[idx].step_id,
+      })
+      if (stageError) console.error('[ops-api] local council payment stage held; council update retained')
+    } catch {
+      console.error('[ops-api] local council payment stage held for retry; council update retained')
+    }
+  }
 
   const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
 
