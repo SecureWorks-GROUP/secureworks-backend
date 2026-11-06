@@ -759,7 +759,7 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
 }
 
 const GROUP_COLUMNS =
-  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by";
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by, signoff_required_after";
 
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(

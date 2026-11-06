@@ -74,10 +74,12 @@ function makeClient(tables: Tables, recorded: any[] = []) {
     const rec: any = { table, eq: {}, neq: {}, is: {} };
     recorded.push(rec);
     let limitN: number | null = null;
+    let rangeN: [number,number] | null = null;
     let selectCols: string[] | null = null;
     const run = () => {
       let rows = (tables[table] || []).filter((r) => preds.every((p) => p(r)));
       if (limitN != null) rows = rows.slice(0, limitN);
+      if (rangeN) rows = rows.slice(rangeN[0],rangeN[1]+1);
       // Honour a plain column projection (no embeds / wildcard) so a column the
       // handler does NOT select — pricing_json, say — cannot reach the payload
       // through the stub and hide a real leak or fake one.
@@ -100,6 +102,7 @@ function makeClient(tables: Tables, recorded: any[] = []) {
         return api;
       },
       order: () => api,
+      range: (start:number,end:number) => {rangeN=[start,end];return api;},
       limit: (n: number) => {
         limitN = n;
         return api;
@@ -2965,6 +2968,10 @@ Deno.test("group end-work: missing or stale client confirmation leaves the job o
  job.status="processing";t.group_work_orders[0].signoff_required_after="2026-11-06T06:01:00Z";
  await assertRejects(()=>_tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,access),Error,"client must sign off the current work");
  assertEquals(job.status,"processing");
+ t.job_client_signoffs[0].created_at="2026-11-06T06:02:00Z";
+ t.job_client_signoffs[0].client_confirmed_on="2026-11-05";
+ await assertRejects(()=>_tradeCompleteMyJobForTest(makeClient(t),{jobId:JOB_FENCE},lead as any,access),Error,"client must sign off the current work");
+ assertEquals(job.status,"processing","an older dated confirmation cannot become fresh by being entered after reopening");
 });
 
 Deno.test("group-required patio without setup: installer completion refuses before changing the job",async()=>{
