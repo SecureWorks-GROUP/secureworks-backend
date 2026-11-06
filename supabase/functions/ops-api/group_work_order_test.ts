@@ -52,6 +52,8 @@ import {
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
   readMyGroupWorkOrders,
+  readInvoicePayableRoutes,
+  assertPatioPaysThroughGroup,
   assertAllInGroupInvoiceStandalone,
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
@@ -2256,6 +2258,31 @@ Deno.test("allocated workers discover an unjoined group without reading its mone
  assertEquals(found.group_job_ids,[JOB]);
  db.rows("job_assignments").at(-1)!.is_ghost=true;
  assertEquals((await readMyGroupWorkOrders(db.client(),trade(USER_C))).groups,[]);
+});
+
+Deno.test("invoice routing distinguishes missing groups from missing allowances and keeps earlier hourly pay", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("jobs")[0].type = "patio";
+  db.rows("feature_flags").push({ flag_name: "patio_pay_group_only_v1", enabled: true });
+  const read = () => readInvoicePayableRoutes(db.client(), [JOB], [], ORG);
+  assertEquals(await read(), [{ job_id: JOB, route: "group_setup_required", group_id: null, setup_reason: "group_missing" }]);
+  const existingGroups = db.rows("group_work_orders").splice(0);
+  let amountRequests = 0;
+  const refusal = await assertRejects(() => assertPatioPaysThroughGroup(db.client(),
+    [{ job_id: JOB, line_type: "labour" }], null, async () => { amountRequests++; }),
+    GroupWorkOrderError, "The approved work-order amount is ready");
+  assertEquals((refusal as GroupWorkOrderError).code, "patio_pay_group_only");
+  assertEquals(amountRequests, 0, "an approved allowance must not request a missing amount");
+  db.rows("work_orders")[0].agreed_labour_ex = null;
+  assertEquals((await read())[0].setup_reason, "allowance_missing");
+  db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "commission", trade_invoices: { status: "paid" } });
+  assertEquals((await read())[0].route, "group_setup_required");
+  db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "labour", trade_invoices: { status: "paid" } });
+  assertEquals((await read())[0].route, "hours");
+  assertEquals(await readInvoicePayableRoutes(db.client(), [JOB], [], "another-org"), []);
+  assertEquals(await readInvoicePayableRoutes(db.client(), [JOB], existingGroups, ORG),
+    [{ job_id: JOB, route: "group", group_id: GROUP }]);
 });
 
 Deno.test("the office approves a full-super crew's hours for them; someone on the crew cannot; later hours undo it", async () => {
