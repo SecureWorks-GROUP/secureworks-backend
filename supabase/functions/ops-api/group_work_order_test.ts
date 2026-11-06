@@ -63,6 +63,9 @@ import {
   PATIO_PAY_GROUP_ONLY_FLAG,
   assertPatioPaysThroughGroup,
   assertAllInGroupInvoiceStandalone,
+  captureGroupClientSignoff,
+  invoiceCardRoute,
+  weekStartWords,
   assertGroupClientConfirmationBeforeCompletion,
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
@@ -192,6 +195,25 @@ class Memory {
         }
       }
       return [...out.values()];
+    }
+    if (fn === "record_on_site_client_signoff") {
+      // Twin of 20261106193000: one call is one transaction under the key's
+      // lock, so a second copy of the key sees the first row and writes nothing.
+      const key = String(args.p_capture_request_id || "");
+      const stored = this.rows("job_client_signoffs").find((row) => row.capture_request_id === key);
+      if (stored) {
+        return {signoff_id: stored.id, claimed: false, same_capture: stored.capture_payload_hash === args.p_capture_payload_hash};
+      }
+      const media = {id: crypto.randomUUID(), job_id: args.p_job_id, type: "photo", storage_url: args.p_signature_png,
+        label: "Client signature", phase: "signature", uploaded_by: args.p_captured_by};
+      this.rows("job_media").push(media);
+      const signoff = {id: crypto.randomUUID(), org_id: args.p_org_id, job_id: args.p_job_id, method: "on_site",
+        signed_name: args.p_signed_name, happy: args.p_happy, satisfaction_rating: args.p_satisfaction_rating,
+        signature_media_id: media.id, captured_by: args.p_captured_by, captured_by_actor: args.p_captured_by_actor,
+        captured_device: args.p_captured_device, outstanding_items: args.p_outstanding_items,
+        capture_request_id: key, capture_payload_hash: args.p_capture_payload_hash};
+      this.rows("job_client_signoffs").push(signoff);
+      return {signoff_id: signoff.id, claimed: true, same_capture: true};
     }
     const groupId = String(args.p_group_id || "");
     const group = this.rows("group_work_orders").find((row) =>
@@ -3070,7 +3092,8 @@ Deno.test("paid by the hour: a claim not billed in Xero is not paid; it holds th
     assertEquals(refused?.code, "group_open_blocked_by_hours_claim", String(invoice.status));
     assertEquals(refused?.status, 409);
     assertStringIncludes(refused?.message || "", "Crew C");
-    assertStringIncludes(refused?.message || "", "withdrawn");
+    // A saved draft is named as a draft with how to clear it (fix 4, F3).
+    assertStringIncludes(refused?.message || "", invoice.status === "draft" ? "saved draft invoice" : "withdrawn");
     assertEquals(db.rows("group_work_orders").length, 0);
     const read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
     assertEquals(read.discovery?.reason, "hours_claim_unresolved");
@@ -3143,4 +3166,334 @@ Deno.test("paid by the hour: the work order drops by that pay and the rest is sp
   assertEquals(used?.code, "group_pot_used_by_hours_pay");
   assertEquals(used?.status, 409);
   assertEquals(over.rows("group_work_orders")[0].split_frozen_at, undefined);
+});
+
+
+// ---- Fix round 4 (6 Nov 2026): office removal, own drafts, card notes, on-site not happy ----
+
+Deno.test("office removal: the trade cannot rejoin, is not offered Join, and only the office puts them back", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  db.rows("job_assignments").push({
+    job_id: JOB, user_id: USER_C, scheduled_date: "2026-10-21", status: "scheduled", role: "installer",
+  });
+  db.rows("users").push(
+    { id: USER_A, name: "Crew A", role: "crew", org_id: ORG },
+    { id: USER_C, name: "Crew C", role: "crew", org_id: ORG },
+    { id: "office-1", name: "Office", role: "ops_manager", org_id: ORG },
+  );
+  await joinGroupWorkOrder(db.client(), trade(USER_C), { group_id: GROUP });
+  assert(db.rows("group_work_order_participants").some((r) => r.user_id === USER_C));
+  await removeGroupWorkOrderParticipant(db.client(), trade("office-1", true), { group_id: GROUP, user_id: USER_C });
+  assertEquals(db.rows("group_work_order_participants").some((r) => r.user_id === USER_C), false);
+
+  // One tap on Join does not put them back.
+  const join = await joinGroupWorkOrder(db.client(), trade(USER_C), { group_id: GROUP })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(join?.code, "group_member_removed_by_office");
+  assertEquals(join?.status, 409);
+  assertStringIncludes(join?.message || "", "The office removed you");
+  assertStringIncludes(join?.message || "", "Ask the office");
+  // Nor does opening the job's group again, by job.
+  const create = await createGroupWorkOrder(db.client(), trade(USER_C), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(create?.code, "group_member_removed_by_office");
+  assertEquals(db.rows("group_work_order_participants").some((r) => r.user_id === USER_C), false);
+
+  // Discovery no longer offers Join, on the job page or the weekly invoice.
+  const page = await readTradeGroupWorkOrder(db.client(), trade(USER_C), { job_id: JOB });
+  assertEquals(page.discovery?.state, "setup_required");
+  assertEquals(page.discovery?.reason, "removed_by_office");
+  const mine = await readMyGroupWorkOrders(db.client(), trade(USER_C));
+  assertEquals(mine.groups.length, 1);
+  assertEquals(mine.groups[0].awaiting, "awaiting_office");
+  assertEquals(mine.groups[0].discovery?.reason, "removed_by_office");
+  // Someone else on the job still sees Join as before.
+  db.rows("group_work_order_participants").splice(
+    db.rows("group_work_order_participants").findIndex((r) => r.user_id === USER_B), 1,
+  );
+  assertEquals((await readTradeGroupWorkOrder(db.client(), trade(USER_B), { job_id: JOB })).discovery, { state: "join" });
+
+  // The office's agent door leaves them off too, and says so.
+  const agent = await agentCreateGroupWorkOrder(db.client(), {
+    job_id: JOB, requested_by_user_id: "office-1", crew_user_ids: [USER_A, USER_C],
+  });
+  assertEquals(agent.crew.find((c) => c.user_id === USER_C)?.removed_by_office, true);
+  assertEquals(agent.crew.find((c) => c.user_id === USER_C)?.added, false);
+  assertStringIncludes(agent.note, "removed from this group by the office");
+  assertEquals(db.rows("group_work_order_participants").some((r) => r.user_id === USER_C), false);
+
+  // Only the office's restore puts them back; then they are a member.
+  await restoreGroupWorkOrderParticipant(db.client(), trade("office-1", true), { group_id: GROUP, user_id: USER_C });
+  assert(db.rows("group_work_order_participants").some((r) => r.user_id === USER_C));
+  assertEquals((await joinGroupWorkOrder(db.client(), trade(USER_C), { group_id: GROUP })).ok, true);
+  assertEquals(db.rows("group_work_order_participants").filter((r) => r.user_id === USER_C).length, 1);
+  assertEquals((await readTradeGroupWorkOrder(db.client(), trade(USER_C), { job_id: JOB })).discovery?.state, "member");
+});
+
+function seedHoursClaim(db: Memory, userId: string, invoiceId: string, invoice: Record<string, unknown>) {
+  const row = { id: invoiceId, user_id: userId, ...invoice };
+  db.rows("trade_invoices").push(row);
+  db.rows("trade_invoice_lines").push({
+    job_id: JOB, trade_invoice_id: invoiceId, line_type: "labour", line_total_ex: 90,
+    group_share_id: null, source_work_order_id: null,
+    // The live route read embeds the invoice; this fake does not join.
+    trade_invoices: row,
+  });
+}
+
+Deno.test("own saved draft: group setup names the week and how to clear it, and the draft clears it", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders").splice(0);
+  db.rows("group_work_order_participants").splice(0);
+  db.rows("users").push({ id: USER_A, name: "Crew A", role: "crew", org_id: ORG });
+  seedHoursClaim(db, USER_A, INV, { status: "draft", week_start: "2026-11-02", xero_bill_id: null, xero_bill_status: null });
+
+  const refused = await createGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(refused?.code, "group_open_blocked_by_hours_claim");
+  assertEquals(refused?.status, 409);
+  assertStringIncludes(refused?.message || "", "Your saved draft invoice for the week starting Monday 2 November has hours on this job");
+  assertStringIncludes(refused?.message || "", "take this job off it");
+  assertStringIncludes(refused?.message || "", "delete the draft");
+  assertEquals((refused?.message || "").includes("Someone"), false);
+  assertEquals(db.rows("group_work_orders").length, 0);
+
+  // The weekly invoice and job page say the same, with the draft to open.
+  const page = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(page.discovery?.reason, "hours_claim_unresolved");
+  assertEquals(page.discovery?.own_draft, { invoice_id: INV, week_start: "2026-11-02" });
+  assertStringIncludes(page.discovery?.message || "", "Monday 2 November");
+  // Another crew member is told someone holds it, never the draft's details.
+  const other = await readTradeGroupWorkOrder(db.client(), trade(USER_B), { job_id: JOB });
+  assertEquals(other.discovery?.reason, "hours_claim_unresolved");
+  assertEquals(other.discovery?.own_draft, undefined);
+  // Named to the rest of the crew as a draft, with what clears it.
+  const forB = await createGroupWorkOrder(db.client(), trade(USER_B), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertStringIncludes(forB?.message || "", "Crew A has a saved draft invoice for the week starting Monday 2 November");
+
+  // Saved again without the job (or deleted): the group opens.
+  db.rows("trade_invoice_lines").splice(0);
+  assertEquals((await createGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB })).ok, true);
+});
+
+Deno.test("regression: a submitted, approved or unbilled hours line still blocks group setup; billed hours still keep their payee off", async () => {
+  for (const invoice of [
+    { status: "pending_acknowledgment", xero_bill_id: null, xero_bill_status: null },
+    { status: "approved", xero_bill_id: null, xero_bill_status: null },
+    { status: "pushed_to_xero", xero_bill_id: "BILL-1", xero_bill_status: null },
+  ]) {
+    const db = new Memory();
+    seedSplit(db);
+    db.rows("group_work_orders").splice(0);
+    db.rows("group_work_order_participants").splice(0);
+    seedHoursClaim(db, USER_A, INV, { ...invoice, week_start: "2026-11-02" });
+    for (const caller of [USER_A, USER_B]) {
+      const refused = await createGroupWorkOrder(db.client(), trade(caller), { job_id: JOB })
+        .then(() => null, (err) => err as GroupWorkOrderError);
+      assertEquals(refused?.code, "group_open_blocked_by_hours_claim", `${invoice.status} ${caller}`);
+      assertStringIncludes(refused?.message || "", "not billed in Xero yet");
+      assertEquals((refused?.message || "").includes("saved draft"), false);
+      const page = await readTradeGroupWorkOrder(db.client(), trade(caller), { job_id: JOB });
+      assertEquals(page.discovery?.own_draft, undefined);
+    }
+    assertEquals(db.rows("group_work_orders").length, 0);
+  }
+
+  // Own draft plus a submitted claim: both are named, and it still blocks.
+  const mixed = new Memory();
+  seedSplit(mixed);
+  mixed.rows("group_work_orders").splice(0);
+  mixed.rows("group_work_order_participants").splice(0);
+  mixed.rows("users").push({ id: USER_B, name: "Crew B", role: "crew", org_id: ORG });
+  seedHoursClaim(mixed, USER_A, INV, { status: "draft", week_start: "2026-11-02" });
+  seedHoursClaim(mixed, USER_B, "60000000-0000-4000-8000-000000000002", { status: "pending_acknowledgment", week_start: "2026-10-26" });
+  const both = await createGroupWorkOrder(mixed.client(), trade(USER_A), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(both?.code, "group_open_blocked_by_hours_claim");
+  assertStringIncludes(both?.message || "", "Crew B has an hours invoice on this job that is not billed in Xero yet");
+  assertStringIncludes(both?.message || "", "Your saved draft invoice for the week starting Monday 2 November");
+  const mixedPage = await readTradeGroupWorkOrder(mixed.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(mixedPage.discovery?.own_draft, undefined, "a submitted claim is not the caller's draft to clear");
+
+  // Billed hours: the payee still cannot open or join; the freeze still names an own draft.
+  const billed = new Memory();
+  seedSplit(billed);
+  billed.rows("group_work_orders").splice(0);
+  billed.rows("group_work_order_participants").splice(0);
+  seedHoursClaim(billed, USER_A, INV, { status: "pushed_to_xero", xero_bill_id: "BILL-1", xero_bill_status: "AUTHORISED" });
+  const paid = await createGroupWorkOrder(billed.client(), trade(USER_A), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(paid?.code, "group_member_paid_by_hours");
+
+  const freeze = new Memory();
+  seedSplit(freeze);
+  freeze.rows("group_work_order_time_entries").push({ group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 6 });
+  seedHoursClaim(freeze, USER_A, INV, { status: "draft", week_start: "2026-11-02" });
+  const held = await freezeGroupWorkOrder(freeze.client(), trade(USER_A), { group_id: GROUP })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(held?.code, "group_hours_claim_unresolved");
+  assertStringIncludes(held?.message || "", "Your saved draft invoice for the week starting Monday 2 November");
+  assertStringIncludes(held?.message || "", "be finalised");
+  assertEquals(freeze.rows("group_work_order_shares").length, 0);
+});
+
+Deno.test("week start words read a Monday plainly and refuse what is not a date", () => {
+  assertEquals(weekStartWords("2026-11-02"), "Monday 2 November");
+  assertEquals(weekStartWords("2026-10-26T00:00:00Z"), "Monday 26 October");
+  assertEquals(weekStartWords(""), null);
+  assertEquals(weekStartWords("not a day"), null);
+});
+
+Deno.test("weekly invoice hours cards carry no group note without a group; group jobs keep theirs", async () => {
+  // Pure rule.
+  const note = { state: "setup_required" as const, reason: "work_order_not_approved", message: "office" };
+  assertEquals(invoiceCardRoute({ job_id: JOB, route: "hours", group_id: null, discovery: note }), { job_id: JOB, route: "hours", group_id: null });
+  assertEquals(invoiceCardRoute({ job_id: JOB, route: "hours", group_id: null, discovery: { state: "create" } }).discovery, { state: "create" });
+  assertEquals(invoiceCardRoute({ job_id: JOB, route: "group_setup_required", group_id: null, discovery: note }).discovery, note);
+  assertEquals(invoiceCardRoute({ job_id: JOB, route: "group", group_id: GROUP, discovery: note }).discovery, note);
+
+  // A fencing hours card whose work order is not approved: no setup note.
+  const fence = new Memory();
+  seedSplit(fence);
+  fence.rows("group_work_orders").splice(0);
+  fence.rows("group_work_order_participants").splice(0);
+  fence.rows("work_orders")[0].status = "draft";
+  const fenceRoutes = (await readMyGroupWorkOrders(fence.client(), trade(USER_A))).payable_routes || [];
+  assertEquals(fenceRoutes.find((r) => r.job_id === JOB)?.route, "hours");
+  assertEquals(fenceRoutes.find((r) => r.job_id === JOB)?.discovery, undefined);
+  // The job's own group page still says why.
+  assertEquals((await readTradeGroupWorkOrder(fence.client(), trade(USER_A), { job_id: JOB })).discovery?.reason, "work_order_not_approved");
+
+  // Paid by the hour on a job with no group: no "group pay is for the rest
+  // of the crew" note on the card, and the page does not speak of group pay.
+  const paidNoGroup = new Memory();
+  seedSplit(paidNoGroup);
+  paidNoGroup.rows("group_work_orders").splice(0);
+  paidNoGroup.rows("group_work_order_participants").splice(0);
+  seedHoursClaim(paidNoGroup, USER_A, INV, { status: "paid", xero_bill_id: "BILL-1", xero_bill_status: "PAID" });
+  const paidRoutes = (await readMyGroupWorkOrders(paidNoGroup.client(), trade(USER_A))).payable_routes || [];
+  assertEquals(paidRoutes.find((r) => r.job_id === JOB)?.discovery, undefined);
+  const paidPage = await readTradeGroupWorkOrder(paidNoGroup.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(paidPage.discovery?.reason, "paid_by_hours");
+  assertEquals((paidPage.discovery?.message || "").includes("group pay is for the rest of the crew"), false);
+  const paidCreate = await createGroupWorkOrder(paidNoGroup.client(), trade(USER_A), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals((paidCreate?.message || "").includes("group pay is for the rest of the crew"), false);
+
+  // With a group the trade is paid outside of, the note stays.
+  const paidGroup = new Memory();
+  seedSplit(paidGroup);
+  paidGroup.rows("group_work_order_participants").splice(0);
+  seedHoursClaim(paidGroup, USER_A, INV, { status: "paid", xero_bill_id: "BILL-1", xero_bill_status: "PAID" });
+  const grouped = await readMyGroupWorkOrders(paidGroup.client(), trade(USER_A));
+  assertStringIncludes((grouped.payable_routes || []).find((r) => r.job_id === JOB)?.discovery?.message || "", "group pay is for the rest of the crew");
+
+  // A patio crew job that needs its group set up keeps its setup note.
+  const patio = new Memory();
+  seedSplit(patio);
+  patio.rows("group_work_orders").splice(0);
+  patio.rows("group_work_order_participants").splice(0);
+  patio.rows("jobs")[0].type = "patio";
+  patio.rows("work_orders")[0].status = "draft";
+  patio.rows("feature_flags").push({ flag_name: PATIO_PAY_GROUP_ONLY_FLAG, enabled: true });
+  const patioRoute = ((await readMyGroupWorkOrders(patio.client(), trade(USER_A))).payable_routes || []).find((r) => r.job_id === JOB);
+  assertEquals(patioRoute?.route, "group_setup_required");
+  assertEquals(patioRoute?.discovery?.reason, "work_order_not_approved");
+});
+
+const SIGNATURE = "data:image/png;base64,iVBORw0KGgo=";
+
+Deno.test("on-site sign-off: not happy with a reason saves once, a retry adds nothing, and shares stay locked", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  const body = {
+    group_id: GROUP, signer_name: "Invented Client", signature_png: SIGNATURE, happy: false,
+    outstanding_items: "Gate latch still to fix",
+    ratings: { sales_process: 5, communication: 5, cleanliness: 5, punctuality: 5, crew: 5 },
+  };
+  const first = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
+  assertEquals(first.client_signed, false);
+  assertEquals(db.rows("job_client_signoffs").length, 1);
+  const row = db.rows("job_client_signoffs")[0];
+  assertEquals([row.method, row.happy, row.outstanding_items], ["on_site", false, "Gate latch still to fix"]);
+  // Not happy: no feedback step, so nothing throws after the signature is stored.
+  assertEquals(db.rows("group_work_order_feedback").length, 0);
+  assertEquals(db.rows("group_work_orders")[0].status, "open");
+
+  const retry = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
+  assertEquals(retry, first);
+  assertEquals(db.rows("job_client_signoffs").length, 1);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 1);
+
+  // A different answer is a new sign-off, not a retry.
+  await captureGroupClientSignoff(db.client(), trade(USER_A), { ...body, outstanding_items: "Gate latch and one paling" });
+  assertEquals(db.rows("job_client_signoffs").length, 2);
+
+  // Not happy needs a reason.
+  const noReason = await captureGroupClientSignoff(db.client(), trade(USER_A), { ...body, outstanding_items: " " })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(noReason?.code, "group_client_reason_required");
+  assertEquals(noReason?.status, 400);
+  assertEquals(db.rows("job_client_signoffs").length, 2);
+});
+
+Deno.test("on-site sign-off: the happy path is unchanged and a retry writes nothing new", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  const body = {
+    group_id: GROUP, signer_name: "Invented Client", signature_png: SIGNATURE, happy: true,
+    ratings: { sales_process: 5, communication: 5, cleanliness: 5, punctuality: 5, crew: 5 },
+  };
+  const signed = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
+  assertEquals(signed.client_signed, true);
+  assertEquals(db.rows("job_client_signoffs").length, 1);
+  assertEquals(db.rows("job_client_signoffs")[0].outstanding_items, null);
+  assertEquals(db.rows("group_work_order_feedback").length, 1);
+  assertEquals(db.rows("group_work_orders")[0].status, "client_signed");
+  const again = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
+  assertEquals(again.client_signed, true);
+  assertEquals((again as Record<string, unknown>).already_signed, true);
+  assertEquals(db.rows("job_client_signoffs").length, 1);
+  assertEquals(db.rows("group_work_order_feedback").length, 1);
+});
+
+Deno.test("on-site sign-off: two identical captures at the same moment leave one sign-off and one signature", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  const body = {
+    group_id: GROUP, signer_name: "Invented Client", signature_png: SIGNATURE, happy: false,
+    outstanding_items: "Gate latch still to fix",
+  };
+  const [a, b] = await Promise.all([
+    captureGroupClientSignoff(db.client(), trade(USER_A), body),
+    captureGroupClientSignoff(db.client(), trade(USER_A), body),
+  ]);
+  assertEquals(db.rows("job_client_signoffs").length, 1);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 1);
+  assertEquals(a, b);
+  assertEquals(a.client_signed, false);
+  assertEquals(db.rows("group_work_orders")[0].status, "open");
+
+  // The app's own capture id: two copies at once still save once.
+  const withId = { ...body, outstanding_items: "Gate latch and one paling", capture_id: "7d1c2f9a-3b4e-4c5d-8e6f-0a1b2c3d4e5f" };
+  const [c, d] = await Promise.all([
+    captureGroupClientSignoff(db.client(), trade(USER_A), withId),
+    captureGroupClientSignoff(db.client(), trade(USER_A), withId),
+  ]);
+  assertEquals(c, d);
+  assertEquals(db.rows("job_client_signoffs").length, 2);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 2);
+
+  // The same capture id with different answers is refused and writes nothing.
+  const reused = await captureGroupClientSignoff(db.client(), trade(USER_A), { ...withId, outstanding_items: "Something else" })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals([reused?.code, reused?.status], ["group_client_signoff_capture_reused", 409]);
+  const badId = await captureGroupClientSignoff(db.client(), trade(USER_A), { ...body, capture_id: "not-a-uuid" })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals([badId?.code, badId?.status], ["group_client_capture_id_invalid", 400]);
+  assertEquals(db.rows("job_client_signoffs").length, 2);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 2);
 });

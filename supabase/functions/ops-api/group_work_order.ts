@@ -369,12 +369,20 @@ export function isBilledHoursInvoice(invoice: Record<string, unknown> | null | u
   return ["AUTHORISED", "PAID"].includes(String(invoice.xero_bill_status || "").trim().toUpperCase());
 }
 
+/** One hours claim on a job that is not ops-reject and not billed yet. */
+export type UnresolvedHoursClaim = {
+  userId: string;
+  invoiceId: string;
+  status: string;
+  weekStart: string | null;
+};
+
 /** Hours claims on a job: who was paid (billed) and how much gross, and who
  * holds a claim that is not ops-reject and not billed yet. */
 export async function readHoursPayOnJob(
   client: any,
   jobId: string,
-): Promise<{ paid: Map<string, number>; unresolved: Set<string> }> {
+): Promise<{ paid: Map<string, number>; unresolved: Set<string>; claims: UnresolvedHoursClaim[] }> {
   const lines = (await rowsOf(
     client.from("trade_invoice_lines").select(
       "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoice_id, line_total_ex",
@@ -383,23 +391,32 @@ export async function readHoursPayOnJob(
   )).filter((line) => isPaidHoursLine(line));
   const invoiceIds = [...new Set(lines.map((line) => String(line.trade_invoice_id || "")).filter(Boolean))];
   const invoices = invoiceIds.length === 0 ? [] : await rowsOf(
-    client.from("trade_invoices").select("id, status, user_id, xero_bill_id, xero_bill_status").in("id", invoiceIds),
+    client.from("trade_invoices").select("id, status, user_id, week_start, xero_bill_id, xero_bill_status").in("id", invoiceIds),
     "load the invoices paid on the job",
   );
   const paid = new Map<string, number>();
   const unresolved = new Set<string>();
+  const claims: UnresolvedHoursClaim[] = [];
   for (const line of lines) {
     const invoice = invoices.find((row) => String(row.id) === String(line.trade_invoice_id));
     if (!invoice || String(invoice.status || "") === "ops-reject") continue;
     const userId = String(invoice.user_id || "");
     if (!isBilledHoursInvoice(invoice)) {
       unresolved.add(userId);
+      if (!claims.some((claim) => claim.invoiceId === String(invoice.id))) {
+        claims.push({
+          userId,
+          invoiceId: String(invoice.id),
+          status: String(invoice.status || ""),
+          weekStart: invoice.week_start ? String(invoice.week_start).slice(0, 10) : null,
+        });
+      }
       continue;
     }
     if (!userId) continue;
     paid.set(userId, (paid.get(userId) || 0) + Number(line.line_total_ex || 0));
   }
-  return { paid, unresolved };
+  return { paid, unresolved, claims };
 }
 
 /** Who was paid by the hour on a job (billed in Xero), and how much gross. */
@@ -418,17 +435,75 @@ async function namesOf(client: any, ids: readonly string[]): Promise<string[]> {
   );
 }
 
-/** A plain refusal naming whose hours claim is not billed yet. */
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June", "July", "August",
+  "September", "October", "November", "December",
+];
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** "Monday 2 November" for a YYYY-MM-DD week start; null when unreadable. */
+export function weekStartWords(day: string | null | undefined): string | null {
+  const text = String(day || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const at = new Date(text + "T00:00:00Z");
+  if (Number.isNaN(at.getTime())) return null;
+  return `${WEEKDAYS[at.getUTCDay()]} ${at.getUTCDate()} ${MONTHS[at.getUTCMonth()]}`;
+}
+
+function andList(items: readonly string[]): string {
+  return items.length <= 1 ? (items[0] || "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** "for the week starting Monday 2 November", or "" for an invoice with no week. */
+function draftWeeks(claims: readonly UnresolvedHoursClaim[]): string {
+  const weeks = [...new Set(claims.map((claim) => claim.weekStart).filter(Boolean) as string[])].sort()
+    .map((day) => weekStartWords(day)).filter(Boolean) as string[];
+  if (!weeks.length) return "";
+  return weeks.length === 1 ? ` for the week starting ${weeks[0]}` : ` for the weeks starting ${andList(weeks)}`;
+}
+
+/**
+ * A plain refusal naming whose hours claim is not billed yet. A saved draft
+ * (never submitted) is named as a draft with its week and how to clear it,
+ * and the caller's own draft is spoken to them. A draft still blocks: a
+ * submit path writes its invoice as a draft before it goes live, so a draft
+ * cannot be told apart from a claim being submitted at that moment.
+ */
 export async function unresolvedHoursClaimMessage(
   client: any,
-  userIds: ReadonlySet<string>,
+  claims: readonly UnresolvedHoursClaim[],
   what: "open" | "freeze",
+  callerUserId: string | null = null,
 ): Promise<string> {
-  const names = (await namesOf(client, [...userIds])).sort();
-  const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-  const has = names.length === 1 ? "has an hours invoice" : "have hours invoices";
-  const it = names.length === 1 ? "It" : "They";
-  return `${who} ${has} on this job that ${names.length === 1 ? "is" : "are"} not billed in Xero yet. ${it} must be withdrawn, or billed in Xero, before the group can ${what === "open" ? "be created" : "be finalised"}.`;
+  const outcome = what === "open" ? "be created" : "be finalised";
+  const byUser = new Map<string, UnresolvedHoursClaim[]>();
+  for (const claim of claims) byUser.set(claim.userId, [...(byUser.get(claim.userId) || []), claim]);
+  const submitted: string[] = [];
+  const draftOnly: string[] = [];
+  for (const [userId, own] of byUser) {
+    (own.every((claim) => claim.status === "draft") ? draftOnly : submitted).push(userId);
+  }
+  const sentences: string[] = [];
+  if (submitted.length) {
+    const names = (await namesOf(client, submitted)).sort();
+    const has = names.length === 1 ? "has an hours invoice" : "have hours invoices";
+    const it = names.length === 1 ? "It" : "They";
+    sentences.push(`${andList(names)} ${has} on this job that ${names.length === 1 ? "is" : "are"} not billed in Xero yet. ${it} must be withdrawn, or billed in Xero, before the group can ${outcome}.`);
+  }
+  const mine = callerUserId ? draftOnly.filter((userId) => userId === callerUserId) : [];
+  const others = draftOnly.filter((userId) => !mine.includes(userId));
+  if (mine.length) {
+    sentences.push(`Your saved draft invoice${draftWeeks(byUser.get(mine[0])!)} has hours on this job. Open that invoice and take this job off it, then save it again, or delete the draft. Then the group can ${outcome}.`);
+  }
+  if (others.length) {
+    const names = await namesOf(client, others);
+    const people = others.map((userId, index) => ({ name: names[index], weeks: draftWeeks(byUser.get(userId)!) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const person of people) {
+      sentences.push(`${person.name} has a saved draft invoice${person.weeks} with hours on this job. They need to take this job off it and save it again, or delete the draft, before the group can ${outcome}.`);
+    }
+  }
+  return sentences.join(" ");
 }
 
 export async function readHoursPaidUserIds(client: any, jobId: string): Promise<Set<string>> {
@@ -437,6 +512,42 @@ export async function readHoursPaidUserIds(client: any, jobId: string): Promise<
 
 const PAID_BY_HOURS_MESSAGE =
   "You were paid by the hour on this job, so its group pay is for the rest of the crew. Your paid days stay paid.";
+// No group on the job yet: there is no group pay to speak of.
+const PAID_BY_HOURS_NO_GROUP_MESSAGE =
+  "You were paid by the hour on this job, so you are not on its crew group. Your paid days stay paid.";
+
+export const REMOVED_BY_OFFICE_MESSAGE =
+  "The office removed you from this group work order. Ask the office if you should be back on it.";
+
+/**
+ * Office removals of these people from these groups that still stand
+ * (20261106170000). Only the office puts a removed person back, through
+ * restore_group_work_order_participant, which ends the removal first.
+ */
+async function standingRemovals(
+  client: any,
+  groupIds: readonly string[],
+  userIds: readonly string[],
+): Promise<Set<string>> {
+  const groups = [...new Set(groupIds.filter(Boolean))];
+  const users = [...new Set(userIds.filter(Boolean))];
+  if (!groups.length || !users.length) return new Set();
+  const rows: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < groups.length; offset += 100) {
+    rows.push(...await rowsOf(
+      client.from("group_work_order_crew_removals").select("group_id, user_id")
+        .in("group_id", groups.slice(offset, offset + 100)).in("user_id", users).is("restored_at", null),
+      "check office removals from the group",
+    ));
+  }
+  return new Set(rows.map((row) => `${row.group_id}:${row.user_id}`));
+}
+
+async function assertNotRemovedByOffice(client: any, groupId: string, userId: string): Promise<void> {
+  if ((await standingRemovals(client, [groupId], [userId])).size > 0) {
+    throw new GroupWorkOrderError("group_member_removed_by_office", REMOVED_BY_OFFICE_MESSAGE, 409);
+  }
+}
 
 export function findFenceProblem(
   submittingUserId: string,
@@ -1015,7 +1126,11 @@ function deviceLabel(value: unknown): string | null {
   return device.slice(0, 200);
 }
 
-export async function assertNoNormalPayOnJob(client: any, jobId: string): Promise<void> {
+export async function assertNoNormalPayOnJob(
+  client: any,
+  jobId: string,
+  callerUserId: string | null = null,
+): Promise<void> {
   const lines = await rowsOf(
     client.from("trade_invoice_lines").select(
       "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoice_id",
@@ -1050,11 +1165,11 @@ export async function assertNoNormalPayOnJob(client: any, jobId: string): Promis
   }
   // An hours claim not billed in Xero yet is not paid: it must be withdrawn
   // or billed before the group opens (20261106160000).
-  const { unresolved } = await readHoursPayOnJob(client, jobId);
-  if (unresolved.size > 0) {
+  const { claims } = await readHoursPayOnJob(client, jobId);
+  if (claims.length > 0) {
     throw new GroupWorkOrderError(
       "group_open_blocked_by_hours_claim",
-      await unresolvedHoursClaimMessage(client, unresolved, "open"),
+      await unresolvedHoursClaimMessage(client, claims, "open", callerUserId),
       409,
     );
   }
@@ -1125,9 +1240,9 @@ export async function createGroupWorkOrder(
   // Read the pot only to refuse a group that can never be invoiced.
   // The amount is not returned.
   potFromWorkOrder(await loadWorkOrder(client, workOrderId));
-  await assertNoNormalPayOnJob(client, jobId);
+  await assertNoNormalPayOnJob(client, jobId, caller.userId);
   if ((await readHoursPaidUserIds(client, jobId)).has(caller.userId)) {
-    throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_MESSAGE, 409);
+    throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_NO_GROUP_MESSAGE, 409);
   }
   const token = newShareToken();
   const { data, error } = await client.from("group_work_orders").insert({
@@ -1206,9 +1321,12 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
   }
   const on = await loadParticipants(client, String(group!.id));
   const paid = await readHoursPaidUserIds(client, jobId);
+  const removed = await standingRemovals(client, [String(group!.id)], crewIds);
+  const isRemoved = (id: string) => removed.has(`${group!.id}:${id}`) && !on.some((row) => String(row.user_id) === id);
   const added: string[] = [];
   for (const id of crewIds) {
     if (paid.has(id)) continue;
+    if (isRemoved(id)) continue;
     if (on.some((row) => String(row.user_id) === id)) continue;
     await insertParticipant(client, String(group!.id), id);
     added.push(id);
@@ -1218,12 +1336,16 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
     ...publicGroupCard(group!),
     created,
     job_number: job.job_number ?? null,
-    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id), paid_by_hours: paid.has(id) })),
-    note: "Group set up. Each crew member logs hours, approves the crew's hours and invoices their share in the trade app; the client signs on the phone or the office signs off.",
+    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id), paid_by_hours: paid.has(id), removed_by_office: isRemoved(id) })),
+    note: crewIds.some(isRemoved)
+      ? "Group set up. Someone named was removed from this group by the office and was not put back; the office restores them from the group if they should be on it."
+      : "Group set up. Each crew member logs hours, approves the crew's hours and invoices their share in the trade app; the client signs on the phone or the office signs off.",
   };
 }
 
 async function insertParticipant(client: any, groupId: string, userId: string) {
+  // Office removal wins: only the office's restore puts them back.
+  await assertNotRemovedByOffice(client, groupId, userId);
   const group = await loadGroupById(client, groupId);
   if (group && (await readHoursPaidUserIds(client, String(group.job_id))).has(userId)) {
     throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_MESSAGE, 409);
@@ -1268,6 +1390,11 @@ export async function joinGroupWorkOrder(
       403,
     );
   }
+  const participants = await loadParticipants(client, String(group.id));
+  if (participants.some((row) => String(row.user_id) === caller.userId)) {
+    return publicGroupCard(group);
+  }
+  await assertNotRemovedByOffice(client, String(group.id), caller.userId);
   if (group.split_frozen_at) {
     throw new GroupWorkOrderError(
       "group_split_frozen",
@@ -1275,10 +1402,7 @@ export async function joinGroupWorkOrder(
       409,
     );
   }
-  const participants = await loadParticipants(client, String(group.id));
-  if (!participants.some((row) => String(row.user_id) === caller.userId)) {
-    await insertParticipant(client, String(group.id), caller.userId);
-  }
+  await insertParticipant(client, String(group.id), caller.userId);
   return publicGroupCard(group);
 }
 
@@ -1662,7 +1786,13 @@ export type GroupDiscovery = {
   state: "create" | "join" | "member" | "setup_required";
   reason?: string;
   message?: string;
+  /** The caller's own saved draft that holds the group's setup, so the app
+   * can open that week. Present only with reason hours_claim_unresolved. */
+  own_draft?: { invoice_id: string; week_start: string | null };
 };
+
+const UNRESOLVED_HOURS_SETUP_MESSAGE =
+  "Someone has an hours invoice on this job that is not billed in Xero yet. It must be withdrawn, or billed in Xero, before the group can be created.";
 
 function groupDiscovery(
   group: Record<string, unknown> | undefined,
@@ -1671,6 +1801,11 @@ function groupDiscovery(
   hasWorkOrderClaim: boolean,
   callerPaidByHours = false,
   hasUnresolvedHoursClaim = false,
+  extra: {
+    removedByOffice?: boolean;
+    /** Unbilled hours claims on the job, when only the caller's own drafts. */
+    ownDrafts?: readonly UnresolvedHoursClaim[];
+  } = {},
 ): GroupDiscovery {
   if (group) {
     if (group.status === "void") {
@@ -1681,6 +1816,11 @@ function groupDiscovery(
       };
     }
     if (member) return { state: "member" };
+    // The office removed them: only the office puts them back
+    // (20261106170000), so never offer a join.
+    if (extra.removedByOffice) {
+      return { state: "setup_required", reason: "removed_by_office", message: REMOVED_BY_OFFICE_MESSAGE };
+    }
     // Paid by the hour on this job: the group is the rest of the crew's
     // (20261106160000), so never offer a join that would be refused.
     if (callerPaidByHours) {
@@ -1703,15 +1843,21 @@ function groupDiscovery(
     };
   }
   if (hasUnresolvedHoursClaim) {
-    return {
-      state: "setup_required",
-      reason: "hours_claim_unresolved",
-      message:
-        "Someone has an hours invoice on this job that is not billed in Xero yet. It must be withdrawn, or billed in Xero, before the group can be created.",
-    };
+    const own = extra.ownDrafts || [];
+    if (own.length) {
+      const first = [...own].sort((a, b) => String(a.weekStart || "").localeCompare(String(b.weekStart || "")))[0];
+      return {
+        state: "setup_required",
+        reason: "hours_claim_unresolved",
+        message: `Your saved draft invoice${draftWeeks(own)} has hours on this job. Open that invoice and take this job off it, then save it again, or delete the draft. Then the group can be created.`,
+        own_draft: { invoice_id: first.invoiceId, week_start: first.weekStart },
+      };
+    }
+    return { state: "setup_required", reason: "hours_claim_unresolved", message: UNRESOLVED_HOURS_SETUP_MESSAGE };
   }
   if (callerPaidByHours) {
-    return { state: "setup_required", reason: "paid_by_hours", message: PAID_BY_HOURS_MESSAGE };
+    // No group yet: there is no group pay to speak of.
+    return { state: "setup_required", reason: "paid_by_hours", message: PAID_BY_HOURS_NO_GROUP_MESSAGE };
   }
   const reason = groupSetupReason(workOrder);
   if (reason === "group_missing") return { state: "create" };
@@ -1790,7 +1936,7 @@ export async function readInvoicePayableRoutes(
         ? rowsOf(
           client.from("trade_invoice_lines")
             .select(
-              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status, user_id, xero_bill_id, xero_bill_status)",
+              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(id, status, user_id, week_start, xero_bill_id, xero_bill_status)",
             )
             .in("job_id", payReadIds),
           "check earlier pay on these jobs",
@@ -1808,6 +1954,17 @@ export async function readInvoicePayableRoutes(
     const legacyJobs = patioIds.length
       ? await readPatioLegacyHoursJobIds(client, jobs.filter((job) => patioIds.includes(String(job.id))))
       : new Set<string>();
+    // Groups the caller is not on: an office removal there stands until the
+    // office restores them (20261106170000).
+    const removals = callerUserId
+      ? await standingRemovals(
+        client,
+        jobs.map((job) => groups.find((row) => String(row.job_id) === String(job.id)))
+          .filter((group) => group && !memberGroupIds.includes(String(group.id)))
+          .map((group) => String(group!.id)),
+        [callerUserId],
+      )
+      : new Set<string>();
     for (const job of jobs) {
       const jobId = String(job.id);
       const group = groups.find((row) => String(row.job_id) === jobId);
@@ -1823,6 +1980,24 @@ export async function readInvoicePayableRoutes(
       });
       const invoiceOf = (row: any) =>
         Array.isArray(row.trade_invoices) ? row.trade_invoices[0] : row.trade_invoices;
+      const unbilledHours = normalPay.filter((row: any) => isPaidHoursLine(row) && !isBilledHoursInvoice(invoiceOf(row)));
+      // When every unbilled hours claim is the caller's own saved draft, the
+      // note names that draft and its week (the weekly builder no longer
+      // shows the line, so the trade could not see what held the group).
+      const ownDrafts: UnresolvedHoursClaim[] = Boolean(callerUserId) && unbilledHours.length > 0 &&
+          unbilledHours.every((row: any) =>
+            String(invoiceOf(row)?.status || "") === "draft" && String(invoiceOf(row)?.user_id || "") === callerUserId
+          )
+        ? [...new Map(unbilledHours.map((row: any) => {
+          const invoice = invoiceOf(row);
+          return [String(invoice?.id || ""), {
+            userId: String(callerUserId),
+            invoiceId: String(invoice?.id || ""),
+            status: "draft",
+            weekStart: invoice?.week_start ? String(invoice.week_start).slice(0, 10) : null,
+          }];
+        })).values()]
+        : [];
       const discovery = supportedIds.includes(jobId) || group
         ? groupDiscovery(
           group,
@@ -1833,7 +2008,11 @@ export async function readInvoicePayableRoutes(
             isPaidHoursLine(row) && isBilledHoursInvoice(invoiceOf(row)) &&
             String(invoiceOf(row)?.user_id || "") === callerUserId
           ),
-          normalPay.some((row: any) => isPaidHoursLine(row) && !isBilledHoursInvoice(invoiceOf(row))),
+          unbilledHours.length > 0,
+          {
+            removedByOffice: Boolean(group) && removals.has(`${group!.id}:${callerUserId}`),
+            ownDrafts,
+          },
         )
         : undefined;
       if (group && group.status !== "void") {
@@ -1941,6 +2120,18 @@ export async function assertPatioPaysThroughGroup(
       409,
     );
   }
+}
+
+/**
+ * What a weekly invoice hours card may say about groups. A job paid by the
+ * hour with no live group carries no group-setup or paid-by-the-hour note:
+ * those belong to group jobs. It may still offer Create. The job's own group
+ * page keeps the full reason (readTradeGroupWorkOrder).
+ */
+export function invoiceCardRoute(route: InvoicePayableRoute): InvoicePayableRoute {
+  if (route.route !== "hours" || !route.discovery || route.discovery.state === "create") return route;
+  const { discovery: _note, ...rest } = route;
+  return rest;
 }
 
 /** The one plain next step for a job paid through a group work order. */
@@ -2508,7 +2699,8 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
   }
   const groups=[...byId.values()];
   const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId, memberIds, caller.userId);
-  if (!groups.length) return { enabled: true, groups: [], payable_routes: payableRoutes };
+  const cardRoutes = payableRoutes.map(invoiceCardRoute);
+  if (!groups.length) return { enabled: true, groups: [], payable_routes: cardRoutes };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
   const jobs: Record<string,unknown>[] = [], claims: Record<string,unknown>[] = [];
   for(let offset=0;offset<jobIds.length;offset+=100) {
@@ -2556,7 +2748,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
       ...(pay ? {projected_my_budget: projectedBudget, projected_cash_pay: pay.cash_pay, projected_super: pay.super_amount, budget_remainder: pay.budget_remainder} : {}), job_id: group.job_id, job_number: job.job_number,
       client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
   }
-  return { enabled: true, group_job_ids: jobIds, groups: result, payable_routes: payableRoutes };
+  return { enabled: true, group_job_ids: jobIds, groups: result, payable_routes: cardRoutes };
 }
 
 async function readSplit(
@@ -2742,10 +2934,18 @@ async function storeClientSignature(
     happy: boolean | null;
     rating: number | null;
     confirmation?: { client_confirmed_on: string; work_done: string; outstanding_items: string | null };
+    /** On-site only: what the client is not happy with. */
+    outstandingItems?: string | null;
+    /** On-site only: the app's id for this capture, when it sends one. */
+    captureId?: string | null;
   },
 ) {
   if (await countingSignoff(client, String(group.job_id), group)) {
     return { ok: true, client_signed: true, already_signed: true };
+  }
+  if (input.method === "on_site") {
+    await recordOnSiteSignoffOnce(client, group, input);
+    return await finishClientSignature(client, group);
   }
   const { data: media, error: mediaError } = await client.from("job_media")
     .insert({
@@ -2779,6 +2979,11 @@ async function storeClientSignature(
     ...(input.confirmation || {}),
   });
   throwQuery(error, "record the client's signature");
+  return await finishClientSignature(client, group);
+}
+
+/** After a signature is stored: does it count, and stamp an open group signed. */
+async function finishClientSignature(client: any, group: Record<string, unknown>) {
   const counts = await countingSignoff(client, String(group.job_id), group);
   if (counts && group.status === "open") {
     const signedAt = new Date().toISOString();
@@ -2828,6 +3033,102 @@ export async function clientSignGroupWorkOrder(
   });
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A uuid made from a hash, so the same capture always gets the same key. */
+function uuidFromHex(hex: string): string {
+  const h = hex.slice(0, 32).split("");
+  h[12] = "5";
+  h[16] = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
+  const v = h.join("");
+  return `${v.slice(0, 8)}-${v.slice(8, 12)}-${v.slice(12, 16)}-${v.slice(16, 20)}-${v.slice(20)}`;
+}
+
+/**
+ * Writes one on-site sign-off and its signature image, once per capture, in
+ * one database call (record_on_site_client_signoff, 20261106193000). The key
+ * is the app's capture id when it sends one, else the group, the person
+ * capturing, the signature image and the answers. A second copy of the same
+ * capture (double tap, retry after a lost response, even at the same moment)
+ * gets the stored row and writes nothing. A capture id sent again with
+ * different answers is refused.
+ */
+async function recordOnSiteSignoffOnce(
+  client: any,
+  group: Record<string, unknown>,
+  input: {
+    name: string;
+    png: string;
+    capturedBy: string | null;
+    actor: string;
+    device: string | null;
+    happy: boolean | null;
+    rating: number | null;
+    outstandingItems?: string | null;
+    captureId?: string | null;
+  },
+): Promise<void> {
+  const answers = await sha256Hex(JSON.stringify([
+    input.name, input.happy, input.rating, input.outstandingItems || null, await sha256Hex(input.png),
+  ]));
+  const scope = `${group.id}:${input.capturedBy || ""}`;
+  const key = uuidFromHex(await sha256Hex(
+    input.captureId ? `on_site_signoff:capture:${scope}:${input.captureId.toLowerCase()}` : `on_site_signoff:answers:${scope}:${answers}`,
+  ));
+  const { data, error } = await client.rpc("record_on_site_client_signoff", {
+    p_capture_request_id: key,
+    p_capture_payload_hash: `sha256:${answers}`,
+    p_org_id: group.org_id,
+    p_job_id: group.job_id,
+    p_signed_name: input.name,
+    p_happy: input.happy,
+    p_satisfaction_rating: input.rating,
+    p_signature_png: input.png,
+    p_captured_by: input.capturedBy,
+    p_captured_by_actor: input.actor,
+    p_captured_device: input.device,
+    p_outstanding_items: input.outstandingItems || null,
+  });
+  throwQuery(error, "record the client's signature");
+  const result = (data || {}) as { signoff_id?: string; same_capture?: boolean };
+  if (!result.signoff_id) {
+    throw new GroupWorkOrderError("group_work_order_unreadable", "Could not store the signature.", 503);
+  }
+  if (result.same_capture === false) {
+    throw new GroupWorkOrderError(
+      "group_client_signoff_capture_reused",
+      "This sign-off was already saved with different answers. Start a new sign-off.",
+      409,
+    );
+  }
+}
+
+/** The app's id for one capture: a uuid, or none. */
+function onSiteCaptureId(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || !UUID_RE.test(value.trim())) {
+    throw new GroupWorkOrderError("group_client_capture_id_invalid", "The sign-off capture id must be a uuid.", 400);
+  }
+  return value.trim();
+}
+
+/** What the client is not happy with, required when they are not happy. */
+function onSiteOutstandingItems(happy: boolean | null, value: unknown): string | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text.length > 10000) {
+    throw new GroupWorkOrderError("group_client_reason_too_long", "Keep what the client is not happy with under 10,000 characters.", 400);
+  }
+  if (happy === false && !text) {
+    throw new GroupWorkOrderError("group_client_reason_required", "Say what the client is not happy with.", 400);
+  }
+  return text || null;
+}
+
 export async function captureGroupClientSignoff(
   client: any,
   caller: GroupCaller,
@@ -2837,6 +3138,7 @@ export async function captureGroupClientSignoff(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   requireParticipant(participants, caller.userId);
+  const happy = happyFlag(body.happy);
   const signed = await storeClientSignature(client, group, {
     name: signerName(body.signer_name || body.signature_name),
     png: parseSignature(body.signature_png, true) || "",
@@ -2844,11 +3146,16 @@ export async function captureGroupClientSignoff(
     capturedBy: caller.userId,
     actor: `user:${caller.userId}`,
     device: deviceLabel(body.device || body.captured_device),
-    happy: happyFlag(body.happy),
+    happy,
     rating: optionalRating(body.satisfaction_rating),
+    outstandingItems: onSiteOutstandingItems(happy, body.outstanding_items),
+    captureId: onSiteCaptureId(body.capture_id),
   });
   const ratings = body.ratings && typeof body.ratings === "object" ? body.ratings as Record<string, unknown> : null;
-  if (ratings) {
+  // Feedback is for a sign-off that counts. A client who is not happy (or a
+  // rating under the bar) leaves the shares locked and is not asked for it,
+  // so the stored signature is never followed by a 409 that invites a retry.
+  if (ratings && signed.client_signed === true) {
     await submitGroupWorkOrderFeedback(client, {
       ...ratings,
       share_token: group.share_token,
@@ -3120,11 +3427,11 @@ export async function freezeGroupWorkOrder(
   // An hours claim not billed in Xero yet holds the freeze, named
   // (20261106160000). The database refuses it too.
   if (!group.split_frozen_at) {
-    const { unresolved } = await readHoursPayOnJob(client, String(group.job_id));
-    if (unresolved.size > 0) {
+    const { claims } = await readHoursPayOnJob(client, String(group.job_id));
+    if (claims.length > 0) {
       throw new GroupWorkOrderError(
         "group_hours_claim_unresolved",
-        await unresolvedHoursClaimMessage(client, unresolved, "freeze"),
+        await unresolvedHoursClaimMessage(client, claims, "freeze", caller.userId),
         409,
       );
     }
