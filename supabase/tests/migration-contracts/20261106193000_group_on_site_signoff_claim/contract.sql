@@ -38,7 +38,7 @@ BEGIN
   END IF;
 
   other := public.record_on_site_client_signoff(k, 'sha256:' || repeat('c', 64), '00000000-0000-0000-0000-000000000001', j,
-    'Invented Client', true, 5, 'data:image/png;base64,AAAA', NULL, 'user:invented', NULL, NULL);
+    'Invented Client', true, 5::smallint, 'data:image/png;base64,AAAA', NULL, 'user:invented', NULL, NULL);
   IF (other->>'claimed')::boolean IS NOT FALSE OR (other->>'same_capture')::boolean IS NOT FALSE
     OR (SELECT count(*) FROM public.job_client_signoffs WHERE job_id = j) <> 1 THEN
     RAISE EXCEPTION 'on-site claim: a key reused with other answers must write nothing: %', other;
@@ -46,7 +46,7 @@ BEGIN
 
   BEGIN
     PERFORM public.record_on_site_client_signoff(gen_random_uuid(), 'not-a-hash', '00000000-0000-0000-0000-000000000001', j,
-      'Invented Client', true, 5, 'data:image/png;base64,AAAA', NULL, 'user:invented', NULL, NULL);
+      'Invented Client', true, 5::smallint, 'data:image/png;base64,AAAA', NULL, 'user:invented', NULL, NULL);
   EXCEPTION WHEN invalid_parameter_value THEN refused := true;
   END;
   IF NOT refused OR (SELECT count(*) FROM public.job_media WHERE job_id = j) <> 1 THEN
