@@ -5,7 +5,7 @@ DECLARE org uuid:=gen_random_uuid(); job uuid:=gen_random_uuid(); rev uuid:=gen_
   submission uuid:=gen_random_uuid(); assignment uuid:=gen_random_uuid(); ghost uuid:=gen_random_uuid();
   pricing jsonb; schedule jsonb; result jsonb; first_ids jsonb; held_id uuid; bad_job uuid:=gen_random_uuid(); bad_rev uuid:=gen_random_uuid();
 BEGIN
-  INSERT INTO public.users(id,org_id,role) VALUES(actor,org,'admin');
+  INSERT INTO public.users(id,org_id,role,name) VALUES(actor,org,'admin','ZZTEST Scope Checker');
   INSERT INTO public.jobs(id,org_id,type,status,job_number) VALUES(job,org,'fencing','draft','ZZTEST-SE-STAGES-LOCAL');
   INSERT INTO public.council_submissions(id,org_id,job_id,steps) VALUES(submission,org,job,
     '[{"step_id":"fixture-step","name":"Synthetic council step","status":"pending"}]');
