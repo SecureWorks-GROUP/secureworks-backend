@@ -60,7 +60,7 @@ ALTER TABLE public.scope_payment_stage_drafts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.scope_payment_stage_confirmations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.scope_payment_signals ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.scope_payment_plans, public.scope_payment_stage_events,
-  public.scope_payment_stage_drafts, public.scope_payment_stage_confirmations, public.scope_payment_signals FROM PUBLIC, anon, authenticated;
+  public.scope_payment_stage_drafts, public.scope_payment_stage_confirmations, public.scope_payment_signals FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT ON public.scope_payment_plans, public.scope_payment_stage_events,
   public.scope_payment_stage_drafts, public.scope_payment_stage_confirmations, public.scope_payment_signals TO service_role;
 
@@ -307,6 +307,6 @@ REVOKE ALL ON FUNCTION public.scope_payment_plan(uuid),public.apply_scope_paymen
   public.record_scope_payment_signal(uuid,text,jsonb,timestamptz),
   public.scope_payment_acceptance_event(),public.scope_payment_install_event(),public.consume_scope_council_payment_event(uuid,text),
   public.read_scope_payment_stages(uuid,uuid,uuid),public.confirm_scope_payment_stage(uuid,uuid,uuid,uuid,text,text,text)
-  FROM PUBLIC,anon,authenticated;
+  FROM PUBLIC,anon,authenticated,service_role;
 GRANT EXECUTE ON FUNCTION public.consume_scope_council_payment_event(uuid,text),public.read_scope_payment_stages(uuid,uuid,uuid),
   public.confirm_scope_payment_stage(uuid,uuid,uuid,uuid,text,text,text) TO service_role;

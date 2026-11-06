@@ -88,5 +88,7 @@ BEGIN
   ASSERT (SELECT released_at IS NOT NULL FROM public.scope_job_draft_sets WHERE job_id=bad_job),'invalid stages cannot fail acceptance';
   ASSERT NOT has_table_privilege('authenticated','public.scope_payment_stage_drafts','SELECT'),'no browser money read';
   ASSERT NOT has_table_privilege('service_role','public.scope_payment_stage_drafts','UPDATE'),'no direct money rewriting';
+  ASSERT NOT has_function_privilege('service_role','public.apply_scope_payment_event(uuid,text,jsonb,timestamptz,text)','EXECUTE'),
+    'internal producer is not a service-role RPC';
 END $$;
 ROLLBACK;

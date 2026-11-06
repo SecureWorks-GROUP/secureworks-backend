@@ -1,3 +1,7 @@
+-- Supabase-style default grants must not survive on these private records or
+-- expose internal producers as callable service-role RPCs.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO service_role;
 CREATE TABLE IF NOT EXISTS public.job_assignments(id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS pricing_json jsonb;
 ALTER TABLE public.job_assignments
