@@ -196,6 +196,25 @@ class Memory {
       }
       return [...out.values()];
     }
+    if (fn === "record_on_site_client_signoff") {
+      // Twin of 20261106193000: one call is one transaction under the key's
+      // lock, so a second copy of the key sees the first row and writes nothing.
+      const key = String(args.p_capture_request_id || "");
+      const stored = this.rows("job_client_signoffs").find((row) => row.capture_request_id === key);
+      if (stored) {
+        return {signoff_id: stored.id, claimed: false, same_capture: stored.capture_payload_hash === args.p_capture_payload_hash};
+      }
+      const media = {id: crypto.randomUUID(), job_id: args.p_job_id, type: "photo", storage_url: args.p_signature_png,
+        label: "Client signature", phase: "signature", uploaded_by: args.p_captured_by};
+      this.rows("job_media").push(media);
+      const signoff = {id: crypto.randomUUID(), org_id: args.p_org_id, job_id: args.p_job_id, method: "on_site",
+        signed_name: args.p_signed_name, happy: args.p_happy, satisfaction_rating: args.p_satisfaction_rating,
+        signature_media_id: media.id, captured_by: args.p_captured_by, captured_by_actor: args.p_captured_by_actor,
+        captured_device: args.p_captured_device, outstanding_items: args.p_outstanding_items,
+        capture_request_id: key, capture_payload_hash: args.p_capture_payload_hash};
+      this.rows("job_client_signoffs").push(signoff);
+      return {signoff_id: signoff.id, claimed: true, same_capture: true};
+    }
     const groupId = String(args.p_group_id || "");
     const group = this.rows("group_work_orders").find((row) =>
       row.id === groupId
@@ -3405,8 +3424,7 @@ Deno.test("on-site sign-off: not happy with a reason saves once, a retry adds no
   assertEquals(db.rows("group_work_orders")[0].status, "open");
 
   const retry = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
-  assertEquals(retry.client_signed, false);
-  assertEquals((retry as Record<string, unknown>).already_recorded, true);
+  assertEquals(retry, first);
   assertEquals(db.rows("job_client_signoffs").length, 1);
   assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 1);
 
@@ -3432,7 +3450,7 @@ Deno.test("on-site sign-off: the happy path is unchanged and a retry writes noth
   const signed = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
   assertEquals(signed.client_signed, true);
   assertEquals(db.rows("job_client_signoffs").length, 1);
-  assertEquals(db.rows("job_client_signoffs")[0].outstanding_items, undefined);
+  assertEquals(db.rows("job_client_signoffs")[0].outstanding_items, null);
   assertEquals(db.rows("group_work_order_feedback").length, 1);
   assertEquals(db.rows("group_work_orders")[0].status, "client_signed");
   const again = await captureGroupClientSignoff(db.client(), trade(USER_A), body);
@@ -3440,4 +3458,42 @@ Deno.test("on-site sign-off: the happy path is unchanged and a retry writes noth
   assertEquals((again as Record<string, unknown>).already_signed, true);
   assertEquals(db.rows("job_client_signoffs").length, 1);
   assertEquals(db.rows("group_work_order_feedback").length, 1);
+});
+
+Deno.test("on-site sign-off: two identical captures at the same moment leave one sign-off and one signature", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  const body = {
+    group_id: GROUP, signer_name: "Invented Client", signature_png: SIGNATURE, happy: false,
+    outstanding_items: "Gate latch still to fix",
+  };
+  const [a, b] = await Promise.all([
+    captureGroupClientSignoff(db.client(), trade(USER_A), body),
+    captureGroupClientSignoff(db.client(), trade(USER_A), body),
+  ]);
+  assertEquals(db.rows("job_client_signoffs").length, 1);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 1);
+  assertEquals(a, b);
+  assertEquals(a.client_signed, false);
+  assertEquals(db.rows("group_work_orders")[0].status, "open");
+
+  // The app's own capture id: two copies at once still save once.
+  const withId = { ...body, outstanding_items: "Gate latch and one paling", capture_id: "7d1c2f9a-3b4e-4c5d-8e6f-0a1b2c3d4e5f" };
+  const [c, d] = await Promise.all([
+    captureGroupClientSignoff(db.client(), trade(USER_A), withId),
+    captureGroupClientSignoff(db.client(), trade(USER_A), withId),
+  ]);
+  assertEquals(c, d);
+  assertEquals(db.rows("job_client_signoffs").length, 2);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 2);
+
+  // The same capture id with different answers is refused and writes nothing.
+  const reused = await captureGroupClientSignoff(db.client(), trade(USER_A), { ...withId, outstanding_items: "Something else" })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals([reused?.code, reused?.status], ["group_client_signoff_capture_reused", 409]);
+  const badId = await captureGroupClientSignoff(db.client(), trade(USER_A), { ...body, capture_id: "not-a-uuid" })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals([badId?.code, badId?.status], ["group_client_capture_id_invalid", 400]);
+  assertEquals(db.rows("job_client_signoffs").length, 2);
+  assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 2);
 });

@@ -2936,15 +2936,16 @@ async function storeClientSignature(
     confirmation?: { client_confirmed_on: string; work_done: string; outstanding_items: string | null };
     /** On-site only: what the client is not happy with. */
     outstandingItems?: string | null;
+    /** On-site only: the app's id for this capture, when it sends one. */
+    captureId?: string | null;
   },
 ) {
   if (await countingSignoff(client, String(group.job_id), group)) {
     return { ok: true, client_signed: true, already_signed: true };
   }
-  // A retry of the same on-site capture (lost response, double tap) returns
-  // the row already stored instead of writing a second one.
-  if (input.method === "on_site" && await sameOnSiteCaptureStored(client, group, input)) {
-    return { ok: true, client_signed: false, already_signed: false, already_recorded: true };
+  if (input.method === "on_site") {
+    await recordOnSiteSignoffOnce(client, group, input);
+    return await finishClientSignature(client, group);
   }
   const { data: media, error: mediaError } = await client.from("job_media")
     .insert({
@@ -2976,9 +2977,13 @@ async function storeClientSignature(
     captured_by_actor: input.actor,
     captured_device: input.device,
     ...(input.confirmation || {}),
-    ...(input.outstandingItems ? { outstanding_items: input.outstandingItems } : {}),
   });
   throwQuery(error, "record the client's signature");
+  return await finishClientSignature(client, group);
+}
+
+/** After a signature is stored: does it count, and stamp an open group signed. */
+async function finishClientSignature(client: any, group: Record<string, unknown>) {
   const counts = await countingSignoff(client, String(group.job_id), group);
   if (counts && group.status === "open") {
     const signedAt = new Date().toISOString();
@@ -3028,48 +3033,88 @@ export async function clientSignGroupWorkOrder(
   });
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A uuid made from a hash, so the same capture always gets the same key. */
+function uuidFromHex(hex: string): string {
+  const h = hex.slice(0, 32).split("");
+  h[12] = "5";
+  h[16] = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
+  const v = h.join("");
+  return `${v.slice(0, 8)}-${v.slice(8, 12)}-${v.slice(12, 16)}-${v.slice(16, 20)}-${v.slice(20)}`;
+}
+
 /**
- * The newest sign-off on the job is this same on-site capture: same person
- * capturing, signer, answer, rating, reason and signature image, and no
- * hours changed since. Then a retry adds nothing.
+ * Writes one on-site sign-off and its signature image, once per capture, in
+ * one database call (record_on_site_client_signoff, 20261106193000). The key
+ * is the app's capture id when it sends one, else the group, the person
+ * capturing, the signature image and the answers. A second copy of the same
+ * capture (double tap, retry after a lost response, even at the same moment)
+ * gets the stored row and writes nothing. A capture id sent again with
+ * different answers is refused.
  */
-async function sameOnSiteCaptureStored(
+async function recordOnSiteSignoffOnce(
   client: any,
   group: Record<string, unknown>,
   input: {
     name: string;
     png: string;
     capturedBy: string | null;
+    actor: string;
+    device: string | null;
     happy: boolean | null;
     rating: number | null;
     outstandingItems?: string | null;
+    captureId?: string | null;
   },
-): Promise<boolean> {
-  const jobId = String(group.job_id);
-  const [rows, latestHoursAt] = await Promise.all([
-    rowsOf(
-      client.from("job_client_signoffs").select(
-        "id, job_id, method, happy, satisfaction_rating, created_at, signature_media_id, signed_name, captured_by, outstanding_items",
-      ).eq("job_id", jobId),
-      "check for this client sign-off",
-    ),
-    latestHoursOnJob(client, jobId),
-  ]);
-  const latest = newestSignoff(rows);
-  if (
-    !latest || latest.method !== "on_site" || !latest.signature_media_id ||
-    String(latest.captured_by || "") !== String(input.capturedBy || "") ||
-    String(latest.signed_name || "") !== input.name ||
-    (latest.happy ?? null) !== input.happy ||
-    (latest.satisfaction_rating == null ? null : Number(latest.satisfaction_rating)) !== input.rating ||
-    String(latest.outstanding_items || "") !== String(input.outstandingItems || "") ||
-    !signedAfterHours(latest.created_at, latestHoursAt) ||
-    (group.signoff_required_after && String(latest.created_at || "") < String(group.signoff_required_after))
-  ) return false;
-  const { data: media, error } = await client.from("job_media").select("id, storage_url")
-    .eq("id", latest.signature_media_id).maybeSingle();
-  throwQuery(error, "check for this client sign-off");
-  return String(media?.storage_url || "") === input.png;
+): Promise<void> {
+  const answers = await sha256Hex(JSON.stringify([
+    input.name, input.happy, input.rating, input.outstandingItems || null, await sha256Hex(input.png),
+  ]));
+  const scope = `${group.id}:${input.capturedBy || ""}`;
+  const key = uuidFromHex(await sha256Hex(
+    input.captureId ? `on_site_signoff:capture:${scope}:${input.captureId.toLowerCase()}` : `on_site_signoff:answers:${scope}:${answers}`,
+  ));
+  const { data, error } = await client.rpc("record_on_site_client_signoff", {
+    p_capture_request_id: key,
+    p_capture_payload_hash: `sha256:${answers}`,
+    p_org_id: group.org_id,
+    p_job_id: group.job_id,
+    p_signed_name: input.name,
+    p_happy: input.happy,
+    p_satisfaction_rating: input.rating,
+    p_signature_png: input.png,
+    p_captured_by: input.capturedBy,
+    p_captured_by_actor: input.actor,
+    p_captured_device: input.device,
+    p_outstanding_items: input.outstandingItems || null,
+  });
+  throwQuery(error, "record the client's signature");
+  const result = (data || {}) as { signoff_id?: string; same_capture?: boolean };
+  if (!result.signoff_id) {
+    throw new GroupWorkOrderError("group_work_order_unreadable", "Could not store the signature.", 503);
+  }
+  if (result.same_capture === false) {
+    throw new GroupWorkOrderError(
+      "group_client_signoff_capture_reused",
+      "This sign-off was already saved with different answers. Start a new sign-off.",
+      409,
+    );
+  }
+}
+
+/** The app's id for one capture: a uuid, or none. */
+function onSiteCaptureId(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || !UUID_RE.test(value.trim())) {
+    throw new GroupWorkOrderError("group_client_capture_id_invalid", "The sign-off capture id must be a uuid.", 400);
+  }
+  return value.trim();
 }
 
 /** What the client is not happy with, required when they are not happy. */
@@ -3104,6 +3149,7 @@ export async function captureGroupClientSignoff(
     happy,
     rating: optionalRating(body.satisfaction_rating),
     outstandingItems: onSiteOutstandingItems(happy, body.outstanding_items),
+    captureId: onSiteCaptureId(body.capture_id),
   });
   const ratings = body.ratings && typeof body.ratings === "object" ? body.ratings as Record<string, unknown> : null;
   // Feedback is for a sign-off that counts. A client who is not happy (or a
