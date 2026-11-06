@@ -1,3 +1,15 @@
+## Own hours, any day, no crew approval, 6 November 2026
+
+Owner: "just let them log their own hours" and "just let them sign their own". Migration `20261106140000_group_self_opt_in_hours`:
+
+- A crew member logs their own hours for any day on the job; a booked day is no longer required (a multi-day booking used to refuse day two on). Hours from someone neither on the crew nor booked that day are refused, `group_hours_not_member`.
+- Every logged hour counts in the split. `loadShareView` is the TypeScript twin of the split's rules; change both together.
+- Logging your own hours is your confirmation. Nobody approves anyone else's: the freeze and the share invoice no longer wait for crew approval on a full-super group, `crew_approval_required` is always false, `needs_approval` is always empty and a crew member with hours reads as approved. The office's own approval mark is kept and still shown, but nothing waits for it.
+- Office staff (admin, owner, ops manager) booked on the job to watch, and not on the crew, never hold the split. A booked trade who has not joined still does, as before.
+- The automatic group sweep never adds back someone a `remove_participant` event took off the group.
+
+Client sign-off is unchanged.
+
 ## Office sign-off update, 27 October 2026
 
 Owner supersedes the earlier no-waiver default: a reasoned, attributed office override now counts for a group. It uses the existing staff-only `waive_client_signoff` action and append-only `job_client_signoffs` with method `office_waiver`. It does not fabricate a drawing or satisfaction rating. It must be newer than the latest hours change; a later revoke still wins. The group read exposes the method/reason/actor to office only. The screen shows the office override separately. No automatic freeze, invoice or payment is triggered.
@@ -219,10 +231,10 @@ Trade JWT, while the switch is on. The caller is the signed-in user.
 | `create_group_work_order` | Opens the group on `jobs.work_order_id`, or joins the caller. Refused when the job already has normal pay. No dollars. The public token is not on this card. |
 | `join_group_work_order` | The caller must be allocated, unless they are staff. After freeze, `group_split_frozen`. |
 | `sign_group_work_order` | Crew signature. PNG or JPEG data URL whose decoded bytes are between 3 and 150000 and match that format, or omitted. SVG is refused. Not the invoice gate. |
-| `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, only on an assigned date. Saving the same day with the same times, break and hours does not move the row's `updated_at` or the group's `hours_changed_at`. |
+| `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, any day on the job (6 November 2026; a booked day is also still accepted). Saving the same day with the same times, break and hours does not move the row's `updated_at` or the group's `hours_changed_at`. |
 | `group_work_order_my_share` | The closed object above. |
 | `capture_group_client_signoff` | On-site client drawing. Records the trade user id. |
-| `freeze_group_work_order` | Explicit freeze after every participant and every currently assigned installer has counting hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. |
+| `freeze_group_work_order` | Explicit freeze after every participant and every currently assigned installer (except office staff booked to watch who are not on the crew) has counting hours, with no crew approval of anyone's hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. |
 | `group_work_order_preview_client_link` | Draft only. `send: true` is 409. |
 
 Public, no account, while the switch is on. The token is only for the

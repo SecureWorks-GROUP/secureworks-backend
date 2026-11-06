@@ -337,7 +337,21 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
   };
 }
 
-/** Crew allocated after the group opened join it, until its pay is frozen. */
+/** People a group's remove_participant events took off it (left or removed). */
+export function removedUserIds(rows: readonly Record<string, unknown>[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    const detail = row.detail && typeof row.detail === "object" ? row.detail as Record<string, unknown> : {};
+    const id = String(detail.user_id || "");
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * Crew allocated after the group opened join it, until its pay is frozen,
+ * unless they left it or the office removed them.
+ */
 async function topUpCrew(
   client: any,
   group: Record<string, unknown>,
@@ -352,7 +366,14 @@ async function topUpCrew(
   ).eq("group_id", groupId);
   if (error) return { reason: "group_failed", group_id: groupId, code: "crew_unreadable" };
   const have = new Set((on || []).map((r: any) => String(r.user_id)));
-  const add = people.filter((id) => !have.has(id));
+  // Someone who left, or whom the office removed, stays off (owner, 6 Nov
+  // 2026: trades opt in themselves). They can join again on their own.
+  const { data: removals, error: removalError } = await client.from("group_work_order_events").select(
+    "detail",
+  ).eq("group_id", groupId).eq("action", "remove_participant");
+  if (removalError) return { reason: "group_failed", group_id: groupId, code: "removals_unreadable" };
+  const leftCrew = removedUserIds(removals || []);
+  const add = people.filter((id) => !have.has(id) && !leftCrew.has(id));
   if (add.length === 0) return null;
   const { error: addError } = await client.from("group_work_order_participants").insert(
     add.map((userId) => ({ group_id: groupId, user_id: userId })),
