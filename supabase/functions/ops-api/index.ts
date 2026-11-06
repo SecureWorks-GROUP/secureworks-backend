@@ -16560,7 +16560,7 @@ export async function tradeCalendarEvents(
 
   const requestedTypeRaw = String(params.get('type') || '').trim().toLowerCase()
   const requestedType = requestedTypeRaw
-    ? _normalizeManagedVerticals([requestedTypeRaw])[0] || null
+    ? normalizeTradeJobFilterType(requestedTypeRaw)
     : null
   if (requestedTypeRaw && !requestedType) {
     throw new ApiError('type must be a supported Trade vertical', 400)
@@ -17455,7 +17455,7 @@ export async function tradeWorkOrders(
 
   const requestedTypeRaw = String(params.get('type') || '').trim().toLowerCase()
   const requestedType = requestedTypeRaw
-    ? _normalizeManagedVerticals([requestedTypeRaw])[0] || null
+    ? normalizeTradeJobFilterType(requestedTypeRaw)
     : null
   if (requestedTypeRaw && !requestedType) {
     throw new ApiError('type must be a supported Trade vertical', 400)
@@ -41340,6 +41340,8 @@ async function addPOEvent(client: any, body: any) {
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
+  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
+  if (type === 'granny_flat') return ''
   if (type === 'repair') return 'SW - MAKESAFE'
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''
@@ -41364,6 +41366,12 @@ function xeroTracking(jobNumber: string, jobType?: string | null): any[] {
 // ── Account code by job type ──
 // Default sales account codes per division — override in job settings if needed
 function accountCodeForJob(jobType: string, fallback = '200'): string {
+  if (String(jobType || '').trim().toLowerCase() === 'granny_flat') {
+    throw new ApiError('Granny flat build revenue account is not configured', 409, {
+      code: 'job_account_mapping_required',
+      job_type: 'granny_flat',
+    })
+  }
   // All map to 200 by default. If the bookkeeper creates separate revenue
   // accounts later (e.g. 201 Patios, 202 Fencing), change these values.
   const map: Record<string, string> = {
@@ -41411,6 +41419,7 @@ function buildRichDescription(job: any, prefix: string): string {
   if (typeLabel === 'fencing') typeParts.push('Colorbond Fencing Installation')
   else if (typeLabel === 'decking') typeParts.push('Composite Decking Installation')
   else if (typeLabel === 'makesafe') typeParts.push('Make-Safe Works')
+  else if (typeLabel === 'granny_flat') typeParts.push('Granny flat build')
   else typeParts.push('Insulated Patio Installation')
   lines.push(typeParts.join(' | '))
 
@@ -43365,6 +43374,14 @@ export function _canSeeFullMakesafePool(isDispatcher: boolean, isMakesafeManager
 // manager gets the repair open pool + allocation rights exactly like every
 // other vertical; see _jobVertical for how a job is classified into it.
 export const _MANAGED_VERTICALS = ['makesafe', 'fencing', 'patio', 'decking', 'repair'] as const
+
+// Existing granny-flat jobs can be filtered without granting a new manager
+// scope. Visibility still comes from see-everything or the caller's allocation.
+function normalizeTradeJobFilterType(type: string): string | null {
+  return type === 'granny_flat' || (_MANAGED_VERTICALS as readonly string[]).includes(type)
+    ? type
+    : null
+}
 
 // Normalise a raw managed_verticals value (DB array, possibly null / mixed-case
 // / unknown entries) into a clean, de-duplicated list of valid verticals.

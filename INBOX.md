@@ -18,3 +18,32 @@ Target for this source slice: a default-off protected profile capability allows 
 ## Worker run checkpoint, 6 November 2026
 
 Partial live profile operation read back privately. Picker source is uncommitted and unverified: Deno compile passed, targeted tests stopped twice on absent cached runtime modules under the no-download rule. Firstmate task trade-app-installer-access-and-granny-type-20261106 retains the exact run record, private receipt and Resume. No PR/push/deploy or invoice action. Firstmate must resolve cached-runtime-dependencies before continuation; no complete invoice journey claimed.
+
+
+## Granny-flat existing-job type source delivery, 2026-11-06 08:41 Perth
+
+Root brief: support one existing job's Granny flat build classification with
+`granny_flat`, preserving identity/history/state and every saved finance link.
+Private job identity and exact CAS/undo are retained outside GitHub. No live
+schema or job operation has been performed. No frontend or dispatch edits.
+
+The canonical Trade App six-part PROJECT/Progress/LIVE-STATE/Context/Spec/CALLS
+pointer remains unlocated after the current repo/project-root search. This
+existing INBOX and Firstmate private run records carry the handoff; no replacement
+project folder or custodian record was invented. Target source delivery is a
+ready exact-head PR; actual repair requires root's separate release and readback.
+
+### 2026-11-06 08:41 Perth · Firstmate crewmate (Codex)
+- Project: secureworks-backend / Trade App · existing-job taxonomy.
+- Asked: admit one supported granny-flat type, trace access/financial effects, prepare reversible operation; root owns release and live change.
+- Did: added guarded twelve-value check migration/down, narrow compatibility contracts, separate job filter admission, explicit unknown-account refusal/no tracking, and backend description. Retained existing permissions and saved finance links. Prepared private apply/readback/undo and root-to-UX handoff.
+- Evidence: docs/granny-flat-existing-job-type.md; task-private OPERATION-PLAN.md, live-before.json, live-trigger-and-link-evidence.json, operation-preflight.json and deno-check.log.
+- Verified: real selected read-only data and cached static compile by self; exact existing job/work-order and live eleven-type baseline observed, migration version collision absent at preparation. Feature none; artifact private task packet. No local new feature tests/browser/smoke campaign; unchanged forge checks will report separately.
+- Result: source prepared; live repair unfinished. Root verifies exact ready PR and unchanged mandatory checks, coordinates UX, commissions migration/release and exact job CAS, then records fresh readback. tools/live-state.py not run because owning six-part/live-state pointer is unlocated; private final receipt records forge state.
+
+
+### 2026-11-06 08:58 Perth · Firstmate crewmate (Codex), integration continuation
+- Asked: merge current main into the published granny-flat branch after the invoice picker landed, preserving both source changes and every INBOX record.
+- Did: merged main fea4985611b32febdfa065da777c5a4cd3d8da38; source auto-merged; resolved only the append conflict by retaining both complete record blocks above. No workflow, migration or operation-plan changes.
+- Verified: preservation checked against both parents by self; cached static compile and native hooks/forge state recorded in the private continuation receipt. Feature none; artifact private task integration packet.
+- Result: source integration only. Root owns release and exact existing-job write; no live mutation. tools/live-state.py not run, canonical Trade App project pointer remains unlocated.
