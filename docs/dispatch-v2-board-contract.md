@@ -1613,6 +1613,46 @@ function `dispatch_v2_record_outlook_order_on_send` (migration
     `sent_failed` (and `first_run` on the first run). The 5 Nov counts
     `outlook_orders` and `outlook_tied` are gone.
 
+### 3g.2 The one-off catch-up (`dispatch_v2_outlook_catch_up`, POST)
+
+For the orders sent from Outlook before the rule was switched on. Rules in
+`dispatch_v2_outlook_catch_up.ts`, using the rule above.
+
+1. **Scope.** Every captured order email sent from admin@ since 5 Oct 2026
+   (midnight Perth; `since` may name another time), by the rule in 3g.1, on
+   jobs still on the Dispatch board. Finished jobs are skipped and listed.
+2. **A dry run by default** (`dry_run` anything but `false`): it changes
+   nothing and answers with every order it would make: job and client, the
+   job's stage, the supplier, the day sent, the lines read or no list, the
+   replies it would tie, and the stage each box would end at. Also every email
+   it refuses, with the reason, and the count of emails it ignores, by reason.
+   Open to staff (a signed-in staff session or the ops key).
+3. **The real run** needs `dry_run: false` and the owner: Shaun
+   (`shaun@secureworkswa.com.au`), signed in, or named as `operator_email` with
+   the ops server key and found in users. Anyone else is refused `403
+   owner_only`. It:
+   - records the orders and boxes (`trigger 'catch_up'` on the job_events
+     row);
+   - ties the supplier replies already stored for them (3g.1 rule 8), so the
+     normal one-step move applies on read;
+   - **on a job whose status is In Progress**, sets every caught-up box
+     straight to Delivered (the materials are on site), as a stage set by
+     Shaun with a `dispatch_v2_material_stage_set` job_events row (`via
+     'outlook_catch_up'`). A box whose stage a person set after the newest
+     caught-up order was sent keeps it;
+   - puts the emails with a wrong or unknown job number, or to a supplier with
+     no Xero contact, under Emails to sort. A finished job, or one not on the
+     board, is only listed.
+4. **Never the order-confirmed step.** It never runs 3e (no crew pickup
+   lines, no supplier PDFs saved to the job, no order sheet), never presses a
+   stage, never sends, never moves a job's status, never writes GHL, Xero or
+   suppliers.
+5. **Run it twice and nothing changes the second time:** each email is once
+   per supplier, a reply is tied only while it has no order, a box is set to
+   Delivered only while nobody has set it since, and an email is put under
+   Emails to sort once. The dry run after a real run shows the orders as
+   already recorded.
+
 ## Tweak 4: the approved supplier names on the board (5 Nov 2026)
 
 Full rules: docs/dispatch-v2-emails-contract.md, section "Tweak 4".

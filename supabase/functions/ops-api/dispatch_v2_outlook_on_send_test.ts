@@ -1,13 +1,14 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
 // Dispatch v2 section 3g (Shaun, 6 Nov 2026): an order sent from Outlook
-// becomes a Dispatch order when it is sent. The rules and the scan step on
-// an in-memory store. No network.
+// becomes a Dispatch order when it is sent, and the one-off catch-up. The
+// rules, the scan step and the catch-up on an in-memory store. No network.
 //
 // Run: deno test --no-check --allow-env --allow-read supabase/functions/ops-api/dispatch_v2_outlook_on_send_test.ts
 
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   isDispatchOwnSend,
@@ -23,6 +24,11 @@ import {
   storedRepliesToTie,
   suppliersAddressed,
 } from "./dispatch_v2_outlook_on_send.ts";
+import {
+  CATCH_UP_SINCE_DEFAULT,
+  CatchUpRefused,
+  runDispatchV2OutlookCatchUp,
+} from "./dispatch_v2_outlook_catch_up.ts";
 import { readOutlookOrderBody } from "./dispatch_v2_outlook_order.ts";
 import {
   ADMIN,
@@ -32,6 +38,7 @@ import {
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const NOW = "2026-11-06T04:00:00Z";
+const SHAUN = "shaun@secureworkswa.com.au";
 
 // ── The suppliers (as on the approved order list, 6 Nov 2026) ────────────
 
@@ -551,4 +558,150 @@ Deno.test("scan: a failed read or write is counted and the scan carries on", asy
   assertEquals((await t.run()).sent_orders, 1);
   t.store.failing.add("sentOrdersSince");
   assertEquals((await t.run()).sent_failed, 1);
+});
+
+// ── The catch-up ──────────────────────────────────────────────────────────
+
+function catchUpSetup() {
+  const t = scanSetup();
+  t.store.sent = [
+    // Vesna: R&R, a stored reply waiting.
+    sentEmail(1, { to: ["sales@randrfencing.com.au"], body: VESNA_BODY }),
+    // Louise (In Progress): Metroll, no list, then a second order.
+    sentEmail(2, {
+      subject: "Material Order Ref SWP-261283",
+      to: ["perth@metroll.com.au"],
+      body: NO_LIST_BODY,
+      sent_at: "2026-10-22T02:00:00Z",
+    }),
+    sentEmail(3, {
+      subject: "Material Order Ref SWP-261283 2nd order",
+      to: ["perth@metroll.com.au"],
+      body: VESNA_BODY,
+      sent_at: "2026-10-30T02:00:00Z",
+    }),
+    // Finished: listed, never recorded, never sorted.
+    sentEmail(4, { subject: "Material Order Ref SWP-26348", to: ["perth@metroll.com.au"], body: VESNA_BODY }),
+    // Westline: no Xero contact.
+    sentEmail(5, { to: ["info@westlinefencing.com.au"], body: VESNA_BODY }),
+    // A quote request.
+    sentEmail(6, { subject: "Material Order Quote Ref SWP-261283", to: ["perth@metroll.com.au"], body: VESNA_BODY }),
+    // Before 5 Oct: outside the catch-up.
+    sentEmail(7, { to: ["sales@randrfencing.com.au"], body: VESNA_BODY, sent_at: "2026-09-20T02:00:00Z" }),
+  ];
+  t.store.replies = [reply(1)];
+  // Louise's Metroll box was set to Sent by hand before both orders.
+  t.store.boxes = [{
+    box_id: "cccccccc-0000-4000-8000-000000000900",
+    job_id: LOUISE.job_id,
+    supplier_id: METROLL,
+    material_stage: "sent",
+    material_stage_set_at: "2026-10-20T00:00:00Z",
+  }];
+  const run = (
+    body: any,
+    operator: { email: string | null; userId: string | null } = {
+      email: SHAUN,
+      userId: "u-shaun",
+    },
+  ) =>
+    runDispatchV2OutlookCatchUp(body, {
+      orgId: ORG,
+      store: t.store,
+      replies: t.tray,
+      operator,
+      now: () => NOW,
+    });
+  return { ...t, run };
+}
+
+Deno.test("catch-up: the dry run lists every order and changes nothing", async () => {
+  const t = catchUpSetup();
+  const r: any = await t.run({});
+  assertEquals([r.dry_run, r.since], [true, CATCH_UP_SINCE_DEFAULT]);
+  assertEquals(r.read, 6);
+  assertEquals(
+    r.orders.map((o: any) => [o.job_number, o.supplier, o.list_read, o.box_stage]),
+    [
+      // R&R is on account: the stored reply moves it to Quote received.
+      ["SWF-261586", "R&R Fencing", true, "quote_received"],
+      ["SWP-261283", "Metroll", false, "delivered"],
+      ["SWP-261283", "Metroll", true, "delivered"],
+    ],
+  );
+  const vesna = r.orders[0];
+  assertEquals([vesna.client_name, vesna.job_stage, vesna.sent_day], ["Vesna Tapajner", "Scheduled", "Tue 3 Nov"]);
+  assertEquals(vesna.replies.map((x: any) => x.email_id), [reply(1).id]);
+  assertEquals(r.counts.jobs, 2);
+  assertEquals(r.counts.to_delivered, 2);
+  assertEquals(
+    r.refused.map((x: any) => [x.reason, x.to_sort]),
+    [["job_not_on_board", false], ["supplier_not_in_xero", true]],
+  );
+  assertEquals(r.counts.ignored, { quote_request: 1 });
+  // Nothing written.
+  assertEquals([t.store.calls.length, t.tray.rows.length, t.store.delivered.length], [0, 0, 0]);
+  assertEquals(t.store.replies[0].order_id, null);
+});
+
+Deno.test("catch-up: the real run is the owner's only", async () => {
+  const t = catchUpSetup();
+  await assertRejects(
+    () => t.run({ dry_run: false }, { email: "jan@secureworkswa.com.au", userId: "u-jan" }),
+    CatchUpRefused,
+  );
+  await assertRejects(() => t.run({ dry_run: false }, { email: null, userId: null }), CatchUpRefused);
+  await assertRejects(() => t.run({ dry_run: false }, { email: SHAUN, userId: null }), CatchUpRefused);
+  assertEquals(t.store.calls.length, 0);
+});
+
+Deno.test("catch-up: the real run records, ties, sets In Progress boxes to Delivered, once", async () => {
+  const t = catchUpSetup();
+  const r: any = await t.run({ dry_run: false });
+  assertEquals(r.done.recorded, 3);
+  assertEquals(r.done.replies_tied, 1);
+  assertEquals(r.done.set_delivered, 1);
+  assertEquals(r.done.to_sort, 1);
+  assert(t.store.calls.every((c) => c.trigger === "catch_up"));
+  // Louise's box: one box, both orders, Delivered by Shaun's run.
+  const louise = t.store.boxes.filter((b) => b.job_id === LOUISE.job_id);
+  assertEquals(louise.length, 1);
+  assertEquals([louise[0].material_stage, louise[0].material_stage_set_at], ["delivered", NOW]);
+  assertEquals(t.store.delivered[0].operator_email, SHAUN);
+  // Vesna's reply is tied; her box keeps no hand-set stage (the reply moves it on read).
+  assertEquals(t.store.replies[0].order_id, t.store.orders.find((o) => o.job_id === VESNA.job_id)!.order_id);
+  const vesnaBox = t.store.boxes.find((b) => b.job_id === VESNA.job_id)!;
+  assertEquals(vesnaBox.material_stage, null);
+  // Westline waits under Emails to sort.
+  assertEquals(t.tray.rows.map((x: any) => x.supplier_name), ["Westline Fencing"]);
+
+  // Run again: nothing changes.
+  const again: any = await t.run({ dry_run: false });
+  assertEquals(
+    [again.done.recorded, again.done.already_recorded, again.done.replies_tied, again.done.set_delivered, again.done.to_sort],
+    [0, 3, 0, 0, 0],
+  );
+  assertEquals(t.store.orders.length, 3);
+  assertEquals(t.store.delivered.length, 1);
+  // And the dry run now shows them as done.
+  const dry: any = await t.run({});
+  assertEquals(dry.counts.already_recorded, 3);
+  assertEquals(dry.counts.to_record, 0);
+});
+
+Deno.test("catch-up: a person's stage set after the order stays", async () => {
+  const t = catchUpSetup();
+  t.store.boxes[0].material_stage = "ready";
+  t.store.boxes[0].material_stage_set_at = "2026-11-01T00:00:00Z";
+  const r: any = await t.run({});
+  const louise = r.orders.filter((o: any) => o.job_number === "SWP-261283");
+  assertEquals(louise.map((o: any) => [o.box_stage, o.box_stage_why]), [["ready", "kept"], ["ready", "kept"]]);
+  const real: any = await t.run({ dry_run: false });
+  assertEquals(real.done.set_delivered, 0);
+  assertEquals(t.store.boxes[0].material_stage, "ready");
+});
+
+Deno.test("catch-up: a since that is not a date is refused", async () => {
+  const t = catchUpSetup();
+  await assertRejects(() => t.run({ since: "last month" }), CatchUpRefused);
 });

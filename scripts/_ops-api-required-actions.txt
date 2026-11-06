@@ -201,6 +201,12 @@ dispatch_v2_set_pay_on               # probe=source-only
 #    source-only, never fired at production by a smoke run. ──
 dispatch_v2_set_date_mode            # probe=source-only
 
+# ── Ops screen Dispatch tab v2: the one-off catch-up of orders sent from
+#    Outlook (docs/dispatch-v2-board-contract.md, section 3g.2). A dry run
+#    by default; the real run writes orders and is for the owner only.
+#    Source-only: never fired at production by a smoke run. ──
+dispatch_v2_outlook_catch_up         # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event

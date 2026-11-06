@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 // Test-only: an in-memory stand-in for the send rule's database
-// (dispatch_v2_outlook_on_send.ts OnSendStore). It behaves like the
+// (dispatch_v2_outlook_on_send.ts OnSendStore) and the catch-up's one extra
+// write (dispatch_v2_outlook_catch_up.ts CatchUpStore). It behaves like the
 // database function dispatch_v2_record_outlook_order_on_send: once per sent
 // email and supplier, never over a Dispatch send, the box reused or made.
 // Never imported by ops-api itself.
@@ -11,11 +12,14 @@ import type {
   OnSendEntry,
   OnSendJob,
   OnSendOrderRow,
-  OnSendStore,
   RecordOnSendInput,
   RecordOnSendResult,
   StoredReply,
 } from "./dispatch_v2_outlook_on_send.ts";
+import type {
+  CatchUpStore,
+  SetDeliveredInput,
+} from "./dispatch_v2_outlook_catch_up.ts";
 import type { SupplierUsage } from "./dispatch_v2_outlook_order.ts";
 
 export const ADMIN = "admin@secureworkswa.com.au";
@@ -45,7 +49,7 @@ export function sentEmail(
   };
 }
 
-export class MemoryOnSendStore implements OnSendStore {
+export class MemoryOnSendStore implements CatchUpStore {
   sent: CapturedSentEmail[] = [];
   entries: OnSendEntry[] = [];
   jobs: OnSendJob[] = [];
@@ -55,6 +59,7 @@ export class MemoryOnSendStore implements OnSendStore {
   usage: SupplierUsage[] = [];
   since: string | null = null;
   calls: RecordOnSendInput[] = [];
+  delivered: SetDeliveredInput[] = [];
   jobEvents: any[] = [];
   // Reads and writes that fail, by method name.
   failing = new Set<string>();
@@ -245,5 +250,20 @@ export class MemoryOnSendStore implements OnSendStore {
   setSentOrdersSince(at: string) {
     this.since = at;
     return Promise.resolve();
+  }
+  setBoxDelivered(input: SetDeliveredInput) {
+    const box = this.boxes.find((b) => b.box_id === input.box.box_id);
+    if (!box || box.material_stage_set_at !== input.box.material_stage_set_at) {
+      return Promise.resolve(false);
+    }
+    box.material_stage = "delivered";
+    box.material_stage_set_at = input.now;
+    this.delivered.push(input);
+    this.jobEvents.push({
+      job_id: box.job_id,
+      event_type: "dispatch_v2_material_stage_set",
+      detail: { box_id: box.box_id, to: "delivered", via: "outlook_catch_up" },
+    });
+    return Promise.resolve(true);
   }
 }
