@@ -1,6 +1,6 @@
 -- A crew member already paid by the hour on a job no longer stops the rest of
 -- the crew being paid through a group (owner, 6 Nov 2026: "just reduce the
--- work order by [his] amount and divide the other two up").
+-- work order by [that person's] amount and divide the other two up").
 --
 -- Before: any ordinary pay on a job refused a group on it, so a patio job
 -- that must pay through a group, where one crew member had already been paid

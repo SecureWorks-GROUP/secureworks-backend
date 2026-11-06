@@ -544,6 +544,12 @@ const QUERY_FAULTS: {
   keepDetail?: boolean;
 }[] = [
   {
+    needle: "group_removal_not_found",
+    code: "group_removal_not_found",
+    message: "That person was not removed from this group, so there is nothing to undo.",
+    status: 404,
+  },
+  {
     needle: "group_pot_used_by_hours_pay",
     code: "group_pot_used_by_hours_pay",
     message:
@@ -2869,7 +2875,7 @@ export async function readGroupWorkOrderOffice(
 ) {
   assertOffice(caller);
   const group = await resolveGroup(client, body);
-  const [participants, entries, shares, feedback] = await Promise.all([
+  const [participants, entries, shares, feedback, removals] = await Promise.all([
     loadParticipants(client, String(group.id)),
     rowsOf(
       client.from("group_work_order_time_entries").select(
@@ -2889,14 +2895,26 @@ export async function readGroupWorkOrderOffice(
       ).eq("group_id", group.id),
       "load feedback",
     ),
+    // Office removals still standing: their bookings do not make them crew
+    // for this group (20261106170000).
+    rowsOf(
+      client.from("group_work_order_crew_removals").select(
+        "user_id, removed_by, removed_at",
+      ).eq("group_id", group.id).is("restored_at", null),
+      "load removals",
+    ),
   ]);
   const [workOrder, view, hoursPaid] = await Promise.all([
     loadWorkOrder(client, String(group.work_order_id)),
     loadShareView(client, group, participants),
     readHoursPaidOnJob(client, String(group.job_id)),
   ]);
-  const people = participants.length ? await rowsOf(
-    client.from("users").select("id, name").in("id", participants.map((p) => p.user_id)),
+  const nameIds = [...new Set([
+    ...participants.map((p) => String(p.user_id)),
+    ...removals.flatMap((r) => [String(r.user_id), String(r.removed_by)]),
+  ])];
+  const people = nameIds.length ? await rowsOf(
+    client.from("users").select("id, name").in("id", nameIds),
     "load crew names",
   ) : [];
   return {
@@ -2931,6 +2949,13 @@ export async function readGroupWorkOrderOffice(
       name: people.find((p) => p.id === row.user_id)?.name || row.signature_name || null,
       signature_name: row.signature_name || null,
       crew_signed: Boolean(row.crew_signed_at),
+    })),
+    removed: removals.map((row) => ({
+      user_id: row.user_id,
+      name: people.find((p) => p.id === row.user_id)?.name || null,
+      removed_by: row.removed_by,
+      removed_by_name: people.find((p) => p.id === row.removed_by)?.name || null,
+      removed_at: row.removed_at,
     })),
     hours: entries,
     shares,
@@ -3065,6 +3090,34 @@ export async function removeGroupWorkOrderParticipant(
   });
   throwQuery(error, "remove the participant");
   return { ok: true, removed: true, group_id: group.id, user_id: userId };
+}
+
+/**
+ * Office undo of a removal: the person is back on the group and their
+ * bookings count again. Recorded with who and when (20261106170000).
+ */
+export async function restoreGroupWorkOrderParticipant(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const userId = String(body.user_id || body.userId || "").trim();
+  if (!userId) {
+    throw new GroupWorkOrderError(
+      "group_actor_required",
+      "Name the person to put back.",
+      400,
+    );
+  }
+  const { error } = await client.rpc("restore_group_work_order_participant", {
+    p_group_id: group.id,
+    p_user: userId,
+    p_actor: caller.userId,
+  });
+  throwQuery(error, "put the participant back");
+  return { ok: true, restored: true, group_id: group.id, user_id: userId };
 }
 
 export async function rekeyGroupWorkOrder(

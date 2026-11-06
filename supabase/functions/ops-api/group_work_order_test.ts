@@ -64,6 +64,7 @@ import {
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
   removeGroupWorkOrderParticipant,
+  restoreGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   submitGroupWorkOrderFeedback,
   submitGroupWorkOrderHours,
@@ -144,6 +145,15 @@ class Memory {
     };
   }
 
+  /** An office removal on the job's live group beats a booking (20261106170000). */
+  standingRemoval(jobId: string, userId: string): boolean {
+    return this.rows("group_work_order_crew_removals").some((r) => {
+      const group = this.rows("group_work_orders").find((g) => g.id === r.group_id);
+      return String(r.job_id) === jobId && String(r.user_id) === userId && r.restored_at == null &&
+        group?.status !== "void";
+    });
+  }
+
   /** Twin of public.group_work_order_hours_paid (20261106160000). */
   hoursPaid(jobId: string): Map<string, number> {
     const out = new Map<string, number>();
@@ -167,6 +177,7 @@ class Memory {
           String(row.status || "").toLowerCase() === "cancelled" ||
           String(row.role || "").toLowerCase() === "observer" || user?.role === "admin") continue;
         if (this.hoursPaid(String(row.job_id)).has(String(row.user_id))) continue;
+        if (this.standingRemoval(String(row.job_id), String(row.user_id))) continue;
         out.set(`${row.job_id}:${row.user_id}`, {job_id:row.job_id,user_id:row.user_id});
       }
       for (const member of this.rows("group_work_order_participants")) {
@@ -200,6 +211,9 @@ class Memory {
       group.hours_office_approved_at = "2099-01-01T00:00:00Z";
       group.hours_office_approved_by = actor;
       return { group_id: groupId, approved_at: group.hours_office_approved_at };
+    }
+    if (fn === "restore_group_work_order_participant") {
+      return this.restoreParticipant(group, String(args.p_user || ""), String(args.p_actor || ""));
     }
     if (fn === "remove_group_work_order_participant") {
       return this.removeParticipant(
@@ -340,8 +354,33 @@ class Memory {
       actor,
       user_id: userId,
     });
+    if (!this.standingRemoval(String(group.job_id), userId)) {
+      this.rows("group_work_order_crew_removals").push({
+        group_id: group.id, job_id: group.job_id, user_id: userId,
+        removed_by: actor, removed_at: "2026-11-06T00:00:00.000Z", restored_by: null, restored_at: null,
+      });
+    }
     this.touchHours(String(group.id));
     return { ok: true };
+  }
+
+  restoreParticipant(group: Row, userId: string, actor: string) {
+    if (!userId || !actor) throw new Error("group_actor_required");
+    if (group.status === "void") throw new Error("group_work_order_void");
+    if (group.split_frozen_at) throw new Error("group_split_frozen");
+    const removal = this.rows("group_work_order_crew_removals").find((r) =>
+      r.group_id === group.id && String(r.user_id) === userId && r.restored_at == null
+    );
+    if (!removal) throw new Error("group_removal_not_found");
+    removal.restored_by = actor;
+    removal.restored_at = "2026-11-06T01:00:00.000Z";
+    const people = this.rows("group_work_order_participants");
+    if (!people.some((r) => r.group_id === group.id && String(r.user_id) === userId)) {
+      people.push({ id: crypto.randomUUID(), group_id: group.id, user_id: userId });
+    }
+    this.rows("group_work_order_events").push({ group_id: group.id, action: "restore_participant", actor, user_id: userId });
+    this.touchHours(String(group.id));
+    return { restored: true };
   }
 
   latestHoursAt(jobId: string): string | null {
@@ -599,7 +638,7 @@ class Memory {
 }
 
 class Query {
-  private filters: { op: "eq" | "in" | "neq"; col: string; value: unknown }[] = [];
+  private filters: { op: "eq" | "in" | "neq" | "is"; col: string; value: unknown }[] = [];
   private op: "select" | "insert" | "upsert" | "update" | "delete" = "select";
   private payload: unknown = null;
   private one: "none" | "maybe" | "single" = "none";
@@ -620,6 +659,7 @@ class Query {
     return this;
   }
   neq(col: string,value:unknown): this { this.filters.push({op:"neq",col,value}); return this; }
+  is(col: string,value:unknown): this { this.filters.push({op:"is",col,value}); return this; }
   order(col:string, options:{ascending?:boolean}={}): this { this.sorts.push({col,ascending:options.ascending!==false});return this; }
   range(start:number,end:number): this { this.bounds=[start,end]; return this; }
   insert(row: unknown): this {
@@ -665,6 +705,7 @@ class Query {
         return row[filter.col] === filter.value;
       }
       if (filter.op === "neq") return row[filter.col] !== filter.value;
+      if (filter.op === "is") return (row[filter.col] ?? null) === filter.value;
       return (filter.value as unknown[]).includes(row[filter.col]);
     });
   }
@@ -1667,6 +1708,58 @@ Deno.test("a signature is a PNG or JPEG, and markup never becomes an image sourc
   assertEquals(memory.rows("job_media").length, 0);
 });
 
+Deno.test("an office removal wins over a booking, is recorded, and the office can undo it", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  // Booked on the job but not named for the group.
+  memory.rows("job_assignments").push({
+    job_id: JOB, user_id: USER_C, scheduled_date: "2026-10-20", status: "scheduled", role: "lead_installer",
+  });
+  const before = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(before.code, "group_split_needs_hours");
+  assert(before.message.includes(USER_C));
+
+  await removeGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), { group_id: GROUP, user_id: USER_C });
+  assertEquals(memory.rows("job_assignments").find((r) => r.user_id === USER_C)?.status, "scheduled");
+
+  const office = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  assertEquals(office.needs_hours.includes(USER_C), false);
+  assertEquals(office.removed.map((r) => r.user_id), [USER_C]);
+  assertEquals(office.removed[0].removed_by, USER_A);
+  assert(office.removed[0].removed_at);
+
+  const tradeTry = await assertRejects(
+    () => restoreGroupWorkOrderParticipant(memory.client(), trade(USER_A), { group_id: GROUP, user_id: USER_C }),
+    GroupWorkOrderError,
+  );
+  assertEquals(tradeTry.status, 403);
+  await restoreGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), { group_id: GROUP, user_id: USER_C });
+  assert(memory.rows("group_work_order_participants").some((r) => r.user_id === USER_C));
+  assertEquals(memory.rows("group_work_order_crew_removals")[0].restored_by, USER_A);
+  const back = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(back.code, "group_split_needs_hours");
+  assert(back.message.includes(USER_C));
+  const again = await assertRejects(
+    () => restoreGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), { group_id: GROUP, user_id: USER_C }),
+    GroupWorkOrderError,
+  );
+  assertEquals(again.code, "group_removal_not_found");
+  assertEquals(again.status, 404);
+  const office2 = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  assertEquals(office2.removed, []);
+  assert(office2.needs_hours.includes(USER_C));
+});
+
 Deno.test("freeze names an installer who has not joined, and removal is only before freeze", async () => {
   const memory = new Memory();
   seedSplit(memory);
@@ -1707,8 +1800,9 @@ Deno.test("freeze names an installer who has not joined, and removal is only bef
     () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
     GroupWorkOrderError,
   );
+  // The office removal wins over B's booking for this group (20261106170000).
   assertEquals(stillAssigned.code, "group_split_needs_hours");
-  assert(stillAssigned.message.includes(USER_B));
+  assertEquals(stillAssigned.message.includes(USER_B), false);
   assert(stillAssigned.message.includes(USER_C));
 
   for (const row of memory.rows("job_assignments")) {

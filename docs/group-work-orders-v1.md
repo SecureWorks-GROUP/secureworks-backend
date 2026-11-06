@@ -360,3 +360,24 @@ both together).
 Nothing is paid twice, no invoice or Xero bill is changed, and nothing
 sends. Proof: `group_work_order_test.ts` (paid by the hour cases) and the
 PostgreSQL contract `20261106160000_group_paid_by_hours_member`.
+
+## Office removal wins over bookings
+
+Owner, 6 Nov 2026: when the owner names the crew for a group, people with
+bookings on the job who were not named must not hold the split. Migration
+`20261106170000_group_office_removal_wins.sql`.
+
+- `remove_group_work_order_participant` (office only, before the freeze)
+  records the removal in `group_work_order_crew_removals` with who removed
+  the person and when. Their bookings are not touched.
+- While that record stands, the person's bookings on the job do not make
+  them crew for that group: readiness and the split no longer wait on their
+  hours, and the patio sweep does not add them back. If they join again
+  themselves they are a member and count, as before.
+- `restore_group_work_order_participant` (office only, before the freeze)
+  reverses it: it records who restored and when, puts them back on the
+  group, and their hours are required again. With no standing removal it
+  answers `group_removal_not_found` (404).
+- A void group's removals hold nobody off a later group.
+- `group_work_order_office` lists standing removals as `removed` (person,
+  who removed them, when).

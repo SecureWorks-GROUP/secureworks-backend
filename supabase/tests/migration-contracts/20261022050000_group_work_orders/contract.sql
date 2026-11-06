@@ -1033,13 +1033,14 @@ BEGIN
   WHERE id = 'd2140000-0000-4000-8000-0000000000d5';
   SET LOCAL ROLE service_role;
   PERFORM public.remove_group_work_order_participant(v_hours_group, v_b, v_shaun);
+  -- Since 20261106170000 the office removal wins over the booking: the freeze
+  -- no longer waits on v_b's hours and stops at the sign-off the removal
+  -- made stale instead.
   BEGIN
     PERFORM public.freeze_group_work_order_split(v_hours_group);
-    RAISE EXCEPTION 'group-wo: freeze ignored a removed participant who is still assigned';
+    RAISE EXCEPTION 'group-wo: freeze passed a stale sign-off after a removal';
   EXCEPTION WHEN check_violation THEN
-    IF SQLERRM NOT LIKE 'group_split_needs_hours:%'
-       OR position(v_b::text IN SQLERRM) = 0
-    THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
       RAISE EXCEPTION 'group-wo: removed-participant freeze said %', SQLERRM;
     END IF;
   END;
