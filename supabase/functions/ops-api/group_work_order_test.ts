@@ -51,6 +51,7 @@ import {
   rateOnDay,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
+  readTradeGroupWorkOrder,
   readMyGroupWorkOrders,
   readInvoicePayableRoutes,
   assertPatioPaysThroughGroup,
@@ -2266,7 +2267,7 @@ Deno.test("invoice routing distinguishes missing groups from missing allowances 
   db.rows("jobs")[0].type = "patio";
   db.rows("feature_flags").push({ flag_name: "patio_pay_group_only_v1", enabled: true });
   const read = () => readInvoicePayableRoutes(db.client(), [JOB], [], ORG);
-  assertEquals(await read(), [{ job_id: JOB, route: "group_setup_required", group_id: null, setup_reason: "group_missing" }]);
+  assertEquals(await read(), [{ job_id: JOB, route: "group_setup_required", group_id: null, setup_reason: "group_missing", discovery: { state: "create" } }]);
   const existingGroups = db.rows("group_work_orders").splice(0);
   let amountRequests = 0;
   const refusal = await assertRejects(() => assertPatioPaysThroughGroup(db.client(),
@@ -2282,7 +2283,40 @@ Deno.test("invoice routing distinguishes missing groups from missing allowances 
   assertEquals((await read())[0].route, "hours");
   assertEquals(await readInvoicePayableRoutes(db.client(), [JOB], [], "another-org"), []);
   assertEquals(await readInvoicePayableRoutes(db.client(), [JOB], existingGroups, ORG),
-    [{ job_id: JOB, route: "group", group_id: GROUP }]);
+    [{ job_id: JOB, route: "group", group_id: GROUP, discovery: { state: "join" } }]);
+});
+
+Deno.test("allocated fencing and patio crew get the same price-free Create or Join decision", async () => {
+  for (const type of ["fencing", "patio"]) {
+    const db = new Memory();
+    seedSplit(db);
+    db.rows("jobs")[0].type = type;
+    const groups = db.rows("group_work_orders").splice(0);
+    let read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery, { state: "create" });
+    assertEquals(Object.hasOwn(read, "pot_total"), false);
+    assertEquals(Object.hasOwn(read, "share_token"), false);
+    db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "labour", trade_invoices: { status: "draft" } });
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery?.reason, "normal_pay_exists");
+    db.rows("trade_invoice_lines").splice(0);
+    db.rows("group_work_orders").push(...groups);
+    db.rows("group_work_order_participants").splice(0);
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery, { state: "join" });
+    assertEquals(Object.hasOwn(read, "pot_total"), false);
+    db.rows("group_work_orders")[0].split_frozen_at = "2026-10-22T00:00:00Z";
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery?.reason, "group_frozen");
+    db.rows("group_work_order_participants").push({ id: "own-participant", group_id: GROUP, user_id: USER_A });
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery, { state: "member" });
+    assertEquals(Object.hasOwn(read, "share_token"), false);
+    assertEquals(Object.hasOwn(read, "shares"), false);
+    db.rows("job_assignments").forEach(row => { row.is_ghost = true; });
+    await assertRejects(() => readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB }), GroupWorkOrderError, "not allocated");
+    await assertRejects(() => readTradeGroupWorkOrder(db.client(), { ...trade(USER_A), orgId: "other-org" }, { job_id: JOB }), GroupWorkOrderError, "not found");
+  }
 });
 
 Deno.test("the office approves a full-super crew's hours for them; someone on the crew cannot; later hours undo it", async () => {

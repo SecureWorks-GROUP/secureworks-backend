@@ -714,7 +714,7 @@ async function callerAssigned(
 ): Promise<boolean> {
   const rows = await rowsOf(
     client.from("job_assignments").select(
-      "user_id, scheduled_date, status, role",
+      "user_id, scheduled_date, status, role, is_ghost",
     ).eq("job_id", jobId).eq("user_id", userId),
     "check the crew assignment",
   );
@@ -1423,10 +1423,59 @@ export async function assertGroupJobDraftUsesShare(
  */
 export const PATIO_PAY_GROUP_ONLY_FLAG = "patio_pay_group_only_v1";
 
+export type GroupDiscovery = {
+  state: "create" | "join" | "member" | "setup_required";
+  reason?: string;
+  message?: string;
+};
+
+function groupDiscovery(
+  group: Record<string, unknown> | undefined,
+  member: boolean,
+  workOrder: Record<string, unknown> | undefined,
+  hasNormalPay: boolean,
+): GroupDiscovery {
+  if (group) {
+    if (group.status === "void") {
+      return {
+        state: "setup_required",
+        reason: "group_void",
+        message: "The office needs to check this voided group work order.",
+      };
+    }
+    if (member) return { state: "member" };
+    return group.split_frozen_at
+      ? {
+        state: "setup_required",
+        reason: "group_frozen",
+        message: "The office needs to reopen this group before you can join.",
+      }
+      : { state: "join" };
+  }
+  if (hasNormalPay) {
+    return {
+      state: "setup_required",
+      reason: "normal_pay_exists",
+      message:
+        "This job already has an ordinary pay claim. The office needs to check it before a group can be created.",
+    };
+  }
+  const reason = groupSetupReason(workOrder);
+  if (reason === "group_missing") return { state: "create" };
+  return {
+    state: "setup_required",
+    reason,
+    message: reason === "work_order_not_approved"
+      ? "The office needs to approve the job work order before the crew group can be created."
+      : "The office needs to set the job work-order amount before the crew group can be created.",
+  };
+}
+
 export type InvoicePayableRoute = {
   job_id: string;
   route: "hours" | "group" | "group_setup_required";
   group_id: string | null;
+  discovery?: GroupDiscovery;
   setup_reason?:
     | "group_missing"
     | "work_order_missing"
@@ -1453,6 +1502,7 @@ export async function readInvoicePayableRoutes(
   jobIds: readonly string[],
   groups: readonly Record<string, unknown>[],
   orgId: string,
+  memberGroupIds: readonly string[] = [],
 ): Promise<InvoicePayableRoute[]> {
   const ids = [...new Set(jobIds.filter(Boolean))];
   if (!ids.length) return [];
@@ -1469,55 +1519,82 @@ export async function readInvoicePayableRoutes(
     const patioIds = flag?.enabled === true
       ? jobs.filter((job) => job.type === "patio").map((job) => String(job.id))
       : [];
-    const prior = patioIds.length
-      ? await rowsOf(
-        client.from("trade_invoice_lines")
-          .select(
-            "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status)",
-          )
-          .in("job_id", patioIds),
-        "check earlier pay on these jobs",
-      )
-      : [];
-    const workOrderIds = jobs.filter((job) => patioIds.includes(String(job.id)))
+    const supportedIds = jobs.filter((job) =>
+      ["fencing", "patio"].includes(String(job.type)) &&
+      !groups.some((group) => String(group.job_id) === String(job.id))
+    ).map((job) => String(job.id));
+    const workOrderIds = jobs.filter((job) =>
+      supportedIds.includes(String(job.id))
+    )
       .map((job) => String(job.work_order_id || "")).filter(Boolean);
-    const workOrders = workOrderIds.length
-      ? await rowsOf(
-        client.from("work_orders")
-          .select("id, kind, status, sealed_content_hash, agreed_labour_ex")
-          .in("id", workOrderIds),
-        "check the group work order setup",
-      )
-      : [];
+    const [prior, workOrders] = await Promise.all([
+      supportedIds.length
+        ? rowsOf(
+          client.from("trade_invoice_lines")
+            .select(
+              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status)",
+            )
+            .in("job_id", supportedIds),
+          "check earlier pay on these jobs",
+        )
+        : [],
+      workOrderIds.length
+        ? rowsOf(
+          client.from("work_orders")
+            .select("id, kind, status, sealed_content_hash, agreed_labour_ex")
+            .in("id", workOrderIds),
+          "check the group work order setup",
+        )
+        : [],
+    ]);
     for (const job of jobs) {
       const jobId = String(job.id);
-      const group = groups.find((row) =>
-        String(row.job_id) === jobId && row.status !== "void"
+      const group = groups.find((row) => String(row.job_id) === jobId);
+      const workOrder = workOrders.find((row) =>
+        String(row.id) === String(job.work_order_id)
       );
-      if (group) {
+      const normalPay = prior.filter((row: any) => {
+        const invoice = Array.isArray(row.trade_invoices)
+          ? row.trade_invoices[0]
+          : row.trade_invoices;
+        return String(row.job_id) === jobId && invoice &&
+          invoice.status !== "ops-reject" && isNormalWorkOrderPayLine(row);
+      });
+      const discovery = supportedIds.includes(jobId) || group
+        ? groupDiscovery(
+          group,
+          memberGroupIds.includes(String(group?.id)),
+          workOrder,
+          normalPay.length > 0,
+        )
+        : undefined;
+      if (group && group.status !== "void") {
         result.push({
           job_id: jobId,
+          discovery,
           route: "group",
           group_id: String(group.id),
         });
         continue;
       }
-      const legacy = prior.some((row: any) =>
-        String(row.job_id) === jobId &&
-        !["draft", "ops-reject"].includes(
-          String(row.trade_invoices?.status || ""),
-        ) &&
-        isNormalWorkOrderPayLine(row)
-      );
+      const legacy = normalPay.some((row: any) => {
+        const invoice = Array.isArray(row.trade_invoices)
+          ? row.trade_invoices[0]
+          : row.trade_invoices;
+        return invoice.status !== "draft";
+      });
       if (!patioIds.includes(jobId) || legacy) {
-        result.push({ job_id: jobId, route: "hours", group_id: null });
+        result.push({
+          job_id: jobId,
+          route: "hours",
+          group_id: null,
+          discovery,
+        });
         continue;
       }
-      const workOrder = workOrders.find((row) =>
-        String(row.id) === String(job.work_order_id)
-      );
       result.push({
         job_id: jobId,
+        discovery,
         route: "group_setup_required",
         group_id: null,
         setup_reason: groupSetupReason(workOrder),
@@ -1699,6 +1776,89 @@ async function loadShareView(
   else if (needsRate.length > 0) awaiting = "awaiting_rate";
   else if (needsApproval.length > 0) awaiting = "awaiting_crew_approval";
   return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate, needsApproval, hoursOfficeApproved };
+}
+
+/** The price-free Create/Join decision used by both Trade entry points. */
+export async function readTradeGroupWorkOrder(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  if (!(await groupFeatureOn(client))) return { enabled: false };
+  const groupId = String(body.group_id || "");
+  const group = groupId ? await loadGroupById(client, groupId) : null;
+  if (groupId && !group) {
+    throw new GroupWorkOrderError(
+      "group_work_order_not_found",
+      "That group was not found.",
+      404,
+    );
+  }
+  const jobId = String(body.job_id || body.jobId || group?.job_id || "");
+  const job = jobId ? await loadJob(client, jobId) : null;
+  if (
+    !job || !caller.orgId || String(job.org_id) !== caller.orgId ||
+    (group && String(group.job_id) !== jobId)
+  ) {
+    throw new GroupWorkOrderError(
+      "group_job_not_found",
+      "That job was not found.",
+      404,
+    );
+  }
+  if (
+    !caller.isStaff && !(await callerAssigned(client, jobId, caller.userId))
+  ) {
+    throw new GroupWorkOrderError(
+      "group_work_order_not_assigned",
+      "You are not allocated to this job.",
+      403,
+    );
+  }
+  const existing = group || await loadGroupByJob(client, jobId);
+  if (existing && String(existing.org_id) !== caller.orgId) {
+    throw new GroupWorkOrderError(
+      "group_job_not_found",
+      "That job was not found.",
+      404,
+    );
+  }
+  const participants = existing
+    ? await loadParticipants(client, String(existing.id))
+    : [];
+  const memberIds =
+    participants.some((row) => String(row.user_id) === caller.userId)
+      ? [String(existing!.id)]
+      : [];
+  const [route] = await readInvoicePayableRoutes(
+    client,
+    [jobId],
+    existing ? [existing] : [],
+    caller.orgId,
+    memberIds,
+  );
+  const discovery = route?.discovery ||
+    {
+      state: "setup_required",
+      reason: "unsupported_job",
+      message: "Group work orders are not available for this job.",
+    };
+  if (discovery.state === "member") {
+    return {
+      ...await readGroupWorkOrderMyShare(client, caller, {
+        group_id: existing!.id,
+      }),
+      enabled: true,
+      discovery,
+    };
+  }
+  return {
+    enabled: true,
+    job_id: jobId,
+    group_id: existing?.id || null,
+    participant: false,
+    discovery,
+  };
 }
 
 export async function readGroupWorkOrderMyShare(
@@ -2019,7 +2179,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     }
   }
   const groups=[...byId.values()];
-  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId);
+  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId, memberIds);
   if (!groups.length) return { enabled: true, groups: [], payable_routes: payableRoutes };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
   const jobs: Record<string,unknown>[] = [], claims: Record<string,unknown>[] = [];
@@ -2043,6 +2203,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
   const result = [];
   // Sequential reads bound database fan-out; every price still uses the participant guard.
   for (const group of groups) {
+    const discovery = payableRoutes.find((route) => route.job_id === String(group.job_id))?.discovery;
     const submitted = claimed.get(String(group.job_id)) || null;
     // Paid shares live in Pay history; a share without a membership is not ours.
     if (submitted && (submitted.status === "paid" || !memberIds.includes(String(group.id)))) continue;
@@ -2050,9 +2211,9 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     if (!job) continue;
     if (!memberIds.includes(String(group.id))) {
       // Allocation grants discovery, never another participant's price or pay.
-      result.push({group_id:group.id,job_id:group.job_id,job_number:job.job_number,client_name:job.client_name,
+      result.push({discovery,group_id:group.id,job_id:group.job_id,job_number:job.job_number,client_name:job.client_name,
         site_suburb:job.site_suburb,job_type:job.type,pot_total:null,my_share:null,needs_hours:true,
-        client_signed:null,awaiting:group.split_frozen_at ? "awaiting_office" : "needs_join",
+        client_signed:null,awaiting:discovery?.state === "join" ? "needs_join" : "awaiting_office",
         group_share_office_review_required:true});
       continue;
     }
@@ -2063,7 +2224,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     const projectedBudget = projection ? Number(projection.share_ex) : null;
     const pay = projectedBudget != null && isAllInBasis(group.pay_basis) ? await allInSharePay(client,group,projectedBudget) : null;
     const crew = { ...await readGroupCrewStatus(client, caller, String(group.id)), ...await readGroupCrewHours(client, caller, group) };
-    result.push({ ...share, ...(submitted ? { submitted } : {}), ...crew, projected_my_share: pay ? Number(pay.invoice_ex) : projectedBudget,
+    result.push({ ...share, discovery, ...(submitted ? { submitted } : {}), ...crew, projected_my_share: pay ? Number(pay.invoice_ex) : projectedBudget,
       ...(pay ? {projected_my_budget: projectedBudget, projected_cash_pay: pay.cash_pay, projected_super: pay.super_amount, budget_remainder: pay.budget_remainder} : {}), job_id: group.job_id, job_number: job.job_number,
       client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
   }
@@ -2696,7 +2857,7 @@ export async function resolveGroupShareInvoiceExtra(
   );
   const assignments = await rowsOf(
     client.from("job_assignments").select(
-      "user_id, scheduled_date, status, role",
+      "user_id, scheduled_date, status, role, is_ghost",
     ).eq("job_id", group.job_id).eq("user_id", input.userId),
     "load allocations",
   );
