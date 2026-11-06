@@ -1,0 +1,14 @@
+-- Narrow stand-ins only; the earlier review-intents case owns its real capture triggers.
+\ir ../20261105003000_invoice_milestone_review_intents/setup.sql
+ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS xero_contact_id text,
+  ADD COLUMN IF NOT EXISTS pricing_json jsonb;
+ALTER TABLE public.quote_revisions ADD COLUMN IF NOT EXISTS pricing_snapshot_json jsonb;
+CREATE TABLE IF NOT EXISTS public.job_contacts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(),job_id uuid);
+
+-- Supabase-style inherited grants must not defeat the migration's narrow grants.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+
+ALTER TABLE public.job_documents ADD COLUMN IF NOT EXISTS run_label text;
+
+-- Match the full registered stack: commercial totals are mandatory, even for fixture-only rows.
+ALTER TABLE public.quote_revisions ALTER COLUMN totals_snapshot_json SET NOT NULL;
