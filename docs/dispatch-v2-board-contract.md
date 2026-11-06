@@ -1150,9 +1150,13 @@ A1's terms and A4 to A7 on A2's payment object.
 ## 3e. Once an order is confirmed (Tweak 1, approved by Shaun 4 Nov 2026)
 
 An order counts as confirmed when a person presses **Accept** on a supplier
-reply's date suggestion (`dispatch_v2_suggestion_accept`), or moves the box's
+reply's date suggestion (`dispatch_v2_suggestion_accept`), moves the box's
 material stage to **Order confirmed** by hand
-(`dispatch_v2_set_material_stage`). Both presses then run the same step,
+(`dispatch_v2_set_material_stage`), or saves a delivery date by hand with
+**Confirmed** ticked (`dispatch_v2_set_delivery_date`, trigger
+`date_confirmed`; Tweak 7 Part A, Shaun 6 Nov 2026: a supplier such as CMI
+confirms by phone or Pro Forma and he ticks the date). All three presses then
+run the same step,
 `runDispatchV2OrderConfirmed` (`dispatch_v2_order_confirmed_write.ts`; rules
 in `dispatch_v2_order_confirmed.ts`). It runs after the press's own write has
 succeeded, never throws, and never undoes the press. Its answer comes back on
@@ -1204,9 +1208,15 @@ Rules:
 7. **A new day later** writes one short "moved to" line. A day landing on an
    ASAP (or no-date) line writes the full line, so the crew gets the branch
    and ref with the day. A cleared date writes nothing.
-8. **A date typed by hand** (`dispatch_v2_set_delivery_date`) only follows
-   up an order that already has a line. It never writes the first line: a
-   date typed by hand is not, by itself, the order being confirmed.
+8. **A date typed by hand** (`dispatch_v2_set_delivery_date`):
+   - ticked **Confirmed**: the order is confirmed (trigger `date_confirmed`).
+     The first line when there is none yet, a "moved to" line when the day
+     changed, and the documents (3e.2 to 3e.4), exactly as the stage press.
+   - not ticked: a pencilled-in day only follows up an order that already
+     has a line (trigger `date_set`). It never writes the first line and
+     saves no documents.
+   Migration `20261106020000_dispatch_v2_crew_lines_date_confirmed.sql`
+   widens the line table's `trigger` check to allow `date_confirmed`.
 9. **A failed note** gives its claim back, so the next press writes it.
 
 Migration: `20261105160000_dispatch_v2_order_crew_lines.sql` (rollback in

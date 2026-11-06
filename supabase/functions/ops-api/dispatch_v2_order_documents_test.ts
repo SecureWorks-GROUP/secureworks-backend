@@ -380,6 +380,28 @@ Deno.test("confirmed: Order confirmed writes the crew line and saves the documen
   assertEquals(r.documents?.saved.map((s) => s.name), ["Stratco order confirmation.pdf"]);
 });
 
+Deno.test("confirmed (Tweak 7 Part A): a by-hand date ticked Confirmed saves the documents; one not ticked does not", async () => {
+  const pencilled = await setup();
+  const r1 = await runDispatchV2OrderConfirmed(pencilled.client, {
+    orgId: ORG,
+    jobId: JOB,
+    supplierId: SUP,
+    trigger: "date_set",
+    operator: { userId: null, email: "shaun@ops.test" },
+  }, { ...deps, now: () => NOW });
+  assertEquals(r1.documents, null);
+  const ticked = await setup();
+  const r2 = await runDispatchV2OrderConfirmed(ticked.client, {
+    orgId: ORG,
+    jobId: JOB,
+    supplierId: SUP,
+    trigger: "date_confirmed",
+    operator: { userId: null, email: "shaun@ops.test" },
+  }, { ...deps, now: () => NOW });
+  assertEquals((r2.crew_line as any).kind, "confirmed");
+  assertEquals(r2.documents?.saved.map((s) => s.name), ["Stratco order confirmation.pdf"]);
+});
+
 Deno.test("sweep: only confirmed orders with a recently changed matched reply are opened", async () => {
   const t = await setup();
   // No crew line yet (confirmed before Tweak 1 shipped): never swept.
