@@ -10295,6 +10295,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (!_isToolKind(tool_kind)) {
           return json({ error: 'tool_kind required (one of patio, fencing, decking, quick_quote, gate, repair, general)' }, 400)
         }
+        const scopeDraftActor = {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        }
+        const preparesJobDraft = tool_kind === 'fencing' || tool_kind === 'patio'
+        if (preparesJobDraft) {
+          if (!scopeDraftActor.staff || !scopeDraftActor.orgId) return json({ code: 'operator_access_required' }, 403)
+          const owned = await client.from('jobs').select('id').eq('id', job_id).eq('org_id', scopeDraftActor.orgId).maybeSingle()
+          if (owned.error) return json({ code: 'scope_drafts_unavailable' }, 503)
+          if (!owned.data) return json({ code: 'scope_drafts_job_forbidden' }, 403)
+        }
         const result = await _freezeScope(client, {
           job_id,
           tool_kind,
@@ -10311,6 +10322,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : result.error.code === 'inconsistent_state' ? 409
             : 500
           return json({ error: result.error }, status)
+        }
+        if (preparesJobDraft) {
+          const { prepareScopeDraftsAfterFreeze } = await import('./scope_job_drafts.ts')
+          const job_drafts = await prepareScopeDraftsAfterFreeze(client, {
+            job_id, scope_revision_id: result.scope_revision_id,
+          }, scopeDraftActor)
+          return json({ ...result, job_drafts })
         }
         return json(result)
       }

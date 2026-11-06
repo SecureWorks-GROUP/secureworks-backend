@@ -1158,3 +1158,4 @@ ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|table|
 ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|read_scope_payment_stages
 ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|confirm_scope_payment_stage
 ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|consume_scope_council_payment_event
+ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|function|prepare_scope_job_drafts
