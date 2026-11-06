@@ -53,6 +53,8 @@ type Fixtures = {
   media?: any[];
   events?: any[];
   jobs?: any[];
+  /** job_assignments rows for the hours-week hint. */
+  bookings?: any[];
 };
 
 function satisfiedEvidenceMedia(workOrders: any[]): any[] {
@@ -178,6 +180,9 @@ function makeClient(
           }
           if (table === "job_events") rows = (fixtures.events || []).slice();
           if (table === "jobs") rows = (fixtures.jobs || []).slice();
+          if (table === "job_assignments") {
+            rows = (fixtures.bookings || []).slice();
+          }
 
           for (const [column, value] of Object.entries(state.eq)) {
             if (column === "jobs.org_id") {
@@ -235,6 +240,7 @@ function workOrder(
     status = "complete",
     jobStatus = "complete",
     scopeItems,
+    completedAt,
   }: {
     assigned?: string;
     type?: string;
@@ -244,8 +250,14 @@ function workOrder(
     status?: string;
     jobStatus?: string;
     scopeItems?: any[];
+    completedAt?: string | null;
   } = {},
 ): any {
+  // A complete work order carries the day it was finished unless a test says
+  // otherwise; the Work Order Invoice door needs that day.
+  const finishedAt = completedAt !== undefined
+    ? completedAt
+    : status === "complete" ? "2026-07-02T03:00:00Z" : null;
   return {
     id,
     org_id: orgId,
@@ -257,6 +269,7 @@ function workOrder(
       [{ description: "Install", quantity: 2, unit_price: 500 }],
     site_address: `${id} Test Street`,
     scheduled_date: scheduledDate,
+    completed_at: finishedAt,
     created_at: createdAt,
     jobs: {
       id: `job-${id}`,
@@ -603,6 +616,11 @@ Deno.test("a sent work order on a closed job is invoice-ready", async () => {
   assertEquals(result.work_orders.length, 1);
   assertEquals(result.work_orders[0].can_add_to_weekly_invoice, true);
   assertEquals(result.work_orders[0].can_invoice, true);
+  // The Work Order Invoice door's database takes only a complete work order,
+  // so that door is not offered, and the card says why.
+  assertEquals(result.work_orders[0].can_invoice_direct, false);
+  assertEquals(result.work_orders[0].direct_invoice_block_reason, "work_order_not_complete");
+  assertEquals(typeof result.work_orders[0].direct_invoice_block_message, "string");
   assertEquals(result.work_orders[0].subtotal, 200);
 });
 
@@ -669,7 +687,64 @@ Deno.test("a sent work order on an archived job is weekly-invoice ready", async 
   assertEquals(result.work_orders.length, 1);
   assertEquals(result.work_orders[0].can_add_to_weekly_invoice, true);
   assertEquals(result.work_orders[0].can_invoice, true);
+  assertEquals(result.work_orders[0].can_invoice_direct, false);
+  assertEquals(result.work_orders[0].direct_invoice_block_reason, "work_order_not_complete");
   assertEquals(result.work_orders[0].subtotal, 1770);
+});
+
+Deno.test("a sent work order on a finished job points the trade at the week of their unbilled booking", async () => {
+  const wo = workOrder("finished-sent", {
+    assigned: HENRY.id,
+    status: "sent",
+    jobStatus: "archived",
+  });
+  const { client } = makeClient({
+    workOrders: [wo],
+    bookings: [
+      { job_id: wo.job_id, user_id: HENRY.id, scheduled_date: "2026-04-21", status: "complete", is_ghost: false, invoiced_in: null },
+      { job_id: wo.job_id, user_id: HENRY.id, scheduled_date: "2026-04-22", status: "complete", is_ghost: false, invoiced_in: null },
+      { job_id: wo.job_id, user_id: HENRY.id, scheduled_date: "2026-05-04", status: "cancelled", is_ghost: false, invoiced_in: null },
+      { job_id: wo.job_id, user_id: HENRY.id, scheduled_date: "2026-06-01", status: "complete", is_ghost: false, invoiced_in: "inv-billed" },
+    ],
+  });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+  const card = result.work_orders[0];
+  assertEquals(card.can_invoice_direct, false);
+  assertEquals(card.direct_invoice_block_reason, "work_order_not_complete");
+  assertEquals(card.hours_week_ending, "2026-04-26");
+});
+
+Deno.test("a complete work order with a finish day is offered on the Work Order Invoice door", async () => {
+  const wo = workOrder("finished-complete", { assigned: HENRY.id });
+  const { client } = makeClient({ workOrders: [wo] });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+  assertEquals(result.work_orders[0].can_invoice_direct, true);
+  assertEquals(result.work_orders[0].direct_invoice_block_reason, null);
+});
+
+Deno.test("a complete work order with no finish day is not offered on the Work Order Invoice door", async () => {
+  const wo = workOrder("no-day", { assigned: HENRY.id, completedAt: null });
+  const { client } = makeClient({ workOrders: [wo] });
+  const result = await tradeWorkOrders(
+    client,
+    new URLSearchParams({ mode: "all", type: "fencing" }),
+    HENRY,
+    false,
+  );
+  const card = result.work_orders[0];
+  assertEquals(card.can_invoice_direct, false);
+  assertEquals(card.direct_invoice_block_reason, "work_order_no_finish_date");
+  assertEquals(card.hours_week_ending, null);
 });
 
 Deno.test("a sent work order on an open job is not invoice-ready", async () => {
