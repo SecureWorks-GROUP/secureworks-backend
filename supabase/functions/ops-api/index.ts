@@ -800,7 +800,7 @@ import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, N
 import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
 import { recordTradeInvoiceEvent } from './trade_invoice_events.ts'
 import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_invoice_line_ack.ts'
-import { createOrReuseTradeXeroBill, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
+import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
 import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
@@ -11076,6 +11076,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             staff: _opsApiCallerIsStaffOperator(authMode, authUser),
             userId: authMode === 'jwt' ? (authUser?.id || null) : null,
             label: reviewActorLabel(authUser),
+          }, {
+            // A release reads Xero first: a lost create reply leaves a bill there.
+            findLiveBills: async (invoiceNumber: string) => {
+              const auth = await getToken(client)
+              return await findLiveTradeBillsByNumber(xeroGet, auth, invoiceNumber)
+            },
           })
         } catch (error) {
           if (error instanceof StuckTradeInvoiceError) {

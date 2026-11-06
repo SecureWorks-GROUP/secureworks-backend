@@ -18,6 +18,7 @@
 import { xeroSyncRefusal } from "./crew_invoice_job_work_order.ts";
 import { isGroupShareLine } from "./group_work_order.ts";
 import { recordTradeInvoiceEvent } from "./trade_invoice_events.ts";
+import { TradeXeroBillSearchError } from "./trade_invoice_xero_existing_bill.ts";
 
 type Row = Record<string, any>;
 
@@ -69,10 +70,15 @@ export interface StuckResolveActor {
   label: string;
 }
 
+/** Live Xero bills that may already be this invoice's, found by its number.
+ * Throws when Xero cannot be searched. */
+export type FindLiveTradeBills = (invoiceNumber: string) => Promise<Row[]>;
+
 export async function resolveStuckTradeInvoice(
   client: any,
   body: Row,
   actor: StuckResolveActor,
+  deps: { findLiveBills: FindLiveTradeBills },
 ): Promise<Row> {
   if (!actor.staff) {
     fail(403, "operator_access_required", "An authorised operator session is required.");
@@ -133,6 +139,42 @@ export async function resolveStuckTradeInvoice(
     );
   }
 
+  // No saved bill id does not prove there is no bill: a create whose reply was
+  // lost leaves a bill in Xero and nothing here. Releasing then frees the week,
+  // the next submission gets a new number, and a second bill would be paid for
+  // the same work. So a release first looks in Xero by this invoice's number,
+  // and refuses if a live bill is there or Xero cannot be searched.
+  let xeroChecked: { live_bills: number } | null = null;
+  if (decision === "release") {
+    const number = String(invoice.invoice_number || "").trim();
+    if (!number) {
+      fail(
+        409,
+        "xero_bill_number_missing",
+        "This invoice has no number to check in Xero, so it was not released. Check Xero by hand.",
+      );
+    }
+    let live: Row[];
+    try {
+      live = await deps.findLiveBills(number);
+    } catch (e) {
+      if (e instanceof TradeXeroBillSearchError && e.status !== 503) fail(e.status, e.code, e.message);
+      fail(
+        503,
+        "xero_existing_bill_search_failed",
+        "Xero could not be checked for a bill for this invoice, so it was not released. Try again shortly.",
+      );
+    }
+    if (live.length > 0) {
+      fail(
+        409,
+        "xero_bill_exists_for_invoice",
+        "Xero already has a live bill for this invoice number, so it was not released. Check that bill in Xero; send it on instead if it is the right bill.",
+      );
+    }
+    xeroChecked = { live_bills: 0 };
+  }
+
   const note = decision === "release"
     ? `Released by the office from pending acknowledgment: ${reason}`
     : `Sent on to Xero by the office from pending acknowledgment: ${reason}`;
@@ -160,6 +202,7 @@ export async function resolveStuckTradeInvoice(
       prior_status: STUCK_TRADE_INVOICE_STATUS,
       new_status: moved.status,
       invoice_number: invoice.invoice_number ?? null,
+      xero_checked: xeroChecked,
     },
   });
   return {

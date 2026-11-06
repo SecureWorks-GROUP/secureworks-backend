@@ -12,6 +12,7 @@
 //   a guess;
 // - Xero cannot be searched: refuse. Nothing is created on a failed check.
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
+import { xeroOptionalContains } from "./xero_where_clause.ts";
 import { recordTradeInvoiceEvent } from "./trade_invoice_events.ts";
 
 type Row = Record<string, any>;
@@ -188,4 +189,61 @@ export async function createOrReuseTradeXeroBill(
     return { result: { Invoices: [existing] }, reused: true };
   }
   return { result: await deps.putBill(args.payload, args.idempotencyKey), reused: false };
+}
+
+/** Where a trade bill carrying this invoice number in its Reference sits. */
+export function tradeBillReferenceWhere(invoiceNumber: string): string {
+  return `Type=="ACCPAY" AND ${xeroOptionalContains("Reference", xeroStringLiteral(invoiceNumber))}`;
+}
+
+/** Live Xero trade bills that may already be this invoice's bill, found by
+ * its number (as the bill number, or inside the bill Reference). Used before
+ * the office releases an invoice with no saved bill id: a create whose reply
+ * was lost leaves a bill in Xero and nothing here. Any failure to search
+ * throws, so the caller refuses rather than releasing on a guess. */
+export async function findLiveTradeBillsByNumber(
+  xeroGet: XeroGet,
+  auth: { accessToken: string; tenantId: string },
+  invoiceNumber: string,
+): Promise<Row[]> {
+  const number = String(invoiceNumber || "").trim();
+  if (!number) {
+    throw new TradeXeroBillSearchError(
+      409,
+      "xero_bill_number_missing",
+      "This invoice has no number to check in Xero.",
+    );
+  }
+  const found = new Map<string, Row>();
+  for (const where of [existingTradeBillWhere(number), tradeBillReferenceWhere(number)]) {
+    let listed: any;
+    try {
+      listed = await xeroGet("/Invoices", auth.accessToken, auth.tenantId, {
+        where,
+        Statuses: LIVE_TRADE_BILL_STATUSES.join(","),
+        page: "1",
+      });
+    } catch (_e) {
+      listed = null;
+    }
+    if (!listed || !Array.isArray(listed.Invoices)) {
+      throw new TradeXeroBillSearchError(
+        503,
+        "xero_existing_bill_search_failed",
+        "Xero could not be checked for a bill for this invoice. Try again shortly.",
+      );
+    }
+    for (const bill of listed.Invoices as Row[]) {
+      const status = String(bill?.Status || "").toUpperCase();
+      if (
+        bill?.Type === "ACCPAY" && bill.InvoiceID &&
+        (LIVE_TRADE_BILL_STATUSES as readonly string[]).includes(status) &&
+        (String(bill.InvoiceNumber ?? "").trim() === number ||
+          String(bill.Reference ?? "").includes(number))
+      ) {
+        found.set(String(bill.InvoiceID), bill);
+      }
+    }
+  }
+  return [...found.values()];
 }

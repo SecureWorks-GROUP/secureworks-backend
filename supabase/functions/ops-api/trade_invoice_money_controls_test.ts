@@ -21,6 +21,7 @@ import {
 import {
   createOrReuseTradeXeroBill,
   existingTradeBillWhere,
+  findLiveTradeBillsByNumber,
   TradeXeroBillSearchError,
 } from "./trade_invoice_xero_existing_bill.ts";
 import {
@@ -194,6 +195,8 @@ function stuckDb(invoice: Row = {}, lines: Row[] = [{ id: "line-1" }]): FakeDb {
   });
 }
 const office = { staff: true, userId: "office-1", label: "user:office-1" };
+/** Xero searched and no live bill found. */
+const noBills = { findLiveBills: () => Promise.resolve([] as Row[]) };
 
 Deno.test("stuck: release frees the week with the reason kept and one audit event", async () => {
   const db = stuckDb();
@@ -201,7 +204,7 @@ Deno.test("stuck: release frees the week with the reason kept and one audit even
     invoice_id: "inv-1",
     decision: "release",
     reason: "checked in Xero, no bill",
-  }, office);
+  }, office, noBills);
   assertEquals(result.status, "ops-reject");
   const row = db.rows("trade_invoices")[0];
   assert(String(row.query_note).includes("checked in Xero, no bill"));
@@ -217,7 +220,9 @@ Deno.test("stuck: send_to_xero moves it to approved, the state the push takes", 
     invoice_id: "inv-1",
     decision: "send_to_xero",
     reason: "lines are right",
-  }, office);
+  }, office, {
+    findLiveBills: () => Promise.reject(new Error("send_to_xero must not search here")),
+  });
   assertEquals(result.status, "approved");
 });
 
@@ -233,7 +238,7 @@ Deno.test("stuck: refusals leave the invoice where it was", async () => {
   for (const [body, actor, lines, code] of cases) {
     const db = stuckDb({}, lines);
     const error = await refusal(
-      () => resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", ...body }, actor as any),
+      () => resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", ...body }, actor as any, noBills),
       StuckTradeInvoiceError,
     );
     assertEquals(error.code, code);
@@ -245,7 +250,7 @@ Deno.test("stuck: refusals leave the invoice where it was", async () => {
   ] as const) {
     const db = stuckDb(invoice);
     const error = await refusal(
-      () => resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", decision: "release", reason: "ok reason" }, office),
+      () => resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", decision: "release", reason: "ok reason" }, office, noBills),
       StuckTradeInvoiceError,
     );
     assertEquals(error.code, code);
@@ -258,11 +263,76 @@ Deno.test("stuck: a concurrent change writes nothing", async () => {
     db.rows("trade_invoices")[0].status = "approved";
   };
   const error = await refusal(
-    () => resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", decision: "release", reason: "ok reason" }, office),
+    () => resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", decision: "release", reason: "ok reason" }, office, noBills),
     StuckTradeInvoiceError,
   );
   assertEquals(error.code, "invoice_changed");
   assertEquals(db.rows("trade_invoice_events").length, 0);
+});
+
+Deno.test("stuck: a release is refused when Xero already holds a bill for this number (lost create reply)", async () => {
+  const db = stuckDb();
+  const searched: string[] = [];
+  const error = await refusal(
+    () =>
+      resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", decision: "release", reason: "ok reason" }, office, {
+        findLiveBills: (number) => {
+          searched.push(number);
+          return Promise.resolve([{ InvoiceID: "bill-x", Status: "DRAFT" }]);
+        },
+      }),
+    StuckTradeInvoiceError,
+  );
+  assertEquals([error.status, error.code], [409, "xero_bill_exists_for_invoice"]);
+  assertEquals(searched, ["SW-INV-T-000000-001"]);
+  assertEquals(db.rows("trade_invoices")[0].status, "pending_acknowledgment");
+  assertEquals(db.writes.length, 0);
+});
+
+Deno.test("stuck: a release is refused when Xero cannot be searched, or the invoice has no number", async () => {
+  for (const [invoice, find, status, code] of [
+    [{}, () => Promise.reject(new Error("timeout")), 503, "xero_existing_bill_search_failed"],
+    [{}, () => Promise.reject(new XeroCooldownError("cooling", 429, "xero_rate_limited")), 503, "xero_existing_bill_search_failed"],
+    [{ invoice_number: null }, () => Promise.resolve([]), 409, "xero_bill_number_missing"],
+  ] as [Row, () => Promise<Row[]>, number, string][]) {
+    const db = stuckDb(invoice);
+    const error = await refusal(
+      () =>
+        resolveStuckTradeInvoice(db.client(), { invoice_id: "inv-1", decision: "release", reason: "ok reason" }, office, {
+          findLiveBills: find,
+        }),
+      StuckTradeInvoiceError,
+    );
+    assertEquals([error.status, error.code], [status, code]);
+    assertEquals(db.writes.length, 0);
+  }
+});
+
+Deno.test("stuck: the release lookup finds a bill by number or by reference, only live ACCPAY bills", async () => {
+  const wheres: string[] = [];
+  const bills = await findLiveTradeBillsByNumber(
+    (_path, _at, _ti, params) => {
+      wheres.push(String(params?.where));
+      return Promise.resolve({
+        Invoices: [
+          { Type: "ACCPAY", InvoiceID: "a", Status: "DRAFT", InvoiceNumber: "N-1" },
+          { Type: "ACCPAY", InvoiceID: "b", Status: "AUTHORISED", Reference: "Trade | N-1 | job" },
+          { Type: "ACCPAY", InvoiceID: "c", Status: "VOIDED", InvoiceNumber: "N-1" },
+          { Type: "ACCREC", InvoiceID: "d", Status: "DRAFT", InvoiceNumber: "N-1" },
+          { Type: "ACCPAY", InvoiceID: "e", Status: "DRAFT", InvoiceNumber: "N-2" },
+        ],
+      });
+    },
+    { accessToken: "t", tenantId: "x" },
+    "N-1",
+  );
+  assertEquals(bills.map((bill) => bill.InvoiceID).sort(), ["a", "b"]);
+  assertEquals(wheres.length, 2);
+  assert(wheres[1].includes('Reference!=null AND Reference.Contains("N-1")'));
+  await assertRejects(
+    () => findLiveTradeBillsByNumber(() => Promise.resolve({}), { accessToken: "t", tenantId: "x" }, "N-1"),
+    TradeXeroBillSearchError,
+  );
 });
 
 Deno.test("stuck: a new invoice with no hold leaves pending acknowledgment before the push", async () => {

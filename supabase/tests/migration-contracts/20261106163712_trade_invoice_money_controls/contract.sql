@@ -2,6 +2,28 @@
 
 -- 1. Invoice numbers are unique; an invoice with no number is not.
 BEGIN;
+-- Test only, undone with the transaction: set aside the rules other
+-- migrations put on these two tables (foreign keys, checks, NOT NULLs and
+-- triggers), so this case tests only its own guard and unique index.
+DO $iso$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT conrelid::regclass AS t, conname FROM pg_constraint
+    WHERE conrelid IN ('public.trade_invoices'::regclass, 'public.trade_invoice_lines'::regclass)
+      AND contype IN ('f', 'c') LOOP
+    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', r.t, r.conname);
+  END LOOP;
+  FOR r IN SELECT a.attrelid::regclass AS t, a.attname FROM pg_attribute a
+    WHERE a.attrelid IN ('public.trade_invoices'::regclass, 'public.trade_invoice_lines'::regclass)
+      AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull AND a.attname <> 'id' LOOP
+    EXECUTE format('ALTER TABLE %s ALTER COLUMN %I DROP NOT NULL', r.t, r.attname);
+  END LOOP;
+  FOR r IN SELECT tgrelid::regclass AS t, tgname FROM pg_trigger
+    WHERE tgrelid IN ('public.trade_invoices'::regclass, 'public.trade_invoice_lines'::regclass)
+      AND NOT tgisinternal AND tgname <> 'trg_trade_invoice_lines_no_week_claim_guard' LOOP
+    EXECUTE format('ALTER TABLE %s DISABLE TRIGGER %I', r.t, r.tgname);
+  END LOOP;
+END $iso$;
 INSERT INTO public.trade_invoices (id, invoice_number, status)
 VALUES ('00000000-0000-4000-8000-000000000001', 'SW-INV-T-000000-001', 'approved'),
        ('00000000-0000-4000-8000-000000000002', NULL, 'draft'),
@@ -88,6 +110,28 @@ ROLLBACK;
 
 -- 3. One live no-week invoice per person per work order and line kind.
 BEGIN;
+-- Test only, undone with the transaction: set aside the rules other
+-- migrations put on these two tables (foreign keys, checks, NOT NULLs and
+-- triggers), so this case tests only its own guard and unique index.
+DO $iso$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT conrelid::regclass AS t, conname FROM pg_constraint
+    WHERE conrelid IN ('public.trade_invoices'::regclass, 'public.trade_invoice_lines'::regclass)
+      AND contype IN ('f', 'c') LOOP
+    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', r.t, r.conname);
+  END LOOP;
+  FOR r IN SELECT a.attrelid::regclass AS t, a.attname FROM pg_attribute a
+    WHERE a.attrelid IN ('public.trade_invoices'::regclass, 'public.trade_invoice_lines'::regclass)
+      AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull AND a.attname <> 'id' LOOP
+    EXECUTE format('ALTER TABLE %s ALTER COLUMN %I DROP NOT NULL', r.t, r.attname);
+  END LOOP;
+  FOR r IN SELECT tgrelid::regclass AS t, tgname FROM pg_trigger
+    WHERE tgrelid IN ('public.trade_invoices'::regclass, 'public.trade_invoice_lines'::regclass)
+      AND NOT tgisinternal AND tgname <> 'trg_trade_invoice_lines_no_week_claim_guard' LOOP
+    EXECUTE format('ALTER TABLE %s DISABLE TRIGGER %I', r.t, r.tgname);
+  END LOOP;
+END $iso$;
 INSERT INTO public.trade_invoices (id, user_id, status, week_start, invoice_number) VALUES
   ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-0000000000f1', 'approved', NULL, 'N-1'),
   ('00000000-0000-4000-8000-0000000000a2', '00000000-0000-4000-8000-0000000000f1', 'pending_acknowledgment', NULL, 'N-2'),
