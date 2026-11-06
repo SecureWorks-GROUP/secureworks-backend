@@ -13,6 +13,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import {
+  classifyTradeContactLink,
   pickTradeSupplierContact,
   resolveTradeXeroSupplierContact,
   type TradeXeroSupplierContactArgs,
@@ -863,6 +864,138 @@ Deno.test("trade Xero contact — caching a name match writes an audit row", asy
       schema_version: "1.0",
     },
   }]);
+});
+
+Deno.test("a first name matches that word inside a full contact name", () => {
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Nithin",
+      email: "personal@gmail.com",
+      contactName: "Nithin Victor Silas",
+      contactEmail: "accounts@example.com",
+    }),
+    { result: "accept", by: "name" },
+  );
+  for (
+    const name of [
+      "Henry",
+      "Isaac",
+      "Ryan",
+      "Hugo",
+      "Khairo",
+      "Anthony",
+      "Israel",
+      "Alyx",
+      "Marnin",
+    ]
+  ) {
+    assertEquals(
+      classifyTradeContactLink({
+        name,
+        email: "",
+        contactName: `${name} Example`,
+        contactEmail: "",
+      }).result,
+      "accept",
+      name,
+    );
+  }
+});
+
+Deno.test("a first name does not match a company name that merely contains those letters", () => {
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Nithin",
+      email: "nithin@secureworkswa.com.au",
+      contactName: "The Trustee for The CMI Unit Trust",
+      contactEmail: "accounts@cmi.example",
+    }).result,
+    "refuse",
+  );
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Nithin",
+      email: "personal@gmail.com",
+      contactName: "Jaiama Investments t/a B&D Metals",
+      contactEmail: "accounts@jaiama.example",
+    }).result,
+    "refuse",
+  );
+  // "ama" sits inside "Jaiama", not at the start of a word.
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Ama",
+      email: "",
+      contactName: "Jaiama Investments t/a B&D Metals",
+      contactEmail: "",
+    }).result,
+    "refuse",
+  );
+  // "al" is a prefix of "allied", and too short to use the prefix rule.
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Al",
+      email: "",
+      contactName: "Allied Metals Group",
+      contactEmail: "",
+    }).result,
+    "refuse",
+  );
+  // "son" is the tail of "Jason", not a word and not its start.
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Son",
+      email: "",
+      contactName: "Jason Plumbing",
+      contactEmail: "",
+    }).result,
+    "refuse",
+  );
+});
+
+Deno.test("email still identifies a cached contact when the name does not", () => {
+  assertEquals(
+    classifyTradeContactLink({
+      name: "Nithin",
+      email: "nithin.personal@gmail.com",
+      contactName: "Jaiama Investments t/a B&D Metals",
+      contactEmail: "nithin.personal@gmail.com",
+    }),
+    { result: "accept", by: "email" },
+  );
+});
+
+Deno.test("trade Xero contact — a cached full name is accepted from a first name", async () => {
+  const client = fakeClient();
+  const result = await resolveTradeXeroSupplierContact(
+    client,
+    args({
+      userId: "user-nithin",
+      name: "Nithin",
+      email: "nithin.personal@gmail.com",
+      cachedContactId: "8fea927a",
+    }),
+    {
+      xeroGet: async (path: string) => {
+        assert(path.endsWith("/Contacts/8fea927a"));
+        return {
+          Contacts: [{
+            ContactID: "8fea927a",
+            Name: "Nithin Victor Silas",
+            EmailAddress: "accounts@example.com",
+            ContactStatus: "ACTIVE",
+            IsSupplier: true,
+          }],
+        };
+      },
+      xeroPost: async () => {
+        throw new Error("should not write");
+      },
+    },
+  );
+  assertEquals(result, "8fea927a");
+  assertEquals(client.updates, []);
+  assertEquals(client.inserts, []);
 });
 
 Deno.test("a work-order invoice uses the shared supplier resolver and does not create a contact itself", () => {

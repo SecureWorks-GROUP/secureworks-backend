@@ -1,8 +1,10 @@
 // One resolver for the Xero supplier contact on a trade invoice.
 //
 // A cached users.xero_contact_id is used only when that Xero contact still
-// identifies this user: its normalised name matches the user's name, or its
-// email matches the user's email. Anything else is a stale or wrong link.
+// identifies this user. users.name is often only a first name, so each of
+// its words must be a whole word in the contact name (or a prefix of one,
+// and only when the word is at least four letters). Email match remains
+// the other way. Anything else is a stale or wrong link.
 // The push is refused. The cache is not overwritten and the contact is not
 // unarchived or replaced.
 //
@@ -131,6 +133,43 @@ export function normaliseTradeContactName(
   return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+/** Letters and digits only. "t/a" and "B&D" become separate words, not one token. */
+export function tradeContactNameWords(
+  value: string | null | undefined,
+): string[] {
+  return normaliseTradeContactName(value)
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0);
+}
+
+/**
+ * A user's name word matches a contact word when it is that whole word, or
+ * the start of a longer word. The prefix form requires four letters, so a
+ * short name cannot latch onto a company word ("al" onto "allied", "in"
+ * onto "investments") and a fragment in the middle of a word never matches
+ * ("ama" inside "jaiama").
+ */
+export function tradeNameTokenMatchesWord(
+  token: string,
+  word: string,
+): boolean {
+  if (word === token) return true;
+  return token.length >= 4 && word.startsWith(token);
+}
+
+/** Every word of the user's name must match some word of the contact name. */
+export function tradeContactNameMatches(
+  userName: string | null | undefined,
+  contactName: string | null | undefined,
+): boolean {
+  const tokens = tradeContactNameWords(userName);
+  if (tokens.length === 0) return false;
+  const words = tradeContactNameWords(contactName);
+  return tokens.every((token) =>
+    words.some((word) => tradeNameTokenMatchesWord(token, word))
+  );
+}
+
 function normaliseEmail(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
 }
@@ -181,15 +220,36 @@ export function tradeContactIdentity(
   tradeName: string,
   tradeEmail: string,
 ): "name" | "email" | null {
-  const wantedName = normaliseTradeContactName(tradeName);
-  if (wantedName && normaliseTradeContactName(contact.Name) === wantedName) {
-    return "name";
-  }
+  if (tradeContactNameMatches(tradeName, contact.Name)) return "name";
   const wantedEmail = normaliseEmail(tradeEmail);
   if (wantedEmail && normaliseEmail(contact.EmailAddress) === wantedEmail) {
     return "email";
   }
   return null;
+}
+
+export type TradeContactLinkVerdict = {
+  result: "accept" | "refuse";
+  by: "name" | "email" | null;
+};
+
+/** Same rule as a cached link. Used by the read-only preflight. */
+export function classifyTradeContactLink(input: {
+  name?: string | null;
+  email?: string | null;
+  contactName?: string | null;
+  contactEmail?: string | null;
+}): TradeContactLinkVerdict {
+  const by = tradeContactIdentity(
+    {
+      ContactID: "preflight",
+      Name: input.contactName || undefined,
+      EmailAddress: input.contactEmail || undefined,
+    },
+    input.name || "",
+    input.email || "",
+  );
+  return { result: by ? "accept" : "refuse", by };
 }
 
 function standout(contacts: readonly XeroContact[]): XeroContact | null {
@@ -218,9 +278,7 @@ export function pickTradeSupplierContact(
 
   const wanted = normaliseTradeContactName(tradeName);
   const named = wanted
-    ? list.filter((contact) =>
-      normaliseTradeContactName(contact.Name) === wanted
-    )
+    ? list.filter((contact) => tradeContactNameMatches(tradeName, contact.Name))
     : [];
   if (named.length === 0) {
     return via === "email"
