@@ -95,6 +95,7 @@ BEGIN
     amount:=public.scope_draft_cents(stage->'amount_inc_gst');
     IF amount IS NULL OR jsonb_typeof(stage->'id') IS DISTINCT FROM 'string'
       OR coalesce(stage->>'id','')='' OR length(stage->>'id')>200 OR stage->>'id'=ANY(ids)
+      OR jsonb_typeof(stage->'label') IS DISTINCT FROM 'string' OR jsonb_typeof(stage->'printed_terms') IS DISTINCT FROM 'string'
       OR coalesce(btrim(stage->>'label'),'')='' OR coalesce(btrim(stage->>'printed_terms'),'')=''
       OR coalesce(stage->>'basis','') NOT IN ('deposit','work_done','materials_supplied','unconfirmed')
       OR coalesce(stage#>>'{trigger,kind}','') NOT IN ('quote_accepted','install_scheduled','council_step_completed','stage_confirmed')
@@ -106,6 +107,8 @@ BEGIN
       OR jsonb_array_length(stage->'payers')=0 THEN
       RAISE EXCEPTION 'scope_payment_schedule_invalid' USING ERRCODE='23514';
     END IF;
+    -- Validate the storage/date range for every stage before consuming any.
+    PERFORM d.released_at+make_interval(days=>(stage#>>'{due_rule,days}')::int);
     IF ordinal=1 AND (stage->>'basis'<>'deposit' OR stage#>>'{trigger,kind}'<>'quote_accepted')
       OR ordinal>1 AND (stage->>'basis'='deposit' OR stage#>>'{trigger,kind}'='quote_accepted') THEN
       RAISE EXCEPTION 'scope_payment_first_stage_invalid' USING ERRCODE='23514';
