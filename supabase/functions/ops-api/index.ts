@@ -63341,7 +63341,7 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   // fencing job still renders the approved "fence". No cross-sell footer is
   // appended to this one. Fired ONLY from the calendar popup's explicit Yes —
   // never automatically.
-  install_rescheduled: { channel: 'sms', template: "Hi {name},\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\nLet us know if you have any questions.\nCheers, Shaun" },
+  install_rescheduled: { channel: 'sms', template: "Hi {name},\n\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\n\nLet us know if you have any questions.\n\nCheers,\nShaun" },
   crew_arriving: { channel: 'sms', template: 'Our crew is on their way to {address}. Expected arrival: {time}.' },
   daily_progress: { channel: 'sms', template: 'Day {day} update: {progress_note}' },
   job_complete: { channel: 'email', template: 'Your {service} is complete! Please review and sign off here: {link}' },
@@ -63475,7 +63475,7 @@ export async function sendClientUpdate(client: any, body: any) {
   }
 
   // Append cross-sell footer for SMS — except install_rescheduled, whose wording
-  // is approved verbatim and ends "Cheers, Shaun".
+  // is approved verbatim and ends "Cheers,\nShaun".
   if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }
