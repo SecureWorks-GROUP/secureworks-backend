@@ -6,14 +6,11 @@
 --    no longer have to fall on a booked day: a multi-day booking is one
 --    job_assignments row, so day two and later were refused before, and a
 --    trade who opted in without a booking could log nothing.
--- 2. Every hour logged on the group counts in the split.
--- 3. The split does not wait for hours from office staff (admin, owner,
---    ops_manager) booked on the job to watch it who never joined the crew.
---    Anyone on the crew still needs hours, office staff included. A booked
---    trade who has not joined, or who left, is still named: the office
---    cancels the booking or they join, so nobody booked goes unpaid.
+-- 2. Every hour a crew member logs on the group counts in the split.
+--    Who still owes hours stays the one crew population of
+--    20261106083000 (group_work_order_crew), which this file does not touch.
 --
--- The TypeScript twin of rules 2 and 3 is loadShareView in
+-- The TypeScript twin of rule 2 is loadShareView in
 -- group_work_order.ts. Change both together. No row is written by this file and
 -- nothing sends. The runner supplies the transaction.
 
@@ -42,8 +39,7 @@ BEGIN
   END IF;
 END $$;
 
--- 2 and 3. The split counts every crew hour and names only the people who
--- still owe hours.
+-- 2. The split counts every crew hour, booked day or not.
 DO $$
 DECLARE
   body text;
@@ -52,36 +48,12 @@ DECLARE
     AND public.group_work_order_assignment_covers(v_job, e.user_id, e.work_date);$old$;
   entries_after text := $new$  WHERE e.group_id = p_group_id
     AND e.hours > 0; -- every crew hour counts, booked day or not (20261106140000)$new$;
-  booked_before text := $old$      AND COALESCE(to_jsonb(a)->>'is_ghost', 'false') IS DISTINCT FROM 'true'
-      AND NOT EXISTS (
-        SELECT 1 FROM group_wo_entries e WHERE e.user_id = a.user_id
-      )
-  ) missing;$old$;
-  booked_after text := $new$      AND COALESCE(to_jsonb(a)->>'is_ghost', 'false') IS DISTINCT FROM 'true'
-      AND NOT EXISTS (
-        SELECT 1 FROM group_wo_entries e WHERE e.user_id = a.user_id
-      )
-      -- Booked office staff watching the job who never joined the crew.
-      AND NOT (
-        EXISTS (
-          SELECT 1 FROM public.users u
-          WHERE u.id = a.user_id
-            AND lower(COALESCE(u.role, '')) IN ('admin', 'owner', 'ops_manager')
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM public.group_work_order_participants p2
-          WHERE p2.group_id = p_group_id AND p2.user_id = a.user_id
-        )
-      )
-  ) missing;$new$;
 BEGIN
   body := pg_get_functiondef('public.group_work_order_write_split(uuid,boolean)'::regprocedure);
   IF strpos(body, '(20261106140000)') = 0 THEN
-    IF strpos(body, entries_before) = 0 OR strpos(body, booked_before) = 0 THEN
+    IF strpos(body, entries_before) = 0 THEN
       RAISE EXCEPTION 'group_work_order_write_split changed; review before applying 20261106140000';
     END IF;
-    body := replace(body, entries_before, entries_after);
-    body := replace(body, booked_before, booked_after);
-    EXECUTE body;
+    EXECUTE replace(body, entries_before, entries_after);
   END IF;
 END $$;

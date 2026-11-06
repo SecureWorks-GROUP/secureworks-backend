@@ -36,7 +36,7 @@ import {
   GROUP_PAY_BASIS_EMPLOYER_SUPER,
   groupFeatureOn,
   GroupWorkOrderError,
-  liveAssignment,
+  readGroupWorkOrderCrew,
   newShareToken,
 } from "./group_work_order.ts";
 import { JOB_WORK_ORDER_OPEN_STATUSES } from "./job_work_order_quote_fill.ts";
@@ -64,8 +64,6 @@ async function minCrewToGroup(client: any, kind: { jobType: string }): Promise<n
   return await minCrewFor(client, kind);
 }
 export const PATIO_AUTO_GROUP_LIMIT = 50;
-/** Office admins are allocated to jobs to watch them, not to install. */
-const NOT_CREW_ROLES: ReadonlySet<string> = new Set(["admin"]);
 
 /** One job type the sweep can group, with its own switch. */
 type AutoGroupKind = {
@@ -140,43 +138,9 @@ export function labourOutsidePool(scopeItems: unknown): boolean {
   });
 }
 
-/** Distinct crew allocated to each job, by the live-allocation rule. */
-export function crewByJob(
-  assignments: readonly Record<string, unknown>[],
-  roleByUser: ReadonlyMap<string, string>,
-): Map<string, string[]> {
-  const out = new Map<string, Set<string>>();
-  for (const row of assignments) {
-    if (!liveAssignment(row)) continue;
-    const userId = String(row.user_id || "");
-    const jobId = String(row.job_id || "");
-    if (!userId || !jobId) continue;
-    if (NOT_CREW_ROLES.has(String(roleByUser.get(userId) || "").toLowerCase())) {
-      continue;
-    }
-    if (!out.has(jobId)) out.set(jobId, new Set());
-    out.get(jobId)!.add(userId);
-  }
-  return new Map([...out].map(([job, set]) => [job, [...set].sort()]));
-}
-
+/** Automatic membership uses the same database crew as readiness and freeze. */
 async function readCrew(client: any, jobIds: string[]) {
-  if (jobIds.length === 0) return new Map<string, string[]>();
-  const { data: rows, error } = await client.from("job_assignments").select(
-    "job_id, user_id, status, role, is_ghost",
-  ).in("job_id", jobIds);
-  if (error) throw new Error("allocations unreadable");
-  const assignments = Array.isArray(rows) ? rows : [];
-  const userIds = [...new Set(assignments.map((r: any) => String(r.user_id || "")).filter(Boolean))];
-  const roleByUser = new Map<string, string>();
-  if (userIds.length > 0) {
-    const { data: users, error: usersError } = await client.from("users").select(
-      "id, role",
-    ).in("id", userIds);
-    if (usersError) throw new Error("crew unreadable");
-    for (const u of users || []) roleByUser.set(String(u.id), String(u.role || ""));
-  }
-  return crewByJob(assignments, roleByUser);
+  return await readGroupWorkOrderCrew(client, jobIds);
 }
 
 /** Step 1: open the missing draft for open patio jobs with 2+ crew. */

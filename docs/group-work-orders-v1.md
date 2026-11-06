@@ -5,7 +5,7 @@ Owner: "just let them log their own hours" and "just let them sign their own". M
 - A crew member logs their own hours for any day on the job; a booked day is no longer required (a multi-day booking used to refuse day two on). Hours from someone neither on the crew nor booked that day are refused, `group_hours_not_member`.
 - Every logged hour counts in the split. `loadShareView` is the TypeScript twin of the split's rules; change both together.
 - Logging your own hours is your confirmation. Nobody approves anyone else's: the freeze and the share invoice no longer wait for crew approval on a full-super group, `crew_approval_required` is always false, `needs_approval` is always empty and a crew member with hours reads as approved. The office's own approval mark is kept and still shown, but nothing waits for it.
-- Office staff (admin, owner, ops manager) booked on the job to watch, and not on the crew, never hold the split. A booked trade who has not joined still does, as before.
+- Who still owes hours is the one crew population (`group_work_order_crew`, see `docs/group-work-order-crew.md`): an office admin booked to watch is not crew; a booked installer who has not joined still owes hours.
 - The automatic group sweep never adds back someone a `remove_participant` event took off the group.
 
 Client sign-off is unchanged.
@@ -234,7 +234,7 @@ Trade JWT, while the switch is on. The caller is the signed-in user.
 | `submit_group_work_order_hours` / `delete_group_work_order_hours` | Own hours, only before freeze, any day on the job (6 November 2026; a booked day is also still accepted). Saving the same day with the same times, break and hours does not move the row's `updated_at` or the group's `hours_changed_at`. |
 | `group_work_order_my_share` | The closed object above. |
 | `capture_group_client_signoff` | On-site client drawing. Records the trade user id. |
-| `freeze_group_work_order` | Explicit freeze after every participant and every currently assigned installer (except office staff booked to watch who are not on the crew) has counting hours, with no crew approval of anyone's hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. |
+| `freeze_group_work_order` | Explicit freeze after everyone in the one crew population (`group_work_order_crew`) has counting hours, with no crew approval of anyone's hours, and a drawn client sign-off is newer than the latest hours, including a delete or a participant removal. |
 | `group_work_order_preview_client_link` | Draft only. `send: true` is 409. |
 
 Public, no account, while the switch is on. The token is only for the

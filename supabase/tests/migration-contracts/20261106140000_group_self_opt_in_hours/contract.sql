@@ -1,7 +1,7 @@
 -- A crew member logs hours for any day on the job and every one counts;
--- someone off the crew cannot log hours; booked office staff who never joined
--- do not hold the split, but anyone on the crew does. Synthetic records
--- only; rolled back.
+-- someone off the crew cannot log hours; who owes hours stays the one crew
+-- population (an office admin watching is not crew; anyone on the crew is).
+-- Synthetic records only; rolled back.
 BEGIN;
 DO $$
 DECLARE
@@ -16,7 +16,7 @@ DECLARE
   refused text;
 BEGIN
   INSERT INTO public.users(id,org_id,name,role) VALUES
-    (office,org,'Synthetic Office','ops_manager'),(crew_a,org,'Crew Synthetic A','crew'),
+    (office,org,'Synthetic Office','admin'),(crew_a,org,'Crew Synthetic A','crew'),
     (crew_b,org,'Crew Synthetic B','crew'),(outsider,org,'Outside Synthetic','crew')
     ON CONFLICT(id) DO NOTHING;
   INSERT INTO public.jobs(id,org_id,type,status,job_number) VALUES(job,org,'patio','quoted','SYN-SELF-OPT-IN');
@@ -53,8 +53,8 @@ BEGIN
     RAISE EXCEPTION 'hours from someone off the crew not refused: %', refused;
   END IF;
 
-  -- Every crew hour counts (both crew logged only unbooked days), and booked
-  -- office staff do not hold the split. With no client sign-off yet, the
+  -- Every crew hour counts (both crew logged only unbooked days), and the
+  -- office admin watching does not hold the split. With no client sign-off yet, the
   -- split gets past hours and rates and stops at the sign-off.
   refused := NULL;
   BEGIN PERFORM public.project_group_work_order_split(grp);

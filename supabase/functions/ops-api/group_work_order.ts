@@ -1774,24 +1774,55 @@ export function withoutGroupJobAssignments<
   });
 }
 
+/** Read the database's one crew population. Missing/malformed RPC results
+ * refuse rather than quietly granting readiness or opening an empty group.
+ */
+export async function readGroupWorkOrderCrew(
+  client: any,
+  jobIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const ids = [...new Set(jobIds.filter(Boolean))];
+  const crew = new Map<string, Set<string>>(
+    ids.map((id) => [id, new Set<string>()]),
+  );
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const batch = ids.slice(offset, offset + 100);
+    for (let page = 0;; page++) {
+      const { data, error } = await client.rpc("group_work_order_crew", {
+        p_job_ids: batch,
+      })
+        .order("job_id").order("user_id").range(page * 500, page * 500 + 499);
+      if (
+        error || !Array.isArray(data) || data.some((row: any) =>
+          !batch.includes(String(row?.job_id || "")) ||
+          typeof row?.user_id !== "string" || !row.user_id
+        )
+      ) {
+        throw new GroupWorkOrderError(
+          "group_crew_unreadable",
+          "The group crew could not be checked. Try again before continuing.",
+          503,
+        );
+      }
+      for (const row of data) crew.get(String(row.job_id))!.add(row.user_id);
+      if (data.length < 500) break;
+    }
+  }
+  return new Map([...crew].map(([job, people]) => [job, [...people].sort()]));
+}
+
 async function loadShareView(
   client: any,
   group: Record<string, unknown>,
   participants: readonly Record<string, unknown>[],
 ): Promise<ShareView> {
-  const [entries, assignments, signoffs, minimum, latestHoursAt] = await Promise
+  const [entries, signoffs, minimum, latestHoursAt, crewByJob] = await Promise
     .all([
       rowsOf(
         client.from("group_work_order_time_entries").select(
           "user_id, work_date, hours, created_at",
         ).eq("group_id", group.id),
         "load hours",
-      ),
-      rowsOf(
-        client.from("job_assignments").select(
-          "user_id, scheduled_date, status, role, is_ghost",
-        ).eq("job_id", group.job_id),
-        "load allocations",
       ),
       rowsOf(
         client.from("job_client_signoffs").select(
@@ -1801,10 +1832,12 @@ async function loadShareView(
       ),
       happyMinimum(client),
       latestHoursOnJob(client, String(group.job_id)),
+      readGroupWorkOrderCrew(client, [String(group.job_id)]),
     ]);
   // Owner, 6 Nov 2026: a crew member logs their own hours for any day on the
-  // job, and logging them is their own confirmation. Every crew hour counts,
+  // job, and logging them is their own confirmation. A member's hours count,
   // booked day or not; the twin of group_work_order_write_split (20261106140000).
+  const requiredCrew = new Set(crewByJob.get(String(group.job_id)) || []);
   const memberIds = new Set(participants.map((row) => String(row.user_id)));
   const hoursByUser = new Map<string, number>();
   const counting: { userId: string; workDate: string }[] = [];
@@ -1813,18 +1846,12 @@ async function loadShareView(
     if (!(hours > 0)) continue;
     const userId = String(entry.user_id);
     const workDate = String(entry.work_date || "");
+    if (!requiredCrew.has(userId) || !memberIds.has(userId)) continue;
     hoursByUser.set(userId, (hoursByUser.get(userId) || 0) + hours);
     counting.push({ userId, workDate });
   }
-  // A booked trade who has not joined still owes hours. Office staff booked to
-  // watch, and not on the crew, never hold the split.
-  const bookedOff = [...new Set(
-    assignments.filter(liveAssignment).map((row) => String(row.user_id)),
-  )].filter((id) => !memberIds.has(id));
-  const staff = bookedOff.length ? await staffAmong(client, bookedOff) : new Set<string>();
-  const needsHours = [
-    ...new Set([...memberIds, ...bookedOff.filter((id) => !staff.has(id))]),
-  ].filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
+  const needsHours = [...requiredCrew]
+    .filter((userId) => (hoursByUser.get(userId) || 0) <= 0).sort();
   const rateUsers = [...new Set(counting.map((row) => row.userId))];
   const rates = rateUsers.length === 0 ? [] : await rowsOf(
     client.from("trade_rates").select(
@@ -1868,19 +1895,6 @@ async function loadShareView(
   else if (needsRate.length > 0) awaiting = "awaiting_rate";
   else if (needsApproval.length > 0) awaiting = "awaiting_crew_approval";
   return { hoursByUser, awaiting, signed, signoff: newestSignoff(signoffs), needsHours, needsRate, needsApproval, hoursOfficeApproved };
-}
-
-/** Office staff (admin, owner, ops_manager) among these people. */
-async function staffAmong(client: any, ids: readonly string[]): Promise<Set<string>> {
-  const out = new Set<string>();
-  for (let offset = 0; offset < ids.length; offset += 100) {
-    const rows = await rowsOf(
-      client.from("users").select("id, role").in("id", ids.slice(offset, offset + 100)),
-      "load the crew's roles",
-    );
-    for (const row of rows) if (callerIsStaff(row.role)) out.add(String(row.id));
-  }
-  return out;
 }
 
 /** The price-free Create/Join decision used by both Trade entry points. */
